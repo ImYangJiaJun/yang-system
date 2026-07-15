@@ -1,0 +1,42 @@
+[app]
+name = "yang-system"
+
+[http]
+bind = "0.0.0.0:8080"
+max_body_bytes = 1048576
+
+[database]
+url = "${DATABASE_URL}"
+max_connections = 20
+min_connections = 2
+connect_timeout_seconds = 10
+idle_timeout_seconds = 600
+max_lifetime_seconds = 1800
+test_before_acquire = true
+
+[redis]
+url = "${REDIS_URL}"
+max_connections = 20
+min_connections = 2
+connect_timeout_seconds = 5
+wait_timeout_seconds = 10
+idle_timeout_seconds = 300
+max_lifetime_seconds = 1800
+test_before_acquire = true
+
+[token]
+secret = "${TOKEN_SECRET}"
+issuer = "yang-system"
+audience = "yang-system-api"
+access_ttl_seconds = 3600
+refresh_ttl_seconds = 2592000
+
+[security]
+username_min_length = 3
+username_max_length = 64
+password_min_length = 10
+password_max_length = 128
+
+[logging]
+filter = "yang_system=info,tower_http=info"
+
