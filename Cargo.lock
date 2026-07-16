@@ -438,7 +438,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2642,14 +2642,15 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "yang-base"
-version = "0.1.3"
-source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=b65a50bd5f0161f7f93f1c60000d4ea5471b600b#b65a50bd5f0161f7f93f1c60000d4ea5471b600b"
+version = "0.2.0"
+source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=fa092f79a748d5208b8446ddcd77a401fd581b29#fa092f79a748d5208b8446ddcd77a401fd581b29"
 dependencies = [
  "async-trait",
  "base64",
  "chrono",
  "jsonwebtoken",
  "log",
+ "matchit",
  "regex",
  "schemars",
  "serde",
@@ -2666,8 +2667,8 @@ dependencies = [
 
 [[package]]
 name = "yang-base-derive"
-version = "0.1.1"
-source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=b65a50bd5f0161f7f93f1c60000d4ea5471b600b#b65a50bd5f0161f7f93f1c60000d4ea5471b600b"
+version = "0.2.0"
+source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=fa092f79a748d5208b8446ddcd77a401fd581b29#fa092f79a748d5208b8446ddcd77a401fd581b29"
 dependencies = [
  "darling",
  "proc-macro-error",
@@ -2679,7 +2680,7 @@ dependencies = [
 [[package]]
 name = "yang-db"
 version = "0.1.4"
-source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=b65a50bd5f0161f7f93f1c60000d4ea5471b600b#b65a50bd5f0161f7f93f1c60000d4ea5471b600b"
+source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=fa092f79a748d5208b8446ddcd77a401fd581b29#fa092f79a748d5208b8446ddcd77a401fd581b29"
 dependencies = [
  "base64",
  "chrono",

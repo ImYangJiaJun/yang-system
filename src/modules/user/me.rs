@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
 use yang_base::action::{ActionContext, TypedHandler};
-use yang_base::router::{ModuleRouter, RouteDescriptor};
+use yang_base::router::Api;
 use yang_base::{Action, BaseError};
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -39,14 +39,8 @@ impl TypedHandler for MeAction {
     }
 }
 
-pub(super) fn register(
-    router: ModuleRouter,
-    service: Arc<UserService>,
-) -> Result<ModuleRouter, BaseError> {
-    let route = RouteDescriptor::new("GET", "/api/v1/users/me", "users.me")?
-        .with_success_status(200)?
-        .with_tags(vec!["users".to_string()])?;
-    router
-        .register_action(MeAction { service })?
-        .register_route("me", route)
+pub(super) fn api(service: Arc<UserService>) -> Api {
+    Api::get("/api/v1/users/me", MeAction { service })
+        .operation_id("users.me")
+        .tag("users")
 }

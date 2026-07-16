@@ -9,10 +9,7 @@ pub fn build_app_router(
     pool: Arc<MySqlPool>,
     security: Arc<SecuritySettings>,
 ) -> Result<AppRouter, BaseError> {
-    let modules = user::build_modules(pool, security)?;
-    AppRouter::new()
-        .register_module(modules.authentication)?
-        .register_module(modules.user)
+    AppRouter::new().module(user::build_module(pool, security)?)
 }
 
 #[cfg(test)]
@@ -51,8 +48,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(router.table_configs().len(), 1);
-        assert_eq!(router.table_configs()[0].table_name, "users");
+        assert_eq!(router.table_definitions().len(), 1);
+        assert_eq!(router.table_definitions()[0].name(), "users");
+        assert_eq!(catalog.modules.len(), 1);
+        assert_eq!(catalog.modules[0].name, "user");
         assert_eq!(operations.len(), 5);
         assert!(operations.contains(&(
             "users.register",

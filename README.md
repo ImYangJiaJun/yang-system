@@ -4,7 +4,7 @@
 
 ## 仓库位置与联合调试
 
-本项目是独立 Git/Cargo 项目。放在 `lib_yang/project/yang-system` 只是为了方便联合调试，根 workspace 会显式排除它。当前应用需要尚未发布到 crates.io 的 `yang-base 0.1.3` API，因此 `Cargo.toml` 通过 SSH 固定到私有 `lib_yang` 的 Git revision；单独 clone 后，具有该仓库 SSH 权限的环境可直接构建和运行。
+本项目是独立 Git/Cargo 项目。放在 `lib_yang/project/yang-system` 只是为了方便联合调试，根 workspace 会显式排除它。当前应用需要尚未发布到 crates.io 的 `yang-base 0.2.0` API，因此 `Cargo.toml` 通过 SSH 固定到私有 `lib_yang` 的 Git revision；单独 clone 后，具有该仓库 SSH 权限的环境可直接构建和运行。
 
 独立开发时直接在项目根目录运行：
 
@@ -23,7 +23,7 @@ cargo --config 'patch."ssh://git@github.com/ImYangJiaJun/lib_yang.git".yang-base
 git restore Cargo.lock
 ```
 
-临时 patch 会改写锁文件中的依赖来源，因此联调完成后要恢复 `Cargo.lock`。`yang-base 0.1.3` 发布后，应把 Git revision 依赖切回 crates.io 版本约束，避免长期依赖仓库提交。
+临时 patch 会改写锁文件中的依赖来源，因此联调完成后要恢复 `Cargo.lock`。`yang-base 0.2.0` 发布后，应把 Git revision 依赖切回 crates.io 版本约束，避免长期依赖仓库提交。
 
 ## 设计原则
 
@@ -31,12 +31,12 @@ git restore Cargo.lock
 
 - 一个进程、一个可执行程序、一个 `AppRouter`，不是微服务。
 - 业务按模块文件夹组织；叶子模块内部只放平级文件，不再建立子文件夹。
-- 一个接口对应一个文件；接口文件同时声明 Action 与 RouteDescriptor，避免实现和路由分散。
-- 文件不是架构层。模块共享的实体、服务、持久化和安全逻辑先收敛在 `mod.rs`，出现独立变化边界后再拆成平级文件。
+- 一个接口对应一个文件；接口文件通过单个 `Api` 值同时声明 Action 与 HTTP 元数据，避免实现和路由分散。
+- 文件不是架构层。模块共享的表定义、服务、持久化和安全逻辑先收敛在 `mod.rs`，出现独立变化边界后再拆成平级文件。
 - HTTP 层只负责协议转换，不写用户业务。
 - MySQL 保存用户事实，Redis 保存 Token 撤销与轮换状态；应用进程不保存会话状态。
 - `config.toml` 是唯一配置文件入口，敏感值通过 `${ENV_NAME}` 注入。
-- 不包含 `.sql` 文件。启动监听 HTTP 端口前，`DatabaseInitializer::sync_app_schema` 从模块的 `TableConfig` 增量同步表结构。
+- 不包含 `.sql` 文件。启动监听 HTTP 端口前，`DatabaseInitializer::sync_app_schema` 从模块的 `TableDefinition` 增量同步表结构。
 - schema 同步只做安全的 additive 变更；已有列的类型、NULL、自增或主键不兼容时直接阻止启动，避免自动破坏数据。
 
 ## 项目结构
@@ -57,7 +57,7 @@ lib_yang/
             ├── config.rs       # 强类型配置、环境变量展开、启动前校验
             ├── app.rs          # 组装所有业务模块，生成唯一 AppRouter
             ├── transport/http/ # HTTP 生命周期、Catalog 投影和健康检查
-            └── modules/user/   # 用户接口、共享实体、服务、持久化和安全逻辑
+            └── modules/user/   # 用户接口、表定义、服务、持久化和安全逻辑
 ```
 
 ### 为什么这样分层
@@ -67,15 +67,15 @@ lib_yang/
 用户模块内部保持一条单向依赖，但不为每一层建立文件：
 
 ```text
-HTTP -> AppRouter -> <interface>.rs -> UserService -> TableQuery/MySQL
+HTTP -> AppRouter -> <interface>.rs -> UserService -> TableHandle/TableQuery -> Record/MySQL
                                       \-> TokenManager -> Redis
 ```
 
-DTO 与实体仍保持类型边界：`UserRow` 含 `password_hash`，`UserView` 永远不含它；它们是否位于不同文件不影响这一安全属性。项目没有注册 `yang-base` 的通用表 CRUD Action，避免用户表被通用接口完整读出。
+API DTO 与数据库记录保持类型边界：持久化层使用 schema-first `Record`，认证查询可在 `system` 角色下读取 `password_hash`，但所有 Action 输出都映射为不含密码字段的类型化 `UserView`。`TableQuery` 在访问数据库前校验 WHERE 字段、权限和值类型，并正确处理 `NULL` 比较。项目没有注册 `yang-base` 的通用表 CRUD Action，也不会直接序列化 `Record`，避免用户表和密码哈希被通用接口完整读出。
 
-`user` 是唯一用户领域文件夹。受基础库模块级认证中间件约束，组合根内部生成两个同进程运行时路由器：`user_auth` 承载注册、登录、刷新、登出等公开或凭 Token 自证的 Action；`user` 承载需要 `TokenAuthMiddleware` 的受保护 Action。它们共享同一个 `UserService` 和连接池，不是两个业务模块，也不会产生网络调用。
+`user` 是唯一用户领域模块。注册、登录、刷新、登出等公开 Action 与受保护的当前用户 Action 注册到同一个 `ModuleRouter`；`TokenAuthMiddleware` 只作用于受保护 Action，日志、限流、请求追踪等通用中间件仍覆盖全部 Action。模块内所有接口共享同一个 `UserService`、表定义和连接池。
 
-HTTP route 不是在两处手写：每个 `<interface>.rs` 把 Action 与 `RouteDescriptor` 一起注册进 `AppRouter`，HTTP 适配器再从 `ApiCatalog` 动态生成 Axum route。这样接口实现、路径、方法、成功状态码和 operation ID 都在同一个文件中维护。
+HTTP route 不是在两处手写：每个 `<interface>.rs` 只返回一个同时包含 Action、路径、方法、成功状态码和 operation ID 的 `Api`，模块根通过 `.apis([...])` 一次注册，HTTP 适配器再从 `ApiCatalog` 动态生成 Axum route。基础库会在注册/目录构建期按 Axum 0.8 的 `{name}` / `{*name}` 语法检查模板和跨模块冲突，因此非法 route 不会延迟到 HTTP 启动时 panic。
 
 ## 启动顺序
 
@@ -84,7 +84,7 @@ HTTP route 不是在两处手写：每个 `<interface>.rs` 把 Action 与 `Route
 3. 创建一个 MySQL 连接池，并以 `Arc<MySqlPool>` 显式共享给用户模块。
 4. 初始化 `GlobalRedis`；这是 `yang-base` Token 黑名单和刷新令牌轮换的共享状态。
 5. 构建 `TokenManager`、用户模块和 `AppRouter`。
-6. 调用 `DatabaseInitializer::sync_app_schema(&app_router)`。
+6. 调用 `DatabaseInitializer::sync_app_schema(&app_router)`，从模块注册的 `TableDefinition` 同步 schema。
 7. schema 完全兼容后才监听 HTTP 端口。
 8. 收到关闭信号后停止 HTTP，并关闭 Redis/MySQL 连接池。
 
@@ -131,6 +131,6 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/users/login -Co
 
 ## 扩展新业务
 
-新增 `src/modules/<business>/`，至少声明 `mod.rs` 和接口文件；每增加一个接口就新增一个平级 `<interface>.rs`，由该文件共同维护 Action 与 RouteDescriptor。共享逻辑先放在 `mod.rs`；只有出现第二种实现、独立复用、独立测试替身或不同变化周期时，才拆成新的平级文件，不建立子文件夹。最后在 `app.rs` 注册 `ModuleRouter`。只要表通过 `with_table_config` 或 `with_schema_table` 挂到模块，启动器就会自动纳入 schema 同步，不需要也不允许新增迁移 SQL 文件。
+新增 `src/modules/<business>/`，至少声明 `mod.rs` 和接口文件；每增加一个接口就新增一个平级 `<interface>.rs`，由该文件用单个 `Api` 共同维护 Action 与 HTTP 元数据。共享逻辑先放在 `mod.rs`；只有出现第二种实现、独立复用、独立测试替身或不同变化周期时，才拆成新的平级文件，不建立子文件夹。最后在 `app.rs` 注册 `ModuleRouter`。表结构应通过 `Table` 与 `Field` 构建不可变 `TableDefinition`，再使用 `ModuleRouter::table` 注册主表或 `ModuleRouter::schema` 注册附属表；启动器会自动纳入 schema 同步，不需要也不允许新增迁移 SQL 文件。
 
 自动同步适合创建表、增加安全的可空列等 additive 变化。删除列、改类型、收紧 NULL、修改主键等破坏性变更必须先设计显式的数据演进方案，再扩展基础库能力，不能靠启动过程猜测业务意图。

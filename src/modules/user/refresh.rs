@@ -1,9 +1,9 @@
-use super::UserService;
+use super::{UserService, USERNAME};
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::auth::{RefreshAction, RefreshClaimsResolver};
 use yang_base::action::ActionContext;
-use yang_base::router::{ModuleRouter, RouteDescriptor};
+use yang_base::router::Api;
 use yang_base::BaseError;
 
 #[derive(Clone)]
@@ -19,21 +19,19 @@ impl RefreshClaimsResolver for UserClaimsResolver {
         subject: &str,
     ) -> Result<serde_json::Value, BaseError> {
         let user = self.service.active_by_subject(subject).await?;
+        let username: String = user.require(USERNAME)?;
         Ok(serde_json::json!({
-            "username": user.username,
+            "username": username,
             "roles": ["user"]
         }))
     }
 }
 
-pub(super) fn register(
-    router: ModuleRouter,
-    service: Arc<UserService>,
-) -> Result<ModuleRouter, BaseError> {
-    let route = RouteDescriptor::new("POST", "/api/v1/users/refresh", "users.refresh")?
-        .with_success_status(200)?
-        .with_tags(vec!["users".to_string()])?;
-    router
-        .register_action(RefreshAction::new(UserClaimsResolver { service }))?
-        .register_route("refresh", route)
+pub(super) fn api(service: Arc<UserService>) -> Api {
+    Api::post(
+        "/api/v1/users/refresh",
+        RefreshAction::new(UserClaimsResolver { service }),
+    )
+    .operation_id("users.refresh")
+    .tag("users")
 }

@@ -11,67 +11,47 @@ use argon2::password_hash::{Error as PasswordHashError, PasswordHash, SaltString
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use rand_core::OsRng;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::MySqlPool;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use yang_base::action::{TokenAuthMiddleware, User};
 use yang_base::router::ModuleRouter;
-use yang_base::table::{
-    FieldPermissions, TableConfig, TableEntity as TableEntityTrait, TableQuery,
-};
+use yang_base::table::{Field, Record, Table, TableDefinition, TableHandle, TableQuery};
 use yang_base::token::TokenClaims;
-use yang_base::{BaseError, TableEntity};
+use yang_base::BaseError;
 
 const SYSTEM_ROLE: &str = "system";
+const USER_ID: &str = "id";
+const USERNAME: &str = "username";
+const PASSWORD_HASH: &str = "password_hash";
+const STATUS: &str = "status";
+const CREATED_AT: &str = "created_at";
+const UPDATED_AT: &str = "updated_at";
+const USER_VIEW_FIELDS: &[&str] = &[USER_ID, USERNAME, STATUS, CREATED_AT, UPDATED_AT];
+const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, USERNAME, PASSWORD_HASH, STATUS];
 
-/// 用户领域需要两个运行时路由器：公开认证接口不经过强制 Token 中间件，
-/// 受保护接口则必须经过 Token 校验。二者共享同一个领域服务和数据表。
-pub struct UserModules {
-    pub authentication: ModuleRouter,
-    pub user: ModuleRouter,
-}
-
-pub fn build_modules(
+/// 构建单一用户领域模块。
+///
+/// `TokenAuthMiddleware` 只作用于受保护 Action，因此注册、登录、刷新、登出与
+/// 当前用户接口可以共享同一份领域服务、表定义和运行时路由器。
+pub fn build_module(
     pool: Arc<MySqlPool>,
     security: Arc<SecuritySettings>,
-) -> Result<UserModules, BaseError> {
-    let table = user_table_config()?;
-    let service = Arc::new(UserService::new(pool, Arc::clone(&table), security));
+) -> Result<ModuleRouter, BaseError> {
+    let table = user_table_definition()?;
+    let service = Arc::new(UserService::new(table.bind(pool), security));
 
-    let authentication = ModuleRouter::new("user_auth", "用户认证");
-    let authentication = register::register(authentication, Arc::clone(&service))?;
-    let authentication = login::register(authentication, Arc::clone(&service))?;
-    let authentication = refresh::register(authentication, Arc::clone(&service))?;
-    let authentication = logout::register(authentication)?;
-
-    let user = ModuleRouter::new("user", "用户管理")
-        .with_table_config(table)
-        .middleware(TokenAuthMiddleware::new(user_from_claims));
-    let user = me::register(user, service)?;
-
-    Ok(UserModules {
-        authentication,
-        user,
-    })
-}
-
-#[derive(Clone, Deserialize, Serialize, JsonSchema, sqlx::FromRow, TableEntity)]
-#[table(name = "users")]
-struct UserRow {
-    #[entity(primary_key, auto_increment)]
-    id: i64,
-    #[entity(max_length = 64, unique)]
-    username: String,
-    #[entity(max_length = 255)]
-    #[serde(skip_serializing)]
-    #[schemars(skip)]
-    password_hash: String,
-    #[entity(max_length = 16)]
-    status: String,
-    created_at: i64,
-    updated_at: i64,
+    ModuleRouter::new("user", "用户管理")
+        .table(table)
+        .middleware(TokenAuthMiddleware::new(user_from_claims))
+        .apis([
+            register::api(Arc::clone(&service)),
+            login::api(Arc::clone(&service)),
+            refresh::api(Arc::clone(&service)),
+            logout::api(),
+            me::api(service),
+        ])
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -85,26 +65,19 @@ struct UserView {
 
 #[derive(Clone)]
 struct UserService {
-    pool: Arc<MySqlPool>,
-    table: Arc<TableConfig>,
-    system_roles: Arc<[String]>,
+    table: TableHandle,
     security: Arc<SecuritySettings>,
 }
 
 impl UserService {
-    fn new(pool: Arc<MySqlPool>, table: Arc<TableConfig>, security: Arc<SecuritySettings>) -> Self {
-        Self {
-            pool,
-            table,
-            system_roles: Arc::from(vec![SYSTEM_ROLE.to_string()]),
-            security,
-        }
+    fn new(table: TableHandle, security: Arc<SecuritySettings>) -> Self {
+        Self { table, security }
     }
 
     async fn register(&self, username: &str, plain_password: &str) -> Result<UserView, BaseError> {
         let username = self.normalize_username(username)?;
         self.validate_password(plain_password)?;
-        if self.find_by_username(&username).await?.is_some() {
+        if self.username_exists(&username).await? {
             return Err(BaseError::ParamInvalid(
                 "username".to_string(),
                 "用户名已存在".to_string(),
@@ -112,26 +85,28 @@ impl UserService {
         }
         let password_hash = hash_password(plain_password)?;
         let user = self.insert(&username, &password_hash).await?;
-        Ok(UserView::from(&user))
+        UserView::try_from(&user)
     }
 
     async fn authenticate(
         &self,
         username: &str,
         plain_password: &str,
-    ) -> Result<UserRow, BaseError> {
+    ) -> Result<Record, BaseError> {
         let username = self.normalize_username(username)?;
         let user = self
-            .find_by_username(&username)
+            .find_credentials_by_username(&username)
             .await?
             .ok_or(BaseError::InvalidPassword)?;
-        if !verify_password(plain_password, &user.password_hash)? {
+        let password_hash: String = user.require(PASSWORD_HASH)?;
+        if !verify_password(plain_password, &password_hash)? {
             return Err(BaseError::InvalidPassword);
         }
-        self.ensure_active(user)
+        self.ensure_active(&user)?;
+        Ok(user)
     }
 
-    async fn active_by_subject(&self, subject: &str) -> Result<UserRow, BaseError> {
+    async fn active_by_subject(&self, subject: &str) -> Result<Record, BaseError> {
         let id = subject
             .parse::<i64>()
             .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
@@ -139,7 +114,8 @@ impl UserService {
             .find_by_id(id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
-        self.ensure_active(user)
+        self.ensure_active(&user)?;
+        Ok(user)
     }
 
     async fn view_by_id(&self, id: i64) -> Result<UserView, BaseError> {
@@ -147,46 +123,53 @@ impl UserService {
             .find_by_id(id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
-        let user = self.ensure_active(user)?;
-        Ok(UserView::from(&user))
+        self.ensure_active(&user)?;
+        UserView::try_from(&user)
     }
 
     fn query(&self) -> TableQuery {
-        TableQuery::new(
-            Arc::clone(&self.table),
-            Arc::clone(&self.system_roles),
-            Some(Arc::clone(&self.pool)),
-        )
+        self.table.query([SYSTEM_ROLE])
     }
 
-    async fn find_by_username(&self, username: &str) -> Result<Option<UserRow>, BaseError> {
+    async fn username_exists(&self, username: &str) -> Result<bool, BaseError> {
         let rows = self
             .query()
-            .where_eq("username", Value::String(username.to_string()))?
-            .select::<UserRow>()
+            .select_fields(&[USER_ID])?
+            .where_eq(USERNAME, Value::String(username.to_string()))?
+            .all()
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn find_credentials_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<Record>, BaseError> {
+        let rows = self
+            .query()
+            .select_fields(USER_CREDENTIAL_FIELDS)?
+            .where_eq(USERNAME, Value::String(username.to_string()))?
+            .all()
             .await?;
         Ok(rows.into_iter().next())
     }
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<UserRow>, BaseError> {
+    async fn find_by_id(&self, id: i64) -> Result<Option<Record>, BaseError> {
         let rows = self
             .query()
-            .where_eq("id", Value::Number(id.into()))?
-            .select::<UserRow>()
+            .select_fields(USER_VIEW_FIELDS)?
+            .where_eq(USER_ID, Value::Number(id.into()))?
+            .all()
             .await?;
         Ok(rows.into_iter().next())
     }
 
-    async fn insert(&self, username: &str, password_hash: &str) -> Result<UserRow, BaseError> {
-        let data = HashMap::from([
-            ("username".to_string(), Value::String(username.to_string())),
-            (
-                "password_hash".to_string(),
-                Value::String(password_hash.to_string()),
-            ),
-            ("status".to_string(), Value::String("active".to_string())),
-        ]);
-        let (_, id) = match self.query().insert_returning_id(data).await {
+    async fn insert(&self, username: &str, password_hash: &str) -> Result<Record, BaseError> {
+        let record = Record::new()
+            .set(USERNAME, username)
+            .set(PASSWORD_HASH, password_hash)
+            .set(STATUS, "active");
+        let (_, id) = match self.query().insert_returning_id(record).await {
             Ok(result) => result,
             Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
                 return Err(BaseError::ParamInvalid(
@@ -203,11 +186,12 @@ impl UserService {
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))
     }
 
-    fn ensure_active(&self, user: UserRow) -> Result<UserRow, BaseError> {
-        if user.status != "active" {
+    fn ensure_active(&self, user: &Record) -> Result<(), BaseError> {
+        let status: String = user.require(STATUS)?;
+        if status != "active" {
             return Err(BaseError::Unauthorized("用户已停用".to_string()));
         }
-        Ok(user)
+        Ok(())
     }
 
     fn normalize_username(&self, username: &str) -> Result<String, BaseError> {
@@ -251,37 +235,36 @@ impl UserService {
     }
 }
 
-impl From<&UserRow> for UserView {
-    fn from(user: &UserRow) -> Self {
-        Self {
-            id: user.id,
-            username: user.username.clone(),
-            status: user.status.clone(),
-            created_at: user.created_at,
-            updated_at: user.updated_at,
-        }
+impl TryFrom<&Record> for UserView {
+    type Error = BaseError;
+
+    fn try_from(user: &Record) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: user.require(USER_ID)?,
+            username: user.require(USERNAME)?,
+            status: user.require(STATUS)?,
+            created_at: user.require(CREATED_AT)?,
+            updated_at: user.require(UPDATED_AT)?,
+        })
     }
 }
 
-fn user_table_config() -> Result<Arc<TableConfig>, BaseError> {
-    let mut config = UserRow::table_config()
-        .clone()
-        .display_name("用户")
-        .timestamps(true, true, false);
-    let protected = HashSet::from([SYSTEM_ROLE.to_string()]);
-    let password = config
-        .fields
-        .get_mut("password_hash")
-        .ok_or_else(|| BaseError::ConfigError("UserRow 缺少 password_hash 字段配置".to_string()))?;
-    password.permissions = FieldPermissions {
-        readable_roles: protected.clone(),
-        writable_roles: protected.clone(),
-        filterable_roles: protected.clone(),
-        sortable_roles: protected,
-    };
-    password.filterable = false;
-    password.sortable = false;
-    Ok(Arc::new(config))
+fn user_table_definition() -> Result<TableDefinition, BaseError> {
+    Table::new("users")
+        .label("用户")
+        .fields([
+            Field::id(USER_ID),
+            Field::string(USERNAME, 64).required().unique(),
+            Field::string(PASSWORD_HASH, 255)
+                .required()
+                .secret()
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+            Field::string(STATUS, 16).required(),
+            Field::created_at(CREATED_AT),
+            Field::updated_at(UPDATED_AT),
+        ])
+        .build()
 }
 
 fn hash_password(password: &str) -> Result<String, BaseError> {
@@ -327,21 +310,73 @@ mod tests {
 
     #[test]
     fn user_schema_uses_generated_id_and_protects_password_hash() {
-        let config =
-            user_table_config().unwrap_or_else(|error| panic!("用户表配置应有效: {error}"));
-        let id = config
-            .fields
-            .get("id")
+        let definition =
+            user_table_definition().unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
+        let id = definition
+            .field(USER_ID)
             .unwrap_or_else(|| panic!("应存在 id 字段"));
-        let password = config
-            .fields
-            .get("password_hash")
+        let password = definition
+            .field(PASSWORD_HASH)
             .unwrap_or_else(|| panic!("应存在 password_hash 字段"));
 
-        assert!(id.auto_increment);
-        assert!(!password.filterable);
-        assert!(!password.sortable);
-        assert_eq!(password.permissions.readable_roles.len(), 1);
+        assert_eq!(definition.name(), "users");
+        assert_eq!(definition.primary_key(), USER_ID);
+        assert!(id.is_auto_increment());
+        assert!(!password.is_filterable());
+        assert!(!password.is_sortable());
+    }
+
+    #[test]
+    fn user_view_does_not_serialize_password_hash_from_record() {
+        let record = Record::new()
+            .set(USER_ID, 7)
+            .set(USERNAME, "alice")
+            .set(PASSWORD_HASH, "secret-hash")
+            .set(STATUS, "active")
+            .set(CREATED_AT, 10)
+            .set(UPDATED_AT, 11);
+
+        let view = UserView::try_from(&record)
+            .unwrap_or_else(|error| panic!("完整记录应转换为用户视图: {error}"));
+        let value = serde_json::to_value(view)
+            .unwrap_or_else(|error| panic!("用户视图应可序列化: {error}"));
+
+        assert_eq!(value.get(USERNAME), Some(&serde_json::json!("alice")));
+        assert!(value.get(PASSWORD_HASH).is_none());
+    }
+
+    #[tokio::test]
+    async fn password_hash_is_only_readable_by_system_role() {
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .connect_lazy("mysql://root:test@127.0.0.1:3306/test")
+            .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
+        let definition =
+            user_table_definition().unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
+        let table = definition.bind(Arc::new(pool));
+
+        let denied = table.query(["user"]).select_fields(&[PASSWORD_HASH]);
+        assert!(matches!(
+            denied,
+            Err(BaseError::FieldPermissionDenied(_, field, _)) if field == PASSWORD_HASH
+        ));
+        assert!(table
+            .query([SYSTEM_ROLE])
+            .select_fields(&[PASSWORD_HASH])
+            .is_ok());
+    }
+
+    #[test]
+    fn user_view_rejects_incomplete_or_invalid_record() {
+        let incomplete = Record::new().set(USER_ID, 7);
+        assert!(UserView::try_from(&incomplete).is_err());
+
+        let invalid = Record::new()
+            .set(USER_ID, "not-an-integer")
+            .set(USERNAME, "alice")
+            .set(STATUS, "active")
+            .set(CREATED_AT, 10)
+            .set(UPDATED_AT, 11);
+        assert!(UserView::try_from(&invalid).is_err());
     }
 
     #[test]

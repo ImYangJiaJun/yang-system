@@ -1,9 +1,9 @@
-use super::UserService;
+use super::{UserService, USERNAME, USER_ID};
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::auth::{CredentialVerifier, LoginAction, LoginInput, VerifiedSubject};
 use yang_base::action::ActionContext;
-use yang_base::router::{ModuleRouter, RouteDescriptor};
+use yang_base::router::Api;
 use yang_base::BaseError;
 
 #[derive(Clone)]
@@ -22,23 +22,22 @@ impl CredentialVerifier for UserCredentialVerifier {
             .service
             .authenticate(&input.username, &input.password)
             .await?;
+        let id: i64 = user.require(USER_ID)?;
+        let username: String = user.require(USERNAME)?;
         Ok(
-            VerifiedSubject::new(user.id.to_string()).with_claims(serde_json::json!({
-                "username": user.username,
+            VerifiedSubject::new(id.to_string()).with_claims(serde_json::json!({
+                "username": username,
                 "roles": ["user"]
             })),
         )
     }
 }
 
-pub(super) fn register(
-    router: ModuleRouter,
-    service: Arc<UserService>,
-) -> Result<ModuleRouter, BaseError> {
-    let route = RouteDescriptor::new("POST", "/api/v1/users/login", "users.login")?
-        .with_success_status(200)?
-        .with_tags(vec!["users".to_string()])?;
-    router
-        .register_action(LoginAction::new(UserCredentialVerifier { service }))?
-        .register_route("login", route)
+pub(super) fn api(service: Arc<UserService>) -> Api {
+    Api::post(
+        "/api/v1/users/login",
+        LoginAction::new(UserCredentialVerifier { service }),
+    )
+    .operation_id("users.login")
+    .tag("users")
 }
