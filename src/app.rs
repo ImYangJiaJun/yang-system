@@ -1,5 +1,5 @@
 use crate::config::SecuritySettings;
-use crate::modules::account;
+use crate::modules::user;
 use sqlx::MySqlPool;
 use std::sync::Arc;
 use yang_base::router::AppRouter;
@@ -9,10 +9,10 @@ pub fn build_app_router(
     pool: Arc<MySqlPool>,
     security: Arc<SecuritySettings>,
 ) -> Result<AppRouter, BaseError> {
-    let modules = account::build_modules(pool, security)?;
+    let modules = user::build_modules(pool, security)?;
     AppRouter::new()
         .register_module(modules.authentication)?
-        .register_module(modules.account)
+        .register_module(modules.user)
 }
 
 #[cfg(test)]
@@ -40,15 +40,36 @@ mod tests {
             .modules
             .iter()
             .flat_map(|module| module.actions.iter())
-            .map(|action| (action.route.operation_id.as_str(), action.is_public))
+            .map(|action| {
+                (
+                    action.route.operation_id.as_str(),
+                    action.route.method.as_str(),
+                    action.route.path.as_str(),
+                    action.route.success_status,
+                    action.is_public,
+                )
+            })
             .collect();
 
         assert_eq!(router.table_configs().len(), 1);
-        assert_eq!(router.table_configs()[0].table_name, "accounts");
-        assert!(operations.contains(&("accounts.register", true)));
-        assert!(operations.contains(&("accounts.login", true)));
-        assert!(operations.contains(&("accounts.refresh", true)));
-        assert!(operations.contains(&("accounts.logout", true)));
-        assert!(operations.contains(&("accounts.me", false)));
+        assert_eq!(router.table_configs()[0].table_name, "users");
+        assert_eq!(operations.len(), 5);
+        assert!(operations.contains(&(
+            "users.register",
+            "POST",
+            "/api/v1/users/register",
+            201,
+            true,
+        )));
+        assert!(operations.contains(&("users.login", "POST", "/api/v1/users/login", 200, true,)));
+        assert!(operations.contains(&(
+            "users.refresh",
+            "POST",
+            "/api/v1/users/refresh",
+            200,
+            true,
+        )));
+        assert!(operations.contains(&("users.logout", "POST", "/api/v1/users/logout", 200, true,)));
+        assert!(operations.contains(&("users.me", "GET", "/api/v1/users/me", 200, false,)));
     }
 }

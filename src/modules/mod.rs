@@ -1,3 +1,3 @@
 //! 业务模块集合。
 
-pub mod account;
+pub mod user;

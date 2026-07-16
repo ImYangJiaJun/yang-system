@@ -1,3 +1,8 @@
+//! HTTP 传输适配器。
+
+mod live;
+mod ready;
+
 use anyhow::{bail, Context};
 use axum::body::to_bytes;
 use axum::extract::{ConnectInfo, Path, Request as AxumRequest, State};
@@ -12,7 +17,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use yang_base::action::{ActionContext, ApiResponse, GlobalTools, Request, RequestMeta};
-use yang_base::database::GlobalRedis;
 use yang_base::router::AppRouter;
 use yang_base::{BaseError, ErrorCategory};
 
@@ -47,7 +51,9 @@ pub async fn serve(
     tracing::info!(address = %local_addr, "HTTP 服务已启动");
     axum::serve(
         listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
+        router
+            .layer(TraceLayer::new_for_http())
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
@@ -59,9 +65,8 @@ fn build_router(state: HttpState) -> anyhow::Result<Router> {
         .app_router
         .catalog()
         .context("构建 API Catalog 失败")?;
-    let mut router = Router::new()
-        .route("/health/live", axum::routing::get(live))
-        .route("/health/ready", axum::routing::get(ready));
+    let mut router = live::register(Router::new());
+    router = ready::register(router);
 
     for module in catalog.modules {
         for action in module.actions {
@@ -98,7 +103,7 @@ fn build_router(state: HttpState) -> anyhow::Result<Router> {
         }
     }
 
-    Ok(router.with_state(state).layer(TraceLayer::new_for_http()))
+    Ok(router.with_state(state))
 }
 
 async fn dispatch_request(
@@ -185,38 +190,6 @@ async fn dispatch_request(
             }
             error_response(status, error)
         }
-    }
-}
-
-async fn live() -> impl IntoResponse {
-    Json(ApiResponse::success_value(
-        json!({"status": "live"}),
-        "服务存活",
-    ))
-}
-
-async fn ready(State(state): State<HttpState>) -> Response {
-    let mysql_ready = sqlx::query("SELECT 1")
-        .execute(state.pool.as_ref())
-        .await
-        .is_ok();
-    let redis_ready = GlobalRedis::health_check().await.unwrap_or(false);
-    if mysql_ready && redis_ready {
-        (
-            StatusCode::OK,
-            Json(ApiResponse::success_value(
-                json!({"status": "ready"}),
-                "服务就绪",
-            )),
-        )
-            .into_response()
-    } else {
-        tracing::warn!(mysql_ready, redis_ready, "就绪检查失败");
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ApiResponse::fail(900001, "服务尚未就绪")),
-        )
-            .into_response()
     }
 }
 
@@ -355,7 +328,7 @@ mod tests {
             build_router(state).unwrap_or_else(|error| panic!("HTTP 路由应构建成功: {error}"));
         let mut request = AxumRequest::builder()
             .method("POST")
-            .uri("/api/v1/accounts/register")
+            .uri("/api/v1/users/register")
             .header("content-type", "application/json")
             .body(Body::from("not-json"))
             .unwrap_or_else(|error| panic!("测试请求应构建成功: {error}"));
