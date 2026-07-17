@@ -9,7 +9,7 @@ use yang_db::{DatabaseConfig, RedisConfig};
 pub struct Settings {
     pub app: AppSettings,
     pub http: HttpSettings,
-    pub database: DatabaseSettings,
+    pub mysql: MysqlSettings,
     pub redis: RedisSettings,
     pub token: TokenSettings,
     pub security: SecuritySettings,
@@ -31,7 +31,7 @@ pub struct HttpSettings {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DatabaseSettings {
+pub struct MysqlSettings {
     pub url: String,
     pub max_connections: u32,
     pub min_connections: u32,
@@ -113,14 +113,14 @@ impl Settings {
             .with_context(|| format!("HTTP bind 地址无效: {}", self.http.bind))
     }
 
-    pub fn database_config(&self) -> DatabaseConfig {
+    pub fn mysql_config(&self) -> DatabaseConfig {
         DatabaseConfig::default()
-            .with_max_connections(self.database.max_connections)
-            .with_min_connections(self.database.min_connections)
-            .with_connect_timeout(self.database.connect_timeout_seconds)
-            .with_idle_timeout(self.database.idle_timeout_seconds)
-            .with_max_lifetime(self.database.max_lifetime_seconds)
-            .with_test_before_acquire(self.database.test_before_acquire)
+            .with_max_connections(self.mysql.max_connections)
+            .with_min_connections(self.mysql.min_connections)
+            .with_connect_timeout(self.mysql.connect_timeout_seconds)
+            .with_idle_timeout(self.mysql.idle_timeout_seconds)
+            .with_max_lifetime(self.mysql.max_lifetime_seconds)
+            .with_test_before_acquire(self.mysql.test_before_acquire)
     }
 
     pub fn redis_config(&self) -> RedisConfig {
@@ -142,9 +142,7 @@ impl Settings {
         if self.http.max_body_bytes == 0 || self.http.max_body_bytes > 16 * 1024 * 1024 {
             bail!("http.max_body_bytes 必须在 1..=16777216 范围内");
         }
-        self.database_config()
-            .validate()
-            .context("database 配置无效")?;
+        self.mysql_config().validate().context("mysql 配置无效")?;
         self.redis_config().validate().context("redis 配置无效")?;
         if self.token.secret.len() < 32 {
             bail!("token.secret 至少需要 32 字节");
@@ -219,8 +217,8 @@ name = "test"
 [http]
 bind = "127.0.0.1:8080"
 max_body_bytes = 1024
-[database]
-url = "${DATABASE_URL}"
+[mysql]
+url = "${MYSQL_URL}"
 max_connections = 2
 min_connections = 0
 connect_timeout_seconds = 2
@@ -255,7 +253,7 @@ filter = "info"
     #[test]
     fn parses_environment_placeholders_and_redacts_token_debug() {
         let values = HashMap::from([
-            ("DATABASE_URL", "mysql://example/test"),
+            ("MYSQL_URL", "mysql://example/test"),
             ("REDIS_URL", "redis://example"),
             ("TOKEN_SECRET", "01234567890123456789012345678901"),
         ]);
@@ -264,7 +262,7 @@ filter = "info"
         })
         .unwrap_or_else(|error| panic!("有效配置应解析成功: {error}"));
 
-        assert_eq!(settings.database.url, "mysql://example/test");
+        assert_eq!(settings.mysql.url, "mysql://example/test");
         assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
     }
 
@@ -274,6 +272,6 @@ filter = "info"
             Ok(_) => panic!("缺少环境变量时应失败"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("DATABASE_URL"));
+        assert!(error.to_string().contains("MYSQL_URL"));
     }
 }

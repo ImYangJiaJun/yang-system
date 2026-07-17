@@ -42,11 +42,11 @@ mod tests {
         let pool = MySqlPoolOptions::new()
             .connect_lazy("mysql://root:test@127.0.0.1:3306/test")
             .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
-        let database = Database::from_pool(pool.clone(), DatabaseConfig::default())
+        let mysql = Database::from_pool(pool.clone(), DatabaseConfig::default())
             .unwrap_or_else(|error| panic!("测试 Database 应构建成功: {error}"));
         let tools = Arc::new(
             ToolsBuilder::new()
-                .database(database)
+                .mysql(mysql)
                 .token(TokenManager::new_symmetric(
                     "01234567890123456789012345678901",
                     Algorithm::HS256,

@@ -16,13 +16,11 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     init_tracing(&settings.logging.filter)?;
     tracing::info!(app = %settings.app.name, config = %config_path.display(), "开始启动系统");
 
-    let database =
-        Database::connect_with_config(&settings.database.url, settings.database_config())
-            .await
-            .context("连接 MySQL 失败")?;
-    let initializer_database =
-        Database::from_pool(database.pool().clone(), settings.database_config())
-            .context("构造 schema 初始化数据库失败")?;
+    let mysql = Database::connect_with_config(&settings.mysql.url, settings.mysql_config())
+        .await
+        .context("连接 MySQL 失败")?;
+    let initializer_mysql = Database::from_pool(mysql.pool().clone(), settings.mysql_config())
+        .context("构造 schema 初始化数据库失败")?;
     let cache = RedisClient::connect_with_config(&settings.redis.url, settings.redis_config())
         .await
         .context("连接 Redis 失败")?;
@@ -37,7 +35,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     );
     let tools = Arc::new(
         ToolsBuilder::new()
-            .database(database)
+            .mysql(mysql)
             .cache(cache)
             .token(token_manager)
             .config(settings.clone())
@@ -47,7 +45,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
 
-    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let initializer = DatabaseInitializer::new(initializer_mysql, false);
     let schema: Vec<_> = application.runtime.table_definitions().iter().collect();
     let report = initializer
         .sync_table_definitions(&schema)

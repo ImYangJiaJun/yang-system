@@ -5,8 +5,9 @@ name = "yang-system"
 bind = "0.0.0.0:8080"
 max_body_bytes = 1048576
 
-[database]
-url = "${DATABASE_URL}"
+[mysql]
+#mysql://用户名:密码@主机地址:端口/数据库名
+url = "mysql://root:111111@127.0.0.1:3306/yang"
 max_connections = 20
 min_connections = 2
 connect_timeout_seconds = 10
@@ -15,7 +16,7 @@ max_lifetime_seconds = 1800
 test_before_acquire = true
 
 [redis]
-url = "${REDIS_URL}"
+url = "127.0.0.1:6379"
 max_connections = 20
 min_connections = 2
 connect_timeout_seconds = 5
@@ -25,7 +26,7 @@ max_lifetime_seconds = 1800
 test_before_acquire = true
 
 [token]
-secret = "${TOKEN_SECRET}"
+secret = "1111111111111111111111111111111111111111111111111111111111"
 issuer = "yang-system"
 audience = "yang-system-api"
 access_ttl_seconds = 3600
