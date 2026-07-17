@@ -27,7 +27,8 @@ impl CredentialVerifier for UserCredentialVerifier {
         Ok(
             VerifiedSubject::new(id.to_string()).with_claims(serde_json::json!({
                 "username": username,
-                "roles": ["user"]
+                "roles": ["user"],
+                "permissions": ["org.org:read", "org.user:read"]
             })),
         )
     }

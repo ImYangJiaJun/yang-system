@@ -15,7 +15,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
-use yang_base::action::{TokenAuthMiddleware, User};
+use yang_base::action::{TokenAuthMiddleware, UiCatalogAction, User};
 use yang_base::definition::{Key, ModuleName, ModuleSpec, Str, TableName, TableSpec, Timestamp};
 #[cfg(test)]
 use yang_base::table::TableDefinition;
@@ -44,7 +44,8 @@ pub fn build_module(security: Arc<SecuritySettings>) -> Result<ModuleSpec, BaseE
         .map_err(|error| BaseError::ConfigError(error.to_string()))?;
     let module = ModuleSpec::new(module_name)
         .table(table_spec)
-        .middleware(TokenAuthMiddleware::new(user_from_claims));
+        .middleware(TokenAuthMiddleware::new(user_from_claims).authenticate_public_actions())
+        .native_action(UiCatalogAction);
     let module = register::register(module, Arc::clone(&service))?;
     let module = register_via_plugin::register(module)?;
     let module = login::register(module, Arc::clone(&service))?;
@@ -324,7 +325,7 @@ fn verify_password(password: &str, encoded: &str) -> Result<bool, BaseError> {
     }
 }
 
-fn user_from_claims(claims: &TokenClaims) -> User {
+pub(crate) fn user_from_claims(claims: &TokenClaims) -> User {
     let id = claims.sub.parse::<i64>().unwrap_or_default();
     let username = claims
         .custom
@@ -340,7 +341,17 @@ fn user_from_claims(claims: &TokenClaims) -> User {
         .flatten()
         .filter_map(serde_json::Value::as_str)
         .map(str::to_string);
-    User::new(id, username).with_roles(roles)
+    let permissions = claims
+        .custom
+        .get("permissions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string);
+    User::new(id, username)
+        .with_roles(roles)
+        .with_permissions(permissions)
 }
 
 #[cfg(test)]
@@ -427,5 +438,32 @@ mod tests {
         assert!(!verify_password("wrong-password", &encoded)
             .unwrap_or_else(|error| panic!("错误密码应得到 false: {error}")));
         assert!(!encoded.contains("correct-horse-battery-staple"));
+    }
+
+    #[test]
+    fn token_claims_project_roles_and_permissions_without_trusting_other_shapes() {
+        let claims = TokenClaims::new(
+            "test",
+            "7",
+            "test-api",
+            60,
+            0,
+            0,
+            "test-jti",
+            yang_base::token::TokenType::Access,
+            serde_json::json!({
+                "username": "alice",
+                "roles": ["user", 123],
+                "permissions": ["org.user:read", null, {"forged": true}]
+            }),
+        );
+
+        let user = user_from_claims(&claims);
+        assert_eq!(user.id, 7);
+        assert_eq!(user.username, "alice");
+        assert!(user.has_role("user"));
+        assert!(!user.has_role("123"));
+        assert!(user.has_permission("org.user:read"));
+        assert!(!user.has_permission("forged"));
     }
 }

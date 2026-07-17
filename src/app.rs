@@ -19,7 +19,7 @@ pub fn build_app(
         .module(user_module);
     let runtime = AppBuilder::new()
         .addon(account)
-        .addon(org::OrgAddon)
+        .addon(org::build_addon().context("构建 org Addon 失败")?)
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
 
@@ -98,7 +98,7 @@ mod tests {
         assert!(tables.contains(&"users"));
         assert!(tables.contains(&"org_org"));
         assert!(tables.contains(&"org_user"));
-        assert_eq!(operations.len(), 6);
+        assert_eq!(operations.len(), 7);
         assert!(operations.contains(&(
             "account.user.register",
             "POST",
@@ -121,6 +121,10 @@ mod tests {
         assert_eq!(
             document["paths"]["/api/v1/orgs"]["get"]["operationId"],
             "org.org.list"
+        );
+        assert_eq!(
+            document["paths"]["/api/v1/orgs/options"]["post"]["operationId"],
+            "org.org.select"
         );
         assert_eq!(app.runtime.compiled_views().len(), 3);
 
@@ -146,5 +150,55 @@ mod tests {
             .with_tenant(TenantContext::new(TenantId::new(7)))
             .table_query();
         assert!(tenant_query.is_ok());
+
+        assert!(operations.iter().any(|operation| {
+            operation.0 == "account.user.ui_catalog"
+                && operation.1 == "GET"
+                && operation.2 == "/.well-known/yang/ui-catalog"
+                && operation.4
+        }));
+
+        let org_user_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "org.user")
+            .unwrap_or_else(|| panic!("应存在 org.user 模块"));
+        let action = |name: &str| {
+            org_user_module
+                .actions()
+                .iter()
+                .find(|action| action.name.as_str() == name)
+                .unwrap_or_else(|| panic!("应存在 org.user.{name}"))
+        };
+        for name in ["get", "select", "table"] {
+            assert_eq!(action(name).permissions, vec!["org.user:read"]);
+        }
+        for name in ["add", "put", "del"] {
+            assert_eq!(action(name).permissions, vec!["org.user:write"]);
+        }
+        let view = org_user_module
+            .views
+            .iter()
+            .find(|view| view.name.as_str() == "list")
+            .unwrap_or_else(|| panic!("应存在 org.user.list View"));
+        assert!(view.actions.contains(&yang_base::action!("org.user.add")));
+        assert!(view.actions.contains(&yang_base::action!("org.user.put")));
+        assert!(view.actions.contains(&yang_base::action!("org.user.del")));
+        let delete = view
+            .action_presentations
+            .get(&yang_base::action!("org.user.del"))
+            .unwrap_or_else(|| panic!("删除操作应声明展示语义"));
+        assert_eq!(
+            delete.placement,
+            yang_base::definition::ActionPlacement::Bulk
+        );
+        assert_eq!(
+            delete.interaction,
+            yang_base::definition::ActionInteraction::Invoke
+        );
+        assert!(delete.confirmation.is_some());
     }
 }
