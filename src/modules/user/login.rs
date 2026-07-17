@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::auth::{CredentialVerifier, LoginAction, LoginInput, VerifiedSubject};
 use yang_base::action::ActionContext;
-use yang_base::router::Api;
+use yang_base::definition::{ActionName, ActionSpec, HttpMethod, ModuleSpec, RouteSpec};
 use yang_base::BaseError;
 
 #[derive(Clone)]
@@ -15,12 +15,12 @@ struct UserCredentialVerifier {
 impl CredentialVerifier for UserCredentialVerifier {
     async fn verify(
         &self,
-        _ctx: &ActionContext,
+        ctx: &ActionContext,
         input: &LoginInput,
     ) -> Result<VerifiedSubject, BaseError> {
         let user = self
             .service
-            .authenticate(&input.username, &input.password)
+            .authenticate(ctx, &input.username, &input.password)
             .await?;
         let id: i64 = user.require(USER_ID)?;
         let username: String = user.require(USERNAME)?;
@@ -33,11 +33,19 @@ impl CredentialVerifier for UserCredentialVerifier {
     }
 }
 
-pub(super) fn api(service: Arc<UserService>) -> Api {
-    Api::post(
-        "/api/v1/users/login",
-        LoginAction::new(UserCredentialVerifier { service }),
+pub(super) fn register(
+    module: ModuleSpec,
+    service: Arc<UserService>,
+) -> Result<ModuleSpec, BaseError> {
+    let name =
+        ActionName::new("login").map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    let spec = ActionSpec::new(
+        name,
+        RouteSpec::new(HttpMethod::Post, "/api/v1/users/login", "users.login"),
     )
-    .operation_id("users.login")
-    .tag("users")
+    .display_name("登录")
+    .description("校验账号密码并签发 Token")
+    .public(true)
+    .tag("users");
+    Ok(module.action(spec, LoginAction::new(UserCredentialVerifier { service })))
 }

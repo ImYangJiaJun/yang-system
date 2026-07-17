@@ -1,12 +1,17 @@
 # yang-system
 
-一个基于 `yang-base` 的模块化单体基础系统。当前只提供用户、JWT 认证和 HTTP 接口，但边界已经为后续业务模块、单机部署和多机负载均衡统一设计。
+`yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用，覆盖账号认证、Addon/Module、强类型 Action、Fields/Params、Tables、内部 Action 调用、租户上下文、Schema、Catalog、Registry 与 OpenAPI。
 
-## 仓库位置与联合调试
+## 相对路径联合调试
 
-本项目是独立 Git/Cargo 项目。放在 `lib_yang/project/yang-system` 只是为了方便联合调试，根 workspace 会显式排除它。当前应用需要尚未发布到 crates.io 的 `yang-base 0.2.0` API，因此 `Cargo.toml` 通过 SSH 固定到私有 `lib_yang` 的 Git revision；单独 clone 后，具有该仓库 SSH 权限的环境可直接构建和运行。
+本项目是独立 Git/Cargo 项目，根 workspace 显式排除它。`Cargo.toml` 直接使用：
 
-独立开发时直接在项目根目录运行：
+```toml
+yang-base = { path = "../../crates/yang-base", ... }
+yang-db = { path = "../../crates/yang-db", ... }
+```
+
+因此在 `project/yang-system` 目录执行普通 Cargo 命令，就会直接编译同一份 `lib_yang` 工作树中的基础库修改：
 
 ```powershell
 cargo check --all-targets
@@ -14,85 +19,56 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-放在 `lib_yang/project` 下联合调试未发布的基础库修改时，可临时覆盖 crates.io 依赖；该命令不会把本地 path 写入 `Cargo.toml`：
+联合调试不需要 Git revision、Cargo `patch`、绝对路径或调试后恢复 `Cargo.lock`。
 
-```powershell
-cargo --config 'patch."ssh://git@github.com/ImYangJiaJun/lib_yang.git".yang-base.path="../../crates/yang-base"' `
-      --config 'patch."ssh://git@github.com/ImYangJiaJun/lib_yang.git".yang-db.path="../../crates/yang-db"' `
-      test --all-targets
-git restore Cargo.lock
-```
-
-临时 patch 会改写锁文件中的依赖来源，因此联调完成后要恢复 `Cargo.lock`。`yang-base 0.2.0` 发布后，应把 Git revision 依赖切回 crates.io 版本约束，避免长期依赖仓库提交。
-
-## 设计原则
-
-系统先满足四个不可省略的事实：HTTP 请求需要稳定入口，业务需要清晰边界，持久状态必须跨进程共享，数据库结构必须与代码声明一致。因此项目采用以下约束：
-
-- 一个进程、一个可执行程序、一个 `AppRouter`，不是微服务。
-- 业务按模块文件夹组织；叶子模块内部只放平级文件，不再建立子文件夹。
-- 一个接口对应一个文件；接口文件通过单个 `Api` 值同时声明 Action 与 HTTP 元数据，避免实现和路由分散。
-- 文件不是架构层。模块共享的表定义、服务、持久化和安全逻辑先收敛在 `mod.rs`，出现独立变化边界后再拆成平级文件。
-- HTTP 层只负责协议转换，不写用户业务。
-- MySQL 保存用户事实，Redis 保存 Token 撤销与轮换状态；应用进程不保存会话状态。
-- `config.toml` 是唯一配置文件入口，敏感值通过 `${ENV_NAME}` 注入。
-- 不包含 `.sql` 文件。启动监听 HTTP 端口前，`DatabaseInitializer::sync_app_schema` 从模块的 `TableDefinition` 增量同步表结构。
-- schema 同步只做安全的 additive 变更；已有列的类型、NULL、自增或主键不兼容时直接阻止启动，避免自动破坏数据。
-
-## 项目结构
+## 原生结构
 
 ```text
-lib_yang/
-├── crates/                     # yang-base、yang-db 等基础库
-└── project/
-    └── yang-system/
-        ├── Cargo.toml          # crate、本地基础库依赖和 lint 边界
-        ├── .cargo/config.toml  # 通过系统 Git CLI 获取私有基础库依赖
-        ├── config.toml         # 唯一配置入口，敏感值引用环境变量
-        ├── README.md
-        └── src/
-            ├── main.rs         # 只解析 APP_CONFIG 并进入启动器
-            ├── lib.rs          # 库模块出口，方便测试与后续复用
-            ├── bootstrap.rs    # 连接资源、同步 schema、启动/关闭 HTTP
-            ├── config.rs       # 强类型配置、环境变量展开、启动前校验
-            ├── app.rs          # 组装所有业务模块，生成唯一 AppRouter
-            ├── transport/http/ # HTTP 生命周期、Catalog 投影和健康检查
-            └── modules/user/   # 用户接口、表定义、服务、持久化和安全逻辑
+src/
+├── main.rs
+├── bootstrap.rs             # 创建 Tools、同步 Schema、启动 HTTP、优雅关闭
+├── app.rs                   # AppBuilder 唯一组装入口
+├── transport/http/          # Catalog 驱动的 Axum 传输与健康检查
+└── modules/
+    ├── user/                # 账号、JWT、ActionLink/Plugins 内部调用
+    └── org.rs               # Addon/Module、关系、租户、table_list/table_select
 ```
 
-### 为什么这样分层
-
-`main.rs` 不应知道数据库表或 HTTP route，否则测试和未来的任务进程都会被可执行入口绑死。`bootstrap.rs` 只处理有顺序的资源生命周期。`app.rs` 只组合模块，所以新增业务通常只需要增加 `modules/<name>` 并在这里注册。
-
-用户模块内部保持一条单向依赖，但不为每一层建立文件：
+核心路径只有一条：
 
 ```text
-HTTP -> AppRouter -> <interface>.rs -> UserService -> TableHandle/TableQuery -> Record/MySQL
-                                      \-> TokenManager -> Redis
+Addon/Module/fields!/params!
+            │
+            ▼
+        AppBuilder
+       ┌────┼──────────────┐
+       ▼    ▼              ▼
+    Catalog Registry   TableDefinition/View
+       │    │              │
+       ▼    ▼              ▼
+   OpenAPI HTTP dispatch  Schema/Tables
 ```
 
-API DTO 与数据库记录保持类型边界：持久化层使用 schema-first `Record`，认证查询可在 `system` 角色下读取 `password_hash`，但所有 Action 输出都映射为不含密码字段的类型化 `UserView`。`TableQuery` 在访问数据库前校验 WHERE 字段、权限和值类型，并正确处理 `NULL` 比较。项目没有注册 `yang-base` 的通用表 CRUD Action，也不会直接序列化 `Record`，避免用户表和密码哈希被通用接口完整读出。
-
-`user` 是唯一用户领域模块。注册、登录、刷新、登出等公开 Action 与受保护的当前用户 Action 注册到同一个 `ModuleRouter`；`TokenAuthMiddleware` 只作用于受保护 Action，日志、限流、请求追踪等通用中间件仍覆盖全部 Action。模块内所有接口共享同一个 `UserService`、表定义和连接池。
-
-HTTP route 不是在两处手写：每个 `<interface>.rs` 只返回一个同时包含 Action、路径、方法、成功状态码和 operation ID 的 `Api`，模块根通过 `.apis([...])` 一次注册，HTTP 适配器再从 `ApiCatalog` 动态生成 Axum route。基础库会在注册/目录构建期按 Axum 0.8 的 `{name}` / `{*name}` 语法检查模板和跨模块冲突，因此非法 route 不会延迟到 HTTP 启动时 panic。
+- `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；没有进程级数据库/Redis/Tools 单例。
+- `params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
+- `fields!` 是 Schema、输入输出约束、OpenAPI、后台元数据和查询策略的字段事实来源。
+- `ActionLink<I, O>` 在 `AppBuilder::build` 绑定 Registry slot；请求期内部调用不查字符串名称、不做 JSON 往返。
+- `ctx.tables()` 统一执行字段权限、筛选、排序、分页、关系批量加载与租户条件。
+- `org_user.org_org` 是租户键；普通上下文缺少 `TenantContext` 时查询 fail-closed，只有显式 system 上下文可绕过。
 
 ## 启动顺序
 
-1. 读取 `config.toml`，展开环境变量并完成 fail-fast 校验。
-2. 初始化 tracing。
-3. 创建一个 MySQL 连接池，并以 `Arc<MySqlPool>` 显式共享给用户模块。
-4. 初始化 `GlobalRedis`；这是 `yang-base` Token 黑名单和刷新令牌轮换的共享状态。
-5. 构建 `TokenManager`、用户模块和 `AppRouter`。
-6. 调用 `DatabaseInitializer::sync_app_schema(&app_router)`，从模块注册的 `TableDefinition` 同步 schema。
-7. schema 完全兼容后才监听 HTTP 端口。
-8. 收到关闭信号后停止 HTTP，并关闭 Redis/MySQL 连接池。
-
-多个实例同时启动时，基础库使用 MySQL advisory lock 串行化 schema 同步。因此可把同一构建产物部署到多台服务器，再由负载均衡器分发请求；所有实例必须连接同一 MySQL、Redis，并使用同一 Token secret/issuer/audience。
+1. 读取 `config.toml` 并展开环境变量。
+2. 创建 MySQL `Database`、Redis `RedisClient` 和 `TokenManager`。
+3. 用 `ToolsBuilder` 构建当前应用独占的不可变 `Tools`。
+4. 用 `AppBuilder` 校验 Addon 依赖、关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
+5. `DatabaseInitializer` 根据 `BuiltApp::table_definitions()` 执行 additive Schema 同步。
+6. 从同一 Catalog 投影 Axum route、OpenAPI 和默认后台 View。
+7. 停机时按当前应用资源的生命周期关闭连接。
 
 ## 本地启动
 
-先创建数据库和 Redis 实例；项目会创建表，但不会创建数据库本身。在 `project/yang-system` 目录启动的 PowerShell 示例：
+先创建数据库和 Redis；应用会创建缺失表和列，但不会创建数据库本身。
 
 ```powershell
 $env:DATABASE_URL = "mysql://root:password@127.0.0.1:3306/yang_system"
@@ -101,36 +77,21 @@ $env:TOKEN_SECRET = "replace-with-at-least-32-random-bytes"
 cargo run
 ```
 
-使用其它配置路径：
+其它配置文件：
 
 ```powershell
 $env:APP_CONFIG = "D:\config\yang-system.toml"
 cargo run
 ```
 
-## HTTP API
+## 参考能力
 
-| 方法 | 路径 | 认证 | 说明 |
-|---|---|---|---|
-| `POST` | `/api/v1/users/register` | 否 | 注册用户 |
-| `POST` | `/api/v1/users/login` | 否 | 登录并返回 access/refresh Token |
-| `POST` | `/api/v1/users/refresh` | 否 | 旋转 refresh Token 并返回新 Token 对 |
-| `POST` | `/api/v1/users/logout` | Token 自证 | 撤销用户已有 Token |
-| `GET` | `/api/v1/users/me` | Bearer access Token | 获取当前用户 |
-| `GET` | `/health/live` | 否 | 进程存活 |
-| `GET` | `/health/ready` | 否 | MySQL 与 Redis 就绪 |
+| 位置 | 展示能力 |
+|---|---|
+| `modules/user/register.rs` | `params!`、类型化 `Action::index`、Fields 约束复用 |
+| `modules/user/register_via_plugin.rs` | `ActionLink`、构建期绑定、`ctx.plugins()` 零 JSON 内部调用 |
+| `modules/user/mod.rs` | 密码保护字段、TableQuery、Token 中间件 |
+| `modules/org.rs` | 原生 `Addon/Module/actions!/modules!`、关系字段、租户键、Tables 列表与选择器 |
+| `app.rs` 测试 | Catalog/Registry 同源、OpenAPI、默认 View、租户 fail-closed |
 
-注册与登录示例：
-
-```powershell
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/users/register -ContentType application/json -Body '{"username":"alice","password":"correct-horse-battery-staple"}'
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/users/login -ContentType application/json -Body '{"username":"alice","password":"correct-horse-battery-staple"}'
-```
-
-所有业务响应使用 `yang-base::ApiResponse`：成功时 `code = 0`，失败时返回稳定错误码。服务端和基础设施错误不会把底层数据库或 Redis 信息暴露给客户端。
-
-## 扩展新业务
-
-新增 `src/modules/<business>/`，至少声明 `mod.rs` 和接口文件；每增加一个接口就新增一个平级 `<interface>.rs`，由该文件用单个 `Api` 共同维护 Action 与 HTTP 元数据。共享逻辑先放在 `mod.rs`；只有出现第二种实现、独立复用、独立测试替身或不同变化周期时，才拆成新的平级文件，不建立子文件夹。最后在 `app.rs` 注册 `ModuleRouter`。表结构应通过 `Table` 与 `Field` 构建不可变 `TableDefinition`，再使用 `ModuleRouter::table` 注册主表或 `ModuleRouter::schema` 注册附属表；启动器会自动纳入 schema 同步，不需要也不允许新增迁移 SQL 文件。
-
-自动同步适合创建表、增加安全的可空列等 additive 变化。删除列、改类型、收紧 NULL、修改主键等破坏性变更必须先设计显式的数据演进方案，再扩展基础库能力，不能靠启动过程猜测业务意图。
+BR 到 YANG 的完整机械映射和 codemod 使用方式见 `../../docs/br-to-yang-migration.md`。

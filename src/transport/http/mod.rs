@@ -11,29 +11,24 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{on, MethodFilter};
 use axum::{Json, Router};
 use serde_json::json;
-use sqlx::MySqlPool;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
-use yang_base::action::{ActionContext, ApiResponse, GlobalTools, Request, RequestMeta};
-use yang_base::router::AppRouter;
+use yang_base::action::{ApiResponse, Request, RequestMeta};
+use yang_base::definition::{ActionHandle, ActionRef, BuiltApp};
 use yang_base::{BaseError, ErrorCategory};
 
 #[derive(Clone)]
 struct HttpState {
-    app_router: Arc<AppRouter>,
-    tools: Arc<GlobalTools>,
-    pool: Arc<MySqlPool>,
+    app: Arc<BuiltApp>,
     local_addr: SocketAddr,
     max_body_bytes: usize,
 }
 
 pub async fn serve(
     bind: SocketAddr,
-    app_router: Arc<AppRouter>,
-    tools: Arc<GlobalTools>,
-    pool: Arc<MySqlPool>,
+    app: Arc<BuiltApp>,
     max_body_bytes: usize,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind)
@@ -41,9 +36,7 @@ pub async fn serve(
         .with_context(|| format!("绑定 HTTP 地址失败: {bind}"))?;
     let local_addr = listener.local_addr().context("读取 HTTP 监听地址失败")?;
     let state = HttpState {
-        app_router,
-        tools,
-        pool,
+        app,
         local_addr,
         max_body_bytes,
     };
@@ -61,45 +54,44 @@ pub async fn serve(
 }
 
 fn build_router(state: HttpState) -> anyhow::Result<Router> {
-    let catalog = state
-        .app_router
-        .catalog()
-        .context("构建 API Catalog 失败")?;
     let mut router = live::register(Router::new());
     router = ready::register(router);
 
-    for module in catalog.modules {
-        for action in module.actions {
-            let method_filter = method_filter(&action.route.method)?;
-            let path = action.route.path.clone();
-            let module_name = module.name.clone();
-            let action_name = action.name.clone();
-            let success_status = action.route.success_status;
-            router = router.route(
-                &path,
-                on(
-                    method_filter,
-                    move |State(state): State<HttpState>,
-                          ConnectInfo(peer): ConnectInfo<SocketAddr>,
-                          Path(path_params): Path<HashMap<String, String>>,
-                          request: AxumRequest| {
-                        let module_name = module_name.clone();
-                        let action_name = action_name.clone();
-                        async move {
-                            dispatch_request(
-                                state,
-                                peer,
-                                path_params,
-                                request,
-                                &module_name,
-                                &action_name,
-                                success_status,
-                            )
-                            .await
-                        }
-                    },
-                ),
-            );
+    for addon in state.app.catalog().addons() {
+        for module in &addon.modules {
+            for action in module.actions() {
+                let method_filter = method_filter(action.route.method.as_str())?;
+                let path = action.route.path.clone();
+                let reference = ActionRef::new(module.name.clone(), action.name.clone());
+                let handle = state
+                    .app
+                    .registry()
+                    .resolve(&reference)
+                    .with_context(|| format!("Action 未预编译到 Registry: {reference}"))?;
+                let success_status = action.success_status;
+                router = router.route(
+                    &path,
+                    on(
+                        method_filter,
+                        move |State(state): State<HttpState>,
+                              ConnectInfo(peer): ConnectInfo<SocketAddr>,
+                              Path(path_params): Path<HashMap<String, String>>,
+                              request: AxumRequest| {
+                            async move {
+                                dispatch_request(
+                                    state,
+                                    peer,
+                                    path_params,
+                                    request,
+                                    handle,
+                                    success_status,
+                                )
+                                .await
+                            }
+                        },
+                    ),
+                );
+            }
         }
     }
 
@@ -111,8 +103,7 @@ async fn dispatch_request(
     peer: SocketAddr,
     path_params: HashMap<String, String>,
     request: AxumRequest,
-    module_name: &str,
-    action_name: &str,
+    handle: ActionHandle,
     success_status: u16,
 ) -> Response {
     let (parts, body) = request.into_parts();
@@ -171,14 +162,12 @@ async fn dispatch_request(
         .with_scheme(parts.uri.scheme_str().unwrap_or("http"))
         .with_peer_addr(peer)
         .with_local_addr(state.local_addr);
-    let context = ActionContext::new(action_request, Arc::clone(&state.tools))
+    let context = state
+        .app
+        .context(action_request)
         .with_request_meta(request_meta);
 
-    match state
-        .app_router
-        .dispatch(module_name, action_name, context)
-        .await
-    {
+    match state.app.dispatch_context(handle, context).await {
         Ok(response) => {
             let status = StatusCode::from_u16(success_status).unwrap_or(StatusCode::OK);
             (status, Json(response)).into_response()
@@ -257,13 +246,15 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::build_app_router;
+    use crate::app::build_app;
     use crate::config::SecuritySettings;
     use axum::body::Body;
     use jsonwebtoken::Algorithm;
     use sqlx::mysql::MySqlPoolOptions;
     use tower::ServiceExt;
     use yang_base::token::TokenManager;
+    use yang_base::tools::ToolsBuilder;
+    use yang_db::{Database, DatabaseConfig};
 
     #[test]
     fn maps_engine_error_categories_to_http_status() {
@@ -303,10 +294,6 @@ mod tests {
             password_min_length: 10,
             password_max_length: 128,
         });
-        let app_router = Arc::new(
-            build_app_router(Arc::clone(&pool), security)
-                .unwrap_or_else(|error| panic!("应用路由应构建成功: {error}")),
-        );
         let token_manager = TokenManager::new_symmetric(
             "01234567890123456789012345678901",
             Algorithm::HS256,
@@ -315,10 +302,20 @@ mod tests {
             60,
             120,
         );
+        let tools = Arc::new(
+            ToolsBuilder::new()
+                .database(
+                    Database::from_pool(pool.as_ref().clone(), DatabaseConfig::default())
+                        .unwrap_or_else(|error| panic!("测试 Database 应构建成功: {error}")),
+                )
+                .token(token_manager)
+                .build()
+                .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
+        );
+        let application = build_app(Arc::clone(&tools), security)
+            .unwrap_or_else(|error| panic!("应用应构建成功: {error}"));
         let state = HttpState {
-            app_router,
-            tools: Arc::new(GlobalTools::new(token_manager)),
-            pool,
+            app: Arc::new(application.runtime),
             local_addr: "127.0.0.1:8080"
                 .parse()
                 .unwrap_or_else(|error| panic!("测试监听地址应有效: {error}")),

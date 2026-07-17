@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::auth::{RefreshAction, RefreshClaimsResolver};
 use yang_base::action::ActionContext;
-use yang_base::router::Api;
+use yang_base::definition::{ActionName, ActionSpec, HttpMethod, ModuleSpec, RouteSpec};
 use yang_base::BaseError;
 
 #[derive(Clone)]
@@ -15,10 +15,10 @@ struct UserClaimsResolver {
 impl RefreshClaimsResolver for UserClaimsResolver {
     async fn resolve(
         &self,
-        _ctx: &ActionContext,
+        ctx: &ActionContext,
         subject: &str,
     ) -> Result<serde_json::Value, BaseError> {
-        let user = self.service.active_by_subject(subject).await?;
+        let user = self.service.active_by_subject(ctx, subject).await?;
         let username: String = user.require(USERNAME)?;
         Ok(serde_json::json!({
             "username": username,
@@ -27,11 +27,19 @@ impl RefreshClaimsResolver for UserClaimsResolver {
     }
 }
 
-pub(super) fn api(service: Arc<UserService>) -> Api {
-    Api::post(
-        "/api/v1/users/refresh",
-        RefreshAction::new(UserClaimsResolver { service }),
+pub(super) fn register(
+    module: ModuleSpec,
+    service: Arc<UserService>,
+) -> Result<ModuleSpec, BaseError> {
+    let name =
+        ActionName::new("refresh").map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    let spec = ActionSpec::new(
+        name,
+        RouteSpec::new(HttpMethod::Post, "/api/v1/users/refresh", "users.refresh"),
     )
-    .operation_id("users.refresh")
-    .tag("users")
+    .display_name("刷新 Token")
+    .description("轮换 Refresh Token 并签发新 Token 对")
+    .public(true)
+    .tag("users");
+    Ok(module.action(spec, RefreshAction::new(UserClaimsResolver { service })))
 }

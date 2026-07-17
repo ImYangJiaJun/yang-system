@@ -1,26 +1,15 @@
 use super::{UserService, UserView};
 use async_trait::async_trait;
-use schemars::JsonSchema;
-use serde::Deserialize;
 use std::sync::Arc;
-use yang_base::action::{ActionContext, TypedHandler};
-use yang_base::router::Api;
+use yang_base::action::{Action as ActionHandler, ActionContext};
+use yang_base::definition::{ModuleSpec, Password, Str};
 use yang_base::{Action, BaseError};
 
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct RegisterInput {
-    username: String,
-    password: String,
-}
-
-impl std::fmt::Debug for RegisterInput {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RegisterInput")
-            .field("username", &self.username)
-            .field("password", &"[REDACTED]")
-            .finish()
+yang_base::params! {
+    #[deny_unknown_fields]
+    pub(super) RegisterInput {
+        username: Str::new().title("用户名").require(true).max_length(64),
+        password: Password::new().title("登录密码").require(true).min_length(10).max_length(128),
     }
 }
 
@@ -29,6 +18,9 @@ impl std::fmt::Debug for RegisterInput {
     name = "register",
     display_name = "注册用户",
     description = "创建一个新用户",
+    method = "POST",
+    path = "/api/v1/users/register",
+    success_status = 201,
     public
 )]
 struct RegisterAction {
@@ -36,24 +28,24 @@ struct RegisterAction {
 }
 
 #[async_trait]
-impl TypedHandler for RegisterAction {
+impl ActionHandler for RegisterAction {
     type Input = RegisterInput;
     type Output = UserView;
 
-    async fn handle(
+    async fn index(
         &self,
-        _ctx: ActionContext,
+        ctx: ActionContext,
         input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
         self.service
-            .register(&input.username, &input.password)
+            .register(&ctx, &input.username, &input.password)
             .await
     }
 }
 
-pub(super) fn api(service: Arc<UserService>) -> Api {
-    Api::post("/api/v1/users/register", RegisterAction { service })
-        .operation_id("users.register")
-        .created()
-        .tag("users")
+pub(super) fn register(
+    module: ModuleSpec,
+    service: Arc<UserService>,
+) -> Result<ModuleSpec, BaseError> {
+    Ok(module.native_action(RegisterAction { service }))
 }

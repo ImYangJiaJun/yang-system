@@ -2643,7 +2643,6 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 [[package]]
 name = "yang-base"
 version = "0.2.0"
-source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=fa092f79a748d5208b8446ddcd77a401fd581b29#fa092f79a748d5208b8446ddcd77a401fd581b29"
 dependencies = [
  "async-trait",
  "base64",
@@ -2668,7 +2667,6 @@ dependencies = [
 [[package]]
 name = "yang-base-derive"
 version = "0.2.0"
-source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=fa092f79a748d5208b8446ddcd77a401fd581b29#fa092f79a748d5208b8446ddcd77a401fd581b29"
 dependencies = [
  "darling",
  "proc-macro-error",
@@ -2680,7 +2678,6 @@ dependencies = [
 [[package]]
 name = "yang-db"
 version = "0.1.4"
-source = "git+ssh://git@github.com/ImYangJiaJun/lib_yang.git?rev=fa092f79a748d5208b8446ddcd77a401fd581b29#fa092f79a748d5208b8446ddcd77a401fd581b29"
 dependencies = [
  "base64",
  "chrono",

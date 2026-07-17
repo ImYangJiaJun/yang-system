@@ -5,6 +5,7 @@ mod logout;
 mod me;
 mod refresh;
 mod register;
+mod register_via_plugin;
 
 use crate::config::SecuritySettings;
 use argon2::password_hash::{Error as PasswordHashError, PasswordHash, SaltString};
@@ -13,11 +14,12 @@ use rand_core::OsRng;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::MySqlPool;
 use std::sync::Arc;
 use yang_base::action::{TokenAuthMiddleware, User};
-use yang_base::router::ModuleRouter;
-use yang_base::table::{Field, Record, Table, TableDefinition, TableHandle, TableQuery};
+use yang_base::definition::{Key, ModuleName, ModuleSpec, Str, TableName, TableSpec, Timestamp};
+#[cfg(test)]
+use yang_base::table::TableDefinition;
+use yang_base::table::{Record, TableQuery};
 use yang_base::token::TokenClaims;
 use yang_base::BaseError;
 
@@ -35,23 +37,22 @@ const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, USERNAME, PASSWORD_HASH, STAT
 ///
 /// `TokenAuthMiddleware` 只作用于受保护 Action，因此注册、登录、刷新、登出与
 /// 当前用户接口可以共享同一份领域服务、表定义和运行时路由器。
-pub fn build_module(
-    pool: Arc<MySqlPool>,
-    security: Arc<SecuritySettings>,
-) -> Result<ModuleRouter, BaseError> {
-    let table = user_table_definition()?;
-    let service = Arc::new(UserService::new(table.bind(pool), security));
+pub fn build_module(security: Arc<SecuritySettings>) -> Result<ModuleSpec, BaseError> {
+    let table_spec = user_table_spec()?;
+    let service = Arc::new(UserService::new(security));
+    let module_name = ModuleName::new("account.user")
+        .map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    let module = ModuleSpec::new(module_name)
+        .table(table_spec)
+        .middleware(TokenAuthMiddleware::new(user_from_claims));
+    let module = register::register(module, Arc::clone(&service))?;
+    let module = register_via_plugin::register(module)?;
+    let module = login::register(module, Arc::clone(&service))?;
+    let module = refresh::register(module, Arc::clone(&service))?;
+    let module = logout::register(module)?;
+    let module = me::register(module, service)?;
 
-    ModuleRouter::new("user", "用户管理")
-        .table(table)
-        .middleware(TokenAuthMiddleware::new(user_from_claims))
-        .apis([
-            register::api(Arc::clone(&service)),
-            login::api(Arc::clone(&service)),
-            refresh::api(Arc::clone(&service)),
-            logout::api(),
-            me::api(service),
-        ])
+    Ok(module)
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -65,37 +66,42 @@ struct UserView {
 
 #[derive(Clone)]
 struct UserService {
-    table: TableHandle,
     security: Arc<SecuritySettings>,
 }
 
 impl UserService {
-    fn new(table: TableHandle, security: Arc<SecuritySettings>) -> Self {
-        Self { table, security }
+    fn new(security: Arc<SecuritySettings>) -> Self {
+        Self { security }
     }
 
-    async fn register(&self, username: &str, plain_password: &str) -> Result<UserView, BaseError> {
+    async fn register(
+        &self,
+        ctx: &yang_base::action::ActionContext,
+        username: &str,
+        plain_password: &str,
+    ) -> Result<UserView, BaseError> {
         let username = self.normalize_username(username)?;
         self.validate_password(plain_password)?;
-        if self.username_exists(&username).await? {
+        if self.username_exists(ctx, &username).await? {
             return Err(BaseError::ParamInvalid(
                 "username".to_string(),
                 "用户名已存在".to_string(),
             ));
         }
         let password_hash = hash_password(plain_password)?;
-        let user = self.insert(&username, &password_hash).await?;
+        let user = self.insert(ctx, &username, &password_hash).await?;
         UserView::try_from(&user)
     }
 
     async fn authenticate(
         &self,
+        ctx: &yang_base::action::ActionContext,
         username: &str,
         plain_password: &str,
     ) -> Result<Record, BaseError> {
         let username = self.normalize_username(username)?;
         let user = self
-            .find_credentials_by_username(&username)
+            .find_credentials_by_username(ctx, &username)
             .await?
             .ok_or(BaseError::InvalidPassword)?;
         let password_hash: String = user.require(PASSWORD_HASH)?;
@@ -106,34 +112,46 @@ impl UserService {
         Ok(user)
     }
 
-    async fn active_by_subject(&self, subject: &str) -> Result<Record, BaseError> {
+    async fn active_by_subject(
+        &self,
+        ctx: &yang_base::action::ActionContext,
+        subject: &str,
+    ) -> Result<Record, BaseError> {
         let id = subject
             .parse::<i64>()
             .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
         let user = self
-            .find_by_id(id)
+            .find_by_id(ctx, id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
         self.ensure_active(&user)?;
         Ok(user)
     }
 
-    async fn view_by_id(&self, id: i64) -> Result<UserView, BaseError> {
+    async fn view_by_id(
+        &self,
+        ctx: &yang_base::action::ActionContext,
+        id: i64,
+    ) -> Result<UserView, BaseError> {
         let user = self
-            .find_by_id(id)
+            .find_by_id(ctx, id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
         self.ensure_active(&user)?;
         UserView::try_from(&user)
     }
 
-    fn query(&self) -> TableQuery {
-        self.table.query([SYSTEM_ROLE])
+    fn query(&self, ctx: &yang_base::action::ActionContext) -> Result<TableQuery, BaseError> {
+        ctx.table_query()
     }
 
-    async fn username_exists(&self, username: &str) -> Result<bool, BaseError> {
+    async fn username_exists(
+        &self,
+        ctx: &yang_base::action::ActionContext,
+        username: &str,
+    ) -> Result<bool, BaseError> {
         let rows = self
-            .query()
+            .query(ctx)?
             .select_fields(&[USER_ID])?
             .where_eq(USERNAME, Value::String(username.to_string()))?
             .all()
@@ -143,10 +161,11 @@ impl UserService {
 
     async fn find_credentials_by_username(
         &self,
+        ctx: &yang_base::action::ActionContext,
         username: &str,
     ) -> Result<Option<Record>, BaseError> {
         let rows = self
-            .query()
+            .query(ctx)?
             .select_fields(USER_CREDENTIAL_FIELDS)?
             .where_eq(USERNAME, Value::String(username.to_string()))?
             .all()
@@ -154,9 +173,13 @@ impl UserService {
         Ok(rows.into_iter().next())
     }
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<Record>, BaseError> {
+    async fn find_by_id(
+        &self,
+        ctx: &yang_base::action::ActionContext,
+        id: i64,
+    ) -> Result<Option<Record>, BaseError> {
         let rows = self
-            .query()
+            .query(ctx)?
             .select_fields(USER_VIEW_FIELDS)?
             .where_eq(USER_ID, Value::Number(id.into()))?
             .all()
@@ -164,12 +187,17 @@ impl UserService {
         Ok(rows.into_iter().next())
     }
 
-    async fn insert(&self, username: &str, password_hash: &str) -> Result<Record, BaseError> {
+    async fn insert(
+        &self,
+        ctx: &yang_base::action::ActionContext,
+        username: &str,
+        password_hash: &str,
+    ) -> Result<Record, BaseError> {
         let record = Record::new()
             .set(USERNAME, username)
             .set(PASSWORD_HASH, password_hash)
             .set(STATUS, "active");
-        let (_, id) = match self.query().insert_returning_id(record).await {
+        let (_, id) = match self.query(ctx)?.insert_returning_id(record).await {
             Ok(result) => result,
             Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
                 return Err(BaseError::ParamInvalid(
@@ -181,7 +209,7 @@ impl UserService {
         };
         let id = i64::try_from(id)
             .map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))?;
-        self.find_by_id(id)
+        self.find_by_id(ctx, id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))
     }
@@ -249,22 +277,33 @@ impl TryFrom<&Record> for UserView {
     }
 }
 
-fn user_table_definition() -> Result<TableDefinition, BaseError> {
-    Table::new("users")
-        .label("用户")
-        .fields([
-            Field::id(USER_ID),
-            Field::string(USERNAME, 64).required().unique(),
-            Field::string(PASSWORD_HASH, 255)
-                .required()
-                .secret()
+fn user_table_spec() -> Result<TableSpec, BaseError> {
+    let fields = yang_base::fields! {
+        id => Key::new().title("ID"),
+        username => Str::new()
+                .title("用户名")
+                .require(true)
+                .max_length(64)
+                .unique(true),
+        password_hash => Str::new()
+                .title("密码摘要")
+                .require(true)
+                .max_length(255)
+                .secret(true)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
-            Field::string(STATUS, 16).required(),
-            Field::created_at(CREATED_AT),
-            Field::updated_at(UPDATED_AT),
-        ])
-        .build()
+        status => Str::new().title("状态").require(true).max_length(16),
+        created_at => Timestamp::new().title("创建时间").created_at(),
+        updated_at => Timestamp::new().title("更新时间").updated_at(),
+    };
+    let table_name =
+        TableName::new("users").map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    Ok(TableSpec::new(table_name).title("用户").fields(fields))
+}
+
+#[cfg(test)]
+fn user_table_definition() -> Result<TableDefinition, BaseError> {
+    user_table_spec()?.table_definition()
 }
 
 fn hash_password(password: &str) -> Result<String, BaseError> {

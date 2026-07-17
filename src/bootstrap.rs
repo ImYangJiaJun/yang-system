@@ -1,4 +1,4 @@
-use crate::app::build_app_router;
+use crate::app::build_app;
 use crate::config::Settings;
 use crate::transport::http;
 use anyhow::Context;
@@ -6,10 +6,10 @@ use jsonwebtoken::Algorithm;
 use std::path::Path;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
-use yang_base::action::GlobalTools;
-use yang_base::database::{DatabaseInitializer, GlobalRedis};
+use yang_base::database::DatabaseInitializer;
 use yang_base::token::TokenManager;
-use yang_db::Database;
+use yang_base::tools::ToolsBuilder;
+use yang_db::{Database, RedisClient};
 
 pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let settings = Settings::load(config_path)?;
@@ -20,9 +20,10 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         Database::connect_with_config(&settings.database.url, settings.database_config())
             .await
             .context("连接 MySQL 失败")?;
-    let pool = Arc::new(database.pool().clone());
-
-    GlobalRedis::init(&settings.redis.url, settings.redis_config())
+    let initializer_database =
+        Database::from_pool(database.pool().clone(), settings.database_config())
+            .context("构造 schema 初始化数据库失败")?;
+    let cache = RedisClient::connect_with_config(&settings.redis.url, settings.redis_config())
         .await
         .context("连接 Redis 失败")?;
 
@@ -34,15 +35,22 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         settings.token.access_ttl_seconds,
         settings.token.refresh_ttl_seconds,
     );
-    let tools = Arc::new(GlobalTools::new(token_manager));
-    let app_router = Arc::new(
-        build_app_router(Arc::clone(&pool), Arc::new(settings.security.clone()))
-            .context("构建应用模块失败")?,
+    let tools = Arc::new(
+        ToolsBuilder::new()
+            .database(database)
+            .cache(cache)
+            .token(token_manager)
+            .config(settings.clone())
+            .build()
+            .context("构建应用 Tools 失败")?,
     );
+    let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
+        .context("构建应用模块失败")?;
 
-    let initializer = DatabaseInitializer::new(database, false);
+    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let schema: Vec<_> = application.runtime.table_definitions().iter().collect();
     let report = initializer
-        .sync_app_schema(app_router.as_ref())
+        .sync_table_definitions(&schema)
         .await
         .context("启动期同步数据库 schema 失败")?;
     tracing::info!(
@@ -53,17 +61,10 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     drop(initializer);
 
     let bind = settings.bind_addr()?;
-    let result = http::serve(
-        bind,
-        app_router,
-        tools,
-        Arc::clone(&pool),
-        settings.http.max_body_bytes,
-    )
-    .await;
+    let runtime = Arc::new(application.runtime);
+    let result = http::serve(bind, runtime, settings.http.max_body_bytes).await;
 
-    GlobalRedis::close().await;
-    pool.close().await;
+    tools.close().await;
     result
 }
 

@@ -21,8 +21,8 @@ toml = "0.8"
 tower-http = { version = "0.7.0", features = ["trace"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-yang-base = { version = "0.2.0", git = "ssh://git@github.com/ImYangJiaJun/lib_yang.git", rev = "fa092f79a748d5208b8446ddcd77a401fd581b29", default-features = false, features = ["mysql", "token", "validator"] }
-yang-db = { version = "0.1.4", git = "ssh://git@github.com/ImYangJiaJun/lib_yang.git", rev = "fa092f79a748d5208b8446ddcd77a401fd581b29", default-features = false, features = ["mysql", "redis"] }
+yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata"] }
+yang-db = { version = "0.1.4", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
