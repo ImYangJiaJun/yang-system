@@ -16,7 +16,8 @@ max_lifetime_seconds = 1800
 test_before_acquire = true
 
 [redis]
-url = "127.0.0.1:6379"
+#redis://用户名:密码@主机地址:端口/数据库编号
+url = "redis://127.0.0.1:6378"
 max_connections = 20
 min_connections = 2
 connect_timeout_seconds = 5
