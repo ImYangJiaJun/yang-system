@@ -1,5 +1,9 @@
 //! 企业租户的可信解析策略。
 
+use super::organization::{ACTIVE_STATUS as ACTIVE_ORG_STATUS, STATUS as ORG_STATUS};
+use super::user::{
+    ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS, ORG_ID, STATUS as MEMBERSHIP_STATUS, USER_ID,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::{ActionContext, TenantContext, TenantId, TenantResolver};
@@ -19,11 +23,15 @@ trait OrgMembershipReader: Send + Sync + 'static {
 /// 使用 `org_user` 表核验成员关系的生产实现。
 struct DatabaseMembershipReader {
     memberships: TableDefinition,
+    organizations: TableDefinition,
 }
 
 impl DatabaseMembershipReader {
-    fn new(memberships: TableDefinition) -> Self {
-        Self { memberships }
+    fn new(memberships: TableDefinition, organizations: TableDefinition) -> Self {
+        Self {
+            memberships,
+            organizations,
+        }
     }
 }
 
@@ -41,8 +49,27 @@ impl OrgMembershipReader for DatabaseMembershipReader {
         let rows = table
             .query(std::iter::empty::<&str>())
             .select_fields(&["id"])?
-            .where_eq("org_org", serde_json::json!(org_id.get()))?
-            .where_eq("user_user", serde_json::json!(user_id))?
+            .where_eq(ORG_ID, serde_json::json!(org_id.get()))?
+            .where_eq(USER_ID, serde_json::json!(user_id))?
+            .where_eq(
+                MEMBERSHIP_STATUS,
+                serde_json::json!(ACTIVE_MEMBERSHIP_STATUS),
+            )?
+            .page(1, 1)?
+            .all()
+            .await?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+
+        let organizations = self
+            .organizations
+            .bind(Arc::new(context.tools().mysql()?.pool().clone()));
+        let rows = organizations
+            .query(std::iter::empty::<&str>())
+            .select_fields(&["id"])?
+            .where_eq("id", serde_json::json!(org_id.get()))?
+            .where_eq(ORG_STATUS, serde_json::json!(ACTIVE_ORG_STATUS))?
             .page(1, 1)?
             .all()
             .await?;
@@ -62,8 +89,14 @@ impl OrgTenantResolver {
     }
 
     /// 从成员关系表构造生产 resolver，不向 Addon 根泄漏内部读取器抽象。
-    pub(super) fn from_membership_table(memberships: TableDefinition) -> Self {
-        Self::new(Arc::new(DatabaseMembershipReader::new(memberships)))
+    pub(super) fn from_tables(
+        memberships: TableDefinition,
+        organizations: TableDefinition,
+    ) -> Self {
+        Self::new(Arc::new(DatabaseMembershipReader::new(
+            memberships,
+            organizations,
+        )))
     }
 
     async fn resolve_authenticated(

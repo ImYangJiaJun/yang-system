@@ -16,12 +16,17 @@ use yang_base::BaseError;
 pub fn build_addon() -> Result<AddonSpec, BaseError> {
     let organization = organization::build_module();
     let members = user::build_module()?;
+    let organization_table = organization
+        .table
+        .as_ref()
+        .ok_or(BaseError::TableDefinitionNotSet)?
+        .table_definition()?;
     let membership_table = members
         .table
         .as_ref()
         .ok_or(BaseError::TableDefinitionNotSet)?
         .table_definition()?;
-    let resolver = tenant::OrgTenantResolver::from_membership_table(membership_table);
+    let resolver = tenant::OrgTenantResolver::from_tables(membership_table, organization_table);
 
     // 中间件顺序具有语义：Token 认证先写入可信用户，租户解析随后校验企业成员关系。
     let organization = organization

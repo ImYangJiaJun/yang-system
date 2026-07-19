@@ -3,8 +3,11 @@
 mod actions;
 
 use yang_base::definition::{
-    Actions, Fields, Module, ModuleName, ModuleSpec, Str, TableName, Timestamp,
+    Actions, Fields, Module, ModuleName, ModuleSpec, Radio, Str, TableName, Timestamp,
 };
+
+pub(super) const STATUS: &str = "status";
+pub(super) const ACTIVE_STATUS: &str = "active";
 
 struct OrganizationModule;
 
@@ -32,7 +35,11 @@ impl Module for OrganizationModule {
                 .max_length(32)
                 .unique(true)
                 .searchable(true),
-            status => Str::new().title("状态").require(true).max_length(16),
+            status => Radio::<String>::new()
+                .title("状态")
+                .require(true)
+                .options([(ACTIVE_STATUS, "启用"), ("disabled", "停用")])
+                .default(ACTIVE_STATUS),
             created_at => Timestamp::new().title("创建时间").created_at(),
         }
     }
