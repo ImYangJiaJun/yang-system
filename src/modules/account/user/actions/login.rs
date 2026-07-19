@@ -1,19 +1,14 @@
-use super::super::schema::{PASSWORD_HASH, STATUS, USERNAME, USER_ID};
 use super::super::service::UserService;
 #[cfg(test)]
 use super::register::hash_password;
 use argon2::password_hash::{Error as PasswordHashError, PasswordHash};
 use argon2::{Argon2, PasswordVerifier};
 use async_trait::async_trait;
-use serde_json::Value;
 use std::sync::Arc;
 use yang_base::action::auth::{CredentialVerifier, LoginAction, LoginInput, VerifiedSubject};
 use yang_base::action::ActionContext;
 use yang_base::definition::{ActionName, ActionSpec, HttpMethod, ModuleSpec, RouteSpec};
-use yang_base::table::Record;
 use yang_base::BaseError;
-
-const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, USERNAME, PASSWORD_HASH, STATUS];
 
 #[derive(Clone)]
 struct UserCredentialVerifier {
@@ -26,32 +21,18 @@ impl UserService {
         ctx: &ActionContext,
         username: &str,
         plain_password: &str,
-    ) -> Result<Record, BaseError> {
+    ) -> Result<super::super::repository::CredentialRecord, BaseError> {
         let username = self.normalize_username(username)?;
         let user = self
-            .find_credentials_by_username(ctx, &username)
+            .credentials()
+            .find_by_username(ctx, &username)
             .await?
             .ok_or(BaseError::InvalidPassword)?;
-        let password_hash: String = user.require(PASSWORD_HASH)?;
-        if !verify_password(plain_password, &password_hash)? {
+        if !verify_password(plain_password, &user.password_hash)? {
             return Err(BaseError::InvalidPassword);
         }
-        self.ensure_active(&user)?;
+        self.ensure_active_status(&user.status)?;
         Ok(user)
-    }
-
-    async fn find_credentials_by_username(
-        &self,
-        ctx: &ActionContext,
-        username: &str,
-    ) -> Result<Option<Record>, BaseError> {
-        let rows = self
-            .query(ctx)?
-            .select_fields(USER_CREDENTIAL_FIELDS)?
-            .where_eq(USERNAME, Value::String(username.to_string()))?
-            .all()
-            .await?;
-        Ok(rows.into_iter().next())
     }
 }
 
@@ -76,11 +57,9 @@ impl CredentialVerifier for UserCredentialVerifier {
             .service
             .authenticate(ctx, &input.username, &input.password)
             .await?;
-        let id: i64 = user.require(USER_ID)?;
-        let username: String = user.require(USERNAME)?;
         Ok(
-            VerifiedSubject::new(id.to_string()).with_claims(serde_json::json!({
-                "username": username,
+            VerifiedSubject::new(user.id.to_string()).with_claims(serde_json::json!({
+                "username": user.username,
                 "roles": ["user"],
                 "permissions": ["org.org:read", "org.user:read"]
             })),

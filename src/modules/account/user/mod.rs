@@ -2,10 +2,12 @@
 
 mod actions;
 mod claims;
+mod repository;
 mod schema;
 mod service;
 
 use crate::config::SecuritySettings;
+use repository::CredentialRepository;
 use service::UserService;
 use std::sync::Arc;
 use yang_base::action::{TokenAuthMiddleware, UiCatalogAction};
@@ -18,12 +20,14 @@ pub(crate) use claims::user_from_claims;
 ///
 /// 此处只聚合 Schema、共享服务、中间件和 Action 清单；具体业务实现留在对应文件中。
 pub(super) fn build_module(security: Arc<SecuritySettings>) -> Result<ModuleSpec, BaseError> {
-    let service = Arc::new(UserService::new(security));
+    let table = schema::user_table_spec()?;
+    let credentials = Arc::new(CredentialRepository::new(table.table_definition()?));
+    let service = Arc::new(UserService::new(security, credentials));
     let module = ModuleSpec::new(
         ModuleName::new("account.user")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,
     )
-    .table(schema::user_table_spec()?)
+    .table(table)
     .middleware(TokenAuthMiddleware::new(user_from_claims).authenticate_public_actions())
     .native_action(UiCatalogAction);
 
