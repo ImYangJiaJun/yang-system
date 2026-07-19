@@ -129,6 +129,23 @@ mod tests {
         );
         assert_eq!(app.runtime.compiled_views().len(), 3);
 
+        let tenant_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "org.tenant")
+            .unwrap_or_else(|| panic!("应存在不依赖租户上下文的 org.tenant 模块"));
+        let tenant_list = tenant_module
+            .actions()
+            .iter()
+            .find(|action| action.name.as_str() == "list")
+            .unwrap_or_else(|| panic!("应存在租户发现 Action"));
+        assert_eq!(tenant_list.route.method.as_str(), "GET");
+        assert_eq!(tenant_list.route.path.as_str(), "/api/v1/tenants");
+        assert!(!tenant_list.is_public);
+
         let org_user = app
             .runtime
             .table_definitions()

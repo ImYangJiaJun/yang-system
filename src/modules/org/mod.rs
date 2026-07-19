@@ -1,5 +1,6 @@
 //! 企业 Addon 的公开组装入口。
 
+mod access;
 mod organization;
 mod tenant;
 mod user;
@@ -26,7 +27,11 @@ pub fn build_addon() -> Result<AddonSpec, BaseError> {
         .as_ref()
         .ok_or(BaseError::TableDefinitionNotSet)?
         .table_definition()?;
-    let resolver = tenant::OrgTenantResolver::from_tables(membership_table, organization_table);
+    let resolver = tenant::OrgTenantResolver::from_tables(
+        membership_table.clone(),
+        organization_table.clone(),
+    );
+    let access = access::build_module(organization_table, membership_table)?;
 
     // 中间件顺序具有语义：Token 认证先写入可信用户，租户解析随后校验企业成员关系。
     let organization = organization
@@ -38,6 +43,7 @@ pub fn build_addon() -> Result<AddonSpec, BaseError> {
 
     Ok(AddonSpec::new(yang_base::addon!("org"))
         .depends_on(yang_base::addon!("account"))
+        .module(access)
         .module(organization)
         .module(members))
 }
