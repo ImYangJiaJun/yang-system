@@ -1,10 +1,10 @@
-//! 用户凭据的受信持久化边界。
+//! 用户聚合的唯一持久化边界。
 //!
 //! 对外 `TableQuery` 始终遵守请求用户的字段权限；只有本 Repository 能以
 //! `system` 能力读写密码摘要，避免公开注册和登录被字段权限拦截，也避免把通用
 //! 提权查询暴露给 Action。
 
-use super::schema::{PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID};
+use super::schema::{PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID, USER_VIEW_FIELDS};
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
@@ -32,18 +32,23 @@ impl TryFrom<&Record> for CredentialRecord {
     }
 }
 
-pub(super) struct CredentialRepository {
+pub(super) struct UserRepository {
     users: TableDefinition,
 }
 
-impl CredentialRepository {
+impl UserRepository {
     pub(super) fn new(users: TableDefinition) -> Self {
         Self { users }
     }
 
-    fn query(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {
+    fn trusted_query(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {
         let pool = Arc::new(ctx.tools().mysql()?.pool().clone());
         Ok(self.users.bind(pool).query([SYSTEM_ROLE]))
+    }
+
+    fn public_query(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {
+        let pool = Arc::new(ctx.tools().mysql()?.pool().clone());
+        Ok(self.users.bind(pool).query(std::iter::empty::<&str>()))
     }
 
     pub(super) async fn username_exists(
@@ -52,7 +57,7 @@ impl CredentialRepository {
         username: &str,
     ) -> Result<bool, BaseError> {
         let rows = self
-            .query(ctx)?
+            .trusted_query(ctx)?
             .select_fields(&[USER_ID])?
             .where_eq(USERNAME, serde_json::Value::String(username.to_string()))?
             .page(1, 1)?
@@ -61,19 +66,34 @@ impl CredentialRepository {
         Ok(!rows.is_empty())
     }
 
-    pub(super) async fn find_by_username(
+    pub(super) async fn find_credentials_by_username(
         &self,
         ctx: &ActionContext,
         username: &str,
     ) -> Result<Option<CredentialRecord>, BaseError> {
         let rows = self
-            .query(ctx)?
+            .trusted_query(ctx)?
             .select_fields(USER_CREDENTIAL_FIELDS)?
             .where_eq(USERNAME, serde_json::Value::String(username.to_string()))?
             .page(1, 1)?
             .all()
             .await?;
         rows.first().map(CredentialRecord::try_from).transpose()
+    }
+
+    pub(super) async fn find_by_id(
+        &self,
+        ctx: &ActionContext,
+        id: i64,
+    ) -> Result<Option<Record>, BaseError> {
+        let rows = self
+            .public_query(ctx)?
+            .select_fields(USER_VIEW_FIELDS)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .page(1, 1)?
+            .all()
+            .await?;
+        Ok(rows.into_iter().next())
     }
 
     pub(super) async fn insert(
@@ -86,7 +106,7 @@ impl CredentialRepository {
             .set(USERNAME, username)
             .set(PASSWORD_HASH, password_hash)
             .set(STATUS, "active");
-        let (_, id) = self.query(ctx)?.insert_returning_id(record).await?;
+        let (_, id) = self.trusted_query(ctx)?.insert_returning_id(record).await?;
         i64::try_from(id).map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))
     }
 }
@@ -101,7 +121,7 @@ mod tests {
     use yang_db::{Database, DatabaseConfig};
 
     #[tokio::test]
-    async fn credential_repository_owns_the_only_trusted_password_projection() {
+    async fn user_repository_owns_the_only_trusted_password_projection() {
         let pool = MySqlPoolOptions::new()
             .connect_lazy("mysql://root:test@127.0.0.1:3306/test")
             .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
@@ -116,12 +136,12 @@ mod tests {
         let definition = user_table_spec()
             .and_then(|spec| spec.table_definition())
             .unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
-        let repository = CredentialRepository::new(definition.clone());
+        let repository = UserRepository::new(definition.clone());
         let ctx = ActionContext::new(Request::new(serde_json::json!({})), tools)
             .with_table_definition(definition);
 
         assert!(repository
-            .query(&ctx)
+            .trusted_query(&ctx)
             .and_then(|query| query.select_fields(&[PASSWORD_HASH]))
             .is_ok());
         assert!(matches!(

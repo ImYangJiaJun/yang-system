@@ -1,6 +1,4 @@
 use super::super::claims::claims_for_user;
-use super::super::policy::normalize_username;
-use super::super::rate_limit::AuthOperation;
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -12,34 +10,6 @@ use yang_base::BaseError;
 #[derive(Clone)]
 struct UserCredentialVerifier {
     service: Arc<UserService>,
-}
-
-impl UserService {
-    async fn authenticate(
-        &self,
-        ctx: &ActionContext,
-        username: &str,
-        plain_password: &str,
-    ) -> Result<super::super::repository::CredentialRecord, BaseError> {
-        let username = normalize_username(username)?;
-        self.rate_limiter()
-            .check(ctx, AuthOperation::Login, &username)
-            .await?;
-        let user = self
-            .credentials()
-            .find_by_username(ctx, &username)
-            .await?
-            .ok_or(BaseError::InvalidPassword)?;
-        if !self
-            .passwords()
-            .verify(plain_password, &user.password_hash)
-            .await?
-        {
-            return Err(BaseError::InvalidPassword);
-        }
-        self.ensure_active_status(&user.status)?;
-        Ok(user)
-    }
 }
 
 #[async_trait]

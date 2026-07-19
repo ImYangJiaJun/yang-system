@@ -22,17 +22,6 @@ struct MeAction {
     service: Arc<UserService>,
 }
 
-impl UserService {
-    async fn view_by_id(&self, ctx: &ActionContext, id: i64) -> Result<UserView, BaseError> {
-        let user = self
-            .find_by_id(ctx, id)
-            .await?
-            .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
-        self.ensure_active(&user)?;
-        UserView::try_from(&user)
-    }
-}
-
 #[async_trait]
 impl TypedHandler for MeAction {
     type Input = EmptyInput;

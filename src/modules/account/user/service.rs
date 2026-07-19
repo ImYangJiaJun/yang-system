@@ -1,75 +1,136 @@
 //! 用户领域共享服务。
 //!
-//! 这里只保留跨 Action 复用的查询和校验；注册、登录等用例逻辑仍由各 Action 文件拥有。
+//! Action 只负责传输适配；注册、登录、刷新和当前用户用例在此集中。
 
 use super::password::PasswordEngine;
-use super::rate_limit::AuthRateLimiter;
-use super::repository::CredentialRepository;
-use super::schema::{STATUS, USER_ID, USER_VIEW_FIELDS};
+use super::policy::{normalize_username, validate_password};
+use super::rate_limit::{AuthOperation, AuthRateLimiter};
+use super::repository::UserRepository;
+use super::schema::{UserView, STATUS, USERNAME};
 use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::table::{Record, TableQuery};
+use yang_base::table::Record;
 use yang_base::BaseError;
+
+pub(super) struct AuthenticatedUser {
+    pub(super) id: i64,
+    pub(super) username: String,
+}
 
 #[derive(Clone)]
 pub(super) struct UserService {
-    credentials: Arc<CredentialRepository>,
+    users: Arc<UserRepository>,
     passwords: Arc<PasswordEngine>,
     rate_limiter: Arc<AuthRateLimiter>,
 }
 
 impl UserService {
     pub(super) fn new(
-        credentials: Arc<CredentialRepository>,
+        users: Arc<UserRepository>,
         passwords: Arc<PasswordEngine>,
         rate_limiter: Arc<AuthRateLimiter>,
     ) -> Self {
         Self {
-            credentials,
+            users,
             passwords,
             rate_limiter,
         }
     }
 
-    pub(super) fn credentials(&self) -> &CredentialRepository {
-        &self.credentials
+    pub(super) async fn register(
+        &self,
+        ctx: &ActionContext,
+        username: &str,
+        plain_password: &str,
+    ) -> Result<UserView, BaseError> {
+        let username = normalize_username(username)?;
+        validate_password(plain_password)?;
+        self.rate_limiter
+            .check(ctx, AuthOperation::Register, &username)
+            .await?;
+        if self.users.username_exists(ctx, &username).await? {
+            return Err(username_exists_error());
+        }
+        let password_hash = self.passwords.hash(plain_password).await?;
+        let id = match self.users.insert(ctx, &username, &password_hash).await {
+            Ok(id) => id,
+            Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
+                return Err(username_exists_error());
+            }
+            Err(error) => return Err(error),
+        };
+        self.view_by_id(ctx, id).await
     }
 
-    pub(super) fn passwords(&self) -> &PasswordEngine {
-        &self.passwords
+    pub(super) async fn authenticate(
+        &self,
+        ctx: &ActionContext,
+        username: &str,
+        plain_password: &str,
+    ) -> Result<AuthenticatedUser, BaseError> {
+        let username = normalize_username(username)?;
+        self.rate_limiter
+            .check(ctx, AuthOperation::Login, &username)
+            .await?;
+        let user = self
+            .users
+            .find_credentials_by_username(ctx, &username)
+            .await?
+            .ok_or(BaseError::InvalidPassword)?;
+        if !self
+            .passwords
+            .verify(plain_password, &user.password_hash)
+            .await?
+        {
+            return Err(BaseError::InvalidPassword);
+        }
+        ensure_active_status(&user.status)?;
+        Ok(AuthenticatedUser {
+            id: user.id,
+            username: user.username,
+        })
     }
 
-    pub(super) fn rate_limiter(&self) -> &AuthRateLimiter {
-        &self.rate_limiter
+    pub(super) async fn active_username_by_subject(
+        &self,
+        ctx: &ActionContext,
+        subject: &str,
+    ) -> Result<String, BaseError> {
+        let id = subject
+            .parse::<i64>()
+            .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+        let user = self.active_record_by_id(ctx, id).await?;
+        user.require(USERNAME)
     }
 
-    pub(super) fn query(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {
-        ctx.table_query()
-    }
-
-    pub(super) async fn find_by_id(
+    pub(super) async fn view_by_id(
         &self,
         ctx: &ActionContext,
         id: i64,
-    ) -> Result<Option<Record>, BaseError> {
-        let rows = self
-            .query(ctx)?
-            .select_fields(USER_VIEW_FIELDS)?
-            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
-            .all()
-            .await?;
-        Ok(rows.into_iter().next())
+    ) -> Result<UserView, BaseError> {
+        let user = self.active_record_by_id(ctx, id).await?;
+        UserView::try_from(&user)
     }
 
-    pub(super) fn ensure_active(&self, user: &Record) -> Result<(), BaseError> {
+    async fn active_record_by_id(&self, ctx: &ActionContext, id: i64) -> Result<Record, BaseError> {
+        let user = self
+            .users
+            .find_by_id(ctx, id)
+            .await?
+            .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
         let status: String = user.require(STATUS)?;
-        self.ensure_active_status(&status)
+        ensure_active_status(&status)?;
+        Ok(user)
     }
+}
 
-    pub(super) fn ensure_active_status(&self, status: &str) -> Result<(), BaseError> {
-        if status != "active" {
-            return Err(BaseError::Unauthorized("用户已停用".to_string()));
-        }
-        Ok(())
+fn ensure_active_status(status: &str) -> Result<(), BaseError> {
+    if status != "active" {
+        return Err(BaseError::Unauthorized("用户已停用".to_string()));
     }
+    Ok(())
+}
+
+fn username_exists_error() -> BaseError {
+    BaseError::ParamInvalid("username".to_string(), "用户名已存在".to_string())
 }
