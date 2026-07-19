@@ -2,13 +2,8 @@ use anyhow::{bail, Context};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::str::FromStr;
 use yang_db::{DatabaseConfig, RedisConfig};
 
-const DATABASE_URL_ENV: &str = "DATABASE_URL";
-const REDIS_URL_ENV: &str = "REDIS_URL";
-const TOKEN_SECRET_ENV: &str = "TOKEN_SECRET";
-const SCHEMA_MODE_ENV: &str = "SCHEMA_MODE";
 const MAX_ACCESS_TTL_SECONDS: u64 = 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 
@@ -43,19 +38,6 @@ pub enum SchemaMode {
     Apply,
     Validate,
     Off,
-}
-
-impl FromStr for SchemaMode {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "apply" => Ok(Self::Apply),
-            "validate" => Ok(Self::Validate),
-            "off" => Ok(Self::Off),
-            _ => bail!("schema.mode 必须是 apply、validate 或 off"),
-        }
-    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -134,18 +116,11 @@ impl Settings {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-        Self::parse_with(&raw, |name| std::env::var(name).ok())
+        Self::parse(&raw)
     }
 
-    fn parse_with(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
-        let mut settings: Self = toml::from_str(raw).context("解析配置文件失败")?;
-        settings.mysql.url = environment_override(DATABASE_URL_ENV, &settings.mysql.url, &lookup)?;
-        settings.redis.url = environment_override(REDIS_URL_ENV, &settings.redis.url, &lookup)?;
-        settings.token.secret =
-            environment_override(TOKEN_SECRET_ENV, &settings.token.secret, &lookup)?;
-        if let Some(mode) = lookup(SCHEMA_MODE_ENV) {
-            settings.schema.mode = mode.parse()?;
-        }
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        let settings: Self = toml::from_str(raw).context("解析配置文件失败")?;
         settings.validate()?;
         Ok(settings)
     }
@@ -233,21 +208,6 @@ fn validate_rate_limit(name: &str, value: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn environment_override(
-    name: &str,
-    configured: &str,
-    lookup: &impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<String> {
-    if let Some(value) = lookup(name) {
-        return Ok(value);
-    }
-    let placeholder = format!("${{{name}}}");
-    if configured == placeholder {
-        bail!("缺少环境变量: {name}");
-    }
-    Ok(configured.to_string())
-}
-
 fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
     if secret.len() < 32 {
         bail!("token.secret 至少需要 32 字节");
@@ -274,7 +234,6 @@ fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn valid_config() -> &'static str {
         r#"
@@ -288,7 +247,7 @@ max_body_bytes = 1024
 request_timeout_seconds = 30
 max_concurrency = 256
 [mysql]
-url = "${DATABASE_URL}"
+url = "mysql://config-user:config-password@config-mysql/config-database"
 max_connections = 2
 min_connections = 0
 connect_timeout_seconds = 2
@@ -296,7 +255,7 @@ idle_timeout_seconds = 30
 max_lifetime_seconds = 60
 test_before_acquire = false
 [redis]
-url = "${REDIS_URL}"
+url = "redis://config-redis/3"
 max_connections = 2
 min_connections = 0
 connect_timeout_seconds = 2
@@ -305,7 +264,7 @@ idle_timeout_seconds = 30
 max_lifetime_seconds = 60
 test_before_acquire = false
 [token]
-secret = "${TOKEN_SECRET}"
+secret = "0123456789abcdef0123456789abcdef"
 issuer = "test"
 audience = "test-api"
 access_ttl_seconds = 60
@@ -321,47 +280,33 @@ filter = "info"
     }
 
     #[test]
-    fn parses_environment_placeholders_and_redacts_token_debug() {
-        let values = HashMap::from([
-            ("DATABASE_URL", "mysql://example/test"),
-            ("REDIS_URL", "redis://example"),
-            ("TOKEN_SECRET", "01234567890123456789012345678901"),
-        ]);
-        let settings = Settings::parse_with(valid_config(), |name| {
-            values.get(name).map(|value| (*value).to_string())
-        })
-        .unwrap_or_else(|error| panic!("有效配置应解析成功: {error}"));
+    fn parses_values_from_config_file_and_redacts_token_debug() {
+        let settings = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("有效配置应解析成功: {error}"));
 
-        assert_eq!(settings.mysql.url, "mysql://example/test");
+        assert_eq!(
+            settings.mysql.url,
+            "mysql://config-user:config-password@config-mysql/config-database"
+        );
+        assert_eq!(settings.redis.url, "redis://config-redis/3");
         assert_eq!(settings.schema.mode, SchemaMode::Validate);
         assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
     }
 
     #[test]
-    fn environment_values_are_not_interpolated_as_toml_source() {
-        let values = HashMap::from([
-            ("DATABASE_URL", "mysql://user:p\"a\\ss@example/test"),
-            ("REDIS_URL", "redis://example"),
-            ("TOKEN_SECRET", "0123456789abcdef0123456789abcdef"),
-        ]);
-        let settings = Settings::parse_with(valid_config(), |name| {
-            values.get(name).map(|value| (*value).to_string())
-        })
-        .unwrap_or_else(|error| panic!("环境变量内容不应作为 TOML 源码插值: {error}"));
-
-        assert_eq!(settings.mysql.url, "mysql://user:p\"a\\ss@example/test");
+    fn rejects_unknown_schema_mode_from_config_file() {
+        let raw = valid_config().replace("mode = \"validate\"", "mode = \"unsafe\"");
+        let error = match Settings::parse(&raw) {
+            Ok(_) => panic!("未知 schema mode 必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("解析配置文件失败"));
     }
 
     #[test]
     fn rejects_placeholder_or_repeated_token_secret() {
-        let repeated = valid_config().replace("${TOKEN_SECRET}", &"1".repeat(32));
-        let values = HashMap::from([
-            ("DATABASE_URL", "mysql://example/test"),
-            ("REDIS_URL", "redis://example"),
-        ]);
-        let error = match Settings::parse_with(&repeated, |name| {
-            values.get(name).map(|value| (*value).to_string())
-        }) {
+        let repeated = valid_config().replace("0123456789abcdef0123456789abcdef", &"1".repeat(32));
+        let error = match Settings::parse(&repeated) {
             Ok(_) => panic!("重复字符密钥必须被拒绝"),
             Err(error) => error,
         };
@@ -369,56 +314,25 @@ filter = "info"
     }
 
     #[test]
-    fn rejects_missing_environment_variable() {
-        let error = match Settings::parse_with(valid_config(), |_| None) {
-            Ok(_) => panic!("缺少环境变量时应失败"),
+    fn rejects_placeholder_token_secret_from_config_file() {
+        let raw = valid_config().replace(
+            "0123456789abcdef0123456789abcdef",
+            "replace-with-at-least-32-random-bytes",
+        );
+        let error = match Settings::parse(&raw) {
+            Ok(_) => panic!("配置文件中的占位密钥必须被拒绝"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("DATABASE_URL"));
+        assert!(error.to_string().contains("占位值"));
     }
 
     #[test]
     fn rejects_unbounded_http_resource_settings() {
         let raw = valid_config().replace("max_concurrency = 256", "max_concurrency = 0");
-        let values = HashMap::from([
-            ("DATABASE_URL", "mysql://example/test"),
-            ("REDIS_URL", "redis://example"),
-            ("TOKEN_SECRET", "0123456789abcdef0123456789abcdef"),
-        ]);
-        let error = match Settings::parse_with(&raw, |name| {
-            values.get(name).map(|value| (*value).to_string())
-        }) {
+        let error = match Settings::parse(&raw) {
             Ok(_) => panic!("HTTP 并发上限为 0 时必须被拒绝"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("max_concurrency"));
-    }
-
-    #[test]
-    fn schema_mode_supports_environment_override_and_rejects_unknown_values() {
-        let values = HashMap::from([
-            ("DATABASE_URL", "mysql://example/test"),
-            ("REDIS_URL", "redis://example"),
-            ("TOKEN_SECRET", "0123456789abcdef0123456789abcdef"),
-            ("SCHEMA_MODE", "off"),
-        ]);
-        let settings = Settings::parse_with(valid_config(), |name| {
-            values.get(name).map(|value| (*value).to_string())
-        })
-        .unwrap_or_else(|error| panic!("有效 schema mode 应解析成功: {error}"));
-        assert_eq!(settings.schema.mode, SchemaMode::Off);
-
-        let result = Settings::parse_with(valid_config(), |name| {
-            if name == "SCHEMA_MODE" {
-                Some("unsafe".to_string())
-            } else {
-                values.get(name).map(|value| (*value).to_string())
-            }
-        });
-        let error = match result {
-            Ok(_) => panic!("未知 schema mode 必须被拒绝"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("apply、validate 或 off"));
     }
 }

@@ -94,7 +94,7 @@ Addon/Module/fields!/params!
 
 ## 启动顺序
 
-1. 读取 `config.toml`，再用 `DATABASE_URL`、`REDIS_URL`、`TOKEN_SECRET` 做结构化覆盖。
+1. 只读取 `config.toml`；运行配置不接受环境变量覆盖。
 2. 创建 MySQL `Database`、Redis `RedisClient` 和 `TokenManager`。
 3. 用 `ToolsBuilder` 构建当前应用独占的不可变 `Tools`。
 4. 用 `AppBuilder` 校验 Addon 依赖、关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
@@ -109,26 +109,16 @@ Addon/Module/fields!/params!
 
 ```powershell
 Copy-Item config.example.toml config.toml
-$env:DATABASE_URL = "mysql://root:password@127.0.0.1:3306/yang_system"
-$env:REDIS_URL = "redis://127.0.0.1:6379"
 $tokenBytes = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
-$env:TOKEN_SECRET = [Convert]::ToBase64String($tokenBytes)
+$tokenSecret = [Convert]::ToBase64String($tokenBytes)
+# 编辑 config.toml：填写 mysql.url、redis.url，并把 token.secret 替换为 $tokenSecret
 cargo run
 ```
 
-`config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。环境变量按字段覆盖，不会作为 TOML 源码插值，因此 URL 或密钥中的引号和反斜杠不会破坏配置解析。
-
-其它配置文件：
-
-```powershell
-$env:APP_CONFIG = "D:\config\yang-system.toml"
-$env:DATABASE_URL = "mysql://app:password@db.internal:3306/yang_system"
-$env:REDIS_URL = "redis://cache.internal:6379"
-$env:TOKEN_SECRET = "从密钥管理服务注入的随机密钥"
-$env:SCHEMA_MODE = "validate"
-cargo run
-```
+`config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。MySQL、
+Redis、Token、Schema 模式等运行参数均以该文件为准；修改环境变量不会覆盖配置。
+部署时应限制 `config.toml` 的读取权限，并通过部署系统生成或挂载该文件。
 
 `schema.mode` 支持 `apply|validate|off`：`apply` 适合本地开发；`validate` 不执行 DDL，
 发现任何待应用变更就拒绝启动，适合由独立迁移任务管理 schema 的生产环境；`off`
