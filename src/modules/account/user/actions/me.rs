@@ -4,30 +4,38 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
-use yang_base::action::{ActionContext, TypedHandler};
-use yang_base::definition::{ActionName, ActionSpec, HttpMethod, ModuleSpec, RouteSpec};
+use yang_base::action::{Action as ActionHandler, ActionContext};
+use yang_base::definition::{ModuleSpec, ParamInput, Params};
 use yang_base::{Action, BaseError};
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EmptyInput {}
 
+impl ParamInput for EmptyInput {
+    fn params() -> Params {
+        Params::new()
+    }
+}
+
 #[derive(Action)]
 #[action(
     name = "me",
     display_name = "当前用户",
-    description = "读取当前已认证用户"
+    description = "读取当前已认证用户",
+    method = "GET",
+    path = "/api/v1/users/me"
 )]
 struct MeAction {
     service: Arc<UserService>,
 }
 
 #[async_trait]
-impl TypedHandler for MeAction {
+impl ActionHandler for MeAction {
     type Input = EmptyInput;
     type Output = UserView;
 
-    async fn handle(
+    async fn index(
         &self,
         ctx: ActionContext,
         _input: Self::Input,
@@ -44,15 +52,7 @@ pub(super) fn register(
     module: ModuleSpec,
     service: Arc<UserService>,
 ) -> Result<ModuleSpec, BaseError> {
-    let name = ActionName::new("me").map_err(|error| BaseError::ConfigError(error.to_string()))?;
-    let spec = ActionSpec::new(
-        name,
-        RouteSpec::new(HttpMethod::Get, "/api/v1/users/me", "account.user.me"),
-    )
-    .display_name("当前用户")
-    .description("读取当前已认证用户")
-    .tag("users");
-    Ok(module.action(spec, MeAction { service }))
+    Ok(module.native_action(MeAction { service }))
 }
 
 #[cfg(test)]
