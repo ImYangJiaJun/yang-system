@@ -1,5 +1,6 @@
 //! `org.tenant` Action 清单。
 
+mod create;
 mod list;
 
 use super::service::TenantService;
@@ -11,5 +12,6 @@ pub(super) fn register_all(
     module: ModuleSpec,
     service: Arc<TenantService>,
 ) -> Result<ModuleSpec, BaseError> {
+    let module = create::register(module, Arc::clone(&service))?;
     list::register(module, service)
 }

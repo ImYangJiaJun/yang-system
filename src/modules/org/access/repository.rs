@@ -1,16 +1,32 @@
 //! pre-tenant 查询的持久化边界。
 
 use super::service::{TenantPage, TenantSummary};
-use crate::modules::org::organization::ACTIVE_STATUS as ACTIVE_ORG_STATUS;
-use crate::modules::org::user::ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS;
+use crate::modules::org::organization::{ACTIVE_STATUS as ACTIVE_ORG_STATUS, STATUS as ORG_STATUS};
+use crate::modules::org::user::{
+    ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS, ORG_ID, STATUS as MEMBERSHIP_STATUS, USER_ID,
+};
+use std::sync::Arc;
 use yang_base::action::ActionContext;
+use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
 
-pub(super) struct TenantRepository;
+pub(super) struct TenantRepository {
+    organizations: TableDefinition,
+    memberships: TableDefinition,
+}
 
 impl TenantRepository {
-    pub(super) fn new() -> Self {
-        Self
+    pub(super) fn new(organizations: TableDefinition, memberships: TableDefinition) -> Self {
+        Self {
+            organizations,
+            memberships,
+        }
+    }
+
+    fn query(&self, ctx: &ActionContext, table: &TableDefinition) -> Result<TableQuery, BaseError> {
+        Ok(table
+            .bind(Arc::new(ctx.tools().mysql()?.pool().clone()))
+            .query(std::iter::empty::<&str>()))
     }
 
     pub(super) async fn list_for_user(
@@ -71,6 +87,43 @@ impl TenantRepository {
             page,
             limit: usize::try_from(limit)
                 .map_err(|_| BaseError::Unknown("分页大小超出 usize 范围".to_string()))?,
+        })
+    }
+
+    pub(super) async fn create_for_user(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        name: &str,
+        code: &str,
+    ) -> Result<TenantSummary, BaseError> {
+        let mut transaction = ctx.begin_transaction().await?;
+        let organization = Record::new()
+            .set("name", name)
+            .set("code", code)
+            .set(ORG_STATUS, ACTIVE_ORG_STATUS);
+        let (_, org_id) = self
+            .query(ctx, &self.organizations)?
+            .insert_returning_id_in_tx(&mut transaction, organization)
+            .await?;
+        let org_id = i64::try_from(org_id)
+            .map_err(|_| BaseError::Unknown("企业主键超出 i64 范围".to_string()))?;
+        let membership = Record::new()
+            .set(ORG_ID, org_id)
+            .set(USER_ID, user_id)
+            .set(MEMBERSHIP_STATUS, ACTIVE_MEMBERSHIP_STATUS);
+        self.query(ctx, &self.memberships)?
+            .insert_in_tx(&mut transaction, membership)
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(BaseError::DatabaseTransactionFailed)?;
+
+        Ok(TenantSummary {
+            id: org_id,
+            name: name.to_string(),
+            code: code.to_string(),
         })
     }
 }

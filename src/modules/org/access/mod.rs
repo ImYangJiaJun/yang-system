@@ -25,7 +25,10 @@ pub(super) fn build_module(
             "org.tenant Repository 绑定了错误的表定义".to_string(),
         ));
     }
-    let service = Arc::new(TenantService::new(TenantRepository::new()));
+    let service = Arc::new(TenantService::new(TenantRepository::new(
+        organizations,
+        memberships,
+    )));
     let module = ModuleSpec::new(yang_base::module!("org.tenant"))
         .middleware(TokenAuthMiddleware::new(account::user_from_claims));
     actions::register_all(module, service)

@@ -145,6 +145,15 @@ mod tests {
         assert_eq!(tenant_list.route.method.as_str(), "GET");
         assert_eq!(tenant_list.route.path.as_str(), "/api/v1/tenants");
         assert!(!tenant_list.is_public);
+        let tenant_create = tenant_module
+            .actions()
+            .iter()
+            .find(|action| action.name.as_str() == "create")
+            .unwrap_or_else(|| panic!("应存在租户初始化 Action"));
+        assert_eq!(tenant_create.route.method.as_str(), "POST");
+        assert_eq!(tenant_create.route.path.as_str(), "/api/v1/tenants");
+        assert_eq!(tenant_create.success_status, 201);
+        assert!(!tenant_create.is_public);
 
         let org_user = app
             .runtime
