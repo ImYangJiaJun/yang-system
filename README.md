@@ -130,6 +130,20 @@ cargo run
 发现任何待应用变更就拒绝启动，适合由独立迁移任务管理 schema 的生产环境；`off`
 只应在外部已完成等价校验时显式使用。
 
+## 真实依赖集成测试
+
+集成测试要求专用 MySQL 数据库名以 `_test` 结尾，并强制 Redis 使用 DB 15；测试会
+重建 `users`、`org_org`、`org_user` 三张测试表：
+
+```powershell
+$env:YANG_SYSTEM_TEST_DATABASE_URL = "mysql://root:password@127.0.0.1:3306/yang_system_test"
+$env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
+cargo test --test system_integration -- --ignored --test-threads=1
+```
+
+该测试覆盖 schema plan/apply/validate、注册、登录、refresh、原子创建企业、租户发现
+和租户作用域查询，不使用 mock 替代 MySQL 或 Redis。
+
 ## 参考能力
 
 | 位置 | 展示能力 |
