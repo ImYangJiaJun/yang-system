@@ -1,3 +1,4 @@
+use super::super::claims::claims_for_user;
 use super::super::service::UserService;
 #[cfg(test)]
 use super::register::hash_password;
@@ -57,13 +58,7 @@ impl CredentialVerifier for UserCredentialVerifier {
             .service
             .authenticate(ctx, &input.username, &input.password)
             .await?;
-        Ok(
-            VerifiedSubject::new(user.id.to_string()).with_claims(serde_json::json!({
-                "username": user.username,
-                "roles": ["user"],
-                "permissions": ["org.org:read", "org.user:read"]
-            })),
-        )
+        Ok(VerifiedSubject::new(user.id.to_string()).with_claims(claims_for_user(&user.username)?))
     }
 }
 

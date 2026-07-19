@@ -1,3 +1,4 @@
+use super::super::claims::claims_for_user;
 use super::super::schema::USERNAME;
 use super::super::service::UserService;
 use async_trait::async_trait;
@@ -39,10 +40,7 @@ impl RefreshClaimsResolver for UserClaimsResolver {
     ) -> Result<serde_json::Value, BaseError> {
         let user = self.service.active_by_subject(ctx, subject).await?;
         let username: String = user.require(USERNAME)?;
-        Ok(serde_json::json!({
-            "username": username,
-            "roles": ["user"]
-        }))
+        claims_for_user(&username)
     }
 }
 
