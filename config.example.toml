@@ -4,6 +4,8 @@ name = "yang-system"
 [http]
 bind = "127.0.0.1:8080"
 max_body_bytes = 1048576
+request_timeout_seconds = 30
+max_concurrency = 256
 
 [mysql]
 # 运行时由 DATABASE_URL 环境变量覆盖。

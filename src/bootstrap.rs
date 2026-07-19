@@ -59,7 +59,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
 
     let bind = settings.bind_addr()?;
     let runtime = Arc::new(application.runtime);
-    let result = http::serve(bind, runtime, settings.http.max_body_bytes).await;
+    let result = http::serve(bind, runtime, &settings.http).await;
 
     tools.close().await;
     result

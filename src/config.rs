@@ -33,6 +33,8 @@ pub struct AppSettings {
 pub struct HttpSettings {
     pub bind: String,
     pub max_body_bytes: usize,
+    pub request_timeout_seconds: u64,
+    pub max_concurrency: usize,
 }
 
 #[derive(Clone, Deserialize)]
@@ -155,6 +157,12 @@ impl Settings {
         if self.http.max_body_bytes == 0 || self.http.max_body_bytes > 16 * 1024 * 1024 {
             bail!("http.max_body_bytes 必须在 1..=16777216 范围内");
         }
+        if self.http.request_timeout_seconds == 0 || self.http.request_timeout_seconds > 300 {
+            bail!("http.request_timeout_seconds 必须在 1..=300 范围内");
+        }
+        if self.http.max_concurrency == 0 || self.http.max_concurrency > 100_000 {
+            bail!("http.max_concurrency 必须在 1..=100000 范围内");
+        }
         self.mysql_config().validate().context("mysql 配置无效")?;
         self.redis_config().validate().context("redis 配置无效")?;
         if self.token.issuer.trim().is_empty() || self.token.audience.trim().is_empty() {
@@ -263,6 +271,8 @@ name = "test"
 [http]
 bind = "127.0.0.1:8080"
 max_body_bytes = 1024
+request_timeout_seconds = 30
+max_concurrency = 256
 [mysql]
 url = "${DATABASE_URL}"
 max_connections = 2
@@ -354,5 +364,22 @@ filter = "info"
             Err(error) => error,
         };
         assert!(error.to_string().contains("DATABASE_URL"));
+    }
+
+    #[test]
+    fn rejects_unbounded_http_resource_settings() {
+        let raw = valid_config().replace("max_concurrency = 256", "max_concurrency = 0");
+        let values = HashMap::from([
+            ("DATABASE_URL", "mysql://example/test"),
+            ("REDIS_URL", "redis://example"),
+            ("TOKEN_SECRET", "0123456789abcdef0123456789abcdef"),
+        ]);
+        let error = match Settings::parse_with(&raw, |name| {
+            values.get(name).map(|value| (*value).to_string())
+        }) {
+            Ok(_) => panic!("HTTP 并发上限为 0 时必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("max_concurrency"));
     }
 }

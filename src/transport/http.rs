@@ -3,9 +3,11 @@
 //! 路由生成、body 限制、错误映射、request_id 透传、健康端点、CORS/超时/压缩
 //! 与文件/重定向响应均由 `yang_base::transport::axum` 统一保证；应用侧只注入配置。
 
+use crate::config::HttpSettings;
 use anyhow::Context;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use yang_base::definition::BuiltApp;
 use yang_base::transport::axum::AxumTransportConfig;
 
@@ -13,10 +15,12 @@ use yang_base::transport::axum::AxumTransportConfig;
 pub async fn serve(
     bind: SocketAddr,
     app: Arc<BuiltApp>,
-    max_body_bytes: usize,
+    settings: &HttpSettings,
 ) -> anyhow::Result<()> {
     let config = AxumTransportConfig {
-        max_body_bytes,
+        max_body_bytes: settings.max_body_bytes,
+        request_timeout: Some(Duration::from_secs(settings.request_timeout_seconds)),
+        max_concurrency: Some(settings.max_concurrency),
         ..AxumTransportConfig::default()
     };
     yang_base::transport::axum::serve(bind, app, config)
