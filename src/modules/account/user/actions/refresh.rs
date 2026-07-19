@@ -1,4 +1,5 @@
-use super::{UserService, USERNAME};
+use super::super::schema::USERNAME;
+use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::auth::{RefreshAction, RefreshClaimsResolver};

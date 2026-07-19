@@ -1,4 +1,5 @@
-use super::{UserService, UserView};
+use super::super::schema::UserView;
+use super::super::service::UserService;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -67,8 +68,10 @@ pub(super) fn register(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::schema::{
+        CREATED_AT, PASSWORD_HASH, STATUS, UPDATED_AT, USERNAME, USER_ID,
+    };
     use super::*;
-    use crate::modules::user::{CREATED_AT, PASSWORD_HASH, STATUS, UPDATED_AT, USERNAME, USER_ID};
     use yang_base::table::Record;
 
     #[test]

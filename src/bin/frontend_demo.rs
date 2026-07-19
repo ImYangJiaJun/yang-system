@@ -224,18 +224,16 @@ impl ActionHandler for DemoListAction {
             .read()
             .await
             .iter()
-            .filter(|item| {
-                input.search.as_ref().is_none_or(|search| {
-                    item.name
-                        .to_lowercase()
-                        .contains(&search.trim().to_lowercase())
-                })
+            .filter(|item| match input.search.as_ref() {
+                Some(search) => item
+                    .name
+                    .to_lowercase()
+                    .contains(&search.trim().to_lowercase()),
+                None => true,
             })
-            .filter(|item| {
-                input
-                    .where_clause
-                    .as_ref()
-                    .is_none_or(|condition| matches_condition(item, condition))
+            .filter(|item| match input.where_clause.as_ref() {
+                Some(condition) => matches_condition(item, condition),
+                None => true,
             })
             .cloned()
             .collect::<Vec<_>>();

@@ -1,6 +1,7 @@
+use super::super::schema::{PASSWORD_HASH, STATUS, USERNAME, USER_ID};
+use super::super::service::UserService;
 #[cfg(test)]
 use super::register::hash_password;
-use super::{UserService, PASSWORD_HASH, STATUS, USERNAME, USER_ID};
 use argon2::password_hash::{Error as PasswordHashError, PasswordHash};
 use argon2::{Argon2, PasswordVerifier};
 use async_trait::async_trait;

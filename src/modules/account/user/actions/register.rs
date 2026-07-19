@@ -1,4 +1,5 @@
-use super::{UserService, UserView, PASSWORD_HASH, STATUS, USERNAME, USER_ID};
+use super::super::schema::{UserView, PASSWORD_HASH, STATUS, USERNAME, USER_ID};
+use super::super::service::UserService;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use async_trait::async_trait;
@@ -85,21 +86,6 @@ impl UserService {
         self.find_by_id(ctx, id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))
-    }
-
-    fn validate_password(&self, password: &str) -> Result<(), BaseError> {
-        let length = password.chars().count();
-        if length < self.security.password_min_length || length > self.security.password_max_length
-        {
-            return Err(BaseError::ParamInvalid(
-                "password".to_string(),
-                format!(
-                    "长度必须在 {}..={} 之间",
-                    self.security.password_min_length, self.security.password_max_length
-                ),
-            ));
-        }
-        Ok(())
     }
 }
 

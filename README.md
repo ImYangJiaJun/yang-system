@@ -30,8 +30,19 @@ src/
 ├── app.rs                   # AppBuilder 唯一组装入口
 ├── transport/http/          # Catalog 驱动的 Axum 传输与健康检查
 └── modules/
-    ├── user/                # 账号、JWT、ActionLink/Plugins 内部调用
-    └── org.rs               # Addon/Module、关系、租户、table_list/table_select
+    ├── account/
+    │   ├── mod.rs           # account Addon 唯一组装入口
+    │   └── user/
+    │       ├── mod.rs       # account.user Module 聚合
+    │       ├── schema.rs    # 用户表 Schema 与安全 DTO
+    │       ├── service.rs   # 跨 Action 共享的领域服务
+    │       ├── claims.rs    # Token Claims 到可信用户上下文的投影
+    │       └── actions/     # 注册、登录、刷新、退出与当前用户 Action
+    └── org/
+        ├── mod.rs           # org Addon 唯一组装入口与中间件顺序
+        ├── tenant.rs        # 企业成员校验与可信租户解析
+        ├── organization/    # org.org Module 及企业查询 Action
+        └── user/            # org.user Schema、CRUD 与 View
 ```
 
 核心路径只有一条：
@@ -88,10 +99,10 @@ cargo run
 
 | 位置 | 展示能力 |
 |---|---|
-| `modules/user/register.rs` | `params!`、类型化 `Action::index`、Fields 约束复用 |
-| `modules/user/register_via_plugin.rs` | `ActionLink`、构建期绑定、`ctx.plugins()` 零 JSON 内部调用 |
-| `modules/user/mod.rs` | 密码保护字段、TableQuery、Token 中间件 |
-| `modules/org.rs` | 原生 `Addon/Module/actions!/modules!`、关系字段、租户键、Tables 列表与选择器 |
+| `modules/account/user/actions/register.rs` | `params!`、类型化 `Action::index`、Fields 约束复用 |
+| `modules/account/user/actions/register_via_plugin.rs` | `ActionLink`、构建期绑定、`ctx.plugins()` 零 JSON 内部调用 |
+| `modules/account/user/{schema,service,claims}.rs` | 密码保护字段、TableQuery、Token 用户投影 |
+| `modules/org/` | 原生 `Addon/Module/actions!`、关系字段、可信租户、Tables 列表与选择器 |
 | `app.rs` 测试 | Catalog/Registry 同源、OpenAPI、默认 View、租户 fail-closed |
 
 BR 到 YANG 的完整机械映射和 codemod 使用方式见 `../../docs/br-to-yang-migration.md`。

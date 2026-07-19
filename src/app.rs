@@ -1,9 +1,8 @@
 use crate::config::SecuritySettings;
-use crate::modules::org;
-use crate::modules::user;
+use crate::modules::{account, org};
 use anyhow::Context;
 use std::sync::Arc;
-use yang_base::definition::{AddonName, AddonSpec, AppBuilder, BuiltApp};
+use yang_base::definition::{AppBuilder, BuiltApp};
 use yang_base::tools::Tools;
 
 pub struct Application {
@@ -14,11 +13,9 @@ pub fn build_app(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
 ) -> anyhow::Result<Application> {
-    let user_module = user::build_module(security)?;
-    let account = AddonSpec::new(AddonName::new("account").context("account Addon 名称无效")?)
-        .module(user_module);
+    // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     let runtime = AppBuilder::new()
-        .addon(account)
+        .addon(account::build_addon(security).context("构建 account Addon 失败")?)
         .addon(org::build_addon().context("构建 org Addon 失败")?)
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;

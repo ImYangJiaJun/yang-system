@@ -1,7 +1,7 @@
 //! 强类型内部 Action 调用样板：构建期绑定 slot，请求期零 JSON 往返。
 
+use super::super::schema::UserView;
 use super::register::RegisterInput;
-use super::UserView;
 use async_trait::async_trait;
 use yang_base::action::{Action as ActionHandler, ActionContext};
 use yang_base::definition::{ActionLink, ActionName, ActionRef, ModuleName, ModuleSpec, Registry};
