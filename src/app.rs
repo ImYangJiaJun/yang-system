@@ -95,7 +95,7 @@ mod tests {
         assert!(tables.contains(&"users"));
         assert!(tables.contains(&"org_org"));
         assert!(tables.contains(&"org_user"));
-        assert_eq!(operations.len(), 7);
+        assert_eq!(operations.len(), 6);
         assert!(operations.contains(&(
             "account.user.register",
             "POST",

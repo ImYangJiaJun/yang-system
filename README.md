@@ -63,7 +63,7 @@ Addon/Module/fields!/params!
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；没有进程级数据库/Redis/Tools 单例。
 - `params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
 - `fields!` 是 Schema、输入输出约束、OpenAPI、后台元数据和查询策略的字段事实来源。
-- `ActionLink<I, O>` 在 `AppBuilder::build` 绑定 Registry slot；请求期内部调用不查字符串名称、不做 JSON 往返。
+- `ActionLink<I, O>` 在 `AppBuilder::build` 绑定 Registry slot；请求期内部调用不查字符串名称、不做 JSON 往返；完整样例位于 `yang-base` 定义层测试。
 - `ctx.tables()` 统一执行字段权限、筛选、排序、分页、关系批量加载与租户条件。
 - `org_user.org_org` 是租户键；普通上下文缺少 `TenantContext` 时查询 fail-closed，只有显式 system 上下文可绕过。
 
@@ -108,7 +108,6 @@ cargo run
 | 位置 | 展示能力 |
 |---|---|
 | `modules/account/user/actions/register.rs` | `params!`、类型化 `Action::index`、Fields 约束复用 |
-| `modules/account/user/actions/register_via_plugin.rs` | `ActionLink`、构建期绑定、`ctx.plugins()` 零 JSON 内部调用 |
 | `modules/account/user/{schema,service,claims}.rs` | 密码保护字段、TableQuery、Token 用户投影 |
 | `modules/org/` | 原生 `Addon/Module/actions!`、关系字段、可信租户、Tables 列表与选择器 |
 | `app.rs` 测试 | Catalog/Registry 同源、OpenAPI、默认 View、租户 fail-closed |

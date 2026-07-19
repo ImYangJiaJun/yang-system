@@ -7,7 +7,6 @@ mod logout;
 mod me;
 mod refresh;
 mod register;
-mod register_via_plugin;
 
 use super::service::UserService;
 use std::sync::Arc;
@@ -20,7 +19,6 @@ pub(super) fn register_all(
     service: Arc<UserService>,
 ) -> Result<ModuleSpec, BaseError> {
     let module = register::register(module, Arc::clone(&service))?;
-    let module = register_via_plugin::register(module)?;
     let module = login::register(module, Arc::clone(&service))?;
     let module = refresh::register(module, Arc::clone(&service))?;
     let module = logout::register(module)?;
