@@ -4,6 +4,12 @@ use std::net::SocketAddr;
 use std::path::Path;
 use yang_db::{DatabaseConfig, RedisConfig};
 
+const DATABASE_URL_ENV: &str = "DATABASE_URL";
+const REDIS_URL_ENV: &str = "REDIS_URL";
+const TOKEN_SECRET_ENV: &str = "TOKEN_SECRET";
+const MAX_ACCESS_TTL_SECONDS: u64 = 24 * 60 * 60;
+const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -100,8 +106,11 @@ impl Settings {
     }
 
     fn parse_with(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
-        let expanded = interpolate_environment(raw, lookup)?;
-        let settings: Self = toml::from_str(&expanded).context("解析 config.toml 失败")?;
+        let mut settings: Self = toml::from_str(raw).context("解析配置文件失败")?;
+        settings.mysql.url = environment_override(DATABASE_URL_ENV, &settings.mysql.url, &lookup)?;
+        settings.redis.url = environment_override(REDIS_URL_ENV, &settings.redis.url, &lookup)?;
+        settings.token.secret =
+            environment_override(TOKEN_SECRET_ENV, &settings.token.secret, &lookup)?;
         settings.validate()?;
         Ok(settings)
     }
@@ -144,18 +153,22 @@ impl Settings {
         }
         self.mysql_config().validate().context("mysql 配置无效")?;
         self.redis_config().validate().context("redis 配置无效")?;
-        if self.token.secret.len() < 32 {
-            bail!("token.secret 至少需要 32 字节");
-        }
         if self.token.issuer.trim().is_empty() || self.token.audience.trim().is_empty() {
             bail!("token.issuer 与 token.audience 不能为空");
         }
         if self.token.access_ttl_seconds == 0 || self.token.refresh_ttl_seconds == 0 {
             bail!("Token 有效期必须大于 0 秒");
         }
+        if self.token.access_ttl_seconds > MAX_ACCESS_TTL_SECONDS {
+            bail!("access token 有效期不能超过 {MAX_ACCESS_TTL_SECONDS} 秒");
+        }
+        if self.token.refresh_ttl_seconds > MAX_REFRESH_TTL_SECONDS {
+            bail!("refresh token 有效期不能超过 {MAX_REFRESH_TTL_SECONDS} 秒");
+        }
         if self.token.refresh_ttl_seconds <= self.token.access_ttl_seconds {
             bail!("refresh token 有效期必须长于 access token");
         }
+        validate_token_secret(&self.token.secret)?;
         validate_range(
             "username",
             self.security.username_min_length,
@@ -177,32 +190,42 @@ fn validate_range(name: &str, minimum: usize, maximum: usize) -> anyhow::Result<
     Ok(())
 }
 
-fn interpolate_environment(
-    input: &str,
-    lookup: impl Fn(&str) -> Option<String>,
+fn environment_override(
+    name: &str,
+    configured: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<String> {
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(start) = rest.find("${") {
-        output.push_str(&rest[..start]);
-        let tail = &rest[start + 2..];
-        let end = tail
-            .find('}')
-            .context("配置中的环境变量占位符缺少右花括号")?;
-        let name = &tail[..end];
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            bail!("环境变量占位符名称无效: {name}");
-        }
-        let value = lookup(name).with_context(|| format!("缺少环境变量: {name}"))?;
-        output.push_str(&value);
-        rest = &tail[end + 1..];
+    if let Some(value) = lookup(name) {
+        return Ok(value);
     }
-    output.push_str(rest);
-    Ok(output)
+    let placeholder = format!("${{{name}}}");
+    if configured == placeholder {
+        bail!("缺少环境变量: {name}");
+    }
+    Ok(configured.to_string())
+}
+
+fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
+    if secret.len() < 32 {
+        bail!("token.secret 至少需要 32 字节");
+    }
+    let normalized = secret.trim().to_ascii_lowercase();
+    let known_placeholder = matches!(
+        normalized.as_str(),
+        "changeme"
+            | "replace-me"
+            | "replace_with_a_random_secret"
+            | "replace-with-at-least-32-random-bytes"
+            | "example-secret"
+    );
+    let repeated_byte = secret
+        .as_bytes()
+        .first()
+        .is_some_and(|first| secret.as_bytes().iter().all(|byte| byte == first));
+    if known_placeholder || repeated_byte {
+        bail!("token.secret 不能使用示例值、占位值或重复字符");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -218,7 +241,7 @@ name = "test"
 bind = "127.0.0.1:8080"
 max_body_bytes = 1024
 [mysql]
-url = "${MYSQL_URL}"
+url = "${DATABASE_URL}"
 max_connections = 2
 min_connections = 0
 connect_timeout_seconds = 2
@@ -253,7 +276,7 @@ filter = "info"
     #[test]
     fn parses_environment_placeholders_and_redacts_token_debug() {
         let values = HashMap::from([
-            ("MYSQL_URL", "mysql://example/test"),
+            ("DATABASE_URL", "mysql://example/test"),
             ("REDIS_URL", "redis://example"),
             ("TOKEN_SECRET", "01234567890123456789012345678901"),
         ]);
@@ -267,11 +290,42 @@ filter = "info"
     }
 
     #[test]
+    fn environment_values_are_not_interpolated_as_toml_source() {
+        let values = HashMap::from([
+            ("DATABASE_URL", "mysql://user:p\"a\\ss@example/test"),
+            ("REDIS_URL", "redis://example"),
+            ("TOKEN_SECRET", "0123456789abcdef0123456789abcdef"),
+        ]);
+        let settings = Settings::parse_with(valid_config(), |name| {
+            values.get(name).map(|value| (*value).to_string())
+        })
+        .unwrap_or_else(|error| panic!("环境变量内容不应作为 TOML 源码插值: {error}"));
+
+        assert_eq!(settings.mysql.url, "mysql://user:p\"a\\ss@example/test");
+    }
+
+    #[test]
+    fn rejects_placeholder_or_repeated_token_secret() {
+        let repeated = valid_config().replace("${TOKEN_SECRET}", &"1".repeat(32));
+        let values = HashMap::from([
+            ("DATABASE_URL", "mysql://example/test"),
+            ("REDIS_URL", "redis://example"),
+        ]);
+        let error = match Settings::parse_with(&repeated, |name| {
+            values.get(name).map(|value| (*value).to_string())
+        }) {
+            Ok(_) => panic!("重复字符密钥必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("重复字符"));
+    }
+
+    #[test]
     fn rejects_missing_environment_variable() {
         let error = match Settings::parse_with(valid_config(), |_| None) {
             Ok(_) => panic!("缺少环境变量时应失败"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("MYSQL_URL"));
+        assert!(error.to_string().contains("DATABASE_URL"));
     }
 }

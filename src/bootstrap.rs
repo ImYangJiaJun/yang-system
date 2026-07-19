@@ -38,7 +38,6 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
             .mysql(mysql)
             .cache(cache)
             .token(token_manager)
-            .config(settings.clone())
             .build()
             .context("构建应用 Tools 失败")?,
     );

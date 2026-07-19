@@ -2,12 +2,12 @@
 name = "yang-system"
 
 [http]
-bind = "0.0.0.0:8080"
+bind = "127.0.0.1:8080"
 max_body_bytes = 1048576
 
 [mysql]
-#mysql://用户名:密码@主机地址:端口/数据库名
-url = "mysql://root:111111@127.0.0.1:3306/yang"
+# 运行时由 DATABASE_URL 环境变量覆盖。
+url = "${DATABASE_URL}"
 max_connections = 20
 min_connections = 2
 connect_timeout_seconds = 10
@@ -16,8 +16,8 @@ max_lifetime_seconds = 1800
 test_before_acquire = true
 
 [redis]
-#redis://用户名:密码@主机地址:端口/数据库编号
-url = "redis://127.0.0.1:6378"
+# 运行时由 REDIS_URL 环境变量覆盖。
+url = "${REDIS_URL}"
 max_connections = 20
 min_connections = 2
 connect_timeout_seconds = 5
@@ -27,7 +27,8 @@ max_lifetime_seconds = 1800
 test_before_acquire = true
 
 [token]
-secret = "1111111111111111111111111111111111111111111111111111111111"
+# 不要在文件中保存真实密钥；运行时由 TOKEN_SECRET 环境变量覆盖。
+secret = "${TOKEN_SECRET}"
 issuer = "yang-system"
 audience = "yang-system-api"
 access_ttl_seconds = 3600
@@ -41,4 +42,3 @@ password_max_length = 128
 
 [logging]
 filter = "yang_system=info,tower_http=info"
-
