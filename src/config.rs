@@ -90,6 +90,7 @@ pub struct SecuritySettings {
     pub username_max_length: usize,
     pub password_min_length: usize,
     pub password_max_length: usize,
+    pub argon2_max_concurrency: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,6 +180,9 @@ impl Settings {
             self.security.password_min_length,
             self.security.password_max_length,
         )?;
+        if self.security.argon2_max_concurrency == 0 {
+            bail!("security.argon2_max_concurrency 必须大于 0");
+        }
         Ok(())
     }
 }
@@ -268,6 +272,7 @@ username_min_length = 3
 username_max_length = 64
 password_min_length = 10
 password_max_length = 128
+argon2_max_concurrency = 4
 [logging]
 filter = "info"
 "#

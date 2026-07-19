@@ -2,11 +2,13 @@
 
 mod actions;
 mod claims;
+mod password;
 mod repository;
 mod schema;
 mod service;
 
 use crate::config::SecuritySettings;
+use password::PasswordEngine;
 use repository::CredentialRepository;
 use service::UserService;
 use std::sync::Arc;
@@ -22,7 +24,8 @@ pub(crate) use claims::user_from_claims;
 pub(super) fn build_module(security: Arc<SecuritySettings>) -> Result<ModuleSpec, BaseError> {
     let table = schema::user_table_spec()?;
     let credentials = Arc::new(CredentialRepository::new(table.table_definition()?));
-    let service = Arc::new(UserService::new(security, credentials));
+    let passwords = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
+    let service = Arc::new(UserService::new(security, credentials, passwords));
     let module = ModuleSpec::new(
         ModuleName::new("account.user")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,

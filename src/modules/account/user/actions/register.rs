@@ -1,9 +1,6 @@
 use super::super::schema::UserView;
 use super::super::service::UserService;
-use argon2::password_hash::SaltString;
-use argon2::{Argon2, PasswordHasher};
 use async_trait::async_trait;
-use rand_core::OsRng;
 use std::sync::Arc;
 use yang_base::action::{Action as ActionHandler, ActionContext};
 use yang_base::definition::{ModuleSpec, Password, Str};
@@ -43,7 +40,7 @@ impl UserService {
         if self.credentials().username_exists(ctx, &username).await? {
             return Err(username_exists_error());
         }
-        let password_hash = hash_password(plain_password)?;
+        let password_hash = self.passwords().hash(plain_password).await?;
         let id = match self
             .credentials()
             .insert(ctx, &username, &password_hash)
@@ -65,14 +62,6 @@ impl UserService {
 
 fn username_exists_error() -> BaseError {
     BaseError::ParamInvalid("username".to_string(), "用户名已存在".to_string())
-}
-
-pub(super) fn hash_password(password: &str) -> Result<String, BaseError> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|value| value.to_string())
-        .map_err(|_| BaseError::Unknown("密码哈希失败".to_string()))
 }
 
 #[async_trait]

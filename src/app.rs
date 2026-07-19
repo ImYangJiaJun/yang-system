@@ -60,6 +60,7 @@ mod tests {
             username_max_length: 64,
             password_min_length: 10,
             password_max_length: 128,
+            argon2_max_concurrency: 1,
         });
         let app =
             build_app(tools, security).unwrap_or_else(|error| panic!("应用应构建成功: {error}"));

@@ -2,6 +2,7 @@
 //!
 //! 这里只保留跨 Action 复用的查询和校验；注册、登录等用例逻辑仍由各 Action 文件拥有。
 
+use super::password::PasswordEngine;
 use super::repository::CredentialRepository;
 use super::schema::{STATUS, USER_ID, USER_VIEW_FIELDS};
 use crate::config::SecuritySettings;
@@ -14,21 +15,28 @@ use yang_base::BaseError;
 pub(super) struct UserService {
     security: Arc<SecuritySettings>,
     credentials: Arc<CredentialRepository>,
+    passwords: Arc<PasswordEngine>,
 }
 
 impl UserService {
     pub(super) fn new(
         security: Arc<SecuritySettings>,
         credentials: Arc<CredentialRepository>,
+        passwords: Arc<PasswordEngine>,
     ) -> Self {
         Self {
             security,
             credentials,
+            passwords,
         }
     }
 
     pub(super) fn credentials(&self) -> &CredentialRepository {
         &self.credentials
+    }
+
+    pub(super) fn passwords(&self) -> &PasswordEngine {
+        &self.passwords
     }
 
     pub(super) fn query(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {
