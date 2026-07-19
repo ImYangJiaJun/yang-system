@@ -6,11 +6,6 @@ import {
   type InvocationResult,
   type SessionContext,
 } from "src/api/client";
-import {
-  asJsonSchema,
-  effectiveSchema,
-  initialObject,
-} from "src/contracts/json-schema";
 import { buildTreeRows, parseTableData } from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
@@ -18,13 +13,14 @@ import type {
   TableViewSchema,
 } from "src/contracts/ui-catalog";
 import JsonSchemaForm from "components/form/JsonSchemaForm.vue";
-
-type SourceRow = Record<string, unknown>;
-type DisplayRow = {
-  data: SourceRow;
-  depth: number;
-  key: string;
-};
+import {
+  buildActionInitialValues,
+  buildWhereClause,
+  flattenDisplayRows,
+  formatCell,
+  pageSizeOptions as buildPageSizeOptions,
+  type DisplayRow,
+} from "./table-view-model";
 
 const props = defineProps<{
   view: TableViewSchema;
@@ -107,22 +103,7 @@ const selectedRows = computed(() =>
   selectedDisplayRows.value.map((row) => row.data),
 );
 const qTableRows = computed(() => {
-  const flatten = (
-    source: SourceRow[],
-    depth = 0,
-    path = "root",
-  ): DisplayRow[] =>
-    source.flatMap((row, index) => {
-      const rowPath = `${path}.${index}`;
-      const children = Array.isArray(row.children)
-        ? (row.children as SourceRow[])
-        : [];
-      return [
-        { data: row, depth, key: rowPath },
-        ...flatten(children, depth + 1, rowPath),
-      ];
-    });
-  return flatten(displayRows.value);
+  return flattenDisplayRows(displayRows.value);
 });
 const tableColumns = computed<QTableColumn<DisplayRow>[]>(() => {
   const columns: QTableColumn<DisplayRow>[] = props.view.columns.map(
@@ -150,29 +131,8 @@ const pageCount = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize.value)),
 );
 const pageSizeOptions = computed(() =>
-  Array.from(new Set([10, 20, 50, props.view.query.max_page_size]))
-    .sort((left, right) => left - right)
-    .map((value) => ({ label: `${value} / 页`, value })),
+  buildPageSizeOptions(props.view.query.max_page_size),
 );
-
-function parseFilterValue(value: string): unknown {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return trimmed;
-  }
-}
-
-function whereClause(): unknown {
-  const conditions = Object.entries(filters.value)
-    .map(([field, value]) => ({ field, value: parseFilterValue(value) }))
-    .filter((item) => item.value !== undefined)
-    .map((item) => ({ type: "eq", field: item.field, value: item.value }));
-  if (conditions.length === 0) return undefined;
-  return conditions.length === 1 ? conditions[0] : { type: "and", conditions };
-}
 
 async function load() {
   if (!dataAction.value) {
@@ -197,7 +157,7 @@ async function load() {
               )
             : pageSize.value,
         search: search.value.trim() || null,
-        where: whereClause(),
+        where: buildWhereClause(filters.value),
         order_by: orderBy.value,
         count_total: true,
       },
@@ -218,36 +178,6 @@ async function load() {
   }
 }
 
-function actionInitialValues(
-  action: ActionDemoSchema,
-  row?: Record<string, unknown>,
-): Record<string, unknown> {
-  const initial = initialObject(action.input_schema);
-  if (!row) return initial;
-  const rootSchema = asJsonSchema(action.input_schema);
-  const inputFields = Object.keys(
-    effectiveSchema(rootSchema, rootSchema).properties ?? {},
-  );
-  const readableRow = Object.fromEntries(
-    Object.entries(row).filter(
-      ([name]) =>
-        !props.view.form.fields.find((field) => field.field === name)
-          ?.write_only,
-    ),
-  );
-  for (const name of inputFields) {
-    if (name in readableRow) initial[name] = readableRow[name];
-  }
-  if (
-    initial.data &&
-    typeof initial.data === "object" &&
-    !Array.isArray(initial.data)
-  ) {
-    initial.data = { ...initial.data, ...readableRow };
-  }
-  return initial;
-}
-
 async function openAction(
   presentation: ActionPresentationSchema,
   row?: Record<string, unknown>,
@@ -266,7 +196,11 @@ async function openAction(
   }
   activePresentation.value = presentation;
   activeAction.value = action;
-  actionValues.value = actionInitialValues(action, row);
+  actionValues.value = buildActionInitialValues(
+    action,
+    props.view.form.fields,
+    row,
+  );
   if (presentation.placement === "bulk") {
     actionValues.value.selected = selectedRows.value;
   }
@@ -368,12 +302,6 @@ function changePageSize(next: number | null) {
   pageSize.value = next;
   page.value = 1;
   void load();
-}
-
-function formatCell(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "boolean") return value ? "是" : "否";
-  return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
 watch(
