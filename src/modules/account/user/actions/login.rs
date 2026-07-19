@@ -64,7 +64,11 @@ pub(super) fn register(
         ActionName::new("login").map_err(|error| BaseError::ConfigError(error.to_string()))?;
     let spec = ActionSpec::new(
         name,
-        RouteSpec::new(HttpMethod::Post, "/api/v1/users/login", "users.login"),
+        RouteSpec::new(
+            HttpMethod::Post,
+            "/api/v1/users/login",
+            "account.user.login",
+        ),
     )
     .display_name("登录")
     .description("校验账号密码并签发 Token")

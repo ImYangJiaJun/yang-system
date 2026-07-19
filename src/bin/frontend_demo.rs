@@ -76,7 +76,7 @@ struct DemoUploadOutput {
     display_name = "上传验收文件",
     description = "验证受限 multipart 表单与请求作用域文件",
     method = "POST",
-    path = "/api/demo/upload",
+    path = "/api/v1/demo/upload",
     public,
     request_media = "multipart",
     content_types("text/plain"),
@@ -171,7 +171,7 @@ struct DemoListOutput {
     display_name = "项目列表数据",
     description = "为通用 TableView 提供标准分页数据",
     method = "POST",
-    path = "/api/demo/items/query",
+    path = "/api/v1/demo/items/query",
     public
 )]
 struct DemoListAction {
@@ -289,7 +289,7 @@ struct MutationOutput {
     display_name = "新增项目",
     description = "通用表单新增演示",
     method = "POST",
-    path = "/api/demo/items",
+    path = "/api/v1/demo/items",
     public
 )]
 struct DemoAddAction {
@@ -336,7 +336,7 @@ yang_base::params! {
     display_name = "编辑项目",
     description = "通用行表单编辑演示",
     method = "PUT",
-    path = "/api/demo/items",
+    path = "/api/v1/demo/items",
     public
 )]
 struct DemoEditAction {
@@ -379,7 +379,7 @@ yang_base::params! {
     display_name = "删除项目",
     description = "通用确认调用演示",
     method = "DELETE",
-    path = "/api/demo/items",
+    path = "/api/v1/demo/items",
     public
 )]
 struct DemoDeleteAction {
@@ -399,7 +399,7 @@ struct DemoInsightOutput {
     display_name = "项目洞察",
     description = "展示静态 view_id 自定义页面覆盖",
     method = "GET",
-    path = "/api/demo/items/insight",
+    path = "/api/v1/demo/items/insight",
     public
 )]
 struct DemoInsightAction {
@@ -454,7 +454,7 @@ impl ActionHandler for DemoDeleteAction {
     display_name = "分类选项",
     description = "通用关系选择器 options",
     method = "POST",
-    path = "/api/demo/categories/options",
+    path = "/api/v1/demo/categories/options",
     public
 )]
 struct CategoryOptionsAction;
@@ -602,7 +602,7 @@ fn demo_item_view() -> anyhow::Result<ViewSpec> {
     display_name = "回显输入",
     description = "用于验收默认 ActionDemo 的真实 HTTP 调用",
     method = "POST",
-    path = "/api/demo/echo",
+    path = "/api/v1/demo/echo",
     public
 )]
 struct EchoAction;
@@ -630,7 +630,7 @@ impl ActionHandler for EchoAction {
     display_name = "下载验收文件",
     description = "验证附件下载不会被 JSON 解析",
     method = "GET",
-    path = "/api/demo/download",
+    path = "/api/v1/demo/download",
     response_kind = "download",
     public
 )]
@@ -658,7 +658,7 @@ impl ActionHandler for DownloadAction {
     display_name = "预览验收文件",
     description = "验证浏览器内联预览通道",
     method = "GET",
-    path = "/api/demo/preview",
+    path = "/api/v1/demo/preview",
     response_kind = "preview",
     public
 )]
@@ -686,7 +686,7 @@ impl ActionHandler for PreviewAction {
     display_name = "重定向验收",
     description = "验证前端展示 Location 而不是静默跳走",
     method = "GET",
-    path = "/api/demo/redirect",
+    path = "/api/v1/demo/redirect",
     response_kind = "redirect",
     public
 )]

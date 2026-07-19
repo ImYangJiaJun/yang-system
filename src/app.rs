@@ -129,6 +129,29 @@ mod tests {
         );
         assert_eq!(app.runtime.compiled_views().len(), 3);
 
+        for module in app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+        {
+            for action in module.actions() {
+                assert_eq!(
+                    action.route.operation_id,
+                    format!("{}.{}", module.name, action.name),
+                    "operation_id 必须与 Action 身份同源"
+                );
+                if action.name.as_str() != "ui_catalog" {
+                    assert!(
+                        action.route.path.starts_with("/api/v1/"),
+                        "业务 Action 必须使用 /api/v1 前缀: {}",
+                        action.route.path
+                    );
+                }
+            }
+        }
+
         let tenant_module = app
             .runtime
             .catalog()
@@ -203,6 +226,9 @@ mod tests {
         for name in ["get", "select", "table"] {
             assert_eq!(action(name).permissions, vec!["org.user:read"]);
         }
+        assert_eq!(action("add").route.path, "/api/v1/org/users");
+        assert_eq!(action("select").route.path, "/api/v1/org/users/query");
+        assert_eq!(action("table").route.path, "/api/v1/org/users/schema");
         for name in ["add", "put", "del"] {
             assert_eq!(action(name).permissions, vec!["org.user:write"]);
         }

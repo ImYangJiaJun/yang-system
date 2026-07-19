@@ -58,7 +58,7 @@ pub(super) fn register(
     let name = ActionName::new("me").map_err(|error| BaseError::ConfigError(error.to_string()))?;
     let spec = ActionSpec::new(
         name,
-        RouteSpec::new(HttpMethod::Get, "/api/v1/users/me", "users.me"),
+        RouteSpec::new(HttpMethod::Get, "/api/v1/users/me", "account.user.me"),
     )
     .display_name("当前用户")
     .description("读取当前已认证用户")

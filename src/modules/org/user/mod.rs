@@ -68,7 +68,10 @@ impl Module for OrgUserModule {
 
 /// 构建成员 Module，并由框架统一生成标准 CRUD Action。
 pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
-    OrgUserModule.into_spec().view(view::build()?).crud()
+    OrgUserModule
+        .into_spec()
+        .view(view::build()?)
+        .crud_at("/api/v1/org/users")
 }
 
 #[cfg(test)]

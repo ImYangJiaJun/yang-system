@@ -52,7 +52,11 @@ pub(super) fn register(
         ActionName::new("refresh").map_err(|error| BaseError::ConfigError(error.to_string()))?;
     let spec = ActionSpec::new(
         name,
-        RouteSpec::new(HttpMethod::Post, "/api/v1/users/refresh", "users.refresh"),
+        RouteSpec::new(
+            HttpMethod::Post,
+            "/api/v1/users/refresh",
+            "account.user.refresh",
+        ),
     )
     .display_name("刷新 Token")
     .description("轮换 Refresh Token 并签发新 Token 对")
