@@ -28,7 +28,7 @@ src/
 ├── main.rs
 ├── bootstrap.rs             # 创建 Tools、同步 Schema、启动 HTTP、优雅关闭
 ├── app.rs                   # AppBuilder 唯一组装入口
-├── transport/http/          # Catalog 驱动的 Axum 传输与健康检查
+├── transport/http.rs        # Catalog 驱动的 Axum 传输与健康检查
 └── modules/
     ├── account/
     │   ├── mod.rs           # account Addon 唯一组装入口
@@ -41,7 +41,7 @@ src/
     └── org/
         ├── mod.rs           # org Addon 唯一组装入口与中间件顺序
         ├── tenant.rs        # 企业成员校验与可信租户解析
-        ├── organization/    # org.org Module 及企业查询 Action
+        ├── organization/    # org.org Module；每个自定义 Action 独立文件
         └── user/            # org.user Schema、CRUD 与 View
 ```
 
@@ -69,7 +69,7 @@ Addon/Module/fields!/params!
 
 ## 启动顺序
 
-1. 读取 `config.toml` 并展开环境变量。
+1. 读取 `config.toml`，再用 `DATABASE_URL`、`REDIS_URL`、`TOKEN_SECRET` 做结构化覆盖。
 2. 创建 MySQL `Database`、Redis `RedisClient` 和 `TokenManager`。
 3. 用 `ToolsBuilder` 构建当前应用独占的不可变 `Tools`。
 4. 用 `AppBuilder` 校验 Addon 依赖、关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
@@ -82,16 +82,24 @@ Addon/Module/fields!/params!
 先创建数据库和 Redis；应用会创建缺失表和列，但不会创建数据库本身。
 
 ```powershell
+Copy-Item config.example.toml config.toml
 $env:DATABASE_URL = "mysql://root:password@127.0.0.1:3306/yang_system"
 $env:REDIS_URL = "redis://127.0.0.1:6379"
-$env:TOKEN_SECRET = "replace-with-at-least-32-random-bytes"
+$tokenBytes = New-Object byte[] 32
+[Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+$env:TOKEN_SECRET = [Convert]::ToBase64String($tokenBytes)
 cargo run
 ```
+
+`config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。环境变量按字段覆盖，不会作为 TOML 源码插值，因此 URL 或密钥中的引号和反斜杠不会破坏配置解析。
 
 其它配置文件：
 
 ```powershell
 $env:APP_CONFIG = "D:\config\yang-system.toml"
+$env:DATABASE_URL = "mysql://app:password@db.internal:3306/yang_system"
+$env:REDIS_URL = "redis://cache.internal:6379"
+$env:TOKEN_SECRET = "从密钥管理服务注入的随机密钥"
 cargo run
 ```
 

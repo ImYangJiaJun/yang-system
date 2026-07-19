@@ -3,6 +3,7 @@ name = "yang-system"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
+default-run = "yang-system"
 
 [dependencies]
 anyhow = "1.0"
