@@ -61,6 +61,7 @@ export function effectiveSchema(
 export function initialValue(
   root: JsonSchemaNode,
   node: JsonSchemaNode,
+  materializeObject = false,
 ): unknown {
   const schema = effectiveSchema(root, node);
   if (schema.default !== undefined) return structuredClone(schema.default);
@@ -68,11 +69,15 @@ export function initialValue(
     ? schema.type.find((item) => item !== "null")
     : schema.type;
   if (type === "object" || schema.properties) {
+    if (!materializeObject) return undefined;
+    const required = new Set(schema.required ?? []);
     return Object.fromEntries(
-      Object.entries(schema.properties ?? {}).map(([name, property]) => [
-        name,
-        initialValue(root, property),
-      ]),
+      Object.entries(schema.properties ?? {})
+        .map(([name, property]) => [
+          name,
+          initialValue(root, property, required.has(name)),
+        ])
+        .filter((entry) => entry[1] !== undefined),
     );
   }
   return undefined;
@@ -80,7 +85,7 @@ export function initialValue(
 
 export function initialObject(schemaValue: unknown): Record<string, unknown> {
   const root = asJsonSchema(schemaValue);
-  const value = initialValue(root, root);
+  const value = initialValue(root, root, true);
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};

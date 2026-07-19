@@ -6,7 +6,11 @@ import {
   type InvocationResult,
   type SessionContext,
 } from "src/api/client";
-import { initialObject } from "src/contracts/json-schema";
+import {
+  asJsonSchema,
+  effectiveSchema,
+  initialObject,
+} from "src/contracts/json-schema";
 import { buildTreeRows, parseTableData } from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
@@ -220,6 +224,10 @@ function actionInitialValues(
 ): Record<string, unknown> {
   const initial = initialObject(action.input_schema);
   if (!row) return initial;
+  const rootSchema = asJsonSchema(action.input_schema);
+  const inputFields = Object.keys(
+    effectiveSchema(rootSchema, rootSchema).properties ?? {},
+  );
   const readableRow = Object.fromEntries(
     Object.entries(row).filter(
       ([name]) =>
@@ -227,7 +235,7 @@ function actionInitialValues(
           ?.write_only,
     ),
   );
-  for (const name of Object.keys(initial)) {
+  for (const name of inputFields) {
     if (name in readableRow) initial[name] = readableRow[name];
   }
   if (

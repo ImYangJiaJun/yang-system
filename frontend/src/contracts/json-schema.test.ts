@@ -13,12 +13,7 @@ describe("initialObject", () => {
       },
     });
 
-    expect(values).toEqual({
-      enabled: undefined,
-      roles: undefined,
-      mode: undefined,
-      title: undefined,
-    });
+    expect(values).toEqual({});
     expect(JSON.parse(JSON.stringify(values))).toEqual({});
   });
 
@@ -32,6 +27,7 @@ describe("initialObject", () => {
           mode: { type: "string", enum: ["safe", "fast"], default: "fast" },
           nested: {
             type: "object",
+            default: { retries: 0 },
             properties: {
               retries: { type: "integer", default: 0 },
               note: { type: "string" },
@@ -43,7 +39,21 @@ describe("initialObject", () => {
       enabled: false,
       roles: [],
       mode: "fast",
-      nested: { retries: 0, note: undefined },
+      nested: { retries: 0 },
     });
+  });
+
+  it("不因可选对象内部存在默认值而伪造父对象", () => {
+    expect(
+      initialObject({
+        type: "object",
+        properties: {
+          optional: {
+            type: "object",
+            properties: { enabled: { type: "boolean", default: true } },
+          },
+        },
+      }),
+    ).toEqual({});
   });
 });
