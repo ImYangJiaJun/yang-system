@@ -31,6 +31,10 @@ python scripts/check_architecture.py
 检查器自身的反向 fixture 可用 `python scripts/check_architecture.py --self-test`
 验证。
 
+本地质量门禁与 `.github/workflows/ci.yml` 共用同一入口：提交前运行
+`python scripts/run_ci.py quick`，推送前运行 `python scripts/run_ci.py full`；真实依赖
+环境准备完成后可运行 `python scripts/run_ci.py integration`。
+
 新增 Action 使用脚手架一次完成文件创建、`mod.rs` 声明和注册；生成器拒绝覆盖
 已有文件，并要求业务路径显式位于 `/api/v1/`：
 

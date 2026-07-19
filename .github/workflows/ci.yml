@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.97.1"
+  LIB_YANG_REF: master
+
+jobs:
+  quality:
+    name: Rust, frontend and architecture
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: project/yang-system
+    steps:
+      - name: Checkout lib_yang dependency
+        uses: actions/checkout@v4
+        with:
+          repository: ImYangJiaJun/lib_yang
+          ref: ${{ env.LIB_YANG_REF }}
+      - name: Checkout yang-system
+        uses: actions/checkout@v4
+        with:
+          path: project/yang-system
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: project/yang-system -> target
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: project/yang-system/frontend/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+      - name: Verify local CI contract
+        run: python scripts/run_ci.py --self-test
+      - name: Full quality gate
+        run: python scripts/run_ci.py full
+
+  msrv:
+    name: MSRV 1.80
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: project/yang-system
+    steps:
+      - name: Checkout lib_yang dependency
+        uses: actions/checkout@v4
+        with:
+          repository: ImYangJiaJun/lib_yang
+          ref: ${{ env.LIB_YANG_REF }}
+      - name: Checkout yang-system
+        uses: actions/checkout@v4
+        with:
+          path: project/yang-system
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.80"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.80
+          workspaces: project/yang-system -> target
+      - run: cargo check --all-targets --locked
+
+  integration:
+    name: Real MySQL 8 and Redis 7
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: integration
+          MYSQL_DATABASE: yang_system_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pintegration"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      YANG_SYSTEM_TEST_DATABASE_URL: mysql://root:integration@127.0.0.1:3306/yang_system_test
+      YANG_SYSTEM_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+    defaults:
+      run:
+        working-directory: project/yang-system
+    steps:
+      - name: Checkout lib_yang dependency
+        uses: actions/checkout@v4
+        with:
+          repository: ImYangJiaJun/lib_yang
+          ref: ${{ env.LIB_YANG_REF }}
+      - name: Checkout yang-system
+        uses: actions/checkout@v4
+        with:
+          path: project/yang-system
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: project/yang-system -> target
+      - run: python scripts/run_ci.py integration
