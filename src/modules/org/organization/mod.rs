@@ -2,7 +2,6 @@
 
 mod actions;
 
-use actions::{OrgListAction, OrgSelectAction};
 use yang_base::definition::{
     Actions, Fields, Module, ModuleName, ModuleSpec, Str, TableName, Timestamp,
 };
@@ -39,7 +38,7 @@ impl Module for OrganizationModule {
     }
 
     fn actions(&self) -> Actions {
-        yang_base::actions![OrgListAction, OrgSelectAction]
+        actions::all()
     }
 }
 
