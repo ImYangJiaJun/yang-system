@@ -1,6 +1,7 @@
 //! 当前用户可访问的租户列表。
 
-use super::super::service::{TenantPage, TenantService};
+use super::super::service::{TenantService, TenantSummary};
+use crate::modules::org::pagination::Page;
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::{Action as ActionHandler, ActionContext};
@@ -32,7 +33,7 @@ struct TenantListAction {
 #[async_trait]
 impl ActionHandler for TenantListAction {
     type Input = TenantListInput;
-    type Output = TenantPage;
+    type Output = Page<TenantSummary>;
 
     async fn index(
         &self,

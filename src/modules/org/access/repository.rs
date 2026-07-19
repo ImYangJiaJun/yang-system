@@ -1,7 +1,8 @@
 //! pre-tenant 查询的持久化边界。
 
-use super::service::{TenantPage, TenantSummary};
+use super::service::TenantSummary;
 use crate::modules::org::organization::{ACTIVE_STATUS as ACTIVE_ORG_STATUS, STATUS as ORG_STATUS};
+use crate::modules::org::pagination::{Page, PageRequest};
 use crate::modules::org::user::{
     ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS, ORG_ID, STATUS as MEMBERSHIP_STATUS, USER_ID,
 };
@@ -33,16 +34,16 @@ impl TenantRepository {
         &self,
         ctx: &ActionContext,
         user_id: i64,
-        page: usize,
-        limit: usize,
-    ) -> Result<TenantPage, BaseError> {
-        let offset = page
+        request: PageRequest,
+    ) -> Result<Page<TenantSummary>, BaseError> {
+        let offset = request
+            .page
             .checked_sub(1)
-            .and_then(|value| value.checked_mul(limit))
+            .and_then(|value| value.checked_mul(request.limit))
             .ok_or_else(|| {
                 BaseError::ParamInvalid("page".to_string(), "分页偏移量超出范围".to_string())
             })?;
-        let limit = u64::try_from(limit).map_err(|_| {
+        let limit = u64::try_from(request.limit).map_err(|_| {
             BaseError::ParamInvalid("limit".to_string(), "参数超出范围".to_string())
         })?;
         let offset = u64::try_from(offset)
@@ -78,16 +79,13 @@ impl TenantRepository {
         let total = usize::try_from(total)
             .map_err(|_| BaseError::Unknown("租户总数超出 usize 范围".to_string()))?;
 
-        Ok(TenantPage {
-            items: rows
-                .into_iter()
+        Ok(Page::new(
+            rows.into_iter()
                 .map(|(id, name, code)| TenantSummary { id, name, code })
                 .collect(),
             total,
-            page,
-            limit: usize::try_from(limit)
-                .map_err(|_| BaseError::Unknown("分页大小超出 usize 范围".to_string()))?,
-        })
+            request,
+        ))
     }
 
     pub(super) async fn create_for_user(

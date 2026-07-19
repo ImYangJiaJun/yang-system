@@ -1,6 +1,7 @@
 //! `org.org` Module：企业主数据定义。
 
 mod actions;
+mod model;
 
 use yang_base::definition::{
     Actions, Fields, Module, ModuleName, ModuleSpec, Radio, Str, TableName, Timestamp,

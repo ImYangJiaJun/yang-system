@@ -2,6 +2,7 @@
 
 mod access;
 mod organization;
+mod pagination;
 mod tenant;
 mod user;
 
