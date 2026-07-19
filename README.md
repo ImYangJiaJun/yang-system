@@ -94,7 +94,8 @@ Addon/Module/fields!/params!
 2. 创建 MySQL `Database`、Redis `RedisClient` 和 `TokenManager`。
 3. 用 `ToolsBuilder` 构建当前应用独占的不可变 `Tools`。
 4. 用 `AppBuilder` 校验 Addon 依赖、关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
-5. `DatabaseInitializer` 根据 `BuiltApp::table_definitions()` 执行 additive Schema 同步。
+5. `DatabaseInitializer` 根据 `schema.mode` 对 `BuiltApp::table_definitions()` 执行
+   additive 同步、只读校验或显式跳过。
 6. 从同一 Catalog 投影 Axum route、OpenAPI 和默认后台 View。
 7. 停机时按当前应用资源的生命周期关闭连接。
 
@@ -121,8 +122,13 @@ $env:APP_CONFIG = "D:\config\yang-system.toml"
 $env:DATABASE_URL = "mysql://app:password@db.internal:3306/yang_system"
 $env:REDIS_URL = "redis://cache.internal:6379"
 $env:TOKEN_SECRET = "从密钥管理服务注入的随机密钥"
+$env:SCHEMA_MODE = "validate"
 cargo run
 ```
+
+`schema.mode` 支持 `apply|validate|off`：`apply` 适合本地开发；`validate` 不执行 DDL，
+发现任何待应用变更就拒绝启动，适合由独立迁移任务管理 schema 的生产环境；`off`
+只应在外部已完成等价校验时显式使用。
 
 ## 参考能力
 

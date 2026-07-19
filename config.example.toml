@@ -1,6 +1,10 @@
 [app]
 name = "yang-system"
 
+[schema]
+# 本地开发使用 apply；生产建议由迁移任务执行 DDL，并设置 SCHEMA_MODE=validate。
+mode = "apply"
+
 [http]
 bind = "127.0.0.1:8080"
 max_body_bytes = 1048576

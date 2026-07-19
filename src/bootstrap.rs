@@ -1,5 +1,5 @@
 use crate::app::build_app;
-use crate::config::Settings;
+use crate::config::{SchemaMode, Settings};
 use crate::transport::http;
 use anyhow::Context;
 use jsonwebtoken::Algorithm;
@@ -46,15 +46,36 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
 
     let initializer = DatabaseInitializer::new(initializer_mysql, false);
     let schema: Vec<_> = application.runtime.table_definitions().iter().collect();
-    let report = initializer
-        .sync_table_definitions(&schema)
-        .await
-        .context("启动期同步数据库 schema 失败")?;
-    tracing::info!(
-        tables = ?report.tables,
-        changes = report.changes.len(),
-        "数据库 schema 同步完成"
-    );
+    match settings.schema.mode {
+        SchemaMode::Apply => {
+            let report = initializer
+                .sync_table_definitions(&schema)
+                .await
+                .context("启动期同步数据库 schema 失败")?;
+            tracing::info!(
+                tables = ?report.tables,
+                changes = report.changes.len(),
+                "数据库 schema 同步完成"
+            );
+        }
+        SchemaMode::Validate => {
+            let report = initializer
+                .plan_table_definitions(&schema)
+                .await
+                .context("启动期校验数据库 schema 失败")?;
+            if !report.is_noop() {
+                anyhow::bail!(
+                    "数据库 schema 未对齐，存在 {} 项待应用变更: {:?}",
+                    report.changes.len(),
+                    report.changes
+                );
+            }
+            tracing::info!(tables = ?report.tables, "数据库 schema 校验通过");
+        }
+        SchemaMode::Off => {
+            tracing::warn!("已按配置跳过数据库 schema 同步与校验");
+        }
+    }
     drop(initializer);
 
     let bind = settings.bind_addr()?;

@@ -2,11 +2,13 @@ use anyhow::{bail, Context};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::str::FromStr;
 use yang_db::{DatabaseConfig, RedisConfig};
 
 const DATABASE_URL_ENV: &str = "DATABASE_URL";
 const REDIS_URL_ENV: &str = "REDIS_URL";
 const TOKEN_SECRET_ENV: &str = "TOKEN_SECRET";
+const SCHEMA_MODE_ENV: &str = "SCHEMA_MODE";
 const MAX_ACCESS_TTL_SECONDS: u64 = 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 
@@ -14,6 +16,7 @@ const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub app: AppSettings,
+    pub schema: SchemaSettings,
     pub http: HttpSettings,
     pub mysql: MysqlSettings,
     pub redis: RedisSettings,
@@ -26,6 +29,33 @@ pub struct Settings {
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaSettings {
+    pub mode: SchemaMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaMode {
+    Apply,
+    Validate,
+    Off,
+}
+
+impl FromStr for SchemaMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "apply" => Ok(Self::Apply),
+            "validate" => Ok(Self::Validate),
+            "off" => Ok(Self::Off),
+            _ => bail!("schema.mode 必须是 apply、validate 或 off"),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -113,6 +143,9 @@ impl Settings {
         settings.redis.url = environment_override(REDIS_URL_ENV, &settings.redis.url, &lookup)?;
         settings.token.secret =
             environment_override(TOKEN_SECRET_ENV, &settings.token.secret, &lookup)?;
+        if let Some(mode) = lookup(SCHEMA_MODE_ENV) {
+            settings.schema.mode = mode.parse()?;
+        }
         settings.validate()?;
         Ok(settings)
     }
@@ -247,6 +280,8 @@ mod tests {
         r#"
 [app]
 name = "test"
+[schema]
+mode = "validate"
 [http]
 bind = "127.0.0.1:8080"
 max_body_bytes = 1024
@@ -298,6 +333,7 @@ filter = "info"
         .unwrap_or_else(|error| panic!("有效配置应解析成功: {error}"));
 
         assert_eq!(settings.mysql.url, "mysql://example/test");
+        assert_eq!(settings.schema.mode, SchemaMode::Validate);
         assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
     }
 
@@ -356,5 +392,33 @@ filter = "info"
             Err(error) => error,
         };
         assert!(error.to_string().contains("max_concurrency"));
+    }
+
+    #[test]
+    fn schema_mode_supports_environment_override_and_rejects_unknown_values() {
+        let values = HashMap::from([
+            ("DATABASE_URL", "mysql://example/test"),
+            ("REDIS_URL", "redis://example"),
+            ("TOKEN_SECRET", "0123456789abcdef0123456789abcdef"),
+            ("SCHEMA_MODE", "off"),
+        ]);
+        let settings = Settings::parse_with(valid_config(), |name| {
+            values.get(name).map(|value| (*value).to_string())
+        })
+        .unwrap_or_else(|error| panic!("有效 schema mode 应解析成功: {error}"));
+        assert_eq!(settings.schema.mode, SchemaMode::Off);
+
+        let result = Settings::parse_with(valid_config(), |name| {
+            if name == "SCHEMA_MODE" {
+                Some("unsafe".to_string())
+            } else {
+                values.get(name).map(|value| (*value).to_string())
+            }
+        });
+        let error = match result {
+            Ok(_) => panic!("未知 schema mode 必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("apply、validate 或 off"));
     }
 }
