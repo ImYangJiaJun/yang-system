@@ -1,7 +1,7 @@
 //! 企业列表 Action。
 
 use super::super::model::OrganizationView;
-use super::support::scoped_org_tables;
+use super::super::query::scoped_org_tables;
 use crate::modules::org::pagination::{Page, PageRequest};
 use async_trait::async_trait;
 use yang_base::action::{Action as ActionHandler, ActionContext};

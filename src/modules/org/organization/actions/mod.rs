@@ -2,7 +2,6 @@
 
 mod list;
 mod select;
-mod support;
 
 use list::OrgListAction;
 use select::OrgSelectAction;

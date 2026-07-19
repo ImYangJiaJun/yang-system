@@ -1,6 +1,6 @@
 //! 企业关系选择 Action。
 
-use super::support::scoped_org_tables;
+use super::super::query::scoped_org_tables;
 use async_trait::async_trait;
 use yang_base::action::{Action as ActionHandler, ActionContext};
 use yang_base::table::{

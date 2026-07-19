@@ -2,6 +2,7 @@
 
 mod actions;
 mod model;
+mod query;
 
 use yang_base::definition::{
     Actions, Fields, Module, ModuleName, ModuleSpec, Radio, Str, TableName, Timestamp,

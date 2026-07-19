@@ -1,4 +1,4 @@
-//! 企业 Action 共享查询支持。
+//! 企业查询的租户作用域支持。
 
 use yang_base::action::ActionContext;
 use yang_base::table::Tables;
