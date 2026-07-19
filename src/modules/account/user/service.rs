@@ -3,6 +3,7 @@
 //! 这里只保留跨 Action 复用的查询和校验；注册、登录等用例逻辑仍由各 Action 文件拥有。
 
 use super::password::PasswordEngine;
+use super::rate_limit::AuthRateLimiter;
 use super::repository::CredentialRepository;
 use super::schema::{STATUS, USER_ID, USER_VIEW_FIELDS};
 use crate::config::SecuritySettings;
@@ -16,6 +17,7 @@ pub(super) struct UserService {
     security: Arc<SecuritySettings>,
     credentials: Arc<CredentialRepository>,
     passwords: Arc<PasswordEngine>,
+    rate_limiter: Arc<AuthRateLimiter>,
 }
 
 impl UserService {
@@ -23,11 +25,13 @@ impl UserService {
         security: Arc<SecuritySettings>,
         credentials: Arc<CredentialRepository>,
         passwords: Arc<PasswordEngine>,
+        rate_limiter: Arc<AuthRateLimiter>,
     ) -> Self {
         Self {
             security,
             credentials,
             passwords,
+            rate_limiter,
         }
     }
 
@@ -37,6 +41,10 @@ impl UserService {
 
     pub(super) fn passwords(&self) -> &PasswordEngine {
         &self.passwords
+    }
+
+    pub(super) fn rate_limiter(&self) -> &AuthRateLimiter {
+        &self.rate_limiter
     }
 
     pub(super) fn query(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {

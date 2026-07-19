@@ -91,6 +91,9 @@ pub struct SecuritySettings {
     pub password_min_length: usize,
     pub password_max_length: usize,
     pub argon2_max_concurrency: usize,
+    pub auth_rate_limit_window_seconds: u64,
+    pub auth_rate_limit_ip_attempts: u64,
+    pub auth_rate_limit_username_attempts: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,6 +186,15 @@ impl Settings {
         if self.security.argon2_max_concurrency == 0 {
             bail!("security.argon2_max_concurrency 必须大于 0");
         }
+        validate_rate_limit(
+            "window_seconds",
+            self.security.auth_rate_limit_window_seconds,
+        )?;
+        validate_rate_limit("ip_attempts", self.security.auth_rate_limit_ip_attempts)?;
+        validate_rate_limit(
+            "username_attempts",
+            self.security.auth_rate_limit_username_attempts,
+        )?;
         Ok(())
     }
 }
@@ -190,6 +202,13 @@ impl Settings {
 fn validate_range(name: &str, minimum: usize, maximum: usize) -> anyhow::Result<()> {
     if minimum == 0 || maximum < minimum {
         bail!("security.{name}_min_length/max_length 范围无效");
+    }
+    Ok(())
+}
+
+fn validate_rate_limit(name: &str, value: u64) -> anyhow::Result<()> {
+    if value == 0 || value > 86_400 {
+        bail!("security.auth_rate_limit_{name} 必须在 1..=86400 范围内");
     }
     Ok(())
 }
@@ -273,6 +292,9 @@ username_max_length = 64
 password_min_length = 10
 password_max_length = 128
 argon2_max_concurrency = 4
+auth_rate_limit_window_seconds = 60
+auth_rate_limit_ip_attempts = 30
+auth_rate_limit_username_attempts = 10
 [logging]
 filter = "info"
 "#

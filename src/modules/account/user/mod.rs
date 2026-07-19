@@ -3,12 +3,14 @@
 mod actions;
 mod claims;
 mod password;
+mod rate_limit;
 mod repository;
 mod schema;
 mod service;
 
 use crate::config::SecuritySettings;
 use password::PasswordEngine;
+use rate_limit::AuthRateLimiter;
 use repository::CredentialRepository;
 use service::UserService;
 use std::sync::Arc;
@@ -25,7 +27,13 @@ pub(super) fn build_module(security: Arc<SecuritySettings>) -> Result<ModuleSpec
     let table = schema::user_table_spec()?;
     let credentials = Arc::new(CredentialRepository::new(table.table_definition()?));
     let passwords = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
-    let service = Arc::new(UserService::new(security, credentials, passwords));
+    let rate_limiter = Arc::new(AuthRateLimiter::new(&security));
+    let service = Arc::new(UserService::new(
+        security,
+        credentials,
+        passwords,
+        rate_limiter,
+    ));
     let module = ModuleSpec::new(
         ModuleName::new("account.user")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,

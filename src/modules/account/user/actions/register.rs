@@ -1,3 +1,4 @@
+use super::super::rate_limit::AuthOperation;
 use super::super::schema::UserView;
 use super::super::service::UserService;
 use async_trait::async_trait;
@@ -37,6 +38,9 @@ impl UserService {
     ) -> Result<UserView, BaseError> {
         let username = self.normalize_username(username)?;
         self.validate_password(plain_password)?;
+        self.rate_limiter()
+            .check(ctx, AuthOperation::Register, &username)
+            .await?;
         if self.credentials().username_exists(ctx, &username).await? {
             return Err(username_exists_error());
         }

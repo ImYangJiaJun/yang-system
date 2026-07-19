@@ -1,4 +1,5 @@
 use super::super::claims::claims_for_user;
+use super::super::rate_limit::AuthOperation;
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -20,6 +21,9 @@ impl UserService {
         plain_password: &str,
     ) -> Result<super::super::repository::CredentialRecord, BaseError> {
         let username = self.normalize_username(username)?;
+        self.rate_limiter()
+            .check(ctx, AuthOperation::Login, &username)
+            .await?;
         let user = self
             .credentials()
             .find_by_username(ctx, &username)
