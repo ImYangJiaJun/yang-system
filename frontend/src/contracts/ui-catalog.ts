@@ -113,9 +113,14 @@ const actionPresentationSchema = z.object({
   operation_id: z.string().min(1),
   title: z.string(),
   placement: z.enum(["row", "bulk", "toolbar"]).catch("toolbar"),
-  interaction: z
-    .enum(["form", "download", "preview", "navigate", "custom", "invoke"])
-    .catch("invoke"),
+  interaction: z.enum([
+    "form",
+    "download",
+    "preview",
+    "navigate",
+    "custom",
+    "invoke",
+  ]),
   confirmation: z
     .object({ title: z.string(), message: z.string() })
     .nullable()

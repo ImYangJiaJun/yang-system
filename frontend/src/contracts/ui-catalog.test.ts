@@ -89,4 +89,35 @@ describe("parseUiCatalog", () => {
     );
     expect(catalog.table_views[0]?.data_action).toBe("demo.items.select");
   });
+
+  it("拒绝未知 Action interaction，禁止降级为 invoke 执行", () => {
+    const tableView = {
+      view_id: "demo.items.main",
+      title: "项目",
+      table: "demo_items",
+      data_action: "demo.items.select",
+      columns: [],
+      form: { fields: [] },
+      query: {
+        search_fields: [],
+        filter_fields: [],
+        default_sort: [],
+        default_page_size: 20,
+        max_page_size: 100,
+      },
+      actions: ["demo.echo"],
+      action_presentations: [
+        {
+          operation_id: "demo.echo",
+          title: "未来交互",
+          placement: "toolbar",
+          interaction: "future-interaction",
+        },
+      ],
+    };
+
+    expect(() =>
+      parseUiCatalog(envelope({ table_views: [tableView] })),
+    ).toThrow(ContractError);
+  });
 });
