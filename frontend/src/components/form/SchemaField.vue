@@ -74,8 +74,7 @@ const inputType = computed(() => {
     control.value === "textarea" ||
     control.value === "password" ||
     control.value === "email" ||
-    control.value === "url" ||
-    control.value === "color"
+    control.value === "url"
   )
     return control.value;
   return "text";
@@ -143,6 +142,11 @@ function updateNumber(value: string | number | null) {
   }
   const parsed = Number(value);
   if (Number.isFinite(parsed)) update(parsed);
+}
+
+function updateColor(event: Event) {
+  const target = event.target;
+  if (target instanceof HTMLInputElement) update(target.value);
 }
 
 function commitJson() {
@@ -250,9 +254,18 @@ function selectFiles(event: Event) {
       :label="label"
       outlined
       dense
-      :disabled="businessField.read_only"
+      :disabled="businessField?.read_only"
       @update:model-value="update"
     />
+    <label v-else-if="control === 'color'" class="upload-control">
+      <span>{{ label }}<span v-if="required"> *</span></span>
+      <input
+        type="color"
+        :value="typeof modelValue === 'string' ? modelValue : undefined"
+        :disabled="businessField?.read_only"
+        @input="updateColor"
+      />
+    </label>
     <q-input
       v-else-if="control !== 'json'"
       :model-value="
