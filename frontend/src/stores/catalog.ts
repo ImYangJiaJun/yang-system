@@ -36,7 +36,8 @@ export const useCatalogStore = defineStore("catalog", () => {
   const navigationMode = ref<NavigationMode>("views");
   const loading = ref(false);
   const error = ref<{ message: string; details?: string[] }>();
-  let controller: AbortController | undefined;
+  let activeRequest: { id: number; controller: AbortController } | undefined;
+  let nextRequestId = 0;
   let sessionReloadTimer: number | undefined;
   let started = false;
 
@@ -77,13 +78,22 @@ export const useCatalogStore = defineStore("catalog", () => {
   });
 
   async function loadCatalog() {
-    controller?.abort();
-    controller = new AbortController();
+    activeRequest?.controller.abort();
+    const request = {
+      id: ++nextRequestId,
+      controller: new AbortController(),
+    };
+    activeRequest = request;
+    const requestSession = { ...session.value };
     loading.value = true;
     error.value = undefined;
     try {
-      const fetched = await fetchUiCatalog(session.value, controller.signal);
-      catalog.value = catalogCache.accept(session.value, fetched);
+      const fetched = await fetchUiCatalog(
+        requestSession,
+        request.controller.signal,
+      );
+      if (activeRequest?.id !== request.id) return;
+      catalog.value = catalogCache.accept(fetched);
       if (
         !catalog.value.actions.some(
           (action) => action.operation_id === selectedOperationId.value,
@@ -101,14 +111,21 @@ export const useCatalogStore = defineStore("catalog", () => {
       }
       if (!catalog.value.table_views.length) navigationMode.value = "actions";
     } catch (cause) {
-      if (cause instanceof Error && cause.name === "AbortError") return;
+      if (
+        activeRequest?.id !== request.id ||
+        (cause instanceof Error && cause.name === "AbortError")
+      )
+        return;
       catalog.value = undefined;
       error.value =
         cause instanceof ContractError
           ? { message: cause.message, details: cause.details }
           : { message: cause instanceof Error ? cause.message : String(cause) };
     } finally {
-      loading.value = false;
+      if (activeRequest?.id === request.id) {
+        activeRequest = undefined;
+        loading.value = false;
+      }
     }
   }
 
@@ -126,7 +143,9 @@ export const useCatalogStore = defineStore("catalog", () => {
   }
 
   function stopPendingRequests() {
-    controller?.abort();
+    activeRequest?.controller.abort();
+    activeRequest = undefined;
+    loading.value = false;
     if (sessionReloadTimer !== undefined)
       window.clearTimeout(sessionReloadTimer);
   }

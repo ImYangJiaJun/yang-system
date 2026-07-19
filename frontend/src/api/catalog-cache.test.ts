@@ -12,16 +12,12 @@ function catalog(revision: string): UiCatalog {
 }
 
 describe("CatalogCache", () => {
-  it("同身份租户 revision 不变时复用，身份或租户切换严格隔离", () => {
+  it("只复用最近一次相同 revision，不保存会话凭证", () => {
     const cache = new CatalogCache();
     const first = catalog("a".repeat(64));
-    expect(cache.accept({ token: "a", tenantId: "1" }, first)).toBe(first);
-    expect(
-      cache.accept({ token: "a", tenantId: "1" }, catalog("a".repeat(64))),
-    ).toBe(first);
-    expect(cache.get({ token: "a", tenantId: "2" })).toBeUndefined();
-    expect(cache.get({ token: "b", tenantId: "1" })).toBeUndefined();
+    expect(cache.accept(first)).toBe(first);
+    expect(cache.accept(catalog("a".repeat(64)))).toBe(first);
     const changed = catalog("b".repeat(64));
-    expect(cache.accept({ token: "a", tenantId: "1" }, changed)).toBe(changed);
+    expect(cache.accept(changed)).toBe(changed);
   });
 });
