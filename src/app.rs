@@ -56,10 +56,6 @@ mod tests {
                 .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
         );
         let security = Arc::new(SecuritySettings {
-            username_min_length: 3,
-            username_max_length: 64,
-            password_min_length: 10,
-            password_max_length: 128,
             argon2_max_concurrency: 1,
             auth_rate_limit_window_seconds: 60,
             auth_rate_limit_ip_attempts: 30,

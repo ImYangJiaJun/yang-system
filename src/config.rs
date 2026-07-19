@@ -88,10 +88,6 @@ impl std::fmt::Debug for TokenSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecuritySettings {
-    pub username_min_length: usize,
-    pub username_max_length: usize,
-    pub password_min_length: usize,
-    pub password_max_length: usize,
     pub argon2_max_concurrency: usize,
     pub auth_rate_limit_window_seconds: u64,
     pub auth_rate_limit_ip_attempts: u64,
@@ -181,16 +177,6 @@ impl Settings {
             bail!("refresh token 有效期必须长于 access token");
         }
         validate_token_secret(&self.token.secret)?;
-        validate_range(
-            "username",
-            self.security.username_min_length,
-            self.security.username_max_length,
-        )?;
-        validate_range(
-            "password",
-            self.security.password_min_length,
-            self.security.password_max_length,
-        )?;
         if self.security.argon2_max_concurrency == 0 {
             bail!("security.argon2_max_concurrency 必须大于 0");
         }
@@ -205,13 +191,6 @@ impl Settings {
         )?;
         Ok(())
     }
-}
-
-fn validate_range(name: &str, minimum: usize, maximum: usize) -> anyhow::Result<()> {
-    if minimum == 0 || maximum < minimum {
-        bail!("security.{name}_min_length/max_length 范围无效");
-    }
-    Ok(())
 }
 
 fn validate_rate_limit(name: &str, value: u64) -> anyhow::Result<()> {
@@ -297,10 +276,6 @@ audience = "test-api"
 access_ttl_seconds = 60
 refresh_ttl_seconds = 120
 [security]
-username_min_length = 3
-username_max_length = 64
-password_min_length = 10
-password_max_length = 128
 argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
 auth_rate_limit_ip_attempts = 30

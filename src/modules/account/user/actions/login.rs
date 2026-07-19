@@ -1,4 +1,5 @@
 use super::super::claims::claims_for_user;
+use super::super::policy::normalize_username;
 use super::super::rate_limit::AuthOperation;
 use super::super::service::UserService;
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ impl UserService {
         username: &str,
         plain_password: &str,
     ) -> Result<super::super::repository::CredentialRecord, BaseError> {
-        let username = self.normalize_username(username)?;
+        let username = normalize_username(username)?;
         self.rate_limiter()
             .check(ctx, AuthOperation::Login, &username)
             .await?;

@@ -1,3 +1,7 @@
+use super::super::policy::{
+    normalize_username, validate_password, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
+    USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_PATTERN,
+};
 use super::super::rate_limit::AuthOperation;
 use super::super::schema::UserView;
 use super::super::service::UserService;
@@ -10,8 +14,17 @@ use yang_base::{Action, BaseError};
 yang_base::params! {
     #[deny_unknown_fields]
     pub(super) RegisterInput {
-        username: Str::new().title("用户名").require(true).max_length(64),
-        password: Password::new().title("登录密码").require(true).min_length(10).max_length(128),
+        username: Str::new()
+            .title("用户名")
+            .require(true)
+            .min_length(USERNAME_MIN_LENGTH)
+            .max_length(USERNAME_MAX_LENGTH)
+            .pattern(USERNAME_PATTERN),
+        password: Password::new()
+            .title("登录密码")
+            .require(true)
+            .min_length(PASSWORD_MIN_LENGTH)
+            .max_length(PASSWORD_MAX_LENGTH),
     }
 }
 
@@ -36,8 +49,8 @@ impl UserService {
         username: &str,
         plain_password: &str,
     ) -> Result<UserView, BaseError> {
-        let username = self.normalize_username(username)?;
-        self.validate_password(plain_password)?;
+        let username = normalize_username(username)?;
+        validate_password(plain_password)?;
         self.rate_limiter()
             .check(ctx, AuthOperation::Register, &username)
             .await?;

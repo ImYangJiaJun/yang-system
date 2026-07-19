@@ -1,5 +1,6 @@
 //! 用户表 Schema 与对外 DTO。
 
+use super::policy::{USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_PATTERN};
 use schemars::JsonSchema;
 use serde::Serialize;
 use yang_base::definition::{Key, Str, TableName, TableSpec, Timestamp};
@@ -46,7 +47,9 @@ pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
         username => Str::new()
                 .title("用户名")
                 .require(true)
-                .max_length(64)
+                .min_length(USERNAME_MIN_LENGTH)
+                .max_length(USERNAME_MAX_LENGTH)
+                .pattern(USERNAME_PATTERN)
                 .unique(true),
         password_hash => Str::new()
                 .title("密码摘要")

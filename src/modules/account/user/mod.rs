@@ -3,6 +3,7 @@
 mod actions;
 mod claims;
 mod password;
+mod policy;
 mod rate_limit;
 mod repository;
 mod schema;
@@ -28,12 +29,7 @@ pub(super) fn build_module(security: Arc<SecuritySettings>) -> Result<ModuleSpec
     let credentials = Arc::new(CredentialRepository::new(table.table_definition()?));
     let passwords = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
     let rate_limiter = Arc::new(AuthRateLimiter::new(&security));
-    let service = Arc::new(UserService::new(
-        security,
-        credentials,
-        passwords,
-        rate_limiter,
-    ));
+    let service = Arc::new(UserService::new(credentials, passwords, rate_limiter));
     let module = ModuleSpec::new(
         ModuleName::new("account.user")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,
