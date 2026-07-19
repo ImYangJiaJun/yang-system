@@ -21,6 +21,16 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 联合调试不需要 Git revision、Cargo `patch`、绝对路径或调试后恢复 `Cargo.lock`。
 
+提交前运行架构门禁，保证 `actions/` 中一个文件只承载一个 Action，且文件与
+`mod.rs` 清单一致：
+
+```powershell
+python scripts/check_architecture.py
+```
+
+检查器自身的反向 fixture 可用 `python scripts/check_architecture.py --self-test`
+验证。
+
 ## 原生结构
 
 ```text
