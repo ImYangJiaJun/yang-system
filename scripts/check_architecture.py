@@ -43,7 +43,9 @@ def check_action_directory(root: Path, directory: Path) -> list[str]:
     if not manifest.is_file():
         return [f"{relative}: 缺少 actions/mod.rs 清单"]
 
-    declared = set(MODULE_RE.findall(manifest.read_text(encoding="utf-8")))
+    manifest_source = manifest.read_text(encoding="utf-8")
+    declared = set(MODULE_RE.findall(manifest_source))
+    registrations = MODULE_RE.sub("", manifest_source)
     files = {path.stem: path for path in directory.glob("*.rs") if path.name != "mod.rs"}
 
     for name, path in sorted(files.items()):
@@ -54,6 +56,8 @@ def check_action_directory(root: Path, directory: Path) -> list[str]:
             )
         if name not in declared:
             errors.append(f"{path.relative_to(root)}: 未在 {relative / 'mod.rs'} 中声明")
+        elif not re.search(rf"\b(?:use\s+)?{re.escape(name)}\s*::", registrations):
+            errors.append(f"{path.relative_to(root)}: 未在 {relative / 'mod.rs'} 中注册")
 
     for name in sorted(declared - files.keys()):
         errors.append(f"{relative / 'mod.rs'}: mod {name}; 缺少同名 {name}.rs")
@@ -98,6 +102,11 @@ def self_test() -> None:
         actions = root / "src" / "modules" / "demo" / "actions"
         write(actions / "mod.rs", "mod list;\n")
         write(actions / "list.rs", "#[derive(Action)]\nstruct ListAction;\n")
+        errors = check(root)
+        assert any("未在" in error and "注册" in error for error in errors), (
+            "必须拒绝只声明未注册的 Action"
+        )
+        write(actions / "mod.rs", "mod list;\nuse list::ListAction;\n")
         assert check(root) == [], "合法 fixture 应通过"
 
         write(

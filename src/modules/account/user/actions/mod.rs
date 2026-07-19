@@ -22,5 +22,7 @@ pub(super) fn register_all(
     let module = login::register(module, Arc::clone(&service))?;
     let module = refresh::register(module, Arc::clone(&service))?;
     let module = logout::register(module)?;
-    me::register(module, service)
+    let module = me::register(module, service)?;
+    // scaffold:action-registration
+    Ok(module)
 }

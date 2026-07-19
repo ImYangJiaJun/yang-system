@@ -13,5 +13,7 @@ pub(super) fn register_all(
     service: Arc<TenantService>,
 ) -> Result<ModuleSpec, BaseError> {
     let module = create::register(module, Arc::clone(&service))?;
-    list::register(module, service)
+    let module = list::register(module, service)?;
+    // scaffold:action-registration
+    Ok(module)
 }

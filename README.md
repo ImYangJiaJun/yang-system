@@ -31,6 +31,17 @@ python scripts/check_architecture.py
 检查器自身的反向 fixture 可用 `python scripts/check_architecture.py --self-test`
 验证。
 
+新增 Action 使用脚手架一次完成文件创建、`mod.rs` 声明和注册；生成器拒绝覆盖
+已有文件，并要求业务路径显式位于 `/api/v1/`：
+
+```powershell
+python scripts/new_action.py src/modules/org/organization/actions archive `
+  --title "归档企业" --method POST --path /api/v1/orgs/archive
+```
+
+生成代码会稳定返回“尚未实现”错误，开发者必须补齐强类型输入、输出和业务逻辑后
+才能交付，避免脚手架端点被误当作已实现能力。
+
 ## 原生结构
 
 ```text
