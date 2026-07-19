@@ -64,7 +64,6 @@ export function initialValue(
 ): unknown {
   const schema = effectiveSchema(root, node);
   if (schema.default !== undefined) return structuredClone(schema.default);
-  if (schema.enum?.length) return schema.enum[0];
   const type = Array.isArray(schema.type)
     ? schema.type.find((item) => item !== "null")
     : schema.type;
@@ -76,10 +75,7 @@ export function initialValue(
       ]),
     );
   }
-  if (type === "array") return [];
-  if (type === "boolean") return false;
-  if (type === "integer" || type === "number") return undefined;
-  return "";
+  return undefined;
 }
 
 export function initialObject(schemaValue: unknown): Record<string, unknown> {

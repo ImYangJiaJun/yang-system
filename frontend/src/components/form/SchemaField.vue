@@ -113,7 +113,8 @@ const selectedFileNames = computed(() => {
 watch(
   () => props.modelValue,
   (value) => {
-    if (isJson.value) jsonDraft.value = JSON.stringify(value ?? null, null, 2);
+    if (!isJson.value) return;
+    jsonDraft.value = value === undefined ? "" : JSON.stringify(value, null, 2);
   },
   { immediate: true },
 );
@@ -137,6 +138,11 @@ function updateNumber(value: string | number | null) {
 }
 
 function commitJson() {
+  if (!jsonDraft.value.trim()) {
+    update(undefined);
+    jsonError.value = "";
+    return;
+  }
   try {
     update(JSON.parse(jsonDraft.value));
     jsonError.value = "";
