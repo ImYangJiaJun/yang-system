@@ -1,0 +1,104 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { invokeAction, type SessionContext } from "@/api/client";
+import { parseRelationOptions } from "@/contracts/table-data";
+import type { ActionDemoSchema, FormFieldSchema } from "@/contracts/ui-catalog";
+
+const props = defineProps<{
+  modelValue: unknown;
+  field: FormFieldSchema;
+  action?: ActionDemoSchema;
+  session: SessionContext;
+  disabled?: boolean;
+}>();
+
+const emit = defineEmits<{ "update:modelValue": [value: unknown] }>();
+const options = ref<Array<{ value: string | number; label: string }>>([]);
+const loading = ref(false);
+const error = ref("");
+let controller: AbortController | undefined;
+let timer: number | undefined;
+const selectValue = computed(() =>
+  typeof props.modelValue === "string" || typeof props.modelValue === "number"
+    ? props.modelValue
+    : undefined,
+);
+
+function selectedValues(): Array<string | number> {
+  return typeof props.modelValue === "string" ||
+    typeof props.modelValue === "number"
+    ? [props.modelValue]
+    : [];
+}
+
+async function load(search?: string) {
+  if (!props.action) {
+    error.value = `目录缺少关系 Action：${props.field.relation?.operation_id ?? "unknown"}`;
+    return;
+  }
+  controller?.abort();
+  controller = new AbortController();
+  loading.value = true;
+  error.value = "";
+  try {
+    const result = await invokeAction(
+      props.action,
+      {
+        search: search?.trim() || null,
+        selected: selectedValues(),
+        filter: {},
+        page: 1,
+        limit: 20,
+      },
+      props.session,
+      controller.signal,
+    );
+    if (result.kind !== "json") throw new Error("关系 Action 必须返回 JSON");
+    options.value = parseRelationOptions(result.data).items;
+  } catch (cause) {
+    if (cause instanceof Error && cause.name === "AbortError") return;
+    error.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    loading.value = false;
+  }
+}
+
+function remoteSearch(value: string) {
+  if (timer !== undefined) window.clearTimeout(timer);
+  timer = window.setTimeout(() => void load(value), 250);
+}
+
+watch(
+  () => props.modelValue,
+  () => void load(),
+);
+onMounted(() => void load());
+onBeforeUnmount(() => {
+  controller?.abort();
+  if (timer !== undefined) window.clearTimeout(timer);
+});
+</script>
+
+<template>
+  <div class="relation-select">
+    <el-select
+      :model-value="selectValue"
+      :disabled="disabled || !action"
+      :loading="loading"
+      filterable
+      remote
+      clearable
+      reserve-keyword
+      :remote-method="remoteSearch"
+      @update:model-value="emit('update:modelValue', $event)"
+    >
+      <el-option
+        v-for="option in options"
+        :key="`${typeof option.value}:${option.value}`"
+        :label="option.label"
+        :value="option.value"
+      />
+    </el-select>
+    <small v-if="error" class="field-error">{{ error }}</small>
+  </div>
+</template>
