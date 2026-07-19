@@ -6,7 +6,7 @@ const action = {
   title: "回显",
   description: "回显输入",
   method: "POST",
-  path: "/api/demo/echo",
+  path: "/api/v1/demo/echo",
   params: [
     {
       name: "message",

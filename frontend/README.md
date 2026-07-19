@@ -46,4 +46,4 @@ pnpm check
 pnpm e2e
 ```
 
-`pnpm e2e` 会同时启动 `../src/bin/frontend_demo.rs`，覆盖默认接口演示、表格、关系选择、上传下载、确认操作和自定义 View。
+`pnpm e2e` 会同时启动 `../examples/frontend_demo/`，覆盖默认接口演示、表格、关系选择、上传下载、确认操作和自定义 View。

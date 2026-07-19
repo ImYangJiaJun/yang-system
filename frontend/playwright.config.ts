@@ -14,7 +14,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "cargo run --bin frontend_demo",
+      command: "cargo run --example frontend_demo",
       cwd: "..",
       url: "http://127.0.0.1:18080/health/live",
       timeout: 180_000,
