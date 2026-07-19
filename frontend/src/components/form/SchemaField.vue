@@ -10,6 +10,7 @@ import type {
   FormFieldSchema,
 } from "src/contracts/ui-catalog";
 import RelationSelect from "./RelationSelect.vue";
+import { resolveFormControl } from "./form-control";
 
 const props = defineProps<{
   name: string;
@@ -60,12 +61,24 @@ const dateValue = computed(() =>
     ? props.modelValue
     : undefined,
 );
+const control = computed(() =>
+  resolveFormControl(
+    props.businessField?.widget,
+    type.value,
+    Boolean(resolved.value.enum),
+    resolved.value.format,
+  ),
+);
 const inputType = computed(() => {
-  const widget = props.businessField?.widget;
-  if (widget === "textarea" || widget === "editor") return "textarea";
-  if (widget === "password") return "password";
-  if (widget) return "text";
-  return resolved.value.format === "password" ? "password" : "text";
+  if (
+    control.value === "textarea" ||
+    control.value === "password" ||
+    control.value === "email" ||
+    control.value === "url" ||
+    control.value === "color"
+  )
+    return control.value;
+  return "text";
 });
 const enumOptions = computed(() =>
   (resolved.value.enum ?? []).map((value) => ({
@@ -80,12 +93,7 @@ const selectedEnumKey = computed(() => {
     ? key
     : undefined;
 });
-const isJson = computed(
-  () =>
-    type.value === "object" ||
-    type.value === "array" ||
-    (!type.value && !resolved.value.enum),
-);
+const isJson = computed(() => control.value === "json");
 const jsonDraft = ref("");
 const jsonError = ref("");
 const uploadInputId = useId();
@@ -179,7 +187,7 @@ function selectFiles(event: Event) {
       </small>
     </div>
     <RelationSelect
-      v-else-if="businessField?.relation && session"
+      v-else-if="control === 'relation' && businessField?.relation && session"
       :model-value="modelValue"
       :label="label"
       :field="businessField"
@@ -188,8 +196,18 @@ function selectFiles(event: Event) {
       :disabled="businessField.read_only"
       @update:model-value="update"
     />
+    <q-input
+      v-else-if="control === 'relation'"
+      :model-value="''"
+      :label="label"
+      outlined
+      dense
+      disable
+      error
+      error-message="关系控件缺少 relation 或 session 契约"
+    />
     <q-select
-      v-else-if="resolved.enum"
+      v-else-if="control === 'enum'"
       :model-value="selectedEnumKey"
       :options="enumOptions"
       option-value="key"
@@ -204,27 +222,29 @@ function selectFiles(event: Event) {
       @update:model-value="updateEnum"
     />
     <q-toggle
-      v-else-if="type === 'boolean'"
+      v-else-if="control === 'toggle'"
       :model-value="Boolean(modelValue)"
       :disabled="businessField?.read_only"
       :label="label"
       @update:model-value="update"
     />
     <q-input
-      v-else-if="type === 'integer' || type === 'number'"
+      v-else-if="control === 'number'"
       :model-value="typeof modelValue === 'number' ? modelValue : undefined"
       type="number"
       :label="label"
       outlined
       dense
-      :step="type === 'integer' ? '1' : '0.1'"
+      :step="
+        type === 'integer' || businessField?.widget === 'integer' ? '1' : '0.1'
+      "
       :min="numericMinimum"
       :max="numericMaximum"
       :disabled="businessField?.read_only"
       @update:model-value="updateNumber"
     />
     <q-input
-      v-else-if="businessField?.widget === 'date_time'"
+      v-else-if="control === 'date_time'"
       :model-value="dateValue"
       type="datetime-local"
       :label="label"
@@ -234,7 +254,7 @@ function selectFiles(event: Event) {
       @update:model-value="update"
     />
     <q-input
-      v-else-if="!isJson"
+      v-else-if="control !== 'json'"
       :model-value="
         typeof modelValue === 'string' ? modelValue : String(modelValue ?? '')
       "
@@ -242,7 +262,7 @@ function selectFiles(event: Event) {
       :label="label"
       outlined
       dense
-      :rows="businessField?.widget === 'textarea' ? 4 : undefined"
+      :rows="control === 'textarea' ? 4 : undefined"
       :maxlength="resolved.maxLength ?? businessField?.validation?.max_length"
       :disabled="businessField?.read_only"
       clearable
