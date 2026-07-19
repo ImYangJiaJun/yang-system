@@ -43,14 +43,15 @@ impl TryFrom<&Record> for UserView {
 /// 构建用户表的唯一 Schema 定义。
 pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
     let fields = yang_base::fields! {
-        id => Key::new().title("ID"),
+        id => Key::new().title("ID").filterable(true),
         username => Str::new()
                 .title("用户名")
                 .require(true)
                 .min_length(USERNAME_MIN_LENGTH)
                 .max_length(USERNAME_MAX_LENGTH)
                 .pattern(USERNAME_PATTERN)
-                .unique(true),
+                .unique(true)
+                .filterable(true),
         password_hash => Str::new()
                 .title("密码摘要")
                 .require(true)
@@ -83,10 +84,15 @@ mod tests {
         let password = definition
             .field(PASSWORD_HASH)
             .unwrap_or_else(|| panic!("应存在 password_hash 字段"));
+        let username = definition
+            .field(USERNAME)
+            .unwrap_or_else(|| panic!("应存在 username 字段"));
 
         assert_eq!(definition.name(), "users");
         assert_eq!(definition.primary_key(), USER_ID);
         assert!(id.is_auto_increment());
+        assert!(id.is_filterable());
+        assert!(username.is_filterable());
         assert!(!password.is_filterable());
         assert!(!password.is_sortable());
     }

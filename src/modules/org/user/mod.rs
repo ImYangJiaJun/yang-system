@@ -32,17 +32,20 @@ impl Module for OrgUserModule {
                 .target(yang_base::field!("org_org.id"))
                 .display([yang_base::field!("org_org.name")])
                 .select(yang_base::action!("org.org.select"))
-                .tenant_key(true),
+                .tenant_key(true)
+                .filterable(true),
             user_user => Table::new()
                 .title("用户")
                 .require(true)
                 .target(yang_base::field!("users.id"))
-                .display([yang_base::field!("users.username")]),
+                .display([yang_base::field!("users.username")])
+                .filterable(true),
             status => Radio::<String>::new()
                 .title("成员状态")
                 .require(true)
                 .options([(ACTIVE_STATUS, "启用"), ("disabled", "停用")])
-                .default(ACTIVE_STATUS),
+                .default(ACTIVE_STATUS)
+                .filterable(true),
             created_at => Timestamp::new().title("创建时间").created_at(),
         }
     }
@@ -101,5 +104,13 @@ mod tests {
         assert!(table.indexes.iter().any(|index| {
             !index.unique && index.name.as_deref() == Some("idx_org_user_user_status")
         }));
+        for name in [ORG_ID, USER_ID, STATUS] {
+            let field = table
+                .fields
+                .iter()
+                .find(|field| field.name.as_str() == name)
+                .unwrap_or_else(|| panic!("应存在字段 {name}"));
+            assert!(field.access.filterable, "resolver 查询键 {name} 必须可筛选");
+        }
     }
 }
