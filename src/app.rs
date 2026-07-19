@@ -193,7 +193,7 @@ mod tests {
             .unwrap_or_else(|| panic!("删除操作应声明展示语义"));
         assert_eq!(
             delete.placement,
-            yang_base::definition::ActionPlacement::Bulk
+            yang_base::definition::ActionPlacement::Row
         );
         assert_eq!(
             delete.interaction,
