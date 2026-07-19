@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { invokeAction, type SessionContext } from "@/api/client";
-import { parseRelationOptions } from "@/contracts/table-data";
-import type { ActionDemoSchema, FormFieldSchema } from "@/contracts/ui-catalog";
+import { invokeAction, type SessionContext } from "src/api/client";
+import { parseRelationOptions } from "src/contracts/table-data";
+import type {
+  ActionDemoSchema,
+  FormFieldSchema,
+} from "src/contracts/ui-catalog";
 
 const props = defineProps<{
+  label: string;
   modelValue: unknown;
   field: FormFieldSchema;
   action?: ActionDemoSchema;
@@ -68,6 +72,11 @@ function remoteSearch(value: string) {
   timer = window.setTimeout(() => void load(value), 250);
 }
 
+function filterOptions(value: string, update: (callback: () => void) => void) {
+  remoteSearch(value);
+  update(() => undefined);
+}
+
 watch(
   () => props.modelValue,
   () => void load(),
@@ -81,24 +90,24 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="relation-select">
-    <el-select
+    <q-select
       :model-value="selectValue"
+      :options="options"
+      option-value="value"
+      option-label="label"
       :disabled="disabled || !action"
       :loading="loading"
-      filterable
-      remote
+      :label="label"
+      outlined
+      dense
+      emit-value
+      map-options
+      use-input
+      input-debounce="0"
       clearable
-      reserve-keyword
-      :remote-method="remoteSearch"
+      @filter="filterOptions"
       @update:model-value="emit('update:modelValue', $event)"
-    >
-      <el-option
-        v-for="option in options"
-        :key="`${typeof option.value}:${option.value}`"
-        :label="option.label"
-        :value="option.value"
-      />
-    </el-select>
+    />
     <small v-if="error" class="field-error">{{ error }}</small>
   </div>
 </template>

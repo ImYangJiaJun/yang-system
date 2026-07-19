@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { z } from "zod";
-import { invokeAction, type SessionContext } from "@/api/client";
+import { invokeAction, type SessionContext } from "src/api/client";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
-} from "@/contracts/ui-catalog";
+} from "src/contracts/ui-catalog";
 
 const props = defineProps<{
   presentation: ActionPresentationSchema;
@@ -60,22 +60,24 @@ onBeforeUnmount(() => controller?.abort());
 </script>
 
 <template>
-  <section class="custom-insight" v-loading="loading">
+  <section class="custom-insight relative-position">
     <header class="custom-insight-heading">
       <div>
-        <el-tag effect="dark">自定义 View</el-tag>
+        <q-badge color="secondary">自定义 View</q-badge>
         <h2>项目运行洞察</h2>
         <p>由静态 view_id 注册表加载，数据仍通过声明的 Action 获取。</p>
       </div>
-      <el-button @click="emit('close')">返回通用表格</el-button>
+      <q-btn
+        outline
+        color="white"
+        label="返回通用表格"
+        @click="emit('close')"
+      />
     </header>
-    <el-alert
-      v-if="error"
-      type="error"
-      :title="error"
-      :closable="false"
-      show-icon
-    />
+    <q-banner v-if="error" rounded class="bg-red-1 text-negative q-mt-lg">
+      <template #avatar><q-icon name="error" /></template>
+      {{ error }}
+    </q-banner>
     <div v-else-if="insight" class="insight-metrics">
       <article>
         <span>项目总数</span>
@@ -90,5 +92,8 @@ onBeforeUnmount(() => controller?.abort());
         <strong>{{ insight.draft }}</strong>
       </article>
     </div>
+    <q-inner-loading :showing="loading" dark>
+      <q-spinner-gears size="48px" color="white" />
+    </q-inner-loading>
   </section>
 </template>

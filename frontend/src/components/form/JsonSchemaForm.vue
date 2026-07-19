@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { asJsonSchema, effectiveSchema } from "@/contracts/json-schema";
-import type { ActionDemoSchema } from "@/contracts/ui-catalog";
-import type { SessionContext } from "@/api/client";
-import type { FormFieldSchema } from "@/contracts/ui-catalog";
+import { asJsonSchema, effectiveSchema } from "src/contracts/json-schema";
+import type { ActionDemoSchema } from "src/contracts/ui-catalog";
+import type { SessionContext } from "src/api/client";
+import type { FormFieldSchema } from "src/contracts/ui-catalog";
 import SchemaField from "./SchemaField.vue";
 
 const props = defineProps<{
@@ -41,12 +41,14 @@ function updateField(name: string, value: unknown) {
 </script>
 
 <template>
-  <el-empty
+  <div
     v-if="Object.keys(properties).length === 0"
-    description="此 Action 无输入字段"
-    :image-size="64"
-  />
-  <el-form v-else label-position="top" class="schema-form">
+    class="empty-state form-empty-state"
+  >
+    <q-icon name="input" size="40px" />
+    <span>此 Action 无输入字段</span>
+  </div>
+  <q-form v-else class="schema-form">
     <SchemaField
       v-for="(property, name) in properties"
       :key="name"
@@ -65,5 +67,5 @@ function updateField(name: string, value: unknown) {
       :multipart="multipart"
       @update:model-value="updateField(name, $event)"
     />
-  </el-form>
+  </q-form>
 </template>

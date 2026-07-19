@@ -3,7 +3,7 @@ import {
   parseUiCatalog,
   type ActionDemoSchema,
   type UiCatalog,
-} from "@/contracts/ui-catalog";
+} from "src/contracts/ui-catalog";
 
 export type SessionContext = {
   token?: string;

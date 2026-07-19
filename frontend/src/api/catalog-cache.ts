@@ -1,5 +1,5 @@
 import type { SessionContext } from "./client";
-import type { UiCatalog } from "@/contracts/ui-catalog";
+import type { UiCatalog } from "src/contracts/ui-catalog";
 
 function contextKey(context: SessionContext): string {
   return JSON.stringify([

@@ -21,6 +21,17 @@ struct MeAction {
     service: Arc<UserService>,
 }
 
+impl UserService {
+    async fn view_by_id(&self, ctx: &ActionContext, id: i64) -> Result<UserView, BaseError> {
+        let user = self
+            .find_by_id(ctx, id)
+            .await?
+            .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
+        self.ensure_active(&user)?;
+        UserView::try_from(&user)
+    }
+}
+
 #[async_trait]
 impl TypedHandler for MeAction {
     type Input = EmptyInput;
@@ -52,4 +63,44 @@ pub(super) fn register(
     .description("读取当前已认证用户")
     .tag("users");
     Ok(module.action(spec, MeAction { service }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::user::{CREATED_AT, PASSWORD_HASH, STATUS, UPDATED_AT, USERNAME, USER_ID};
+    use yang_base::table::Record;
+
+    #[test]
+    fn user_view_does_not_serialize_password_hash_from_record() {
+        let record = Record::new()
+            .set(USER_ID, 7)
+            .set(USERNAME, "alice")
+            .set(PASSWORD_HASH, "secret-hash")
+            .set(STATUS, "active")
+            .set(CREATED_AT, 10)
+            .set(UPDATED_AT, 11);
+
+        let view = UserView::try_from(&record)
+            .unwrap_or_else(|error| panic!("完整记录应转换为用户视图: {error}"));
+        let value = serde_json::to_value(view)
+            .unwrap_or_else(|error| panic!("用户视图应可序列化: {error}"));
+
+        assert_eq!(value.get(USERNAME), Some(&serde_json::json!("alice")));
+        assert!(value.get(PASSWORD_HASH).is_none());
+    }
+
+    #[test]
+    fn user_view_rejects_incomplete_or_invalid_record() {
+        let incomplete = Record::new().set(USER_ID, 7);
+        assert!(UserView::try_from(&incomplete).is_err());
+
+        let invalid = Record::new()
+            .set(USER_ID, "not-an-integer")
+            .set(USERNAME, "alice")
+            .set(STATUS, "active")
+            .set(CREATED_AT, 10)
+            .set(UPDATED_AT, 11);
+        assert!(UserView::try_from(&invalid).is_err());
+    }
 }

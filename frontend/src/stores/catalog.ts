@@ -1,0 +1,153 @@
+import { computed, ref, watch } from "vue";
+import { defineStore } from "pinia";
+import { CatalogCache } from "src/api/catalog-cache";
+import { fetchUiCatalog, type SessionContext } from "src/api/client";
+import {
+  ContractError,
+  type ActionDemoSchema,
+  type UiCatalog,
+} from "src/contracts/ui-catalog";
+
+export type NavigationMode = "views" | "actions";
+
+export const navigationOptions: Array<{
+  label: string;
+  value: NavigationMode;
+}> = [
+  { label: "业务页面", value: "views" },
+  { label: "接口演示", value: "actions" },
+];
+
+const catalogCache = new CatalogCache();
+
+function sessionValue(key: string): string {
+  return typeof window === "undefined"
+    ? ""
+    : (sessionStorage.getItem(key) ?? "");
+}
+
+export const useCatalogStore = defineStore("catalog", () => {
+  const token = ref(sessionValue("yang.token"));
+  const tenantId = ref(sessionValue("yang.tenant-id"));
+  const query = ref("");
+  const catalog = ref<UiCatalog>();
+  const selectedOperationId = ref("");
+  const selectedViewId = ref("");
+  const navigationMode = ref<NavigationMode>("views");
+  const loading = ref(false);
+  const error = ref<{ message: string; details?: string[] }>();
+  let controller: AbortController | undefined;
+  let sessionReloadTimer: number | undefined;
+  let started = false;
+
+  const session = computed<SessionContext>(() => ({
+    token: token.value || undefined,
+    tenantId: tenantId.value || undefined,
+  }));
+  const actions = computed(() => {
+    const keyword = query.value.trim().toLocaleLowerCase();
+    if (!keyword) return catalog.value?.actions ?? [];
+    return (catalog.value?.actions ?? []).filter((action) =>
+      [action.operation_id, action.title, action.description, action.path]
+        .join(" ")
+        .toLocaleLowerCase()
+        .includes(keyword),
+    );
+  });
+  const views = computed(() => {
+    const keyword = query.value.trim().toLocaleLowerCase();
+    if (!keyword) return catalog.value?.table_views ?? [];
+    return (catalog.value?.table_views ?? []).filter((view) =>
+      [view.view_id, view.title, view.table, view.data_action]
+        .join(" ")
+        .toLocaleLowerCase()
+        .includes(keyword),
+    );
+  });
+  const selectedView = computed(() => {
+    const all = catalog.value?.table_views ?? [];
+    return all.find((view) => view.view_id === selectedViewId.value) ?? all[0];
+  });
+  const selectedAction = computed<ActionDemoSchema | undefined>(() => {
+    const all = catalog.value?.actions ?? [];
+    return (
+      all.find((action) => action.operation_id === selectedOperationId.value) ??
+      all[0]
+    );
+  });
+
+  async function loadCatalog() {
+    controller?.abort();
+    controller = new AbortController();
+    loading.value = true;
+    error.value = undefined;
+    try {
+      const fetched = await fetchUiCatalog(session.value, controller.signal);
+      catalog.value = catalogCache.accept(session.value, fetched);
+      if (
+        !catalog.value.actions.some(
+          (action) => action.operation_id === selectedOperationId.value,
+        )
+      ) {
+        selectedOperationId.value =
+          catalog.value.actions[0]?.operation_id ?? "";
+      }
+      if (
+        !catalog.value.table_views.some(
+          (view) => view.view_id === selectedViewId.value,
+        )
+      ) {
+        selectedViewId.value = catalog.value.table_views[0]?.view_id ?? "";
+      }
+      if (!catalog.value.table_views.length) navigationMode.value = "actions";
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === "AbortError") return;
+      catalog.value = undefined;
+      error.value =
+        cause instanceof ContractError
+          ? { message: cause.message, details: cause.details }
+          : { message: cause instanceof Error ? cause.message : String(cause) };
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    watch([token, tenantId], ([nextToken, nextTenant]) => {
+      sessionStorage.setItem("yang.token", nextToken);
+      sessionStorage.setItem("yang.tenant-id", nextTenant);
+      if (sessionReloadTimer !== undefined)
+        window.clearTimeout(sessionReloadTimer);
+      sessionReloadTimer = window.setTimeout(() => void loadCatalog(), 400);
+    });
+    void loadCatalog();
+  }
+
+  function stopPendingRequests() {
+    controller?.abort();
+    if (sessionReloadTimer !== undefined)
+      window.clearTimeout(sessionReloadTimer);
+  }
+
+  return {
+    token,
+    tenantId,
+    query,
+    catalog,
+    selectedOperationId,
+    selectedViewId,
+    navigationMode,
+    loading,
+    error,
+    session,
+    actions,
+    views,
+    selectedView,
+    selectedAction,
+    loadCatalog,
+    start,
+    stopPendingRequests,
+  };
+});

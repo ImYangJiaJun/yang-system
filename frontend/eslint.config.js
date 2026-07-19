@@ -7,6 +7,7 @@ export default [
   {
     ignores: [
       "dist/**",
+      ".quasar/**",
       "test-results/**",
       "playwright-report/**",
       "src/*.d.ts",

@@ -1,19 +1,26 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { Dialog, Notify, type QTableColumn } from "quasar";
 import {
   invokeAction,
   type InvocationResult,
   type SessionContext,
-} from "@/api/client";
-import { initialObject } from "@/contracts/json-schema";
-import { buildTreeRows, parseTableData } from "@/contracts/table-data";
+} from "src/api/client";
+import { initialObject } from "src/contracts/json-schema";
+import { buildTreeRows, parseTableData } from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
   TableViewSchema,
-} from "@/contracts/ui-catalog";
-import JsonSchemaForm from "./JsonSchemaForm.vue";
+} from "src/contracts/ui-catalog";
+import JsonSchemaForm from "components/form/JsonSchemaForm.vue";
+
+type SourceRow = Record<string, unknown>;
+type DisplayRow = {
+  data: SourceRow;
+  depth: number;
+  key: string;
+};
 
 const props = defineProps<{
   view: TableViewSchema;
@@ -34,7 +41,7 @@ const pageSize = ref(props.view.query.default_page_size);
 const search = ref("");
 const filters = ref<Record<string, string>>({});
 const orderBy = ref(props.view.query.default_sort);
-const selectedRows = ref<Array<Record<string, unknown>>>([]);
+const selectedDisplayRows = ref<DisplayRow[]>([]);
 const loading = ref(false);
 const error = ref("");
 const actionDialog = ref(false);
@@ -42,6 +49,12 @@ const actionLoading = ref(false);
 const activePresentation = ref<ActionPresentationSchema>();
 const activeAction = ref<ActionDemoSchema>();
 const actionValues = ref<Record<string, unknown>>({});
+const tablePagination = ref({
+  sortBy: null as string | null,
+  descending: false,
+  page: 1,
+  rowsPerPage: 0,
+});
 let controller: AbortController | undefined;
 let actionController: AbortController | undefined;
 
@@ -86,6 +99,57 @@ const treeResult = computed(() => {
   }
 });
 const displayRows = computed(() => treeResult.value.rows);
+const selectedRows = computed(() =>
+  selectedDisplayRows.value.map((row) => row.data),
+);
+const qTableRows = computed(() => {
+  const flatten = (
+    source: SourceRow[],
+    depth = 0,
+    path = "root",
+  ): DisplayRow[] =>
+    source.flatMap((row, index) => {
+      const rowPath = `${path}.${index}`;
+      const children = Array.isArray(row.children)
+        ? (row.children as SourceRow[])
+        : [];
+      return [
+        { data: row, depth, key: rowPath },
+        ...flatten(children, depth + 1, rowPath),
+      ];
+    });
+  return flatten(displayRows.value);
+});
+const tableColumns = computed<QTableColumn<DisplayRow>[]>(() => {
+  const columns: QTableColumn<DisplayRow>[] = props.view.columns.map(
+    (column) => ({
+      name: column.field,
+      label: column.title || column.field,
+      field: (row) => row.data[column.field],
+      align: "left",
+      sortable: column.sortable,
+      format: (value) => formatCell(value),
+    }),
+  );
+  if (rowActions.value.length) {
+    columns.push({
+      name: "__actions",
+      label: "操作",
+      field: () => "",
+      align: "right",
+    });
+  }
+  return columns;
+});
+const firstColumnName = computed(() => props.view.columns[0]?.field);
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(total.value / pageSize.value)),
+);
+const pageSizeOptions = computed(() =>
+  Array.from(new Set([10, 20, 50, props.view.query.max_page_size]))
+    .sort((left, right) => left - right)
+    .map((value) => ({ label: `${value} / 页`, value })),
+);
 
 function parseFilterValue(value: string): unknown {
   const trimmed = value.trim();
@@ -186,7 +250,10 @@ async function openAction(
   }
   const action = actionById.value.get(presentation.operation_id);
   if (!action) {
-    ElMessage.error(`目录缺少 Action：${presentation.operation_id}`);
+    Notify.create({
+      type: "negative",
+      message: `目录缺少 Action：${presentation.operation_id}`,
+    });
     return;
   }
   activePresentation.value = presentation;
@@ -202,13 +269,22 @@ async function openAction(
   await submitAction();
 }
 
-async function confirmAction(presentation: ActionPresentationSchema) {
-  if (!presentation.confirmation) return;
-  await ElMessageBox.confirm(
-    presentation.confirmation.message,
-    presentation.confirmation.title,
-    { type: "warning", confirmButtonText: "确认", cancelButtonText: "取消" },
-  );
+async function confirmAction(
+  presentation: ActionPresentationSchema,
+): Promise<boolean> {
+  if (!presentation.confirmation) return true;
+  return new Promise((resolve) => {
+    Dialog.create({
+      title: presentation.confirmation?.title,
+      message: presentation.confirmation?.message ?? "",
+      ok: { label: "确认", color: "negative" },
+      cancel: { label: "取消", flat: true },
+      persistent: true,
+    })
+      .onOk(() => resolve(true))
+      .onCancel(() => resolve(false))
+      .onDismiss(() => resolve(false));
+  });
 }
 
 function handleAttachment(result: InvocationResult) {
@@ -232,7 +308,7 @@ async function submitAction() {
   actionController?.abort();
   actionController = new AbortController();
   try {
-    await confirmAction(presentation);
+    if (!(await confirmAction(presentation))) return;
     const result = await invokeAction(
       action,
       actionValues.value,
@@ -243,13 +319,15 @@ async function submitAction() {
     if (result.kind === "redirect" && result.location) {
       window.location.assign(result.location);
     }
-    ElMessage.success(result.message || "操作成功");
+    Notify.create({ type: "positive", message: result.message || "操作成功" });
     actionDialog.value = false;
     await load();
   } catch (cause) {
-    if (cause === "cancel" || cause === "close") return;
     if (cause instanceof Error && cause.name === "AbortError") return;
-    ElMessage.error(cause instanceof Error ? cause.message : String(cause));
+    Notify.create({
+      type: "negative",
+      message: cause instanceof Error ? cause.message : String(cause),
+    });
   } finally {
     actionLoading.value = false;
   }
@@ -260,18 +338,28 @@ function applyQuery() {
   void load();
 }
 
-function changeSort({
-  prop,
-  order,
-}: {
-  prop?: string | null;
-  order?: string | null;
-}) {
-  orderBy.value =
-    prop && order
-      ? [{ field: prop, direction: order === "descending" ? "desc" : "asc" }]
-      : props.view.query.default_sort;
+function changeSort(next: typeof tablePagination.value) {
+  const changed =
+    next.sortBy !== tablePagination.value.sortBy ||
+    next.descending !== tablePagination.value.descending;
+  tablePagination.value = next;
+  if (!changed) return;
+  orderBy.value = next.sortBy
+    ? [{ field: next.sortBy, direction: next.descending ? "desc" : "asc" }]
+    : props.view.query.default_sort;
   applyQuery();
+}
+
+function changePage(next: number) {
+  page.value = next;
+  void load();
+}
+
+function changePageSize(next: number | null) {
+  if (!next) return;
+  pageSize.value = next;
+  page.value = 1;
+  void load();
 }
 
 function formatCell(value: unknown): string {
@@ -288,6 +376,14 @@ watch(
     search.value = "";
     filters.value = {};
     orderBy.value = view.query.default_sort;
+    const initialSort = view.query.default_sort[0];
+    tablePagination.value = {
+      sortBy: initialSort?.field ?? null,
+      descending: initialSort?.direction === "desc",
+      page: 1,
+      rowsPerPage: 0,
+    };
+    selectedDisplayRows.value = [];
     void load();
   },
   { immediate: true },
@@ -307,167 +403,197 @@ onBeforeUnmount(() => {
   <section class="table-view">
     <header class="table-view-heading">
       <div>
-        <el-tag size="small" effect="plain">{{ view.view_id }}</el-tag>
+        <q-badge outline color="primary">{{ view.view_id }}</q-badge>
         <h2>{{ view.title || view.table }}</h2>
         <p>
           {{ view.columns.length }} 个可见字段 · 数据源 {{ view.data_action }}
         </p>
       </div>
       <div class="view-actions">
-        <el-button
+        <q-btn
           v-for="presentation in toolbarActions"
           :key="presentation.operation_id"
           :disabled="presentation.availability?.state === 'disabled'"
           :title="presentation.availability?.reason"
-          type="primary"
+          color="primary"
+          :label="presentation.title || presentation.operation_id"
           @click="openAction(presentation)"
-        >
-          {{ presentation.title || presentation.operation_id }}
-        </el-button>
-        <el-button :loading="loading" @click="load">刷新</el-button>
+        />
+        <q-btn
+          outline
+          color="primary"
+          label="刷新"
+          :loading="loading"
+          @click="load"
+        />
       </div>
     </header>
 
-    <el-card shadow="never" class="query-card">
-      <div class="query-grid">
-        <el-input
-          v-if="view.query.search_fields.length"
-          v-model="search"
-          clearable
-          :placeholder="`搜索 ${view.query.search_fields.join('、')}`"
-          @keyup.enter="applyQuery"
-        />
-        <el-input
-          v-for="column in filterColumns"
-          :key="column.field"
-          v-model="filters[column.field]"
-          clearable
-          :placeholder="`${column.title || column.field} 精确筛选`"
-          @keyup.enter="applyQuery"
-        />
-        <el-button type="primary" @click="applyQuery">查询</el-button>
-      </div>
-    </el-card>
+    <q-card flat bordered class="query-card">
+      <q-card-section>
+        <div class="query-grid">
+          <q-input
+            v-if="view.query.search_fields.length"
+            v-model="search"
+            dense
+            outlined
+            clearable
+            :placeholder="`搜索 ${view.query.search_fields.join('、')}`"
+            @keyup.enter="applyQuery"
+          />
+          <q-input
+            v-for="column in filterColumns"
+            :key="column.field"
+            v-model="filters[column.field]"
+            dense
+            outlined
+            clearable
+            :placeholder="`${column.title || column.field} 精确筛选`"
+            @keyup.enter="applyQuery"
+          />
+          <q-btn color="primary" label="查询" @click="applyQuery" />
+        </div>
+      </q-card-section>
+    </q-card>
 
-    <el-alert
-      v-if="error"
-      type="error"
-      :title="error"
-      :closable="false"
-      show-icon
-      class="table-error"
-    />
-    <el-alert
+    <q-banner v-if="error" rounded class="table-error bg-red-1 text-negative">
+      <template #avatar><q-icon name="error" /></template>
+      {{ error }}
+    </q-banner>
+    <q-banner
       v-else-if="treeResult.warning"
-      type="warning"
-      :title="treeResult.warning"
-      :closable="false"
-      show-icon
-      class="table-error"
-    />
+      rounded
+      class="table-error bg-orange-1 text-warning"
+    >
+      <template #avatar><q-icon name="warning" /></template>
+      {{ treeResult.warning }}
+    </q-banner>
 
     <div v-if="bulkActions.length" class="bulk-actions">
       <span>已选 {{ selectedRows.length }} 项</span>
-      <el-button
+      <q-btn
         v-for="presentation in bulkActions"
         :key="presentation.operation_id"
-        size="small"
+        dense
+        outline
+        color="primary"
         :disabled="
           selectedRows.length === 0 ||
           presentation.availability?.state === 'disabled'
         "
         :title="presentation.availability?.reason"
+        :label="presentation.title || presentation.operation_id"
         @click="openAction(presentation)"
-      >
-        {{ presentation.title || presentation.operation_id }}
-      </el-button>
+      />
     </div>
 
-    <el-table
-      v-loading="loading"
-      :data="displayRows"
-      :row-key="
-        (row: Record<string, unknown>) =>
-          String(row[view.tree?.id_field || view.columns[0]?.field || 'id'])
-      "
-      border
-      default-expand-all
-      @selection-change="selectedRows = $event"
-      @sort-change="changeSort"
+    <q-table
+      v-model:selected="selectedDisplayRows"
+      :rows="qTableRows"
+      :columns="tableColumns"
+      :loading="loading"
+      :pagination="tablePagination"
+      :rows-per-page-options="[0]"
+      row-key="key"
+      :selection="bulkActions.length ? 'multiple' : 'none'"
+      flat
+      bordered
+      hide-pagination
+      binary-state-sort
+      @update:pagination="changeSort"
     >
-      <el-table-column v-if="bulkActions.length" type="selection" width="48" />
-      <el-table-column
-        v-for="column in view.columns"
-        :key="column.field"
-        :prop="column.field"
-        :label="column.title || column.field"
-        :sortable="column.sortable ? 'custom' : false"
-        min-width="140"
-        show-overflow-tooltip
-      >
-        <template #default="scope">
-          {{ formatCell(scope.row[column.field]) }}
-        </template>
-      </el-table-column>
-      <el-table-column
-        v-if="rowActions.length"
-        label="操作"
-        fixed="right"
-        min-width="160"
-      >
-        <template #default="scope">
-          <el-button
+      <template #body-cell="slotProps">
+        <q-td :props="slotProps">
+          <span
+            :style="
+              slotProps.col.name === firstColumnName
+                ? { paddingLeft: `${slotProps.row.depth * 20}px` }
+                : undefined
+            "
+          >
+            {{ slotProps.value }}
+          </span>
+        </q-td>
+      </template>
+      <template #body-cell-__actions="slotProps">
+        <q-td :props="slotProps" class="table-row-actions">
+          <q-btn
             v-for="presentation in rowActions"
             :key="presentation.operation_id"
-            link
-            type="primary"
+            flat
+            dense
+            color="primary"
             :disabled="presentation.availability?.state === 'disabled'"
             :title="presentation.availability?.reason"
-            @click="openAction(presentation, scope.row)"
-          >
-            {{ presentation.title || presentation.operation_id }}
-          </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-
-    <el-pagination
-      v-if="!view.tree || hasActiveQuery"
-      v-model:current-page="page"
-      v-model:page-size="pageSize"
-      :total="total"
-      :page-sizes="[10, 20, 50, view.query.max_page_size]"
-      layout="total, sizes, prev, pager, next"
-      class="table-pagination"
-      @change="load"
-    />
-
-    <el-dialog
-      v-model="actionDialog"
-      :title="activePresentation?.title || activeAction?.title"
-      width="min(720px, 86vw)"
-      destroy-on-close
-    >
-      <JsonSchemaForm
-        v-if="activeAction"
-        v-model="actionValues"
-        :schema="activeAction.input_schema"
-        :params="activeAction.params"
-        :business-fields="view.form.fields"
-        :actions="actions"
-        :session="session"
-        :multipart="activeAction.multipart"
-      />
-      <template #footer>
-        <el-button @click="actionDialog = false">取消</el-button>
-        <el-button
-          type="primary"
-          :loading="actionLoading"
-          @click="submitAction"
-        >
-          提交
-        </el-button>
+            :label="presentation.title || presentation.operation_id"
+            @click="openAction(presentation, slotProps.row.data)"
+          />
+        </q-td>
       </template>
-    </el-dialog>
+    </q-table>
+
+    <div v-if="!view.tree || hasActiveQuery" class="table-pagination">
+      <span>共 {{ total }} 项</span>
+      <q-select
+        :model-value="pageSize"
+        :options="pageSizeOptions"
+        dense
+        outlined
+        emit-value
+        map-options
+        class="page-size-select"
+        aria-label="每页数量"
+        @update:model-value="changePageSize"
+      />
+      <q-pagination
+        :model-value="page"
+        :max="pageCount"
+        boundary-numbers
+        direction-links
+        @update:model-value="changePage"
+      />
+    </div>
+
+    <q-dialog v-model="actionDialog">
+      <q-card class="action-dialog-card">
+        <q-card-section class="row items-center">
+          <div class="text-h6">
+            {{ activePresentation?.title || activeAction?.title }}
+          </div>
+          <q-space />
+          <q-btn
+            v-close-popup
+            flat
+            round
+            dense
+            icon="close"
+            aria-label="关闭"
+          />
+        </q-card-section>
+        <q-separator />
+        <q-card-section class="scroll action-dialog-content">
+          <JsonSchemaForm
+            v-if="activeAction"
+            v-model="actionValues"
+            :schema="activeAction.input_schema"
+            :params="activeAction.params"
+            :business-fields="view.form.fields"
+            :actions="actions"
+            :session="session"
+            :multipart="activeAction.multipart"
+          />
+        </q-card-section>
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn v-close-popup flat label="取消" />
+          <q-btn
+            color="primary"
+            label="提交"
+            :loading="actionLoading"
+            @click="submitAction"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </section>
 </template>

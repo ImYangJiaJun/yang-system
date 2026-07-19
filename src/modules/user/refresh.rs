@@ -11,6 +11,24 @@ struct UserClaimsResolver {
     service: Arc<UserService>,
 }
 
+impl UserService {
+    async fn active_by_subject(
+        &self,
+        ctx: &ActionContext,
+        subject: &str,
+    ) -> Result<yang_base::table::Record, BaseError> {
+        let id = subject
+            .parse::<i64>()
+            .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+        let user = self
+            .find_by_id(ctx, id)
+            .await?
+            .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
+        self.ensure_active(&user)?;
+        Ok(user)
+    }
+}
+
 #[async_trait]
 impl RefreshClaimsResolver for UserClaimsResolver {
     async fn resolve(

@@ -8,12 +8,8 @@ mod register;
 mod register_via_plugin;
 
 use crate::config::SecuritySettings;
-use argon2::password_hash::{Error as PasswordHashError, PasswordHash, SaltString};
-use argon2::{Argon2, PasswordHasher, PasswordVerifier};
-use rand_core::OsRng;
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::Value;
 use std::sync::Arc;
 use yang_base::action::{TokenAuthMiddleware, UiCatalogAction, User};
 use yang_base::definition::{Key, ModuleName, ModuleSpec, Str, TableName, TableSpec, Timestamp};
@@ -31,7 +27,6 @@ const STATUS: &str = "status";
 const CREATED_AT: &str = "created_at";
 const UPDATED_AT: &str = "updated_at";
 const USER_VIEW_FIELDS: &[&str] = &[USER_ID, USERNAME, STATUS, CREATED_AT, UPDATED_AT];
-const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, USERNAME, PASSWORD_HASH, STATUS];
 
 /// 构建单一用户领域模块。
 ///
@@ -75,103 +70,8 @@ impl UserService {
         Self { security }
     }
 
-    async fn register(
-        &self,
-        ctx: &yang_base::action::ActionContext,
-        username: &str,
-        plain_password: &str,
-    ) -> Result<UserView, BaseError> {
-        let username = self.normalize_username(username)?;
-        self.validate_password(plain_password)?;
-        if self.username_exists(ctx, &username).await? {
-            return Err(BaseError::ParamInvalid(
-                "username".to_string(),
-                "用户名已存在".to_string(),
-            ));
-        }
-        let password_hash = hash_password(plain_password)?;
-        let user = self.insert(ctx, &username, &password_hash).await?;
-        UserView::try_from(&user)
-    }
-
-    async fn authenticate(
-        &self,
-        ctx: &yang_base::action::ActionContext,
-        username: &str,
-        plain_password: &str,
-    ) -> Result<Record, BaseError> {
-        let username = self.normalize_username(username)?;
-        let user = self
-            .find_credentials_by_username(ctx, &username)
-            .await?
-            .ok_or(BaseError::InvalidPassword)?;
-        let password_hash: String = user.require(PASSWORD_HASH)?;
-        if !verify_password(plain_password, &password_hash)? {
-            return Err(BaseError::InvalidPassword);
-        }
-        self.ensure_active(&user)?;
-        Ok(user)
-    }
-
-    async fn active_by_subject(
-        &self,
-        ctx: &yang_base::action::ActionContext,
-        subject: &str,
-    ) -> Result<Record, BaseError> {
-        let id = subject
-            .parse::<i64>()
-            .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
-        let user = self
-            .find_by_id(ctx, id)
-            .await?
-            .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
-        self.ensure_active(&user)?;
-        Ok(user)
-    }
-
-    async fn view_by_id(
-        &self,
-        ctx: &yang_base::action::ActionContext,
-        id: i64,
-    ) -> Result<UserView, BaseError> {
-        let user = self
-            .find_by_id(ctx, id)
-            .await?
-            .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
-        self.ensure_active(&user)?;
-        UserView::try_from(&user)
-    }
-
     fn query(&self, ctx: &yang_base::action::ActionContext) -> Result<TableQuery, BaseError> {
         ctx.table_query()
-    }
-
-    async fn username_exists(
-        &self,
-        ctx: &yang_base::action::ActionContext,
-        username: &str,
-    ) -> Result<bool, BaseError> {
-        let rows = self
-            .query(ctx)?
-            .select_fields(&[USER_ID])?
-            .where_eq(USERNAME, Value::String(username.to_string()))?
-            .all()
-            .await?;
-        Ok(!rows.is_empty())
-    }
-
-    async fn find_credentials_by_username(
-        &self,
-        ctx: &yang_base::action::ActionContext,
-        username: &str,
-    ) -> Result<Option<Record>, BaseError> {
-        let rows = self
-            .query(ctx)?
-            .select_fields(USER_CREDENTIAL_FIELDS)?
-            .where_eq(USERNAME, Value::String(username.to_string()))?
-            .all()
-            .await?;
-        Ok(rows.into_iter().next())
     }
 
     async fn find_by_id(
@@ -182,37 +82,10 @@ impl UserService {
         let rows = self
             .query(ctx)?
             .select_fields(USER_VIEW_FIELDS)?
-            .where_eq(USER_ID, Value::Number(id.into()))?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
             .all()
             .await?;
         Ok(rows.into_iter().next())
-    }
-
-    async fn insert(
-        &self,
-        ctx: &yang_base::action::ActionContext,
-        username: &str,
-        password_hash: &str,
-    ) -> Result<Record, BaseError> {
-        let record = Record::new()
-            .set(USERNAME, username)
-            .set(PASSWORD_HASH, password_hash)
-            .set(STATUS, "active");
-        let (_, id) = match self.query(ctx)?.insert_returning_id(record).await {
-            Ok(result) => result,
-            Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
-                return Err(BaseError::ParamInvalid(
-                    "username".to_string(),
-                    "用户名已存在".to_string(),
-                ));
-            }
-            Err(error) => return Err(error),
-        };
-        let id = i64::try_from(id)
-            .map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))?;
-        self.find_by_id(ctx, id)
-            .await?
-            .ok_or_else(|| BaseError::UserNotFound(id.to_string()))
     }
 
     fn ensure_active(&self, user: &Record) -> Result<(), BaseError> {
@@ -246,21 +119,6 @@ impl UserService {
             ));
         }
         Ok(normalized)
-    }
-
-    fn validate_password(&self, password: &str) -> Result<(), BaseError> {
-        let length = password.chars().count();
-        if length < self.security.password_min_length || length > self.security.password_max_length
-        {
-            return Err(BaseError::ParamInvalid(
-                "password".to_string(),
-                format!(
-                    "长度必须在 {}..={} 之间",
-                    self.security.password_min_length, self.security.password_max_length
-                ),
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -305,24 +163,6 @@ fn user_table_spec() -> Result<TableSpec, BaseError> {
 #[cfg(test)]
 fn user_table_definition() -> Result<TableDefinition, BaseError> {
     user_table_spec()?.table_definition()
-}
-
-fn hash_password(password: &str) -> Result<String, BaseError> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|value| value.to_string())
-        .map_err(|_| BaseError::Unknown("密码哈希失败".to_string()))
-}
-
-fn verify_password(password: &str, encoded: &str) -> Result<bool, BaseError> {
-    let parsed = PasswordHash::new(encoded)
-        .map_err(|_| BaseError::Unknown("数据库中的密码哈希格式无效".to_string()))?;
-    match Argon2::default().verify_password(password.as_bytes(), &parsed) {
-        Ok(()) => Ok(true),
-        Err(PasswordHashError::Password) => Ok(false),
-        Err(_) => Err(BaseError::Unknown("密码校验失败".to_string())),
-    }
 }
 
 pub(crate) fn user_from_claims(claims: &TokenClaims) -> User {
@@ -376,25 +216,6 @@ mod tests {
         assert!(!password.is_sortable());
     }
 
-    #[test]
-    fn user_view_does_not_serialize_password_hash_from_record() {
-        let record = Record::new()
-            .set(USER_ID, 7)
-            .set(USERNAME, "alice")
-            .set(PASSWORD_HASH, "secret-hash")
-            .set(STATUS, "active")
-            .set(CREATED_AT, 10)
-            .set(UPDATED_AT, 11);
-
-        let view = UserView::try_from(&record)
-            .unwrap_or_else(|error| panic!("完整记录应转换为用户视图: {error}"));
-        let value = serde_json::to_value(view)
-            .unwrap_or_else(|error| panic!("用户视图应可序列化: {error}"));
-
-        assert_eq!(value.get(USERNAME), Some(&serde_json::json!("alice")));
-        assert!(value.get(PASSWORD_HASH).is_none());
-    }
-
     #[tokio::test]
     async fn password_hash_is_only_readable_by_system_role() {
         let pool = sqlx::mysql::MySqlPoolOptions::new()
@@ -413,31 +234,6 @@ mod tests {
             .query([SYSTEM_ROLE])
             .select_fields(&[PASSWORD_HASH])
             .is_ok());
-    }
-
-    #[test]
-    fn user_view_rejects_incomplete_or_invalid_record() {
-        let incomplete = Record::new().set(USER_ID, 7);
-        assert!(UserView::try_from(&incomplete).is_err());
-
-        let invalid = Record::new()
-            .set(USER_ID, "not-an-integer")
-            .set(USERNAME, "alice")
-            .set(STATUS, "active")
-            .set(CREATED_AT, 10)
-            .set(UPDATED_AT, 11);
-        assert!(UserView::try_from(&invalid).is_err());
-    }
-
-    #[test]
-    fn password_hash_round_trip() {
-        let encoded = hash_password("correct-horse-battery-staple")
-            .unwrap_or_else(|error| panic!("密码应成功哈希: {error}"));
-        assert!(verify_password("correct-horse-battery-staple", &encoded)
-            .unwrap_or_else(|error| panic!("密码应成功校验: {error}")));
-        assert!(!verify_password("wrong-password", &encoded)
-            .unwrap_or_else(|error| panic!("错误密码应得到 false: {error}")));
-        assert!(!encoded.contains("correct-horse-battery-staple"));
     }
 
     #[test]

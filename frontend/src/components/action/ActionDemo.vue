@@ -5,10 +5,10 @@ import {
   invokeAction,
   type InvocationResult,
   type SessionContext,
-} from "@/api/client";
-import { ContractError, type ActionDemoSchema } from "@/contracts/ui-catalog";
-import { initialObject } from "@/contracts/json-schema";
-import JsonSchemaForm from "./JsonSchemaForm.vue";
+} from "src/api/client";
+import { ContractError, type ActionDemoSchema } from "src/contracts/ui-catalog";
+import { initialObject } from "src/contracts/json-schema";
+import JsonSchemaForm from "components/form/JsonSchemaForm.vue";
 
 const props = defineProps<{
   action: ActionDemoSchema;
@@ -21,9 +21,9 @@ const result = ref<InvocationResult>();
 const error = ref<{ message: string; details?: unknown; requestId?: string }>();
 let controller: AbortController | undefined;
 
-const methodTagType = computed(() => {
-  if (props.action.method === "GET") return "success";
-  if (props.action.method === "DELETE") return "danger";
+const methodTagColor = computed(() => {
+  if (props.action.method === "GET") return "positive";
+  if (props.action.method === "DELETE") return "negative";
   if (props.action.method === "PUT" || props.action.method === "PATCH")
     return "warning";
   return "primary";
@@ -81,13 +81,11 @@ async function submit() {
     <div class="action-heading">
       <div>
         <div class="action-tags">
-          <el-tag :type="methodTagType" effect="dark">{{
-            action.method
-          }}</el-tag>
-          <el-tag v-if="action.requires_auth" type="warning" effect="plain"
-            >需要认证</el-tag
-          >
-          <el-tag effect="plain">{{ action.response_kind }}</el-tag>
+          <q-badge :color="methodTagColor">{{ action.method }}</q-badge>
+          <q-badge v-if="action.requires_auth" outline color="warning">
+            需要认证
+          </q-badge>
+          <q-badge outline color="primary">{{ action.response_kind }}</q-badge>
         </div>
         <h2>{{ action.title || action.operation_id }}</h2>
         <p>{{ action.description || "该 Action 未提供说明。" }}</p>
@@ -95,13 +93,15 @@ async function submit() {
       <code class="operation-id">{{ action.operation_id }}</code>
     </div>
 
-    <el-alert
+    <q-banner
       v-if="action.request_media_type === 'multipart'"
-      type="info"
-      :closable="false"
-      :title="`受限 multipart：最多 ${action.multipart?.max_files ?? 0} 个文件，单文件 ${action.multipart?.max_file_bytes ?? 0} bytes`"
-      show-icon
-    />
+      rounded
+      class="bg-blue-1 text-primary"
+    >
+      <template #avatar><q-icon name="info" /></template>
+      受限 multipart：最多 {{ action.multipart?.max_files ?? 0 }} 个文件，单文件
+      {{ action.multipart?.max_file_bytes ?? 0 }} bytes
+    </q-banner>
 
     <div class="route-line">
       <span>{{ action.method }}</span>
@@ -117,61 +117,59 @@ async function submit() {
 
     <div v-if="action.params.length" class="param-summary">
       <span v-for="parameter in action.params" :key="parameter.name">
-        <el-tag size="small" effect="plain">{{ parameter.source }}</el-tag>
+        <q-badge outline color="primary">{{ parameter.source }}</q-badge>
         {{ parameter.title || parameter.name }}
       </span>
     </div>
 
     <div class="action-controls">
-      <el-button
-        type="primary"
+      <q-btn
+        color="primary"
+        label="发起真实调用"
         :loading="loading"
         data-testid="invoke-action"
         @click="submit"
-      >
-        发起真实调用
-      </el-button>
-      <el-button v-if="loading" @click="controller?.abort()">取消</el-button>
+      />
+      <q-btn
+        v-if="loading"
+        flat
+        color="grey-8"
+        label="取消"
+        @click="controller?.abort()"
+      />
     </div>
 
-    <el-alert
-      v-if="error"
-      type="error"
-      :title="error.message"
-      :description="
-        error.requestId ? `request-id: ${error.requestId}` : undefined
-      "
-      :closable="false"
-      show-icon
-    />
+    <q-banner v-if="error" rounded class="bg-red-1 text-negative">
+      <template #avatar><q-icon name="error" /></template>
+      <strong>{{ error.message }}</strong>
+      <div v-if="error.requestId">request-id: {{ error.requestId }}</div>
+    </q-banner>
     <pre v-if="error?.details" class="result-panel error-panel">{{
       JSON.stringify(error.details, null, 2)
     }}</pre>
 
     <div v-if="result" class="result-wrap" data-testid="action-result">
       <div class="result-meta">
-        <el-tag type="success">
+        <q-badge color="positive">
           {{
             result.kind === "redirect" && result.status === 0
               ? "Redirect 已拦截"
               : `HTTP ${result.status}`
           }}
-        </el-tag>
+        </q-badge>
         <span>{{ result.durationMs }} ms</span>
         <span v-if="result.requestId">request-id: {{ result.requestId }}</span>
       </div>
       <pre v-if="result.kind === 'json'" class="result-panel">{{
         JSON.stringify(result.data, null, 2)
       }}</pre>
-      <el-result
-        v-else-if="result.kind === 'redirect'"
-        icon="info"
-        title="服务端请求重定向"
-      >
-        <template #sub-title>{{
+      <div v-else-if="result.kind === 'redirect'" class="redirect-result">
+        <q-icon name="info" size="40px" color="primary" />
+        <strong>服务端请求重定向</strong>
+        <span>{{
           result.location || "浏览器安全策略隐藏 Location，页面未自动跳转"
-        }}</template>
-      </el-result>
+        }}</span>
+      </div>
       <div v-else class="attachment-result">
         <a
           :href="result.blobUrl"

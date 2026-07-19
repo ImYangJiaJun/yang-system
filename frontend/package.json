@@ -1,27 +1,34 @@
 {
   "name": "yang-system-frontend",
   "version": "0.1.0",
+  "description": "YANG 生态契约驱动前端",
+  "productName": "YANG 接口工作台",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.33.1",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
-    "build": "vue-tsc -b && vite build",
-    "typecheck": "vue-tsc -b --pretty false",
+    "dev": "quasar dev",
+    "build": "quasar build",
+    "typecheck": "vue-tsc --noEmit --pretty false",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "postinstall": "quasar prepare"
   },
   "dependencies": {
-    "element-plus": "2.14.3",
+    "@quasar/extras": "^1.17.0",
+    "pinia": "^3.0.0",
+    "quasar": "^2.18.0",
     "vue": "3.5.40",
+    "vue-router": "^4.6.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@quasar/app-vite": "^2.4.0",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "1.61.1",
     "@types/node": "24.13.3",
@@ -33,8 +40,6 @@
     "prettier": "3.9.5",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.64.0",
-    "unplugin-auto-import": "21.0.0",
-    "unplugin-vue-components": "32.1.0",
     "vite": "8.1.5",
     "vitest": "4.1.10",
     "vue-tsc": "3.3.7"

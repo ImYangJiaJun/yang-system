@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, invokeAction } from "./client";
-import type { ActionDemoSchema } from "@/contracts/ui-catalog";
+import type { ActionDemoSchema } from "src/contracts/ui-catalog";
 
 const action: ActionDemoSchema = {
   operation_id: "demo.update",

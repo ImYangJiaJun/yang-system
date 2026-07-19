@@ -1,0 +1,36 @@
+import { defineConfig } from "#q-app/wrappers";
+
+export default defineConfig(() => ({
+  css: ["app.css"],
+  extras: ["material-icons"],
+  build: {
+    target: {
+      browser: ["es2022", "firefox115", "chrome115", "safari14"],
+      node: "node20",
+    },
+    vueRouterMode: "history",
+  },
+  devServer: {
+    host: "127.0.0.1",
+    port: 5173,
+    open: false,
+    proxy: {
+      "/api": {
+        target: process.env.VITE_PROXY_TARGET || "http://127.0.0.1:8080",
+      },
+      "/.well-known": {
+        target: process.env.VITE_PROXY_TARGET || "http://127.0.0.1:8080",
+      },
+      "/health": {
+        target: process.env.VITE_PROXY_TARGET || "http://127.0.0.1:8080",
+      },
+    },
+  },
+  framework: {
+    config: {
+      notify: { position: "top-right", timeout: 2500 },
+    },
+    lang: "zh-CN",
+    plugins: ["Dialog", "Notify"],
+  },
+}));

@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, useId, watch } from "vue";
-import { effectiveSchema, type JsonSchemaNode } from "@/contracts/json-schema";
-import type { SessionContext } from "@/api/client";
-import type { ActionDemoSchema, FormFieldSchema } from "@/contracts/ui-catalog";
+import {
+  effectiveSchema,
+  type JsonSchemaNode,
+} from "src/contracts/json-schema";
+import type { SessionContext } from "src/api/client";
+import type {
+  ActionDemoSchema,
+  FormFieldSchema,
+} from "src/contracts/ui-catalog";
 import RelationSelect from "./RelationSelect.vue";
 
 const props = defineProps<{
@@ -121,6 +127,15 @@ function updateEnum(key: string) {
   update(option?.value);
 }
 
+function updateNumber(value: string | number | null) {
+  if (value === null || value === "") {
+    update(undefined);
+    return;
+  }
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) update(parsed);
+}
+
 function commitJson() {
   try {
     update(JSON.parse(jsonDraft.value));
@@ -139,13 +154,11 @@ function selectFiles(event: Event) {
 </script>
 
 <template>
-  <el-form-item
-    :label="label"
-    :required="required"
-    :error="jsonError"
-    :for="isBinary ? uploadInputId : undefined"
-  >
+  <div class="schema-field">
     <div v-if="isBinary" class="upload-control">
+      <label :for="uploadInputId" class="upload-label">
+        {{ label }}<span v-if="required"> *</span>
+      </label>
       <input
         :id="uploadInputId"
         type="file"
@@ -162,71 +175,84 @@ function selectFiles(event: Event) {
     <RelationSelect
       v-else-if="businessField?.relation && session"
       :model-value="modelValue"
+      :label="label"
       :field="businessField"
       :action="relationAction"
       :session="session"
       :disabled="businessField.read_only"
       @update:model-value="update"
     />
-    <el-select
+    <q-select
       v-else-if="resolved.enum"
       :model-value="selectedEnumKey"
+      :options="enumOptions"
+      option-value="key"
+      option-label="label"
       :disabled="businessField?.read_only"
+      :label="label"
+      outlined
+      dense
+      emit-value
+      map-options
       clearable
-      filterable
       @update:model-value="updateEnum"
-    >
-      <el-option
-        v-for="option in enumOptions"
-        :key="option.key"
-        :label="option.label"
-        :value="option.key"
-      />
-    </el-select>
-    <el-switch
+    />
+    <q-toggle
       v-else-if="type === 'boolean'"
       :model-value="Boolean(modelValue)"
       :disabled="businessField?.read_only"
+      :label="label"
       @update:model-value="update"
     />
-    <el-input-number
+    <q-input
       v-else-if="type === 'integer' || type === 'number'"
       :model-value="typeof modelValue === 'number' ? modelValue : undefined"
-      :step="type === 'integer' ? 1 : 0.1"
+      type="number"
+      :label="label"
+      outlined
+      dense
+      :step="type === 'integer' ? '1' : '0.1'"
       :min="numericMinimum"
       :max="numericMaximum"
       :disabled="businessField?.read_only"
-      controls-position="right"
-      @update:model-value="update"
+      @update:model-value="updateNumber"
     />
-    <el-date-picker
+    <q-input
       v-else-if="businessField?.widget === 'date_time'"
       :model-value="dateValue"
-      type="datetime"
-      value-format="YYYY-MM-DDTHH:mm:ss"
+      type="datetime-local"
+      :label="label"
+      outlined
+      dense
       :disabled="businessField.read_only"
       @update:model-value="update"
     />
-    <el-input
+    <q-input
       v-else-if="!isJson"
       :model-value="
         typeof modelValue === 'string' ? modelValue : String(modelValue ?? '')
       "
       :type="inputType"
+      :label="label"
+      outlined
+      dense
       :rows="businessField?.widget === 'textarea' ? 4 : undefined"
       :maxlength="resolved.maxLength ?? businessField?.validation?.max_length"
       :disabled="businessField?.read_only"
-      :show-password="inputType === 'password'"
       clearable
       @update:model-value="update"
     />
-    <el-input
+    <q-input
       v-else
       v-model="jsonDraft"
       type="textarea"
+      :label="label"
+      outlined
+      dense
       :rows="6"
-      resize="vertical"
       :disabled="businessField?.read_only"
+      :error="Boolean(jsonError)"
+      :error-message="jsonError"
       @blur="commitJson"
     />
     <div
@@ -235,5 +261,5 @@ function selectFiles(event: Event) {
     >
       {{ description || businessField?.description || resolved.description }}
     </div>
-  </el-form-item>
+  </div>
 </template>

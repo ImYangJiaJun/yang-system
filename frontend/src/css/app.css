@@ -20,7 +20,7 @@
 html,
 body,
 #app {
-  min-width: 1040px;
+  min-width: 320px;
   min-height: 100%;
   margin: 0;
 }
@@ -36,17 +36,17 @@ textarea {
 }
 
 .app-header {
-  height: 72px;
-  padding: 0 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
   color: #f8fbff;
   background: linear-gradient(115deg, #13213d 0%, #1a365d 54%, #176b87 100%);
   box-shadow: 0 8px 24px rgb(20 39 69 / 18%);
   position: relative;
   z-index: 2;
+}
+
+.app-toolbar {
+  min-height: 72px;
+  padding: 0 24px;
+  gap: 14px;
 }
 
 .brand,
@@ -101,17 +101,17 @@ textarea {
   gap: 10px;
 }
 
+.session-settings .q-field {
+  flex: 1;
+}
+
 .tenant-input {
   max-width: 180px;
 }
 
-.workspace {
-  min-height: calc(100vh - 72px);
-}
-
 .action-sidebar {
+  height: 100%;
   background: #fff;
-  border-right: 1px solid #dfe7f1;
 }
 
 .sidebar-tools {
@@ -127,7 +127,7 @@ textarea {
 }
 
 .action-list {
-  height: calc(100vh - 151px);
+  height: calc(100% - 154px);
 }
 
 .action-item {
@@ -171,6 +171,7 @@ textarea {
 }
 
 .main-panel {
+  min-height: calc(100vh - 72px);
   padding: 28px;
 }
 
@@ -235,12 +236,17 @@ textarea {
 .schema-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 18px;
+  gap: 18px;
 }
 
-.schema-form .el-textarea,
-.schema-form .el-form-item:has(.field-help) {
+.schema-field:has(textarea),
+.schema-field:has(.field-help) {
   grid-column: 1 / -1;
+}
+
+.schema-field > .q-field,
+.schema-field > .relation-select {
+  width: 100%;
 }
 
 .field-help {
@@ -289,6 +295,21 @@ textarea {
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.redirect-result,
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #6c788b;
+  text-align: center;
+}
+
+.redirect-result {
+  min-height: 150px;
 }
 
 .error-panel {
@@ -362,12 +383,16 @@ textarea {
 }
 
 .table-pagination {
+  display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 14px;
   margin-top: 18px;
+  color: #657187;
 }
 
 .relation-select,
-.relation-select .el-select {
+.relation-select .q-field {
   width: 100%;
 }
 
@@ -384,6 +409,13 @@ textarea {
   background: #f8fafc;
   border: 1px dashed #b7c5d8;
   border-radius: 9px;
+}
+
+.upload-label {
+  display: block;
+  margin-bottom: 10px;
+  color: #49566a;
+  font-weight: 600;
 }
 
 .upload-control small {
@@ -403,6 +435,36 @@ textarea {
     linear-gradient(135deg, #112038, #153b55 58%, #0e5d68);
   border-radius: 22px;
   box-shadow: 0 22px 60px rgb(10 35 55 / 24%);
+}
+
+.action-dialog-card {
+  width: min(720px, 86vw);
+  max-width: 86vw;
+}
+
+.action-dialog-content {
+  max-height: 68vh;
+}
+
+.page-size-select {
+  width: 116px;
+}
+
+.empty-state {
+  min-height: 180px;
+  padding: 24px;
+}
+
+.main-empty-state {
+  min-height: calc(100vh - 140px);
+}
+
+.form-empty-state {
+  min-height: 120px;
+}
+
+.table-row-actions {
+  white-space: nowrap;
 }
 
 .custom-insight-heading {
@@ -463,5 +525,46 @@ textarea {
   .operation-id {
     display: inline-block;
     margin-top: 14px;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-toolbar {
+    padding: 8px 12px;
+  }
+
+  .brand small,
+  .session-settings .tenant-input {
+    display: none;
+  }
+
+  .session-settings {
+    width: auto;
+    flex: 1;
+  }
+
+  .main-panel {
+    padding: 12px;
+  }
+
+  .action-demo,
+  .table-view {
+    padding: 20px 16px;
+    border-radius: 12px;
+  }
+
+  .schema-form,
+  .insight-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .table-view-heading,
+  .custom-insight-heading {
+    display: block;
+  }
+
+  .view-actions {
+    margin-top: 16px;
+    flex-wrap: wrap;
   }
 }
