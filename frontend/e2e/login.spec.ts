@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("账号密码登录后保存会话并进入工作台", async ({ page }) => {
+test("账号密码登录后保存会话并进入正式控制台", async ({ page }) => {
   await page.route("**/api/v1/users/login", async (route) => {
     expect(route.request().postDataJSON()).toEqual({
       username: "alice",
@@ -21,12 +21,13 @@ test("账号密码登录后保存会话并进入工作台", async ({ page }) => 
   });
 
   await page.goto("/login");
-  await page.getByLabel("用户名").fill("alice");
+  await page.getByLabel("帐号").fill("alice");
   await page.getByLabel("密码").fill("correct-password");
   await page.getByRole("button", { name: "登录" }).click();
 
   await expect(page).toHaveURL("/");
-  await expect(page.getByRole("button", { name: "退出" })).toBeVisible();
+  await page.getByRole("button", { name: "账号菜单" }).click();
+  await expect(page.getByRole("button", { name: "退出帐号" })).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
     .toBe("access-token");
@@ -42,7 +43,7 @@ test("登录失败时停留在登录页且不保存凭据", async ({ page }) => 
   );
 
   await page.goto("/login");
-  await page.getByLabel("用户名").fill("alice");
+  await page.getByLabel("帐号").fill("alice");
   await page.getByLabel("密码").fill("wrong-password");
   await page.getByRole("button", { name: "登录" }).click();
 

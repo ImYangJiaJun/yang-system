@@ -155,14 +155,6 @@ export const useCatalogStore = defineStore("catalog", () => {
     void loadCatalog();
   }
 
-  function stopPendingRequests() {
-    activeRequest?.controller.abort();
-    activeRequest = undefined;
-    loading.value = false;
-    if (sessionReloadTimer !== undefined)
-      window.clearTimeout(sessionReloadTimer);
-  }
-
   return {
     token,
     tenantId,
@@ -182,6 +174,5 @@ export const useCatalogStore = defineStore("catalog", () => {
     clearSession,
     loadCatalog,
     start,
-    stopPendingRequests,
   };
 });

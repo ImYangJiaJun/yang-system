@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test("后端新增 Action 后默认页面可发现、填参、真实调用并展示结果", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("/workbench");
 
   await page
     .locator(".navigation-mode")
@@ -23,7 +23,7 @@ test("后端新增 Action 后默认页面可发现、填参、真实调用并展
 });
 
 test("下载、预览和重定向按声明的响应通道安全展示", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/workbench");
   await page
     .locator(".navigation-mode")
     .getByText("接口演示", { exact: true })
@@ -52,7 +52,7 @@ test("下载、预览和重定向按声明的响应通道安全展示", async ({
 });
 
 test("multipart Action 生成受限文件表单并真实上传", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/workbench");
   await page
     .locator(".navigation-mode")
     .getByText("接口演示", { exact: true })
@@ -74,7 +74,7 @@ test("身份或租户切换会重新获取请求级目录", async ({ page }) => 
     if (request.url().includes("/.well-known/yang/ui-catalog"))
       catalogRequests += 1;
   });
-  await page.goto("/");
+  await page.goto("/workbench");
   await expect.poll(() => catalogRequests).toBeGreaterThanOrEqual(1);
   const initialRequests = catalogRequests;
 

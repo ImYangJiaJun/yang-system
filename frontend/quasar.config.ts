@@ -28,6 +28,14 @@ export default defineConfig(() => ({
   },
   framework: {
     config: {
+      brand: {
+        primary: "#004976",
+        secondary: "#26a69a",
+        accent: "#9c27b0",
+        positive: "#3f9667",
+        negative: "#b7312c",
+        warning: "#bd862f",
+      },
       notify: { position: "top-right", timeout: 2500 },
     },
     lang: "zh-CN",

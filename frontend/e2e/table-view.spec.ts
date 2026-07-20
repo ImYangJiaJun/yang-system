@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test("TableView 自动完成树、搜索、排序、关系表单和真实新增", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("/workbench");
 
   await expect(page.getByText("1 Views")).toBeVisible();
   await expect(page.getByRole("heading", { name: "项目目录" })).toBeVisible();
@@ -27,7 +27,7 @@ test("TableView 自动完成树、搜索、排序、关系表单和真实新增"
 });
 
 test("行操作按 presentation 执行表单编辑与确认删除", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/workbench");
 
   const row = page.getByRole("row", { name: /通用渲染器/ });
   await row.getByRole("button", { name: "编辑项目" }).click();
@@ -43,7 +43,7 @@ test("行操作按 presentation 执行表单编辑与确认删除", async ({ pag
 });
 
 test("静态 view_id 覆盖通用页并可返回", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/workbench");
 
   await page.getByRole("button", { name: "项目洞察" }).click();
   await expect(

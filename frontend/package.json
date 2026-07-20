@@ -1,8 +1,8 @@
 {
   "name": "yang-system-frontend",
   "version": "0.1.0",
-  "description": "YANG 生态契约驱动前端",
-  "productName": "YANG 接口工作台",
+  "description": "YANG System 正式控制台与契约驱动开发工作台",
+  "productName": "YANG System",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.33.1",

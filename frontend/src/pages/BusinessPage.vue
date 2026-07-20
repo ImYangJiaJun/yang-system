@@ -1,29 +1,15 @@
 <script setup lang="ts">
-import { defineAsyncComponent, shallowRef, watch, type Component } from "vue";
+import { shallowRef, watch, type Component } from "vue";
 import { storeToRefs } from "pinia";
 import { useQuasar } from "quasar";
+import TableView from "components/table/TableView.vue";
 import type { ActionPresentationSchema } from "src/contracts/ui-catalog";
 import { resolveCustomView } from "src/custom/registry";
 import { useCatalogStore } from "stores/catalog";
 
-const ActionDemo = defineAsyncComponent(
-  () => import("components/action/ActionDemo.vue"),
-);
-const TableView = defineAsyncComponent(
-  () => import("components/table/TableView.vue"),
-);
-
 const $q = useQuasar();
 const store = useCatalogStore();
-const {
-  catalog,
-  error,
-  loading,
-  navigationMode,
-  selectedAction,
-  selectedView,
-  session,
-} = storeToRefs(store);
+const { catalog, error, loading, selectedView, session } = storeToRefs(store);
 const customLoading = shallowRef(false);
 const customComponent = shallowRef<Component>();
 const customPresentation = shallowRef<ActionPresentationSchema>();
@@ -33,7 +19,7 @@ async function openCustomAction(presentation: ActionPresentationSchema) {
   if (!loader) {
     $q.notify({
       type: "warning",
-      message: `自定义页面 ${presentation.view_id ?? "未声明"} 未注册，已保留通用 TableView`,
+      message: `自定义页面 ${presentation.view_id ?? "未声明"} 未注册，已保留通用业务页`,
     });
     return;
   }
@@ -46,7 +32,7 @@ async function openCustomAction(presentation: ActionPresentationSchema) {
     customPresentation.value = undefined;
     $q.notify({
       type: "negative",
-      message: `自定义页面加载失败，已回退通用 TableView：${
+      message: `自定义页面加载失败，已回退通用业务页：${
         cause instanceof Error ? cause.message : String(cause)
       }`,
     });
@@ -55,20 +41,25 @@ async function openCustomAction(presentation: ActionPresentationSchema) {
   }
 }
 
-watch(session, () => {
+watch([session, selectedView], () => {
   customComponent.value = undefined;
   customPresentation.value = undefined;
 });
 </script>
 
 <template>
-  <q-page class="main-panel relative-position">
+  <q-page padding class="business-page relative-position">
     <q-banner v-if="error" rounded class="bg-red-1 text-negative">
       <template #avatar><q-icon name="error" /></template>
       <strong>{{ error.message }}</strong>
-      <div v-if="error.details?.length" class="q-mt-xs">
-        {{ error.details.join("\n") }}
-      </div>
+      <template #action>
+        <q-btn
+          flat
+          color="negative"
+          label="重新加载"
+          @click="store.loadCatalog"
+        />
+      </template>
     </q-banner>
     <component
       :is="customComponent"
@@ -79,20 +70,22 @@ watch(session, () => {
       @close="customComponent = undefined"
     />
     <TableView
-      v-else-if="navigationMode === 'views' && selectedView && catalog"
+      v-else-if="selectedView && catalog"
       :view="selectedView"
       :actions="catalog.actions"
       :session="session"
       @custom-action="openCustomAction"
     />
-    <ActionDemo
-      v-else-if="navigationMode === 'actions' && selectedAction"
-      :action="selectedAction"
-      :session="session"
-    />
-    <div v-else-if="!loading" class="empty-state main-empty-state">
-      <q-icon name="inbox" size="54px" />
-      <span>后端目录中没有当前身份可访问的 Action</span>
+    <div v-else-if="!loading" class="business-empty">
+      <q-icon name="space_dashboard" size="52px" />
+      <h2>暂无可访问的业务页面</h2>
+      <p>请确认当前身份拥有页面权限，或稍后刷新后端目录。</p>
+      <q-btn
+        outline
+        color="primary"
+        label="刷新目录"
+        @click="store.loadCatalog"
+      />
     </div>
     <q-inner-loading :showing="loading || customLoading">
       <q-spinner-gears size="50px" color="primary" />

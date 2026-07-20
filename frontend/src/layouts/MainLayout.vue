@@ -1,20 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
-import { useRouter } from "vue-router";
-import { navigationOptions, useCatalogStore } from "stores/catalog";
+import { useRoute, useRouter } from "vue-router";
+import { useCatalogStore } from "stores/catalog";
 
 const drawerOpen = ref(true);
+const route = useRoute();
 const router = useRouter();
 const store = useCatalogStore();
 const {
-  actions,
   catalog,
+  error,
   loading,
-  navigationMode,
-  query,
-  selectedAction,
-  selectedOperationId,
   selectedView,
   selectedViewId,
   tenantId,
@@ -22,10 +19,14 @@ const {
   views,
 } = storeToRefs(store);
 
-const emptyMessage = computed(() =>
-  navigationMode.value === "views" ? "没有匹配的业务页面" : "没有匹配的 Action",
-);
 const loggedIn = computed(() => Boolean(token.value.trim()));
+const businessMode = computed(() => route.path === "/business");
+const catalogRevision = computed(() => catalog.value?.revision || "尚未加载");
+
+async function openBusinessView(viewId: string) {
+  selectedViewId.value = viewId;
+  await router.push("/business");
+}
 
 async function endSession() {
   store.clearSession();
@@ -36,9 +37,9 @@ store.start();
 </script>
 
 <template>
-  <q-layout view="hHh Lpr fFf" class="app-shell">
-    <q-header class="app-header">
-      <q-toolbar class="app-toolbar">
+  <q-layout view="hHh LpR fFf" class="formal-shell">
+    <q-header elevated class="formal-header">
+      <q-toolbar class="formal-toolbar">
         <q-btn
           flat
           dense
@@ -47,127 +48,144 @@ store.start();
           aria-label="切换导航"
           @click="drawerOpen = !drawerOpen"
         />
-        <div class="brand">
-          <span class="brand-mark">Y</span>
-          <div>
-            <strong>YANG 接口工作台</strong>
-            <small>后端注册即可演示，复杂场景允许覆盖</small>
-          </div>
-        </div>
+        <router-link to="/" class="formal-brand" aria-label="返回应用中心">
+          <strong>YANG System</strong>
+        </router-link>
+        <q-tabs
+          inline-label
+          stretch
+          shrink
+          active-color="white"
+          indicator-color="transparent"
+          class="formal-addon-tabs text-blue-grey-3"
+        >
+          <q-route-tab exact to="/" icon="apps" label="应用中心" />
+          <q-route-tab
+            v-if="views.length"
+            to="/business"
+            icon="business"
+            label="业务空间"
+          />
+          <q-route-tab to="/workbench" icon="terminal" label="开发工作台" />
+        </q-tabs>
         <q-space />
-        <div class="session-settings">
-          <q-input
-            v-model="tenantId"
-            dense
-            standout="bg-white text-dark"
-            placeholder="租户 ID（可选）"
-            clearable
-            class="tenant-input"
-          />
-          <q-btn
-            outline
-            color="white"
-            label="刷新目录"
-            :loading="loading"
-            @click="store.loadCatalog"
-          />
-          <q-btn
-            v-if="loggedIn"
-            flat
-            color="white"
-            label="退出"
-            @click="endSession"
-          />
-          <q-btn
-            v-else
-            unelevated
-            color="white"
-            text-color="primary"
-            label="登录"
-            to="/login"
-          />
-        </div>
+        <q-btn v-if="loggedIn" flat round dense aria-label="账号菜单">
+          <q-avatar size="32px" color="white" text-color="primary">Y</q-avatar>
+          <q-menu fit :offset="[0, 10]" class="account-menu">
+            <q-card flat>
+              <q-card-section class="text-center q-pb-sm">
+                <q-avatar size="56px" color="primary" text-color="white"
+                  >Y</q-avatar
+                >
+                <div class="text-subtitle1 text-weight-medium q-mt-sm">
+                  YANG 用户
+                </div>
+                <div class="text-caption text-grey-7">已建立安全会话</div>
+              </q-card-section>
+              <q-separator inset />
+              <q-card-section>
+                <q-input
+                  v-model="tenantId"
+                  dense
+                  outlined
+                  clearable
+                  label="企业租户 ID"
+                  hint="切换后自动刷新可访问目录"
+                />
+              </q-card-section>
+              <q-separator inset />
+              <q-card-actions align="center">
+                <q-btn
+                  flat
+                  color="negative"
+                  icon="logout"
+                  label="退出帐号"
+                  @click="endSession"
+                />
+              </q-card-actions>
+            </q-card>
+          </q-menu>
+        </q-btn>
+        <q-btn
+          v-else
+          flat
+          color="white"
+          icon="login"
+          label="登录"
+          to="/login"
+        />
       </q-toolbar>
     </q-header>
 
-    <q-drawer v-model="drawerOpen" show-if-above bordered :width="320">
-      <aside class="action-sidebar">
-        <div class="sidebar-tools">
-          <q-option-group
-            v-model="navigationMode"
-            :options="navigationOptions"
-            type="radio"
-            inline
-            dense
-            color="primary"
-            class="navigation-mode"
-          />
-          <q-input
-            v-model="query"
-            dense
-            outlined
-            clearable
-            :placeholder="
-              navigationMode === 'views'
-                ? '搜索业务页面'
-                : '搜索 Action、路径或说明'
-            "
+    <q-drawer
+      v-if="businessMode"
+      v-model="drawerOpen"
+      show-if-above
+      :width="200"
+      class="formal-drawer"
+    >
+      <aside class="formal-navigation">
+        <q-list padding class="formal-nav-list">
+          <q-item
+            v-ripple
+            clickable
+            exact
+            to="/"
+            active-class="formal-nav-active"
           >
-            <template #prepend><q-icon name="search" /></template>
-          </q-input>
-          <div class="catalog-meta">
-            <span v-if="navigationMode === 'views'">
-              {{ catalog?.table_views.length ?? 0 }} Views
-            </span>
-            <span v-else>{{ catalog?.actions.length ?? 0 }} Actions</span>
-            <q-badge v-if="catalog" outline color="primary">
-              schema {{ catalog.schema_version }}
-            </q-badge>
+            <q-item-section avatar
+              ><q-icon name="space_dashboard"
+            /></q-item-section>
+            <q-item-section>
+              <q-item-label>控制台</q-item-label>
+            </q-item-section>
+          </q-item>
+
+          <q-item-label header class="formal-nav-heading"
+            >业务菜单</q-item-label
+          >
+          <q-item
+            v-for="view in views"
+            :key="view.view_id"
+            v-ripple
+            clickable
+            :active="
+              route.path === '/business' &&
+              selectedView?.view_id === view.view_id
+            "
+            active-class="formal-nav-active"
+            @click="openBusinessView(view.view_id)"
+          >
+            <q-item-section avatar><q-icon name="view_list" /></q-item-section>
+            <q-item-section>
+              <q-item-label>{{ view.title || view.table }}</q-item-label>
+            </q-item-section>
+          </q-item>
+          <q-item v-if="loading" class="nav-loading">
+            <q-item-section avatar
+              ><q-spinner color="primary" size="22px"
+            /></q-item-section>
+            <q-item-section>正在加载业务目录</q-item-section>
+          </q-item>
+          <q-item v-else-if="!views.length" class="nav-empty">
+            <q-item-section avatar><q-icon name="inbox" /></q-item-section>
+            <q-item-section>
+              <q-item-label>暂无业务页面</q-item-label>
+              <q-item-label caption>{{
+                error?.message || "后端尚未投影可访问页面"
+              }}</q-item-label>
+            </q-item-section>
+          </q-item>
+        </q-list>
+
+        <div class="formal-drawer-footer">
+          <span>目录版本</span>
+          <code>{{ catalogRevision }}</code>
+          <div class="drawer-status">
+            <span class="status-dot" :class="{ online: Boolean(catalog) }" />
+            {{ catalog ? "目录已连接" : "等待目录" }}
           </div>
         </div>
-
-        <q-scroll-area class="action-list">
-          <button
-            v-for="view in navigationMode === 'views' ? views : []"
-            :key="view.view_id"
-            type="button"
-            class="action-item"
-            :class="{ active: selectedView?.view_id === view.view_id }"
-            @click="selectedViewId = view.view_id"
-          >
-            <span class="action-item-title">{{
-              view.title || view.table
-            }}</span>
-            <code>{{ view.view_id }} · {{ view.columns.length }} columns</code>
-          </button>
-          <button
-            v-for="action in navigationMode === 'actions' ? actions : []"
-            :key="action.operation_id"
-            type="button"
-            class="action-item"
-            :class="{
-              active: selectedAction?.operation_id === action.operation_id,
-            }"
-            @click="selectedOperationId = action.operation_id"
-          >
-            <span class="action-item-title">
-              {{ action.title || action.operation_id }}
-            </span>
-            <code>{{ action.method }} {{ action.path }}</code>
-          </button>
-          <div
-            v-if="
-              !loading &&
-              (navigationMode === 'views'
-                ? views.length === 0
-                : actions.length === 0)
-            "
-            class="empty-state"
-          >
-            <q-icon name="search_off" size="40px" />
-            <span>{{ emptyMessage }}</span>
-          </div>
-        </q-scroll-area>
       </aside>
     </q-drawer>
 
