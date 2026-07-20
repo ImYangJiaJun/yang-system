@@ -1,15 +1,24 @@
 //! 企业 Addon 的公开组装入口。
 
 mod access;
+mod grants;
 mod organization;
 mod pagination;
 mod tenant;
 mod user;
 
 use crate::modules::account;
+use crate::modules::account::GrantResolver;
+use grants::OrgGrantResolver;
+use std::sync::Arc;
 use yang_base::action::{TenantResolverMiddleware, TokenAuthMiddleware};
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
+
+/// 返回企业账号域的 Token 授权解析器。
+pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {
+    Arc::new(OrgGrantResolver)
+}
 
 /// 构建企业 Addon。
 ///
@@ -40,7 +49,8 @@ pub fn build_addon() -> Result<AddonSpec, BaseError> {
         .middleware(TenantResolverMiddleware::new(resolver.clone()));
     let members = members
         .middleware(TokenAuthMiddleware::new(account::user_from_claims))
-        .middleware(TenantResolverMiddleware::new(resolver));
+        .middleware(TenantResolverMiddleware::new(resolver))
+        .middleware(user::OrgAdminGuardMiddleware::new());
 
     Ok(AddonSpec::new(yang_base::addon!("org"))
         .depends_on(yang_base::addon!("account"))

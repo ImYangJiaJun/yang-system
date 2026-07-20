@@ -8,7 +8,7 @@ use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
-pub(crate) use grants::{AuthorizationGrants, GrantResolver};
+pub(crate) use grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
 pub(crate) use user::user_from_claims;
 
 /// 构建账号 Addon。

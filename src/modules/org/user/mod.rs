@@ -1,6 +1,9 @@
 //! `org.user` Module：企业成员关系定义。
 
+mod guard;
 mod view;
+
+pub(super) use guard::OrgAdminGuardMiddleware;
 
 use yang_base::definition::{
     Fields, Module, ModuleName, ModuleSpec, Radio, Str, Switch, Table, TableName, TableSpec,

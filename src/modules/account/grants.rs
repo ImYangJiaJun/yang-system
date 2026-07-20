@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
 
@@ -63,9 +64,50 @@ pub trait GrantResolver: Send + Sync + 'static {
     ) -> Result<AuthorizationGrants, BaseError>;
 }
 
+/// 依次执行多个外围领域解析器，并合并为一份稳定、去重的授权快照。
+pub(crate) struct CompositeGrantResolver {
+    resolvers: Vec<Arc<dyn GrantResolver>>,
+}
+
+impl CompositeGrantResolver {
+    pub(crate) fn new(resolvers: Vec<Arc<dyn GrantResolver>>) -> Self {
+        Self { resolvers }
+    }
+}
+
+#[async_trait]
+impl GrantResolver for CompositeGrantResolver {
+    async fn resolve(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+    ) -> Result<AuthorizationGrants, BaseError> {
+        let mut grants = AuthorizationGrants::default();
+        for resolver in &self.resolvers {
+            grants = grants.extend(resolver.resolve(ctx, user_id).await?);
+        }
+        Ok(grants)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yang_base::action::Request;
+    use yang_base::tools::ToolsBuilder;
+
+    struct FixedGrantResolver(AuthorizationGrants);
+
+    #[async_trait]
+    impl GrantResolver for FixedGrantResolver {
+        async fn resolve(
+            &self,
+            _ctx: &ActionContext,
+            _user_id: i64,
+        ) -> Result<AuthorizationGrants, BaseError> {
+            Ok(self.0.clone())
+        }
+    }
 
     #[test]
     fn grants_are_deduplicated_and_stably_ordered() {
@@ -79,6 +121,37 @@ mod tests {
         assert_eq!(
             grants.permissions().collect::<Vec<_>>(),
             ["admin.user:read", "org.org:read", "org.user:read"]
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_resolver_merges_every_domain_without_duplicates() {
+        let tools = ToolsBuilder::new()
+            .build()
+            .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}"));
+        let context = ActionContext::new(Request::new(serde_json::json!({})), Arc::new(tools));
+        let resolver = CompositeGrantResolver::new(vec![
+            Arc::new(FixedGrantResolver(
+                AuthorizationGrants::default()
+                    .role("admin")
+                    .permission("admin.user:write"),
+            )),
+            Arc::new(FixedGrantResolver(
+                AuthorizationGrants::default()
+                    .role("org_admin")
+                    .permission("admin.user:write")
+                    .permission("org.user:write"),
+            )),
+        ]);
+
+        let grants = resolver
+            .resolve(&context, 7)
+            .await
+            .unwrap_or_else(|error| panic!("组合授权应解析成功: {error}"));
+        assert_eq!(grants.roles().collect::<Vec<_>>(), ["admin", "org_admin"]);
+        assert_eq!(
+            grants.permissions().collect::<Vec<_>>(),
+            ["admin.user:write", "org.user:write"]
         );
     }
 }
