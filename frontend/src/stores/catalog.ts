@@ -166,7 +166,7 @@ export const useCatalogStore = defineStore("catalog", () => {
 
   async function loadOrganizations() {
     const action = catalog.value?.actions.find(
-      (candidate) => candidate.operation_id === "org.access.list",
+      (candidate) => candidate.operation_id === "org.tenant.list",
     );
     if (!token.value || !action) {
       organizations.value = [];

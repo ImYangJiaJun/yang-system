@@ -107,7 +107,7 @@ describe("catalog store", () => {
   it("通过我的企业 Action 加载名称选项并隐藏内部租户输入", async () => {
     const store = useCatalogStore();
     store.token = "access-token";
-    store.catalog = catalog("c".repeat(64), "org.access.list");
+    store.catalog = catalog("c".repeat(64), "org.tenant.list");
     invokeActionMock.mockResolvedValue({
       kind: "json",
       status: 200,

@@ -102,7 +102,7 @@ const columns = computed<QTableColumn[]>(() => {
     sortable: true,
     format: (value) => formatValue(key, value),
   }));
-  if (rowActions.value.length || modulePage.value?.id === "org.access") {
+  if (rowActions.value.length || modulePage.value?.id === "org.tenant") {
     values.push({
       name: "actions",
       label: "操作",
@@ -223,7 +223,7 @@ function refreshFromFirstPage() {
 
 function handleCompleted() {
   void loadPrimary();
-  if (modulePage.value?.id === "org.access") {
+  if (modulePage.value?.id === "org.tenant") {
     void store.loadOrganizations();
   }
 }
@@ -330,7 +330,7 @@ onBeforeUnmount(() => controller?.abort());
           <template #body-cell-actions="props">
             <q-td :props="props">
               <q-btn
-                v-if="modulePage.id === 'org.access'"
+                v-if="modulePage.id === 'org.tenant'"
                 flat
                 dense
                 color="primary"

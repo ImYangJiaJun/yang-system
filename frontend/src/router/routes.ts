@@ -31,7 +31,7 @@ const routes: RouteRecordRaw[] = [
           const modules: Record<string, string> = {
             user: "account.user",
             admin: "admin.user",
-            org: "org.access",
+            org: "org.tenant",
           };
           return `/module/${modules[String(route.params.space)] ?? "account.user"}`;
         },

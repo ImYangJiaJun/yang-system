@@ -15,14 +15,29 @@ function action(
           : {}),
       }
     : {};
+  const createProperties =
+    operationId === "org.tenant.create"
+      ? {
+          name: { type: "string", title: "企业名称" },
+          code: { type: "string", title: "企业编号" },
+        }
+      : {};
   return {
     operation_id: operationId,
     title,
     description,
     method,
-    path: `/api/v1/${operationId.replaceAll(".", "/")}`,
+    path: operationId.startsWith("org.tenant.")
+      ? "/api/v1/tenants"
+      : `/api/v1/${operationId.replaceAll(".", "/")}`,
     params: [],
-    input_schema: { type: "object", properties: listProperties },
+    input_schema: {
+      type: "object",
+      properties: { ...listProperties, ...createProperties },
+      ...(operationId === "org.tenant.create"
+        ? { required: ["name", "code"] }
+        : {}),
+    },
     output_schema: { type: "object" },
     request_media_type: "json",
     response_kind: "json",
@@ -57,7 +72,8 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
     action("account.user.me", "当前用户", "查看当前登录账号"),
     action("admin.user.list", "平台账号列表", "分页查看平台账号"),
     action("admin.user.add", "添加平台账号", "创建平台账号", "POST"),
-    action("org.access.list", "我的企业", "查看当前账号加入的企业"),
+    action("org.tenant.list", "我的企业", "查看当前账号加入的企业"),
+    action("org.tenant.create", "创建企业", "创建新的企业账户", "POST"),
   ]);
   await page.route("**/api/v1/admin/user/list**", (route) =>
     route.fulfill({
@@ -104,8 +120,22 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
       }),
     }),
   );
-  await page.route("**/api/v1/org/access/list**", (route) =>
-    route.fulfill({
+  let createdOrganization: unknown;
+  await page.route("**/api/v1/tenants**", async (route) => {
+    if (route.request().method() === "POST") {
+      createdOrganization = route.request().postDataJSON();
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: 0,
+          message: "成功",
+          data: { id: 24, name: "新企业", code: "NEWCO" },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
@@ -119,8 +149,8 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
           total_pages: 1,
         },
       }),
-    }),
-  );
+    });
+  });
 
   await page.goto("/");
 
@@ -129,7 +159,7 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
   await expect(page.getByRole("tab", { name: "企业账户" })).toBeVisible();
   await expect(page.getByTestId("module-page-account.user")).toBeVisible();
   await expect(page.getByTestId("module-page-admin.user")).toHaveCount(0);
-  await expect(page.getByTestId("module-page-org.access")).toHaveCount(0);
+  await expect(page.getByTestId("module-page-org.tenant")).toHaveCount(0);
 
   await page.getByRole("tab", { name: "管理平台" }).click();
   await expect(page).toHaveURL("/module/admin.user");
@@ -149,7 +179,7 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
   await page.getByRole("tab", { name: "应用中心" }).click();
   await expect(page.getByTestId("module-page-admin.user")).toBeVisible();
   await expect(page.getByTestId("module-page-account.user")).toHaveCount(0);
-  await expect(page.getByTestId("module-page-org.access")).toHaveCount(0);
+  await expect(page.getByTestId("module-page-org.tenant")).toHaveCount(0);
 
   await page.getByRole("button", { name: "账号菜单" }).click();
   const accountMenu = page.locator(".account-switcher-menu");
@@ -170,13 +200,25 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
 
   await page.getByRole("button", { name: "账号菜单" }).click();
   await accountMenu.getByText("示例企业", { exact: true }).click();
-  await expect(page).toHaveURL("/module/org.access");
+  await expect(page).toHaveURL("/module/org.tenant");
   await expect(
     page.getByText("示例企业", { exact: true }).first(),
   ).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => sessionStorage.getItem("yang.tenant-id")))
     .toBe("23");
+
+  await page.getByRole("button", { name: "创建企业" }).click();
+  const createDialog = page.getByRole("dialog");
+  await createDialog.getByLabel("企业名称").fill("新企业");
+  await createDialog.getByLabel("企业编号").fill("NEWCO");
+  await createDialog.getByRole("button", { name: "创建企业" }).click();
+  await expect
+    .poll(() => createdOrganization)
+    .toEqual({
+      name: "新企业",
+      code: "NEWCO",
+    });
 });
 
 test("直接访问未授权 Module 页面时保持 fail-closed", async ({ page }) => {

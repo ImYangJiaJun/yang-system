@@ -55,7 +55,7 @@ python scripts/new_action.py src/modules/org/organization/actions archive `
 |---|---|---|
 | `account.user` | 用户中心 | 个人账户 |
 | `admin.user` | 平台账号 | 管理平台 |
-| `org.access` | 我的企业 | 企业账户 |
+| `org.tenant` | 我的企业 | 企业账户 |
 | `org.org` | 企业资料 | 企业账户 |
 | `org.user` | 企业成员 | 企业账户 |
 
@@ -64,7 +64,7 @@ python scripts/new_action.py src/modules/org/organization/actions archive `
 模块和操作不会出现在前端；直接访问无权模块时同样 fail-closed。
 
 右上角账号菜单对应 BR 的 `user/admin/org` 账号模型。企业身份从
-`org.access.list` 加载当前用户可访问的企业名称，选择企业后由前端保存其内部
+`org.tenant.list` 加载当前用户可访问的企业名称，选择企业后由前端保存其内部
 tenant ID 并重新加载 Catalog；用户无需看到或手动输入企业 ID。
 
 本地联调前端：

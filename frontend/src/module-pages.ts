@@ -47,7 +47,7 @@ const knownModules: readonly KnownModule[] = [
     icon: "admin_panel_settings",
   },
   {
-    id: "org.access",
+    id: "org.tenant",
     identity: "org",
     title: "我的企业",
     description: "选择已有企业或创建新的企业账户。",

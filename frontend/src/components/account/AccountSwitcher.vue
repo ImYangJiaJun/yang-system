@@ -60,13 +60,13 @@ async function switchOrganization(organization: OrganizationSummary) {
   store.selectAccountIdentity("org");
   store.selectOrganization(organization);
   menuOpen.value = false;
-  await router.push("/module/org.access");
+  await router.push("/module/org.tenant");
 }
 
 async function openOrganizationManagement() {
   store.selectAccountIdentity("org");
   menuOpen.value = false;
-  await router.push("/module/org.access");
+  await router.push("/module/org.tenant");
 }
 
 watch(menuOpen, (open) => {

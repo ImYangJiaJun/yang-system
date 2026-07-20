@@ -51,8 +51,8 @@ function catalog(): UiCatalog {
       action("account.user.logout"),
       action("admin.user.list"),
       action("admin.user.add"),
-      action("org.access.list"),
-      action("org.access.create"),
+      action("org.tenant.list"),
+      action("org.tenant.create"),
       action("org.org.list"),
       action("org.user.select"),
     ],
@@ -67,7 +67,7 @@ describe("module pages", () => {
     expect(pages.map((page) => page.id)).toEqual([
       "account.user",
       "admin.user",
-      "org.access",
+      "org.tenant",
       "org.org",
       "org.user",
     ]);
