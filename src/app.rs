@@ -15,7 +15,10 @@ pub fn build_app(
 ) -> anyhow::Result<Application> {
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     let runtime = AppBuilder::new()
-        .addon(account::build_addon(security).context("构建 account Addon 失败")?)
+        .addon(
+            account::build_addon(security, admin::grant_resolver())
+                .context("构建 account Addon 失败")?,
+        )
         .addon(admin::build_addon().context("构建 admin Addon 失败")?)
         .addon(org::build_addon().context("构建 org Addon 失败")?)
         .build(tools)

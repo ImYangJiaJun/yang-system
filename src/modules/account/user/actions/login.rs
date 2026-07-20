@@ -1,4 +1,3 @@
-use super::super::claims::claims_for_user;
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -23,7 +22,8 @@ impl CredentialVerifier for UserCredentialVerifier {
             .service
             .authenticate(ctx, &input.username, &input.password)
             .await?;
-        Ok(VerifiedSubject::new(user.id.to_string()).with_claims(claims_for_user(&user.username)?))
+        let claims = self.service.claims_for(ctx, &user).await?;
+        Ok(VerifiedSubject::new(user.id.to_string()).with_claims(claims))
     }
 }
 

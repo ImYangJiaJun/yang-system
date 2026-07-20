@@ -1,13 +1,12 @@
 //! Token Claims 的唯一构造与可信用户投影。
 
+use crate::modules::account::AuthorizationGrants;
 use serde::{Deserialize, Serialize};
 use yang_base::action::User;
 use yang_base::token::TokenClaims;
 use yang_base::BaseError;
 
 const APP_CLAIMS_VERSION: u8 = 1;
-const USER_ROLE: &str = "user";
-const USER_PERMISSIONS: &[&str] = &["org.org:read", "org.user:read"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,15 +17,15 @@ struct AppClaims {
     permissions: Vec<String>,
 }
 
-pub(super) fn claims_for_user(username: &str) -> Result<serde_json::Value, BaseError> {
+pub(super) fn claims_for_user(
+    username: &str,
+    grants: &AuthorizationGrants,
+) -> Result<serde_json::Value, BaseError> {
     serde_json::to_value(AppClaims {
         version: APP_CLAIMS_VERSION,
         username: username.to_string(),
-        roles: vec![USER_ROLE.to_string()],
-        permissions: USER_PERMISSIONS
-            .iter()
-            .map(|permission| (*permission).to_string())
-            .collect(),
+        roles: grants.roles().map(str::to_string).collect(),
+        permissions: grants.permissions().map(str::to_string).collect(),
     })
     .map_err(|error| BaseError::Unknown(format!("构造用户 Token Claims 失败: {error}")))
 }
@@ -127,8 +126,8 @@ mod tests {
 
     #[test]
     fn login_and_refresh_share_the_same_claims_snapshot() {
-        let claims =
-            claims_for_user("alice").unwrap_or_else(|error| panic!("用户声明应可序列化: {error}"));
+        let claims = claims_for_user("alice", &AuthorizationGrants::user())
+            .unwrap_or_else(|error| panic!("用户声明应可序列化: {error}"));
         assert_eq!(claims["version"], APP_CLAIMS_VERSION);
         assert_eq!(claims["roles"], serde_json::json!(["user"]));
         assert_eq!(

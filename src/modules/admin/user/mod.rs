@@ -7,7 +7,6 @@ use yang_base::definition::{
 pub(super) const USER_ID: &str = "user_user";
 pub(super) const STATUS: &str = "status";
 pub(super) const IS_ADMIN: &str = "admin";
-pub(super) const BOOTSTRAP_KEY: &str = "bootstrap_key";
 pub(super) const ACTIVE_STATUS: &str = "active";
 const SYSTEM_ROLE: &str = "system";
 
@@ -85,7 +84,7 @@ mod tests {
             .iter()
             .any(|field| { field.name.as_str() == USER_ID && field.storage.unique }));
         assert!(table.fields.iter().any(|field| {
-            field.name.as_str() == BOOTSTRAP_KEY && field.storage.unique && field.access.secret
+            field.name.as_str() == "bootstrap_key" && field.storage.unique && field.access.secret
         }));
         for name in [USER_ID, STATUS, IS_ADMIN] {
             let field = table

@@ -10,6 +10,7 @@ mod schema;
 mod service;
 
 use crate::config::SecuritySettings;
+use crate::modules::account::GrantResolver;
 use password::PasswordEngine;
 use rate_limit::AuthRateLimiter;
 use repository::UserRepository;
@@ -24,12 +25,20 @@ pub(crate) use claims::user_from_claims;
 /// 构建用户 Module。
 ///
 /// 此处只聚合 Schema、共享服务、中间件和 Action 清单；具体业务实现留在对应文件中。
-pub(super) fn build_module(security: Arc<SecuritySettings>) -> Result<ModuleSpec, BaseError> {
+pub(super) fn build_module(
+    security: Arc<SecuritySettings>,
+    grant_resolver: Arc<dyn GrantResolver>,
+) -> Result<ModuleSpec, BaseError> {
     let table = schema::user_table_spec()?;
     let users = Arc::new(UserRepository::new(table.table_definition()?));
     let passwords = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
     let rate_limiter = Arc::new(AuthRateLimiter::new(&security));
-    let service = Arc::new(UserService::new(users, passwords, rate_limiter));
+    let service = Arc::new(UserService::new(
+        users,
+        passwords,
+        rate_limiter,
+        grant_resolver,
+    ));
     let module = ModuleSpec::new(
         ModuleName::new("account.user")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,

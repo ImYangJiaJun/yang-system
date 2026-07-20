@@ -1,4 +1,3 @@
-use super::super::claims::claims_for_user;
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -19,11 +18,8 @@ impl RefreshClaimsResolver for UserClaimsResolver {
         ctx: &ActionContext,
         subject: &str,
     ) -> Result<serde_json::Value, BaseError> {
-        let username = self
-            .service
-            .active_username_by_subject(ctx, subject)
-            .await?;
-        claims_for_user(&username)
+        let user = self.service.active_user_by_subject(ctx, subject).await?;
+        self.service.claims_for(ctx, &user).await
     }
 }
 

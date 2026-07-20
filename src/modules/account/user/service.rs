@@ -7,6 +7,7 @@ use super::policy::{normalize_username, validate_password};
 use super::rate_limit::{AuthOperation, AuthRateLimiter};
 use super::repository::UserRepository;
 use super::schema::{UserView, STATUS, USERNAME};
+use crate::modules::account::{AuthorizationGrants, GrantResolver};
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::Record;
@@ -22,6 +23,7 @@ pub(super) struct UserService {
     users: Arc<UserRepository>,
     passwords: Arc<PasswordEngine>,
     rate_limiter: Arc<AuthRateLimiter>,
+    grant_resolver: Arc<dyn GrantResolver>,
 }
 
 impl UserService {
@@ -29,11 +31,13 @@ impl UserService {
         users: Arc<UserRepository>,
         passwords: Arc<PasswordEngine>,
         rate_limiter: Arc<AuthRateLimiter>,
+        grant_resolver: Arc<dyn GrantResolver>,
     ) -> Self {
         Self {
             users,
             passwords,
             rate_limiter,
+            grant_resolver,
         }
     }
 
@@ -91,16 +95,29 @@ impl UserService {
         })
     }
 
-    pub(super) async fn active_username_by_subject(
+    pub(super) async fn active_user_by_subject(
         &self,
         ctx: &ActionContext,
         subject: &str,
-    ) -> Result<String, BaseError> {
+    ) -> Result<AuthenticatedUser, BaseError> {
         let id = subject
             .parse::<i64>()
             .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
         let user = self.active_record_by_id(ctx, id).await?;
-        user.require(USERNAME)
+        Ok(AuthenticatedUser {
+            id,
+            username: user.require(USERNAME)?,
+        })
+    }
+
+    pub(super) async fn claims_for(
+        &self,
+        ctx: &ActionContext,
+        user: &AuthenticatedUser,
+    ) -> Result<serde_json::Value, BaseError> {
+        let grants =
+            AuthorizationGrants::user().extend(self.grant_resolver.resolve(ctx, user.id).await?);
+        super::claims::claims_for_user(&user.username, &grants)
     }
 
     pub(super) async fn view_by_id(
