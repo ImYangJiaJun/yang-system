@@ -2,6 +2,38 @@
 
 `yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用，覆盖账号认证、Addon/Module、强类型 Action、Fields/Params、Tables、内部 Action 调用、租户上下文、Schema、Catalog、Registry 与 OpenAPI。
 
+## 本地环境
+
+推荐在 Windows PowerShell 7 中使用仓库提供的初始化脚本。必需工具为 Rustup、
+Python 3.11+、已启动的 Docker Desktop、Node.js 24+ 和 Corepack；脚本会安装仓库
+固定的 Rust 1.97.1 组件和 `package.json` 固定的 pnpm 10.33.1。
+
+从 `lib_yang` 仓库根目录执行：
+
+```powershell
+pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1
+```
+
+脚本会启动 Compose 中的 MySQL 8.0 与 Redis 7、等待健康检查、安装前端依赖，
+并仅在不存在时生成被 Git 忽略的 `config.toml`。已有本机配置不会被覆盖。
+只检查必需工具时使用：
+
+```powershell
+pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 -CheckOnly
+```
+
+依赖服务也可以在本目录手工管理：
+
+```powershell
+docker compose up -d --wait
+docker compose ps
+docker compose down
+```
+
+MySQL 监听 `127.0.0.1:3306`，Redis 监听 `127.0.0.1:6379`。普通停止会保留数据；
+`docker compose down -v` 会永久删除本地 MySQL 与 Redis 数据卷，只应在需要彻底
+重置开发数据时执行。
+
 ## 相对路径联合调试
 
 本项目是独立 Git/Cargo 项目，根 workspace 显式排除它。`Cargo.toml` 直接使用：
@@ -137,7 +169,18 @@ Addon/Module/fields!/params!
 
 ## 本地启动
 
-先创建数据库和 Redis；应用会创建缺失表和列，但不会创建数据库本身。
+初始化脚本执行完成后，启动后端：
+
+```powershell
+Set-Location project/yang-system
+cargo run --locked
+```
+
+后端位于 `http://127.0.0.1:8080`，存活与就绪检查分别位于
+`/health/live` 和 `/health/ready`。前端开发服务器位于 `http://127.0.0.1:5173`。
+
+需要手工配置时，先创建 MySQL 数据库和 Redis，再复制配置示例。应用会创建缺失
+表和列，但不会创建数据库本身。
 
 ```powershell
 Copy-Item config.example.toml config.toml

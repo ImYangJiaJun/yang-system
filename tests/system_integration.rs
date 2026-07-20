@@ -269,7 +269,6 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let member_id = member["id"].as_i64().context("成员注册响应缺少 id")?;
     let tenant_id = organization_id.to_string();
     let member_body = json!({
-        "org_org": organization_id,
         "user_user": member_id,
         "name": "Integration Member",
         "admin": false,
