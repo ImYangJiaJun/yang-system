@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const frontendPort = process.env.YANG_E2E_FRONTEND_PORT || "5173";
+const backendPort = process.env.YANG_E2E_BACKEND_PORT || "18080";
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
@@ -8,7 +11,7 @@ export default defineConfig({
   workers: 1,
   reporter: "list",
   use: {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL: `http://127.0.0.1:${frontendPort}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
@@ -16,20 +19,21 @@ export default defineConfig({
     {
       command: "cargo run --example frontend_demo",
       cwd: "..",
-      url: "http://127.0.0.1:18080/health/live",
+      url: `http://127.0.0.1:${backendPort}/health/live`,
       timeout: 180_000,
       reuseExistingServer: !process.env.CI,
       env: {
-        YANG_DEMO_BIND: "127.0.0.1:18080",
+        YANG_DEMO_BIND: `127.0.0.1:${backendPort}`,
       },
     },
     {
       command: "pnpm dev",
-      url: "http://127.0.0.1:5173",
+      url: `http://127.0.0.1:${frontendPort}`,
       timeout: 120_000,
       reuseExistingServer: !process.env.CI,
       env: {
-        VITE_PROXY_TARGET: "http://127.0.0.1:18080",
+        VITE_DEV_PORT: frontendPort,
+        VITE_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
       },
     },
   ],

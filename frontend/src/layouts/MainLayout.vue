@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
 import { navigationOptions, useCatalogStore } from "stores/catalog";
 
 const drawerOpen = ref(true);
+const router = useRouter();
 const store = useCatalogStore();
 const {
   actions,
@@ -23,6 +25,12 @@ const {
 const emptyMessage = computed(() =>
   navigationMode.value === "views" ? "没有匹配的业务页面" : "没有匹配的 Action",
 );
+const loggedIn = computed(() => Boolean(token.value.trim()));
+
+async function endSession() {
+  store.clearSession();
+  await router.push("/login");
+}
 
 store.start();
 </script>
@@ -56,20 +64,27 @@ store.start();
             clearable
             class="tenant-input"
           />
-          <q-input
-            v-model="token"
-            dense
-            standout="bg-white text-dark"
-            placeholder="Bearer Token（仅本会话）"
-            type="password"
-            clearable
-          />
           <q-btn
             outline
             color="white"
             label="刷新目录"
             :loading="loading"
             @click="store.loadCatalog"
+          />
+          <q-btn
+            v-if="loggedIn"
+            flat
+            color="white"
+            label="退出"
+            @click="endSession"
+          />
+          <q-btn
+            v-else
+            unelevated
+            color="white"
+            text-color="primary"
+            label="登录"
+            to="/login"
           />
         </div>
       </q-toolbar>

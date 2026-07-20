@@ -40,10 +40,13 @@ describe("login", () => {
       "fetch",
       vi.fn(
         async () =>
-          new Response(JSON.stringify({ code: 40101, message: "账号或密码错误" }), {
-            status: 401,
-            headers: { "content-type": "application/json" },
-          }),
+          new Response(
+            JSON.stringify({ code: 40101, message: "账号或密码错误" }),
+            {
+              status: 401,
+              headers: { "content-type": "application/json" },
+            },
+          ),
       ),
     );
 

@@ -73,4 +73,19 @@ describe("catalog store", () => {
     expect(store.loading).toBe(false);
     expect(store.catalog?.actions[0]?.operation_id).toBe("current");
   });
+
+  it("登录和退出立即同步当前会话", () => {
+    const store = useCatalogStore();
+
+    store.setAccessToken("access-token");
+    expect(store.token).toBe("access-token");
+    expect(sessionStorage.getItem("yang.token")).toBe("access-token");
+
+    store.tenantId = "tenant-7";
+    store.clearSession();
+    expect(store.token).toBe("");
+    expect(store.tenantId).toBe("");
+    expect(sessionStorage.getItem("yang.token")).toBeNull();
+    expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
+  });
 });

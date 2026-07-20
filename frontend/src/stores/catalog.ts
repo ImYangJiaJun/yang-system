@@ -129,6 +129,19 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   }
 
+  function setAccessToken(accessToken: string) {
+    token.value = accessToken;
+    sessionStorage.setItem("yang.token", accessToken);
+  }
+
+  function clearSession() {
+    token.value = "";
+    tenantId.value = "";
+    catalog.value = undefined;
+    sessionStorage.removeItem("yang.token");
+    sessionStorage.removeItem("yang.tenant-id");
+  }
+
   function start() {
     if (started) return;
     started = true;
@@ -165,6 +178,8 @@ export const useCatalogStore = defineStore("catalog", () => {
     views,
     selectedView,
     selectedAction,
+    setAccessToken,
+    clearSession,
     loadCatalog,
     start,
     stopPendingRequests,

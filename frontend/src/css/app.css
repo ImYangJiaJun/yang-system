@@ -35,6 +35,50 @@ textarea {
   min-height: 100vh;
 }
 
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 20% 10%, rgb(100 223 223 / 24%), transparent 32%),
+    linear-gradient(135deg, #13213d, #176b87);
+}
+
+.login-card {
+  width: min(420px, 100%);
+  padding: 28px;
+  border-radius: 18px;
+  box-shadow: 0 24px 70px rgb(6 24 44 / 32%);
+}
+
+.login-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 0 28px;
+}
+
+.login-heading h1,
+.login-heading p {
+  margin: 0;
+}
+
+.login-heading h1 {
+  color: #172033;
+  font-size: 24px;
+}
+
+.login-heading p {
+  margin-top: 5px;
+  color: #69758a;
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+}
+
 .app-header {
   color: #f8fbff;
   background: linear-gradient(115deg, #13213d 0%, #1a365d 54%, #176b87 100%);
