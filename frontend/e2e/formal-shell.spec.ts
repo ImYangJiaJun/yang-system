@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 
-test("正式控制台使用 BR 生态的应用中心与模块导航", async ({ page }) => {
+test("正式控制台只显示后端目录授权的 BR 模块导航", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "应用中心" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "应用中心" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "个人账户" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "业务空间" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "个人账户" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "管理平台" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "企业账户" })).toHaveCount(0);
   await expect(page.locator(".navigation-mode")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "开发工作台" })).toHaveCount(0);
 
