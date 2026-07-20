@@ -101,9 +101,16 @@ export function buildAccountModulePages(
 
 export function modulesForIdentity(
   pages: ModulePageDefinition[],
-  identity: AccountIdentity,
+  identity: AccountIdentity | undefined,
 ): ModulePageDefinition[] {
+  if (!identity) return [];
   return pages.filter((page) => page.identity === identity);
+}
+
+export function identityForModuleId(
+  moduleId: string,
+): AccountIdentity | undefined {
+  return knownModules.find((module) => module.id === moduleId)?.identity;
 }
 
 export function visibleAccountIdentities(

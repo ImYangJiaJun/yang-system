@@ -7,13 +7,18 @@ const routes: RouteRecordRaw[] = [
     component: () => import("pages/LoginPage.vue"),
   },
   {
+    path: "/roles",
+    name: "role-selection",
+    component: () => import("pages/RoleSelectionPage.vue"),
+  },
+  {
     path: "/",
     component: () => import("layouts/MainLayout.vue"),
+    meta: { requiresRole: true },
     children: [
       {
         path: "",
-        name: "dashboard",
-        component: () => import("pages/DashboardPage.vue"),
+        redirect: "/roles",
       },
       {
         path: "business",

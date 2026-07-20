@@ -1,14 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute, useRouter } from "vue-router";
 import AccountSwitcher from "components/account/AccountSwitcher.vue";
 import {
   buildAccountModulePages,
   modulesForIdentity,
-  unassignedViews,
-  visibleAccountIdentities,
-  type AccountIdentity,
+  accountIdentityDefinitions,
 } from "src/module-pages";
 import { useCatalogStore } from "stores/catalog";
 
@@ -31,27 +29,25 @@ const loggedIn = computed(() => Boolean(token.value.trim()));
 const businessMode = computed(() => route.path === "/business");
 const moduleMode = computed(() => route.path.startsWith("/module/"));
 const navigationMode = computed(() => businessMode.value || moduleMode.value);
-const catalogRevision = computed(() => catalog.value?.revision || "尚未加载");
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
-const businessViews = computed(() => unassignedViews(catalog.value));
 const currentModule = computed(() =>
   modulePages.value.find(
     (module) => module.id === String(route.params.moduleId ?? ""),
   ),
 );
-const activeIdentity = computed<AccountIdentity>(
-  () => currentModule.value?.identity ?? accountIdentity.value,
-);
 const currentIdentityModules = computed(() =>
-  modulesForIdentity(modulePages.value, activeIdentity.value),
+  modulesForIdentity(modulePages.value, accountIdentity.value),
 );
-const identityTabs = computed(() =>
-  visibleAccountIdentities(modulePages.value).flatMap((identity) => {
-    const first = modulePages.value.find(
-      (module) => module.identity === identity.id,
-    );
-    return first ? [{ ...identity, to: `/module/${first.id}` }] : [];
-  }),
+const homeTarget = computed(() => {
+  if (businessMode.value) return "/business";
+  const firstModule = currentIdentityModules.value[0];
+  return firstModule ? `/module/${firstModule.id}` : "/roles";
+});
+const activeIdentityTitle = computed(
+  () =>
+    accountIdentityDefinitions.find(
+      (identity) => identity.id === accountIdentity.value,
+    )?.title ?? "未选择角色",
 );
 
 async function openBusinessView(viewId: string) {
@@ -68,16 +64,6 @@ async function endSession() {
   await router.push("/login");
 }
 
-watch(
-  currentModule,
-  (module) => {
-    if (module && module.identity !== accountIdentity.value) {
-      store.selectAccountIdentity(module.identity);
-    }
-  },
-  { immediate: true },
-);
-
 store.start();
 </script>
 
@@ -93,32 +79,21 @@ store.start();
           aria-label="切换导航"
           @click="drawerOpen = !drawerOpen"
         />
-        <router-link to="/" class="formal-brand" aria-label="返回应用中心">
+        <router-link
+          :to="homeTarget"
+          class="formal-brand"
+          aria-label="返回当前角色首页"
+        >
+          <span class="formal-brand-mark">Y</span>
           <strong>YANG System</strong>
         </router-link>
-        <q-tabs
-          inline-label
-          stretch
-          shrink
-          active-color="white"
-          indicator-color="transparent"
-          class="formal-addon-tabs text-blue-grey-3"
-        >
-          <q-route-tab exact to="/" icon="apps" label="应用中心" />
-          <q-route-tab
-            v-for="identity in identityTabs"
-            :key="identity.id"
-            :to="identity.to"
-            :icon="identity.icon"
-            :label="identity.title"
-          />
-          <q-route-tab
-            v-if="businessViews.length"
-            to="/business"
-            icon="business"
-            label="业务空间"
-          />
-        </q-tabs>
+        <div class="formal-context" aria-live="polite">
+          <span>{{ activeIdentityTitle }}</span>
+          <q-icon name="chevron_right" size="16px" />
+          <strong>{{
+            currentModule?.title || selectedView?.title || "业务页面"
+          }}</strong>
+        </div>
         <q-space />
         <AccountSwitcher v-if="loggedIn" @logout="endSession" />
         <q-btn
@@ -136,49 +111,39 @@ store.start();
       v-if="navigationMode"
       v-model="drawerOpen"
       show-if-above
-      :width="200"
+      :width="240"
       class="formal-drawer"
     >
       <aside class="formal-navigation">
+        <div class="workspace-summary">
+          <span class="workspace-label">当前角色</span>
+          <strong>{{ activeIdentityTitle }}</strong>
+          <small>选择模块开始处理业务</small>
+        </div>
         <q-list padding class="formal-nav-list">
-          <q-item
-            v-ripple
-            clickable
-            exact
-            to="/"
-            active-class="formal-nav-active"
-          >
-            <q-item-section avatar
-              ><q-icon name="space_dashboard"
-            /></q-item-section>
-            <q-item-section>
-              <q-item-label>控制台</q-item-label>
-            </q-item-section>
-          </q-item>
-
           <template v-if="moduleMode">
             <q-item-label header class="formal-nav-heading">
-              {{
-                identityTabs.find((item) => item.id === activeIdentity)?.title
-              }}模块
+              业务模块
             </q-item-label>
-            <q-item
-              v-for="module in currentIdentityModules"
-              :key="module.id"
-              v-ripple
-              clickable
-              :active="currentModule?.id === module.id"
-              active-class="formal-nav-active"
-              @click="openModule(module.id)"
-            >
-              <q-item-section avatar>
-                <q-icon :name="module.icon" />
-              </q-item-section>
-              <q-item-section>
-                <q-item-label>{{ module.title }}</q-item-label>
-                <q-item-label caption>{{ module.id }}</q-item-label>
-              </q-item-section>
-            </q-item>
+            <nav data-testid="module-navigation" aria-label="业务模块">
+              <q-item
+                v-for="module in currentIdentityModules"
+                :key="module.id"
+                v-ripple
+                clickable
+                :active="currentModule?.id === module.id"
+                :data-testid="`module-nav-${module.id}`"
+                active-class="formal-nav-active"
+                @click="openModule(module.id)"
+              >
+                <q-item-section avatar>
+                  <q-icon :name="module.icon" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ module.title }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </nav>
           </template>
 
           <template v-else>
@@ -225,11 +190,9 @@ store.start();
         </q-list>
 
         <div class="formal-drawer-footer">
-          <span>目录版本</span>
-          <code>{{ catalogRevision }}</code>
           <div class="drawer-status">
             <span class="status-dot" :class="{ online: Boolean(catalog) }" />
-            {{ catalog ? "目录已连接" : "等待目录" }}
+            {{ catalog ? "业务服务已连接" : "正在连接业务服务" }}
           </div>
         </div>
       </aside>

@@ -19,7 +19,7 @@ async function submit() {
   try {
     const result = await login(username.value.trim(), password.value);
     store.setAccessToken(result.accessToken);
-    await router.replace("/");
+    await router.replace("/roles");
   } catch (cause) {
     errorMessage.value =
       cause instanceof Error ? cause.message : "登录失败，请稍后重试";

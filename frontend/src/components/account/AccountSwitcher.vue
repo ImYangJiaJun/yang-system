@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { useRoute, useRouter } from "vue-router";
+import { useRouter } from "vue-router";
 import {
   buildAccountModulePages,
   visibleAccountIdentities,
@@ -11,7 +11,6 @@ import type { OrganizationSummary } from "src/contracts/account-data";
 import { useCatalogStore } from "stores/catalog";
 
 const emit = defineEmits<{ logout: [] }>();
-const route = useRoute();
 const router = useRouter();
 const store = useCatalogStore();
 const {
@@ -27,18 +26,11 @@ const menuOpen = ref(false);
 
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
 const identities = computed(() => visibleAccountIdentities(modulePages.value));
-const currentModule = computed(() =>
-  modulePages.value.find(
-    (module) => module.id === String(route.params.moduleId ?? ""),
-  ),
-);
-const activeIdentity = computed<AccountIdentity>(
-  () => currentModule.value?.identity ?? accountIdentity.value,
-);
+const activeIdentity = computed(() => accountIdentity.value);
 const activeIdentityTitle = computed(
   () =>
     identities.value.find((identity) => identity.id === activeIdentity.value)
-      ?.title ?? "个人账户",
+      ?.title ?? "未选择角色",
 );
 const contextLabel = computed(() =>
   activeIdentity.value === "org" && selectedOrganization.value
@@ -120,25 +112,33 @@ watch(menuOpen, (open) => {
 
           <q-separator inset />
           <q-list padding>
-            <q-item-label header>账号身份</q-item-label>
+            <q-item-label header>切换角色</q-item-label>
             <q-item
               v-for="identity in identities.filter((item) => item.id !== 'org')"
               :key="identity.id"
-              tag="label"
               clickable
+              :active="activeIdentity === identity.id"
+              active-class="account-switcher-active"
+              @click="switchIdentity(identity.id)"
             >
               <q-item-section avatar>
-                <q-radio
-                  :model-value="activeIdentity"
-                  :val="identity.id"
-                  @update:model-value="switchIdentity(identity.id)"
-                />
+                <q-icon :name="identity.icon" />
               </q-item-section>
               <q-item-section>
                 <q-item-label>{{ identity.title }}</q-item-label>
               </q-item-section>
-              <q-item-section v-if="identity.id === 'admin'" side>
-                <q-badge outline color="primary" label="平台" />
+              <q-item-section side>
+                <q-icon
+                  v-if="activeIdentity === identity.id"
+                  name="check_circle"
+                  color="primary"
+                />
+                <q-badge
+                  v-else-if="identity.id === 'admin'"
+                  outline
+                  color="primary"
+                  label="平台"
+                />
               </q-item-section>
             </q-item>
           </q-list>
@@ -176,19 +176,23 @@ watch(menuOpen, (open) => {
                 v-for="organization in organizations"
                 v-else
                 :key="organization.id"
-                tag="label"
                 clickable
+                :active="tenantId === String(organization.id)"
+                active-class="account-switcher-active"
+                @click="switchOrganization(organization)"
               >
                 <q-item-section avatar>
-                  <q-radio
-                    :model-value="tenantId"
-                    :val="String(organization.id)"
-                    @update:model-value="switchOrganization(organization)"
-                  />
+                  <q-icon name="domain" />
                 </q-item-section>
                 <q-item-section>
                   <q-item-label>{{ organization.name }}</q-item-label>
                   <q-item-label caption>{{ organization.code }}</q-item-label>
+                </q-item-section>
+                <q-item-section
+                  v-if="tenantId === String(organization.id)"
+                  side
+                >
+                  <q-icon name="check_circle" color="primary" />
                 </q-item-section>
               </q-item>
               <q-item v-if="!organizationsLoading && !organizations.length">

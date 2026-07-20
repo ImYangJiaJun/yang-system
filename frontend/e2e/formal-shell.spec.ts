@@ -1,14 +1,143 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-test("正式控制台只显示后端目录授权的 BR 模块导航", async ({ page }) => {
-  await page.goto("/");
+async function serveBusinessCatalog(page: Page) {
+  await page.route("**/.well-known/yang/ui-catalog", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          schema_version: "2.2",
+          revision: "b".repeat(64),
+          actions: [
+            {
+              operation_id: "demo.items.list",
+              title: "查询项目",
+              description: "分页查询项目",
+              method: "POST",
+              path: "/api/v1/demo/items/query",
+              params: [],
+              input_schema: { type: "object" },
+              output_schema: { type: "object" },
+              request_media_type: "json",
+              response_kind: "json",
+              requires_auth: false,
+            },
+            {
+              operation_id: "demo.items.add",
+              title: "新增项目",
+              description: "创建项目",
+              method: "POST",
+              path: "/api/v1/demo/items",
+              params: [],
+              input_schema: { type: "object" },
+              output_schema: { type: "object" },
+              request_media_type: "json",
+              response_kind: "json",
+              requires_auth: false,
+            },
+          ],
+          table_views: [
+            {
+              view_id: "demo.items.main",
+              title: "项目目录",
+              table: "demo_items",
+              data_action: "demo.items.list",
+              columns: [
+                {
+                  field: "name",
+                  title: "名称",
+                  description: "项目名称",
+                  widget: "text",
+                  required: true,
+                  searchable: true,
+                  filterable: true,
+                  sortable: true,
+                },
+              ],
+              form: { fields: [] },
+              query: {
+                search_fields: ["name"],
+                filter_fields: ["name"],
+                default_sort: [],
+                default_page_size: 20,
+                max_page_size: 100,
+              },
+              actions: ["demo.items.add"],
+              action_presentations: [
+                {
+                  operation_id: "demo.items.add",
+                  title: "新增项目",
+                  placement: "toolbar",
+                  interaction: "form",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/demo/items/query", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { items: [{ name: "示例项目" }], total: 1 },
+      }),
+    }),
+  );
+}
 
-  await expect(page.getByRole("heading", { name: "应用中心" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "应用中心" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "业务空间" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "个人账户" })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "管理平台" })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "企业账户" })).toHaveCount(0);
+test("正式控制台模块只有一个导航入口", async ({ page }) => {
+  await page.addInitScript(() => {
+    sessionStorage.setItem("yang.token", "formal-shell-token");
+    sessionStorage.setItem("yang.account-identity", "user");
+  });
+  await page.route("**/.well-known/yang/ui-catalog", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          schema_version: "2.2",
+          revision: "f".repeat(64),
+          actions: [
+            {
+              operation_id: "account.user.me",
+              title: "当前用户",
+              description: "查看当前登录账号",
+              method: "GET",
+              path: "/api/v1/account/user/me",
+              params: [],
+              input_schema: {},
+              output_schema: {},
+              request_media_type: "json",
+              response_kind: "json",
+              requires_auth: true,
+            },
+          ],
+          table_views: [],
+        },
+      }),
+    }),
+  );
+  await page.goto("/module/account.user");
+
+  await expect(page.getByRole("tab")).toHaveCount(0);
+  await expect(page.getByTestId("module-nav-account.user")).toBeVisible();
+  await expect(page.getByTestId("module-navigation")).toHaveCount(1);
+  await expect(page.getByText("account.user", { exact: true })).toHaveCount(0);
+  await expect(
+    page.locator(".formal-context").getByText("个人账户", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("切换角色", { exact: true })).toHaveCount(0);
   await expect(page.locator(".navigation-mode")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "开发工作台" })).toHaveCount(0);
 
@@ -21,9 +150,12 @@ test("正式控制台只显示后端目录授权的 BR 模块导航", async ({ p
 });
 
 test("正式业务入口使用目录投影的通用页面", async ({ page }) => {
-  await page.goto("/");
-
-  await page.getByText("项目目录", { exact: true }).first().click();
+  await page.addInitScript(() => {
+    sessionStorage.setItem("yang.token", "formal-shell-token");
+    sessionStorage.setItem("yang.account-identity", "user");
+  });
+  await serveBusinessCatalog(page);
+  await page.goto("/business");
 
   await expect(page).toHaveURL("/business");
   await expect(page.getByRole("heading", { name: "项目目录" })).toBeVisible();

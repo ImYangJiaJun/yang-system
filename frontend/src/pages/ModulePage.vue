@@ -253,7 +253,6 @@ onBeforeUnmount(() => controller?.abort());
             :icon="modulePage.icon"
           />
           <div>
-            <div class="module-id">{{ modulePage.id }}</div>
             <h1>{{ modulePage.title }}</h1>
             <p>{{ modulePage.description }}</p>
           </div>

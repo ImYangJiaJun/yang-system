@@ -80,9 +80,12 @@ describe("catalog store", () => {
   it("登录和退出立即同步当前会话", () => {
     const store = useCatalogStore();
 
+    store.selectAccountIdentity("admin");
     store.setAccessToken("access-token");
     expect(store.token).toBe("access-token");
+    expect(store.accountIdentity).toBeUndefined();
     expect(sessionStorage.getItem("yang.token")).toBe("access-token");
+    expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
 
     store.tenantId = "tenant-7";
     store.clearSession();
@@ -92,7 +95,7 @@ describe("catalog store", () => {
     expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
   });
 
-  it("账号身份独立保存并在退出后回到个人账户", () => {
+  it("账号身份独立保存并在退出后回到未选择状态", () => {
     const store = useCatalogStore();
 
     store.selectAccountIdentity("admin");
@@ -100,7 +103,7 @@ describe("catalog store", () => {
     expect(sessionStorage.getItem("yang.account-identity")).toBe("admin");
 
     store.clearSession();
-    expect(store.accountIdentity).toBe("user");
+    expect(store.accountIdentity).toBeUndefined();
     expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
   });
 

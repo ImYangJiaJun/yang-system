@@ -35,15 +35,17 @@ function sessionValue(key: string): string {
     : (sessionStorage.getItem(key) ?? "");
 }
 
-function sessionIdentity(): AccountIdentity {
+function sessionIdentity(): AccountIdentity | undefined {
   const identity = sessionValue("yang.account-identity");
-  return identity === "admin" || identity === "org" ? identity : "user";
+  return identity === "user" || identity === "admin" || identity === "org"
+    ? identity
+    : undefined;
 }
 
 export const useCatalogStore = defineStore("catalog", () => {
   const token = ref(sessionValue("yang.token"));
   const tenantId = ref(sessionValue("yang.tenant-id"));
-  const accountIdentity = ref<AccountIdentity>(sessionIdentity());
+  const accountIdentity = ref<AccountIdentity | undefined>(sessionIdentity());
   const query = ref("");
   const catalog = ref<UiCatalog>();
   const selectedOperationId = ref("");
@@ -155,8 +157,12 @@ export const useCatalogStore = defineStore("catalog", () => {
 
   function setAccessToken(accessToken: string) {
     token.value = accessToken;
+    tenantId.value = "";
+    accountIdentity.value = undefined;
+    catalog.value = undefined;
     sessionStorage.setItem("yang.token", accessToken);
-    selectAccountIdentity("user");
+    sessionStorage.removeItem("yang.tenant-id");
+    sessionStorage.removeItem("yang.account-identity");
   }
 
   function selectAccountIdentity(identity: AccountIdentity) {
@@ -209,7 +215,7 @@ export const useCatalogStore = defineStore("catalog", () => {
   function clearSession() {
     token.value = "";
     tenantId.value = "";
-    accountIdentity.value = "user";
+    accountIdentity.value = undefined;
     catalog.value = undefined;
     organizations.value = [];
     organizationsError.value = "";
