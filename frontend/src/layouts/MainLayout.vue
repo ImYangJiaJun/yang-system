@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute, useRouter } from "vue-router";
 import AccountSwitcher from "components/account/AccountSwitcher.vue";
@@ -16,8 +16,16 @@ const drawerOpen = ref(true);
 const route = useRoute();
 const router = useRouter();
 const store = useCatalogStore();
-const { catalog, error, loading, selectedView, selectedViewId, token, views } =
-  storeToRefs(store);
+const {
+  accountIdentity,
+  catalog,
+  error,
+  loading,
+  selectedView,
+  selectedViewId,
+  token,
+  views,
+} = storeToRefs(store);
 
 const loggedIn = computed(() => Boolean(token.value.trim()));
 const businessMode = computed(() => route.path === "/business");
@@ -32,7 +40,7 @@ const currentModule = computed(() =>
   ),
 );
 const activeIdentity = computed<AccountIdentity>(
-  () => currentModule.value?.identity ?? "user",
+  () => currentModule.value?.identity ?? accountIdentity.value,
 );
 const currentIdentityModules = computed(() =>
   modulesForIdentity(modulePages.value, activeIdentity.value),
@@ -59,6 +67,16 @@ async function endSession() {
   store.clearSession();
   await router.push("/login");
 }
+
+watch(
+  currentModule,
+  (module) => {
+    if (module && module.identity !== accountIdentity.value) {
+      store.selectAccountIdentity(module.identity);
+    }
+  },
+  { immediate: true },
+);
 
 store.start();
 </script>

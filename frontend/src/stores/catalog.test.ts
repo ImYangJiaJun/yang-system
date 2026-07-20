@@ -92,6 +92,18 @@ describe("catalog store", () => {
     expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
   });
 
+  it("账号身份独立保存并在退出后回到个人账户", () => {
+    const store = useCatalogStore();
+
+    store.selectAccountIdentity("admin");
+    expect(store.accountIdentity).toBe("admin");
+    expect(sessionStorage.getItem("yang.account-identity")).toBe("admin");
+
+    store.clearSession();
+    expect(store.accountIdentity).toBe("user");
+    expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
+  });
+
   it("通过我的企业 Action 加载名称选项并隐藏内部租户输入", async () => {
     const store = useCatalogStore();
     store.token = "access-token";

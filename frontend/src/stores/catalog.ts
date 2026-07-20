@@ -15,6 +15,7 @@ import {
   type ActionDemoSchema,
   type UiCatalog,
 } from "src/contracts/ui-catalog";
+import type { AccountIdentity } from "src/module-pages";
 
 export type NavigationMode = "views" | "actions";
 
@@ -34,9 +35,15 @@ function sessionValue(key: string): string {
     : (sessionStorage.getItem(key) ?? "");
 }
 
+function sessionIdentity(): AccountIdentity {
+  const identity = sessionValue("yang.account-identity");
+  return identity === "admin" || identity === "org" ? identity : "user";
+}
+
 export const useCatalogStore = defineStore("catalog", () => {
   const token = ref(sessionValue("yang.token"));
   const tenantId = ref(sessionValue("yang.tenant-id"));
+  const accountIdentity = ref<AccountIdentity>(sessionIdentity());
   const query = ref("");
   const catalog = ref<UiCatalog>();
   const selectedOperationId = ref("");
@@ -149,6 +156,12 @@ export const useCatalogStore = defineStore("catalog", () => {
   function setAccessToken(accessToken: string) {
     token.value = accessToken;
     sessionStorage.setItem("yang.token", accessToken);
+    selectAccountIdentity("user");
+  }
+
+  function selectAccountIdentity(identity: AccountIdentity) {
+    accountIdentity.value = identity;
+    sessionStorage.setItem("yang.account-identity", identity);
   }
 
   async function loadOrganizations() {
@@ -196,11 +209,13 @@ export const useCatalogStore = defineStore("catalog", () => {
   function clearSession() {
     token.value = "";
     tenantId.value = "";
+    accountIdentity.value = "user";
     catalog.value = undefined;
     organizations.value = [];
     organizationsError.value = "";
     sessionStorage.removeItem("yang.token");
     sessionStorage.removeItem("yang.tenant-id");
+    sessionStorage.removeItem("yang.account-identity");
   }
 
   function start() {
@@ -219,6 +234,7 @@ export const useCatalogStore = defineStore("catalog", () => {
   return {
     token,
     tenantId,
+    accountIdentity,
     query,
     catalog,
     selectedOperationId,
@@ -236,6 +252,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     selectedAction,
     selectedOrganization,
     setAccessToken,
+    selectAccountIdentity,
     clearSession,
     loadOrganizations,
     selectOrganization,

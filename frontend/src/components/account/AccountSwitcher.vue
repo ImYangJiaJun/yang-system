@@ -15,6 +15,7 @@ const route = useRoute();
 const router = useRouter();
 const store = useCatalogStore();
 const {
+  accountIdentity,
   catalog,
   organizations,
   organizationsError,
@@ -32,7 +33,7 @@ const currentModule = computed(() =>
   ),
 );
 const activeIdentity = computed<AccountIdentity>(
-  () => currentModule.value?.identity ?? "user",
+  () => currentModule.value?.identity ?? accountIdentity.value,
 );
 const activeIdentityTitle = computed(
   () =>
@@ -50,17 +51,20 @@ async function switchIdentity(identity: AccountIdentity) {
     (module) => module.identity === identity,
   );
   if (!first) return;
+  store.selectAccountIdentity(identity);
   menuOpen.value = false;
   await router.push(`/module/${first.id}`);
 }
 
 async function switchOrganization(organization: OrganizationSummary) {
+  store.selectAccountIdentity("org");
   store.selectOrganization(organization);
   menuOpen.value = false;
   await router.push("/module/org.access");
 }
 
 async function openOrganizationManagement() {
+  store.selectAccountIdentity("org");
   menuOpen.value = false;
   await router.push("/module/org.access");
 }

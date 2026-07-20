@@ -2,20 +2,28 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
-import { buildAccountModulePages, unassignedViews } from "src/module-pages";
+import {
+  buildAccountModulePages,
+  modulesForIdentity,
+  unassignedViews,
+} from "src/module-pages";
 import { useCatalogStore } from "stores/catalog";
 
 const router = useRouter();
 const store = useCatalogStore();
-const { catalog, error, loading, selectedViewId } = storeToRefs(store);
+const { accountIdentity, catalog, error, loading, selectedViewId } =
+  storeToRefs(store);
 const query = ref("");
 
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
+const identityModules = computed(() =>
+  modulesForIdentity(modulePages.value, accountIdentity.value),
+);
 const businessViews = computed(() => unassignedViews(catalog.value));
 const filteredModules = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase();
-  if (!keyword) return modulePages.value;
-  return modulePages.value.filter((module) =>
+  if (!keyword) return identityModules.value;
+  return identityModules.value.filter((module) =>
     [module.id, module.title, module.description]
       .join(" ")
       .toLocaleLowerCase()
@@ -77,7 +85,7 @@ async function openModule(moduleId: string) {
     </q-banner>
 
     <div
-      v-if="modulePages.length + businessViews.length > 1"
+      v-if="identityModules.length + businessViews.length > 1"
       class="row no-gutters q-mb-lg"
     >
       <q-input

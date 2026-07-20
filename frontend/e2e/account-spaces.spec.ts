@@ -128,10 +128,10 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
   await expect(page.getByRole("tab", { name: "管理平台" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "企业账户" })).toBeVisible();
   await expect(page.getByTestId("module-page-account.user")).toBeVisible();
-  await expect(page.getByTestId("module-page-admin.user")).toBeVisible();
-  await expect(page.getByTestId("module-page-org.access")).toBeVisible();
+  await expect(page.getByTestId("module-page-admin.user")).toHaveCount(0);
+  await expect(page.getByTestId("module-page-org.access")).toHaveCount(0);
 
-  await page.getByTestId("module-page-admin.user").click();
+  await page.getByRole("tab", { name: "管理平台" }).click();
   await expect(page).toHaveURL("/module/admin.user");
   await expect(page.getByRole("heading", { name: "平台账号" })).toBeVisible();
   await expect(page.getByText("平台账号列表", { exact: true })).toBeVisible();
@@ -145,6 +145,11 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
   await expect(page.locator(".operation-id")).toHaveCount(0);
   await expect(page.locator(".route-line")).toHaveCount(0);
   await page.getByRole("button", { name: "关闭" }).click();
+
+  await page.getByRole("tab", { name: "应用中心" }).click();
+  await expect(page.getByTestId("module-page-admin.user")).toBeVisible();
+  await expect(page.getByTestId("module-page-account.user")).toHaveCount(0);
+  await expect(page.getByTestId("module-page-org.access")).toHaveCount(0);
 
   await page.getByRole("button", { name: "账号菜单" }).click();
   const accountMenu = page.locator(".account-switcher-menu");
