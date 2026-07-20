@@ -363,6 +363,11 @@ function setFilterValue(field: string, value: unknown) {
   if (filter) filter.value = value;
 }
 
+function scalarFilterValue(field: string): string | number | null {
+  const value = filters.value[field]?.value;
+  return typeof value === "string" || typeof value === "number" ? value : null;
+}
+
 function rangeValue(field: string, index: number) {
   const value = filters.value[field]?.value;
   return Array.isArray(value) ? value[index] : null;
@@ -854,7 +859,7 @@ onBeforeUnmount(() => {
                 />
                 <q-input
                   v-else
-                  :model-value="filters[column.field]?.value"
+                  :model-value="scalarFilterValue(column.field)"
                   :type="filterInputType(column)"
                   dense
                   outlined
