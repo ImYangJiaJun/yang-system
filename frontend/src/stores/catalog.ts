@@ -58,7 +58,7 @@ export const useCatalogStore = defineStore("catalog", () => {
   let organizationsController: AbortController | undefined;
   let nextRequestId = 0;
   let sessionReloadTimer: number | undefined;
-  let started = false;
+  let stopSessionWatcher: (() => void) | undefined;
 
   const session = computed<SessionContext>(() => ({
     token: token.value || undefined,
@@ -219,15 +219,22 @@ export const useCatalogStore = defineStore("catalog", () => {
   }
 
   function start() {
-    if (started) return;
-    started = true;
-    watch([token, tenantId], ([nextToken, nextTenant]) => {
+    stopSessionWatcher?.();
+    stopSessionWatcher = watch([token, tenantId], ([nextToken, nextTenant]) => {
       sessionStorage.setItem("yang.token", nextToken);
       sessionStorage.setItem("yang.tenant-id", nextTenant);
-      if (sessionReloadTimer !== undefined)
+      if (sessionReloadTimer !== undefined) {
         window.clearTimeout(sessionReloadTimer);
-      sessionReloadTimer = window.setTimeout(() => void loadCatalog(), 400);
+      }
+      sessionReloadTimer = window.setTimeout(() => {
+        sessionReloadTimer = undefined;
+        void loadCatalog();
+      }, 400);
     });
+    if (sessionReloadTimer !== undefined) {
+      window.clearTimeout(sessionReloadTimer);
+      sessionReloadTimer = undefined;
+    }
     void loadCatalog();
   }
 
