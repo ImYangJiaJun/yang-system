@@ -19,7 +19,7 @@ pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {
 /// 构建平台账号 Addon。
 pub fn build_addon() -> Result<AddonSpec, BaseError> {
     let users =
-        user::build_module().middleware(TokenAuthMiddleware::new(account::user_from_claims));
+        user::build_module()?.middleware(TokenAuthMiddleware::new(account::user_from_claims));
 
     Ok(AddonSpec::new(yang_base::addon!("admin"))
         .depends_on(yang_base::addon!("account"))

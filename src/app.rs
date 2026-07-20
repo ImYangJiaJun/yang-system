@@ -209,6 +209,24 @@ mod tests {
                 && operation.4
         }));
 
+        let admin_user_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "admin.user")
+            .unwrap_or_else(|| panic!("应存在 admin.user 模块"));
+        let bootstrap = admin_user_module
+            .actions()
+            .iter()
+            .find(|action| action.name.as_str() == "bootstrap")
+            .unwrap_or_else(|| panic!("应存在 admin.user.bootstrap"));
+        assert_eq!(bootstrap.route.path.as_str(), "/api/v1/admin/bootstrap");
+        assert_eq!(bootstrap.success_status, 201);
+        assert!(!bootstrap.is_public);
+        assert!(bootstrap.permissions.is_empty());
+
         let org_user_module = app
             .runtime
             .catalog()

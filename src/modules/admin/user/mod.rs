@@ -1,14 +1,25 @@
 //! `admin.user` Module：平台账号定义。
 
+mod actions;
+mod repository;
+mod service;
+
+use repository::AdminRepository;
+use service::AdminService;
+use std::sync::Arc;
 use yang_base::definition::{
     Fields, Module, ModuleName, ModuleSpec, Radio, Str, Switch, Table, TableName, Timestamp,
 };
+use yang_base::BaseError;
 
 pub(super) const USER_ID: &str = "user_user";
+pub(super) const NAME: &str = "name";
+pub(super) const POSITION: &str = "position";
 pub(super) const STATUS: &str = "status";
 pub(super) const IS_ADMIN: &str = "admin";
+pub(super) const BOOTSTRAP_KEY: &str = "bootstrap_key";
 pub(super) const ACTIVE_STATUS: &str = "active";
-const SYSTEM_ROLE: &str = "system";
+pub(super) const SYSTEM_ROLE: &str = "system";
 
 struct AdminUserModule;
 
@@ -63,8 +74,15 @@ impl Module for AdminUserModule {
 }
 
 /// 构建平台账号 Module。
-pub(super) fn build_module() -> ModuleSpec {
-    AdminUserModule.into_spec()
+pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
+    let module = AdminUserModule.into_spec();
+    let table = module
+        .table
+        .as_ref()
+        .ok_or(BaseError::TableDefinitionNotSet)?
+        .table_definition()?;
+    let service = Arc::new(AdminService::new(AdminRepository::new(table)));
+    Ok(actions::register_all(module, service))
 }
 
 #[cfg(test)]
@@ -84,7 +102,7 @@ mod tests {
             .iter()
             .any(|field| { field.name.as_str() == USER_ID && field.storage.unique }));
         assert!(table.fields.iter().any(|field| {
-            field.name.as_str() == "bootstrap_key" && field.storage.unique && field.access.secret
+            field.name.as_str() == BOOTSTRAP_KEY && field.storage.unique && field.access.secret
         }));
         for name in [USER_ID, STATUS, IS_ADMIN] {
             let field = table
