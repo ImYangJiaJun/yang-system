@@ -51,7 +51,7 @@ store.start();
 
     <section class="role-selection-content">
       <div class="role-selection-heading">
-        <span>ACCOUNT ROLE</span>
+        <span>工作身份</span>
         <h1>选择本次使用的角色</h1>
         <p>角色决定本次会话可进入的业务模块，之后仍可从账号菜单切换。</p>
       </div>
@@ -108,6 +108,7 @@ store.start();
               color="primary"
               class="full-width"
               :label="`以${role.title}进入`"
+              icon-right="arrow_forward"
               :aria-label="`选择${role.title}角色`"
               @click="selectRole(role.id)"
             />
