@@ -501,6 +501,77 @@ textarea {
   background: #f7fbfc;
 }
 
+.business-status {
+  padding: 5px 9px;
+  color: #445268;
+  background: #eef2f6;
+  font-weight: 700;
+}
+
+.business-status--info {
+  color: #075985;
+  background: #e0f2fe;
+}
+
+.business-status--positive {
+  color: #08745f;
+  background: #dcf8ef;
+}
+
+.business-status--warning {
+  color: #9a5b08;
+  background: #fff3cf;
+}
+
+.business-status--negative {
+  color: #b42335;
+  background: #fee8eb;
+}
+
+.business-relation,
+.business-boolean {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.business-relation {
+  color: #0b6f78;
+  font-weight: 650;
+}
+
+.business-boolean--positive {
+  color: #0b8069;
+}
+
+.business-boolean--neutral {
+  color: #8a96a6;
+}
+
+.business-cell-text--primary {
+  color: #172b44;
+  font-weight: 700;
+}
+
+.business-cell-text--secondary {
+  color: #43536a;
+}
+
+.business-cell-text--technical,
+.business-json {
+  color: #66758a;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.business-json {
+  display: inline-block;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .table-error,
 .bulk-actions {
   margin-bottom: 14px;

@@ -6,7 +6,11 @@ import {
   type InvocationResult,
   type SessionContext,
 } from "src/api/client";
-import { buildTreeRows, parseTableData } from "src/contracts/table-data";
+import {
+  buildTreeRows,
+  parseRelationOptions,
+  parseTableData,
+} from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
@@ -15,12 +19,12 @@ import type {
   TableViewSchema,
 } from "src/contracts/ui-catalog";
 import JsonSchemaForm from "components/form/JsonSchemaForm.vue";
+import BusinessTableCell from "./BusinessTableCell.vue";
 import {
   buildActionInitialValues,
   buildWhereClause,
   createTableFilters,
   flattenDisplayRows,
-  formatCell,
   groupPresentedActions,
   isFilterActive,
   pageSizeOptions as buildPageSizeOptions,
@@ -32,6 +36,7 @@ const props = defineProps<{
   view: TableViewSchema;
   actions: ActionDemoSchema[];
   session: SessionContext;
+  developer?: boolean;
 }>();
 const emit = defineEmits<{
   customAction: [
@@ -57,6 +62,10 @@ const visibleColumnNames = ref(
   props.view.columns.map((column) => column.field),
 );
 const denseTable = ref(false);
+const relationOptions = ref<
+  Record<string, Array<{ value: string | number; label: string }>>
+>({});
+const relationErrors = ref<string[]>([]);
 const orderBy = ref(props.view.query.default_sort);
 const selectedDisplayRows = ref<DisplayRow[]>([]);
 const loading = ref(false);
@@ -74,6 +83,8 @@ const tablePagination = ref({
 });
 let controller: AbortController | undefined;
 let actionController: AbortController | undefined;
+let relationController: AbortController | undefined;
+let relationRequestId = 0;
 
 const actionById = computed(
   () => new Map(props.actions.map((action) => [action.operation_id, action])),
@@ -153,7 +164,6 @@ const tableColumns = computed<QTableColumn<DisplayRow>[]>(() => {
       field: (row) => row.data[column.field],
       align: column.display?.align ?? "left",
       sortable: column.sortable,
-      format: (value) => formatCell(value),
       style: column.display?.width
         ? `width: ${column.display.width}px`
         : column.display?.min_width
@@ -176,6 +186,9 @@ const tableColumns = computed<QTableColumn<DisplayRow>[]>(() => {
   }
   return columns;
 });
+const columnByField = computed(
+  () => new Map(props.view.columns.map((column) => [column.field, column])),
+);
 const firstColumnName = computed(() => props.view.columns[0]?.field);
 const pageCount = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize.value)),
@@ -233,6 +246,9 @@ function filterInputType(column: TableColumnSchema) {
 }
 
 function filterValueOptions(column: TableColumnSchema) {
+  if (column.relation) {
+    return relationOptions.value[column.relation.operation_id] ?? [];
+  }
   if (column.display?.options?.length) {
     return column.display.options.map((option) => ({
       label: option.label,
@@ -250,7 +266,88 @@ function filterValueOptions(column: TableColumnSchema) {
 
 function usesOptionSelect(column: TableColumnSchema) {
   return (
-    filterValueOptions(column).length > 0 || filterWidget(column) === "radio"
+    Boolean(column.relation) ||
+    filterValueOptions(column).length > 0 ||
+    filterWidget(column) === "radio"
+  );
+}
+
+function relationLabel(column: TableColumnSchema, value: unknown) {
+  if (!column.relation) return undefined;
+  const option = relationOptions.value[column.relation.operation_id]?.find(
+    (candidate) =>
+      Object.is(candidate.value, value) ||
+      String(candidate.value) === String(value),
+  );
+  return option?.label;
+}
+
+async function loadRelationOptions(sourceRows: Array<Record<string, unknown>>) {
+  relationController?.abort();
+  relationController = new AbortController();
+  const requestId = ++relationRequestId;
+  const flatRows = flattenDisplayRows(sourceRows).map((row) => row.data);
+  const requests = new Map<string, Set<string | number>>();
+  for (const column of props.view.columns) {
+    if (!column.relation) continue;
+    const selected = requests.get(column.relation.operation_id) ?? new Set();
+    for (const row of flatRows) {
+      const value = row[column.field];
+      if (typeof value === "string" || typeof value === "number") {
+        selected.add(value);
+      }
+    }
+    requests.set(column.relation.operation_id, selected);
+  }
+  if (!requests.size) {
+    relationOptions.value = {};
+    relationErrors.value = [];
+    return;
+  }
+  const results = await Promise.all(
+    [...requests].map(async ([operationId, selected]) => {
+      const action = actionById.value.get(operationId);
+      if (!action) {
+        return { operationId, error: `目录缺少关系 Action：${operationId}` };
+      }
+      try {
+        const result = await invokeAction(
+          action,
+          {
+            search: null,
+            selected: [...selected],
+            filter: {},
+            page: 1,
+            limit: Math.min(100, Math.max(20, selected.size)),
+          },
+          props.session,
+          relationController?.signal,
+        );
+        if (result.kind !== "json")
+          throw new Error("关系 Action 必须返回 JSON");
+        return {
+          operationId,
+          options: parseRelationOptions(result.data).items,
+        };
+      } catch (cause) {
+        if (cause instanceof Error && cause.name === "AbortError") {
+          return { operationId, aborted: true };
+        }
+        return {
+          operationId,
+          error: cause instanceof Error ? cause.message : String(cause),
+        };
+      }
+    }),
+  );
+  if (requestId !== relationRequestId) return;
+  relationOptions.value = Object.fromEntries(
+    results
+      .filter((result) => result.options)
+      .map((result) => [result.operationId, result.options!]),
+  );
+  relationErrors.value = results.flatMap((result) =>
+    result.error ? [result.error] : [],
   );
 }
 
@@ -326,6 +423,7 @@ async function load() {
     return;
   }
   controller?.abort();
+  relationController?.abort();
   controller = new AbortController();
   loading.value = true;
   error.value = "";
@@ -353,11 +451,14 @@ async function load() {
     const data = parseTableData(result.data);
     rows.value = data.items;
     total.value = data.total ?? data.items.length;
+    void loadRelationOptions(data.items);
   } catch (cause) {
     if (cause instanceof Error && cause.name === "AbortError") return;
     error.value = cause instanceof Error ? cause.message : String(cause);
     rows.value = [];
     total.value = 0;
+    relationOptions.value = {};
+    relationErrors.value = [];
   } finally {
     loading.value = false;
   }
@@ -523,6 +624,7 @@ watch(
 onBeforeUnmount(() => {
   controller?.abort();
   actionController?.abort();
+  relationController?.abort();
 });
 </script>
 
@@ -530,10 +632,23 @@ onBeforeUnmount(() => {
   <section class="table-view">
     <header class="table-view-heading">
       <div>
-        <q-badge outline color="primary">{{ view.view_id }}</q-badge>
+        <q-badge v-if="developer" outline color="primary">
+          {{ view.view_id }}
+        </q-badge>
         <h2>{{ view.title || view.table }}</h2>
-        <p>
+        <p v-if="developer">
           {{ view.columns.length }} 个可见字段 · 数据源 {{ view.data_action }}
+        </p>
+        <p v-else>
+          共 {{ total }} 项 · 支持搜索、筛选、排序和批量处理
+          <q-icon
+            v-if="relationErrors.length"
+            name="warning_amber"
+            color="warning"
+            size="16px"
+          >
+            <q-tooltip>{{ relationErrors.join("；") }}</q-tooltip>
+          </q-icon>
         </p>
       </div>
       <div class="view-actions">
@@ -844,7 +959,17 @@ onBeforeUnmount(() => {
                 : undefined
             "
           >
-            {{ slotProps.value }}
+            <BusinessTableCell
+              v-if="columnByField.get(slotProps.col.name)"
+              :column="columnByField.get(slotProps.col.name)!"
+              :value="slotProps.row.data[slotProps.col.name]"
+              :relation-label="
+                relationLabel(
+                  columnByField.get(slotProps.col.name)!,
+                  slotProps.row.data[slotProps.col.name],
+                )
+              "
+            />
           </span>
         </q-td>
       </template>

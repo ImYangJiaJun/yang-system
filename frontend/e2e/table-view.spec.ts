@@ -3,12 +3,25 @@ import { expect, test } from "@playwright/test";
 test("TableView 自动完成树、搜索、排序、关系表单和真实新增", async ({
   page,
 }) => {
+  let relationRequests = 0;
+  page.on("request", (request) => {
+    if (request.url().includes("/api/v1/demo/categories/options")) {
+      relationRequests += 1;
+    }
+  });
   await page.goto("/workbench");
 
   await expect(page.getByText("1 Views")).toBeVisible();
   await expect(page.getByRole("heading", { name: "项目目录" })).toBeVisible();
   await expect(page.getByText("平台能力", { exact: true })).toBeVisible();
   await expect(page.getByText("通用渲染器", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("cell", { name: "平台", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("cell", { name: "业务", exact: true }),
+  ).toBeVisible();
+  expect(relationRequests).toBe(1);
 
   await page.getByRole("button", { name: "新增项目" }).click();
   const dialog = page.getByRole("dialog");

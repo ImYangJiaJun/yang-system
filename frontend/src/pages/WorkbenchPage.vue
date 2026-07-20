@@ -83,6 +83,7 @@ watch(session, () => {
       :view="selectedView"
       :actions="catalog.actions"
       :session="session"
+      developer
       @custom-action="openCustomAction"
     />
     <ActionDemo

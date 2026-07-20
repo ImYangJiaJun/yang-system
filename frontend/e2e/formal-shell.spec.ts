@@ -164,4 +164,12 @@ test("正式业务入口使用目录投影的通用页面", async ({ page }) => 
   ).toBeVisible();
   await expect(page.locator(".navigation-mode")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "新增项目" })).toBeVisible();
+  await expect(
+    page.locator(".table-view-heading").getByText("demo.items.main", {
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".table-view-heading").getByText(/数据源/),
+  ).toHaveCount(0);
 });
