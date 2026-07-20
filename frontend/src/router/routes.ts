@@ -20,6 +20,11 @@ const routes: RouteRecordRaw[] = [
         name: "business",
         component: () => import("pages/BusinessPage.vue"),
       },
+      {
+        path: "space/:space",
+        name: "account-space",
+        component: () => import("pages/AccountSpacePage.vue"),
+      },
     ],
   },
   {

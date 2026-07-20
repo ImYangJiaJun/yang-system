@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute, useRouter } from "vue-router";
+import { unassignedViews, visibleAccountSpaces } from "src/account-spaces";
 import { useCatalogStore } from "stores/catalog";
 
 const drawerOpen = ref(true);
@@ -22,6 +23,8 @@ const {
 const loggedIn = computed(() => Boolean(token.value.trim()));
 const businessMode = computed(() => route.path === "/business");
 const catalogRevision = computed(() => catalog.value?.revision || "尚未加载");
+const accountSpaces = computed(() => visibleAccountSpaces(catalog.value));
+const businessViews = computed(() => unassignedViews(catalog.value));
 
 async function openBusinessView(viewId: string) {
   selectedViewId.value = viewId;
@@ -61,12 +64,18 @@ store.start();
         >
           <q-route-tab exact to="/" icon="apps" label="应用中心" />
           <q-route-tab
-            v-if="views.length"
+            v-for="space in accountSpaces"
+            :key="space.id"
+            :to="`/space/${space.id}`"
+            :icon="space.icon"
+            :label="space.title"
+          />
+          <q-route-tab
+            v-if="businessViews.length"
             to="/business"
             icon="business"
             label="业务空间"
           />
-          <q-route-tab to="/workbench" icon="terminal" label="开发工作台" />
         </q-tabs>
         <q-space />
         <q-btn v-if="loggedIn" flat round dense aria-label="账号菜单">
@@ -83,6 +92,25 @@ store.start();
                 <div class="text-caption text-grey-7">已建立安全会话</div>
               </q-card-section>
               <q-separator inset />
+              <q-list padding>
+                <q-item-label header>切换账号空间</q-item-label>
+                <q-item
+                  v-for="space in accountSpaces"
+                  :key="space.id"
+                  v-close-popup
+                  clickable
+                  :to="`/space/${space.id}`"
+                >
+                  <q-item-section avatar>
+                    <q-icon color="primary" :name="space.icon" />
+                  </q-item-section>
+                  <q-item-section>
+                    <q-item-label>{{ space.title }}</q-item-label>
+                    <q-item-label caption>{{ space.description }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </q-list>
+              <q-separator inset />
               <q-card-section>
                 <q-input
                   v-model="tenantId"
@@ -93,6 +121,18 @@ store.start();
                   hint="切换后自动刷新可访问目录"
                 />
               </q-card-section>
+              <q-separator inset />
+              <q-item v-close-popup clickable to="/workbench">
+                <q-item-section avatar>
+                  <q-icon color="blue-grey-7" name="terminal" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>开发工作台</q-item-label>
+                  <q-item-label caption
+                    >查看完整 Action 与目录契约</q-item-label
+                  >
+                </q-item-section>
+              </q-item>
               <q-separator inset />
               <q-card-actions align="center">
                 <q-btn

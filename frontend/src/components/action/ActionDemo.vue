@@ -13,6 +13,7 @@ import JsonSchemaForm from "components/form/JsonSchemaForm.vue";
 const props = defineProps<{
   action: ActionDemoSchema;
   session: SessionContext;
+  formal?: boolean;
 }>();
 
 const values = ref<Record<string, unknown>>({});
@@ -77,10 +78,14 @@ async function submit() {
 </script>
 
 <template>
-  <section class="action-demo" data-testid="action-demo">
+  <section
+    class="action-demo"
+    :class="{ 'action-demo--formal': formal }"
+    data-testid="action-demo"
+  >
     <div class="action-heading">
       <div>
-        <div class="action-tags">
+        <div v-if="!formal" class="action-tags">
           <q-badge :color="methodTagColor">{{ action.method }}</q-badge>
           <q-badge v-if="action.requires_auth" outline color="warning">
             需要认证
@@ -90,7 +95,7 @@ async function submit() {
         <h2>{{ action.title || action.operation_id }}</h2>
         <p>{{ action.description || "该 Action 未提供说明。" }}</p>
       </div>
-      <code class="operation-id">{{ action.operation_id }}</code>
+      <code v-if="!formal" class="operation-id">{{ action.operation_id }}</code>
     </div>
 
     <q-banner
@@ -103,7 +108,7 @@ async function submit() {
       {{ action.multipart?.max_file_bytes ?? 0 }} bytes
     </q-banner>
 
-    <div class="route-line">
+    <div v-if="!formal" class="route-line">
       <span>{{ action.method }}</span>
       <code>{{ action.path }}</code>
     </div>
@@ -125,7 +130,7 @@ async function submit() {
     <div class="action-controls">
       <q-btn
         color="primary"
-        label="发起真实调用"
+        :label="formal ? action.title || '确认' : '发起真实调用'"
         :loading="loading"
         data-testid="invoke-action"
         @click="submit"

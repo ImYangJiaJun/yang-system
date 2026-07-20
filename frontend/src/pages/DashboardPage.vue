@@ -2,27 +2,31 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
+import { unassignedViews, visibleAccountSpaces } from "src/account-spaces";
 import { useCatalogStore } from "stores/catalog";
 
 const router = useRouter();
 const store = useCatalogStore();
-const {
-  actions,
-  catalog,
-  error,
-  loading,
-  selectedViewId,
-  tenantId,
-  token,
-  views,
-} = storeToRefs(store);
+const { catalog, error, loading, selectedViewId, token } = storeToRefs(store);
 const query = ref("");
 
 const loggedIn = computed(() => Boolean(token.value.trim()));
+const accountSpaces = computed(() => visibleAccountSpaces(catalog.value));
+const businessViews = computed(() => unassignedViews(catalog.value));
+const filteredSpaces = computed(() => {
+  const keyword = query.value.trim().toLocaleLowerCase();
+  if (!keyword) return accountSpaces.value;
+  return accountSpaces.value.filter((space) =>
+    [space.title, space.subtitle, space.description]
+      .join(" ")
+      .toLocaleLowerCase()
+      .includes(keyword),
+  );
+});
 const filteredViews = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase();
-  if (!keyword) return views.value;
-  return views.value.filter((view) =>
+  if (!keyword) return businessViews.value;
+  return businessViews.value.filter((view) =>
     [view.title, view.table, view.view_id]
       .filter(Boolean)
       .some((value) => value.toLocaleLowerCase().includes(keyword)),
@@ -32,6 +36,10 @@ const filteredViews = computed(() => {
 async function openBusinessView(viewId: string) {
   selectedViewId.value = viewId;
   await router.push("/business");
+}
+
+async function openAccountSpace(spaceId: string) {
+  await router.push(`/space/${spaceId}`);
 }
 </script>
 
@@ -69,7 +77,10 @@ async function openBusinessView(viewId: string) {
       </template>
     </q-banner>
 
-    <div v-if="views.length" class="row no-gutters q-mb-lg">
+    <div
+      v-if="accountSpaces.length + businessViews.length > 1"
+      class="row no-gutters q-mb-lg"
+    >
       <q-input
         v-model="query"
         outlined
@@ -82,6 +93,50 @@ async function openBusinessView(viewId: string) {
     </div>
 
     <div class="q-col-gutter-md row">
+      <div
+        v-for="space in filteredSpaces"
+        :key="space.id"
+        class="col-12 col-sm-6 col-md-4 col-lg-3"
+      >
+        <q-card
+          flat
+          bordered
+          class="application-card cursor-pointer full-height"
+          :data-testid="`account-space-${space.id}`"
+          @click="openAccountSpace(space.id)"
+        >
+          <q-card-section horizontal>
+            <q-card-section class="row items-center">
+              <q-avatar
+                color="primary"
+                text-color="white"
+                size="72px"
+                :icon="space.icon"
+              />
+            </q-card-section>
+            <q-separator vertical inset />
+            <q-card-section class="full-width">
+              <q-item dense>
+                <q-item-section>
+                  <q-item-label class="text-h6">{{ space.title }}</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                  <q-item-label caption>{{ space.subtitle }}</q-item-label>
+                </q-item-section>
+              </q-item>
+              <q-separator inset />
+              <q-card-section class="text-caption text-grey-7">
+                {{
+                  space.id === "user" && !loggedIn
+                    ? "登录后进入个人账户"
+                    : `${space.views.length} 个页面 · ${space.actions.length} 项操作`
+                }}
+              </q-card-section>
+            </q-card-section>
+          </q-card-section>
+        </q-card>
+      </div>
+
       <div
         v-for="view in filteredViews"
         :key="view.view_id"
@@ -122,86 +177,7 @@ async function openBusinessView(viewId: string) {
           </q-card-section>
         </q-card>
       </div>
-
-      <div class="col-12 col-sm-6 col-md-4 col-lg-3">
-        <q-card flat bordered class="application-card full-height">
-          <q-card-section horizontal>
-            <q-card-section class="row items-center">
-              <q-avatar
-                color="blue-grey-7"
-                text-color="white"
-                size="72px"
-                icon="terminal"
-              />
-            </q-card-section>
-            <q-separator vertical inset />
-            <q-card-section class="full-width">
-              <q-item dense>
-                <q-item-section>
-                  <q-item-label class="text-h6">开发工作台</q-item-label>
-                </q-item-section>
-                <q-item-section side
-                  ><q-item-label caption
-                    >developer</q-item-label
-                  ></q-item-section
-                >
-              </q-item>
-              <q-separator inset />
-              <q-card-actions>
-                <q-btn flat color="primary" label="进入" to="/workbench" />
-              </q-card-actions>
-            </q-card-section>
-          </q-card-section>
-        </q-card>
-      </div>
     </div>
-
-    <q-card flat bordered class="account-summary q-mt-xl">
-      <q-list separator>
-        <q-item>
-          <q-item-section avatar
-            ><q-icon color="primary" name="account_circle"
-          /></q-item-section>
-          <q-item-section>
-            <q-item-label>个人账户</q-item-label>
-            <q-item-label caption>{{
-              loggedIn ? "已登录" : "访客模式"
-            }}</q-item-label>
-          </q-item-section>
-          <q-item-section side>
-            <q-btn
-              v-if="!loggedIn"
-              flat
-              color="primary"
-              label="登录"
-              to="/login"
-            />
-          </q-item-section>
-        </q-item>
-        <q-item>
-          <q-item-section avatar
-            ><q-icon color="primary" name="domain"
-          /></q-item-section>
-          <q-item-section>
-            <q-item-label>企业账户</q-item-label>
-            <q-item-label caption>{{
-              tenantId ? `当前租户 ${tenantId}` : "尚未选择企业"
-            }}</q-item-label>
-          </q-item-section>
-        </q-item>
-        <q-item>
-          <q-item-section avatar
-            ><q-icon color="primary" name="schema"
-          /></q-item-section>
-          <q-item-section>
-            <q-item-label>服务目录</q-item-label>
-            <q-item-label caption
-              >{{ actions.length }} 项可访问能力</q-item-label
-            >
-          </q-item-section>
-        </q-item>
-      </q-list>
-    </q-card>
 
     <q-inner-loading :showing="loading">
       <q-spinner color="primary" size="48px" />
