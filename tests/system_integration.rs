@@ -71,7 +71,7 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         database.ends_with("_test"),
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
-    for table in ["org_user", "org_org", "users"] {
+    for table in ["org_user", "org_org", "admin_user", "users"] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
             .execute(pool)
             .await?;
@@ -180,7 +180,32 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let refresh_token = login["refresh_token"]
         .as_str()
         .context("登录响应缺少 refresh_token")?;
-    let refreshed = data(
+    data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "bootstrap",
+            json!({ "name": "Integration Administrator", "position": "Owner" }),
+            &[("authorization", &format!("Bearer {access_token}"))],
+            &[],
+        )
+        .await?,
+    )?;
+    ensure!(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "bootstrap",
+            json!({ "name": "Second Administrator" }),
+            &[("authorization", &format!("Bearer {access_token}"))],
+            &[],
+        )
+        .await
+        .is_err(),
+        "平台管理员初始化必须只能成功一次"
+    );
+
+    let refreshed_admin = data(
         dispatch(
             &application.runtime,
             "account.user",
@@ -191,24 +216,110 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         )
         .await?,
     )?;
+    let admin_access_token = refreshed_admin["access_token"]
+        .as_str()
+        .context("平台管理员刷新响应缺少 access_token")?;
+    let admin_refresh_token = refreshed_admin["refresh_token"]
+        .as_str()
+        .context("平台管理员刷新响应缺少 refresh_token")?;
+    let admin_authorization = format!("Bearer {admin_access_token}");
+    let admin_accounts = data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "list",
+            json!({}),
+            &[("authorization", &admin_authorization)],
+            &[("page", "1"), ("limit", "20")],
+        )
+        .await?,
+    )?;
     ensure!(
-        refreshed["access_token"].as_str().is_some(),
-        "刷新响应缺少 access_token"
+        admin_accounts["items"]
+            .as_array()
+            .is_some_and(|items| items.len() == 1),
+        "刷新 Token 后应获得平台账号读取权限"
     );
 
-    let authorization = format!("Bearer {access_token}");
     let organization = data(
         dispatch(
             &application.runtime,
             "org.tenant",
             "create",
             json!({ "name": "Integration Corp", "code": format!("IT{suffix}") }),
-            &[("authorization", &authorization)],
+            &[("authorization", &admin_authorization)],
             &[],
         )
         .await?,
     )?;
     let organization_id = organization["id"].as_i64().context("创建企业响应缺少 id")?;
+
+    let member_username = format!("member_{suffix}");
+    let member = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "register",
+            json!({ "username": member_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let member_id = member["id"].as_i64().context("成员注册响应缺少 id")?;
+    let tenant_id = organization_id.to_string();
+    let member_body = json!({
+        "org_org": organization_id,
+        "user_user": member_id,
+        "name": "Integration Member",
+        "admin": false,
+        "status": "active"
+    });
+    ensure!(
+        dispatch(
+            &application.runtime,
+            "org.user",
+            "add",
+            member_body.clone(),
+            &[
+                ("authorization", &admin_authorization),
+                ("x-tenant-id", &tenant_id),
+            ],
+            &[],
+        )
+        .await
+        .is_err(),
+        "创建企业前签发的 Token 不应隐式获得组织写权限"
+    );
+    let refreshed_org_admin = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "refresh",
+            json!({ "refresh_token": admin_refresh_token }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let org_access_token = refreshed_org_admin["access_token"]
+        .as_str()
+        .context("组织管理员刷新响应缺少 access_token")?;
+    let authorization = format!("Bearer {org_access_token}");
+    data(
+        dispatch(
+            &application.runtime,
+            "org.user",
+            "add",
+            member_body,
+            &[
+                ("authorization", &authorization),
+                ("x-tenant-id", &tenant_id),
+            ],
+            &[],
+        )
+        .await?,
+    )?;
 
     let tenants = data(
         dispatch(
@@ -228,7 +339,6 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         "租户发现未返回新创建企业"
     );
 
-    let tenant_id = organization_id.to_string();
     let organizations = data(
         dispatch(
             &application.runtime,
