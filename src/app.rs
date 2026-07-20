@@ -1,5 +1,5 @@
 use crate::config::SecuritySettings;
-use crate::modules::{account, org};
+use crate::modules::{account, admin, org};
 use anyhow::Context;
 use std::sync::Arc;
 use yang_base::definition::{AppBuilder, BuiltApp};
@@ -16,6 +16,7 @@ pub fn build_app(
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     let runtime = AppBuilder::new()
         .addon(account::build_addon(security).context("构建 account Addon 失败")?)
+        .addon(admin::build_addon().context("构建 admin Addon 失败")?)
         .addon(org::build_addon().context("构建 org Addon 失败")?)
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
@@ -85,7 +86,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(app.runtime.table_definitions().len(), 3);
+        assert_eq!(app.runtime.table_definitions().len(), 4);
         let tables = app
             .runtime
             .table_definitions()
@@ -93,6 +94,7 @@ mod tests {
             .map(|definition| definition.name())
             .collect::<Vec<_>>();
         assert!(tables.contains(&"users"));
+        assert!(tables.contains(&"admin_user"));
         assert!(tables.contains(&"org_org"));
         assert!(tables.contains(&"org_user"));
         assert_eq!(operations.len(), 6);
@@ -123,7 +125,7 @@ mod tests {
             document["paths"]["/api/v1/orgs/options"]["post"]["operationId"],
             "org.org.select"
         );
-        assert_eq!(app.runtime.compiled_views().len(), 3);
+        assert_eq!(app.runtime.compiled_views().len(), 4);
 
         for module in app
             .runtime

@@ -4,4 +4,5 @@
 //! 具体 Module、Action 和领域服务由 Addon 自己封装，避免应用组合根了解内部结构。
 
 pub mod account;
+pub mod admin;
 pub mod org;
