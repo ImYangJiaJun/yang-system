@@ -4,7 +4,8 @@ use super::service::TenantSummary;
 use crate::modules::org::organization::{ACTIVE_STATUS as ACTIVE_ORG_STATUS, STATUS as ORG_STATUS};
 use crate::modules::org::pagination::{Page, PageRequest};
 use crate::modules::org::user::{
-    ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS, ORG_ID, STATUS as MEMBERSHIP_STATUS, USER_ID,
+    ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS, IS_ADMIN, NAME as MEMBER_NAME, ORG_ID,
+    STATUS as MEMBERSHIP_STATUS, USER_ID,
 };
 use std::sync::Arc;
 use yang_base::action::ActionContext;
@@ -92,6 +93,7 @@ impl TenantRepository {
         &self,
         ctx: &ActionContext,
         user_id: i64,
+        username: &str,
         name: &str,
         code: &str,
     ) -> Result<TenantSummary, BaseError> {
@@ -109,6 +111,8 @@ impl TenantRepository {
         let membership = Record::new()
             .set(ORG_ID, org_id)
             .set(USER_ID, user_id)
+            .set(MEMBER_NAME, username)
+            .set(IS_ADMIN, true)
             .set(MEMBERSHIP_STATUS, ACTIVE_MEMBERSHIP_STATUS);
         self.query(ctx, &self.memberships)?
             .insert_in_tx(&mut transaction, membership)

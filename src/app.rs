@@ -272,6 +272,18 @@ mod tests {
         for name in ["add", "put", "del"] {
             assert_eq!(action(name).permissions, vec!["org.user:write"]);
         }
+        let membership_table = app
+            .runtime
+            .table_definitions()
+            .iter()
+            .find(|definition| definition.name() == "org_user")
+            .unwrap_or_else(|| panic!("应存在 org_user 表"));
+        for field in ["name", "position", "email", "phone", "admin", "updated_at"] {
+            assert!(
+                membership_table.field(field).is_some(),
+                "org_user 应包含基础账号字段 {field}"
+            );
+        }
         let view = org_user_module
             .views
             .iter()

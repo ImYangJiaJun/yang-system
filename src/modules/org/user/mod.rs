@@ -3,12 +3,15 @@
 mod view;
 
 use yang_base::definition::{
-    Fields, Module, ModuleName, ModuleSpec, Radio, Table, TableName, TableSpec, Timestamp,
+    Fields, Module, ModuleName, ModuleSpec, Radio, Str, Switch, Table, TableName, TableSpec,
+    Timestamp,
 };
 use yang_base::BaseError;
 
 pub(super) const ORG_ID: &str = "org_org";
 pub(super) const USER_ID: &str = "user_user";
+pub(super) const NAME: &str = "name";
+pub(super) const IS_ADMIN: &str = "admin";
 pub(super) const STATUS: &str = "status";
 pub(super) const ACTIVE_STATUS: &str = "active";
 
@@ -40,6 +43,19 @@ impl Module for OrgUserModule {
                 .target(yang_base::field!("users.id"))
                 .display([yang_base::field!("users.username")])
                 .filterable(true),
+            name => Str::new()
+                .title("姓名")
+                .max_length(50)
+                .searchable(true)
+                .sortable(true),
+            position => Str::new().title("职务").max_length(50),
+            email => Str::new().title("邮箱").max_length(254),
+            phone => Str::new().title("手机").max_length(20),
+            admin => Switch::new()
+                .title("企业管理员")
+                .require(true)
+                .default(false)
+                .filterable(true),
             status => Radio::<String>::new()
                 .title("成员状态")
                 .require(true)
@@ -47,6 +63,7 @@ impl Module for OrgUserModule {
                 .default(ACTIVE_STATUS)
                 .filterable(true),
             created_at => Timestamp::new().title("创建时间").created_at(),
+            updated_at => Timestamp::new().title("更新时间").updated_at(),
         }
     }
 
@@ -60,10 +77,11 @@ impl Module for OrgUserModule {
                 ],
             )
             .index_named(
-                "idx_org_user_user_status",
+                "idx_org_user_user_status_admin",
                 [
                     yang_base::field!("org_user.user_user"),
                     yang_base::field!("org_user.status"),
+                    yang_base::field!("org_user.admin"),
                 ],
             )
     }
@@ -102,9 +120,15 @@ mod tests {
                     .eq([ORG_ID, USER_ID])
         }));
         assert!(table.indexes.iter().any(|index| {
-            !index.unique && index.name.as_deref() == Some("idx_org_user_user_status")
+            !index.unique
+                && index.name.as_deref() == Some("idx_org_user_user_status_admin")
+                && index
+                    .fields
+                    .iter()
+                    .map(|field| field.field().as_str())
+                    .eq([USER_ID, STATUS, IS_ADMIN])
         }));
-        for name in [ORG_ID, USER_ID, STATUS] {
+        for name in [ORG_ID, USER_ID, STATUS, IS_ADMIN] {
             let field = table
                 .fields
                 .iter()

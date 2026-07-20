@@ -14,8 +14,14 @@ pub(super) fn build() -> Result<ViewSpec, BaseError> {
         .field(yang_base::field!("org_user.id"))
         .field(yang_base::field!("org_user.org_org"))
         .field(yang_base::field!("org_user.user_user"))
+        .field(yang_base::field!("org_user.name"))
+        .field(yang_base::field!("org_user.position"))
+        .field(yang_base::field!("org_user.email"))
+        .field(yang_base::field!("org_user.phone"))
+        .field(yang_base::field!("org_user.admin"))
         .field(yang_base::field!("org_user.status"))
         .field(yang_base::field!("org_user.created_at"))
+        .field(yang_base::field!("org_user.updated_at"))
         .present_action(
             yang_base::action!("org.user.add"),
             ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),

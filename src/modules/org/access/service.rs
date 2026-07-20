@@ -45,11 +45,13 @@ impl TenantService {
         let user = ctx
             .authenticated_user()
             .ok_or_else(|| BaseError::Unauthorized("创建租户需要已认证用户".to_string()))?;
+        let user_id = user.id;
+        let username = user.username.clone();
         let name = normalize_name(name)?;
         let code = normalize_code(code)?;
         match self
             .repository
-            .create_for_user(ctx, user.id, &name, &code)
+            .create_for_user(ctx, user_id, &username, &name, &code)
             .await
         {
             Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => Err(
