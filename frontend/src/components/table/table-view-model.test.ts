@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type {
   ActionDemoSchema,
+  ActionPresentationSchema,
   FormFieldSchema,
 } from "src/contracts/ui-catalog";
 import {
   buildActionInitialValues,
   buildWhereClause,
+  createTableFilters,
   flattenDisplayRows,
   formatCell,
+  groupPresentedActions,
   pageSizeOptions,
 } from "./table-view-model";
 
@@ -60,15 +63,95 @@ describe("table view model", () => {
     ]);
   });
 
-  it("将有效筛选构造成类型化 where，并忽略空输入", () => {
+  it("将精确筛选构造成类型化 where，并忽略空输入", () => {
     expect(
-      buildWhereClause({ enabled: "true", count: " 3 ", empty: " " }),
+      buildWhereClause({
+        enabled: { operator: "eq", value: "true" },
+        count: { operator: "eq", value: " 3 " },
+        empty: { operator: "eq", value: " " },
+      }),
     ).toEqual({
       type: "and",
       conditions: [
         { type: "eq", field: "enabled", value: true },
         { type: "eq", field: "count", value: 3 },
       ],
+    });
+  });
+
+  it("按后端契约生成包含、集合与区间条件", () => {
+    expect(
+      buildWhereClause({
+        name: { operator: "contains", value: " 渲染器 " },
+        status: { operator: "in", value: ["active", "paused"] },
+        score: { operator: "range", value: ["10", "20"] },
+      }),
+    ).toEqual({
+      type: "and",
+      conditions: [
+        { type: "like", field: "name", pattern: "%渲染器%" },
+        {
+          type: "in",
+          field: "status",
+          values: ["active", "paused"],
+        },
+        { type: "between", field: "score", lo: 10, hi: 20 },
+      ],
+    });
+  });
+
+  it("从列契约初始化默认操作符和区间值", () => {
+    const filters = createTableFilters([
+      {
+        field: "name",
+        title: "名称",
+        description: "",
+        widget: "text",
+        required: false,
+        searchable: true,
+        filterable: true,
+        sortable: true,
+      },
+      {
+        field: "score",
+        title: "分数",
+        description: "",
+        widget: "integer",
+        required: false,
+        searchable: false,
+        filterable: true,
+        sortable: true,
+        filter: { operators: ["range"], default_operator: "range" },
+      },
+    ]);
+    expect(filters).toEqual({
+      name: { operator: "eq", value: null },
+      score: { operator: "range", value: [null, null] },
+    });
+    expect(buildWhereClause(filters)).toBeUndefined();
+  });
+
+  it("将危险和超额操作收纳到更多菜单", () => {
+    const presentation = (
+      operationId: string,
+      confirmation = false,
+    ): ActionPresentationSchema => ({
+      operation_id: operationId,
+      title: operationId,
+      placement: "row",
+      interaction: "invoke",
+      confirmation: confirmation
+        ? { title: "确认", message: "不可撤销" }
+        : undefined,
+    });
+    const edit = presentation("edit");
+    const inspect = presentation("inspect");
+    const remove = presentation("remove", true);
+
+    expect(groupPresentedActions([edit, inspect, remove], 1)).toEqual({
+      primary: edit,
+      secondary: [],
+      overflow: [inspect, remove],
     });
   });
 

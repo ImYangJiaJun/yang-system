@@ -36,10 +36,30 @@ test("行操作按 presentation 执行表单编辑与确认删除", async ({ pag
   await expect(page.getByText("通用业务页", { exact: true })).toBeVisible();
 
   const editedRow = page.getByRole("row", { name: /通用业务页/ });
-  await editedRow.getByRole("button", { name: "删除项目" }).click();
+  await editedRow.getByRole("button", { name: "更多操作" }).click();
+  await page.getByText("删除项目", { exact: true }).click();
   await expect(page.getByText("此操作无法撤销")).toBeVisible();
   await page.getByRole("button", { name: "确认", exact: true }).click();
   await expect(page.getByText("通用业务页", { exact: true })).toHaveCount(0);
+});
+
+test("表格支持渐进筛选、活动条件和列管理", async ({ page }) => {
+  await page.goto("/workbench");
+
+  await page.getByRole("button", { name: "筛选" }).click();
+  await page.getByLabel("状态筛选值").fill("active");
+  await page.getByRole("button", { name: "查询" }).click();
+  await expect(
+    page.getByText("状态 等于 active", { exact: true }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "列设置" }).click();
+  await page.getByLabel("显示分类列").click();
+  await expect(page.getByRole("columnheader", { name: "分类" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "清除全部" }).click();
+  await expect(page.getByText("平台能力", { exact: true })).toBeVisible();
 });
 
 test("静态 view_id 覆盖通用页并可返回", async ({ page }) => {

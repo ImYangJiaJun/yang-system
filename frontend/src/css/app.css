@@ -379,13 +379,126 @@ textarea {
 
 .query-card {
   margin-bottom: 16px;
-  background: #f8fafc;
+  overflow: visible;
+  background: rgb(255 255 255 / 86%);
+  border-color: var(--ys-border);
+  border-radius: 14px;
+  box-shadow: 0 8px 26px rgb(24 55 78 / 5%);
 }
 
-.query-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+.table-query-section {
+  padding: 14px 16px;
+}
+
+.table-query-bar {
+  display: flex;
+  align-items: center;
   gap: 10px;
+}
+
+.table-search-input {
+  width: min(420px, 42vw);
+}
+
+.advanced-filter-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+  padding: 16px;
+  background: #f7fafc;
+  border: 1px solid #e6edf3;
+  border-radius: 12px;
+}
+
+.filter-control > label {
+  display: block;
+  margin-bottom: 7px;
+  color: #425269;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.filter-control-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-control-fields > .q-field:not(.filter-operator-select) {
+  min-width: 0;
+  flex: 1;
+}
+
+.filter-operator-select {
+  width: 104px;
+  flex: 0 0 104px;
+}
+
+.range-separator {
+  color: #7c8999;
+  font-size: 12px;
+}
+
+.active-filter-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+  color: #657187;
+  font-size: 12px;
+}
+
+.active-filter-row .q-chip {
+  margin: 0;
+}
+
+.column-settings-list {
+  min-width: 220px;
+  padding-bottom: 6px;
+}
+
+.action-menu-list {
+  min-width: 176px;
+  padding: 6px;
+}
+
+.action-menu-list .q-item {
+  min-height: 42px;
+  border-radius: 8px;
+}
+
+.business-table {
+  overflow: hidden;
+  background: #fff;
+  border-color: var(--ys-border);
+  border-radius: 14px;
+  box-shadow: 0 12px 34px rgb(24 55 78 / 6%);
+}
+
+.business-table thead tr {
+  background: #f5f8fb;
+}
+
+.business-table thead th {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  height: 48px;
+  color: #47566b;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.business-table tbody td {
+  height: 56px;
+  border-color: #edf1f5;
+}
+
+.business-table tbody tr:hover {
+  background: #f7fbfc;
 }
 
 .table-error,
@@ -483,6 +596,7 @@ textarea {
 }
 
 .table-row-actions {
+  min-width: 156px;
   white-space: nowrap;
 }
 
@@ -1098,6 +1212,33 @@ textarea {
 @media (max-width: 760px) {
   .app-toolbar {
     padding: 8px 12px;
+  }
+
+  .table-query-bar {
+    flex-wrap: wrap;
+  }
+
+  .table-query-bar .q-space {
+    display: none;
+  }
+
+  .table-search-input {
+    width: 100%;
+    flex: 1 0 100%;
+  }
+
+  .advanced-filter-panel {
+    grid-template-columns: 1fr;
+    padding: 12px;
+  }
+
+  .filter-control-fields {
+    flex-wrap: wrap;
+  }
+
+  .filter-operator-select {
+    width: 100%;
+    flex-basis: 100%;
   }
 
   .brand small,

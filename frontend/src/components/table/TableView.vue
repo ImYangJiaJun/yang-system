@@ -10,16 +10,22 @@ import { buildTreeRows, parseTableData } from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
+  TableColumnSchema,
+  TableFilterOperator,
   TableViewSchema,
 } from "src/contracts/ui-catalog";
 import JsonSchemaForm from "components/form/JsonSchemaForm.vue";
 import {
   buildActionInitialValues,
   buildWhereClause,
+  createTableFilters,
   flattenDisplayRows,
   formatCell,
+  groupPresentedActions,
+  isFilterActive,
   pageSizeOptions as buildPageSizeOptions,
   type DisplayRow,
+  type TableFilters,
 } from "./table-view-model";
 
 const props = defineProps<{
@@ -39,7 +45,18 @@ const total = ref(0);
 const page = ref(1);
 const pageSize = ref(props.view.query.default_page_size);
 const search = ref("");
-const filters = ref<Record<string, string>>({});
+const filters = ref<TableFilters>(
+  createTableFilters(
+    props.view.columns.filter((column) =>
+      props.view.query.filter_fields.includes(column.field),
+    ),
+  ),
+);
+const filtersOpen = ref(false);
+const visibleColumnNames = ref(
+  props.view.columns.map((column) => column.field),
+);
+const denseTable = ref(false);
 const orderBy = ref(props.view.query.default_sort);
 const selectedDisplayRows = ref<DisplayRow[]>([]);
 const loading = ref(false);
@@ -76,15 +93,38 @@ const rowActions = computed(() =>
 const bulkActions = computed(() =>
   presentations.value.filter((item) => item.placement === "bulk"),
 );
+const toolbarActionGroups = computed(() =>
+  groupPresentedActions(toolbarActions.value, 2),
+);
+const directToolbarActions = computed(() => [
+  ...(toolbarActionGroups.value.primary
+    ? [toolbarActionGroups.value.primary]
+    : []),
+  ...toolbarActionGroups.value.secondary,
+]);
+const rowActionGroups = computed(() =>
+  groupPresentedActions(rowActions.value, 1),
+);
+const directRowActions = computed(() =>
+  rowActionGroups.value.primary ? [rowActionGroups.value.primary] : [],
+);
 const filterColumns = computed(() =>
   props.view.columns.filter((column) =>
     props.view.query.filter_fields.includes(column.field),
   ),
 );
+const activeFilterColumns = computed(() =>
+  filterColumns.value.filter((column) =>
+    isFilterActive(filters.value[column.field]),
+  ),
+);
+const activeFilterCount = computed(
+  () => activeFilterColumns.value.length + (search.value.trim() ? 1 : 0),
+);
 const hasActiveQuery = computed(
   () =>
     Boolean(search.value.trim()) ||
-    Object.values(filters.value).some((value) => Boolean(value.trim())),
+    Object.values(filters.value).some((filter) => isFilterActive(filter)),
 );
 const treeResult = computed(() => {
   if (!props.view.tree || hasActiveQuery.value)
@@ -111,9 +151,19 @@ const tableColumns = computed<QTableColumn<DisplayRow>[]>(() => {
       name: column.field,
       label: column.title || column.field,
       field: (row) => row.data[column.field],
-      align: "left",
+      align: column.display?.align ?? "left",
       sortable: column.sortable,
       format: (value) => formatCell(value),
+      style: column.display?.width
+        ? `width: ${column.display.width}px`
+        : column.display?.min_width
+          ? `min-width: ${column.display.min_width}px`
+          : undefined,
+      headerStyle: column.display?.width
+        ? `width: ${column.display.width}px`
+        : column.display?.min_width
+          ? `min-width: ${column.display.min_width}px`
+          : undefined,
     }),
   );
   if (rowActions.value.length) {
@@ -133,6 +183,141 @@ const pageCount = computed(() =>
 const pageSizeOptions = computed(() =>
   buildPageSizeOptions(props.view.query.max_page_size),
 );
+const visibleColumns = computed(() => [
+  ...visibleColumnNames.value,
+  ...(rowActions.value.length ? ["__actions"] : []),
+]);
+
+const filterOperatorLabels: Record<TableFilterOperator, string> = {
+  eq: "等于",
+  contains: "包含",
+  in: "任一值",
+  range: "区间",
+};
+
+function actionLabel(presentation: ActionPresentationSchema) {
+  return presentation.title || presentation.operation_id;
+}
+
+function isDangerAction(presentation: ActionPresentationSchema) {
+  return (
+    presentation.appearance?.emphasis === "danger" ||
+    Boolean(presentation.confirmation)
+  );
+}
+
+function actionColor(presentation: ActionPresentationSchema) {
+  return isDangerAction(presentation) ? "negative" : "primary";
+}
+
+function filterOperators(column: TableColumnSchema) {
+  return column.filter?.operators ?? (["eq"] as TableFilterOperator[]);
+}
+
+function filterOperatorOptions(column: TableColumnSchema) {
+  return filterOperators(column).map((value) => ({
+    label: filterOperatorLabels[value],
+    value,
+  }));
+}
+
+function filterWidget(column: TableColumnSchema) {
+  return column.filter?.widget ?? column.widget;
+}
+
+function filterInputType(column: TableColumnSchema) {
+  const widget = filterWidget(column);
+  if (widget === "integer" || widget === "decimal") return "number";
+  if (widget === "date_time") return "datetime-local";
+  return "text";
+}
+
+function filterValueOptions(column: TableColumnSchema) {
+  if (column.display?.options?.length) {
+    return column.display.options.map((option) => ({
+      label: option.label,
+      value: option.value,
+    }));
+  }
+  if (filterWidget(column) === "switch") {
+    return [
+      { label: "是", value: true },
+      { label: "否", value: false },
+    ];
+  }
+  return [];
+}
+
+function usesOptionSelect(column: TableColumnSchema) {
+  return (
+    filterValueOptions(column).length > 0 || filterWidget(column) === "radio"
+  );
+}
+
+function setFilterOperator(field: string, operator: TableFilterOperator) {
+  filters.value[field] = {
+    operator,
+    value: operator === "range" ? [null, null] : operator === "in" ? [] : null,
+  };
+}
+
+function setFilterValue(field: string, value: unknown) {
+  const filter = filters.value[field];
+  if (filter) filter.value = value;
+}
+
+function rangeValue(field: string, index: number) {
+  const value = filters.value[field]?.value;
+  return Array.isArray(value) ? value[index] : null;
+}
+
+function setRangeValue(field: string, index: number, value: unknown) {
+  const current = filters.value[field];
+  if (!current) return;
+  const range = Array.isArray(current.value)
+    ? [...current.value]
+    : [null, null];
+  range[index] = value;
+  current.value = range;
+}
+
+function clearFilter(field: string) {
+  const filter = filters.value[field];
+  if (!filter) return;
+  filter.value =
+    filter.operator === "range"
+      ? [null, null]
+      : filter.operator === "in"
+        ? []
+        : null;
+}
+
+function filterSummary(column: TableColumnSchema) {
+  const filter = filters.value[column.field];
+  if (!filter) return column.title || column.field;
+  const value = Array.isArray(filter.value)
+    ? filter.value.filter((item) => item !== null && item !== "").join(" ～ ")
+    : String(filter.value);
+  return `${column.title || column.field} ${filterOperatorLabels[filter.operator]} ${value}`;
+}
+
+function clearAllQuery() {
+  search.value = "";
+  filters.value = createTableFilters(filterColumns.value);
+  applyQuery();
+}
+
+function setColumnVisible(field: string, visible: boolean) {
+  if (visible && !visibleColumnNames.value.includes(field)) {
+    visibleColumnNames.value.push(field);
+    return;
+  }
+  if (!visible && visibleColumnNames.value.length > 1) {
+    visibleColumnNames.value = visibleColumnNames.value.filter(
+      (name) => name !== field,
+    );
+  }
+}
 
 async function load() {
   if (!dataAction.value) {
@@ -310,7 +495,13 @@ watch(
     page.value = 1;
     pageSize.value = view.query.default_page_size;
     search.value = "";
-    filters.value = {};
+    filters.value = createTableFilters(
+      view.columns.filter((column) =>
+        view.query.filter_fields.includes(column.field),
+      ),
+    );
+    filtersOpen.value = false;
+    visibleColumnNames.value = view.columns.map((column) => column.field);
     orderBy.value = view.query.default_sort;
     const initialSort = view.query.default_sort[0];
     tablePagination.value = {
@@ -347,18 +538,50 @@ onBeforeUnmount(() => {
       </div>
       <div class="view-actions">
         <q-btn
-          v-for="presentation in toolbarActions"
+          v-for="presentation in directToolbarActions"
           :key="presentation.operation_id"
           :disabled="presentation.availability?.state === 'disabled'"
           :title="presentation.availability?.reason"
-          color="primary"
-          :label="presentation.title || presentation.operation_id"
+          :outline="presentation !== toolbarActionGroups.primary"
+          :color="actionColor(presentation)"
+          :icon="presentation.appearance?.icon"
+          :label="actionLabel(presentation)"
           @click="openAction(presentation)"
         />
         <q-btn
-          outline
+          v-if="toolbarActionGroups.overflow.length"
+          flat
+          round
           color="primary"
-          label="刷新"
+          icon="more_horiz"
+          aria-label="更多工具操作"
+        >
+          <q-menu auto-close>
+            <q-list class="action-menu-list">
+              <q-item
+                v-for="presentation in toolbarActionGroups.overflow"
+                :key="presentation.operation_id"
+                clickable
+                :disable="presentation.availability?.state === 'disabled'"
+                @click="openAction(presentation)"
+              >
+                <q-item-section avatar>
+                  <q-icon
+                    :name="presentation.appearance?.icon || 'arrow_forward'"
+                    :color="actionColor(presentation)"
+                  />
+                </q-item-section>
+                <q-item-section>{{ actionLabel(presentation) }}</q-item-section>
+              </q-item>
+            </q-list>
+          </q-menu>
+        </q-btn>
+        <q-btn
+          flat
+          round
+          color="primary"
+          icon="refresh"
+          aria-label="刷新数据"
           :loading="loading"
           @click="load"
         />
@@ -366,28 +589,199 @@ onBeforeUnmount(() => {
     </header>
 
     <q-card flat bordered class="query-card">
-      <q-card-section>
-        <div class="query-grid">
+      <q-card-section class="table-query-section">
+        <div class="table-query-bar">
           <q-input
             v-if="view.query.search_fields.length"
             v-model="search"
             dense
             outlined
             clearable
+            class="table-search-input"
             :placeholder="`搜索 ${view.query.search_fields.join('、')}`"
             @keyup.enter="applyQuery"
+          >
+            <template #prepend><q-icon name="search" /></template>
+          </q-input>
+          <q-btn
+            v-if="filterColumns.length"
+            outline
+            color="primary"
+            icon="tune"
+            :label="activeFilterCount ? `筛选 ${activeFilterCount}` : '筛选'"
+            :aria-expanded="filtersOpen"
+            @click="filtersOpen = !filtersOpen"
           />
-          <q-input
-            v-for="column in filterColumns"
+          <q-btn unelevated color="primary" label="查询" @click="applyQuery" />
+          <q-space />
+          <q-btn
+            flat
+            round
+            color="grey-7"
+            icon="view_column"
+            aria-label="列设置"
+          >
+            <q-menu>
+              <q-list class="column-settings-list">
+                <q-item-label header>显示字段</q-item-label>
+                <q-item
+                  v-for="column in view.columns"
+                  :key="column.field"
+                  tag="label"
+                  clickable
+                >
+                  <q-item-section side>
+                    <q-checkbox
+                      :model-value="visibleColumnNames.includes(column.field)"
+                      :aria-label="`显示${column.title || column.field}列`"
+                      :disable="
+                        visibleColumnNames.length === 1 &&
+                        visibleColumnNames.includes(column.field)
+                      "
+                      @update:model-value="
+                        setColumnVisible(column.field, Boolean($event))
+                      "
+                    />
+                  </q-item-section>
+                  <q-item-section>{{
+                    column.title || column.field
+                  }}</q-item-section>
+                </q-item>
+                <q-separator />
+                <q-item tag="label" clickable>
+                  <q-item-section side>
+                    <q-toggle v-model="denseTable" aria-label="紧凑行高" />
+                  </q-item-section>
+                  <q-item-section>紧凑行高</q-item-section>
+                </q-item>
+              </q-list>
+            </q-menu>
+          </q-btn>
+        </div>
+
+        <q-slide-transition>
+          <div v-show="filtersOpen" class="advanced-filter-panel">
+            <div
+              v-for="column in filterColumns"
+              :key="column.field"
+              class="filter-control"
+            >
+              <label>{{ column.title || column.field }}</label>
+              <div class="filter-control-fields">
+                <q-select
+                  v-if="filterOperators(column).length > 1"
+                  :model-value="filters[column.field]?.operator"
+                  :options="filterOperatorOptions(column)"
+                  dense
+                  outlined
+                  emit-value
+                  map-options
+                  class="filter-operator-select"
+                  aria-label="筛选方式"
+                  @update:model-value="setFilterOperator(column.field, $event)"
+                />
+                <template v-if="filters[column.field]?.operator === 'range'">
+                  <q-input
+                    :model-value="rangeValue(column.field, 0)"
+                    :type="filterInputType(column)"
+                    dense
+                    outlined
+                    clearable
+                    placeholder="起始值"
+                    :aria-label="`${column.title || column.field}筛选起始值`"
+                    @update:model-value="setRangeValue(column.field, 0, $event)"
+                    @keyup.enter="applyQuery"
+                  />
+                  <span class="range-separator">至</span>
+                  <q-input
+                    :model-value="rangeValue(column.field, 1)"
+                    :type="filterInputType(column)"
+                    dense
+                    outlined
+                    clearable
+                    placeholder="结束值"
+                    :aria-label="`${column.title || column.field}筛选结束值`"
+                    @update:model-value="setRangeValue(column.field, 1, $event)"
+                    @keyup.enter="applyQuery"
+                  />
+                </template>
+                <q-select
+                  v-else-if="filters[column.field]?.operator === 'in'"
+                  :model-value="filters[column.field]?.value"
+                  :options="filterValueOptions(column)"
+                  dense
+                  outlined
+                  clearable
+                  multiple
+                  use-chips
+                  use-input
+                  emit-value
+                  map-options
+                  new-value-mode="add-unique"
+                  :placeholder="
+                    column.filter?.placeholder || '输入后按回车添加'
+                  "
+                  :aria-label="`${column.title || column.field}筛选值`"
+                  @update:model-value="setFilterValue(column.field, $event)"
+                />
+                <q-select
+                  v-else-if="usesOptionSelect(column)"
+                  :model-value="filters[column.field]?.value"
+                  :options="filterValueOptions(column)"
+                  dense
+                  outlined
+                  clearable
+                  emit-value
+                  map-options
+                  :placeholder="column.filter?.placeholder || '请选择'"
+                  :aria-label="`${column.title || column.field}筛选值`"
+                  @update:model-value="setFilterValue(column.field, $event)"
+                />
+                <q-input
+                  v-else
+                  :model-value="filters[column.field]?.value"
+                  :type="filterInputType(column)"
+                  dense
+                  outlined
+                  clearable
+                  :placeholder="column.filter?.placeholder || '输入筛选值'"
+                  :aria-label="`${column.title || column.field}筛选值`"
+                  @update:model-value="setFilterValue(column.field, $event)"
+                  @keyup.enter="applyQuery"
+                />
+              </div>
+            </div>
+          </div>
+        </q-slide-transition>
+
+        <div v-if="hasActiveQuery" class="active-filter-row">
+          <span>当前条件</span>
+          <q-chip
+            v-if="search.trim()"
+            removable
+            color="blue-grey-1"
+            text-color="blue-grey-9"
+            @remove="search = ''"
+          >
+            关键词：{{ search.trim() }}
+          </q-chip>
+          <q-chip
+            v-for="column in activeFilterColumns"
             :key="column.field"
-            v-model="filters[column.field]"
+            removable
+            color="blue-grey-1"
+            text-color="blue-grey-9"
+            @remove="clearFilter(column.field)"
+          >
+            {{ filterSummary(column) }}
+          </q-chip>
+          <q-btn
+            flat
             dense
-            outlined
-            clearable
-            :placeholder="`${column.title || column.field} 精确筛选`"
-            @keyup.enter="applyQuery"
+            color="primary"
+            label="清除全部"
+            @click="clearAllQuery"
           />
-          <q-btn color="primary" label="查询" @click="applyQuery" />
         </div>
       </q-card-section>
     </q-card>
@@ -427,6 +821,7 @@ onBeforeUnmount(() => {
       v-model:selected="selectedDisplayRows"
       :rows="qTableRows"
       :columns="tableColumns"
+      :visible-columns="visibleColumns"
       :loading="loading"
       :pagination="tablePagination"
       :rows-per-page-options="[0]"
@@ -434,8 +829,10 @@ onBeforeUnmount(() => {
       :selection="bulkActions.length ? 'multiple' : 'none'"
       flat
       bordered
+      :dense="denseTable"
       hide-pagination
       binary-state-sort
+      class="business-table"
       @update:pagination="changeSort"
     >
       <template #body-cell="slotProps">
@@ -454,16 +851,48 @@ onBeforeUnmount(() => {
       <template #body-cell-__actions="slotProps">
         <q-td :props="slotProps" class="table-row-actions">
           <q-btn
-            v-for="presentation in rowActions"
+            v-for="presentation in directRowActions"
             :key="presentation.operation_id"
             flat
             dense
-            color="primary"
+            :color="actionColor(presentation)"
+            :icon="presentation.appearance?.icon"
             :disabled="presentation.availability?.state === 'disabled'"
             :title="presentation.availability?.reason"
-            :label="presentation.title || presentation.operation_id"
+            :label="actionLabel(presentation)"
             @click="openAction(presentation, slotProps.row.data)"
           />
+          <q-btn
+            v-if="rowActionGroups.overflow.length"
+            flat
+            round
+            dense
+            color="grey-7"
+            icon="more_horiz"
+            aria-label="更多操作"
+          >
+            <q-menu auto-close anchor="bottom right" self="top right">
+              <q-list class="action-menu-list">
+                <q-item
+                  v-for="presentation in rowActionGroups.overflow"
+                  :key="presentation.operation_id"
+                  clickable
+                  :disable="presentation.availability?.state === 'disabled'"
+                  @click="openAction(presentation, slotProps.row.data)"
+                >
+                  <q-item-section avatar>
+                    <q-icon
+                      :name="presentation.appearance?.icon || 'arrow_forward'"
+                      :color="actionColor(presentation)"
+                    />
+                  </q-item-section>
+                  <q-item-section>{{
+                    actionLabel(presentation)
+                  }}</q-item-section>
+                </q-item>
+              </q-list>
+            </q-menu>
+          </q-btn>
         </q-td>
       </template>
     </q-table>

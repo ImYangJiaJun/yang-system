@@ -5,7 +5,10 @@ import {
 } from "src/contracts/json-schema";
 import type {
   ActionDemoSchema,
+  ActionPresentationSchema,
   FormFieldSchema,
+  TableColumnSchema,
+  TableFilterOperator,
 } from "src/contracts/ui-catalog";
 
 export type SourceRow = Record<string, unknown>;
@@ -33,7 +36,22 @@ export function flattenDisplayRows(
   });
 }
 
-function parseFilterValue(value: string): unknown {
+export type TableFilterEntry = {
+  operator: TableFilterOperator;
+  value: unknown;
+};
+
+export type TableFilters = Record<string, TableFilterEntry>;
+
+export type PresentedActionGroups = {
+  primary?: ActionPresentationSchema;
+  secondary: ActionPresentationSchema[];
+  overflow: ActionPresentationSchema[];
+};
+
+function parseFilterValue(value: unknown): unknown {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string") return value;
   const trimmed = value.trim();
   if (!trimmed) return undefined;
   try {
@@ -43,13 +61,108 @@ function parseFilterValue(value: string): unknown {
   }
 }
 
-export function buildWhereClause(filters: Record<string, string>): unknown {
-  const conditions = Object.entries(filters)
-    .map(([field, value]) => ({ field, value: parseFilterValue(value) }))
-    .filter((item) => item.value !== undefined)
-    .map((item) => ({ type: "eq", field: item.field, value: item.value }));
+export function createTableFilters(columns: TableColumnSchema[]): TableFilters {
+  return Object.fromEntries(
+    columns.map((column) => [
+      column.field,
+      {
+        operator: column.filter?.default_operator ?? "eq",
+        value:
+          column.filter?.default_operator === "range" ? [null, null] : null,
+      },
+    ]),
+  );
+}
+
+export function isFilterActive(filter: TableFilterEntry | undefined): boolean {
+  if (!filter) return false;
+  if (filter.operator === "range") {
+    return (
+      Array.isArray(filter.value) &&
+      filter.value.length >= 2 &&
+      parseFilterValue(filter.value[0]) !== undefined &&
+      parseFilterValue(filter.value[1]) !== undefined
+    );
+  }
+  if (filter.operator === "in") {
+    return (
+      Array.isArray(filter.value) &&
+      filter.value.some((value) => parseFilterValue(value) !== undefined)
+    );
+  }
+  return parseFilterValue(filter.value) !== undefined;
+}
+
+export function buildWhereClause(filters: TableFilters): unknown {
+  const conditions: Array<Record<string, unknown>> = [];
+  for (const [field, filter] of Object.entries(filters)) {
+    if (!isFilterActive(filter)) continue;
+    if (filter.operator === "contains") {
+      conditions.push({
+        type: "like",
+        field,
+        pattern: `%${String(filter.value).trim()}%`,
+      });
+      continue;
+    }
+    if (filter.operator === "in") {
+      const values = (filter.value as unknown[])
+        .map(parseFilterValue)
+        .filter((value) => value !== undefined);
+      conditions.push({ type: "in", field, values });
+      continue;
+    }
+    if (filter.operator === "range") {
+      const [lo, hi] = filter.value as unknown[];
+      conditions.push({
+        type: "between",
+        field,
+        lo: parseFilterValue(lo),
+        hi: parseFilterValue(hi),
+      });
+      continue;
+    }
+    conditions.push({
+      type: "eq",
+      field,
+      value: parseFilterValue(filter.value),
+    });
+  }
   if (conditions.length === 0) return undefined;
   return conditions.length === 1 ? conditions[0] : { type: "and", conditions };
+}
+
+export function groupPresentedActions(
+  actions: ActionPresentationSchema[],
+  directLimit: number,
+): PresentedActionGroups {
+  const sorted = actions
+    .map((action, index) => ({ action, index }))
+    .sort(
+      (left, right) =>
+        (left.action.appearance?.order ?? 0) -
+          (right.action.appearance?.order ?? 0) || left.index - right.index,
+    )
+    .map(({ action }) => action);
+  const inferredOverflow = (action: ActionPresentationSchema) =>
+    action.appearance?.overflow === true ||
+    (action.appearance?.overflow !== false &&
+      (action.appearance?.emphasis === "danger" ||
+        Boolean(action.confirmation)));
+  const directCandidates = sorted.filter((action) => !inferredOverflow(action));
+  const explicitPrimary = directCandidates.find(
+    (action) => action.appearance?.emphasis === "primary",
+  );
+  const primary = explicitPrimary ?? directCandidates[0];
+  const direct = [
+    ...(primary ? [primary] : []),
+    ...directCandidates.filter((action) => action !== primary),
+  ].slice(0, Math.max(0, directLimit));
+  return {
+    primary,
+    secondary: direct.filter((action) => action !== primary),
+    overflow: sorted.filter((action) => !direct.includes(action)),
+  };
 }
 
 export function buildActionInitialValues(
