@@ -1,5 +1,6 @@
 //! 平台账号用例服务。
 
+use super::model::{AdminAccountPage, AdminAccountView, PageRequest};
 use super::repository::AdminRepository;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -52,6 +53,70 @@ impl AdminService {
             refresh_token_required: true,
         })
     }
+
+    pub(super) async fn list(
+        &self,
+        ctx: &ActionContext,
+        page: Option<i64>,
+        limit: Option<i64>,
+        search: Option<&str>,
+    ) -> Result<AdminAccountPage, BaseError> {
+        let request = PageRequest::parse(page, limit)?;
+        let search = normalize_optional("search", search, 100)?;
+        self.repository.list(ctx, request, search.as_deref()).await
+    }
+
+    pub(super) async fn add(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        name: &str,
+        position: Option<&str>,
+        admin: bool,
+    ) -> Result<AdminAccountView, BaseError> {
+        validate_id("user_user", user_id)?;
+        let name = normalize_required("name", name, 50)?;
+        let position = normalize_optional("position", position, 50)?;
+        self.repository
+            .add(ctx, user_id, &name, position.as_deref(), admin)
+            .await
+    }
+
+    pub(super) async fn set_status(
+        &self,
+        ctx: &ActionContext,
+        id: i64,
+        status: &str,
+    ) -> Result<AdminAccountView, BaseError> {
+        validate_id("id", id)?;
+        if !matches!(status, super::ACTIVE_STATUS | "disabled") {
+            return Err(BaseError::ParamInvalid(
+                "status".to_string(),
+                "平台账号状态必须是 active 或 disabled".to_string(),
+            ));
+        }
+        self.repository.set_status(ctx, id, status).await
+    }
+
+    pub(super) async fn set_admin(
+        &self,
+        ctx: &ActionContext,
+        id: i64,
+        admin: bool,
+    ) -> Result<AdminAccountView, BaseError> {
+        validate_id("id", id)?;
+        self.repository.set_admin(ctx, id, admin).await
+    }
+}
+
+fn validate_id(field: &str, id: i64) -> Result<(), BaseError> {
+    if id < 1 {
+        return Err(BaseError::ParamInvalid(
+            field.to_string(),
+            format!("{field} 必须是正整数"),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn normalize_required(
@@ -109,5 +174,7 @@ mod tests {
         );
         assert!(normalize_required("name", "", 50).is_err());
         assert!(normalize_optional("position", Some(&"x".repeat(51)), 50).is_err());
+        assert!(validate_id("id", 0).is_err());
+        assert!(validate_id("id", 1).is_ok());
     }
 }

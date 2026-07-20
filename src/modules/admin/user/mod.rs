@@ -1,6 +1,7 @@
 //! `admin.user` Module：平台账号定义。
 
 mod actions;
+mod model;
 mod repository;
 mod service;
 

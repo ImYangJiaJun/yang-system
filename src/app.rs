@@ -226,6 +226,27 @@ mod tests {
         assert_eq!(bootstrap.success_status, 201);
         assert!(!bootstrap.is_public);
         assert!(bootstrap.permissions.is_empty());
+        let admin_action = |name: &str| {
+            admin_user_module
+                .actions()
+                .iter()
+                .find(|action| action.name.as_str() == name)
+                .unwrap_or_else(|| panic!("应存在 admin.user.{name}"))
+        };
+        assert_eq!(admin_action("list").permissions, ["admin.user:read"]);
+        for name in ["add", "set_status", "set_admin"] {
+            assert_eq!(admin_action(name).permissions, ["admin.user:write"]);
+        }
+        assert_eq!(admin_action("list").route.path, "/api/v1/admin/users");
+        assert_eq!(admin_action("add").route.path, "/api/v1/admin/users");
+        assert_eq!(
+            admin_action("set_status").route.path,
+            "/api/v1/admin/users/status"
+        );
+        assert_eq!(
+            admin_action("set_admin").route.path,
+            "/api/v1/admin/users/admin"
+        );
 
         let org_user_module = app
             .runtime
