@@ -5,10 +5,12 @@ test("正式控制台使用 BR 生态的应用中心与模块导航", async ({ p
 
   await expect(page.getByRole("heading", { name: "应用中心" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "应用中心" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "个人账户" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "业务空间" })).toBeVisible();
   await expect(page.locator(".navigation-mode")).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "开发工作台" })).toHaveCount(0);
 
-  await page.getByRole("tab", { name: "开发工作台" }).click();
+  await page.goto("/workbench");
   await expect(page).toHaveURL("/workbench");
   await expect(
     page.getByText("YANG 接口工作台", { exact: true }),
