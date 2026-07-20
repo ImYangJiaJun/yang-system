@@ -20,4 +20,30 @@ describe("CatalogCache", () => {
     const changed = catalog("b".repeat(64));
     expect(cache.accept(changed)).toBe(changed);
   });
+
+  it("相同 revision 的不同授权投影不能复用旧目录", () => {
+    const cache = new CatalogCache();
+    const anonymous = catalog("a".repeat(64));
+    const authenticated: UiCatalog = {
+      ...catalog("a".repeat(64)),
+      actions: [
+        {
+          operation_id: "admin.user.list",
+          title: "平台账号列表",
+          description: "",
+          method: "GET",
+          path: "/api/v1/admin/users",
+          params: [],
+          input_schema: {},
+          output_schema: {},
+          request_media_type: "json",
+          response_kind: "json",
+          requires_auth: true,
+        },
+      ],
+    };
+
+    expect(cache.accept(anonymous)).toBe(anonymous);
+    expect(cache.accept(authenticated)).toBe(authenticated);
+  });
 });
