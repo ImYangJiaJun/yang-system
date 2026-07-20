@@ -2,22 +2,21 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
-import { unassignedViews, visibleAccountSpaces } from "src/account-spaces";
+import { buildAccountModulePages, unassignedViews } from "src/module-pages";
 import { useCatalogStore } from "stores/catalog";
 
 const router = useRouter();
 const store = useCatalogStore();
-const { catalog, error, loading, selectedViewId, token } = storeToRefs(store);
+const { catalog, error, loading, selectedViewId } = storeToRefs(store);
 const query = ref("");
 
-const loggedIn = computed(() => Boolean(token.value.trim()));
-const accountSpaces = computed(() => visibleAccountSpaces(catalog.value));
+const modulePages = computed(() => buildAccountModulePages(catalog.value));
 const businessViews = computed(() => unassignedViews(catalog.value));
-const filteredSpaces = computed(() => {
+const filteredModules = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase();
-  if (!keyword) return accountSpaces.value;
-  return accountSpaces.value.filter((space) =>
-    [space.title, space.subtitle, space.description]
+  if (!keyword) return modulePages.value;
+  return modulePages.value.filter((module) =>
+    [module.id, module.title, module.description]
       .join(" ")
       .toLocaleLowerCase()
       .includes(keyword),
@@ -38,8 +37,8 @@ async function openBusinessView(viewId: string) {
   await router.push("/business");
 }
 
-async function openAccountSpace(spaceId: string) {
-  await router.push(`/space/${spaceId}`);
+async function openModule(moduleId: string) {
+  await router.push(`/module/${moduleId}`);
 }
 </script>
 
@@ -78,7 +77,7 @@ async function openAccountSpace(spaceId: string) {
     </q-banner>
 
     <div
-      v-if="accountSpaces.length + businessViews.length > 1"
+      v-if="modulePages.length + businessViews.length > 1"
       class="row no-gutters q-mb-lg"
     >
       <q-input
@@ -94,16 +93,16 @@ async function openAccountSpace(spaceId: string) {
 
     <div class="q-col-gutter-md row">
       <div
-        v-for="space in filteredSpaces"
-        :key="space.id"
+        v-for="module in filteredModules"
+        :key="module.id"
         class="col-12 col-sm-6 col-md-4 col-lg-3"
       >
         <q-card
           flat
           bordered
           class="application-card cursor-pointer full-height"
-          :data-testid="`account-space-${space.id}`"
-          @click="openAccountSpace(space.id)"
+          :data-testid="`module-page-${module.id}`"
+          @click="openModule(module.id)"
         >
           <q-card-section horizontal>
             <q-card-section class="row items-center">
@@ -111,26 +110,24 @@ async function openAccountSpace(spaceId: string) {
                 color="primary"
                 text-color="white"
                 size="72px"
-                :icon="space.icon"
+                :icon="module.icon"
               />
             </q-card-section>
             <q-separator vertical inset />
             <q-card-section class="full-width">
               <q-item dense>
                 <q-item-section>
-                  <q-item-label class="text-h6">{{ space.title }}</q-item-label>
+                  <q-item-label class="text-h6">{{
+                    module.title
+                  }}</q-item-label>
                 </q-item-section>
                 <q-item-section side>
-                  <q-item-label caption>{{ space.subtitle }}</q-item-label>
+                  <q-item-label caption>{{ module.id }}</q-item-label>
                 </q-item-section>
               </q-item>
               <q-separator inset />
               <q-card-section class="text-caption text-grey-7">
-                {{
-                  space.id === "user" && !loggedIn
-                    ? "登录后进入个人账户"
-                    : `${space.views.length} 个页面 · ${space.actions.length} 项操作`
-                }}
+                {{ module.description }}
               </q-card-section>
             </q-card-section>
           </q-card-section>

@@ -1615,6 +1615,112 @@ textarea {
   box-shadow: none;
 }
 
+.module-page {
+  min-height: calc(100vh - 50px);
+  padding: 24px clamp(18px, 3vw, 42px) 48px;
+  background: #f7f8fa;
+}
+
+.module-page-heading {
+  max-width: 1440px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 0 auto 18px;
+  padding: 22px 24px;
+  background: #fff;
+  border: 1px solid #e2e6ea;
+  border-radius: 4px;
+}
+
+.module-page-heading h1,
+.module-page-heading p {
+  margin: 0;
+}
+
+.module-page-heading h1 {
+  margin-top: 3px;
+  color: #263238;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.module-page-heading p {
+  margin-top: 4px;
+  color: #78909c;
+}
+
+.module-id {
+  color: #00796b;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.module-data-card {
+  max-width: 1440px;
+  margin: 0 auto;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 4px;
+}
+
+.module-data-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 76px;
+}
+
+.module-data-toolbar .q-field {
+  width: min(320px, 40vw);
+}
+
+.module-detail-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.module-detail-list .q-item {
+  min-height: 76px;
+}
+
+.module-data-empty,
+.module-page-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #78909c;
+  text-align: center;
+}
+
+.module-data-empty {
+  min-height: 260px;
+}
+
+.module-page-empty {
+  min-height: 440px;
+}
+
+.module-page-empty h2,
+.module-page-empty p {
+  margin: 0;
+}
+
+.module-page-empty h2 {
+  margin-top: 10px;
+  color: #37474f;
+  font-size: 24px;
+}
+
+.module-page-empty .q-btn {
+  margin-top: 12px;
+}
+
 @media (max-width: 760px) {
   .login-page {
     grid-template-columns: 1fr;
@@ -1648,6 +1754,43 @@ textarea {
 
   .account-space-page {
     padding: 16px 12px 36px;
+  }
+
+  .module-page {
+    padding: 12px 8px 32px;
+  }
+
+  .module-page-heading {
+    align-items: flex-start;
+    padding: 18px 16px;
+  }
+
+  .module-page-heading,
+  .module-page-heading > .row {
+    display: block;
+  }
+
+  .module-page-heading > .row:last-child {
+    margin-top: 16px;
+  }
+
+  .module-page-heading > .row:last-child .q-btn {
+    width: 100%;
+    margin: 4px 0;
+  }
+
+  .module-page-heading .q-avatar {
+    float: left;
+    margin-right: 14px;
+  }
+
+  .module-data-toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .module-data-toolbar .q-field {
+    width: calc(100% - 52px);
   }
 
   .account-space-hero {

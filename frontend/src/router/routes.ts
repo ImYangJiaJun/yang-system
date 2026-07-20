@@ -21,9 +21,20 @@ const routes: RouteRecordRaw[] = [
         component: () => import("pages/BusinessPage.vue"),
       },
       {
+        path: "module/:moduleId",
+        name: "module-page",
+        component: () => import("pages/ModulePage.vue"),
+      },
+      {
         path: "space/:space",
-        name: "account-space",
-        component: () => import("pages/AccountSpacePage.vue"),
+        redirect: (route) => {
+          const modules: Record<string, string> = {
+            user: "account.user",
+            admin: "admin.user",
+            org: "org.access",
+          };
+          return `/module/${modules[String(route.params.space)] ?? "account.user"}`;
+        },
       },
     ],
   },

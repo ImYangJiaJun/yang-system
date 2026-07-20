@@ -14,6 +14,10 @@ const props = defineProps<{
   action: ActionDemoSchema;
   session: SessionContext;
   formal?: boolean;
+  initialValues?: Record<string, unknown>;
+}>();
+const emit = defineEmits<{
+  completed: [result: InvocationResult];
 }>();
 
 const values = ref<Record<string, unknown>>({});
@@ -31,9 +35,12 @@ const methodTagColor = computed(() => {
 });
 
 watch(
-  () => props.action,
-  (action) => {
-    values.value = initialObject(action.input_schema);
+  [() => props.action, () => props.initialValues],
+  ([action, initialValues]) => {
+    values.value = {
+      ...initialObject(action.input_schema),
+      ...(initialValues ?? {}),
+    };
     result.value = undefined;
     error.value = undefined;
   },
@@ -59,6 +66,7 @@ async function submit() {
       props.session,
       controller.signal,
     );
+    emit("completed", result.value);
   } catch (cause) {
     if (cause instanceof ApiError) {
       error.value = {
