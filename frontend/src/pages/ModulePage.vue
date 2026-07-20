@@ -13,7 +13,12 @@ import { useCatalogStore } from "stores/catalog";
 
 const route = useRoute();
 const store = useCatalogStore();
-const { catalog, loading: catalogLoading, session } = storeToRefs(store);
+const {
+  catalog,
+  loading: catalogLoading,
+  selectedOrganization,
+  session,
+} = storeToRefs(store);
 const activeAction = ref<ActionDemoSchema>();
 const activeInitialValues = ref<Record<string, unknown>>({});
 const actionDialogOpen = ref(false);
@@ -97,7 +102,7 @@ const columns = computed<QTableColumn[]>(() => {
     sortable: true,
     format: (value) => formatValue(key, value),
   }));
-  if (rowActions.value.length) {
+  if (rowActions.value.length || modulePage.value?.id === "org.access") {
     values.push({
       name: "actions",
       label: "操作",
@@ -199,6 +204,18 @@ function openAction(action: ActionDemoSchema, row?: Record<string, unknown>) {
   actionDialogOpen.value = true;
 }
 
+function selectOrganizationRow(row: Record<string, unknown>) {
+  if (
+    typeof row.id !== "number" ||
+    typeof row.name !== "string" ||
+    typeof row.code !== "string"
+  ) {
+    dataError.value = "企业列表缺少 id、name 或 code";
+    return;
+  }
+  store.selectOrganization({ id: row.id, name: row.name, code: row.code });
+}
+
 function refreshFromFirstPage() {
   page.value = 1;
   void loadPrimary();
@@ -206,6 +223,9 @@ function refreshFromFirstPage() {
 
 function handleCompleted() {
   void loadPrimary();
+  if (modulePage.value?.id === "org.access") {
+    void store.loadOrganizations();
+  }
 }
 
 watch(
@@ -309,7 +329,26 @@ onBeforeUnmount(() => controller?.abort());
         >
           <template #body-cell-actions="props">
             <q-td :props="props">
-              <q-btn-dropdown flat dense color="primary" label="管理">
+              <q-btn
+                v-if="modulePage.id === 'org.access'"
+                flat
+                dense
+                color="primary"
+                :disable="selectedOrganization?.id === props.row.id"
+                :label="
+                  selectedOrganization?.id === props.row.id
+                    ? '当前企业'
+                    : '进入企业'
+                "
+                @click="selectOrganizationRow(props.row)"
+              />
+              <q-btn-dropdown
+                v-if="rowActions.length"
+                flat
+                dense
+                color="primary"
+                label="管理"
+              >
                 <q-list>
                   <q-item
                     v-for="action in rowActions"

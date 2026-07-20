@@ -87,6 +87,40 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
       }),
     }),
   );
+  await page.route("**/api/v1/account/user/me**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          id: 7,
+          username: "alice",
+          status: "active",
+          created_at: 1_700_000_000,
+          updated_at: 1_700_000_000,
+        },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/org/access/list**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          items: [{ id: 23, name: "示例企业", code: "ACME" }],
+          total: 1,
+          page: 1,
+          limit: 100,
+          total_pages: 1,
+        },
+      }),
+    }),
+  );
 
   await page.goto("/");
 
@@ -113,15 +147,31 @@ test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page 
   await page.getByRole("button", { name: "关闭" }).click();
 
   await page.getByRole("button", { name: "账号菜单" }).click();
+  const accountMenu = page.locator(".account-switcher-menu");
   await expect(
-    page.getByText("用户中心", { exact: true }).last(),
+    accountMenu.getByText("个人账户", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByText("平台账号", { exact: true }).last(),
+    accountMenu.getByText("管理平台", { exact: true }).last(),
   ).toBeVisible();
   await expect(
-    page.getByText("我的企业", { exact: true }).last(),
+    accountMenu.getByText("示例企业", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByLabel("企业租户 ID")).toHaveCount(0);
+
+  await accountMenu.getByText("个人账户", { exact: true }).click();
+  await expect(page).toHaveURL("/module/account.user");
+  await expect(page.getByRole("heading", { name: "用户中心" })).toBeVisible();
+
+  await page.getByRole("button", { name: "账号菜单" }).click();
+  await accountMenu.getByText("示例企业", { exact: true }).click();
+  await expect(page).toHaveURL("/module/org.access");
+  await expect(
+    page.getByText("示例企业", { exact: true }).first(),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("yang.tenant-id")))
+    .toBe("23");
 });
 
 test("直接访问未授权 Module 页面时保持 fail-closed", async ({ page }) => {

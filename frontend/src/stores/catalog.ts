@@ -1,7 +1,15 @@
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { CatalogCache } from "src/api/catalog-cache";
-import { fetchUiCatalog, type SessionContext } from "src/api/client";
+import {
+  fetchUiCatalog,
+  invokeAction,
+  type SessionContext,
+} from "src/api/client";
+import {
+  parseOrganizationsPage,
+  type OrganizationSummary,
+} from "src/contracts/account-data";
 import {
   ContractError,
   type ActionDemoSchema,
@@ -36,7 +44,11 @@ export const useCatalogStore = defineStore("catalog", () => {
   const navigationMode = ref<NavigationMode>("views");
   const loading = ref(false);
   const error = ref<{ message: string; details?: string[] }>();
+  const organizations = ref<OrganizationSummary[]>([]);
+  const organizationsLoading = ref(false);
+  const organizationsError = ref("");
   let activeRequest: { id: number; controller: AbortController } | undefined;
+  let organizationsController: AbortController | undefined;
   let nextRequestId = 0;
   let sessionReloadTimer: number | undefined;
   let started = false;
@@ -76,6 +88,11 @@ export const useCatalogStore = defineStore("catalog", () => {
       all[0]
     );
   });
+  const selectedOrganization = computed(() =>
+    organizations.value.find(
+      (organization) => String(organization.id) === tenantId.value,
+    ),
+  );
 
   async function loadCatalog() {
     activeRequest?.controller.abort();
@@ -134,10 +151,54 @@ export const useCatalogStore = defineStore("catalog", () => {
     sessionStorage.setItem("yang.token", accessToken);
   }
 
+  async function loadOrganizations() {
+    const action = catalog.value?.actions.find(
+      (candidate) => candidate.operation_id === "org.access.list",
+    );
+    if (!token.value || !action) {
+      organizations.value = [];
+      organizationsError.value = "";
+      return;
+    }
+    organizationsController?.abort();
+    const controller = new AbortController();
+    organizationsController = controller;
+    organizationsLoading.value = true;
+    organizationsError.value = "";
+    try {
+      const result = await invokeAction(
+        action,
+        { page: 1, limit: 100 },
+        { token: token.value },
+        controller.signal,
+      );
+      if (result.kind !== "json") {
+        throw new ContractError("我的企业 Action 必须返回 JSON");
+      }
+      organizations.value = parseOrganizationsPage(result.data);
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === "AbortError") return;
+      organizations.value = [];
+      organizationsError.value =
+        cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      if (organizationsController === controller) {
+        organizationsController = undefined;
+        organizationsLoading.value = false;
+      }
+    }
+  }
+
+  function selectOrganization(organization?: OrganizationSummary) {
+    tenantId.value = organization ? String(organization.id) : "";
+  }
+
   function clearSession() {
     token.value = "";
     tenantId.value = "";
     catalog.value = undefined;
+    organizations.value = [];
+    organizationsError.value = "";
     sessionStorage.removeItem("yang.token");
     sessionStorage.removeItem("yang.tenant-id");
   }
@@ -165,13 +226,19 @@ export const useCatalogStore = defineStore("catalog", () => {
     navigationMode,
     loading,
     error,
+    organizations,
+    organizationsLoading,
+    organizationsError,
     session,
     actions,
     views,
     selectedView,
     selectedAction,
+    selectedOrganization,
     setAccessToken,
     clearSession,
+    loadOrganizations,
+    selectOrganization,
     loadCatalog,
     start,
   };

@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute, useRouter } from "vue-router";
+import AccountSwitcher from "components/account/AccountSwitcher.vue";
 import {
   buildAccountModulePages,
   modulesForIdentity,
@@ -15,16 +16,8 @@ const drawerOpen = ref(true);
 const route = useRoute();
 const router = useRouter();
 const store = useCatalogStore();
-const {
-  catalog,
-  error,
-  loading,
-  selectedView,
-  selectedViewId,
-  tenantId,
-  token,
-  views,
-} = storeToRefs(store);
+const { catalog, error, loading, selectedView, selectedViewId, token, views } =
+  storeToRefs(store);
 
 const loggedIn = computed(() => Boolean(token.value.trim()));
 const businessMode = computed(() => route.path === "/business");
@@ -109,74 +102,7 @@ store.start();
           />
         </q-tabs>
         <q-space />
-        <q-btn v-if="loggedIn" flat round dense aria-label="账号菜单">
-          <q-avatar size="32px" color="white" text-color="primary">Y</q-avatar>
-          <q-menu fit :offset="[0, 10]" class="account-menu">
-            <q-card flat>
-              <q-card-section class="text-center q-pb-sm">
-                <q-avatar size="56px" color="primary" text-color="white"
-                  >Y</q-avatar
-                >
-                <div class="text-subtitle1 text-weight-medium q-mt-sm">
-                  YANG 用户
-                </div>
-                <div class="text-caption text-grey-7">已建立安全会话</div>
-              </q-card-section>
-              <q-separator inset />
-              <q-list padding>
-                <q-item-label header>后端模块页面</q-item-label>
-                <q-item
-                  v-for="module in modulePages"
-                  :key="module.id"
-                  v-close-popup
-                  clickable
-                  :to="`/module/${module.id}`"
-                >
-                  <q-item-section avatar>
-                    <q-icon color="primary" :name="module.icon" />
-                  </q-item-section>
-                  <q-item-section>
-                    <q-item-label>{{ module.title }}</q-item-label>
-                    <q-item-label caption>{{ module.id }}</q-item-label>
-                  </q-item-section>
-                </q-item>
-              </q-list>
-              <q-separator inset />
-              <q-card-section>
-                <q-input
-                  v-model="tenantId"
-                  dense
-                  outlined
-                  clearable
-                  label="企业租户 ID"
-                  hint="切换后自动刷新可访问目录"
-                />
-              </q-card-section>
-              <q-separator inset />
-              <q-item v-close-popup clickable to="/workbench">
-                <q-item-section avatar>
-                  <q-icon color="blue-grey-7" name="terminal" />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label>开发工作台</q-item-label>
-                  <q-item-label caption
-                    >查看完整 Action 与目录契约</q-item-label
-                  >
-                </q-item-section>
-              </q-item>
-              <q-separator inset />
-              <q-card-actions align="center">
-                <q-btn
-                  flat
-                  color="negative"
-                  icon="logout"
-                  label="退出帐号"
-                  @click="endSession"
-                />
-              </q-card-actions>
-            </q-card>
-          </q-menu>
-        </q-btn>
+        <AccountSwitcher v-if="loggedIn" @logout="endSession" />
         <q-btn
           v-else
           flat

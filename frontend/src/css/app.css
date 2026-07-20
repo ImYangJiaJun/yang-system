@@ -1346,6 +1346,32 @@ textarea {
   border-radius: 15px;
 }
 
+.account-switcher {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-context-label {
+  max-width: 220px;
+  overflow: hidden;
+  color: rgb(255 255 255 / 86%);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-switcher-menu {
+  width: 370px;
+  max-width: calc(100vw - 24px);
+}
+
+.organization-switch-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border-radius: 4px;
+}
+
 .formal-drawer,
 .formal-drawer .q-drawer__content {
   color: #004976;
@@ -1745,6 +1771,10 @@ textarea {
   }
 
   .formal-addon-tabs {
+    display: none;
+  }
+
+  .account-context-label {
     display: none;
   }
 
