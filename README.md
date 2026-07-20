@@ -46,6 +46,38 @@ python scripts/new_action.py src/modules/org/organization/actions archive `
 生成代码会稳定返回“尚未实现”错误，开发者必须补齐强类型输入、输出和业务逻辑后
 才能交付，避免脚手架端点被误当作已实现能力。
 
+## BR 生态前端
+
+`frontend/` 使用 Quasar 构建与 BR 生态一致的账号管理入口。前端不维护另一套固定
+菜单，而是读取后端 Catalog，将可访问的 Addon/Module 直接投影为页面：
+
+| 后端模块 | 前端页面 | 账号身份 |
+|---|---|---|
+| `account.user` | 用户中心 | 个人账户 |
+| `admin.user` | 平台账号 | 管理平台 |
+| `org.access` | 我的企业 | 企业账户 |
+| `org.org` | 企业资料 | 企业账户 |
+| `org.user` | 企业成员 | 企业账户 |
+
+只有 Action、没有 TableView 的模块也会生成页面：列表或详情 Action 负责初始数据，
+其余 Action 按 Catalog 中的展示位置生成页面操作或行操作。后端权限投影中不存在的
+模块和操作不会出现在前端；直接访问无权模块时同样 fail-closed。
+
+右上角账号菜单对应 BR 的 `user/admin/org` 账号模型。企业身份从
+`org.access.list` 加载当前用户可访问的企业名称，选择企业后由前端保存其内部
+tenant ID 并重新加载 Catalog；用户无需看到或手动输入企业 ID。
+
+本地联调前端：
+
+```powershell
+cd frontend
+pnpm install
+pnpm dev
+```
+
+默认通过 Vite 代理访问 `http://127.0.0.1:18080` 的后端。提交前可运行
+`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 和 `pnpm e2e`。
+
 ## 原生结构
 
 ```text
