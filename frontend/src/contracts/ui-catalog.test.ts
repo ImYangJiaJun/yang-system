@@ -120,4 +120,154 @@ describe("parseUiCatalog", () => {
       parseUiCatalog(envelope({ table_views: [tableView] })),
     ).toThrow(ContractError);
   });
+
+  it("接受 2.3 表格展示、过滤和操作语义且不接收 CSS", () => {
+    const catalog = parseUiCatalog(
+      envelope({
+        schema_version: "2.3",
+        table_views: [
+          {
+            view_id: "demo.items.main",
+            title: "项目",
+            table: "demo_items",
+            data_action: "demo.echo",
+            columns: [
+              {
+                field: "status",
+                title: "状态",
+                description: "项目状态",
+                widget: "radio",
+                required: true,
+                searchable: false,
+                filterable: true,
+                sortable: true,
+                display: {
+                  kind: "status",
+                  align: "center",
+                  width: 120,
+                  options: [
+                    { value: "active", label: "启用", tone: "positive" },
+                  ],
+                  class: "unsafe-backend-css",
+                },
+                filter: {
+                  operators: ["eq", "in"],
+                  default_operator: "eq",
+                  widget: "radio",
+                },
+              },
+            ],
+            form: { fields: [] },
+            query: {
+              search_fields: [],
+              filter_fields: ["status"],
+              default_sort: [],
+              default_page_size: 20,
+              max_page_size: 100,
+            },
+            actions: ["demo.echo"],
+            action_presentations: [
+              {
+                operation_id: "demo.echo",
+                title: "删除",
+                placement: "row",
+                interaction: "invoke",
+                appearance: {
+                  emphasis: "danger",
+                  icon: "delete",
+                  order: 20,
+                  overflow: true,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const column = catalog.table_views[0]?.columns[0];
+    expect(column?.display).toEqual({
+      kind: "status",
+      align: "center",
+      width: 120,
+      options: [{ value: "active", label: "启用", tone: "positive" }],
+    });
+    expect(column?.filter?.operators).toEqual(["eq", "in"]);
+    expect(
+      catalog.table_views[0]?.action_presentations[0]?.appearance,
+    ).toMatchObject({ emphasis: "danger", overflow: true });
+  });
+
+  it("拒绝未声明或矛盾的过滤操作符", () => {
+    const baseColumn = {
+      field: "name",
+      title: "名称",
+      description: "",
+      widget: "text",
+      required: false,
+      searchable: true,
+      filterable: true,
+      sortable: true,
+    };
+    const baseView = {
+      view_id: "demo.items.main",
+      title: "项目",
+      table: "demo_items",
+      data_action: "demo.echo",
+      form: { fields: [] },
+      query: {
+        search_fields: ["name"],
+        filter_fields: ["name"],
+        default_sort: [],
+        default_page_size: 20,
+        max_page_size: 100,
+      },
+      actions: [],
+      action_presentations: [],
+    };
+
+    expect(() =>
+      parseUiCatalog(
+        envelope({
+          schema_version: "2.3",
+          table_views: [
+            {
+              ...baseView,
+              columns: [
+                {
+                  ...baseColumn,
+                  filter: {
+                    operators: ["eq"],
+                    default_operator: "contains",
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toThrow(ContractError);
+
+    expect(() =>
+      parseUiCatalog(
+        envelope({
+          schema_version: "2.3",
+          table_views: [
+            {
+              ...baseView,
+              columns: [
+                {
+                  ...baseColumn,
+                  filter: {
+                    operators: ["unsafe-sql"],
+                    default_operator: "unsafe-sql",
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toThrow(ContractError);
+  });
 });

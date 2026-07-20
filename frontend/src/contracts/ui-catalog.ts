@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const SUPPORTED_UI_SCHEMA_VERSIONS = ["2.2"] as const;
+export const SUPPORTED_UI_SCHEMA_VERSIONS = ["2.2", "2.3"] as const;
 type SupportedUiSchemaVersion = (typeof SUPPORTED_UI_SCHEMA_VERSIONS)[number];
 
 const jsonSchema = z.record(z.string(), z.unknown());
@@ -77,6 +77,60 @@ const relationOptionsSchema = z.object({
   label_fields: z.array(z.string().min(1)),
 });
 
+const semanticTone = z
+  .enum(["neutral", "info", "positive", "warning", "negative"])
+  .catch("neutral");
+
+const displayValue = z.union([z.string(), z.number(), z.boolean()]);
+
+const tableColumnDisplaySchema = z.object({
+  kind: z
+    .enum([
+      "text",
+      "number",
+      "boolean",
+      "status",
+      "date",
+      "date_time",
+      "relation",
+      "json",
+    ])
+    .catch("text"),
+  align: z.enum(["left", "center", "right"]).catch("left").optional(),
+  width: z.number().int().positive().max(1200).optional(),
+  min_width: z.number().int().positive().max(1200).optional(),
+  sticky: z.enum(["left", "right"]).optional(),
+  importance: z.enum(["primary", "secondary", "technical"]).optional(),
+  options: z
+    .array(
+      z.object({
+        value: displayValue,
+        label: z.string(),
+        tone: semanticTone.optional(),
+      }),
+    )
+    .optional(),
+});
+
+const filterOperator = z.enum(["eq", "contains", "in", "range"]);
+
+const tableFilterSchema = z
+  .object({
+    operators: z.array(filterOperator).min(1),
+    default_operator: filterOperator,
+    widget: widgetHint.optional(),
+    placeholder: z.string().optional(),
+  })
+  .superRefine((filter, context) => {
+    if (!filter.operators.includes(filter.default_operator)) {
+      context.addIssue({
+        code: "custom",
+        path: ["default_operator"],
+        message: "默认过滤操作符必须包含在 operators 中",
+      });
+    }
+  });
+
 const fieldValidationSchema = z.object({
   min_length: z.number().int().nonnegative().optional(),
   max_length: z.number().int().nonnegative().optional(),
@@ -95,6 +149,8 @@ const tableColumnSchema = z.object({
   filterable: z.boolean(),
   sortable: z.boolean(),
   relation: relationOptionsSchema.optional(),
+  display: tableColumnDisplaySchema.optional(),
+  filter: tableFilterSchema.optional(),
 });
 
 export const formFieldSchema = z.object({
@@ -133,6 +189,14 @@ const actionPresentationSchema = z.object({
     .nullable()
     .optional(),
   view_id: z.string().nullable().optional(),
+  appearance: z
+    .object({
+      emphasis: z.enum(["primary", "secondary", "danger"]).catch("secondary"),
+      icon: z.string().min(1).optional(),
+      order: z.number().int().optional(),
+      overflow: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 export const tableViewSchema = z.object({
@@ -200,6 +264,10 @@ export type ActionDemoSchema = z.infer<typeof actionDemoSchema>;
 export type UiCatalog = z.infer<typeof uiCatalogSchema>;
 export type UiParamSource = z.infer<typeof paramSource>;
 export type TableViewSchema = z.infer<typeof tableViewSchema>;
+export type TableColumnSchema = z.infer<typeof tableColumnSchema>;
+export type TableColumnDisplaySchema = z.infer<typeof tableColumnDisplaySchema>;
+export type TableFilterSchema = z.infer<typeof tableFilterSchema>;
+export type TableFilterOperator = z.infer<typeof filterOperator>;
 export type FormFieldSchema = z.infer<typeof formFieldSchema>;
 export type ActionPresentationSchema = z.infer<typeof actionPresentationSchema>;
 
