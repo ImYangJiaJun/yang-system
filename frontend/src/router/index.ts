@@ -5,6 +5,12 @@ import {
   createWebHistory,
 } from "vue-router";
 import { identityForModuleId } from "src/module-pages";
+import type { LoginResult } from "src/api/auth";
+import {
+  SESSION_EXPIRED_EVENT,
+  SESSION_REFRESHED_EVENT,
+} from "src/api/auth-session";
+import { useCatalogStore } from "src/stores/catalog";
 import {
   readAccessState,
   resolveAccessRedirect,
@@ -43,6 +49,21 @@ export default defineRouter(() => {
         : undefined;
     return resolveAccessRedirect(target, readAccessState(), targetIdentity);
   });
+
+  if (typeof window !== "undefined") {
+    window.addEventListener(SESSION_REFRESHED_EVENT, (event) => {
+      const tokens = (event as CustomEvent<LoginResult>).detail;
+      if (tokens) useCatalogStore().acceptRefreshedTokenPair(tokens);
+    });
+    window.addEventListener(SESSION_EXPIRED_EVENT, () => {
+      useCatalogStore().clearSession();
+      if (router.currentRoute.value.name === "login") return;
+      void router.replace({
+        name: "login",
+        query: { reason: "session-expired" },
+      });
+    });
+  }
 
   return router;
 });

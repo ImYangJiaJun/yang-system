@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./errors";
-import { login } from "./auth";
+import { login, refreshSession } from "./auth";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -80,5 +80,32 @@ describe("login", () => {
     await expect(login("alice", "correct-password")).rejects.toThrow(
       "登录响应缺少有效 Token",
     );
+  });
+});
+
+describe("refreshSession", () => {
+  it("发送 Refresh Token 并返回轮换后的 Token 对", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.method).toBe("POST");
+      expect(init.body).toBe(JSON.stringify({ refresh_token: "refresh-old" }));
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "成功",
+          data: {
+            access_token: "access-new",
+            refresh_token: "refresh-new",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(refreshSession("refresh-old")).resolves.toEqual({
+      accessToken: "access-new",
+      refreshToken: "refresh-new",
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/users/refresh");
   });
 });

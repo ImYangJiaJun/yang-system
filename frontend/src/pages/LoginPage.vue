@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { login } from "src/api/auth";
 import { useCatalogStore } from "stores/catalog";
 
 const router = useRouter();
+const route = useRoute();
 const store = useCatalogStore();
 const username = ref("");
 const password = ref("");
 const submitting = ref(false);
-const errorMessage = ref("");
+const errorMessage = ref(
+  route.query.reason === "session-expired" ? "登录状态已过期，请重新登录" : "",
+);
 const passwordVisible = ref(false);
 
 async function submit() {
@@ -18,7 +21,7 @@ async function submit() {
   submitting.value = true;
   try {
     const result = await login(username.value.trim(), password.value);
-    store.setAccessToken(result.accessToken);
+    store.setTokenPair(result);
     await router.replace("/roles");
   } catch (cause) {
     errorMessage.value =

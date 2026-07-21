@@ -45,7 +45,10 @@ const action: ActionDemoSchema = {
   requires_auth: true,
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  sessionStorage.clear();
+  vi.unstubAllGlobals();
+});
 
 describe("invokeAction", () => {
   it("按来源构建 path/query/header/body 且注入会话上下文", async () => {
@@ -123,6 +126,44 @@ describe("invokeAction", () => {
       { page: 1, page_size: 20, search: "Alice" },
       {},
     );
+  });
+
+  it("收到 401 后使用刷新结果重建并重试 Action 请求", async () => {
+    sessionStorage.setItem("yang.token", "access-old");
+    sessionStorage.setItem("yang.refresh-token", "refresh-old");
+    const authorizations: Array<string | null> = [];
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      if (url === "/api/v1/users/refresh") {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            message: "成功",
+            data: {
+              access_token: "access-new",
+              refresh_token: "refresh-new",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      authorizations.push(new Headers(init.headers).get("authorization"));
+      if (authorizations.length === 1) {
+        return new Response(
+          JSON.stringify({ code: 40102, message: "Token 已过期" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ code: 0, message: "成功", data: { ok: true } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      invokeAction(action, { id: 1, name: "A" }, { token: "access-old" }),
+    ).resolves.toMatchObject({ data: { ok: true } });
+    expect(authorizations).toEqual(["Bearer access-old", "Bearer access-new"]);
   });
 
   it("multipart Action 使用 FormData 并在发送前执行 MIME 与大小边界", async () => {

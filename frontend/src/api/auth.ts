@@ -28,18 +28,19 @@ function tokenPair(data: unknown): LoginResult | undefined {
   };
 }
 
-export async function login(
-  username: string,
-  password: string,
+async function requestTokenPair(
+  path: string,
+  body: Record<string, string>,
+  missingTokenMessage: string,
   signal?: AbortSignal,
 ): Promise<LoginResult> {
-  const response = await fetch(`${apiBase}/api/v1/users/login`, {
+  const response = await fetch(`${apiBase}${path}`, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify(body),
     signal,
   });
   const requestId = response.headers.get("x-request-id") ?? undefined;
@@ -54,7 +55,7 @@ export async function login(
   }
   const result = tokenPair(payload.data);
   if (!result) {
-    throw new ApiError("登录响应缺少有效 Token", {
+    throw new ApiError(missingTokenMessage, {
       status: response.status,
       code: payload.code,
       requestId,
@@ -62,4 +63,29 @@ export async function login(
     });
   }
   return result;
+}
+
+export async function login(
+  username: string,
+  password: string,
+  signal?: AbortSignal,
+): Promise<LoginResult> {
+  return requestTokenPair(
+    "/api/v1/users/login",
+    { username, password },
+    "登录响应缺少有效 Token",
+    signal,
+  );
+}
+
+export async function refreshSession(
+  refreshToken: string,
+  signal?: AbortSignal,
+): Promise<LoginResult> {
+  return requestTokenPair(
+    "/api/v1/users/refresh",
+    { refresh_token: refreshToken },
+    "刷新响应缺少有效 Token",
+    signal,
+  );
 }

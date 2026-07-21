@@ -81,18 +81,41 @@ describe("catalog store", () => {
     const store = useCatalogStore();
 
     store.selectAccountIdentity("admin");
-    store.setAccessToken("access-token");
+    store.setTokenPair({
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+    });
     expect(store.token).toBe("access-token");
+    expect(store.refreshToken).toBe("refresh-token");
     expect(store.accountIdentity).toBeUndefined();
     expect(sessionStorage.getItem("yang.token")).toBe("access-token");
+    expect(sessionStorage.getItem("yang.refresh-token")).toBe("refresh-token");
     expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
 
     store.tenantId = "tenant-7";
     store.clearSession();
     expect(store.token).toBe("");
+    expect(store.refreshToken).toBe("");
     expect(store.tenantId).toBe("");
     expect(sessionStorage.getItem("yang.token")).toBeNull();
+    expect(sessionStorage.getItem("yang.refresh-token")).toBeNull();
     expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
+  });
+
+  it("自动刷新 Token 时保留当前角色和租户上下文", () => {
+    const store = useCatalogStore();
+    store.selectAccountIdentity("org");
+    store.tenantId = "tenant-7";
+
+    store.acceptRefreshedTokenPair({
+      accessToken: "access-new",
+      refreshToken: "refresh-new",
+    });
+
+    expect(store.token).toBe("access-new");
+    expect(store.refreshToken).toBe("refresh-new");
+    expect(store.accountIdentity).toBe("org");
+    expect(store.tenantId).toBe("tenant-7");
   });
 
   it("账号身份独立保存并在退出后回到未选择状态", () => {

@@ -5,6 +5,7 @@ import {
 } from "src/contracts/ui-catalog";
 import { buildActionRequest } from "./action-request";
 import { parseActionResponse } from "./action-response";
+import { requestWithTokenRefresh } from "./auth-session";
 import { ApiError } from "./errors";
 import { apiBase, contextHeaders, parseJson } from "./http";
 import type { InvocationResult, SessionContext } from "./types";
@@ -16,11 +17,13 @@ export async function fetchUiCatalog(
   context: SessionContext,
   signal?: AbortSignal,
 ): Promise<UiCatalog> {
-  const response = await fetch(`${apiBase}/.well-known/yang/ui-catalog`, {
-    method: "GET",
-    headers: contextHeaders(context),
-    signal,
-  });
+  const response = await requestWithTokenRefresh(context.token, (token) =>
+    fetch(`${apiBase}/.well-known/yang/ui-catalog`, {
+      method: "GET",
+      headers: contextHeaders({ ...context, token }),
+      signal,
+    }),
+  );
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = await parseJson(response);
   if (!response.ok) {
@@ -42,8 +45,10 @@ export async function invokeAction(
   signal?: AbortSignal,
 ): Promise<InvocationResult> {
   const startedAt = performance.now();
-  const request = buildActionRequest(action, values, context);
-  const response = await fetch(request.url, { ...request.init, signal });
+  const response = await requestWithTokenRefresh(context.token, (token) => {
+    const request = buildActionRequest(action, values, { ...context, token });
+    return fetch(request.url, { ...request.init, signal });
+  });
   const durationMs = Math.round((performance.now() - startedAt) * 10) / 10;
   return parseActionResponse(action, response, durationMs);
 }

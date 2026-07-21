@@ -82,6 +82,11 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
     .toBe("access-token");
   await expect
     .poll(() =>
+      page.evaluate(() => sessionStorage.getItem("yang.refresh-token")),
+    )
+    .toBe("refresh-token");
+  await expect
+    .poll(() =>
       page.evaluate(() => sessionStorage.getItem("yang.account-identity")),
     )
     .toBe("admin");
@@ -106,4 +111,113 @@ test("登录失败时停留在登录页且不保存凭据", async ({ page }) => 
   await expect
     .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
     .toBeNull();
+});
+
+test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) => {
+  await page.addInitScript(() => {
+    sessionStorage.setItem("yang.token", "access-old");
+    sessionStorage.setItem("yang.refresh-token", "refresh-old");
+  });
+  const catalogAuthorizations: Array<string | undefined> = [];
+  let refreshRequests = 0;
+  await page.route("**/.well-known/yang/ui-catalog", async (route) => {
+    const authorization = route.request().headers().authorization;
+    catalogAuthorizations.push(authorization);
+    if (authorization === "Bearer access-old") {
+      await route.fulfill({
+        status: 401,
+        contentType: "application/json",
+        body: JSON.stringify({ code: 40102, message: "Token 已过期" }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          schema_version: "2.2",
+          revision: "b".repeat(64),
+          actions: [catalogAction("account.user.me")],
+          table_views: [],
+        },
+      }),
+    });
+  });
+  await page.route("**/api/v1/users/refresh", async (route) => {
+    refreshRequests += 1;
+    expect(route.request().postDataJSON()).toEqual({
+      refresh_token: "refresh-old",
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          access_token: "access-new",
+          refresh_token: "refresh-new",
+        },
+      }),
+    });
+  });
+
+  await page.goto("/roles");
+
+  await expect(page.getByTestId("role-option-user")).toBeVisible();
+  await expect(page).toHaveURL("/roles");
+  expect(refreshRequests).toBe(1);
+  expect(catalogAuthorizations).toEqual([
+    "Bearer access-old",
+    "Bearer access-new",
+  ]);
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
+    .toBe("access-new");
+  await expect
+    .poll(() =>
+      page.evaluate(() => sessionStorage.getItem("yang.refresh-token")),
+    )
+    .toBe("refresh-new");
+});
+
+test("访问令牌和刷新令牌均失效时自动退出到登录页", async ({ page }) => {
+  await page.addInitScript(() => {
+    sessionStorage.setItem("yang.token", "access-expired");
+    sessionStorage.setItem("yang.refresh-token", "refresh-expired");
+    sessionStorage.setItem("yang.tenant-id", "7");
+    sessionStorage.setItem("yang.account-identity", "admin");
+  });
+  await page.route("**/.well-known/yang/ui-catalog", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: JSON.stringify({ code: 40102, message: "Token 已过期" }),
+    }),
+  );
+  await page.route("**/api/v1/users/refresh", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: JSON.stringify({ code: 40103, message: "Refresh Token 已失效" }),
+    }),
+  );
+
+  await page.goto("/roles");
+
+  await expect(page).toHaveURL(/\/login\?reason=session-expired$/);
+  await expect(page.getByText("登录状态已过期，请重新登录")).toBeVisible();
+  for (const key of [
+    "yang.token",
+    "yang.refresh-token",
+    "yang.tenant-id",
+    "yang.account-identity",
+  ]) {
+    await expect
+      .poll(() => page.evaluate((name) => sessionStorage.getItem(name), key))
+      .toBeNull();
+  }
 });

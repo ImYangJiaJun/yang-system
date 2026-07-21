@@ -1,6 +1,8 @@
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { CatalogCache } from "src/api/catalog-cache";
+import type { LoginResult } from "src/api/auth";
+import { clearStoredSession, persistTokenPair } from "src/api/auth-session";
 import {
   fetchUiCatalog,
   invokeAction,
@@ -44,6 +46,7 @@ function sessionIdentity(): AccountIdentity | undefined {
 
 export const useCatalogStore = defineStore("catalog", () => {
   const token = ref(sessionValue("yang.token"));
+  const refreshToken = ref(sessionValue("yang.refresh-token"));
   const tenantId = ref(sessionValue("yang.tenant-id"));
   const accountIdentity = ref<AccountIdentity | undefined>(sessionIdentity());
   const query = ref("");
@@ -155,14 +158,21 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   }
 
-  function setAccessToken(accessToken: string) {
-    token.value = accessToken;
+  function setTokenPair(tokens: LoginResult) {
+    token.value = tokens.accessToken;
+    refreshToken.value = tokens.refreshToken;
     tenantId.value = "";
     accountIdentity.value = undefined;
     catalog.value = undefined;
-    sessionStorage.setItem("yang.token", accessToken);
+    persistTokenPair(tokens);
     sessionStorage.removeItem("yang.tenant-id");
     sessionStorage.removeItem("yang.account-identity");
+  }
+
+  function acceptRefreshedTokenPair(tokens: LoginResult) {
+    token.value = tokens.accessToken;
+    refreshToken.value = tokens.refreshToken;
+    persistTokenPair(tokens);
   }
 
   function selectAccountIdentity(identity: AccountIdentity) {
@@ -214,29 +224,38 @@ export const useCatalogStore = defineStore("catalog", () => {
 
   function clearSession() {
     token.value = "";
+    refreshToken.value = "";
     tenantId.value = "";
     accountIdentity.value = undefined;
     catalog.value = undefined;
     organizations.value = [];
     organizationsError.value = "";
-    sessionStorage.removeItem("yang.token");
-    sessionStorage.removeItem("yang.tenant-id");
-    sessionStorage.removeItem("yang.account-identity");
+    clearStoredSession();
   }
 
   function start() {
     stopSessionWatcher?.();
-    stopSessionWatcher = watch([token, tenantId], ([nextToken, nextTenant]) => {
-      sessionStorage.setItem("yang.token", nextToken);
-      sessionStorage.setItem("yang.tenant-id", nextTenant);
-      if (sessionReloadTimer !== undefined) {
-        window.clearTimeout(sessionReloadTimer);
-      }
-      sessionReloadTimer = window.setTimeout(() => {
-        sessionReloadTimer = undefined;
-        void loadCatalog();
-      }, 400);
-    });
+    stopSessionWatcher = watch(
+      [token, refreshToken, tenantId],
+      ([nextToken, nextRefreshToken, nextTenant]) => {
+        if (nextToken) sessionStorage.setItem("yang.token", nextToken);
+        else sessionStorage.removeItem("yang.token");
+        if (nextRefreshToken) {
+          sessionStorage.setItem("yang.refresh-token", nextRefreshToken);
+        } else {
+          sessionStorage.removeItem("yang.refresh-token");
+        }
+        if (nextTenant) sessionStorage.setItem("yang.tenant-id", nextTenant);
+        else sessionStorage.removeItem("yang.tenant-id");
+        if (sessionReloadTimer !== undefined) {
+          window.clearTimeout(sessionReloadTimer);
+        }
+        sessionReloadTimer = window.setTimeout(() => {
+          sessionReloadTimer = undefined;
+          void loadCatalog();
+        }, 400);
+      },
+    );
     if (sessionReloadTimer !== undefined) {
       window.clearTimeout(sessionReloadTimer);
       sessionReloadTimer = undefined;
@@ -246,6 +265,7 @@ export const useCatalogStore = defineStore("catalog", () => {
 
   return {
     token,
+    refreshToken,
     tenantId,
     accountIdentity,
     query,
@@ -264,7 +284,8 @@ export const useCatalogStore = defineStore("catalog", () => {
     selectedView,
     selectedAction,
     selectedOrganization,
-    setAccessToken,
+    setTokenPair,
+    acceptRefreshedTokenPair,
     selectAccountIdentity,
     clearSession,
     loadOrganizations,
