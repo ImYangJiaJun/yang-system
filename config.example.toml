@@ -2,8 +2,8 @@
 name = "yang-system"
 
 [schema]
-# 本地开发使用 apply；生产建议由迁移任务执行 DDL，并在配置文件中改为 validate。
-mode = "apply"
+# 安全默认值为 validate；仅本地首次初始化需要时显式改为 apply。
+mode = "validate"
 
 [http]
 bind = "127.0.0.1:8080"

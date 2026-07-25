@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$CheckOnly,
-    [switch]$SkipFrontendInstall
+    [switch]$SkipFrontendInstall,
+    [switch]$ApplySchema
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +11,13 @@ $configPath = Join-Path $projectRoot "config.toml"
 $configExamplePath = Join-Path $projectRoot "config.example.toml"
 $composePath = Join-Path $projectRoot "compose.yaml"
 $databaseInitPath = Join-Path $projectRoot "docker/mysql/init/001-create-databases.sql"
+
+if ($CheckOnly -and $ApplySchema) {
+    throw "-CheckOnly 与 -ApplySchema 不能同时使用。"
+}
+if ($ApplySchema -and (Test-Path -LiteralPath $configPath)) {
+    throw "-ApplySchema 仅用于首次生成 config.toml；已有配置不会被脚本改写，请手工确认 schema.mode。"
+}
 
 function Assert-Command {
     param([Parameter(Mandatory)][string]$Name)
@@ -70,8 +78,13 @@ try {
     if (-not (Test-Path -LiteralPath $configPath)) {
         $mysqlPlaceholder = "mysql://root:password@127.0.0.1:3306/yang_system"
         $tokenPlaceholder = "replace-with-at-least-32-random-bytes"
+        $schemaValidate = 'mode = "validate"'
         $config = Get-Content -Raw -LiteralPath $configExamplePath
-        if (-not $config.Contains($mysqlPlaceholder) -or -not $config.Contains($tokenPlaceholder)) {
+        if (
+            -not $config.Contains($mysqlPlaceholder) -or
+            -not $config.Contains($tokenPlaceholder) -or
+            -not $config.Contains($schemaValidate)
+        ) {
             throw "config.example.toml 缺少预期占位值，无法安全生成本机配置。"
         }
 
@@ -83,8 +96,12 @@ try {
             "mysql://root:yang-local@127.0.0.1:3306/yang_system"
         )
         $config = $config.Replace($tokenPlaceholder, $tokenSecret)
+        if ($ApplySchema) {
+            $config = $config.Replace($schemaValidate, 'mode = "apply"')
+        }
         Set-Content -LiteralPath $configPath -Value $config -Encoding utf8NoBOM
-        Write-Host "已生成本机 config.toml。"
+        $schemaMode = if ($ApplySchema) { "apply" } else { "validate" }
+        Write-Host "已生成本机 config.toml（schema.mode=$schemaMode）。"
     } else {
         Write-Host "保留已有 config.toml。"
     }
@@ -98,5 +115,10 @@ try {
 }
 
 Write-Host "本地环境初始化完成。"
-Write-Host "后端: Set-Location project/yang-system; cargo run --locked"
+if ($ApplySchema) {
+    Write-Host "已显式允许本地首次建表。后端: Set-Location project/yang-system; cargo run --locked"
+} else {
+    Write-Host "后端启动前提: 数据库 schema 已对齐；空库首次建表需手工显式设置 schema.mode=apply。"
+    Write-Host "后端: Set-Location project/yang-system; cargo run --locked"
+}
 Write-Host "前端: Set-Location project/yang-system; pnpm --dir frontend dev"

@@ -11,11 +11,17 @@ Python 3.11+、已启动的 Docker Desktop、Node.js 24+ 和 Corepack；脚本�
 从 `lib_yang` 仓库根目录执行：
 
 ```powershell
+# 默认生成 schema.mode = "validate" 的安全配置
 pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1
+
+# 仅全新本地空库首次建表时，显式允许 additive schema apply
+pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 -ApplySchema
 ```
 
 脚本会启动 Compose 中的 MySQL 8.0 与 Redis 7、等待健康检查、安装前端依赖，
-并仅在不存在时生成被 Git 忽略的 `config.toml`。已有本机配置不会被覆盖。
+并仅在不存在时生成被 Git 忽略的 `config.toml`。默认配置使用 `validate`；
+`-ApplySchema` 仅在首次生成配置时改为 `apply`。已有本机配置不会被覆盖，若已存在
+则必须手工确认 `schema.mode`。
 只检查必需工具时使用：
 
 ```powershell
@@ -169,7 +175,8 @@ Addon/Module/fields!/params!
 
 ## 本地启动
 
-初始化脚本执行完成后，启动后端：
+初始化脚本执行完成且数据库 schema 已对齐后，启动后端。全新空库必须在首次生成
+配置时传入 `-ApplySchema`，或手工明确设置 `schema.mode = "apply"`：
 
 ```powershell
 Set-Location project/yang-system
@@ -179,15 +186,17 @@ cargo run --locked
 后端位于 `http://127.0.0.1:8080`，存活与就绪检查分别位于
 `/health/live` 和 `/health/ready`。前端开发服务器位于 `http://127.0.0.1:5173`。
 
-需要手工配置时，先创建 MySQL 数据库和 Redis，再复制配置示例。应用会创建缺失
-表和列，但不会创建数据库本身。
+需要手工配置时，先创建 MySQL 数据库和 Redis，再复制配置示例。示例保持安全的
+`schema.mode = "validate"`；首次本地初始化若需要自动创建缺失表和列，必须显式
+改为 `apply`，应用不会创建数据库本身。
 
 ```powershell
 Copy-Item config.example.toml config.toml
 $tokenBytes = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
 $tokenSecret = [Convert]::ToBase64String($tokenBytes)
-# 编辑 config.toml：填写 mysql.url、redis.url，并把 token.secret 替换为 $tokenSecret
+# 编辑 config.toml：填写 mysql.url、redis.url，把 token.secret 替换为 $tokenSecret；
+# 仅首次本地初始化需要时，将 schema.mode 显式改为 apply
 cargo run
 ```
 
@@ -195,9 +204,10 @@ cargo run
 Redis、Token、Schema 模式等运行参数均以该文件为准；修改环境变量不会覆盖配置。
 部署时应限制 `config.toml` 的读取权限，并通过部署系统生成或挂载该文件。
 
-`schema.mode` 支持 `apply|validate|off`：`apply` 适合本地开发；`validate` 不执行 DDL，
-发现任何待应用变更就拒绝启动，适合由独立迁移任务管理 schema 的生产环境；`off`
-只应在外部已完成等价校验时显式使用。
+`schema.mode` 支持 `apply|validate|off`。省略整个 `[schema]` 或只省略 `mode` 时均
+默认 `validate`：它不执行 DDL，发现任何待应用变更就拒绝启动，适合由独立迁移任务
+管理 schema 的生产环境。`apply` 仅适合本地开发或受控初始化，`off` 只应在外部已
+完成等价校验时使用；二者都必须显式配置。
 
 ## 真实依赖集成测试
 

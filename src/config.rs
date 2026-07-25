@@ -11,6 +11,7 @@ const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub app: AppSettings,
+    #[serde(default)]
     pub schema: SchemaSettings,
     pub http: HttpSettings,
     pub mysql: MysqlSettings,
@@ -26,16 +27,18 @@ pub struct AppSettings {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaSettings {
+    #[serde(default)]
     pub mode: SchemaMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaMode {
     Apply,
+    #[default]
     Validate,
     Off,
 }
@@ -294,10 +297,59 @@ filter = "info"
     }
 
     #[test]
+    fn defaults_schema_mode_to_validate_when_section_or_mode_is_omitted() {
+        let without_section = valid_config().replace("[schema]\nmode = \"validate\"\n", "");
+        let without_mode = valid_config().replace("mode = \"validate\"\n", "");
+
+        for raw in [without_section, without_mode] {
+            let settings = Settings::parse(&raw)
+                .unwrap_or_else(|error| panic!("缺省 schema 配置应使用安全默认值: {error}"));
+            assert_eq!(settings.schema.mode, SchemaMode::Validate);
+        }
+    }
+
+    #[test]
+    fn accepts_apply_and_off_only_when_explicitly_selected() {
+        for (raw_mode, expected) in [("apply", SchemaMode::Apply), ("off", SchemaMode::Off)] {
+            let raw =
+                valid_config().replace("mode = \"validate\"", &format!("mode = \"{raw_mode}\""));
+            let settings = Settings::parse(&raw)
+                .unwrap_or_else(|error| panic!("显式 schema mode 应解析成功: {error}"));
+            assert_eq!(settings.schema.mode, expected);
+        }
+    }
+
+    #[test]
+    fn example_config_uses_validate_schema_mode() {
+        let value: toml::Value = toml::from_str(include_str!("../config.example.toml"))
+            .unwrap_or_else(|error| panic!("示例配置必须是合法 TOML: {error}"));
+        assert_eq!(
+            value
+                .get("schema")
+                .and_then(|schema| schema.get("mode"))
+                .and_then(toml::Value::as_str),
+            Some("validate")
+        );
+    }
+
+    #[test]
     fn rejects_unknown_schema_mode_from_config_file() {
         let raw = valid_config().replace("mode = \"validate\"", "mode = \"unsafe\"");
         let error = match Settings::parse(&raw) {
             Ok(_) => panic!("未知 schema mode 必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("解析配置文件失败"));
+    }
+
+    #[test]
+    fn rejects_unknown_schema_field_when_safe_defaults_are_enabled() {
+        let raw = valid_config().replace(
+            "mode = \"validate\"",
+            "mode = \"validate\"\nunexpected = true",
+        );
+        let error = match Settings::parse(&raw) {
+            Ok(_) => panic!("未知 schema 字段必须被拒绝"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("解析配置文件失败"));
