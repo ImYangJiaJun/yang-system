@@ -3,12 +3,13 @@ use crate::config::{SchemaMode, Settings};
 use crate::transport::http;
 use anyhow::Context;
 use jsonwebtoken::Algorithm;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use yang_base::database::DatabaseInitializer;
 use yang_base::token::TokenManager;
-use yang_base::tools::ToolsBuilder;
+use yang_base::tools::{Tools, ToolsBuilder};
 use yang_db::{Database, RedisClient};
 
 pub async fn run(config_path: &Path) -> anyhow::Result<()> {
@@ -41,6 +42,23 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
             .build()
             .context("构建应用 Tools 失败")?,
     );
+
+    run_then_cleanup(
+        run_after_tools_created(&settings, initializer_mysql, Arc::clone(&tools)),
+        tools.close(),
+    )
+    .await
+}
+
+/// 运行 Tools 构建后的完整启动与服务阶段。
+///
+/// 该函数整体位于 [`run_then_cleanup`] 的 operation 边界内，因此应用构建、schema、
+/// 地址解析/绑定、服务运行失败以及正常退出都会进入同一个关闭出口。
+async fn run_after_tools_created(
+    settings: &Settings,
+    initializer_mysql: Database,
+    tools: Arc<Tools>,
+) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
 
@@ -80,9 +98,16 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
 
     let bind = settings.bind_addr()?;
     let runtime = Arc::new(application.runtime);
-    let result = http::serve(bind, runtime, &settings.http).await;
+    http::serve(bind, runtime, &settings.http).await
+}
 
-    tools.close().await;
+/// 等待 operation 完成后无条件执行且仅执行一次 cleanup，并保留原始结果。
+async fn run_then_cleanup<T, E>(
+    operation: impl Future<Output = Result<T, E>>,
+    cleanup: impl Future<Output = ()>,
+) -> Result<T, E> {
+    let result = operation.await;
+    cleanup.await;
     result
 }
 
@@ -92,4 +117,69 @@ fn init_tracing(filter: &str) -> anyhow::Result<()> {
         .with_env_filter(filter)
         .try_init()
         .map_err(|error| anyhow::anyhow!("初始化 tracing 失败: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use yang_base::tools::ToolsState;
+
+    #[tokio::test]
+    async fn cleanup_runs_exactly_once_for_success_and_every_post_tools_failure() {
+        for failed_stage in [
+            None,
+            Some("build"),
+            Some("schema"),
+            Some("bind"),
+            Some("serve"),
+        ] {
+            let cleanup_calls = AtomicUsize::new(0);
+            let operation = async move {
+                match failed_stage {
+                    Some(stage) => Err(anyhow::anyhow!("{stage} failed")),
+                    None => Ok("completed"),
+                }
+            };
+
+            let result = run_then_cleanup(operation, async {
+                cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            })
+            .await;
+
+            assert_eq!(
+                cleanup_calls.load(Ordering::SeqCst),
+                1,
+                "退出场景 {failed_stage:?} 必须恰好 cleanup 一次"
+            );
+            match (failed_stage, result) {
+                (Some(stage), Err(error)) => {
+                    assert_eq!(error.to_string(), format!("{stage} failed"));
+                }
+                (None, Ok(value)) => assert_eq!(value, "completed"),
+                (stage, unexpected) => {
+                    panic!("退出场景 {stage:?} 返回意外结果: {unexpected:?}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_boundary_reaches_tools_close() {
+        let tools = match ToolsBuilder::new().build() {
+            Ok(tools) => tools,
+            Err(error) => panic!("测试 Tools 应构建成功: {error}"),
+        };
+        let result: anyhow::Result<()> = run_then_cleanup(
+            async { Err(anyhow::anyhow!("schema failed")) },
+            tools.close(),
+        )
+        .await;
+
+        match result {
+            Err(error) => assert_eq!(error.to_string(), "schema failed"),
+            Ok(()) => panic!("业务失败必须保留"),
+        }
+        assert_eq!(tools.state(), ToolsState::Closed);
+    }
 }
