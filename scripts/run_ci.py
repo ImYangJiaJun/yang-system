@@ -32,6 +32,19 @@ QUICK = (
     Command("Frontend tests", ("pnpm", "--dir", "frontend", "test")),
 )
 
+FRONTEND_PRODUCTION_AUDIT = Command(
+    "Frontend production dependency audit",
+    (
+        "pnpm",
+        "--dir",
+        "frontend",
+        "audit",
+        "--prod",
+        "--audit-level",
+        "moderate",
+    ),
+)
+
 FULL = (
     *ARCHITECTURE,
     Command("Rust formatting", ("cargo", "fmt", "--", "--check")),
@@ -49,6 +62,7 @@ FULL = (
             "warnings",
         ),
     ),
+    FRONTEND_PRODUCTION_AUDIT,
     Command("Frontend full check", ("pnpm", "--dir", "frontend", "check")),
 )
 
@@ -90,6 +104,18 @@ def self_test() -> None:
     assert "python scripts/run_ci.py integration" in workflow
     assert any(command.argv[:3] == ("cargo", "test", "--all-targets") for command in FULL)
     assert any(command.argv[:2] == ("pnpm", "--dir") for command in FULL)
+    assert FRONTEND_PRODUCTION_AUDIT.argv == (
+        "pnpm",
+        "--dir",
+        "frontend",
+        "audit",
+        "--prod",
+        "--audit-level",
+        "moderate",
+    )
+    assert FULL.index(FRONTEND_PRODUCTION_AUDIT) < next(
+        index for index, command in enumerate(FULL) if command.name == "Frontend full check"
+    )
     for command in (*QUICK, *FULL, *INTEGRATION):
         if command.argv[0] == "cargo" and command.argv[1] != "fmt":
             assert "--locked" in command.argv, f"Cargo 命令缺少 --locked: {command.name}"
