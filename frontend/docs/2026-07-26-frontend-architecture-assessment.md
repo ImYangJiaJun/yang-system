@@ -30,20 +30,20 @@
 
 ## 二、技术选型判断
 
-| 选型 | 结论 | 理由 |
-|---|---|---|
-| Vue 3 Composition API | 保留 | 动态界面、强类型组合逻辑和渐进拆分适配度高 |
-| TypeScript strict | 保留并强化 | Catalog/表格是高动态边界，需要静态约束兜底 |
-| Quasar CLI + Vite | 保留 | 后台组件覆盖广，CLI 集成构建/路由/图标/样式最省总成本 |
-| SPA | 当前合理 | 登录后的内部系统不依赖 SEO；需补服务器 history fallback |
-| Pinia | 保留 | 当前规模足够，不需要换 Redux 类方案 |
-| Vue Router | 保留 | 路由元数据和身份入口清楚 |
-| Zod 4 | 保留 | 后端 Catalog 和 API 返回必须运行时验证 |
-| Vitest | 保留 | 与 Vite/Vue 工具链一致 |
-| Playwright | 保留并扩大关键旅程 | 适合真实浏览器隔离、自动等待和多角色场景 |
-| TanStack Query | 暂不引入 | 先拆请求 composable；出现广泛缓存失效/去重需求后再评估 |
-| SSR/Nuxt | 不引入 | 当前没有 SEO、首屏公开内容或服务端渲染收益 |
-| 微前端 | 不引入 | 当前模块规模和团队边界不足以抵消运行复杂度 |
+| 选型                  | 结论               | 理由                                                    |
+| --------------------- | ------------------ | ------------------------------------------------------- |
+| Vue 3 Composition API | 保留               | 动态界面、强类型组合逻辑和渐进拆分适配度高              |
+| TypeScript strict     | 保留并强化         | Catalog/表格是高动态边界，需要静态约束兜底              |
+| Quasar CLI + Vite     | 保留               | 后台组件覆盖广，CLI 集成构建/路由/图标/样式最省总成本   |
+| SPA                   | 当前合理           | 登录后的内部系统不依赖 SEO；需补服务器 history fallback |
+| Pinia                 | 保留               | 当前规模足够，不需要换 Redux 类方案                     |
+| Vue Router            | 保留               | 路由元数据和身份入口清楚                                |
+| Zod 4                 | 保留               | 后端 Catalog 和 API 返回必须运行时验证                  |
+| Vitest                | 保留               | 与 Vite/Vue 工具链一致                                  |
+| Playwright            | 保留并扩大关键旅程 | 适合真实浏览器隔离、自动等待和多角色场景                |
+| TanStack Query        | 暂不引入           | 先拆请求 composable；出现广泛缓存失效/去重需求后再评估  |
+| SSR/Nuxt              | 不引入             | 当前没有 SEO、首屏公开内容或服务端渲染收益              |
+| 微前端                | 不引入             | 当前模块规模和团队边界不足以抵消运行复杂度              |
 
 ### 官方能力校准
 
@@ -69,17 +69,17 @@
 
 ## 四、成熟度评分
 
-| 维度 | 评分 | 判断 |
-|---|---:|---|
-| 技术栈适配度 | 4.5 | 与内部管理 SPA、动态 Catalog 高度匹配 |
-| API/契约边界 | 4.1 | Zod、集中 client、请求 id、单飞 refresh 较完整 |
-| Catalog 驱动程度 | 3.2 | 基础设施已成形，仍有较多 operation/字段名启发式 |
-| 状态与生命周期 | 3.2 | Pinia 可用，但 store 过宽且多入口 start |
-| 组件可维护性 | 3.1 | 通用能力强，TableView/ModulePage 体积和职责过大 |
-| 浏览器安全 | 3.0 | 有严格校验与静态组件注册，但 token 可被 JS 读取 |
-| 测试 | 3.8 | 单元 + Playwright 完整，组件交互和安全负例不足 |
-| 无障碍与可观测性 | 2.8 | 尚未形成自动门禁和端到端错误关联 |
-| **整体** | **3.6** | **完整工程骨架，进入契约与可维护性收敛阶段** |
+| 维度             |    评分 | 判断                                            |
+| ---------------- | ------: | ----------------------------------------------- |
+| 技术栈适配度     |     4.5 | 与内部管理 SPA、动态 Catalog 高度匹配           |
+| API/契约边界     |     4.1 | Zod、集中 client、请求 id、单飞 refresh 较完整  |
+| Catalog 驱动程度 |     3.2 | 基础设施已成形，仍有较多 operation/字段名启发式 |
+| 状态与生命周期   |     3.2 | Pinia 可用，但 store 过宽且多入口 start         |
+| 组件可维护性     |     3.1 | 通用能力强，TableView/ModulePage 体积和职责过大 |
+| 浏览器安全       |     3.0 | 有严格校验与静态组件注册，但 token 可被 JS 读取 |
+| 测试             |     3.8 | 单元 + Playwright 完整，组件交互和安全负例不足  |
+| 无障碍与可观测性 |     2.8 | 尚未形成自动门禁和端到端错误关联                |
+| **整体**         | **3.6** | **完整工程骨架，进入契约与可维护性收敛阶段**    |
 
 ## 五、当前架构的成熟点
 
@@ -523,18 +523,18 @@ API boundary
 
 ## 九、建议的验收矩阵
 
-| 目标 | 自动化证据 |
-|---|---|
-| 新模块零前端业务改动 | Catalog fixture contract test + Playwright，未知语义安全降级 |
-| 身份/租户切换无旧数据覆盖 | store/composable race test |
-| refresh 并发唯一 | API client unit test + browser E2E |
-| refresh token 不可由 JS 读取 | cookie 属性集成测试 + 浏览器断言 |
-| 多标签页会话一致 | rotation、登出和身份切换的多页 E2E |
-| TableView 可安全拆分 | component tests + visual/E2E 关键旅程 |
-| Workbench 不泄露 | production build chunk/route test + permission E2E |
-| 无障碍 | eslint accessibility + axe + keyboard E2E |
-| 生产可诊断 | error event 含 release/route/request id 的集成测试 |
-| 部署可用 | production build + 深链接 history fallback + HTML/静态资源缓存策略 smoke test |
+| 目标                         | 自动化证据                                                                    |
+| ---------------------------- | ----------------------------------------------------------------------------- |
+| 新模块零前端业务改动         | Catalog fixture contract test + Playwright，未知语义安全降级                  |
+| 身份/租户切换无旧数据覆盖    | store/composable race test                                                    |
+| refresh 并发唯一             | API client unit test + browser E2E                                            |
+| refresh token 不可由 JS 读取 | cookie 属性集成测试 + 浏览器断言                                              |
+| 多标签页会话一致             | rotation、登出和身份切换的多页 E2E                                            |
+| TableView 可安全拆分         | component tests + visual/E2E 关键旅程                                         |
+| Workbench 不泄露             | production build chunk/route test + permission E2E                            |
+| 无障碍                       | eslint accessibility + axe + keyboard E2E                                     |
+| 生产可诊断                   | error event 含 release/route/request id 的集成测试                            |
+| 部署可用                     | production build + 深链接 history fallback + HTML/静态资源缓存策略 smoke test |
 
 ## 十、最终判断
 
@@ -554,12 +554,12 @@ API boundary
 
 ### 本机新鲜验证
 
-| 命令 | 结果 | 可见证据 |
-|---|---|---|
-| `pnpm --dir frontend install --frozen-lockfile` | 通过 | 依赖按现有 lockfile 成功安装，锁文件无变更，Quasar prepare 成功 |
-| `python scripts/run_ci.py full` | 通过 | ESLint、Prettier、`vue-tsc`、15 个 Vitest 文件/71 个测试、Quasar SPA production build |
-| `pnpm --dir frontend e2e` | 通过 | Chromium 18/18，32.4 秒 |
-| `pnpm --dir frontend audit --prod` | **未通过** | 1 项中危：Quasar `<=2.21.4` prototype pollution；修复版本 `>=2.22.0` |
+| 命令                                            | 结果       | 可见证据                                                                              |
+| ----------------------------------------------- | ---------- | ------------------------------------------------------------------------------------- |
+| `pnpm --dir frontend install --frozen-lockfile` | 通过       | 依赖按现有 lockfile 成功安装，锁文件无变更，Quasar prepare 成功                       |
+| `python scripts/run_ci.py full`                 | 通过       | ESLint、Prettier、`vue-tsc`、15 个 Vitest 文件/71 个测试、Quasar SPA production build |
+| `pnpm --dir frontend e2e`                       | 通过       | Chromium 18/18，32.4 秒                                                               |
+| `pnpm --dir frontend audit --prod`              | **未通过** | 1 项中危：Quasar `<=2.21.4` prototype pollution；修复版本 `>=2.22.0`                  |
 
 E2E 实际覆盖登录成功/失败、refresh、会话失效、不同账号空间、未授权 Module fail-closed、Catalog 切换、动态 Action、上传/下载/预览/重定向，以及 TableView 的树、筛选、排序、关系表单和行操作。
 
