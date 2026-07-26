@@ -41,6 +41,11 @@ audience = "yang-system-api"
 access_ttl_seconds = 3600
 refresh_ttl_seconds = 2592000
 
+[bootstrap]
+# 运行 yang-bootstrap-secret 生成；配置只保存摘要，原始 secret 由运维安全保管。
+# 该占位值会被启动校验拒绝。
+secret_digest = "replace-with-yang-bootstrap-secret-digest"
+
 [security]
 argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60

@@ -209,14 +209,20 @@ Copy-Item config.example.toml config.toml
 $tokenBytes = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
 $tokenSecret = [Convert]::ToBase64String($tokenBytes)
-# 编辑 config.toml：填写 mysql.url、redis.url，把 token.secret 替换为 $tokenSecret；
+# 生成器只在当前终端显示一次原始 bootstrap secret；配置只填写 digest。
+cargo run --quiet --locked --bin yang-bootstrap-secret
+# 编辑 config.toml：填写 mysql.url、redis.url，把 token.secret 替换为 $tokenSecret，
+# 并把 bootstrap.secret_digest 替换为生成器输出的 digest；安全保存原始 secret。
 cargo run --locked --bin yang-migrate -- apply
 cargo run --locked --bin yang-system
 ```
 
 `config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。MySQL、
-Redis、Token、Schema 模式等运行参数均以该文件为准；修改环境变量不会覆盖配置。
-部署时应限制 `config.toml` 的读取权限，并通过部署系统生成或挂载该文件。
+Redis、Token、Bootstrap、Schema 模式等运行参数均以该文件为准；修改环境变量不会
+覆盖配置。`bootstrap.secret_digest` 只接受带强度边界的 Argon2id PHC 摘要，
+原始一次性 secret 不得写入配置、日志或普通响应。缺失、明文、弱参数或非法摘要
+都会在连接外部资源前阻止应用启动。部署时应限制 `config.toml` 的读取权限，并通过
+部署系统生成或挂载该文件。
 
 `schema.mode` 支持 `apply|validate|off`。省略整个 `[schema]` 或只省略 `mode` 时均
 默认 `validate`：它不执行 DDL，发现任何待应用变更就拒绝启动，适合由独立迁移任务

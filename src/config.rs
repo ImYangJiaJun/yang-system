@@ -1,3 +1,4 @@
+use crate::bootstrap_secret::BootstrapSecretDigest;
 use anyhow::{bail, Context};
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -17,6 +18,7 @@ pub struct Settings {
     pub mysql: MysqlSettings,
     pub redis: RedisSettings,
     pub token: TokenSettings,
+    pub bootstrap: BootstrapSettings,
     pub security: SecuritySettings,
     pub logging: LoggingSettings,
 }
@@ -105,6 +107,12 @@ pub struct TokenSettings {
     pub audience: String,
     pub access_ttl_seconds: u64,
     pub refresh_ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapSettings {
+    pub secret_digest: BootstrapSecretDigest,
 }
 
 impl std::fmt::Debug for TokenSettings {
@@ -291,6 +299,12 @@ fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    const VALID_BOOTSTRAP_DIGEST: &str = concat!(
+        "$argon2id$v=19$m=19456,t=2,p=1$",
+        "MDEyMzQ1Njc4OWFiY2RlZg$",
+        "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
+    );
+
     fn valid_config() -> &'static str {
         r#"
 [app]
@@ -326,6 +340,8 @@ issuer = "test"
 audience = "test-api"
 access_ttl_seconds = 60
 refresh_ttl_seconds = 120
+[bootstrap]
+secret_digest = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
 [security]
 argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
@@ -349,6 +365,14 @@ filter = "info"
         assert_eq!(settings.schema.mode, SchemaMode::Validate);
         assert_eq!(settings.app.environment, DeploymentEnvironment::Development);
         assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
+        assert_eq!(
+            settings.bootstrap.secret_digest.as_str(),
+            VALID_BOOTSTRAP_DIGEST
+        );
+        assert!(
+            !format!("{:?}", settings.bootstrap.secret_digest).contains(VALID_BOOTSTRAP_DIGEST),
+            "bootstrap 摘要不得进入 Debug"
+        );
     }
 
     #[test]
@@ -448,6 +472,20 @@ filter = "info"
                 .and_then(toml::Value::as_str),
             Some("development")
         );
+        assert_eq!(
+            value
+                .get("bootstrap")
+                .and_then(|bootstrap| bootstrap.get("secret_digest"))
+                .and_then(toml::Value::as_str),
+            Some("replace-with-yang-bootstrap-secret-digest")
+        );
+        assert!(
+            value
+                .get("bootstrap")
+                .and_then(|bootstrap| bootstrap.get("secret"))
+                .is_none(),
+            "示例配置不得保存原始 bootstrap secret"
+        );
     }
 
     #[test]
@@ -494,6 +532,31 @@ filter = "info"
             Err(error) => error,
         };
         assert!(error.to_string().contains("占位值"));
+    }
+
+    #[test]
+    fn rejects_missing_weak_or_invalid_bootstrap_digest() {
+        let section = format!("[bootstrap]\nsecret_digest = \"{VALID_BOOTSTRAP_DIGEST}\"\n");
+        let missing = valid_config().replace(&section, "");
+        let invalid = [
+            "operator-raw-secret-must-not-be-stored",
+            "$argon2i$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+            "$argon2id$v=19$m=8192,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+            "$argon2id$v=19$m=19456,t=1,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+            "$argon2id$v=19$m=19456,t=2,p=1$short$short",
+        ]
+        .map(|digest| valid_config().replace(VALID_BOOTSTRAP_DIGEST, digest));
+
+        for raw in std::iter::once(missing).chain(invalid) {
+            let error = match Settings::parse(&raw) {
+                Ok(_) => panic!("缺失、弱或非法 bootstrap 摘要必须在启动前被拒绝"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("bootstrap"),
+                "错误必须定位 bootstrap 配置: {error:#}"
+            );
+        }
     }
 
     #[test]

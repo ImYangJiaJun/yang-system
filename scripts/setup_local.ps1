@@ -75,11 +75,13 @@ try {
     if (-not (Test-Path -LiteralPath $configPath)) {
         $mysqlPlaceholder = "mysql://root:password@127.0.0.1:3306/yang_system"
         $tokenPlaceholder = "replace-with-at-least-32-random-bytes"
+        $bootstrapPlaceholder = "replace-with-yang-bootstrap-secret-digest"
         $schemaValidate = 'mode = "validate"'
         $config = Get-Content -Raw -LiteralPath $configExamplePath
         if (
             -not $config.Contains($mysqlPlaceholder) -or
             -not $config.Contains($tokenPlaceholder) -or
+            -not $config.Contains($bootstrapPlaceholder) -or
             -not $config.Contains($schemaValidate)
         ) {
             throw "config.example.toml 缺少预期占位值，无法安全生成本机配置。"
@@ -88,15 +90,37 @@ try {
         $tokenBytes = [byte[]]::new(48)
         [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
         $tokenSecret = [Convert]::ToBase64String($tokenBytes)
+        $bootstrapOutput = @(& cargo run --quiet --locked --bin yang-bootstrap-secret)
+        Assert-LastExitCode "生成本地 bootstrap secret 失败。"
+        $bootstrapSecretLine = $bootstrapOutput |
+            Where-Object { $_.StartsWith("secret=") } |
+            Select-Object -First 1
+        $bootstrapDigestLine = $bootstrapOutput |
+            Where-Object { $_.StartsWith("digest=") } |
+            Select-Object -First 1
+        if ($null -eq $bootstrapSecretLine -or $null -eq $bootstrapDigestLine) {
+            throw "bootstrap secret 生成器输出格式无效。"
+        }
+        $bootstrapSecret = $bootstrapSecretLine.Substring("secret=".Length)
+        $bootstrapDigest = $bootstrapDigestLine.Substring("digest=".Length)
         $config = $config.Replace(
             $mysqlPlaceholder,
             "mysql://root:yang-local@127.0.0.1:3306/yang_system"
         )
         $config = $config.Replace($tokenPlaceholder, $tokenSecret)
+        $config = $config.Replace($bootstrapPlaceholder, $bootstrapDigest)
         Set-Content -LiteralPath $configPath -Value $config -Encoding utf8NoBOM
         Write-Host "已生成本机 config.toml（schema.mode=validate）。"
+        Write-Host "本地 bootstrap secret（仅显示一次，请立即保存）: $bootstrapSecret"
     } else {
         Write-Host "保留已有 config.toml。"
+        $existingConfig = Get-Content -Raw -LiteralPath $configPath
+        if (
+            -not $existingConfig.Contains("[bootstrap]") -or
+            -not $existingConfig.Contains("secret_digest")
+        ) {
+            throw "已有 config.toml 缺少 [bootstrap].secret_digest；请运行 yang-bootstrap-secret 并手工加入摘要。"
+        }
     }
 
     if (-not $SkipFrontendInstall) {
