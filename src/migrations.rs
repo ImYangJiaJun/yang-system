@@ -103,7 +103,7 @@ impl MigrationDescriptor {
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 6] = [
+const MIGRATIONS: [MigrationDescriptor; 7] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -156,6 +156,14 @@ const MIGRATIONS: [MigrationDescriptor; 6] = [
         description: "建立授权版本事务 Outbox，支持至少一次 Redis 失效传播",
         prerequisite: "20260726_0005_add_user_authz_version 已完成；MySQL 8 支持 SKIP LOCKED",
         recovery: "DDL 可重入；失败时修复 authorization_outbox 结构或索引差异后原版本重跑",
+        completion_check: None,
+    },
+    MigrationDescriptor {
+        version: "20260726_0007_create_audit_event",
+        sql: include_str!("../migrations/20260726_0007_create_audit_event.sql"),
+        description: "建立高权限业务不可变审计事实表与检索/保留索引",
+        prerequisite: "MySQL 8 支持已执行 CHECK 约束；生产运行账号与迁移账号已分离",
+        recovery: "DDL 可重入；失败时修复 audit_event 列、约束或索引差异后原版本重跑",
         completion_check: None,
     },
 ];
@@ -294,6 +302,9 @@ pub async fn execute_with_database(
             report.changes.len(),
             report.changes
         );
+        crate::audit::validate_schema(tools.mysql()?.pool())
+            .await
+            .context("迁移后校验高权限审计表失败")?;
         Ok::<_, anyhow::Error>(report.tables)
     }
     .await;

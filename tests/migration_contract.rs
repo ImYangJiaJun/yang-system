@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 6);
+    assert_eq!(manifest.migrations().len(), 7);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -35,7 +35,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     assert!(authz_version.completion_check().is_some());
     let authorization_outbox = manifest
         .migrations()
-        .last()
+        .get(5)
         .unwrap_or_else(|| panic!("应存在授权事务 Outbox 迁移"));
     assert_eq!(
         authorization_outbox.version(),
@@ -53,6 +53,26 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
             .contains("KEY `idx_authorization_outbox_dispatch` (`state`, `available_at`, `id`)"),
         "Outbox 必须支持按状态、可用时间与稳定 ID 批量 claim"
     );
+    let audit_event = manifest
+        .migrations()
+        .last()
+        .unwrap_or_else(|| panic!("应存在高权限审计迁移"));
+    assert_eq!(audit_event.version(), "20260726_0007_create_audit_event");
+    for required in [
+        "UNIQUE KEY `uk_audit_event_event_id` (`event_id`)",
+        "KEY `idx_audit_event_actor` (`actor_type`, `actor_id`, `occurred_at`, `id`)",
+        "KEY `idx_audit_event_subject` (`subject_type`, `subject_id`, `occurred_at`, `id`)",
+        "KEY `idx_audit_event_target` (`target_type`, `target_id`, `occurred_at`, `id`)",
+        "KEY `idx_audit_event_tenant` (`tenant_id`, `occurred_at`, `id`)",
+        "KEY `idx_audit_event_request` (`request_id`, `id`)",
+        "KEY `idx_audit_event_retention` (`occurred_at`, `id`)",
+        "CONSTRAINT `chk_audit_event_subject_pair`",
+    ] {
+        assert!(
+            audit_event.sql().contains(required),
+            "审计迁移缺少不可变事件检索或约束契约: {required}"
+        );
+    }
 }
 
 #[test]

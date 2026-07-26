@@ -3,6 +3,7 @@
 pub mod authorization;
 
 pub mod app;
+pub mod audit;
 pub mod bootstrap;
 pub mod bootstrap_secret;
 pub mod config;

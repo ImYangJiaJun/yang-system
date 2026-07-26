@@ -108,6 +108,9 @@ async fn run_after_tools_created(
             tracing::warn!("已按配置跳过数据库 schema 同步与校验");
         }
     }
+    crate::audit::validate_schema(tools.mysql()?.pool())
+        .await
+        .context("启动期校验高权限审计表失败")?;
     drop(initializer);
 
     let bind = settings.bind_addr()?;

@@ -99,6 +99,13 @@ TENANT_EVIDENCE_OWNERS = {
     "tenant_crud_and_object_ids_are_isolated_end_to_end": "run_isolation_matrix",
     "tenant_join_relation_batch_and_transaction_bypasses_are_closed": "run_bypass_matrix",
 }
+AUDIT_FORBIDDEN_MUTATION_RE = re.compile(
+    r"(?i)\b(?:"
+    r"UPDATE\s+`?audit_event`?"
+    r"|DELETE\s+FROM\s+`?audit_event`?"
+    r"|TRUNCATE(?:\s+TABLE)?\s+`?audit_event`?"
+    r")\b"
+)
 
 
 def derived_action_count(source: str) -> int:
@@ -389,6 +396,24 @@ def check_tenant_isolation_evidence(root: Path) -> list[str]:
     return errors
 
 
+def check_audit_append_only(root: Path) -> list[str]:
+    """在线 Rust 代码不得获得修改或销毁审计事实的路径。"""
+
+    errors: list[str] = []
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return errors
+    for path in sorted(source_root.rglob("*.rs")):
+        source = production_source(path.read_text(encoding="utf-8"))
+        for match in AUDIT_FORBIDDEN_MUTATION_RE.finditer(source):
+            line_number = source.count("\n", 0, match.start()) + 1
+            errors.append(
+                f"{path.relative_to(root)}:{line_number}: audit_event 只允许追加；"
+                "在线代码禁止 UPDATE/DELETE/TRUNCATE"
+            )
+    return errors
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     directories = action_directories(root)
@@ -399,6 +424,7 @@ def check(root: Path) -> list[str]:
     errors.extend(check_actions_outside_directories(root))
     errors.extend(check_tenant_boundaries(root))
     errors.extend(check_tenant_isolation_evidence(root))
+    errors.extend(check_audit_append_only(root))
     return errors
 
 
@@ -438,6 +464,23 @@ def self_test() -> None:
         )
         errors = check(root)
         assert any("必须移动到" in error for error in errors), "必须拒绝目录外 Action"
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        write(
+            root / "src" / "audit_mutation.rs",
+            'fn mutate() { sqlx::query("DELETE FROM `audit_event`"); }\n',
+        )
+        errors = check_audit_append_only(root)
+        assert any("audit_event 只允许追加" in error for error in errors), (
+            "必须拒绝在线代码修改或销毁审计事实"
+        )
+        write(
+            root / "src" / "audit_insert.rs",
+            'fn append() { sqlx::query("INSERT INTO `audit_event` (`id`) VALUES (?)"); }\n',
+        )
+        (root / "src" / "audit_mutation.rs").unlink()
+        assert check_audit_append_only(root) == [], "审计 INSERT 必须允许"
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

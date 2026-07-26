@@ -7,7 +7,7 @@ use yang_system::config::SecuritySettings;
 use yang_system::migrations::{execute_with_database, MigrationCommand, MigrationRunReport};
 
 const BUSINESS_TABLES: [&str; 4] = ["org_user", "org_org", "admin_user", "users"];
-const INTERNAL_TABLES: [&str; 1] = ["authorization_outbox"];
+const INTERNAL_TABLES: [&str; 2] = ["audit_event", "authorization_outbox"];
 
 fn database_config() -> DatabaseConfig {
     DatabaseConfig::default()
@@ -133,7 +133,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 6, "应记录 6 个 applied 版本");
+        ensure!(migration_count == 7, "应记录 7 个 applied 版本");
         let authz_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'authz_version'",
         )
@@ -164,6 +164,57 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
             .all(|index| outbox_indexes.contains(index)),
             "授权 Outbox 必须具备主键、幂等键、派发索引与用户版本索引: {outbox_indexes:?}"
         );
+        let audit_indexes: BTreeSet<String> = sqlx::query_scalar(
+            "SELECT DISTINCT INDEX_NAME FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'audit_event'",
+        )
+        .fetch_all(control.pool())
+        .await
+        .context("读取审计表索引失败")?
+        .into_iter()
+        .collect();
+        ensure!(
+            [
+                "PRIMARY",
+                "uk_audit_event_event_id",
+                "idx_audit_event_actor",
+                "idx_audit_event_subject",
+                "idx_audit_event_target",
+                "idx_audit_event_tenant",
+                "idx_audit_event_request",
+                "idx_audit_event_retention",
+            ]
+            .into_iter()
+            .all(|index| audit_indexes.contains(index)),
+            "审计表必须具备幂等、检索和保留游标索引: {audit_indexes:?}"
+        );
+        let invalid_request_id = sqlx::query(
+            "INSERT INTO `audit_event` (`event_id`, `schema_version`, `occurred_at`, \
+             `actor_type`, `actor_id`, `action`, `target_type`, `target_id`, \
+             `after_summary`, `request_id`, `result`) \
+             VALUES ('0123456789abcdef0123456789abcdef', 1, UNIX_TIMESTAMP(), \
+             'user', '7', 'admin.user.bootstrap', 'admin_account', '1', \
+             JSON_OBJECT('status', 'active'), 'not-a-request-id', 'succeeded')",
+        )
+        .execute(control.pool())
+        .await;
+        ensure!(
+            invalid_request_id.is_err(),
+            "数据库 CHECK 必须拒绝不可关联的 request_id"
+        );
+        let uppercase_event_id = sqlx::query(
+            "INSERT INTO `audit_event` (`event_id`, `schema_version`, `occurred_at`, \
+             `actor_type`, `actor_id`, `action`, `target_type`, `target_id`, \
+             `after_summary`, `request_id`, `result`) \
+             VALUES ('ABCDEF0123456789ABCDEF0123456789', 1, UNIX_TIMESTAMP(), \
+             'user', '7', 'admin.user.bootstrap', 'admin_account', '1', \
+             JSON_OBJECT('status', 'active'), '0123456789abcdef0123456789abcdef', 'succeeded')",
+        )
+        .execute(control.pool())
+        .await;
+        ensure!(
+            uppercase_event_id.is_err(),
+            "数据库 CHECK 必须拒绝非规范化大写 event_id"
+        );
         sqlx::query(
             "INSERT INTO `users` (`username`, `password_hash`, `status`, `created_at`, `updated_at`) VALUES ('migration_sentinel', 'hash', 'active', 1, 1)",
         )
@@ -180,7 +231,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         ensure!(sentinel_authz_version == 1, "新增用户必须取得授权版本默认值 1");
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event')",
         )
         .execute(control.pool())
         .await
@@ -200,6 +251,25 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
                 .await
                 .context("检查幂等重跑哨兵失败")?;
         ensure!(sentinel_count == 1, "幂等重跑不得破坏或重复业务数据");
+
+        sqlx::query("ALTER TABLE `audit_event` DROP INDEX `idx_audit_event_request`")
+            .execute(control.pool())
+            .await
+            .context("构造审计表索引漂移失败")?;
+        let audit_drift_error = match run_job(MigrationCommand::Apply).await {
+            Ok(_) => anyhow::bail!("审计表结构漂移必须阻止迁移后 validate"),
+            Err(error) => error,
+        };
+        ensure!(
+            format!("{audit_drift_error:#}").contains("idx_audit_event_request"),
+            "审计结构漂移错误必须定位具体索引: {audit_drift_error:#}"
+        );
+        sqlx::query(
+            "ALTER TABLE `audit_event` ADD KEY `idx_audit_event_request` (`request_id`, `id`)",
+        )
+        .execute(control.pool())
+        .await
+        .context("恢复审计表请求索引失败")?;
 
         sqlx::query(
             "UPDATE `_migrations` SET checksum = '0000000000000000' WHERE module_name = 'yang-system' AND version = '20260726_0001_create_users'",

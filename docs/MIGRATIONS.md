@@ -48,6 +48,11 @@ Module，也不进入对外 Catalog；`(user_id, authz_version)` 唯一键负责
 `(state, available_at, id)` 索引支持多 Worker 以稳定顺序批量 claim。该表必须在
 启用授权 writer 的应用版本滚动前完成迁移。
 
+`20260726_0007_create_audit_event` 建立应用内部高权限审计事实表。它不进入对外
+Catalog；启动和迁移作业都会精确校验列、CHECK、索引、引擎与 collation。运行账号
+只能追加/读取，UPDATE/DELETE 由独立保留账号控制，具体权限和保留流程见
+[`AUDIT.md`](AUDIT.md)。
+
 ## 中断、并发与恢复
 
 - 同一数据库的显式迁移作业由 MySQL advisory lock 串行化；后到作业等待锁并重新
