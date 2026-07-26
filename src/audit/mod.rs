@@ -1,15 +1,17 @@
 //! 高权限业务审计事实。
 //!
-//! 审计事件是独立于 tracing 的数据库事实源；本模块只提供不可变事件契约与
-//! Schema 校验。事务内写入在独立改进点 P-05 接入各高风险业务路径。
+//! 审计事件是独立于 tracing 的数据库事实源；本模块提供不可变事件契约、
+//! Schema 校验，以及只能复用业务事务的追加原语。
 
 mod event;
+mod repository;
 mod schema;
 
 pub use event::{
     AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult, AuditSummary,
 };
 
+pub(crate) use repository::{append_in_tx, entity, succeeded_event, summary};
 pub(crate) use schema::validate_schema;
 
 pub const AUDIT_EVENT_TABLE: &str = "audit_event";

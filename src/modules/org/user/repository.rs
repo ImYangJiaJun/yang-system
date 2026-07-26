@@ -1,9 +1,10 @@
 //! 企业成员授权事实的显式事务 writer。
 
 use super::{IS_ADMIN, ORG_ID, STATUS, USER_ID};
+use crate::audit;
 use crate::modules::account::{increment_locked_authz_versions, lock_user_authorizations};
 use crate::modules::org::organization::ACTIVE_STATUS as ACTIVE_ORG_STATUS;
-use serde_json::Value;
+use serde_json::{json, Value};
 use yang_base::action::builtin::{AffectedResult, GetByPk, InsertResult, PutInput};
 use yang_base::action::ActionContext;
 use yang_base::table::Record;
@@ -21,12 +22,16 @@ struct LockedMembership {
 struct MembershipAuthorizationChange {
     next_org_id: i64,
     next_user_id: i64,
+    next_status: String,
+    next_admin: bool,
     changed: bool,
 }
 
 pub(super) async fn add(ctx: &ActionContext, input: Record) -> Result<InsertResult, BaseError> {
     let org_id = add_org_id(ctx, &input)?;
     let user_id = input.require::<i64>(USER_ID)?;
+    let status = proposed_string(&input, STATUS, super::ACTIVE_STATUS)?;
+    let admin = proposed_bool(&input, IS_ADMIN, false)?;
     // tenant-boundary: database org-member-add-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
@@ -38,6 +43,16 @@ pub(super) async fn add(ctx: &ActionContext, input: Record) -> Result<InsertResu
             .await?;
         if affected == 1 {
             increment_locked_authz_versions(&mut transaction, &locked).await?;
+            append_membership_event(
+                &mut transaction,
+                ctx,
+                id,
+                org_id,
+                user_id,
+                None,
+                Some(membership_summary(org_id, user_id, &status, admin, None)?),
+            )
+            .await?;
         }
         Ok(InsertResult { affected, id })
     }
@@ -53,6 +68,13 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
         ));
     }
     let id = primary_key(&input.id)?;
+    let changed_fields = input
+        .data
+        .as_map()
+        .keys()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
     // tenant-boundary: database org-member-put-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
@@ -76,6 +98,30 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
             .await?;
         if affected == 1 && change.changed {
             increment_locked_authz_versions(&mut transaction, &locked).await?;
+        }
+        if affected == 1 {
+            append_membership_event(
+                &mut transaction,
+                ctx,
+                id,
+                change.next_org_id,
+                change.next_user_id,
+                Some(membership_summary(
+                    membership.org_id,
+                    membership.user_id,
+                    &membership.status,
+                    membership.admin,
+                    None,
+                )?),
+                Some(membership_summary(
+                    change.next_org_id,
+                    change.next_user_id,
+                    &change.next_status,
+                    change.next_admin,
+                    Some(changed_fields),
+                )?),
+            )
+            .await?;
         }
         Ok(AffectedResult { affected })
     }
@@ -102,6 +148,22 @@ pub(super) async fn delete(
             .await?;
         if affected == 1 {
             increment_locked_authz_versions(&mut transaction, &locked).await?;
+            append_membership_event(
+                &mut transaction,
+                ctx,
+                id,
+                membership.org_id,
+                membership.user_id,
+                Some(membership_summary(
+                    membership.org_id,
+                    membership.user_id,
+                    &membership.status,
+                    membership.admin,
+                    None,
+                )?),
+                None,
+            )
+            .await?;
         }
         Ok(AffectedResult { affected })
     }
@@ -198,11 +260,49 @@ fn authorization_change(
     Ok(MembershipAuthorizationChange {
         next_org_id,
         next_user_id,
+        next_status: next_status.clone(),
+        next_admin,
         changed: next_org_id != membership.org_id
             || next_user_id != membership.user_id
             || next_status != membership.status
             || next_admin != membership.admin,
     })
+}
+
+fn membership_summary(
+    org_id: i64,
+    user_id: i64,
+    status: &str,
+    admin: bool,
+    changed_fields: Option<Vec<Value>>,
+) -> Result<audit::AuditSummary, BaseError> {
+    audit::summary([
+        ("admin", json!(admin)),
+        ("changed_fields", json!(changed_fields)),
+        ("org_id", json!(org_id)),
+        ("status", json!(status)),
+        ("user_id", json!(user_id)),
+    ])
+}
+
+async fn append_membership_event(
+    transaction: &mut Transaction,
+    ctx: &ActionContext,
+    id: impl ToString,
+    org_id: i64,
+    user_id: i64,
+    before: Option<audit::AuditSummary>,
+    after: Option<audit::AuditSummary>,
+) -> Result<(), BaseError> {
+    let event = audit::succeeded_event(
+        ctx,
+        Some(org_id),
+        Some(audit::entity("user", user_id)?),
+        audit::entity("org_membership", id)?,
+        before,
+        after,
+    )?;
+    audit::append_in_tx(transaction, &event).await
 }
 
 fn proposed_i64(data: &Record, field: &str, current: i64) -> Result<i64, BaseError> {

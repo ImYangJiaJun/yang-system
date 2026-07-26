@@ -2,9 +2,11 @@
 
 use super::model::{AdminAccountPage, AdminAccountView, PageRequest};
 use super::{ACTIVE_STATUS, BOOTSTRAP_KEY, IS_ADMIN, NAME, POSITION, STATUS, SYSTEM_ROLE, USER_ID};
+use crate::audit;
 use crate::modules::account::{
     increment_locked_authz_version, lock_user_authorization, LockedUserAuthorization,
 };
+use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
@@ -127,8 +129,18 @@ impl AdminRepository {
                 result => result?,
             };
             increment_locked_authz_version(&mut transaction, &locked).await?;
-            i64::try_from(id)
-                .map_err(|_| BaseError::Unknown("平台账号主键超出 i64 范围".to_string()))
+            let id = i64::try_from(id)
+                .map_err(|_| BaseError::Unknown("平台账号主键超出 i64 范围".to_string()))?;
+            append_admin_event(
+                &mut transaction,
+                ctx,
+                id,
+                user_id,
+                None,
+                Some(admin_summary(ACTIVE_STATUS, true, user_id)?),
+            )
+            .await?;
+            Ok(id)
         }
         .await;
         finish_transaction(transaction, result).await
@@ -168,8 +180,18 @@ impl AdminRepository {
                 result => result?,
             };
             increment_locked_authz_version(&mut transaction, &locked).await?;
-            i64::try_from(id)
-                .map_err(|_| BaseError::Unknown("平台账号主键超出 i64 范围".to_string()))
+            let id = i64::try_from(id)
+                .map_err(|_| BaseError::Unknown("平台账号主键超出 i64 范围".to_string()))?;
+            append_admin_event(
+                &mut transaction,
+                ctx,
+                id,
+                user_id,
+                None,
+                Some(admin_summary(ACTIVE_STATUS, admin, user_id)?),
+            )
+            .await?;
+            Ok(id)
         }
         .await;
         let id = finish_transaction(transaction, result).await?;
@@ -206,6 +228,15 @@ impl AdminRepository {
             .await
             .map_err(yang_db::DbError::from)?;
             increment_locked_authz_version(&mut transaction, &locked).await?;
+            append_admin_event(
+                &mut transaction,
+                ctx,
+                id,
+                target.user_id,
+                Some(admin_summary(&target.status, target.admin, target.user_id)?),
+                Some(admin_summary(status, target.admin, target.user_id)?),
+            )
+            .await?;
             Ok(id)
         }
         .await;
@@ -243,6 +274,15 @@ impl AdminRepository {
             .await
             .map_err(yang_db::DbError::from)?;
             increment_locked_authz_version(&mut transaction, &locked).await?;
+            append_admin_event(
+                &mut transaction,
+                ctx,
+                id,
+                target.user_id,
+                Some(admin_summary(&target.status, target.admin, target.user_id)?),
+                Some(admin_summary(&target.status, admin, target.user_id)?),
+            )
+            .await?;
             Ok(id)
         }
         .await;
@@ -334,6 +374,37 @@ fn ensure_active_user(locked: &LockedUserAuthorization) -> Result<(), BaseError>
         return Err(BaseError::UserNotFound(locked.user_id().to_string()));
     }
     Ok(())
+}
+
+fn admin_summary(
+    status: &str,
+    admin: bool,
+    user_id: i64,
+) -> Result<audit::AuditSummary, BaseError> {
+    audit::summary([
+        ("admin", json!(admin)),
+        ("status", json!(status)),
+        ("user_id", json!(user_id)),
+    ])
+}
+
+async fn append_admin_event(
+    transaction: &mut Transaction,
+    ctx: &ActionContext,
+    id: i64,
+    user_id: i64,
+    before: Option<audit::AuditSummary>,
+    after: Option<audit::AuditSummary>,
+) -> Result<(), BaseError> {
+    let event = audit::succeeded_event(
+        ctx,
+        None,
+        Some(audit::entity("user", user_id)?),
+        audit::entity("admin_account", id)?,
+        before,
+        after,
+    )?;
+    audit::append_in_tx(transaction, &event).await
 }
 
 fn executor(transaction: &mut Transaction) -> Result<&mut sqlx::MySqlConnection, BaseError> {

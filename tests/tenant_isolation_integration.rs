@@ -87,6 +87,7 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
     for table in [
+        "audit_event",
         "authorization_outbox",
         "org_user",
         "org_org",
@@ -160,6 +161,11 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
     initializer.sync_table_definitions(&definitions).await?;
     sqlx::raw_sql(include_str!(
         "../migrations/20260726_0006_create_authorization_outbox.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0007_create_audit_event.sql"
     ))
     .execute(&pool)
     .await?;

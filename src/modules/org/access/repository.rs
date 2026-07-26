@@ -1,6 +1,7 @@
 //! pre-tenant 查询的持久化边界。
 
 use super::service::TenantSummary;
+use crate::audit;
 use crate::modules::account::{increment_locked_authz_version, lock_user_authorization};
 use crate::modules::org::organization::{ACTIVE_STATUS as ACTIVE_ORG_STATUS, STATUS as ORG_STATUS};
 use crate::modules::org::pagination::{Page, PageRequest};
@@ -8,6 +9,7 @@ use crate::modules::org::user::{
     ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS, IS_ADMIN, NAME as MEMBER_NAME, ORG_ID,
     STATUS as MEMBERSHIP_STATUS, USER_ID,
 };
+use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
@@ -127,6 +129,20 @@ impl TenantRepository {
                 .insert_in_tx(&mut transaction, membership)
                 .await?;
             increment_locked_authz_version(&mut transaction, &locked).await?;
+            let event = audit::succeeded_event(
+                ctx,
+                Some(org_id),
+                Some(audit::entity("user", user_id)?),
+                audit::entity("organization", org_id)?,
+                None,
+                Some(audit::summary([
+                    ("owner_admin", json!(true)),
+                    ("owner_status", json!(ACTIVE_MEMBERSHIP_STATUS)),
+                    ("organization_status", json!(ACTIVE_ORG_STATUS)),
+                    ("user_id", json!(user_id)),
+                ])?),
+            )?;
+            audit::append_in_tx(&mut transaction, &event).await?;
             Ok(TenantSummary {
                 id: org_id,
                 name: name.to_string(),

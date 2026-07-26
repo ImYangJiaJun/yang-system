@@ -235,6 +235,7 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
     for table in [
+        "audit_event",
         "authorization_outbox",
         "org_user",
         "org_org",
@@ -314,6 +315,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     initializer.sync_table_definitions(&definitions).await?;
     sqlx::raw_sql(include_str!(
         "../migrations/20260726_0006_create_authorization_outbox.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0007_create_audit_event.sql"
     ))
     .execute(tools.mysql()?.pool())
     .await?;
@@ -766,6 +772,67 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == member_version_after_idempotent_status + 2,
         "平台账号停用与启用必须各递增一次授权版本"
     );
+    let audit_count_before_forced_failure: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_event")
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    let outbox_count_before_forced_failure: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM authorization_outbox WHERE user_id = ?")
+            .bind(member_id)
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    let version_before_forced_failure =
+        database_authz_version(tools.mysql()?.pool(), member_id).await?;
+    sqlx::query("RENAME TABLE audit_event TO audit_event_unavailable")
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let forced_audit_failure = dispatch(
+        &application.runtime,
+        "admin.user",
+        "set_status",
+        json!({ "id": platform_member_id, "status": "disabled" }),
+        &[("authorization", &admin_authorization)],
+        &[],
+    )
+    .await;
+    sqlx::query("RENAME TABLE audit_event_unavailable TO audit_event")
+        .execute(tools.mysql()?.pool())
+        .await?;
+    ensure!(
+        forced_audit_failure.is_err(),
+        "审计事实无法追加时，高权限业务写必须失败"
+    );
+    let status_after_forced_failure: String =
+        sqlx::query_scalar("SELECT status FROM admin_user WHERE id = ?")
+            .bind(platform_member_id)
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    ensure!(
+        status_after_forced_failure == "active",
+        "审计追加失败必须回滚平台账号状态"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), member_id).await?
+            == version_before_forced_failure,
+        "审计追加失败必须回滚授权版本"
+    );
+    let outbox_count_after_forced_failure: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM authorization_outbox WHERE user_id = ?")
+            .bind(member_id)
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    ensure!(
+        outbox_count_after_forced_failure == outbox_count_before_forced_failure,
+        "审计追加失败必须回滚授权 Outbox"
+    );
+    let audit_count_after_forced_failure: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_event")
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    ensure!(
+        audit_count_after_forced_failure == audit_count_before_forced_failure,
+        "失败业务事务不得留下成功审计事件"
+    );
 
     let creator_version_before_onboarding =
         database_authz_version(tools.mysql()?.pool(), user_id).await?;
@@ -1053,6 +1120,54 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     ensure!(
         invalid_outbox_rows == 0,
         "Outbox 清空后只能留下已确认发布且租约已释放的事件"
+    );
+    let audit_action_counts: Vec<(String, i64)> =
+        sqlx::query_as("SELECT action, COUNT(*) FROM audit_event GROUP BY action ORDER BY action")
+            .fetch_all(tools.mysql()?.pool())
+            .await?;
+    let audit_action_count = |action: &str| {
+        audit_action_counts
+            .iter()
+            .find_map(|(candidate, count)| (candidate == action).then_some(*count))
+            .unwrap_or_default()
+    };
+    for (action, minimum) in [
+        ("admin.user.bootstrap", 1),
+        ("admin.user.add", 1),
+        ("admin.user.set_admin", 2),
+        ("admin.user.set_status", 2),
+        ("org.tenant.create", 1),
+        ("org.user.add", 1),
+        ("org.user.put", 6),
+        ("org.user.del", 1),
+    ] {
+        ensure!(
+            audit_action_count(action) >= minimum,
+            "已提交高权限写缺少审计事件: action={action}, counts={audit_action_counts:?}"
+        );
+    }
+    let invalid_audit_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_event \
+         WHERE actor_type <> 'user' OR result <> 'succeeded' \
+            OR subject_type <> 'user' OR subject_id IS NULL \
+            OR (before_summary IS NULL AND after_summary IS NULL) \
+            OR (before_summary IS NOT NULL AND JSON_TYPE(before_summary) <> 'OBJECT') \
+            OR (after_summary IS NOT NULL AND JSON_TYPE(after_summary) <> 'OBJECT')",
+    )
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        invalid_audit_rows == 0,
+        "高权限成功事件必须携带操作者、subject 和受控 JSON 摘要"
+    );
+    let (audit_rows, distinct_events, distinct_requests): (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COUNT(DISTINCT event_id), COUNT(DISTINCT request_id) FROM audit_event",
+    )
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        audit_rows == distinct_events && audit_rows == distinct_requests,
+        "每个高权限事务必须产生唯一且可关联的审计事实"
     );
     outbox_worker.shutdown().await?;
 
