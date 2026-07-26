@@ -1,7 +1,8 @@
 # yang-system 前端架构与技术选型评估
 
 > 评估对象：`D:\code\lib_yang\project\yang-system\frontend`
-> 后端快照：`450372f20ab54ceb9dec230b87b5ecf5780bd54b`
+> 初评仓库快照：`450372f20ab54ceb9dec230b87b5ecf5780bd54b`
+> 复评仓库快照：`11563b072fcbc6c7ac94b83f07e680a09471409c`
 > 评估日期：2026-07-26
 > 形态：Quasar CLI + Vue 3 SPA，消费 YANG UI Catalog
 > 说明：版本与框架建议按 2026-07-26 官方资料校准；评分用于排序，不代表真实用户流量认证。
@@ -18,7 +19,7 @@
 - Zod 很适合把后端动态 Catalog 当作不可信输入做运行时校验；
 - Playwright 适合验证多角色、登录刷新和真实浏览器交互。
 
-综合评为 **3.6/5（L3 后段）**。项目已具备完整前端工程骨架、严格类型检查、运行时契约校验、单元测试和 E2E，不是简单 demo。主要瓶颈也不是框架，而是：
+综合复评为 **3.7/5（L3 后段）**。项目已具备完整前端工程骨架、严格类型检查、运行时契约校验、单元测试和 E2E，不是简单 demo。分数只因依赖供应链闭环小幅上调；主要架构瓶颈没有因为版本升级而消失：
 
 1. 后端虽然输出 Catalog，前端仍通过 `operation_id` 后缀、字段名和硬编码模块表推断业务语义；
 2. `TableView.vue` 和 Catalog store 承担过多职责；
@@ -26,7 +27,19 @@
 4. access/refresh token 存于 `sessionStorage`，仍可被同源 XSS 读取；
 5. 组件级交互、无障碍和生产可观测性门禁不足。
 
-下一阶段应把项目从“Catalog 辅助的前端”推进为“**显式 UI 契约驱动的前端**”，而不是引入新的大型状态/请求框架。当前发布前还有一项直接动作：把命中安全公告的 Quasar 2.21.4 升级到已修复版本。
+下一阶段应把项目从“Catalog 辅助的前端”推进为“**显式 UI 契约驱动的前端**”，而不是引入新的大型状态/请求框架。初评时的 Quasar 发布阻断已经解除，当前最高收益点转为显式 UI 契约、唯一应用生命周期和按行为拆分 Table/store。
+
+### 复评增量
+
+| 初评问题             | 复评状态   | 已落地证据                                                                   | 剩余边界                                                  |
+| -------------------- | ---------- | ---------------------------------------------------------------------------- | --------------------------------------------------------- |
+| W-00 Quasar 安全公告 | **已完成** | `0b69ad7` 升级到 Quasar 2.22.0；`501435e` 将 production audit 纳入 full gate | 继续依赖锁定版本与审计门禁                                |
+| W-01 UI 语义启发式   | **未开始** | `ModulePage` 仍按 `.list/.me/.select` 与输入字段 `id` 推断 placement         | 先扩展基础库 Catalog，再迁移前端，禁止双解释链            |
+| W-02 TableView 过宽  | **未开始** | 当前仍为 1,094 行，混合查询、筛选、关系、选择、Action 和呈现                 | 先提取无 DOM composable，再拆呈现组件                     |
+| W-03/W-04 状态与启动 | **未开始** | `catalog.ts` 仍为 296 行；`start()` 仍有 3 个调用者                          | 建立唯一 app boot，随后拆 session/identity/tenant/catalog |
+| W-05/W-06 浏览器边界 | **未开始** | refresh token 仍在 `sessionStorage`；`/workbench` 仍无 build/permission gate | 需要前后端协议和部署决策                                  |
+
+因此，技术选型依旧正确，当前问题是职责和契约没有收敛，而不是 Vue、Quasar 或 Pinia 不够强。
 
 ## 二、技术选型判断
 
@@ -69,17 +82,17 @@
 
 ## 四、成熟度评分
 
-| 维度             |    评分 | 判断                                            |
-| ---------------- | ------: | ----------------------------------------------- |
-| 技术栈适配度     |     4.5 | 与内部管理 SPA、动态 Catalog 高度匹配           |
-| API/契约边界     |     4.1 | Zod、集中 client、请求 id、单飞 refresh 较完整  |
-| Catalog 驱动程度 |     3.2 | 基础设施已成形，仍有较多 operation/字段名启发式 |
-| 状态与生命周期   |     3.2 | Pinia 可用，但 store 过宽且多入口 start         |
-| 组件可维护性     |     3.1 | 通用能力强，TableView/ModulePage 体积和职责过大 |
-| 浏览器安全       |     3.0 | 有严格校验与静态组件注册，但 token 可被 JS 读取 |
-| 测试             |     3.8 | 单元 + Playwright 完整，组件交互和安全负例不足  |
-| 无障碍与可观测性 |     2.8 | 尚未形成自动门禁和端到端错误关联                |
-| **整体**         | **3.6** | **完整工程骨架，进入契约与可维护性收敛阶段**    |
+| 维度             |    评分 | 判断                                                     |
+| ---------------- | ------: | -------------------------------------------------------- |
+| 技术栈适配度     |     4.5 | 与内部管理 SPA、动态 Catalog 高度匹配                    |
+| API/契约边界     |     4.1 | Zod、集中 client、请求 id、单飞 refresh 较完整           |
+| Catalog 驱动程度 |     3.2 | 基础设施已成形，仍有较多 operation/字段名启发式          |
+| 状态与生命周期   |     3.2 | Pinia 可用，但 store 过宽且多入口 start                  |
+| 组件可维护性     |     3.1 | 通用能力强，TableView/ModulePage 体积和职责过大          |
+| 浏览器安全       |     3.2 | 依赖公告已关闭并进入门禁，但 token 仍可被 JS 读取        |
+| 测试             |     3.9 | 单元 + Playwright + 生产依赖审计，组件交互和安全负例不足 |
+| 无障碍与可观测性 |     2.8 | 尚未形成自动门禁和端到端错误关联                         |
+| **整体**         | **3.7** | **供应链阻断已关闭，进入契约与可维护性收敛阶段**         |
 
 ## 五、当前架构的成熟点
 
@@ -135,11 +148,11 @@ Catalog store 会取消旧请求，并用 request id 防止慢响应覆盖新身
 
 ## 六、关键问题与改进建议
 
-### W-00：当前锁定的 Quasar 命中中危安全公告
+### W-00：Quasar 中危安全公告（已完成）
 
-**优先级：P1（发布前处理）；影响：依赖供应链与潜在原型污染。**
+**原优先级：P1（发布阻断）；复评状态：升级与持续门禁闭环。**
 
-本轮 `pnpm --dir frontend audit --prod` 返回 1 项中危：
+初评时 `pnpm --dir frontend audit --prod` 返回 1 项中危：
 
 - 当前解析版本：Quasar 2.21.4；
 - 受影响范围：`<= 2.21.4`；
@@ -148,15 +161,18 @@ Catalog store 会取消旧请求，并用 request id 防止慢响应覆盖新身
 
 公告与修复范围见 [GitHub Reviewed Advisory GHSA-3r53-75j5-3g7j](https://github.com/advisories/GHSA-3r53-75j5-3g7j)。
 
-前端业务源码、E2E 和 Quasar 配置中未发现直接调用 `extend(...)`，因此本轮没有证明当前应用存在可利用路径；但 Quasar 自身或未来代码仍可能触达该工具，且官方修复版本已经可用，不应靠“看起来没调用”长期接受残余风险。
+复评时已完成：
 
-**建议路径与验收条件：**
+- `0b69ad7` 将 Quasar 受控升级到 2.22.0 并更新 lockfile；
+- frozen install、类型检查、Vitest、production build 与 Playwright 关键旅程保持绿色；
+- `pnpm audit --prod --audit-level moderate` 返回无已知漏洞；
+- `501435e` 把 production dependency audit 加入 `python scripts/run_ci.py full`，以后同级公告会阻断完整门禁。
 
-1. 受控升级 Quasar 到 2.22.x 或更高兼容修复版本；
-2. 更新 lockfile 后执行 frozen install、`full` 和 18 项 E2E；
-3. 检查组件行为、构建产物和 Quasar breaking changes；
-4. 重新执行 `pnpm audit --prod`，该公告不再出现；
-5. 将 production dependency audit 纳入 CI，并建立例外的 owner、到期日和风险说明。
+**持续验收条件：**
+
+- 不降低 audit level，不把扫描失败静默转为 warning；
+- 若未来必须接受 advisory 例外，必须记录 owner、到期日、影响路径和退出条件；
+- 依赖升级继续通过 frozen install、full 与浏览器旅程，不单独以 audit 绿色替代行为验证。
 
 ### W-01：前端仍在推断后端没有表达的 UI 语义
 
@@ -474,7 +490,7 @@ API boundary
 
 ### 阶段 0：契约封口与安全决策（1—2 周）
 
-1. 升级 Quasar 到修复版本，重新通过 dependency audit、full 和 E2E。
+1. ✅ 已升级 Quasar 到修复版本，并将 dependency audit 纳入 full gate。
 2. 定义 module/navigation/action presentation Catalog vNext。
 3. 固定 Node/pnpm/浏览器支持矩阵并记录 SPA/Quasar ADR 与非目标。
 4. 基于公网/内网和权限价值完成浏览器威胁模型，明确 refresh token cookie/BFF 或 Bearer 残余风险方案。
@@ -554,16 +570,16 @@ API boundary
 
 ### 本机新鲜验证
 
-| 命令                                            | 结果       | 可见证据                                                                              |
-| ----------------------------------------------- | ---------- | ------------------------------------------------------------------------------------- |
-| `pnpm --dir frontend install --frozen-lockfile` | 通过       | 依赖按现有 lockfile 成功安装，锁文件无变更，Quasar prepare 成功                       |
-| `python scripts/run_ci.py full`                 | 通过       | ESLint、Prettier、`vue-tsc`、15 个 Vitest 文件/71 个测试、Quasar SPA production build |
-| `pnpm --dir frontend e2e`                       | 通过       | Chromium 18/18，32.4 秒                                                               |
-| `pnpm --dir frontend audit --prod`              | **未通过** | 1 项中危：Quasar `<=2.21.4` prototype pollution；修复版本 `>=2.22.0`                  |
+| 命令                                                              | 结果 | 可见证据                                                                                                                  |
+| ----------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm --dir frontend install --frozen-lockfile`（初评）           | 通过 | 依赖按 lockfile 安装，Quasar prepare 成功                                                                                 |
+| `python scripts/run_ci.py full`（复评）                           | 通过 | production audit 无已知漏洞；ESLint、Prettier、`vue-tsc`、15 个 Vitest 文件/71 个测试、Quasar 2.22.0 SPA production build |
+| `pnpm --dir frontend e2e`（复评）                                 | 通过 | Chromium 18/18，33.0 秒；登录/refresh/失效、角色、Catalog、Action、TableView 与自定义视图旅程                             |
+| `pnpm --dir frontend audit --prod --audit-level moderate`（复评） | 通过 | Quasar 原公告不再出现，当前生产依赖无已知漏洞                                                                             |
 
 E2E 实际覆盖登录成功/失败、refresh、会话失效、不同账号空间、未授权 Module fail-closed、Catalog 切换、动态 Action、上传/下载/预览/重定向，以及 TableView 的树、筛选、排序、关系表单和行操作。
 
-这证明当前锁定版本组合在本机 Node `v24.13.0`、pnpm `10.33.1` 下可安装、类型检查、测试和构建；但 production dependency audit 当前不是绿色，不能据此宣布前端发布门禁全部通过。它也不替代 Firefox/WebKit、低端设备或生产 Web Server 验证。
+这证明当前锁定版本组合在本机 Node `v24.13.0`、pnpm `10.33.1` 下可安装、类型检查、测试、审计和构建；W-00 不再是发布阻断。它仍不替代 Firefox/WebKit、低端设备或生产 Web Server 验证，也不证明 W-01—W-11 的架构与运行风险已经解决。
 
 以下结论仍需真实环境数据支持，本文不作通过声明：
 
