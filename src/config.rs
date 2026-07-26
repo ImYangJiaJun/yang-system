@@ -159,13 +159,14 @@ pub struct LoggingSettings {
 
 impl Settings {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-        Self::parse(&raw)
+        let settings: Self = crate::config_source::load(path, "读取配置文件失败")?;
+        settings.validate()?;
+        Ok(settings)
     }
 
+    #[cfg(test)]
     fn parse(raw: &str) -> anyhow::Result<Self> {
-        let settings: Self = toml::from_str(raw).context("解析配置文件失败")?;
+        let settings: Self = crate::config_source::parse_file_only(raw)?;
         settings.validate()?;
         Ok(settings)
     }
@@ -240,9 +241,7 @@ impl Settings {
 
 impl MigrationSettings {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("读取迁移配置文件失败: {}", path.display()))?;
-        let settings: Self = toml::from_str(&raw).context("解析迁移配置文件失败")?;
+        let settings: Self = crate::config_source::load(path, "读取迁移配置文件失败")?;
         settings
             .mysql_config()
             .validate()
@@ -333,6 +332,8 @@ fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_source::{SecretKey, SecretProvider};
+    use std::collections::BTreeMap;
 
     const VALID_BOOTSTRAP_DIGEST: &str = concat!(
         "$argon2id$v=19$m=19456,t=2,p=1$",
@@ -417,6 +418,82 @@ filter = "info"
         assert!(
             !format!("{:?}", settings.bootstrap.secret_digest).contains(VALID_BOOTSTRAP_DIGEST),
             "bootstrap 摘要不得进入 Debug"
+        );
+    }
+
+    struct TestSecretProvider(BTreeMap<SecretKey, String>);
+
+    impl SecretProvider for TestSecretProvider {
+        fn read(&self, key: SecretKey) -> anyhow::Result<Option<String>> {
+            Ok(self.0.get(&key).cloned())
+        }
+    }
+
+    #[test]
+    fn resolves_actual_settings_with_explicit_source_precedence() {
+        let environment = BTreeMap::from([
+            (
+                "YANG_SYSTEM_MYSQL_URL".to_owned(),
+                "mysql://environment".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_TOKEN_SECRET".to_owned(),
+                "environment-secret-0123456789abcdef".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_BOOTSTRAP_SECRET_DIGEST".to_owned(),
+                "invalid-environment-digest".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_HTTP_MAX_CONCURRENCY".to_owned(),
+                "128".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_SECURITY_TRUSTED_PROXY_CIDRS".to_owned(),
+                "127.0.0.1/32, 10.42.0.0/24".to_owned(),
+            ),
+        ]);
+        let provider = TestSecretProvider(BTreeMap::from([
+            (
+                SecretKey::MysqlUrl,
+                "mysql://provider-user:provider-password@provider/database".to_owned(),
+            ),
+            (
+                SecretKey::TokenSecret,
+                "provider-secret-0123456789abcdef0123456789abcdef".to_owned(),
+            ),
+            (
+                SecretKey::BootstrapSecretDigest,
+                VALID_BOOTSTRAP_DIGEST.to_owned(),
+            ),
+        ]));
+
+        let settings: Settings =
+            crate::config_source::parse_with_sources(valid_config(), &environment, Some(&provider))
+                .and_then(|settings: Settings| {
+                    settings.validate()?;
+                    Ok(settings)
+                })
+                .unwrap_or_else(|error| {
+                    panic!("真实 Settings 应按优先级合成并通过校验: {error:#}")
+                });
+
+        assert_eq!(
+            settings.mysql.url,
+            "mysql://provider-user:provider-password@provider/database"
+        );
+        assert_eq!(
+            settings.token.secret,
+            "provider-secret-0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            settings.bootstrap.secret_digest.as_str(),
+            VALID_BOOTSTRAP_DIGEST
+        );
+        assert_eq!(settings.http.max_concurrency, 128);
+        assert_eq!(
+            settings.security.trusted_proxy_cidrs,
+            ["127.0.0.1/32", "10.42.0.0/24"]
         );
     }
 
