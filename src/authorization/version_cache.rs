@@ -31,6 +31,13 @@ pub enum CachePublishOutcome {
     Ignored,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachedAuthorizationVersion {
+    Missing,
+    Version(i64),
+    Malformed,
+}
+
 /// 单调发布用户授权版本；旧事件和重复事件既不回退值，也不延长 TTL。
 #[derive(Clone)]
 pub struct AuthorizationVersionCache {
@@ -69,8 +76,31 @@ impl AuthorizationVersionCache {
         }
     }
 
+    /// 读取缓存中的授权版本，并把缺失与损坏值显式分流给事实库降级路径。
+    pub async fn read(&self, user_id: i64) -> anyhow::Result<CachedAuthorizationVersion> {
+        ensure!(user_id > 0, "授权缓存 user_id 必须是正整数");
+        let value = self
+            .redis
+            .get(&self.key(user_id))
+            .await
+            .context("读取 Redis 授权版本失败")?;
+        Ok(match value {
+            None => CachedAuthorizationVersion::Missing,
+            Some(value) => parse_cached_version(&value),
+        })
+    }
+
     fn key(&self, user_id: i64) -> String {
         format!("yang-system:{}:authz:version:{user_id}", self.deployment)
+    }
+}
+
+fn parse_cached_version(value: &str) -> CachedAuthorizationVersion {
+    match value.parse::<i64>() {
+        Ok(version) if version > 0 && version.to_string() == value => {
+            CachedAuthorizationVersion::Version(version)
+        }
+        _ => CachedAuthorizationVersion::Malformed,
     }
 }
 
@@ -105,6 +135,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cached_version_accepts_only_canonical_positive_i64() {
+        assert_eq!(
+            parse_cached_version("1"),
+            CachedAuthorizationVersion::Version(1)
+        );
+        assert_eq!(
+            parse_cached_version("9223372036854775807"),
+            CachedAuthorizationVersion::Version(i64::MAX)
+        );
+        for malformed in [
+            "",
+            "0",
+            "-1",
+            "+1",
+            "01",
+            " 1",
+            "1 ",
+            "9223372036854775808",
+            "malformed",
+        ] {
+            assert_eq!(
+                parse_cached_version(malformed),
+                CachedAuthorizationVersion::Malformed,
+                "必须拒绝非规范缓存值: {malformed:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     #[ignore = "需要 YANG_SYSTEM_TEST_REDIS_URL 指向独立 Redis DB 15"]
     async fn real_redis_publish_is_monotonic_and_does_not_refresh_ignored_events(
@@ -127,12 +186,14 @@ mod tests {
         let cache = AuthorizationVersionCache::new(redis.clone(), format!("test-{suffix}"))?;
         let key = cache.key(42);
         redis.del(std::slice::from_ref(&key)).await?;
+        ensure!(cache.read(42).await? == CachedAuthorizationVersion::Missing);
 
         ensure!(
             cache.publish(42, 7).await? == CachePublishOutcome::Updated,
             "首次发布必须写入缓存"
         );
         ensure!(redis.get(&key).await?.as_deref() == Some("7"));
+        ensure!(cache.read(42).await? == CachedAuthorizationVersion::Version(7));
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         let decayed_ttl = redis.ttl(&key).await?;
         ensure!(
@@ -163,6 +224,7 @@ mod tests {
         );
 
         redis.set(&key, "malformed").await?;
+        ensure!(cache.read(42).await? == CachedAuthorizationVersion::Malformed);
         ensure!(
             cache.publish(42, i64::MAX).await? == CachePublishOutcome::Updated,
             "可信 Outbox 事件必须修复非法缓存值"
