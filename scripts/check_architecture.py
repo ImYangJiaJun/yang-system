@@ -49,6 +49,47 @@ TENANT_RISK_PATTERNS = {
     ),
 }
 TENANT_BOUNDARY_DOCUMENT = Path("docs/architecture/tenant-data-paths.md")
+TENANT_ISOLATION_TEST = Path("tests/tenant_isolation_integration.rs")
+TENANT_TEST_RE = re.compile(
+    r"#\s*\[\s*tokio::test(?:\([^]]*\))?\s*\]\s*"
+    r"#\s*\[\s*ignore\s*=\s*\"[^\"]+\"\s*\]\s*"
+    r"async\s+fn\s+([a-z][a-z0-9_]*)\s*\(",
+    re.DOTALL,
+)
+TENANT_TEST_FUNCTION_RE = re.compile(
+    r"(?m)^async\s+fn\s+([a-z][a-z0-9_]*)\s*\("
+)
+TENANT_EVIDENCE_RE = re.compile(
+    r"(?m)^\s*//\s*tenant-evidence:\s*([a-z][a-z0-9-]*)\s*$"
+)
+TENANT_DOC_EVIDENCE_RE = re.compile(
+    r"<!--\s*tenant-evidence:\s*([a-z][a-z0-9_]*)\s+"
+    r"([a-z][a-z0-9-]*)\s*-->"
+)
+REQUIRED_TENANT_EVIDENCE = {
+    "tenant_crud_and_object_ids_are_isolated_end_to_end": {
+        "crud-tenant-injection",
+        "crud-own-scope",
+        "crud-list-scope",
+        "crud-object-id-hidden",
+        "crud-cross-mutation-zero",
+        "crud-explicit-tenant-rejected",
+        "crud-tenant-move-rejected",
+        "crud-context-switch-rejected",
+        "crud-cross-effects-zero",
+    },
+    "tenant_join_relation_batch_and_transaction_bypasses_are_closed": {
+        "join-user-scope",
+        "relation-selected-scope",
+        "batch-add-rejected",
+        "batch-mutation-rejected",
+        "transaction-rollback",
+    },
+}
+TENANT_EVIDENCE_OWNERS = {
+    "tenant_crud_and_object_ids_are_isolated_end_to_end": "run_isolation_matrix",
+    "tenant_join_relation_batch_and_transaction_bypasses_are_closed": "run_bypass_matrix",
+}
 
 
 def derived_action_count(source: str) -> int:
@@ -227,6 +268,110 @@ def check_tenant_boundaries(root: Path) -> list[str]:
     return errors
 
 
+def check_tenant_isolation_evidence(root: Path) -> list[str]:
+    """锁定真实库租户矩阵的测试入口、证据点和文档映射。"""
+
+    if not (root / "src" / "modules" / "org").is_dir():
+        return []
+
+    errors: list[str] = []
+    test_path = root / TENANT_ISOLATION_TEST
+    if not test_path.is_file():
+        return [f"{TENANT_ISOLATION_TEST}: 缺少真实库租户隔离矩阵"]
+    source = test_path.read_text(encoding="utf-8")
+    declared_tests = set(TENANT_TEST_RE.findall(source))
+    required_tests = set(REQUIRED_TENANT_EVIDENCE)
+    for name in sorted(required_tests - declared_tests):
+        errors.append(
+            f"{TENANT_ISOLATION_TEST}: {name} 必须是 #[ignore] 的 Tokio 真实库测试"
+        )
+    for name in sorted(declared_tests - required_tests):
+        errors.append(f"{TENANT_ISOLATION_TEST}: 未登记的租户隔离测试 {name}")
+
+    ordered_functions = list(TENANT_TEST_FUNCTION_RE.finditer(source))
+    function_matches = {match.group(1): match for match in ordered_functions}
+    owned_evidence: set[tuple[str, str]] = set()
+    for name, required_evidence in REQUIRED_TENANT_EVIDENCE.items():
+        owner = TENANT_EVIDENCE_OWNERS[name]
+        match = function_matches.get(owner)
+        if match is None:
+            errors.append(f"{TENANT_ISOLATION_TEST}: {name} 缺少证据函数 {owner}")
+            continue
+        end = next(
+            (
+                candidate.start()
+                for candidate in ordered_functions
+                if candidate.start() > match.start()
+            ),
+            len(source),
+        )
+        evidence_entries = TENANT_EVIDENCE_RE.findall(source[match.start() : end])
+        actual_evidence = set(evidence_entries)
+        for evidence_id in sorted(
+            {value for value in evidence_entries if evidence_entries.count(value) > 1}
+        ):
+            errors.append(
+                f"{TENANT_ISOLATION_TEST}: {name} 的证据 {evidence_id} 重复"
+            )
+        for evidence_id in sorted(required_evidence - actual_evidence):
+            errors.append(f"{TENANT_ISOLATION_TEST}: {name} 缺少证据 {evidence_id}")
+        for evidence_id in sorted(actual_evidence - required_evidence):
+            errors.append(
+                f"{TENANT_ISOLATION_TEST}: {name} 包含未登记证据 {evidence_id}"
+            )
+        owned_evidence.update((name, evidence_id) for evidence_id in actual_evidence)
+
+        test_match = function_matches.get(name)
+        if test_match is not None:
+            test_end = next(
+                (
+                    candidate.start()
+                    for candidate in ordered_functions
+                    if candidate.start() > test_match.start()
+                ),
+                len(source),
+            )
+            if not re.search(rf"\b{re.escape(owner)}\s*\(", source[test_match.start() : test_end]):
+                errors.append(
+                    f"{TENANT_ISOLATION_TEST}: {name} 未执行证据函数 {owner}"
+                )
+
+    all_evidence = TENANT_EVIDENCE_RE.findall(source)
+    for evidence_id in sorted(
+        {value for value in all_evidence if all_evidence.count(value) > 1}
+    ):
+        errors.append(f"{TENANT_ISOLATION_TEST}: tenant evidence {evidence_id} 重复")
+    owned_ids = {evidence_id for _, evidence_id in owned_evidence}
+    for evidence_id in sorted(set(all_evidence) - owned_ids):
+        errors.append(f"{TENANT_ISOLATION_TEST}: 测试函数外存在孤儿证据 {evidence_id}")
+
+    document = root / TENANT_BOUNDARY_DOCUMENT
+    if not document.is_file():
+        return errors
+    documented_entries = TENANT_DOC_EVIDENCE_RE.findall(
+        document.read_text(encoding="utf-8")
+    )
+    documented = set(documented_entries)
+    required_documented = {
+        (name, evidence_id)
+        for name, evidence_ids in REQUIRED_TENANT_EVIDENCE.items()
+        for evidence_id in evidence_ids
+    }
+    for entry in sorted(
+        {value for value in documented_entries if documented_entries.count(value) > 1}
+    ):
+        errors.append(f"{TENANT_BOUNDARY_DOCUMENT}: tenant evidence {entry[1]} 重复")
+    for name, evidence_id in sorted(required_documented - documented):
+        errors.append(
+            f"{TENANT_BOUNDARY_DOCUMENT}: 缺少测试证据 {name} {evidence_id}"
+        )
+    for name, evidence_id in sorted(documented - required_documented):
+        errors.append(
+            f"{TENANT_BOUNDARY_DOCUMENT}: 已记录不存在的测试证据 {name} {evidence_id}"
+        )
+    return errors
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     directories = action_directories(root)
@@ -236,6 +381,7 @@ def check(root: Path) -> list[str]:
         errors.extend(check_action_directory(root, directory))
     errors.extend(check_actions_outside_directories(root))
     errors.extend(check_tenant_boundaries(root))
+    errors.extend(check_tenant_isolation_evidence(root))
     return errors
 
 
@@ -335,6 +481,79 @@ def self_test() -> None:
         errors = check_tenant_boundaries(root)
         assert any("已记录不存在" in error for error in errors), (
             "必须拒绝清单中的孤儿旁路"
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        (root / "src" / "modules" / "org").mkdir(parents=True)
+        test_source = ""
+        document_source = ""
+        for test_name, evidence_ids in REQUIRED_TENANT_EVIDENCE.items():
+            owner = TENANT_EVIDENCE_OWNERS[test_name]
+            test_source += f"async fn {owner}() {{\n"
+            for evidence_id in sorted(evidence_ids):
+                test_source += f"    // tenant-evidence: {evidence_id}\n"
+                document_source += (
+                    f"<!-- tenant-evidence: {test_name} {evidence_id} -->\n"
+                )
+            test_source += "}\n\n"
+            test_source += (
+                '#[tokio::test(flavor = "current_thread")]\n'
+                '#[ignore = "需要真实数据库"]\n'
+                f"async fn {test_name}() {{\n"
+                f"    {owner}().await;\n"
+            )
+            test_source += "}\n\n"
+        write(root / TENANT_ISOLATION_TEST, test_source)
+        write(root / TENANT_BOUNDARY_DOCUMENT, document_source)
+        assert check_tenant_isolation_evidence(root) == [], (
+            "完整租户隔离证据契约应通过"
+        )
+
+        missing_test, missing_evidence = next(iter(REQUIRED_TENANT_EVIDENCE.items()))
+        missing_id = sorted(missing_evidence)[0]
+        write(
+            root / TENANT_ISOLATION_TEST,
+            test_source.replace(
+                f"    // tenant-evidence: {missing_id}\n",
+                "",
+                1,
+            ),
+        )
+        errors = check_tenant_isolation_evidence(root)
+        assert any("缺少证据" in error and missing_id in error for error in errors), (
+            "必须拒绝缺失的真实库证据"
+        )
+
+        write(
+            root / TENANT_ISOLATION_TEST,
+            test_source + "// tenant-evidence: orphan-proof\n",
+        )
+        errors = check_tenant_isolation_evidence(root)
+        assert any("孤儿证据" in error for error in errors), "必须拒绝函数外证据"
+
+        write(root / TENANT_ISOLATION_TEST, test_source)
+        write(
+            root / TENANT_BOUNDARY_DOCUMENT,
+            document_source.replace(
+                f"<!-- tenant-evidence: {missing_test} {missing_id} -->\n",
+                "",
+                1,
+            ),
+        )
+        errors = check_tenant_isolation_evidence(root)
+        assert any(
+            "缺少测试证据" in error and missing_id in error for error in errors
+        ), "必须拒绝缺失的文档证据映射"
+
+        write(root / TENANT_BOUNDARY_DOCUMENT, document_source)
+        write(
+            root / TENANT_ISOLATION_TEST,
+            test_source.replace('#[ignore = "需要真实数据库"]\n', "", 1),
+        )
+        errors = check_tenant_isolation_evidence(root)
+        assert any("必须是 #[ignore]" in error for error in errors), (
+            "必须拒绝失去真实库属性的矩阵测试"
         )
 
 

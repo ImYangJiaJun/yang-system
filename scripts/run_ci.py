@@ -107,7 +107,7 @@ INTEGRATION = (
         ),
     ),
     Command(
-        "Tenant CRUD isolation integration",
+        "Tenant isolation evidence integration",
         (
             "cargo",
             "test",
@@ -183,6 +183,22 @@ def self_test() -> None:
         "system_integration",
         "tenant_isolation_integration",
     }
+    tenant_isolation = next(
+        command
+        for command in INTEGRATION
+        if command.argv[:4]
+        == ("cargo", "test", "--test", "tenant_isolation_integration")
+    )
+    assert tenant_isolation.argv == (
+        "cargo",
+        "test",
+        "--test",
+        "tenant_isolation_integration",
+        "--locked",
+        "--",
+        "--ignored",
+        "--test-threads=1",
+    )
     print("local CI runner self-test: passed")
 
 

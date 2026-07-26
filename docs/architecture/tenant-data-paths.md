@@ -114,5 +114,32 @@
 
 - C2-02：A/B 双租户标准 CRUD、对象 ID 猜测、跨租户更新和删除。
 - C2-03：Join、selected relation、批量、事务回滚与旁路调用。
+- C2-04：把真实库测试入口、证据 ID 和本文映射加入架构门禁；任何删减都必须显式更新契约。
 - C2-04+：每个真实失败旁路独立修复、独立提交。
 - C2-final：repository 强制接收非可选 tenant capability，并移除 `Option + bool` system 绕过表达。
+
+## 8. 真实库证据契约
+
+`python scripts/check_architecture.py` 同时校验以下机器条目与
+`tests/tenant_isolation_integration.rs` 的 `tenant-evidence` marker 一一对应；两个矩阵函数必须保持为
+`#[ignore]` 的 Tokio 测试，并由 `python scripts/run_ci.py integration` 在 MySQL 8 / Redis 7 上执行。
+
+- CRUD 矩阵：可信 tenant key 注入、租户内正向 CRUD、列表范围、对象 ID 隐藏、跨租户写零影响、
+  显式 tenant key 拒绝、租户迁移拒绝、上下文切换拒绝、失败操作零副作用。
+- 旁路矩阵：按用户约束的 join、selected relation 的 `IN` 批量范围、批量新增/变更拒绝、
+  组织与首成员事务回滚。
+
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-tenant-injection -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-own-scope -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-list-scope -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-object-id-hidden -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-cross-mutation-zero -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-explicit-tenant-rejected -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-tenant-move-rejected -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-context-switch-rejected -->
+<!-- tenant-evidence: tenant_crud_and_object_ids_are_isolated_end_to_end crud-cross-effects-zero -->
+<!-- tenant-evidence: tenant_join_relation_batch_and_transaction_bypasses_are_closed join-user-scope -->
+<!-- tenant-evidence: tenant_join_relation_batch_and_transaction_bypasses_are_closed relation-selected-scope -->
+<!-- tenant-evidence: tenant_join_relation_batch_and_transaction_bypasses_are_closed batch-add-rejected -->
+<!-- tenant-evidence: tenant_join_relation_batch_and_transaction_bypasses_are_closed batch-mutation-rejected -->
+<!-- tenant-evidence: tenant_join_relation_batch_and_transaction_bypasses_are_closed transaction-rollback -->

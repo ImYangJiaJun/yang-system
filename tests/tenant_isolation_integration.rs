@@ -312,6 +312,7 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
         .bind(tenant_a_membership)
         .fetch_one(&harness.pool)
         .await?;
+    // tenant-evidence: crud-tenant-injection
     ensure!(
         stored_tenant == tenant_a.tenant_id,
         "tenant key 必须由可信上下文注入"
@@ -327,6 +328,7 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
         )
         .await?,
     )?;
+    // tenant-evidence: crud-own-scope
     ensure!(own["id"] == tenant_a_membership, "租户内主键读取必须成功");
     ensure!(
         affected(
@@ -353,6 +355,7 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
         .await?,
     )?;
     let items = selected["items"].as_array().context("成员列表缺少 items")?;
+    // tenant-evidence: crud-list-scope
     ensure!(
         items
             .iter()
@@ -372,10 +375,12 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
         &tenant_a_headers,
     )
     .await;
+    // tenant-evidence: crud-object-id-hidden
     ensure!(
         matches!(cross_get, Err(BaseError::RecordNotFound(_))),
         "A 租户猜测 B 对象 id 必须表现为不存在: {cross_get:?}"
     );
+    // tenant-evidence: crud-cross-mutation-zero
     ensure!(
         affected(
             dispatch(
@@ -422,6 +427,7 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
         &tenant_a_headers,
     )
     .await;
+    // tenant-evidence: crud-explicit-tenant-rejected
     ensure!(
         matches!(explicit_insert, Err(BaseError::PermissionDenied(_))),
         "调用方显式写 tenant key 必须失败: {explicit_insert:?}"
@@ -441,6 +447,7 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
         &tenant_a_headers,
     )
     .await;
+    // tenant-evidence: crud-tenant-move-rejected
     ensure!(
         move_tenant.is_err(),
         "更新路径不得允许把 A 对象移动到 B 租户"
@@ -467,6 +474,7 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
         &cross_context_headers,
     )
     .await;
+    // tenant-evidence: crud-context-switch-rejected
     ensure!(
         matches!(cross_context, Err(BaseError::PermissionDenied(_))),
         "A 身份不得直接选择 B 租户上下文: {cross_context:?}"
@@ -477,6 +485,7 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
             .bind(tenant_b_membership)
             .fetch_one(&harness.pool)
             .await?;
+    // tenant-evidence: crud-cross-effects-zero
     ensure!(
         tenant_b_row == tenant_b_before,
         "跨租户更新/删除不得改变 B 创建者成员记录: before={tenant_b_before:?}, after={tenant_b_row:?}"
@@ -547,6 +556,7 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
     let tenant_a_discovery_items = tenant_a_discovery["items"]
         .as_array()
         .context("A 租户发现响应缺少 items")?;
+    // tenant-evidence: join-user-scope
     ensure!(
         tenant_a_discovery_items
             .iter()
@@ -601,6 +611,7 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
     let relation_items = relation_options["items"]
         .as_array()
         .context("企业关系选择响应缺少 items")?;
+    // tenant-evidence: relation-selected-scope
     ensure!(
         relation_items
             .iter()
@@ -652,6 +663,7 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
             .bind(batch_user_b)
             .fetch_one(&harness.pool)
             .await?;
+    // tenant-evidence: batch-add-rejected
     ensure!(batch_inserted == 0, "被拒绝的批量新增不得产生部分写入");
 
     let tenant_a_membership = creator_membership_id(&harness.pool, &tenant_a).await?;
@@ -694,6 +706,7 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
     .bind(tenant_b_membership)
     .fetch_all(&harness.pool)
     .await?;
+    // tenant-evidence: batch-mutation-rejected
     ensure!(
         membership_after == membership_before,
         "被拒绝的批量更新/删除不得改变任一租户记录"
@@ -727,6 +740,7 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
         .bind(&rollback_code)
         .fetch_one(&harness.pool)
         .await?;
+    // tenant-evidence: transaction-rollback
     ensure!(
         rolled_back_orgs == 0,
         "首个成员插入失败时，事务必须回滚已插入的企业"
