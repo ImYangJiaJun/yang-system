@@ -26,7 +26,7 @@ lock，另一个执行迁移与校验。
 清单位于 `src/migrations.rs`，SQL 位于 `migrations/`。每个版本必须同时声明：
 
 - 严格递增且永久唯一的 `version`；
-- 一条可独立审计、可重入的前向 SQL；
+- 一条可独立审计的前向 SQL；SQL 必须自身可重入，或声明能完整代表其效果的精确完成探针；
 - 变更目的 `description`；
 - 执行前提 `prerequisite`；
 - 中断或失败后的 `recovery`。
@@ -35,20 +35,25 @@ lock，另一个执行迁移与校验。
 相同版本内容变化会成为 `ChecksumMismatch` 并阻断发布。新增变更只能追加更高版本，
 不能重排、删除或覆盖旧文件。
 
-当前 4 个基线版本使用 `CREATE TABLE IF NOT EXISTS`，用于接管此前由本地
+前 4 个基线版本使用 `CREATE TABLE IF NOT EXISTS`，用于接管此前由本地
 `schema.apply` 创建的同构数据库。建表 no-op 后仍会执行完整 Schema 校验；已有表若
 结构不一致，发布会在 validate 阶段失败，不会进入 ready。
+
+`20260726_0005_add_user_authz_version` 是首个非幂等原子 DDL。它使用列完成探针
+精确匹配 `COLUMN_TYPE`、可空性与默认值；只有完整结构一致时，执行器才会在崩溃
+恢复中把遗留 `running` 记录改为 `applied`，不会凭“列存在”跳过错误结构。
 
 ## 中断、并发与恢复
 
 - 同一数据库的显式迁移作业由 MySQL advisory lock 串行化；后到作业等待锁并重新
   读取执行记录。
 - SQL 失败会删除本次 `running` 预留。进程崩溃会自动释放连接级锁；下一作业取得锁
-  后只恢复 checksum 一致的遗留预留，并重跑可重入 SQL。
+  后只恢复 checksum 一致的遗留预留：普通迁移重跑可重入 SQL，带探针迁移先精确
+  验证完成状态，已生效则只修复记录，否则执行原 SQL。
 - checksum 不一致、未知状态或 Schema 差异均 fail-closed。先保留现场并诊断，再追加
   修复版本；禁止手工把异常记录直接改成 `applied`。
-- MySQL DDL 会隐式提交，因此一个版本只放一条可重入语句。多阶段变更拆成多个版本，
-  并使用 expand → backfill → switch → contract。
+- MySQL DDL 会隐式提交，因此一个版本只放一条语句；非幂等原子 DDL 必须声明完整
+  完成探针。多阶段变更拆成多个版本，并使用 expand → backfill → switch → contract。
 
 ## 新增迁移路径
 

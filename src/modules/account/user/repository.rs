@@ -120,6 +120,8 @@ mod tests {
     use yang_base::tools::ToolsBuilder;
     use yang_db::{Database, DatabaseConfig};
 
+    const AUTHZ_VERSION: &str = "authz_version";
+
     #[tokio::test]
     async fn user_repository_owns_the_only_trusted_password_projection() {
         let pool = MySqlPoolOptions::new()
@@ -142,12 +144,14 @@ mod tests {
 
         assert!(repository
             .trusted_query(&ctx)
-            .and_then(|query| query.select_fields(&[PASSWORD_HASH]))
+            .and_then(|query| query.select_fields(&[PASSWORD_HASH, AUTHZ_VERSION]))
             .is_ok());
-        assert!(matches!(
-            ctx.table_query()
-                .and_then(|query| query.select_fields(&[PASSWORD_HASH])),
-            Err(BaseError::FieldPermissionDenied(_, field, _)) if field == PASSWORD_HASH
-        ));
+        for field_name in [PASSWORD_HASH, AUTHZ_VERSION] {
+            assert!(matches!(
+                ctx.table_query()
+                    .and_then(|query| query.select_fields(&[field_name])),
+                Err(BaseError::FieldPermissionDenied(_, field, _)) if field == field_name
+            ));
+        }
     }
 }

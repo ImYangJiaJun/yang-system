@@ -10,19 +10,29 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 4);
+    assert_eq!(manifest.migrations().len(), 5);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
         assert!(!descriptor.description().trim().is_empty());
         assert!(!descriptor.prerequisite().trim().is_empty());
         assert!(!descriptor.recovery().trim().is_empty());
+        let idempotent_create = migration.sql().starts_with("CREATE TABLE IF NOT EXISTS");
         assert!(
-            migration.sql().starts_with("CREATE TABLE IF NOT EXISTS"),
-            "{} 必须可安全重跑",
+            idempotent_create || migration.completion_check().is_some(),
+            "{} 必须可重入或声明精确完成探针",
             migration.version()
         );
     }
+    let authz_version = manifest
+        .migrations()
+        .last()
+        .unwrap_or_else(|| panic!("应存在授权版本迁移"));
+    assert_eq!(
+        authz_version.version(),
+        "20260726_0005_add_user_authz_version"
+    );
+    assert!(authz_version.completion_check().is_some());
 }
 
 #[test]

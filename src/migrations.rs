@@ -6,7 +6,8 @@ use anyhow::{ensure, Context};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use yang_base::database::{
-    DatabaseInitializer, Migration, MigrationManifest, MigrationPlan, MigrationPlanStatus,
+    DatabaseInitializer, Migration, MigrationColumnCheck, MigrationManifest, MigrationPlan,
+    MigrationPlanStatus,
 };
 use yang_base::tools::ToolsBuilder;
 use yang_db::{Database, DatabaseConfig};
@@ -58,6 +59,16 @@ pub struct MigrationDescriptor {
     description: &'static str,
     prerequisite: &'static str,
     recovery: &'static str,
+    completion_check: Option<ColumnCompletionDescriptor>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ColumnCompletionDescriptor {
+    table: &'static str,
+    column: &'static str,
+    column_type: &'static str,
+    nullable: bool,
+    default: Option<&'static str>,
 }
 
 impl MigrationDescriptor {
@@ -76,15 +87,30 @@ impl MigrationDescriptor {
     pub fn recovery(&self) -> &'static str {
         self.recovery
     }
+
+    fn migration(&self) -> Migration {
+        let migration = Migration::new(self.version, self.sql);
+        match self.completion_check {
+            Some(check) => migration.with_completion_check(MigrationColumnCheck::new(
+                check.table,
+                check.column,
+                check.column_type,
+                check.nullable,
+                check.default,
+            )),
+            None => migration,
+        }
+    }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 4] = [
+const MIGRATIONS: [MigrationDescriptor; 5] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
         description: "建立账号、密码摘要与状态的用户主表",
         prerequisite: "目标数据库存在；已有 users 表必须与当前应用定义兼容",
         recovery: "DDL 可重入；失败时修复 users 结构差异后原版本重跑，禁止修改已发布 SQL",
+        completion_check: None,
     },
     MigrationDescriptor {
         version: "20260726_0002_create_admin_user",
@@ -92,6 +118,7 @@ const MIGRATIONS: [MigrationDescriptor; 4] = [
         description: "建立平台账号与唯一初始化占位约束",
         prerequisite: "20260726_0001_create_users 已完成",
         recovery: "DDL 可重入；失败时修复 admin_user 结构差异后原版本重跑",
+        completion_check: None,
     },
     MigrationDescriptor {
         version: "20260726_0003_create_org_org",
@@ -99,6 +126,7 @@ const MIGRATIONS: [MigrationDescriptor; 4] = [
         description: "建立企业主数据与唯一企业编号约束",
         prerequisite: "20260726_0002_create_admin_user 已完成",
         recovery: "DDL 可重入；失败时修复 org_org 结构差异后原版本重跑",
+        completion_check: None,
     },
     MigrationDescriptor {
         version: "20260726_0004_create_org_user",
@@ -106,6 +134,21 @@ const MIGRATIONS: [MigrationDescriptor; 4] = [
         description: "建立企业成员、租户键与成员身份索引",
         prerequisite: "users 与 org_org 表已完成",
         recovery: "DDL 可重入；失败时修复 org_user 结构或索引差异后原版本重跑",
+        completion_check: None,
+    },
+    MigrationDescriptor {
+        version: "20260726_0005_add_user_authz_version",
+        sql: include_str!("../migrations/20260726_0005_add_user_authz_version.sql"),
+        description: "为用户增加单调授权版本，作为长生命周期 Token 的失效依据",
+        prerequisite: "20260726_0001_create_users 已完成；应用仍兼容默认版本 1",
+        recovery: "列完成探针精确核对 bigint、NOT NULL 与默认值 1；原子 DDL 已提交时只恢复迁移状态",
+        completion_check: Some(ColumnCompletionDescriptor {
+            table: "users",
+            column: "authz_version",
+            column_type: "bigint",
+            nullable: false,
+            default: Some("1"),
+        }),
     },
 ];
 
@@ -122,9 +165,7 @@ pub fn descriptors() -> &'static [MigrationDescriptor] {
 pub fn manifest() -> anyhow::Result<MigrationManifest> {
     MigrationManifest::new(
         MIGRATION_MODULE,
-        MIGRATIONS
-            .iter()
-            .map(|migration| Migration::new(migration.version, migration.sql)),
+        MIGRATIONS.iter().map(MigrationDescriptor::migration),
     )
     .context("构建 yang-system 迁移清单失败")
 }

@@ -131,7 +131,18 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 4, "应记录 4 个 applied 版本");
+        ensure!(migration_count == 5, "应记录 5 个 applied 版本");
+        let authz_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'authz_version'",
+        )
+        .fetch_optional(control.pool())
+        .await
+        .context("读取授权版本列结构失败")?;
+        ensure!(
+            authz_version_shape
+                == Some(("bigint".to_string(), "NO".to_string(), Some("1".to_string()))),
+            "authz_version 必须是 BIGINT NOT NULL DEFAULT 1: {authz_version_shape:?}"
+        );
         sqlx::query(
             "INSERT INTO `users` (`username`, `password_hash`, `status`, `created_at`, `updated_at`) VALUES ('migration_sentinel', 'hash', 'active', 1, 1)",
         )
@@ -139,12 +150,20 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .await
         .context("写入幂等重跑哨兵失败")?;
 
+        let sentinel_authz_version: i64 = sqlx::query_scalar(
+            "SELECT `authz_version` FROM `users` WHERE username = 'migration_sentinel'",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取迁移哨兵授权版本失败")?;
+        ensure!(sentinel_authz_version == 1, "新增用户必须取得授权版本默认值 1");
+
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version = '20260726_0004_create_org_user'",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version')",
         )
         .execute(control.pool())
         .await
-        .context("模拟迁移作业中断失败")?;
+        .context("模拟幂等建表和原子 ALTER 两类迁移作业中断失败")?;
         let retried = run_job(MigrationCommand::Apply).await?;
         ensure!(
             retried

@@ -3,7 +3,7 @@
 use super::policy::{USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_PATTERN};
 use schemars::JsonSchema;
 use serde::Serialize;
-use yang_base::definition::{Key, Str, TableName, TableSpec, Timestamp};
+use yang_base::definition::{Int, Key, Str, TableName, TableSpec, Timestamp};
 use yang_base::table::Record;
 use yang_base::BaseError;
 
@@ -60,6 +60,12 @@ pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
         status => Str::new().title("状态").require(true).max_length(16),
+        authz_version => Int::new()
+                .title("授权版本")
+                .require(true)
+                .default(1_i64)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
         created_at => Timestamp::new().title("创建时间").created_at(),
         updated_at => Timestamp::new().title("更新时间").updated_at(),
     };
@@ -73,8 +79,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    const AUTHZ_VERSION: &str = "authz_version";
+
     #[test]
-    fn user_schema_uses_generated_id_and_protects_password_hash() {
+    fn user_schema_uses_generated_id_and_protects_internal_fields() {
         let definition = user_table_spec()
             .and_then(|spec| spec.table_definition())
             .unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
@@ -87,6 +95,9 @@ mod tests {
         let username = definition
             .field(USERNAME)
             .unwrap_or_else(|| panic!("应存在 username 字段"));
+        let authz_version = definition
+            .field(AUTHZ_VERSION)
+            .unwrap_or_else(|| panic!("应存在 authz_version 字段"));
 
         assert_eq!(definition.name(), "users");
         assert_eq!(definition.primary_key(), USER_ID);
@@ -95,10 +106,17 @@ mod tests {
         assert!(username.is_filterable());
         assert!(!password.is_filterable());
         assert!(!password.is_sortable());
+        assert_eq!(
+            authz_version.default_value(),
+            Some(&serde_json::json!(1_i64))
+        );
+        assert!(!authz_version.is_filterable());
+        assert!(!authz_version.is_sortable());
+        assert!(!USER_VIEW_FIELDS.contains(&AUTHZ_VERSION));
     }
 
     #[tokio::test]
-    async fn password_hash_is_only_readable_by_system_role() {
+    async fn internal_fields_are_only_readable_and_writable_by_system_role() {
         let pool = sqlx::mysql::MySqlPoolOptions::new()
             .connect_lazy("mysql://root:test@127.0.0.1:3306/test")
             .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
@@ -107,14 +125,25 @@ mod tests {
             .unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
         let table = definition.bind(Arc::new(pool));
 
-        let denied = table.query(["user"]).select_fields(&[PASSWORD_HASH]);
+        for field_name in [PASSWORD_HASH, AUTHZ_VERSION] {
+            let denied = table.query(["user"]).select_fields(&[field_name]);
+            assert!(matches!(
+                denied,
+                Err(BaseError::FieldPermissionDenied(_, field, _)) if field == field_name
+            ));
+            assert!(table
+                .query([SYSTEM_ROLE])
+                .select_fields(&[field_name])
+                .is_ok());
+        }
+
+        let denied_write = table
+            .query(["user"])
+            .insert(Record::new().set(AUTHZ_VERSION, 2_i64))
+            .await;
         assert!(matches!(
-            denied,
-            Err(BaseError::FieldPermissionDenied(_, field, _)) if field == PASSWORD_HASH
+            denied_write,
+            Err(BaseError::FieldPermissionDenied(_, field, _)) if field == AUTHZ_VERSION
         ));
-        assert!(table
-            .query([SYSTEM_ROLE])
-            .select_fields(&[PASSWORD_HASH])
-            .is_ok());
     }
 }
