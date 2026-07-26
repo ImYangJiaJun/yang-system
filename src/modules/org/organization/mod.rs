@@ -43,7 +43,10 @@ impl Module for OrganizationModule {
                 .options([(ACTIVE_STATUS, "启用"), ("disabled", "停用")])
                 .default(ACTIVE_STATUS)
                 .filterable(true),
-            created_at => Timestamp::new().title("创建时间").created_at(),
+            created_at => Timestamp::new()
+                .title("创建时间")
+                .created_at()
+                .sortable(true),
         }
     }
 
@@ -62,7 +65,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolver_query_keys_are_declared_filterable() {
+    fn query_contract_fields_are_explicitly_authorized() {
         let table = OrganizationModule
             .into_spec()
             .table
@@ -74,6 +77,14 @@ mod tests {
                 .find(|field| field.name.as_str() == name)
                 .unwrap_or_else(|| panic!("应存在字段 {name}"));
             assert!(field.access.filterable, "resolver 查询键 {name} 必须可筛选");
+        }
+        for name in ["name", "created_at"] {
+            let field = table
+                .fields
+                .iter()
+                .find(|field| field.name.as_str() == name)
+                .unwrap_or_else(|| panic!("应存在字段 {name}"));
+            assert!(field.access.sortable, "Action 排序字段 {name} 必须显式授权");
         }
     }
 }
