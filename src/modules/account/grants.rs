@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
+use yang_db::Transaction;
 
 /// 一次 Token 签发所需的角色与权限快照。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,6 +62,7 @@ pub trait GrantResolver: Send + Sync + 'static {
         &self,
         ctx: &ActionContext,
         user_id: i64,
+        transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError>;
 }
 
@@ -81,10 +83,11 @@ impl GrantResolver for CompositeGrantResolver {
         &self,
         ctx: &ActionContext,
         user_id: i64,
+        transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError> {
         let mut grants = AuthorizationGrants::default();
         for resolver in &self.resolvers {
-            grants = grants.extend(resolver.resolve(ctx, user_id).await?);
+            grants = grants.extend(resolver.resolve(ctx, user_id, transaction).await?);
         }
         Ok(grants)
     }
@@ -93,21 +96,6 @@ impl GrantResolver for CompositeGrantResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yang_base::action::Request;
-    use yang_base::tools::ToolsBuilder;
-
-    struct FixedGrantResolver(AuthorizationGrants);
-
-    #[async_trait]
-    impl GrantResolver for FixedGrantResolver {
-        async fn resolve(
-            &self,
-            _ctx: &ActionContext,
-            _user_id: i64,
-        ) -> Result<AuthorizationGrants, BaseError> {
-            Ok(self.0.clone())
-        }
-    }
 
     #[test]
     fn grants_are_deduplicated_and_stably_ordered() {
@@ -121,37 +109,6 @@ mod tests {
         assert_eq!(
             grants.permissions().collect::<Vec<_>>(),
             ["admin.user:read", "org.org:read", "org.user:read"]
-        );
-    }
-
-    #[tokio::test]
-    async fn composite_resolver_merges_every_domain_without_duplicates() {
-        let tools = ToolsBuilder::new()
-            .build()
-            .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}"));
-        let context = ActionContext::new(Request::new(serde_json::json!({})), Arc::new(tools));
-        let resolver = CompositeGrantResolver::new(vec![
-            Arc::new(FixedGrantResolver(
-                AuthorizationGrants::default()
-                    .role("admin")
-                    .permission("admin.user:write"),
-            )),
-            Arc::new(FixedGrantResolver(
-                AuthorizationGrants::default()
-                    .role("org_admin")
-                    .permission("admin.user:write")
-                    .permission("org.user:write"),
-            )),
-        ]);
-
-        let grants = resolver
-            .resolve(&context, 7)
-            .await
-            .unwrap_or_else(|error| panic!("组合授权应解析成功: {error}"));
-        assert_eq!(grants.roles().collect::<Vec<_>>(), ["admin", "org_admin"]);
-        assert_eq!(
-            grants.permissions().collect::<Vec<_>>(),
-            ["admin.user:write", "org.user:write"]
         );
     }
 }

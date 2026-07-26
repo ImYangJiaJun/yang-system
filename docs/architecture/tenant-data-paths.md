@@ -66,7 +66,6 @@
 | `tenant-membership-lookup` | unscoped-query | `org/tenant.rs` | 同时限定请求 `org_id`、已认证 `user_id` 和 active 成员状态 |
 | `tenant-organization-database` | database | `org/tenant.rs` | 只供租户解析器的组织状态查询使用 |
 | `tenant-organization-status` | unscoped-query | `org/tenant.rs` | 同一次解析继续限定同一 `org_id` 且组织必须 active |
-| `authorization-grant-database` | database | `org/grants.rs` | 只供 Token 授权快照的 actor 级查询使用 |
 | `authorization-grant-snapshot` | raw-sql | `org/grants.rs` | 只按待签发 `user_id` 汇总“是否任一有效组织管理员”；租户写仍由实时管理员守卫二次校验 |
 | `member-admin-database` | database | `org/user/guard.rs` | 只供当前租户管理员实时校验使用 |
 | `member-admin-guard` | raw-sql | `org/user/guard.rs` | 同时限定可信 `tenant_id`、已认证 `user_id`、active 与 admin |
@@ -82,7 +81,6 @@
 <!-- tenant-boundary: unscoped-query tenant-membership-lookup -->
 <!-- tenant-boundary: database tenant-organization-database -->
 <!-- tenant-boundary: unscoped-query tenant-organization-status -->
-<!-- tenant-boundary: database authorization-grant-database -->
 <!-- tenant-boundary: raw-sql authorization-grant-snapshot -->
 <!-- tenant-boundary: database member-admin-database -->
 <!-- tenant-boundary: raw-sql member-admin-guard -->

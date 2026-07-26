@@ -12,6 +12,7 @@ pub(super) const USER_ID: &str = "id";
 pub(super) const USERNAME: &str = "username";
 pub(super) const PASSWORD_HASH: &str = "password_hash";
 pub(super) const STATUS: &str = "status";
+pub(super) const AUTHZ_VERSION: &str = "authz_version";
 pub(super) const CREATED_AT: &str = "created_at";
 pub(super) const UPDATED_AT: &str = "updated_at";
 pub(super) const USER_VIEW_FIELDS: &[&str] = &[USER_ID, USERNAME, STATUS, CREATED_AT, UPDATED_AT];
@@ -78,8 +79,6 @@ pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
-
-    const AUTHZ_VERSION: &str = "authz_version";
 
     #[test]
     fn user_schema_uses_generated_id_and_protects_internal_fields() {

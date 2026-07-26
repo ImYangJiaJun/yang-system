@@ -5,6 +5,7 @@ use crate::modules::account::{AuthorizationGrants, GrantResolver};
 use async_trait::async_trait;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
+use yang_db::Transaction;
 
 #[derive(Debug, Default)]
 pub(super) struct AdminGrantResolver;
@@ -13,17 +14,23 @@ pub(super) struct AdminGrantResolver;
 impl GrantResolver for AdminGrantResolver {
     async fn resolve(
         &self,
-        ctx: &ActionContext,
+        _ctx: &ActionContext,
         user_id: i64,
+        transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError> {
         let sql = format!(
             "SELECT `{IS_ADMIN}` FROM `admin_user` \
              WHERE `{USER_ID}` = ? AND `{STATUS}` = ? LIMIT 1"
         );
+        let executor = transaction.executor().ok_or_else(|| {
+            BaseError::from(yang_db::DbError::TransactionError(
+                "授权快照事务已结束".to_string(),
+            ))
+        })?;
         let admin = sqlx::query_scalar::<_, bool>(&sql)
             .bind(user_id)
             .bind(ACTIVE_STATUS)
-            .fetch_optional(ctx.tools().mysql()?.pool())
+            .fetch_optional(executor)
             .await
             .map_err(yang_db::DbError::from)?;
 

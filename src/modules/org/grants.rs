@@ -8,6 +8,7 @@ use crate::modules::account::{AuthorizationGrants, GrantResolver};
 use async_trait::async_trait;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
+use yang_db::Transaction;
 
 #[derive(Debug, Default)]
 pub(super) struct OrgGrantResolver;
@@ -16,8 +17,9 @@ pub(super) struct OrgGrantResolver;
 impl GrantResolver for OrgGrantResolver {
     async fn resolve(
         &self,
-        ctx: &ActionContext,
+        _ctx: &ActionContext,
         user_id: i64,
+        transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError> {
         let sql = format!(
             "SELECT EXISTS(\
@@ -31,13 +33,17 @@ impl GrantResolver for OrgGrantResolver {
                  LIMIT 1\
              )"
         );
+        let executor = transaction.executor().ok_or_else(|| {
+            BaseError::from(yang_db::DbError::TransactionError(
+                "授权快照事务已结束".to_string(),
+            ))
+        })?;
         // tenant-boundary: raw-sql authorization-grant-snapshot
         let is_admin = sqlx::query_scalar::<_, bool>(&sql)
             .bind(user_id)
             .bind(ACTIVE_MEMBERSHIP_STATUS)
             .bind(ACTIVE_ORG_STATUS)
-            // tenant-boundary: database authorization-grant-database
-            .fetch_one(ctx.tools().mysql()?.pool())
+            .fetch_one(executor)
             .await
             .map_err(yang_db::DbError::from)?;
 

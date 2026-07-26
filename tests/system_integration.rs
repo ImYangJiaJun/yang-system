@@ -63,6 +63,17 @@ fn data(response: ApiResponse) -> anyhow::Result<Value> {
     response.data.context("Action 成功响应缺少 data")
 }
 
+fn token_authz_version(tools: &yang_base::tools::Tools, token: &str) -> anyhow::Result<i64> {
+    tools
+        .token()?
+        .verify_token(token)?
+        .custom
+        .get("authz_version")
+        .and_then(Value::as_i64)
+        .filter(|version| *version >= 1)
+        .context("Token 缺少正整数 authz_version")
+}
+
 async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
     let database: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
         .fetch_one(pool)
@@ -185,6 +196,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let refresh_token = login["refresh_token"]
         .as_str()
         .context("登录响应缺少 refresh_token")?;
+    let login_authz_version = token_authz_version(&tools, access_token)?;
+    ensure!(
+        login_authz_version == token_authz_version(&tools, refresh_token)?,
+        "同次登录签发的 Access/Refresh Token 必须携带同一授权版本"
+    );
     data(
         dispatch(
             &application.runtime,
@@ -231,6 +247,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let admin_refresh_token = refreshed_admin["refresh_token"]
         .as_str()
         .context("平台管理员刷新响应缺少 refresh_token")?;
+    ensure!(
+        token_authz_version(&tools, admin_access_token)?
+            == token_authz_version(&tools, admin_refresh_token)?,
+        "refresh 签发的 Access/Refresh Token 必须携带同一授权版本"
+    );
     let admin_authorization = format!("Bearer {admin_access_token}");
     let admin_accounts = data(
         dispatch(

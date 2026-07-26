@@ -22,8 +22,8 @@ impl CredentialVerifier for UserCredentialVerifier {
             .service
             .authenticate(ctx, &input.username, &input.password)
             .await?;
-        let claims = self.service.claims_for(ctx, &user).await?;
-        Ok(VerifiedSubject::new(user.id.to_string()).with_claims(claims))
+        let claims = self.service.claims_for(ctx, user.id).await?;
+        Ok(VerifiedSubject::new(user.id.to_string()).with_token_pair_claims(claims))
     }
 }
 

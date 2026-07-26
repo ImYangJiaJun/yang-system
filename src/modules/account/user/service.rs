@@ -5,17 +5,23 @@
 use super::password::PasswordEngine;
 use super::policy::{normalize_username, validate_password};
 use super::rate_limit::{AuthOperation, AuthRateLimiter};
-use super::repository::UserRepository;
-use super::schema::{UserView, STATUS, USERNAME};
+use super::repository::{AuthorizationStateRecord, UserRepository};
+use super::schema::{UserView, STATUS};
 use crate::modules::account::{AuthorizationGrants, GrantResolver};
 use std::sync::Arc;
+use yang_base::action::auth::TokenPairClaims;
 use yang_base::action::ActionContext;
 use yang_base::table::Record;
 use yang_base::BaseError;
 
 pub(super) struct AuthenticatedUser {
     pub(super) id: i64,
-    pub(super) username: String,
+}
+
+struct AuthorizationSnapshot {
+    username: String,
+    authz_version: i64,
+    grants: AuthorizationGrants,
 }
 
 #[derive(Clone)]
@@ -89,35 +95,27 @@ impl UserService {
             return Err(BaseError::InvalidPassword);
         }
         ensure_active_status(&user.status)?;
-        Ok(AuthenticatedUser {
-            id: user.id,
-            username: user.username,
-        })
-    }
-
-    pub(super) async fn active_user_by_subject(
-        &self,
-        ctx: &ActionContext,
-        subject: &str,
-    ) -> Result<AuthenticatedUser, BaseError> {
-        let id = subject
-            .parse::<i64>()
-            .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
-        let user = self.active_record_by_id(ctx, id).await?;
-        Ok(AuthenticatedUser {
-            id,
-            username: user.require(USERNAME)?,
-        })
+        Ok(AuthenticatedUser { id: user.id })
     }
 
     pub(super) async fn claims_for(
         &self,
         ctx: &ActionContext,
-        user: &AuthenticatedUser,
-    ) -> Result<serde_json::Value, BaseError> {
-        let grants =
-            AuthorizationGrants::user().extend(self.grant_resolver.resolve(ctx, user.id).await?);
-        super::claims::claims_for_user(&user.username, &grants)
+        user_id: i64,
+    ) -> Result<TokenPairClaims, BaseError> {
+        let snapshot = self.authorization_snapshot(ctx, user_id).await?;
+        super::claims::claims_for_user(&snapshot.username, snapshot.authz_version, &snapshot.grants)
+    }
+
+    pub(super) async fn claims_for_subject(
+        &self,
+        ctx: &ActionContext,
+        subject: &str,
+    ) -> Result<TokenPairClaims, BaseError> {
+        let user_id = subject
+            .parse::<i64>()
+            .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+        self.claims_for(ctx, user_id).await
     }
 
     pub(super) async fn view_by_id(
@@ -139,6 +137,63 @@ impl UserService {
         ensure_active_status(&status)?;
         Ok(user)
     }
+
+    async fn authorization_snapshot(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+    ) -> Result<AuthorizationSnapshot, BaseError> {
+        let mut transaction = ctx
+            .tools()
+            .mysql()?
+            .read_only_transaction()
+            .await
+            .map_err(BaseError::from)?;
+        let snapshot_result: Result<AuthorizationSnapshot, BaseError> = async {
+            let state = self
+                .users
+                .find_authorization_state_in_tx(ctx, &mut transaction, user_id)
+                .await?
+                .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
+            validate_authorization_state(&state)?;
+            let grants = AuthorizationGrants::user().extend(
+                self.grant_resolver
+                    .resolve(ctx, user_id, &mut transaction)
+                    .await?,
+            );
+            Ok(AuthorizationSnapshot {
+                username: state.username,
+                authz_version: state.authz_version,
+                grants,
+            })
+        }
+        .await;
+
+        match snapshot_result {
+            Ok(snapshot) => {
+                transaction.commit().await.map_err(BaseError::from)?;
+                Ok(snapshot)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    tracing::error!(
+                        "授权快照失败后回滚事务也失败: user_id={}, error={}",
+                        user_id,
+                        rollback_error
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+fn validate_authorization_state(state: &AuthorizationStateRecord) -> Result<(), BaseError> {
+    ensure_active_status(&state.status)?;
+    if state.authz_version < 1 {
+        return Err(BaseError::Unauthorized("用户授权版本无效".to_string()));
+    }
+    Ok(())
 }
 
 fn ensure_active_status(status: &str) -> Result<(), BaseError> {

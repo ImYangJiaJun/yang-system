@@ -4,17 +4,19 @@
 //! `system` 能力读写密码摘要，避免公开注册和登录被字段权限拦截，也避免把通用
 //! 提权查询暴露给 Action。
 
-use super::schema::{PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID, USER_VIEW_FIELDS};
+use super::schema::{
+    AUTHZ_VERSION, PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID, USER_VIEW_FIELDS,
+};
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
 
-const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, USERNAME, PASSWORD_HASH, STATUS];
+const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, PASSWORD_HASH, STATUS];
+const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION];
 
 pub(super) struct CredentialRecord {
     pub(super) id: i64,
-    pub(super) username: String,
     pub(super) password_hash: String,
     pub(super) status: String,
 }
@@ -25,9 +27,26 @@ impl TryFrom<&Record> for CredentialRecord {
     fn try_from(record: &Record) -> Result<Self, Self::Error> {
         Ok(Self {
             id: record.require(USER_ID)?,
-            username: record.require(USERNAME)?,
             password_hash: record.require(PASSWORD_HASH)?,
             status: record.require(STATUS)?,
+        })
+    }
+}
+
+pub(super) struct AuthorizationStateRecord {
+    pub(super) username: String,
+    pub(super) status: String,
+    pub(super) authz_version: i64,
+}
+
+impl TryFrom<&Record> for AuthorizationStateRecord {
+    type Error = BaseError;
+
+    fn try_from(record: &Record) -> Result<Self, Self::Error> {
+        Ok(Self {
+            username: record.require(USERNAME)?,
+            status: record.require(STATUS)?,
+            authz_version: record.require(AUTHZ_VERSION)?,
         })
     }
 }
@@ -96,6 +115,24 @@ impl UserRepository {
         Ok(rows.into_iter().next())
     }
 
+    pub(super) async fn find_authorization_state_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+    ) -> Result<Option<AuthorizationStateRecord>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(USER_AUTHORIZATION_FIELDS)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .page(1, 1)?
+            .all_in_tx(transaction)
+            .await?;
+        rows.first()
+            .map(AuthorizationStateRecord::try_from)
+            .transpose()
+    }
+
     pub(super) async fn insert(
         &self,
         ctx: &ActionContext,
@@ -119,8 +156,6 @@ mod tests {
     use yang_base::action::Request;
     use yang_base::tools::ToolsBuilder;
     use yang_db::{Database, DatabaseConfig};
-
-    const AUTHZ_VERSION: &str = "authz_version";
 
     #[tokio::test]
     async fn user_repository_owns_the_only_trusted_password_projection() {

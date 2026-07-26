@@ -1,7 +1,7 @@
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
-use yang_base::action::auth::{RefreshAction, RefreshClaimsResolver};
+use yang_base::action::auth::{RefreshAction, RefreshClaimsResolver, TokenPairClaims};
 use yang_base::action::ActionContext;
 use yang_base::definition::{ActionName, ActionSpec, HttpMethod, ModuleSpec, RouteSpec};
 use yang_base::BaseError;
@@ -18,8 +18,15 @@ impl RefreshClaimsResolver for UserClaimsResolver {
         ctx: &ActionContext,
         subject: &str,
     ) -> Result<serde_json::Value, BaseError> {
-        let user = self.service.active_user_by_subject(ctx, subject).await?;
-        self.service.claims_for(ctx, &user).await
+        Ok(self.service.claims_for_subject(ctx, subject).await?.access)
+    }
+
+    async fn resolve_pair(
+        &self,
+        ctx: &ActionContext,
+        subject: &str,
+    ) -> Result<TokenPairClaims, BaseError> {
+        self.service.claims_for_subject(ctx, subject).await
     }
 }
 

@@ -2,6 +2,7 @@
 
 use crate::modules::account::AuthorizationGrants;
 use serde::{Deserialize, Serialize};
+use yang_base::action::auth::TokenPairClaims;
 use yang_base::action::User;
 use yang_base::token::TokenClaims;
 use yang_base::BaseError;
@@ -13,21 +14,32 @@ const APP_CLAIMS_VERSION: u8 = 1;
 struct AppClaims {
     version: u8,
     username: String,
+    // C3-02 签发端总是写入；C3-06 强制比较前临时接受旧 Token 缺失该字段。
+    authz_version: Option<i64>,
     roles: Vec<String>,
     permissions: Vec<String>,
 }
 
 pub(super) fn claims_for_user(
     username: &str,
+    authz_version: i64,
     grants: &AuthorizationGrants,
-) -> Result<serde_json::Value, BaseError> {
-    serde_json::to_value(AppClaims {
+) -> Result<TokenPairClaims, BaseError> {
+    if authz_version < 1 {
+        return Err(BaseError::Unauthorized(
+            "用户授权版本必须是正整数".to_string(),
+        ));
+    }
+    let access = serde_json::to_value(AppClaims {
         version: APP_CLAIMS_VERSION,
         username: username.to_string(),
+        authz_version: Some(authz_version),
         roles: grants.roles().map(str::to_string).collect(),
         permissions: grants.permissions().map(str::to_string).collect(),
     })
-    .map_err(|error| BaseError::Unknown(format!("构造用户 Token Claims 失败: {error}")))
+    .map_err(|error| BaseError::Unknown(format!("构造用户 Token Claims 失败: {error}")))?;
+    Ok(TokenPairClaims::new(access)
+        .with_refresh(serde_json::json!({ "authz_version": authz_version })))
 }
 
 pub(crate) fn user_from_claims(claims: &TokenClaims) -> Result<User, BaseError> {
@@ -48,6 +60,11 @@ pub(crate) fn user_from_claims(claims: &TokenClaims) -> Result<User, BaseError> 
             "Token username 不能为空".to_string(),
         ));
     }
+    if app_claims.authz_version.is_some_and(|version| version < 1) {
+        return Err(BaseError::Unauthorized(
+            "Token authz_version 无效".to_string(),
+        ));
+    }
     Ok(User::new(id, app_claims.username)
         .with_roles(app_claims.roles)
         .with_permissions(app_claims.permissions))
@@ -56,7 +73,8 @@ pub(crate) fn user_from_claims(claims: &TokenClaims) -> Result<User, BaseError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yang_base::token::TokenType;
+    use jsonwebtoken::Algorithm;
+    use yang_base::token::{TokenManager, TokenType};
 
     #[test]
     fn token_claims_project_strict_roles_and_permissions() {
@@ -72,6 +90,7 @@ mod tests {
             serde_json::json!({
                 "version": 1,
                 "username": "alice",
+                "authz_version": 7,
                 "roles": ["user"],
                 "permissions": ["org.user:read"]
             }),
@@ -103,6 +122,7 @@ mod tests {
         let valid_shape = serde_json::json!({
             "version": 1,
             "username": "alice",
+            "authz_version": 7,
             "roles": ["user"],
             "permissions": ["org.user:read"]
         });
@@ -122,17 +142,65 @@ mod tests {
             )),
             Err(BaseError::Unauthorized(_))
         ));
+        assert!(matches!(
+            user_from_claims(&claims(
+                "7",
+                serde_json::json!({
+                    "version": 1,
+                    "username": "alice",
+                    "authz_version": 0,
+                    "roles": ["user"],
+                    "permissions": ["org.user:read"]
+                })
+            )),
+            Err(BaseError::Unauthorized(_))
+        ));
     }
 
     #[test]
     fn login_and_refresh_share_the_same_claims_snapshot() {
-        let claims = claims_for_user("alice", &AuthorizationGrants::user())
+        let claims = claims_for_user("alice", 7, &AuthorizationGrants::user())
             .unwrap_or_else(|error| panic!("用户声明应可序列化: {error}"));
-        assert_eq!(claims["version"], APP_CLAIMS_VERSION);
-        assert_eq!(claims["roles"], serde_json::json!(["user"]));
+        assert_eq!(claims.access["version"], APP_CLAIMS_VERSION);
+        assert_eq!(claims.access["authz_version"], 7);
+        assert_eq!(claims.access["roles"], serde_json::json!(["user"]));
         assert_eq!(
-            claims["permissions"],
+            claims.access["permissions"],
             serde_json::json!(["org.org:read", "org.user:read"])
+        );
+        assert_eq!(claims.refresh, serde_json::json!({ "authz_version": 7 }));
+        assert!(claims_for_user("alice", 0, &AuthorizationGrants::user()).is_err());
+    }
+
+    #[test]
+    fn authorization_version_survives_jwt_round_trip() {
+        let manager = TokenManager::new_symmetric(
+            "claims-round-trip-secret-32-bytes",
+            Algorithm::HS256,
+            "test".to_string(),
+            "test-api".to_string(),
+            60,
+            120,
+        );
+        let custom = claims_for_user("alice", 7, &AuthorizationGrants::user())
+            .unwrap_or_else(|error| panic!("授权快照应可序列化: {error}"));
+        let (access, refresh) = manager
+            .generate_token_pair_with_refresh_claims("7", custom.access, custom.refresh)
+            .unwrap_or_else(|error| panic!("Token 对应可签发: {error}"));
+
+        let access_claims = manager
+            .verify_token(&access)
+            .unwrap_or_else(|error| panic!("Access Token 应可验签: {error}"));
+        let refresh_claims = manager
+            .verify_token(&refresh)
+            .unwrap_or_else(|error| panic!("Refresh Token 应可验签: {error}"));
+
+        assert_eq!(access_claims.custom["authz_version"], 7);
+        assert_eq!(access_claims.custom["roles"], serde_json::json!(["user"]));
+        assert_eq!(refresh_claims.custom["authz_version"], 7);
+        assert!(
+            refresh_claims.custom.get("roles").is_none(),
+            "Refresh Token 只能携带最小版本声明"
         );
     }
 }
