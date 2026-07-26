@@ -2,7 +2,7 @@
 param(
     [switch]$CheckOnly,
     [switch]$SkipFrontendInstall,
-    [switch]$ApplySchema
+    [switch]$RunMigrations
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,11 +12,8 @@ $configExamplePath = Join-Path $projectRoot "config.example.toml"
 $composePath = Join-Path $projectRoot "compose.yaml"
 $databaseInitPath = Join-Path $projectRoot "docker/mysql/init/001-create-databases.sql"
 
-if ($CheckOnly -and $ApplySchema) {
-    throw "-CheckOnly 与 -ApplySchema 不能同时使用。"
-}
-if ($ApplySchema -and (Test-Path -LiteralPath $configPath)) {
-    throw "-ApplySchema 仅用于首次生成 config.toml；已有配置不会被脚本改写，请手工确认 schema.mode。"
+if ($CheckOnly -and $RunMigrations) {
+    throw "-CheckOnly 与 -RunMigrations 不能同时使用。"
 }
 
 function Assert-Command {
@@ -96,12 +93,8 @@ try {
             "mysql://root:yang-local@127.0.0.1:3306/yang_system"
         )
         $config = $config.Replace($tokenPlaceholder, $tokenSecret)
-        if ($ApplySchema) {
-            $config = $config.Replace($schemaValidate, 'mode = "apply"')
-        }
         Set-Content -LiteralPath $configPath -Value $config -Encoding utf8NoBOM
-        $schemaMode = if ($ApplySchema) { "apply" } else { "validate" }
-        Write-Host "已生成本机 config.toml（schema.mode=$schemaMode）。"
+        Write-Host "已生成本机 config.toml（schema.mode=validate）。"
     } else {
         Write-Host "保留已有 config.toml。"
     }
@@ -110,15 +103,20 @@ try {
         pnpm --dir frontend install --frozen-lockfile
         Assert-LastExitCode "前端依赖安装失败。"
     }
+    if ($RunMigrations) {
+        cargo run --locked --bin yang-migrate -- apply --config $configPath
+        Assert-LastExitCode "本地版本化迁移失败。"
+    }
 } finally {
     Pop-Location
 }
 
 Write-Host "本地环境初始化完成。"
-if ($ApplySchema) {
-    Write-Host "已显式允许本地首次建表。后端: Set-Location project/yang-system; cargo run --locked"
+if ($RunMigrations) {
+    Write-Host "版本化迁移与 Schema 校验已完成。后端: Set-Location project/yang-system; cargo run --locked"
 } else {
-    Write-Host "后端启动前提: 数据库 schema 已对齐；空库首次建表需手工显式设置 schema.mode=apply。"
+    Write-Host "后端启动前提: 数据库 Schema 已对齐；首次建表或升级请先运行 yang-migrate apply。"
+    Write-Host "迁移: Set-Location project/yang-system; cargo run --locked --bin yang-migrate -- apply"
     Write-Host "后端: Set-Location project/yang-system; cargo run --locked"
 }
 Write-Host "前端: Set-Location project/yang-system; pnpm --dir frontend dev"

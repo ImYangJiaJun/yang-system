@@ -11,17 +11,16 @@ Python 3.11+、已启动的 Docker Desktop、Node.js 24+ 和 Corepack；脚本�
 从 `lib_yang` 仓库根目录执行：
 
 ```powershell
-# 默认生成 schema.mode = "validate" 的安全配置
+# 生成 schema.mode = "validate" 的安全配置，不写数据库结构
 pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1
 
-# 仅全新本地空库首次建表时，显式允许 additive schema apply
-pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 -ApplySchema
+# 生成/复用配置，并运行版本化迁移与迁移后 Schema 校验
+pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 -RunMigrations
 ```
 
 脚本会启动 Compose 中的 MySQL 8.0 与 Redis 7、等待健康检查、安装前端依赖，
-并仅在不存在时生成被 Git 忽略的 `config.toml`。默认配置使用 `validate`；
-`-ApplySchema` 仅在首次生成配置时改为 `apply`。已有本机配置不会被覆盖，若已存在
-则必须手工确认 `schema.mode`。
+并仅在不存在时生成被 Git 忽略的 `config.toml`。生成配置始终使用 `validate`；
+`-RunMigrations` 对新旧配置都执行独立迁移作业，不会把应用启动模式改为 `apply`。
 只检查必需工具时使用：
 
 ```powershell
@@ -162,7 +161,23 @@ Addon/Module/fields!/params!
 - `ctx.tables()` 统一执行字段权限、筛选、排序、分页、关系批量加载与租户条件。
 - `org_user.org_org` 是租户键；普通上下文缺少 `TenantContext` 时查询 fail-closed，只有显式 system 上下文可绕过。
 
-## 启动顺序
+## 生产发布与启动顺序
+
+生产发布必须按 `migrate → validate → ready` 执行：
+
+```powershell
+cargo run --locked --bin yang-migrate -- plan --config config.toml
+cargo run --locked --bin yang-migrate -- apply --config config.toml
+cargo run --locked --bin yang-system
+```
+
+`plan` 只读，不创建 `_migrations`；`apply` 在数据库级 advisory lock 内执行版本化
+清单，复核 checksum/执行状态，并在退出前用当前应用定义完成只读 Schema 校验。
+应用的生产配置保持 `app.environment = "production"` 与 `schema.mode = "validate"`；
+只有校验成功后才会创建 HTTP 服务，因此 `/health/ready` 不可能早于迁移和校验。
+迁移规则、恢复步骤和新增版本流程见 [`docs/MIGRATIONS.md`](docs/MIGRATIONS.md)。
+
+应用进程内部启动顺序为：
 
 1. 只读取 `config.toml`；运行配置不接受环境变量覆盖。
 2. 创建 MySQL `Database`、Redis `RedisClient` 和 `TokenManager`。
@@ -175,8 +190,8 @@ Addon/Module/fields!/params!
 
 ## 本地启动
 
-初始化脚本执行完成且数据库 schema 已对齐后，启动后端。全新空库必须在首次生成
-配置时传入 `-ApplySchema`，或手工明确设置 `schema.mode = "apply"`：
+初始化脚本执行完成且数据库 Schema 已对齐后，启动后端。全新空库先运行
+`setup_local.ps1 -RunMigrations`，或手工执行 `yang-migrate apply`：
 
 ```powershell
 Set-Location project/yang-system
@@ -187,8 +202,7 @@ cargo run --locked
 `/health/live` 和 `/health/ready`。前端开发服务器位于 `http://127.0.0.1:5173`。
 
 需要手工配置时，先创建 MySQL 数据库和 Redis，再复制配置示例。示例保持安全的
-`schema.mode = "validate"`；首次本地初始化若需要自动创建缺失表和列，必须显式
-改为 `apply`，应用不会创建数据库本身。
+`schema.mode = "validate"`；迁移作业创建业务表，但不会创建数据库本身。
 
 ```powershell
 Copy-Item config.example.toml config.toml
@@ -196,8 +210,8 @@ $tokenBytes = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
 $tokenSecret = [Convert]::ToBase64String($tokenBytes)
 # 编辑 config.toml：填写 mysql.url、redis.url，把 token.secret 替换为 $tokenSecret；
-# 仅首次本地初始化需要时，将 schema.mode 显式改为 apply
-cargo run
+cargo run --locked --bin yang-migrate -- apply
+cargo run --locked --bin yang-system
 ```
 
 `config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。MySQL、
@@ -206,8 +220,9 @@ Redis、Token、Schema 模式等运行参数均以该文件为准；修改环境
 
 `schema.mode` 支持 `apply|validate|off`。省略整个 `[schema]` 或只省略 `mode` 时均
 默认 `validate`：它不执行 DDL，发现任何待应用变更就拒绝启动，适合由独立迁移任务
-管理 schema 的生产环境。`apply` 仅适合本地开发或受控初始化，`off` 只应在外部已
-完成等价校验时使用；二者都必须显式配置。
+管理 Schema 的生产环境。`apply` 只保留给本地 Schema 原型调试，不产生版本执行
+记录，不得替代 `yang-migrate`；`off` 只应在外部已完成等价校验时使用，二者都必须
+显式配置。
 
 `app.environment` 支持 `development|test|production`，缺省时按 `production`
 处理。`production` 与 `schema.mode = "apply"` 的组合会在连接数据库前被拒绝；
@@ -218,7 +233,7 @@ Redis、Token、Schema 模式等运行参数均以该文件为准；修改环境
 ## 真实依赖集成测试
 
 集成测试要求专用 MySQL 数据库名以 `_test` 结尾，并强制 Redis 使用 DB 15；测试会
-重建业务测试表与 `b05_schema_*` 专用表：
+重建业务测试表、`_migrations` 与 `b05_schema_*` 专用表：
 
 ```powershell
 $env:YANG_SYSTEM_TEST_DATABASE_URL = "mysql://root:password@127.0.0.1:3306/yang_system_test"
@@ -226,9 +241,9 @@ $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
 python scripts/run_ci.py integration
 ```
 
-该门禁覆盖 schema plan/apply/validate、跨实例并发 apply、锁内失败后跨实例重跑、
-注册、登录、refresh、原子创建企业、租户发现和租户作用域查询，不使用 mock 替代
-MySQL 或 Redis。
+该门禁覆盖迁移 dry-run/version/checksum/幂等与中断重跑、Schema
+plan/apply/validate、跨实例并发 apply、锁内失败后跨实例重跑、注册、登录、
+refresh、原子创建企业、租户发现和租户作用域查询，不使用 mock 替代 MySQL 或 Redis。
 
 ## 参考能力
 

@@ -4,7 +4,7 @@ name = "yang-system"
 environment = "development"
 
 [schema]
-# 安全默认值为 validate；仅本地首次初始化需要时显式改为 apply。
+# 安全默认值为 validate；首次建表与升级优先使用独立 yang-migrate 作业。
 mode = "validate"
 
 [http]

@@ -68,6 +68,19 @@ FULL = (
 
 INTEGRATION = (
     Command(
+        "Versioned migration job integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "migration_job_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Schema apply concurrency and retry integration",
         (
             "cargo",
@@ -137,7 +150,11 @@ def self_test() -> None:
         for command in INTEGRATION
         if command.argv[:3] == ("cargo", "test", "--test")
     }
-    assert integration_tests == {"schema_apply_integration", "system_integration"}
+    assert integration_tests == {
+        "migration_job_integration",
+        "schema_apply_integration",
+        "system_integration",
+    }
     print("local CI runner self-test: passed")
 
 

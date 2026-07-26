@@ -21,6 +21,15 @@ pub struct Settings {
     pub logging: LoggingSettings,
 }
 
+/// 独立迁移作业所需的最小配置投影。
+///
+/// 迁移不依赖 HTTP、Redis 或 Token；只读取构建应用 Schema 所需的 MySQL 与安全参数。
+#[derive(Clone, Deserialize)]
+pub struct MigrationSettings {
+    pub mysql: MysqlSettings,
+    pub security: SecuritySettings,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
@@ -147,13 +156,7 @@ impl Settings {
     }
 
     pub fn mysql_config(&self) -> DatabaseConfig {
-        DatabaseConfig::default()
-            .with_max_connections(self.mysql.max_connections)
-            .with_min_connections(self.mysql.min_connections)
-            .with_connect_timeout(self.mysql.connect_timeout_seconds)
-            .with_idle_timeout(self.mysql.idle_timeout_seconds)
-            .with_max_lifetime(self.mysql.max_lifetime_seconds)
-            .with_test_before_acquire(self.mysql.test_before_acquire)
+        self.mysql.database_config()
     }
 
     pub fn redis_config(&self) -> RedisConfig {
@@ -207,18 +210,49 @@ impl Settings {
             bail!("refresh token 有效期必须长于 access token");
         }
         validate_token_secret(&self.token.secret)?;
-        if self.security.argon2_max_concurrency == 0 {
+        self.security.validate()?;
+        Ok(())
+    }
+}
+
+impl MigrationSettings {
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("读取迁移配置文件失败: {}", path.display()))?;
+        let settings: Self = toml::from_str(&raw).context("解析迁移配置文件失败")?;
+        settings
+            .mysql_config()
+            .validate()
+            .context("mysql 配置无效")?;
+        settings.security.validate()?;
+        Ok(settings)
+    }
+
+    pub fn mysql_config(&self) -> DatabaseConfig {
+        self.mysql.database_config()
+    }
+}
+
+impl MysqlSettings {
+    fn database_config(&self) -> DatabaseConfig {
+        DatabaseConfig::default()
+            .with_max_connections(self.max_connections)
+            .with_min_connections(self.min_connections)
+            .with_connect_timeout(self.connect_timeout_seconds)
+            .with_idle_timeout(self.idle_timeout_seconds)
+            .with_max_lifetime(self.max_lifetime_seconds)
+            .with_test_before_acquire(self.test_before_acquire)
+    }
+}
+
+impl SecuritySettings {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.argon2_max_concurrency == 0 {
             bail!("security.argon2_max_concurrency 必须大于 0");
         }
-        validate_rate_limit(
-            "window_seconds",
-            self.security.auth_rate_limit_window_seconds,
-        )?;
-        validate_rate_limit("ip_attempts", self.security.auth_rate_limit_ip_attempts)?;
-        validate_rate_limit(
-            "username_attempts",
-            self.security.auth_rate_limit_username_attempts,
-        )?;
+        validate_rate_limit("window_seconds", self.auth_rate_limit_window_seconds)?;
+        validate_rate_limit("ip_attempts", self.auth_rate_limit_ip_attempts)?;
+        validate_rate_limit("username_attempts", self.auth_rate_limit_username_attempts)?;
         Ok(())
     }
 }
