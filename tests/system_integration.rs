@@ -3,17 +3,31 @@ use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::database::DatabaseInitializer;
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
+use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
-use yang_system::authorization::AuthorizationVersionCache;
+use yang_system::authorization::{
+    AuthorizationOutboxWorker, AuthorizationVersionCache, CachedAuthorizationVersion,
+};
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
-use yang_system::config::SecuritySettings;
+use yang_system::config::{AuthorizationSettings, SecuritySettings};
+
+fn integration_token_manager() -> TokenManager {
+    TokenManager::new_symmetric(
+        "integration-test-secret-32-bytes-minimum",
+        Algorithm::HS256,
+        "yang-system-integration".to_string(),
+        "yang-system-integration-api".to_string(),
+        300,
+        3600,
+    )
+}
 
 fn action_handle(
     app: &BuiltApp,
@@ -54,6 +68,112 @@ async fn dispatch(
         .map_err(|error| anyhow::anyhow!("{module}.{action} 调用失败: {error}"))
 }
 
+async fn dispatch_token_action(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    token: &str,
+) -> Result<ApiResponse, BaseError> {
+    dispatch_token_body_action(app, module, action, token, json!({})).await
+}
+
+async fn dispatch_token_body_action(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    token: &str,
+    body: Value,
+) -> Result<ApiResponse, BaseError> {
+    let request = Request::new(body).header("authorization", format!("Bearer {token}"));
+    let context = app.context(request).with_request_meta(
+        RequestMeta::new().with_peer_addr(SocketAddr::from(([127, 0, 0, 1], 41_001))),
+    );
+    let handle = action_handle(app, module, action)
+        .map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    app.dispatch_context(handle, context).await
+}
+
+async fn assert_authorization_error(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    token: &str,
+    expected_code: i32,
+) -> anyhow::Result<()> {
+    match dispatch_token_action(app, module, action, token).await {
+        Err(error) if error.code() == expected_code => Ok(()),
+        Err(error) => anyhow::bail!(
+            "授权错误码不符: expected={expected_code}, actual={}, error={error}",
+            error.code()
+        ),
+        Ok(response) => anyhow::bail!(
+            "预期授权失败 {expected_code}，实际 Action 成功: code={}, message={}",
+            response.code,
+            response.message
+        ),
+    }
+}
+
+async fn assert_authorization_error_with_body(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    token: &str,
+    body: Value,
+    expected_code: i32,
+) -> anyhow::Result<()> {
+    match dispatch_token_body_action(app, module, action, token, body).await {
+        Err(error) if error.code() == expected_code => Ok(()),
+        Err(error) => anyhow::bail!(
+            "授权错误码不符: expected={expected_code}, actual={}, error={error}",
+            error.code()
+        ),
+        Ok(response) => anyhow::bail!(
+            "预期授权失败 {expected_code}，实际 Action 成功: code={}, message={}",
+            response.code,
+            response.message
+        ),
+    }
+}
+
+async fn assert_authorization_success(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    token: &str,
+) -> anyhow::Result<()> {
+    let response = dispatch_token_action(app, module, action, token).await?;
+    ensure!(
+        response.code == 0,
+        "预期授权成功，实际 Action 返回业务错误 {}: {}",
+        response.code,
+        response.message
+    );
+    Ok(())
+}
+
+async fn wait_for_cached_version(
+    cache: &AuthorizationVersionCache,
+    user_id: i64,
+    expected: i64,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if cache.read(user_id).await? == CachedAuthorizationVersion::Version(expected) {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "等待授权缓存超时: user_id={user_id}, expected={expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn authorization_cache_key(deployment: &str, user_id: i64) -> String {
+    format!("yang-system:{deployment}:authz:version:{user_id}")
+}
+
 fn data(response: ApiResponse) -> anyhow::Result<Value> {
     ensure!(
         response.code == 0,
@@ -81,6 +201,25 @@ async fn database_authz_version(pool: &sqlx::MySqlPool, user_id: i64) -> anyhow:
         .fetch_one(pool)
         .await
         .map_err(Into::into)
+}
+
+async fn wait_for_outbox_idle(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM authorization_outbox WHERE state <> 'published'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if remaining == 0 {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "等待授权 Outbox 清空超时: remaining={remaining}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
@@ -126,7 +265,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .await
         .context("连接测试 MySQL 失败")?;
     reset_test_database(mysql.pool()).await?;
-    let initializer_database = Database::from_pool(mysql.pool().clone(), database_config)?;
+    let initializer_database = Database::from_pool(mysql.pool().clone(), database_config.clone())?;
     let redis = RedisClient::connect_with_config(
         &redis_url,
         RedisConfig::default()
@@ -137,26 +276,18 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     .await
     .context("连接测试 Redis 失败")?;
     let cache_namespace = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let authorization_cache = AuthorizationVersionCache::new(
-        redis.clone(),
-        format!("system-integration-{cache_namespace}"),
-    )?;
+    let deployment = format!("system-integration-{cache_namespace}");
+    let authorization_cache = AuthorizationVersionCache::new(redis.clone(), deployment.clone())?;
+    let authorization_cache_probe = authorization_cache.clone();
     let generated_bootstrap = generate_bootstrap_secret()?;
     let bootstrap_secret = generated_bootstrap.secret().to_owned();
     let bootstrap_verifier = BootstrapSecretVerifier::new(generated_bootstrap.digest().clone(), 2)?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
-            .cache(redis)
+            .cache(redis.clone())
             .extension(authorization_cache)
-            .token(TokenManager::new_symmetric(
-                "integration-test-secret-32-bytes-minimum",
-                Algorithm::HS256,
-                "yang-system-integration".to_string(),
-                "yang-system-integration-api".to_string(),
-                300,
-                3600,
-            ))
+            .token(integration_token_manager())
             .config(bootstrap_verifier)
             .build()?,
     );
@@ -166,7 +297,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
     });
-    let application = build_app(Arc::clone(&tools), security)?;
+    let application = build_app(Arc::clone(&tools), Arc::clone(&security))?;
     let initializer = DatabaseInitializer::new(initializer_database, false);
     let definitions = application
         .runtime
@@ -189,6 +320,17 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .is_noop(),
         "同步后 schema 规划必须为空"
     );
+    let outbox_worker = AuthorizationOutboxWorker::start(
+        &tools,
+        AuthorizationSettings {
+            deployment: deployment.clone(),
+            outbox_poll_interval_ms: 10,
+            outbox_batch_size: 100,
+            outbox_lease_seconds: 5,
+            outbox_max_retry_seconds: 5,
+        },
+    )
+    .await?;
 
     let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let username = format!("integration_{suffix}");
@@ -234,7 +376,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             "admin.user",
             "bootstrap",
             json!({
-                "secret": bootstrap_secret,
+                "secret": bootstrap_secret.clone(),
                 "name": "Integration Administrator",
                 "position": "Owner"
             }),
@@ -246,19 +388,15 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let bootstrap_admin_id = bootstrap["id"]
         .as_i64()
         .context("平台管理员初始化响应缺少 id")?;
-    ensure!(
-        dispatch(
-            &application.runtime,
-            "admin.user",
-            "bootstrap",
-            json!({ "secret": bootstrap_secret, "name": "Second Administrator" }),
-            &[("authorization", &format!("Bearer {access_token}"))],
-            &[],
-        )
-        .await
-        .is_err(),
-        "平台管理员初始化必须只能成功一次"
-    );
+    assert_authorization_error_with_body(
+        &application.runtime,
+        "admin.user",
+        "bootstrap",
+        access_token,
+        json!({ "secret": bootstrap_secret, "name": "Second Administrator" }),
+        700002,
+    )
+    .await?;
 
     let refreshed_admin = data(
         dispatch(
@@ -291,6 +429,130 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == token_authz_version(&tools, admin_access_token)?,
         "bootstrap 提交后的数据库版本必须与刷新快照一致"
     );
+    wait_for_cached_version(&authorization_cache_probe, user_id, login_authz_version + 1).await?;
+    for (module, action) in [
+        ("account.user", "ui_catalog"),
+        ("admin.user", "list"),
+        ("org.tenant", "list"),
+        ("org.org", "list"),
+        ("org.user", "select"),
+    ] {
+        assert_authorization_error(&application.runtime, module, action, access_token, 400009)
+            .await?;
+    }
+    let admin_authz_version = login_authz_version + 1;
+    let admin_cache_key = authorization_cache_key(&deployment, user_id);
+    let admin_cache_keys = [admin_cache_key.clone()];
+
+    redis.del(&admin_cache_keys).await?;
+    assert_authorization_success(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        admin_access_token,
+    )
+    .await?;
+    ensure!(
+        authorization_cache_probe.read(user_id).await?
+            == CachedAuthorizationVersion::Version(admin_authz_version),
+        "缓存缺失时必须回源 MySQL 并回填当前版本"
+    );
+
+    redis.set(&admin_cache_key, "malformed").await?;
+    assert_authorization_success(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        admin_access_token,
+    )
+    .await?;
+    ensure!(
+        authorization_cache_probe.read(user_id).await?
+            == CachedAuthorizationVersion::Version(admin_authz_version),
+        "缓存值损坏时必须回源 MySQL 并修复缓存"
+    );
+
+    redis
+        .set(&admin_cache_key, login_authz_version.to_string())
+        .await?;
+    assert_authorization_success(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        admin_access_token,
+    )
+    .await?;
+    ensure!(
+        authorization_cache_probe.read(user_id).await?
+            == CachedAuthorizationVersion::Version(admin_authz_version),
+        "缓存落后时必须以 MySQL 事实版本为准并推进缓存"
+    );
+
+    redis
+        .set(&admin_cache_key, (admin_authz_version + 1).to_string())
+        .await?;
+    assert_authorization_error(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        admin_access_token,
+        400009,
+    )
+    .await?;
+
+    redis.del(&admin_cache_keys).await?;
+    redis
+        .lpush(&admin_cache_key, &["wrong-type".to_string()])
+        .await?;
+    assert_authorization_success(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        admin_access_token,
+    )
+    .await?;
+    redis.del(&admin_cache_keys).await?;
+    authorization_cache_probe
+        .publish(user_id, admin_authz_version)
+        .await?;
+
+    let user_id_subject = user_id.to_string();
+    let future_version_token = tools.token()?.generate_access_token(
+        &user_id_subject,
+        json!({ "authz_version": admin_authz_version + 1 }),
+    )?;
+    assert_authorization_error(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        &future_version_token,
+        400010,
+    )
+    .await?;
+    let missing_version_token = tools
+        .token()?
+        .generate_access_token(&user_id_subject, json!({}))?;
+    assert_authorization_error(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        &missing_version_token,
+        400010,
+    )
+    .await?;
+    let invalid_subject_token = tools.token()?.generate_access_token(
+        "not-a-user-id",
+        json!({ "authz_version": admin_authz_version }),
+    )?;
+    assert_authorization_error(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        &invalid_subject_token,
+        400010,
+    )
+    .await?;
+
     let admin_authorization = format!("Bearer {admin_access_token}");
     let admin_accounts = data(
         dispatch(
@@ -316,7 +578,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             &application.runtime,
             "account.user",
             "register",
-            json!({ "username": member_username, "password": password }),
+            json!({ "username": member_username.clone(), "password": password }),
             &[],
             &[],
         )
@@ -347,6 +609,20 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == member_initial_version + 1,
         "新增平台账号必须递增目标用户授权版本"
     );
+    let member_login = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "login",
+            json!({ "username": member_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let member_platform_access = member_login["access_token"]
+        .as_str()
+        .context("平台成员登录响应缺少 access_token")?;
 
     let main_version_before_rejected_demotion =
         database_authz_version(tools.mysql()?.pool(), user_id).await?;
@@ -386,24 +662,74 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         member_version_after_idempotent_admin == member_initial_version + 1,
         "幂等 admin 写不得递增授权版本"
     );
-    for admin in [true, false] {
-        data(
-            dispatch(
-                &application.runtime,
-                "admin.user",
-                "set_admin",
-                json!({ "id": platform_member_id, "admin": admin }),
-                &[("authorization", &admin_authorization)],
-                &[],
-            )
-            .await?,
-        )?;
+    let concurrent_admin_headers = [("authorization", admin_authorization.as_str())];
+    let (set_admin_a, set_admin_b, set_admin_c, set_admin_d) = tokio::join!(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_admin",
+            json!({ "id": platform_member_id, "admin": true }),
+            &concurrent_admin_headers,
+            &[],
+        ),
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_admin",
+            json!({ "id": platform_member_id, "admin": true }),
+            &concurrent_admin_headers,
+            &[],
+        ),
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_admin",
+            json!({ "id": platform_member_id, "admin": true }),
+            &concurrent_admin_headers,
+            &[],
+        ),
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_admin",
+            json!({ "id": platform_member_id, "admin": true }),
+            &concurrent_admin_headers,
+            &[],
+        ),
+    );
+    for response in [set_admin_a, set_admin_b, set_admin_c, set_admin_d] {
+        data(response?)?;
     }
+    data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_admin",
+            json!({ "id": platform_member_id, "admin": false }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
     ensure!(
         database_authz_version(tools.mysql()?.pool(), member_id).await?
             == member_version_after_idempotent_admin + 2,
-        "超级管理员授予与撤销必须各递增一次授权版本"
+        "并发幂等授予只能递增一次，随后撤销再递增一次"
     );
+    wait_for_cached_version(
+        &authorization_cache_probe,
+        member_id,
+        member_version_after_idempotent_admin + 2,
+    )
+    .await?;
+    assert_authorization_error(
+        &application.runtime,
+        "admin.user",
+        "list",
+        member_platform_access,
+        400009,
+    )
+    .await?;
 
     data(
         dispatch(
@@ -494,6 +820,9 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let org_access_token = refreshed_org_admin["access_token"]
         .as_str()
         .context("组织管理员刷新响应缺少 access_token")?;
+    let org_refresh_token = refreshed_org_admin["refresh_token"]
+        .as_str()
+        .context("组织管理员刷新响应缺少 refresh_token")?;
     let authorization = format!("Bearer {org_access_token}");
     let member_version_before_org_add =
         database_authz_version(tools.mysql()?.pool(), member_id).await?;
@@ -673,6 +1002,21 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == replacement_initial_version + 2,
         "删除企业成员必须原子递增当前绑定用户授权版本"
     );
+    let outage_tokens = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "refresh",
+            json!({ "refresh_token": org_refresh_token }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let outage_admin_access_token = outage_tokens["access_token"]
+        .as_str()
+        .context("故障矩阵刷新响应缺少 access_token")?
+        .to_owned();
     let inconsistent_outbox_users: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM (\
             SELECT u.id \
@@ -691,18 +1035,149 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         inconsistent_outbox_users == 0,
         "每次已提交授权版本递增都必须恰好产生连续、无重复的 Outbox 事件"
     );
+    wait_for_outbox_idle(tools.mysql()?.pool()).await?;
     let invalid_outbox_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM authorization_outbox \
-         WHERE state <> 'pending' OR attempts <> 0 OR available_at <= 0 OR created_at <= 0 \
+         WHERE state <> 'published' \
+            OR attempts < 1 OR available_at <= 0 OR created_at <= 0 \
             OR lease_until IS NOT NULL OR worker_id IS NOT NULL \
-            OR published_at IS NOT NULL OR last_error IS NOT NULL",
+            OR last_error IS NOT NULL \
+            OR published_at IS NULL",
     )
     .fetch_one(tools.mysql()?.pool())
     .await?;
     ensure!(
         invalid_outbox_rows == 0,
-        "事务 writer 只能写入可立即派发的纯净 pending 事件"
+        "Outbox 清空后只能留下已确认发布且租约已释放的事件"
     );
+    outbox_worker.shutdown().await?;
+
+    let redis_outage_authorization_redis = RedisClient::connect_with_config(
+        &redis_url,
+        RedisConfig::default()
+            .with_max_connections(2)
+            .with_min_connections(0)
+            .with_connect_timeout(10),
+    )
+    .await?;
+    let redis_outage_cache = AuthorizationVersionCache::new(
+        redis_outage_authorization_redis.clone(),
+        format!("{deployment}-redis-down"),
+    )?;
+    redis_outage_authorization_redis.close().await;
+    let redis_outage_database =
+        Database::from_pool(tools.mysql()?.pool().clone(), database_config.clone())?;
+    let redis_outage_tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(redis_outage_database)
+            .cache(redis.clone())
+            .extension(redis_outage_cache)
+            .token(integration_token_manager())
+            .build()?,
+    );
+    let redis_outage_app = build_app(redis_outage_tools, Arc::clone(&security))?;
+    assert_authorization_success(
+        &redis_outage_app.runtime,
+        "account.user",
+        "ui_catalog",
+        &outage_admin_access_token,
+    )
+    .await?;
+
+    let mysql_outage_authorization_redis = RedisClient::connect_with_config(
+        &redis_url,
+        RedisConfig::default()
+            .with_max_connections(2)
+            .with_min_connections(0)
+            .with_connect_timeout(10),
+    )
+    .await?;
+    let mysql_outage_deployment = format!("{deployment}-mysql-down");
+    let mysql_outage_cache = AuthorizationVersionCache::new(
+        mysql_outage_authorization_redis.clone(),
+        mysql_outage_deployment.clone(),
+    )?;
+    let current_admin_version = database_authz_version(tools.mysql()?.pool(), user_id).await?;
+    ensure!(
+        token_authz_version(&tools, &outage_admin_access_token)? == current_admin_version,
+        "MySQL 故障矩阵必须使用当前授权版本 Token"
+    );
+    mysql_outage_cache
+        .publish(user_id, current_admin_version)
+        .await?;
+    let mysql_outage_database =
+        Database::from_pool(tools.mysql()?.pool().clone(), database_config)?;
+    let mysql_outage_tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(mysql_outage_database)
+            .cache(redis.clone())
+            .extension(mysql_outage_cache)
+            .token(integration_token_manager())
+            .build()?,
+    );
+    let mysql_outage_app = build_app(mysql_outage_tools, security)?;
+
+    tools.mysql()?.close().await;
+    assert_authorization_success(
+        &mysql_outage_app.runtime,
+        "account.user",
+        "ui_catalog",
+        &outage_admin_access_token,
+    )
+    .await?;
+    let mysql_outage_key = authorization_cache_key(&mysql_outage_deployment, user_id);
+    let mysql_outage_keys = [mysql_outage_key.clone()];
+    mysql_outage_authorization_redis
+        .set(&mysql_outage_key, (current_admin_version + 1).to_string())
+        .await?;
+    assert_authorization_error(
+        &mysql_outage_app.runtime,
+        "account.user",
+        "ui_catalog",
+        &outage_admin_access_token,
+        400009,
+    )
+    .await?;
+    mysql_outage_authorization_redis
+        .del(&mysql_outage_keys)
+        .await?;
+    assert_authorization_error(
+        &mysql_outage_app.runtime,
+        "account.user",
+        "ui_catalog",
+        &outage_admin_access_token,
+        400011,
+    )
+    .await?;
+    mysql_outage_authorization_redis
+        .set(&mysql_outage_key, "malformed")
+        .await?;
+    assert_authorization_error(
+        &mysql_outage_app.runtime,
+        "account.user",
+        "ui_catalog",
+        &outage_admin_access_token,
+        400011,
+    )
+    .await?;
+    mysql_outage_authorization_redis
+        .del(&mysql_outage_keys)
+        .await?;
+    mysql_outage_authorization_redis
+        .lpush(&mysql_outage_key, &["wrong-type".to_string()])
+        .await?;
+    assert_authorization_error(
+        &mysql_outage_app.runtime,
+        "account.user",
+        "ui_catalog",
+        &outage_admin_access_token,
+        400011,
+    )
+    .await?;
+    mysql_outage_authorization_redis
+        .del(&mysql_outage_keys)
+        .await?;
+    mysql_outage_authorization_redis.close().await;
 
     tools.close().await;
     Ok(())
