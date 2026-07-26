@@ -12,6 +12,7 @@ use yang_base::tools::{Tools, ToolsBuilder};
 use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::{build_app, Application};
+use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
 
@@ -119,12 +120,18 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
     )
     .await
     .context("连接租户隔离测试 Redis 失败")?;
+    let cache_namespace = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let authorization_cache = AuthorizationVersionCache::new(
+        redis.clone(),
+        format!("tenant-integration-{cache_namespace}"),
+    )?;
     let generated_bootstrap = generate_bootstrap_secret()?;
     let verifier = BootstrapSecretVerifier::new(generated_bootstrap.digest().clone(), 2)?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis)
+            .extension(authorization_cache)
             .token(TokenManager::new_symmetric(
                 "tenant-isolation-integration-secret",
                 Algorithm::HS256,

@@ -14,6 +14,7 @@ use yang_base::tools::{Tools, ToolsBuilder};
 use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::{build_app, Application};
+use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
 
@@ -146,10 +147,16 @@ async fn build_harness(
     )
     .await
     .context("连接 bootstrap 测试 Redis 失败")?;
+    let cache_namespace = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let authorization_cache = AuthorizationVersionCache::new(
+        redis.clone(),
+        format!("bootstrap-integration-{cache_namespace}"),
+    )?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis)
+            .extension(authorization_cache)
             .token(TokenManager::new_symmetric(
                 "bootstrap-integration-token-secret",
                 Algorithm::HS256,

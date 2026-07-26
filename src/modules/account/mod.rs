@@ -4,6 +4,7 @@ mod authz_version;
 mod grants;
 mod user;
 
+use crate::authorization::AuthorizationVersionCache;
 use crate::config::SecuritySettings;
 use std::sync::Arc;
 use yang_base::definition::AddonSpec;
@@ -22,7 +23,13 @@ pub(crate) use user::user_from_claims;
 pub fn build_addon(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
+    authorization_cache: Option<AuthorizationVersionCache>,
 ) -> Result<AddonSpec, BaseError> {
-    Ok(AddonSpec::new(yang_base::addon!("account"))
-        .module(user::build_module(security, grant_resolver)?))
+    Ok(
+        AddonSpec::new(yang_base::addon!("account")).module(user::build_module(
+            security,
+            grant_resolver,
+            authorization_cache,
+        )?),
+    )
 }

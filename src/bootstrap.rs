@@ -1,5 +1,5 @@
 use crate::app::build_app;
-use crate::authorization::AuthorizationOutboxWorker;
+use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
 use crate::transport::http;
@@ -32,6 +32,9 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let cache = RedisClient::connect_with_config(&settings.redis.url, settings.redis_config())
         .await
         .context("连接 Redis 失败")?;
+    let authorization_cache =
+        AuthorizationVersionCache::new(cache.clone(), settings.authorization.deployment.clone())
+            .context("构建授权版本缓存失败")?;
 
     let token_manager = TokenManager::new_symmetric(
         &settings.token.secret,
@@ -46,6 +49,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
             .mysql(mysql)
             .cache(cache)
             .token(token_manager)
+            .extension(authorization_cache)
             .config(bootstrap_verifier)
             .build()
             .context("构建应用 Tools 失败")?,

@@ -138,8 +138,7 @@ impl AuthorizationOutboxWorker {
     pub async fn start(tools: &Tools, settings: AuthorizationSettings) -> anyhow::Result<Self> {
         let repository = AuthorizationOutboxRepository::new(tools.mysql()?.pool().clone());
         repository.validate_schema().await?;
-        let cache =
-            AuthorizationVersionCache::new(tools.cache()?.clone(), settings.deployment.clone())?;
+        let cache = tools.extension::<AuthorizationVersionCache>()?.clone();
         let processor = AuthorizationOutboxProcessor::new(
             tools.mysql()?.pool().clone(),
             Arc::new(cache),

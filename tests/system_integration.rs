@@ -11,6 +11,7 @@ use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
+use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
 
@@ -135,6 +136,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     )
     .await
     .context("连接测试 Redis 失败")?;
+    let cache_namespace = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let authorization_cache = AuthorizationVersionCache::new(
+        redis.clone(),
+        format!("system-integration-{cache_namespace}"),
+    )?;
     let generated_bootstrap = generate_bootstrap_secret()?;
     let bootstrap_secret = generated_bootstrap.secret().to_owned();
     let bootstrap_verifier = BootstrapSecretVerifier::new(generated_bootstrap.digest().clone(), 2)?;
@@ -142,6 +148,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis)
+            .extension(authorization_cache)
             .token(TokenManager::new_symmetric(
                 "integration-test-secret-32-bytes-minimum",
                 Algorithm::HS256,

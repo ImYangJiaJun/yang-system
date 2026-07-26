@@ -1,3 +1,4 @@
+use crate::authorization::AuthorizationVersionCache;
 use crate::config::SecuritySettings;
 use crate::modules::{account, admin, org};
 use anyhow::Context;
@@ -13,6 +14,16 @@ pub fn build_app(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
 ) -> anyhow::Result<Application> {
+    let authorization_cache = match tools.cache() {
+        Ok(_) => Some(
+            tools
+                .extension::<AuthorizationVersionCache>()
+                .context("Redis 运行态缺少 AuthorizationVersionCache 扩展")?
+                .clone(),
+        ),
+        Err(yang_base::BaseError::RedisNotInitialized) => None,
+        Err(error) => return Err(error).context("检查授权版本缓存运行态失败"),
+    };
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     let runtime = AppBuilder::new()
         .addon(
@@ -22,6 +33,7 @@ pub fn build_app(
                     admin::grant_resolver(),
                     org::grant_resolver(),
                 ])),
+                authorization_cache,
             )
             .context("构建 account Addon 失败")?,
         )

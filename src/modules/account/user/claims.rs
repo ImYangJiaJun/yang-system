@@ -14,8 +14,7 @@ const APP_CLAIMS_VERSION: u8 = 1;
 struct AppClaims {
     version: u8,
     username: String,
-    // C3-02 签发端总是写入；C3-06 强制比较前临时接受旧 Token 缺失该字段。
-    authz_version: Option<i64>,
+    authz_version: i64,
     roles: Vec<String>,
     permissions: Vec<String>,
 }
@@ -33,7 +32,7 @@ pub(super) fn claims_for_user(
     let access = serde_json::to_value(AppClaims {
         version: APP_CLAIMS_VERSION,
         username: username.to_string(),
-        authz_version: Some(authz_version),
+        authz_version,
         roles: grants.roles().map(str::to_string).collect(),
         permissions: grants.permissions().map(str::to_string).collect(),
     })
@@ -60,10 +59,8 @@ pub(crate) fn user_from_claims(claims: &TokenClaims) -> Result<User, BaseError> 
             "Token username 不能为空".to_string(),
         ));
     }
-    if app_claims.authz_version.is_some_and(|version| version < 1) {
-        return Err(BaseError::Unauthorized(
-            "Token authz_version 无效".to_string(),
-        ));
+    if app_claims.authz_version < 1 {
+        return Err(BaseError::AuthorizationVersionInvalid);
     }
     Ok(User::new(id, app_claims.username)
         .with_roles(app_claims.roles)
@@ -153,7 +150,7 @@ mod tests {
                     "permissions": ["org.user:read"]
                 })
             )),
-            Err(BaseError::Unauthorized(_))
+            Err(BaseError::AuthorizationVersionInvalid)
         ));
     }
 

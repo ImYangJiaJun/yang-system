@@ -14,6 +14,7 @@ use yang_base::BaseError;
 
 const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, PASSWORD_HASH, STATUS];
 const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION];
+const USER_AUTHORIZATION_VERSION_FIELDS: &[&str] = &[STATUS, AUTHZ_VERSION];
 
 pub(super) struct CredentialRecord {
     pub(super) id: i64,
@@ -37,6 +38,22 @@ pub(super) struct AuthorizationStateRecord {
     pub(super) username: String,
     pub(super) status: String,
     pub(super) authz_version: i64,
+}
+
+pub(super) struct AuthorizationVersionRecord {
+    pub(super) status: String,
+    pub(super) authz_version: i64,
+}
+
+impl TryFrom<&Record> for AuthorizationVersionRecord {
+    type Error = BaseError;
+
+    fn try_from(record: &Record) -> Result<Self, Self::Error> {
+        Ok(Self {
+            status: record.require(STATUS)?,
+            authz_version: record.require(AUTHZ_VERSION)?,
+        })
+    }
 }
 
 impl TryFrom<&Record> for AuthorizationStateRecord {
@@ -130,6 +147,23 @@ impl UserRepository {
             .await?;
         rows.first()
             .map(AuthorizationStateRecord::try_from)
+            .transpose()
+    }
+
+    pub(super) async fn find_authorization_version(
+        &self,
+        ctx: &ActionContext,
+        id: i64,
+    ) -> Result<Option<AuthorizationVersionRecord>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(USER_AUTHORIZATION_VERSION_FIELDS)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .page(1, 1)?
+            .all()
+            .await?;
+        rows.first()
+            .map(AuthorizationVersionRecord::try_from)
             .transpose()
     }
 

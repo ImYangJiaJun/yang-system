@@ -223,13 +223,13 @@ worker 采用至少一次、可重放模型：
 | 场景 | 行为 |
 |---|---|
 | Redis 正常、版本相等 | 通过 |
-| Redis 显示 Token 过期 | 401 `AUTHZ_STALE` |
+| Redis 显示 Token 过期 | 401 `AUTHZ_STALE`（错误码 `400009`） |
 | Redis miss/损坏/超时，MySQL 正常 | 回查主库；相等才通过 |
 | Redis 重启 | 冷缓存回查主库，不使用旧权限 |
 | outbox 延迟/worker 停止 | 最多等待 key 剩余 TTL；过期后回查主库 |
 | MySQL 不可用但 Redis 有未过期有效版本 | 在 key 剩余 TTL 内按缓存比较；最坏陈旧窗口仍不超过 5 秒 |
-| 比较所需的 Redis 与 MySQL 都不可用 | 503 `AUTHZ_CHECK_UNAVAILABLE`，失败关闭 |
-| Token 版本高于事实源 | 401 `AUTHZ_VERSION_INVALID` 并告警 |
+| 比较所需的 Redis 与 MySQL 都不可用 | 503 `AUTHZ_CHECK_UNAVAILABLE`（错误码 `400011`），失败关闭 |
+| Token 版本高于事实源 | 401 `AUTHZ_VERSION_INVALID`（错误码 `400010`）并告警 |
 | MySQL 回查确认用户不存在或停用 | 401，不能由较低缓存版本重新放行 |
 
 “失败关闭”指系统不能完成可信比较时不构造 `User`、不执行权限检查后的 Action；不要求把
@@ -240,7 +240,7 @@ Redis 单点故障扩大为全站故障，主库回退是可信比较而不是�
 
 至少提供以下低基数指标：
 
-- `authz_version_check_total{result=match|stale|invalid|unavailable,source=redis|mysql}`
+- `authz_version_check_total{result=match|stale|invalid|unavailable,source=token|redis|mysql}`
 - `authz_version_fallback_total{reason=miss|redis_error|malformed|cache_behind}`
 - `authz_outbox_pending`
 - `authz_outbox_oldest_age_seconds`
