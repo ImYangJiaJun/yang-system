@@ -23,6 +23,8 @@ pub struct Settings {
     pub token: TokenSettings,
     pub bootstrap: BootstrapSettings,
     pub security: SecuritySettings,
+    #[serde(default)]
+    pub shutdown: ShutdownSettings,
     pub logging: LoggingSettings,
 }
 
@@ -188,6 +190,25 @@ pub struct LoggingSettings {
     pub filter: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShutdownSettings {
+    #[serde(default = "default_shutdown_total_timeout_seconds")]
+    pub total_timeout_seconds: u64,
+}
+
+impl Default for ShutdownSettings {
+    fn default() -> Self {
+        Self {
+            total_timeout_seconds: default_shutdown_total_timeout_seconds(),
+        }
+    }
+}
+
+const fn default_shutdown_total_timeout_seconds() -> u64 {
+    30
+}
+
 impl Settings {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let settings: Self = crate::config_source::load(path, "读取配置文件失败")?;
@@ -266,6 +287,9 @@ impl Settings {
         }
         self.token.validate()?;
         self.security.validate()?;
+        if !(1..=300).contains(&self.shutdown.total_timeout_seconds) {
+            bail!("shutdown.total_timeout_seconds 必须在 1..=300 范围内");
+        }
         Ok(())
     }
 }
@@ -471,6 +495,8 @@ argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
 auth_rate_limit_ip_attempts = 30
 auth_rate_limit_username_attempts = 10
+[shutdown]
+total_timeout_seconds = 30
 [logging]
 filter = "info"
 "#
@@ -492,6 +518,7 @@ filter = "info"
         assert_eq!(settings.authorization.outbox_poll_interval_ms, 250);
         assert_eq!(settings.authorization.outbox_batch_size, 100);
         assert!(settings.security.trusted_proxy_cidrs.is_empty());
+        assert_eq!(settings.shutdown.total_timeout_seconds, 30);
         assert!(
             !format!("{:?}", settings.token).contains(&settings.token.active_secret),
             "active secret 不得进入 Debug"
@@ -536,6 +563,10 @@ filter = "info"
             (
                 "YANG_SYSTEM_SECURITY_TRUSTED_PROXY_CIDRS".to_owned(),
                 "127.0.0.1/32, 10.42.0.0/24".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_SHUTDOWN_TOTAL_TIMEOUT_SECONDS".to_owned(),
+                "45".to_owned(),
             ),
         ]);
         let provider = TestSecretProvider(BTreeMap::from([
@@ -583,6 +614,7 @@ filter = "info"
             VALID_BOOTSTRAP_DIGEST
         );
         assert_eq!(settings.http.max_concurrency, 128);
+        assert_eq!(settings.shutdown.total_timeout_seconds, 45);
         assert_eq!(
             settings.security.trusted_proxy_cidrs,
             ["127.0.0.1/32", "10.42.0.0/24"]
@@ -701,6 +733,29 @@ filter = "info"
     }
 
     #[test]
+    fn shutdown_budget_defaults_safely_and_rejects_out_of_range_values() {
+        let without_section =
+            valid_config().replace("[shutdown]\ntotal_timeout_seconds = 30\n", "");
+        let settings = Settings::parse(&without_section)
+            .unwrap_or_else(|error| panic!("缺省关闭预算应使用安全默认值: {error}"));
+        assert_eq!(settings.shutdown.total_timeout_seconds, 30);
+
+        for invalid in [0, 301] {
+            let raw = valid_config().replace(
+                "total_timeout_seconds = 30",
+                &format!("total_timeout_seconds = {invalid}"),
+            );
+            let error = Settings::parse(&raw)
+                .err()
+                .unwrap_or_else(|| panic!("越界关闭预算 {invalid} 必须被拒绝"));
+            assert!(
+                error.to_string().contains("shutdown.total_timeout_seconds"),
+                "错误必须定位关闭预算字段: {error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_schema_apply_in_production_or_without_environment_marker() {
         let explicit_production = valid_config()
             .replace(
@@ -776,6 +831,13 @@ filter = "info"
                 .and_then(toml::Value::as_array)
                 .map(Vec::len),
             Some(0)
+        );
+        assert_eq!(
+            value
+                .get("shutdown")
+                .and_then(|shutdown| shutdown.get("total_timeout_seconds"))
+                .and_then(toml::Value::as_integer),
+            Some(30)
         );
     }
 

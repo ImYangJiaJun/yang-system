@@ -2,11 +2,13 @@ use crate::app::build_app;
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
+use crate::shutdown::{ShutdownBudget, ShutdownPhase, ShutdownTrigger};
 use crate::transport::http;
 use anyhow::Context;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use yang_base::database::DatabaseInitializer;
 use yang_base::tools::{Tools, ToolsBuilder};
@@ -15,6 +17,8 @@ use yang_db::{Database, RedisClient};
 pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let settings = Settings::load(config_path)?;
     init_tracing(&settings.logging.filter)?;
+    let shutdown_budget =
+        ShutdownBudget::new(Duration::from_secs(settings.shutdown.total_timeout_seconds));
     tracing::info!(app = %settings.app.name, config = %config_path.display(), "开始启动系统");
     let bootstrap_verifier = BootstrapSecretVerifier::new(
         settings.bootstrap.secret_digest.clone(),
@@ -47,8 +51,14 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     );
 
     run_then_cleanup(
-        run_after_tools_created(&settings, initializer_mysql, Arc::clone(&tools)),
+        run_after_tools_created(
+            &settings,
+            initializer_mysql,
+            Arc::clone(&tools),
+            shutdown_budget.clone(),
+        ),
         tools.close(),
+        &shutdown_budget,
     )
     .await
 }
@@ -61,6 +71,7 @@ async fn run_after_tools_created(
     settings: &Settings,
     initializer_mysql: Database,
     tools: Arc<Tools>,
+    shutdown_budget: ShutdownBudget,
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
@@ -104,23 +115,75 @@ async fn run_after_tools_created(
         .await
         .context("启动授权 Outbox Worker 失败")?;
     let runtime = Arc::new(application.runtime);
-    let serve_result = http::serve(bind, runtime, &settings.http).await;
-    let shutdown_result = outbox_worker.shutdown().await;
+    let signal_budget = shutdown_budget.clone();
+    let shutdown_signal = async move {
+        yang_base::lifecycle::wait_for_shutdown_signal().await;
+        signal_budget.begin(ShutdownTrigger::Signal).await;
+    };
+    let serve = http::serve_with_shutdown(bind, runtime, &settings.http, shutdown_signal);
+    tokio::pin!(serve);
+    let budget_started = shutdown_budget.wait_started();
+    tokio::pin!(budget_started);
+
+    let serve_result = tokio::select! {
+        result = &mut serve => result,
+        _ = &mut budget_started => {
+            shutdown_budget
+                .run_phase(ShutdownPhase::HttpDrain, &mut serve)
+                .await
+        }
+    };
+    shutdown_budget.begin(ShutdownTrigger::OperationExit).await;
+    let shutdown_result = shutdown_budget
+        .run_phase(
+            ShutdownPhase::AuthorizationOutboxWorker,
+            outbox_worker.shutdown(),
+        )
+        .await;
     match (serve_result, shutdown_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error.context("停止授权 Outbox Worker 失败")),
+        (Err(serve_error), Err(worker_error)) => {
+            tracing::error!(
+                error = %worker_error,
+                "HTTP 服务退出失败后，授权 Outbox Worker 关闭也失败"
+            );
+            Err(serve_error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
         (Ok(()), Ok(())) => Ok(()),
     }
 }
 
-/// 等待 operation 完成后无条件执行且仅执行一次 cleanup，并保留原始结果。
-async fn run_then_cleanup<T, E>(
-    operation: impl Future<Output = Result<T, E>>,
+/// 等待 operation 完成后无条件执行且仅执行一次 cleanup。
+///
+/// cleanup 与 operation 内部的关闭阶段共享同一截止时间；若两者都失败，保留最早的
+/// operation 错误，同时记录 cleanup 错误。
+async fn run_then_cleanup<T>(
+    operation: impl Future<Output = anyhow::Result<T>>,
     cleanup: impl Future<Output = ()>,
-) -> Result<T, E> {
+    shutdown_budget: &ShutdownBudget,
+) -> anyhow::Result<T> {
     let result = operation.await;
-    cleanup.await;
-    result
+    shutdown_budget.begin(ShutdownTrigger::OperationExit).await;
+    let cleanup_result = shutdown_budget
+        .run_phase(ShutdownPhase::ToolsClose, async {
+            cleanup.await;
+            Ok(())
+        })
+        .await;
+
+    match (result, cleanup_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(operation_error), Ok(())) => Err(operation_error),
+        (Err(operation_error), Err(cleanup_error)) => {
+            tracing::error!(
+                error = %cleanup_error,
+                "业务阶段失败后，Tools 资源关闭也失败"
+            );
+            Err(operation_error)
+        }
+    }
 }
 
 fn init_tracing(filter: &str) -> anyhow::Result<()> {
@@ -147,6 +210,7 @@ mod tests {
             Some("serve"),
         ] {
             let cleanup_calls = AtomicUsize::new(0);
+            let shutdown_budget = ShutdownBudget::new(Duration::from_secs(1));
             let operation = async move {
                 match failed_stage {
                     Some(stage) => Err(anyhow::anyhow!("{stage} failed")),
@@ -154,9 +218,13 @@ mod tests {
                 }
             };
 
-            let result = run_then_cleanup(operation, async {
-                cleanup_calls.fetch_add(1, Ordering::SeqCst);
-            })
+            let result = run_then_cleanup(
+                operation,
+                async {
+                    cleanup_calls.fetch_add(1, Ordering::SeqCst);
+                },
+                &shutdown_budget,
+            )
             .await;
 
             assert_eq!(
@@ -182,9 +250,11 @@ mod tests {
             Ok(tools) => tools,
             Err(error) => panic!("测试 Tools 应构建成功: {error}"),
         };
+        let shutdown_budget = ShutdownBudget::new(Duration::from_secs(1));
         let result: anyhow::Result<()> = run_then_cleanup(
             async { Err(anyhow::anyhow!("schema failed")) },
             tools.close(),
+            &shutdown_budget,
         )
         .await;
 
@@ -193,5 +263,32 @@ mod tests {
             Ok(()) => panic!("业务失败必须保留"),
         }
         assert_eq!(tools.state(), ToolsState::Closed);
+    }
+
+    #[tokio::test]
+    async fn cleanup_timeout_is_reported_for_success_but_does_not_hide_operation_failure() {
+        let success_budget = ShutdownBudget::new(Duration::from_millis(20));
+        let success_result = run_then_cleanup(
+            async { Ok("completed") },
+            tokio::time::sleep(Duration::from_millis(100)),
+            &success_budget,
+        )
+        .await;
+        let success_error = success_result
+            .err()
+            .unwrap_or_else(|| panic!("成功业务后的 cleanup 超时必须返回错误"));
+        assert!(success_error.to_string().contains("tools_close"));
+
+        let failure_budget = ShutdownBudget::new(Duration::from_millis(20));
+        let failure_result: anyhow::Result<()> = run_then_cleanup(
+            async { Err(anyhow::anyhow!("original failure")) },
+            tokio::time::sleep(Duration::from_millis(100)),
+            &failure_budget,
+        )
+        .await;
+        let failure_error = failure_result
+            .err()
+            .unwrap_or_else(|| panic!("业务错误必须保留"));
+        assert_eq!(failure_error.to_string(), "original failure");
     }
 }

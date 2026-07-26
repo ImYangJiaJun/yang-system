@@ -20,6 +20,7 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `mysql.url` | `YANG_SYSTEM_MYSQL_URL` |
 | `token.active_secret` | `YANG_SYSTEM_TOKEN_ACTIVE_SECRET` |
 | `security.trusted_proxy_cidrs` | `YANG_SYSTEM_SECURITY_TRUSTED_PROXY_CIDRS` |
+| `shutdown.total_timeout_seconds` | `YANG_SYSTEM_SHUTDOWN_TOTAL_TIMEOUT_SECONDS` |
 
 `config.example.toml` 中的所有字段均支持该映射。数值使用非负十进制，
 布尔值只接受小写 `true`/`false`，字符串列表使用逗号分隔。可选的
@@ -68,6 +69,13 @@ bootstrap 原始 secret 提交到 Git；bootstrap provider 保存的是 Argon2id
 keyring 最多 8 把密钥，`key_id` 必须唯一。生产 Token 强制携带 `kid`，
 缺失或未知 `kid` 均失败关闭。首次从旧单密钥版本升级时，既有无 `kid`
 会话会失效并要求重新登录；系统不保留隐式逐密钥试签名的兼容回退链。
+
+## 关闭总预算
+
+`shutdown.total_timeout_seconds` 是进程关闭的唯一总预算，默认 30 秒，允许
+范围为 1..=300 秒。收到 SIGINT/SIGTERM 后开始计时，HTTP 请求排空、授权
+Outbox Worker 退出和 MySQL/Redis 资源关闭依次消费同一个截止时间，不会把
+多个阶段超时相加。若服务在收到信号前失败，则从该失败出口开始计时。
 
 PowerShell 示例：
 

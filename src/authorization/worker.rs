@@ -131,7 +131,7 @@ impl AuthorizationOutboxProcessor {
 /// 与 HTTP 服务同生共死的授权传播 Worker 句柄。
 pub struct AuthorizationOutboxWorker {
     shutdown: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl AuthorizationOutboxWorker {
@@ -148,13 +148,28 @@ impl AuthorizationOutboxWorker {
         let poll_interval = Duration::from_millis(settings.outbox_poll_interval_ms);
         let (shutdown, receiver) = watch::channel(false);
         let task = tokio::spawn(run_loop(processor, poll_interval, receiver));
-        Ok(Self { shutdown, task })
+        Ok(Self {
+            shutdown,
+            task: Some(task),
+        })
     }
 
-    pub async fn shutdown(self) -> anyhow::Result<()> {
+    pub async fn shutdown(mut self) -> anyhow::Result<()> {
         let _ = self.shutdown.send(true);
-        self.task.await.context("等待授权 Outbox Worker 退出失败")?;
+        let Some(task) = self.task.take() else {
+            return Ok(());
+        };
+        task.await.context("等待授权 Outbox Worker 退出失败")?;
         Ok(())
+    }
+}
+
+impl Drop for AuthorizationOutboxWorker {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -233,7 +248,40 @@ mod tests {
     use super::*;
     use crate::authorization::outbox::AuthorizationOutboxRepository;
     use std::sync::atomic::AtomicUsize;
+    use tokio::sync::oneshot;
     use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
+
+    struct AbortNotifier(Option<oneshot::Sender<()>>);
+
+    impl Drop for AbortNotifier {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_worker_aborts_an_in_flight_task() {
+        let (completed_sender, completed_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _notifier = AbortNotifier(Some(completed_sender));
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        let (shutdown, _receiver) = watch::channel(false);
+        let worker = AuthorizationOutboxWorker {
+            shutdown,
+            task: Some(task),
+        };
+
+        drop(worker);
+
+        tokio::time::timeout(Duration::from_secs(1), completed_receiver)
+            .await
+            .unwrap_or_else(|_| panic!("Worker 句柄丢弃后必须及时中止后台任务"))
+            .unwrap_or_else(|_| panic!("后台任务中止时应释放任务内资源"));
+    }
 
     struct FailingPublisher {
         calls: AtomicUsize,

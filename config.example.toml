@@ -70,5 +70,9 @@ auth_rate_limit_username_attempts = 10
 # 示例：trusted_proxy_cidrs = ["127.0.0.1/32", "10.42.0.0/24"]
 trusted_proxy_cidrs = []
 
+[shutdown]
+# 从收到退出信号起，HTTP 排空、后台任务退出和资源关闭共享这一总预算。
+total_timeout_seconds = 30
+
 [logging]
 filter = "yang_system=info,tower_http=info"

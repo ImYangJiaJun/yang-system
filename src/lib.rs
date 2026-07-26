@@ -10,4 +10,5 @@ mod config_source;
 pub mod migrations;
 pub mod modules;
 mod security;
+mod shutdown;
 pub mod transport;

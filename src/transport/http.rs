@@ -5,6 +5,7 @@
 
 use crate::config::HttpSettings;
 use anyhow::Context;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,13 +18,36 @@ pub async fn serve(
     app: Arc<BuiltApp>,
     settings: &HttpSettings,
 ) -> anyhow::Result<()> {
-    let config = AxumTransportConfig {
+    yang_base::transport::axum::serve(bind, app, transport_config(settings))
+        .await
+        .context("HTTP 服务运行失败")
+}
+
+/// 使用调用方提供的关闭信号启动 HTTP 服务。
+pub async fn serve_with_shutdown<S>(
+    bind: SocketAddr,
+    app: Arc<BuiltApp>,
+    settings: &HttpSettings,
+    shutdown_signal: S,
+) -> anyhow::Result<()>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
+    yang_base::transport::axum::serve_with_shutdown(
+        bind,
+        app,
+        transport_config(settings),
+        shutdown_signal,
+    )
+    .await
+    .context("HTTP 服务运行失败")
+}
+
+fn transport_config(settings: &HttpSettings) -> AxumTransportConfig {
+    AxumTransportConfig {
         max_body_bytes: settings.max_body_bytes,
         request_timeout: Some(Duration::from_secs(settings.request_timeout_seconds)),
         max_concurrency: Some(settings.max_concurrency),
         ..AxumTransportConfig::default()
-    };
-    yang_base::transport::axum::serve(bind, app, config)
-        .await
-        .context("HTTP 服务运行失败")
+    }
 }

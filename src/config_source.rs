@@ -246,6 +246,12 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "trusted_proxy_cidrs",
         StringList
     ),
+    environment_binding!(
+        "YANG_SYSTEM_SHUTDOWN_TOTAL_TIMEOUT_SECONDS",
+        "shutdown",
+        "total_timeout_seconds",
+        Integer
+    ),
     environment_binding!("YANG_SYSTEM_LOGGING_FILTER", "logging", "filter", Text),
 ];
 
