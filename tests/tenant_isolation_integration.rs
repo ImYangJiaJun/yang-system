@@ -237,6 +237,14 @@ async fn creator_membership_id(pool: &sqlx::MySqlPool, actor: &TenantActor) -> a
         .context("缺少租户创建者成员记录")
 }
 
+async fn database_authz_version(pool: &sqlx::MySqlPool, user_id: i64) -> anyhow::Result<i64> {
+    sqlx::query_scalar("SELECT authz_version FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+}
+
 fn affected(response: ApiResponse) -> anyhow::Result<u64> {
     data(response)?["affected"]
         .as_u64()
@@ -722,6 +730,8 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
         .execute(&harness.pool)
         .await?;
     let rollback_code = format!("ROLLBACK{suffix}");
+    let creator_version_before_failed_onboarding =
+        database_authz_version(&harness.pool, tenant_a.user_id).await?;
     let failed_onboarding = dispatch(
         &harness.application.runtime,
         "org.tenant",
@@ -744,6 +754,11 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
     ensure!(
         rolled_back_orgs == 0,
         "首个成员插入失败时，事务必须回滚已插入的企业"
+    );
+    ensure!(
+        database_authz_version(&harness.pool, tenant_a.user_id).await?
+            == creator_version_before_failed_onboarding,
+        "onboarding 失败事务不得递增创建者授权版本"
     );
     Ok(())
 }

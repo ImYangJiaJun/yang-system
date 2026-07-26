@@ -419,6 +419,8 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         "平台账号停用与启用必须各递增一次授权版本"
     );
 
+    let creator_version_before_onboarding =
+        database_authz_version(tools.mysql()?.pool(), user_id).await?;
     let organization = data(
         dispatch(
             &application.runtime,
@@ -431,6 +433,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .await?,
     )?;
     let organization_id = organization["id"].as_i64().context("创建企业响应缺少 id")?;
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), user_id).await?
+            == creator_version_before_onboarding + 1,
+        "租户 onboarding 必须与创始管理员成员关系原子递增授权版本"
+    );
 
     let tenant_id = organization_id.to_string();
     let member_body = json!({
@@ -470,7 +477,9 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .as_str()
         .context("组织管理员刷新响应缺少 access_token")?;
     let authorization = format!("Bearer {org_access_token}");
-    data(
+    let member_version_before_org_add =
+        database_authz_version(tools.mysql()?.pool(), member_id).await?;
+    let membership = data(
         dispatch(
             &application.runtime,
             "org.user",
@@ -484,6 +493,14 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         )
         .await?,
     )?;
+    let membership_id = membership["id"]
+        .as_i64()
+        .context("新增企业成员响应缺少 id")?;
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), member_id).await?
+            == member_version_before_org_add + 1,
+        "新增企业成员必须原子递增目标用户授权版本"
+    );
 
     let tenants = data(
         dispatch(
@@ -522,6 +539,121 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .as_array()
             .is_some_and(|items| items.iter().any(|item| item["id"] == organization_id)),
         "租户作用域企业列表未返回当前企业"
+    );
+
+    let member_version_after_add = database_authz_version(tools.mysql()?.pool(), member_id).await?;
+    for data_patch in [
+        json!({ "name": "Integration Member Renamed" }),
+        json!({ "admin": false, "status": "active" }),
+    ] {
+        data(
+            dispatch(
+                &application.runtime,
+                "org.user",
+                "put",
+                json!({ "id": membership_id, "data": data_patch }),
+                &[
+                    ("authorization", &authorization),
+                    ("x-tenant-id", &tenant_id),
+                ],
+                &[],
+            )
+            .await?,
+        )?;
+    }
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), member_id).await? == member_version_after_add,
+        "展示字段与幂等授权写不得递增企业成员授权版本"
+    );
+
+    for data_patch in [
+        json!({ "admin": true }),
+        json!({ "admin": false }),
+        json!({ "status": "disabled" }),
+        json!({ "status": "active" }),
+    ] {
+        data(
+            dispatch(
+                &application.runtime,
+                "org.user",
+                "put",
+                json!({ "id": membership_id, "data": data_patch }),
+                &[
+                    ("authorization", &authorization),
+                    ("x-tenant-id", &tenant_id),
+                ],
+                &[],
+            )
+            .await?,
+        )?;
+    }
+    let member_version_after_role_changes =
+        database_authz_version(tools.mysql()?.pool(), member_id).await?;
+    ensure!(
+        member_version_after_role_changes == member_version_after_add + 4,
+        "成员管理员与状态的四次有效迁移必须各递增一次授权版本"
+    );
+
+    let replacement_username = format!("replacement_{suffix}");
+    let replacement = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "register",
+            json!({ "username": replacement_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let replacement_id = replacement["id"]
+        .as_i64()
+        .context("替换成员注册响应缺少 id")?;
+    let replacement_initial_version =
+        database_authz_version(tools.mysql()?.pool(), replacement_id).await?;
+    data(
+        dispatch(
+            &application.runtime,
+            "org.user",
+            "put",
+            json!({ "id": membership_id, "data": { "user_user": replacement_id } }),
+            &[
+                ("authorization", &authorization),
+                ("x-tenant-id", &tenant_id),
+            ],
+            &[],
+        )
+        .await?,
+    )?;
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), member_id).await?
+            == member_version_after_role_changes + 1,
+        "成员绑定用户变化必须递增旧用户授权版本"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), replacement_id).await?
+            == replacement_initial_version + 1,
+        "成员绑定用户变化必须递增新用户授权版本"
+    );
+
+    data(
+        dispatch(
+            &application.runtime,
+            "org.user",
+            "del",
+            json!({ "id": membership_id }),
+            &[
+                ("authorization", &authorization),
+                ("x-tenant-id", &tenant_id),
+            ],
+            &[],
+        )
+        .await?,
+    )?;
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), replacement_id).await?
+            == replacement_initial_version + 2,
+        "删除企业成员必须原子递增当前绑定用户授权版本"
     );
 
     tools.close().await;

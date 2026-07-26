@@ -1,6 +1,8 @@
 //! `org.user` Module：企业成员关系定义。
 
+mod actions;
 mod guard;
+mod repository;
 mod view;
 
 pub(super) use guard::OrgAdminGuardMiddleware;
@@ -95,7 +97,12 @@ pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
     OrgUserModule
         .into_spec()
         .view(view::build()?)
-        .crud_at("/api/v1/org/users")
+        .crud_at_with_mutations(
+            "/api/v1/org/users",
+            actions::AddMembershipAction,
+            actions::PutMembershipAction,
+            actions::DeleteMembershipAction,
+        )
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@
 | 表 | 分类 | 隔离键 | 约束与入口 |
 |---|---|---|---|
 | `org_org` | 租户根 | 主键 `id` 本身 | `org.org` 查询强制取得普通 capability 并限定 `id = tenant_id`；system 不会自动跨租户 |
-| `org_user` | 租户数据 | `org_org`，声明为 `tenant_key(true)` | 标准 CRUD 由 `TableQuery` 自动限定/注入 `org_org`；唯一键为 `(org_org, user_user)` |
+| `org_user` | 租户数据 | `org_org`，声明为 `tenant_key(true)` | 标准读 Action 与显式事务 writer 均由 `TableQuery` 限定/注入 `org_org`；唯一键为 `(org_org, user_user)` |
 
 `users` 和 `admin_user` 是全局身份/平台域表，不属于组织租户表；它们不应因为 C2 的扫描规则
 而伪装成租户表。
@@ -39,9 +39,9 @@
 | `org.tenant.create` | pre-tenant | 显式事务 + 无租户 TableQuery | 已认证 actor；同事务创建组织与 actor 的管理员成员关系 |
 | `org.org.list` | tenant | `scoped_org_tables` | 强制普通租户 capability，并显式限定 `org_org.id = tenant_id` |
 | `org.org.select` | tenant/relation | `scoped_org_tables` | 普通 capability 的分页、筛选和 selected 回填均重复施加同一 scope |
-| `org.user.add` | tenant | 内置 CRUD `TableQuery` | tenant key 自动注入；实时企业管理员守卫 |
-| `org.user.put` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤；实时企业管理员守卫 |
-| `org.user.del` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤；实时企业管理员守卫 |
+| `org.user.add` | tenant | 显式事务 writer + `TableQuery` | tenant key 自动注入；锁定组织和用户；成员事实与授权版本原子提交 |
+| `org.user.put` | tenant | 显式事务 writer + `TableQuery` | tenant key 自动过滤；锁定成员和稳定排序用户集合；幂等授权写不递增 |
+| `org.user.del` | tenant | 显式事务 writer + `TableQuery` | tenant key 自动过滤；成员删除与当前绑定用户版本原子提交 |
 | `org.user.get` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤 |
 | `org.user.select` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤 |
 | `org.user.table` | tenant | 只读契约 | 仍经过认证与租户解析，不访问业务记录 |
@@ -70,6 +70,14 @@
 | `member-admin-database` | database | `org/user/guard.rs` | 只供当前租户管理员实时校验使用 |
 | `member-admin-guard` | raw-sql | `org/user/guard.rs` | 同时限定可信 `tenant_id`、已认证 `user_id`、active 与 admin |
 | `member-admin-system` | system-capability | `org/user/guard.rs` | system 管理操作必须消费当前请求 capability，并核对 capability actor 与已认证用户一致；不授予数据查询旁路 |
+| `org-member-add-database` | database | `org/user/repository.rs` | 只供 add writer 开启显式事务；普通租户仍由 `table_query()` 注入 tenant key |
+| `org-member-put-database` | database | `org/user/repository.rs` | 只供 put writer 开启显式事务；成员锁和后续更新重复限定同一 capability |
+| `org-member-delete-database` | database | `org/user/repository.rs` | 只供 delete writer 开启显式事务；成员锁和删除重复限定同一 capability |
+| `org-member-organization-lock` | raw-sql | `org/user/repository.rs` | add 或归属迁移前按组织主键锁定，并要求组织 active |
+| `org-member-tenant-lock` | raw-sql | `org/user/repository.rs` | 普通租户按 `id + tenant_id` 锁定成员事实，隐藏跨租户对象 ID |
+| `org-member-system-lock` | raw-sql | `org/user/repository.rs` | 仅在已消费 actor-bound system capability 后按成员主键锁定 |
+| `org-member-add-system` | system-capability | `org/user/repository.rs` | system add 必须显式提供目标组织，且组织存在并 active |
+| `org-member-lock-system` | system-capability | `org/user/repository.rs` | system put/delete 在无普通租户 capability 时必须显式消费 system capability |
 
 <!-- tenant-boundary: database pre-tenant-table-database -->
 <!-- tenant-boundary: unscoped-query pre-tenant-table-query -->
@@ -85,6 +93,14 @@
 <!-- tenant-boundary: database member-admin-database -->
 <!-- tenant-boundary: raw-sql member-admin-guard -->
 <!-- tenant-boundary: system-capability member-admin-system -->
+<!-- tenant-boundary: database org-member-add-database -->
+<!-- tenant-boundary: database org-member-put-database -->
+<!-- tenant-boundary: database org-member-delete-database -->
+<!-- tenant-boundary: raw-sql org-member-organization-lock -->
+<!-- tenant-boundary: raw-sql org-member-tenant-lock -->
+<!-- tenant-boundary: raw-sql org-member-system-lock -->
+<!-- tenant-boundary: system-capability org-member-add-system -->
+<!-- tenant-boundary: system-capability org-member-lock-system -->
 
 ## 5. Relation、批量、事务与后台任务
 
@@ -93,7 +109,7 @@
 | Relation | `org_user.org_org → org_org.id`，选择器为 `org.org.select` | 当前走租户化 `Tables`；C2-03 用双租户 selected/关联负例证明 |
 | RelationLoader | 无 | 新增 `RelationLoader::new` 或 `.relations(...)` 必须声明 `relation` boundary |
 | 批量写 | 无 | 新增 many/batch/bulk 写调用必须声明 `batch` boundary |
-| 显式事务 | `org.tenant.create` 一处 | 已列为 `tenant-onboarding-create`；C2-03 验证回滚与跨租户负例 |
+| 显式事务 | `org.tenant.create` 与 `org.user.add/put/del` | onboarding 和成员授权事实 writer 均显式提交/回滚；C2/C3 真实库矩阵验证隔离、回滚与版本原子性 |
 | 后台任务/导入 Job | 无 | 新增 Tokio spawn/JoinSet 后台入口必须声明 `background` boundary |
 
 迁移 Job 只演进 schema，不读取或修改租户业务记录，因此不列为租户数据访问路径；一旦迁移
