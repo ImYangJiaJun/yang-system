@@ -45,8 +45,10 @@ impl OrgMembershipReader for DatabaseMembershipReader {
     ) -> Result<bool, BaseError> {
         let table = self
             .memberships
+            // tenant-boundary: database tenant-membership-database
             .bind(Arc::new(context.tools().mysql()?.pool().clone()));
         let rows = table
+            // tenant-boundary: unscoped-query tenant-membership-lookup
             .query(std::iter::empty::<&str>())
             .select_fields(&["id"])?
             .where_eq(ORG_ID, serde_json::json!(org_id.get()))?
@@ -64,8 +66,10 @@ impl OrgMembershipReader for DatabaseMembershipReader {
 
         let organizations = self
             .organizations
+            // tenant-boundary: database tenant-organization-database
             .bind(Arc::new(context.tools().mysql()?.pool().clone()));
         let rows = organizations
+            // tenant-boundary: unscoped-query tenant-organization-status
             .query(std::iter::empty::<&str>())
             .select_fields(&["id"])?
             .where_eq("id", serde_json::json!(org_id.get()))?

@@ -31,10 +31,12 @@ impl GrantResolver for OrgGrantResolver {
                  LIMIT 1\
              )"
         );
+        // tenant-boundary: raw-sql authorization-grant-snapshot
         let is_admin = sqlx::query_scalar::<_, bool>(&sql)
             .bind(user_id)
             .bind(ACTIVE_MEMBERSHIP_STATUS)
             .bind(ACTIVE_ORG_STATUS)
+            // tenant-boundary: database authorization-grant-database
             .fetch_one(ctx.tools().mysql()?.pool())
             .await
             .map_err(yang_db::DbError::from)?;

@@ -27,7 +27,9 @@ impl TenantRepository {
 
     fn query(&self, ctx: &ActionContext, table: &TableDefinition) -> Result<TableQuery, BaseError> {
         Ok(table
+            // tenant-boundary: database pre-tenant-table-database
             .bind(Arc::new(ctx.tools().mysql()?.pool().clone()))
+            // tenant-boundary: unscoped-query pre-tenant-table-query
             .query(std::iter::empty::<&str>()))
     }
 
@@ -49,7 +51,9 @@ impl TenantRepository {
         })?;
         let offset = u64::try_from(offset)
             .map_err(|_| BaseError::ParamInvalid("page".to_string(), "参数超出范围".to_string()))?;
+        // tenant-boundary: database tenant-discovery-database
         let pool = ctx.tools().mysql()?.pool();
+        // tenant-boundary: raw-sql tenant-discovery-page
         let rows = sqlx::query_as::<_, (i64, String, String)>(
             "SELECT o.id, o.name, o.code \
              FROM org_user AS m \
@@ -65,6 +69,7 @@ impl TenantRepository {
         .fetch_all(pool)
         .await
         .map_err(yang_db::DbError::from)?;
+        // tenant-boundary: raw-sql tenant-discovery-count
         let total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) \
              FROM org_user AS m \
@@ -97,6 +102,7 @@ impl TenantRepository {
         name: &str,
         code: &str,
     ) -> Result<TenantSummary, BaseError> {
+        // tenant-boundary: transaction tenant-onboarding-create
         let mut transaction = ctx.begin_transaction().await?;
         let organization = Record::new()
             .set("name", name)

@@ -35,10 +35,12 @@ impl OrgAdminGuardMiddleware {
                  LIMIT 1\
              )"
         );
+        // tenant-boundary: raw-sql member-admin-guard
         sqlx::query_scalar::<_, bool>(&sql)
             .bind(org_id.get())
             .bind(user.id)
             .bind(ACTIVE_STATUS)
+            // tenant-boundary: database member-admin-database
             .fetch_one(ctx.tools().mysql()?.pool())
             .await
             .map_err(yang_db::DbError::from)
