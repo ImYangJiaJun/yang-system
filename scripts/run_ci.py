@@ -68,6 +68,19 @@ FULL = (
 
 INTEGRATION = (
     Command(
+        "Schema apply concurrency and retry integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "schema_apply_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Real MySQL/Redis system integration",
         (
             "cargo",
@@ -119,6 +132,12 @@ def self_test() -> None:
     for command in (*QUICK, *FULL, *INTEGRATION):
         if command.argv[0] == "cargo" and command.argv[1] != "fmt":
             assert "--locked" in command.argv, f"Cargo 命令缺少 --locked: {command.name}"
+    integration_tests = {
+        command.argv[3]
+        for command in INTEGRATION
+        if command.argv[:3] == ("cargo", "test", "--test")
+    }
+    assert integration_tests == {"schema_apply_integration", "system_integration"}
     print("local CI runner self-test: passed")
 
 

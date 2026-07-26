@@ -1,5 +1,7 @@
 [app]
 name = "yang-system"
+# development/test 可在受控场景显式 apply；缺省按 production 处理。
+environment = "development"
 
 [schema]
 # 安全默认值为 validate；仅本地首次初始化需要时显式改为 apply。

@@ -209,19 +209,26 @@ Redis、Token、Schema 模式等运行参数均以该文件为准；修改环境
 管理 schema 的生产环境。`apply` 仅适合本地开发或受控初始化，`off` 只应在外部已
 完成等价校验时使用；二者都必须显式配置。
 
+`app.environment` 支持 `development|test|production`，缺省时按 `production`
+处理。`production` 与 `schema.mode = "apply"` 的组合会在连接数据库前被拒绝；
+预发布等面向真实数据的环境也应标记为 `production`。示例配置仅面向本地开发，部署
+配置必须显式复核该标识。升级前已有的本地 `apply` 配置还需补充
+`app.environment = "development"`，否则会按安全缺省值视为生产环境并拒绝启动。
+
 ## 真实依赖集成测试
 
 集成测试要求专用 MySQL 数据库名以 `_test` 结尾，并强制 Redis 使用 DB 15；测试会
-重建 `users`、`org_org`、`org_user` 三张测试表：
+重建业务测试表与 `b05_schema_*` 专用表：
 
 ```powershell
 $env:YANG_SYSTEM_TEST_DATABASE_URL = "mysql://root:password@127.0.0.1:3306/yang_system_test"
 $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
-cargo test --test system_integration -- --ignored --test-threads=1
+python scripts/run_ci.py integration
 ```
 
-该测试覆盖 schema plan/apply/validate、注册、登录、refresh、原子创建企业、租户发现
-和租户作用域查询，不使用 mock 替代 MySQL 或 Redis。
+该门禁覆盖 schema plan/apply/validate、跨实例并发 apply、锁内失败后跨实例重跑、
+注册、登录、refresh、原子创建企业、租户发现和租户作用域查询，不使用 mock 替代
+MySQL 或 Redis。
 
 ## 参考能力
 

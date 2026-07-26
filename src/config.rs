@@ -25,6 +25,17 @@ pub struct Settings {
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
     pub name: String,
+    #[serde(default)]
+    pub environment: DeploymentEnvironment,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentEnvironment {
+    Development,
+    Test,
+    #[default]
+    Production,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -160,6 +171,14 @@ impl Settings {
         if self.app.name.trim().is_empty() {
             bail!("app.name 不能为空");
         }
+        if self.schema.mode == SchemaMode::Apply
+            && !matches!(
+                self.app.environment,
+                DeploymentEnvironment::Development | DeploymentEnvironment::Test
+            )
+        {
+            bail!("production 环境禁止 schema.mode=apply；请使用独立迁移作业并保持 validate");
+        }
         self.bind_addr()?;
         if self.http.max_body_bytes == 0 || self.http.max_body_bytes > 16 * 1024 * 1024 {
             bail!("http.max_body_bytes 必须在 1..=16777216 范围内");
@@ -242,6 +261,7 @@ mod tests {
         r#"
 [app]
 name = "test"
+environment = "development"
 [schema]
 mode = "validate"
 [http]
@@ -293,6 +313,7 @@ filter = "info"
         );
         assert_eq!(settings.redis.url, "redis://config-redis/3");
         assert_eq!(settings.schema.mode, SchemaMode::Validate);
+        assert_eq!(settings.app.environment, DeploymentEnvironment::Development);
         assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
     }
 
@@ -320,6 +341,62 @@ filter = "info"
     }
 
     #[test]
+    fn allows_schema_apply_in_test_environment() {
+        let raw = valid_config()
+            .replace("environment = \"development\"", "environment = \"test\"")
+            .replace("mode = \"validate\"", "mode = \"apply\"");
+        let settings = Settings::parse(&raw)
+            .unwrap_or_else(|error| panic!("测试环境应允许显式 schema apply: {error}"));
+        assert_eq!(settings.app.environment, DeploymentEnvironment::Test);
+        assert_eq!(settings.schema.mode, SchemaMode::Apply);
+    }
+
+    #[test]
+    fn deployment_environment_defaults_to_production() {
+        let raw = valid_config().replace("environment = \"development\"\n", "");
+        let settings = Settings::parse(&raw)
+            .unwrap_or_else(|error| panic!("缺省部署环境应采用安全默认值: {error}"));
+        assert_eq!(settings.app.environment, DeploymentEnvironment::Production);
+    }
+
+    #[test]
+    fn rejects_schema_apply_in_production_or_without_environment_marker() {
+        let explicit_production = valid_config()
+            .replace(
+                "environment = \"development\"",
+                "environment = \"production\"",
+            )
+            .replace("mode = \"validate\"", "mode = \"apply\"");
+        let implicit_production = valid_config()
+            .replace("environment = \"development\"\n", "")
+            .replace("mode = \"validate\"", "mode = \"apply\"");
+
+        for raw in [explicit_production, implicit_production] {
+            let error = match Settings::parse(&raw) {
+                Ok(_) => panic!("生产环境必须拒绝 schema apply"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("production 环境禁止 schema.mode=apply"),
+                "应返回明确的生产 DDL 保护错误: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_deployment_environment() {
+        let raw =
+            valid_config().replace("environment = \"development\"", "environment = \"staging\"");
+        let error = match Settings::parse(&raw) {
+            Ok(_) => panic!("未知部署环境必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("解析配置文件失败"));
+    }
+
+    #[test]
     fn example_config_uses_validate_schema_mode() {
         let value: toml::Value = toml::from_str(include_str!("../config.example.toml"))
             .unwrap_or_else(|error| panic!("示例配置必须是合法 TOML: {error}"));
@@ -329,6 +406,13 @@ filter = "info"
                 .and_then(|schema| schema.get("mode"))
                 .and_then(toml::Value::as_str),
             Some("validate")
+        );
+        assert_eq!(
+            value
+                .get("app")
+                .and_then(|app| app.get("environment"))
+                .and_then(toml::Value::as_str),
+            Some("development")
         );
     }
 
