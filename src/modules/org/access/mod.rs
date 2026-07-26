@@ -4,6 +4,7 @@ mod actions;
 mod repository;
 mod service;
 
+use crate::authorization::AuthorizationVersionValidator;
 use crate::modules::account;
 use repository::TenantRepository;
 use service::TenantService;
@@ -19,6 +20,7 @@ pub(super) const MEMBERSHIP_TABLE: &str = "org_user";
 pub(super) fn build_module(
     organizations: TableDefinition,
     memberships: TableDefinition,
+    authorization_validator: AuthorizationVersionValidator,
 ) -> Result<ModuleSpec, BaseError> {
     if organizations.name() != ORGANIZATION_TABLE || memberships.name() != MEMBERSHIP_TABLE {
         return Err(BaseError::ConfigError(
@@ -29,7 +31,9 @@ pub(super) fn build_module(
         organizations,
         memberships,
     )));
-    let module = ModuleSpec::new(yang_base::module!("org.tenant"))
-        .middleware(TokenAuthMiddleware::new(account::user_from_claims));
+    let module = ModuleSpec::new(yang_base::module!("org.tenant")).middleware(
+        TokenAuthMiddleware::new(account::user_from_claims)
+            .with_claims_validator(authorization_validator),
+    );
     actions::register_all(module, service)
 }

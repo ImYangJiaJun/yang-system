@@ -7,6 +7,7 @@ mod pagination;
 mod tenant;
 mod user;
 
+use crate::authorization::AuthorizationVersionValidator;
 use crate::modules::account;
 use crate::modules::account::GrantResolver;
 use grants::OrgGrantResolver;
@@ -24,7 +25,9 @@ pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {
 ///
 /// 此处只负责 Module 组合、Addon 依赖和跨 Module 中间件；企业查询、成员 Schema、
 /// 租户校验分别由子模块维护，避免 `mod.rs` 演变为业务实现文件。
-pub fn build_addon() -> Result<AddonSpec, BaseError> {
+pub fn build_addon(
+    authorization_validator: AuthorizationVersionValidator,
+) -> Result<AddonSpec, BaseError> {
     let organization = organization::build_module();
     let members = user::build_module()?;
     let organization_table = organization
@@ -41,14 +44,24 @@ pub fn build_addon() -> Result<AddonSpec, BaseError> {
         membership_table.clone(),
         organization_table.clone(),
     );
-    let access = access::build_module(organization_table, membership_table)?;
+    let access = access::build_module(
+        organization_table,
+        membership_table,
+        authorization_validator.clone(),
+    )?;
 
     // 中间件顺序具有语义：Token 认证先写入可信用户，租户解析随后校验企业成员关系。
     let organization = organization
-        .middleware(TokenAuthMiddleware::new(account::user_from_claims))
+        .middleware(
+            TokenAuthMiddleware::new(account::user_from_claims)
+                .with_claims_validator(authorization_validator.clone()),
+        )
         .middleware(TenantResolverMiddleware::new(resolver.clone()));
     let members = members
-        .middleware(TokenAuthMiddleware::new(account::user_from_claims))
+        .middleware(
+            TokenAuthMiddleware::new(account::user_from_claims)
+                .with_claims_validator(authorization_validator),
+        )
         .middleware(TenantResolverMiddleware::new(resolver))
         .middleware(user::OrgAdminGuardMiddleware::new());
 

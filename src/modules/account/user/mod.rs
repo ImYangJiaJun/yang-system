@@ -1,7 +1,6 @@
 //! `account.user` Module 的定义与组装入口。
 
 mod actions;
-mod authorization_validator;
 mod claims;
 mod password;
 mod policy;
@@ -10,10 +9,9 @@ mod repository;
 mod schema;
 mod service;
 
-use crate::authorization::AuthorizationVersionCache;
+use crate::authorization::AuthorizationVersionValidator;
 use crate::config::SecuritySettings;
 use crate::modules::account::GrantResolver;
-use authorization_validator::AuthorizationVersionValidator;
 use password::PasswordEngine;
 use rate_limit::AuthRateLimiter;
 use repository::UserRepository;
@@ -31,7 +29,7 @@ pub(crate) use claims::user_from_claims;
 pub(super) fn build_module(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
-    authorization_cache: Option<AuthorizationVersionCache>,
+    authorization_validator: AuthorizationVersionValidator,
 ) -> Result<ModuleSpec, BaseError> {
     let table = schema::user_table_spec()?;
     let users = Arc::new(UserRepository::new(table.table_definition()?));
@@ -43,8 +41,6 @@ pub(super) fn build_module(
         rate_limiter,
         grant_resolver,
     ));
-    let claims_validator =
-        AuthorizationVersionValidator::new(Arc::clone(&users), authorization_cache);
     let module = ModuleSpec::new(
         ModuleName::new("account.user")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,
@@ -52,7 +48,7 @@ pub(super) fn build_module(
     .table(table)
     .middleware(
         TokenAuthMiddleware::new(user_from_claims)
-            .with_claims_validator(claims_validator)
+            .with_claims_validator(authorization_validator)
             .authenticate_public_actions(),
     )
     .native_action(UiCatalogAction);

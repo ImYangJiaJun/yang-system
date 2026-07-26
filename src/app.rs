@@ -1,4 +1,4 @@
-use crate::authorization::AuthorizationVersionCache;
+use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
 use crate::modules::{account, admin, org};
 use anyhow::Context;
@@ -24,6 +24,7 @@ pub fn build_app(
         Err(yang_base::BaseError::RedisNotInitialized) => None,
         Err(error) => return Err(error).context("检查授权版本缓存运行态失败"),
     };
+    let authorization_validator = AuthorizationVersionValidator::new(authorization_cache);
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     let runtime = AppBuilder::new()
         .addon(
@@ -33,12 +34,14 @@ pub fn build_app(
                     admin::grant_resolver(),
                     org::grant_resolver(),
                 ])),
-                authorization_cache,
+                authorization_validator.clone(),
             )
             .context("构建 account Addon 失败")?,
         )
-        .addon(admin::build_addon().context("构建 admin Addon 失败")?)
-        .addon(org::build_addon().context("构建 org Addon 失败")?)
+        .addon(
+            admin::build_addon(authorization_validator.clone()).context("构建 admin Addon 失败")?,
+        )
+        .addon(org::build_addon(authorization_validator).context("构建 org Addon 失败")?)
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
 

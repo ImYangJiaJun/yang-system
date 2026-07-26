@@ -1,30 +1,30 @@
 //! Access Token 授权版本的新鲜度校验。
 
-use super::repository::{AuthorizationVersionRecord, UserRepository};
 use async_trait::async_trait;
 use std::cmp::Ordering;
-use std::sync::Arc;
 use yang_base::action::{ActionContext, TokenClaimsValidator};
 use yang_base::token::TokenClaims;
 use yang_base::BaseError;
 
-use crate::authorization::{AuthorizationVersionCache, CachedAuthorizationVersion};
+use super::{AuthorizationVersionCache, CachedAuthorizationVersion};
 
 const ACTIVE_STATUS: &str = "active";
 
 #[derive(Clone)]
-pub(super) struct AuthorizationVersionValidator {
-    users: Arc<UserRepository>,
+pub struct AuthorizationVersionValidator {
     cache: Option<AuthorizationVersionCache>,
 }
 
 impl AuthorizationVersionValidator {
-    pub(super) fn new(
-        users: Arc<UserRepository>,
-        cache: Option<AuthorizationVersionCache>,
-    ) -> Self {
-        Self { users, cache }
+    pub fn new(cache: Option<AuthorizationVersionCache>) -> Self {
+        Self { cache }
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct AuthorizationVersionRecord {
+    status: String,
+    authz_version: i64,
 }
 
 #[async_trait]
@@ -120,7 +120,7 @@ impl TokenClaimsValidator for AuthorizationVersionValidator {
         };
         record_fallback(fallback_reason);
 
-        let state = match self.users.find_authorization_version(ctx, user_id).await {
+        let state = match find_authorization_version(ctx, user_id).await {
             Ok(state) => state,
             Err(error) => {
                 record_check("unavailable", "mysql");
@@ -207,6 +207,23 @@ impl TokenClaimsValidator for AuthorizationVersionValidator {
             }
         }
     }
+}
+
+async fn find_authorization_version(
+    ctx: &ActionContext,
+    user_id: i64,
+) -> Result<Option<AuthorizationVersionRecord>, BaseError> {
+    sqlx::query_as(
+        "SELECT status, authz_version \
+         FROM users \
+         WHERE id = ? \
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(ctx.tools().mysql()?.pool())
+    .await
+    .map_err(yang_db::DbError::from)
+    .map_err(BaseError::from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
