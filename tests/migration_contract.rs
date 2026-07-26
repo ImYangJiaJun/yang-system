@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 5);
+    assert_eq!(manifest.migrations().len(), 6);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -26,13 +26,33 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     }
     let authz_version = manifest
         .migrations()
-        .last()
+        .get(4)
         .unwrap_or_else(|| panic!("应存在授权版本迁移"));
     assert_eq!(
         authz_version.version(),
         "20260726_0005_add_user_authz_version"
     );
     assert!(authz_version.completion_check().is_some());
+    let authorization_outbox = manifest
+        .migrations()
+        .last()
+        .unwrap_or_else(|| panic!("应存在授权事务 Outbox 迁移"));
+    assert_eq!(
+        authorization_outbox.version(),
+        "20260726_0006_create_authorization_outbox"
+    );
+    assert!(
+        authorization_outbox.sql().contains(
+            "UNIQUE KEY `uk_authorization_outbox_user_version` (`user_id`, `authz_version`)"
+        ),
+        "Outbox 必须以用户与授权版本作为幂等键"
+    );
+    assert!(
+        authorization_outbox
+            .sql()
+            .contains("KEY `idx_authorization_outbox_dispatch` (`state`, `available_at`, `id`)"),
+        "Outbox 必须支持按状态、可用时间与稳定 ID 批量 claim"
+    );
 }
 
 #[test]

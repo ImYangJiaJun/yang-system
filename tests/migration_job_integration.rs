@@ -7,6 +7,7 @@ use yang_system::config::SecuritySettings;
 use yang_system::migrations::{execute_with_database, MigrationCommand, MigrationRunReport};
 
 const BUSINESS_TABLES: [&str; 4] = ["org_user", "org_org", "admin_user", "users"];
+const INTERNAL_TABLES: [&str; 1] = ["authorization_outbox"];
 
 fn database_config() -> DatabaseConfig {
     DatabaseConfig::default()
@@ -53,7 +54,7 @@ async fn run_job(command: MigrationCommand) -> anyhow::Result<MigrationRunReport
 }
 
 async fn reset_test_database(database: &Database) -> anyhow::Result<()> {
-    for table in BUSINESS_TABLES {
+    for table in INTERNAL_TABLES.into_iter().chain(BUSINESS_TABLES) {
         let statement = format!("DROP TABLE IF EXISTS `{table}`");
         sqlx::query(&statement)
             .execute(database.pool())
@@ -131,7 +132,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 5, "应记录 5 个 applied 版本");
+        ensure!(migration_count == 6, "应记录 6 个 applied 版本");
         let authz_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'authz_version'",
         )
@@ -142,6 +143,25 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
             authz_version_shape
                 == Some(("bigint".to_string(), "NO".to_string(), Some("1".to_string()))),
             "authz_version 必须是 BIGINT NOT NULL DEFAULT 1: {authz_version_shape:?}"
+        );
+        let outbox_indexes: BTreeSet<String> = sqlx::query_scalar(
+            "SELECT DISTINCT INDEX_NAME FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'authorization_outbox'",
+        )
+        .fetch_all(control.pool())
+        .await
+        .context("读取授权 Outbox 索引失败")?
+        .into_iter()
+        .collect();
+        ensure!(
+            [
+                "PRIMARY",
+                "uk_authorization_outbox_user_version",
+                "idx_authorization_outbox_dispatch",
+                "idx_authorization_outbox_user_version",
+            ]
+            .into_iter()
+            .all(|index| outbox_indexes.contains(index)),
+            "授权 Outbox 必须具备主键、幂等键、派发索引与用户版本索引: {outbox_indexes:?}"
         );
         sqlx::query(
             "INSERT INTO `users` (`username`, `password_hash`, `status`, `created_at`, `updated_at`) VALUES ('migration_sentinel', 'hash', 'active', 1, 1)",
@@ -159,7 +179,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         ensure!(sentinel_authz_version == 1, "新增用户必须取得授权版本默认值 1");
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox')",
         )
         .execute(control.pool())
         .await

@@ -103,7 +103,7 @@ impl MigrationDescriptor {
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 5] = [
+const MIGRATIONS: [MigrationDescriptor; 6] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -149,6 +149,14 @@ const MIGRATIONS: [MigrationDescriptor; 5] = [
             nullable: false,
             default: Some("1"),
         }),
+    },
+    MigrationDescriptor {
+        version: "20260726_0006_create_authorization_outbox",
+        sql: include_str!("../migrations/20260726_0006_create_authorization_outbox.sql"),
+        description: "建立授权版本事务 Outbox，支持至少一次 Redis 失效传播",
+        prerequisite: "20260726_0005_add_user_authz_version 已完成；MySQL 8 支持 SKIP LOCKED",
+        recovery: "DDL 可重入；失败时修复 authorization_outbox 结构或索引差异后原版本重跑",
+        completion_check: None,
     },
 ];
 

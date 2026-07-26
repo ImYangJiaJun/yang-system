@@ -43,6 +43,11 @@ lock，另一个执行迁移与校验。
 精确匹配 `COLUMN_TYPE`、可空性与默认值；只有完整结构一致时，执行器才会在崩溃
 恢复中把遗留 `running` 记录改为 `applied`，不会凭“列存在”跳过错误结构。
 
+`20260726_0006_create_authorization_outbox` 建立应用内部授权传播表。它不属于业务
+Module，也不进入对外 Catalog；`(user_id, authz_version)` 唯一键负责事件幂等，
+`(state, available_at, id)` 索引支持多 Worker 以稳定顺序批量 claim。该表必须在
+启用授权 writer 的应用版本滚动前完成迁移。
+
 ## 中断、并发与恢复
 
 - 同一数据库的显式迁移作业由 MySQL advisory lock 串行化；后到作业等待锁并重新
