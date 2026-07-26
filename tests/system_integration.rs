@@ -19,14 +19,17 @@ use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVe
 use yang_system::config::{AuthorizationSettings, SecuritySettings};
 
 fn integration_token_manager() -> TokenManager {
-    TokenManager::new_symmetric(
+    TokenManager::new_symmetric_keyring(
+        "integration-active".to_string(),
         "integration-test-secret-32-bytes-minimum",
+        Vec::new(),
         Algorithm::HS256,
         "yang-system-integration".to_string(),
         "yang-system-integration-api".to_string(),
         300,
         3600,
     )
+    .unwrap_or_else(|error| panic!("集成测试 Token keyring 应构建成功: {error}"))
 }
 
 fn action_handle(

@@ -46,8 +46,11 @@ max_lifetime_seconds = 1800
 test_before_acquire = true
 
 [token]
+# active key 负责签发；retiring key 只验证存量 Token，至少保留一个 refresh TTL。
+active_key_id = "local-2026-07"
 # 必须替换为至少 32 字节的随机密钥；该占位值会被启动校验拒绝。
-secret = "replace-with-at-least-32-random-bytes"
+active_secret = "replace-with-at-least-32-random-bytes"
+retiring_keys = []
 issuer = "yang-system"
 audience = "yang-system-api"
 access_ttl_seconds = 3600

@@ -18,7 +18,7 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `app.environment` | `YANG_SYSTEM_APP_ENVIRONMENT` |
 | `http.max_concurrency` | `YANG_SYSTEM_HTTP_MAX_CONCURRENCY` |
 | `mysql.url` | `YANG_SYSTEM_MYSQL_URL` |
-| `token.secret` | `YANG_SYSTEM_TOKEN_SECRET` |
+| `token.active_secret` | `YANG_SYSTEM_TOKEN_ACTIVE_SECRET` |
 | `security.trusted_proxy_cidrs` | `YANG_SYSTEM_SECURITY_TRUSTED_PROXY_CIDRS` |
 
 `config.example.toml` 中的所有字段均支持该映射。数值使用非负十进制，
@@ -26,6 +26,13 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 `max_lifetime_seconds` 可用空字符串或 `none` 清除。不认识的
 `YANG_SYSTEM_*` 变量会让启动失败，避免拼写错误被静默忽略；
 `YANG_SYSTEM_TEST_*` 保留给测试门禁。
+
+`token.retiring_keys` 是对象数组，环境变量使用显式的
+`YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON`，例如：
+
+```json
+[{"key_id":"2026-06","secret":"at-least-32-bytes-retiring-secret"}]
+```
 
 ## Secret provider
 
@@ -36,7 +43,8 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 |---|---|
 | `mysql_url` | `mysql.url` |
 | `redis_url` | `redis.url` |
-| `token_secret` | `token.secret` |
+| `token_active_secret` | `token.active_secret` |
+| `token_retiring_keys_json` | `token.retiring_keys`（JSON 对象数组） |
 | `bootstrap_secret_digest` | `bootstrap.secret_digest` |
 
 每个文件上限 64 KiB；允许一个结尾换行，拒绝空值、内嵌换行、NUL 和非
@@ -47,6 +55,19 @@ UTF-8 内容。目录一旦显式配置却不可访问，进程会失败关闭�
 把 secret 只读挂载到独立目录。不要把原始 token secret、数据库密码或
 bootstrap 原始 secret 提交到 Git；bootstrap provider 保存的是 Argon2id
 摘要，而不是操作员输入的原文。
+
+## Token keyring 轮换
+
+`token.active_key_id` 与 `token.active_secret` 只负责签发新 Token；
+`token.retiring_keys` 只负责验证存量 Token。轮换顺序固定为：
+
+1. 把旧 active key 移入 retiring，同时部署新 active key；
+2. 等待至少一个 `refresh_ttl_seconds`，确保旧 Refresh Token 全部自然过期；
+3. 从 retiring 移除旧 key。
+
+keyring 最多 8 把密钥，`key_id` 必须唯一。生产 Token 强制携带 `kid`，
+缺失或未知 `kid` 均失败关闭。首次从旧单密钥版本升级时，既有无 `kid`
+会话会失效并要求重新登录；系统不保留隐式逐密钥试签名的兼容回退链。
 
 PowerShell 示例：
 

@@ -4,13 +4,11 @@ use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
 use crate::transport::http;
 use anyhow::Context;
-use jsonwebtoken::Algorithm;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use yang_base::database::DatabaseInitializer;
-use yang_base::token::TokenManager;
 use yang_base::tools::{Tools, ToolsBuilder};
 use yang_db::{Database, RedisClient};
 
@@ -23,6 +21,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         settings.security.argon2_max_concurrency,
     )
     .context("构建 bootstrap secret 校验器失败")?;
+    let token_manager = settings.token.build_manager()?;
 
     let mysql = Database::connect_with_config(&settings.mysql.url, settings.mysql_config())
         .await
@@ -36,14 +35,6 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         AuthorizationVersionCache::new(cache.clone(), settings.authorization.deployment.clone())
             .context("构建授权版本缓存失败")?;
 
-    let token_manager = TokenManager::new_symmetric(
-        &settings.token.secret,
-        Algorithm::HS256,
-        settings.token.issuer.clone(),
-        settings.token.audience.clone(),
-        settings.token.access_ttl_seconds,
-        settings.token.refresh_ttl_seconds,
-    );
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)

@@ -23,6 +23,7 @@ enum EnvironmentValueKind {
     OptionalInteger,
     Boolean,
     StringList,
+    Json,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,7 +178,24 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "test_before_acquire",
         Boolean
     ),
-    environment_binding!("YANG_SYSTEM_TOKEN_SECRET", "token", "secret", Text),
+    environment_binding!(
+        "YANG_SYSTEM_TOKEN_ACTIVE_KEY_ID",
+        "token",
+        "active_key_id",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_TOKEN_ACTIVE_SECRET",
+        "token",
+        "active_secret",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON",
+        "token",
+        "retiring_keys",
+        Json
+    ),
     environment_binding!("YANG_SYSTEM_TOKEN_ISSUER", "token", "issuer", Text),
     environment_binding!("YANG_SYSTEM_TOKEN_AUDIENCE", "token", "audience", Text),
     environment_binding!(
@@ -236,7 +254,8 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
 pub(crate) enum SecretKey {
     MysqlUrl,
     RedisUrl,
-    TokenSecret,
+    TokenActiveSecret,
+    TokenRetiringKeys,
     BootstrapSecretDigest,
 }
 
@@ -245,7 +264,8 @@ impl SecretKey {
         match self {
             Self::MysqlUrl => "mysql_url",
             Self::RedisUrl => "redis_url",
-            Self::TokenSecret => "token_secret",
+            Self::TokenActiveSecret => "token_active_secret",
+            Self::TokenRetiringKeys => "token_retiring_keys_json",
             Self::BootstrapSecretDigest => "bootstrap_secret_digest",
         }
     }
@@ -254,16 +274,22 @@ impl SecretKey {
         match self {
             Self::MysqlUrl => ("mysql", "url"),
             Self::RedisUrl => ("redis", "url"),
-            Self::TokenSecret => ("token", "secret"),
+            Self::TokenActiveSecret => ("token", "active_secret"),
+            Self::TokenRetiringKeys => ("token", "retiring_keys"),
             Self::BootstrapSecretDigest => ("bootstrap", "secret_digest"),
         }
+    }
+
+    fn is_json(self) -> bool {
+        matches!(self, Self::TokenRetiringKeys)
     }
 }
 
 const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::MysqlUrl,
     SecretKey::RedisUrl,
-    SecretKey::TokenSecret,
+    SecretKey::TokenActiveSecret,
+    SecretKey::TokenRetiringKeys,
     SecretKey::BootstrapSecretDigest,
 ];
 
@@ -498,6 +524,7 @@ fn parse_environment_value(
             };
             Value::Array(values)
         }
+        EnvironmentValueKind::Json => parse_json_override(binding.variable, raw)?,
     };
     Ok(ResolvedOverride::Set(value))
 }
@@ -510,6 +537,12 @@ fn parse_non_negative_integer(variable: &str, raw: &str) -> anyhow::Result<i64> 
         .with_context(|| format!("环境变量 {variable} 必须是非负十进制整数"))
 }
 
+fn parse_json_override(source: &str, raw: &str) -> anyhow::Result<Value> {
+    let json: serde_json::Value =
+        serde_json::from_str(raw).with_context(|| format!("{source} 必须是合法 JSON"))?;
+    Value::try_from(json).with_context(|| format!("{source} JSON 不能转换为 TOML 配置值"))
+}
+
 fn apply_secrets(document: &mut Value, provider: &dyn SecretProvider) -> anyhow::Result<()> {
     for key in SECRET_KEYS {
         if let Some(value) = provider
@@ -517,7 +550,12 @@ fn apply_secrets(document: &mut Value, provider: &dyn SecretProvider) -> anyhow:
             .with_context(|| format!("加载 secret {} 失败", key.file_name()))?
         {
             let (section, field) = key.destination();
-            set_value(document, section, field, Value::String(value))?;
+            let value = if key.is_json() {
+                parse_json_override(key.file_name(), &value)?
+            } else {
+                Value::String(value)
+            };
+            set_value(document, section, field, value)?;
         }
     }
     Ok(())
@@ -573,6 +611,13 @@ mod tests {
 
     #[derive(Debug, Deserialize, PartialEq, Eq)]
     struct TestToken {
+        active_secret: String,
+        retiring_keys: Vec<TestRetiringKey>,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestRetiringKey {
+        key_id: String,
         secret: String,
     }
 
@@ -591,7 +636,8 @@ mod tests {
 url = "mysql://file"
 max_lifetime_seconds = 60
 [token]
-secret = "file-secret"
+active_secret = "file-secret"
+retiring_keys = []
 "#;
         let environment = BTreeMap::from([
             (
@@ -603,13 +649,21 @@ secret = "file-secret"
                 "none".to_owned(),
             ),
             (
-                "YANG_SYSTEM_TOKEN_SECRET".to_owned(),
+                "YANG_SYSTEM_TOKEN_ACTIVE_SECRET".to_owned(),
                 "environment-secret".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON".to_owned(),
+                r#"[{"key_id":"environment","secret":"environment-retiring"}]"#.to_owned(),
             ),
         ]);
         let provider = StaticSecretProvider(BTreeMap::from([
             (SecretKey::MysqlUrl, "mysql://provider".to_owned()),
-            (SecretKey::TokenSecret, "provider-secret".to_owned()),
+            (SecretKey::TokenActiveSecret, "provider-secret".to_owned()),
+            (
+                SecretKey::TokenRetiringKeys,
+                r#"[{"key_id":"provider","secret":"provider-retiring"}]"#.to_owned(),
+            ),
         ]));
 
         let config: TestConfig = parse_with_sources(raw, &environment, Some(&provider))
@@ -617,7 +671,14 @@ secret = "file-secret"
 
         assert_eq!(config.mysql.url, "mysql://provider");
         assert_eq!(config.mysql.max_lifetime_seconds, None);
-        assert_eq!(config.token.secret, "provider-secret");
+        assert_eq!(config.token.active_secret, "provider-secret");
+        assert_eq!(
+            config.token.retiring_keys,
+            [TestRetiringKey {
+                key_id: "provider".to_owned(),
+                secret: "provider-retiring".to_owned(),
+            }]
+        );
     }
 
     #[test]
@@ -626,7 +687,8 @@ secret = "file-secret"
 [mysql]
 url = "mysql://file"
 [token]
-secret = "file-secret"
+active_secret = "file-secret"
+retiring_keys = []
 "#;
         let environment = BTreeMap::from([(
             "YANG_SYSTEM_MYSQL_URL".to_owned(),
@@ -638,7 +700,8 @@ secret = "file-secret"
             .unwrap_or_else(|error| panic!("环境覆盖应成功: {error:#}"));
 
         assert_eq!(config.mysql.url, "mysql://environment");
-        assert_eq!(config.token.secret, "file-secret");
+        assert_eq!(config.token.active_secret, "file-secret");
+        assert!(config.token.retiring_keys.is_empty());
     }
 
     #[test]
@@ -649,7 +712,7 @@ secret = "file-secret"
             sensitive_value.to_owned(),
         )]);
         let error = parse_with_sources::<TestConfig>(
-            "[mysql]\nurl='mysql://file'\n[token]\nsecret='file'\n",
+            "[mysql]\nurl='mysql://file'\n[token]\nactive_secret='file'\nretiring_keys=[]\n",
             &environment,
             None,
         )
@@ -696,14 +759,14 @@ secret = "file-secret"
         ));
         std::fs::create_dir(&directory)
             .unwrap_or_else(|error| panic!("应创建测试 secret 目录: {error}"));
-        let secret_path = directory.join(SecretKey::TokenSecret.file_name());
+        let secret_path = directory.join(SecretKey::TokenActiveSecret.file_name());
         std::fs::write(&secret_path, b"provider-secret\r\n")
             .unwrap_or_else(|error| panic!("应写入测试 secret: {error}"));
         let provider = DirectorySecretProvider::new(directory.clone())
             .unwrap_or_else(|error| panic!("合法 secret 目录应被接受: {error:#}"));
 
         let value = provider
-            .read(SecretKey::TokenSecret)
+            .read(SecretKey::TokenActiveSecret)
             .unwrap_or_else(|error| panic!("应读取单行 secret: {error:#}"));
         assert_eq!(value.as_deref(), Some("provider-secret"));
         assert!(provider

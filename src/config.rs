@@ -1,8 +1,10 @@
 use crate::bootstrap_secret::BootstrapSecretDigest;
 use anyhow::{bail, Context};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
+use yang_base::token::TokenManager;
 use yang_db::{DatabaseConfig, RedisConfig};
 
 const MAX_ACCESS_TTL_SECONDS: u64 = 24 * 60 * 60;
@@ -113,11 +115,21 @@ pub struct RedisSettings {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenSettings {
-    pub secret: String,
+    pub active_key_id: String,
+    pub active_secret: String,
+    #[serde(default)]
+    pub retiring_keys: Vec<RetiringTokenKeySettings>,
     pub issuer: String,
     pub audience: String,
     pub access_ttl_seconds: u64,
     pub refresh_ttl_seconds: u64,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiringTokenKeySettings {
+    pub key_id: String,
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,11 +142,30 @@ impl std::fmt::Debug for TokenSettings {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TokenSettings")
-            .field("secret", &"[REDACTED]")
+            .field("active_key_id", &self.active_key_id)
+            .field("active_secret", &"[REDACTED]")
+            .field(
+                "retiring_key_ids",
+                &self
+                    .retiring_keys
+                    .iter()
+                    .map(|key| key.key_id.as_str())
+                    .collect::<Vec<_>>(),
+            )
             .field("issuer", &self.issuer)
             .field("audience", &self.audience)
             .field("access_ttl_seconds", &self.access_ttl_seconds)
             .field("refresh_ttl_seconds", &self.refresh_ttl_seconds)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for RetiringTokenKeySettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RetiringTokenKeySettings")
+            .field("key_id", &self.key_id)
+            .field("secret", &"[REDACTED]")
             .finish()
     }
 }
@@ -233,8 +264,45 @@ impl Settings {
         if self.token.refresh_ttl_seconds <= self.token.access_ttl_seconds {
             bail!("refresh token 有效期必须长于 access token");
         }
-        validate_token_secret(&self.token.secret)?;
+        self.token.validate()?;
         self.security.validate()?;
+        Ok(())
+    }
+}
+
+impl TokenSettings {
+    pub fn build_manager(&self) -> anyhow::Result<TokenManager> {
+        TokenManager::new_symmetric_keyring(
+            self.active_key_id.clone(),
+            &self.active_secret,
+            self.retiring_keys
+                .iter()
+                .map(|key| (key.key_id.clone(), key.secret.clone()))
+                .collect(),
+            jsonwebtoken::Algorithm::HS256,
+            self.issuer.clone(),
+            self.audience.clone(),
+            self.access_ttl_seconds,
+            self.refresh_ttl_seconds,
+        )
+        .context("构建 Token keyring 失败")
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.retiring_keys.len() + 1 > 8 {
+            bail!("token keyring 最多允许 8 把密钥");
+        }
+        let mut key_ids = HashSet::with_capacity(self.retiring_keys.len() + 1);
+        validate_token_key_id(&self.active_key_id)?;
+        validate_token_secret(&self.active_secret)?;
+        key_ids.insert(self.active_key_id.as_str());
+        for key in &self.retiring_keys {
+            validate_token_key_id(&key.key_id)?;
+            validate_token_secret(&key.secret)?;
+            if !key_ids.insert(key.key_id.as_str()) {
+                bail!("token keyring 的 key_id 必须唯一");
+            }
+        }
         Ok(())
     }
 }
@@ -308,7 +376,7 @@ fn validate_rate_limit(name: &str, value: u64) -> anyhow::Result<()> {
 
 fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
     if secret.len() < 32 {
-        bail!("token.secret 至少需要 32 字节");
+        bail!("token key secret 至少需要 32 字节");
     }
     let normalized = secret.trim().to_ascii_lowercase();
     let known_placeholder = matches!(
@@ -324,7 +392,19 @@ fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
         .first()
         .is_some_and(|first| secret.as_bytes().iter().all(|byte| byte == first));
     if known_placeholder || repeated_byte {
-        bail!("token.secret 不能使用示例值、占位值或重复字符");
+        bail!("token key secret 不能使用示例值、占位值或重复字符");
+    }
+    Ok(())
+}
+
+fn validate_token_key_id(key_id: &str) -> anyhow::Result<()> {
+    if key_id.is_empty()
+        || key_id.len() > 64
+        || !key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("token key_id 必须是 1..=64 字节的 ASCII 字母、数字、点、下划线或连字符");
     }
     Ok(())
 }
@@ -377,7 +457,9 @@ idle_timeout_seconds = 30
 max_lifetime_seconds = 60
 test_before_acquire = false
 [token]
-secret = "0123456789abcdef0123456789abcdef"
+active_key_id = "test-2026-07"
+active_secret = "0123456789abcdef0123456789abcdef"
+retiring_keys = []
 issuer = "test"
 audience = "test-api"
 access_ttl_seconds = 60
@@ -410,7 +492,10 @@ filter = "info"
         assert_eq!(settings.authorization.outbox_poll_interval_ms, 250);
         assert_eq!(settings.authorization.outbox_batch_size, 100);
         assert!(settings.security.trusted_proxy_cidrs.is_empty());
-        assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
+        assert!(
+            !format!("{:?}", settings.token).contains(&settings.token.active_secret),
+            "active secret 不得进入 Debug"
+        );
         assert_eq!(
             settings.bootstrap.secret_digest.as_str(),
             VALID_BOOTSTRAP_DIGEST
@@ -437,7 +522,7 @@ filter = "info"
                 "mysql://environment".to_owned(),
             ),
             (
-                "YANG_SYSTEM_TOKEN_SECRET".to_owned(),
+                "YANG_SYSTEM_TOKEN_ACTIVE_SECRET".to_owned(),
                 "environment-secret-0123456789abcdef".to_owned(),
             ),
             (
@@ -459,8 +544,13 @@ filter = "info"
                 "mysql://provider-user:provider-password@provider/database".to_owned(),
             ),
             (
-                SecretKey::TokenSecret,
+                SecretKey::TokenActiveSecret,
                 "provider-secret-0123456789abcdef0123456789abcdef".to_owned(),
+            ),
+            (
+                SecretKey::TokenRetiringKeys,
+                r#"[{"key_id":"provider-retiring","secret":"provider-retiring-secret-0123456789abcdef"}]"#
+                    .to_owned(),
             ),
             (
                 SecretKey::BootstrapSecretDigest,
@@ -483,9 +573,11 @@ filter = "info"
             "mysql://provider-user:provider-password@provider/database"
         );
         assert_eq!(
-            settings.token.secret,
+            settings.token.active_secret,
             "provider-secret-0123456789abcdef0123456789abcdef"
         );
+        assert_eq!(settings.token.retiring_keys.len(), 1);
+        assert_eq!(settings.token.retiring_keys[0].key_id, "provider-retiring");
         assert_eq!(
             settings.bootstrap.secret_digest.as_str(),
             VALID_BOOTSTRAP_DIGEST
@@ -495,6 +587,75 @@ filter = "info"
             settings.security.trusted_proxy_cidrs,
             ["127.0.0.1/32", "10.42.0.0/24"]
         );
+    }
+
+    #[test]
+    fn token_keyring_signs_with_active_and_verifies_retiring_key_without_debug_leaks() {
+        let retiring_secret = "retiring-secret-0123456789abcdef0123456789abcdef";
+        let raw = valid_config().replace(
+            "retiring_keys = []",
+            &format!(
+                "retiring_keys = [{{ key_id = \"test-2026-06\", secret = \"{retiring_secret}\" }}]"
+            ),
+        );
+        let settings = Settings::parse(&raw)
+            .unwrap_or_else(|error| panic!("合法 Token keyring 应解析成功: {error:#}"));
+        let manager = settings
+            .token
+            .build_manager()
+            .unwrap_or_else(|error| panic!("合法 Token keyring 应构建成功: {error:#}"));
+        let active_token = manager
+            .generate_access_token("7", serde_json::json!({}))
+            .unwrap_or_else(|error| panic!("active key 应签发成功: {error}"));
+        assert_eq!(
+            jsonwebtoken::decode_header(&active_token)
+                .unwrap_or_else(|error| panic!("签发 Token Header 应合法: {error}"))
+                .kid
+                .as_deref(),
+            Some("test-2026-07")
+        );
+
+        let previous = TokenManager::new_symmetric_keyring(
+            "test-2026-06".to_owned(),
+            retiring_secret,
+            Vec::new(),
+            jsonwebtoken::Algorithm::HS256,
+            "test".to_owned(),
+            "test-api".to_owned(),
+            60,
+            120,
+        )
+        .unwrap_or_else(|error| panic!("旧 keyring 应构建成功: {error}"));
+        let retiring_token = previous
+            .generate_refresh_token("7")
+            .unwrap_or_else(|error| panic!("旧 key 应签发测试 Token: {error}"));
+        assert!(
+            manager.verify_token(&retiring_token).is_ok(),
+            "retiring key 应继续验证存量 Token"
+        );
+
+        let debug = format!("{:?}", settings.token);
+        assert!(!debug.contains(&settings.token.active_secret));
+        assert!(!debug.contains(retiring_secret));
+    }
+
+    #[test]
+    fn rejects_invalid_or_duplicate_token_key_ids() {
+        for raw in [
+            valid_config().replace("test-2026-07", "invalid key id"),
+            valid_config().replace(
+                "retiring_keys = []",
+                "retiring_keys = [{ key_id = \"test-2026-07\", secret = \"retiring-secret-0123456789abcdef0123456789abcdef\" }]",
+            ),
+        ] {
+            let error = Settings::parse(&raw)
+                .err()
+                .unwrap_or_else(|| panic!("非法或重复 key_id 必须被拒绝"));
+            assert!(
+                format!("{error:#}").contains("key_id"),
+                "错误必须定位 key_id: {error:#}"
+            );
+        }
     }
 
     #[test]
