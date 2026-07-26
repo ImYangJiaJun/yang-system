@@ -6,7 +6,7 @@ use super::user::{
 };
 use async_trait::async_trait;
 use std::sync::Arc;
-use yang_base::action::{ActionContext, TenantContext, TenantId, TenantResolver};
+use yang_base::action::{ActionContext, TenantContext, TenantId, TenantResolution, TenantResolver};
 use yang_base::table::TableDefinition;
 use yang_base::BaseError;
 
@@ -108,9 +108,9 @@ impl OrgTenantResolver {
         context: &ActionContext,
         user: &yang_base::action::User,
         requested: Option<TenantId>,
-    ) -> Result<TenantContext, BaseError> {
+    ) -> Result<TenantResolution, BaseError> {
         if user.has_role("system") {
-            return Ok(TenantContext::system());
+            return TenantResolution::system_for(user);
         }
         let org_id = requested
             .ok_or_else(|| BaseError::Unauthorized("请求缺少企业租户上下文".to_string()))?;
@@ -120,7 +120,7 @@ impl OrgTenantResolver {
                 org_id.get()
             )));
         }
-        Ok(TenantContext::new(org_id))
+        Ok(TenantContext::new(org_id).into())
     }
 }
 
@@ -130,7 +130,7 @@ impl TenantResolver for OrgTenantResolver {
         &self,
         context: &ActionContext,
         requested: Option<TenantId>,
-    ) -> Result<TenantContext, BaseError> {
+    ) -> Result<TenantResolution, BaseError> {
         let user = context
             .authenticated_user()
             .ok_or_else(|| BaseError::Unauthorized("企业租户解析需要已认证用户".to_string()))?;
@@ -186,24 +186,32 @@ mod tests {
                 .await,
             Err(BaseError::PermissionDenied(_))
         ));
-        let tenant = resolver
+        let resolution = resolver
             .resolve_authenticated(&context(), &member, Some(TenantId::new(10)))
             .await
             .unwrap_or_else(|error| panic!("真实成员应通过租户策略: {error}"));
-        assert_eq!(tenant.id(), Some(TenantId::new(10)));
-        assert!(!tenant.is_system());
+        match resolution {
+            TenantResolution::Tenant(tenant) => {
+                assert_eq!(tenant.id(), TenantId::new(10));
+            }
+            TenantResolution::System(_) => panic!("普通成员不得获得系统 capability"),
+        }
     }
 
     #[tokio::test]
-    async fn system_role_is_the_only_explicit_tenant_bypass() {
+    async fn system_role_receives_actor_bound_capability() {
         let resolver = OrgTenantResolver::new(Arc::new(FakeMembershipReader));
         let system = User::new(9, "system").with_roles(["system"]);
 
-        let tenant = resolver
+        let resolution = resolver
             .resolve_authenticated(&context(), &system, None)
             .await
             .unwrap_or_else(|error| panic!("system 角色应显式绕过普通租户选择: {error}"));
-        assert!(tenant.is_system());
-        assert_eq!(tenant.id(), None);
+        match resolution {
+            TenantResolution::System(capability) => {
+                assert_eq!(capability.actor().user_id(), system.id);
+            }
+            TenantResolution::Tenant(_) => panic!("system 角色不得伪装成普通租户"),
+        }
     }
 }

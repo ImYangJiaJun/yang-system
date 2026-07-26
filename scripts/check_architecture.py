@@ -20,6 +20,7 @@ TENANT_BOUNDARY_KINDS = (
     "relation",
     "batch",
     "background",
+    "system-capability",
 )
 TENANT_BOUNDARY_KIND_PATTERN = "|".join(re.escape(kind) for kind in TENANT_BOUNDARY_KINDS)
 TENANT_CODE_BOUNDARY_RE = re.compile(
@@ -47,6 +48,14 @@ TENANT_RISK_PATTERNS = {
     "background": re.compile(
         r"\b(?:tokio::(?:task::)?spawn|spawn_blocking|JoinSet::spawn)\s*\("
     ),
+    "system-capability": re.compile(
+        r"\.\s*(?:system_tenant|system_table_query|system_tables)\s*\("
+    ),
+}
+TENANT_FORBIDDEN_PATTERNS = {
+    "TenantContext::system()": re.compile(r"\bTenantContext\s*::\s*system\s*\("),
+    "TenantContext.is_system()": re.compile(r"\.\s*is_system\s*\("),
+    "Option<TenantContext>": re.compile(r"\bOption\s*<\s*TenantContext\s*>"),
 }
 TENANT_BOUNDARY_DOCUMENT = Path("docs/architecture/tenant-data-paths.md")
 TENANT_ISOLATION_TEST = Path("tests/tenant_isolation_integration.rs")
@@ -227,6 +236,14 @@ def tenant_code_boundaries(root: Path) -> tuple[set[tuple[str, str]], list[str]]
                     )
                     continue
                 used.add(boundary)
+
+        for legacy, pattern in TENANT_FORBIDDEN_PATTERNS.items():
+            for match in pattern.finditer(source):
+                line_number = source.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{relative}:{line_number}: 禁止旧租户绕过表达 {legacy}，"
+                    "repository 必须使用非可选普通租户或显式系统 capability"
+                )
 
     for kind, boundary_id in sorted(declared - used):
         path = owners[boundary_id][1].relative_to(root)
@@ -474,8 +491,50 @@ def self_test() -> None:
         )
 
         write(
+            repository,
+            "fn system_access(ctx: &ActionContext) {\n"
+            "    let _ = ctx.system_tenant();\n"
+            "}\n",
+        )
+        errors = check_tenant_boundaries(root)
+        assert any("system-capability 租户旁路缺少" in error for error in errors), (
+            "必须拒绝未声明的系统租户 capability"
+        )
+
+        write(
+            repository,
+            "fn system_access(ctx: &ActionContext) {\n"
+            "    // tenant-boundary: system-capability demo-system-access\n"
+            "    let _ = ctx.system_tenant();\n"
+            "}\n",
+        )
+        write(
             root / TENANT_BOUNDARY_DOCUMENT,
-            "<!-- tenant-boundary: raw-sql demo-lookup -->\n"
+            "<!-- tenant-boundary: system-capability demo-system-access -->\n",
+        )
+        assert check_tenant_boundaries(root) == [], "完整系统 capability 声明应通过"
+
+        write(
+            repository,
+            "fn legacy_access() {\n"
+            "    let _ = TenantContext::system();\n"
+            "}\n",
+        )
+        errors = check_tenant_boundaries(root)
+        assert any("禁止旧租户绕过表达" in error for error in errors), (
+            "必须拒绝旧 Option + bool 系统绕过模型"
+        )
+
+        write(
+            repository,
+            "fn system_access(ctx: &ActionContext) {\n"
+            "    // tenant-boundary: system-capability demo-system-access\n"
+            "    let _ = ctx.system_tenant();\n"
+            "}\n",
+        )
+        write(
+            root / TENANT_BOUNDARY_DOCUMENT,
+            "<!-- tenant-boundary: system-capability demo-system-access -->\n"
             "<!-- tenant-boundary: transaction removed-boundary -->\n",
         )
         errors = check_tenant_boundaries(root)

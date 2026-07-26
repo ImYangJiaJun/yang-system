@@ -2,7 +2,7 @@
 
 use super::{ACTIVE_STATUS, IS_ADMIN, ORG_ID, STATUS, USER_ID};
 use async_trait::async_trait;
-use yang_base::action::{ActionContext, ApiResponse};
+use yang_base::action::{ActionContext, ApiResponse, SystemTenantCapability, User};
 use yang_base::router::{Middleware, Next};
 use yang_base::BaseError;
 
@@ -19,12 +19,16 @@ impl OrgAdminGuardMiddleware {
             .authenticated_user()
             .ok_or_else(|| BaseError::Unauthorized("企业成员管理需要已认证用户".to_string()))?;
         if user.has_role("system") {
+            // tenant-boundary: system-capability member-admin-system
+            let capability = ctx.system_tenant()?;
+            if !system_capability_matches_user(capability, user) {
+                return Err(BaseError::PermissionDenied(
+                    "系统租户 capability 与当前操作者不匹配".to_string(),
+                ));
+            }
             return Ok(true);
         }
-        let org_id = ctx
-            .tenant()?
-            .id()
-            .ok_or_else(|| BaseError::PermissionDenied("企业成员管理需要明确租户".to_string()))?;
+        let org_id = ctx.tenant()?.id();
         let sql = format!(
             "SELECT EXISTS(\
                  SELECT 1 FROM `org_user` \
@@ -46,6 +50,10 @@ impl OrgAdminGuardMiddleware {
             .map_err(yang_db::DbError::from)
             .map_err(Into::into)
     }
+}
+
+fn system_capability_matches_user(capability: SystemTenantCapability, user: &User) -> bool {
+    capability.actor().user_id() == user.id
 }
 
 #[async_trait]
@@ -75,6 +83,7 @@ fn requires_org_admin(module: &str, action: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yang_base::action::TenantResolution;
 
     #[test]
     fn guard_covers_only_member_mutations() {
@@ -85,5 +94,21 @@ mod tests {
             assert!(!requires_org_admin("org.user", action));
         }
         assert!(!requires_org_admin("org.org", "put"));
+    }
+
+    #[test]
+    fn system_capability_is_bound_to_the_authenticated_actor() {
+        let system = User::new(9, "system").with_roles(["system"]);
+        let capability = match TenantResolution::system_for(&system)
+            .unwrap_or_else(|error| panic!("system 角色应获得 capability: {error}"))
+        {
+            TenantResolution::System(capability) => capability,
+            TenantResolution::Tenant(_) => panic!("system 角色不得获得普通租户"),
+        };
+        assert!(system_capability_matches_user(capability, &system));
+        assert!(!system_capability_matches_user(
+            capability,
+            &User::new(10, "other-system").with_roles(["system"])
+        ));
     }
 }

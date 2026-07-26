@@ -1,19 +1,23 @@
 # 租户数据路径与旁路清单
 
-状态：C2-01 基线
+状态：C2-final capability 模型
 适用范围：`src/modules/org/` 的生产代码
 
 ## 1. 边界模型
 
 租户隔离的事实链只有一条：
 
-`Token 身份 → 请求租户声明 → 成员与组织状态校验 → TenantContext → 数据访问作用域`
+`Token 身份 → 请求租户声明 → 成员与组织状态校验 → TenantResolution → 互斥租户 capability → 数据访问作用域`
 
-- 普通请求必须得到 `TenantContext::new(TenantId)`；缺少租户、成员关系无效或组织停用时失败关闭。
-- `system` 角色当前会得到 `TenantContext::system()`，这是唯一已有的全租户入口。它仍使用
-  `Option<TenantId> + bool` 表达，后续 C2-final 将替换为独立、显式、可审计的 system capability。
+- 普通请求必须得到始终携带非可选 `TenantId` 的 `TenantContext`；缺少租户、成员关系无效或组织
+  停用时失败关闭。
+- `system` 角色只会得到绑定已认证 actor 的 `SystemTenantCapability`，与普通 `TenantContext`
+  是互斥类型，不能伪装为无 ID 租户。
 - 标准表访问必须从 `ActionContext::table_query()` / `Tables` 进入。`org_user.org_org`
-  的 tenant key 会由基础库自动注入查询条件和写入值。
+  的 tenant key 会由基础库自动注入查询条件和写入值；系统身份调用标准入口同样失败关闭。
+- 全租户 repository 必须先从当前请求取得 system capability，再显式传给
+  `system_table_query(capability)` / `system_tables(capability)`；当前业务代码没有此类全租户
+  repository。
 - pre-tenant 发现、租户解析、授权快照等无法依赖已注入 `TenantContext` 的路径，必须在本清单
   中逐点声明自己的收敛键。
 
@@ -21,7 +25,7 @@
 
 | 表 | 分类 | 隔离键 | 约束与入口 |
 |---|---|---|---|
-| `org_org` | 租户根 | 主键 `id` 本身 | `org.org` 查询在普通上下文显式限定 `id = tenant_id`；system 可跨租户 |
+| `org_org` | 租户根 | 主键 `id` 本身 | `org.org` 查询强制取得普通 capability 并限定 `id = tenant_id`；system 不会自动跨租户 |
 | `org_user` | 租户数据 | `org_org`，声明为 `tenant_key(true)` | 标准 CRUD 由 `TableQuery` 自动限定/注入 `org_org`；唯一键为 `(org_org, user_user)` |
 
 `users` 和 `admin_user` 是全局身份/平台域表，不属于组织租户表；它们不应因为 C2 的扫描规则
@@ -33,8 +37,8 @@
 |---|---|---|---|
 | `org.tenant.list` | pre-tenant | raw SQL Join | 已认证 `user_id` + 有效成员状态 + 有效组织状态 |
 | `org.tenant.create` | pre-tenant | 显式事务 + 无租户 TableQuery | 已认证 actor；同事务创建组织与 actor 的管理员成员关系 |
-| `org.org.list` | tenant | `scoped_org_tables` | 普通租户显式 `org_org.id = tenant_id` |
-| `org.org.select` | tenant/relation | `scoped_org_tables` | 普通租户的分页、筛选和 selected 回填均重复施加同一 scope |
+| `org.org.list` | tenant | `scoped_org_tables` | 强制普通租户 capability，并显式限定 `org_org.id = tenant_id` |
+| `org.org.select` | tenant/relation | `scoped_org_tables` | 普通 capability 的分页、筛选和 selected 回填均重复施加同一 scope |
 | `org.user.add` | tenant | 内置 CRUD `TableQuery` | tenant key 自动注入；实时企业管理员守卫 |
 | `org.user.put` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤；实时企业管理员守卫 |
 | `org.user.del` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤；实时企业管理员守卫 |
@@ -66,6 +70,7 @@
 | `authorization-grant-snapshot` | raw-sql | `org/grants.rs` | 只按待签发 `user_id` 汇总“是否任一有效组织管理员”；租户写仍由实时管理员守卫二次校验 |
 | `member-admin-database` | database | `org/user/guard.rs` | 只供当前租户管理员实时校验使用 |
 | `member-admin-guard` | raw-sql | `org/user/guard.rs` | 同时限定可信 `tenant_id`、已认证 `user_id`、active 与 admin |
+| `member-admin-system` | system-capability | `org/user/guard.rs` | system 管理操作必须消费当前请求 capability，并核对 capability actor 与已认证用户一致；不授予数据查询旁路 |
 
 <!-- tenant-boundary: database pre-tenant-table-database -->
 <!-- tenant-boundary: unscoped-query pre-tenant-table-query -->
@@ -81,6 +86,7 @@
 <!-- tenant-boundary: raw-sql authorization-grant-snapshot -->
 <!-- tenant-boundary: database member-admin-database -->
 <!-- tenant-boundary: raw-sql member-admin-guard -->
+<!-- tenant-boundary: system-capability member-admin-system -->
 
 ## 5. Relation、批量、事务与后台任务
 
@@ -105,10 +111,13 @@
 - 显式事务；
 - RelationLoader/relation 扩展；
 - many/batch/bulk 写；
-- Tokio/JoinSet 后台任务。
+- Tokio/JoinSet 后台任务；
+- `system_tenant()` / `system_table_query(...)` / `system_tables(...)` 显式系统 capability。
 
 风险调用前必须紧邻唯一 boundary 声明，且 ID/类型必须出现在本文件。文件级豁免、孤儿清单
-和重复 ID 都会失败。门禁只证明“旁路可枚举”，不替代 C2-02/C2-03 的真实双租户行为证据。
+和重复 ID 都会失败；生产代码中的 `TenantContext::system()`、`.is_system()` 与
+`Option<TenantContext>` 也会直接失败。门禁只证明“旁路可枚举”，不替代 C2-02/C2-03 的
+真实双租户行为证据。
 
 ## 7. 后续验证矩阵
 
@@ -116,7 +125,8 @@
 - C2-03：Join、selected relation、批量、事务回滚与旁路调用。
 - C2-04：把真实库测试入口、证据 ID 和本文映射加入架构门禁；任何删减都必须显式更新契约。
 - C2-04+：每个真实失败旁路独立修复、独立提交。
-- C2-final：repository 强制接收非可选 tenant capability，并移除 `Option + bool` system 绕过表达。
+- C2-final（完成）：repository 强制接收非可选 tenant capability；移除 `Option + bool`
+  system 绕过表达；系统访问改为绑定 actor、显式消费且逐点登记的 capability。
 
 ## 8. 真实库证据契约
 
