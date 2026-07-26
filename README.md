@@ -224,6 +224,10 @@ Redis、Token、Bootstrap、Schema 模式等运行参数均以该文件为准；
 都会在连接外部资源前阻止应用启动。部署时应限制 `config.toml` 的读取权限，并通过
 部署系统生成或挂载该文件。
 
+`admin.user.bootstrap` 仍要求已登录身份，并额外要求请求体携带生成器输出的原始
+`secret`。服务端在受并发限制的阻塞线程中执行 Argon2id 常量时间校验；缺失、错误
+或未注入 verifier 均失败关闭，只有正确凭证才会进入数据库的一次性初始化事务。
+
 `schema.mode` 支持 `apply|validate|off`。省略整个 `[schema]` 或只省略 `mode` 时均
 默认 `validate`：它不执行 DDL，发现任何待应用变更就拒绝启动，适合由独立迁移任务
 管理 Schema 的生产环境。`apply` 只保留给本地 Schema 原型调试，不产生版本执行

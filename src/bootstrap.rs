@@ -1,4 +1,5 @@
 use crate::app::build_app;
+use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
 use crate::transport::http;
 use anyhow::Context;
@@ -16,6 +17,11 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let settings = Settings::load(config_path)?;
     init_tracing(&settings.logging.filter)?;
     tracing::info!(app = %settings.app.name, config = %config_path.display(), "开始启动系统");
+    let bootstrap_verifier = BootstrapSecretVerifier::new(
+        settings.bootstrap.secret_digest.clone(),
+        settings.security.argon2_max_concurrency,
+    )
+    .context("构建 bootstrap secret 校验器失败")?;
 
     let mysql = Database::connect_with_config(&settings.mysql.url, settings.mysql_config())
         .await
@@ -39,6 +45,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
             .mysql(mysql)
             .cache(cache)
             .token(token_manager)
+            .config(bootstrap_verifier)
             .build()
             .context("构建应用 Tools 失败")?,
     );

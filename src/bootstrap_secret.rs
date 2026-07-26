@@ -1,11 +1,14 @@
 //! 平台初始化一次性凭证的不可逆配置值对象。
 
 use anyhow::{ensure, Context};
-use argon2::password_hash::{PasswordHash, SaltString};
-use argon2::{Argon2, PasswordHasher};
+use argon2::password_hash::{Error as PasswordHashError, PasswordHash, SaltString};
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Deserializer};
 use std::fmt::Write as _;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use yang_base::BaseError;
 
 const ARGON2_VERSION: u32 = 19;
 const MIN_MEMORY_KIB: u32 = 19_456;
@@ -108,6 +111,56 @@ impl<'de> Deserialize<'de> for BootstrapSecretDigest {
     }
 }
 
+/// 在受控阻塞线程中执行常量时间 Argon2id 校验的运行期能力。
+#[derive(Clone)]
+pub struct BootstrapSecretVerifier {
+    digest: BootstrapSecretDigest,
+    permits: Arc<Semaphore>,
+}
+
+impl BootstrapSecretVerifier {
+    pub fn new(digest: BootstrapSecretDigest, max_concurrency: usize) -> Result<Self, BaseError> {
+        if max_concurrency == 0 {
+            return Err(BaseError::ConfigError(
+                "bootstrap secret 校验并发必须大于 0".to_string(),
+            ));
+        }
+        Ok(Self {
+            digest,
+            permits: Arc::new(Semaphore::new(max_concurrency)),
+        })
+    }
+
+    /// 校验请求携带的原始 secret；错误 secret 返回 false，不泄露摘要或候选值。
+    pub async fn verify(&self, candidate: &str) -> Result<bool, BaseError> {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| BaseError::Unknown("bootstrap secret 校验器已关闭".to_string()))?;
+        let candidate = candidate.to_owned();
+        let encoded = self.digest.as_str().to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let parsed = PasswordHash::new(&encoded).map_err(|_| {
+                BaseError::ConfigError("bootstrap secret 摘要格式在运行期失效".to_string())
+            })?;
+            match Argon2::default().verify_password(candidate.as_bytes(), &parsed) {
+                Ok(()) => Ok(true),
+                Err(PasswordHashError::Password) => Ok(false),
+                Err(_) => Err(BaseError::Unknown("bootstrap secret 校验失败".to_string())),
+            }
+        })
+        .await
+        .map_err(|error| BaseError::Unknown(format!("bootstrap secret 校验任务失败: {error}")))?
+    }
+}
+
+impl std::fmt::Debug for BootstrapSecretVerifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BootstrapSecretVerifier([REDACTED])")
+    }
+}
+
 /// 本地/运维工具一次性生成的原始 secret 与其不可逆摘要。
 ///
 /// 应只展示原始 secret 一次，并只把 `digest` 写入应用配置。
@@ -172,5 +225,23 @@ mod tests {
         let debug = format!("{generated:?}");
         assert!(!debug.contains(generated.secret()));
         assert!(!debug.contains(generated.digest().as_str()));
+    }
+
+    #[tokio::test]
+    async fn verifier_accepts_only_the_generated_secret_and_rejects_zero_concurrency() {
+        let generated = generate_bootstrap_secret()
+            .unwrap_or_else(|error| panic!("bootstrap secret 应生成成功: {error:#}"));
+        let verifier = BootstrapSecretVerifier::new(generated.digest().clone(), 1)
+            .unwrap_or_else(|error| panic!("verifier 应构建成功: {error}"));
+
+        assert!(verifier
+            .verify(generated.secret())
+            .await
+            .unwrap_or_else(|error| panic!("正确 secret 应完成验证: {error}")));
+        assert!(!verifier
+            .verify("wrong-bootstrap-secret-with-sufficient-length")
+            .await
+            .unwrap_or_else(|error| panic!("错误 secret 应得到 false: {error}")));
+        assert!(BootstrapSecretVerifier::new(generated.digest().clone(), 0).is_err());
     }
 }

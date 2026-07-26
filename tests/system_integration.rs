@@ -11,6 +11,7 @@ use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
+use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
 
 fn action_handle(
@@ -109,6 +110,9 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     )
     .await
     .context("连接测试 Redis 失败")?;
+    let generated_bootstrap = generate_bootstrap_secret()?;
+    let bootstrap_secret = generated_bootstrap.secret().to_owned();
+    let bootstrap_verifier = BootstrapSecretVerifier::new(generated_bootstrap.digest().clone(), 2)?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
@@ -121,6 +125,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
                 300,
                 3600,
             ))
+            .config(bootstrap_verifier)
             .build()?,
     );
     let security = Arc::new(SecuritySettings {
@@ -185,7 +190,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             &application.runtime,
             "admin.user",
             "bootstrap",
-            json!({ "name": "Integration Administrator", "position": "Owner" }),
+            json!({
+                "secret": bootstrap_secret,
+                "name": "Integration Administrator",
+                "position": "Owner"
+            }),
             &[("authorization", &format!("Bearer {access_token}"))],
             &[],
         )
@@ -196,7 +205,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             &application.runtime,
             "admin.user",
             "bootstrap",
-            json!({ "name": "Second Administrator" }),
+            json!({ "secret": bootstrap_secret, "name": "Second Administrator" }),
             &[("authorization", &format!("Bearer {access_token}"))],
             &[],
         )
