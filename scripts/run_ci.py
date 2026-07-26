@@ -68,6 +68,19 @@ FULL = (
 
 INTEGRATION = (
     Command(
+        "Authorization Redis monotonic cache integration",
+        (
+            "cargo",
+            "test",
+            "--lib",
+            "--locked",
+            "authorization::version_cache::tests::real_redis_publish_is_monotonic_and_does_not_refresh_ignored_events",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Versioned migration job integration",
         (
             "cargo",
@@ -198,6 +211,17 @@ def self_test() -> None:
         "--",
         "--ignored",
         "--test-threads=1",
+    )
+    authorization_cache = next(
+        command
+        for command in INTEGRATION
+        if command.name == "Authorization Redis monotonic cache integration"
+    )
+    assert authorization_cache.argv[:4] == (
+        "cargo",
+        "test",
+        "--lib",
+        "--locked",
     )
     print("local CI runner self-test: passed")
 
