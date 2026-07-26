@@ -296,6 +296,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), Arc::clone(&security))?;
     let initializer = DatabaseInitializer::new(initializer_database, false);

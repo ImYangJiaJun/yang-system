@@ -85,6 +85,7 @@ mod tests {
             auth_rate_limit_window_seconds: 60,
             auth_rate_limit_ip_attempts: 30,
             auth_rate_limit_username_attempts: 10,
+            trusted_proxy_cidrs: Vec::new(),
         });
         let app =
             build_app(tools, security).unwrap_or_else(|error| panic!("应用应构建成功: {error}"));

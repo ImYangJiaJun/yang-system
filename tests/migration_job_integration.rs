@@ -22,6 +22,7 @@ fn security_settings() -> Arc<SecuritySettings> {
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        trusted_proxy_cidrs: Vec::new(),
     })
 }
 

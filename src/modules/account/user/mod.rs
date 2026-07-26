@@ -12,6 +12,7 @@ mod service;
 use crate::authorization::AuthorizationVersionValidator;
 use crate::config::SecuritySettings;
 use crate::modules::account::GrantResolver;
+use crate::security::TrustedClientIpMiddleware;
 use password::PasswordEngine;
 use rate_limit::AuthRateLimiter;
 use repository::UserRepository;
@@ -35,6 +36,7 @@ pub(super) fn build_module(
     let users = Arc::new(UserRepository::new(table.table_definition()?));
     let passwords = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
     let rate_limiter = Arc::new(AuthRateLimiter::new(&security));
+    let trusted_client_ip = TrustedClientIpMiddleware::from_cidrs(&security.trusted_proxy_cidrs)?;
     let service = Arc::new(UserService::new(
         Arc::clone(&users),
         passwords,
@@ -46,6 +48,7 @@ pub(super) fn build_module(
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,
     )
     .table(table)
+    .middleware(trusted_client_ip)
     .middleware(
         TokenAuthMiddleware::new(user_from_claims)
             .with_claims_validator(authorization_validator)

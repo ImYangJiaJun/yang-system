@@ -8,4 +8,5 @@ pub mod bootstrap_secret;
 pub mod config;
 pub mod migrations;
 pub mod modules;
+mod security;
 pub mod transport;

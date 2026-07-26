@@ -146,6 +146,9 @@ pub struct SecuritySettings {
     pub auth_rate_limit_window_seconds: u64,
     pub auth_rate_limit_ip_attempts: u64,
     pub auth_rate_limit_username_attempts: u64,
+    /// 允许提供 `Forwarded`/`X-Forwarded-For` 的 TCP 对端网段；空列表表示完全忽略。
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -273,6 +276,7 @@ impl SecuritySettings {
         validate_rate_limit("window_seconds", self.auth_rate_limit_window_seconds)?;
         validate_rate_limit("ip_attempts", self.auth_rate_limit_ip_attempts)?;
         validate_rate_limit("username_attempts", self.auth_rate_limit_username_attempts)?;
+        crate::security::validate_trusted_proxy_cidrs(&self.trusted_proxy_cidrs)?;
         Ok(())
     }
 }
@@ -404,6 +408,7 @@ filter = "info"
         assert_eq!(settings.authorization.deployment, "test-local");
         assert_eq!(settings.authorization.outbox_poll_interval_ms, 250);
         assert_eq!(settings.authorization.outbox_batch_size, 100);
+        assert!(settings.security.trusted_proxy_cidrs.is_empty());
         assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
         assert_eq!(
             settings.bootstrap.secret_digest.as_str(),
@@ -526,6 +531,14 @@ filter = "info"
                 .is_none(),
             "示例配置不得保存原始 bootstrap secret"
         );
+        assert_eq!(
+            value
+                .get("security")
+                .and_then(|security| security.get("trusted_proxy_cidrs"))
+                .and_then(toml::Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
     }
 
     #[test]
@@ -607,6 +620,37 @@ filter = "info"
             Err(error) => error,
         };
         assert!(error.to_string().contains("max_concurrency"));
+    }
+
+    #[test]
+    fn validates_trusted_proxy_cidrs_and_keeps_empty_as_safe_default() {
+        let valid = valid_config().replace(
+            "auth_rate_limit_username_attempts = 10",
+            "auth_rate_limit_username_attempts = 10\ntrusted_proxy_cidrs = [\"127.0.0.1/32\", \"10.42.0.0/24\"]",
+        );
+        let settings = Settings::parse(&valid)
+            .unwrap_or_else(|error| panic!("合法代理 CIDR 应通过配置校验: {error:#}"));
+        assert_eq!(
+            settings.security.trusted_proxy_cidrs,
+            ["127.0.0.1/32", "10.42.0.0/24"]
+        );
+
+        for cidr in ["0.0.0.0/0", "::/0", "10.0.0.1", "10.0.0.0/33"] {
+            let raw = valid_config().replace(
+                "auth_rate_limit_username_attempts = 10",
+                &format!(
+                    "auth_rate_limit_username_attempts = 10\ntrusted_proxy_cidrs = [\"{cidr}\"]"
+                ),
+            );
+            let error = match Settings::parse(&raw) {
+                Ok(_) => panic!("不安全或非法代理 CIDR 必须在启动前被拒绝: {cidr}"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("trusted_proxy_cidrs"),
+                "错误必须定位代理 CIDR 配置: {error:#}"
+            );
+        }
     }
 
     #[test]

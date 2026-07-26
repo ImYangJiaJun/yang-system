@@ -1,6 +1,8 @@
 //! 认证入口的 Redis 原子限流。
 
 use crate::config::SecuritySettings;
+use crate::security::CLIENT_IP_META_KEY;
+use std::borrow::Cow;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
 
@@ -70,11 +72,7 @@ impl AuthRateLimiter {
         operation: AuthOperation,
         username: &str,
     ) -> Result<(), BaseError> {
-        let source = ctx
-            .request_meta
-            .peer_addr
-            .map(|address| address.ip().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let source = client_ip_identity(ctx);
         let prefix = format!("yang-system:auth-rate:{}", operation.key());
         let keys = [
             format!("{prefix}:ip:{source}"),
@@ -92,6 +90,19 @@ impl AuthRateLimiter {
     }
 }
 
+fn client_ip_identity(ctx: &ActionContext) -> Cow<'_, str> {
+    ctx.request_meta
+        .extensions
+        .get(CLIENT_IP_META_KEY)
+        .map(|value| Cow::Borrowed(value.as_str()))
+        .or_else(|| {
+            ctx.request_meta
+                .peer_addr
+                .map(|address| Cow::Owned(address.ip().to_string()))
+        })
+        .unwrap_or(Cow::Borrowed("unknown"))
+}
+
 fn rate_limit_result(exceeded: i64, retry_after: i64) -> Result<(), BaseError> {
     if exceeded == 0 {
         return Ok(());
@@ -104,6 +115,10 @@ fn rate_limit_result(exceeded: i64, retry_after: i64) -> Result<(), BaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use yang_base::action::{Request, RequestMeta};
+    use yang_base::tools::ToolsBuilder;
 
     #[test]
     fn maps_redis_decision_to_standard_rate_limit_error() {
@@ -125,5 +140,28 @@ mod tests {
     #[test]
     fn operation_keys_are_isolated() {
         assert_ne!(AuthOperation::Login.key(), AuthOperation::Register.key());
+    }
+
+    #[test]
+    fn rate_limit_identity_prefers_trusted_transport_extension() {
+        let tools = ToolsBuilder::new()
+            .build()
+            .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}"));
+        let peer = "10.0.0.2:443"
+            .parse::<SocketAddr>()
+            .unwrap_or_else(|error| panic!("测试对端地址应有效: {error}"));
+        let mut context =
+            ActionContext::new(Request::new(serde_json::Value::Null), Arc::new(tools))
+                .with_request_meta(RequestMeta::new().with_peer_addr(peer));
+        context
+            .request_meta
+            .extensions
+            .insert(CLIENT_IP_META_KEY.to_string(), "198.51.100.7".to_string());
+
+        assert_eq!(client_ip_identity(&context), "198.51.100.7");
+        context.request_meta.extensions.clear();
+        assert_eq!(client_ip_identity(&context), "10.0.0.2");
+        context.request_meta.peer_addr = None;
+        assert_eq!(client_ip_identity(&context), "unknown");
     }
 }
