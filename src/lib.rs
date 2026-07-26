@@ -10,6 +10,7 @@ pub mod config;
 mod config_source;
 pub mod migrations;
 pub mod modules;
+mod observability;
 mod security;
 mod shutdown;
 pub mod transport;

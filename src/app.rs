@@ -1,6 +1,7 @@
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
 use crate::modules::{account, admin, org};
+use crate::observability::logging::{ActionLogMiddleware, LogIdentity};
 use anyhow::Context;
 use std::sync::Arc;
 use yang_base::definition::{AppBuilder, BuiltApp};
@@ -25,6 +26,7 @@ pub fn build_app(
         Err(error) => return Err(error).context("检查授权版本缓存运行态失败"),
     };
     let authorization_validator = AuthorizationVersionValidator::new(authorization_cache);
+    let action_logging = ActionLogMiddleware::new(LogIdentity::from_tools(&tools));
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     let runtime = AppBuilder::new()
         .addon(
@@ -36,12 +38,19 @@ pub fn build_app(
                 ])),
                 authorization_validator.clone(),
             )
-            .context("构建 account Addon 失败")?,
+            .context("构建 account Addon 失败")?
+            .middleware(action_logging.clone()),
         )
         .addon(
-            admin::build_addon(authorization_validator.clone()).context("构建 admin Addon 失败")?,
+            admin::build_addon(authorization_validator.clone())
+                .context("构建 admin Addon 失败")?
+                .middleware(action_logging.clone()),
         )
-        .addon(org::build_addon(authorization_validator).context("构建 org Addon 失败")?)
+        .addon(
+            org::build_addon(authorization_validator)
+                .context("构建 org Addon 失败")?
+                .middleware(action_logging),
+        )
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
 

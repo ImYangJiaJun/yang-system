@@ -75,4 +75,5 @@ trusted_proxy_cidrs = []
 total_timeout_seconds = 30
 
 [logging]
+# 输出一行一个 JSON object；filter 只控制级别，不改变生产日志结构。
 filter = "yang_system=info,tower_http=info"

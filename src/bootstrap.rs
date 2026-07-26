@@ -2,6 +2,7 @@ use crate::app::build_app;
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
+use crate::observability::logging::{init_tracing, LogIdentity};
 use crate::shutdown::{ShutdownBudget, ShutdownPhase, ShutdownTrigger};
 use crate::transport::http;
 use anyhow::Context;
@@ -9,7 +10,6 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing_subscriber::EnvFilter;
 use yang_base::database::DatabaseInitializer;
 use yang_base::tools::{Tools, ToolsBuilder};
 use yang_db::{Database, RedisClient};
@@ -17,9 +17,16 @@ use yang_db::{Database, RedisClient};
 pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let settings = Settings::load(config_path)?;
     init_tracing(&settings.logging.filter)?;
+    let log_identity = LogIdentity::new(&settings.app.name, settings.app.environment);
     let shutdown_budget =
         ShutdownBudget::new(Duration::from_secs(settings.shutdown.total_timeout_seconds));
-    tracing::info!(app = %settings.app.name, config = %config_path.display(), "开始启动系统");
+    tracing::info!(
+        service = %log_identity.service,
+        version = %log_identity.version,
+        environment = %log_identity.environment,
+        config = %config_path.display(),
+        "开始启动系统"
+    );
     let bootstrap_verifier = BootstrapSecretVerifier::new(
         settings.bootstrap.secret_digest.clone(),
         settings.security.argon2_max_concurrency,
@@ -45,6 +52,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
             .cache(cache)
             .token(token_manager)
             .extension(authorization_cache)
+            .config(log_identity)
             .config(bootstrap_verifier)
             .build()
             .context("构建应用 Tools 失败")?,
@@ -187,14 +195,6 @@ async fn run_then_cleanup<T>(
             Err(operation_error)
         }
     }
-}
-
-fn init_tracing(filter: &str) -> anyhow::Result<()> {
-    let filter = EnvFilter::try_new(filter).context("logging.filter 无效")?;
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .try_init()
-        .map_err(|error| anyhow::anyhow!("初始化 tracing 失败: {error}"))
 }
 
 #[cfg(test)]

@@ -54,6 +54,16 @@ pub enum DeploymentEnvironment {
     Production,
 }
 
+impl DeploymentEnvironment {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Test => "test",
+            Self::Production => "production",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationSettings {

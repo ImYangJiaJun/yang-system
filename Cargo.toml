@@ -19,7 +19,7 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 tokio = { version = "1.52.1", features = ["fs", "macros", "rt-multi-thread", "signal", "sync"] }
 toml = "0.8"
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics"] }
 yang-db = { version = "0.1.4", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
 

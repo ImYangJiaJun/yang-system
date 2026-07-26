@@ -260,6 +260,8 @@ async fn bootstrap_requires_operator_secret_and_is_single_use_under_concurrency(
     let (application, tools, pool) = build_harness(&mysql_url, &redis_url, verifier).await?;
     let log_writer = SharedLogWriter::default();
     let subscriber = tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
         .with_ansi(false)
         .without_time()
         .with_writer(log_writer.clone())
@@ -372,6 +374,37 @@ async fn bootstrap_requires_operator_secret_and_is_single_use_under_concurrency(
             ensure!(
                 !log_output.contains(sensitive),
                 "bootstrap 日志不得泄露 secret 或摘要"
+            );
+        }
+        let action_logs = log_output
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["message"] == "Action 执行完成")
+            .collect::<Vec<_>>();
+        ensure!(
+            !action_logs.is_empty(),
+            "每次 Action 派发必须输出 JSON 完成事件: {log_output}"
+        );
+        for event in action_logs {
+            for field in [
+                "service",
+                "version",
+                "environment",
+                "operation",
+                "request_id",
+                "result",
+                "error_code",
+                "error",
+                "duration_ms",
+            ] {
+                ensure!(
+                    event.get(field).is_some(),
+                    "Action 完成事件缺少固定字段 {field}: {event}"
+                );
+            }
+            ensure!(
+                event["span"]["name"] == "dispatch",
+                "Action 完成事件必须关联 dispatch span: {event}"
             );
         }
         Ok(())
