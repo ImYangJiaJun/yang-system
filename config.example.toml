@@ -3,6 +3,15 @@ name = "yang-system"
 # development/test 可在受控场景显式 apply；缺省按 production 处理。
 environment = "development"
 
+[authorization]
+# 同一 Redis DB 内必须唯一且发布后保持稳定；只允许小写字母、数字和连字符。
+deployment = "local"
+# 授权变更传播轮询不得高于 250ms，目标 p99 不超过 2s。
+outbox_poll_interval_ms = 250
+outbox_batch_size = 100
+outbox_lease_seconds = 10
+outbox_max_retry_seconds = 60
+
 [schema]
 # 安全默认值为 validate；首次建表与升级优先使用独立 yang-migrate 作业。
 mode = "validate"

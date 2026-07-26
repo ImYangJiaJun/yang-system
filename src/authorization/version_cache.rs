@@ -41,7 +41,7 @@ pub struct AuthorizationVersionCache {
 impl AuthorizationVersionCache {
     pub fn new(redis: RedisClient, deployment: impl Into<String>) -> anyhow::Result<Self> {
         let deployment = deployment.into();
-        validate_deployment(&deployment)?;
+        validate_deployment_name(&deployment)?;
         Ok(Self { redis, deployment })
     }
 
@@ -74,7 +74,7 @@ impl AuthorizationVersionCache {
     }
 }
 
-fn validate_deployment(deployment: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_deployment_name(deployment: &str) -> anyhow::Result<()> {
     ensure!(
         !deployment.is_empty() && deployment.len() <= MAX_DEPLOYMENT_LENGTH,
         "authorization.deployment 长度必须在 1..={MAX_DEPLOYMENT_LENGTH}"
@@ -96,10 +96,10 @@ mod tests {
 
     #[test]
     fn deployment_is_a_bounded_stable_cache_namespace() {
-        assert!(validate_deployment("prod-cn-1").is_ok());
+        assert!(validate_deployment_name("prod-cn-1").is_ok());
         for deployment in ["", "UPPER", "contains_space", "slash/value"] {
             assert!(
-                validate_deployment(deployment).is_err(),
+                validate_deployment_name(deployment).is_err(),
                 "部署命名空间必须拒绝: {deployment:?}"
             );
         }

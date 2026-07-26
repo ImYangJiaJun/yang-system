@@ -12,6 +12,7 @@ const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub app: AppSettings,
+    pub authorization: AuthorizationSettings,
     #[serde(default)]
     pub schema: SchemaSettings,
     pub http: HttpSettings,
@@ -47,6 +48,16 @@ pub enum DeploymentEnvironment {
     Test,
     #[default]
     Production,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationSettings {
+    pub deployment: String,
+    pub outbox_poll_interval_ms: u64,
+    pub outbox_batch_size: u32,
+    pub outbox_lease_seconds: u64,
+    pub outbox_max_retry_seconds: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -182,6 +193,7 @@ impl Settings {
         if self.app.name.trim().is_empty() {
             bail!("app.name 不能为空");
         }
+        self.authorization.validate()?;
         if self.schema.mode == SchemaMode::Apply
             && !matches!(
                 self.app.environment,
@@ -265,6 +277,25 @@ impl SecuritySettings {
     }
 }
 
+impl AuthorizationSettings {
+    fn validate(&self) -> anyhow::Result<()> {
+        crate::authorization::validate_deployment_name(&self.deployment)?;
+        if !(10..=250).contains(&self.outbox_poll_interval_ms) {
+            bail!("authorization.outbox_poll_interval_ms 必须在 10..=250 范围内");
+        }
+        if !(1..=1_000).contains(&self.outbox_batch_size) {
+            bail!("authorization.outbox_batch_size 必须在 1..=1000 范围内");
+        }
+        if !(1..=300).contains(&self.outbox_lease_seconds) {
+            bail!("authorization.outbox_lease_seconds 必须在 1..=300 范围内");
+        }
+        if !(1..=300).contains(&self.outbox_max_retry_seconds) {
+            bail!("authorization.outbox_max_retry_seconds 必须在 1..=300 范围内");
+        }
+        Ok(())
+    }
+}
+
 fn validate_rate_limit(name: &str, value: u64) -> anyhow::Result<()> {
     if value == 0 || value > 86_400 {
         bail!("security.auth_rate_limit_{name} 必须在 1..=86400 范围内");
@@ -310,6 +341,12 @@ mod tests {
 [app]
 name = "test"
 environment = "development"
+[authorization]
+deployment = "test-local"
+outbox_poll_interval_ms = 250
+outbox_batch_size = 100
+outbox_lease_seconds = 10
+outbox_max_retry_seconds = 60
 [schema]
 mode = "validate"
 [http]
@@ -364,6 +401,9 @@ filter = "info"
         assert_eq!(settings.redis.url, "redis://config-redis/3");
         assert_eq!(settings.schema.mode, SchemaMode::Validate);
         assert_eq!(settings.app.environment, DeploymentEnvironment::Development);
+        assert_eq!(settings.authorization.deployment, "test-local");
+        assert_eq!(settings.authorization.outbox_poll_interval_ms, 250);
+        assert_eq!(settings.authorization.outbox_batch_size, 100);
         assert!(!format!("{:?}", settings.token).contains(&settings.token.secret));
         assert_eq!(
             settings.bootstrap.secret_digest.as_str(),
@@ -567,5 +607,27 @@ filter = "info"
             Err(error) => error,
         };
         assert!(error.to_string().contains("max_concurrency"));
+    }
+
+    #[test]
+    fn rejects_unsafe_authorization_worker_settings() {
+        for raw in [
+            valid_config().replace("deployment = \"test-local\"", "deployment = \"INVALID\""),
+            valid_config().replace(
+                "outbox_poll_interval_ms = 250",
+                "outbox_poll_interval_ms = 251",
+            ),
+            valid_config().replace("outbox_batch_size = 100", "outbox_batch_size = 0"),
+            valid_config().replace("outbox_lease_seconds = 10", "outbox_lease_seconds = 0"),
+            valid_config().replace(
+                "outbox_max_retry_seconds = 60",
+                "outbox_max_retry_seconds = 301",
+            ),
+        ] {
+            assert!(
+                Settings::parse(&raw).is_err(),
+                "不安全的授权传播配置必须在启动前被拒绝"
+            );
+        }
     }
 }

@@ -2,4 +2,5 @@
 
 mod version_cache;
 
+pub(crate) use version_cache::validate_deployment_name;
 pub use version_cache::{AuthorizationVersionCache, CachePublishOutcome};
