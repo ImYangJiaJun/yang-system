@@ -512,6 +512,228 @@ async fn run_isolation_matrix(harness: &Harness) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
+    let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let tenant_a = create_tenant_actor(
+        &harness.application.runtime,
+        &format!("bypass_a_admin_{suffix}"),
+        "Bypass Tenant A",
+        &format!("BA{suffix}"),
+    )
+    .await?;
+    let tenant_b = create_tenant_actor(
+        &harness.application.runtime,
+        &format!("bypass_b_admin_{suffix}"),
+        "Bypass Tenant B",
+        &format!("BB{suffix}"),
+    )
+    .await?;
+    let tenant_a_id = tenant_a.tenant_id.to_string();
+    let tenant_a_headers = [
+        ("authorization", tenant_a.authorization.as_str()),
+        ("x-tenant-id", tenant_a_id.as_str()),
+    ];
+
+    let tenant_a_discovery = data(
+        dispatch(
+            &harness.application.runtime,
+            "org.tenant",
+            "list",
+            json!({ "page": 1, "limit": 100 }),
+            &[("authorization", tenant_a.authorization.as_str())],
+        )
+        .await?,
+    )?;
+    let tenant_a_discovery_items = tenant_a_discovery["items"]
+        .as_array()
+        .context("A 租户发现响应缺少 items")?;
+    ensure!(
+        tenant_a_discovery_items
+            .iter()
+            .any(|item| item["id"] == tenant_a.tenant_id),
+        "租户发现 join 必须返回当前用户自己的租户"
+    );
+    ensure!(
+        !tenant_a_discovery_items
+            .iter()
+            .any(|item| item["id"] == tenant_b.tenant_id),
+        "租户发现 join 不得泄露其他用户的租户"
+    );
+    let tenant_b_discovery = data(
+        dispatch(
+            &harness.application.runtime,
+            "org.tenant",
+            "list",
+            json!({ "page": 1, "limit": 100 }),
+            &[("authorization", tenant_b.authorization.as_str())],
+        )
+        .await?,
+    )?;
+    let tenant_b_discovery_items = tenant_b_discovery["items"]
+        .as_array()
+        .context("B 租户发现响应缺少 items")?;
+    ensure!(
+        tenant_b_discovery_items
+            .iter()
+            .any(|item| item["id"] == tenant_b.tenant_id)
+            && !tenant_b_discovery_items
+                .iter()
+                .any(|item| item["id"] == tenant_a.tenant_id),
+        "租户发现 join 必须双向隔离"
+    );
+
+    let relation_options = data(
+        dispatch(
+            &harness.application.runtime,
+            "org.org",
+            "select",
+            json!({
+                "search": "no-page-match",
+                "selected": [tenant_a.tenant_id, tenant_b.tenant_id],
+                "filter": {},
+                "page": 1,
+                "limit": 20
+            }),
+            &tenant_a_headers,
+        )
+        .await?,
+    )?;
+    let relation_items = relation_options["items"]
+        .as_array()
+        .context("企业关系选择响应缺少 items")?;
+    ensure!(
+        relation_items
+            .iter()
+            .any(|item| item["value"] == tenant_a.tenant_id),
+        "selected 批量关系加载必须保留当前租户选项"
+    );
+    ensure!(
+        !relation_items
+            .iter()
+            .any(|item| item["value"] == tenant_b.tenant_id),
+        "selected IN 批量关系加载不得带回其他租户"
+    );
+
+    let batch_user_a = register_user(
+        &harness.application.runtime,
+        &format!("batch_member_a_{suffix}"),
+    )
+    .await?;
+    let batch_user_b = register_user(
+        &harness.application.runtime,
+        &format!("batch_member_b_{suffix}"),
+    )
+    .await?;
+    let batch_add = dispatch(
+        &harness.application.runtime,
+        "org.user",
+        "add",
+        json!([
+            {
+                "user_user": batch_user_a,
+                "name": "Batch A",
+                "admin": false,
+                "status": "active"
+            },
+            {
+                "user_user": batch_user_b,
+                "name": "Batch B",
+                "admin": false,
+                "status": "active"
+            }
+        ]),
+        &tenant_a_headers,
+    )
+    .await;
+    ensure!(batch_add.is_err(), "成员新增契约不得接受数组形式的批量写入");
+    let batch_inserted: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM org_user WHERE user_user IN (?, ?)")
+            .bind(batch_user_a)
+            .bind(batch_user_b)
+            .fetch_one(&harness.pool)
+            .await?;
+    ensure!(batch_inserted == 0, "被拒绝的批量新增不得产生部分写入");
+
+    let tenant_a_membership = creator_membership_id(&harness.pool, &tenant_a).await?;
+    let tenant_b_membership = creator_membership_id(&harness.pool, &tenant_b).await?;
+    let membership_before: Vec<(i64, String, String, bool)> = sqlx::query_as(
+        "SELECT id, name, status, admin FROM org_user WHERE id IN (?, ?) ORDER BY id",
+    )
+    .bind(tenant_a_membership)
+    .bind(tenant_b_membership)
+    .fetch_all(&harness.pool)
+    .await?;
+    let batch_put = dispatch(
+        &harness.application.runtime,
+        "org.user",
+        "put",
+        json!({
+            "id": [tenant_a_membership, tenant_b_membership],
+            "data": { "name": "Batch Cross Tenant Write" }
+        }),
+        &tenant_a_headers,
+    )
+    .await;
+    ensure!(batch_put.is_err(), "成员更新契约不得接受数组形式的批量主键");
+    let batch_delete = dispatch(
+        &harness.application.runtime,
+        "org.user",
+        "del",
+        json!({ "id": [tenant_a_membership, tenant_b_membership] }),
+        &tenant_a_headers,
+    )
+    .await;
+    ensure!(
+        batch_delete.is_err(),
+        "成员删除契约不得接受数组形式的批量主键"
+    );
+    let membership_after: Vec<(i64, String, String, bool)> = sqlx::query_as(
+        "SELECT id, name, status, admin FROM org_user WHERE id IN (?, ?) ORDER BY id",
+    )
+    .bind(tenant_a_membership)
+    .bind(tenant_b_membership)
+    .fetch_all(&harness.pool)
+    .await?;
+    ensure!(
+        membership_after == membership_before,
+        "被拒绝的批量更新/删除不得改变任一租户记录"
+    );
+
+    let trigger_name = format!("force_org_user_failure_{suffix}");
+    let create_trigger = format!(
+        "CREATE TRIGGER `{trigger_name}` BEFORE INSERT ON `org_user` \
+         FOR EACH ROW SIGNAL SQLSTATE '45000' \
+         SET MESSAGE_TEXT = 'forced tenant onboarding membership failure'"
+    );
+    sqlx::raw_sql(&create_trigger)
+        .execute(&harness.pool)
+        .await?;
+    let rollback_code = format!("ROLLBACK{suffix}");
+    let failed_onboarding = dispatch(
+        &harness.application.runtime,
+        "org.tenant",
+        "create",
+        json!({ "name": "Must Roll Back", "code": rollback_code }),
+        &[("authorization", tenant_a.authorization.as_str())],
+    )
+    .await;
+    let drop_trigger = format!("DROP TRIGGER IF EXISTS `{trigger_name}`");
+    sqlx::raw_sql(&drop_trigger).execute(&harness.pool).await?;
+    ensure!(
+        failed_onboarding.is_err(),
+        "测试触发器必须强制租户创建第二步失败"
+    );
+    let rolled_back_orgs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM org_org WHERE code = ?")
+        .bind(&rollback_code)
+        .fetch_one(&harness.pool)
+        .await?;
+    ensure!(
+        rolled_back_orgs == 0,
+        "首个成员插入失败时，事务必须回滚已插入的企业"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn tenant_crud_and_object_ids_are_isolated_end_to_end() -> anyhow::Result<()> {
@@ -526,6 +748,25 @@ async fn tenant_crud_and_object_ids_are_isolated_end_to_end() -> anyhow::Result<
 
     let harness = build_harness(&mysql_url, &redis_url).await?;
     let outcome = run_isolation_matrix(&harness).await;
+    let cleanup = reset_test_database(&harness.pool).await;
+    harness.tools.close().await;
+    merge_outcome(outcome, cleanup)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn tenant_join_relation_batch_and_transaction_bypasses_are_closed() -> anyhow::Result<()> {
+    let mysql_url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
+        .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
+    let redis_url =
+        std::env::var("YANG_SYSTEM_TEST_REDIS_URL").context("缺少 YANG_SYSTEM_TEST_REDIS_URL")?;
+    ensure!(
+        redis_url.trim_end_matches('/').ends_with("/15"),
+        "集成测试 Redis URL 必须使用独立 DB 15"
+    );
+
+    let harness = build_harness(&mysql_url, &redis_url).await?;
+    let outcome = run_bypass_matrix(&harness).await;
     let cleanup = reset_test_database(&harness.pool).await;
     harness.tools.close().await;
     merge_outcome(outcome, cleanup)
