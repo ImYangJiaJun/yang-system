@@ -74,6 +74,14 @@ fn token_authz_version(tools: &yang_base::tools::Tools, token: &str) -> anyhow::
         .context("Token 缺少正整数 authz_version")
 }
 
+async fn database_authz_version(pool: &sqlx::MySqlPool, user_id: i64) -> anyhow::Result<i64> {
+    sqlx::query_scalar("SELECT authz_version FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+}
+
 async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
     let database: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
         .fetch_one(pool)
@@ -167,7 +175,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let username = format!("integration_{suffix}");
     let password = "correct-horse-battery-staple";
-    data(
+    let registered = data(
         dispatch(
             &application.runtime,
             "account.user",
@@ -178,6 +186,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         )
         .await?,
     )?;
+    let user_id = registered["id"].as_i64().context("注册响应缺少用户 id")?;
 
     let login = data(
         dispatch(
@@ -201,7 +210,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         login_authz_version == token_authz_version(&tools, refresh_token)?,
         "同次登录签发的 Access/Refresh Token 必须携带同一授权版本"
     );
-    data(
+    let bootstrap = data(
         dispatch(
             &application.runtime,
             "admin.user",
@@ -216,6 +225,9 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         )
         .await?,
     )?;
+    let bootstrap_admin_id = bootstrap["id"]
+        .as_i64()
+        .context("平台管理员初始化响应缺少 id")?;
     ensure!(
         dispatch(
             &application.runtime,
@@ -252,6 +264,15 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == token_authz_version(&tools, admin_refresh_token)?,
         "refresh 签发的 Access/Refresh Token 必须携带同一授权版本"
     );
+    ensure!(
+        token_authz_version(&tools, admin_access_token)? == login_authz_version + 1,
+        "bootstrap 必须在同一事务中递增目标用户授权版本"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), user_id).await?
+            == token_authz_version(&tools, admin_access_token)?,
+        "bootstrap 提交后的数据库版本必须与刷新快照一致"
+    );
     let admin_authorization = format!("Bearer {admin_access_token}");
     let admin_accounts = data(
         dispatch(
@@ -271,19 +292,6 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         "刷新 Token 后应获得平台账号读取权限"
     );
 
-    let organization = data(
-        dispatch(
-            &application.runtime,
-            "org.tenant",
-            "create",
-            json!({ "name": "Integration Corp", "code": format!("IT{suffix}") }),
-            &[("authorization", &admin_authorization)],
-            &[],
-        )
-        .await?,
-    )?;
-    let organization_id = organization["id"].as_i64().context("创建企业响应缺少 id")?;
-
     let member_username = format!("member_{suffix}");
     let member = data(
         dispatch(
@@ -297,6 +305,133 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .await?,
     )?;
     let member_id = member["id"].as_i64().context("成员注册响应缺少 id")?;
+    let member_initial_version = database_authz_version(tools.mysql()?.pool(), member_id).await?;
+    let platform_member = data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "add",
+            json!({
+                "user_user": member_id,
+                "name": "Integration Platform Member",
+                "admin": false
+            }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    let platform_member_id = platform_member["id"]
+        .as_i64()
+        .context("添加平台账号响应缺少 id")?;
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), member_id).await?
+            == member_initial_version + 1,
+        "新增平台账号必须递增目标用户授权版本"
+    );
+
+    let main_version_before_rejected_demotion =
+        database_authz_version(tools.mysql()?.pool(), user_id).await?;
+    ensure!(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_admin",
+            json!({ "id": bootstrap_admin_id, "admin": false }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await
+        .is_err(),
+        "最后一个启用中的超级管理员不得被降级"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), user_id).await?
+            == main_version_before_rejected_demotion,
+        "失败事务不得递增授权版本"
+    );
+
+    data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_admin",
+            json!({ "id": platform_member_id, "admin": false }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    let member_version_after_idempotent_admin =
+        database_authz_version(tools.mysql()?.pool(), member_id).await?;
+    ensure!(
+        member_version_after_idempotent_admin == member_initial_version + 1,
+        "幂等 admin 写不得递增授权版本"
+    );
+    for admin in [true, false] {
+        data(
+            dispatch(
+                &application.runtime,
+                "admin.user",
+                "set_admin",
+                json!({ "id": platform_member_id, "admin": admin }),
+                &[("authorization", &admin_authorization)],
+                &[],
+            )
+            .await?,
+        )?;
+    }
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), member_id).await?
+            == member_version_after_idempotent_admin + 2,
+        "超级管理员授予与撤销必须各递增一次授权版本"
+    );
+
+    data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "set_status",
+            json!({ "id": platform_member_id, "status": "active" }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    let member_version_after_idempotent_status =
+        database_authz_version(tools.mysql()?.pool(), member_id).await?;
+    for status in ["disabled", "active"] {
+        data(
+            dispatch(
+                &application.runtime,
+                "admin.user",
+                "set_status",
+                json!({ "id": platform_member_id, "status": status }),
+                &[("authorization", &admin_authorization)],
+                &[],
+            )
+            .await?,
+        )?;
+    }
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), member_id).await?
+            == member_version_after_idempotent_status + 2,
+        "平台账号停用与启用必须各递增一次授权版本"
+    );
+
+    let organization = data(
+        dispatch(
+            &application.runtime,
+            "org.tenant",
+            "create",
+            json!({ "name": "Integration Corp", "code": format!("IT{suffix}") }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    let organization_id = organization["id"].as_i64().context("创建企业响应缺少 id")?;
+
     let tenant_id = organization_id.to_string();
     let member_body = json!({
         "user_user": member_id,

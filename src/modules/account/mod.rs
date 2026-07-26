@@ -1,5 +1,6 @@
 //! 账号 Addon 的公开组装入口。
 
+mod authz_version;
 mod grants;
 mod user;
 
@@ -8,6 +9,9 @@ use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
+pub(crate) use authz_version::{
+    increment_locked_authz_version, lock_user_authorization, LockedUserAuthorization,
+};
 pub(crate) use grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
 pub(crate) use user::user_from_claims;
 
