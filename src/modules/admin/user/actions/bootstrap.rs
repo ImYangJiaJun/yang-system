@@ -44,10 +44,39 @@ impl ActionHandler for BootstrapAction {
         ctx: ActionContext,
         input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
-        authorize_bootstrap_secret(&ctx, &input.secret).await?;
-        self.service
+        let actor_id = ctx.authenticated_user().map(|user| user.id);
+        let request_id = ctx.request_id();
+        if let Err(error) = authorize_bootstrap_secret(&ctx, &input.secret).await {
+            tracing::warn!(
+                ?actor_id,
+                %request_id,
+                outcome = "credential_rejected",
+                error_code = error.code_str(),
+                "平台管理员初始化"
+            );
+            return Err(error);
+        }
+
+        let result = self
+            .service
             .bootstrap(&ctx, &input.name, input.position.as_deref())
-            .await
+            .await;
+        match &result {
+            Ok(_) => tracing::info!(
+                ?actor_id,
+                %request_id,
+                outcome = "succeeded",
+                "平台管理员初始化"
+            ),
+            Err(error) => tracing::warn!(
+                ?actor_id,
+                %request_id,
+                outcome = "failed",
+                error_code = error.code_str(),
+                "平台管理员初始化"
+            ),
+        }
+        result
     }
 }
 

@@ -94,6 +94,19 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "Bootstrap trust-root integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "bootstrap_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Real MySQL/Redis system integration",
         (
             "cargo",
@@ -151,6 +164,7 @@ def self_test() -> None:
         if command.argv[:3] == ("cargo", "test", "--test")
     }
     assert integration_tests == {
+        "bootstrap_integration",
         "migration_job_integration",
         "schema_apply_integration",
         "system_integration",
