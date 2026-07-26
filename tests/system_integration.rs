@@ -91,7 +91,13 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         database.ends_with("_test"),
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
-    for table in ["org_user", "org_org", "admin_user", "users"] {
+    for table in [
+        "authorization_outbox",
+        "org_user",
+        "org_org",
+        "admin_user",
+        "users",
+    ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
             .execute(pool)
             .await?;
@@ -164,6 +170,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let pending = initializer.plan_table_definitions(&definitions).await?;
     ensure!(!pending.is_noop(), "空测试数据库应产生 schema 变更计划");
     initializer.sync_table_definitions(&definitions).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0006_create_authorization_outbox.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
     ensure!(
         initializer
             .plan_table_definitions(&definitions)
@@ -654,6 +665,36 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         database_authz_version(tools.mysql()?.pool(), replacement_id).await?
             == replacement_initial_version + 2,
         "删除企业成员必须原子递增当前绑定用户授权版本"
+    );
+    let inconsistent_outbox_users: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (\
+            SELECT u.id \
+            FROM users u \
+            LEFT JOIN authorization_outbox o ON o.user_id = u.id \
+            WHERE u.authz_version > 1 \
+            GROUP BY u.id, u.authz_version \
+            HAVING COUNT(o.id) <> u.authz_version - 1 \
+                OR MIN(o.authz_version) <> 2 \
+                OR MAX(o.authz_version) <> u.authz_version\
+        ) inconsistent",
+    )
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        inconsistent_outbox_users == 0,
+        "每次已提交授权版本递增都必须恰好产生连续、无重复的 Outbox 事件"
+    );
+    let invalid_outbox_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM authorization_outbox \
+         WHERE state <> 'pending' OR attempts <> 0 OR available_at <= 0 OR created_at <= 0 \
+            OR lease_until IS NOT NULL OR worker_id IS NOT NULL \
+            OR published_at IS NOT NULL OR last_error IS NOT NULL",
+    )
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        invalid_outbox_rows == 0,
+        "事务 writer 只能写入可立即派发的纯净 pending 事件"
     );
 
     tools.close().await;

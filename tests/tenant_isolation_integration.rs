@@ -85,7 +85,13 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         database.ends_with("_test"),
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
-    for table in ["org_user", "org_org", "admin_user", "users"] {
+    for table in [
+        "authorization_outbox",
+        "org_user",
+        "org_org",
+        "admin_user",
+        "users",
+    ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
             .execute(pool)
             .await?;
@@ -144,6 +150,11 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
         .iter()
         .collect::<Vec<_>>();
     initializer.sync_table_definitions(&definitions).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0006_create_authorization_outbox.sql"
+    ))
+    .execute(&pool)
+    .await?;
     Ok(Harness {
         application,
         tools,
@@ -732,6 +743,11 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
     let rollback_code = format!("ROLLBACK{suffix}");
     let creator_version_before_failed_onboarding =
         database_authz_version(&harness.pool, tenant_a.user_id).await?;
+    let outbox_before_failed_onboarding: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM authorization_outbox WHERE user_id = ?")
+            .bind(tenant_a.user_id)
+            .fetch_one(&harness.pool)
+            .await?;
     let failed_onboarding = dispatch(
         &harness.application.runtime,
         "org.tenant",
@@ -759,6 +775,15 @@ async fn run_bypass_matrix(harness: &Harness) -> anyhow::Result<()> {
         database_authz_version(&harness.pool, tenant_a.user_id).await?
             == creator_version_before_failed_onboarding,
         "onboarding 失败事务不得递增创建者授权版本"
+    );
+    let outbox_after_failed_onboarding: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM authorization_outbox WHERE user_id = ?")
+            .bind(tenant_a.user_id)
+            .fetch_one(&harness.pool)
+            .await?;
+    ensure!(
+        outbox_after_failed_onboarding == outbox_before_failed_onboarding,
+        "onboarding 失败事务不得遗留未提交的授权 Outbox 事件"
     );
     Ok(())
 }

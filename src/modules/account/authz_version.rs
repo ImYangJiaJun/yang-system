@@ -60,7 +60,7 @@ pub(crate) async fn lock_user_authorizations(
     Ok(locked)
 }
 
-/// 在持有用户行锁的同一事务中递增版本，并返回新版本。
+/// 在持有用户行锁的同一事务中递增版本、写入 Outbox，并返回新版本。
 pub(crate) async fn increment_locked_authz_version(
     transaction: &mut Transaction,
     locked: &LockedUserAuthorization,
@@ -79,6 +79,16 @@ pub(crate) async fn increment_locked_authz_version(
             format!("用户 {} 授权版本在持锁事务内发生意外变化", locked.user_id),
         )));
     }
+    sqlx::query(
+        "INSERT INTO authorization_outbox \
+         (user_id, authz_version, state, attempts, available_at, created_at) \
+         VALUES (?, ?, 'pending', 0, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())",
+    )
+    .bind(locked.user_id)
+    .bind(next)
+    .execute(executor(transaction)?)
+    .await
+    .map_err(yang_db::DbError::from)?;
     Ok(next)
 }
 

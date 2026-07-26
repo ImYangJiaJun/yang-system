@@ -108,7 +108,13 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         database.ends_with("_test"),
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
-    for table in ["org_user", "org_org", "admin_user", "users"] {
+    for table in [
+        "authorization_outbox",
+        "org_user",
+        "org_org",
+        "admin_user",
+        "users",
+    ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
             .execute(pool)
             .await?;
@@ -169,6 +175,11 @@ async fn build_harness(
         .iter()
         .collect::<Vec<_>>();
     initializer.sync_table_definitions(&definitions).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0006_create_authorization_outbox.sql"
+    ))
+    .execute(&pool)
+    .await?;
     Ok((application, tools, pool))
 }
 
