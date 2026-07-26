@@ -10,6 +10,7 @@ anyhow = "1.0"
 argon2 = "0.5.3"
 async-trait = "0.1.89"
 jsonwebtoken = "=9.3.1"
+metrics = "0.24.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 schemars = "0.8"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -19,7 +20,7 @@ tokio = { version = "1.52.1", features = ["fs", "macros", "rt-multi-thread", "si
 toml = "0.8"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum"] }
+yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics"] }
 yang-db = { version = "0.1.4", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
 
 [lints.rust]

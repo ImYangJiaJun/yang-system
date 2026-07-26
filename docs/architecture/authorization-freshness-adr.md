@@ -247,6 +247,12 @@ Redis 单点故障扩大为全站故障，主库回退是可信比较而不是�
 - `authz_outbox_publish_total{result=success|retry}`
 - `authz_propagation_seconds`
 
+应用进程在进入 HTTP 服务前校验 `authorization_outbox` 列与关键索引并启动
+传播 Worker；退出 HTTP 服务后先停止 Worker，再关闭 Redis/MySQL。Worker 使用
+`FOR UPDATE SKIP LOCKED` claim，Redis 调用位于 MySQL 事务外；失败采用有上界的
+指数退避，租约过期、重复事件、乱序事件以及“Redis 成功但 DB 完成标记失败”均通过
+至少一次重放与 Redis 单调脚本收敛。
+
 日志包含 `request_id`、`user_id`、Token 版本、当前版本和稳定错误码；不记录 JWT、密码、
 完整 claims 或 Redis 凭据。对版本高于事实源、版本回退企图和超过 5 秒的传播延迟告警。
 

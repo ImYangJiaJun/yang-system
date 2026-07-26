@@ -1,4 +1,5 @@
 use crate::app::build_app;
+use crate::authorization::AuthorizationOutboxWorker;
 use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
 use crate::transport::http;
@@ -104,8 +105,17 @@ async fn run_after_tools_created(
     drop(initializer);
 
     let bind = settings.bind_addr()?;
+    let outbox_worker = AuthorizationOutboxWorker::start(&tools, settings.authorization.clone())
+        .await
+        .context("启动授权 Outbox Worker 失败")?;
     let runtime = Arc::new(application.runtime);
-    http::serve(bind, runtime, &settings.http).await
+    let serve_result = http::serve(bind, runtime, &settings.http).await;
+    let shutdown_result = outbox_worker.shutdown().await;
+    match (serve_result, shutdown_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error.context("停止授权 Outbox Worker 失败")),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 /// 等待 operation 完成后无条件执行且仅执行一次 cleanup，并保留原始结果。

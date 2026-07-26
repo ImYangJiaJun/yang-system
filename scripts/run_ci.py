@@ -81,6 +81,19 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "Authorization outbox worker replay integration",
+        (
+            "cargo",
+            "test",
+            "--lib",
+            "--locked",
+            "authorization::worker::tests::real_outbox_supports_concurrent_claim_retry_and_expired_lease_replay",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Versioned migration job integration",
         (
             "cargo",
