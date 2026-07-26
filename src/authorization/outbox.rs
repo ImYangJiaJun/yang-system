@@ -103,14 +103,25 @@ impl AuthorizationOutboxRepository {
             .begin()
             .await
             .context("开启 Outbox claim 事务失败")?;
+        // MySQL 会缓存预编译语句的索引范围。若把 UNIX_TIMESTAMP() 直接放进范围谓词，
+        // 首次空轮询时的时间边界可能被后续执行复用，导致后来写入的事件永久不可见。
+        // 先在同一事务内采样数据库时钟，再把边界作为参数绑定，既保持索引可用，
+        // 又确保每轮 claim 使用新的、跨实例一致的时间。
+        let now: i64 = sqlx::query_scalar("SELECT CAST(UNIX_TIMESTAMP() AS SIGNED)")
+            .fetch_one(&mut *transaction)
+            .await
+            .context("读取 Outbox claim 数据库时钟失败")?;
+        ensure!(now > 0, "Outbox claim 数据库时钟无效");
         let rows: Vec<(i64, i64, i64, u32, i64)> = sqlx::query_as(
             "SELECT id, user_id, authz_version, attempts, created_at \
              FROM authorization_outbox \
-             WHERE (state = 'pending' AND available_at <= UNIX_TIMESTAMP()) \
-                OR (state = 'processing' AND lease_until <= UNIX_TIMESTAMP()) \
+             WHERE (state = 'pending' AND available_at <= ?) \
+                OR (state = 'processing' AND lease_until <= ?) \
              ORDER BY id \
              LIMIT ? FOR UPDATE SKIP LOCKED",
         )
+        .bind(now)
+        .bind(now)
         .bind(settings.outbox_batch_size)
         .fetch_all(&mut *transaction)
         .await
@@ -128,10 +139,11 @@ impl AuthorizationOutboxRepository {
             let result = sqlx::query(
                 "UPDATE authorization_outbox \
                  SET state = 'processing', attempts = ?, \
-                     lease_until = UNIX_TIMESTAMP() + ?, worker_id = ?, last_error = NULL \
+                     lease_until = ? + ?, worker_id = ?, last_error = NULL \
                  WHERE id = ?",
             )
             .bind(attempts)
+            .bind(now)
             .bind(settings.outbox_lease_seconds)
             .bind(worker_id)
             .bind(id)
@@ -246,6 +258,8 @@ fn bounded_error(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use yang_db::{Database, DatabaseConfig};
 
     #[test]
     fn retry_is_exponential_bounded_and_overflow_safe() {
@@ -262,5 +276,70 @@ mod tests {
         let bounded = bounded_error(&error);
         assert_eq!(bounded.chars().count(), MAX_LAST_ERROR_CHARS);
         assert!(bounded.is_char_boundary(bounded.len()));
+    }
+
+    #[tokio::test]
+    #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL"]
+    async fn claim_refreshes_prepared_statement_time_boundary() -> anyhow::Result<()> {
+        let mysql_url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
+            .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = Database::connect_with_config(
+            &mysql_url,
+            DatabaseConfig::default()
+                .with_max_connections(1)
+                .with_min_connections(0)
+                .with_connect_timeout(10),
+        )
+        .await?;
+        let database_name: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        ensure!(
+            database_name.is_some_and(|name| name.ends_with("_test")),
+            "授权 Outbox 集成测试只能使用 _test 数据库"
+        );
+        sqlx::query("DROP TABLE IF EXISTS authorization_outbox")
+            .execute(database.pool())
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20260726_0006_create_authorization_outbox.sql"
+        ))
+        .execute(database.pool())
+        .await?;
+
+        let repository = AuthorizationOutboxRepository::new(database.pool().clone());
+        let settings = AuthorizationSettings {
+            deployment: "outbox-boundary-regression".to_string(),
+            outbox_poll_interval_ms: 10,
+            outbox_batch_size: 10,
+            outbox_lease_seconds: 5,
+            outbox_max_retry_seconds: 5,
+        };
+        assert!(
+            repository.claim(&settings, "cold-poll").await?.is_empty(),
+            "首次空轮询必须返回空批次"
+        );
+        sqlx::query(
+            "INSERT INTO authorization_outbox \
+             (user_id, authz_version, available_at, created_at) \
+             VALUES (900001, 2, UNIX_TIMESTAMP() + 1, UNIX_TIMESTAMP())",
+        )
+        .execute(database.pool())
+        .await?;
+        tokio::time::sleep(Duration::from_millis(2_100)).await;
+
+        let claimed = repository.claim(&settings, "warm-poll").await?;
+        assert_eq!(
+            claimed.len(),
+            1,
+            "空轮询后写入的到期事件不得受预编译时间边界影响"
+        );
+        assert_eq!(claimed[0].user_id, 900001);
+
+        sqlx::query("DROP TABLE IF EXISTS authorization_outbox")
+            .execute(database.pool())
+            .await?;
+        database.close().await;
+        Ok(())
     }
 }
