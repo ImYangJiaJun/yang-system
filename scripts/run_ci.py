@@ -107,6 +107,19 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "Tenant CRUD isolation integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "tenant_isolation_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Real MySQL/Redis system integration",
         (
             "cargo",
@@ -168,6 +181,7 @@ def self_test() -> None:
         "migration_job_integration",
         "schema_apply_integration",
         "system_integration",
+        "tenant_isolation_integration",
     }
     print("local CI runner self-test: passed")
 
