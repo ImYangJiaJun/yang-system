@@ -27,6 +27,7 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `observability.traces_otlp_endpoint` | `YANG_SYSTEM_OBSERVABILITY_TRACES_OTLP_ENDPOINT` |
 | `observability.traces_sample_ratio` | `YANG_SYSTEM_OBSERVABILITY_TRACES_SAMPLE_RATIO` |
 | `observability.traces_export_timeout_seconds` | `YANG_SYSTEM_OBSERVABILITY_TRACES_EXPORT_TIMEOUT_SECONDS` |
+| `observability.readiness_budget_ms` | `YANG_SYSTEM_OBSERVABILITY_READINESS_BUDGET_MS` |
 
 `config.example.toml` 中的所有字段均支持该映射。整数使用非负十进制，
 `traces_sample_ratio` 使用有限浮点数，
@@ -34,6 +35,10 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 `max_lifetime_seconds` 可用空字符串或 `none` 清除。不认识的
 `YANG_SYSTEM_*` 变量会让启动失败，避免拼写错误被静默忽略；
 `YANG_SYSTEM_TEST_*` 保留给测试门禁。
+
+`app.environment=production` 时必须启用 `observability.metrics_enabled`，以保证
+独立管理面 `/metrics` 与预算化 `/health/ready` 一定存在；开发与测试环境可以显式
+关闭。`observability.readiness_budget_ms` 默认 2000，允许 50..=10000。
 
 `token.retiring_keys` 是对象数组，环境变量使用显式的
 `YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON`，例如：

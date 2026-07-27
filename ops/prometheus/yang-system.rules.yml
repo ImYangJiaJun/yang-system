@@ -1,0 +1,125 @@
+groups:
+  - name: yang-system-slo-recording
+    interval: 30s
+    rules:
+      - record: yang_system:sli_action_error_ratio:rate5m
+        expr: |
+          sum by (job) (rate(yang_system_action_requests_total{result="error"}[5m]))
+          /
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total[5m])), 0.001)
+      - record: yang_system:sli_action_error_ratio:rate1h
+        expr: |
+          sum by (job) (rate(yang_system_action_requests_total{result="error"}[1h]))
+          /
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total[1h])), 0.001)
+      - record: yang_system:sli_action_error_ratio:rate6h
+        expr: |
+          sum by (job) (rate(yang_system_action_requests_total{result="error"}[6h]))
+          /
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total[6h])), 0.001)
+      - record: yang_system:sli_action_error_ratio:rate3d
+        expr: |
+          sum by (job) (rate(yang_system_action_requests_total{result="error"}[3d]))
+          /
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total[3d])), 0.001)
+      - record: yang_system:sli_action_latency_p95_seconds:rate5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (rate(yang_system_action_duration_seconds_bucket[5m]))
+          )
+
+  - name: yang-system-slo-alerts
+    rules:
+      - alert: YangSystemAvailabilityErrorBudgetFastBurn
+        expr: |
+          yang_system:sli_action_error_ratio:rate5m > 0.0144
+          and on (job)
+          yang_system:sli_action_error_ratio:rate1h > 0.0144
+        for: 2m
+        labels:
+          severity: critical
+          slo: availability
+        annotations:
+          summary: "yang-system availability error budget is burning quickly"
+          runbook: "docs/SLO.md"
+
+      - alert: YangSystemAvailabilityErrorBudgetSlowBurn
+        expr: |
+          yang_system:sli_action_error_ratio:rate6h > 0.001
+          and on (job)
+          yang_system:sli_action_error_ratio:rate3d > 0.001
+        for: 30m
+        labels:
+          severity: warning
+          slo: availability
+        annotations:
+          summary: "yang-system availability error budget is burning continuously"
+          runbook: "docs/SLO.md"
+
+      - alert: YangSystemActionLatencyP95High
+        expr: yang_system:sli_action_latency_p95_seconds:rate5m > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          slo: latency
+        annotations:
+          summary: "yang-system Action p95 latency exceeds 500 ms"
+          runbook: "docs/SLO.md"
+
+      - alert: YangSystemReadinessUnavailable
+        expr: max_over_time(yang_system_readiness_ready[2m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+          slo: readiness
+        annotations:
+          summary: "yang-system instance has not passed readiness for two minutes"
+          runbook: "docs/SLO.md"
+
+      - alert: YangSystemAuthorizationPropagationDelayed
+        expr: authz_outbox_oldest_age_seconds > 2
+        for: 5m
+        labels:
+          severity: warning
+          slo: authorization_freshness
+        annotations:
+          summary: "authorization outbox propagation exceeds two seconds"
+          runbook: "docs/SLO.md"
+
+      - alert: YangSystemResourcePoolExhausted
+        expr: |
+          (
+            yang_system_resource_pool_connections{state="open"}
+            /
+            ignoring (state)
+            clamp_min(yang_system_resource_pool_connections{state="max"}, 1)
+          ) >= 0.9
+          and on (job, instance, resource)
+          yang_system_resource_pool_connections{state="available"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          slo: dependency_capacity
+        annotations:
+          summary: "yang-system dependency connection pool is exhausted"
+          runbook: "docs/SLO.md"
+
+      - alert: YangSystemAuthRateLimitDependencyUnavailable
+        expr: rate(yang_system_auth_rate_limit_total{result="unavailable"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          slo: dependency_availability
+        annotations:
+          summary: "authentication rate limiter cannot reach Redis"
+          runbook: "docs/SLO.md"
+
+      - alert: YangSystemShutdownPhaseTimedOut
+        expr: increase(shutdown_phase_total{result="timeout"}[15m]) > 0
+        labels:
+          severity: warning
+          slo: graceful_shutdown
+        annotations:
+          summary: "yang-system shutdown phase exhausted the process budget"
+          runbook: "docs/SLO.md"

@@ -292,19 +292,28 @@
 - 可按 actor、target、tenant、request_id 检索；
 - 审计表只追加，修改/删除权限独立控制。
 
-### S-09：可观测性尚未形成运行闭环
+### S-09：可观测性运行闭环已完成基础版
 
 **优先级：P1；影响：故障定位和容量管理。**
 
-当前有 tracing、request id、live/ready 和慢查询基础，但系统没有完整启用/导出基础库 metrics，也缺少结构化生产日志、trace exporter 和关键 SLI。
+系统现已输出固定字段 JSON 日志，以独立管理面导出 Prometheus 指标，并通过
+OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生产环境强制
+启用管理面；readiness 受单一总预算与 starting/ready/stopping gate 约束，规则文件
+定义 99.9% 可用性、多窗口 burn-rate、p95 延迟、授权传播、连接池与关闭超时告警。
 
-**建议路径：**
+**已落地路径：**
 
 - 日志采用 JSON，固定 service、version、environment、request_id、action、result；
 - 接入 OpenTelemetry trace 或等价方案；
 - 暴露请求量、错误率、延迟、连接池、Redis、限流、授权版本不匹配、Schema 状态；
 - readiness 检查设置总预算，避免依赖逐个串行阻塞；
 - 定义告警而非只暴露指标。
+
+**剩余演练：**
+
+- 在真实 Prometheus/Alertmanager 环境加载规则并执行一次告警路由演练；
+- 用稳定压测数据校准默认 500 ms p95 与连接池阈值；
+- 多副本滚动发布时验证 readiness 先撤销、在途请求后排空的时间线。
 
 **验收条件：**
 
@@ -367,7 +376,7 @@
 | **已覆盖** | P1 | 组织创建中途失败 | 组织和成员同事务，不残留半成品 |
 | **已完成基础版** | P1 | Schema 多步失败/重跑 | 迁移 checksum、完成探针和重试不误记成功 |
 | **待完成** | P1 | 受信代理 IP | 转发头不能伪造，代理用户不会全部共享同一身份 |
-| **待完成** | P2 | readiness 依赖超时 | 有界返回且状态可诊断 |
+| **已完成** | P2 | readiness 依赖超时 | 管理面单一总预算；lifecycle/dependency/timeout 有限原因；真实 TCP 探针与 timeout 单测 |
 | **待完成** | P2 | audit outbox 重投 | 至少一次投递不产生重复业务事实 |
 
 ## 七、分阶段改进路径

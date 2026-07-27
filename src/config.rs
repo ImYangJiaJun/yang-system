@@ -217,6 +217,8 @@ pub struct ObservabilitySettings {
     pub traces_sample_ratio: f64,
     #[serde(default = "default_traces_export_timeout_seconds")]
     pub traces_export_timeout_seconds: u64,
+    #[serde(default = "default_readiness_budget_ms")]
+    pub readiness_budget_ms: u64,
 }
 
 impl Default for ObservabilitySettings {
@@ -228,6 +230,7 @@ impl Default for ObservabilitySettings {
             traces_otlp_endpoint: default_traces_otlp_endpoint(),
             traces_sample_ratio: default_traces_sample_ratio(),
             traces_export_timeout_seconds: default_traces_export_timeout_seconds(),
+            readiness_budget_ms: default_readiness_budget_ms(),
         }
     }
 }
@@ -265,6 +268,10 @@ const fn default_traces_sample_ratio() -> f64 {
 
 const fn default_traces_export_timeout_seconds() -> u64 {
     5
+}
+
+const fn default_readiness_budget_ms() -> u64 {
+    2_000
 }
 
 impl Settings {
@@ -349,6 +356,11 @@ impl Settings {
             bail!("shutdown.total_timeout_seconds 必须在 1..=300 范围内");
         }
         self.observability.validate(self.bind_addr()?)?;
+        if self.app.environment == DeploymentEnvironment::Production
+            && !self.observability.metrics_enabled
+        {
+            bail!("production 环境必须启用 observability.metrics_enabled 管理面与预算化 readiness");
+        }
         Ok(())
     }
 }
@@ -371,6 +383,9 @@ impl ObservabilitySettings {
         }
         if !(1..=60).contains(&self.traces_export_timeout_seconds) {
             bail!("observability.traces_export_timeout_seconds 必须在 1..=60 范围内");
+        }
+        if !(50..=10_000).contains(&self.readiness_budget_ms) {
+            bail!("observability.readiness_budget_ms 必须在 50..=10000 范围内");
         }
         if self.traces_enabled {
             let endpoint = self.traces_otlp_endpoint.trim();
@@ -595,6 +610,7 @@ traces_enabled = false
 traces_otlp_endpoint = "http://127.0.0.1:4317"
 traces_sample_ratio = 0.1
 traces_export_timeout_seconds = 5
+readiness_budget_ms = 2000
 [logging]
 filter = "info"
 "#
@@ -832,7 +848,9 @@ filter = "info"
 
     #[test]
     fn deployment_environment_defaults_to_production() {
-        let raw = valid_config().replace("environment = \"development\"\n", "");
+        let raw = valid_config()
+            .replace("environment = \"development\"\n", "")
+            .replace("metrics_enabled = false", "metrics_enabled = true");
         let settings = Settings::parse(&raw)
             .unwrap_or_else(|error| panic!("缺省部署环境应采用安全默认值: {error}"));
         assert_eq!(settings.app.environment, DeploymentEnvironment::Production);
@@ -864,7 +882,7 @@ filter = "info"
     #[test]
     fn observability_defaults_are_disabled_and_validation_is_fail_fast() {
         let without_section = valid_config().replace(
-            "[observability]\nmetrics_enabled = false\nmetrics_bind = \"127.0.0.1:9090\"\ntraces_enabled = false\ntraces_otlp_endpoint = \"http://127.0.0.1:4317\"\ntraces_sample_ratio = 0.1\ntraces_export_timeout_seconds = 5\n",
+            "[observability]\nmetrics_enabled = false\nmetrics_bind = \"127.0.0.1:9090\"\ntraces_enabled = false\ntraces_otlp_endpoint = \"http://127.0.0.1:4317\"\ntraces_sample_ratio = 0.1\ntraces_export_timeout_seconds = 5\nreadiness_budget_ms = 2000\n",
             "",
         );
         let settings = Settings::parse(&without_section)
@@ -884,6 +902,7 @@ filter = "info"
                 "traces_export_timeout_seconds = 5",
                 "traces_export_timeout_seconds = 0",
             ),
+            valid_config().replace("readiness_budget_ms = 2000", "readiness_budget_ms = 49"),
             valid_config()
                 .replace("traces_enabled = false", "traces_enabled = true")
                 .replace(
@@ -896,6 +915,22 @@ filter = "info"
                 "非法可观测性配置必须在启动前失败"
             );
         }
+    }
+
+    #[test]
+    fn production_requires_the_budgeted_management_probe() {
+        let disabled = valid_config().replace(
+            "environment = \"development\"",
+            "environment = \"production\"",
+        );
+        let error = Settings::parse(&disabled)
+            .err()
+            .unwrap_or_else(|| panic!("production 不得在无管理面 readiness 时启动"));
+        assert!(error.to_string().contains("metrics_enabled"));
+
+        let enabled = disabled.replace("metrics_enabled = false", "metrics_enabled = true");
+        Settings::parse(&enabled)
+            .unwrap_or_else(|error| panic!("启用管理面后 production 配置应通过: {error:#}"));
     }
 
     #[test]

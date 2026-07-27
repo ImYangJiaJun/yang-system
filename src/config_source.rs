@@ -289,6 +289,12 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "traces_export_timeout_seconds",
         Integer
     ),
+    environment_binding!(
+        "YANG_SYSTEM_OBSERVABILITY_READINESS_BUDGET_MS",
+        "observability",
+        "readiness_budget_ms",
+        Integer
+    ),
     environment_binding!("YANG_SYSTEM_LOGGING_FILTER", "logging", "filter", Text),
 ];
 

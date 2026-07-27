@@ -84,21 +84,13 @@ async fn run_after_telemetry_initialized(
     );
 
     run_then_cleanup(
-        async {
-            telemetry
-                .start_metrics_server(
-                    settings.observability.metrics_bind_addr()?,
-                    Arc::clone(&tools),
-                )
-                .await?;
-            run_after_tools_created(
-                settings,
-                initializer_mysql,
-                Arc::clone(&tools),
-                shutdown_budget.clone(),
-            )
-            .await
-        },
+        run_after_tools_created(
+            settings,
+            initializer_mysql,
+            Arc::clone(&tools),
+            shutdown_budget.clone(),
+            telemetry,
+        ),
         tools.close(),
         &shutdown_budget,
     )
@@ -134,6 +126,7 @@ async fn run_after_tools_created(
     initializer_mysql: Database,
     tools: Arc<Tools>,
     shutdown_budget: ShutdownBudget,
+    telemetry: &mut TelemetryRuntime,
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
@@ -176,13 +169,23 @@ async fn run_after_tools_created(
     drop(initializer);
 
     let bind = settings.bind_addr()?;
+    telemetry
+        .start_management_server(
+            settings.observability.metrics_bind_addr()?,
+            Arc::clone(&tools),
+        )
+        .await?;
+    let readiness_gate = telemetry.readiness_gate();
     let outbox_worker = AuthorizationOutboxWorker::start(&tools, settings.authorization.clone())
         .await
         .context("启动授权 Outbox Worker 失败")?;
     let runtime = Arc::new(application.runtime);
     let signal_budget = shutdown_budget.clone();
+    let signal_readiness = readiness_gate.clone();
+    readiness_gate.mark_ready();
     let shutdown_signal = async move {
         yang_base::lifecycle::wait_for_shutdown_signal().await;
+        signal_readiness.mark_not_ready();
         signal_budget.begin(ShutdownTrigger::Signal).await;
     };
     let serve = http::serve_with_shutdown(bind, runtime, &settings.http, shutdown_signal);
@@ -198,6 +201,7 @@ async fn run_after_tools_created(
                 .await
         }
     };
+    readiness_gate.mark_not_ready();
     shutdown_budget.begin(ShutdownTrigger::OperationExit).await;
     let shutdown_result = shutdown_budget
         .run_phase(

@@ -26,9 +26,10 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 ## Prometheus 指标
 
 `observability.metrics_enabled=true` 时，进程在独立的
-`observability.metrics_bind` 地址提供 `GET /metrics`。该端点不复用业务 HTTP
-监听器，不承载认证或业务路由；生产部署必须通过 loopback、Sidecar 或网络策略把
-访问范围限制为采集端。启动时若监听地址冲突，服务失败关闭，不静默降级。
+`observability.metrics_bind` 地址提供 `GET /metrics` 与预算化
+`GET /health/ready`。该管理面不复用业务 HTTP 监听器，不承载认证或业务路由；
+生产部署必须通过 loopback、Sidecar 或网络策略把访问范围限制为采集端与探针。
+启动时若监听地址冲突，服务失败关闭，不静默降级。
 
 核心指标包括：
 
@@ -39,12 +40,25 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
   Redis 不可用结果；
 - `yang_system_resource_pool_connections{resource,state}`：MySQL/Redis 连接池的
   `max/open/available/waiting` 快照；
+- `yang_system_readiness_*`：管理面探针结果、耗时和各依赖健康状态；
 - 既有授权传播、关闭阶段和 YANG Action 指标；
 - `yang_system_build_info{service,version,environment}`：部署身份。
 
 标签只能来自部署身份、已冻结 Catalog operation 和有限枚举。禁止把
 `request_id`、用户/租户 ID、用户名、IP、SQL、Redis key、URL 或错误文本放入指标
 标签。所有 histogram 使用固定秒级 buckets，避免实例间聚合语义漂移。
+
+## Readiness 总预算
+
+生产编排应把 readiness 指向管理面 `/health/ready`。进程在 Schema/audit 校验与
+后台 worker 启动完成前保持 `lifecycle` 未就绪，收到关闭信号后先撤销 readiness，
+再进入 HTTP drain。依赖检查共享 `observability.readiness_budget_ms` 一个总预算；
+不会给 MySQL、Redis 各自累加一份 timeout。
+
+响应原因只有 `lifecycle`、`dependency`、`timeout` 三个有限值，不暴露连接串或底层
+错误文本。默认预算为 2000 ms，允许 50..=10000 ms。编排器的客户端 timeout 应略
+大于应用预算，例如应用 2 秒、Kubernetes `timeoutSeconds: 3`。SLO 与告警规则见
+[`SLO.md`](SLO.md) 和 `ops/prometheus/yang-system.rules.yml`。
 
 ## OpenTelemetry tracing
 
