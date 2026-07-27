@@ -246,7 +246,7 @@ Redis、Token、Bootstrap、Schema 模式等运行参数均以该文件为准；
 重建业务测试表、`_migrations` 与 `b05_schema_*` 专用表：
 
 ```powershell
-$env:YANG_SYSTEM_TEST_DATABASE_URL = "mysql://root:password@127.0.0.1:3306/yang_system_test"
+$env:YANG_SYSTEM_TEST_DATABASE_URL = "mysql://root:yang-local@127.0.0.1:3306/yang_system_test"
 $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
 python scripts/run_ci.py integration
 ```
