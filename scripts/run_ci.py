@@ -180,6 +180,12 @@ def self_test() -> None:
     workflow = open(".github/workflows/ci.yml", encoding="utf-8").read()
     assert "python scripts/run_ci.py full" in workflow
     assert "python scripts/run_ci.py integration" in workflow
+    assert workflow.count("ssh-key: ${{ secrets.LIB_YANG_SSH_KEY }}") == 3, (
+        "每个 lib_yang 跨仓库 checkout 都必须使用只读 Deploy Key"
+    )
+    assert workflow.count("persist-credentials: false") == 3, (
+        "lib_yang checkout 不得在 runner 中持久化 Deploy Key 凭据"
+    )
     assert any(command.argv[:3] == ("cargo", "test", "--all-targets") for command in FULL)
     assert any(command.argv[:2] == ("pnpm", "--dir") for command in FULL)
     assert FRONTEND_PRODUCTION_AUDIT.argv == (

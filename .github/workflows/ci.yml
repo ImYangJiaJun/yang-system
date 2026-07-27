@@ -24,6 +24,8 @@ jobs:
         with:
           repository: ImYangJiaJun/lib_yang
           ref: ${{ env.LIB_YANG_REF }}
+          ssh-key: ${{ secrets.LIB_YANG_SSH_KEY }}
+          persist-credentials: false
       - name: Checkout yang-system
         uses: actions/checkout@v4
         with:
@@ -62,6 +64,8 @@ jobs:
         with:
           repository: ImYangJiaJun/lib_yang
           ref: ${{ env.LIB_YANG_REF }}
+          ssh-key: ${{ secrets.LIB_YANG_SSH_KEY }}
+          persist-credentials: false
       - name: Checkout yang-system
         uses: actions/checkout@v4
         with:
@@ -112,6 +116,8 @@ jobs:
         with:
           repository: ImYangJiaJun/lib_yang
           ref: ${{ env.LIB_YANG_REF }}
+          ssh-key: ${{ secrets.LIB_YANG_SSH_KEY }}
+          persist-credentials: false
       - name: Checkout yang-system
         uses: actions/checkout@v4
         with:
