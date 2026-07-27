@@ -85,8 +85,28 @@ impl AuthRateLimiter {
         ];
         let cache = ctx.tools().cache()?;
         let script = cache.script(RATE_LIMIT_SCRIPT);
-        let (exceeded, retry_after): (i64, i64) = cache.eval_script(&script, &keys, &args).await?;
-        rate_limit_result(exceeded, retry_after)
+        let decision: Result<(i64, i64), _> = cache.eval_script(&script, &keys, &args).await;
+        match decision {
+            Ok((exceeded, retry_after)) => {
+                let result = rate_limit_result(exceeded, retry_after);
+                metrics::counter!(
+                    "yang_system_auth_rate_limit_total",
+                    "operation" => operation.key(),
+                    "result" => if result.is_ok() { "allowed" } else { "limited" }
+                )
+                .increment(1);
+                result
+            }
+            Err(error) => {
+                metrics::counter!(
+                    "yang_system_auth_rate_limit_total",
+                    "operation" => operation.key(),
+                    "result" => "unavailable"
+                )
+                .increment(1);
+                Err(error.into())
+            }
+        }
     }
 }
 

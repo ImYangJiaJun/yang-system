@@ -2,7 +2,8 @@ use crate::app::build_app;
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
-use crate::observability::logging::{init_tracing, LogIdentity};
+use crate::observability::logging::LogIdentity;
+use crate::observability::telemetry::TelemetryRuntime;
 use crate::shutdown::{ShutdownBudget, ShutdownPhase, ShutdownTrigger};
 use crate::transport::http;
 use anyhow::Context;
@@ -16,8 +17,12 @@ use yang_db::{Database, RedisClient};
 
 pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let settings = Settings::load(config_path)?;
-    init_tracing(&settings.logging.filter)?;
     let log_identity = LogIdentity::new(&settings.app.name, settings.app.environment);
+    let mut telemetry = TelemetryRuntime::initialize(
+        &settings.observability,
+        &settings.logging.filter,
+        &log_identity,
+    )?;
     let shutdown_budget =
         ShutdownBudget::new(Duration::from_secs(settings.shutdown.total_timeout_seconds));
     tracing::info!(
@@ -27,6 +32,26 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         config = %config_path.display(),
         "开始启动系统"
     );
+    let result = run_after_telemetry_initialized(
+        &settings,
+        log_identity,
+        &mut telemetry,
+        shutdown_budget.clone(),
+    )
+    .await;
+    shutdown_budget.begin(ShutdownTrigger::OperationExit).await;
+    let telemetry_result = shutdown_budget
+        .run_phase(ShutdownPhase::Observability, telemetry.shutdown())
+        .await;
+    combine_operation_and_cleanup(result, telemetry_result, "可观测性运行时")
+}
+
+async fn run_after_telemetry_initialized(
+    settings: &Settings,
+    log_identity: LogIdentity,
+    telemetry: &mut TelemetryRuntime,
+    shutdown_budget: ShutdownBudget,
+) -> anyhow::Result<()> {
     let bootstrap_verifier = BootstrapSecretVerifier::new(
         settings.bootstrap.secret_digest.clone(),
         settings.security.argon2_max_concurrency,
@@ -59,16 +84,45 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     );
 
     run_then_cleanup(
-        run_after_tools_created(
-            &settings,
-            initializer_mysql,
-            Arc::clone(&tools),
-            shutdown_budget.clone(),
-        ),
+        async {
+            telemetry
+                .start_metrics_server(
+                    settings.observability.metrics_bind_addr()?,
+                    Arc::clone(&tools),
+                )
+                .await?;
+            run_after_tools_created(
+                settings,
+                initializer_mysql,
+                Arc::clone(&tools),
+                shutdown_budget.clone(),
+            )
+            .await
+        },
         tools.close(),
         &shutdown_budget,
     )
     .await
+}
+
+fn combine_operation_and_cleanup<T>(
+    result: anyhow::Result<T>,
+    cleanup_result: anyhow::Result<()>,
+    cleanup_name: &str,
+) -> anyhow::Result<T> {
+    match (result, cleanup_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(operation_error), Ok(())) => Err(operation_error),
+        (Err(operation_error), Err(cleanup_error)) => {
+            tracing::error!(
+                cleanup = cleanup_name,
+                error = %cleanup_error,
+                "业务阶段失败后，清理阶段也失败"
+            );
+            Err(operation_error)
+        }
+    }
 }
 
 /// 运行 Tools 构建后的完整启动与服务阶段。

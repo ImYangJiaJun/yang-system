@@ -30,6 +30,7 @@ pub(crate) enum ShutdownPhase {
     HttpDrain,
     AuthorizationOutboxWorker,
     ToolsClose,
+    Observability,
 }
 
 impl ShutdownPhase {
@@ -38,6 +39,7 @@ impl ShutdownPhase {
             Self::HttpDrain => "http_drain",
             Self::AuthorizationOutboxWorker => "authorization_outbox_worker",
             Self::ToolsClose => "tools_close",
+            Self::Observability => "observability",
         }
     }
 }

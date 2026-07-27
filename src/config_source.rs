@@ -20,6 +20,7 @@ const MAX_SECRET_BYTES: u64 = 64 * 1024;
 enum EnvironmentValueKind {
     Text,
     Integer,
+    Float,
     OptionalInteger,
     Boolean,
     StringList,
@@ -250,6 +251,42 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "YANG_SYSTEM_SHUTDOWN_TOTAL_TIMEOUT_SECONDS",
         "shutdown",
         "total_timeout_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_OBSERVABILITY_METRICS_ENABLED",
+        "observability",
+        "metrics_enabled",
+        Boolean
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_OBSERVABILITY_METRICS_BIND",
+        "observability",
+        "metrics_bind",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_OBSERVABILITY_TRACES_ENABLED",
+        "observability",
+        "traces_enabled",
+        Boolean
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_OBSERVABILITY_TRACES_OTLP_ENDPOINT",
+        "observability",
+        "traces_otlp_endpoint",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_OBSERVABILITY_TRACES_SAMPLE_RATIO",
+        "observability",
+        "traces_sample_ratio",
+        Float
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_OBSERVABILITY_TRACES_EXPORT_TIMEOUT_SECONDS",
+        "observability",
+        "traces_export_timeout_seconds",
         Integer
     ),
     environment_binding!("YANG_SYSTEM_LOGGING_FILTER", "logging", "filter", Text),
@@ -498,6 +535,13 @@ fn parse_environment_value(
         EnvironmentValueKind::Integer => {
             Value::Integer(parse_non_negative_integer(binding.variable, raw)?)
         }
+        EnvironmentValueKind::Float => Value::Float(
+            raw.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .with_context(|| format!("环境变量 {} 必须是有限浮点数", binding.variable))?,
+        ),
         EnvironmentValueKind::OptionalInteger
             if raw.trim().is_empty() || raw.trim().eq_ignore_ascii_case("none") =>
         {

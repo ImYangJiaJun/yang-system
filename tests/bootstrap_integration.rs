@@ -403,8 +403,14 @@ async fn bootstrap_requires_operator_secret_and_is_single_use_under_concurrency(
                 );
             }
             ensure!(
-                event["span"]["name"] == "dispatch",
-                "Action 完成事件必须关联 dispatch span: {event}"
+                event["span"]["name"] == "action.request",
+                "Action 完成事件必须关联可继承远端 parent 的 action.request span: {event}"
+            );
+            ensure!(
+                event["spans"]
+                    .as_array()
+                    .is_some_and(|spans| spans.iter().any(|span| span["name"] == "dispatch")),
+                "Action 完成事件的祖先链必须保留原生 dispatch span: {event}"
             );
         }
         Ok(())

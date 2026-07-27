@@ -74,6 +74,16 @@ trusted_proxy_cidrs = []
 # 从收到退出信号起，HTTP 排空、后台任务退出和资源关闭共享这一总预算。
 total_timeout_seconds = 30
 
+[observability]
+# Prometheus 使用独立运维监听地址；生产环境应由网络策略限制采集端访问。
+metrics_enabled = true
+metrics_bind = "127.0.0.1:9090"
+# 未部署 OpenTelemetry Collector 时保持关闭；启用后使用 OTLP/gRPC 导出。
+traces_enabled = false
+traces_otlp_endpoint = "http://127.0.0.1:4317"
+traces_sample_ratio = 0.1
+traces_export_timeout_seconds = 5
+
 [logging]
 # 输出一行一个 JSON object；filter 只控制级别，不改变生产日志结构。
 filter = "yang_system=info,tower_http=info"

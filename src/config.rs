@@ -25,6 +25,8 @@ pub struct Settings {
     pub security: SecuritySettings,
     #[serde(default)]
     pub shutdown: ShutdownSettings,
+    #[serde(default)]
+    pub observability: ObservabilitySettings,
     pub logging: LoggingSettings,
 }
 
@@ -202,6 +204,36 @@ pub struct LoggingSettings {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ObservabilitySettings {
+    #[serde(default)]
+    pub metrics_enabled: bool,
+    #[serde(default = "default_metrics_bind")]
+    pub metrics_bind: String,
+    #[serde(default)]
+    pub traces_enabled: bool,
+    #[serde(default = "default_traces_otlp_endpoint")]
+    pub traces_otlp_endpoint: String,
+    #[serde(default = "default_traces_sample_ratio")]
+    pub traces_sample_ratio: f64,
+    #[serde(default = "default_traces_export_timeout_seconds")]
+    pub traces_export_timeout_seconds: u64,
+}
+
+impl Default for ObservabilitySettings {
+    fn default() -> Self {
+        Self {
+            metrics_enabled: false,
+            metrics_bind: default_metrics_bind(),
+            traces_enabled: false,
+            traces_otlp_endpoint: default_traces_otlp_endpoint(),
+            traces_sample_ratio: default_traces_sample_ratio(),
+            traces_export_timeout_seconds: default_traces_export_timeout_seconds(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShutdownSettings {
     #[serde(default = "default_shutdown_total_timeout_seconds")]
     pub total_timeout_seconds: u64,
@@ -217,6 +249,22 @@ impl Default for ShutdownSettings {
 
 const fn default_shutdown_total_timeout_seconds() -> u64 {
     30
+}
+
+fn default_metrics_bind() -> String {
+    "127.0.0.1:9090".to_string()
+}
+
+fn default_traces_otlp_endpoint() -> String {
+    "http://127.0.0.1:4317".to_string()
+}
+
+const fn default_traces_sample_ratio() -> f64 {
+    0.1
+}
+
+const fn default_traces_export_timeout_seconds() -> u64 {
+    5
 }
 
 impl Settings {
@@ -299,6 +347,39 @@ impl Settings {
         self.security.validate()?;
         if !(1..=300).contains(&self.shutdown.total_timeout_seconds) {
             bail!("shutdown.total_timeout_seconds 必须在 1..=300 范围内");
+        }
+        self.observability.validate(self.bind_addr()?)?;
+        Ok(())
+    }
+}
+
+impl ObservabilitySettings {
+    pub fn metrics_bind_addr(&self) -> anyhow::Result<SocketAddr> {
+        self.metrics_bind
+            .parse()
+            .with_context(|| format!("observability.metrics_bind 地址无效: {}", self.metrics_bind))
+    }
+
+    fn validate(&self, http_bind: SocketAddr) -> anyhow::Result<()> {
+        let metrics_bind = self.metrics_bind_addr()?;
+        if self.metrics_enabled && metrics_bind == http_bind {
+            bail!("observability.metrics_bind 必须与 http.bind 使用不同地址");
+        }
+        if !(0.0..=1.0).contains(&self.traces_sample_ratio) || !self.traces_sample_ratio.is_finite()
+        {
+            bail!("observability.traces_sample_ratio 必须在 0.0..=1.0 范围内");
+        }
+        if !(1..=60).contains(&self.traces_export_timeout_seconds) {
+            bail!("observability.traces_export_timeout_seconds 必须在 1..=60 范围内");
+        }
+        if self.traces_enabled {
+            let endpoint = self.traces_otlp_endpoint.trim();
+            if endpoint.is_empty()
+                || endpoint.bytes().any(|byte| byte.is_ascii_whitespace())
+                || !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
+            {
+                bail!("observability.traces_otlp_endpoint 必须是非空的 http:// 或 https:// 地址");
+            }
         }
         Ok(())
     }
@@ -507,6 +588,13 @@ auth_rate_limit_ip_attempts = 30
 auth_rate_limit_username_attempts = 10
 [shutdown]
 total_timeout_seconds = 30
+[observability]
+metrics_enabled = false
+metrics_bind = "127.0.0.1:9090"
+traces_enabled = false
+traces_otlp_endpoint = "http://127.0.0.1:4317"
+traces_sample_ratio = 0.1
+traces_export_timeout_seconds = 5
 [logging]
 filter = "info"
 "#
@@ -529,6 +617,9 @@ filter = "info"
         assert_eq!(settings.authorization.outbox_batch_size, 100);
         assert!(settings.security.trusted_proxy_cidrs.is_empty());
         assert_eq!(settings.shutdown.total_timeout_seconds, 30);
+        assert!(!settings.observability.metrics_enabled);
+        assert!(!settings.observability.traces_enabled);
+        assert_eq!(settings.observability.traces_sample_ratio, 0.1);
         assert!(
             !format!("{:?}", settings.token).contains(&settings.token.active_secret),
             "active secret 不得进入 Debug"
@@ -578,6 +669,10 @@ filter = "info"
                 "YANG_SYSTEM_SHUTDOWN_TOTAL_TIMEOUT_SECONDS".to_owned(),
                 "45".to_owned(),
             ),
+            (
+                "YANG_SYSTEM_OBSERVABILITY_TRACES_SAMPLE_RATIO".to_owned(),
+                "0.25".to_owned(),
+            ),
         ]);
         let provider = TestSecretProvider(BTreeMap::from([
             (
@@ -625,6 +720,7 @@ filter = "info"
         );
         assert_eq!(settings.http.max_concurrency, 128);
         assert_eq!(settings.shutdown.total_timeout_seconds, 45);
+        assert_eq!(settings.observability.traces_sample_ratio, 0.25);
         assert_eq!(
             settings.security.trusted_proxy_cidrs,
             ["127.0.0.1/32", "10.42.0.0/24"]
@@ -766,6 +862,43 @@ filter = "info"
     }
 
     #[test]
+    fn observability_defaults_are_disabled_and_validation_is_fail_fast() {
+        let without_section = valid_config().replace(
+            "[observability]\nmetrics_enabled = false\nmetrics_bind = \"127.0.0.1:9090\"\ntraces_enabled = false\ntraces_otlp_endpoint = \"http://127.0.0.1:4317\"\ntraces_sample_ratio = 0.1\ntraces_export_timeout_seconds = 5\n",
+            "",
+        );
+        let settings = Settings::parse(&without_section)
+            .unwrap_or_else(|error| panic!("缺省可观测性配置应安全关闭: {error:#}"));
+        assert!(!settings.observability.metrics_enabled);
+        assert!(!settings.observability.traces_enabled);
+
+        for raw in [
+            valid_config()
+                .replace("metrics_enabled = false", "metrics_enabled = true")
+                .replace(
+                    "metrics_bind = \"127.0.0.1:9090\"",
+                    "metrics_bind = \"127.0.0.1:8080\"",
+                ),
+            valid_config().replace("traces_sample_ratio = 0.1", "traces_sample_ratio = 1.1"),
+            valid_config().replace(
+                "traces_export_timeout_seconds = 5",
+                "traces_export_timeout_seconds = 0",
+            ),
+            valid_config()
+                .replace("traces_enabled = false", "traces_enabled = true")
+                .replace(
+                    "traces_otlp_endpoint = \"http://127.0.0.1:4317\"",
+                    "traces_otlp_endpoint = \"collector:4317\"",
+                ),
+        ] {
+            assert!(
+                Settings::parse(&raw).is_err(),
+                "非法可观测性配置必须在启动前失败"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_schema_apply_in_production_or_without_environment_marker() {
         let explicit_production = valid_config()
             .replace(
@@ -848,6 +981,20 @@ filter = "info"
                 .and_then(|shutdown| shutdown.get("total_timeout_seconds"))
                 .and_then(toml::Value::as_integer),
             Some(30)
+        );
+        assert_eq!(
+            value
+                .get("observability")
+                .and_then(|observability| observability.get("metrics_enabled"))
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            value
+                .get("observability")
+                .and_then(|observability| observability.get("traces_enabled"))
+                .and_then(toml::Value::as_bool),
+            Some(false)
         );
     }
 
