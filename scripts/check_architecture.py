@@ -106,6 +106,27 @@ AUDIT_FORBIDDEN_MUTATION_RE = re.compile(
     r"|TRUNCATE(?:\s+TABLE)?\s+`?audit_event`?"
     r")\b"
 )
+RAW_SQL_BOUNDARY_KINDS = (
+    "domain-repository",
+    "domain-service",
+    "infrastructure-repository",
+    "schema-validator",
+)
+RAW_SQL_BOUNDARY_KIND_PATTERN = "|".join(
+    re.escape(kind) for kind in RAW_SQL_BOUNDARY_KINDS
+)
+RAW_SQL_CODE_BOUNDARY_RE = re.compile(
+    rf"(?m)^//!\s*raw-sql-boundary:\s*({RAW_SQL_BOUNDARY_KIND_PATTERN})\s+"
+    r"([a-z][a-z0-9-]*)\s*$"
+)
+RAW_SQL_DOC_BOUNDARY_RE = re.compile(
+    rf"<!--\s*raw-sql-boundary:\s*({RAW_SQL_BOUNDARY_KIND_PATTERN})\s+"
+    r"([a-z][a-z0-9-]*)\s+([a-zA-Z0-9_./-]+)\s*-->"
+)
+RAW_SQL_INVOCATION_RE = re.compile(
+    r"\bsqlx::query(?:_as|_scalar)?(?:\s*::\s*<[^\n;]*>)?\s*\("
+)
+RAW_SQL_BOUNDARY_DOCUMENT = Path("docs/architecture/raw-sql-boundaries.md")
 
 
 def derived_action_count(source: str) -> int:
@@ -414,6 +435,125 @@ def check_audit_append_only(root: Path) -> list[str]:
     return errors
 
 
+def raw_sql_boundary_path_allowed(kind: str, relative: Path) -> bool:
+    """只允许领域 repository/service 与两个显式基础设施边界持有原始 SQL。"""
+
+    value = relative.as_posix()
+    if kind == "domain-repository":
+        return (
+            value.startswith("src/modules/")
+            and relative.name == "repository.rs"
+        )
+    if kind == "domain-service":
+        return (
+            value.startswith("src/modules/")
+            and relative.stem in {"authz_version", "grants", "guard", "service"}
+        )
+    if kind == "infrastructure-repository":
+        return value in {
+            "src/audit/repository.rs",
+            "src/authorization/outbox.rs",
+        }
+    if kind == "schema-validator":
+        return value == "src/audit/schema.rs"
+    return False
+
+
+def raw_sql_argument_is_literal(source: str, invocation_end: int) -> bool:
+    """生产查询文本必须直接来自字符串字面量，禁止请求值参与 SQL 结构。"""
+
+    argument = source[invocation_end:]
+    return re.match(r'\s*(?:"|r#+")', argument) is not None
+
+
+def raw_sql_code_boundaries(
+    root: Path,
+) -> tuple[set[tuple[str, str, str]], list[str]]:
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return set(), []
+
+    errors: list[str] = []
+    boundaries: set[tuple[str, str, str]] = set()
+    owners: dict[str, Path] = {}
+    for path in sorted(source_root.rglob("*.rs")):
+        source = production_source(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(root)
+        matches = list(RAW_SQL_INVOCATION_RE.finditer(source))
+        declarations = RAW_SQL_CODE_BOUNDARY_RE.findall(source)
+
+        if not matches:
+            if declarations:
+                errors.append(
+                    f"{relative}: 声明了 raw SQL 边界但生产代码没有 sqlx 查询"
+                )
+            continue
+        if len(declarations) != 1:
+            errors.append(
+                f"{relative}: 含 {len(matches)} 条生产 sqlx 查询，必须恰好声明一个 "
+                "`//! raw-sql-boundary: <kind> <id>`"
+            )
+            continue
+
+        kind, boundary_id = declarations[0]
+        if not raw_sql_boundary_path_allowed(kind, relative):
+            errors.append(
+                f"{relative}: raw SQL 边界类型 {kind} 不允许出现在该路径"
+            )
+        previous = owners.get(boundary_id)
+        if previous is not None:
+            errors.append(
+                f"{relative}: raw SQL boundary {boundary_id} 与 {previous} 重复"
+            )
+        owners[boundary_id] = relative
+        boundary = (kind, boundary_id, relative.as_posix())
+        boundaries.add(boundary)
+
+        for match in matches:
+            if raw_sql_argument_is_literal(source, match.end()):
+                continue
+            line_number = source.count("\n", 0, match.start()) + 1
+            errors.append(
+                f"{relative}:{line_number}: 生产 sqlx 查询必须直接使用静态字符串字面量；"
+                "参数必须通过 bind 传入，动态标识符不得来自请求"
+            )
+    return boundaries, errors
+
+
+def check_raw_sql_boundaries(root: Path) -> list[str]:
+    code_boundaries, errors = raw_sql_code_boundaries(root)
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return errors
+
+    document = root / RAW_SQL_BOUNDARY_DOCUMENT
+    if not document.is_file():
+        if not code_boundaries and not errors:
+            return []
+        return [*errors, f"{RAW_SQL_BOUNDARY_DOCUMENT}: 缺少 raw SQL 边界清单"]
+    documented_entries = RAW_SQL_DOC_BOUNDARY_RE.findall(
+        document.read_text(encoding="utf-8")
+    )
+    documented = set(documented_entries)
+    documented_ids = [boundary_id for _, boundary_id, _ in documented_entries]
+    for boundary_id in sorted(
+        {value for value in documented_ids if documented_ids.count(value) > 1}
+    ):
+        errors.append(
+            f"{RAW_SQL_BOUNDARY_DOCUMENT}: raw SQL boundary {boundary_id} 重复"
+        )
+    for kind, boundary_id, path in sorted(code_boundaries - documented):
+        errors.append(
+            f"{RAW_SQL_BOUNDARY_DOCUMENT}: 缺少代码边界 {kind} {boundary_id} {path}"
+        )
+    for kind, boundary_id, path in sorted(documented - code_boundaries):
+        errors.append(
+            f"{RAW_SQL_BOUNDARY_DOCUMENT}: 已记录不存在的代码边界 "
+            f"{kind} {boundary_id} {path}"
+        )
+    return errors
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     directories = action_directories(root)
@@ -425,6 +565,7 @@ def check(root: Path) -> list[str]:
     errors.extend(check_tenant_boundaries(root))
     errors.extend(check_tenant_isolation_evidence(root))
     errors.extend(check_audit_append_only(root))
+    errors.extend(check_raw_sql_boundaries(root))
     return errors
 
 
@@ -481,6 +622,47 @@ def self_test() -> None:
         )
         (root / "src" / "audit_mutation.rs").unlink()
         assert check_audit_append_only(root) == [], "审计 INSERT 必须允许"
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        repository = root / "src" / "modules" / "demo" / "repository.rs"
+        write(
+            repository,
+            "//! raw-sql-boundary: domain-repository demo-read\n"
+            "async fn load(pool: &sqlx::MySqlPool) {\n"
+            '    sqlx::query("SELECT value FROM demo WHERE id = ?")\n'
+            "        .bind(1_i64).fetch_one(pool).await;\n"
+            "}\n",
+        )
+        write(
+            root / RAW_SQL_BOUNDARY_DOCUMENT,
+            "<!-- raw-sql-boundary: domain-repository demo-read "
+            "src/modules/demo/repository.rs -->\n",
+        )
+        assert check_raw_sql_boundaries(root) == [], "已登记静态查询边界应通过"
+
+        write(
+            repository,
+            "//! raw-sql-boundary: domain-repository demo-read\n"
+            "async fn load(pool: &sqlx::MySqlPool, sql: &str) {\n"
+            "    sqlx::query(sql).fetch_one(pool).await;\n"
+            "}\n",
+        )
+        errors = check_raw_sql_boundaries(root)
+        assert any("静态字符串字面量" in error for error in errors), (
+            "必须拒绝运行时拼接或传入的 SQL"
+        )
+
+        write(
+            repository,
+            "async fn load(pool: &sqlx::MySqlPool) {\n"
+            '    sqlx::query("SELECT 1").fetch_one(pool).await;\n'
+            "}\n",
+        )
+        errors = check_raw_sql_boundaries(root)
+        assert any("必须恰好声明一个" in error for error in errors), (
+            "必须拒绝未登记的生产 SQL"
+        )
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

@@ -1,4 +1,5 @@
 //! 审计事件的事务内追加边界。
+//! raw-sql-boundary: infrastructure-repository audit-event-repository
 //!
 //! 本模块刻意不提供独立事务或连接池写入口，确保调用方只能把审计事实与业务
 //! 变更放进同一个 MySQL 事务。

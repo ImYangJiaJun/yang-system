@@ -1,4 +1,5 @@
 //! 平台账号持久化边界。
+//! raw-sql-boundary: domain-repository admin-user-repository
 
 use super::model::{AdminAccountPage, AdminAccountView, PageRequest};
 use super::{ACTIVE_STATUS, BOOTSTRAP_KEY, IS_ADMIN, NAME, POSITION, STATUS, SYSTEM_ROLE, USER_ID};

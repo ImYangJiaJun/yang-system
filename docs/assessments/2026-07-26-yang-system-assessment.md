@@ -31,6 +31,7 @@
 | S-03 bootstrap 信任根 | **已完成** | 运维 secret 的 Argon2id 摘要、并发受限校验、HTTP 强制验证、并发/重放集成矩阵 | 生产 secret 交付与轮换 runbook |
 | S-05 Schema 发布边界 | **已完成（基础版本）** | 默认 validate、生产 apply 拒绝、版本/checksum/恢复说明/完成探针迁移作业 | expand/backfill/contract 的真实演练 |
 | S-06 生命周期关闭 | **统一出口已完成** | Tools 后统一 cleanup，保留主错误；outbox worker 显式 shutdown | 增加进程级有界 shutdown 预算 |
+| S-10 领域 SQL 边界 | **边界治理已完成** | 代码声明与文档清单一一对应；生产 SQL 必须是静态字面量；租户真实库负例持续执行 | `query!` 宏迁移时提交 SQLx offline metadata |
 
 原 P0 清零后，架构重心已从“补安全事实”转为“证明长期运营”：S-04、S-07、S-08、S-09 和灾备不应被已有绿色测试掩盖。
 
@@ -328,6 +329,13 @@ OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生�
 
 组织成员 Join、列表和管理员行锁使用 raw sqlx 是合理的：通用 `TableQuery` 不应被迫表达所有领域查询与锁语义。问题只在于这些 SQL 是否散落、是否都有租户/权限前置、是否能静态校验。
 
+**复评状态：边界治理已完成。** 当前 10 个生产 SQLx 文件已经在
+[`raw-sql-boundaries.md`](../architecture/raw-sql-boundaries.md) 中逐一登记。架构检查会拒绝
+未声明、文档不一致、路径类型不符或查询文本不是静态字面量的改动；授权版本 MySQL
+回源也已从通用请求校验器归还账号域。SQLx offline metadata 只覆盖 `query!` 系列宏，
+当前运行时查询 API 不会从伪造的 `.sqlx/` 获得校验，因此保留为后续宏迁移条件，而不
+制造无效的离线门禁。
+
 **建议路径：**
 
 - raw SQL 只允许在模块 repository/service 边界；
@@ -396,7 +404,7 @@ OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生�
 1. ✅ 已统一 bootstrap 失败/关机资源清理。
 2. 实现受信代理 client IP。
 3. 建立配置覆盖和 JWT key ring。
-4. ◐ 租户 raw SQL 已收敛到 scoped/system capability 并持续执行负例；非租户领域 SQL 继续按 S-10 治理。
+4. ✅ 全部生产 raw SQL 已进入可枚举 repository/service/基础设施边界；租户路径继续执行 scoped/system capability 负例。
 
 **退出条件：** 多副本部署的代理、密钥、Schema、关闭策略有可执行 runbook。
 

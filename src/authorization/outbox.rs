@@ -1,4 +1,5 @@
 //! 授权事务 Outbox 的 MySQL 状态机。
+//! raw-sql-boundary: infrastructure-repository authorization-outbox
 
 use crate::config::AuthorizationSettings;
 use anyhow::{ensure, Context};

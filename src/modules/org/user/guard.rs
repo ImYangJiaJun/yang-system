@@ -1,6 +1,7 @@
 //! 企业成员写操作的实时租户管理员校验。
+//! raw-sql-boundary: domain-service org-member-guard
 
-use super::{ACTIVE_STATUS, IS_ADMIN, ORG_ID, STATUS, USER_ID};
+use super::ACTIVE_STATUS;
 use async_trait::async_trait;
 use yang_base::action::{ActionContext, ApiResponse, SystemTenantCapability, User};
 use yang_base::router::{Middleware, Next};
@@ -29,26 +30,25 @@ impl OrgAdminGuardMiddleware {
             return Ok(true);
         }
         let org_id = ctx.tenant()?.id();
-        let sql = format!(
+        // tenant-boundary: raw-sql member-admin-guard
+        sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(\
                  SELECT 1 FROM `org_user` \
-                 WHERE `{ORG_ID}` = ? \
-                   AND `{USER_ID}` = ? \
-                   AND `{STATUS}` = ? \
-                   AND `{IS_ADMIN}` = TRUE \
+                 WHERE `org_org` = ? \
+                   AND `user_user` = ? \
+                   AND `status` = ? \
+                   AND `admin` = TRUE \
                  LIMIT 1\
-             )"
-        );
-        // tenant-boundary: raw-sql member-admin-guard
-        sqlx::query_scalar::<_, bool>(&sql)
-            .bind(org_id.get())
-            .bind(user.id)
-            .bind(ACTIVE_STATUS)
-            // tenant-boundary: database member-admin-database
-            .fetch_one(ctx.tools().mysql()?.pool())
-            .await
-            .map_err(yang_db::DbError::from)
-            .map_err(Into::into)
+             )",
+        )
+        .bind(org_id.get())
+        .bind(user.id)
+        .bind(ACTIVE_STATUS)
+        // tenant-boundary: database member-admin-database
+        .fetch_one(ctx.tools().mysql()?.pool())
+        .await
+        .map_err(yang_db::DbError::from)
+        .map_err(Into::into)
     }
 }
 

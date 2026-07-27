@@ -1,3 +1,5 @@
+//! raw-sql-boundary: schema-validator audit-schema-validator
+
 use super::AUDIT_EVENT_TABLE;
 use anyhow::{ensure, Context};
 use sqlx::MySqlPool;

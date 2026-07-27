@@ -1,4 +1,5 @@
 //! 企业成员授权事实的显式事务 writer。
+//! raw-sql-boundary: domain-repository org-member-repository
 
 use super::{IS_ADMIN, ORG_ID, STATUS, USER_ID};
 use crate::audit;

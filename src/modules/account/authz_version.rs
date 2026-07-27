@@ -1,5 +1,7 @@
 //! 授权事实 writer 共享的用户版本锁与递增原语。
+//! raw-sql-boundary: domain-service account-authz-version
 
+use sqlx::MySqlPool;
 use yang_base::BaseError;
 use yang_db::Transaction;
 
@@ -20,6 +22,24 @@ impl LockedUserAuthorization {
     pub(crate) fn status(&self) -> &str {
         &self.status
     }
+}
+
+/// 读取 Token 校验所需的最小授权事实。
+pub(crate) async fn find_authorization_version(
+    pool: &MySqlPool,
+    user_id: i64,
+) -> Result<Option<(String, i64)>, BaseError> {
+    sqlx::query_as(
+        "SELECT status, authz_version \
+         FROM users \
+         WHERE id = ? \
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(yang_db::DbError::from)
+    .map_err(BaseError::from)
 }
 
 /// 锁定用户行，并读取授权 writer 所需的最小状态。

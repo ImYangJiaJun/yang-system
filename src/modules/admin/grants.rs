@@ -1,6 +1,7 @@
 //! 平台账号对 Token 授权快照的扩展。
+//! raw-sql-boundary: domain-service admin-grant-snapshot
 
-use super::user::{ACTIVE_STATUS, IS_ADMIN, STATUS, USER_ID};
+use super::user::ACTIVE_STATUS;
 use crate::modules::account::{AuthorizationGrants, GrantResolver};
 use async_trait::async_trait;
 use yang_base::action::ActionContext;
@@ -18,21 +19,20 @@ impl GrantResolver for AdminGrantResolver {
         user_id: i64,
         transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError> {
-        let sql = format!(
-            "SELECT `{IS_ADMIN}` FROM `admin_user` \
-             WHERE `{USER_ID}` = ? AND `{STATUS}` = ? LIMIT 1"
-        );
         let executor = transaction.executor().ok_or_else(|| {
             BaseError::from(yang_db::DbError::TransactionError(
                 "授权快照事务已结束".to_string(),
             ))
         })?;
-        let admin = sqlx::query_scalar::<_, bool>(&sql)
-            .bind(user_id)
-            .bind(ACTIVE_STATUS)
-            .fetch_optional(executor)
-            .await
-            .map_err(yang_db::DbError::from)?;
+        let admin = sqlx::query_scalar::<_, bool>(
+            "SELECT `admin` FROM `admin_user` \
+             WHERE `user_user` = ? AND `status` = ? LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(ACTIVE_STATUS)
+        .fetch_optional(executor)
+        .await
+        .map_err(yang_db::DbError::from)?;
 
         Ok(admin.map(grants_for_admin).unwrap_or_default())
     }

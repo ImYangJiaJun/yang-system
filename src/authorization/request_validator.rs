@@ -7,6 +7,7 @@ use yang_base::token::TokenClaims;
 use yang_base::BaseError;
 
 use super::{AuthorizationVersionCache, CachedAuthorizationVersion};
+use crate::modules::account;
 
 const ACTIVE_STATUS: &str = "active";
 
@@ -19,12 +20,6 @@ impl AuthorizationVersionValidator {
     pub fn new(cache: Option<AuthorizationVersionCache>) -> Self {
         Self { cache }
     }
-}
-
-#[derive(sqlx::FromRow)]
-struct AuthorizationVersionRecord {
-    status: String,
-    authz_version: i64,
 }
 
 #[async_trait]
@@ -120,25 +115,23 @@ impl TokenClaimsValidator for AuthorizationVersionValidator {
         };
         record_fallback(fallback_reason);
 
-        let state = match find_authorization_version(ctx, user_id).await {
-            Ok(state) => state,
-            Err(error) => {
-                record_check("unavailable", "mysql");
-                tracing::error!(
-                    request_id = %ctx.request_id,
-                    user_id,
-                    token_version,
-                    error_code = BaseError::AuthorizationCheckUnavailable.code_str(),
-                    error = %error,
-                    "MySQL 授权版本回源失败"
-                );
-                return Err(BaseError::AuthorizationCheckUnavailable);
-            }
-        };
-        let AuthorizationVersionRecord {
-            status,
-            authz_version: current_version,
-        } = match state {
+        let state =
+            match account::find_authorization_version(ctx.tools().mysql()?.pool(), user_id).await {
+                Ok(state) => state,
+                Err(error) => {
+                    record_check("unavailable", "mysql");
+                    tracing::error!(
+                        request_id = %ctx.request_id,
+                        user_id,
+                        token_version,
+                        error_code = BaseError::AuthorizationCheckUnavailable.code_str(),
+                        error = %error,
+                        "MySQL 授权版本回源失败"
+                    );
+                    return Err(BaseError::AuthorizationCheckUnavailable);
+                }
+            };
+        let (status, current_version) = match state {
             Some(state) => state,
             None => {
                 record_check("invalid", "mysql");
@@ -207,23 +200,6 @@ impl TokenClaimsValidator for AuthorizationVersionValidator {
             }
         }
     }
-}
-
-async fn find_authorization_version(
-    ctx: &ActionContext,
-    user_id: i64,
-) -> Result<Option<AuthorizationVersionRecord>, BaseError> {
-    sqlx::query_as(
-        "SELECT status, authz_version \
-         FROM users \
-         WHERE id = ? \
-         LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(ctx.tools().mysql()?.pool())
-    .await
-    .map_err(yang_db::DbError::from)
-    .map_err(BaseError::from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

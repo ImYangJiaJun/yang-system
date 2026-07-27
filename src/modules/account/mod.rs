@@ -11,8 +11,8 @@ use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
 pub(crate) use authz_version::{
-    increment_locked_authz_version, increment_locked_authz_versions, lock_user_authorization,
-    lock_user_authorizations, LockedUserAuthorization,
+    find_authorization_version, increment_locked_authz_version, increment_locked_authz_versions,
+    lock_user_authorization, lock_user_authorizations, LockedUserAuthorization,
 };
 pub(crate) use grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
 pub(crate) use user::user_from_claims;
