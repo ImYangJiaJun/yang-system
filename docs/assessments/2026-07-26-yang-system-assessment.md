@@ -3,24 +3,27 @@
 > 评估对象：`D:\code\lib_yang\project\yang-system` 后端
 > 初评源码快照：`450372f20ab54ceb9dec230b87b5ecf5780bd54b`
 > 复评源码快照：`84c14fad57b972e0e6a25cab603ae1f1e83555fe`
+> 后端收尾快照：`ed7b95d9e2f3b0e0fc76364d4063ec1954b5d99b`
 > 评估日期：2026-07-26
+> 后端收尾日期：2026-07-27
 > 基础库关系：消费 `yang-base`、`yang-db` 的本地 path dependency
 > 说明：分数用于风险排序和阶段决策，不代表经过生产流量认证。
 
 ## 一、结论先行
 
-`yang-system` 已经具备基础系统应有的主要纵向切面：账号、平台管理、组织/租户、认证授权、受保护数据访问、Schema 同步、配置、健康检查、真实数据库集成测试和配套前端 Catalog。模块边界清楚，关键并发写使用事务与行锁，整体可读性明显高于“控制器 + service + 任意 SQL”式后台。
+`yang-system` 已经具备基础系统应有的主要纵向切面：账号、平台管理、组织/租户、认证授权、受保护数据访问、Schema 发布、配置、可观测管理面和真实数据库集成测试。模块边界清楚，关键并发写使用事务与行锁，整体可读性明显高于“控制器 + service + 任意 SQL”式后台。
 
-综合复评为 **4.1/5（L4 入口，受控生产候选）**：
+后端收尾复评为 **4.4/5（L4，受控生产候选）**：
 
 - 初评识别的授权新鲜度、租户旁路证明和 bootstrap 信任根三个 P0 已全部形成代码、真实依赖测试和架构门禁闭环；
 - 生产 Schema 已改为默认 validate、非开发/测试环境禁止 apply，并具备独立版本化迁移作业；
-- Tools 构建后的成功与失败路径已统一关闭，授权 outbox worker 也与服务生命周期绑定；
-- 对受控内网或边界清楚的部署，可以进入生产候选验证；经反向代理的互联网部署、无中断 JWT 密钥轮换、强审计和完整 SLO 仍有明确缺口。
+- 受信代理链、配置来源优先级、JWT active/retiring key ring、不可变审计、结构化日志、metrics/trace、readiness/SLO、raw SQL 边界和统一关闭预算均已形成基础闭环；
+- Tools、HTTP、worker 与 exporter 共享有界生命周期，关键故障具有稳定诊断；
+- 对边界清楚且完成部署参数校验的场景，可以进入生产候选验证；更高等级仍需真实告警、密钥轮换、滚动发布与备份恢复演练。
 
-这次上调不是因为“测试变多”，而是原来跨模块的不变量已经从约定变成了可执行边界。它仍不是高保障生产系统：代理信任、key ring、不可变业务审计、可观测闭环和灾备演练需要按部署等级继续完成。
+这次上调不是因为“测试变多”，而是生产共同基线的跨模块不变量已经从约定变成了可执行边界。它仍不是 L5 或高保障生产系统：当前证据主要来自本机门禁和隔离依赖，长期负载、多副本发布、告警路由、密钥实操与灾备恢复尚未得到环境级证明。
 
-生产成熟度的下一步重点不是增加更多业务模块，而是补上 **代理信任、密钥轮换、审计、可观测性和发布/恢复演练**。
+生产成熟度的下一步重点不是增加更多业务模块，而是执行 **告警路由、密钥轮换、滚动发布、备份恢复和容量校准演练**。
 
 ### 复评增量
 
@@ -29,11 +32,15 @@
 | S-01 授权新鲜度 | **已完成** | 事务版本 writer、outbox、单调 Redis 发布、共享请求校验器、真实 MySQL/Redis 故障矩阵 | 指标告警与传播延迟 SLO |
 | S-02 租户全路径证明 | **已完成（当前范围）** | 路径清单、scoped/system capability、架构门禁、CRUD/事务/批量/关联双租户负例 | 新后台任务和新 raw SQL 必须继续纳入清单 |
 | S-03 bootstrap 信任根 | **已完成** | 运维 secret 的 Argon2id 摘要、并发受限校验、HTTP 强制验证、并发/重放集成矩阵 | 生产 secret 交付与轮换 runbook |
+| S-04 代理信任边界 | **已完成** | 默认忽略转发头；仅受信 CIDR peer 可解析有界代理链；认证限流消费可信 client IP | 部署环境验证真实代理拓扑 |
 | S-05 Schema 发布边界 | **已完成（基础版本）** | 默认 validate、生产 apply 拒绝、版本/checksum/恢复说明/完成探针迁移作业 | expand/backfill/contract 的真实演练 |
-| S-06 生命周期关闭 | **统一出口已完成** | Tools 后统一 cleanup，保留主错误；outbox worker 显式 shutdown | 增加进程级有界 shutdown 预算 |
+| S-06 生命周期关闭 | **已完成** | Tools 后统一 cleanup；HTTP drain、worker、exporter 与 Tools 共享单一截止时间，超时强制取消并保留阶段诊断 | 多副本滚动发布演练 |
+| S-07 配置与密钥 | **基础闭环已完成** | 文件 < 环境变量 < secret provider；JWT `kid` 与 active/retiring key ring | 生产 secret provider、轮换和紧急吊销演练 |
+| S-08 不可变审计 | **基础闭环已完成** | 追加式高权限事件、白名单摘要、精确 Schema、事务内 `append_in_tx` 与 365 天在线保留策略 | SIEM 外送重投；高保障场景的 WORM/哈希链 |
+| S-09 可观测运行闭环 | **基础闭环已完成** | JSON 日志、Prometheus、OTLP/W3C trace、readiness 总预算、99.9% SLO 和告警规则 | 真实规则加载、告警路由与阈值校准 |
 | S-10 领域 SQL 边界 | **边界治理已完成** | 代码声明与文档清单一一对应；生产 SQL 必须是静态字面量；租户真实库负例持续执行 | `query!` 宏迁移时提交 SQLx offline metadata |
 
-原 P0 清零后，架构重心已从“补安全事实”转为“证明长期运营”：S-04、S-07、S-08、S-09 和灾备不应被已有绿色测试掩盖。
+原 P0 与 P-01—P-10 共同基线清零后，架构重心已从“补安全事实”转为“证明长期运营”。剩余风险主要是部署和演练证据，不应被本机绿色测试掩盖。
 
 ## 二、第一性原理：基础系统必须守住什么
 
@@ -53,14 +60,14 @@
 | 维度 | 评分 | 判断 |
 |---|---:|---|
 | 模块化与装配 | 4.3 | account/admin/org Addon 清楚，组合根集中 |
-| 事务与数据一致性 | 4.4 | 高风险写、授权版本与 outbox 同事务，唯一约束和行锁边界清楚 |
-| 认证与授权 | 4.3 | 登录/刷新与请求期授权版本闭环，缓存损坏和依赖故障策略明确 |
-| 租户隔离 | 4.3 | scoped capability、路径清单、架构门禁和真实双租户矩阵已闭环 |
-| 配置与密钥 | 3.3 | 严格校验和 bootstrap 摘要成熟，仍缺环境覆盖与 JWT key ring |
-| 可观测与运维 | 3.4 | health/tracing/request id/outbox metrics 已有，审计、SLO 和恢复演练不足 |
-| 测试与质量门禁 | 4.5 | quick/full/integration 分层，原 P0 与缓存/数据库故障矩阵已进入门禁 |
-| 可读性与逻辑简洁性 | 4.2 | 共享授权校验器与 scoped capability 收敛职责，模块主线仍清楚 |
-| **整体** | **4.1** | **L4 入口的受控生产候选，尚非互联网/强审计场景的完整基线** |
+| 事务与数据一致性 | 4.5 | 高风险写、授权版本、outbox 与 audit 同事务，唯一约束和行锁边界清楚 |
+| 认证与授权 | 4.5 | 登录/刷新、请求期授权新鲜度与 key ring 闭环，缓存损坏和依赖故障策略明确 |
+| 租户隔离 | 4.4 | scoped capability、路径清单、raw SQL 门禁和真实双租户矩阵已闭环 |
+| 配置与密钥 | 4.3 | 严格来源优先级、secret provider 插槽、bootstrap 摘要与 JWT key ring 已具备 |
+| 可观测与运维 | 4.3 | 日志、metrics、trace、readiness、SLO、关闭预算已闭环；环境演练仍待执行 |
+| 测试与质量门禁 | 4.6 | quick/full/integration 分层，安全不变量与真实依赖故障矩阵进入门禁 |
+| 可读性与逻辑简洁性 | 4.3 | 共享校验器、scoped capability 与可枚举 SQL 边界收敛职责 |
+| **整体** | **4.4** | **L4 受控生产候选；基础代码闭环，尚缺长期运行与恢复证明** |
 
 ## 四、当前架构的成熟点
 
@@ -199,25 +206,23 @@
 - 初始化事件进入 S-08 审计账本；
 - 若威胁模型要求 HTTP 面完全无初始化能力，可在部署层改为一次性运维 Job。
 
-### S-04：代理后的客户端 IP 信任边界不完整
+### S-04：代理后的客户端 IP 信任边界（已完成）
 
 **优先级：P1；影响：限流正确性与可绕过性。**
 
-当前限流从直接 peer `SocketAddr` 取得 IP。在反向代理后，所有用户可能表现为同一个代理地址；如果未来简单改成无条件信任 `X-Forwarded-For`，攻击者又可以伪造来源。
+`2e35f81` 已把客户端 IP 从不可信 header 字符串升级为受信传输事实：未配置受信代理时只使用直接 peer 并忽略转发头；只有 peer 命中显式 CIDR 才解析标准代理链，从右向左剥离受信节点并拒绝非法或超限输入。认证限流只消费解析后的可信 client IP。
 
-**建议路径：**
+**已完成路径：**
 
-- 配置受信代理 CIDR；
-- 只有直接 peer 位于受信代理范围时，才解析标准 `Forwarded` 或约定的 `X-Forwarded-For`；
-- 从右向左剥离受信代理，得到第一个非受信地址；
-- 对头长度、地址数量和非法值设置上限；
-- 将解析后的 client IP 作为受信 request extension 注入，认证限流只消费该值。
+- 受信代理 CIDR 经过启动期严格校验；
+- 未受信直连无法用转发头伪造身份；
+- 单层、多层、非法和超长代理链均有回归覆盖；
+- 解析失败与限流结果进入低基数 metrics。
 
-**验收条件：**
+**剩余部署验收：**
 
-- 直连、单层代理、多层受信代理、伪造头、超长头都有测试；
-- 未配置代理时完全忽略转发头；
-- metrics 能区分解析失败与限流触发。
+- 在目标 ingress/LB 拓扑核对实际 header 格式和 CIDR；
+- 用部署 smoke test 证明直连伪造失败且不同代理用户不会共享同一限流身份。
 
 ### S-05：生产 Schema 发布与启动期同步分离（已完成基础闭环）
 
@@ -237,61 +242,61 @@
 - expand → backfill → switch → contract 的破坏性步骤保持拆分和审批；
 - 发布流水线先执行 migration job，再由应用 `validate` 阻止 Schema 漂移。
 
-### S-06：启动与失败路径统一资源收尾（统一出口已完成）
+### S-06：启动与失败路径统一资源收尾（已完成）
 
 **优先级：P1；影响：测试、优雅退出、未来资源扩展。**
 
-`run_then_cleanup` 现在包围 Tools 创建后的完整操作阶段：应用构建、Schema、地址解析/绑定、serve 失败和正常退出都会恰好执行一次 `tools.close()`，且保留原始业务错误。授权 outbox worker 在 HTTP 服务退出后显式 shutdown。
+`run_then_cleanup` 包围 Tools 创建后的完整操作阶段：应用构建、Schema、地址解析/绑定、serve 失败和正常退出都会恰好执行一次关闭，且保留原始业务错误。`6c1e682` 又把 HTTP drain、授权 outbox worker、telemetry exporter 与 Tools 关闭纳入同一个进程截止时间，超时会记录固定阶段并强制取消。
 
 **已完成路径：**
 
 - `3a21588` 将 Tools 后流程收敛到统一 cleanup 边界，并覆盖 build/schema/bind/serve/成功路径；
-- outbox worker 作为显式句柄随服务停止，不依赖进程退出隐式丢弃。
+- 根基础库 `178d8c8` 接受调用方提供的 shutdown signal；
+- `6c1e682` 统一进程级 shutdown budget、阶段诊断和超时取消。
 
-**剩余与持续验收条件：**
+**持续验收条件：**
 
 - 新增 worker、exporter、租约或插件资源时必须接入同一生命周期；
-- 在进程级 shutdown budget 内为 worker 与资源关闭增加统一超时；关闭必须幂等，且不能覆盖原始运行错误。
+- 关闭必须幂等，且不能覆盖原始运行错误；
+- 在多副本环境演练 readiness 撤销、连接排空与强制截止时间线。
 
-### S-07：配置和 Token 密钥缺少生产级治理
+### S-07：配置和 Token 密钥生产治理（基础闭环已完成）
 
 **优先级：P1；影响：部署、轮换、泄露响应。**
 
-当前配置使用 `deny_unknown_fields`、资源上限和脱敏 Debug，bootstrap secret 也只保存 Argon2id 摘要；但 `Settings::load` 仍直接读取 TOML 文件，JWT 使用单个 HS256 secret，缺少明确的环境/secret-provider 覆盖、`kid`、验证 key ring 和轮换窗口。
+`d14d10d` 已固定配置文件 < 环境变量 < secret provider 的启动期单一合成入口，应用和 migration job 使用同一优先级；secret 不进入普通 Debug。根 `e2697e6` 与系统 `38692b0` 已引入带 `kid` 的有界 key ring：active key 只签发，active + retiring keys 可验证，未知 `kid`、弱密钥、重复 key 与无界集合在启动期失败。
 
-**建议路径：**
+**已完成路径：**
 
-- 明确优先级：默认值 < 配置文件 < 环境变量 < secret provider；
-- secret 不进入普通配置 dump；
-- Token header 携带 `kid`，签发只用 active key，验证接受 active + retiring keys；
-- 建立轮换和紧急吊销 runbook；
-- 第一阶段不做配置热更新，避免把一致性问题带入运行期。
+- 明确且测试配置来源优先级；
+- 支持不修改镜像的环境/secret provider 注入；
+- Token header 携带 `kid`，签发与验证职责分离；
+- 保持启动期冻结，不引入配置热更新一致性。
 
-**验收条件：**
+**剩余运营验收：**
 
-- 无需修改镜像或落盘明文即可注入密钥；
-- 轮换期间旧 Token 按策略继续验证，窗口结束后失效；
-- 未知 `kid`、弱 secret 和空 secret 在启动期失败。
+- 在真实 secret provider 演练 active → retiring → 移除；
+- 验证窗口结束后的旧 Token 失效和紧急吊销；
+- 将轮换、回退和 break-glass 步骤纳入发布 runbook。
 
-### S-08：业务审计仍停留在日志层
+### S-08：不可变业务审计（基础闭环已完成）
 
 **优先级：P1；影响：追责、合规、事故恢复。**
 
-认证 hook 会输出 tracing，但 admin/org 的高权限变化没有不可变审计账本。普通日志可能丢失、重采样或被运维系统按保留期删除，也不保证和业务提交一致。
+`d25b0d0` 已建立追加式高权限审计事实：事件只接受白名单、有界摘要，精确 Schema 不匹配时失败关闭，并定义 365 天在线保留策略。`d221f3a` 将唯一 `append_in_tx` 接入高权限业务事务；审计失败时业务事实、授权版本与 outbox 一并回滚，不再存在“业务成功但审计缺失”的可提交状态。
 
-**建议路径：**
+**已完成路径：**
 
-- 建立 append-only audit event：actor、subject/target、tenant、action、before/after 摘要、request_id、时间和结果；
-- 高风险业务写与 outbox/audit 事件在同一数据库事务提交；
-- 异步投递到日志/SIEM，但数据库记录是事实源；
-- 对敏感字段做白名单摘要，不记录密码、Token、bootstrap nonce。
+- 记录 actor、target、tenant、可信 action、request_id、时间和白名单摘要；
+- 高风险业务写与授权版本/outbox/audit 使用同一事务；
+- 数据库追加记录作为事实源，业务侧无更新/删除入口；
+- 密码、Token、bootstrap nonce 等敏感值不得进入 payload。
 
-**验收条件：**
+**剩余运营与高保障扩展：**
 
-- 管理员授予/撤销、用户停用、组织角色变化、bootstrap 均有事件；
-- 业务提交成功却没有审计记录的状态不可出现；
-- 可按 actor、target、tenant、request_id 检索；
-- 审计表只追加，修改/删除权限独立控制。
+- 若外送 SIEM，增加至少一次投递、幂等键与重投演练；
+- 强合规场景再增加独立 WORM、哈希链或签名；
+- 定期验证保留、归档、检索与恢复流程。
 
 ### S-09：可观测性运行闭环已完成基础版
 
@@ -323,7 +328,7 @@ OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生�
 - readiness 在依赖退化时有界返回；
 - 指标标签无 user id、tenant id 等高基数值。
 
-### S-10：领域 SQL 逃生口应保留，但要集中
+### S-10：领域 SQL 逃生口集中治理（已完成）
 
 **优先级：P2；影响：可读性和安全审查。**
 
@@ -383,9 +388,9 @@ OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生�
 | **已覆盖** | P1 | 最后一个管理员并发变更 | 任意调度下至少保留一个有效超级管理员 |
 | **已覆盖** | P1 | 组织创建中途失败 | 组织和成员同事务，不残留半成品 |
 | **已完成基础版** | P1 | Schema 多步失败/重跑 | 迁移 checksum、完成探针和重试不误记成功 |
-| **待完成** | P1 | 受信代理 IP | 转发头不能伪造，代理用户不会全部共享同一身份 |
+| **已完成** | P1 | 受信代理 IP | 默认忽略转发头；受信 CIDR、多层链、伪造与超限输入具有回归证据 |
 | **已完成** | P2 | readiness 依赖超时 | 管理面单一总预算；lifecycle/dependency/timeout 有限原因；真实 TCP 探针与 timeout 单测 |
-| **待完成** | P2 | audit outbox 重投 | 至少一次投递不产生重复业务事实 |
+| **条件项** | P2 | audit SIEM 外送重投 | 数据库审计事实与业务提交已原子；只有启用异步外送时才需证明至少一次投递不重复 |
 
 ## 七、分阶段改进路径
 
@@ -402,20 +407,20 @@ OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生�
 ### 阶段 1：生命周期与边界（2—4 周）
 
 1. ✅ 已统一 bootstrap 失败/关机资源清理。
-2. 实现受信代理 client IP。
-3. 建立配置覆盖和 JWT key ring。
+2. ✅ 已实现受信代理 client IP。
+3. ✅ 已建立配置来源优先级和 JWT key ring。
 4. ✅ 全部生产 raw SQL 已进入可枚举 repository/service/基础设施边界；租户路径继续执行 scoped/system capability 负例。
 
-**退出条件：** 多副本部署的代理、密钥、Schema、关闭策略有可执行 runbook。
+**代码退出条件：已达到。** 多副本环境仍需执行代理、密钥、Schema 与关闭 runbook。
 
 ### 阶段 2：可审计、可观测（4—8 周）
 
-1. 建立事务内 audit/outbox。
-2. 输出结构化日志、metrics、trace。
-3. 定义 SLO、告警和 readiness 预算。
-4. 为 Schema 建立版本化 deploy migration。
+1. ✅ 已建立事务内 audit/outbox。
+2. ✅ 已输出结构化日志、metrics、trace。
+3. ✅ 已定义 SLO、告警和 readiness 预算。
+4. ✅ 已为 Schema 建立版本化 deploy migration。
 
-**退出条件：** 高权限变化可追责；一次请求可端到端定位；部署变更可预演和恢复。
+**代码退出条件：已达到。** 环境退出条件仍需真实告警路由、滚动发布和备份恢复演练。
 
 ### 阶段 3：规模化前再优化（8 周以后）
 
@@ -430,17 +435,17 @@ OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生�
 |---|---|
 | 本地开发/演示 | 可用 |
 | 受控内网试运行 | 可用；bootstrap 信任根已关闭抢占窗口 |
-| 受控生产候选 | S-01、S-03、S-05 与 S-06 统一出口已完成；需按部署完成 S-07、S-09、有界 shutdown 与恢复演练 |
+| 受控生产候选 | 后端共同基线已完成；需为目标环境配置 proxy/secret/management plane，并完成恢复演练 |
 | 多租户生产 | S-02 当前路径已闭环；新增路径必须持续扩展证据清单 |
-| 经反向代理的互联网生产 | **仍需 S-04**，并完成适用的 S-07、S-09 |
-| 强审计/高价值权限系统 | 共同基线 + S-08 + 灾备/恢复演练 |
+| 经反向代理的互联网生产 | S-04/S-07/S-09 基础能力已具备；准入前必须验证真实代理拓扑、key 轮换和告警链 |
+| 强审计/高价值权限系统 | 原子追加审计已具备；按威胁模型补 WORM/哈希链、SIEM 重投和灾备演练 |
 | 微服务拆分 | 当前没有必要 |
 
 ## 九、最终判断
 
-`yang-system` 的主体架构已经从“成熟方向”推进到“受控生产候选”：模块边界、事务、租户能力、初始化信任根、生产 Schema 边界、资源生命周期和授权新鲜度都不需要根本性返工。原 P0 已关闭，接下来限制更高等级的是运营与部署信任边界，而不是业务骨架。
+`yang-system` 的主体架构已经达到 L4 受控生产候选：模块边界、事务、租户能力、初始化信任根、生产 Schema、资源生命周期、授权新鲜度、代理/密钥、审计、可观测性和 SQL 边界都不需要根本性返工。原 P0 与生产共同基线已关闭，接下来限制更高等级的是环境运营证据，而不是业务骨架。
 
-建议保持模块化单体和 YANG 原生单运行时，按 S-04 → S-07 → S-08/S-09 的风险顺序补齐代理、密钥、审计与可观测性，再做滚动发布和恢复演练。不要因为允许框架级重构就提前微服务化；当前最简路径是继续强化现有组合根和不可绕过边界。
+建议保持模块化单体和 YANG 原生单运行时，先执行告警、轮换、滚动发布和恢复演练，再由真实容量或组织边界决定后续演进。不要因为允许框架级重构就提前微服务化；当前最简路径是维护现有组合根、架构门禁和不可绕过边界。
 
 ## 十、验证记录与结论边界
 
@@ -455,13 +460,20 @@ OTLP/gRPC 与 W3C TraceContext 形成 Action 到 SQL/Redis 的 trace 链。生�
 | `python scripts/run_ci.py integration`（复评） | 通过 | 9 个真实依赖测试：授权缓存、outbox、迁移、Schema 竞争/恢复、bootstrap、租户隔离与系统旅程全部通过 |
 | `cargo test --test system_integration -- --ignored`（复评） | 连续 3 次通过 | 授权新鲜度共享模块、并发 writer、缓存缺失/损坏/落后/领先/错误类型、Redis/MySQL 独立故障、outbox 连续性 |
 | `cargo clippy --all-targets -- -D warnings`（复评） | 通过 | 当前授权与集成测试代码无 Clippy warning |
+| `python scripts/check_architecture.py --self-test` + 正式检查（后端收尾） | 通过 | raw SQL 声明/文档/路径/静态字面量门禁及自测均通过 |
+| `cargo test --all-targets --locked`（后端收尾） | 通过 | 94 项 Rust 单测通过、3 项真实依赖测试按设计 ignored；4 项 migration contract 通过 |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings`（后端收尾） | 通过 | P-09 完成后的全部后端 targets/features 无 Clippy 错误 |
+| `python scripts/run_ci.py integration`（后端收尾） | 通过 | 9 个隔离 MySQL/Redis 真实依赖场景通过 |
 
 复评使用本机 Compose 管理且仅绑定 loopback 的 MySQL/Redis：测试只连接名称以 `_test` 结尾的 `yang_system_test` 和 Redis DB 15。集成脚本逐项串行运行会修改这些隔离测试依赖，不触碰开发或生产数据。
 
-复评已经补上授权链中的 Redis/MySQL 组合故障注入，但以下内容在没有对应实测前仍不作通过声明：
+2026-07-27 后端收尾按用户范围没有修改 `frontend/`，也没有运行任何前端命令。以下内容在没有对应环境实测前仍不作通过声明：
 
 - 高并发下的吞吐和 p95；
 - 多副本滚动发布与故障恢复；
-- 受信代理链和 JWT key ring 轮换；
+- 目标 ingress/LB 上的代理链配置；
+- 真实 secret provider 上的 JWT key ring 轮换与紧急吊销；
+- Prometheus/Alertmanager 告警路由和审计 SIEM 外送；
+- 备份恢复的 RPO/RTO。
 - 不可变业务审计与端到端 SLO 告警；
 - 灾备 RPO/RTO。
