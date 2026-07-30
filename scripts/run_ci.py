@@ -21,6 +21,10 @@ class Command:
 ARCHITECTURE = (
     Command("Architecture checker self-test", ("python", "scripts/check_architecture.py", "--self-test")),
     Command("Action scaffold self-test", ("python", "scripts/new_action.py", "--self-test")),
+    Command(
+        "Local config upgrade self-test",
+        ("python", "scripts/upgrade_local_config.py", "--self-test"),
+    ),
     Command("Architecture check", ("python", "scripts/check_architecture.py")),
 )
 

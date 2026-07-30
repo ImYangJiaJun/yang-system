@@ -2,7 +2,8 @@
 param(
     [switch]$CheckOnly,
     [switch]$SkipFrontendInstall,
-    [switch]$RunMigrations
+    [switch]$RunMigrations,
+    [switch]$UpgradeLegacyConfig
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,9 +12,10 @@ $configPath = Join-Path $projectRoot "config.toml"
 $configExamplePath = Join-Path $projectRoot "config.example.toml"
 $composePath = Join-Path $projectRoot "compose.yaml"
 $databaseInitPath = Join-Path $projectRoot "docker/mysql/init/001-create-databases.sql"
+$configUpgradePath = Join-Path $PSScriptRoot "upgrade_local_config.py"
 
-if ($CheckOnly -and $RunMigrations) {
-    throw "-CheckOnly 与 -RunMigrations 不能同时使用。"
+if ($CheckOnly -and ($RunMigrations -or $UpgradeLegacyConfig)) {
+    throw "-CheckOnly 不能与 -RunMigrations/-UpgradeLegacyConfig 同时使用。"
 }
 
 function Assert-Command {
@@ -32,7 +34,39 @@ function Assert-LastExitCode {
     }
 }
 
-foreach ($command in @("rustup", "cargo", "docker", "node", "corepack")) {
+function New-LocalBootstrapSecretPair {
+    $bootstrapOutput = @(& cargo run --quiet --locked --bin yang-bootstrap-secret)
+    Assert-LastExitCode "生成本地 bootstrap secret 失败。"
+    $bootstrapSecretLine = $bootstrapOutput |
+        Where-Object { $_.StartsWith("secret=") } |
+        Select-Object -First 1
+    $bootstrapDigestLine = $bootstrapOutput |
+        Where-Object { $_.StartsWith("digest=") } |
+        Select-Object -First 1
+    if ($null -eq $bootstrapSecretLine -or $null -eq $bootstrapDigestLine) {
+        throw "bootstrap secret 生成器输出格式无效。"
+    }
+    return [pscustomobject]@{
+        Secret = $bootstrapSecretLine.Substring("secret=".Length)
+        Digest = $bootstrapDigestLine.Substring("digest=".Length)
+    }
+}
+
+function Get-LocalConfigInspection {
+    $inspectionOutput = @(
+        & python $configUpgradePath inspect `
+            --config $configPath `
+            --template $configExamplePath
+    )
+    Assert-LastExitCode "检查本地 config.toml 版本失败。"
+    try {
+        return ($inspectionOutput -join "`n") | ConvertFrom-Json
+    } catch {
+        throw "本地 config.toml 检查器输出格式无效。"
+    }
+}
+
+foreach ($command in @("rustup", "cargo", "docker", "node", "corepack", "python")) {
     Assert-Command $command
 }
 
@@ -90,36 +124,57 @@ try {
         $tokenBytes = [byte[]]::new(48)
         [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
         $tokenSecret = [Convert]::ToBase64String($tokenBytes)
-        $bootstrapOutput = @(& cargo run --quiet --locked --bin yang-bootstrap-secret)
-        Assert-LastExitCode "生成本地 bootstrap secret 失败。"
-        $bootstrapSecretLine = $bootstrapOutput |
-            Where-Object { $_.StartsWith("secret=") } |
-            Select-Object -First 1
-        $bootstrapDigestLine = $bootstrapOutput |
-            Where-Object { $_.StartsWith("digest=") } |
-            Select-Object -First 1
-        if ($null -eq $bootstrapSecretLine -or $null -eq $bootstrapDigestLine) {
-            throw "bootstrap secret 生成器输出格式无效。"
-        }
-        $bootstrapSecret = $bootstrapSecretLine.Substring("secret=".Length)
-        $bootstrapDigest = $bootstrapDigestLine.Substring("digest=".Length)
+        $bootstrapPair = New-LocalBootstrapSecretPair
         $config = $config.Replace(
             $mysqlPlaceholder,
             "mysql://root:yang-local@127.0.0.1:3306/yang_system"
         )
         $config = $config.Replace($tokenPlaceholder, $tokenSecret)
-        $config = $config.Replace($bootstrapPlaceholder, $bootstrapDigest)
+        $config = $config.Replace($bootstrapPlaceholder, $bootstrapPair.Digest)
         Set-Content -LiteralPath $configPath -Value $config -Encoding utf8NoBOM
         Write-Host "已生成本机 config.toml（schema.mode=validate）。"
-        Write-Host "本地 bootstrap secret（仅显示一次，请立即保存）: $bootstrapSecret"
+        Write-Host "本地 bootstrap secret（仅显示一次，请立即保存）: $($bootstrapPair.Secret)"
     } else {
-        Write-Host "保留已有 config.toml。"
-        $existingConfig = Get-Content -Raw -LiteralPath $configPath
-        if (
-            -not $existingConfig.Contains("[bootstrap]") -or
-            -not $existingConfig.Contains("secret_digest")
-        ) {
-            throw "已有 config.toml 缺少 [bootstrap].secret_digest；请运行 yang-bootstrap-secret 并手工加入摘要。"
+        $inspection = Get-LocalConfigInspection
+        if (-not $inspection.current) {
+            if (-not $UpgradeLegacyConfig) {
+                throw "已有 config.toml 与当前启动契约不兼容。请备份后使用 -UpgradeLegacyConfig 显式升级。"
+            }
+
+            $bootstrapPair = $null
+            $upgradeArguments = @(
+                $configUpgradePath,
+                "upgrade",
+                "--config",
+                $configPath,
+                "--template",
+                $configExamplePath
+            )
+            if ($inspection.needs_bootstrap_digest) {
+                $bootstrapPair = New-LocalBootstrapSecretPair
+                $upgradeArguments += @(
+                    "--bootstrap-digest",
+                    $bootstrapPair.Digest
+                )
+            }
+            $upgradeOutput = @(& python @upgradeArguments)
+            Assert-LastExitCode "升级旧版 config.toml 失败。"
+            $inspection = Get-LocalConfigInspection
+            if (-not $inspection.current) {
+                throw "升级后的 config.toml 仍不满足当前启动契约。"
+            }
+            Write-Host "旧版 config.toml 已升级到当前本地启动契约。"
+            $backupLine = $upgradeOutput |
+                Where-Object { $_.StartsWith("backup=") } |
+                Select-Object -First 1
+            if ($null -ne $backupLine) {
+                Write-Host "旧配置备份: $($backupLine.Substring("backup=".Length))"
+            }
+            if ($null -ne $bootstrapPair) {
+                Write-Host "本地 bootstrap secret（仅显示一次，请立即保存）: $($bootstrapPair.Secret)"
+            }
+        } else {
+            Write-Host "保留已有 config.toml。"
         }
     }
 

@@ -16,11 +16,19 @@ pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1
 
 # 生成/复用配置，并运行版本化迁移与迁移后 Schema 校验
 pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 -RunMigrations
+
+# 旧 config.toml 明确授权升级后，再执行迁移与校验
+pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 `
+    -UpgradeLegacyConfig -RunMigrations
 ```
 
 脚本会启动 Compose 中的 MySQL 8.0 与 Redis 7、等待健康检查、安装前端依赖，
 并仅在不存在时生成被 Git 忽略的 `config.toml`。生成配置始终使用 `validate`；
 `-RunMigrations` 对新旧配置都执行独立迁移作业，不会把应用启动模式改为 `apply`。
+已有配置若缺少当前 JWT keyring、bootstrap、授权或可观测字段，脚本默认拒绝覆盖；
+`-UpgradeLegacyConfig` 会先备份到 `target/local-config-backups/`，再以当前模板补齐
+字段、迁移 `token.secret` 并对齐本仓库 Compose 的 loopback URL。若需要新建
+bootstrap 摘要，原始 secret 仍只在当前终端显示一次。
 只检查必需工具时使用：
 
 ```powershell
@@ -211,15 +219,16 @@ $tokenBytes = New-Object byte[] 32
 $tokenSecret = [Convert]::ToBase64String($tokenBytes)
 # 生成器只在当前终端显示一次原始 bootstrap secret；配置只填写 digest。
 cargo run --quiet --locked --bin yang-bootstrap-secret
-# 编辑 config.toml：填写 mysql.url、redis.url，把 token.secret 替换为 $tokenSecret，
+# 编辑 config.toml：填写 mysql.url、redis.url，把 token.active_secret 替换为 $tokenSecret，
 # 并把 bootstrap.secret_digest 替换为生成器输出的 digest；安全保存原始 secret。
 cargo run --locked --bin yang-migrate -- apply
 cargo run --locked --bin yang-system
 ```
 
 `config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。MySQL、
-Redis、Token、Bootstrap、Schema 模式等运行参数均以该文件为准；修改环境变量不会
-覆盖配置。`bootstrap.secret_digest` 只接受带强度边界的 Argon2id PHC 摘要，
+Redis、Token、Bootstrap、Schema 模式等运行参数按
+`config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成。
+`bootstrap.secret_digest` 只接受带强度边界的 Argon2id PHC 摘要，
 原始一次性 secret 不得写入配置、日志或普通响应。缺失、明文、弱参数或非法摘要
 都会在连接外部资源前阻止应用启动。部署时应限制 `config.toml` 的读取权限，并通过
 部署系统生成或挂载该文件。
