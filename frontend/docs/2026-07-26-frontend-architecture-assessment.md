@@ -19,25 +19,25 @@
 - Zod 很适合把后端动态 Catalog 当作不可信输入做运行时校验；
 - Playwright 适合验证多角色、登录刷新和真实浏览器交互。
 
-综合复评为 **3.7/5（L3 后段）**。项目已具备完整前端工程骨架、严格类型检查、运行时契约校验、单元测试和 E2E，不是简单 demo。分数只因依赖供应链闭环小幅上调；主要架构瓶颈没有因为版本升级而消失：
+综合复评为 **3.7/5（L3 后段）**；2026-07-27 完成本轮前后端联合优化后，工程成熟度更新为 **4.0/5（L4 初段）**。项目已具备完整前端工程骨架、严格类型检查、运行时契约校验、单元测试和 E2E，不是简单 demo。初评中的主要结构问题已有三项闭环：
 
-1. 后端虽然输出 Catalog，前端仍通过 `operation_id` 后缀、字段名和硬编码模块表推断业务语义；
-2. `TableView.vue` 和 Catalog store 承担过多职责；
-3. 应用生命周期在多个页面/布局重复启动；
-4. access/refresh token 存于 `sessionStorage`，仍可被同源 XSS 读取；
-5. 组件级交互、无障碍和生产可观测性门禁不足。
+1. Catalog 2.3 显式输出身份、模块、主 Action、placement、interaction、view ownership 和行参数绑定，前端已删除后缀/字段名/已知模块推断；
+2. `TableView.vue`、Catalog store 和全局生命周期已按行为及单一所有权拆分；
+3. Catalog 已采用内容寻址 revision、ETag/`If-None-Match` 和 304 协议。
 
-下一阶段应把项目从“Catalog 辅助的前端”推进为“**显式 UI 契约驱动的前端**”，而不是引入新的大型状态/请求框架。初评时的 Quasar 发布阻断已经解除，当前最高收益点转为显式 UI 契约、唯一应用生命周期和按行为拆分 Table/store。
+refresh token 也已迁入 `HttpOnly; SameSite=Strict` host-only Cookie，前端不再读取或保存它；但 access token 仍位于 `sessionStorage`，CSP、多标签页一致性和真实 Redis/MySQL 下的 rotation/replay 证据尚未闭环。下一阶段不需要引入新的大型状态/请求框架，应集中完成浏览器安全、无障碍、可观测性和部署契约。
 
 ### 复评增量
 
-| 初评问题             | 复评状态   | 已落地证据                                                                   | 剩余边界                                                  |
-| -------------------- | ---------- | ---------------------------------------------------------------------------- | --------------------------------------------------------- |
-| W-00 Quasar 安全公告 | **已完成** | `0b69ad7` 升级到 Quasar 2.22.0；`501435e` 将 production audit 纳入 full gate | 继续依赖锁定版本与审计门禁                                |
-| W-01 UI 语义启发式   | **未开始** | `ModulePage` 仍按 `.list/.me/.select` 与输入字段 `id` 推断 placement         | 先扩展基础库 Catalog，再迁移前端，禁止双解释链            |
-| W-02 TableView 过宽  | **未开始** | 当前仍为 1,094 行，混合查询、筛选、关系、选择、Action 和呈现                 | 先提取无 DOM composable，再拆呈现组件                     |
-| W-03/W-04 状态与启动 | **未开始** | `catalog.ts` 仍为 296 行；`start()` 仍有 3 个调用者                          | 建立唯一 app boot，随后拆 session/identity/tenant/catalog |
-| W-05/W-06 浏览器边界 | **未开始** | refresh token 仍在 `sessionStorage`；`/workbench` 仍无 build/permission gate | 需要前后端协议和部署决策                                  |
+| 初评问题              | 复评状态     | 已落地证据                                                                                      | 剩余边界                                             |
+| --------------------- | ------------ | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| W-00 Quasar 安全公告  | **已完成**   | `0b69ad7` 升级到 Quasar 2.22.0；`501435e` 将 production audit 纳入 full gate                    | 继续依赖锁定版本与审计门禁                           |
+| W-01 UI 语义启发式    | **已完成**   | Catalog 2.3 显式输出 module/identity/presentation/view；前端删除后缀、`id` 与已知模块推断       | 保持语义 token 白名单和构建期引用校验                |
+| W-02 TableView 过宽   | **已完成**   | 2026-07-27 将顶层组件降至约 320 行，提取 5 个 composable 和 3 个呈现组件                        | 后续仅按真实重复压力继续细分                         |
+| W-03/W-04 状态与启动  | **已完成**   | session/identity/tenant/catalog/navigation 分离；App 只启动一组生命周期                         | 继续保持显式级联动作和 dispose 测试                  |
+| W-05 浏览器认证边界   | **部分完成** | refresh token 已迁入 HttpOnly/Strict Cookie；登录/刷新轮换、登出清 Cookie、浏览器 POST 同源校验 | access token 内存化、CSP、多标签页与真实服务安全测试 |
+| W-06 Workbench 边界   | **已完成**   | 采用开发构建专用路由，生产构建检查无 Workbench chunk 和公开 source map                          | 若未来生产启用，必须增加后端权限                     |
+| W-07 Catalog 缓存协议 | **已完成**   | SHA-256 revision 覆盖模块投影；后端 ETag/304，前端 `If-None-Match`，缓存命中不再序列化全文      | 继续保留上下文 key、取消和迟到响应 guard             |
 
 因此，技术选型依旧正确，当前问题是职责和契约没有收敛，而不是 Vue、Quasar 或 Pinia 不够强。
 
@@ -82,17 +82,17 @@
 
 ## 四、成熟度评分
 
-| 维度             |    评分 | 判断                                                     |
-| ---------------- | ------: | -------------------------------------------------------- |
-| 技术栈适配度     |     4.5 | 与内部管理 SPA、动态 Catalog 高度匹配                    |
-| API/契约边界     |     4.1 | Zod、集中 client、请求 id、单飞 refresh 较完整           |
-| Catalog 驱动程度 |     3.2 | 基础设施已成形，仍有较多 operation/字段名启发式          |
-| 状态与生命周期   |     3.2 | Pinia 可用，但 store 过宽且多入口 start                  |
-| 组件可维护性     |     3.1 | 通用能力强，TableView/ModulePage 体积和职责过大          |
-| 浏览器安全       |     3.2 | 依赖公告已关闭并进入门禁，但 token 仍可被 JS 读取        |
-| 测试             |     3.9 | 单元 + Playwright + 生产依赖审计，组件交互和安全负例不足 |
-| 无障碍与可观测性 |     2.8 | 尚未形成自动门禁和端到端错误关联                         |
-| **整体**         | **3.7** | **供应链阻断已关闭，进入契约与可维护性收敛阶段**         |
+| 维度             |    评分 | 判断                                                      |
+| ---------------- | ------: | --------------------------------------------------------- |
+| 技术栈适配度     |     4.5 | 与内部管理 SPA、动态 Catalog 高度匹配                     |
+| API/契约边界     |     4.5 | Catalog 2.3、Zod、集中 client、请求 id、单飞 refresh      |
+| Catalog 驱动程度 |     4.4 | 模块、身份、导航、动作展示和视图归属均由显式契约驱动      |
+| 状态与生命周期   |     4.2 | 状态单一所有权，应用根唯一启动，dispose 有回归测试        |
+| 组件可维护性     |     4.1 | Table 顶层只编排，查询、关系、选择、动作和列偏好已拆分    |
+| 浏览器安全       |     3.7 | refresh token 已不可被 JS 读取；access token/CSP 尚待完成 |
+| 测试             |     4.3 | 单元、全量 Chromium、生产依赖审计、构建产物门禁           |
+| 无障碍与可观测性 |     2.8 | 尚未形成自动门禁和端到端错误关联                          |
+| **整体**         | **4.0** | **进入显式契约驱动阶段，剩余风险集中在生产完整性**        |
 
 ## 五、当前架构的成熟点
 
@@ -217,6 +217,14 @@ action presentation:
 - 后端构建期校验 view/action 引用和互斥配置；
 - 前端只保留静态组件 registry，不允许 Catalog 指定任意 import。
 
+**2026-07-27 实施结果：已闭环。**
+
+- `yang-base` 将 UI schema 升至 2.3，`ModuleSpec` 原生声明账号身份、模块标题/图标/顺序、主 Action、工具栏/行级 Action 和所属 View；
+- `record_parameter` 显式声明行记录如何绑定 Action 入参，基础库构建期验证该参数确实存在；
+- `Registry::ui_catalog` 对 module/action/view 使用同一冻结授权策略；主 Action 不可见时对应模块 fail-closed；
+- 前端 `module-pages.ts` 只投影 Catalog，`ModulePage.vue` 不再按 `.list/.me/.select/.login/.refresh` 或 `id` 推断行为；
+- 图标仍通过前端静态语义 token 白名单解析，Catalog 不能指定任意组件或 import。
+
 ### W-02：`TableView.vue` 是当前最大的维护瓶颈
 
 **优先级：P1；影响：可读性、测试、并行开发。**
@@ -328,6 +336,14 @@ HttpOnly cookie 会引入 CSRF、SameSite、CORS、rotation 和多标签页一�
 - CSP 在生产 enforce，违规有报告入口；
 - 安全测试覆盖 XSS 后 token 外泄边界、CSRF 和登出撤销。
 
+**2026-07-27 实施结果：部分闭环。**
+
+- 登录和刷新仅在 JSON 中返回 access token，refresh token 通过 `HttpOnly; SameSite=Strict; Path=/api/v1/users` 的 host-only Cookie 传递；HTTPS 同源请求自动增加 `Secure`；
+- refresh 请求体改为空对象，前端不再读写 refresh token，遗留 Storage key 会被启动清理；
+- 登录/刷新轮换 Cookie，登出调用服务端撤销逻辑并返回过期 Cookie；
+- 浏览器 POST 拒绝 cross-site `Sec-Fetch-Site`，并要求 `Origin`/`Referer` 与 `Host` 精确同源；
+- access token 目前仍保存在 `sessionStorage`，真实 Redis/MySQL 下的重放检测、多标签页协调和生产 CSP 仍未达到完整验收条件。
+
 ### W-06：Workbench 不应无条件进入生产包
 
 **优先级：P1；影响：攻击面和产品可读性。**
@@ -366,6 +382,13 @@ HttpOnly cookie 会引入 CSRF、SameSite、CORS、rotation 和多标签页一�
 - 未变化 Catalog 返回 304 或轻量 revision；
 - 不再为缓存命中序列化完整 Catalog；
 - 权限变化不会复用旧投影。
+
+**2026-07-27 实施结果：已闭环。**
+
+- revision 使用 SHA-256 绑定 schema、授权后的 actions/views/modules 完整投影；
+- 后端返回强 ETag，支持强/弱/列表形式 `If-None-Match` 并在命中时返回 304；
+- 前端缓存以身份、租户和 revision 为事实，发送 `If-None-Match`，304 时复用已校验对象，不再用 `JSON.stringify` 比较全文；
+- 原有 AbortController、上下文 generation 和迟到响应保护继续保留。
 
 ### W-08：测试重心应从纯函数扩展到关键组件交互
 
@@ -491,30 +514,30 @@ API boundary
 ### 阶段 0：契约封口与安全决策（1—2 周）
 
 1. ✅ 已升级 Quasar 到修复版本，并将 dependency audit 纳入 full gate。
-2. 定义 module/navigation/action presentation Catalog vNext。
+2. ✅ 定义并实现 module/identity/navigation/action presentation Catalog 2.3。
 3. 固定 Node/pnpm/浏览器支持矩阵并记录 SPA/Quasar ADR 与非目标。
-4. 基于公网/内网和权限价值完成浏览器威胁模型，明确 refresh token cookie/BFF 或 Bearer 残余风险方案。
-5. 给 Workbench 增加 build/permission gate。
+4. 🟡 已完成 refresh Cookie 协议与同源校验，仍需补 access token、CSP、多标签页和真实服务安全证据。
+5. ✅ 给 Workbench 增加 build gate 和生产包反向检查。
 
 **退出条件：** Catalog vNext、兼容策略、认证存储和 Workbench 暴露 ADR 获批；过渡期间禁止新增 operation/字段名启发式。
 
 ### 阶段 1：先拆行为，再拆页面（2—4 周）
 
-1. 将 `store.start()` 移到唯一 app boot。
-2. 拆 session/identity/tenant/catalog store。
-3. 从 TableView 提取五个核心 composable。
-4. 由前后端并行实现选定的 refresh token/Cookie/BFF 或强化 Bearer 协议，并完成 CSRF/rotation/多标签页测试。
-5. 保持 UI 和 API 行为不变，增加组件回归测试。
+1. ✅ 将 `store.start()` 移到唯一 app boot。
+2. ✅ 拆 session/identity/tenant/catalog store，并将导航状态独立。
+3. ✅ 从 TableView 提取五个核心 composable 和三个呈现组件。
+4. 🟡 前后端已实现 refresh HttpOnly Cookie、rotation、同源校验与登出撤销；多标签页和真实服务重放测试待补。
+5. ✅ 保持 UI 和 API 行为不变，增加生命周期、查询、relation、选择和 Action 回归测试。
 
 **退出条件：** 顶层组件只编排；每个异步行为可独立测试和 dispose；生产认证协议达到 W-05 验收条件。
 
 ### 阶段 2：Catalog 真正驱动 UI（4—8 周）
 
-1. 后端输出显式 module/navigation/placement/interaction；
-2. 删除 `.list/.me/.select` 和 `id` 字段启发式；
-3. 引入 ETag/revision 协议；
-4. 增加 schema compatibility fixture 和未知语义安全降级；
-5. 滚动发布期只支持明确的相邻版本窗口，不长期保留双 Catalog/双解释链。
+1. ✅ 后端输出显式 module/identity/navigation/placement/interaction/view ownership；
+2. ✅ 删除 `.list/.me/.select` 和 `id` 字段启发式；
+3. ✅ 引入内容寻址 revision、ETag/`If-None-Match` 和 304；
+4. ✅ 保留 2.2 相邻版本解析窗口，未知语义由 Zod 和静态 token registry 安全降级；
+5. ✅ 前端只有 Catalog 2.3 解释链；2.2 仅缺省为空模块，不保留业务启发式。
 
 **退出条件：** 用一个 fixture 新增模块，前端零业务代码改动即可正确导航和呈现。
 
@@ -577,14 +600,38 @@ API boundary
 | `pnpm --dir frontend e2e`（复评）                                 | 通过 | Chromium 18/18，33.0 秒；登录/refresh/失效、角色、Catalog、Action、TableView 与自定义视图旅程                             |
 | `pnpm --dir frontend audit --prod --audit-level moderate`（复评） | 通过 | Quasar 原公告不再出现，当前生产依赖无已知漏洞                                                                             |
 
+### 2026-07-27 优化实施复验
+
+| 目标               | 结果 | 新鲜证据                                                                                                               |
+| ------------------ | ---- | ---------------------------------------------------------------------------------------------------------------------- |
+| 唯一应用生命周期   | 通过 | App 唯一异步启动；`start()` 幂等并返回 disposer；布局/页面不再启动；架构检查含反向自测                                 |
+| 状态单一所有权     | 通过 | Catalog store 从 296 行降至 68 行；会话、身份、租户、Catalog、导航分别拥有状态；退出显式级联清理                       |
+| TableView 行为拆分 | 通过 | 顶层从 1,094 行降至约 320 行；查询、relation、选择、Action、列偏好均为独立 composable                                  |
+| 关键异步回归       | 通过 | Vitest 20 个文件/82 个测试；覆盖查询取消、迟到响应、relation 竞态、跨页选择清理、Action 刷新、生命周期与监听器 dispose |
+| 浏览器关键旅程     | 通过 | Chromium 18/18；登录、refresh、角色、租户、TableView 筛选/排序/关系/Action 和自定义视图保持通过                        |
+| Workbench 生产隔离 | 通过 | production route 由 `import.meta.env.DEV` 排除；构建后自动检查无 Workbench 标记和公开 source map                       |
+| 生产 JS 体积       | 通过 | 同一基线提交：总 JS `500337 -> 488895` 字节，gzip `180046 -> 172462`；初始 JS gzip `105144 -> 79989`                   |
+
+### 2026-07-27 前后端联合优化复验
+
+| 目标                     | 结果 | 新鲜证据                                                                                                     |
+| ------------------------ | ---- | ------------------------------------------------------------------------------------------------------------ |
+| Catalog 2.3 显式 UI 契约 | 通过 | 基础库 module/action/view 投影、构建期引用校验与授权 fail-closed 单测通过；应用 Registry 构建测试通过        |
+| ETag/304 传输协议        | 通过 | Axum 集成测试验证动态状态码、重复响应头与 JSON 隔离；前端单测验证 `If-None-Match` 和 304 复用                |
+| refresh HttpOnly Cookie  | 通过 | Cookie 属性、同源校验 Rust 单测；前端不存 refresh token；Chromium 登录、自动刷新和双失效退出旅程通过         |
+| 根基础库完整门禁         | 通过 | `CARGO_INCREMENTAL=0 python scripts/run_ci.py full`：feature isolation、fmt、测试、doctest、Clippy 全部通过  |
+| 应用仓库完整门禁         | 通过 | `python scripts/run_ci.py full`：Rust 96 通过/3 个真实服务测试忽略；Clippy、审计、前端 check、生产构建均通过 |
+| 浏览器关键旅程           | 通过 | `pnpm --dir frontend e2e`：Chromium 18/18，34.4 秒                                                           |
+| 前端契约与状态回归       | 通过 | Vitest 20 个文件/83 个测试；生产构建 18 个 JS 文件，总 JS 478.36 KB，无 Workbench chunk/public source map    |
+
 E2E 实际覆盖登录成功/失败、refresh、会话失效、不同账号空间、未授权 Module fail-closed、Catalog 切换、动态 Action、上传/下载/预览/重定向，以及 TableView 的树、筛选、排序、关系表单和行操作。
 
-这证明当前锁定版本组合在本机 Node `v24.13.0`、pnpm `10.33.1` 下可安装、类型检查、测试、审计和构建；W-00 不再是发布阻断。它仍不替代 Firefox/WebKit、低端设备或生产 Web Server 验证，也不证明 W-01—W-11 的架构与运行风险已经解决。
+这证明当前锁定版本组合在本机 Node `v24.13.0`、pnpm `10.33.1` 下可安装、类型检查、测试、审计和构建；W-00、W-01、W-02、W-03、W-04、W-06、W-07 已闭环，W-05 已完成 refresh token 迁移但仍是部分完成。它仍不替代 Firefox/WebKit、低端设备或生产 Web Server 验证，也不证明 W-08—W-11 的生产完整性风险已经解决。
 
 以下结论仍需真实环境数据支持，本文不作通过声明：
 
 - 大 Catalog 下的解析、渲染和内存上限；
 - 低端设备和 Safari 14 的实际兼容性；
 - WCAG 全量人工审查；
-- CSP/HttpOnly cookie 方案（当前尚未实现）；
+- access token 内存化、CSP enforce、多标签页会话一致性和真实 Redis/MySQL 下的 refresh 重放检测；
 - 生产 CDN/Web Server history fallback。
