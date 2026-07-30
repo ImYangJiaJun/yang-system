@@ -1,5 +1,21 @@
 import type { RouteRecordRaw } from "vue-router";
 
+const workbenchRoutes: RouteRecordRaw[] = import.meta.env.DEV
+  ? [
+      {
+        path: "/workbench",
+        component: () => import("layouts/WorkbenchLayout.vue"),
+        children: [
+          {
+            path: "",
+            name: "workbench",
+            component: () => import("pages/WorkbenchPage.vue"),
+          },
+        ],
+      },
+    ]
+  : [];
+
 const routes: RouteRecordRaw[] = [
   {
     path: "/login",
@@ -30,30 +46,9 @@ const routes: RouteRecordRaw[] = [
         name: "module-page",
         component: () => import("pages/ModulePage.vue"),
       },
-      {
-        path: "space/:space",
-        redirect: (route) => {
-          const modules: Record<string, string> = {
-            user: "account.user",
-            admin: "admin.user",
-            org: "org.tenant",
-          };
-          return `/module/${modules[String(route.params.space)] ?? "account.user"}`;
-        },
-      },
     ],
   },
-  {
-    path: "/workbench",
-    component: () => import("layouts/WorkbenchLayout.vue"),
-    children: [
-      {
-        path: "",
-        name: "workbench",
-        component: () => import("pages/WorkbenchPage.vue"),
-      },
-    ],
-  },
+  ...workbenchRoutes,
   {
     path: "/:catchAll(.*)*",
     redirect: "/",

@@ -3,15 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionContext } from "src/api/client";
 import type { UiCatalog } from "src/contracts/ui-catalog";
 
-const { fetchUiCatalogMock, invokeActionMock } = vi.hoisted(() => ({
+const { fetchUiCatalogMock } = vi.hoisted(() => ({
   fetchUiCatalogMock: vi.fn(),
-  invokeActionMock: vi.fn(),
 }));
 
 vi.mock("src/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("src/api/client")>()),
   fetchUiCatalog: fetchUiCatalogMock,
-  invokeAction: invokeActionMock,
 }));
 
 import { useCatalogStore } from "./catalog";
@@ -36,15 +34,14 @@ function catalog(revision: string, operationId: string): UiCatalog {
       },
     ],
     table_views: [],
+    modules: [],
   };
 }
 
 describe("catalog store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
-    sessionStorage.clear();
     fetchUiCatalogMock.mockReset();
-    invokeActionMock.mockReset();
   });
 
   it("忽略已过期请求，旧请求结束不会清除新请求的 loading", async () => {
@@ -58,9 +55,8 @@ describe("catalog store", () => {
     );
     const store = useCatalogStore();
 
-    const firstLoad = store.loadCatalog();
-    store.token = "new-token";
-    const secondLoad = store.loadCatalog();
+    const firstLoad = store.loadCatalog({});
+    const secondLoad = store.loadCatalog({ token: "new-token" });
     expect(pending.map((request) => request.context.token)).toEqual([
       undefined,
       "new-token",
@@ -77,86 +73,22 @@ describe("catalog store", () => {
     expect(store.catalog?.actions[0]?.operation_id).toBe("current");
   });
 
-  it("登录和退出立即同步当前会话", () => {
-    const store = useCatalogStore();
-
-    store.selectAccountIdentity("admin");
-    store.setTokenPair({
-      accessToken: "access-token",
-      refreshToken: "refresh-token",
-    });
-    expect(store.token).toBe("access-token");
-    expect(store.refreshToken).toBe("refresh-token");
-    expect(store.accountIdentity).toBeUndefined();
-    expect(sessionStorage.getItem("yang.token")).toBe("access-token");
-    expect(sessionStorage.getItem("yang.refresh-token")).toBe("refresh-token");
-    expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
-
-    store.tenantId = "tenant-7";
-    store.clearSession();
-    expect(store.token).toBe("");
-    expect(store.refreshToken).toBe("");
-    expect(store.tenantId).toBe("");
-    expect(sessionStorage.getItem("yang.token")).toBeNull();
-    expect(sessionStorage.getItem("yang.refresh-token")).toBeNull();
-    expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
-  });
-
-  it("自动刷新 Token 时保留当前角色和租户上下文", () => {
-    const store = useCatalogStore();
-    store.selectAccountIdentity("org");
-    store.tenantId = "tenant-7";
-
-    store.acceptRefreshedTokenPair({
-      accessToken: "access-new",
-      refreshToken: "refresh-new",
-    });
-
-    expect(store.token).toBe("access-new");
-    expect(store.refreshToken).toBe("refresh-new");
-    expect(store.accountIdentity).toBe("org");
-    expect(store.tenantId).toBe("tenant-7");
-  });
-
-  it("账号身份独立保存并在退出后回到未选择状态", () => {
-    const store = useCatalogStore();
-
-    store.selectAccountIdentity("admin");
-    expect(store.accountIdentity).toBe("admin");
-    expect(sessionStorage.getItem("yang.account-identity")).toBe("admin");
-
-    store.clearSession();
-    expect(store.accountIdentity).toBeUndefined();
-    expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
-  });
-
-  it("通过我的企业 Action 加载名称选项并隐藏内部租户输入", async () => {
-    const store = useCatalogStore();
-    store.token = "access-token";
-    store.catalog = catalog("c".repeat(64), "org.tenant.list");
-    invokeActionMock.mockResolvedValue({
-      kind: "json",
-      status: 200,
-      durationMs: 1,
-      data: {
-        items: [{ id: 7, name: "示例企业", code: "ACME" }],
-        total: 1,
-        page: 1,
-        limit: 100,
-        total_pages: 1,
+  it("reset 会取消当前请求并清空 Catalog 状态", async () => {
+    let signal: AbortSignal | undefined;
+    fetchUiCatalogMock.mockImplementation(
+      (_context: SessionContext, nextSignal: AbortSignal) => {
+        signal = nextSignal;
+        return new Promise<UiCatalog>(() => undefined);
       },
-    });
+    );
+    const store = useCatalogStore();
 
-    await store.loadOrganizations();
+    void store.loadCatalog({});
+    store.reset();
 
-    expect(store.organizations).toEqual([
-      { id: 7, name: "示例企业", code: "ACME" },
-    ]);
-    expect(invokeActionMock.mock.calls[0]?.[2]).toEqual({
-      token: "access-token",
-    });
-    store.selectOrganization(store.organizations[0]);
-    expect(store.tenantId).toBe("7");
-    expect(store.selectedOrganization?.name).toBe("示例企业");
+    expect(signal?.aborted).toBe(true);
+    expect(store.catalog).toBeUndefined();
+    expect(store.loading).toBe(false);
+    expect(store.error).toBeUndefined();
   });
 });

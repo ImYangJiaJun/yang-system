@@ -9,7 +9,8 @@ use repository::AdminRepository;
 use service::AdminService;
 use std::sync::Arc;
 use yang_base::definition::{
-    Fields, Module, ModuleName, ModuleSpec, Radio, Str, Switch, Table, TableName, Timestamp,
+    ActionInteraction, ActionPlacement, ActionPresentationSpec, Fields, Module, ModuleName,
+    ModulePresentationSpec, ModuleSpec, Radio, Str, Switch, Table, TableName, Timestamp,
 };
 use yang_base::BaseError;
 
@@ -83,7 +84,20 @@ pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
         .ok_or(BaseError::TableDefinitionNotSet)?
         .table_definition()?;
     let service = Arc::new(AdminService::new(AdminRepository::new(table)));
-    Ok(actions::register_all(module, service))
+    Ok(actions::register_all(module, service).presentation(
+        ModulePresentationSpec::new(
+            crate::modules::presentation::administrator_identity(),
+            "平台账号",
+            "admin_users",
+        )
+        .description("查询并维护平台管理账号")
+        .order(10)
+        .primary_action(yang_base::action!("admin.user.list"))
+        .present_action(
+            yang_base::action!("admin.user.add"),
+            ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
+        ),
+    ))
 }
 
 #[cfg(test)]

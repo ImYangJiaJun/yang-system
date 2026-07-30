@@ -165,7 +165,7 @@ export const formFieldSchema = z.object({
   validation: fieldValidationSchema.optional(),
 });
 
-const actionPresentationSchema = z.object({
+export const actionPresentationSchema = z.object({
   operation_id: z.string().min(1),
   title: z.string(),
   placement: z.enum(["row", "bulk", "toolbar"]).catch("toolbar"),
@@ -189,6 +189,7 @@ const actionPresentationSchema = z.object({
     .nullable()
     .optional(),
   view_id: z.string().nullable().optional(),
+  record_parameter: z.string().min(1).nullable().optional(),
   appearance: z
     .object({
       emphasis: z.enum(["primary", "secondary", "danger"]).catch("secondary"),
@@ -197,6 +198,26 @@ const actionPresentationSchema = z.object({
       overflow: z.boolean().optional(),
     })
     .optional(),
+});
+
+const accountIdentitySchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  icon: z.string().min(1),
+  order: z.number().int(),
+});
+
+export const modulePresentationSchema = z.object({
+  module_id: z.string().min(1),
+  identity: accountIdentitySchema,
+  title: z.string().min(1),
+  description: z.string(),
+  icon: z.string().min(1),
+  order: z.number().int(),
+  primary_action: z.string().min(1).nullable().optional(),
+  actions: z.array(z.string().min(1)),
+  action_presentations: z.array(actionPresentationSchema),
+  views: z.array(z.string().min(1)),
 });
 
 export const tableViewSchema = z.object({
@@ -236,6 +257,7 @@ export const uiCatalogSchema = z
     revision: z.string().regex(/^[0-9a-f]{64}$/i),
     actions: z.array(actionDemoSchema),
     table_views: z.array(tableViewSchema),
+    modules: z.array(modulePresentationSchema).default([]),
   })
   .superRefine((catalog, context) => {
     if (
@@ -270,6 +292,7 @@ export type TableFilterSchema = z.infer<typeof tableFilterSchema>;
 export type TableFilterOperator = z.infer<typeof filterOperator>;
 export type FormFieldSchema = z.infer<typeof formFieldSchema>;
 export type ActionPresentationSchema = z.infer<typeof actionPresentationSchema>;
+export type ModulePresentationSchema = z.infer<typeof modulePresentationSchema>;
 
 export class ContractError extends Error {
   readonly details: string[];

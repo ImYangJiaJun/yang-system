@@ -4,7 +4,9 @@ import { storeToRefs } from "pinia";
 import { useQuasar } from "quasar";
 import type { ActionPresentationSchema } from "src/contracts/ui-catalog";
 import { resolveCustomView } from "src/custom/registry";
+import { useApplicationSession } from "src/composables/useApplicationSession";
 import { useCatalogStore } from "stores/catalog";
+import { useCatalogNavigationStore } from "stores/catalog-navigation";
 
 const ActionDemo = defineAsyncComponent(
   () => import("components/action/ActionDemo.vue"),
@@ -14,16 +16,12 @@ const TableView = defineAsyncComponent(
 );
 
 const $q = useQuasar();
-const store = useCatalogStore();
-const {
-  catalog,
-  error,
-  loading,
-  navigationMode,
-  selectedAction,
-  selectedView,
-  session,
-} = storeToRefs(store);
+const catalogStore = useCatalogStore();
+const navigationStore = useCatalogNavigationStore();
+const { session } = useApplicationSession();
+const { catalog, error, loading } = storeToRefs(catalogStore);
+const { navigationMode, selectedAction, selectedView } =
+  storeToRefs(navigationStore);
 const customLoading = shallowRef(false);
 const customComponent = shallowRef<Component>();
 const customPresentation = shallowRef<ActionPresentationSchema>();

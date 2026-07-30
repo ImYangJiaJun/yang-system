@@ -8,8 +8,8 @@ mod view;
 pub(super) use guard::OrgAdminGuardMiddleware;
 
 use yang_base::definition::{
-    Fields, Module, ModuleName, ModuleSpec, Radio, Str, Switch, Table, TableName, TableSpec,
-    Timestamp,
+    Fields, Module, ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Switch, Table,
+    TableName, TableSpec, Timestamp,
 };
 use yang_base::BaseError;
 
@@ -96,6 +96,15 @@ impl Module for OrgUserModule {
 pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
     OrgUserModule
         .into_spec()
+        .presentation(
+            ModulePresentationSpec::new(
+                crate::modules::presentation::organization_identity(),
+                "企业成员",
+                "organization_members",
+            )
+            .description("查询并维护当前企业成员")
+            .order(30),
+        )
         .view(view::build()?)
         .crud_at_with_mutations(
             "/api/v1/org/users",

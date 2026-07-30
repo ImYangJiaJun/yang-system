@@ -97,7 +97,7 @@ mod tests {
             trusted_proxy_cidrs: Vec::new(),
         });
         let app =
-            build_app(tools, security).unwrap_or_else(|error| panic!("应用应构建成功: {error}"));
+            build_app(tools, security).unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
         let module = app
             .runtime
             .catalog()

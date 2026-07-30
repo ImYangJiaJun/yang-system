@@ -5,7 +5,8 @@ mod model;
 mod query;
 
 use yang_base::definition::{
-    Actions, Fields, Module, ModuleName, ModuleSpec, Radio, Str, TableName, Timestamp,
+    Actions, Fields, Module, ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, TableName,
+    Timestamp,
 };
 
 pub(super) const STATUS: &str = "status";
@@ -57,7 +58,16 @@ impl Module for OrganizationModule {
 
 /// 将企业 Module 的 Schema 与 Action 原子聚合为 `ModuleSpec`。
 pub(super) fn build_module() -> ModuleSpec {
-    OrganizationModule.into_spec()
+    OrganizationModule.into_spec().presentation(
+        ModulePresentationSpec::new(
+            crate::modules::presentation::organization_identity(),
+            "企业资料",
+            "organization_profile",
+        )
+        .description("查看当前企业主数据")
+        .order(20)
+        .primary_action(yang_base::action!("org.org.list")),
+    )
 }
 
 #[cfg(test)]

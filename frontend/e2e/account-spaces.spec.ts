@@ -45,6 +45,108 @@ function action(
   };
 }
 
+function modulesForActions(actions: ReturnType<typeof action>[]) {
+  const ids = new Set(actions.map((item) => item.operation_id));
+  const identity = (
+    id: "user" | "admin" | "org",
+    title: string,
+    icon: string,
+    order: number,
+  ) => ({ id, title, icon, order });
+  const module = (
+    moduleId: string,
+    moduleIdentity: ReturnType<typeof identity>,
+    title: string,
+    icon: string,
+    primaryAction?: string,
+    secondaryAction?: string,
+  ) => ({
+    module_id: moduleId,
+    identity: moduleIdentity,
+    title,
+    description: "",
+    icon,
+    order: 10,
+    ...(primaryAction ? { primary_action: primaryAction } : {}),
+    actions:
+      secondaryAction && ids.has(secondaryAction) ? [secondaryAction] : [],
+    action_presentations:
+      secondaryAction && ids.has(secondaryAction)
+        ? [
+            {
+              operation_id: secondaryAction,
+              title:
+                actions.find((item) => item.operation_id === secondaryAction)
+                  ?.title ?? secondaryAction,
+              placement: "toolbar",
+              interaction: "form",
+            },
+          ]
+        : [],
+    views: [],
+  });
+  const result = [];
+  if (ids.has("account.user.me")) {
+    result.push(
+      module(
+        "account.user",
+        identity("user", "个人账户", "person", 10),
+        "用户中心",
+        "account",
+        "account.user.me",
+      ),
+    );
+  }
+  if (ids.has("admin.user.list")) {
+    result.push(
+      module(
+        "admin.user",
+        identity("admin", "管理平台", "administrator", 30),
+        "平台账号",
+        "admin_users",
+        "admin.user.list",
+        "admin.user.add",
+      ),
+    );
+  }
+  const orgIdentity = identity("org", "企业账户", "organization", 20);
+  if (ids.has("org.tenant.list")) {
+    result.push(
+      module(
+        "org.tenant",
+        orgIdentity,
+        "我的企业",
+        "organizations",
+        "org.tenant.list",
+        "org.tenant.create",
+      ),
+    );
+  }
+  if (ids.has("org.org.list")) {
+    result.push(
+      module(
+        "org.org",
+        orgIdentity,
+        "企业资料",
+        "organization_profile",
+        "org.org.list",
+      ),
+    );
+  }
+  if (ids.has("org.user.select")) {
+    result.push(
+      module(
+        "org.user",
+        orgIdentity,
+        "企业成员",
+        "organization_members",
+        "org.user.select",
+      ),
+    );
+  }
+  return result;
+}
+
 async function serveCatalog(
   page: Page,
   actions: ReturnType<typeof action>[],
@@ -62,10 +164,11 @@ async function serveCatalog(
         code: 0,
         message: "成功",
         data: {
-          schema_version: "2.2",
+          schema_version: "2.3",
           revision: "c".repeat(64),
           actions,
           table_views: [],
+          modules: modulesForActions(actions),
         },
       }),
     }),
@@ -91,10 +194,13 @@ test("登录后无需刷新即可获得完整账号身份目录", async ({ page 
         code: 0,
         message: "成功",
         data: {
-          schema_version: "2.2",
-          revision: "c".repeat(64),
+          schema_version: "2.3",
+          revision: (authenticated ? "d" : "c").repeat(64),
           actions: authenticated ? authenticatedActions : userActions,
           table_views: [],
+          modules: modulesForActions(
+            authenticated ? authenticatedActions : userActions,
+          ),
         },
       }),
     });
@@ -108,7 +214,6 @@ test("登录后无需刷新即可获得完整账号身份目录", async ({ page 
         message: "成功",
         data: {
           access_token: "new-session-token",
-          refresh_token: "new-refresh-token",
         },
       }),
     }),

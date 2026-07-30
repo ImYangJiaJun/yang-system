@@ -16,14 +16,23 @@ export type { InvocationResult, SessionContext } from "./types";
 export async function fetchUiCatalog(
   context: SessionContext,
   signal?: AbortSignal,
+  cached?: UiCatalog,
 ): Promise<UiCatalog> {
-  const response = await requestWithTokenRefresh(context.token, (token) =>
-    fetch(`${apiBase}/.well-known/yang/ui-catalog`, {
+  const response = await requestWithTokenRefresh(context.token, (token) => {
+    const headers = contextHeaders({ ...context, token });
+    if (cached) headers.set("If-None-Match", `"${cached.revision}"`);
+    return fetch(`${apiBase}/.well-known/yang/ui-catalog`, {
       method: "GET",
-      headers: contextHeaders({ ...context, token }),
+      headers,
       signal,
-    }),
-  );
+    });
+  });
+  if (response.status === 304) {
+    if (cached) return cached;
+    throw new ApiError("UI catalog 返回 304，但本地没有可复用目录", {
+      status: response.status,
+    });
+  }
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = await parseJson(response);
   if (!response.ok) {

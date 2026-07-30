@@ -5,11 +5,18 @@ import { useQuasar } from "quasar";
 import TableView from "components/table/TableView.vue";
 import type { ActionPresentationSchema } from "src/contracts/ui-catalog";
 import { resolveCustomView } from "src/custom/registry";
+import { useApplicationSession } from "src/composables/useApplicationSession";
+import { useApplicationLifecycleStore } from "stores/application-lifecycle";
 import { useCatalogStore } from "stores/catalog";
+import { useCatalogNavigationStore } from "stores/catalog-navigation";
 
 const $q = useQuasar();
-const store = useCatalogStore();
-const { catalog, error, loading, selectedView, session } = storeToRefs(store);
+const catalogStore = useCatalogStore();
+const navigationStore = useCatalogNavigationStore();
+const lifecycleStore = useApplicationLifecycleStore();
+const { session } = useApplicationSession();
+const { catalog, error, loading } = storeToRefs(catalogStore);
+const { selectedView } = storeToRefs(navigationStore);
 const customLoading = shallowRef(false);
 const customComponent = shallowRef<Component>();
 const customPresentation = shallowRef<ActionPresentationSchema>();
@@ -57,7 +64,7 @@ watch([session, selectedView], () => {
           flat
           color="negative"
           label="重新加载"
-          @click="store.loadCatalog"
+          @click="lifecycleStore.reloadCatalog"
         />
       </template>
     </q-banner>
@@ -84,7 +91,7 @@ watch([session, selectedView], () => {
         outline
         color="primary"
         label="刷新目录"
-        @click="store.loadCatalog"
+        @click="lifecycleStore.reloadCatalog"
       />
     </div>
     <q-inner-loading :showing="loading || customLoading">

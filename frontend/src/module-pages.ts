@@ -1,15 +1,17 @@
 import type {
   ActionDemoSchema,
+  ActionPresentationSchema,
   TableViewSchema,
   UiCatalog,
 } from "src/contracts/ui-catalog";
 
-export type AccountIdentity = "user" | "admin" | "org";
+export type AccountIdentity = string;
 
 export interface AccountIdentityDefinition {
   id: AccountIdentity;
   title: string;
   icon: string;
+  order: number;
 }
 
 export interface ModulePageDefinition {
@@ -18,85 +20,69 @@ export interface ModulePageDefinition {
   title: string;
   description: string;
   icon: string;
+  order: number;
+  primaryAction?: ActionDemoSchema;
   actions: ActionDemoSchema[];
+  actionPresentations: ActionPresentationSchema[];
   views: TableViewSchema[];
 }
 
-type KnownModule = Omit<ModulePageDefinition, "actions" | "views">;
+const iconTokens: Readonly<Record<string, string>> = {
+  account: "manage_accounts",
+  admin_users: "admin_panel_settings",
+  administrator: "admin_panel_settings",
+  organization: "domain",
+  organization_members: "groups",
+  organization_profile: "apartment",
+  organizations: "domain",
+  person: "account_circle",
+};
 
-export const accountIdentityDefinitions: readonly AccountIdentityDefinition[] =
-  [
-    { id: "user", title: "个人账户", icon: "account_circle" },
-    { id: "admin", title: "管理平台", icon: "admin_panel_settings" },
-    { id: "org", title: "企业账户", icon: "domain" },
-  ] as const;
-
-const knownModules: readonly KnownModule[] = [
-  {
-    id: "account.user",
-    identity: "user",
-    title: "用户中心",
-    description: "查看当前用户身份并管理登录会话。",
-    icon: "manage_accounts",
-  },
-  {
-    id: "admin.user",
-    identity: "admin",
-    title: "平台账号",
-    description: "查询、添加和维护平台管理员账号。",
-    icon: "admin_panel_settings",
-  },
-  {
-    id: "org.tenant",
-    identity: "org",
-    title: "我的企业",
-    description: "选择已有企业或创建新的企业账户。",
-    icon: "domain",
-  },
-  {
-    id: "org.org",
-    identity: "org",
-    title: "企业资料",
-    description: "查看当前企业的基础资料与状态。",
-    icon: "apartment",
-  },
-  {
-    id: "org.user",
-    identity: "org",
-    title: "企业成员",
-    description: "维护企业成员、职务和企业管理员身份。",
-    icon: "groups",
-  },
-] as const;
-
-function moduleIdFromOperation(operationId: string): string {
-  return operationId.split(".").slice(0, -1).join(".");
-}
-
-function viewBelongsTo(moduleId: string, view: TableViewSchema): boolean {
-  return [view.view_id, view.data_action, ...view.actions].some(
-    (value) =>
-      value === moduleId ||
-      value.startsWith(`${moduleId}.`) ||
-      moduleIdFromOperation(value) === moduleId,
-  );
+function iconFor(token: string): string {
+  return iconTokens[token] ?? "extension";
 }
 
 export function buildAccountModulePages(
   catalog: UiCatalog | undefined,
 ): ModulePageDefinition[] {
-  const actions = catalog?.actions ?? [];
-  const views = catalog?.table_views ?? [];
-  return knownModules.flatMap((definition) => {
-    const moduleActions = actions.filter(
-      (action) => moduleIdFromOperation(action.operation_id) === definition.id,
+  if (!catalog) return [];
+  const actions = new Map(
+    catalog.actions.map((action) => [action.operation_id, action]),
+  );
+  const views = new Map(
+    catalog.table_views.map((view) => [view.view_id, view]),
+  );
+  return catalog.modules
+    .map((module): ModulePageDefinition => {
+      const primaryAction = module.primary_action
+        ? actions.get(module.primary_action)
+        : undefined;
+      const moduleActions = module.actions.flatMap((operationId) => {
+        const action = actions.get(operationId);
+        return action ? [action] : [];
+      });
+      return {
+        id: module.module_id,
+        identity: module.identity.id,
+        title: module.title,
+        description: module.description,
+        icon: iconFor(module.icon),
+        order: module.order,
+        primaryAction,
+        actions: moduleActions,
+        actionPresentations: module.action_presentations.filter(
+          (presentation) => actions.has(presentation.operation_id),
+        ),
+        views: module.views.flatMap((viewId) => {
+          const view = views.get(viewId);
+          return view ? [view] : [];
+        }),
+      };
+    })
+    .sort(
+      (left, right) =>
+        left.order - right.order || left.id.localeCompare(right.id),
     );
-    const moduleViews = views.filter((view) =>
-      viewBelongsTo(definition.id, view),
-    );
-    if (!moduleActions.length && !moduleViews.length) return [];
-    return [{ ...definition, actions: moduleActions, views: moduleViews }];
-  });
 }
 
 export function modulesForIdentity(
@@ -108,24 +94,37 @@ export function modulesForIdentity(
 }
 
 export function identityForModuleId(
+  pages: ModulePageDefinition[],
   moduleId: string,
 ): AccountIdentity | undefined {
-  return knownModules.find((module) => module.id === moduleId)?.identity;
+  return pages.find((module) => module.id === moduleId)?.identity;
 }
 
 export function visibleAccountIdentities(
   pages: ModulePageDefinition[],
+  catalog?: UiCatalog,
 ): AccountIdentityDefinition[] {
-  return accountIdentityDefinitions.filter((identity) =>
-    pages.some((page) => page.identity === identity.id),
+  const visible = new Set(pages.map((page) => page.identity));
+  const identities = new Map<string, AccountIdentityDefinition>();
+  for (const module of catalog?.modules ?? []) {
+    if (!visible.has(module.identity.id)) continue;
+    identities.set(module.identity.id, {
+      id: module.identity.id,
+      title: module.identity.title,
+      icon: iconFor(module.identity.icon),
+      order: module.identity.order,
+    });
+  }
+  return [...identities.values()].sort(
+    (left, right) =>
+      left.order - right.order || left.id.localeCompare(right.id),
   );
 }
 
 export function unassignedViews(
   catalog: UiCatalog | undefined,
 ): TableViewSchema[] {
-  return (catalog?.table_views ?? []).filter(
-    (view) =>
-      !knownModules.some((definition) => viewBelongsTo(definition.id, view)),
-  );
+  if (!catalog) return [];
+  const assigned = new Set(catalog.modules.flatMap((module) => module.views));
+  return catalog.table_views.filter((view) => !assigned.has(view.view_id));
 }

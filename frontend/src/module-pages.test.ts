@@ -44,7 +44,7 @@ function view(viewId: string, dataAction: string): TableViewSchema {
 
 function catalog(): UiCatalog {
   return {
-    schema_version: "2.2",
+    schema_version: "2.3",
     revision: "d".repeat(64),
     actions: [
       action("account.user.me"),
@@ -57,6 +57,50 @@ function catalog(): UiCatalog {
       action("org.user.select"),
     ],
     table_views: [view("org.user.list", "org.user.select")],
+    modules: [
+      module("account.user", "user", {
+        primary_action: "account.user.me",
+        actions: ["account.user.logout"],
+      }),
+      module("admin.user", "admin", {
+        primary_action: "admin.user.list",
+        actions: ["admin.user.add"],
+      }),
+      module("org.tenant", "org", {
+        primary_action: "org.tenant.list",
+        actions: ["org.tenant.create"],
+        order: 10,
+      }),
+      module("org.org", "org", {
+        primary_action: "org.org.list",
+        order: 20,
+      }),
+      module("org.user", "org", { views: ["org.user.list"], order: 30 }),
+    ],
+  };
+}
+
+function module(
+  moduleId: string,
+  identity: string,
+  overrides: Partial<UiCatalog["modules"][number]> = {},
+): UiCatalog["modules"][number] {
+  return {
+    module_id: moduleId,
+    identity: {
+      id: identity,
+      title: identity,
+      icon: identity === "org" ? "organization" : "person",
+      order: 10,
+    },
+    title: moduleId === "admin.user" ? "平台账号" : moduleId,
+    description: "",
+    icon: "account",
+    order: 10,
+    actions: [],
+    action_presentations: [],
+    views: [],
+    ...overrides,
   };
 }
 
@@ -73,7 +117,11 @@ describe("module pages", () => {
     ]);
     expect(
       pages.find((page) => page.id === "admin.user")?.actions,
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      pages.find((page) => page.id === "admin.user")?.primaryAction
+        ?.operation_id,
+    ).toBe("admin.user.list");
     expect(pages.find((page) => page.id === "org.user")?.views).toHaveLength(1);
   });
 
@@ -82,6 +130,11 @@ describe("module pages", () => {
       ...catalog(),
       actions: [action("admin.user.list")],
       table_views: [],
+      modules: [
+        module("admin.user", "admin", {
+          primary_action: "admin.user.list",
+        }),
+      ],
     });
 
     expect(pages).toHaveLength(1);

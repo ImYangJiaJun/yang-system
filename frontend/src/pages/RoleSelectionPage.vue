@@ -7,30 +7,36 @@ import {
   visibleAccountIdentities,
   type AccountIdentity,
 } from "src/module-pages";
+import { useApplicationSession } from "src/composables/useApplicationSession";
+import { useApplicationLifecycleStore } from "stores/application-lifecycle";
 import { useCatalogStore } from "stores/catalog";
+import { useIdentityStore } from "stores/identity";
 
 const router = useRouter();
-const store = useCatalogStore();
-const { catalog, error, loading } = storeToRefs(store);
+const catalogStore = useCatalogStore();
+const identityStore = useIdentityStore();
+const lifecycleStore = useApplicationLifecycleStore();
+const applicationSession = useApplicationSession();
+const { catalog, error, loading } = storeToRefs(catalogStore);
 
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
-const roles = computed(() => visibleAccountIdentities(modulePages.value));
+const roles = computed(() =>
+  visibleAccountIdentities(modulePages.value, catalog.value),
+);
 
 async function selectRole(identity: AccountIdentity) {
   const firstModule = modulePages.value.find(
     (module) => module.identity === identity,
   );
   if (!firstModule) return;
-  store.selectAccountIdentity(identity);
+  identityStore.select(identity);
   await router.replace(`/module/${firstModule.id}`);
 }
 
 async function logout() {
-  store.clearSession();
+  await applicationSession.endSession();
   await router.replace("/login");
 }
-
-store.start();
 </script>
 
 <template>
@@ -74,7 +80,7 @@ store.start();
             flat
             color="negative"
             label="重试"
-            @click="store.loadCatalog"
+            @click="lifecycleStore.reloadCatalog"
           />
         </template>
       </q-banner>

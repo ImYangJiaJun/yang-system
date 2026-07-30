@@ -9,7 +9,7 @@ async function serveBusinessCatalog(page: Page) {
         code: 0,
         message: "成功",
         data: {
-          schema_version: "2.2",
+          schema_version: "2.3",
           revision: "b".repeat(64),
           actions: [
             {
@@ -76,6 +76,7 @@ async function serveBusinessCatalog(page: Page) {
               ],
             },
           ],
+          modules: [],
         },
       }),
     }),
@@ -106,7 +107,7 @@ test("正式控制台模块只有一个导航入口", async ({ page }) => {
         code: 0,
         message: "成功",
         data: {
-          schema_version: "2.2",
+          schema_version: "2.3",
           revision: "f".repeat(64),
           actions: [
             {
@@ -124,6 +125,25 @@ test("正式控制台模块只有一个导航入口", async ({ page }) => {
             },
           ],
           table_views: [],
+          modules: [
+            {
+              module_id: "account.user",
+              identity: {
+                id: "user",
+                title: "个人账户",
+                icon: "person",
+                order: 10,
+              },
+              title: "用户中心",
+              description: "",
+              icon: "account",
+              order: 10,
+              primary_action: "account.user.me",
+              actions: [],
+              action_presentations: [],
+              views: [],
+            },
+          ],
         },
       }),
     }),

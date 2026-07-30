@@ -8,6 +8,7 @@ function catalog(revision: string): UiCatalog {
     revision,
     actions: [],
     table_views: [],
+    modules: [],
   };
 }
 
@@ -21,7 +22,7 @@ describe("CatalogCache", () => {
     expect(cache.accept(changed)).toBe(changed);
   });
 
-  it("相同 revision 的不同授权投影不能复用旧目录", () => {
+  it("revision 是完整过滤后目录的内容地址", () => {
     const cache = new CatalogCache();
     const anonymous = catalog("a".repeat(64));
     const authenticated: UiCatalog = {
@@ -44,6 +45,6 @@ describe("CatalogCache", () => {
     };
 
     expect(cache.accept(anonymous)).toBe(anonymous);
-    expect(cache.accept(authenticated)).toBe(authenticated);
+    expect(cache.accept(authenticated)).toBe(anonymous);
   });
 });

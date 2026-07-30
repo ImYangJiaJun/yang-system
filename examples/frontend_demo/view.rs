@@ -35,11 +35,13 @@ pub(super) fn item_view() -> anyhow::Result<ViewSpec> {
             )
             .present_action(
                 yang_base::action!("demo.items.edit"),
-                ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Form),
+                ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Form)
+                    .record_parameter("id"),
             )
             .present_action(
                 yang_base::action!("demo.items.delete"),
                 ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Invoke)
+                    .record_parameter("id")
                     .confirmation(confirm),
             )
             .present_action(

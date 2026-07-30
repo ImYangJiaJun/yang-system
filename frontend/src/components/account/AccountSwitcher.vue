@@ -9,23 +9,32 @@ import {
 } from "src/module-pages";
 import type { OrganizationSummary } from "src/contracts/account-data";
 import { useCatalogStore } from "stores/catalog";
+import { useIdentityStore } from "stores/identity";
+import { useSessionStore } from "stores/session";
+import { useTenantStore } from "stores/tenant";
 
 const emit = defineEmits<{ logout: [] }>();
 const router = useRouter();
-const store = useCatalogStore();
+const catalogStore = useCatalogStore();
+const identityStore = useIdentityStore();
+const sessionStore = useSessionStore();
+const tenantStore = useTenantStore();
+const { catalog } = storeToRefs(catalogStore);
+const { accountIdentity } = storeToRefs(identityStore);
+const { token } = storeToRefs(sessionStore);
 const {
-  accountIdentity,
-  catalog,
   organizations,
-  organizationsError,
-  organizationsLoading,
+  error: organizationsError,
+  loading: organizationsLoading,
   selectedOrganization,
   tenantId,
-} = storeToRefs(store);
+} = storeToRefs(tenantStore);
 const menuOpen = ref(false);
 
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
-const identities = computed(() => visibleAccountIdentities(modulePages.value));
+const identities = computed(() =>
+  visibleAccountIdentities(modulePages.value, catalog.value),
+);
 const activeIdentity = computed(() => accountIdentity.value);
 const activeIdentityTitle = computed(
   () =>
@@ -43,26 +52,33 @@ async function switchIdentity(identity: AccountIdentity) {
     (module) => module.identity === identity,
   );
   if (!first) return;
-  store.selectAccountIdentity(identity);
+  identityStore.select(identity);
   menuOpen.value = false;
   await router.push(`/module/${first.id}`);
 }
 
 async function switchOrganization(organization: OrganizationSummary) {
-  store.selectAccountIdentity("org");
-  store.selectOrganization(organization);
+  identityStore.select("org");
+  tenantStore.selectOrganization(organization);
   menuOpen.value = false;
   await router.push("/module/org.tenant");
 }
 
 async function openOrganizationManagement() {
-  store.selectAccountIdentity("org");
+  identityStore.select("org");
   menuOpen.value = false;
   await router.push("/module/org.tenant");
 }
 
+function loadOrganizations() {
+  return tenantStore.loadOrganizations(
+    catalog.value?.actions ?? [],
+    token.value,
+  );
+}
+
 watch(menuOpen, (open) => {
-  if (open) void store.loadOrganizations();
+  if (open) void loadOrganizations();
 });
 </script>
 
@@ -168,7 +184,7 @@ watch(menuOpen, (open) => {
                     flat
                     color="primary"
                     label="重试"
-                    @click="store.loadOrganizations"
+                    @click="loadOrganizations"
                   />
                 </q-item-section>
               </q-item>

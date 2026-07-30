@@ -1,24 +1,31 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { type QTableColumn } from "quasar";
 import ActionDemo from "components/action/ActionDemo.vue";
 import TableView from "components/table/TableView.vue";
 import { invokeAction } from "src/api/client";
+import { useApplicationSession } from "src/composables/useApplicationSession";
 import { asJsonSchema, initialObject } from "src/contracts/json-schema";
-import type { ActionDemoSchema } from "src/contracts/ui-catalog";
+import type {
+  ActionDemoSchema,
+  ActionPresentationSchema,
+} from "src/contracts/ui-catalog";
 import { buildAccountModulePages } from "src/module-pages";
 import { useCatalogStore } from "stores/catalog";
+import { useIdentityStore } from "stores/identity";
+import { useTenantStore } from "stores/tenant";
 
 const route = useRoute();
-const store = useCatalogStore();
-const {
-  catalog,
-  loading: catalogLoading,
-  selectedOrganization,
-  session,
-} = storeToRefs(store);
+const router = useRouter();
+const catalogStore = useCatalogStore();
+const identityStore = useIdentityStore();
+const tenantStore = useTenantStore();
+const { session } = useApplicationSession();
+const { catalog, loading: catalogLoading } = storeToRefs(catalogStore);
+const { accountIdentity } = storeToRefs(identityStore);
+const { selectedOrganization } = storeToRefs(tenantStore);
 const activeAction = ref<ActionDemoSchema>();
 const activeInitialValues = ref<Record<string, unknown>>({});
 const actionDialogOpen = ref(false);
@@ -31,42 +38,48 @@ const pageSize = 20;
 let controller: AbortController | undefined;
 
 const moduleId = computed(() => String(route.params.moduleId ?? ""));
-const modulePage = computed(() =>
+const availableModule = computed(() =>
   buildAccountModulePages(catalog.value).find(
     (candidate) => candidate.id === moduleId.value,
   ),
 );
-const primaryAction = computed(() => {
-  if (modulePage.value?.views.length) return undefined;
-  return (
-    modulePage.value?.actions.find((action) =>
-      action.operation_id.endsWith(".list"),
-    ) ??
-    modulePage.value?.actions.find((action) =>
-      action.operation_id.endsWith(".me"),
-    )
-  );
-});
-const secondaryActions = computed(() =>
-  (modulePage.value?.actions ?? []).filter(
-    (action) =>
-      action !== primaryAction.value &&
-      !action.operation_id.endsWith(".select") &&
-      !action.operation_id.endsWith(".login") &&
-      !action.operation_id.endsWith(".refresh"),
-  ),
+const modulePage = computed(() =>
+  availableModule.value?.identity === accountIdentity.value
+    ? availableModule.value
+    : undefined,
 );
+const primaryAction = computed(() =>
+  modulePage.value?.views.length ? undefined : modulePage.value?.primaryAction,
+);
+type PresentedAction = {
+  action: ActionDemoSchema;
+  presentation: ActionPresentationSchema;
+};
+const presentedActions = computed<PresentedAction[]>(() => {
+  const page = modulePage.value;
+  if (!page) return [];
+  const actions = new Map(
+    page.actions.map((action) => [action.operation_id, action]),
+  );
+  return page.actionPresentations.flatMap((presentation) => {
+    const action = actions.get(presentation.operation_id);
+    return action ? [{ action, presentation }] : [];
+  });
+});
+const secondaryActions = computed(() => presentedActions.value);
 
 function inputFields(action: ActionDemoSchema): string[] {
   return Object.keys(asJsonSchema(action.input_schema).properties ?? {});
 }
 
 const rowActions = computed(() =>
-  secondaryActions.value.filter((action) => inputFields(action).includes("id")),
+  secondaryActions.value.filter(
+    ({ presentation }) => presentation.placement === "row",
+  ),
 );
 const toolbarActions = computed(() =>
   secondaryActions.value.filter(
-    (action) => !inputFields(action).includes("id"),
+    ({ presentation }) => presentation.placement === "toolbar",
   ),
 );
 const resultRecord = computed<Record<string, unknown> | undefined>(() =>
@@ -197,10 +210,12 @@ async function loadPrimary() {
   }
 }
 
-function openAction(action: ActionDemoSchema, row?: Record<string, unknown>) {
+function openAction(presented: PresentedAction, row?: Record<string, unknown>) {
+  const { action, presentation } = presented;
   activeAction.value = action;
+  const recordParameter = presentation.record_parameter;
   activeInitialValues.value =
-    row && inputFields(action).includes("id") ? { id: row.id } : {};
+    row && recordParameter ? { [recordParameter]: row.id } : {};
   actionDialogOpen.value = true;
 }
 
@@ -213,7 +228,11 @@ function selectOrganizationRow(row: Record<string, unknown>) {
     dataError.value = "企业列表缺少 id、name 或 code";
     return;
   }
-  store.selectOrganization({ id: row.id, name: row.name, code: row.code });
+  tenantStore.selectOrganization({
+    id: row.id,
+    name: row.name,
+    code: row.code,
+  });
 }
 
 function refreshFromFirstPage() {
@@ -224,7 +243,10 @@ function refreshFromFirstPage() {
 function handleCompleted() {
   void loadPrimary();
   if (modulePage.value?.id === "org.tenant") {
-    void store.loadOrganizations();
+    void tenantStore.loadOrganizations(
+      catalog.value?.actions ?? [],
+      session.value.token ?? "",
+    );
   }
 }
 
@@ -236,6 +258,15 @@ watch(
     void loadPrimary();
   },
   { immediate: true, deep: true },
+);
+watch(
+  [availableModule, catalog, catalogLoading],
+  ([pageDefinition, currentCatalog, loading]) => {
+    if (currentCatalog && !loading && !pageDefinition) {
+      void router.replace("/roles");
+    }
+  },
+  { immediate: true },
 );
 watch(page, () => void loadPrimary());
 onBeforeUnmount(() => controller?.abort());
@@ -259,13 +290,13 @@ onBeforeUnmount(() => controller?.abort());
         </div>
         <div class="row q-gutter-sm">
           <q-btn
-            v-for="action in toolbarActions"
-            :key="action.operation_id"
+            v-for="presented in toolbarActions"
+            :key="presented.action.operation_id"
             color="primary"
             unelevated
-            :icon="action.method === 'POST' ? 'add' : 'tune'"
-            :label="action.title"
-            @click="openAction(action)"
+            :icon="presented.action.method === 'POST' ? 'add' : 'tune'"
+            :label="presented.action.title"
+            @click="openAction(presented)"
           />
         </div>
       </header>
@@ -350,13 +381,15 @@ onBeforeUnmount(() => controller?.abort());
               >
                 <q-list>
                   <q-item
-                    v-for="action in rowActions"
-                    :key="action.operation_id"
+                    v-for="presented in rowActions"
+                    :key="presented.action.operation_id"
                     v-close-popup
                     clickable
-                    @click="openAction(action, props.row)"
+                    @click="openAction(presented, props.row)"
                   >
-                    <q-item-section>{{ action.title }}</q-item-section>
+                    <q-item-section>{{
+                      presented.action.title
+                    }}</q-item-section>
                   </q-item>
                 </q-list>
               </q-btn-dropdown>
@@ -397,17 +430,19 @@ onBeforeUnmount(() => controller?.abort());
       >
         <q-list separator>
           <q-item
-            v-for="action in secondaryActions"
-            :key="action.operation_id"
+            v-for="presented in secondaryActions"
+            :key="presented.action.operation_id"
             clickable
-            @click="openAction(action)"
+            @click="openAction(presented)"
           >
             <q-item-section avatar>
               <q-icon color="primary" name="tune" />
             </q-item-section>
             <q-item-section>
-              <q-item-label>{{ action.title }}</q-item-label>
-              <q-item-label caption>{{ action.description }}</q-item-label>
+              <q-item-label>{{ presented.action.title }}</q-item-label>
+              <q-item-label caption>{{
+                presented.action.description
+              }}</q-item-label>
             </q-item-section>
             <q-item-section side
               ><q-icon name="chevron_right"

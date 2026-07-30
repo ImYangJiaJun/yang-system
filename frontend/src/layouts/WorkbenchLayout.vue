@@ -2,37 +2,45 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
-import { navigationOptions, useCatalogStore } from "stores/catalog";
+import { useApplicationSession } from "src/composables/useApplicationSession";
+import { useApplicationLifecycleStore } from "stores/application-lifecycle";
+import { useCatalogStore } from "stores/catalog";
+import {
+  navigationOptions,
+  useCatalogNavigationStore,
+} from "stores/catalog-navigation";
+import { useSessionStore } from "stores/session";
+import { useTenantStore } from "stores/tenant";
 
 const drawerOpen = ref(true);
 const router = useRouter();
-const store = useCatalogStore();
+const catalogStore = useCatalogStore();
+const navigationStore = useCatalogNavigationStore();
+const sessionStore = useSessionStore();
+const tenantStore = useTenantStore();
+const lifecycleStore = useApplicationLifecycleStore();
+const applicationSession = useApplicationSession();
+const { catalog, loading } = storeToRefs(catalogStore);
 const {
   actions,
-  catalog,
-  loading,
   navigationMode,
   query,
   selectedAction,
   selectedOperationId,
   selectedView,
   selectedViewId,
-  tenantId,
-  token,
   views,
-} = storeToRefs(store);
+} = storeToRefs(navigationStore);
+const { loggedIn } = storeToRefs(sessionStore);
+const { tenantId } = storeToRefs(tenantStore);
 
 const emptyMessage = computed(() =>
   navigationMode.value === "views" ? "没有匹配的业务页面" : "没有匹配的 Action",
 );
-const loggedIn = computed(() => Boolean(token.value.trim()));
-
 async function endSession() {
-  store.clearSession();
+  await applicationSession.endSession();
   await router.push("/login");
 }
-
-store.start();
 </script>
 
 <template>
@@ -58,12 +66,13 @@ store.start();
         <q-space />
         <div class="session-settings">
           <q-input
-            v-model="tenantId"
+            :model-value="tenantId"
             dense
             standout="bg-white text-dark"
             placeholder="租户 ID（可选）"
             clearable
             class="tenant-input"
+            @update:model-value="tenantStore.setTenantId(String($event ?? ''))"
           />
           <q-btn flat color="white" icon="home" label="正式控制台" to="/" />
           <q-btn
@@ -71,7 +80,7 @@ store.start();
             color="white"
             label="刷新目录"
             :loading="loading"
-            @click="store.loadCatalog"
+            @click="lifecycleStore.reloadCatalog"
           />
           <q-btn
             v-if="loggedIn"

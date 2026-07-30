@@ -28,11 +28,13 @@ pub(super) fn build() -> Result<ViewSpec, BaseError> {
         )
         .present_action(
             yang_base::action!("org.user.put"),
-            ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Form),
+            ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Form)
+                .record_parameter("id"),
         )
         .present_action(
             yang_base::action!("org.user.del"),
             ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Invoke)
+                .record_parameter("id")
                 .confirmation(confirm_delete),
         ))
 }

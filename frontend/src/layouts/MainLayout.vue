@@ -6,30 +6,34 @@ import AccountSwitcher from "components/account/AccountSwitcher.vue";
 import {
   buildAccountModulePages,
   modulesForIdentity,
-  accountIdentityDefinitions,
+  visibleAccountIdentities,
 } from "src/module-pages";
+import { useApplicationSession } from "src/composables/useApplicationSession";
 import { useCatalogStore } from "stores/catalog";
+import { useCatalogNavigationStore } from "stores/catalog-navigation";
+import { useIdentityStore } from "stores/identity";
+import { useSessionStore } from "stores/session";
 
 const drawerOpen = ref(true);
 const route = useRoute();
 const router = useRouter();
-const store = useCatalogStore();
-const {
-  accountIdentity,
-  catalog,
-  error,
-  loading,
-  selectedView,
-  selectedViewId,
-  token,
-  views,
-} = storeToRefs(store);
+const catalogStore = useCatalogStore();
+const navigationStore = useCatalogNavigationStore();
+const identityStore = useIdentityStore();
+const sessionStore = useSessionStore();
+const applicationSession = useApplicationSession();
+const { catalog, error, loading } = storeToRefs(catalogStore);
+const { selectedView, selectedViewId, views } = storeToRefs(navigationStore);
+const { accountIdentity } = storeToRefs(identityStore);
+const { loggedIn } = storeToRefs(sessionStore);
 
-const loggedIn = computed(() => Boolean(token.value.trim()));
 const businessMode = computed(() => route.path === "/business");
 const moduleMode = computed(() => route.path.startsWith("/module/"));
 const navigationMode = computed(() => businessMode.value || moduleMode.value);
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
+const identities = computed(() =>
+  visibleAccountIdentities(modulePages.value, catalog.value),
+);
 const currentModule = computed(() =>
   modulePages.value.find(
     (module) => module.id === String(route.params.moduleId ?? ""),
@@ -45,9 +49,8 @@ const homeTarget = computed(() => {
 });
 const activeIdentityTitle = computed(
   () =>
-    accountIdentityDefinitions.find(
-      (identity) => identity.id === accountIdentity.value,
-    )?.title ?? "未选择角色",
+    identities.value.find((identity) => identity.id === accountIdentity.value)
+      ?.title ?? "未选择角色",
 );
 
 async function openBusinessView(viewId: string) {
@@ -60,11 +63,9 @@ async function openModule(moduleId: string) {
 }
 
 async function endSession() {
-  store.clearSession();
+  await applicationSession.endSession();
   await router.push("/login");
 }
-
-store.start();
 </script>
 
 <template>

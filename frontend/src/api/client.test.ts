@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, invokeAction } from "./client";
-import type { ActionDemoSchema } from "src/contracts/ui-catalog";
+import { ApiError, fetchUiCatalog, invokeAction } from "./client";
+import type { ActionDemoSchema, UiCatalog } from "src/contracts/ui-catalog";
 
 const action: ActionDemoSchema = {
   operation_id: "demo.update",
@@ -48,6 +48,29 @@ const action: ActionDemoSchema = {
 afterEach(() => {
   sessionStorage.clear();
   vi.unstubAllGlobals();
+});
+
+describe("fetchUiCatalog", () => {
+  it("发送 revision ETag，并在 304 时复用不可变目录", async () => {
+    const cached: UiCatalog = {
+      schema_version: "2.3",
+      revision: "a".repeat(64),
+      actions: [],
+      table_views: [],
+      modules: [],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        expect(new Headers(init.headers).get("if-none-match")).toBe(
+          `"${cached.revision}"`,
+        );
+        return new Response(null, { status: 304 });
+      }),
+    );
+
+    await expect(fetchUiCatalog({}, undefined, cached)).resolves.toBe(cached);
+  });
 });
 
 describe("invokeAction", () => {
@@ -130,7 +153,6 @@ describe("invokeAction", () => {
 
   it("收到 401 后使用刷新结果重建并重试 Action 请求", async () => {
     sessionStorage.setItem("yang.token", "access-old");
-    sessionStorage.setItem("yang.refresh-token", "refresh-old");
     const authorizations: Array<string | null> = [];
     const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
       if (url === "/api/v1/users/refresh") {
@@ -140,7 +162,6 @@ describe("invokeAction", () => {
             message: "成功",
             data: {
               access_token: "access-new",
-              refresh_token: "refresh-new",
             },
           }),
           { status: 200, headers: { "content-type": "application/json" } },

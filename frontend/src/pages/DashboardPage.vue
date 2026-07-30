@@ -7,12 +7,19 @@ import {
   modulesForIdentity,
   unassignedViews,
 } from "src/module-pages";
+import { useApplicationLifecycleStore } from "stores/application-lifecycle";
 import { useCatalogStore } from "stores/catalog";
+import { useCatalogNavigationStore } from "stores/catalog-navigation";
+import { useIdentityStore } from "stores/identity";
 
 const router = useRouter();
-const store = useCatalogStore();
-const { accountIdentity, catalog, error, loading, selectedViewId } =
-  storeToRefs(store);
+const catalogStore = useCatalogStore();
+const navigationStore = useCatalogNavigationStore();
+const identityStore = useIdentityStore();
+const lifecycleStore = useApplicationLifecycleStore();
+const { catalog, error, loading } = storeToRefs(catalogStore);
+const { selectedViewId } = storeToRefs(navigationStore);
+const { accountIdentity } = storeToRefs(identityStore);
 const query = ref("");
 
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
@@ -79,7 +86,7 @@ async function openModule(moduleId: string) {
           flat
           color="negative"
           label="重新加载"
-          @click="store.loadCatalog"
+          @click="lifecycleStore.reloadCatalog"
         />
       </template>
     </q-banner>

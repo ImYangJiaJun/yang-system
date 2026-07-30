@@ -10,7 +10,9 @@ use repository::TenantRepository;
 use service::TenantService;
 use std::sync::Arc;
 use yang_base::action::TokenAuthMiddleware;
-use yang_base::definition::ModuleSpec;
+use yang_base::definition::{
+    ActionInteraction, ActionPlacement, ActionPresentationSpec, ModulePresentationSpec, ModuleSpec,
+};
 use yang_base::table::TableDefinition;
 use yang_base::BaseError;
 
@@ -35,5 +37,20 @@ pub(super) fn build_module(
         TokenAuthMiddleware::new(account::user_from_claims)
             .with_claims_validator(authorization_validator),
     );
-    actions::register_all(module, service)
+    actions::register_all(module, service).map(|module| {
+        module.presentation(
+            ModulePresentationSpec::new(
+                crate::modules::presentation::organization_identity(),
+                "我的企业",
+                "organizations",
+            )
+            .description("发现已有企业或创建新的企业")
+            .order(10)
+            .primary_action(yang_base::action!("org.tenant.list"))
+            .present_action(
+                yang_base::action!("org.tenant.create"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
+            ),
+        )
+    })
 }

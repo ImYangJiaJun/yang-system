@@ -5,14 +5,14 @@ import type { UiCatalog } from "src/contracts/ui-catalog";
 /// 缓存键。缓存不保存 bearer token，也不会随会话数量无界增长。
 export class CatalogCache {
   private current: UiCatalog | undefined;
-  private currentSignature = "";
+
+  get value(): UiCatalog | undefined {
+    return this.current;
+  }
 
   accept(catalog: UiCatalog): UiCatalog {
-    const signature = JSON.stringify(catalog);
-    if (this.current && this.currentSignature === signature)
-      return this.current;
+    if (this.current?.revision === catalog.revision) return this.current;
     this.current = catalog;
-    this.currentSignature = signature;
     return catalog;
   }
 }

@@ -32,6 +32,7 @@ function envelope(overrides: Record<string, unknown> = {}) {
       revision: "a".repeat(64),
       actions: [action],
       table_views: [],
+      modules: [],
       ...overrides,
     },
   };

@@ -554,6 +554,74 @@ def check_raw_sql_boundaries(root: Path) -> list[str]:
     return errors
 
 
+def check_frontend_boundaries(root: Path) -> list[str]:
+    frontend = root / "frontend" / "src"
+    if not frontend.is_dir():
+        return []
+
+    errors: list[str] = []
+    app = frontend / "App.vue"
+    app_source = app.read_text(encoding="utf-8") if app.is_file() else ""
+    if app_source.count("startApplication(") != 1:
+        errors.append("frontend/src/App.vue: 应由应用根节点唯一启动全局生命周期")
+    application_start = frontend / "application" / "startApplication.ts"
+    application_start_source = (
+        application_start.read_text(encoding="utf-8")
+        if application_start.is_file()
+        else ""
+    )
+    if application_start_source.count("useApplicationLifecycleStore().start()") != 1:
+        errors.append(
+            "frontend/src/application/startApplication.ts: "
+            "应用启动器必须且只能启动一次全局生命周期"
+        )
+
+    for directory in ("layouts", "pages"):
+        for source in sorted((frontend / directory).glob("*.vue")):
+            if ".start()" in source.read_text(encoding="utf-8"):
+                errors.append(
+                    f"{source.relative_to(root).as_posix()}: 页面或布局不得启动全局生命周期"
+                )
+
+    table_view = frontend / "components" / "table" / "TableView.vue"
+    if table_view.is_file():
+        source = table_view.read_text(encoding="utf-8")
+        if len(source.splitlines()) > 400:
+            errors.append(
+                "frontend/src/components/table/TableView.vue: 顶层编排组件不得超过 400 行"
+            )
+        required_composables = {
+            "useTableQuery",
+            "useRelationOptions",
+            "useTableSelection",
+            "useTableActions",
+            "useColumnPreferences",
+        }
+        for composable in sorted(required_composables):
+            if f"{composable}(" not in source:
+                errors.append(
+                    "frontend/src/components/table/TableView.vue: "
+                    f"缺少行为边界 {composable}"
+                )
+        for forbidden in ("invokeAction(", "new AbortController("):
+            if forbidden in source:
+                errors.append(
+                    "frontend/src/components/table/TableView.vue: "
+                    f"顶层组件不得直接拥有异步状态机 {forbidden}"
+                )
+
+    routes = frontend / "router" / "routes.ts"
+    routes_source = routes.read_text(encoding="utf-8") if routes.is_file() else ""
+    if (
+        'path: "/workbench"' in routes_source
+        and "import.meta.env.DEV" not in routes_source
+    ):
+        errors.append(
+            "frontend/src/router/routes.ts: Workbench 必须由开发构建条件门控"
+        )
+    return errors
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     directories = action_directories(root)
@@ -566,6 +634,7 @@ def check(root: Path) -> list[str]:
     errors.extend(check_tenant_isolation_evidence(root))
     errors.extend(check_audit_append_only(root))
     errors.extend(check_raw_sql_boundaries(root))
+    errors.extend(check_frontend_boundaries(root))
     return errors
 
 
@@ -575,6 +644,40 @@ def write(path: Path, content: str) -> None:
 
 
 def self_test() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        write(
+            root / "frontend/src/App.vue",
+            "<script setup>\nstartApplication(router)\n</script>\n",
+        )
+        write(
+            root / "frontend/src/application/startApplication.ts",
+            "useApplicationLifecycleStore().start()\n",
+        )
+        write(root / "frontend/src/layouts/MainLayout.vue", "<template />\n")
+        write(
+            root / "frontend/src/components/table/TableView.vue",
+            "<script setup>\n"
+            "useTableQuery(); useRelationOptions(); useTableSelection();\n"
+            "useTableActions(); useColumnPreferences();\n"
+            "</script>\n",
+        )
+        write(
+            root / "frontend/src/router/routes.ts",
+            'const workbench = import.meta.env.DEV ? [{ path: "/workbench" }] : [];\n',
+        )
+        assert check_frontend_boundaries(root) == [], (
+            "合法前端生命周期和 Table 编排边界应通过"
+        )
+        write(
+            root / "frontend/src/layouts/MainLayout.vue",
+            "<script setup>store.start()</script>\n",
+        )
+        errors = check_frontend_boundaries(root)
+        assert any("不得启动全局生命周期" in error for error in errors), (
+            "必须拒绝布局重复启动全局生命周期"
+        )
+
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         actions = root / "src" / "modules" / "demo" / "actions"
