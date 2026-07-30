@@ -16,6 +16,30 @@ function catalogAction(operationId: string) {
   };
 }
 
+function catalogModule(
+  moduleId: string,
+  identity: "user" | "admin",
+  primaryAction: string,
+) {
+  return {
+    module_id: moduleId,
+    identity: {
+      id: identity,
+      title: identity === "user" ? "个人账户" : "管理平台",
+      icon: identity === "user" ? "person" : "administrator",
+      order: identity === "user" ? 10 : 30,
+    },
+    title: moduleId === "account.user" ? "用户中心" : "平台账号",
+    description: "",
+    icon: identity === "user" ? "account" : "admin_users",
+    order: 10,
+    primary_action: primaryAction,
+    actions: [],
+    action_presentations: [],
+    views: [],
+  };
+}
+
 test("默认入口是登录界面", async ({ page }) => {
   await page.goto("/");
 
@@ -32,13 +56,17 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
         code: 0,
         message: "成功",
         data: {
-          schema_version: "2.2",
+          schema_version: "2.3",
           revision: "a".repeat(64),
           actions: [
             catalogAction("account.user.me"),
             catalogAction("admin.user.list"),
           ],
           table_views: [],
+          modules: [
+            catalogModule("account.user", "user", "account.user.me"),
+            catalogModule("admin.user", "admin", "admin.user.list"),
+          ],
         },
       }),
     }),
@@ -56,9 +84,12 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
         message: "成功",
         data: {
           access_token: "access-token",
-          refresh_token: "refresh-token",
         },
       }),
+      headers: {
+        "Set-Cookie":
+          "yang_refresh=refresh-token; Path=/api/v1/users; HttpOnly; SameSite=Strict",
+      },
     });
   });
 
@@ -84,7 +115,7 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
     .poll(() =>
       page.evaluate(() => sessionStorage.getItem("yang.refresh-token")),
     )
-    .toBe("refresh-token");
+    .toBeNull();
   await expect
     .poll(() =>
       page.evaluate(() => sessionStorage.getItem("yang.account-identity")),
@@ -116,7 +147,6 @@ test("登录失败时停留在登录页且不保存凭据", async ({ page }) => 
 test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) => {
   await page.addInitScript(() => {
     sessionStorage.setItem("yang.token", "access-old");
-    sessionStorage.setItem("yang.refresh-token", "refresh-old");
   });
   const catalogAuthorizations: Array<string | undefined> = [];
   let refreshRequests = 0;
@@ -138,19 +168,18 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
         code: 0,
         message: "成功",
         data: {
-          schema_version: "2.2",
+          schema_version: "2.3",
           revision: "b".repeat(64),
           actions: [catalogAction("account.user.me")],
           table_views: [],
+          modules: [catalogModule("account.user", "user", "account.user.me")],
         },
       }),
     });
   });
   await page.route("**/api/v1/users/refresh", async (route) => {
     refreshRequests += 1;
-    expect(route.request().postDataJSON()).toEqual({
-      refresh_token: "refresh-old",
-    });
+    expect(route.request().postDataJSON()).toEqual({});
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -159,9 +188,12 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
         message: "成功",
         data: {
           access_token: "access-new",
-          refresh_token: "refresh-new",
         },
       }),
+      headers: {
+        "Set-Cookie":
+          "yang_refresh=refresh-new; Path=/api/v1/users; HttpOnly; SameSite=Strict",
+      },
     });
   });
 
@@ -169,11 +201,11 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
 
   await expect(page.getByTestId("role-option-user")).toBeVisible();
   await expect(page).toHaveURL("/roles");
-  expect(refreshRequests).toBe(1);
   expect(catalogAuthorizations).toEqual([
     "Bearer access-old",
     "Bearer access-new",
   ]);
+  expect(refreshRequests).toBe(1);
   await expect
     .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
     .toBe("access-new");
@@ -181,13 +213,12 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
     .poll(() =>
       page.evaluate(() => sessionStorage.getItem("yang.refresh-token")),
     )
-    .toBe("refresh-new");
+    .toBeNull();
 });
 
 test("访问令牌和刷新令牌均失效时自动退出到登录页", async ({ page }) => {
   await page.addInitScript(() => {
     sessionStorage.setItem("yang.token", "access-expired");
-    sessionStorage.setItem("yang.refresh-token", "refresh-expired");
     sessionStorage.setItem("yang.tenant-id", "7");
     sessionStorage.setItem("yang.account-identity", "admin");
   });

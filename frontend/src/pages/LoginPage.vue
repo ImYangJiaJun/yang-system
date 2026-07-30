@@ -2,11 +2,11 @@
 import { ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { login } from "src/api/auth";
-import { useCatalogStore } from "stores/catalog";
+import { useApplicationSession } from "src/composables/useApplicationSession";
 
 const router = useRouter();
 const route = useRoute();
-const store = useCatalogStore();
+const applicationSession = useApplicationSession();
 const username = ref("");
 const password = ref("");
 const submitting = ref(false);
@@ -21,7 +21,7 @@ async function submit() {
   submitting.value = true;
   try {
     const result = await login(username.value.trim(), password.value);
-    store.setTokenPair(result);
+    applicationSession.beginSession(result);
     await router.replace("/roles");
   } catch (cause) {
     errorMessage.value =

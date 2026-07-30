@@ -5,10 +5,9 @@ export const SESSION_EXPIRED_EVENT = "yang:session-expired";
 export const SESSION_REFRESHED_EVENT = "yang:session-refreshed";
 
 const ACCESS_TOKEN_KEY = "yang.token";
-const REFRESH_TOKEN_KEY = "yang.refresh-token";
 const SESSION_KEYS = [
   ACCESS_TOKEN_KEY,
-  REFRESH_TOKEN_KEY,
+  "yang.refresh-token",
   "yang.tenant-id",
   "yang.account-identity",
 ] as const;
@@ -39,7 +38,7 @@ function dispatchSessionEvent(name: string, detail?: LoginResult) {
 export function persistTokenPair(tokens: LoginResult) {
   const target = storage();
   target?.setItem(ACCESS_TOKEN_KEY, tokens.accessToken);
-  target?.setItem(REFRESH_TOKEN_KEY, tokens.refreshToken);
+  target?.removeItem("yang.refresh-token");
   expiredAccessToken = undefined;
 }
 
@@ -73,11 +72,8 @@ async function refreshAccessToken(failedAccessToken: string): Promise<string> {
   if (currentAccessToken && currentAccessToken !== failedAccessToken) {
     return currentAccessToken;
   }
-  const refreshToken = storedValue(REFRESH_TOKEN_KEY);
-  if (!refreshToken) expireSession(failedAccessToken);
-
   if (!activeRefresh) {
-    activeRefresh = refreshSession(refreshToken)
+    activeRefresh = refreshSession()
       .then((tokens) => {
         persistTokenPair(tokens);
         dispatchSessionEvent(SESSION_REFRESHED_EVENT, tokens);

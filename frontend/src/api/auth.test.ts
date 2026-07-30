@@ -5,7 +5,7 @@ import { login, refreshSession } from "./auth";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("login", () => {
-  it("只发送用户名和密码并返回 Token 对", async () => {
+  it("只发送用户名和密码并只暴露 Access Token", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       expect(init.method).toBe("POST");
       expect(new Headers(init.headers).get("content-type")).toBe(
@@ -14,13 +14,13 @@ describe("login", () => {
       expect(init.body).toBe(
         JSON.stringify({ username: "alice", password: "correct-password" }),
       );
+      expect(init.credentials).toBe("include");
       return new Response(
         JSON.stringify({
           code: 0,
           message: "成功",
           data: {
             access_token: "access-token",
-            refresh_token: "refresh-token",
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -30,7 +30,6 @@ describe("login", () => {
 
     await expect(login("alice", "correct-password")).resolves.toEqual({
       accessToken: "access-token",
-      refreshToken: "refresh-token",
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/users/login");
   });
@@ -70,7 +69,7 @@ describe("login", () => {
             JSON.stringify({
               code: 0,
               message: "成功",
-              data: { access_token: "", refresh_token: "refresh-token" },
+              data: { access_token: "" },
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           ),
@@ -84,17 +83,17 @@ describe("login", () => {
 });
 
 describe("refreshSession", () => {
-  it("发送 Refresh Token 并返回轮换后的 Token 对", async () => {
+  it("由 HttpOnly Cookie 刷新且请求体不携带 Refresh Token", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       expect(init.method).toBe("POST");
-      expect(init.body).toBe(JSON.stringify({ refresh_token: "refresh-old" }));
+      expect(init.body).toBe("{}");
+      expect(init.credentials).toBe("include");
       return new Response(
         JSON.stringify({
           code: 0,
           message: "成功",
           data: {
             access_token: "access-new",
-            refresh_token: "refresh-new",
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -102,9 +101,8 @@ describe("refreshSession", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(refreshSession("refresh-old")).resolves.toEqual({
+    await expect(refreshSession()).resolves.toEqual({
       accessToken: "access-new",
-      refreshToken: "refresh-new",
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/users/refresh");
   });

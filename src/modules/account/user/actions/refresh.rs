@@ -1,9 +1,11 @@
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
-use yang_base::action::auth::{RefreshAction, RefreshClaimsResolver, TokenPairClaims};
-use yang_base::action::ActionContext;
-use yang_base::definition::{ActionName, ActionSpec, HttpMethod, ModuleSpec, RouteSpec};
+use yang_base::action::auth::{
+    RefreshAction, RefreshClaimsResolver, RefreshInput, TokenPairClaims,
+};
+use yang_base::action::{Action as BusinessAction, ActionContext, ApiResponse, TypedHandler};
+use yang_base::definition::{ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 #[derive(Clone)]
@@ -30,23 +32,58 @@ impl RefreshClaimsResolver for UserClaimsResolver {
     }
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BrowserRefreshInput {}
+
+impl ParamInput for BrowserRefreshInput {
+    fn params() -> Params {
+        Params::new()
+    }
+}
+
+#[derive(yang_base::Action)]
+#[action(
+    name = "refresh",
+    display_name = "刷新 Token",
+    description = "轮换 Refresh Token 并签发新 Token 对",
+    method = "POST",
+    path = "/api/v1/users/refresh",
+    public
+)]
+struct BrowserRefreshAction {
+    inner: RefreshAction<UserClaimsResolver>,
+}
+
+#[async_trait]
+impl BusinessAction for BrowserRefreshAction {
+    type Input = BrowserRefreshInput;
+    type Output = ApiResponse;
+
+    async fn index(
+        &self,
+        ctx: ActionContext,
+        _input: Self::Input,
+    ) -> Result<Self::Output, BaseError> {
+        let secure = super::super::browser_session::validate_same_origin(&ctx.request)?;
+        let refresh_token = super::super::browser_session::refresh_token(&ctx.request)?;
+        let tokens = self
+            .inner
+            .handle(ctx, RefreshInput { refresh_token })
+            .await?;
+        super::super::browser_session::token_response(
+            tokens.access_token,
+            tokens.refresh_token,
+            secure,
+        )
+    }
+}
+
 pub(super) fn register(
     module: ModuleSpec,
     service: Arc<UserService>,
 ) -> Result<ModuleSpec, BaseError> {
-    let name =
-        ActionName::new("refresh").map_err(|error| BaseError::ConfigError(error.to_string()))?;
-    let spec = ActionSpec::new(
-        name,
-        RouteSpec::new(
-            HttpMethod::Post,
-            "/api/v1/users/refresh",
-            "account.user.refresh",
-        ),
-    )
-    .display_name("刷新 Token")
-    .description("轮换 Refresh Token 并签发新 Token 对")
-    .public(true)
-    .tag("users");
-    Ok(module.action(spec, RefreshAction::new(UserClaimsResolver { service })))
+    Ok(module.native_action(BrowserRefreshAction {
+        inner: RefreshAction::new(UserClaimsResolver { service }),
+    }))
 }

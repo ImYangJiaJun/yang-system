@@ -1,6 +1,7 @@
 //! `account.user` Module 的定义与组装入口。
 
 mod actions;
+mod browser_session;
 mod claims;
 mod password;
 mod policy;
@@ -19,7 +20,10 @@ use repository::UserRepository;
 use service::UserService;
 use std::sync::Arc;
 use yang_base::action::{TokenAuthMiddleware, UiCatalogAction};
-use yang_base::definition::{ModuleName, ModuleSpec};
+use yang_base::definition::{
+    ActionInteraction, ActionPlacement, ActionPresentationSpec, ModuleName, ModulePresentationSpec,
+    ModuleSpec,
+};
 use yang_base::BaseError;
 
 pub(crate) use claims::user_from_claims;
@@ -56,5 +60,20 @@ pub(super) fn build_module(
     )
     .native_action(UiCatalogAction);
 
-    actions::register_all(module, service)
+    actions::register_all(module, service).map(|module| {
+        module.presentation(
+            ModulePresentationSpec::new(
+                crate::modules::presentation::user_identity(),
+                "用户中心",
+                "account",
+            )
+            .description("查看当前登录账号与管理会话")
+            .order(10)
+            .primary_action(yang_base::action!("account.user.me"))
+            .present_action(
+                yang_base::action!("account.user.logout"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Invoke),
+            ),
+        )
+    })
 }

@@ -5,14 +5,13 @@ import {
   requestWithTokenRefresh,
 } from "./auth-session";
 
-function tokenResponse(accessToken: string, refreshToken: string) {
+function tokenResponse(accessToken: string) {
   return new Response(
     JSON.stringify({
       code: 0,
       message: "成功",
       data: {
         access_token: accessToken,
-        refresh_token: refreshToken,
       },
     }),
     { status: 200, headers: { "content-type": "application/json" } },
@@ -25,12 +24,13 @@ afterEach(() => {
 });
 
 describe("requestWithTokenRefresh", () => {
-  it("访问令牌过期后刷新 Token 对并只重试一次", async () => {
+  it("访问令牌过期后用 HttpOnly Cookie 刷新并只重试一次", async () => {
     sessionStorage.setItem("yang.token", "access-old");
-    sessionStorage.setItem("yang.refresh-token", "refresh-old");
-    const fetchMock = vi.fn(async () =>
-      tokenResponse("access-new", "refresh-new"),
-    );
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.credentials).toBe("include");
+      expect(init.body).toBe("{}");
+      return tokenResponse("access-new");
+    });
     vi.stubGlobal("fetch", fetchMock);
     const request = vi.fn(async (accessToken?: string) =>
       accessToken === "access-old"
@@ -47,15 +47,12 @@ describe("requestWithTokenRefresh", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(sessionStorage.getItem("yang.token")).toBe("access-new");
-    expect(sessionStorage.getItem("yang.refresh-token")).toBe("refresh-new");
+    expect(sessionStorage.getItem("yang.refresh-token")).toBeNull();
   });
 
   it("并发 401 共享同一次刷新", async () => {
     sessionStorage.setItem("yang.token", "access-old");
-    sessionStorage.setItem("yang.refresh-token", "refresh-old");
-    const fetchMock = vi.fn(async () =>
-      tokenResponse("access-new", "refresh-new"),
-    );
+    const fetchMock = vi.fn(async () => tokenResponse("access-new"));
     vi.stubGlobal("fetch", fetchMock);
     const request = vi.fn(
       async (accessToken?: string) =>
@@ -75,7 +72,6 @@ describe("requestWithTokenRefresh", () => {
 
   it("刷新被拒绝时清空会话并只发出一次过期事件", async () => {
     sessionStorage.setItem("yang.token", "access-old");
-    sessionStorage.setItem("yang.refresh-token", "refresh-invalid");
     sessionStorage.setItem("yang.tenant-id", "7");
     sessionStorage.setItem("yang.account-identity", "admin");
     vi.stubGlobal(
@@ -109,14 +105,27 @@ describe("requestWithTokenRefresh", () => {
     window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   });
 
-  it("缺少 Refresh Token 时直接结束不完整会话", async () => {
-    sessionStorage.setItem("yang.token", "access-without-refresh");
+  it("服务端判定 Refresh Cookie 缺失时结束会话", async () => {
+    sessionStorage.setItem("yang.token", "access-without-cookie");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ code: 40102, message: "刷新会话 Cookie 缺失" }),
+            {
+              status: 401,
+              headers: { "content-type": "application/json" },
+            },
+          ),
+      ),
+    );
     const expired = vi.fn();
     window.addEventListener(SESSION_EXPIRED_EVENT, expired);
 
     await expect(
       requestWithTokenRefresh(
-        "access-without-refresh",
+        "access-without-cookie",
         async () => new Response(undefined, { status: 401 }),
       ),
     ).rejects.toBeInstanceOf(SessionExpiredError);
@@ -128,10 +137,7 @@ describe("requestWithTokenRefresh", () => {
 
   it("刷新成功但重试仍为 401 时不进入刷新循环", async () => {
     sessionStorage.setItem("yang.token", "access-retry-old");
-    sessionStorage.setItem("yang.refresh-token", "refresh-retry-old");
-    const fetchMock = vi.fn(async () =>
-      tokenResponse("access-retry-new", "refresh-retry-new"),
-    );
+    const fetchMock = vi.fn(async () => tokenResponse("access-retry-new"));
     vi.stubGlobal("fetch", fetchMock);
     const request = vi.fn(async () => new Response(undefined, { status: 401 }));
 
@@ -146,7 +152,6 @@ describe("requestWithTokenRefresh", () => {
 
   it("刷新网络失败时保留会话，允许稍后重试", async () => {
     sessionStorage.setItem("yang.token", "access-old");
-    sessionStorage.setItem("yang.refresh-token", "refresh-old");
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Promise.reject(new Error("offline"))),
@@ -163,7 +168,7 @@ describe("requestWithTokenRefresh", () => {
 
     expect(expired).not.toHaveBeenCalled();
     expect(sessionStorage.getItem("yang.token")).toBe("access-old");
-    expect(sessionStorage.getItem("yang.refresh-token")).toBe("refresh-old");
+    expect(sessionStorage.getItem("yang.refresh-token")).toBeNull();
     window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   });
 });
