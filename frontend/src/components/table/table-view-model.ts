@@ -169,6 +169,7 @@ export function buildActionInitialValues(
   action: ActionDemoSchema,
   fields: FormFieldSchema[],
   row?: SourceRow,
+  recordParameter?: string | null,
 ): Record<string, unknown> {
   const initial = initialObject(action.input_schema);
   if (!row) return initial;
@@ -184,6 +185,9 @@ export function buildActionInitialValues(
   );
   for (const name of inputFields) {
     if (name in readableRow) initial[name] = readableRow[name];
+  }
+  if (recordParameter && row.id !== undefined) {
+    initial[recordParameter] = row.id;
   }
   if (
     initial.data &&
