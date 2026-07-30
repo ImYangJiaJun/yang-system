@@ -187,6 +187,22 @@ fn data(response: ApiResponse) -> anyhow::Result<Value> {
     response.data.context("Action 成功响应缺少 data")
 }
 
+fn refresh_cookie(response: &ApiResponse) -> anyhow::Result<String> {
+    response
+        .response_headers()
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+        .find_map(|(_, value)| {
+            value
+                .split(';')
+                .next()
+                .and_then(|cookie| cookie.trim().strip_prefix("yang_refresh="))
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+        })
+        .context("浏览器会话响应缺少 yang_refresh Cookie")
+}
+
 fn token_authz_version(tools: &yang_base::tools::Tools, token: &str) -> anyhow::Result<i64> {
     tools
         .token()?
@@ -358,26 +374,23 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     )?;
     let user_id = registered["id"].as_i64().context("注册响应缺少用户 id")?;
 
-    let login = data(
-        dispatch(
-            &application.runtime,
-            "account.user",
-            "login",
-            json!({ "username": username, "password": password }),
-            &[],
-            &[],
-        )
-        .await?,
-    )?;
+    let login_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "login",
+        json!({ "username": username, "password": password }),
+        &[],
+        &[],
+    )
+    .await?;
+    let refresh_token = refresh_cookie(&login_response)?;
+    let login = data(login_response)?;
     let access_token = login["access_token"]
         .as_str()
         .context("登录响应缺少 access_token")?;
-    let refresh_token = login["refresh_token"]
-        .as_str()
-        .context("登录响应缺少 refresh_token")?;
     let login_authz_version = token_authz_version(&tools, access_token)?;
     ensure!(
-        login_authz_version == token_authz_version(&tools, refresh_token)?,
+        login_authz_version == token_authz_version(&tools, &refresh_token)?,
         "同次登录签发的 Access/Refresh Token 必须携带同一授权版本"
     );
     let bootstrap = data(
@@ -408,26 +421,24 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     )
     .await?;
 
-    let refreshed_admin = data(
-        dispatch(
-            &application.runtime,
-            "account.user",
-            "refresh",
-            json!({ "refresh_token": refresh_token }),
-            &[],
-            &[],
-        )
-        .await?,
-    )?;
+    let refresh_cookie_header = format!("yang_refresh={refresh_token}");
+    let refreshed_admin_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", refresh_cookie_header.as_str())],
+        &[],
+    )
+    .await?;
+    let admin_refresh_token = refresh_cookie(&refreshed_admin_response)?;
+    let refreshed_admin = data(refreshed_admin_response)?;
     let admin_access_token = refreshed_admin["access_token"]
         .as_str()
         .context("平台管理员刷新响应缺少 access_token")?;
-    let admin_refresh_token = refreshed_admin["refresh_token"]
-        .as_str()
-        .context("平台管理员刷新响应缺少 refresh_token")?;
     ensure!(
         token_authz_version(&tools, admin_access_token)?
-            == token_authz_version(&tools, admin_refresh_token)?,
+            == token_authz_version(&tools, &admin_refresh_token)?,
         "refresh 签发的 Access/Refresh Token 必须携带同一授权版本"
     );
     ensure!(
@@ -877,23 +888,21 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .is_err(),
         "创建企业前签发的 Token 不应隐式获得组织写权限"
     );
-    let refreshed_org_admin = data(
-        dispatch(
-            &application.runtime,
-            "account.user",
-            "refresh",
-            json!({ "refresh_token": admin_refresh_token }),
-            &[],
-            &[],
-        )
-        .await?,
-    )?;
+    let admin_refresh_cookie = format!("yang_refresh={admin_refresh_token}");
+    let refreshed_org_admin_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", admin_refresh_cookie.as_str())],
+        &[],
+    )
+    .await?;
+    let org_refresh_token = refresh_cookie(&refreshed_org_admin_response)?;
+    let refreshed_org_admin = data(refreshed_org_admin_response)?;
     let org_access_token = refreshed_org_admin["access_token"]
         .as_str()
         .context("组织管理员刷新响应缺少 access_token")?;
-    let org_refresh_token = refreshed_org_admin["refresh_token"]
-        .as_str()
-        .context("组织管理员刷新响应缺少 refresh_token")?;
     let authorization = format!("Bearer {org_access_token}");
     let member_version_before_org_add =
         database_authz_version(tools.mysql()?.pool(), member_id).await?;
@@ -1073,13 +1082,14 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == replacement_initial_version + 2,
         "删除企业成员必须原子递增当前绑定用户授权版本"
     );
+    let org_refresh_cookie = format!("yang_refresh={org_refresh_token}");
     let outage_tokens = data(
         dispatch(
             &application.runtime,
             "account.user",
             "refresh",
-            json!({ "refresh_token": org_refresh_token }),
-            &[],
+            json!({}),
+            &[("cookie", org_refresh_cookie.as_str())],
             &[],
         )
         .await?,

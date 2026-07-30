@@ -77,6 +77,22 @@ fn data(response: ApiResponse) -> anyhow::Result<Value> {
     response.data.context("Action 成功响应缺少 data")
 }
 
+fn refresh_cookie(response: &ApiResponse) -> anyhow::Result<String> {
+    response
+        .response_headers()
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+        .find_map(|(_, value)| {
+            value
+                .split(';')
+                .next()
+                .and_then(|cookie| cookie.trim().strip_prefix("yang_refresh="))
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+        })
+        .context("浏览器会话响应缺少 yang_refresh Cookie")
+}
+
 async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
     let database: Option<String> = sqlx::query_scalar("SELECT DATABASE()")
         .fetch_one(pool)
@@ -191,25 +207,22 @@ async fn register_user(app: &BuiltApp, username: &str) -> anyhow::Result<i64> {
 }
 
 async fn login(app: &BuiltApp, username: &str) -> anyhow::Result<LoginSession> {
-    let response = data(
-        dispatch(
-            app,
-            "account.user",
-            "login",
-            json!({ "username": username, "password": PASSWORD }),
-            &[],
-        )
-        .await?,
-    )?;
+    let response = dispatch(
+        app,
+        "account.user",
+        "login",
+        json!({ "username": username, "password": PASSWORD }),
+        &[],
+    )
+    .await?;
+    let refresh_token = refresh_cookie(&response)?;
+    let response = data(response)?;
     Ok(LoginSession {
         access_token: response["access_token"]
             .as_str()
             .context("登录响应缺少 access_token")?
             .to_string(),
-        refresh_token: response["refresh_token"]
-            .as_str()
-            .context("登录响应缺少 refresh_token")?
-            .to_string(),
+        refresh_token,
     })
 }
 
@@ -233,13 +246,14 @@ async fn create_tenant_actor(
         .await?,
     )?;
     let tenant_id = tenant["id"].as_i64().context("创建企业响应缺少 id")?;
+    let refresh_cookie = format!("yang_refresh={}", login.refresh_token);
     let refreshed = data(
         dispatch(
             app,
             "account.user",
             "refresh",
-            json!({ "refresh_token": login.refresh_token }),
-            &[],
+            json!({}),
+            &[("cookie", refresh_cookie.as_str())],
         )
         .await?,
     )?;
