@@ -5,6 +5,11 @@ import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import process, { env, stderr, stdout } from "node:process";
 import { URL } from "node:url";
 
+import {
+  cacheControl,
+  deploymentHeaders,
+} from "../deploy/deployment-contract.mjs";
+
 const host = "127.0.0.1";
 const port = positivePort(
   env.YANG_PRODUCTION_E2E_FRONTEND_PORT,
@@ -137,7 +142,14 @@ async function serveStatic(method, target, response) {
   if (relativePath) {
     const metadata = await stat(candidate).catch(() => undefined);
     if (metadata?.isFile()) {
-      streamFile(response, candidate, method);
+      streamFile(
+        response,
+        candidate,
+        method,
+        relativePath.startsWith("assets/")
+          ? cacheControl.immutableAsset
+          : cacheControl.html,
+      );
       return;
     }
   }
@@ -148,7 +160,7 @@ async function serveStatic(method, target, response) {
   }
 
   response.setHeader("X-Yang-SPA-Fallback", "index.html");
-  streamFile(response, indexPath, method);
+  streamFile(response, indexPath, method, cacheControl.html);
 }
 
 function isInside(root, candidate) {
@@ -159,14 +171,14 @@ function isInside(root, candidate) {
   );
 }
 
-function streamFile(response, path, method) {
+function streamFile(response, path, method, cachePolicy) {
   response.statusCode = 200;
   response.setHeader(
     "Content-Type",
     contentTypes.get(extname(path).toLowerCase()) || "application/octet-stream",
   );
-  response.setHeader("Cache-Control", "no-cache");
-  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Cache-Control", cachePolicy);
+  applyDeploymentHeaders(response);
   if (method === "HEAD") {
     response.end();
     return;
@@ -186,8 +198,14 @@ function sendText(response, status, body, method = "GET") {
   response.statusCode = status;
   response.setHeader("Content-Type", "text/plain; charset=utf-8");
   response.setHeader("Cache-Control", "no-store");
-  response.setHeader("X-Content-Type-Options", "nosniff");
+  applyDeploymentHeaders(response);
   response.end(method === "HEAD" ? undefined : body);
+}
+
+function applyDeploymentHeaders(response) {
+  for (const [name, value] of Object.entries(deploymentHeaders)) {
+    response.setHeader(name, value);
+  }
 }
 
 function proxyRequest(clientRequest, clientResponse, target) {
@@ -203,10 +221,14 @@ function proxyRequest(clientRequest, clientResponse, target) {
     (upstreamResponse) => {
       const responseHeaders = { ...upstreamResponse.headers };
       delete responseHeaders.connection;
-      clientResponse.writeHead(
-        upstreamResponse.statusCode || 502,
-        responseHeaders,
-      );
+      clientResponse.statusCode = upstreamResponse.statusCode || 502;
+      for (const [name, value] of Object.entries(responseHeaders)) {
+        if (value !== undefined) {
+          clientResponse.setHeader(name, value);
+        }
+      }
+      clientResponse.setHeader("Cache-Control", cacheControl.html);
+      applyDeploymentHeaders(clientResponse);
       upstreamResponse.pipe(clientResponse);
     },
   );

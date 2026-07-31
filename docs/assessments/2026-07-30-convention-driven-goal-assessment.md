@@ -23,7 +23,7 @@
 | 自定义页面安全降级 | 已验证 | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面 |
 | 自定义页面只新增一个文件 | 未达成 | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点 |
 | Vue/Quasar/Pinia/Zod 技术选型 | 合理 | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益 |
-| 完整生产就绪 | 未达成 | 已有较强工程基础，但本提交尚无远程 CI 终态，部署契约、端到端可观测性、a11y 和真实业务压力证据仍不完整 |
+| 完整生产就绪 | 未达成 | 已有较强工程基础，但本提交尚无远程 CI 终态，端到端可观测性、a11y 和真实业务压力证据仍不完整 |
 
 ### 1.2 对两个评估问题的直接回答
 
@@ -65,7 +65,7 @@
 
 - scs 的路径约定确实减少了页面代码，但页面文件缺失只会在运行时表现为组件解析失败；
 - yang-system 的后端引用校验、请求级权限投影、前端运行时契约解析和安全降级，在“契约明确性与失败可控性”上优于 scs；
-- 不能把这种优势扩大为所有生产能力都更强。scs 已有 i18n 目录和 nginx 部署配置，而 yang-system 对应生产契约尚未闭环。
+- 不能把这种优势扩大为所有生产能力都更强。scs 已有 i18n 目录；yang-system 的 Nginx 仓库部署合同已在 §9.5 闭环，但多语言仍取决于产品需求，真实域名发布终态也只能在目标环境取证。
 
 ## 四、yang-system 后端：已成立的能力与边界
 
@@ -173,7 +173,7 @@
 | Pinia | 保留 | session、identity、tenant、catalog、navigation、lifecycle 已有清晰 owner |
 | Vue Router | 保留 | 参数化路由和访问策略满足当前规模 |
 | Zod | 保留 | HTTP JSON 是运行时不可信边界，必须在使用前解析 |
-| Vitest + Playwright | 保留并补门禁 | 工具链匹配；下一步重点是正式产物和 CI 隔离，不是替换测试框架 |
+| Vitest + Playwright | 保留 | 工具链匹配；dev 与正式产物浏览器门禁都已进入 full/CI，后续重点是 a11y、可观测性和规模证据 |
 | TanStack Query、SSR、微前端 | 暂不引入 | 当前问题是契约完备性和生产门禁，不是缺少新框架 |
 
 ### 6.2 已有生产导向能力
@@ -184,7 +184,7 @@
 - Catalog 运行时解析、ETag/304、取消和竞态保护；
 - `pnpm check` 串联 Prettier、ESLint、vue-tsc、Vitest、生产构建和产物检查；
 - 生产构建检查禁止公开 source map，并检查 Workbench 标记没有进入产物；
-- `scripts/run_ci.py full` 包含 Rust 全目标测试、Clippy、前端生产依赖审计和 `pnpm check`。
+- `scripts/run_ci.py full` 包含 Rust 全目标测试、Clippy、前端生产依赖审计、`pnpm check` 与两套隔离 Playwright。
 
 ### 6.3 生产门槛状态
 
@@ -194,7 +194,7 @@
 | 正式页面契约完备性 | 已闭环 | Module 多 View、统一 Action executor、custom/bulk、fail-closed 与显式产品外壳接口均有正式路由和矩阵测试证据 |
 | 正式产物 E2E | 已闭环 | 独立 Playwright 配置每次重建并启动 `dist/spa`，验证正式模块深链接、生产路由裁剪、无 dev runtime，以及静态/API 404 不被 history fallback 掩盖 |
 | CI 浏览器门禁 | 已闭环（实现） | `run_ci.py full` 串行执行隔离 dev 与 production Playwright；quality job 安装 Chromium 后复用同一 full 门禁；本提交未 push，远程 job 终态仍未验证 |
-| 部署契约 | 未闭环 | history fallback、安全头、HTML/静态资源缓存策略和深链接 smoke test 未入门禁 |
+| 部署契约 | 已闭环（仓库合同） | 可执行 Nginx 配置、共享响应合同、生产构建 E2E 与变异测试覆盖 history fallback、安全头、HTML/资产缓存和严格 404；真实域名 TLS/边缘 smoke 仍须在首次部署后取证 |
 | 端到端可观测性 | 部分具备 | 后端已有 tracing/request id 等基础信号，前端也提取 request id；尚无统一错误上报、关联检索和告警验收 |
 | 无障碍 | 未闭环 | 无 axe 等自动检查，也没有键盘/焦点关键旅程门禁 |
 | 真实业务与规模 | 未验证 | 深层 relation、大树、大分页、复杂批量、弱网和并发边界尚无基线 |
@@ -221,7 +221,7 @@
 
 1. **已满足（2026-07-31）：** access token 内存化；enforce CSP 下已验证登录、刷新、上传和静态自定义组件；多标签页并发刷新与退出同步已有浏览器对抗测试。
 2. **已满足（2026-07-31）：** Playwright 在本地 full 与 CI 中使用两组专用且互斥的端口，两个配置都禁止复用既有服务；日常手工调试只有显式设置 `YANG_E2E_REUSE_EXISTING_SERVER=true` 才允许复用。
-3. **产物行为已满足（2026-07-31）：** 浏览器 smoke 会构建 `dist/spa`，以隔离 history fallback 服务器启动并验证深链接；安全响应头与分层缓存策略仍由“部署契约”门槛验收。
+3. **已满足（仓库合同，2026-07-31）：** 浏览器 smoke 构建并启动 `dist/spa`，验收深链接、响应头 CSP/`frame-ancestors`/HSTS 等安全头、HTML `no-store`、`/assets` 一年 immutable、严格资产 404 和 API 代理边界；真实域名的 TLS/证书/DNS/边缘终态只可在目标环境发布后验收。
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
 5. 前端错误上报包含 request id，能够与后端 trace/log/metric 关联，并完成一次告警演练。
 6. 增加关键页面 a11y、键盘导航和焦点恢复门禁。
@@ -241,7 +241,7 @@
 
 1. CI quality job 已通过 `run_ci.py full` 执行 dev 与 production Playwright，并预装 Chromium 与系统依赖；
 2. 本地与 CI 的两套 Playwright 使用互斥专用端口且禁止复用旧服务；
-3. 生产构建与深链接 smoke 已纳入 `e2e:production`；安全响应头和缓存策略仍需在部署契约中闭环。
+3. 生产构建、深链接、安全响应头、HTML/资产分层缓存、严格资产 404 与 API 边界 smoke 已纳入 `e2e:production` 和部署合同校验。
 
 ### P0：闭环浏览器安全与诊断
 
@@ -374,7 +374,7 @@ pnpm --dir frontend e2e:production
 
 红测先在 Vite preview 上真实进入断言并出现两个失败：深链接响应没有可审计 fallback 标记，且缺失 JS 被 history fallback 错误返回 200 HTML。替换为边界明确的产物服务器后，首次绿测又暴露 `account.user` 被 `path.extname()` 误判为静态扩展；最终只把 `/assets` 作为严格静态资源命名空间，并增加 `/module/report.json` 反例，2/2 通过。全门禁还发现 Vitest 会误收集新 Playwright 目录；`vitest.config.ts` 显式排除 `e2e-production/**` 后，21 个测试文件/91 项 Vitest 与生产构建重新通过。
 
-本项不把测试夹具服务器写成目标环境的生产流量服务器，也不据此关闭部署契约：当前夹具只使用最小 `nosniff` 与 `no-cache`，尚未验收响应头 CSP、`frame-ancestors`、HTML 不缓存、哈希资产 immutable、反向代理边界和目标平台配置。
+本项当时没有把测试夹具服务器写成目标环境的生产流量服务器，也没有提前关闭部署契约；后续 §9.5 以独立共享合同、可执行 Nginx 配置、浏览器响应断言和 Nginx 运行 smoke 补齐该门槛。
 
 ### 9.4 2026-07-31 增量闭环：CI 浏览器门禁实现
 
@@ -410,10 +410,47 @@ pnpm --dir frontend e2e:production
 
 本项只证明门禁定义与本地等价执行已闭环。本提交按用户要求只创建 Git commit、没有 push，因此不能声称 GitHub Actions quality job 已取得远程成功终态；该证据必须在后续推送后逐 job 检查。
 
+### 9.5 2026-07-31 增量闭环：生产部署合同
+
+本项采用的不变量是：页面入口和 history fallback 必须 `no-store`；Vite `/assets` 命名空间必须长期 immutable 且缺失文件严格 404；后端路径不得落入 SPA fallback；CSP 必须由响应头提供并包含 `frame-ancestors 'none'`；应用边缘只绑定 loopback，公网 HTTPS、转发头覆盖和 TLS 终态由受信边缘承担。
+
+实现证据：
+
+- `frontend/deploy/deployment-contract.mjs` 集中定义 CSP、HSTS、COOP、Permissions Policy、Referrer Policy、`nosniff`、拒绝 framing 和两类缓存策略；
+- `frontend/scripts/serve-production-build.mjs` 消费共享合同，生产构建 E2E 因而验证浏览器实际收到的响应，不只检查配置文本；
+- `frontend/deploy/nginx.conf` 是完整、可执行的 Nginx 主配置：loopback listener、静态根目录、后端代理边界、严格 `/assets`、history fallback、安全头和 URI 分层缓存都显式声明；
+- `frontend/scripts/verify-deployment-contract.mjs` 把 Nginx 与共享合同交叉校验，并主动破坏 `frame-ancestors`、immutable、资产 404、history fallback、loopback 监听、转发协议白名单和被注释掉的伪指令，七种变异都必须被拒绝；
+- GitHub quality job 使用版本与摘要双重固定的 Nginx 官方镜像执行 `nginx -t`，`run_ci.py --self-test` 防止该真实语法检查被静默移除；
+- `frontend/deploy/README.md` 固化 TLS 终止层的前置条件和首次真实发布 smoke，明确 HSTS 在本地 HTTP 上只能验证响应合同、不能伪装成浏览器已执行。
+
+对抗性验证：
+
+```powershell
+# 红测：临时删除 Nginx CSP 的 frame-ancestors 后，合同必须 fail-closed
+pnpm --dir frontend verify:deployment-contract
+
+# 合同交叉校验与七类内置破坏性变异
+pnpm --dir frontend verify:deployment-contract
+
+# 独立正式产物浏览器回归
+pnpm --dir frontend e2e:production
+
+# 将 dist/spa 挂入真实 Nginx 解析配置
+docker run --rm `
+  -v "${PWD}\frontend\deploy\nginx.conf:/etc/nginx/nginx.conf:ro" `
+  -v "${PWD}\frontend\dist\spa:/usr/share/nginx/html:ro" `
+  nginx:1.30.4-alpine3.24@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46 `
+  nginx -t
+```
+
+红测稳定失败为“Nginx 缺少生产响应头 Content-Security-Policy”，并打印缺失的完整 enforce CSP；恢复后合同校验通过且内置 7/7 破坏性变异全部被拒绝。生产 Chromium 2/2 通过，并验证深链接响应的完整安全头、HTML `no-store`、真实构建 JS 的 immutable 与非 fallback。CI 和本地语法检查都使用版本与摘要双重固定的 `nginx:1.30.4-alpine3.24@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46`，`nginx -t` 通过；容器内运行 smoke 取得深链接 200 + `no-store`、JS 200 + immutable、缺失 JS 404。
+
+本项闭环的是仓库内可交付部署合同，不虚构尚不存在的公网环境。真实域名的证书链、HTTP 到 HTTPS 重定向、HSTS 浏览器执行、DNS/CDN 和远程 smoke 必须在选定目标并发布后取得终态；它们属于环境发布证据，不再是仓库缺少实现。
+
 ## 十、最终结论
 
 yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明一个或多个可用 View 与 presentation”的契约范围内，多 View 和模块级交互的零前端修改交付已经可行。
 
 当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，自定义页面仍有两个手工触点，尚无独立真实业务 Addon 的零前端业务 diff 证据，前端产品外壳也仍显式持有账号/租户入口知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E 和 CI 浏览器门禁实现已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、部署、可观测性、无障碍与真实规模证据共同支持。
+技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E、CI 浏览器门禁实现和仓库部署合同已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、目标环境发布证据、可观测性、无障碍与真实规模证据共同支持。

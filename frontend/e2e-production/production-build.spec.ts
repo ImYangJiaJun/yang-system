@@ -86,12 +86,35 @@ async function serveAuthorizedModule(page: Page) {
   );
 }
 
-test("dist/spa 从正式模块深链接启动且不包含开发运行时", async ({ page }) => {
+test("dist/spa 从正式模块深链接启动且满足生产响应头与缓存契约", async ({
+  page,
+  request,
+}) => {
   await serveAuthorizedModule(page);
 
   const navigation = await page.goto("/module/account.user");
 
   expect(navigation?.headers()["x-yang-spa-fallback"]).toBe("index.html");
+  expect(navigation?.headers()["cache-control"]).toBe("no-store");
+  const contentSecurityPolicy =
+    navigation?.headers()["content-security-policy"] || "";
+  expect(contentSecurityPolicy).toContain("default-src 'self'");
+  expect(contentSecurityPolicy).toContain("script-src 'self'");
+  expect(contentSecurityPolicy).toContain("connect-src 'self'");
+  expect(contentSecurityPolicy).toContain("frame-ancestors 'none'");
+  expect(contentSecurityPolicy).not.toContain("'unsafe-eval'");
+  expect(navigation?.headers()["strict-transport-security"]).toBe(
+    "max-age=31536000; includeSubDomains",
+  );
+  expect(navigation?.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(navigation?.headers()["x-frame-options"]).toBe("DENY");
+  expect(navigation?.headers()["referrer-policy"]).toBe("no-referrer");
+  expect(navigation?.headers()["cross-origin-opener-policy"]).toBe(
+    "same-origin",
+  );
+  expect(navigation?.headers()["permissions-policy"]).toBe(
+    "camera=(), geolocation=(), microphone=()",
+  );
   await expect(
     page.getByRole("heading", { name: "生产产物用户中心" }),
   ).toBeVisible();
@@ -105,6 +128,17 @@ test("dist/spa 从正式模块深链接启动且不包含开发运行时", async
     );
   expect(scriptSources.length).toBeGreaterThan(0);
   expect(scriptSources).not.toContainEqual(expect.stringContaining("@vite"));
+  const firstScriptSource = scriptSources[0];
+  if (!firstScriptSource) {
+    throw new Error("生产入口没有可验证缓存策略的脚本资产");
+  }
+  const asset = await request.get(new URL(firstScriptSource).pathname);
+  expect(asset.status()).toBe(200);
+  expect(asset.headers()["cache-control"]).toBe(
+    "public, max-age=31536000, immutable",
+  );
+  expect(asset.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(asset.headers()["x-yang-spa-fallback"]).toBeUndefined();
   await expect(page.locator("[data-vite-dev-id]")).toHaveCount(0);
 });
 

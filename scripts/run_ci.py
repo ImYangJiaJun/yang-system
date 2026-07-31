@@ -220,6 +220,13 @@ def self_test() -> None:
     assert workflow.count(
         "pnpm --dir frontend exec playwright install --with-deps chromium"
     ) == 1, "quality job 必须安装 Playwright Chromium 与系统依赖"
+    assert workflow.count(
+        "nginx:1.30.4-alpine3.24@sha256:"
+    ) == 1, "quality job 必须用版本与摘要双重固定的 Nginx 镜像加载生产部署配置"
+    assert workflow.count(
+        "frontend/deploy/nginx.conf:/etc/nginx/nginx.conf:ro"
+    ) == 1, "Nginx 语法检查必须只读加载仓库内的生产配置"
+    assert workflow.count("nginx -t") == 1, "quality job 必须执行真实 Nginx 语法检查"
     assert FRONTEND_DEV_E2E.env == (
         ("CI", "true"),
         ("YANG_E2E_FRONTEND_PORT", "5310"),

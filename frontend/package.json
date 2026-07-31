@@ -18,7 +18,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "verify:production-build": "node scripts/verify-production-build.mjs",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm verify:production-build",
+    "verify:deployment-contract": "node scripts/verify-deployment-contract.mjs",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm verify:production-build && pnpm verify:deployment-contract",
     "postinstall": "quasar prepare"
   },
   "dependencies": {

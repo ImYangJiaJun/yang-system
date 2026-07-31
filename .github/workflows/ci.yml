@@ -49,6 +49,12 @@ jobs:
         run: pnpm --dir frontend install --frozen-lockfile
       - name: Install Playwright Chromium
         run: pnpm --dir frontend exec playwright install --with-deps chromium
+      - name: Validate deployment Nginx configuration
+        run: >-
+          docker run --rm
+          -v "${PWD}/frontend/deploy/nginx.conf:/etc/nginx/nginx.conf:ro"
+          nginx:1.30.4-alpine3.24@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
+          nginx -t
       - name: Verify local CI contract
         run: python scripts/run_ci.py --self-test
       - name: Full quality gate
