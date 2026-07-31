@@ -89,6 +89,22 @@ Action，防止版本大于 0 的用户拿到无法继续刷新的兼容期 Toke
 双 `RESTRICT`，可恢复“DDL 已提交、迁移记录仍为 running”的 MySQL 中断窗口，同时拒绝
 同名异义外键。
 
+`20260731_0016_add_admin_bootstrap_key_check` 在现有 `bootstrap_key NULL UNIQUE`
+并发守卫之上增加强制 CHECK，只允许 `NULL` 或保留值 `initial-admin`。`NULL` 仍允许普通
+平台授权记录共存，唯一非空值继续保证 bootstrap 最多成功一次；任意其他非空占位值会
+在数据库边界失败。`apply` 会先核对 MySQL 版本与现有非空值分组，精确完成探针同时
+匹配约束名、表达式和 `ENFORCED`。该迁移不会把 bootstrap 状态拆到新表，也不改变现有
+API；DDL 锁预算仍须在生产等量 staging 评估。
+
+```powershell
+$env:YANG_SYSTEM_TEST_DATABASE_URL='mysql://<staging-test-database>'
+$env:YANG_SYSTEM_BOOTSTRAP_DDL_SCALE_ROWS='<admin_user 生产等量行数>'
+$env:YANG_SYSTEM_BOOTSTRAP_DDL_BUDGET_MS='<允许的DDL毫秒预算>'
+cargo test -p yang-system --test migration_job_integration --locked `
+  bootstrap_key_check_ddl_rehearsal_obeys_configured_budget -- `
+  --ignored --nocapture --test-threads=1
+```
+
 发布前必须在生产等量 staging 运行授权外键 DDL 演练，并用发布窗口设置预算：
 
 ```powershell

@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 15);
+    assert_eq!(manifest.migrations().len(), 16);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -189,6 +189,20 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
         }
         assert!(migration.completion_check().is_some());
     }
+
+    let bootstrap_key_check = manifest
+        .migrations()
+        .get(15)
+        .unwrap_or_else(|| panic!("应存在平台初始化占位约束迁移"));
+    assert_eq!(
+        bootstrap_key_check.version(),
+        "20260731_0016_add_admin_bootstrap_key_check"
+    );
+    assert_eq!(
+        bootstrap_key_check.sql().trim(),
+        "ALTER TABLE `admin_user` ADD CONSTRAINT `chk_admin_user_bootstrap_key` CHECK (`bootstrap_key` IS NULL OR `bootstrap_key` = 'initial-admin')"
+    );
+    assert!(bootstrap_key_check.completion_check().is_some());
 }
 
 #[test]

@@ -84,6 +84,18 @@ async fn reset_test_database(database: &Database) -> anyhow::Result<()> {
 }
 
 async fn users_status_check(database: &Database) -> anyhow::Result<Option<(String, String)>> {
+    check_constraint_metadata(database, "users", "chk_users_status").await
+}
+
+async fn bootstrap_key_check(database: &Database) -> anyhow::Result<Option<(String, String)>> {
+    check_constraint_metadata(database, "admin_user", "chk_admin_user_bootstrap_key").await
+}
+
+async fn check_constraint_metadata(
+    database: &Database,
+    table: &str,
+    constraint: &str,
+) -> anyhow::Result<Option<(String, String)>> {
     sqlx::query_as(
         "SELECT CAST(tc.ENFORCED AS CHAR), CAST(cc.CHECK_CLAUSE AS CHAR) \
          FROM information_schema.table_constraints tc \
@@ -91,13 +103,15 @@ async fn users_status_check(database: &Database) -> anyhow::Result<Option<(Strin
            ON cc.constraint_schema = tc.constraint_schema \
           AND cc.constraint_name = tc.constraint_name \
          WHERE tc.table_schema = DATABASE() \
-           AND tc.table_name = 'users' \
+           AND tc.table_name = ? \
            AND tc.constraint_type = 'CHECK' \
-           AND tc.constraint_name = 'chk_users_status'",
+           AND tc.constraint_name = ?",
     )
+    .bind(table)
+    .bind(constraint)
     .fetch_optional(database.pool())
     .await
-    .context("读取 users.status CHECK 元数据失败")
+    .with_context(|| format!("读取 {table}.{constraint} CHECK 元数据失败"))
 }
 
 async fn foreign_key_metadata(
@@ -187,7 +201,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 15, "应记录 15 个 applied 版本");
+        ensure!(migration_count == 16, "应记录 16 个 applied 版本");
         let server_identity: (String, String) =
             sqlx::query_as("SELECT CAST(VERSION() AS CHAR), CAST(@@version_comment AS CHAR)")
                 .fetch_one(control.pool())
@@ -409,7 +423,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         );
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version', '20260731_0011_create_password_reset_token', '20260731_0012_add_users_status_check', '20260731_0013_add_admin_user_user_fk', '20260731_0014_add_org_user_user_fk', '20260731_0015_add_org_user_org_fk')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version', '20260731_0011_create_password_reset_token', '20260731_0012_add_users_status_check', '20260731_0013_add_admin_user_user_fk', '20260731_0014_add_org_user_user_fk', '20260731_0015_add_org_user_org_fk', '20260731_0016_add_admin_bootstrap_key_check')",
         )
         .execute(control.pool())
         .await
@@ -566,6 +580,155 @@ async fn status_check_upgrade_rejects_dirty_data_and_same_name_drift() -> anyhow
         let mismatch_text = format!("{mismatch:#}");
         ensure!(
             mismatch_text.contains("chk_users_status")
+                && (mismatch_text.contains("表达式")
+                    || mismatch_text.contains("Duplicate check constraint name")),
+            "完成探针必须拒绝并定位同名异义 CHECK: {mismatch_text}"
+        );
+        Ok(())
+    }
+    .await;
+
+    let cleanup = reset_test_database(&control).await;
+    finish_with_cleanup(outcome, cleanup)
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 指向 _test MySQL 数据库"]
+async fn bootstrap_key_check_rejects_dirty_values_and_same_name_drift() -> anyhow::Result<()> {
+    let control = connect_test_database().await?;
+    reset_test_database(&control).await?;
+
+    let outcome = async {
+        run_job(MigrationCommand::Apply).await?;
+        sqlx::query("ALTER TABLE admin_user DROP CHECK chk_admin_user_bootstrap_key")
+            .execute(control.pool())
+            .await
+            .context("构造 0015 到 0016 的既有库升级起点失败")?;
+        sqlx::query(
+            "DELETE FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version = '20260731_0016_add_admin_bootstrap_key_check'",
+        )
+        .execute(control.pool())
+        .await
+        .context("移除 0016 迁移记录失败")?;
+
+        let first_user = sqlx::query(
+            "INSERT INTO users (username, password_hash, status, created_at, updated_at) \
+             VALUES ('bootstrap_check_first', 'hash', 'active', 1, 1)",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造 bootstrap_key CHECK 用户失败")?
+        .last_insert_id();
+        sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, status, admin, bootstrap_key, created_at, updated_at) \
+             VALUES (?, 'Bootstrap Check', 'active', TRUE, 'unexpected-bootstrap', 1, 1)",
+        )
+        .bind(first_user)
+        .execute(control.pool())
+        .await
+        .context("构造 bootstrap_key 脏数据失败")?;
+
+        let dirty_error = match run_job(MigrationCommand::Apply).await {
+            Ok(_) => anyhow::bail!("非法 bootstrap_key 必须在 DDL 前阻止升级"),
+            Err(error) => error,
+        };
+        ensure!(
+            format!("{dirty_error:#}").contains("bootstrap_key CHECK 发布预检发现 1 行"),
+            "脏数据失败必须给出计数诊断: {dirty_error:#}"
+        );
+        ensure!(
+            bootstrap_key_check(&control).await?.is_none(),
+            "脏数据失败后不得遗留半完成 CHECK"
+        );
+
+        sqlx::query("UPDATE admin_user SET bootstrap_key = NULL WHERE user_user = ?")
+            .bind(first_user)
+            .execute(control.pool())
+            .await
+            .context("修复 bootstrap_key 脏数据失败")?;
+        run_job(MigrationCommand::Apply).await?;
+        let (enforced, expression) = bootstrap_key_check(&control)
+            .await?
+            .context("0016 完成后必须存在精确 CHECK")?;
+        ensure!(
+            enforced.eq_ignore_ascii_case("YES")
+                && expression.contains("bootstrap_key")
+                && expression.contains("initial-admin"),
+            "bootstrap_key CHECK 元数据必须为 ENFORCED 且绑定保留值: {enforced} {expression}"
+        );
+
+        let invalid_update = sqlx::query(
+            "UPDATE admin_user SET bootstrap_key = 'unexpected-bootstrap' WHERE user_user = ?",
+        )
+        .bind(first_user)
+        .execute(control.pool())
+        .await;
+        ensure!(
+            invalid_update.is_err(),
+            "CHECK 必须拒绝任意其他非空 bootstrap_key"
+        );
+        sqlx::query("UPDATE admin_user SET bootstrap_key = 'initial-admin' WHERE user_user = ?")
+            .bind(first_user)
+            .execute(control.pool())
+            .await
+            .context("CHECK 必须允许唯一 initial-admin 哨兵")?;
+
+        let second_user = sqlx::query(
+            "INSERT INTO users (username, password_hash, status, created_at, updated_at) \
+             VALUES ('bootstrap_check_second', 'hash', 'active', 1, 1)",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造第二个 bootstrap_key CHECK 用户失败")?
+        .last_insert_id();
+        sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, status, admin, bootstrap_key, created_at, updated_at) \
+             VALUES (?, 'Ordinary Admin', 'active', TRUE, NULL, 1, 1)",
+        )
+        .bind(second_user)
+        .execute(control.pool())
+        .await
+        .context("NULL bootstrap_key 必须允许普通平台授权关系共存")?;
+        let duplicate_sentinel = sqlx::query(
+            "UPDATE admin_user SET bootstrap_key = 'initial-admin' WHERE user_user = ?",
+        )
+        .bind(second_user)
+        .execute(control.pool())
+        .await;
+        ensure!(
+            duplicate_sentinel.is_err(),
+            "NULL UNIQUE 与 CHECK 组合必须拒绝第二个 initial-admin 哨兵"
+        );
+
+        sqlx::query("ALTER TABLE admin_user DROP CHECK chk_admin_user_bootstrap_key")
+            .execute(control.pool())
+            .await
+            .context("移除正确 bootstrap_key CHECK 失败")?;
+        sqlx::query(
+            "ALTER TABLE admin_user ADD CONSTRAINT chk_admin_user_bootstrap_key \
+             CHECK (bootstrap_key IS NULL OR bootstrap_key <> '')",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造同名异义 bootstrap_key CHECK 失败")?;
+        sqlx::query(
+            "UPDATE `_migrations` SET status = 'running' \
+             WHERE module_name = 'yang-system' \
+               AND version = '20260731_0016_add_admin_bootstrap_key_check'",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造 0016 DDL 中断状态失败")?;
+        let mismatch = match run_job(MigrationCommand::Apply).await {
+            Ok(_) => anyhow::bail!("同名异义 bootstrap_key CHECK 必须阻止中断恢复"),
+            Err(error) => error,
+        };
+        let mismatch_text = format!("{mismatch:#}");
+        ensure!(
+            mismatch_text.contains("chk_admin_user_bootstrap_key")
                 && (mismatch_text.contains("表达式")
                     || mismatch_text.contains("Duplicate check constraint name")),
             "完成探针必须拒绝并定位同名异义 CHECK: {mismatch_text}"
@@ -1020,6 +1183,119 @@ async fn status_check_ddl_rehearsal_obeys_configured_lock_budget() -> anyhow::Re
         );
         eprintln!(
             "users.status CHECK DDL rehearsal: rows={row_count}, indexes={before_indexes}, elapsed_ms={elapsed_ms}, budget_ms={budget_ms}"
+        );
+        Ok(())
+    }
+    .await;
+
+    let cleanup = reset_test_database(&control).await;
+    finish_with_cleanup(outcome, cleanup)
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL；staging 应设置 YANG_SYSTEM_BOOTSTRAP_DDL_SCALE_ROWS 与 YANG_SYSTEM_BOOTSTRAP_DDL_BUDGET_MS"]
+async fn bootstrap_key_check_ddl_rehearsal_obeys_configured_budget() -> anyhow::Result<()> {
+    let control = connect_test_database().await?;
+    reset_test_database(&control).await?;
+
+    let outcome = async {
+        run_job(MigrationCommand::Apply).await?;
+        sqlx::query("ALTER TABLE admin_user DROP CHECK chk_admin_user_bootstrap_key")
+            .execute(control.pool())
+            .await
+            .context("移除 bootstrap_key CHECK 以准备 DDL 演练失败")?;
+        sqlx::query(
+            "DELETE FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version = '20260731_0016_add_admin_bootstrap_key_check'",
+        )
+        .execute(control.pool())
+        .await
+        .context("准备 bootstrap_key DDL 演练迁移起点失败")?;
+
+        let row_count = std::env::var("YANG_SYSTEM_BOOTSTRAP_DDL_SCALE_ROWS")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .context("YANG_SYSTEM_BOOTSTRAP_DDL_SCALE_ROWS 必须是正整数")?
+            .unwrap_or(10_000);
+        ensure!(row_count > 0, "bootstrap_key DDL 演练行数必须大于 0");
+        let budget_ms = std::env::var("YANG_SYSTEM_BOOTSTRAP_DDL_BUDGET_MS")
+            .ok()
+            .map(|value| value.parse::<u128>())
+            .transpose()
+            .context("YANG_SYSTEM_BOOTSTRAP_DDL_BUDGET_MS 必须是正整数")?
+            .unwrap_or(30_000);
+        ensure!(budget_ms > 0, "bootstrap_key DDL 预算必须大于 0ms");
+
+        for batch_start in (0..row_count).step_by(500) {
+            let batch_end = (batch_start + 500).min(row_count);
+            let mut builder = sqlx::QueryBuilder::<sqlx::MySql>::new(
+                "INSERT INTO users (username, password_hash, status, created_at, updated_at) ",
+            );
+            builder.push_values(batch_start..batch_end, |mut row, index| {
+                row.push_bind(format!("bootstrap_scale_{index}"))
+                    .push_bind("hash")
+                    .push_bind("active")
+                    .push_bind(1_i64)
+                    .push_bind(1_i64);
+            });
+            builder
+                .build()
+                .execute(control.pool())
+                .await
+                .with_context(|| {
+                    format!("写入 bootstrap_key DDL 用户失败: {batch_start}..{batch_end}")
+                })?;
+        }
+        sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, status, admin, bootstrap_key, created_at, updated_at) \
+             SELECT id, username, 'active', FALSE, NULL, 1, 1 \
+             FROM users WHERE username LIKE 'bootstrap\\_scale\\_%'",
+        )
+        .execute(control.pool())
+        .await
+        .context("写入 bootstrap_key DDL 平台授权关系失败")?;
+        let actual_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_user")
+            .fetch_one(control.pool())
+            .await
+            .context("读取 bootstrap_key DDL 演练行数失败")?;
+        ensure!(
+            usize::try_from(actual_rows).ok() == Some(row_count),
+            "bootstrap_key DDL 演练行数不完整: expected={row_count}, actual={actual_rows}"
+        );
+
+        let before_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND table_name = 'admin_user'",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取 bootstrap_key DDL 演练前索引规模失败")?;
+        let started = Instant::now();
+        run_job(MigrationCommand::Apply).await?;
+        let elapsed_ms = started.elapsed().as_millis();
+        let after_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND table_name = 'admin_user'",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取 bootstrap_key DDL 演练后索引规模失败")?;
+        ensure!(
+            before_indexes == after_indexes,
+            "增加 bootstrap_key CHECK 不得改变 admin_user 索引集合"
+        );
+        ensure!(
+            elapsed_ms <= budget_ms,
+            "bootstrap_key CHECK DDL 耗时 {elapsed_ms}ms 超过预算 {budget_ms}ms；不得直接发布，应调整发布窗口或采用在线 Schema 变更"
+        );
+        ensure!(
+            bootstrap_key_check(&control).await?.is_some(),
+            "bootstrap_key DDL 演练完成后精确 CHECK 必须存在"
+        );
+        eprintln!(
+            "admin_user.bootstrap_key CHECK DDL rehearsal: rows={row_count}, indexes={before_indexes}, elapsed_ms={elapsed_ms}, budget_ms={budget_ms}"
         );
         Ok(())
     }

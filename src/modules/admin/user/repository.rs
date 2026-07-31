@@ -17,6 +17,8 @@ use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
 use yang_db::Transaction;
 
+/// 数据库只允许这一种非空初始化哨兵；`NULL UNIQUE` 允许普通授权关系共存，
+/// 唯一非空值使并发 bootstrap 最多一个事务成功。
 const INITIAL_BOOTSTRAP_KEY: &str = "initial-admin";
 
 type AdminRow = (

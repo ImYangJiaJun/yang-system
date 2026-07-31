@@ -151,7 +151,7 @@ impl MigrationDescriptor {
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 15] = [
+const MIGRATIONS: [MigrationDescriptor; 16] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -323,6 +323,21 @@ const MIGRATIONS: [MigrationDescriptor; 15] = [
             },
         )),
     },
+    MigrationDescriptor {
+        version: "20260731_0016_add_admin_bootstrap_key_check",
+        sql: include_str!("../migrations/20260731_0016_add_admin_bootstrap_key_check.sql"),
+        description: "把平台初始化占位值固化为 NULL 或唯一 initial-admin",
+        prerequisite: "0015 已完成；发布前核对 MySQL 8.0.16+ 且 admin_user.bootstrap_key 非空值只含 initial-admin；在生产等量 staging 记录 ALTER 耗时与元数据锁等待",
+        recovery: "前向恢复；精确完成探针核对 chk_admin_user_bootstrap_key 名称、表达式与 ENFORCED；脏数据或同名异义约束须先人工修复",
+        completion_check: Some(CompletionDescriptor::CheckConstraint(
+            CheckConstraintCompletionDescriptor {
+                table: "admin_user",
+                constraint: "chk_admin_user_bootstrap_key",
+                expression: "(bootstrap_key IS NULL) OR (bootstrap_key = 'initial-admin')",
+                enforced: true,
+            },
+        )),
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,6 +436,7 @@ pub async fn execute_with_database(
     }
 
     preflight_users_status_check(database.pool()).await?;
+    preflight_admin_bootstrap_key_check(database.pool()).await?;
     preflight_authorization_foreign_keys(database.pool()).await?;
 
     initializer
@@ -508,6 +524,42 @@ async fn preflight_users_status_check(pool: &sqlx::MySqlPool) -> anyhow::Result<
     ensure!(
         dirty_rows == 0,
         "用户状态 CHECK 发布预检发现 {dirty_rows} 行领域集合之外的数据；必须先清洗并复核 status 分组计数"
+    );
+    Ok(())
+}
+
+async fn preflight_admin_bootstrap_key_check(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
+    let (version, version_comment): (String, String) =
+        sqlx::query_as("SELECT CAST(VERSION() AS CHAR), CAST(@@version_comment AS CHAR)")
+            .fetch_one(pool)
+            .await
+            .context("bootstrap_key CHECK 发布预检无法读取 MySQL 版本")?;
+    ensure!(
+        supports_enforced_check(&version, &version_comment),
+        "bootstrap_key CHECK 要求 MySQL 8.0.16 及以上且不能是未纳入验证的兼容实现"
+    );
+
+    let table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables \
+         WHERE table_schema = DATABASE() AND table_name = 'admin_user' AND table_type = 'BASE TABLE'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("bootstrap_key CHECK 发布预检无法确认 admin_user 表")?;
+    if table_exists == 0 {
+        return Ok(());
+    }
+
+    let dirty_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_user \
+         WHERE bootstrap_key IS NOT NULL AND bootstrap_key <> 'initial-admin'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("bootstrap_key CHECK 发布预检无法统计脏数据")?;
+    ensure!(
+        dirty_rows == 0,
+        "bootstrap_key CHECK 发布预检发现 {dirty_rows} 行非法非空占位值；必须先清洗并核对 bootstrap_key 分组计数"
     );
     Ok(())
 }
@@ -758,7 +810,7 @@ fn status_name(status: MigrationPlanStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::supports_enforced_check;
+    use super::{descriptors, supports_enforced_check, CompletionDescriptor};
 
     #[test]
     fn check_preflight_accepts_only_verified_mysql_version_floor() {
@@ -778,5 +830,25 @@ mod tests {
         for invalid in ["", "8", "8.0", "not-a-version"] {
             assert!(!supports_enforced_check(invalid, "MySQL"));
         }
+    }
+
+    #[test]
+    fn bootstrap_key_check_is_the_last_forward_only_migration() {
+        let descriptor = descriptors()
+            .last()
+            .unwrap_or_else(|| panic!("迁移清单不得为空"));
+        assert_eq!(
+            descriptor.version,
+            "20260731_0016_add_admin_bootstrap_key_check"
+        );
+        assert!(matches!(
+            descriptor.completion_check,
+            Some(CompletionDescriptor::CheckConstraint(check))
+                if check.table == "admin_user"
+                    && check.constraint == "chk_admin_user_bootstrap_key"
+                    && check.expression
+                        == "(bootstrap_key IS NULL) OR (bootstrap_key = 'initial-admin')"
+                    && check.enforced
+        ));
     }
 }
