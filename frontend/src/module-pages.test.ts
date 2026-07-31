@@ -4,7 +4,7 @@ import type {
   TableViewSchema,
   UiCatalog,
 } from "src/contracts/ui-catalog";
-import { buildAccountModulePages } from "./module-pages";
+import { buildAccountModulePages, moduleView } from "./module-pages";
 
 function action(operationId: string): ActionDemoSchema {
   return {
@@ -143,5 +143,41 @@ describe("module pages", () => {
       identity: "admin",
       title: "平台账号",
     });
+  });
+
+  it("模块 Action 只接受模块显式授权的引用，并合并到当前 View", () => {
+    const source = catalog();
+    source.actions.push(action("org.user.export"), action("other.action"));
+    source.modules = [
+      module("org.user", "org", {
+        actions: ["org.user.export"],
+        action_presentations: [
+          {
+            operation_id: "org.user.export",
+            title: "导出",
+            placement: "toolbar",
+            interaction: "download",
+          },
+          {
+            operation_id: "other.action",
+            title: "越权引用",
+            placement: "toolbar",
+            interaction: "invoke",
+          },
+        ],
+        views: ["org.user.list"],
+      }),
+    ];
+
+    const page = buildAccountModulePages(source)[0]!;
+    const effectiveView = moduleView(page, "org.user.list");
+
+    expect(page.actionPresentations.map((item) => item.operation_id)).toEqual([
+      "org.user.export",
+    ]);
+    expect(
+      effectiveView?.action_presentations.map((item) => item.operation_id),
+    ).toEqual(["org.user.export"]);
+    expect(effectiveView?.actions).toEqual(["org.user.export"]);
   });
 });

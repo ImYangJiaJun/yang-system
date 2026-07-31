@@ -19,19 +19,19 @@
 | 显式 View 的默认表格页 | 已验证 | 后端声明可访问的 `data_action`、字段和 presentation 后，`TableView` 可在不修改前端的情况下渲染 |
 | 仅新增 Module/CRUD 即自动出现可用表格页 | 未达成 | 框架生成的无 Action 默认 View 不会投影到 UI Catalog；必须声明可访问的数据 Action |
 | 仅新增 Action/API 即自动进入正式页面 | 未达成 | Action 会进入请求级 Catalog，但只有被 Module/View presentation 引用后才进入正式工具栏、行或批量区 |
-| 正式 `ModulePage` 完整解释全部合法契约 | 部分达成 | 当前只渲染首个 View，模块级 Action 未完整按 interaction 分派，并保留业务硬编码 |
-| 自定义页面安全降级 | 已验证 | 静态 registry 未命中或加载失败时，`BusinessPage`/`WorkbenchPage` 保留通用页面 |
+| 正式 `ModulePage` 解释当前合法契约 | 已闭环 | 全部 View 可切换；Module presentation 复用统一执行器并覆盖 toolbar/row/bulk 与当前六类 interaction；业务特例已移出通用页面 |
+| 自定义页面安全降级 | 已验证 | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面 |
 | 自定义页面只新增一个文件 | 未达成 | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点 |
 | Vue/Quasar/Pinia/Zod 技术选型 | 合理 | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益 |
-| 完整生产就绪 | 未达成 | 已有较强工程基础，但浏览器安全闭环、正式产物 E2E、部署契约、端到端可观测性、a11y 和真实业务压力证据仍不完整 |
+| 完整生产就绪 | 未达成 | 已有较强工程基础，但正式产物 E2E、CI 浏览器门禁、部署契约、端到端可观测性、a11y 和真实业务压力证据仍不完整 |
 
 ### 1.2 对两个评估问题的直接回答
 
 **问题 1：条件性达成，不是普遍达成。**
 
-- 已经达成的范围：后端新增 Module 时，同时声明 `ModulePresentationSpec`、带可访问 `data_action` 的 `ViewSpec`、字段和受支持的 Action presentation，前端可以零修改获得通用表格、查询、表单和 View Action。
-- 尚未达成的范围：只注册 Module/CRUD、只新增 Action、一个 Module 包含多个 View、模块级 custom/download/preview/navigate/bulk、严格“只新增一个自定义文件”等场景。
-- 因此不能写成“后端新增任意模块/API 都自动完成正式页面”，应写成“符合当前可渲染契约子集的后端变更可以零前端修改交付”。
+- 已经达成的范围：后端新增 Module 时，同时声明 `ModulePresentationSpec`、一个或多个带可访问 `data_action` 的 `ViewSpec`、字段和受支持的 Action presentation，前端可以零修改获得多 View、通用表格、查询、表单，以及模块级 toolbar/row/bulk 与 form/invoke/download/preview/navigate/custom 分派。
+- 尚未达成的范围：只注册 Module/CRUD、只新增 Action、严格“自定义页面只新增一个文件”，以及用一个独立真实业务 Addon 证明零前端业务 diff 的验收场景。
+- 因此不能写成“后端新增任意模块/API 都自动完成正式页面”，应写成“符合显式 Module/View/presentation 契约的后端变更可以零前端修改交付”。
 
 **问题 2：选型合理，但当前只能定性为准生产阶段。**
 
@@ -92,7 +92,7 @@
 
 | 路径 | 构建状态 | 当前能力 | 不能据此证明的内容 |
 |---|---|---|---|
-| `/module/:moduleId` | 生产包含 | 正式账户空间、Module 标题、首个 View 或 primary Action、模块级 Action 对话框 | 多 View、完整 interaction 分派、Module 级 custom/bulk |
+| `/module/:moduleId` | 生产包含 | 正式账户空间、全部 View 或 primary Action；Module presentation 统一分派并支持 custom 安全回退 | 独立真实业务 Addon、生产部署与规模上限 |
 | `/business` | 生产包含 | Catalog 导航、通用 `TableView`、View Action、custom 安全降级 | 每个 Module 的正式账户空间行为 |
 | `/workbench` | 仅 DEV | 全局 Action 演示、TableView、上传下载预览重定向、自定义 View 调试 | 生产包中的最终用户路径 |
 
@@ -112,24 +112,24 @@
 
 这里的结论只适用于 `TableView` 已接入且 Catalog 契约完整的路径。
 
-### 5.3 正式 ModulePage 的当前限制
+### 5.3 正式 ModulePage 的当前闭环
 
-`frontend/src/pages/ModulePage.vue` 仍不是对 Catalog 的完备解释器：
+`frontend/src/pages/ModulePage.vue` 已收敛到与 `TableView` 相同的解释链：
 
-- `ModulePage.vue:304-309` 只渲染 `modulePage.views[0]`；
-- `ModulePage.vue:213-220` 的模块级 `openAction` 不检查 interaction，统一打开 `ActionDemo` 对话框；
-- ModulePage 中的 `TableView` 没有处理 `custom-action`；
-- 模块级 presentation 只分 row/toolbar，没有 bulk 路径；
-- `ModulePage.vue:118-125`、`:137-167`、`:222-250`、`:363-374` 保留 `org.tenant`、字段名和状态值特判。
+- `moduleView()` 把 Module presentation 合并到当前 View，并以标签页暴露全部 `views`，不再静默丢弃 `views[1..]`；
+- `usePresentedActions()` 是 View 与无 View Module 共用的 Action executor，统一处理 hidden/disabled、确认、表单、调用、附件、重定向结果、行参数与批量选择；
+- ModulePage 接入静态 custom registry；注册命中时加载组件，未注册或加载失败时保留通用模块页；
+- Module presentation 必须同时被 `module.actions` 授权才会进入页面，不能借用 Catalog 中仅全局可见的 Action；
+- 字段标题与显示类型改从输出 JSON Schema 推导，`org.tenant` 行为通过 `product-shell/module-extensions.ts` 的显式产品外壳接口注入，通用页面不再判断具体模块 ID、字段名或状态值。
 
-因此“placement × interaction 在正式模块页全部成立”不正确。
+正式路由 E2E 已覆盖多 View、行 form、bulk invoke、download、preview、navigate 的安全分支、custom 成功与未注册回退、hidden/disabled 以及未获 Module 授权的 Action 引用；执行器单测穷举 toolbar/row/bulk × 六类 interaction。
 
 ### 5.4 后端不是当前唯一 UI 事实源
 
 除 Catalog 投影外，前端仍保存以下业务知识：
 
 - `module-pages.ts:30-43` 的业务 icon token 映射；
-- `ModulePage.vue` 的字段 label、状态格式和 `org.tenant` 特判；
+- `product-shell/module-extensions.ts` 对 `org.tenant` 的显式产品外壳扩展；
 - `components/account/AccountSwitcher.vue:44-70` 对 `"org"` 和 `/module/org.tenant` 的硬编码；
 - `stores/tenant.ts:43-46` 对 `org.tenant.list` operation id 的硬编码。
 
@@ -140,14 +140,14 @@
 当前安全机制是正确的：
 
 - `custom/registry.ts` 是静态白名单，不根据后端字符串拼接 import；
-- `BusinessPage` 与 `WorkbenchPage` 在未注册或加载失败时保留通用页面。
+- `ModulePage`、`BusinessPage` 与 `WorkbenchPage` 在未注册或加载失败时保留通用页面。
 
 当前成本也必须如实记录：
 
 - 一个自定义页面需要新增组件文件；
 - 还需要修改 `custom/registry.ts`；
 - 后端与前端 registry 不存在构建期交叉校验；
-- `ModulePage` 尚未接入 custom 回退链。
+- 三条页面路径都已接入同一静态 registry 的运行时安全回退；后端仍不能在构建期证明 `view_id` 已注册。
 
 所以当前是“两个手工触点 + 运行时安全降级”，不是“只新增一个文件 + 构建期保证”。
 
@@ -186,12 +186,12 @@
 - 生产构建检查禁止公开 source map，并检查 Workbench 标记没有进入产物；
 - `scripts/run_ci.py full` 包含 Rust 全目标测试、Clippy、前端生产依赖审计和 `pnpm check`。
 
-### 6.3 尚未通过的生产门槛
+### 6.3 生产门槛状态
 
 | 门槛 | 当前状态 | 缺少的证据或实现 |
 |---|---|---|
 | 浏览器 XSS 会话边界 | 已闭环 | access token 已改为仅驻留内存，Refresh Token 仍为 host-only HttpOnly Cookie；生产入口启用 enforce CSP，并用 Web Locks、版本化跨标签页结束信号闭环刷新轮换与退出同步 |
-| 正式页面契约完备性 | 未闭环 | 多 View、Module interaction、custom/bulk 与业务特例尚未收敛 |
+| 正式页面契约完备性 | 已闭环 | Module 多 View、统一 Action executor、custom/bulk、fail-closed 与显式产品外壳接口均有正式路由和矩阵测试证据 |
 | 正式产物 E2E | 未闭环 | Playwright 当前启动 Quasar dev server 和 demo backend，不测试 `dist/spa` 部署行为 |
 | CI 浏览器门禁 | 未闭环 | `run_ci.py full` 与当前 GitHub Actions quality job 不执行 Playwright |
 | 部署契约 | 未闭环 | history fallback、安全头、HTML/静态资源缓存策略和深链接 smoke test 未入门禁 |
@@ -210,10 +210,10 @@
 
 1. 新增一个独立真实业务 Addon，包含关系字段、树 View、批量 Action、至少两个 View；除自定义扩展外，`frontend/` 无业务代码 diff。
 2. 新 Module 只通过后端 presentation 出现在身份空间和导航中，不增加前端模块 ID、operation id、字段名或状态值特判。
-3. `/module/:moduleId` 能访问全部 View，而不只 `views[0]`。
-4. 在正式路由验证 toolbar/row/bulk × form/invoke/download/preview/navigate/custom 的受支持矩阵；不使用 `/workbench` 结果替代。
-5. 未授权 Module/View/Action 始终 fail-closed；availability 只控制提示，不替代服务端权限。
-6. custom `view_id` 未注册和加载失败时，正式 Module/Business 页面都能安全降级。
+3. **已满足（2026-07-31）：** `/module/:moduleId` 能通过标签页访问全部 View，不再只取 `views[0]`。
+4. **已满足（2026-07-31）：** 统一执行器单测覆盖 toolbar/row/bulk × form/invoke/download/preview/navigate/custom，正式 `/module` 浏览器用例实际覆盖三个 placement 和六类 interaction 的执行/安全分支，不使用 `/workbench` 结果替代。
+5. **已满足（2026-07-31）：** 未授权 Module、Module 未授权的 Action 引用与 hidden presentation 均 fail-closed；disabled 只呈现原因且不可执行。
+6. **已满足（2026-07-31）：** custom `view_id` 未注册时正式 Module/Business 页面安全降级；动态加载失败也走同一异常回退分支。
 7. 如果目标坚持“自定义页面只新增一个文件”，必须引入构建时静态 manifest/codegen，并增加后端 view id 与前端 manifest 的交叉校验；在此之前验收口径保持“一个新文件 + 一个 registry 修改”。
 8. 用 Git diff 证明约定场景没有前端业务改动，并由隔离 E2E 证明页面真实可用。
 
@@ -230,12 +230,12 @@
 
 ## 八、优先改进路径
 
-### P0：统一正式页面解释器
+### P0：统一正式页面解释器（已闭环）
 
-1. 让 `ModulePage` 复用 `TableView` 的统一 Action executor，而不是维护第二套简化 Action 流程。
-2. 为 Module 增加多 View 选择或明确主 View 契约，禁止静默丢弃 `views[1..]`。
-3. 把 `org.tenant`、字段 label、状态展示和租户入口语义移入 Catalog 或显式产品外壳接口。
-4. 将 custom 安全降级接入 ModulePage。
+1. `ModulePage` 与 `TableView` 已复用 `usePresentedActions()`，不再维护第二套简化 Action 流程。
+2. Module 已提供多 View 标签选择，禁止静默丢弃 `views[1..]`。
+3. `org.tenant` 进入显式产品外壳扩展，字段标题和显示类型由输出 schema 推导；ModulePage 不再包含具体模块 ID、字段名或状态值特判。
+4. custom 安全降级已接入 ModulePage。
 
 ### P0：把 E2E 变成可信门禁
 
@@ -318,10 +318,46 @@ pnpm --dir frontend verify:production-build
 
 本项闭环不外推为“任意已执行脚本都无法读取内存”：一旦可信 bundle 或允许执行的同源脚本自身失陷，运行时凭据仍可能被截获。当前 CSP 关闭的是内联/外部脚本注入面，依赖供应链与 DOM sink 仍需持续审计。生产服务器的响应头 CSP、`frame-ancestors`、history fallback 和缓存头仍属于“部署契约”门槛，本项没有提前把该门槛记为完成。
 
+### 9.2 2026-07-31 增量闭环：正式页面契约完备性
+
+本项采用的不变量是：正式 `/module/:moduleId` 不得静默丢弃合法 View；同一份 Module presentation 在 View 和 primary Action 页面中必须走同一 Action executor；任何未获 Module 授权、hidden 或未知 custom 引用都不得升级为可执行操作；通用页面不得包含具体模块 ID、字段名或状态值分支。
+
+实现证据：
+
+- `frontend/src/module-pages.ts` 只接受同时出现在 `module.actions` 中的 presentation，并把合法 Module presentation 合并到当前 View；
+- `frontend/src/pages/ModulePage.vue` 提供多 View 标签页，View 路径复用 `TableView`，无 View 路径复用 `usePresentedActions()`；两条路径共享 form/invoke/download/preview/navigate/custom、row/bulk、确认、附件和重载语义；
+- `frontend/src/product-shell/module-extensions.ts` 是产品外壳扩展边界；`org.tenant` 不再散落在通用页面，字段标题与显示类型从 Action 输出 JSON Schema 推导；
+- `TableActionDialog` 恢复语义化二级标题，Module 正式页保留 presentation 的业务提交文案；Business/Workbench 的既有通用表单文案保持不变。
+
+对抗性验证：
+
+```powershell
+# 红测：旧实现找不到第二个 View 标签，定向用例预期失败
+$env:YANG_E2E_FRONTEND_PORT="5198"
+$env:YANG_E2E_BACKEND_PORT="18098"
+pnpm --dir frontend exec playwright test e2e/formal-shell.spec.ts -g "正式模块页解释多 View"
+
+# 完整静态门禁、91 项 Vitest、生产构建与产物检查
+pnpm --dir frontend check
+
+# 隔离 demo backend + dev frontend 的全部正式/开发路径浏览器回归
+$env:YANG_E2E_FRONTEND_PORT="5206"
+$env:YANG_E2E_BACKEND_PORT="18106"
+pnpm --dir frontend e2e
+
+git diff --check
+```
+
+红测稳定失败在 `Alpha 项目` 标签不存在；实现后定向用例走过 Alpha/Beta 切换、row form、bulk invoke、下载、预览、navigate 安全分支、已注册/未注册 custom、hidden/disabled 与未获 Module 授权的 Action 引用。全量结果为前端 21 个测试文件/91 项 Vitest、生产构建和 23 文件产物检查全部通过，隔离 Chromium E2E 21/21 通过。
+
+对抗回归还发现统一弹窗最初把视觉标题保留为普通 `div`，导致既有正式账号空间失去 heading 语义；修复为 `h2` 并按页面策略恢复业务提交文案后，`account-spaces` 与全量 E2E 均通过。navigate 的浏览器分支仍遵守 Fetch 对手动 302 的安全边界：Location 不可见时不得猜测或跳转；执行器对可验证 location 的重定向分派由矩阵单测覆盖。
+
+本项不外推为“约定式交付目标已经普遍达成”：独立真实业务 Addon、严格只新增一个 custom 文件和大数据规模仍是单独验收项；也不把 dev server E2E 当作正式产物或部署契约证据。
+
 ## 十、最终结论
 
-yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明可用 View 与 presentation”的契约子集内，零前端修改交付已经可行。
+yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明一个或多个可用 View 与 presentation”的契约范围内，多 View 和模块级交互的零前端修改交付已经可行。
 
-当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，ModulePage 不是完备解释器，自定义页面仍有两个手工触点，前端也仍保留业务知识。
+当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，自定义页面仍有两个手工触点，尚无独立真实业务 Addon 的零前端业务 diff 证据，前端产品外壳也仍显式持有账号/租户入口知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界已有本地对抗证据；整体结论升级仍必须由正式路径、生产产物 E2E、隔离 CI、部署、可观测性、无障碍与真实规模证据共同支持。
+技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界和正式页面契约完备性已有本地对抗证据；整体结论升级仍必须由生产产物 E2E、隔离 CI、部署、可观测性、无障碍与真实规模证据共同支持。

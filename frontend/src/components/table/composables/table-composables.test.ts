@@ -8,7 +8,7 @@ import type {
 } from "src/contracts/ui-catalog";
 import { useColumnPreferences } from "./useColumnPreferences";
 import { useRelationOptions } from "./useRelationOptions";
-import { useTableActions } from "./useTableActions";
+import { usePresentedActions, useTableActions } from "./useTableActions";
 import { useTableQuery } from "./useTableQuery";
 import { useTableSelection } from "./useTableSelection";
 
@@ -280,5 +280,114 @@ describe("useTableActions", () => {
     expect(notify).toHaveBeenCalledWith("positive", "保存成功");
     expect(actions.actionDialog.value).toBe(false);
     expect(actions.actionLoading.value).toBe(false);
+  });
+
+  it("统一执行器覆盖正式页 placement 与 interaction 矩阵", async () => {
+    const placements = ["toolbar", "row", "bulk"] as const;
+    const interactions = [
+      "form",
+      "invoke",
+      "download",
+      "preview",
+      "navigate",
+      "custom",
+    ] as const;
+
+    for (const placement of placements) {
+      for (const interaction of interactions) {
+        const operationId = `matrix.${placement}.${interaction}`;
+        const itemAction = {
+          ...action(operationId),
+          response_kind:
+            interaction === "download" ||
+            interaction === "preview" ||
+            interaction === "navigate"
+              ? interaction === "navigate"
+                ? "redirect"
+                : interaction
+              : "json",
+          input_schema: {
+            type: "object",
+            properties: { record_id: { type: "integer" } },
+          },
+        } satisfies ActionDemoSchema;
+        const itemPresentation = presentation(operationId, {
+          placement,
+          interaction,
+          record_parameter: "record_id",
+          ...(interaction === "custom"
+            ? { view_id: "demo.items.insight" }
+            : {}),
+        });
+        const reload = vi.fn().mockResolvedValue(undefined);
+        const emitCustom = vi.fn();
+        const handleAttachment = vi.fn();
+        const redirect = vi.fn();
+        const result = {
+          kind:
+            itemAction.response_kind === "redirect"
+              ? "redirect"
+              : itemAction.response_kind,
+          status: 200,
+          durationMs: 1,
+          ...(itemAction.response_kind === "download" ||
+          itemAction.response_kind === "preview"
+            ? { blobUrl: "blob:matrix" }
+            : {}),
+          ...(itemAction.response_kind === "redirect"
+            ? { location: "/matrix-target" }
+            : { data: {} }),
+        } satisfies InvocationResult;
+        const invoke = vi.fn().mockResolvedValue(result);
+        const actions = inScope(() =>
+          usePresentedActions({
+            presentations: () => [itemPresentation],
+            businessFields: () => [],
+            actions: () => [itemAction],
+            session: () => ({ token: "access-token" }),
+            selectedRows: () => [{ id: 7, name: "已选择" }],
+            reload,
+            emitCustom,
+            invoke,
+            confirm: async () => true,
+            notify: vi.fn(),
+            handleAttachment,
+            redirect,
+          }),
+        );
+        const row = { id: 9, name: "当前行" };
+
+        await actions.openAction(
+          itemPresentation,
+          placement === "row" ? row : undefined,
+        );
+        if (interaction === "custom") {
+          expect(emitCustom).toHaveBeenCalledWith(
+            itemPresentation,
+            placement === "row" ? row : undefined,
+          );
+          expect(invoke).not.toHaveBeenCalled();
+          continue;
+        }
+        if (interaction === "form") {
+          expect(actions.actionDialog.value).toBe(true);
+          await actions.submitAction();
+        }
+
+        expect(invoke).toHaveBeenCalledOnce();
+        const values = invoke.mock.calls[0]?.[1] as Record<string, unknown>;
+        if (placement === "row") expect(values.record_id).toBe(9);
+        if (placement === "bulk") {
+          expect(values.selected).toEqual([{ id: 7, name: "已选择" }]);
+        }
+        expect(reload).toHaveBeenCalledOnce();
+        expect(handleAttachment).toHaveBeenCalledWith(result);
+        if (interaction === "navigate") {
+          expect(redirect).toHaveBeenCalledWith("/matrix-target");
+        } else {
+          expect(redirect).not.toHaveBeenCalled();
+        }
+      }
+    }
   });
 });

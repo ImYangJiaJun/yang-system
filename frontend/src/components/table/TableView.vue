@@ -24,6 +24,7 @@ const props = defineProps<{
   actions: ActionDemoSchema[];
   session: SessionContext;
   developer?: boolean;
+  presentationSubmitLabel?: boolean;
 }>();
 const emit = defineEmits<{
   customAction: [
@@ -310,10 +311,13 @@ function relationLabel(column: TableColumnSchema, value: unknown) {
       v-model:values="actionValues"
       :active-presentation="activePresentation"
       :active-action="activeAction"
-      :view="view"
+      :business-fields="view.form.fields"
       :actions="actions"
       :session="session"
       :loading="actionLoading"
+      :submit-label="
+        presentationSubmitLabel ? activePresentation?.title : undefined
+      "
       @submit="submitAction"
     />
   </section>

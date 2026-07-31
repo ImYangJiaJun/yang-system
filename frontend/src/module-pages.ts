@@ -61,6 +61,9 @@ export function buildAccountModulePages(
         const action = actions.get(operationId);
         return action ? [action] : [];
       });
+      const moduleActionIds = new Set(
+        moduleActions.map((action) => action.operation_id),
+      );
       return {
         id: module.module_id,
         identity: module.identity.id,
@@ -71,7 +74,7 @@ export function buildAccountModulePages(
         primaryAction,
         actions: moduleActions,
         actionPresentations: module.action_presentations.filter(
-          (presentation) => actions.has(presentation.operation_id),
+          (presentation) => moduleActionIds.has(presentation.operation_id),
         ),
         views: module.views.flatMap((viewId) => {
           const view = views.get(viewId);
@@ -83,6 +86,41 @@ export function buildAccountModulePages(
       (left, right) =>
         left.order - right.order || left.id.localeCompare(right.id),
     );
+}
+
+export function moduleView(
+  page: ModulePageDefinition,
+  viewId: string | undefined,
+): TableViewSchema | undefined {
+  const view =
+    page.views.find((candidate) => candidate.view_id === viewId) ??
+    page.views[0];
+  if (!view) return undefined;
+  const existingPresentations = new Set(
+    view.action_presentations.map(
+      (presentation) =>
+        `${presentation.operation_id}\u0000${presentation.placement}`,
+    ),
+  );
+  const modulePresentations = page.actionPresentations.filter(
+    (presentation) =>
+      !existingPresentations.has(
+        `${presentation.operation_id}\u0000${presentation.placement}`,
+      ),
+  );
+  return {
+    ...view,
+    actions: [
+      ...new Set([
+        ...view.actions,
+        ...modulePresentations.map((presentation) => presentation.operation_id),
+      ]),
+    ],
+    action_presentations: [
+      ...view.action_presentations,
+      ...modulePresentations,
+    ],
+  };
 }
 
 export function modulesForIdentity(

@@ -14,6 +14,7 @@ import {
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
+  FormFieldSchema,
   TableViewSchema,
 } from "src/contracts/ui-catalog";
 import {
@@ -21,8 +22,9 @@ import {
   groupPresentedActions,
 } from "../table-view-model";
 
-interface UseTableActionsOptions {
-  view: MaybeRefOrGetter<TableViewSchema>;
+interface UsePresentedActionsOptions {
+  presentations: MaybeRefOrGetter<ActionPresentationSchema[]>;
+  businessFields: MaybeRefOrGetter<FormFieldSchema[]>;
   actions: MaybeRefOrGetter<ActionDemoSchema[]>;
   session: MaybeRefOrGetter<SessionContext>;
   selectedRows: MaybeRefOrGetter<Array<Record<string, unknown>>>;
@@ -38,7 +40,14 @@ interface UseTableActionsOptions {
   redirect?: (location: string) => void;
 }
 
-export function useTableActions(options: UseTableActionsOptions) {
+interface UseTableActionsOptions extends Omit<
+  UsePresentedActionsOptions,
+  "presentations" | "businessFields"
+> {
+  view: MaybeRefOrGetter<TableViewSchema>;
+}
+
+export function usePresentedActions(options: UsePresentedActionsOptions) {
   const invoke = options.invoke ?? invokeAction;
   const confirm = options.confirm ?? confirmAction;
   const notify =
@@ -64,7 +73,7 @@ export function useTableActions(options: UseTableActionsOptions) {
       ),
   );
   const presentations = computed(() =>
-    toValue(options.view).action_presentations.filter(
+    toValue(options.presentations).filter(
       (item) => item.availability?.state !== "hidden",
     ),
   );
@@ -110,7 +119,7 @@ export function useTableActions(options: UseTableActionsOptions) {
     activeAction.value = action;
     actionValues.value = buildActionInitialValues(
       action,
-      toValue(options.view).form.fields,
+      toValue(options.businessFields),
       row,
       presentation.record_parameter,
     );
@@ -185,6 +194,23 @@ export function useTableActions(options: UseTableActionsOptions) {
     submitAction,
     dispose,
   };
+}
+
+export function useTableActions(options: UseTableActionsOptions) {
+  return usePresentedActions({
+    presentations: () => toValue(options.view).action_presentations,
+    businessFields: () => toValue(options.view).form.fields,
+    actions: options.actions,
+    session: options.session,
+    selectedRows: options.selectedRows,
+    reload: options.reload,
+    emitCustom: options.emitCustom,
+    invoke: options.invoke,
+    confirm: options.confirm,
+    notify: options.notify,
+    handleAttachment: options.handleAttachment,
+    redirect: options.redirect,
+  });
 }
 
 function confirmAction(

@@ -3,17 +3,18 @@ import type { SessionContext } from "src/api/client";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
-  TableViewSchema,
+  FormFieldSchema,
 } from "src/contracts/ui-catalog";
 import JsonSchemaForm from "components/form/JsonSchemaForm.vue";
 
 defineProps<{
   activePresentation?: ActionPresentationSchema;
   activeAction?: ActionDemoSchema;
-  view: TableViewSchema;
+  businessFields: FormFieldSchema[];
   actions: ActionDemoSchema[];
   session: SessionContext;
   loading: boolean;
+  submitLabel?: string;
 }>();
 
 const open = defineModel<boolean>({ required: true });
@@ -27,9 +28,9 @@ const emit = defineEmits<{ submit: [] }>();
   <q-dialog v-model="open">
     <q-card class="action-dialog-card">
       <q-card-section class="row items-center">
-        <div class="text-h6">
+        <h2 class="text-h6 q-my-none">
           {{ activePresentation?.title || activeAction?.title }}
-        </div>
+        </h2>
         <q-space />
         <q-btn v-close-popup flat round dense icon="close" aria-label="关闭" />
       </q-card-section>
@@ -40,7 +41,7 @@ const emit = defineEmits<{ submit: [] }>();
           v-model="values"
           :schema="activeAction.input_schema"
           :params="activeAction.params"
-          :business-fields="view.form.fields"
+          :business-fields="businessFields"
           :actions="actions"
           :session="session"
           :multipart="activeAction.multipart"
@@ -51,7 +52,7 @@ const emit = defineEmits<{ submit: [] }>();
         <q-btn v-close-popup flat label="取消" />
         <q-btn
           color="primary"
-          label="提交"
+          :label="submitLabel || '提交'"
           :loading="loading"
           @click="emit('submit')"
         />
