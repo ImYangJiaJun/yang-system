@@ -97,4 +97,20 @@ mod tests {
             assert!(field.access.sortable, "Action 排序字段 {name} 必须显式授权");
         }
     }
+
+    #[test]
+    fn organization_remains_read_only_until_disable_state_machine_is_implemented() {
+        let module = OrganizationModule.into_spec();
+        let actions = module
+            .actions()
+            .iter()
+            .map(|action| (action.name.as_str(), action.route.method.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actions,
+            [("list", "GET"), ("select", "POST")],
+            "企业模块在 active -> disabling -> disabled 状态机落地前不得暴露写 Action"
+        );
+    }
 }
