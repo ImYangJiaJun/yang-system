@@ -20,6 +20,30 @@ async function filesUnder(directory) {
 }
 
 const files = await filesUnder(buildRoot);
+const indexHtml = await readFile(resolve(buildRoot, "index.html"), "utf8");
+const cspMatch = indexHtml.match(
+  /<meta\b[^>]*http-equiv=(?:["']Content-Security-Policy["']|Content-Security-Policy)[^>]*content="([^"]+)"/i,
+);
+if (!cspMatch) {
+  throw new Error("生产入口必须包含 enforce 模式 Content-Security-Policy");
+}
+const csp = cspMatch[1];
+for (const directive of [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "script-src 'self'",
+  "connect-src 'self'",
+]) {
+  if (!csp.includes(directive)) {
+    throw new Error(`生产 CSP 缺少必要指令：${directive}`);
+  }
+}
+for (const forbidden of ["'unsafe-eval'", "https:", "http:"]) {
+  if (csp.includes(forbidden)) {
+    throw new Error(`生产 CSP 包含禁止的脚本或外部源能力：${forbidden}`);
+  }
+}
 const publicSourceMaps = files.filter((file) => extname(file) === ".map");
 if (publicSourceMaps.length) {
   throw new Error(
@@ -47,5 +71,5 @@ for (const file of files.filter((candidate) =>
 }
 
 stdout.write(
-  `production build verification: ${files.length} files, no Workbench chunk or public source map\n`,
+  `production build verification: ${files.length} files, enforce CSP, no Workbench chunk or public source map\n`,
 );

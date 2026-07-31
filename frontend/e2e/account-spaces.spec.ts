@@ -153,9 +153,23 @@ async function serveCatalog(
   identity: "user" | "admin" | "org" = "user",
 ) {
   await page.addInitScript((selectedIdentity) => {
-    sessionStorage.setItem("yang.token", "account-space-test-token");
     sessionStorage.setItem("yang.account-identity", selectedIdentity);
   }, identity);
+  await page.route("**/api/v1/users/refresh", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { access_token: "account-space-test-token" },
+      }),
+      headers: {
+        "Set-Cookie":
+          "yang_refresh=account-space-refresh; Path=/api/v1/users; HttpOnly; SameSite=Strict",
+      },
+    }),
+  );
   await page.route("**/.well-known/yang/ui-catalog", (route) =>
     route.fulfill({
       status: 200,

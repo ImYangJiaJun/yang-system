@@ -110,7 +110,7 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
   await expect(page.getByTestId("module-nav-account.user")).toHaveCount(0);
   await expect
     .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
-    .toBe("access-token");
+    .toBeNull();
   await expect
     .poll(() =>
       page.evaluate(() => sessionStorage.getItem("yang.refresh-token")),
@@ -145,9 +145,6 @@ test("登录失败时停留在登录页且不保存凭据", async ({ page }) => 
 });
 
 test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) => {
-  await page.addInitScript(() => {
-    sessionStorage.setItem("yang.token", "access-old");
-  });
   const catalogAuthorizations: Array<string | undefined> = [];
   let refreshRequests = 0;
   await page.route("**/.well-known/yang/ui-catalog", async (route) => {
@@ -180,6 +177,7 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
   await page.route("**/api/v1/users/refresh", async (route) => {
     refreshRequests += 1;
     expect(route.request().postDataJSON()).toEqual({});
+    const accessToken = refreshRequests === 1 ? "access-old" : "access-new";
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -187,7 +185,7 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
         code: 0,
         message: "成功",
         data: {
-          access_token: "access-new",
+          access_token: accessToken,
         },
       }),
       headers: {
@@ -205,10 +203,10 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
     "Bearer access-old",
     "Bearer access-new",
   ]);
-  expect(refreshRequests).toBe(1);
+  expect(refreshRequests).toBe(2);
   await expect
     .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
-    .toBe("access-new");
+    .toBeNull();
   await expect
     .poll(() =>
       page.evaluate(() => sessionStorage.getItem("yang.refresh-token")),
@@ -216,7 +214,9 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
     .toBeNull();
 });
 
-test("访问令牌和刷新令牌均失效时自动退出到登录页", async ({ page }) => {
+test("伪造 Web Storage Token 且 Refresh Cookie 无效时保持未认证", async ({
+  page,
+}) => {
   await page.addInitScript(() => {
     sessionStorage.setItem("yang.token", "access-expired");
     sessionStorage.setItem("yang.tenant-id", "7");
@@ -239,8 +239,7 @@ test("访问令牌和刷新令牌均失效时自动退出到登录页", async ({
 
   await page.goto("/roles");
 
-  await expect(page).toHaveURL(/\/login\?reason=session-expired$/);
-  await expect(page.getByText("登录状态已过期，请重新登录")).toBeVisible();
+  await expect(page).toHaveURL("/login");
   for (const key of [
     "yang.token",
     "yang.refresh-token",
@@ -251,4 +250,94 @@ test("访问令牌和刷新令牌均失效时自动退出到登录页", async ({
       .poll(() => page.evaluate((name) => sessionStorage.getItem(name), key))
       .toBeNull();
   }
+});
+
+test("enforce CSP 拒绝内联脚本且不开放 unsafe-eval", async ({ page }) => {
+  await page.goto("/login");
+  const policy = await page
+    .locator('meta[http-equiv="Content-Security-Policy"]')
+    .getAttribute("content");
+
+  expect(policy).toContain("script-src 'self'");
+  expect(policy).not.toContain("'unsafe-eval'");
+  const executed = await page.evaluate(() => {
+    const marker = "__yang_inline_script_executed__";
+    const script = document.createElement("script");
+    script.textContent = `window.${marker} = true`;
+    document.head.append(script);
+    return (window as unknown as Record<string, unknown>)[marker] === true;
+  });
+  expect(executed).toBe(false);
+});
+
+test("多标签页串行轮换 Refresh Cookie 并同步退出且不共享持久化 Token", async ({
+  context,
+  page,
+}) => {
+  let activeRefreshes = 0;
+  let maxConcurrentRefreshes = 0;
+  await context.route("**/api/v1/users/refresh", async (route) => {
+    activeRefreshes += 1;
+    maxConcurrentRefreshes = Math.max(maxConcurrentRefreshes, activeRefreshes);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { access_token: "shared-memory-access" },
+      }),
+      headers: {
+        "Set-Cookie":
+          "yang_refresh=rotated-refresh; Path=/api/v1/users; HttpOnly; SameSite=Strict",
+      },
+    });
+    activeRefreshes -= 1;
+  });
+  await context.route("**/.well-known/yang/ui-catalog", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          schema_version: "2.3",
+          revision: "e".repeat(64),
+          actions: [catalogAction("account.user.me")],
+          table_views: [],
+          modules: [catalogModule("account.user", "user", "account.user.me")],
+        },
+      }),
+    }),
+  );
+  await context.route("**/api/v1/users/logout", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ code: 0, message: "成功", data: null }),
+      headers: {
+        "Set-Cookie":
+          "yang_refresh=; Path=/api/v1/users; HttpOnly; SameSite=Strict; Max-Age=0",
+      },
+    }),
+  );
+  const otherPage = await context.newPage();
+
+  await Promise.all([page.goto("/roles"), otherPage.goto("/roles")]);
+  await expect(page.getByTestId("role-option-user")).toBeVisible();
+  await expect(otherPage.getByTestId("role-option-user")).toBeVisible();
+  expect(maxConcurrentRefreshes).toBe(1);
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
+    .toBeNull();
+  await expect
+    .poll(() => otherPage.evaluate(() => sessionStorage.getItem("yang.token")))
+    .toBeNull();
+
+  await page.getByRole("button", { name: "退出登录" }).click();
+
+  await expect(page).toHaveURL("/login");
+  await expect(otherPage).toHaveURL(/\/login\?reason=session-expired$/);
 });

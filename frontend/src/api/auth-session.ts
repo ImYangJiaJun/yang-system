@@ -4,15 +4,17 @@ import { ApiError } from "./errors";
 export const SESSION_EXPIRED_EVENT = "yang:session-expired";
 export const SESSION_REFRESHED_EVENT = "yang:session-refreshed";
 
-const ACCESS_TOKEN_KEY = "yang.token";
 const SESSION_KEYS = [
-  ACCESS_TOKEN_KEY,
+  "yang.token",
   "yang.refresh-token",
   "yang.tenant-id",
   "yang.account-identity",
 ] as const;
+const CREDENTIAL_KEYS = ["yang.token", "yang.refresh-token"] as const;
+const REFRESH_LOCK = "yang.session.refresh";
 
 let activeRefresh: Promise<LoginResult> | undefined;
+let currentAccessToken: string | undefined;
 let expiredAccessToken: string | undefined;
 
 export class SessionExpiredError extends Error {
@@ -26,23 +28,24 @@ function storage(): Storage | undefined {
   return typeof sessionStorage === "undefined" ? undefined : sessionStorage;
 }
 
-function storedValue(key: string): string {
-  return storage()?.getItem(key)?.trim() ?? "";
-}
-
 function dispatchSessionEvent(name: string, detail?: LoginResult) {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
-export function persistTokenPair(tokens: LoginResult) {
+export function discardLegacyStoredCredentials() {
   const target = storage();
-  target?.setItem(ACCESS_TOKEN_KEY, tokens.accessToken);
-  target?.removeItem("yang.refresh-token");
+  for (const key of CREDENTIAL_KEYS) target?.removeItem(key);
+}
+
+export function persistTokenPair(tokens: LoginResult) {
+  currentAccessToken = tokens.accessToken;
+  discardLegacyStoredCredentials();
   expiredAccessToken = undefined;
 }
 
 export function clearStoredSession() {
+  currentAccessToken = undefined;
   const target = storage();
   for (const key of SESSION_KEYS) target?.removeItem(key);
 }
@@ -67,29 +70,55 @@ function terminalRefreshFailure(cause: unknown): boolean {
   );
 }
 
-async function refreshAccessToken(failedAccessToken: string): Promise<string> {
-  const currentAccessToken = storedValue(ACCESS_TOKEN_KEY);
-  if (currentAccessToken && currentAccessToken !== failedAccessToken) {
-    return currentAccessToken;
-  }
+async function withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
+  if (typeof navigator === "undefined" || !navigator.locks) return task();
+  return navigator.locks.request(REFRESH_LOCK, { mode: "exclusive" }, () =>
+    task(),
+  );
+}
+
+async function refreshTokenPair(): Promise<LoginResult> {
   if (!activeRefresh) {
-    activeRefresh = refreshSession()
+    activeRefresh = withRefreshLock(refreshSession)
       .then((tokens) => {
         persistTokenPair(tokens);
         dispatchSessionEvent(SESSION_REFRESHED_EVENT, tokens);
         return tokens;
       })
-      .catch((cause: unknown) => {
-        if (terminalRefreshFailure(cause)) {
-          expireSession(failedAccessToken, cause);
-        }
-        throw cause;
-      })
       .finally(() => {
         activeRefresh = undefined;
       });
   }
-  return (await activeRefresh).accessToken;
+  return activeRefresh;
+}
+
+export async function restoreSessionFromCookie(): Promise<
+  LoginResult | undefined
+> {
+  if (currentAccessToken) return { accessToken: currentAccessToken };
+  try {
+    return await refreshTokenPair();
+  } catch (cause: unknown) {
+    if (terminalRefreshFailure(cause)) {
+      clearStoredSession();
+      return undefined;
+    }
+    throw cause;
+  }
+}
+
+async function refreshAccessToken(failedAccessToken: string): Promise<string> {
+  if (currentAccessToken && currentAccessToken !== failedAccessToken) {
+    return currentAccessToken;
+  }
+  try {
+    return (await refreshTokenPair()).accessToken;
+  } catch (cause: unknown) {
+    if (terminalRefreshFailure(cause)) {
+      expireSession(failedAccessToken, cause);
+    }
+    throw cause;
+  }
 }
 
 export async function requestWithTokenRefresh(

@@ -1,5 +1,26 @@
 import { expect, test, type Page } from "@playwright/test";
 
+async function restoreSession(page: Page, identity: "user" | "admin" | "org") {
+  await page.addInitScript((selectedIdentity) => {
+    sessionStorage.setItem("yang.account-identity", selectedIdentity);
+  }, identity);
+  await page.route("**/api/v1/users/refresh", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { access_token: "formal-shell-token" },
+      }),
+      headers: {
+        "Set-Cookie":
+          "yang_refresh=formal-shell-refresh; Path=/api/v1/users; HttpOnly; SameSite=Strict",
+      },
+    }),
+  );
+}
+
 async function serveBusinessCatalog(page: Page) {
   await page.route("**/.well-known/yang/ui-catalog", (route) =>
     route.fulfill({
@@ -95,10 +116,7 @@ async function serveBusinessCatalog(page: Page) {
 }
 
 test("正式控制台模块只有一个导航入口", async ({ page }) => {
-  await page.addInitScript(() => {
-    sessionStorage.setItem("yang.token", "formal-shell-token");
-    sessionStorage.setItem("yang.account-identity", "user");
-  });
+  await restoreSession(page, "user");
   await page.route("**/.well-known/yang/ui-catalog", (route) =>
     route.fulfill({
       status: 200,
@@ -170,10 +188,7 @@ test("正式控制台模块只有一个导航入口", async ({ page }) => {
 });
 
 test("正式业务入口使用目录投影的通用页面", async ({ page }) => {
-  await page.addInitScript(() => {
-    sessionStorage.setItem("yang.token", "formal-shell-token");
-    sessionStorage.setItem("yang.account-identity", "user");
-  });
+  await restoreSession(page, "user");
   await serveBusinessCatalog(page);
   await page.goto("/business");
 

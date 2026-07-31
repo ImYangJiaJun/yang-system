@@ -190,7 +190,7 @@
 
 | 门槛 | 当前状态 | 缺少的证据或实现 |
 |---|---|---|
-| 浏览器 XSS 会话边界 | 未闭环 | access token 仍在 `sessionStorage`；缺少 enforce 模式 CSP 和多标签页策略 |
+| 浏览器 XSS 会话边界 | 已闭环 | access token 已改为仅驻留内存，Refresh Token 仍为 host-only HttpOnly Cookie；生产入口启用 enforce CSP，并用 Web Locks、版本化跨标签页结束信号闭环刷新轮换与退出同步 |
 | 正式页面契约完备性 | 未闭环 | 多 View、Module interaction、custom/bulk 与业务特例尚未收敛 |
 | 正式产物 E2E | 未闭环 | Playwright 当前启动 Quasar dev server 和 demo backend，不测试 `dist/spa` 部署行为 |
 | CI 浏览器门禁 | 未闭环 | `run_ci.py full` 与当前 GitHub Actions quality job 不执行 Playwright |
@@ -219,7 +219,7 @@
 
 ### 7.2 “生产就绪”的通过条件
 
-1. access token 内存化或采用经过威胁建模的等价方案，并在 enforce CSP 下验证登录、刷新、上传和自定义组件。
+1. **已满足（2026-07-31）：** access token 内存化；enforce CSP 下已验证登录、刷新、上传和静态自定义组件；多标签页并发刷新与退出同步已有浏览器对抗测试。
 2. Playwright 在 CI 中使用唯一端口或由测试框架分配端口，禁止误复用开发者已有服务。
 3. 增加针对生产构建的浏览器 smoke：构建 `dist/spa`，以真实 history fallback 服务器启动，验证深链接、缓存头和安全头。
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
@@ -286,10 +286,42 @@ git diff -- docs/assessments/2026-07-30-convention-driven-goal-assessment.md
 - 本评估没有把未在本次运行的 `python scripts/run_ci.py full`、真实 MySQL/Redis integration 或远程 CI 状态写成当前通过。
 - 文档优化不会自动改变代码能力；只有 §7 的验收条件真实通过后，才可以升级结论。
 
+### 9.1 2026-07-31 增量闭环：浏览器 XSS 会话边界
+
+本项采用的安全不变量是：Access Token、Refresh Token 原文都不得进入 Web Storage；路由认证事实只能来自当前标签页的内存状态或同源 HttpOnly Refresh Cookie 恢复结果；跨标签页协议只能传递版本化会话结束元数据，不得传递 Token。
+
+实现证据：
+
+- `frontend/src/api/auth-session.ts` 把 Access Token 改为模块内存状态，启动时主动删除旧 `yang.token`/`yang.refresh-token`，终态刷新失败清空会话上下文；
+- `frontend/src/stores/session.ts` 不再从 `sessionStorage` 初始化认证状态，路由进入登录/角色/受保护页面前只通过 HttpOnly Cookie 尝试恢复；
+- 同源多标签页刷新使用 Web Locks 串行化，避免两个标签页同时轮换同一 Refresh Cookie；不支持 Web Locks 的浏览器仍保持 fail-closed，最坏结果是竞争失败的标签页重新登录，不会接受未验证 Token；
+- `frontend/src/api/session-coordination.ts` 以每标签页 sender id、事件 id 和版本校验同步 logout/expired；BroadcastChannel 与 `storage` fallback 只发送结束原因，不发送凭据；
+- `frontend/index.html` 的 enforce CSP 不包含 `unsafe-eval` 或外部脚本源；`verify-production-build.mjs` 会在 CSP 缺失、关键指令缺失或放开外部协议时让生产构建失败。
+
+对抗性验证：
+
+```powershell
+# 内存令牌、Web Locks 回调参数、伪造旧 Token、跨标签页畸形消息
+pnpm --dir frontend test
+
+# enforce CSP、伪造 Web Storage Token、刷新轮换、双标签页并发与退出同步
+$env:YANG_E2E_FRONTEND_PORT="5197"
+$env:YANG_E2E_BACKEND_PORT="18097"
+pnpm --dir frontend e2e
+
+# CSP 与生产产物边界
+pnpm --dir frontend build
+pnpm --dir frontend verify:production-build
+```
+
+浏览器对抗结果为 20/20，其中上传与静态 `view_id` 自定义组件都在同一 enforce CSP 下通过；双标签页用例同时证明 Refresh 请求最大并发数为 1、两个标签页都没有持久化 Access Token，且一处退出会驱动另一处回到登录页。红绿证据也已保留：旧实现会在 4 个凭据持久化断言上失败；首次浏览器运行又分别暴露了 Web Locks 回调把 `Lock` 误传为 `AbortSignal`、同页 BroadcastChannel 回环两个竞态，修复后对应回归均通过。
+
+本项闭环不外推为“任意已执行脚本都无法读取内存”：一旦可信 bundle 或允许执行的同源脚本自身失陷，运行时凭据仍可能被截获。当前 CSP 关闭的是内联/外部脚本注入面，依赖供应链与 DOM sink 仍需持续审计。生产服务器的响应头 CSP、`frame-ancestors`、history fallback 和缓存头仍属于“部署契约”门槛，本项没有提前把该门槛记为完成。
+
 ## 十、最终结论
 
 yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明可用 View 与 presentation”的契约子集内，零前端修改交付已经可行。
 
 当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，ModulePage 不是完备解释器，自定义页面仍有两个手工触点，前端也仍保留业务知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待关键门禁闭环”，而不是“已经完整生产就绪”。后续结论升级必须由正式路径、生产构建、隔离 CI、浏览器安全、部署与可观测性证据共同支持。
+技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界已有本地对抗证据；整体结论升级仍必须由正式路径、生产产物 E2E、隔离 CI、部署、可观测性、无障碍与真实规模证据共同支持。

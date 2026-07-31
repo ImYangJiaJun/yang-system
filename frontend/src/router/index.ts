@@ -4,14 +4,14 @@ import {
   createRouter,
   createWebHistory,
 } from "vue-router";
-import {
-  readAccessState,
-  resolveAccessRedirect,
-  type AccessTarget,
-} from "./access-policy";
+import { resolveAccessRedirect, type AccessTarget } from "./access-policy";
 import routes from "./routes";
+import { useIdentityStore } from "src/stores/identity";
+import { useSessionStore } from "src/stores/session";
 
-export default defineRouter(() => {
+export default defineRouter(({ store }) => {
+  const sessionStore = useSessionStore(store);
+  const identityStore = useIdentityStore(store);
   const router = createRouter({
     history: process.env.SERVER
       ? createMemoryHistory()
@@ -20,7 +20,7 @@ export default defineRouter(() => {
     scrollBehavior: () => ({ left: 0, top: 0 }),
   });
 
-  router.beforeEach((to) => {
+  router.beforeEach(async (to) => {
     if (
       to.name !== "login" &&
       to.name !== "role-selection" &&
@@ -36,7 +36,11 @@ export default defineRouter(() => {
           : to.meta.requiresRole
             ? "protected"
             : "role-selection";
-    return resolveAccessRedirect(target, readAccessState());
+    await sessionStore.restoreFromCookie();
+    return resolveAccessRedirect(target, {
+      authenticated: sessionStore.loggedIn,
+      accountIdentity: identityStore.accountIdentity,
+    });
   });
 
   return router;

@@ -7,6 +7,7 @@ import { useIdentityStore } from "src/stores/identity";
 import { useApplicationLifecycleStore } from "src/stores/application-lifecycle";
 import { useSessionStore } from "src/stores/session";
 import { useTenantStore } from "src/stores/tenant";
+import { publishSessionEnd } from "src/api/session-coordination";
 
 export function useApplicationSession() {
   const sessionStore = useSessionStore();
@@ -42,6 +43,7 @@ export function useApplicationSession() {
       await logout(sessionStore.token || undefined);
     } finally {
       clearSession();
+      publishSessionEnd("logout");
     }
   }
 

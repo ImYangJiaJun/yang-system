@@ -3,6 +3,10 @@ import {
   SESSION_EXPIRED_EVENT,
   SESSION_REFRESHED_EVENT,
 } from "src/api/auth-session";
+import {
+  publishSessionEnd,
+  subscribeSessionEnd,
+} from "src/api/session-coordination";
 import { useApplicationSession } from "src/composables/useApplicationSession";
 import { useApplicationLifecycleStore } from "src/stores/application-lifecycle";
 import type { Router } from "vue-router";
@@ -11,6 +15,15 @@ export type ApplicationRouter = Pick<Router, "currentRoute" | "replace">;
 
 export function startApplication(router: ApplicationRouter) {
   const disposeLifecycle = useApplicationLifecycleStore().start();
+  const endSession = (reason: "expired" | "logout", publish: boolean) => {
+    useApplicationSession().clearSession();
+    if (publish) publishSessionEnd(reason);
+    if (router.currentRoute.value.name === "login") return;
+    void router.replace({
+      name: "login",
+      query: { reason: "session-expired" },
+    });
+  };
   const refreshed = (event: Event) => {
     const tokens = (event as CustomEvent<LoginResult>).detail;
     if (tokens) {
@@ -18,13 +31,11 @@ export function startApplication(router: ApplicationRouter) {
     }
   };
   const expired = () => {
-    useApplicationSession().clearSession();
-    if (router.currentRoute.value.name === "login") return;
-    void router.replace({
-      name: "login",
-      query: { reason: "session-expired" },
-    });
+    endSession("expired", true);
   };
+  const disposeCoordination = subscribeSessionEnd((reason) =>
+    endSession(reason, false),
+  );
 
   window.addEventListener(SESSION_REFRESHED_EVENT, refreshed);
   window.addEventListener(SESSION_EXPIRED_EVENT, expired);
@@ -32,6 +43,7 @@ export function startApplication(router: ApplicationRouter) {
   return () => {
     window.removeEventListener(SESSION_REFRESHED_EVENT, refreshed);
     window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
+    disposeCoordination();
     disposeLifecycle();
   };
 }
