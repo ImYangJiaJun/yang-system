@@ -27,8 +27,25 @@ impl TypedHandler for AddTaskAction {
     ) -> Result<Self::Output, BaseError> {
         let project_id = input.require("project_project")?;
         let parent_id = input.optional("parent_task")?;
-        repository::validate_task_links(&context, project_id, parent_id, None).await?;
-        let (affected, id) = context.table_query()?.insert_returning_id(input).await?;
-        Ok(InsertResult { affected, id })
+        // tenant-boundary: transaction work-task-add-transaction
+        let mut transaction = context.begin_transaction().await?;
+        let result = async {
+            repository::lock_workspace(&context, &mut transaction).await?;
+            repository::validate_task_links_in_tx(
+                &context,
+                &mut transaction,
+                project_id,
+                parent_id,
+                None,
+            )
+            .await?;
+            let (affected, id) = context
+                .table_query()?
+                .insert_returning_id_in_tx(&mut transaction, input)
+                .await?;
+            Ok(InsertResult { affected, id })
+        }
+        .await;
+        repository::finish_transaction(transaction, result).await
     }
 }

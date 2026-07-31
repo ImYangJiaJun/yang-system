@@ -32,23 +32,38 @@ impl TypedHandler for PutTaskAction {
             ));
         }
         let task_id = positive_id("id", &input.id)?;
-        let current = repository::current_links(&context, task_id).await?;
-        let project_id = match input.data.get("project_project") {
-            Some(value) => positive_id("project_project", value)?,
-            None => current.project_id,
-        };
-        let parent_id = match input.data.get("parent_task") {
-            Some(Value::Null) => None,
-            Some(value) => Some(positive_id("parent_task", value)?),
-            None => current.parent_id,
-        };
-        repository::validate_task_links(&context, project_id, parent_id, Some(task_id)).await?;
-        let affected = context
-            .table_query()?
-            .where_primary_key_eq(input.id)?
-            .update(input.data)
+        // tenant-boundary: transaction work-task-put-transaction
+        let mut transaction = context.begin_transaction().await?;
+        let result = async {
+            repository::lock_workspace(&context, &mut transaction).await?;
+            let current =
+                repository::current_links_in_tx(&context, &mut transaction, task_id).await?;
+            let project_id = match input.data.get("project_project") {
+                Some(value) => positive_id("project_project", value)?,
+                None => current.project_id,
+            };
+            let parent_id = match input.data.get("parent_task") {
+                Some(Value::Null) => None,
+                Some(value) => Some(positive_id("parent_task", value)?),
+                None => current.parent_id,
+            };
+            repository::validate_task_links_in_tx(
+                &context,
+                &mut transaction,
+                project_id,
+                parent_id,
+                Some(task_id),
+            )
             .await?;
-        Ok(AffectedResult { affected })
+            let affected = context
+                .table_query()?
+                .where_primary_key_eq(input.id)?
+                .update_in_tx(&mut transaction, input.data)
+                .await?;
+            Ok(AffectedResult { affected })
+        }
+        .await;
+        repository::finish_transaction(transaction, result).await
     }
 }
 

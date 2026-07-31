@@ -11,20 +11,41 @@ pub(super) struct TaskLinks {
     pub(super) parent_id: Option<i64>,
 }
 
-pub(super) async fn current_links(
+pub(super) async fn lock_workspace(
     context: &ActionContext,
+    transaction: &mut Transaction,
+) -> Result<(), BaseError> {
+    let owner = context.tenant()?.id().get();
+    // 个人任务的关系写入以用户行为串行化，避免两个并发移动分别通过环检测。
+    let locked_owner: Option<i64> =
+        // tenant-boundary: raw-sql work-task-workspace-lock
+        sqlx::query_scalar("SELECT id FROM users WHERE id = ? FOR UPDATE")
+            .bind(owner)
+            .fetch_optional(executor(transaction)?)
+            .await
+            .map_err(yang_db::DbError::from)?;
+    if locked_owner != Some(owner) {
+        return Err(BaseError::PermissionDenied(
+            "个人工作区不存在或已失效".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn current_links_in_tx(
+    context: &ActionContext,
+    transaction: &mut Transaction,
     task_id: i64,
 ) -> Result<TaskLinks, BaseError> {
     let owner = context.tenant()?.id().get();
-    // tenant-boundary: raw-sql work-task-current-links
+    // tenant-boundary: raw-sql work-task-current-links-lock
     let row = sqlx::query_as::<_, (i64, Option<i64>)>(
         "SELECT project_project, parent_task FROM work_task \
-         WHERE id = ? AND owner_user = ? LIMIT 1",
+         WHERE id = ? AND owner_user = ? LIMIT 1 FOR UPDATE",
     )
     .bind(task_id)
     .bind(owner)
-    // tenant-boundary: database work-task-current-links-database
-    .fetch_optional(context.tools().mysql()?.pool())
+    .fetch_optional(executor(transaction)?)
     .await
     .map_err(yang_db::DbError::from)?
     .ok_or_else(|| BaseError::RecordNotFound(format!("任务 {task_id}")))?;
@@ -34,8 +55,9 @@ pub(super) async fn current_links(
     })
 }
 
-pub(super) async fn validate_task_links(
+pub(super) async fn validate_task_links_in_tx(
     context: &ActionContext,
+    transaction: &mut Transaction,
     project_id: i64,
     parent_id: Option<i64>,
     task_id: Option<i64>,
@@ -47,19 +69,17 @@ pub(super) async fn validate_task_links(
         ));
     }
     let owner = context.tenant()?.id().get();
-    // tenant-boundary: database work-task-validation-database
-    let pool = context.tools().mysql()?.pool();
-    // tenant-boundary: raw-sql work-task-project-ownership
-    let project_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM work_project \
-         WHERE id = ? AND owner_user = ? LIMIT 1)",
+    // tenant-boundary: raw-sql work-task-project-ownership-lock
+    let locked_project: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM work_project \
+         WHERE id = ? AND owner_user = ? LIMIT 1 FOR UPDATE",
     )
     .bind(project_id)
     .bind(owner)
-    .fetch_one(pool)
+    .fetch_optional(executor(transaction)?)
     .await
     .map_err(yang_db::DbError::from)?;
-    if !project_exists {
+    if locked_project != Some(project_id) {
         return Err(BaseError::PermissionDenied(
             "所属项目不存在或不属于当前工作区".to_string(),
         ));
@@ -83,11 +103,11 @@ pub(super) async fn validate_task_links(
     // tenant-boundary: raw-sql work-task-parent-ownership
     let parent_project: Option<i64> = sqlx::query_scalar(
         "SELECT project_project FROM work_task \
-         WHERE id = ? AND owner_user = ? LIMIT 1",
+         WHERE id = ? AND owner_user = ? LIMIT 1 FOR UPDATE",
     )
     .bind(parent_id)
     .bind(owner)
-    .fetch_optional(pool)
+    .fetch_optional(executor(transaction)?)
     .await
     .map_err(yang_db::DbError::from)?;
     if parent_project != Some(project_id) {
@@ -114,7 +134,7 @@ pub(super) async fn validate_task_links(
         .bind(owner)
         .bind(owner)
         .bind(task_id)
-        .fetch_one(pool)
+        .fetch_one(executor(transaction)?)
         .await
         .map_err(yang_db::DbError::from)?;
         if creates_cycle {
@@ -125,6 +145,32 @@ pub(super) async fn validate_task_links(
         }
     }
     Ok(())
+}
+
+pub(super) async fn finish_transaction<T>(
+    transaction: Transaction,
+    result: Result<T, BaseError>,
+) -> Result<T, BaseError> {
+    match result {
+        Ok(value) => {
+            transaction.commit().await.map_err(BaseError::from)?;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = transaction.rollback().await {
+                tracing::error!("个人任务 writer 回滚失败: error={}", rollback_error);
+            }
+            Err(error)
+        }
+    }
+}
+
+fn executor(transaction: &mut Transaction) -> Result<&mut sqlx::MySqlConnection, BaseError> {
+    transaction.executor().ok_or_else(|| {
+        BaseError::from(yang_db::DbError::TransactionError(
+            "个人任务 writer 事务已结束".to_string(),
+        ))
+    })
 }
 
 pub(super) async fn lock_tasks_for_completion(

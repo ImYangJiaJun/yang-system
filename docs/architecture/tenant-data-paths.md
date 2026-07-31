@@ -84,12 +84,13 @@
 | `org-member-system-lock` | raw-sql | `org/user/repository.rs` | 仅在已消费 actor-bound system capability 后按成员主键锁定 |
 | `org-member-add-system` | system-capability | `org/user/repository.rs` | system add 必须显式提供目标组织，且组织存在并 active |
 | `org-member-lock-system` | system-capability | `org/user/repository.rs` | system put/delete 在无普通租户 capability 时必须显式消费 system capability |
-| `work-task-current-links` | raw-sql | `work/task/repository.rs` | 更新前只按可信 owner 与任务 ID 读取当前项目/父任务关系 |
-| `work-task-current-links-database` | database | `work/task/repository.rs` | 只供同函数执行 owner-scoped 当前关系查询 |
-| `work-task-validation-database` | database | `work/task/repository.rs` | 只供任务关系校验中的静态、参数化 owner-scoped 查询 |
-| `work-task-project-ownership` | raw-sql | `work/task/repository.rs` | 项目必须存在且 owner 等于可信个人工作区 |
+| `work-task-workspace-lock` | raw-sql | `work/task/repository.rs` | 任务关系写入先按可信 owner 锁定个人工作区，串行化同一用户的并发关系变更 |
+| `work-task-current-links-lock` | raw-sql | `work/task/repository.rs` | 更新前按可信 owner 与任务 ID 锁定当前项目/父任务关系 |
+| `work-task-project-ownership-lock` | raw-sql | `work/task/repository.rs` | 锁定目标项目，并要求项目 owner 等于可信个人工作区 |
 | `work-task-parent-ownership` | raw-sql | `work/task/repository.rs` | 父任务必须同 owner 且属于同一项目 |
 | `work-task-cycle-check` | raw-sql | `work/task/repository.rs` | 递归链每层重复限定 owner，深度上限 100，并拒绝形成关系环 |
+| `work-task-add-transaction` | transaction | `work/task/actions/add.rs` | 工作区锁、项目/父任务校验和新增任务在同一事务提交 |
+| `work-task-put-transaction` | transaction | `work/task/actions/put.rs` | 工作区锁、当前关系锁、项目/父任务校验和更新任务在同一事务提交 |
 | `work-task-complete-lock` | raw-sql | `work/task/repository.rs` | JSON_TABLE 只承载绑定 ID 值；按可信 owner 全量锁行，缺失或跨工作区时批次失败 |
 | `work-task-complete-transaction` | transaction | `work/task/actions/complete.rs` | 最多 100 个唯一 ID 在 tenant-scoped 事务内全量可见后才原子更新 |
 
@@ -115,12 +116,13 @@
 <!-- tenant-boundary: raw-sql org-member-system-lock -->
 <!-- tenant-boundary: system-capability org-member-add-system -->
 <!-- tenant-boundary: system-capability org-member-lock-system -->
-<!-- tenant-boundary: raw-sql work-task-current-links -->
-<!-- tenant-boundary: database work-task-current-links-database -->
-<!-- tenant-boundary: database work-task-validation-database -->
-<!-- tenant-boundary: raw-sql work-task-project-ownership -->
+<!-- tenant-boundary: raw-sql work-task-workspace-lock -->
+<!-- tenant-boundary: raw-sql work-task-current-links-lock -->
+<!-- tenant-boundary: raw-sql work-task-project-ownership-lock -->
 <!-- tenant-boundary: raw-sql work-task-parent-ownership -->
 <!-- tenant-boundary: raw-sql work-task-cycle-check -->
+<!-- tenant-boundary: transaction work-task-add-transaction -->
+<!-- tenant-boundary: transaction work-task-put-transaction -->
 <!-- tenant-boundary: raw-sql work-task-complete-lock -->
 <!-- tenant-boundary: transaction work-task-complete-transaction -->
 
