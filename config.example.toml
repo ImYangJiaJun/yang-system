@@ -56,6 +56,18 @@ audience = "yang-system-api"
 access_ttl_seconds = 3600
 refresh_ttl_seconds = 2592000
 
+[step_up]
+# Step-up 使用独立签名域；不得与 Access/Refresh Token 复用任何密钥。
+active_key_id = "local-step-up-2026-07"
+# 必须替换为独立的至少 32 字节随机密钥；该占位值会被启动校验拒绝。
+active_secret = "replace-with-independent-step-up-secret"
+# retiring key 只验证存量 challenge/proof；至少保留一个 proof TTL。
+retiring_keys = []
+issuer = "yang-system-step-up"
+audience = "yang-system-sensitive-actions"
+challenge_ttl_seconds = 120
+proof_ttl_seconds = 300
+
 [bootstrap]
 # 运行 yang-bootstrap-secret 生成；配置只保存摘要，原始 secret 由运维安全保管。
 # 该占位值会被启动校验拒绝。

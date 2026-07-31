@@ -4,6 +4,8 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
+use yang_base::action::StepUpManager;
 use yang_base::token::TokenManager;
 use yang_db::{DatabaseConfig, RedisConfig};
 
@@ -21,6 +23,7 @@ pub struct Settings {
     pub mysql: MysqlSettings,
     pub redis: RedisSettings,
     pub token: TokenSettings,
+    pub step_up: StepUpSettings,
     pub bootstrap: BootstrapSettings,
     pub security: SecuritySettings,
     #[serde(default)]
@@ -146,6 +149,19 @@ pub struct RetiringTokenKeySettings {
     pub secret: String,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepUpSettings {
+    pub active_key_id: String,
+    pub active_secret: String,
+    #[serde(default)]
+    pub retiring_keys: Vec<RetiringTokenKeySettings>,
+    pub issuer: String,
+    pub audience: String,
+    pub challenge_ttl_seconds: u64,
+    pub proof_ttl_seconds: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapSettings {
@@ -180,6 +196,28 @@ impl std::fmt::Debug for RetiringTokenKeySettings {
             .debug_struct("RetiringTokenKeySettings")
             .field("key_id", &self.key_id)
             .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for StepUpSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StepUpSettings")
+            .field("active_key_id", &self.active_key_id)
+            .field("active_secret", &"[REDACTED]")
+            .field(
+                "retiring_key_ids",
+                &self
+                    .retiring_keys
+                    .iter()
+                    .map(|key| key.key_id.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("challenge_ttl_seconds", &self.challenge_ttl_seconds)
+            .field("proof_ttl_seconds", &self.proof_ttl_seconds)
             .finish()
     }
 }
@@ -357,6 +395,7 @@ impl Settings {
             bail!("refresh token 有效期必须长于 access token");
         }
         self.token.validate()?;
+        self.step_up.validate(&self.token)?;
         self.security.validate()?;
         if !(1..=300).contains(&self.shutdown.total_timeout_seconds) {
             bail!("shutdown.total_timeout_seconds 必须在 1..=300 范围内");
@@ -439,6 +478,71 @@ impl TokenSettings {
                 bail!("token keyring 的 key_id 必须唯一");
             }
         }
+        Ok(())
+    }
+}
+
+impl StepUpSettings {
+    pub fn build_manager(&self) -> anyhow::Result<StepUpManager> {
+        StepUpManager::new_with_keyring(
+            self.active_key_id.clone(),
+            &self.active_secret,
+            self.retiring_keys
+                .iter()
+                .map(|key| (key.key_id.clone(), key.secret.clone())),
+            self.issuer.clone(),
+            self.audience.clone(),
+        )
+        .and_then(|manager| {
+            manager.with_ttls(
+                Duration::from_secs(self.challenge_ttl_seconds),
+                Duration::from_secs(self.proof_ttl_seconds),
+            )
+        })
+        .map_err(anyhow::Error::from)
+        .context("构建 Step-up keyring 失败")
+    }
+
+    fn validate(&self, token: &TokenSettings) -> anyhow::Result<()> {
+        if self.retiring_keys.len() > 8 {
+            bail!("step_up retiring_keys 最多允许 8 把密钥");
+        }
+        if self.issuer.trim().is_empty() || self.audience.trim().is_empty() {
+            bail!("step_up.issuer 与 step_up.audience 不能为空");
+        }
+        if !(1..=300).contains(&self.challenge_ttl_seconds) {
+            bail!("step_up.challenge_ttl_seconds 必须在 1..=300 范围内");
+        }
+        if !(1..=600).contains(&self.proof_ttl_seconds) {
+            bail!("step_up.proof_ttl_seconds 必须在 1..=600 范围内");
+        }
+
+        let mut key_ids = HashSet::with_capacity(self.retiring_keys.len() + 1);
+        let mut secrets = HashSet::with_capacity(self.retiring_keys.len() + 1);
+        validate_step_up_key_id(&self.active_key_id)?;
+        validate_step_up_secret(&self.active_secret)?;
+        key_ids.insert(self.active_key_id.as_str());
+        secrets.insert(self.active_secret.as_str());
+        for key in &self.retiring_keys {
+            validate_step_up_key_id(&key.key_id)?;
+            validate_step_up_secret(&key.secret)?;
+            if !key_ids.insert(key.key_id.as_str()) {
+                bail!("step_up keyring 的 key_id 必须唯一");
+            }
+            if !secrets.insert(key.secret.as_str()) {
+                bail!("step_up active/retiring keys 不得复用同一密钥");
+            }
+        }
+
+        let token_secrets = std::iter::once(token.active_secret.as_str())
+            .chain(token.retiring_keys.iter().map(|key| key.secret.as_str()));
+        if token_secrets
+            .into_iter()
+            .any(|secret| secrets.contains(secret))
+        {
+            bail!("step_up 与 Access/Refresh Token 必须使用不同密钥");
+        }
+        self.build_manager()?;
         Ok(())
     }
 }
@@ -552,6 +656,22 @@ fn validate_token_key_id(key_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_step_up_secret(secret: &str) -> anyhow::Result<()> {
+    validate_token_secret(secret).context("step_up key secret 无效")
+}
+
+fn validate_step_up_key_id(key_id: &str) -> anyhow::Result<()> {
+    if key_id.is_empty()
+        || key_id.len() > 64
+        || !key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("step_up key_id 必须是 1..=64 字节的 ASCII 字母、数字、下划线或连字符");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +727,14 @@ issuer = "test"
 audience = "test-api"
 access_ttl_seconds = 60
 refresh_ttl_seconds = 120
+[step_up]
+active_key_id = "step-up-test-2026-07"
+active_secret = "step-up-0123456789abcdef0123456789abcdef"
+retiring_keys = []
+issuer = "test-step-up"
+audience = "test-sensitive-actions"
+challenge_ttl_seconds = 120
+proof_ttl_seconds = 300
 [bootstrap]
 secret_digest = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
 [security]
@@ -655,6 +783,10 @@ filter = "info"
         assert!(
             !format!("{:?}", settings.token).contains(&settings.token.active_secret),
             "active secret 不得进入 Debug"
+        );
+        assert!(
+            !format!("{:?}", settings.step_up).contains(&settings.step_up.active_secret),
+            "step-up active secret 不得进入 Debug"
         );
         assert_eq!(
             settings.bootstrap.secret_digest.as_str(),
@@ -787,11 +919,12 @@ filter = "info"
     #[test]
     fn token_keyring_signs_with_active_and_verifies_retiring_key_without_debug_leaks() {
         let retiring_secret = "retiring-secret-0123456789abcdef0123456789abcdef";
-        let raw = valid_config().replace(
+        let raw = valid_config().replacen(
             "retiring_keys = []",
             &format!(
                 "retiring_keys = [{{ key_id = \"test-2026-06\", secret = \"{retiring_secret}\" }}]"
             ),
+            1,
         );
         let settings = Settings::parse(&raw)
             .unwrap_or_else(|error| panic!("合法 Token keyring 应解析成功: {error:#}"));
@@ -832,6 +965,70 @@ filter = "info"
         let debug = format!("{:?}", settings.token);
         assert!(!debug.contains(&settings.token.active_secret));
         assert!(!debug.contains(retiring_secret));
+    }
+
+    #[test]
+    fn step_up_keyring_is_independent_redacted_and_uses_configured_ttls() {
+        let settings = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("合法 Step-up 配置应解析成功: {error:#}"));
+        let manager = settings
+            .step_up
+            .build_manager()
+            .unwrap_or_else(|error| panic!("合法 Step-up keyring 应构建成功: {error:#}"));
+        let challenge = manager
+            .issue_challenge(
+                "7",
+                &yang_base::action!("admin.user.set_admin"),
+                "admin_user:42:admin=true",
+            )
+            .unwrap_or_else(|error| panic!("Step-up challenge 应签发成功: {error}"));
+
+        assert_eq!(challenge.expires_in, 120);
+        assert_eq!(
+            jsonwebtoken::decode_header(&challenge.challenge)
+                .unwrap_or_else(|error| panic!("challenge header 应可解码: {error}"))
+                .kid
+                .as_deref(),
+            Some("step-up-test-2026-07")
+        );
+        let debug = format!("{:?}", settings.step_up);
+        assert!(!debug.contains(&settings.step_up.active_secret));
+    }
+
+    #[test]
+    fn rejects_step_up_key_reuse_duplicates_and_ttl_overflow() {
+        for (raw, expected) in [
+            (
+                valid_config().replace(
+                    "step-up-0123456789abcdef0123456789abcdef",
+                    "0123456789abcdef0123456789abcdef",
+                ),
+                "必须使用不同密钥",
+            ),
+            (
+                valid_config().replace(
+                    "retiring_keys = []\nissuer = \"test-step-up\"",
+                    "retiring_keys = [{ key_id = \"step-up-test-2026-07\", secret = \"another-step-up-secret-0123456789abcdef\" }]\nissuer = \"test-step-up\"",
+                ),
+                "key_id 必须唯一",
+            ),
+            (
+                valid_config().replace("challenge_ttl_seconds = 120", "challenge_ttl_seconds = 301"),
+                "challenge_ttl_seconds",
+            ),
+            (
+                valid_config().replace("proof_ttl_seconds = 300", "proof_ttl_seconds = 601"),
+                "proof_ttl_seconds",
+            ),
+        ] {
+            let error = Settings::parse(&raw)
+                .err()
+                .unwrap_or_else(|| panic!("非法 Step-up 配置必须被拒绝: {expected}"));
+            assert!(
+                format!("{error:#}").contains(expected),
+                "错误应指出 {expected}: {error:#}"
+            );
+        }
     }
 
     #[test]

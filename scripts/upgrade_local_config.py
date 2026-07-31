@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import tomllib
@@ -20,6 +21,7 @@ from typing import Any
 SECTION_PATTERN = re.compile(r"^\[([^\]]+)\]$")
 SCALAR_PATTERN = re.compile(r"^([A-Za-z0-9_]+)\s*=\s*(.+)$")
 TOKEN_PLACEHOLDER = "replace-with-at-least-32-random-bytes"
+STEP_UP_PLACEHOLDER = "replace-with-independent-step-up-secret"
 BOOTSTRAP_PLACEHOLDER = "replace-with-yang-bootstrap-secret-digest"
 MYSQL_PLACEHOLDER = "mysql://root:password@127.0.0.1:3306/yang_system"
 LOCAL_MYSQL_URL = "mysql://root:yang-local@127.0.0.1:3306/yang_system"
@@ -81,6 +83,7 @@ def inspect_config(raw: str, template_raw: str) -> Inspection:
     template_document = parse_document(template_raw)
     required = set(scalar_values(template_raw))
     token_secret = nested_value(document, "token.active_secret")
+    step_up_secret = nested_value(document, "step_up.active_secret")
     bootstrap_digest = nested_value(document, "bootstrap.secret_digest")
     mysql_url = nested_value(document, "mysql.url")
     token_table = nested_value(document, "token")
@@ -91,6 +94,7 @@ def inspect_config(raw: str, template_raw: str) -> Inspection:
         all(nested_value(document, path) is not MISSING for path in required)
         and not has_legacy_token_secret
         and token_secret not in (MISSING, TOKEN_PLACEHOLDER)
+        and step_up_secret not in (MISSING, STEP_UP_PLACEHOLDER)
         and bootstrap_digest not in (MISSING, BOOTSTRAP_PLACEHOLDER)
         and mysql_url not in (MISSING, MYSQL_PLACEHOLDER)
     )
@@ -131,6 +135,9 @@ def upgrade_text(
 
     values["mysql.url"] = quote_toml_string(LOCAL_MYSQL_URL)
     values["redis.url"] = quote_toml_string(LOCAL_REDIS_URL)
+    existing_step_up_secret = nested_value(document, "step_up.active_secret")
+    if existing_step_up_secret in (MISSING, STEP_UP_PLACEHOLDER):
+        values["step_up.active_secret"] = quote_toml_string(secrets.token_urlsafe(48))
 
     existing_digest = nested_value(document, "bootstrap.secret_digest")
     if existing_digest in (MISSING, BOOTSTRAP_PLACEHOLDER):
@@ -286,6 +293,11 @@ filter = "yang_system=debug"
             values["token.active_secret"],
             '"legacy-token-secret-with-more-than-32-bytes"',
         )
+        self.assertIn("step_up.active_secret", values)
+        self.assertNotEqual(
+            values["step_up.active_secret"], values["token.active_secret"]
+        )
+        self.assertNotEqual(values["step_up.active_secret"], quote_toml_string(STEP_UP_PLACEHOLDER))
         self.assertNotIn("token.secret", values)
         self.assertEqual(values["http.bind"], '"127.0.0.1:8181"')
         self.assertEqual(values["mysql.max_connections"], "7")
@@ -335,11 +347,15 @@ filter = "yang_system=debug"
         current = (
             self.template.replace(TOKEN_PLACEHOLDER, "active-secret-32-bytes-or-more-value")
             .replace(
+                STEP_UP_PLACEHOLDER,
+                "independent-step-up-secret-32-bytes-or-more-value",
+            )
+            .replace(
                 BOOTSTRAP_PLACEHOLDER,
                 "$argon2id$v=19$m=19456,t=2,p=1$test$test",
             )
             .replace(MYSQL_PLACEHOLDER, LOCAL_MYSQL_URL)
-            .replace("retiring_keys = []\n", "")
+            .replace("retiring_keys = []\n", "", 1)
             + '\n[[token.retiring_keys]]\n'
             'key_id = "retiring-1"\n'
             'secret = "retiring-token-secret-with-more-than-32-bytes"\n'

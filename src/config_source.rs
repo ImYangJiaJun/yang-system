@@ -212,6 +212,38 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         Integer
     ),
     environment_binding!(
+        "YANG_SYSTEM_STEP_UP_ACTIVE_KEY_ID",
+        "step_up",
+        "active_key_id",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_STEP_UP_ACTIVE_SECRET",
+        "step_up",
+        "active_secret",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_STEP_UP_RETIRING_KEYS_JSON",
+        "step_up",
+        "retiring_keys",
+        Json
+    ),
+    environment_binding!("YANG_SYSTEM_STEP_UP_ISSUER", "step_up", "issuer", Text),
+    environment_binding!("YANG_SYSTEM_STEP_UP_AUDIENCE", "step_up", "audience", Text),
+    environment_binding!(
+        "YANG_SYSTEM_STEP_UP_CHALLENGE_TTL_SECONDS",
+        "step_up",
+        "challenge_ttl_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_STEP_UP_PROOF_TTL_SECONDS",
+        "step_up",
+        "proof_ttl_seconds",
+        Integer
+    ),
+    environment_binding!(
         "YANG_SYSTEM_BOOTSTRAP_SECRET_DIGEST",
         "bootstrap",
         "secret_digest",
@@ -305,6 +337,8 @@ pub(crate) enum SecretKey {
     RedisUrl,
     TokenActiveSecret,
     TokenRetiringKeys,
+    StepUpActiveSecret,
+    StepUpRetiringKeys,
     BootstrapSecretDigest,
 }
 
@@ -315,6 +349,8 @@ impl SecretKey {
             Self::RedisUrl => "redis_url",
             Self::TokenActiveSecret => "token_active_secret",
             Self::TokenRetiringKeys => "token_retiring_keys_json",
+            Self::StepUpActiveSecret => "step_up_active_secret",
+            Self::StepUpRetiringKeys => "step_up_retiring_keys_json",
             Self::BootstrapSecretDigest => "bootstrap_secret_digest",
         }
     }
@@ -325,12 +361,14 @@ impl SecretKey {
             Self::RedisUrl => ("redis", "url"),
             Self::TokenActiveSecret => ("token", "active_secret"),
             Self::TokenRetiringKeys => ("token", "retiring_keys"),
+            Self::StepUpActiveSecret => ("step_up", "active_secret"),
+            Self::StepUpRetiringKeys => ("step_up", "retiring_keys"),
             Self::BootstrapSecretDigest => ("bootstrap", "secret_digest"),
         }
     }
 
     fn is_json(self) -> bool {
-        matches!(self, Self::TokenRetiringKeys)
+        matches!(self, Self::TokenRetiringKeys | Self::StepUpRetiringKeys)
     }
 }
 
@@ -339,6 +377,8 @@ const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::RedisUrl,
     SecretKey::TokenActiveSecret,
     SecretKey::TokenRetiringKeys,
+    SecretKey::StepUpActiveSecret,
+    SecretKey::StepUpRetiringKeys,
     SecretKey::BootstrapSecretDigest,
 ];
 
@@ -657,6 +697,7 @@ mod tests {
     struct TestConfig {
         mysql: TestMysql,
         token: TestToken,
+        step_up: TestToken,
     }
 
     #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -694,6 +735,9 @@ max_lifetime_seconds = 60
 [token]
 active_secret = "file-secret"
 retiring_keys = []
+[step_up]
+active_secret = "file-step-up-secret"
+retiring_keys = []
 "#;
         let environment = BTreeMap::from([
             (
@@ -712,6 +756,15 @@ retiring_keys = []
                 "YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON".to_owned(),
                 r#"[{"key_id":"environment","secret":"environment-retiring"}]"#.to_owned(),
             ),
+            (
+                "YANG_SYSTEM_STEP_UP_ACTIVE_SECRET".to_owned(),
+                "environment-step-up-secret".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_STEP_UP_RETIRING_KEYS_JSON".to_owned(),
+                r#"[{"key_id":"environment-step-up","secret":"environment-step-up-retiring"}]"#
+                    .to_owned(),
+            ),
         ]);
         let provider = StaticSecretProvider(BTreeMap::from([
             (SecretKey::MysqlUrl, "mysql://provider".to_owned()),
@@ -719,6 +772,15 @@ retiring_keys = []
             (
                 SecretKey::TokenRetiringKeys,
                 r#"[{"key_id":"provider","secret":"provider-retiring"}]"#.to_owned(),
+            ),
+            (
+                SecretKey::StepUpActiveSecret,
+                "provider-step-up-secret".to_owned(),
+            ),
+            (
+                SecretKey::StepUpRetiringKeys,
+                r#"[{"key_id":"provider-step-up","secret":"provider-step-up-retiring"}]"#
+                    .to_owned(),
             ),
         ]));
 
@@ -735,6 +797,14 @@ retiring_keys = []
                 secret: "provider-retiring".to_owned(),
             }]
         );
+        assert_eq!(config.step_up.active_secret, "provider-step-up-secret");
+        assert_eq!(
+            config.step_up.retiring_keys,
+            [TestRetiringKey {
+                key_id: "provider-step-up".to_owned(),
+                secret: "provider-step-up-retiring".to_owned(),
+            }]
+        );
     }
 
     #[test]
@@ -744,6 +814,9 @@ retiring_keys = []
 url = "mysql://file"
 [token]
 active_secret = "file-secret"
+retiring_keys = []
+[step_up]
+active_secret = "file-step-up-secret"
 retiring_keys = []
 "#;
         let environment = BTreeMap::from([(
@@ -758,6 +831,8 @@ retiring_keys = []
         assert_eq!(config.mysql.url, "mysql://environment");
         assert_eq!(config.token.active_secret, "file-secret");
         assert!(config.token.retiring_keys.is_empty());
+        assert_eq!(config.step_up.active_secret, "file-step-up-secret");
+        assert!(config.step_up.retiring_keys.is_empty());
     }
 
     #[test]
@@ -768,7 +843,7 @@ retiring_keys = []
             sensitive_value.to_owned(),
         )]);
         let error = parse_with_sources::<TestConfig>(
-            "[mysql]\nurl='mysql://file'\n[token]\nactive_secret='file'\nretiring_keys=[]\n",
+            "[mysql]\nurl='mysql://file'\n[token]\nactive_secret='file'\nretiring_keys=[]\n[step_up]\nactive_secret='step-up-file'\nretiring_keys=[]\n",
             &environment,
             None,
         )
