@@ -103,6 +103,21 @@ impl UserRepository {
         rows.first().map(CredentialRecord::try_from).transpose()
     }
 
+    pub(super) async fn find_credentials_by_id(
+        &self,
+        ctx: &ActionContext,
+        id: i64,
+    ) -> Result<Option<CredentialRecord>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(USER_CREDENTIAL_FIELDS)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .page(1, 1)?
+            .all()
+            .await?;
+        rows.first().map(CredentialRecord::try_from).transpose()
+    }
+
     pub(super) async fn find_by_id(
         &self,
         ctx: &ActionContext,
@@ -148,6 +163,26 @@ impl UserRepository {
             .set(STATUS, "active");
         let (_, id) = self.trusted_query(ctx)?.insert_returning_id(record).await?;
         i64::try_from(id).map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))
+    }
+
+    pub(super) async fn update_password_hash_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+        password_hash: &str,
+    ) -> Result<(), BaseError> {
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .update_in_tx(transaction, Record::new().set(PASSWORD_HASH, password_hash))
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {id} 密码摘要更新未精确影响一行"),
+            )));
+        }
+        Ok(())
     }
 }
 

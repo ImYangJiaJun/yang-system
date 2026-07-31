@@ -11,7 +11,11 @@ const username = ref("");
 const password = ref("");
 const submitting = ref(false);
 const errorMessage = ref(
-  route.query.reason === "session-expired" ? "登录状态已过期，请重新登录" : "",
+  route.query.reason === "credentials-changed"
+    ? "凭据已变更，请使用新密码重新登录"
+    : route.query.reason === "session-expired"
+      ? "登录状态已过期，请重新登录"
+      : "",
 );
 const passwordVisible = ref(false);
 

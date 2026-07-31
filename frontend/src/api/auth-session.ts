@@ -3,6 +3,7 @@ import { ApiError } from "./errors";
 
 export const SESSION_EXPIRED_EVENT = "yang:session-expired";
 export const SESSION_REFRESHED_EVENT = "yang:session-refreshed";
+export const SESSION_RELOGIN_REQUIRED_EVENT = "yang:session-relogin-required";
 
 const SESSION_KEYS = [
   "yang.token",
@@ -52,6 +53,11 @@ export function clearStoredSession() {
   currentAccessToken = undefined;
   const target = storage();
   for (const key of SESSION_KEYS) target?.removeItem(key);
+}
+
+export function requireCredentialRelogin() {
+  clearStoredSession();
+  dispatchSessionEvent(SESSION_RELOGIN_REQUIRED_EVENT);
 }
 
 function expireSession(accessToken: string, cause?: unknown): never {

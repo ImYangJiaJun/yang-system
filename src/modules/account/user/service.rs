@@ -3,11 +3,16 @@
 //! Action 只负责传输适配；注册、登录、刷新和当前用户用例在此集中。
 
 use super::password::PasswordEngine;
-use super::policy::{normalize_username, validate_password};
+use super::policy::{normalize_username, validate_new_password, validate_password};
 use super::rate_limit::{AuthOperation, AuthRateLimiter};
 use super::repository::{AuthorizationStateRecord, UserRepository};
 use super::schema::{UserView, STATUS};
-use crate::modules::account::{AuthorizationGrants, GrantResolver};
+use crate::audit;
+use crate::modules::account::{
+    increment_locked_credential_versions, lock_user_credential, AuthorizationGrants, GrantResolver,
+    LockedUserCredential,
+};
+use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::auth::TokenPairClaims;
 use yang_base::action::ActionContext;
@@ -101,6 +106,63 @@ impl UserService {
         }
         ensure_active_status(&user.status)?;
         Ok(AuthenticatedUser { id: user.id })
+    }
+
+    pub(super) async fn change_password(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), BaseError> {
+        if !self.issue_refresh_credential_version {
+            return Err(BaseError::ConfigError(
+                "改密能力必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
+            ));
+        }
+        validate_new_password(new_password)?;
+        self.rate_limiter
+            .check(ctx, AuthOperation::ChangePassword, &user_id.to_string())
+            .await?;
+
+        let observed = self
+            .users
+            .find_credentials_by_id(ctx, user_id)
+            .await?
+            .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
+        ensure_active_status(&observed.status)?;
+        if !self
+            .passwords
+            .verify(old_password, &observed.password_hash)
+            .await?
+        {
+            return Err(BaseError::InvalidPassword);
+        }
+        // 两次昂贵 Argon2 运算均在事务和用户行锁之外完成。
+        let new_password_hash = self.passwords.hash(new_password).await?;
+
+        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let result = async {
+            let locked = lock_user_credential(&mut transaction, user_id).await?;
+            ensure_active_status(locked.status())?;
+            ensure_password_hash_unchanged(&locked, &observed.password_hash)?;
+            self.users
+                .update_password_hash_in_tx(ctx, &mut transaction, user_id, &new_password_hash)
+                .await?;
+            increment_locked_credential_versions(&mut transaction, &locked).await?;
+            let event = audit::succeeded_event(
+                ctx,
+                None,
+                Some(audit::entity("user", user_id)?),
+                audit::entity("user", user_id)?,
+                None,
+                Some(audit::summary([("relogin_required", json!(true))])?),
+            )?;
+            audit::append_in_tx(&mut transaction, &event).await?;
+            Ok(())
+        }
+        .await;
+        finish_transaction(transaction, result).await
     }
 
     pub(super) async fn claims_for(
@@ -244,4 +306,35 @@ fn ensure_active_status(status: &str) -> Result<(), BaseError> {
 
 fn username_exists_error() -> BaseError {
     BaseError::ParamInvalid("username".to_string(), "用户名已存在".to_string())
+}
+
+fn ensure_password_hash_unchanged(
+    locked: &LockedUserCredential,
+    observed_password_hash: &str,
+) -> Result<(), BaseError> {
+    if locked.password_hash_matches(observed_password_hash) {
+        return Ok(());
+    }
+    Err(BaseError::ParamInvalid(
+        "old_password".to_string(),
+        "密码已被其他请求修改，请重新登录后重试".to_string(),
+    ))
+}
+
+async fn finish_transaction<T>(
+    transaction: yang_db::Transaction,
+    result: Result<T, BaseError>,
+) -> Result<T, BaseError> {
+    match result {
+        Ok(value) => {
+            transaction.commit().await.map_err(BaseError::from)?;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = transaction.rollback().await {
+                tracing::error!("用户凭据事务回滚失败: error={}", rollback_error);
+            }
+            Err(error)
+        }
+    }
 }

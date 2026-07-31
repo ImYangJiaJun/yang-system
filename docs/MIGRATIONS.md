@@ -62,9 +62,9 @@ Catalog；启动和迁移作业都会精确校验列、CHECK、索引、引擎�
 完成探针精确匹配 `BIGINT NOT NULL DEFAULT 0`。该版本必须按三阶段发布：先执行迁移；
 再让全部实例以 `security.issue_refresh_credential_version = false` 部署兼容读取（旧
 Refresh 缺字段按 0 比较）；确认没有旧实例后改为 `true`，开始只在 Refresh Token
-签发 `credential_version`。Access Token 继续只使用 `authz_version`。在开关开启前
-不得发布会递增 `credential_version` 的凭据写操作，否则版本大于 0 的用户会拿到
-无法继续刷新的兼容期 Token。
+签发 `credential_version`，并注册 `account.user.change_password`。Access Token 继续
+只使用 `authz_version`。开关关闭时 Registry/Catalog 不暴露会递增凭据版本的改密
+Action，防止版本大于 0 的用户拿到无法继续刷新的兼容期 Token。
 
 ## 中断、并发与恢复
 

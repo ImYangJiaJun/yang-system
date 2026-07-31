@@ -61,20 +61,26 @@ pub(super) fn build_module(
     )
     .native_action(UiCatalogAction);
 
-    actions::register_all(module, service).map(|module| {
-        module.presentation(
-            ModulePresentationSpec::new(
-                crate::modules::presentation::user_identity(),
-                "用户中心",
-                "account",
-            )
-            .description("查看当前登录账号与管理会话")
-            .order(10)
-            .primary_action(yang_base::action!("account.user.me"))
-            .present_action(
-                yang_base::action!("account.user.logout"),
-                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Invoke),
-            ),
+    let credential_mutations_enabled = security.issue_refresh_credential_version;
+    actions::register_all(module, service, credential_mutations_enabled).map(|module| {
+        let mut presentation = ModulePresentationSpec::new(
+            crate::modules::presentation::user_identity(),
+            "用户中心",
+            "account",
         )
+        .description("查看当前登录账号与管理会话")
+        .order(10)
+        .primary_action(yang_base::action!("account.user.me"))
+        .present_action(
+            yang_base::action!("account.user.logout"),
+            ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Invoke),
+        );
+        if credential_mutations_enabled {
+            presentation = presentation.present_action(
+                yang_base::action!("account.user.change_password"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
+            );
+        }
+        module.presentation(presentation)
     })
 }

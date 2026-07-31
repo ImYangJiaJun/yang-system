@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, fetchUiCatalog, invokeAction } from "./client";
+import {
+  activeAccessToken,
+  clearStoredSession,
+  persistTokenPair,
+  SESSION_RELOGIN_REQUIRED_EVENT,
+} from "./auth-session";
 import type { ActionDemoSchema, UiCatalog } from "src/contracts/ui-catalog";
 
 const action: ActionDemoSchema = {
@@ -46,6 +52,7 @@ const action: ActionDemoSchema = {
 };
 
 afterEach(() => {
+  clearStoredSession();
   sessionStorage.clear();
   vi.unstubAllGlobals();
 });
@@ -74,6 +81,43 @@ describe("fetchUiCatalog", () => {
 });
 
 describe("invokeAction", () => {
+  it("凭据变更成功后清除 Access 状态并发出重新登录事件", async () => {
+    persistTokenPair({ accessToken: "access-before-change" });
+    const relogin = vi.fn();
+    window.addEventListener(SESSION_RELOGIN_REQUIRED_EVENT, relogin);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 0,
+              message: "密码已修改",
+              data: { relogin_required: true },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    await expect(
+      invokeAction(
+        {
+          ...action,
+          operation_id: "account.user.change_password",
+          path: "/api/v1/users/change-password",
+          params: [],
+        },
+        { old_password: "old", new_password: "new" },
+        { token: "access-before-change" },
+      ),
+    ).resolves.toMatchObject({ data: { relogin_required: true } });
+
+    expect(activeAccessToken()).toBeUndefined();
+    expect(relogin).toHaveBeenCalledOnce();
+    window.removeEventListener(SESSION_RELOGIN_REQUIRED_EVENT, relogin);
+  });
+
   it("按来源构建 path/query/header/body 且注入会话上下文", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const headers = new Headers(init.headers);

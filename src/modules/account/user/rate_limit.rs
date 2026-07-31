@@ -37,6 +37,7 @@ return { exceeded, retry_after }
 
 #[derive(Clone, Copy)]
 pub(super) enum AuthOperation {
+    ChangePassword,
     Login,
     Register,
 }
@@ -44,8 +45,16 @@ pub(super) enum AuthOperation {
 impl AuthOperation {
     fn key(self) -> &'static str {
         match self {
+            Self::ChangePassword => "change-password",
             Self::Login => "login",
             Self::Register => "register",
+        }
+    }
+
+    fn identity_key(self) -> &'static str {
+        match self {
+            Self::ChangePassword => "user",
+            Self::Login | Self::Register => "username",
         }
     }
 }
@@ -70,13 +79,13 @@ impl AuthRateLimiter {
         &self,
         ctx: &ActionContext,
         operation: AuthOperation,
-        username: &str,
+        identity: &str,
     ) -> Result<(), BaseError> {
         let source = client_ip_identity(ctx);
         let prefix = format!("yang-system:auth-rate:{}", operation.key());
         let keys = [
             format!("{prefix}:ip:{source}"),
-            format!("{prefix}:username:{username}"),
+            format!("{prefix}:{}:{identity}", operation.identity_key()),
         ];
         let args = [
             self.window_seconds.to_string(),
@@ -160,6 +169,12 @@ mod tests {
     #[test]
     fn operation_keys_are_isolated() {
         assert_ne!(AuthOperation::Login.key(), AuthOperation::Register.key());
+        assert_ne!(
+            AuthOperation::ChangePassword.key(),
+            AuthOperation::Login.key()
+        );
+        assert_eq!(AuthOperation::ChangePassword.identity_key(), "user");
+        assert_eq!(AuthOperation::Login.identity_key(), "username");
     }
 
     #[test]

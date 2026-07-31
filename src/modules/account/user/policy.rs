@@ -30,10 +30,18 @@ pub(super) fn normalize_username(username: &str) -> Result<String, BaseError> {
 }
 
 pub(super) fn validate_password(password: &str) -> Result<(), BaseError> {
+    validate_password_field("password", password)
+}
+
+pub(super) fn validate_new_password(password: &str) -> Result<(), BaseError> {
+    validate_password_field("new_password", password)
+}
+
+fn validate_password_field(field: &str, password: &str) -> Result<(), BaseError> {
     let length = password.chars().count();
     if !(PASSWORD_MIN_LENGTH..=PASSWORD_MAX_LENGTH).contains(&length) {
         return Err(BaseError::ParamInvalid(
-            "password".to_string(),
+            field.to_string(),
             format!("长度必须在 {PASSWORD_MIN_LENGTH}..={PASSWORD_MAX_LENGTH} 之间"),
         ));
     }
@@ -60,5 +68,13 @@ mod tests {
         assert!(validate_password("1234567890").is_ok());
         assert!(validate_password("123456789").is_err());
         assert!(validate_password(&"x".repeat(PASSWORD_MAX_LENGTH + 1)).is_err());
+    }
+
+    #[test]
+    fn change_password_reports_the_new_password_field() {
+        assert!(matches!(
+            validate_new_password("too-short"),
+            Err(BaseError::ParamInvalid(field, _)) if field == "new_password"
+        ));
     }
 }

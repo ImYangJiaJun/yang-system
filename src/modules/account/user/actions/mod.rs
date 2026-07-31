@@ -2,6 +2,7 @@
 //!
 //! 所有 Action 只在这里进入 `ModuleSpec`，新增接口时无需在多层字符串路由表中重复登记。
 
+mod change_password;
 mod login;
 mod logout;
 mod me;
@@ -17,10 +18,16 @@ use yang_base::BaseError;
 pub(super) fn register_all(
     module: ModuleSpec,
     service: Arc<UserService>,
+    credential_mutations_enabled: bool,
 ) -> Result<ModuleSpec, BaseError> {
     let module = register::register(module, Arc::clone(&service))?;
     let module = login::register(module, Arc::clone(&service))?;
     let module = refresh::register(module, Arc::clone(&service))?;
+    let module = if credential_mutations_enabled {
+        change_password::register(module, Arc::clone(&service))?
+    } else {
+        module
+    };
     let module = logout::register(module)?;
     let module = me::register(module, service)?;
     // scaffold:action-registration

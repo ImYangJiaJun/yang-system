@@ -105,9 +105,29 @@ mod tests {
             auth_rate_limit_window_seconds: 60,
             auth_rate_limit_ip_attempts: 30,
             auth_rate_limit_username_attempts: 10,
-            issue_refresh_credential_version: false,
+            issue_refresh_credential_version: true,
             trusted_proxy_cidrs: Vec::new(),
         });
+        let compatibility_security = Arc::new(SecuritySettings {
+            issue_refresh_credential_version: false,
+            ..(*security).clone()
+        });
+        let compatibility_app = build_app(Arc::clone(&tools), compatibility_security)
+            .unwrap_or_else(|error| panic!("兼容阶段应用应构建成功: {error:#}"));
+        let change_password_ref = ActionRef::new(
+            ModuleName::new("account.user")
+                .unwrap_or_else(|error| panic!("ModuleName 应有效: {error}")),
+            ActionName::new("change_password")
+                .unwrap_or_else(|error| panic!("ActionName 应有效: {error}")),
+        );
+        assert!(
+            compatibility_app
+                .runtime
+                .registry()
+                .resolve(&change_password_ref)
+                .is_none(),
+            "协议兼容阶段不得开放会制造非零凭据版本的 Action"
+        );
         let app =
             build_app(tools, security).unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
         let module = app
@@ -145,13 +165,20 @@ mod tests {
         assert!(tables.contains(&"org_user"));
         assert!(tables.contains(&"work_project"));
         assert!(tables.contains(&"work_task"));
-        assert_eq!(operations.len(), 6);
+        assert_eq!(operations.len(), 7);
         assert!(operations.contains(&(
             "account.user.register",
             "POST",
             "/api/v1/users/register",
             201,
             true,
+        )));
+        assert!(operations.contains(&(
+            "account.user.change_password",
+            "POST",
+            "/api/v1/users/change-password",
+            200,
+            false,
         )));
         let reference = ActionRef::new(
             ModuleName::new("account.user")

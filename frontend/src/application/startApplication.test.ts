@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SESSION_EXPIRED_EVENT,
+  SESSION_RELOGIN_REQUIRED_EVENT,
   SESSION_REFRESHED_EVENT,
 } from "src/api/auth-session";
 import { SESSION_SIGNAL_STORAGE_KEY } from "src/api/session-coordination";
@@ -88,6 +89,21 @@ describe("application startup", () => {
     expect(applicationRouter.replace).toHaveBeenCalledWith({
       name: "login",
       query: { reason: "session-expired" },
+    });
+  });
+
+  it("修改凭据后级联清空状态并显示重新登录原因", () => {
+    const session = useSessionStore();
+    session.setTokenPair({ accessToken: "access-token" });
+    const applicationRouter = router();
+    disposers.push(startApplication(applicationRouter));
+
+    window.dispatchEvent(new CustomEvent(SESSION_RELOGIN_REQUIRED_EVENT));
+
+    expect(session.token).toBe("");
+    expect(applicationRouter.replace).toHaveBeenCalledWith({
+      name: "login",
+      query: { reason: "credentials-changed" },
     });
   });
 

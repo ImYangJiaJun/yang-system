@@ -4,7 +4,7 @@ const SESSION_CHANNEL = "yang.session.v1";
 const SIGNAL_VERSION = 1;
 const TAB_ID = signalId();
 
-export type SessionEndReason = "expired" | "logout";
+export type SessionEndReason = "credentials-changed" | "expired" | "logout";
 
 interface SessionEndSignal {
   version: typeof SIGNAL_VERSION;
@@ -38,7 +38,9 @@ function parseSignal(value: unknown): SessionEndSignal | undefined {
     typeof signal.id !== "string" ||
     typeof signal.sender !== "string" ||
     signal.type !== "session-ended" ||
-    (signal.reason !== "expired" && signal.reason !== "logout")
+    (signal.reason !== "credentials-changed" &&
+      signal.reason !== "expired" &&
+      signal.reason !== "logout")
   ) {
     return undefined;
   }

@@ -7,7 +7,10 @@ import {
 import { captureFrontendError } from "src/observability/error-reporter";
 import { buildActionRequest } from "./action-request";
 import { parseActionResponse } from "./action-response";
-import { requestWithTokenRefresh } from "./auth-session";
+import {
+  requestWithTokenRefresh,
+  requireCredentialRelogin,
+} from "./auth-session";
 import { ApiError } from "./errors";
 import { apiBase, contextHeaders, parseJson } from "./http";
 import type { InvocationResult, SessionContext } from "./types";
@@ -76,7 +79,11 @@ export async function invokeAction(
     });
     relatedRequestId = response.headers.get("x-request-id") ?? undefined;
     const durationMs = Math.round((performance.now() - startedAt) * 10) / 10;
-    return await parseActionResponse(action, response, durationMs);
+    const result = await parseActionResponse(action, response, durationMs);
+    if (requiresCredentialRelogin(result.data)) {
+      requireCredentialRelogin();
+    }
+    return result;
   } catch (cause) {
     if (!(cause instanceof Error && cause.name === "AbortError")) {
       captureFrontendError(cause, {
@@ -87,6 +94,15 @@ export async function invokeAction(
     }
     throw cause;
   }
+}
+
+function requiresCredentialRelogin(data: unknown): boolean {
+  return (
+    data !== null &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    (data as Record<string, unknown>).relogin_required === true
+  );
 }
 
 function failureKind(cause: unknown): "api" | "contract" | "network" {

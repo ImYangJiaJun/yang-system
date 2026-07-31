@@ -12,7 +12,8 @@ use yang_base::BaseError;
 
 pub(crate) use authz_version::{
     find_authorization_version, increment_locked_authz_version, increment_locked_authz_versions,
-    lock_user_authorization, lock_user_authorizations, LockedUserAuthorization,
+    increment_locked_credential_versions, lock_user_authorization, lock_user_authorizations,
+    lock_user_credential, LockedUserAuthorization, LockedUserCredential,
 };
 pub(crate) use grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
 pub(crate) use user::user_from_claims;

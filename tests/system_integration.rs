@@ -1128,6 +1128,317 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == replacement_initial_version + 2,
         "删除企业成员必须原子递增当前绑定用户授权版本"
     );
+
+    let change_username = format!("change_password_{suffix}");
+    let change_password = "change-password-before";
+    let first_replacement = "change-password-after-one";
+    let second_replacement = "change-password-after-two";
+    let change_user = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "register",
+            json!({ "username": change_username.clone(), "password": change_password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let change_user_id = change_user["id"]
+        .as_i64()
+        .context("改密对抗用户响应缺少 id")?;
+    let change_login_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "login",
+        json!({ "username": change_username.clone(), "password": change_password }),
+        &[],
+        &[],
+    )
+    .await?;
+    let change_refresh_token = refresh_cookie(&change_login_response)?;
+    let change_login = data(change_login_response)?;
+    let change_access_token = change_login["access_token"]
+        .as_str()
+        .context("改密对抗登录响应缺少 access_token")?
+        .to_owned();
+    let initial_change_authz =
+        database_authz_version(tools.mysql()?.pool(), change_user_id).await?;
+    let initial_change_credential =
+        database_credential_version(tools.mysql()?.pool(), change_user_id).await?;
+
+    let wrong_old_password = dispatch_token_body_action(
+        &application.runtime,
+        "account.user",
+        "change_password",
+        &change_access_token,
+        json!({
+            "old_password": "definitely-not-the-current-password",
+            "new_password": first_replacement
+        }),
+    )
+    .await;
+    ensure!(
+        matches!(wrong_old_password, Err(BaseError::InvalidPassword)),
+        "错误旧密码必须被拒绝且不能进入写事务"
+    );
+    let weak_new_password = dispatch_token_body_action(
+        &application.runtime,
+        "account.user",
+        "change_password",
+        &change_access_token,
+        json!({ "old_password": change_password, "new_password": "short" }),
+    )
+    .await;
+    ensure!(
+        matches!(
+            weak_new_password,
+            Err(BaseError::ParamInvalid(field, _)) if field == "new_password"
+        ),
+        "弱新密码必须在进入 Argon2 和事务前被拒绝"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), change_user_id).await?
+            == initial_change_authz
+            && database_credential_version(tools.mysql()?.pool(), change_user_id).await?
+                == initial_change_credential,
+        "旧密码错误和弱新密码不得改变任何安全版本"
+    );
+
+    let first_change = dispatch_token_body_action(
+        &application.runtime,
+        "account.user",
+        "change_password",
+        &change_access_token,
+        json!({ "old_password": change_password, "new_password": first_replacement }),
+    );
+    let second_change = dispatch_token_body_action(
+        &application.runtime,
+        "account.user",
+        "change_password",
+        &change_access_token,
+        json!({ "old_password": change_password, "new_password": second_replacement }),
+    );
+    let (first_result, second_result) = tokio::join!(first_change, second_change);
+    ensure!(
+        first_result.is_ok() ^ second_result.is_ok(),
+        "两个基于同一旧摘要的并发改密必须恰好一个成功: first={first_result:?}, second={second_result:?}"
+    );
+    let (winning_password, change_response, losing_error) = match first_result {
+        Ok(response) => (
+            first_replacement,
+            response,
+            second_result.err().context("第二个并发改密应失败")?,
+        ),
+        Err(first_error) => (
+            second_replacement,
+            second_result.context("第二个并发改密应成功")?,
+            first_error,
+        ),
+    };
+    ensure!(
+        matches!(losing_error, BaseError::InvalidPassword)
+            || matches!(
+                losing_error,
+                BaseError::ParamInvalid(ref field, _) if field == "old_password"
+            ),
+        "并发失败只能来自旧密码已经失效或持锁摘要复核冲突: {losing_error}"
+    );
+    ensure!(
+        change_response
+            .data
+            .as_ref()
+            .and_then(|value| value.get("relogin_required"))
+            .and_then(Value::as_bool)
+            == Some(true),
+        "改密成功必须明确要求客户端重新登录"
+    );
+    ensure!(
+        change_response
+            .response_headers()
+            .iter()
+            .any(|(name, value)| {
+                name.eq_ignore_ascii_case("set-cookie")
+                    && value.contains("yang_refresh=;")
+                    && value.contains("Max-Age=0")
+            }),
+        "改密成功必须清除浏览器 Refresh Cookie"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), change_user_id).await?
+            == initial_change_authz + 1
+            && database_credential_version(tools.mysql()?.pool(), change_user_id).await?
+                == initial_change_credential + 1,
+        "一次成功改密必须在同一事务中恰好递增两个版本"
+    );
+    wait_for_cached_version(
+        &authorization_cache_probe,
+        change_user_id,
+        initial_change_authz + 1,
+    )
+    .await?;
+    assert_authorization_error(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        &change_access_token,
+        400009,
+    )
+    .await?;
+    let stale_change_cookie = format!("yang_refresh={change_refresh_token}");
+    ensure!(
+        matches!(
+            dispatch_raw(
+                &application.runtime,
+                "account.user",
+                "refresh",
+                json!({}),
+                &[("cookie", stale_change_cookie.as_str())],
+                &[],
+            )
+            .await,
+            Err(BaseError::Unauthorized(_))
+        ),
+        "改密前签发且尚未过期的 Refresh Token 必须立即失效"
+    );
+
+    let changed_login_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "login",
+        json!({ "username": change_username.clone(), "password": winning_password }),
+        &[],
+        &[],
+    )
+    .await?;
+    let changed_login = data(changed_login_response)?;
+    let changed_access_token = changed_login["access_token"]
+        .as_str()
+        .context("新密码登录响应缺少 access_token")?
+        .to_owned();
+
+    let unavailable_rate_cache = RedisClient::connect_with_config(
+        &redis_url,
+        RedisConfig::default()
+            .with_max_connections(1)
+            .with_min_connections(0)
+            .with_connect_timeout(10),
+    )
+    .await?;
+    unavailable_rate_cache.close().await;
+    let rate_outage_database =
+        Database::from_pool(tools.mysql()?.pool().clone(), database_config.clone())?;
+    let rate_outage_tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(rate_outage_database)
+            .cache(unavailable_rate_cache)
+            .extension(authorization_cache_probe.clone())
+            .token(integration_token_manager())
+            .build()?,
+    );
+    let rate_outage_app = build_app(rate_outage_tools, Arc::clone(&security))?;
+    let before_rate_outage_authz =
+        database_authz_version(tools.mysql()?.pool(), change_user_id).await?;
+    let before_rate_outage_credential =
+        database_credential_version(tools.mysql()?.pool(), change_user_id).await?;
+    let rate_outage_attempt = dispatch_token_body_action(
+        &rate_outage_app.runtime,
+        "account.user",
+        "change_password",
+        &changed_access_token,
+        json!({
+            "old_password": winning_password,
+            "new_password": "change-password-after-outage"
+        }),
+    )
+    .await;
+    ensure!(
+        matches!(
+            rate_outage_attempt,
+            Err(BaseError::RedisConnectionFailed(_)) | Err(BaseError::RedisOperationFailed(_))
+        ),
+        "Redis 限流不可用时必须由 Redis 错误失败关闭"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), change_user_id).await?
+            == before_rate_outage_authz
+            && database_credential_version(tools.mysql()?.pool(), change_user_id).await?
+                == before_rate_outage_credential,
+        "Redis 失败不得改变密码相关版本"
+    );
+
+    let rollback_username = format!("change_rollback_{suffix}");
+    let rollback_password = "rollback-password-before";
+    let rollback_user = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "register",
+            json!({ "username": rollback_username.clone(), "password": rollback_password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let rollback_user_id = rollback_user["id"]
+        .as_i64()
+        .context("回滚对抗用户响应缺少 id")?;
+    let rollback_login = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "login",
+            json!({ "username": rollback_username.clone(), "password": rollback_password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let rollback_access_token = rollback_login["access_token"]
+        .as_str()
+        .context("回滚对抗登录响应缺少 access_token")?
+        .to_owned();
+    let rollback_authz_before =
+        database_authz_version(tools.mysql()?.pool(), rollback_user_id).await?;
+    let rollback_credential_before =
+        database_credential_version(tools.mysql()?.pool(), rollback_user_id).await?;
+    sqlx::query("RENAME TABLE audit_event TO audit_event_unavailable")
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let rollback_attempt = dispatch_token_body_action(
+        &application.runtime,
+        "account.user",
+        "change_password",
+        &rollback_access_token,
+        json!({
+            "old_password": rollback_password,
+            "new_password": "rollback-password-after"
+        }),
+    )
+    .await;
+    let restore_audit = sqlx::query("RENAME TABLE audit_event_unavailable TO audit_event")
+        .execute(tools.mysql()?.pool())
+        .await;
+    restore_audit.context("恢复审计表失败")?;
+    ensure!(rollback_attempt.is_err(), "审计写入失败必须中止改密事务");
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), rollback_user_id).await?
+            == rollback_authz_before
+            && database_credential_version(tools.mysql()?.pool(), rollback_user_id).await?
+                == rollback_credential_before,
+        "审计写失败回滚后两个版本必须保持不变"
+    );
+    dispatch(
+        &application.runtime,
+        "account.user",
+        "login",
+        json!({ "username": rollback_username, "password": rollback_password }),
+        &[],
+        &[],
+    )
+    .await
+    .context("审计写失败回滚后旧密码仍应可登录")?;
+
     let org_refresh_cookie = format!("yang_refresh={org_refresh_token}");
     let outage_tokens = data(
         dispatch(
@@ -1188,6 +1499,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .unwrap_or_default()
     };
     for (action, minimum) in [
+        ("account.user.change_password", 1),
         ("admin.user.bootstrap", 1),
         ("admin.user.add", 1),
         ("admin.user.set_admin", 2),
@@ -1216,6 +1528,20 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         invalid_audit_rows == 0,
         "高权限成功事件必须携带操作者、subject 和受控 JSON 摘要"
     );
+    let sensitive_change_audit_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_event \
+         WHERE action = 'account.user.change_password' \
+           AND LOWER(CONCAT( \
+               COALESCE(CAST(before_summary AS CHAR), ''), \
+               COALESCE(CAST(after_summary AS CHAR), '') \
+           )) REGEXP 'password|token|cookie|secret|hash|credential|authorization'",
+    )
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        sensitive_change_audit_rows == 0,
+        "改密成功审计不得包含密码、Token、Cookie、摘要或版本敏感字段"
+    );
     let (audit_rows, distinct_events, distinct_requests): (i64, i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COUNT(DISTINCT event_id), COUNT(DISTINCT request_id) FROM audit_event",
     )
@@ -1225,6 +1551,69 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         audit_rows == distinct_events && audit_rows == distinct_requests,
         "每个高权限事务必须产生唯一且可关联的审计事实"
     );
+
+    let current_credential_version =
+        database_credential_version(tools.mysql()?.pool(), user_id).await?;
+    ensure!(
+        current_credential_version == 0,
+        "未发生凭据事件前版本应保持为 0"
+    );
+    let (_, future_refresh_token) = tools.token()?.generate_token_pair_with_refresh_claims(
+        &user_id.to_string(),
+        Value::Null,
+        json!({ "credential_version": current_credential_version + 1 }),
+    )?;
+    let future_cookie = format!("yang_refresh={future_refresh_token}");
+    let future_attempt = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", future_cookie.as_str())],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(future_attempt, Err(BaseError::Unauthorized(_))),
+        "领先数据库的 Refresh 凭据版本必须拒绝"
+    );
+    sqlx::query("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?")
+        .bind(user_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let recovered_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", future_cookie.as_str())],
+        &[],
+    )
+    .await?;
+    let current_refresh_token = refresh_cookie(&recovered_response)?;
+    ensure!(
+        token_credential_version(&tools, &current_refresh_token)? == 1,
+        "版本拒绝不得提前消费旧 JTI，数据库追平后同一 Token 应可完成一次轮换"
+    );
+    sqlx::query("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?")
+        .bind(user_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let stale_cookie = format!("yang_refresh={current_refresh_token}");
+    let stale_attempt = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", stale_cookie.as_str())],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(stale_attempt, Err(BaseError::Unauthorized(_))),
+        "落后数据库的旧 Refresh Token 即使未过期也必须拒绝"
+    );
+
     outbox_worker.shutdown().await?;
 
     let redis_outage_authorization_redis = RedisClient::connect_with_config(
@@ -1353,68 +1742,6 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .del(&mysql_outage_keys)
         .await?;
     mysql_outage_authorization_redis.close().await;
-
-    let current_credential_version =
-        database_credential_version(tools.mysql()?.pool(), user_id).await?;
-    ensure!(
-        current_credential_version == 0,
-        "未发生凭据事件前版本应保持为 0"
-    );
-    let (_, future_refresh_token) = tools.token()?.generate_token_pair_with_refresh_claims(
-        &user_id.to_string(),
-        Value::Null,
-        json!({ "credential_version": current_credential_version + 1 }),
-    )?;
-    let future_cookie = format!("yang_refresh={future_refresh_token}");
-    let future_attempt = dispatch_raw(
-        &application.runtime,
-        "account.user",
-        "refresh",
-        json!({}),
-        &[("cookie", future_cookie.as_str())],
-        &[],
-    )
-    .await;
-    ensure!(
-        matches!(future_attempt, Err(BaseError::Unauthorized(_))),
-        "领先数据库的 Refresh 凭据版本必须拒绝"
-    );
-    sqlx::query("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?")
-        .bind(user_id)
-        .execute(tools.mysql()?.pool())
-        .await?;
-    let recovered_response = dispatch(
-        &application.runtime,
-        "account.user",
-        "refresh",
-        json!({}),
-        &[("cookie", future_cookie.as_str())],
-        &[],
-    )
-    .await?;
-    let current_refresh_token = refresh_cookie(&recovered_response)?;
-    ensure!(
-        token_credential_version(&tools, &current_refresh_token)? == 1,
-        "版本拒绝不得提前消费旧 JTI，数据库追平后同一 Token 应可完成一次轮换"
-    );
-    sqlx::query("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?")
-        .bind(user_id)
-        .execute(tools.mysql()?.pool())
-        .await?;
-    let stale_cookie = format!("yang_refresh={current_refresh_token}");
-    let stale_attempt = dispatch_raw(
-        &application.runtime,
-        "account.user",
-        "refresh",
-        json!({}),
-        &[("cookie", stale_cookie.as_str())],
-        &[],
-    )
-    .await;
-    ensure!(
-        matches!(stale_attempt, Err(BaseError::Unauthorized(_))),
-        "落后数据库的旧 Refresh Token 即使未过期也必须拒绝"
-    );
 
     tools.close().await;
     Ok(())
