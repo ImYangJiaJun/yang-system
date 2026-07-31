@@ -221,15 +221,20 @@ def preceding_tenant_boundary(
 
 
 def tenant_code_boundaries(root: Path) -> tuple[set[tuple[str, str]], list[str]]:
-    org_root = root / "src" / "modules" / "org"
-    if not org_root.is_dir():
+    tenant_roots = [
+        root / "src" / "modules" / name
+        for name in ("org", "work")
+        if (root / "src" / "modules" / name).is_dir()
+    ]
+    if not tenant_roots:
         return set(), []
 
     errors: list[str] = []
     declared: set[tuple[str, str]] = set()
     used: set[tuple[str, str]] = set()
     owners: dict[str, tuple[str, Path]] = {}
-    for path in sorted(org_root.rglob("*.rs")):
+    paths = sorted(path for tenant_root in tenant_roots for path in tenant_root.rglob("*.rs"))
+    for path in paths:
         source = production_source(path.read_text(encoding="utf-8"))
         lines = source.splitlines()
         relative = path.relative_to(root)

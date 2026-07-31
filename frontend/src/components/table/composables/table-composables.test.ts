@@ -120,7 +120,13 @@ describe("useTableQuery", () => {
     const dataAction = action("items.list");
     const pending: Array<(value: InvocationResult) => void> = [];
     const invoke = vi.fn(
-      () => new Promise<InvocationResult>((resolve) => pending.push(resolve)),
+      (actionInput: ActionDemoSchema, values: Record<string, unknown>) => {
+        void actionInput;
+        void values;
+        return new Promise<InvocationResult>((resolve) =>
+          pending.push(resolve),
+        );
+      },
     );
     const query = inScope(() =>
       useTableQuery({
@@ -131,6 +137,9 @@ describe("useTableQuery", () => {
       }),
     );
     expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls[0]?.[1]).toMatchObject({
+      order_by: [{ field: "id", direction: "Asc" }],
+    });
 
     session.value = { token: "new-token" };
     await nextTick();

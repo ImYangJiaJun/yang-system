@@ -115,7 +115,10 @@ export function useTableQuery(options: UseTableQueryOptions) {
               : pageSize.value,
           search: search.value.trim() || null,
           where: buildWhereClause(filters.value),
-          order_by: orderBy.value,
+          order_by: orderBy.value.map((item) => ({
+            field: item.field,
+            direction: item.direction === "desc" ? "Desc" : "Asc",
+          })),
           count_total: true,
         },
         { ...toValue(options.session) },

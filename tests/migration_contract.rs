@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 7);
+    assert_eq!(manifest.migrations().len(), 9);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -55,7 +55,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     );
     let audit_event = manifest
         .migrations()
-        .last()
+        .get(6)
         .unwrap_or_else(|| panic!("应存在高权限审计迁移"));
     assert_eq!(audit_event.version(), "20260726_0007_create_audit_event");
     for required in [
@@ -71,6 +71,36 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
         assert!(
             audit_event.sql().contains(required),
             "审计迁移缺少不可变事件检索或约束契约: {required}"
+        );
+    }
+    let work_project = manifest
+        .migrations()
+        .get(7)
+        .unwrap_or_else(|| panic!("应存在个人项目迁移"));
+    assert_eq!(work_project.version(), "20260731_0008_create_work_project");
+    for required in [
+        "UNIQUE KEY `uk_work_project_owner_name` (`owner_user`, `name`)",
+        "UNIQUE KEY `uk_work_project_id_owner` (`id`, `owner_user`)",
+        "CONSTRAINT `fk_work_project_owner`",
+    ] {
+        assert!(
+            work_project.sql().contains(required),
+            "项目迁移缺少租户唯一性或外键契约: {required}"
+        );
+    }
+    let work_task = manifest
+        .migrations()
+        .get(8)
+        .unwrap_or_else(|| panic!("应存在任务树迁移"));
+    assert_eq!(work_task.version(), "20260731_0009_create_work_task");
+    for required in [
+        "KEY `idx_work_task_owner_project_status` (`owner_user`, `project_project`, `status`)",
+        "CONSTRAINT `fk_work_task_project_owner`",
+        "CONSTRAINT `fk_work_task_parent_project_owner`",
+    ] {
+        assert!(
+            work_task.sql().contains(required),
+            "任务迁移缺少规模索引或同租户关系约束: {required}"
         );
     }
 }

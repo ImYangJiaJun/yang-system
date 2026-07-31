@@ -112,6 +112,8 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
     for table in [
         "audit_event",
         "authorization_outbox",
+        "work_task",
+        "work_project",
         "org_user",
         "org_org",
         "admin_user",

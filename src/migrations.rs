@@ -103,7 +103,7 @@ impl MigrationDescriptor {
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 7] = [
+const MIGRATIONS: [MigrationDescriptor; 9] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -164,6 +164,22 @@ const MIGRATIONS: [MigrationDescriptor; 7] = [
         description: "建立高权限业务不可变审计事实表与检索/保留索引",
         prerequisite: "MySQL 8 支持已执行 CHECK 约束；生产运行账号与迁移账号已分离",
         recovery: "DDL 可重入；失败时修复 audit_event 列、约束或索引差异后原版本重跑",
+        completion_check: None,
+    },
+    MigrationDescriptor {
+        version: "20260731_0008_create_work_project",
+        sql: include_str!("../migrations/20260731_0008_create_work_project.sql"),
+        description: "建立按个人工作区隔离的项目组合与关系选择索引",
+        prerequisite: "20260726_0001_create_users 已完成；个人工作区以 users.id 为可信租户键",
+        recovery: "DDL 可重入；失败时核对 owner 外键与三个声明索引后原版本重跑",
+        completion_check: None,
+    },
+    MigrationDescriptor {
+        version: "20260731_0009_create_work_task",
+        sql: include_str!("../migrations/20260731_0009_create_work_task.sql"),
+        description: "建立任务树、项目关系、分页筛选与批量操作索引",
+        prerequisite: "20260731_0008_create_work_project 已完成；MySQL 8 支持递归 CTE",
+        recovery: "DDL 可重入；失败时核对 owner/project/parent 复合外键与声明索引后原版本重跑",
         completion_check: None,
     },
 ];

@@ -1,7 +1,7 @@
 # 租户数据路径与旁路清单
 
 状态：C2-final capability 模型
-适用范围：`src/modules/org/` 的生产代码
+适用范围：`src/modules/org/` 与 `src/modules/work/` 的生产代码
 
 ## 1. 边界模型
 
@@ -27,6 +27,8 @@
 |---|---|---|---|
 | `org_org` | 租户根 | 主键 `id` 本身 | `org.org` 查询强制取得普通 capability 并限定 `id = tenant_id`；system 不会自动跨租户 |
 | `org_user` | 租户数据 | `org_org`，声明为 `tenant_key(true)` | 标准读 Action 与显式事务 writer 均由 `TableQuery` 限定/注入 `org_org`；唯一键为 `(org_org, user_user)` |
+| `work_project` | 个人租户数据 | `owner_user`，声明为 `tenant_key(true)` | 已认证用户 ID 被解析为唯一个人工作区；标准 CRUD 自动限定并注入 owner |
+| `work_task` | 个人租户数据 | `owner_user`，声明为 `tenant_key(true)` | 标准 CRUD、关系选择器和任务 repository 均以可信个人工作区限定 owner |
 
 `users` 和 `admin_user` 是全局身份/平台域表，不属于组织租户表；它们不应因为 C2 的扫描规则
 而伪装成租户表。
@@ -45,6 +47,10 @@
 | `org.user.get` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤 |
 | `org.user.select` | tenant | 内置 CRUD `TableQuery` | tenant key 自动过滤 |
 | `org.user.table` | tenant | 只读契约 | 仍经过认证与租户解析，不访问业务记录 |
+| `work.project.*` | personal-tenant | 内置 CRUD / relation options | Token actor 被解析为 `owner_user`，客户端伪造其他 tenant 失败关闭 |
+| `work.task.get/select/table/del` | personal-tenant | 内置 CRUD `TableQuery` | `owner_user` tenant key 自动过滤；跨用户对象 ID 不可见 |
+| `work.task.add/put/options` | personal-tenant/relation | `TableQuery` + raw SQL 校验 | 项目和父任务重复限定可信 owner，拒绝跨项目父任务与关系环 |
+| `work.task.complete` | personal-tenant/batch | 显式事务 + `TableQuery` | 最多 100 个唯一 ID；事务内 tenant scope 锁定并全有或全无更新 |
 
 `org.org` 和 `org.user` 的中间件顺序固定为 Token 认证后再解析租户；成员写操作在此后增加
 `OrgAdminGuardMiddleware`。`org.tenant` 是刻意不运行租户解析器的 pre-tenant 模块，但仍强制认证。
@@ -78,6 +84,14 @@
 | `org-member-system-lock` | raw-sql | `org/user/repository.rs` | 仅在已消费 actor-bound system capability 后按成员主键锁定 |
 | `org-member-add-system` | system-capability | `org/user/repository.rs` | system add 必须显式提供目标组织，且组织存在并 active |
 | `org-member-lock-system` | system-capability | `org/user/repository.rs` | system put/delete 在无普通租户 capability 时必须显式消费 system capability |
+| `work-task-current-links` | raw-sql | `work/task/repository.rs` | 更新前只按可信 owner 与任务 ID 读取当前项目/父任务关系 |
+| `work-task-current-links-database` | database | `work/task/repository.rs` | 只供同函数执行 owner-scoped 当前关系查询 |
+| `work-task-validation-database` | database | `work/task/repository.rs` | 只供任务关系校验中的静态、参数化 owner-scoped 查询 |
+| `work-task-project-ownership` | raw-sql | `work/task/repository.rs` | 项目必须存在且 owner 等于可信个人工作区 |
+| `work-task-parent-ownership` | raw-sql | `work/task/repository.rs` | 父任务必须同 owner 且属于同一项目 |
+| `work-task-cycle-check` | raw-sql | `work/task/repository.rs` | 递归链每层重复限定 owner，深度上限 100，并拒绝形成关系环 |
+| `work-task-complete-lock` | raw-sql | `work/task/repository.rs` | JSON_TABLE 只承载绑定 ID 值；按可信 owner 全量锁行，缺失或跨工作区时批次失败 |
+| `work-task-complete-transaction` | transaction | `work/task/actions/complete.rs` | 最多 100 个唯一 ID 在 tenant-scoped 事务内全量可见后才原子更新 |
 
 <!-- tenant-boundary: database pre-tenant-table-database -->
 <!-- tenant-boundary: unscoped-query pre-tenant-table-query -->
@@ -101,6 +115,14 @@
 <!-- tenant-boundary: raw-sql org-member-system-lock -->
 <!-- tenant-boundary: system-capability org-member-add-system -->
 <!-- tenant-boundary: system-capability org-member-lock-system -->
+<!-- tenant-boundary: raw-sql work-task-current-links -->
+<!-- tenant-boundary: database work-task-current-links-database -->
+<!-- tenant-boundary: database work-task-validation-database -->
+<!-- tenant-boundary: raw-sql work-task-project-ownership -->
+<!-- tenant-boundary: raw-sql work-task-parent-ownership -->
+<!-- tenant-boundary: raw-sql work-task-cycle-check -->
+<!-- tenant-boundary: raw-sql work-task-complete-lock -->
+<!-- tenant-boundary: transaction work-task-complete-transaction -->
 
 ## 5. Relation、批量、事务与后台任务
 
@@ -108,7 +130,7 @@
 |---|---|---|
 | Relation | `org_user.org_org → org_org.id`，选择器为 `org.org.select` | 当前走租户化 `Tables`；C2-03 用双租户 selected/关联负例证明 |
 | RelationLoader | 无 | 新增 `RelationLoader::new` 或 `.relations(...)` 必须声明 `relation` boundary |
-| 批量写 | 无 | 新增 many/batch/bulk 写调用必须声明 `batch` boundary |
+| 批量写 | `work.task.complete` | 1..=100 个唯一 ID；tenant-scoped 事务内先验证全量可见再原子更新 |
 | 显式事务 | `org.tenant.create` 与 `org.user.add/put/del` | onboarding 和成员授权事实 writer 均显式提交/回滚；C2/C3 真实库矩阵验证隔离、回滚与版本原子性 |
 | 后台任务/导入 Job | 无 | 新增 Tokio spawn/JoinSet 后台入口必须声明 `background` boundary |
 
@@ -117,7 +139,8 @@
 
 ## 6. 机械门禁
 
-`python scripts/check_architecture.py` 对 `src/modules/org/**/*.rs` 的非测试生产段扫描：
+`python scripts/check_architecture.py` 对 `src/modules/org/**/*.rs` 与
+`src/modules/work/**/*.rs` 的非测试生产段扫描：
 
 - raw `sqlx::query*`；
 - 直接取得 `Tools.mysql()` 数据库 capability；

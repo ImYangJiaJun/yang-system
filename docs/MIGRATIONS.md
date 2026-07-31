@@ -53,6 +53,11 @@ Catalog；启动和迁移作业都会精确校验列、CHECK、索引、引擎�
 只能追加/读取，UPDATE/DELETE 由独立保留账号控制，具体权限和保留流程见
 [`AUDIT.md`](AUDIT.md)。
 
+`20260731_0008_create_work_project` 与 `20260731_0009_create_work_task` 建立首个
+真实个人任务规划 Addon。两张表都以已认证 `users.id` 作为不可伪造的租户键；
+项目名称唯一性、任务分页组合索引和 owner/project/parent 复合外键共同约束跨工作区
+关系、跨项目父子关系与删除顺序。发布时必须按版本顺序先项目、后任务。
+
 ## 中断、并发与恢复
 
 - 同一数据库的显式迁移作业由 MySQL advisory lock 串行化；后到作业等待锁并重新

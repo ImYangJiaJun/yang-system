@@ -23,14 +23,14 @@
 | 自定义页面安全降级                      | 已验证   | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面                             |
 | 自定义页面只新增一个文件                | 未达成   | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点                                                            |
 | Vue/Quasar/Pinia/Zod 技术选型           | 合理     | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益                                                      |
-| 完整生产就绪                            | 未达成   | 已有较强工程基础，但本提交尚无远程 CI 终态和真实业务压力证据                                                               |
+| 完整生产就绪                            | 未达成   | 仓库内门槛已闭环到真实业务规模基线；本提交未 push，远程 CI 与目标环境 TLS/告警送达仍无终态证据                                |
 
 ### 1.2 对两个评估问题的直接回答
 
 **问题 1：条件性达成，不是普遍达成。**
 
 - 已经达成的范围：后端新增 Module 时，同时声明 `ModulePresentationSpec`、一个或多个带可访问 `data_action` 的 `ViewSpec`、字段和受支持的 Action presentation，前端可以零修改获得多 View、通用表格、查询、表单，以及模块级 toolbar/row/bulk 与 form/invoke/download/preview/navigate/custom 分派。
-- 尚未达成的范围：只注册 Module/CRUD、只新增 Action、严格“自定义页面只新增一个文件”，以及用一个独立真实业务 Addon 证明零前端业务 diff 的验收场景。
+- 尚未达成的范围：只注册 Module/CRUD、只新增 Action，以及严格“自定义页面只新增一个文件”。独立 `work` Addon 已证明：符合显式契约的关系、树、双 View 和批量流程无需增加前端业务特判。
 - 因此不能写成“后端新增任意模块/API 都自动完成正式页面”，应写成“符合显式 Module/View/presentation 契约的后端变更可以零前端修改交付”。
 
 **问题 2：选型合理，但当前只能定性为准生产阶段。**
@@ -84,7 +84,7 @@
 1. **默认 View 不等于可用 UI View。** `compile_runtime_table_views` 为无显式 View 的表生成 `data_action: None` 的默认 View；`Registry::ui_catalog` 只投影有可访问 data Action 的 View。因此“只新增表和 CRUD 就自动有默认表格页”不成立。
 2. **Action 注册与 Action 展示是两件事。** 新 Action 可以出现在 Catalog 的全局 `actions` 中，但正式 Module/View 只消费被 presentation 引用的 Action。
 3. **后端不能验证前端 custom registry。** 后端可验证 custom interaction 必须有 `view_id`，但不知道该 ID 是否已进入前端构建产物；当前只能运行时降级。
-4. **现有业务样本有限。** 当前只有 account、admin、org 三个 Addon，不能用它们证明深层关系、大树、大数据量和复杂批量流程的上限。
+4. **规模结论有明确边界。** 新增 `work` Addon 后，当前样本覆盖 account、admin、org、work；本地真实 MySQL 基线证明 1 万项目、5 万任务、100 层树、100 条批量和 10 路并发，不外推为生产容量或未测业务形态。
 
 ## 五、前端：按运行路径评估，而不是混合计算
 
@@ -92,7 +92,7 @@
 
 | 路径                | 构建状态 | 当前能力                                                                                      | 不能据此证明的内容                     |
 | ------------------- | -------- | --------------------------------------------------------------------------------------------- | -------------------------------------- |
-| `/module/:moduleId` | 生产包含 | 正式账户空间、全部 View 或 primary Action；Module presentation 统一分派并支持 custom 安全回退 | 独立真实业务 Addon、生产部署与规模上限 |
+| `/module/:moduleId` | 生产包含 | 正式账户空间、全部 View 或 primary Action；`work.task` 已用树/清单双 View 和批量 Action 验收 | 目标环境发布与未声明的新交互类型       |
 | `/business`         | 生产包含 | Catalog 导航、通用 `TableView`、View Action、custom 安全降级                                  | 每个 Module 的正式账户空间行为         |
 | `/workbench`        | 仅 DEV   | 全局 Action 演示、TableView、上传下载预览重定向、自定义 View 调试                             | 生产包中的最终用户路径                 |
 
@@ -197,7 +197,7 @@
 | 部署契约            | 已闭环（仓库合同） | 可执行 Nginx 配置、共享响应合同、生产构建 E2E 与变异测试覆盖 history fallback、安全头、HTML/资产缓存和严格 404；真实域名 TLS/边缘 smoke 仍须在首次部署后取证                      |
 | 端到端可观测性      | 已闭环（仓库链路） | 已认证前端统一上报无敏感正文错误指纹，`related_request_id` 关联原 Action log/trace，低基数 metric 与真实 promtool firing/silent 演练入 CI；真实 Alertmanager 送达仍须目标环境取证 |
 | 无障碍              | 已闭环（自动门禁） | 固定版本 axe 覆盖登录、角色、正式模块与表单对话框的 WCAG 2.2 AA 可自动检测规则；纯键盘旅程、可见焦点和对话框焦点恢复进入 dev E2E/full/CI                                          |
-| 真实业务与规模      | 未验证             | 深层 relation、大树、大分页、复杂批量、弱网和并发边界尚无基线                                                                                                                     |
+| 真实业务与规模      | 已闭环（本地基线） | 独立 `work` Addon、版本化迁移、1 万项目/5 万任务真实库基线、100 层树/100 条原子批量/十路并发和浏览器弱网乱序均有可重复测试；不外推为生产容量                                      |
 | i18n                | 按产品需求决定     | 当前文案硬编码中文；只有明确多语言需求时才是上线阻塞项                                                                                                                            |
 
 生产就绪必须按目标部署环境逐项通过这些门槛，不能用维度平均分替代。
@@ -208,14 +208,14 @@
 
 只有以下检查全部通过，才能把问题 1 从“条件性达成”改成“达成”：
 
-1. 新增一个独立真实业务 Addon，包含关系字段、树 View、批量 Action、至少两个 View；除自定义扩展外，`frontend/` 无业务代码 diff。
-2. 新 Module 只通过后端 presentation 出现在身份空间和导航中，不增加前端模块 ID、operation id、字段名或状态值特判。
+1. **已满足（2026-07-31）：** 独立 `work` Addon 包含 project/task 关系、父任务树、批量完成和 outline/backlog 双 View；前端改动仅为通用排序 wire 适配、通用确认框语义与测试，没有 `work` 业务分支。
+2. **已满足（2026-07-31）：** 新 Module 只通过后端 presentation 出现在个人身份空间和导航中，前端没有新增模块 ID、operation id、字段名或状态值特判。
 3. **已满足（2026-07-31）：** `/module/:moduleId` 能通过标签页访问全部 View，不再只取 `views[0]`。
 4. **已满足（2026-07-31）：** 统一执行器单测覆盖 toolbar/row/bulk × form/invoke/download/preview/navigate/custom，正式 `/module` 浏览器用例实际覆盖三个 placement 和六类 interaction 的执行/安全分支，不使用 `/workbench` 结果替代。
 5. **已满足（2026-07-31）：** 未授权 Module、Module 未授权的 Action 引用与 hidden presentation 均 fail-closed；disabled 只呈现原因且不可执行。
 6. **已满足（2026-07-31）：** custom `view_id` 未注册时正式 Module/Business 页面安全降级；动态加载失败也走同一异常回退分支。
 7. 如果目标坚持“自定义页面只新增一个文件”，必须引入构建时静态 manifest/codegen，并增加后端 view id 与前端 manifest 的交叉校验；在此之前验收口径保持“一个新文件 + 一个 registry 修改”。
-8. 用 Git diff 证明约定场景没有前端业务改动，并由隔离 E2E 证明页面真实可用。
+8. **已满足（2026-07-31）：** Git diff 中没有 `work` 前端业务实现；隔离 E2E 从 Catalog 构造正式 `/module/work.task`，真实解释 100 节点树、弱网查询和 100 条 bulk presentation。
 
 ### 7.2 “生产就绪”的通过条件
 
@@ -225,7 +225,7 @@
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
 5. **已满足（仓库链路，2026-07-31）：** 前端错误上报携带原后端 request id；后端 `frontend.error` 日志、Action trace 与低基数 metric 可关联；promtool 演练验证达到阈值 firing、低于阈值 silent。真实 Alertmanager 接收器送达仍属于目标环境验收。
 6. **已满足（自动门禁，2026-07-31）：** 登录、角色、正式模块和表单对话框通过 axe WCAG 2.2 AA 扫描；纯键盘完成登录、角色选择、模块操作，关键控件有可见焦点，对话框打开后聚焦且关闭后恢复触发点。屏幕阅读器、高对比度和语音控制仍按目标用户/采购规范做环境人工验收。
-7. 为大分页、relation options、树节点上限和批量 Action 建立数据规模与响应时间基线。
+7. **已满足（本地基线，2026-07-31）：** `.ecc/benchmarks/work-scale.json` 固化 1 万项目/5 万任务环境、SLO 和实测值；真实库测试覆盖第 500 页、relation options、100 节点上限、100 条原子批量和十路并发。
 8. 推送前运行 `python scripts/run_ci.py full`、隔离 Playwright、必要的真实 MySQL/Redis integration；远程 CI 每个 job 都必须有终态成功证据。
 
 ## 八、优先改进路径
@@ -248,9 +248,9 @@
 1. access token 内存化与 enforce CSP 已联合闭环；
 2. 前端无敏感正文错误指纹、原 request id、后端 Action log/trace、低基数指标和告警 firing/silent 演练已形成仓库内完整诊断链。
 
-### P1：证明通用渲染上限
+### P1：证明通用渲染上限（已闭环本地基线）
 
-新增真实业务 Addon，并以大数据量、关系、树和批量流程压测，而不是继续用纯 demo 扩大结论。
+`work` Addon 已用真实 MySQL 数据量、关系、树、批量、并发和浏览器弱网对抗完成本地基线；后续新增业务形态仍须按同一方法重新取证。
 
 ### P2：按产品需求补齐
 
@@ -525,10 +525,78 @@ pnpm --dir frontend exec playwright test e2e/accessibility.spec.ts --retries=0
 
 该闭环只声明仓库自动门禁覆盖的 WCAG 可检测规则与键盘/焦点行为，不把 axe 结果外推为完整合规认证。屏幕阅读器、200%/400% 缩放、Windows 高对比度和语音控制的人工矩阵，只有在目标用户、采购或法规范围确定后才能形成环境终态证据。
 
+### 9.8 2026-07-31 增量闭环：真实业务 Addon 与规模基线
+
+本项采用的不变量是：规模证据必须来自生产同构 Module、Action、迁移和真实 MySQL/Redis，
+不能用纯前端 fixture 或 demo 表替代；个人工作区只能由 Token actor 决定，项目、父任务和
+批量 ID 必须重复受同一 tenant scope 约束；页面、关系选择和批量上限必须先拒绝越界，再
+测量合法上限；本地延迟只作为可重复回归基线，不写成生产容量承诺。
+
+实现证据：
+
+- 新增独立 `work` Addon：`work.project` 提供个人项目 CRUD、关系 options 和一个 View；
+  `work.task` 提供项目关系、自关联父任务、outline 树与 backlog 清单双 View，以及
+  add/put/del/complete 的 toolbar/row/bulk presentation；
+- `PersonalWorkspaceResolver` 把已认证 `user_id` 解析为唯一 tenant capability，并拒绝
+  伪造其他 `x-tenant-id`；两张业务表都把 `owner_user` 声明为 tenant key，标准 CRUD、
+  relation options 与自定义 repository 复用同一 scope；
+- task writer 校验项目 owner、父任务 owner/项目一致性和 100 层递归防环；批量完成只接受
+  1..=100 个唯一正整数 ID，事务内先验证全部可见，再全有或全无更新；
+- `20260731_0008_create_work_project` 和 `0009_create_work_task` 固化分页/关系索引及
+  owner/project/parent 复合外键；迁移 job 的 dry-run、apply、running 恢复、checksum 和
+  schema drift 继续 fail-closed；
+- 前端没有 `work` Module、operation、字段或状态特判。真实库首次对抗反而暴露 Catalog
+  的小写展示排序与 Rust Action 输入 `Asc/Desc` wire 值不一致；`useTableQuery` 现统一在
+  API 边界序列化。批量确认又暴露 Quasar ad-hoc dialog 无可访问名称，现改用具名、初始
+  聚焦明确的通用确认组件；
+- `.ecc/benchmarks/work-scale.json` 记录机器、依赖、数据集、SLO、命令和实测值，避免
+  只在文档中留下不可重放的数字。
+
+对抗性验证：
+
+```powershell
+# 编译红灯曾真实检出子模块可见性过窄和 resolver 类型不符合中间件契约
+cargo check --all-targets
+
+# 真实 MySQL 8 / Redis 7：1 万项目、5 万任务与安全负例
+$env:YANG_SYSTEM_TEST_DATABASE_URL="mysql://root:yang-local@127.0.0.1:3306/yang_system_test"
+$env:YANG_SYSTEM_TEST_REDIS_URL="redis://127.0.0.1:6379/15"
+cargo test --test system_integration work_addon_scale_and_adversarial_boundaries_hold `
+  -- --ignored --nocapture --test-threads=1
+
+# 版本化迁移的首次执行、重跑、中断恢复和漂移阻断
+cargo test --test migration_job_integration -- --ignored --nocapture --test-threads=1
+
+# 通用前端门禁与无重试弱网/批量浏览器矩阵
+pnpm --dir frontend check
+$env:CI="true"
+$env:YANG_E2E_FRONTEND_PORT="5320"
+$env:YANG_E2E_BACKEND_PORT="18320"
+pnpm --dir frontend e2e
+```
+
+真实库第一轮在合法数据写入后拒绝小写 `asc`，错误为
+`unknown variant 'asc', expected 'Asc' or 'Desc'`；修复通用 wire 适配后，同一测试写入
+1 万项目和 5 万任务并通过：seed 3046ms，第 500 页 20 次样本 p95 113ms，一万项目关系
+搜索 p95 13ms，100 条批量完成 19ms，十路并发分页总耗时 72ms。安全负例同时证明
+`page_size=101`、100 层关系环、伪造个人 tenant 和混入其他工作区 ID 的批次都失败，且
+失败批次没有部分提交。
+
+浏览器红测先证明确认框虽视觉可见，但可访问树中的 `dialog` 没有名称；具名通用确认组件
+落地后，正式 `/module/work.task` 在旧请求延迟 700ms、新请求延迟 30ms 的乱序条件下始终
+保留新结果，100 节点树全部渲染，表头全选生成恰好 100 条 `selected` 并完成确认。最终
+前端 `check` 为 22 个测试文件/96 项 Vitest、26 文件生产产物和 7 个部署合同变异全部通过；
+完整 dev E2E 禁用重试后 26/26 通过。迁移真实库矩阵也通过首次 apply、可重入恢复和结构
+漂移阻断。
+
+本项完成的是仓库内约定式交付样本和本地回归基线。数据在 loopback Docker 上运行，未包含
+公网 RTT、多副本争用、生产数据分布、连接池配额或容量拐点，因此不能据此承诺生产吞吐；
+这些值只能作为后续提交不得显著退化的基准。
+
 ## 十、最终结论
 
 yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明一个或多个可用 View 与 presentation”的契约范围内，多 View 和模块级交互的零前端修改交付已经可行。
 
-当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，自定义页面仍有两个手工触点，尚无独立真实业务 Addon 的零前端业务 diff 证据，前端产品外壳也仍显式持有账号/租户入口知识。
+在显式契约范围内，约定式交付目标已有独立真实业务证据：`work` Addon 的关系、树、双 View 和批量 Action 只由后端 presentation 驱动，前端没有业务特判。仍不能把结论扩大为“任意 Action 自动进入正式页”，自定义页面也仍有“组件文件 + 静态 registry”两个手工触点；前端产品外壳继续显式持有账号/租户入口知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E、CI 浏览器门禁实现、仓库部署合同、端到端错误可观测性和关键旅程无障碍已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、目标环境发布/告警送达证据与真实规模证据共同支持。
+技术选型合理，不建议换框架。仓库内浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E、CI 浏览器门禁实现、部署合同、端到端错误可观测性、关键旅程无障碍和真实业务规模基线均已有本地对抗证据。当前仍应定义为“仓库门槛已闭环、等待环境终态”，而不是“已经完整生产就绪”：本提交未 push，远程 CI 每个 job 尚未验证；真实域名 TLS/边缘 smoke、Alertmanager 送达和人工辅助技术矩阵也只能在确定目标环境后取证。

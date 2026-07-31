@@ -1,6 +1,7 @@
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
+use sqlx::{MySql, QueryBuilder};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -253,6 +254,8 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
     for table in [
         "audit_event",
         "authorization_outbox",
+        "work_task",
+        "work_project",
         "org_user",
         "org_org",
         "admin_user",
@@ -1307,6 +1310,479 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .del(&mysql_outage_keys)
         .await?;
     mysql_outage_authorization_redis.close().await;
+
+    tools.close().await;
+    Ok(())
+}
+
+fn p95_millis(samples: &mut [u128]) -> u128 {
+    samples.sort_unstable();
+    let rank = (samples.len() * 95).div_ceil(100);
+    samples[rank.saturating_sub(1)]
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL；会写入 1 万项目和 5 万任务"]
+async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()> {
+    const PROJECTS: usize = 10_000;
+    const TASKS: usize = 50_000;
+    const TREE_NODES: usize = 100;
+    const SAMPLES: usize = 20;
+
+    let mysql_url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
+        .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
+    let redis_url =
+        std::env::var("YANG_SYSTEM_TEST_REDIS_URL").context("缺少 YANG_SYSTEM_TEST_REDIS_URL")?;
+    ensure!(
+        redis_url.trim_end_matches('/').ends_with("/15"),
+        "规模测试 Redis URL 必须使用独立 DB 15"
+    );
+    let database_config = DatabaseConfig::default()
+        .with_max_connections(16)
+        .with_min_connections(0)
+        .with_connect_timeout(10);
+    let mysql = Database::connect_with_config(&mysql_url, database_config.clone())
+        .await
+        .context("连接规模测试 MySQL 失败")?;
+    reset_test_database(mysql.pool()).await?;
+    let initializer_database = Database::from_pool(mysql.pool().clone(), database_config)?;
+    let redis = RedisClient::connect_with_config(
+        &redis_url,
+        RedisConfig::default()
+            .with_max_connections(16)
+            .with_min_connections(0)
+            .with_connect_timeout(10),
+    )
+    .await
+    .context("连接规模测试 Redis 失败")?;
+    let deployment = format!(
+        "work-scale-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    );
+    let authorization_cache = AuthorizationVersionCache::new(redis.clone(), deployment)?;
+    let tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(mysql)
+            .cache(redis)
+            .extension(authorization_cache)
+            .token(integration_token_manager())
+            .build()?,
+    );
+    let security = Arc::new(SecuritySettings {
+        argon2_max_concurrency: 2,
+        auth_rate_limit_window_seconds: 60,
+        auth_rate_limit_ip_attempts: 1_000,
+        auth_rate_limit_username_attempts: 100,
+        trusted_proxy_cidrs: Vec::new(),
+    });
+    let application = build_app(Arc::clone(&tools), security)?;
+    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let definitions = application
+        .runtime
+        .table_definitions()
+        .iter()
+        .collect::<Vec<_>>();
+    initializer.sync_table_definitions(&definitions).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0006_create_authorization_outbox.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0007_create_audit_event.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
+    let runtime = Arc::new(application.runtime);
+
+    let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let username = format!("work_scale_{suffix}");
+    let password = "correct-horse-battery-staple";
+    let registered = data(
+        dispatch(
+            &runtime,
+            "account.user",
+            "register",
+            json!({ "username": username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let user_id = registered["id"].as_i64().context("规模用户缺少 id")?;
+    let login = data(
+        dispatch(
+            &runtime,
+            "account.user",
+            "login",
+            json!({ "username": username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let access_token = login["access_token"]
+        .as_str()
+        .context("规模用户登录缺少 access_token")?
+        .to_owned();
+    let authorization = format!("Bearer {access_token}");
+    let headers = [("authorization", authorization.as_str())];
+    let pool = tools.mysql()?.pool();
+
+    let seed_started = Instant::now();
+    for chunk_start in (0..PROJECTS).step_by(1_000) {
+        let chunk_end = (chunk_start + 1_000).min(PROJECTS);
+        let mut query = QueryBuilder::<MySql>::new(
+            "INSERT INTO work_project (owner_user, name, status, created_at, updated_at) ",
+        );
+        query.push_values(chunk_start..chunk_end, |mut row, index| {
+            row.push_bind(user_id)
+                .push_bind(format!("项目-{index:05}"))
+                .push_bind("active")
+                .push_bind(i64::try_from(index).unwrap_or_default())
+                .push_bind(i64::try_from(index).unwrap_or_default());
+        });
+        query.build().execute(pool).await?;
+    }
+    let project_ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM work_project WHERE owner_user = ? ORDER BY id")
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?;
+    ensure!(project_ids.len() == PROJECTS, "项目规模数据写入不完整");
+
+    let tree_project = project_ids[0];
+    let mut tree_ids = Vec::with_capacity(TREE_NODES);
+    for index in 0..TREE_NODES {
+        let parent = tree_ids.last().copied();
+        let result = sqlx::query(
+            "INSERT INTO work_task \
+             (owner_user, project_project, parent_task, title, status, priority, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'todo', 'normal', ?, ?)",
+        )
+        .bind(user_id)
+        .bind(tree_project)
+        .bind(parent)
+        .bind(format!("树任务-{index:03}"))
+        .bind(i64::try_from(index).unwrap_or_default())
+        .bind(i64::try_from(index).unwrap_or_default())
+        .execute(pool)
+        .await?;
+        tree_ids.push(i64::try_from(result.last_insert_id()).context("任务 ID 超出 i64")?);
+    }
+    for chunk_start in (TREE_NODES..TASKS).step_by(1_000) {
+        let chunk_end = (chunk_start + 1_000).min(TASKS);
+        let mut query = QueryBuilder::<MySql>::new(
+            "INSERT INTO work_task \
+             (owner_user, project_project, parent_task, title, status, priority, created_at, updated_at) ",
+        );
+        query.push_values(chunk_start..chunk_end, |mut row, index| {
+            row.push_bind(user_id)
+                .push_bind(project_ids[index % PROJECTS])
+                .push_bind(Option::<i64>::None)
+                .push_bind(format!("任务-{index:05}"))
+                .push_bind("todo")
+                .push_bind("normal")
+                .push_bind(i64::try_from(index).unwrap_or_default())
+                .push_bind(i64::try_from(index).unwrap_or_default());
+        });
+        query.build().execute(pool).await?;
+    }
+    let seeded_tasks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM work_task WHERE owner_user = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    ensure!(
+        seeded_tasks == i64::try_from(TASKS)?,
+        "任务规模数据写入不完整"
+    );
+    let seed_ms = seed_started.elapsed().as_millis();
+
+    let mut page_samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let started = Instant::now();
+        let page = data(
+            dispatch(
+                &runtime,
+                "work.task",
+                "select",
+                json!({
+                    "page": 500,
+                    "page_size": 100,
+                    "order_by": [{ "field": "created_at", "direction": "Asc" }]
+                }),
+                &headers,
+                &[],
+            )
+            .await?,
+        )?;
+        ensure!(
+            page["items"]
+                .as_array()
+                .is_some_and(|items| items.len() == 100),
+            "第 500 页必须稳定返回 100 条"
+        );
+        page_samples.push(started.elapsed().as_millis());
+    }
+
+    let mut relation_samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let started = Instant::now();
+        let options = data(
+            dispatch(
+                &runtime,
+                "work.project",
+                "options",
+                json!({
+                    "search": "项目-09999",
+                    "selected": [],
+                    "filter": {},
+                    "page": 1,
+                    "limit": 20
+                }),
+                &headers,
+                &[],
+            )
+            .await?,
+        )?;
+        ensure!(
+            options["items"]
+                .as_array()
+                .is_some_and(|items| items.len() == 1),
+            "一万项目中的关系搜索必须精确返回目标"
+        );
+        relation_samples.push(started.elapsed().as_millis());
+    }
+
+    let tree = data(
+        dispatch(
+            &runtime,
+            "work.task",
+            "select",
+            json!({
+                "page": 1,
+                "page_size": 100,
+                "order_by": [{ "field": "created_at", "direction": "Asc" }]
+            }),
+            &headers,
+            &[],
+        )
+        .await?,
+    )?;
+    let tree_items = tree["items"].as_array().context("任务树响应缺少 items")?;
+    ensure!(
+        tree_items.len() == TREE_NODES,
+        "任务树必须受 100 节点上限保护"
+    );
+    for (index, item) in tree_items.iter().enumerate().skip(1) {
+        ensure!(
+            item["parent_task"] == tree_items[index - 1]["id"],
+            "100 层任务链必须保持父子关系"
+        );
+    }
+    ensure!(
+        dispatch(
+            &runtime,
+            "work.task",
+            "select",
+            json!({ "page": 1, "page_size": 101 }),
+            &headers,
+            &[],
+        )
+        .await
+        .is_err(),
+        "任务查询必须拒绝超过 100 的页面"
+    );
+    ensure!(
+        dispatch(
+            &runtime,
+            "work.task",
+            "put",
+            json!({ "id": tree_ids[0], "data": { "parent_task": tree_ids[99] } }),
+            &headers,
+            &[],
+        )
+        .await
+        .is_err(),
+        "深层任务树必须拒绝形成关系环"
+    );
+
+    let other_username = format!("work_scale_other_{suffix}");
+    let other = data(
+        dispatch(
+            &runtime,
+            "account.user",
+            "register",
+            json!({ "username": other_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let other_user_id = other["id"].as_i64().context("对抗用户缺少 id")?;
+    let other_login = data(
+        dispatch(
+            &runtime,
+            "account.user",
+            "login",
+            json!({ "username": other_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let other_authorization = format!(
+        "Bearer {}",
+        other_login["access_token"]
+            .as_str()
+            .context("对抗用户缺少 access_token")?
+    );
+    let other_headers = [("authorization", other_authorization.as_str())];
+    let other_project = data(
+        dispatch(
+            &runtime,
+            "work.project",
+            "add",
+            json!({ "name": "其他用户项目", "status": "active" }),
+            &other_headers,
+            &[],
+        )
+        .await?,
+    )?;
+    let other_task = data(
+        dispatch(
+            &runtime,
+            "work.task",
+            "add",
+            json!({
+                "project_project": other_project["id"],
+                "title": "其他用户任务",
+                "status": "todo",
+                "priority": "normal"
+            }),
+            &other_headers,
+            &[],
+        )
+        .await?,
+    )?;
+    let forged_tenant = other_user_id.to_string();
+    ensure!(
+        dispatch(
+            &runtime,
+            "work.task",
+            "select",
+            json!({ "page": 1, "page_size": 20 }),
+            &[
+                ("authorization", authorization.as_str()),
+                ("x-tenant-id", forged_tenant.as_str())
+            ],
+            &[],
+        )
+        .await
+        .is_err(),
+        "个人工作区必须拒绝伪造其他用户 tenant"
+    );
+
+    let bulk_ids = tree_ids
+        .iter()
+        .take(100)
+        .map(|id| json!({ "id": id }))
+        .collect::<Vec<_>>();
+    let bulk_started = Instant::now();
+    let bulk = data(
+        dispatch(
+            &runtime,
+            "work.task",
+            "complete",
+            json!({ "selected": bulk_ids }),
+            &headers,
+            &[],
+        )
+        .await?,
+    )?;
+    let bulk_ms = bulk_started.elapsed().as_millis();
+    ensure!(
+        bulk["requested"] == 100 && bulk["affected"] == 100,
+        "100 条批量完成必须全量提交"
+    );
+    sqlx::query("UPDATE work_task SET status = 'todo' WHERE id = ? AND owner_user = ?")
+        .bind(tree_ids[0])
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    ensure!(
+        dispatch(
+            &runtime,
+            "work.task",
+            "complete",
+            json!({
+                "selected": [
+                    { "id": tree_ids[0] },
+                    { "id": other_task["id"] }
+                ]
+            }),
+            &headers,
+            &[],
+        )
+        .await
+        .is_err(),
+        "混入其他工作区任务的批量更新必须整体失败"
+    );
+    let own_status: String =
+        sqlx::query_scalar("SELECT status FROM work_task WHERE id = ? AND owner_user = ?")
+            .bind(tree_ids[0])
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    ensure!(own_status == "todo", "失败批次不得部分提交当前用户任务");
+
+    let concurrent_started = Instant::now();
+    let mut requests = tokio::task::JoinSet::new();
+    for page_number in 1..=10 {
+        let runtime = Arc::clone(&runtime);
+        let token = access_token.clone();
+        requests.spawn(async move {
+            dispatch_token_body_action(
+                &runtime,
+                "work.task",
+                "select",
+                &token,
+                json!({ "page": page_number, "page_size": 100 }),
+            )
+            .await
+        });
+    }
+    let mut completed = 0;
+    while let Some(result) = requests.join_next().await {
+        let response = result.context("并发查询任务 panic")??;
+        ensure!(response.code == 0, "并发任务查询返回业务错误");
+        completed += 1;
+    }
+    let concurrent_ms = concurrent_started.elapsed().as_millis();
+    ensure!(completed == 10, "十路并发查询必须全部完成");
+
+    let page_p95_ms = p95_millis(&mut page_samples);
+    let relation_p95_ms = p95_millis(&mut relation_samples);
+    ensure!(
+        page_p95_ms <= 1_000,
+        "深分页 p95 超过 1000ms: {page_p95_ms}"
+    );
+    ensure!(
+        relation_p95_ms <= 1_000,
+        "关系搜索 p95 超过 1000ms: {relation_p95_ms}"
+    );
+    ensure!(bulk_ms <= 2_000, "100 条批量完成超过 2000ms: {bulk_ms}");
+    ensure!(
+        concurrent_ms <= 5_000,
+        "十路并发查询超过 5000ms: {concurrent_ms}"
+    );
+    println!(
+        "work_scale_metrics projects={PROJECTS} tasks={TASKS} tree_nodes={TREE_NODES} \
+         seed_ms={seed_ms} page_500_p95_ms={page_p95_ms} \
+         relation_10000_p95_ms={relation_p95_ms} bulk_100_ms={bulk_ms} \
+         concurrent_10_ms={concurrent_ms}"
+    );
 
     tools.close().await;
     Ok(())

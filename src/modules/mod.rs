@@ -8,3 +8,4 @@ pub mod admin;
 pub mod observability;
 pub mod org;
 mod presentation;
+pub mod work;

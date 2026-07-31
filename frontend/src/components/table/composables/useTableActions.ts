@@ -23,6 +23,7 @@ import {
   buildActionInitialValues,
   groupPresentedActions,
 } from "../table-view-model";
+import ActionConfirmationDialog from "../ActionConfirmationDialog.vue";
 
 interface UsePresentedActionsOptions {
   presentations: MaybeRefOrGetter<ActionPresentationSchema[]>;
@@ -227,11 +228,11 @@ function confirmAction(
   if (!presentation.confirmation) return Promise.resolve(true);
   return new Promise((resolve) => {
     Dialog.create({
-      title: presentation.confirmation?.title,
-      message: presentation.confirmation?.message ?? "",
-      ok: { label: "确认", color: "negative" },
-      cancel: { label: "取消", flat: true },
-      persistent: true,
+      component: ActionConfirmationDialog,
+      componentProps: {
+        title: presentation.confirmation?.title,
+        message: presentation.confirmation?.message ?? "",
+      },
     })
       .onOk(() => resolve(true))
       .onCancel(() => resolve(false))

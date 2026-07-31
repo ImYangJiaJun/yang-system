@@ -1,6 +1,6 @@
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
-use crate::modules::{account, admin, observability, org};
+use crate::modules::{account, admin, observability, org, work};
 use crate::observability::logging::{ActionLogMiddleware, LogIdentity};
 use anyhow::Context;
 use std::sync::Arc;
@@ -35,6 +35,7 @@ pub fn build_app(
                 Arc::new(account::CompositeGrantResolver::new(vec![
                     admin::grant_resolver(),
                     org::grant_resolver(),
+                    work::grant_resolver(),
                 ])),
                 authorization_validator.clone(),
             )
@@ -52,8 +53,13 @@ pub fn build_app(
                 .middleware(action_logging.clone()),
         )
         .addon(
-            org::build_addon(authorization_validator)
+            org::build_addon(authorization_validator.clone())
                 .context("构建 org Addon 失败")?
+                .middleware(action_logging.clone()),
+        )
+        .addon(
+            work::build_addon(authorization_validator)
+                .context("构建 work Addon 失败")?
                 .middleware(action_logging),
         )
         .build(tools)
@@ -125,7 +131,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(app.runtime.table_definitions().len(), 4);
+        assert_eq!(app.runtime.table_definitions().len(), 6);
         let tables = app
             .runtime
             .table_definitions()
@@ -136,6 +142,8 @@ mod tests {
         assert!(tables.contains(&"admin_user"));
         assert!(tables.contains(&"org_org"));
         assert!(tables.contains(&"org_user"));
+        assert!(tables.contains(&"work_project"));
+        assert!(tables.contains(&"work_task"));
         assert_eq!(operations.len(), 6);
         assert!(operations.contains(&(
             "account.user.register",
@@ -164,7 +172,21 @@ mod tests {
             document["paths"]["/api/v1/orgs/options"]["post"]["operationId"],
             "org.org.select"
         );
-        assert_eq!(app.runtime.compiled_views().len(), 4);
+        assert_eq!(app.runtime.compiled_views().len(), 7);
+
+        let work_task_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "work.task")
+            .unwrap_or_else(|| panic!("应存在 work.task 模块"));
+        assert_eq!(work_task_module.views.len(), 2);
+        assert!(work_task_module
+            .actions()
+            .iter()
+            .any(|action| action.name.as_str() == "complete"));
 
         for module in app
             .runtime

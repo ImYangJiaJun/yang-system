@@ -6,7 +6,14 @@ use yang_db::{Database, DatabaseConfig};
 use yang_system::config::SecuritySettings;
 use yang_system::migrations::{execute_with_database, MigrationCommand, MigrationRunReport};
 
-const BUSINESS_TABLES: [&str; 4] = ["org_user", "org_org", "admin_user", "users"];
+const BUSINESS_TABLES: [&str; 6] = [
+    "work_task",
+    "work_project",
+    "org_user",
+    "org_org",
+    "admin_user",
+    "users",
+];
 const INTERNAL_TABLES: [&str; 2] = ["audit_event", "authorization_outbox"];
 
 fn database_config() -> DatabaseConfig {
@@ -133,7 +140,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 7, "应记录 7 个 applied 版本");
+        ensure!(migration_count == 9, "应记录 9 个 applied 版本");
         let authz_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'authz_version'",
         )
@@ -231,7 +238,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         ensure!(sentinel_authz_version == 1, "新增用户必须取得授权版本默认值 1");
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task')",
         )
         .execute(control.pool())
         .await

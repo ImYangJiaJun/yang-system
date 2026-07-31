@@ -1,0 +1,162 @@
+//! 任务关系一致性读取边界。
+//! raw-sql-boundary: domain-repository work-task-repository
+
+use yang_base::action::ActionContext;
+use yang_base::BaseError;
+use yang_db::Transaction;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TaskLinks {
+    pub(super) project_id: i64,
+    pub(super) parent_id: Option<i64>,
+}
+
+pub(super) async fn current_links(
+    context: &ActionContext,
+    task_id: i64,
+) -> Result<TaskLinks, BaseError> {
+    let owner = context.tenant()?.id().get();
+    // tenant-boundary: raw-sql work-task-current-links
+    let row = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT project_project, parent_task FROM work_task \
+         WHERE id = ? AND owner_user = ? LIMIT 1",
+    )
+    .bind(task_id)
+    .bind(owner)
+    // tenant-boundary: database work-task-current-links-database
+    .fetch_optional(context.tools().mysql()?.pool())
+    .await
+    .map_err(yang_db::DbError::from)?
+    .ok_or_else(|| BaseError::RecordNotFound(format!("任务 {task_id}")))?;
+    Ok(TaskLinks {
+        project_id: row.0,
+        parent_id: row.1,
+    })
+}
+
+pub(super) async fn validate_task_links(
+    context: &ActionContext,
+    project_id: i64,
+    parent_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Result<(), BaseError> {
+    if project_id <= 0 {
+        return Err(BaseError::ParamInvalid(
+            "project_project".to_string(),
+            "必须是正整数".to_string(),
+        ));
+    }
+    let owner = context.tenant()?.id().get();
+    // tenant-boundary: database work-task-validation-database
+    let pool = context.tools().mysql()?.pool();
+    // tenant-boundary: raw-sql work-task-project-ownership
+    let project_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM work_project \
+         WHERE id = ? AND owner_user = ? LIMIT 1)",
+    )
+    .bind(project_id)
+    .bind(owner)
+    .fetch_one(pool)
+    .await
+    .map_err(yang_db::DbError::from)?;
+    if !project_exists {
+        return Err(BaseError::PermissionDenied(
+            "所属项目不存在或不属于当前工作区".to_string(),
+        ));
+    }
+
+    let Some(parent_id) = parent_id else {
+        return Ok(());
+    };
+    if parent_id <= 0 {
+        return Err(BaseError::ParamInvalid(
+            "parent_task".to_string(),
+            "必须是正整数".to_string(),
+        ));
+    }
+    if task_id == Some(parent_id) {
+        return Err(BaseError::ParamInvalid(
+            "parent_task".to_string(),
+            "任务不能成为自己的父任务".to_string(),
+        ));
+    }
+    // tenant-boundary: raw-sql work-task-parent-ownership
+    let parent_project: Option<i64> = sqlx::query_scalar(
+        "SELECT project_project FROM work_task \
+         WHERE id = ? AND owner_user = ? LIMIT 1",
+    )
+    .bind(parent_id)
+    .bind(owner)
+    .fetch_optional(pool)
+    .await
+    .map_err(yang_db::DbError::from)?;
+    if parent_project != Some(project_id) {
+        return Err(BaseError::PermissionDenied(
+            "父任务不存在、跨工作区或不属于同一项目".to_string(),
+        ));
+    }
+
+    if let Some(task_id) = task_id {
+        // tenant-boundary: raw-sql work-task-cycle-check
+        let creates_cycle: bool = sqlx::query_scalar(
+            "WITH RECURSIVE ancestors AS (\
+                 SELECT id, parent_task, 1 AS depth FROM work_task \
+                 WHERE id = ? AND owner_user = ? \
+                 UNION ALL \
+                 SELECT task.id, task.parent_task, ancestors.depth + 1 \
+                 FROM work_task AS task \
+                 INNER JOIN ancestors ON task.id = ancestors.parent_task \
+                 WHERE task.owner_user = ? AND ancestors.depth < 100\
+             ) \
+             SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?)",
+        )
+        .bind(parent_id)
+        .bind(owner)
+        .bind(owner)
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .map_err(yang_db::DbError::from)?;
+        if creates_cycle {
+            return Err(BaseError::ParamInvalid(
+                "parent_task".to_string(),
+                "父任务关系会形成环".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn lock_tasks_for_completion(
+    context: &ActionContext,
+    ids: &[i64],
+    transaction: &mut Transaction,
+) -> Result<(), BaseError> {
+    let owner = context.tenant()?.id().get();
+    let ids_json =
+        serde_json::Value::Array(ids.iter().copied().map(Into::into).collect()).to_string();
+    let executor = transaction.executor().ok_or_else(|| {
+        BaseError::DatabaseTransactionFailed(yang_db::DbError::TransactionError(
+            "批量完成事务已结束".to_string(),
+        ))
+    })?;
+    // tenant-boundary: raw-sql work-task-complete-lock
+    let locked: Vec<i64> = sqlx::query_scalar(
+        "SELECT task.id FROM work_task AS task \
+         INNER JOIN JSON_TABLE(?, '$[*]' COLUMNS(selected_id BIGINT PATH '$')) AS selected \
+             ON selected.selected_id = task.id \
+         WHERE task.owner_user = ? \
+         ORDER BY task.id FOR UPDATE OF task",
+    )
+    .bind(ids_json)
+    .bind(owner)
+    .fetch_all(executor)
+    .await
+    .map_err(yang_db::DbError::from)?;
+    if locked.len() != ids.len() {
+        return Err(BaseError::PermissionDenied(
+            "批量选择包含不存在或不属于当前工作区的任务".to_string(),
+        ));
+    }
+    Ok(())
+}

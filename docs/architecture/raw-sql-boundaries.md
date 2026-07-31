@@ -26,6 +26,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | `org-access-repository` | domain-repository | `src/modules/org/access/repository.rs` | pre-tenant 企业发现 Join，范围固定为已认证 actor |
 | `org-member-guard` | domain-service | `src/modules/org/user/guard.rs` | 写操作前按可信租户与 actor 实时验证企业管理员身份 |
 | `org-member-repository` | domain-repository | `src/modules/org/user/repository.rs` | 成员关系行锁、同租户校验、批量 writer 与审计原子性 |
+| `work-task-repository` | domain-repository | `src/modules/work/task/repository.rs` | 任务关系同租户校验、递归防环和批量完成事务 |
 | `audit-event-repository` | infrastructure-repository | `src/audit/repository.rs` | 只提供事务内追加，不提供 UPDATE/DELETE 或独立提交入口 |
 | `audit-schema-validator` | schema-validator | `src/audit/schema.rs` | 启动期只读 `information_schema`，验证审计表不可变约束 |
 | `authorization-outbox` | infrastructure-repository | `src/authorization/outbox.rs` | claim/lease/retry 状态机必须使用锁与条件更新 |
@@ -37,6 +38,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 <!-- raw-sql-boundary: domain-repository org-access-repository src/modules/org/access/repository.rs -->
 <!-- raw-sql-boundary: domain-service org-member-guard src/modules/org/user/guard.rs -->
 <!-- raw-sql-boundary: domain-repository org-member-repository src/modules/org/user/repository.rs -->
+<!-- raw-sql-boundary: domain-repository work-task-repository src/modules/work/task/repository.rs -->
 <!-- raw-sql-boundary: infrastructure-repository audit-event-repository src/audit/repository.rs -->
 <!-- raw-sql-boundary: schema-validator audit-schema-validator src/audit/schema.rs -->
 <!-- raw-sql-boundary: infrastructure-repository authorization-outbox src/authorization/outbox.rs -->
