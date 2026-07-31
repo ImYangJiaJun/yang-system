@@ -13,17 +13,17 @@
 
 ### 1.1 结论表
 
-| 判断项 | 当前状态 | 准确结论 |
-|---|---|---|
-| 后端显式 UI 契约 | 已验证 | 字段、Action、View、Module presentation、权限投影、revision 和 ETag 已形成一条显式链路 |
-| 显式 View 的默认表格页 | 已验证 | 后端声明可访问的 `data_action`、字段和 presentation 后，`TableView` 可在不修改前端的情况下渲染 |
-| 仅新增 Module/CRUD 即自动出现可用表格页 | 未达成 | 框架生成的无 Action 默认 View 不会投影到 UI Catalog；必须声明可访问的数据 Action |
-| 仅新增 Action/API 即自动进入正式页面 | 未达成 | Action 会进入请求级 Catalog，但只有被 Module/View presentation 引用后才进入正式工具栏、行或批量区 |
-| 正式 `ModulePage` 解释当前合法契约 | 已闭环 | 全部 View 可切换；Module presentation 复用统一执行器并覆盖 toolbar/row/bulk 与当前六类 interaction；业务特例已移出通用页面 |
-| 自定义页面安全降级 | 已验证 | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面 |
-| 自定义页面只新增一个文件 | 未达成 | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点 |
-| Vue/Quasar/Pinia/Zod 技术选型 | 合理 | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益 |
-| 完整生产就绪 | 未达成 | 已有较强工程基础，但本提交尚无远程 CI 终态，a11y 和真实业务压力证据仍不完整 |
+| 判断项                                  | 当前状态 | 准确结论                                                                                                                   |
+| --------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 后端显式 UI 契约                        | 已验证   | 字段、Action、View、Module presentation、权限投影、revision 和 ETag 已形成一条显式链路                                     |
+| 显式 View 的默认表格页                  | 已验证   | 后端声明可访问的 `data_action`、字段和 presentation 后，`TableView` 可在不修改前端的情况下渲染                             |
+| 仅新增 Module/CRUD 即自动出现可用表格页 | 未达成   | 框架生成的无 Action 默认 View 不会投影到 UI Catalog；必须声明可访问的数据 Action                                           |
+| 仅新增 Action/API 即自动进入正式页面    | 未达成   | Action 会进入请求级 Catalog，但只有被 Module/View presentation 引用后才进入正式工具栏、行或批量区                          |
+| 正式 `ModulePage` 解释当前合法契约      | 已闭环   | 全部 View 可切换；Module presentation 复用统一执行器并覆盖 toolbar/row/bulk 与当前六类 interaction；业务特例已移出通用页面 |
+| 自定义页面安全降级                      | 已验证   | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面                             |
+| 自定义页面只新增一个文件                | 未达成   | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点                                                            |
+| Vue/Quasar/Pinia/Zod 技术选型           | 合理     | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益                                                      |
+| 完整生产就绪                            | 未达成   | 已有较强工程基础，但本提交尚无远程 CI 终态和真实业务压力证据                                                               |
 
 ### 1.2 对两个评估问题的直接回答
 
@@ -90,11 +90,11 @@
 
 ### 5.1 三条路径的职责
 
-| 路径 | 构建状态 | 当前能力 | 不能据此证明的内容 |
-|---|---|---|---|
+| 路径                | 构建状态 | 当前能力                                                                                      | 不能据此证明的内容                     |
+| ------------------- | -------- | --------------------------------------------------------------------------------------------- | -------------------------------------- |
 | `/module/:moduleId` | 生产包含 | 正式账户空间、全部 View 或 primary Action；Module presentation 统一分派并支持 custom 安全回退 | 独立真实业务 Addon、生产部署与规模上限 |
-| `/business` | 生产包含 | Catalog 导航、通用 `TableView`、View Action、custom 安全降级 | 每个 Module 的正式账户空间行为 |
-| `/workbench` | 仅 DEV | 全局 Action 演示、TableView、上传下载预览重定向、自定义 View 调试 | 生产包中的最终用户路径 |
+| `/business`         | 生产包含 | Catalog 导航、通用 `TableView`、View Action、custom 安全降级                                  | 每个 Module 的正式账户空间行为         |
+| `/workbench`        | 仅 DEV   | 全局 Action 演示、TableView、上传下载预览重定向、自定义 View 调试                             | 生产包中的最终用户路径                 |
 
 `frontend/src/router/routes.ts:3-17` 会从生产包移除 Workbench。任何只在 `/workbench` 通过的功能都必须在正式路由另有证据，才能计入正式交付能力。
 
@@ -165,16 +165,16 @@
 
 ### 6.1 技术选型
 
-| 选型 | 当前判断 | 原因 |
-|---|---|---|
-| Vue 3 Composition API | 保留 | 动态契约界面与可组合状态逻辑匹配 |
-| TypeScript strict + vue-tsc | 保留 | 高动态 Catalog 边界仍需要静态约束 |
-| Quasar CLI + Vite SPA | 保留 | 后台表格、表单、对话框和响应式组件覆盖足够；当前无 SEO/SSR 刚需 |
-| Pinia | 保留 | session、identity、tenant、catalog、navigation、lifecycle 已有清晰 owner |
-| Vue Router | 保留 | 参数化路由和访问策略满足当前规模 |
-| Zod | 保留 | HTTP JSON 是运行时不可信边界，必须在使用前解析 |
-| Vitest + Playwright | 保留 | 工具链匹配；dev 与正式产物浏览器门禁都已进入 full/CI，后续重点是 a11y、可观测性和规模证据 |
-| TanStack Query、SSR、微前端 | 暂不引入 | 当前问题是契约完备性和生产门禁，不是缺少新框架 |
+| 选型                        | 当前判断 | 原因                                                                                      |
+| --------------------------- | -------- | ----------------------------------------------------------------------------------------- |
+| Vue 3 Composition API       | 保留     | 动态契约界面与可组合状态逻辑匹配                                                          |
+| TypeScript strict + vue-tsc | 保留     | 高动态 Catalog 边界仍需要静态约束                                                         |
+| Quasar CLI + Vite SPA       | 保留     | 后台表格、表单、对话框和响应式组件覆盖足够；当前无 SEO/SSR 刚需                           |
+| Pinia                       | 保留     | session、identity、tenant、catalog、navigation、lifecycle 已有清晰 owner                  |
+| Vue Router                  | 保留     | 参数化路由和访问策略满足当前规模                                                          |
+| Zod                         | 保留     | HTTP JSON 是运行时不可信边界，必须在使用前解析                                            |
+| Vitest + Playwright         | 保留     | 工具链匹配；dev 与正式产物浏览器门禁都已进入 full/CI，后续重点是 a11y、可观测性和规模证据 |
+| TanStack Query、SSR、微前端 | 暂不引入 | 当前问题是契约完备性和生产门禁，不是缺少新框架                                            |
 
 ### 6.2 已有生产导向能力
 
@@ -188,17 +188,17 @@
 
 ### 6.3 生产门槛状态
 
-| 门槛 | 当前状态 | 缺少的证据或实现 |
-|---|---|---|
-| 浏览器 XSS 会话边界 | 已闭环 | access token 已改为仅驻留内存，Refresh Token 仍为 host-only HttpOnly Cookie；生产入口启用 enforce CSP，并用 Web Locks、版本化跨标签页结束信号闭环刷新轮换与退出同步 |
-| 正式页面契约完备性 | 已闭环 | Module 多 View、统一 Action executor、custom/bulk、fail-closed 与显式产品外壳接口均有正式路由和矩阵测试证据 |
-| 正式产物 E2E | 已闭环 | 独立 Playwright 配置每次重建并启动 `dist/spa`，验证正式模块深链接、生产路由裁剪、无 dev runtime，以及静态/API 404 不被 history fallback 掩盖 |
-| CI 浏览器门禁 | 已闭环（实现） | `run_ci.py full` 串行执行隔离 dev 与 production Playwright；quality job 安装 Chromium 后复用同一 full 门禁；本提交未 push，远程 job 终态仍未验证 |
-| 部署契约 | 已闭环（仓库合同） | 可执行 Nginx 配置、共享响应合同、生产构建 E2E 与变异测试覆盖 history fallback、安全头、HTML/资产缓存和严格 404；真实域名 TLS/边缘 smoke 仍须在首次部署后取证 |
-| 端到端可观测性 | 已闭环（仓库链路） | 已认证前端统一上报无敏感正文错误指纹，`related_request_id` 关联原 Action log/trace，低基数 metric 与真实 promtool firing/silent 演练入 CI；真实 Alertmanager 送达仍须目标环境取证 |
-| 无障碍 | 未闭环 | 无 axe 等自动检查，也没有键盘/焦点关键旅程门禁 |
-| 真实业务与规模 | 未验证 | 深层 relation、大树、大分页、复杂批量、弱网和并发边界尚无基线 |
-| i18n | 按产品需求决定 | 当前文案硬编码中文；只有明确多语言需求时才是上线阻塞项 |
+| 门槛                | 当前状态           | 缺少的证据或实现                                                                                                                                                                  |
+| ------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 浏览器 XSS 会话边界 | 已闭环             | access token 已改为仅驻留内存，Refresh Token 仍为 host-only HttpOnly Cookie；生产入口启用 enforce CSP，并用 Web Locks、版本化跨标签页结束信号闭环刷新轮换与退出同步               |
+| 正式页面契约完备性  | 已闭环             | Module 多 View、统一 Action executor、custom/bulk、fail-closed 与显式产品外壳接口均有正式路由和矩阵测试证据                                                                       |
+| 正式产物 E2E        | 已闭环             | 独立 Playwright 配置每次重建并启动 `dist/spa`，验证正式模块深链接、生产路由裁剪、无 dev runtime，以及静态/API 404 不被 history fallback 掩盖                                      |
+| CI 浏览器门禁       | 已闭环（实现）     | `run_ci.py full` 串行执行隔离 dev 与 production Playwright；quality job 安装 Chromium 后复用同一 full 门禁；本提交未 push，远程 job 终态仍未验证                                  |
+| 部署契约            | 已闭环（仓库合同） | 可执行 Nginx 配置、共享响应合同、生产构建 E2E 与变异测试覆盖 history fallback、安全头、HTML/资产缓存和严格 404；真实域名 TLS/边缘 smoke 仍须在首次部署后取证                      |
+| 端到端可观测性      | 已闭环（仓库链路） | 已认证前端统一上报无敏感正文错误指纹，`related_request_id` 关联原 Action log/trace，低基数 metric 与真实 promtool firing/silent 演练入 CI；真实 Alertmanager 送达仍须目标环境取证 |
+| 无障碍              | 已闭环（自动门禁） | 固定版本 axe 覆盖登录、角色、正式模块与表单对话框的 WCAG 2.2 AA 可自动检测规则；纯键盘旅程、可见焦点和对话框焦点恢复进入 dev E2E/full/CI                                          |
+| 真实业务与规模      | 未验证             | 深层 relation、大树、大分页、复杂批量、弱网和并发边界尚无基线                                                                                                                     |
+| i18n                | 按产品需求决定     | 当前文案硬编码中文；只有明确多语言需求时才是上线阻塞项                                                                                                                            |
 
 生产就绪必须按目标部署环境逐项通过这些门槛，不能用维度平均分替代。
 
@@ -224,7 +224,7 @@
 3. **已满足（仓库合同，2026-07-31）：** 浏览器 smoke 构建并启动 `dist/spa`，验收深链接、响应头 CSP/`frame-ancestors`/HSTS 等安全头、HTML `no-store`、`/assets` 一年 immutable、严格资产 404 和 API 代理边界；真实域名的 TLS/证书/DNS/边缘终态只可在目标环境发布后验收。
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
 5. **已满足（仓库链路，2026-07-31）：** 前端错误上报携带原后端 request id；后端 `frontend.error` 日志、Action trace 与低基数 metric 可关联；promtool 演练验证达到阈值 firing、低于阈值 silent。真实 Alertmanager 接收器送达仍属于目标环境验收。
-6. 增加关键页面 a11y、键盘导航和焦点恢复门禁。
+6. **已满足（自动门禁，2026-07-31）：** 登录、角色、正式模块和表单对话框通过 axe WCAG 2.2 AA 扫描；纯键盘完成登录、角色选择、模块操作，关键控件有可见焦点，对话框打开后聚焦且关闭后恢复触发点。屏幕阅读器、高对比度和语音控制仍按目标用户/采购规范做环境人工验收。
 7. 为大分页、relation options、树节点上限和批量 Action 建立数据规模与响应时间基线。
 8. 推送前运行 `python scripts/run_ci.py full`、隔离 Playwright、必要的真实 MySQL/Redis integration；远程 CI 每个 job 都必须有终态成功证据。
 
@@ -488,10 +488,47 @@ promtool test rules yang-system.rules.test.yml
 
 本项不把规则单测写成真实值班送达：Alertmanager receiver、通知渠道、升级路径和告警恢复时间线必须在目标环境演练。仓库内从浏览器错误到 request id、Action log/trace、metric 和告警阈值的实现与可执行证据已经闭环。
 
+### 9.7 2026-07-31 增量闭环：关键旅程无障碍
+
+本项采用的不变量是：自动扫描不能代替键盘行为，键盘可达也不能代替语义与对比度；门禁必须同时覆盖登录、角色选择、正式模块和表单对话框，且对话框关闭后焦点必须回到原触发点。
+
+实现证据：
+
+- 固定 `@axe-core/playwright@4.12.1`，`e2e/accessibility.spec.ts` 对关键页面和对话框运行 WCAG 2.0/2.1/2.2 A/AA 标签；该 spec 由默认 `pnpm e2e` 自动进入 full 与 CI；
+- 纯键盘用例通过 Tab/Enter/Escape 完成登录、角色选择、模块操作和对话框关闭，不使用鼠标捷径；
+- 全局双层 3px `:focus-visible` 焦点环在浅色与深色背景都有可见边界，测试直接断言关键控件的计算样式；
+- 模块导航改为具名 navigation 地标，避免 list 角色包含非法 `nav` 子节点；低对比度导航标题、连接状态、模块说明和表单帮助文字已改用 AA 颜色；
+- `TableActionDialog` 提供可访问名称，在完成显示后显式聚焦关闭按钮，并依赖对话框焦点管理把焦点恢复到触发按钮；卡片建立独立层叠上下文，保证遮罩不会改变内容对比度判定；
+- `frontend/docs/ACCESSIBILITY.md` 固化自动门禁、组件约束和人工辅助技术验收边界。
+
+对抗性验证：
+
+```powershell
+# 红测一：依赖不存在时，Playwright 无法加载 @axe-core/playwright
+$env:CI="true"
+$env:YANG_E2E_FRONTEND_PORT="5315"
+$env:YANG_E2E_BACKEND_PORT="18315"
+pnpm --dir frontend exec playwright test e2e/accessibility.spec.ts --retries=0
+
+# 红测二：接入 axe 后真实检出 aria-required-children 与三处 color-contrast
+# 红测三：语义/对比度修复后，键盘打开的对话框仍因缺少可访问名称无法按名称定位
+
+# 绿测：不允许重试掩盖失败
+$env:YANG_E2E_FRONTEND_PORT="5319"
+$env:YANG_E2E_BACKEND_PORT="18319"
+pnpm --dir frontend exec playwright test e2e/accessibility.spec.ts --retries=0
+```
+
+首个红测报 `Cannot find package '@axe-core/playwright'`，证明门禁此前不存在。安装固定版本后，axe 报出模块导航 `aria-required-children` critical，以及导航标题、连接状态、模块说明的 `color-contrast` serious；这些违规在修复后清零。随后键盘确实打开了对话框，但可访问树只显示匿名 `dialog`，具名 locator 稳定失败；补齐名称后，计算样式断言又证明 Quasar 的 `no-outline` 优先级会静默吞掉焦点环。覆盖组件库抑制规则并补齐焦点合同后，关键旅程无重试通过。
+
+最终专项无重试 2/2、前端 `check`（含 22 个测试文件/96 项 Vitest、生产构建与 7 个部署合同变异）通过；完整 dev E2E 在禁用重试后 25/25，production E2E 2/2 通过。
+
+该闭环只声明仓库自动门禁覆盖的 WCAG 可检测规则与键盘/焦点行为，不把 axe 结果外推为完整合规认证。屏幕阅读器、200%/400% 缩放、Windows 高对比度和语音控制的人工矩阵，只有在目标用户、采购或法规范围确定后才能形成环境终态证据。
+
 ## 十、最终结论
 
 yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明一个或多个可用 View 与 presentation”的契约范围内，多 View 和模块级交互的零前端修改交付已经可行。
 
 当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，自定义页面仍有两个手工触点，尚无独立真实业务 Addon 的零前端业务 diff 证据，前端产品外壳也仍显式持有账号/租户入口知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E、CI 浏览器门禁实现、仓库部署合同和端到端错误可观测性已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、目标环境发布/告警送达证据、无障碍与真实规模证据共同支持。
+技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E、CI 浏览器门禁实现、仓库部署合同、端到端错误可观测性和关键旅程无障碍已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、目标环境发布/告警送达证据与真实规模证据共同支持。

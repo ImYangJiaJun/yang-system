@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import type { SessionContext } from "src/api/client";
 import type {
   ActionDemoSchema,
@@ -22,17 +23,34 @@ const values = defineModel<Record<string, unknown>>("values", {
   required: true,
 });
 const emit = defineEmits<{ submit: [] }>();
+const closeButton = ref<{ $el: HTMLButtonElement }>();
+
+function focusCloseButton() {
+  closeButton.value?.$el.focus();
+}
 </script>
 
 <template>
-  <q-dialog v-model="open">
+  <q-dialog
+    v-model="open"
+    :aria-label="activePresentation?.title || activeAction?.title"
+    @show="focusCloseButton"
+  >
     <q-card class="action-dialog-card">
       <q-card-section class="row items-center">
         <h2 class="text-h6 q-my-none">
           {{ activePresentation?.title || activeAction?.title }}
         </h2>
         <q-space />
-        <q-btn v-close-popup flat round dense icon="close" aria-label="关闭" />
+        <q-btn
+          ref="closeButton"
+          v-close-popup
+          flat
+          round
+          dense
+          icon="close"
+          aria-label="关闭"
+        />
       </q-card-section>
       <q-separator />
       <q-card-section class="scroll action-dialog-content">

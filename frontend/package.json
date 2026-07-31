@@ -31,9 +31,10 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@quasar/app-vite": "^2.4.0",
+    "@axe-core/playwright": "4.12.1",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "1.61.1",
+    "@quasar/app-vite": "^2.4.0",
     "@types/node": "24.13.3",
     "@vitejs/plugin-vue": "6.0.8",
     "eslint": "^10.7.0",

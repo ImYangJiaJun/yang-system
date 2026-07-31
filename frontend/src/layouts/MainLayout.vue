@@ -121,12 +121,16 @@ async function endSession() {
           <strong>{{ activeIdentityTitle }}</strong>
           <small>选择模块开始处理业务</small>
         </div>
-        <q-list padding class="formal-nav-list">
-          <template v-if="moduleMode">
-            <q-item-label header class="formal-nav-heading">
-              业务模块
-            </q-item-label>
-            <nav data-testid="module-navigation" aria-label="业务模块">
+        <nav
+          class="formal-nav-list"
+          :aria-label="moduleMode ? '业务模块' : '业务菜单'"
+          :data-testid="moduleMode ? 'module-navigation' : undefined"
+        >
+          <q-list padding role="none">
+            <template v-if="moduleMode">
+              <q-item-label header class="formal-nav-heading">
+                业务模块
+              </q-item-label>
               <q-item
                 v-for="module in currentIdentityModules"
                 :key="module.id"
@@ -144,51 +148,51 @@ async function endSession() {
                   <q-item-label>{{ module.title }}</q-item-label>
                 </q-item-section>
               </q-item>
-            </nav>
-          </template>
+            </template>
 
-          <template v-else>
-            <q-item-label header class="formal-nav-heading">
-              业务菜单
-            </q-item-label>
-            <q-item
-              v-for="view in views"
-              :key="view.view_id"
-              v-ripple
-              clickable
-              :active="selectedView?.view_id === view.view_id"
-              active-class="formal-nav-active"
-              @click="openBusinessView(view.view_id)"
-            >
+            <template v-else>
+              <q-item-label header class="formal-nav-heading">
+                业务菜单
+              </q-item-label>
+              <q-item
+                v-for="view in views"
+                :key="view.view_id"
+                v-ripple
+                clickable
+                :active="selectedView?.view_id === view.view_id"
+                active-class="formal-nav-active"
+                @click="openBusinessView(view.view_id)"
+              >
+                <q-item-section avatar
+                  ><q-icon name="view_list"
+                /></q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ view.title || view.table }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+            <q-item v-if="loading" class="nav-loading">
               <q-item-section avatar
-                ><q-icon name="view_list"
+                ><q-spinner color="primary" size="22px"
               /></q-item-section>
+              <q-item-section>正在加载业务目录</q-item-section>
+            </q-item>
+            <q-item
+              v-else-if="
+                moduleMode ? !currentIdentityModules.length : !views.length
+              "
+              class="nav-empty"
+            >
+              <q-item-section avatar><q-icon name="inbox" /></q-item-section>
               <q-item-section>
-                <q-item-label>{{ view.title || view.table }}</q-item-label>
+                <q-item-label>暂无可访问页面</q-item-label>
+                <q-item-label caption>{{
+                  error?.message || "后端尚未投影当前身份的 Module"
+                }}</q-item-label>
               </q-item-section>
             </q-item>
-          </template>
-          <q-item v-if="loading" class="nav-loading">
-            <q-item-section avatar
-              ><q-spinner color="primary" size="22px"
-            /></q-item-section>
-            <q-item-section>正在加载业务目录</q-item-section>
-          </q-item>
-          <q-item
-            v-else-if="
-              moduleMode ? !currentIdentityModules.length : !views.length
-            "
-            class="nav-empty"
-          >
-            <q-item-section avatar><q-icon name="inbox" /></q-item-section>
-            <q-item-section>
-              <q-item-label>暂无可访问页面</q-item-label>
-              <q-item-label caption>{{
-                error?.message || "后端尚未投影当前身份的 Module"
-              }}</q-item-label>
-            </q-item-section>
-          </q-item>
-        </q-list>
+          </q-list>
+        </nav>
 
         <div class="formal-drawer-footer">
           <div class="drawer-status">

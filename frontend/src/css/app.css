@@ -45,6 +45,21 @@ textarea {
   font: inherit;
 }
 
+:where(
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  [role="button"],
+  [role="tab"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  outline: 3px solid #fff !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 5px #004976 !important;
+}
+
 .app-shell {
   min-height: 100vh;
 }
@@ -270,7 +285,7 @@ textarea {
 
 .field-help {
   margin-top: 5px;
-  color: #8792a4;
+  color: #536273;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -641,8 +656,11 @@ textarea {
 }
 
 .action-dialog-card {
+  position: relative;
+  z-index: 1;
   width: min(720px, 86vw);
   max-width: 86vw;
+  background: #fff;
 }
 
 .action-dialog-content {
@@ -897,7 +915,7 @@ textarea {
 
 .formal-nav-heading {
   padding: 20px 20px 8px;
-  color: #8894a6;
+  color: #536273;
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.12em;
@@ -912,7 +930,7 @@ textarea {
 
 .formal-drawer-footer {
   padding: 15px 20px 18px;
-  color: #8591a2;
+  color: #536273;
   border-top: 1px solid #ebeff4;
   font-size: 11px;
 }
@@ -1797,7 +1815,7 @@ textarea {
 
 .module-page-heading p {
   margin-top: 4px;
-  color: #78909c;
+  color: #546e7a;
 }
 
 .module-data-card {
