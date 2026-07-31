@@ -46,6 +46,7 @@ pub(super) fn build_module(
         passwords,
         rate_limiter,
         grant_resolver,
+        security.issue_refresh_credential_version,
     ));
     let module = ModuleSpec::new(
         ModuleName::new("account.user")

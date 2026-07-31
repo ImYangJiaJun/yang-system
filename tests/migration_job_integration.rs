@@ -29,6 +29,7 @@ fn security_settings() -> Arc<SecuritySettings> {
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        issue_refresh_credential_version: false,
         trusted_proxy_cidrs: Vec::new(),
     })
 }
@@ -140,7 +141,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 9, "应记录 9 个 applied 版本");
+        ensure!(migration_count == 10, "应记录 10 个 applied 版本");
         let authz_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'authz_version'",
         )
@@ -151,6 +152,17 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
             authz_version_shape
                 == Some(("bigint".to_string(), "NO".to_string(), Some("1".to_string()))),
             "authz_version 必须是 BIGINT NOT NULL DEFAULT 1: {authz_version_shape:?}"
+        );
+        let credential_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'credential_version'",
+        )
+        .fetch_optional(control.pool())
+        .await
+        .context("读取凭据版本列结构失败")?;
+        ensure!(
+            credential_version_shape
+                == Some(("bigint".to_string(), "NO".to_string(), Some("0".to_string()))),
+            "credential_version 必须是 BIGINT NOT NULL DEFAULT 0: {credential_version_shape:?}"
         );
         let outbox_indexes: BTreeSet<String> = sqlx::query_scalar(
             "SELECT DISTINCT INDEX_NAME FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'authorization_outbox'",
@@ -236,9 +248,19 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .await
         .context("读取迁移哨兵授权版本失败")?;
         ensure!(sentinel_authz_version == 1, "新增用户必须取得授权版本默认值 1");
+        let sentinel_credential_version: i64 = sqlx::query_scalar(
+            "SELECT `credential_version` FROM `users` WHERE username = 'migration_sentinel'",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取迁移哨兵凭据版本失败")?;
+        ensure!(
+            sentinel_credential_version == 0,
+            "新增用户必须取得凭据版本默认值 0"
+        );
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version')",
         )
         .execute(control.pool())
         .await

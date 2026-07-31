@@ -191,6 +191,9 @@ pub struct SecuritySettings {
     pub auth_rate_limit_window_seconds: u64,
     pub auth_rate_limit_ip_attempts: u64,
     pub auth_rate_limit_username_attempts: u64,
+    /// 所有实例均已支持凭据版本读取后，才开启新 Refresh Token 字段签发。
+    #[serde(default)]
+    pub issue_refresh_credential_version: bool,
     /// 允许提供 `Forwarded`/`X-Forwarded-For` 的 TCP 对端网段；空列表表示完全忽略。
     #[serde(default)]
     pub trusted_proxy_cidrs: Vec<String>,
@@ -601,6 +604,7 @@ argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
 auth_rate_limit_ip_attempts = 30
 auth_rate_limit_username_attempts = 10
+issue_refresh_credential_version = false
 [shutdown]
 total_timeout_seconds = 30
 [observability]
@@ -632,6 +636,7 @@ filter = "info"
         assert_eq!(settings.authorization.outbox_poll_interval_ms, 250);
         assert_eq!(settings.authorization.outbox_batch_size, 100);
         assert!(settings.security.trusted_proxy_cidrs.is_empty());
+        assert!(!settings.security.issue_refresh_credential_version);
         assert_eq!(settings.shutdown.total_timeout_seconds, 30);
         assert!(!settings.observability.metrics_enabled);
         assert!(!settings.observability.traces_enabled);

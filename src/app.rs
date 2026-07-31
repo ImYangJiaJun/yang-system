@@ -105,6 +105,7 @@ mod tests {
             auth_rate_limit_window_seconds: 60,
             auth_rate_limit_ip_attempts: 30,
             auth_rate_limit_username_attempts: 10,
+            issue_refresh_credential_version: false,
             trusted_proxy_cidrs: Vec::new(),
         });
         let app =

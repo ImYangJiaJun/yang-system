@@ -66,6 +66,8 @@ argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
 auth_rate_limit_ip_attempts = 30
 auth_rate_limit_username_attempts = 10
+# 三阶段发布：先保持 false 部署兼容读取；确认无旧实例后改为 true 开启 Refresh 凭据版本签发。
+issue_refresh_credential_version = false
 # 默认不信任任何 Forwarded/X-Forwarded-For；仅填写实际反向代理的最小 CIDR。
 # 示例：trusted_proxy_cidrs = ["127.0.0.1/32", "10.42.0.0/24"]
 trusted_proxy_cidrs = []

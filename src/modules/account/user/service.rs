@@ -12,6 +12,7 @@ use std::sync::Arc;
 use yang_base::action::auth::TokenPairClaims;
 use yang_base::action::ActionContext;
 use yang_base::table::Record;
+use yang_base::token::TokenClaims;
 use yang_base::BaseError;
 
 pub(super) struct AuthenticatedUser {
@@ -21,6 +22,7 @@ pub(super) struct AuthenticatedUser {
 struct AuthorizationSnapshot {
     username: String,
     authz_version: i64,
+    credential_version: i64,
     grants: AuthorizationGrants,
 }
 
@@ -30,6 +32,7 @@ pub(super) struct UserService {
     passwords: Arc<PasswordEngine>,
     rate_limiter: Arc<AuthRateLimiter>,
     grant_resolver: Arc<dyn GrantResolver>,
+    issue_refresh_credential_version: bool,
 }
 
 impl UserService {
@@ -38,12 +41,14 @@ impl UserService {
         passwords: Arc<PasswordEngine>,
         rate_limiter: Arc<AuthRateLimiter>,
         grant_resolver: Arc<dyn GrantResolver>,
+        issue_refresh_credential_version: bool,
     ) -> Self {
         Self {
             users,
             passwords,
             rate_limiter,
             grant_resolver,
+            issue_refresh_credential_version,
         }
     }
 
@@ -104,7 +109,7 @@ impl UserService {
         user_id: i64,
     ) -> Result<TokenPairClaims, BaseError> {
         let snapshot = self.authorization_snapshot(ctx, user_id).await?;
-        super::claims::claims_for_user(&snapshot.username, snapshot.authz_version, &snapshot.grants)
+        self.claims_from_snapshot(&snapshot)
     }
 
     pub(super) async fn claims_for_subject(
@@ -116,6 +121,36 @@ impl UserService {
             .parse::<i64>()
             .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
         self.claims_for(ctx, user_id).await
+    }
+
+    pub(super) async fn claims_for_refresh(
+        &self,
+        ctx: &ActionContext,
+        old_claims: &TokenClaims,
+    ) -> Result<TokenPairClaims, BaseError> {
+        let user_id = old_claims
+            .sub
+            .parse::<i64>()
+            .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+        let snapshot = self.authorization_snapshot(ctx, user_id).await?;
+        super::claims::validate_refresh_credential_version(
+            old_claims,
+            snapshot.credential_version,
+        )?;
+        self.claims_from_snapshot(&snapshot)
+    }
+
+    fn claims_from_snapshot(
+        &self,
+        snapshot: &AuthorizationSnapshot,
+    ) -> Result<TokenPairClaims, BaseError> {
+        super::claims::claims_for_user(
+            &snapshot.username,
+            snapshot.authz_version,
+            snapshot.credential_version,
+            self.issue_refresh_credential_version,
+            &snapshot.grants,
+        )
     }
 
     pub(super) async fn view_by_id(
@@ -164,6 +199,7 @@ impl UserService {
             Ok(AuthorizationSnapshot {
                 username: state.username,
                 authz_version: state.authz_version,
+                credential_version: state.credential_version,
                 grants,
             })
         }
@@ -192,6 +228,9 @@ fn validate_authorization_state(state: &AuthorizationStateRecord) -> Result<(), 
     ensure_active_status(&state.status)?;
     if state.authz_version < 1 {
         return Err(BaseError::Unauthorized("用户授权版本无效".to_string()));
+    }
+    if state.credential_version < 0 {
+        return Err(BaseError::Unauthorized("用户凭据版本无效".to_string()));
     }
     Ok(())
 }

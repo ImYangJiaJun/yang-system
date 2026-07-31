@@ -58,6 +58,14 @@ Catalog；启动和迁移作业都会精确校验列、CHECK、索引、引擎�
 项目名称唯一性、任务分页组合索引和 owner/project/parent 复合外键共同约束跨工作区
 关系、跨项目父子关系与删除顺序。发布时必须按版本顺序先项目、后任务。
 
+`20260731_0010_add_user_credential_version` 增加独立的凭据/全量会话版本，使用列
+完成探针精确匹配 `BIGINT NOT NULL DEFAULT 0`。该版本必须按三阶段发布：先执行迁移；
+再让全部实例以 `security.issue_refresh_credential_version = false` 部署兼容读取（旧
+Refresh 缺字段按 0 比较）；确认没有旧实例后改为 `true`，开始只在 Refresh Token
+签发 `credential_version`。Access Token 继续只使用 `authz_version`。在开关开启前
+不得发布会递增 `credential_version` 的凭据写操作，否则版本大于 0 的用户会拿到
+无法继续刷新的兼容期 Token。
+
 ## 中断、并发与恢复
 
 - 同一数据库的显式迁移作业由 MySQL advisory lock 串行化；后到作业等待锁并重新

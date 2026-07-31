@@ -6,6 +6,7 @@ use yang_base::action::auth::{
 };
 use yang_base::action::{Action as BusinessAction, ActionContext, ApiResponse, TypedHandler};
 use yang_base::definition::{ModuleSpec, ParamInput, Params};
+use yang_base::token::TokenClaims;
 use yang_base::BaseError;
 
 #[derive(Clone)]
@@ -29,6 +30,14 @@ impl RefreshClaimsResolver for UserClaimsResolver {
         subject: &str,
     ) -> Result<TokenPairClaims, BaseError> {
         self.service.claims_for_subject(ctx, subject).await
+    }
+
+    async fn resolve_pair_from_claims(
+        &self,
+        ctx: &ActionContext,
+        old_claims: &TokenClaims,
+    ) -> Result<TokenPairClaims, BaseError> {
+        self.service.claims_for_refresh(ctx, old_claims).await
     }
 }
 

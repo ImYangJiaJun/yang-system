@@ -5,7 +5,8 @@
 //! 提权查询暴露给 Action。
 
 use super::schema::{
-    AUTHZ_VERSION, PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID, USER_VIEW_FIELDS,
+    AUTHZ_VERSION, CREDENTIAL_VERSION, PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID,
+    USER_VIEW_FIELDS,
 };
 use std::sync::Arc;
 use yang_base::action::ActionContext;
@@ -13,7 +14,7 @@ use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
 
 const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, PASSWORD_HASH, STATUS];
-const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION];
+const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION, CREDENTIAL_VERSION];
 
 pub(super) struct CredentialRecord {
     pub(super) id: i64,
@@ -37,6 +38,7 @@ pub(super) struct AuthorizationStateRecord {
     pub(super) username: String,
     pub(super) status: String,
     pub(super) authz_version: i64,
+    pub(super) credential_version: i64,
 }
 
 impl TryFrom<&Record> for AuthorizationStateRecord {
@@ -47,6 +49,7 @@ impl TryFrom<&Record> for AuthorizationStateRecord {
             username: record.require(USERNAME)?,
             status: record.require(STATUS)?,
             authz_version: record.require(AUTHZ_VERSION)?,
+            credential_version: record.require(CREDENTIAL_VERSION)?,
         })
     }
 }
@@ -179,9 +182,11 @@ mod tests {
 
         assert!(repository
             .trusted_query(&ctx)
-            .and_then(|query| query.select_fields(&[PASSWORD_HASH, AUTHZ_VERSION]))
+            .and_then(|query| {
+                query.select_fields(&[PASSWORD_HASH, AUTHZ_VERSION, CREDENTIAL_VERSION])
+            })
             .is_ok());
-        for field_name in [PASSWORD_HASH, AUTHZ_VERSION] {
+        for field_name in [PASSWORD_HASH, AUTHZ_VERSION, CREDENTIAL_VERSION] {
             assert!(matches!(
                 ctx.table_query()
                     .and_then(|query| query.select_fields(&[field_name])),

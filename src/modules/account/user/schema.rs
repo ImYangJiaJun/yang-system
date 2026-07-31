@@ -13,6 +13,7 @@ pub(super) const USERNAME: &str = "username";
 pub(super) const PASSWORD_HASH: &str = "password_hash";
 pub(super) const STATUS: &str = "status";
 pub(super) const AUTHZ_VERSION: &str = "authz_version";
+pub(super) const CREDENTIAL_VERSION: &str = "credential_version";
 pub(super) const CREATED_AT: &str = "created_at";
 pub(super) const UPDATED_AT: &str = "updated_at";
 pub(super) const USER_VIEW_FIELDS: &[&str] = &[USER_ID, USERNAME, STATUS, CREATED_AT, UPDATED_AT];
@@ -67,6 +68,12 @@ pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
                 .default(1_i64)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
+        credential_version => Int::new()
+                .title("凭据版本")
+                .require(true)
+                .default(0_i64)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
         created_at => Timestamp::new().title("创建时间").created_at(),
         updated_at => Timestamp::new().title("更新时间").updated_at(),
     };
@@ -97,6 +104,9 @@ mod tests {
         let authz_version = definition
             .field(AUTHZ_VERSION)
             .unwrap_or_else(|| panic!("应存在 authz_version 字段"));
+        let credential_version = definition
+            .field(CREDENTIAL_VERSION)
+            .unwrap_or_else(|| panic!("应存在 credential_version 字段"));
 
         assert_eq!(definition.name(), "users");
         assert_eq!(definition.primary_key(), USER_ID);
@@ -111,7 +121,14 @@ mod tests {
         );
         assert!(!authz_version.is_filterable());
         assert!(!authz_version.is_sortable());
+        assert_eq!(
+            credential_version.default_value(),
+            Some(&serde_json::json!(0_i64))
+        );
+        assert!(!credential_version.is_filterable());
+        assert!(!credential_version.is_sortable());
         assert!(!USER_VIEW_FIELDS.contains(&AUTHZ_VERSION));
+        assert!(!USER_VIEW_FIELDS.contains(&CREDENTIAL_VERSION));
     }
 
     #[tokio::test]
@@ -124,7 +141,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
         let table = definition.bind(Arc::new(pool));
 
-        for field_name in [PASSWORD_HASH, AUTHZ_VERSION] {
+        for field_name in [PASSWORD_HASH, AUTHZ_VERSION, CREDENTIAL_VERSION] {
             let denied = table.query(["user"]).select_fields(&[field_name]);
             assert!(matches!(
                 denied,

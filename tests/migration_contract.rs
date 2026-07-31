@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 9);
+    assert_eq!(manifest.migrations().len(), 10);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -103,6 +103,18 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
             "任务迁移缺少规模索引或同租户关系约束: {required}"
         );
     }
+    let credential_version = manifest
+        .migrations()
+        .get(9)
+        .unwrap_or_else(|| panic!("应存在凭据版本迁移"));
+    assert_eq!(
+        credential_version.version(),
+        "20260731_0010_add_user_credential_version"
+    );
+    assert!(credential_version.completion_check().is_some());
+    assert!(credential_version
+        .sql()
+        .contains("ADD COLUMN `credential_version` BIGINT NOT NULL DEFAULT 0"));
 }
 
 #[test]

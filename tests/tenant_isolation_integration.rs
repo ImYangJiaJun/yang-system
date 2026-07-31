@@ -167,6 +167,7 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 1_000,
+        issue_refresh_credential_version: false,
         trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), security)?;

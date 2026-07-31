@@ -103,7 +103,7 @@ impl MigrationDescriptor {
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 9] = [
+const MIGRATIONS: [MigrationDescriptor; 10] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -181,6 +181,20 @@ const MIGRATIONS: [MigrationDescriptor; 9] = [
         prerequisite: "20260731_0008_create_work_project 已完成；MySQL 8 支持递归 CTE",
         recovery: "DDL 可重入；失败时核对 owner/project/parent 复合外键与声明索引后原版本重跑",
         completion_check: None,
+    },
+    MigrationDescriptor {
+        version: "20260731_0010_add_user_credential_version",
+        sql: include_str!("../migrations/20260731_0010_add_user_credential_version.sql"),
+        description: "为用户增加独立的凭据与全量会话单调版本",
+        prerequisite: "20260731_0009_create_work_task 已完成；先部署兼容读取版本，再开启新字段签发",
+        recovery: "列完成探针精确核对 bigint、NOT NULL 与默认值 0；原子 DDL 已提交时只恢复迁移状态",
+        completion_check: Some(ColumnCompletionDescriptor {
+            table: "users",
+            column: "credential_version",
+            column_type: "bigint",
+            nullable: false,
+            default: Some("0"),
+        }),
     },
 ];
 

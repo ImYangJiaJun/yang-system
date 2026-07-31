@@ -56,6 +56,19 @@ async fn dispatch(
     headers: &[(&str, &str)],
     query: &[(&str, &str)],
 ) -> anyhow::Result<ApiResponse> {
+    dispatch_raw(app, module, action, body, headers, query)
+        .await
+        .map_err(|error| anyhow::anyhow!("{module}.{action} 调用失败: {error}"))
+}
+
+async fn dispatch_raw(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    body: Value,
+    headers: &[(&str, &str)],
+    query: &[(&str, &str)],
+) -> Result<ApiResponse, BaseError> {
     let mut request = Request::new(body);
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -63,13 +76,15 @@ async fn dispatch(
     for (name, value) in query {
         request = request.query(*name, *value);
     }
-    let peer: SocketAddr = "127.0.0.1:41000".parse()?;
+    let peer: SocketAddr = "127.0.0.1:41000"
+        .parse()
+        .map_err(|error| BaseError::ConfigError(format!("测试对端地址无效: {error}")))?;
     let context = app
         .context(request)
         .with_request_meta(RequestMeta::new().with_peer_addr(peer));
-    app.dispatch_context(action_handle(app, module, action)?, context)
-        .await
-        .map_err(|error| anyhow::anyhow!("{module}.{action} 调用失败: {error}"))
+    let handle = action_handle(app, module, action)
+        .map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    app.dispatch_context(handle, context).await
 }
 
 async fn dispatch_token_action(
@@ -215,8 +230,27 @@ fn token_authz_version(tools: &yang_base::tools::Tools, token: &str) -> anyhow::
         .context("Token 缺少正整数 authz_version")
 }
 
+fn token_credential_version(tools: &yang_base::tools::Tools, token: &str) -> anyhow::Result<i64> {
+    tools
+        .token()?
+        .verify_token(token)?
+        .custom
+        .get("credential_version")
+        .and_then(Value::as_i64)
+        .filter(|version| *version >= 0)
+        .context("Refresh Token 缺少非负 credential_version")
+}
+
 async fn database_authz_version(pool: &sqlx::MySqlPool, user_id: i64) -> anyhow::Result<i64> {
     sqlx::query_scalar("SELECT authz_version FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+}
+
+async fn database_credential_version(pool: &sqlx::MySqlPool, user_id: i64) -> anyhow::Result<i64> {
+    sqlx::query_scalar("SELECT credential_version FROM users WHERE id = ?")
         .bind(user_id)
         .fetch_one(pool)
         .await
@@ -319,6 +353,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), Arc::clone(&security))?;
@@ -393,8 +428,17 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .context("登录响应缺少 access_token")?;
     let login_authz_version = token_authz_version(&tools, access_token)?;
     ensure!(
-        login_authz_version == token_authz_version(&tools, &refresh_token)?,
-        "同次登录签发的 Access/Refresh Token 必须携带同一授权版本"
+        tools
+            .token()?
+            .verify_token(access_token)?
+            .custom
+            .get("credential_version")
+            .is_none(),
+        "Access Token 不得携带未被请求校验器消费的凭据版本"
+    );
+    ensure!(
+        token_credential_version(&tools, &refresh_token)? == 0,
+        "开启签发后 Refresh Token 必须携带数据库凭据版本"
     );
     let bootstrap = data(
         dispatch(
@@ -440,9 +484,8 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .as_str()
         .context("平台管理员刷新响应缺少 access_token")?;
     ensure!(
-        token_authz_version(&tools, admin_access_token)?
-            == token_authz_version(&tools, &admin_refresh_token)?,
-        "refresh 签发的 Access/Refresh Token 必须携带同一授权版本"
+        token_credential_version(&tools, &admin_refresh_token)? == 0,
+        "refresh 签发的新 Refresh Token 必须保持当前凭据版本"
     );
     ensure!(
         token_authz_version(&tools, admin_access_token)? == login_authz_version + 1,
@@ -1311,6 +1354,68 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .await?;
     mysql_outage_authorization_redis.close().await;
 
+    let current_credential_version =
+        database_credential_version(tools.mysql()?.pool(), user_id).await?;
+    ensure!(
+        current_credential_version == 0,
+        "未发生凭据事件前版本应保持为 0"
+    );
+    let (_, future_refresh_token) = tools.token()?.generate_token_pair_with_refresh_claims(
+        &user_id.to_string(),
+        Value::Null,
+        json!({ "credential_version": current_credential_version + 1 }),
+    )?;
+    let future_cookie = format!("yang_refresh={future_refresh_token}");
+    let future_attempt = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", future_cookie.as_str())],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(future_attempt, Err(BaseError::Unauthorized(_))),
+        "领先数据库的 Refresh 凭据版本必须拒绝"
+    );
+    sqlx::query("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?")
+        .bind(user_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let recovered_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", future_cookie.as_str())],
+        &[],
+    )
+    .await?;
+    let current_refresh_token = refresh_cookie(&recovered_response)?;
+    ensure!(
+        token_credential_version(&tools, &current_refresh_token)? == 1,
+        "版本拒绝不得提前消费旧 JTI，数据库追平后同一 Token 应可完成一次轮换"
+    );
+    sqlx::query("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?")
+        .bind(user_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let stale_cookie = format!("yang_refresh={current_refresh_token}");
+    let stale_attempt = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", stale_cookie.as_str())],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(stale_attempt, Err(BaseError::Unauthorized(_))),
+        "落后数据库的旧 Refresh Token 即使未过期也必须拒绝"
+    );
+
     tools.close().await;
     Ok(())
 }
@@ -1373,6 +1478,7 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), security)?;
