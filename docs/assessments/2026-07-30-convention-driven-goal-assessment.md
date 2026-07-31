@@ -227,7 +227,7 @@
 6. **已满足（自动门禁，2026-07-31）：** 登录、角色、正式模块和表单对话框通过 axe WCAG 2.2 AA 扫描；纯键盘完成登录、角色选择、模块操作，关键控件有可见焦点，对话框打开后聚焦且关闭后恢复触发点。屏幕阅读器、高对比度和语音控制仍按目标用户/采购规范做环境人工验收。
 7. **已满足（本地基线，2026-07-31）：** `.ecc/benchmarks/work-scale.json` 固化 1 万项目/5 万任务环境、SLO 和实测值；真实库测试覆盖第 500 页、relation options、100 节点上限、100 条原子批量和十路并发。
 8. **已满足（产品合同，2026-07-31）：** 当前发布范围明确为单语言 `zh-CN`，HTML、Quasar 与 locale-sensitive API 均固定同一 locale；第二语言/地区格式触发条件和完整重开验收已写入 `frontend/docs/LOCALE.md`。
-9. 推送前运行 `python scripts/run_ci.py full`、隔离 Playwright、必要的真实 MySQL/Redis integration；远程 CI 每个 job 都必须有终态成功证据。
+9. **已满足（本地终态，2026-07-31）：** `python scripts/run_ci.py full` 与隔离 MySQL/Redis 的 `integration` 均从头通过；远程 CI 每个 job 的终态仍须在 push 后取证，不能用本地结果代替。
 
 ## 八、优先改进路径
 
@@ -631,6 +631,44 @@ pnpm --dir frontend check
 `LOCALE.md` 所列任一重开事实后，必须在上线前完成 locale 协商、Catalog 缓存隔离、
 文案所有权、地区/时区格式、伪本地化、每语言 Playwright/axe 和人工辅助技术矩阵；届时
 本行状态应恢复为未闭环，不能沿用当前单语言豁免。
+
+### 9.10 2026-07-31 最终审计：先红后绿的全量与真实依赖门禁
+
+最终审计没有复用各增量门槛的局部结果，而是在全部提交叠加后重新执行：
+
+```powershell
+python scripts/run_ci.py full
+
+$env:YANG_SYSTEM_TEST_DATABASE_URL = "mysql://root:***@127.0.0.1:3306/yang_system_test"
+$env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
+python scripts/run_ci.py integration
+```
+
+第一次 `full` 在架构检查阶段失败，实际证明门禁是 fail-closed：任务关系并发修复新增的
+workspace/project/task 行锁与 add/put 事务没有同步到租户数据路径清单，旧的无锁路径又成为
+孤儿条目。修复后：
+
+- `f94bbba` 将 add/put 的 workspace 锁、当前关系锁、项目/父任务锁与写入放进同一事务，
+  并使代码标记与 `tenant-data-paths.md` 一一对应；
+- `2275e8a` 使批量完成共享 workspace 锁，并在提交前要求 `affected == requested`，任何
+  并发集合漂移都会整体回滚；
+- `1e07614` 增加相反父关系并发写的真实库对抗：两个请求必须恰好一个成功，最终只保留
+  一条边且无环。
+
+修复后的 `full` 从头通过：架构自检与实际检查、Rust formatting/all-targets/all-features、
+Clippy `-D warnings`、生产依赖审计、22 个文件共 96 项 Vitest、5 个 locale 破坏性变异、
+生产构建与产物检查、7 个部署合同变异、26 项隔离 dev E2E 和 2 项 production-build E2E
+全部成功。真实依赖 `integration` 共通过 10 项：Redis 单调缓存、outbox 并发 claim/retry/
+过期 lease 重放、版本化迁移 plan/apply/retry/drift、schema apply 并发与失败重试、
+bootstrap 单次信任根、两项租户隔离，以及账号/租户生命周期和 work 规模对抗。
+
+针对最后三笔 work 并发修复，另以 `--nocapture` 重跑规模测试并通过：1 万项目、5 万任务、
+100 层树，seed 3437 ms，第 500 页 p95 156 ms，1 万关系选项 p95 24 ms，100 条原子批量
+23 ms，10 路并发 111 ms。该结果仍只是本机回归基线，不承诺生产容量。
+
+本次未 push，因此远程 CI job 仍无新提交终态；真实域名 TLS/边缘 smoke、Alertmanager
+接收器送达以及屏幕阅读器/高对比度/语音控制仍须在确定目标环境后取证。它们是环境发布
+终态，不得被本地 `full` 或 demo backend E2E 替代。
 
 ## 十、最终结论
 
