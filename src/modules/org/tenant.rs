@@ -1,83 +1,77 @@
 //! 企业租户的可信解析策略。
+//! raw-sql-boundary: domain-service org-tenant-capability
 
-use super::organization::{ACTIVE_STATUS as ACTIVE_ORG_STATUS, STATUS as ORG_STATUS};
-use super::user::{
-    ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS, ORG_ID, STATUS as MEMBERSHIP_STATUS, USER_ID,
-};
 use async_trait::async_trait;
 use std::sync::Arc;
-use yang_base::action::{ActionContext, TenantContext, TenantId, TenantResolution, TenantResolver};
-use yang_base::table::TableDefinition;
+use yang_base::action::{
+    ActionContext, ContextKey, TenantContext, TenantId, TenantResolution, TenantResolver,
+};
 use yang_base::BaseError;
 
-#[async_trait]
-trait OrgMembershipReader: Send + Sync + 'static {
-    async fn contains(
-        &self,
-        context: &ActionContext,
-        user_id: i64,
-        org_id: TenantId,
-    ) -> Result<bool, BaseError>;
+pub(super) const ORG_MEMBERSHIP_CAPABILITY: ContextKey<OrgMembershipCapability> =
+    ContextKey::new("org_membership_capability");
+
+/// 同一次租户事实查询签发的请求级成员 capability。
+///
+/// 它只消除事务前的重复查询；写事务仍必须锁定并复核当前管理员事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OrgMembershipCapability {
+    actor_id: i64,
+    tenant_id: TenantId,
+    is_admin: bool,
 }
 
-/// 使用 `org_user` 表核验成员关系的生产实现。
-struct DatabaseMembershipReader {
-    memberships: TableDefinition,
-    organizations: TableDefinition,
-}
-
-impl DatabaseMembershipReader {
-    fn new(memberships: TableDefinition, organizations: TableDefinition) -> Self {
+impl OrgMembershipCapability {
+    fn new(actor_id: i64, tenant_id: TenantId, is_admin: bool) -> Self {
         Self {
-            memberships,
-            organizations,
+            actor_id,
+            tenant_id,
+            is_admin,
         }
+    }
+
+    pub(super) fn authorizes_admin_precheck(self, actor_id: i64, tenant_id: TenantId) -> bool {
+        self.actor_id == actor_id && self.tenant_id == tenant_id && self.is_admin
     }
 }
 
 #[async_trait]
-impl OrgMembershipReader for DatabaseMembershipReader {
-    async fn contains(
+trait OrgMembershipReader: Send + Sync + 'static {
+    async fn resolve(
         &self,
         context: &ActionContext,
         user_id: i64,
         org_id: TenantId,
-    ) -> Result<bool, BaseError> {
-        let table = self
-            .memberships
-            // tenant-boundary: database tenant-membership-database
-            .bind(Arc::new(context.tools().mysql()?.pool().clone()));
-        let rows = table
-            // tenant-boundary: unscoped-query tenant-membership-lookup
-            .query(std::iter::empty::<&str>())
-            .select_fields(&["id"])?
-            .where_eq(ORG_ID, serde_json::json!(org_id.get()))?
-            .where_eq(USER_ID, serde_json::json!(user_id))?
-            .where_eq(
-                MEMBERSHIP_STATUS,
-                serde_json::json!(ACTIVE_MEMBERSHIP_STATUS),
-            )?
-            .page(1, 1)?
-            .all()
-            .await?;
-        if rows.is_empty() {
-            return Ok(false);
-        }
+    ) -> Result<Option<OrgMembershipCapability>, BaseError>;
+}
 
-        let organizations = self
-            .organizations
-            // tenant-boundary: database tenant-organization-database
-            .bind(Arc::new(context.tools().mysql()?.pool().clone()));
-        let rows = organizations
-            // tenant-boundary: unscoped-query tenant-organization-status
-            .query(std::iter::empty::<&str>())
-            .select_fields(&["id"])?
-            .where_eq("id", serde_json::json!(org_id.get()))?
-            .where_eq(ORG_STATUS, serde_json::json!(ACTIVE_ORG_STATUS))?
-            .page(1, 1)?
-            .all()
-            .await?;
-        Ok(!rows.is_empty())
+/// 使用单次 JOIN 同时核验成员、企业状态并投影管理员能力的生产实现。
+struct DatabaseMembershipReader;
+
+#[async_trait]
+impl OrgMembershipReader for DatabaseMembershipReader {
+    async fn resolve(
+        &self,
+        context: &ActionContext,
+        user_id: i64,
+        org_id: TenantId,
+    ) -> Result<Option<OrgMembershipCapability>, BaseError> {
+        // tenant-boundary: raw-sql tenant-membership-capability
+        let is_admin: Option<bool> = sqlx::query_scalar(
+            "SELECT membership.admin FROM org_user AS membership \
+             INNER JOIN org_org AS organization ON organization.id = membership.org_org \
+             WHERE membership.org_org = ? AND membership.user_user = ? \
+               AND membership.status = 'active' AND organization.status = 'active' \
+             LIMIT 1",
+        )
+        .bind(org_id.get())
+        .bind(user_id)
+        // tenant-boundary: database tenant-membership-capability-database
+        .fetch_optional(context.tools().mysql()?.pool())
+        .await
+        .map_err(yang_db::DbError::from)
+        .map_err(BaseError::from)?;
+        Ok(is_admin.map(|admin| OrgMembershipCapability::new(user_id, org_id, admin)))
     }
 }
 
@@ -92,15 +86,29 @@ impl OrgTenantResolver {
         Self { memberships }
     }
 
-    /// 从成员关系表构造生产 resolver，不向 Addon 根泄漏内部读取器抽象。
-    pub(super) fn from_tables(
-        memberships: TableDefinition,
-        organizations: TableDefinition,
-    ) -> Self {
-        Self::new(Arc::new(DatabaseMembershipReader::new(
-            memberships,
-            organizations,
-        )))
+    /// 构造生产 resolver，不向 Addon 根泄漏内部读取器抽象。
+    pub(super) fn database() -> Self {
+        Self::new(Arc::new(DatabaseMembershipReader))
+    }
+
+    async fn resolve_authenticated_with_capability(
+        &self,
+        context: &ActionContext,
+        user: &yang_base::action::User,
+        requested: Option<TenantId>,
+    ) -> Result<(TenantResolution, Option<OrgMembershipCapability>), BaseError> {
+        if user.has_role("system") {
+            return Ok((TenantResolution::system_for(user)?, None));
+        }
+        let org_id = requested
+            .ok_or_else(|| BaseError::Unauthorized("请求缺少企业租户上下文".to_string()))?;
+        let Some(capability) = self.memberships.resolve(context, user.id, org_id).await? else {
+            return Err(BaseError::PermissionDenied(format!(
+                "用户无权访问企业 {}",
+                org_id.get()
+            )));
+        };
+        Ok((TenantContext::new(org_id).into(), Some(capability)))
     }
 
     async fn resolve_authenticated(
@@ -109,18 +117,9 @@ impl OrgTenantResolver {
         user: &yang_base::action::User,
         requested: Option<TenantId>,
     ) -> Result<TenantResolution, BaseError> {
-        if user.has_role("system") {
-            return TenantResolution::system_for(user);
-        }
-        let org_id = requested
-            .ok_or_else(|| BaseError::Unauthorized("请求缺少企业租户上下文".to_string()))?;
-        if !self.memberships.contains(context, user.id, org_id).await? {
-            return Err(BaseError::PermissionDenied(format!(
-                "用户无权访问企业 {}",
-                org_id.get()
-            )));
-        }
-        Ok(TenantContext::new(org_id).into())
+        self.resolve_authenticated_with_capability(context, user, requested)
+            .await
+            .map(|(resolution, _)| resolution)
     }
 }
 
@@ -136,6 +135,26 @@ impl TenantResolver for OrgTenantResolver {
             .ok_or_else(|| BaseError::Unauthorized("企业租户解析需要已认证用户".to_string()))?;
         self.resolve_authenticated(context, user, requested).await
     }
+
+    async fn resolve_with_context(
+        &self,
+        context: &mut ActionContext,
+        requested: Option<TenantId>,
+    ) -> Result<TenantResolution, BaseError> {
+        let user = context
+            .authenticated_user()
+            .cloned()
+            .ok_or_else(|| BaseError::Unauthorized("企业租户解析需要已认证用户".to_string()))?;
+        let (resolution, capability) = self
+            .resolve_authenticated_with_capability(context, &user, requested)
+            .await?;
+        if let Some(capability) = capability {
+            context
+                .request_context()
+                .insert(ORG_MEMBERSHIP_CAPABILITY, capability);
+        }
+        Ok(resolution)
+    }
 }
 
 #[cfg(test)]
@@ -148,13 +167,14 @@ mod tests {
 
     #[async_trait]
     impl OrgMembershipReader for FakeMembershipReader {
-        async fn contains(
+        async fn resolve(
             &self,
             _context: &ActionContext,
             user_id: i64,
             org_id: TenantId,
-        ) -> Result<bool, BaseError> {
-            Ok(user_id == 7 && org_id == TenantId::new(10))
+        ) -> Result<Option<OrgMembershipCapability>, BaseError> {
+            Ok((user_id == 7 && org_id == TenantId::new(10))
+                .then(|| OrgMembershipCapability::new(user_id, org_id, true)))
         }
     }
 
@@ -213,5 +233,15 @@ mod tests {
             }
             TenantResolution::Tenant(_) => panic!("system 角色不得伪装成普通租户"),
         }
+    }
+
+    #[test]
+    fn membership_capability_is_bound_to_actor_tenant_and_admin_fact() {
+        let admin = OrgMembershipCapability::new(7, TenantId::new(10), true);
+        assert!(admin.authorizes_admin_precheck(7, TenantId::new(10)));
+        assert!(!admin.authorizes_admin_precheck(8, TenantId::new(10)));
+        assert!(!admin.authorizes_admin_precheck(7, TenantId::new(20)));
+        assert!(!OrgMembershipCapability::new(7, TenantId::new(10), false)
+            .authorizes_admin_precheck(7, TenantId::new(10)));
     }
 }

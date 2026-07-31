@@ -9,7 +9,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 - 每个含生产 SQLx 查询的文件必须声明唯一的
   `//! raw-sql-boundary: <kind> <id>`，并与下表一一对应；
 - `domain-repository` 只能位于 `src/modules/**/repository.rs`；
-- `domain-service` 只用于明确的授权快照、实时 guard 或锁服务边界；
+- `domain-service` 只用于明确的授权快照、租户 capability、实时 guard 或锁服务边界；
 - 基础设施例外只允许审计 repository、授权 Outbox repository 与审计 schema
   validator；
 - 查询文本必须是代码中的静态字符串字面量，所有数据参数通过 `bind` 传入；
@@ -26,7 +26,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | `admin-user-repository` | domain-repository | `src/modules/admin/user/repository.rs` | 跨表列表、管理员行锁和与审计同事务的受控更新 |
 | `org-grant-snapshot` | domain-service | `src/modules/org/grants.rs` | Token 签发前按用户有效成员关系聚合授权，不接受请求租户 |
 | `org-access-repository` | domain-repository | `src/modules/org/access/repository.rs` | pre-tenant 企业发现 Join，范围固定为已认证 actor |
-| `org-member-guard` | domain-service | `src/modules/org/user/guard.rs` | 写操作前按可信租户与 actor 实时验证企业管理员身份 |
+| `org-tenant-capability` | domain-service | `src/modules/org/tenant.rs` | 单次 JOIN 校验 active 成员与企业并投影绑定 actor/tenant 的请求级管理员能力；事务内仍最终复核 |
 | `org-member-repository` | domain-repository | `src/modules/org/user/repository.rs` | 成员关系行锁、同租户校验、批量 writer 与审计原子性 |
 | `work-task-repository` | domain-repository | `src/modules/work/task/repository.rs` | 任务关系同租户校验、递归防环和批量完成事务 |
 | `audit-event-repository` | infrastructure-repository | `src/audit/repository.rs` | 业务成功走事务内追加；业务尚未开始或已失败的拒绝/失败结果可独立追加；两条路径都只允许 INSERT，不提供 UPDATE/DELETE |
@@ -41,7 +41,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 <!-- raw-sql-boundary: domain-repository admin-user-repository src/modules/admin/user/repository.rs -->
 <!-- raw-sql-boundary: domain-service org-grant-snapshot src/modules/org/grants.rs -->
 <!-- raw-sql-boundary: domain-repository org-access-repository src/modules/org/access/repository.rs -->
-<!-- raw-sql-boundary: domain-service org-member-guard src/modules/org/user/guard.rs -->
+<!-- raw-sql-boundary: domain-service org-tenant-capability src/modules/org/tenant.rs -->
 <!-- raw-sql-boundary: domain-repository org-member-repository src/modules/org/user/repository.rs -->
 <!-- raw-sql-boundary: domain-repository work-task-repository src/modules/work/task/repository.rs -->
 <!-- raw-sql-boundary: infrastructure-repository audit-event-repository src/audit/repository.rs -->

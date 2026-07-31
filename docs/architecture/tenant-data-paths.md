@@ -53,7 +53,17 @@
 | `work.task.complete` | personal-tenant/batch | 显式事务 + `TableQuery` | 最多 100 个唯一 ID；事务内 tenant scope 锁定并全有或全无更新 |
 
 `org.org` 和 `org.user` 的中间件顺序固定为 Token 认证后再解析租户；成员写操作在此后增加
-`OrgAdminGuardMiddleware`。`org.tenant` 是刻意不运行租户解析器的 pre-tenant 模块，但仍强制认证。
+`OrgAdminGuardMiddleware`。租户解析用单次 JOIN 同时校验成员与企业状态，并把绑定
+`actor + tenant + admin` 的请求 capability 交给 guard；它只承担事务前快速拒绝，成员
+writer 仍在事务内锁定并复核管理员事实。`org.tenant` 是刻意不运行租户解析器的
+pre-tenant 模块，但仍强制认证。
+
+本次收敛有可复现的本地证据，而不是只按查询条数推断。10,000 名成员、10 路并发、
+1,000 次请求的真实 MySQL 对比中，旧三查询路径 p95 为 10,951 μs、总耗时 863 ms；
+单 JOIN capability p95 为 3,830 μs、总耗时 275 ms，每请求 SQL 从 3 条降为 1 条。
+基准与非成员、disabled 企业、非管理员和 actor/tenant 绑定负例见
+`.ecc/benchmarks/tenant-capability.json` 与 `tests/tenant_query_benchmark.rs`。这是本地改造
+依据，不是生产容量声明；生产仍须观察 endpoint p95、连接池等待和数据库 QPS。
 
 ## 4. 显式旁路
 
@@ -68,13 +78,9 @@
 | `tenant-discovery-page` | raw-sql | `org/access/repository.rs` | `membership.user_user = actor_id`，同时校验成员和组织为 active |
 | `tenant-discovery-count` | raw-sql | `org/access/repository.rs` | 与分页查询使用相同 Join 和三个状态/身份谓词 |
 | `tenant-onboarding-create` | transaction | `org/access/repository.rs` | 新组织尚无 tenant id；组织和创建者管理员成员关系同事务提交 |
-| `tenant-membership-database` | database | `org/tenant.rs` | 只供租户解析器的成员资格查询使用 |
-| `tenant-membership-lookup` | unscoped-query | `org/tenant.rs` | 同时限定请求 `org_id`、已认证 `user_id` 和 active 成员状态 |
-| `tenant-organization-database` | database | `org/tenant.rs` | 只供租户解析器的组织状态查询使用 |
-| `tenant-organization-status` | unscoped-query | `org/tenant.rs` | 同一次解析继续限定同一 `org_id` 且组织必须 active |
-| `authorization-grant-snapshot` | raw-sql | `org/grants.rs` | 只按待签发 `user_id` 汇总“是否任一有效组织管理员”；租户写仍由实时管理员守卫二次校验 |
-| `member-admin-database` | database | `org/user/guard.rs` | 只供当前租户管理员实时校验使用 |
-| `member-admin-guard` | raw-sql | `org/user/guard.rs` | 同时限定可信 `tenant_id`、已认证 `user_id`、active 与 admin |
+| `tenant-membership-capability-database` | database | `org/tenant.rs` | 只供单次租户 capability JOIN 查询使用 |
+| `tenant-membership-capability` | raw-sql | `org/tenant.rs` | 同时限定请求 `org_id`、已认证 `user_id`、active 成员与 active 企业，并投影当前 admin 事实 |
+| `authorization-grant-snapshot` | raw-sql | `org/grants.rs` | 只按待签发 `user_id` 汇总“是否任一有效组织管理员”；请求 capability 和事务内最终复核仍使用实时事实 |
 | `member-admin-system` | system-capability | `org/user/guard.rs` | system 管理操作必须消费当前请求 capability，并核对 capability actor 与已认证用户一致；不授予数据查询旁路 |
 | `org-member-add-database` | database | `org/user/repository.rs` | 只供 add writer 开启显式事务；普通租户仍由 `table_query()` 注入 tenant key |
 | `org-member-put-database` | database | `org/user/repository.rs` | 只供 put writer 开启显式事务；成员锁和后续更新重复限定同一 capability |
@@ -105,13 +111,9 @@
 <!-- tenant-boundary: raw-sql tenant-discovery-page -->
 <!-- tenant-boundary: raw-sql tenant-discovery-count -->
 <!-- tenant-boundary: transaction tenant-onboarding-create -->
-<!-- tenant-boundary: database tenant-membership-database -->
-<!-- tenant-boundary: unscoped-query tenant-membership-lookup -->
-<!-- tenant-boundary: database tenant-organization-database -->
-<!-- tenant-boundary: unscoped-query tenant-organization-status -->
+<!-- tenant-boundary: database tenant-membership-capability-database -->
+<!-- tenant-boundary: raw-sql tenant-membership-capability -->
 <!-- tenant-boundary: raw-sql authorization-grant-snapshot -->
-<!-- tenant-boundary: database member-admin-database -->
-<!-- tenant-boundary: raw-sql member-admin-guard -->
 <!-- tenant-boundary: system-capability member-admin-system -->
 <!-- tenant-boundary: database org-member-add-database -->
 <!-- tenant-boundary: database org-member-put-database -->

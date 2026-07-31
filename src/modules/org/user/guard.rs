@@ -1,10 +1,9 @@
-//! 企业成员写操作的实时租户管理员校验。
-//! raw-sql-boundary: domain-service org-member-guard
+//! 企业成员写操作的请求 capability 快速校验。
 
-use super::ACTIVE_STATUS;
 use crate::authorization::{resource_authorization_checkpoint, ResourceAuthorizationCheckpoint};
+use crate::modules::org::tenant::ORG_MEMBERSHIP_CAPABILITY;
 use async_trait::async_trait;
-use yang_base::action::{ActionContext, ApiResponse, SystemTenantCapability, User};
+use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::ActionRef;
 use yang_base::router::{Middleware, Next};
 use yang_base::BaseError;
@@ -19,14 +18,15 @@ impl OrgAdminGuardMiddleware {
         Self { target }
     }
 
-    async fn is_active_admin(&self, ctx: &ActionContext) -> Result<bool, BaseError> {
-        let user = ctx
+    fn is_active_admin(&self, ctx: &mut ActionContext) -> Result<bool, BaseError> {
+        let (user_id, is_system) = ctx
             .authenticated_user()
+            .map(|user| (user.id, user.has_role("system")))
             .ok_or_else(|| BaseError::Unauthorized("企业成员管理需要已认证用户".to_string()))?;
-        if user.has_role("system") {
+        if is_system {
             // tenant-boundary: system-capability member-admin-system
             let capability = ctx.system_tenant()?;
-            if !system_capability_matches_user(capability, user) {
+            if capability.actor().user_id() != user_id {
                 return Err(BaseError::PermissionDenied(
                     "系统租户 capability 与当前操作者不匹配".to_string(),
                 ));
@@ -34,29 +34,16 @@ impl OrgAdminGuardMiddleware {
             return Ok(true);
         }
         let org_id = ctx.tenant()?.id();
-        // tenant-boundary: raw-sql member-admin-guard
-        sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(\
-                 SELECT 1 FROM `org_user` \
-                 WHERE `org_org` = ? \
-                   AND `user_user` = ? \
-                   AND `status` = ? \
-                   AND `admin` = TRUE \
-                 LIMIT 1\
-             )",
-        )
-        .bind(org_id.get())
-        .bind(user.id)
-        .bind(ACTIVE_STATUS)
-        // tenant-boundary: database member-admin-database
-        .fetch_one(ctx.tools().mysql()?.pool())
-        .await
-        .map_err(yang_db::DbError::from)
-        .map_err(Into::into)
+        let capability = *ctx.request_context().require(ORG_MEMBERSHIP_CAPABILITY)?;
+        Ok(capability.authorizes_admin_precheck(user_id, org_id))
     }
 }
 
-fn system_capability_matches_user(capability: SystemTenantCapability, user: &User) -> bool {
+#[cfg(test)]
+fn system_capability_matches_user(
+    capability: yang_base::action::SystemTenantCapability,
+    user: &yang_base::action::User,
+) -> bool {
     capability.actor().user_id() == user.id
 }
 
@@ -66,8 +53,12 @@ impl Middleware for OrgAdminGuardMiddleware {
         Some(&self.target)
     }
 
-    async fn handle(&self, ctx: ActionContext, next: Next<'_>) -> Result<ApiResponse, BaseError> {
-        if !self.is_active_admin(&ctx).await? {
+    async fn handle(
+        &self,
+        mut ctx: ActionContext,
+        next: Next<'_>,
+    ) -> Result<ApiResponse, BaseError> {
+        if !self.is_active_admin(&mut ctx)? {
             return Err(BaseError::PermissionDenied(
                 "当前用户不是该企业的有效管理员".to_string(),
             ));
@@ -81,7 +72,7 @@ impl Middleware for OrgAdminGuardMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yang_base::action::TenantResolution;
+    use yang_base::action::{TenantResolution, User};
 
     #[test]
     fn guard_is_bound_to_one_exact_registry_action() {

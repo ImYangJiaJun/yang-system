@@ -1,0 +1,40 @@
+{
+  "benchmark": "tenant-membership-capability",
+  "captured_at": "2026-07-31",
+  "status": "passed",
+  "command": "cargo test -p yang-system --test tenant_query_benchmark --locked joined_membership_capability_reduces_queries_with_equivalent_security_semantics -- --ignored --nocapture --test-threads=1",
+  "environment": {
+    "os": "Windows",
+    "cpu": "AMD Ryzen 9 5900HX with Radeon Graphics",
+    "mysql": "mysql:8.0",
+    "database_transport": "127.0.0.1:3306"
+  },
+  "dataset": {
+    "members": 10000,
+    "concurrent_requests": 10,
+    "measured_requests": 1000,
+    "warmup_requests_per_strategy": 50
+  },
+  "legacy_three_queries": {
+    "queries_per_request": 3,
+    "p50_us": 8150,
+    "p95_us": 10951,
+    "p99_us": 13093,
+    "total_ms": 863
+  },
+  "joined_capability": {
+    "queries_per_request": 1,
+    "p50_us": 2964,
+    "p95_us": 3830,
+    "p99_us": 4502,
+    "total_ms": 275
+  },
+  "adversarial_checks": [
+    "non_member_rejected",
+    "disabled_organization_rejected",
+    "non_admin_membership_does_not_gain_admin",
+    "capability_bound_to_actor_and_tenant",
+    "transactional_admin_recheck_retained"
+  ],
+  "scope": "Local reproducible comparison used to justify query consolidation; it is not a production capacity claim."
+}

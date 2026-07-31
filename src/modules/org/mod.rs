@@ -42,10 +42,7 @@ pub fn build_addon(
         .as_ref()
         .ok_or(BaseError::TableDefinitionNotSet)?
         .table_definition()?;
-    let resolver = tenant::OrgTenantResolver::from_tables(
-        membership_table.clone(),
-        organization_table.clone(),
-    );
+    let resolver = tenant::OrgTenantResolver::database();
     let access = access::build_module(
         organization_table,
         membership_table,

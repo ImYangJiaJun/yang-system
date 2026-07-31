@@ -64,6 +64,61 @@ async fn dispatch(
     body: Value,
     headers: &[(&str, &str)],
 ) -> Result<ApiResponse, BaseError> {
+    let first = dispatch_once(app, module, action, body.clone(), headers).await;
+    let challenge = match first {
+        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+        result => return result,
+    };
+    let authorization = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| *value)
+        .ok_or_else(|| BaseError::ConfigError("Step-up 目标请求缺少 authorization".to_string()))?;
+    let token = authorization.strip_prefix("Bearer ").ok_or_else(|| {
+        BaseError::ConfigError("Step-up 目标请求 authorization 不是 Bearer".to_string())
+    })?;
+    let claims = app.tools().token()?.verify_token(token)?;
+    let username = claims
+        .custom
+        .get("username")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BaseError::ConfigError("Step-up Access Token 缺少 username".to_string()))?;
+    let completed = dispatch_once(
+        app,
+        "account.user",
+        "step_up_complete",
+        json!({
+            "challenge": challenge,
+            "credentials": { "username": username, "password": PASSWORD }
+        }),
+        &[("authorization", authorization)],
+    )
+    .await?;
+    if completed.code != 0 {
+        return Err(BaseError::ConfigError(format!(
+            "租户隔离测试 Step-up 完成失败: code={}",
+            completed.code
+        )));
+    }
+    let proof = completed
+        .data
+        .as_ref()
+        .and_then(|data| data.get("proof"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| BaseError::ConfigError("Step-up 完成响应缺少 proof".to_string()))?
+        .to_owned();
+    let mut retry_headers = headers.to_vec();
+    retry_headers.push(("x-step-up-proof", proof.as_str()));
+    dispatch_once(app, module, action, body, &retry_headers).await
+}
+
+async fn dispatch_once(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    body: Value,
+    headers: &[(&str, &str)],
+) -> Result<ApiResponse, BaseError> {
     let mut request = Request::new(body);
     for (name, value) in headers {
         request = request.header(*name, *value);

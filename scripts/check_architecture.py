@@ -510,7 +510,7 @@ def raw_sql_boundary_path_allowed(kind: str, relative: Path) -> bool:
         return (
             value.startswith("src/modules/")
             and relative.stem
-            in {"authz_version", "grants", "guard", "lifecycle", "service"}
+            in {"authz_version", "grants", "guard", "lifecycle", "service", "tenant"}
         )
     if kind == "infrastructure-repository":
         return value in {

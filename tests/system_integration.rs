@@ -20,6 +20,8 @@ use yang_system::authorization::{
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::{AuthorizationSettings, SecuritySettings};
 
+const INTEGRATION_PASSWORD: &str = "correct-horse-battery-staple";
+
 fn integration_token_manager() -> TokenManager {
     TokenManager::new_symmetric_keyring(
         "integration-active".to_string(),
@@ -70,9 +72,72 @@ async fn dispatch(
     headers: &[(&str, &str)],
     query: &[(&str, &str)],
 ) -> anyhow::Result<ApiResponse> {
-    dispatch_raw(app, module, action, body, headers, query)
+    dispatch_raw_with_step_up(app, module, action, body, headers, query)
         .await
         .map_err(|error| anyhow::anyhow!("{module}.{action} 调用失败: {error}"))
+}
+
+fn dispatch_raw_with_step_up<'a>(
+    app: &'a BuiltApp,
+    module: &'a str,
+    action: &'a str,
+    body: Value,
+    headers: &'a [(&'a str, &'a str)],
+    query: &'a [(&'a str, &'a str)],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ApiResponse, BaseError>> + 'a>> {
+    Box::pin(async move {
+        let first = dispatch_raw(app, module, action, body.clone(), headers, query).await;
+        let challenge = match first {
+            Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+            result => return result,
+        };
+        let authorization = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| *value)
+            .ok_or_else(|| {
+                BaseError::ConfigError("Step-up 目标请求缺少 authorization".to_string())
+            })?;
+        let token = authorization.strip_prefix("Bearer ").ok_or_else(|| {
+            BaseError::ConfigError("Step-up 目标请求 authorization 不是 Bearer".to_string())
+        })?;
+        let claims = app.tools().token()?.verify_token(token)?;
+        let username = claims
+            .custom
+            .get("username")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                BaseError::ConfigError("Step-up Access Token 缺少 username".to_string())
+            })?;
+        let completed = dispatch_raw(
+            app,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": challenge,
+                "credentials": { "username": username, "password": INTEGRATION_PASSWORD }
+            }),
+            &[("authorization", authorization)],
+            &[],
+        )
+        .await?;
+        if completed.code != 0 {
+            return Err(BaseError::ConfigError(format!(
+                "集成测试 Step-up 完成失败: code={}",
+                completed.code
+            )));
+        }
+        let proof = completed
+            .data
+            .as_ref()
+            .and_then(|data| data.get("proof"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| BaseError::ConfigError("Step-up 完成响应缺少 proof".to_string()))?
+            .to_owned();
+        let mut retry_headers = headers.to_vec();
+        retry_headers.push(("x-step-up-proof", proof.as_str()));
+        dispatch_raw(app, module, action, body, &retry_headers, query).await
+    })
 }
 
 async fn dispatch_raw(
@@ -1163,9 +1228,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Result<()> {
+async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
     let mysql_url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
         .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
     let redis_url =
@@ -2125,7 +2188,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .bind(bootstrap_admin_id)
         .execute(tools.mysql()?.pool())
         .await?;
-    let stale_platform_write = dispatch_raw(
+    let stale_platform_write = dispatch_raw_with_step_up(
         &application.runtime,
         "admin.user",
         "set_status",
@@ -2446,7 +2509,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         ("authorization", authorization.as_str()),
         ("x-tenant-id", tenant_id.as_str()),
     ];
-    let precheck_request = dispatch_raw(
+    let precheck_request = dispatch_raw_with_step_up(
         &precheck_app.runtime,
         "org.user",
         "put",
@@ -2504,7 +2567,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .build()?,
     );
     let linearized_app = build_app(linearized_tools, Arc::clone(&security))?;
-    let linearized_request = dispatch_raw(
+    let linearized_request = dispatch_raw_with_step_up(
         &linearized_app.runtime,
         "org.user",
         "put",
@@ -3122,12 +3185,18 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     }
     let invalid_audit_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM audit_event \
-         WHERE (actor_type <> 'user' AND NOT (actor_type = 'system' AND action = 'account.user.reset_password')) \
-            OR result <> 'succeeded' \
-            OR subject_type <> 'user' OR subject_id IS NULL \
-            OR (before_summary IS NULL AND after_summary IS NULL) \
-            OR (before_summary IS NOT NULL AND JSON_TYPE(before_summary) <> 'OBJECT') \
-            OR (after_summary IS NOT NULL AND JSON_TYPE(after_summary) <> 'OBJECT')",
+         WHERE action IN ( \
+               'account.user.change_password', 'account.user.reset_password', \
+               'admin.user.bootstrap', 'admin.user.add', \
+               'admin.user.create_password_reset', 'admin.user.set_admin', \
+               'admin.user.set_status', 'org.tenant.create', \
+               'org.user.add', 'org.user.put', 'org.user.del') \
+           AND result = 'succeeded' \
+           AND ((actor_type <> 'user' AND NOT (actor_type = 'system' AND action = 'account.user.reset_password')) \
+             OR subject_type <> 'user' OR subject_id IS NULL \
+             OR (before_summary IS NULL AND after_summary IS NULL) \
+             OR (before_summary IS NOT NULL AND JSON_TYPE(before_summary) <> 'OBJECT') \
+             OR (after_summary IS NOT NULL AND JSON_TYPE(after_summary) <> 'OBJECT'))",
     )
     .fetch_one(tools.mysql()?.pool())
     .await?;
@@ -3169,8 +3238,23 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     .fetch_one(tools.mysql()?.pool())
     .await?;
     ensure!(
-        audit_rows == distinct_events && audit_rows == distinct_requests,
-        "每个高权限事务必须产生唯一且可关联的审计事实"
+        audit_rows == distinct_events && distinct_requests <= audit_rows,
+        "每条审计必须有唯一 event_id，并允许同一高危请求关联 proof 接受与业务结果"
+    );
+    let invalid_correlated_requests: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ( \
+               SELECT request_id, COUNT(*) AS event_count, \
+                      SUM(action = 'security.step_up' AND result = 'succeeded') AS proof_count, \
+                      SUM(action <> 'security.step_up') AS business_count \
+               FROM audit_event GROUP BY request_id HAVING COUNT(*) > 1 \
+             ) AS correlated \
+             WHERE event_count <> 2 OR proof_count <> 1 OR business_count <> 1",
+    )
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        invalid_correlated_requests == 0,
+        "重复 request_id 只能精确关联一条 Step-up 接受审计与一条业务结果审计"
     );
 
     let current_credential_version =
@@ -3368,6 +3452,24 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
 
     tools.close().await;
     Ok(())
+}
+
+#[test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("account-tenant-lifecycle".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("构建账户/租户生命周期测试运行时失败")?
+                .block_on(account_and_tenant_lifecycle_scenario())
+        })
+        .context("创建账户/租户生命周期专用测试线程失败")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("账户/租户生命周期专用测试线程 panic"))?
 }
 
 fn p95_millis(samples: &mut [u128]) -> u128 {
