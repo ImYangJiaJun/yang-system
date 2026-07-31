@@ -5,11 +5,9 @@ mod guard;
 mod repository;
 mod view;
 
-pub(super) use guard::OrgAdminGuardMiddleware;
-
 use yang_base::definition::{
-    Fields, Module, ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Switch, Table,
-    TableName, TableSpec, Timestamp,
+    ActionRef, Fields, Module, ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Switch,
+    Table, TableName, TableSpec, Timestamp,
 };
 use yang_base::BaseError;
 
@@ -114,6 +112,22 @@ pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
         )
 }
 
+fn resource_authorizer_targets() -> [ActionRef; 3] {
+    [
+        yang_base::action!("org.user.add"),
+        yang_base::action!("org.user.put"),
+        yang_base::action!("org.user.del"),
+    ]
+}
+
+/// 在认证与租户解析之后，为每个成员 mutation 注册确定目标的资源授权器。
+pub(super) fn register_resource_authorizers(mut module: ModuleSpec) -> ModuleSpec {
+    for target in resource_authorizer_targets() {
+        module = module.middleware(guard::OrgAdminGuardMiddleware::new(target));
+    }
+    module
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +169,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("应存在字段 {name}"));
             assert!(field.access.filterable, "resolver 查询键 {name} 必须可筛选");
         }
+    }
+
+    #[test]
+    fn every_member_mutation_has_an_exact_resource_authorizer_target() {
+        let module = build_module().unwrap_or_else(|error| panic!("成员模块应可构建: {error}"));
+        let mutation_names = module
+            .actions()
+            .iter()
+            // 新 Action 默认按高危 mutation 处理；只有逐项审计过的只读 Action 可进入白名单。
+            .filter(|action| !matches!(action.name.as_str(), "get" | "select" | "table"))
+            .map(|action| action.name.as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let guarded_names = resource_authorizer_targets()
+            .into_iter()
+            .map(|target| target.action().as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(mutation_names, guarded_names);
     }
 }

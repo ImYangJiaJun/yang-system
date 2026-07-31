@@ -3,6 +3,7 @@
 
 use super::{IS_ADMIN, ORG_ID, STATUS, USER_ID};
 use crate::audit;
+use crate::authorization::{resource_authorization_checkpoint, ResourceAuthorizationCheckpoint};
 use crate::modules::account::{increment_locked_authz_versions, lock_user_authorizations};
 use crate::modules::org::organization::ACTIVE_STATUS as ACTIVE_ORG_STATUS;
 use serde_json::{json, Value};
@@ -36,6 +37,7 @@ pub(super) async fn add(ctx: &ActionContext, input: Record) -> Result<InsertResu
     // tenant-boundary: database org-member-add-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
+        lock_active_org_admin(ctx, &mut transaction, org_id).await?;
         lock_active_organization(&mut transaction, org_id).await?;
         let locked = lock_user_authorizations(&mut transaction, [user_id]).await?;
         let (affected, id) = ctx
@@ -69,6 +71,7 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
         ));
     }
     let id = primary_key(&input.id)?;
+    let org_id = membership_org_id(ctx, id).await?;
     let changed_fields = input
         .data
         .as_map()
@@ -79,12 +82,16 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
     // tenant-boundary: database org-member-put-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
+        lock_active_org_admin(ctx, &mut transaction, org_id).await?;
+        lock_active_organization(&mut transaction, org_id).await?;
         let Some(membership) = lock_membership(ctx, &mut transaction, id).await? else {
             return Ok(AffectedResult { affected: 0 });
         };
         let change = authorization_change(&membership, &input.data)?;
-        if change.next_org_id != membership.org_id {
-            lock_active_organization(&mut transaction, change.next_org_id).await?;
+        if change.next_org_id != org_id {
+            return Err(BaseError::PermissionDenied(
+                "企业成员归属不可跨资源授权边界修改".to_string(),
+            ));
         }
         let locked = if change.changed {
             lock_user_authorizations(&mut transaction, [membership.user_id, change.next_user_id])
@@ -135,12 +142,20 @@ pub(super) async fn delete(
     input: GetByPk,
 ) -> Result<AffectedResult, BaseError> {
     let id = primary_key(&input.id)?;
+    let org_id = membership_org_id(ctx, id).await?;
     // tenant-boundary: database org-member-delete-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
+        lock_active_org_admin(ctx, &mut transaction, org_id).await?;
+        lock_active_organization(&mut transaction, org_id).await?;
         let Some(membership) = lock_membership(ctx, &mut transaction, id).await? else {
             return Ok(AffectedResult { affected: 0 });
         };
+        if membership.org_id != org_id {
+            return Err(BaseError::PermissionDenied(
+                "企业成员在资源解析后已迁移，必须重新授权".to_string(),
+            ));
+        }
         let locked = lock_user_authorizations(&mut transaction, [membership.user_id]).await?;
         let affected = ctx
             .table_query()?
@@ -170,6 +185,71 @@ pub(super) async fn delete(
     }
     .await;
     finish_transaction(transaction, result).await
+}
+
+async fn membership_org_id(ctx: &ActionContext, membership_id: i64) -> Result<i64, BaseError> {
+    if let Ok(tenant) = ctx.tenant() {
+        return Ok(tenant.id().get());
+    }
+    let user = ctx
+        .authenticated_user()
+        .ok_or_else(|| BaseError::Unauthorized("企业成员管理需要已认证用户".to_string()))?;
+    // tenant-boundary: system-capability org-member-resource-resolve-system
+    let capability = ctx.system_tenant()?;
+    if capability.actor().user_id() != user.id {
+        return Err(BaseError::PermissionDenied(
+            "系统租户 capability 与当前操作者不匹配".to_string(),
+        ));
+    }
+    // tenant-boundary: raw-sql org-member-resource-resolve
+    sqlx::query_scalar::<_, i64>("SELECT org_org FROM org_user WHERE id = ?")
+        .bind(membership_id)
+        // tenant-boundary: database org-member-resource-resolve-database
+        .fetch_optional(ctx.tools().mysql()?.pool())
+        .await
+        .map_err(yang_db::DbError::from)?
+        .ok_or_else(|| BaseError::RecordNotFound(format!("企业成员 {membership_id}")))
+}
+
+async fn lock_active_org_admin(
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    org_id: i64,
+) -> Result<(), BaseError> {
+    let user = ctx
+        .authenticated_user()
+        .ok_or_else(|| BaseError::Unauthorized("企业成员管理需要已认证用户".to_string()))?;
+    if user.has_role("system") {
+        // tenant-boundary: system-capability org-member-linearization-system
+        let capability = ctx.system_tenant()?;
+        if capability.actor().user_id() != user.id {
+            return Err(BaseError::PermissionDenied(
+                "系统租户 capability 与当前操作者不匹配".to_string(),
+            ));
+        }
+    } else {
+        let authorized =
+            // tenant-boundary: raw-sql org-member-admin-linearization
+            sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM org_user \
+                 WHERE org_org = ? AND user_user = ? \
+                   AND status = 'active' AND admin = TRUE \
+                 FOR UPDATE",
+            )
+            .bind(org_id)
+            .bind(user.id)
+            .fetch_optional(executor(transaction)?)
+            .await
+            .map_err(yang_db::DbError::from)?;
+        if authorized.is_none() {
+            return Err(BaseError::PermissionDenied(
+                "当前用户在写事务内已不是该企业的有效管理员".to_string(),
+            ));
+        }
+    }
+    resource_authorization_checkpoint(ctx, ResourceAuthorizationCheckpoint::AfterLinearization)
+        .await;
+    Ok(())
 }
 
 fn add_org_id(ctx: &ActionContext, input: &Record) -> Result<i64, BaseError> {

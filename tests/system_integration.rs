@@ -15,6 +15,7 @@ use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
 use yang_system::authorization::{
     AuthorizationOutboxWorker, AuthorizationVersionCache, CachedAuthorizationVersion,
+    ResourceAuthorizationCheckpoint, ResourceAuthorizationProbe,
 };
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::{AuthorizationSettings, SecuritySettings};
@@ -1128,6 +1129,28 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         .as_str()
         .context("平台成员登录响应缺少 access_token")?;
 
+    sqlx::query("UPDATE admin_user SET admin = FALSE WHERE id = ?")
+        .bind(bootstrap_admin_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let stale_platform_write = dispatch_raw(
+        &application.runtime,
+        "admin.user",
+        "set_status",
+        json!({ "id": platform_member_id, "status": "active" }),
+        &[("authorization", admin_authorization.as_str())],
+        &[],
+    )
+    .await;
+    sqlx::query("UPDATE admin_user SET admin = TRUE WHERE id = ?")
+        .bind(bootstrap_admin_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+    ensure!(
+        matches!(stale_platform_write, Err(BaseError::PermissionDenied(_))),
+        "平台权限快照仍有效但数据库管理员事实已撤销时，高危写必须在事务内失败"
+    );
+
     let main_version_before_rejected_demotion =
         database_authz_version(tools.mysql()?.pool(), user_id).await?;
     ensure!(
@@ -1411,6 +1434,128 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             == member_version_before_org_add + 1,
         "新增企业成员必须原子递增目标用户授权版本"
     );
+
+    let precheck_probe =
+        ResourceAuthorizationProbe::new(ResourceAuthorizationCheckpoint::AfterPrecheck);
+    let precheck_database =
+        Database::from_pool(tools.mysql()?.pool().clone(), database_config.clone())?;
+    let precheck_tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(precheck_database)
+            .cache(redis.clone())
+            .extension(authorization_cache_probe.clone())
+            .extension(precheck_probe.clone())
+            .token(integration_token_manager())
+            .build()?,
+    );
+    let precheck_app = build_app(precheck_tools, Arc::clone(&security))?;
+    let resource_headers = [
+        ("authorization", authorization.as_str()),
+        ("x-tenant-id", tenant_id.as_str()),
+    ];
+    let precheck_request = dispatch_raw(
+        &precheck_app.runtime,
+        "org.user",
+        "put",
+        json!({ "id": membership_id, "data": { "name": "must-not-commit" } }),
+        &resource_headers,
+        &[],
+    );
+    let revoke_before_linearization = async {
+        precheck_probe.wait_until_reached().await;
+        sqlx::query(
+            "UPDATE org_user SET admin = FALSE \
+             WHERE org_org = ? AND user_user = ?",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+        precheck_probe.resume().await;
+        Ok::<(), anyhow::Error>(())
+    };
+    let (precheck_attempt, revoke_result) =
+        tokio::join!(precheck_request, revoke_before_linearization);
+    revoke_result?;
+    ensure!(
+        matches!(precheck_attempt, Err(BaseError::PermissionDenied(_))),
+        "middleware 预检后、事务线性化点前撤权必须拒绝写入"
+    );
+    let rejected_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM org_user WHERE id = ?")
+            .bind(membership_id)
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    ensure!(
+        rejected_name.as_deref() != Some("must-not-commit"),
+        "线性化点前撤权不得留下业务写入"
+    );
+    sqlx::query("UPDATE org_user SET admin = TRUE WHERE org_org = ? AND user_user = ?")
+        .bind(organization_id)
+        .bind(user_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
+
+    let linearized_probe =
+        ResourceAuthorizationProbe::new(ResourceAuthorizationCheckpoint::AfterLinearization);
+    let linearized_database =
+        Database::from_pool(tools.mysql()?.pool().clone(), database_config.clone())?;
+    let linearized_tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(linearized_database)
+            .cache(redis.clone())
+            .extension(authorization_cache_probe.clone())
+            .extension(linearized_probe.clone())
+            .token(integration_token_manager())
+            .build()?,
+    );
+    let linearized_app = build_app(linearized_tools, Arc::clone(&security))?;
+    let linearized_request = dispatch_raw(
+        &linearized_app.runtime,
+        "org.user",
+        "put",
+        json!({ "id": membership_id, "data": { "name": "linearized-write" } }),
+        &resource_headers,
+        &[],
+    );
+    let revoke_after_linearization = async {
+        linearized_probe.wait_until_reached().await;
+        let revoke = sqlx::query(
+            "UPDATE org_user SET admin = FALSE \
+             WHERE org_org = ? AND user_user = ?",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .execute(tools.mysql()?.pool());
+        tokio::pin!(revoke);
+        tokio::select! {
+            result = &mut revoke => {
+                anyhow::bail!("授权事实行锁释放前撤权不应完成: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        linearized_probe.resume().await;
+        revoke.await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    let (linearized_attempt, revoke_result) =
+        tokio::join!(linearized_request, revoke_after_linearization);
+    revoke_result?;
+    data(linearized_attempt?)?;
+    let committed_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM org_user WHERE id = ?")
+            .bind(membership_id)
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    ensure!(
+        committed_name.as_deref() == Some("linearized-write"),
+        "线性化点后到达的撤权必须等待在途事务提交"
+    );
+    sqlx::query("UPDATE org_user SET admin = TRUE WHERE org_org = ? AND user_user = ?")
+        .bind(organization_id)
+        .bind(user_id)
+        .execute(tools.mysql()?.pool())
+        .await?;
 
     let tenants = data(
         dispatch(

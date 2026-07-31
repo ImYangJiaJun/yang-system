@@ -79,7 +79,12 @@
 | `org-member-add-database` | database | `org/user/repository.rs` | 只供 add writer 开启显式事务；普通租户仍由 `table_query()` 注入 tenant key |
 | `org-member-put-database` | database | `org/user/repository.rs` | 只供 put writer 开启显式事务；成员锁和后续更新重复限定同一 capability |
 | `org-member-delete-database` | database | `org/user/repository.rs` | 只供 delete writer 开启显式事务；成员锁和删除重复限定同一 capability |
-| `org-member-organization-lock` | raw-sql | `org/user/repository.rs` | add 或归属迁移前按组织主键锁定，并要求组织 active |
+| `org-member-resource-resolve-database` | database | `org/user/repository.rs` | system capability 的 put/delete 在事务外只解析目标组织；事务内仍会重新按组织锁定目标成员 |
+| `org-member-resource-resolve` | raw-sql | `org/user/repository.rs` | 仅为已核对 actor 的 system capability 解析成员所属组织，不作为写入授权线性化点 |
+| `org-member-resource-resolve-system` | system-capability | `org/user/repository.rs` | system 资源解析必须核对 capability actor 与已认证用户一致 |
+| `org-member-admin-linearization` | raw-sql | `org/user/repository.rs` | 普通租户写事务内按 `org_id + actor user_id` 锁定 active 管理员成员事实，作为最终授权线性化点 |
+| `org-member-linearization-system` | system-capability | `org/user/repository.rs` | system 写事务在最终线性化点再次消费并核对 actor-bound capability |
+| `org-member-organization-lock` | raw-sql | `org/user/repository.rs` | mutation 在目标成员锁之前按组织主键锁定，并要求组织 active |
 | `org-member-tenant-lock` | raw-sql | `org/user/repository.rs` | 普通租户按 `id + tenant_id` 锁定成员事实，隐藏跨租户对象 ID |
 | `org-member-system-lock` | raw-sql | `org/user/repository.rs` | 仅在已消费 actor-bound system capability 后按成员主键锁定 |
 | `org-member-add-system` | system-capability | `org/user/repository.rs` | system add 必须显式提供目标组织，且组织存在并 active |
@@ -111,6 +116,11 @@
 <!-- tenant-boundary: database org-member-add-database -->
 <!-- tenant-boundary: database org-member-put-database -->
 <!-- tenant-boundary: database org-member-delete-database -->
+<!-- tenant-boundary: database org-member-resource-resolve-database -->
+<!-- tenant-boundary: raw-sql org-member-resource-resolve -->
+<!-- tenant-boundary: system-capability org-member-resource-resolve-system -->
+<!-- tenant-boundary: raw-sql org-member-admin-linearization -->
+<!-- tenant-boundary: system-capability org-member-linearization-system -->
 <!-- tenant-boundary: raw-sql org-member-organization-lock -->
 <!-- tenant-boundary: raw-sql org-member-tenant-lock -->
 <!-- tenant-boundary: raw-sql org-member-system-lock -->

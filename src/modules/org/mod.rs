@@ -62,8 +62,8 @@ pub fn build_addon(
             TokenAuthMiddleware::new(account::user_from_claims)
                 .with_claims_validator(authorization_validator),
         )
-        .middleware(TenantResolverMiddleware::new(resolver))
-        .middleware(user::OrgAdminGuardMiddleware::new());
+        .middleware(TenantResolverMiddleware::new(resolver));
+    let members = user::register_resource_authorizers(members);
 
     Ok(AddonSpec::new(yang_base::addon!("org"))
         .depends_on(yang_base::addon!("account"))

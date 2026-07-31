@@ -2,10 +2,13 @@
 
 mod outbox;
 mod request_validator;
+mod resource_probe;
 mod version_cache;
 mod worker;
 
 pub use request_validator::AuthorizationVersionValidator;
+pub(crate) use resource_probe::checkpoint as resource_authorization_checkpoint;
+pub use resource_probe::{ResourceAuthorizationCheckpoint, ResourceAuthorizationProbe};
 pub(crate) use version_cache::validate_deployment_name;
 pub use version_cache::{
     AuthorizationVersionCache, CachePublishOutcome, CachedAuthorizationVersion,

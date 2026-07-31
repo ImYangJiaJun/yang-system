@@ -4,6 +4,7 @@
 use super::model::{AdminAccountPage, AdminAccountView, PageRequest};
 use super::{ACTIVE_STATUS, BOOTSTRAP_KEY, IS_ADMIN, NAME, POSITION, STATUS, SYSTEM_ROLE, USER_ID};
 use crate::audit;
+use crate::authorization::{resource_authorization_checkpoint, ResourceAuthorizationCheckpoint};
 use crate::modules::account::{
     create_password_reset_in_tx, increment_locked_authz_version, lock_user_authorization,
     GeneratedPasswordReset, LockedUserAuthorization,
@@ -158,6 +159,7 @@ impl AdminRepository {
     ) -> Result<AdminAccountView, BaseError> {
         let mut transaction = ctx.tools().mysql()?.transaction().await?;
         let result = async {
+            lock_active_admin_actor(ctx, &mut transaction).await?;
             let locked = lock_user_authorization(&mut transaction, user_id).await?;
             ensure_active_user(&locked)?;
             let mut account = Record::new()
@@ -210,6 +212,7 @@ impl AdminRepository {
     ) -> Result<(), BaseError> {
         let mut transaction = ctx.tools().mysql()?.transaction().await?;
         let result = async {
+            lock_active_admin_actor(ctx, &mut transaction).await?;
             let locked = lock_user_authorization(&mut transaction, target_user_id).await?;
             ensure_active_user(&locked)?;
             create_password_reset_in_tx(
@@ -246,17 +249,19 @@ impl AdminRepository {
     ) -> Result<AdminAccountView, BaseError> {
         let mut transaction = ctx.tools().mysql()?.transaction().await?;
         let result = async {
-            let active_admins = if status != ACTIVE_STATUS {
-                Some(lock_active_admins(&mut transaction).await?)
-            } else {
-                None
-            };
+            let active_admins = lock_active_admins(&mut transaction).await?;
+            ensure_active_admin_actor(ctx, &active_admins)?;
+            resource_authorization_checkpoint(
+                ctx,
+                ResourceAuthorizationCheckpoint::AfterLinearization,
+            )
+            .await;
             let target = lock_target(&mut transaction, id).await?;
             if status == target.status {
                 return Ok(id);
             }
             if status != ACTIVE_STATUS && target.status == ACTIVE_STATUS && target.admin {
-                ensure_not_last_active_admin(active_admins.as_deref().unwrap_or_default(), id)?;
+                ensure_not_last_active_admin(&active_admins, id)?;
             }
             let locked = lock_user_authorization(&mut transaction, target.user_id).await?;
             sqlx::query(
@@ -292,17 +297,19 @@ impl AdminRepository {
     ) -> Result<AdminAccountView, BaseError> {
         let mut transaction = ctx.tools().mysql()?.transaction().await?;
         let result = async {
-            let active_admins = if admin {
-                None
-            } else {
-                Some(lock_active_admins(&mut transaction).await?)
-            };
+            let active_admins = lock_active_admins(&mut transaction).await?;
+            ensure_active_admin_actor(ctx, &active_admins)?;
+            resource_authorization_checkpoint(
+                ctx,
+                ResourceAuthorizationCheckpoint::AfterLinearization,
+            )
+            .await;
             let target = lock_target(&mut transaction, id).await?;
             if admin == target.admin {
                 return Ok(id);
             }
             if !admin && target.status == ACTIVE_STATUS && target.admin {
-                ensure_not_last_active_admin(active_admins.as_deref().unwrap_or_default(), id)?;
+                ensure_not_last_active_admin(&active_admins, id)?;
             }
             let locked = lock_user_authorization(&mut transaction, target.user_id).await?;
             sqlx::query(
@@ -370,6 +377,57 @@ struct LockedAdminTarget {
     user_id: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LockedActiveAdmin {
+    id: i64,
+    user_id: i64,
+}
+
+async fn lock_active_admin_actor(
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+) -> Result<(), BaseError> {
+    let actor_user_id = authenticated_actor_user_id(ctx)?;
+    let actor = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM admin_user \
+         WHERE user_user = ? AND status = 'active' AND admin = TRUE FOR UPDATE",
+    )
+    .bind(actor_user_id)
+    .fetch_optional(executor(transaction)?)
+    .await
+    .map_err(yang_db::DbError::from)?;
+    if actor.is_none() {
+        return Err(BaseError::PermissionDenied(
+            "当前用户在写事务内已不是有效平台超级管理员".to_string(),
+        ));
+    }
+    resource_authorization_checkpoint(ctx, ResourceAuthorizationCheckpoint::AfterLinearization)
+        .await;
+    Ok(())
+}
+
+fn ensure_active_admin_actor(
+    ctx: &ActionContext,
+    active_admins: &[LockedActiveAdmin],
+) -> Result<(), BaseError> {
+    let actor_user_id = authenticated_actor_user_id(ctx)?;
+    if active_admins
+        .iter()
+        .any(|admin| admin.user_id == actor_user_id)
+    {
+        return Ok(());
+    }
+    Err(BaseError::PermissionDenied(
+        "当前用户在写事务内已不是有效平台超级管理员".to_string(),
+    ))
+}
+
+fn authenticated_actor_user_id(ctx: &ActionContext) -> Result<i64, BaseError> {
+    ctx.authenticated_user()
+        .map(|user| user.id)
+        .ok_or_else(|| BaseError::Unauthorized("平台高权限写入需要已认证用户".to_string()))
+}
+
 async fn lock_target(
     transaction: &mut Transaction,
     id: i64,
@@ -389,19 +447,27 @@ async fn lock_target(
     .ok_or_else(|| BaseError::RecordNotFound(format!("平台账号 {id}")))
 }
 
-async fn lock_active_admins(transaction: &mut Transaction) -> Result<Vec<i64>, BaseError> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM admin_user \
+async fn lock_active_admins(
+    transaction: &mut Transaction,
+) -> Result<Vec<LockedActiveAdmin>, BaseError> {
+    let rows = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT id, user_user FROM admin_user \
          WHERE status = 'active' AND admin = TRUE ORDER BY id FOR UPDATE",
     )
     .fetch_all(executor(transaction)?)
     .await
-    .map_err(yang_db::DbError::from)
-    .map_err(Into::into)
+    .map_err(yang_db::DbError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, user_id)| LockedActiveAdmin { id, user_id })
+        .collect())
 }
 
-fn ensure_not_last_active_admin(active_admins: &[i64], target_id: i64) -> Result<(), BaseError> {
-    if active_admins.len() < 2 || !active_admins.contains(&target_id) {
+fn ensure_not_last_active_admin(
+    active_admins: &[LockedActiveAdmin],
+    target_id: i64,
+) -> Result<(), BaseError> {
+    if active_admins.len() < 2 || !active_admins.iter().any(|admin| admin.id == target_id) {
         return Err(BaseError::PermissionDenied(
             "不能停用或降级最后一个启用中的超级管理员".to_string(),
         ));
