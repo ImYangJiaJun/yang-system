@@ -96,6 +96,12 @@ async function submit() {
             :loading="submitting"
             class="full-width"
           />
+          <q-btn
+            flat
+            label="使用重置凭证"
+            class="full-width"
+            to="/reset-password"
+          />
         </q-form>
         <q-card-section class="login-footer text-center text-grey-7">
           YANG 生态 · 契约驱动企业应用

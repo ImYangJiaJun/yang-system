@@ -47,6 +47,50 @@ test("默认入口是登录界面", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "用户登录" })).toBeVisible();
 });
 
+test("一次性凭证不进入 URL 且重置成功后清空旧会话", async ({ page }) => {
+  const resetToken = "a".repeat(64);
+  await page.addInitScript(() => {
+    sessionStorage.setItem("yang.tenant-id", "7");
+    sessionStorage.setItem("yang.account-identity", "admin");
+  });
+  await page.route("**/api/v1/users/reset-password", async (route) => {
+    expect(route.request().headers().authorization).toBeUndefined();
+    expect(route.request().postDataJSON()).toEqual({
+      reset_token: resetToken,
+      new_password: "new-correct-password",
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "密码已重置",
+        data: { relogin_required: true },
+      }),
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByRole("link", { name: "使用重置凭证" }).click();
+  await expect(page).toHaveURL("/reset-password");
+  await expect(page.getByLabel("重置凭证")).toHaveAttribute("type", "password");
+  await page.getByLabel("重置凭证").fill(resetToken);
+  await page.getByLabel("新密码", { exact: true }).fill("new-correct-password");
+  await page.getByLabel("确认新密码").fill("new-correct-password");
+  await page.getByRole("button", { name: "重置密码" }).click();
+
+  await expect(page).toHaveURL("/login?reason=credentials-changed");
+  await expect(
+    page.getByText("凭据已变更，请使用新密码重新登录"),
+  ).toBeVisible();
+  expect(page.url()).not.toContain(resetToken);
+  for (const key of ["yang.tenant-id", "yang.account-identity"]) {
+    await expect
+      .poll(() => page.evaluate((name) => sessionStorage.getItem(name), key))
+      .toBeNull();
+  }
+});
+
 test("账号密码登录后先选择角色再进入对应模块", async ({ page }) => {
   await page.route("**/.well-known/yang/ui-catalog", (route) =>
     route.fulfill({

@@ -191,6 +191,9 @@ pub struct SecuritySettings {
     pub auth_rate_limit_window_seconds: u64,
     pub auth_rate_limit_ip_attempts: u64,
     pub auth_rate_limit_username_attempts: u64,
+    /// 密码重置凭证的短期有效期；旧配置缺省为 15 分钟。
+    #[serde(default = "default_password_reset_ttl_seconds")]
+    pub password_reset_ttl_seconds: u64,
     /// 所有实例均已支持凭据版本读取后，才开启新 Refresh 字段签发与凭据写 Action。
     #[serde(default)]
     pub issue_refresh_credential_version: bool,
@@ -476,9 +479,16 @@ impl SecuritySettings {
         validate_rate_limit("window_seconds", self.auth_rate_limit_window_seconds)?;
         validate_rate_limit("ip_attempts", self.auth_rate_limit_ip_attempts)?;
         validate_rate_limit("username_attempts", self.auth_rate_limit_username_attempts)?;
+        if !(60..=3_600).contains(&self.password_reset_ttl_seconds) {
+            bail!("security.password_reset_ttl_seconds 必须在 60..=3600 范围内");
+        }
         crate::security::validate_trusted_proxy_cidrs(&self.trusted_proxy_cidrs)?;
         Ok(())
     }
+}
+
+const fn default_password_reset_ttl_seconds() -> u64 {
+    900
 }
 
 impl AuthorizationSettings {
@@ -637,6 +647,7 @@ filter = "info"
         assert_eq!(settings.authorization.outbox_batch_size, 100);
         assert!(settings.security.trusted_proxy_cidrs.is_empty());
         assert!(!settings.security.issue_refresh_credential_version);
+        assert_eq!(settings.security.password_reset_ttl_seconds, 900);
         assert_eq!(settings.shutdown.total_timeout_seconds, 30);
         assert!(!settings.observability.metrics_enabled);
         assert!(!settings.observability.traces_enabled);
@@ -653,6 +664,31 @@ filter = "info"
             !format!("{:?}", settings.bootstrap.secret_digest).contains(VALID_BOOTSTRAP_DIGEST),
             "bootstrap 摘要不得进入 Debug"
         );
+    }
+
+    #[test]
+    fn rejects_password_reset_ttl_outside_the_short_lived_window() {
+        let mut too_short = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("测试配置应可解析: {error}"));
+        too_short.security.password_reset_ttl_seconds = 59;
+        let error = match too_short.validate() {
+            Ok(()) => panic!("少于 60 秒的重置凭证必须拒绝"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("security.password_reset_ttl_seconds"));
+
+        let mut too_long = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("测试配置应可解析: {error}"));
+        too_long.security.password_reset_ttl_seconds = 3_601;
+        let error = match too_long.validate() {
+            Ok(()) => panic!("超过一小时的重置凭证必须拒绝"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("security.password_reset_ttl_seconds"));
     }
 
     struct TestSecretProvider(BTreeMap<SecretKey, String>);

@@ -103,7 +103,7 @@ impl MigrationDescriptor {
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 10] = [
+const MIGRATIONS: [MigrationDescriptor; 11] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -195,6 +195,16 @@ const MIGRATIONS: [MigrationDescriptor; 10] = [
             nullable: false,
             default: Some("0"),
         }),
+    },
+    MigrationDescriptor {
+        version: "20260731_0011_create_password_reset_token",
+        sql: include_str!("../migrations/20260731_0011_create_password_reset_token.sql"),
+        description: "建立短期、单次消费且只存摘要的密码重置凭证表",
+        prerequisite:
+            "20260731_0010_add_user_credential_version 已完成；凭据写 Action 仅在协议开关开启后注册",
+        recovery:
+            "DDL 可重入；失败时核对摘要唯一键、活动凭证索引、时间约束和两个用户外键后原版本重跑",
+        completion_check: None,
     },
 ];
 

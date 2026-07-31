@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./errors";
-import { login, refreshSession } from "./auth";
+import { login, refreshSession, resetPassword } from "./auth";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -105,5 +105,52 @@ describe("refreshSession", () => {
       accessToken: "access-new",
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/users/refresh");
+  });
+});
+
+describe("resetPassword", () => {
+  it("只提交一次性凭证和新密码，并要求服务端确认重新登录", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.method).toBe("POST");
+      expect(init.credentials).toBe("include");
+      expect(new Headers(init.headers).get("authorization")).toBeNull();
+      expect(init.body).toBe(
+        JSON.stringify({
+          reset_token: "a".repeat(64),
+          new_password: "replacement-password",
+        }),
+      );
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "密码已重置",
+          data: { relogin_required: true },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      resetPassword("a".repeat(64), "replacement-password"),
+    ).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/users/reset-password");
+  });
+
+  it("拒绝缺少重新登录确认的畸形成功响应", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ code: 0, message: "成功", data: {} }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+
+    await expect(
+      resetPassword("a".repeat(64), "replacement-password"),
+    ).rejects.toThrow("密码重置响应缺少重新登录确认");
   });
 });

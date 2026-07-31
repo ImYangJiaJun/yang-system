@@ -20,6 +20,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | ID | 类型 | 文件 | 保留原因与不变量 |
 |---|---|---|---|
 | `account-authz-version` | domain-service | `src/modules/account/authz_version.rs` | 用户授权版本的行锁、单调递增与 Outbox 写入必须处于同一事务 |
+| `password-reset-token` | domain-repository | `src/modules/account/password_reset/repository.rs` | 重置凭证摘要的目标用户查询、行锁、单次消费和旧凭证失效必须在调用方事务内完成 |
 | `admin-grant-snapshot` | domain-service | `src/modules/admin/grants.rs` | Token 签发事务内读取平台管理员授权快照 |
 | `admin-user-repository` | domain-repository | `src/modules/admin/user/repository.rs` | 跨表列表、管理员行锁和与审计同事务的受控更新 |
 | `org-grant-snapshot` | domain-service | `src/modules/org/grants.rs` | Token 签发前按用户有效成员关系聚合授权，不接受请求租户 |
@@ -32,6 +33,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | `authorization-outbox` | infrastructure-repository | `src/authorization/outbox.rs` | claim/lease/retry 状态机必须使用锁与条件更新 |
 
 <!-- raw-sql-boundary: domain-service account-authz-version src/modules/account/authz_version.rs -->
+<!-- raw-sql-boundary: domain-repository password-reset-token src/modules/account/password_reset/repository.rs -->
 <!-- raw-sql-boundary: domain-service admin-grant-snapshot src/modules/admin/grants.rs -->
 <!-- raw-sql-boundary: domain-repository admin-user-repository src/modules/admin/user/repository.rs -->
 <!-- raw-sql-boundary: domain-service org-grant-snapshot src/modules/org/grants.rs -->

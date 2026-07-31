@@ -66,6 +66,12 @@ Refresh 缺字段按 0 比较）；确认没有旧实例后改为 `true`，开�
 只使用 `authz_version`。开关关闭时 Registry/Catalog 不暴露会递增凭据版本的改密
 Action，防止版本大于 0 的用户拿到无法继续刷新的兼容期 Token。
 
+`20260731_0011_create_password_reset_token` 建立密码重置凭证表。原始凭证不落库，
+只保存 SHA-256 摘要与 16 字符指纹；目标用户、发起管理员、到期、消费和失效时间均
+受数据库约束。一个用户创建新凭证会使旧的未消费凭证失效，成功消费时也会失效该
+用户的其他未消费凭证。该迁移可先发布，但创建与消费 Action 和改密一样只在
+`security.issue_refresh_credential_version = true` 时注册。
+
 ## 中断、并发与恢复
 
 - 同一数据库的显式迁移作业由 MySQL advisory lock 串行化；后到作业等待锁并重新

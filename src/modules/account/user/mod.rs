@@ -15,7 +15,6 @@ use crate::config::SecuritySettings;
 use crate::modules::account::GrantResolver;
 use crate::security::TrustedClientIpMiddleware;
 use password::PasswordEngine;
-use rate_limit::AuthRateLimiter;
 use repository::UserRepository;
 use service::UserService;
 use std::sync::Arc;
@@ -27,6 +26,7 @@ use yang_base::definition::{
 use yang_base::BaseError;
 
 pub(crate) use claims::user_from_claims;
+pub(crate) use rate_limit::{AuthOperation, AuthRateLimiter};
 
 /// 构建用户 Module。
 ///

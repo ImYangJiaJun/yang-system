@@ -31,7 +31,7 @@ pub fn build_app(
     let runtime = AppBuilder::new()
         .addon(
             account::build_addon(
-                security,
+                Arc::clone(&security),
                 Arc::new(account::CompositeGrantResolver::new(vec![
                     admin::grant_resolver(),
                     org::grant_resolver(),
@@ -43,7 +43,7 @@ pub fn build_app(
             .middleware(action_logging.clone()),
         )
         .addon(
-            admin::build_addon(authorization_validator.clone())
+            admin::build_addon(security, authorization_validator.clone())
                 .context("构建 admin Addon 失败")?
                 .middleware(action_logging.clone()),
         )
@@ -105,6 +105,7 @@ mod tests {
             auth_rate_limit_window_seconds: 60,
             auth_rate_limit_ip_attempts: 30,
             auth_rate_limit_username_attempts: 10,
+            password_reset_ttl_seconds: 900,
             issue_refresh_credential_version: true,
             trusted_proxy_cidrs: Vec::new(),
         });
@@ -165,7 +166,7 @@ mod tests {
         assert!(tables.contains(&"org_user"));
         assert!(tables.contains(&"work_project"));
         assert!(tables.contains(&"work_task"));
-        assert_eq!(operations.len(), 7);
+        assert_eq!(operations.len(), 8);
         assert!(operations.contains(&(
             "account.user.register",
             "POST",
@@ -179,6 +180,13 @@ mod tests {
             "/api/v1/users/change-password",
             200,
             false,
+        )));
+        assert!(operations.contains(&(
+            "account.user.reset_password",
+            "POST",
+            "/api/v1/users/reset-password",
+            200,
+            true,
         )));
         let reference = ActionRef::new(
             ModuleName::new("account.user")
@@ -329,6 +337,16 @@ mod tests {
             .flat_map(|addon| &addon.modules)
             .find(|module| module.name.as_str() == "admin.user")
             .unwrap_or_else(|| panic!("应存在 admin.user 模块"));
+        let create_password_reset = admin_user_module
+            .actions()
+            .iter()
+            .find(|action| action.name.as_str() == "create_password_reset")
+            .unwrap_or_else(|| panic!("应存在 admin.user.create_password_reset"));
+        assert_eq!(
+            create_password_reset.route.path.as_str(),
+            "/api/v1/admin/users/password-reset"
+        );
+        assert!(!create_password_reset.is_public);
         let bootstrap = admin_user_module
             .actions()
             .iter()

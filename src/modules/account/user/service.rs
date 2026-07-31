@@ -9,8 +9,10 @@ use super::repository::{AuthorizationStateRecord, UserRepository};
 use super::schema::{UserView, STATUS};
 use crate::audit;
 use crate::modules::account::{
-    increment_locked_credential_versions, lock_user_credential, AuthorizationGrants, GrantResolver,
-    LockedUserCredential,
+    consume_password_reset_in_tx, find_password_reset_target_user,
+    increment_locked_credential_versions, invalid_reset_token, lock_password_reset_in_tx,
+    lock_user_credential, AuthorizationGrants, GrantResolver, LockedUserCredential,
+    PasswordResetReference,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -157,6 +159,74 @@ impl UserService {
                 audit::entity("user", user_id)?,
                 None,
                 Some(audit::summary([("relogin_required", json!(true))])?),
+            )?;
+            audit::append_in_tx(&mut transaction, &event).await?;
+            Ok(())
+        }
+        .await;
+        finish_transaction(transaction, result).await
+    }
+
+    pub(super) async fn reset_password(
+        &self,
+        ctx: &ActionContext,
+        raw_reset_token: &str,
+        new_password: &str,
+    ) -> Result<(), BaseError> {
+        if !self.issue_refresh_credential_version {
+            return Err(BaseError::ConfigError(
+                "密码重置能力必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
+            ));
+        }
+        validate_new_password(new_password)?;
+        let attempt_fingerprint = PasswordResetReference::attempt_fingerprint(raw_reset_token)?;
+        self.rate_limiter
+            .check(
+                ctx,
+                AuthOperation::PasswordResetConsume,
+                &attempt_fingerprint,
+            )
+            .await?;
+        let reference = PasswordResetReference::parse(raw_reset_token)?;
+
+        // 无论凭证是否存在，新摘要都在任何事务和行锁之前计算；全局/指纹限流约束成本。
+        let new_password_hash = self.passwords.hash(new_password).await?;
+        let target_user_id =
+            find_password_reset_target_user(ctx.tools().mysql()?.pool(), &reference)
+                .await?
+                .ok_or_else(invalid_reset_token)?;
+
+        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let result = async {
+            // 所有创建与消费路径统一先锁用户、再锁凭证，避免同用户并发形成反向锁序。
+            let locked_user = lock_user_credential(&mut transaction, target_user_id).await?;
+            ensure_active_status(locked_user.status())?;
+            let locked_reset = lock_password_reset_in_tx(&mut transaction, &reference).await?;
+            if locked_reset.user_id() != target_user_id || !locked_reset.is_usable() {
+                return Err(invalid_reset_token());
+            }
+            self.users
+                .update_password_hash_in_tx(
+                    ctx,
+                    &mut transaction,
+                    target_user_id,
+                    &new_password_hash,
+                )
+                .await?;
+            increment_locked_credential_versions(&mut transaction, &locked_user).await?;
+            consume_password_reset_in_tx(&mut transaction, &locked_reset).await?;
+            let event = audit::succeeded_system_event(
+                ctx,
+                format!("password-reset-{}", reference.fingerprint()),
+                None,
+                Some(audit::entity("user", target_user_id)?),
+                audit::entity("password_reset", reference.fingerprint())?,
+                None,
+                Some(audit::summary([
+                    ("relogin_required", json!(true)),
+                    ("reset_fingerprint", json!(reference.fingerprint())),
+                    ("user_id", json!(target_user_id)),
+                ])?),
             )?;
             audit::append_in_tx(&mut transaction, &event).await?;
             Ok(())

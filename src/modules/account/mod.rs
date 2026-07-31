@@ -2,6 +2,7 @@
 
 mod authz_version;
 mod grants;
+mod password_reset;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
@@ -16,7 +17,13 @@ pub(crate) use authz_version::{
     lock_user_credential, LockedUserAuthorization, LockedUserCredential,
 };
 pub(crate) use grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
+pub(crate) use password_reset::{
+    consume_in_tx as consume_password_reset_in_tx, create_in_tx as create_password_reset_in_tx,
+    find_target_user as find_password_reset_target_user, invalid_reset_token,
+    lock_in_tx as lock_password_reset_in_tx, GeneratedPasswordReset, PasswordResetReference,
+};
 pub(crate) use user::user_from_claims;
+pub(crate) use user::{AuthOperation, AuthRateLimiter};
 
 /// 构建账号 Addon。
 ///

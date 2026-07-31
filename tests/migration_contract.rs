@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 10);
+    assert_eq!(manifest.migrations().len(), 11);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -115,6 +115,25 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     assert!(credential_version
         .sql()
         .contains("ADD COLUMN `credential_version` BIGINT NOT NULL DEFAULT 0"));
+    let password_reset = manifest
+        .migrations()
+        .get(10)
+        .unwrap_or_else(|| panic!("应存在密码重置凭证迁移"));
+    assert_eq!(
+        password_reset.version(),
+        "20260731_0011_create_password_reset_token"
+    );
+    for required in [
+        "UNIQUE KEY `uk_password_reset_token_digest` (`token_digest`)",
+        "KEY `idx_password_reset_token_user_active` (`user_user`, `consumed_at`, `invalidated_at`, `expires_at`, `id`)",
+        "CONSTRAINT `fk_password_reset_token_user`",
+        "CONSTRAINT `fk_password_reset_token_requested_by`",
+    ] {
+        assert!(
+            password_reset.sql().contains(required),
+            "密码重置迁移缺少单次消费、清理索引或外键契约: {required}"
+        );
+    }
 }
 
 #[test]

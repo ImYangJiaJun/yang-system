@@ -36,8 +36,10 @@ return { exceeded, retry_after }
 "#;
 
 #[derive(Clone, Copy)]
-pub(super) enum AuthOperation {
+pub(crate) enum AuthOperation {
     ChangePassword,
+    PasswordResetCreate,
+    PasswordResetConsume,
     Login,
     Register,
 }
@@ -46,6 +48,8 @@ impl AuthOperation {
     fn key(self) -> &'static str {
         match self {
             Self::ChangePassword => "change-password",
+            Self::PasswordResetCreate => "password-reset-create",
+            Self::PasswordResetConsume => "password-reset-consume",
             Self::Login => "login",
             Self::Register => "register",
         }
@@ -54,20 +58,22 @@ impl AuthOperation {
     fn identity_key(self) -> &'static str {
         match self {
             Self::ChangePassword => "user",
+            Self::PasswordResetCreate => "actor-target",
+            Self::PasswordResetConsume => "fingerprint",
             Self::Login | Self::Register => "username",
         }
     }
 }
 
 #[derive(Clone)]
-pub(super) struct AuthRateLimiter {
+pub(crate) struct AuthRateLimiter {
     window_seconds: u64,
     ip_attempts: u64,
     username_attempts: u64,
 }
 
 impl AuthRateLimiter {
-    pub(super) fn new(settings: &SecuritySettings) -> Self {
+    pub(crate) fn new(settings: &SecuritySettings) -> Self {
         Self {
             window_seconds: settings.auth_rate_limit_window_seconds,
             ip_attempts: settings.auth_rate_limit_ip_attempts,
@@ -75,7 +81,7 @@ impl AuthRateLimiter {
         }
     }
 
-    pub(super) async fn check(
+    pub(crate) async fn check(
         &self,
         ctx: &ActionContext,
         operation: AuthOperation,

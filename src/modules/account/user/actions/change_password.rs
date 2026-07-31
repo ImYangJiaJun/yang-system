@@ -1,8 +1,6 @@
 use super::super::policy::{PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH};
 use super::super::service::UserService;
 use async_trait::async_trait;
-use schemars::JsonSchema;
-use serde::Serialize;
 use std::sync::Arc;
 use yang_base::action::{Action as ActionHandler, ActionContext, ApiResponse};
 use yang_base::definition::{ModuleSpec, Password};
@@ -22,11 +20,6 @@ yang_base::params! {
             .min_length(PASSWORD_MIN_LENGTH)
             .max_length(PASSWORD_MAX_LENGTH),
     }
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-struct ChangePasswordResult {
-    relogin_required: bool,
 }
 
 #[derive(Action)]
@@ -64,15 +57,7 @@ impl ActionHandler for ChangePasswordAction {
 }
 
 fn change_password_response(secure: bool) -> Result<ApiResponse, BaseError> {
-    super::super::browser_session::clear_response(
-        ApiResponse::success(
-            ChangePasswordResult {
-                relogin_required: true,
-            },
-            "密码已修改，请重新登录",
-        )?,
-        secure,
-    )
+    super::super::browser_session::relogin_response("密码已修改，请重新登录", secure)
 }
 
 pub(super) fn register(

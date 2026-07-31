@@ -30,6 +30,48 @@ pub(crate) fn succeeded_event(
     after_summary: Option<AuditSummary>,
 ) -> Result<AuditEvent, BaseError> {
     let actor = AuditActor::user(ctx.actor()?.user_id()).map_err(invalid_event)?;
+    succeeded_event_with_actor(
+        ctx,
+        actor,
+        tenant_id,
+        subject,
+        target,
+        before_summary,
+        after_summary,
+    )
+}
+
+/// 为没有登录用户、但持有一次性凭证的成功写入创建系统 actor 审计事件。
+pub(crate) fn succeeded_system_event(
+    ctx: &ActionContext,
+    actor_id: impl Into<String>,
+    tenant_id: Option<i64>,
+    subject: Option<AuditEntity>,
+    target: AuditEntity,
+    before_summary: Option<AuditSummary>,
+    after_summary: Option<AuditSummary>,
+) -> Result<AuditEvent, BaseError> {
+    let actor = AuditActor::system(actor_id).map_err(invalid_event)?;
+    succeeded_event_with_actor(
+        ctx,
+        actor,
+        tenant_id,
+        subject,
+        target,
+        before_summary,
+        after_summary,
+    )
+}
+
+fn succeeded_event_with_actor(
+    ctx: &ActionContext,
+    actor: AuditActor,
+    tenant_id: Option<i64>,
+    subject: Option<AuditEntity>,
+    target: AuditEntity,
+    before_summary: Option<AuditSummary>,
+    after_summary: Option<AuditSummary>,
+) -> Result<AuditEvent, BaseError> {
     let context =
         AuditEventContext::new(actor, tenant_id, ctx.request_id()).map_err(invalid_event)?;
     let (module, action) = ctx.dispatch_target().ok_or_else(|| {

@@ -5,7 +5,8 @@ use super::model::{AdminAccountPage, AdminAccountView, PageRequest};
 use super::{ACTIVE_STATUS, BOOTSTRAP_KEY, IS_ADMIN, NAME, POSITION, STATUS, SYSTEM_ROLE, USER_ID};
 use crate::audit;
 use crate::modules::account::{
-    increment_locked_authz_version, lock_user_authorization, LockedUserAuthorization,
+    create_password_reset_in_tx, increment_locked_authz_version, lock_user_authorization,
+    GeneratedPasswordReset, LockedUserAuthorization,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -197,6 +198,44 @@ impl AdminRepository {
         .await;
         let id = finish_transaction(transaction, result).await?;
         self.find_by_id(ctx, id).await
+    }
+
+    pub(super) async fn create_password_reset(
+        &self,
+        ctx: &ActionContext,
+        target_user_id: i64,
+        requested_by_user_id: i64,
+        reset: &GeneratedPasswordReset,
+        ttl_seconds: u64,
+    ) -> Result<(), BaseError> {
+        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let result = async {
+            let locked = lock_user_authorization(&mut transaction, target_user_id).await?;
+            ensure_active_user(&locked)?;
+            create_password_reset_in_tx(
+                &mut transaction,
+                target_user_id,
+                requested_by_user_id,
+                reset,
+                ttl_seconds,
+            )
+            .await?;
+            let event = audit::succeeded_event(
+                ctx,
+                None,
+                Some(audit::entity("user", target_user_id)?),
+                audit::entity("password_reset", reset.reference().fingerprint())?,
+                None,
+                Some(audit::summary([
+                    ("expires_in_seconds", json!(ttl_seconds)),
+                    ("reset_fingerprint", json!(reset.reference().fingerprint())),
+                    ("user_id", json!(target_user_id)),
+                ])?),
+            )?;
+            audit::append_in_tx(&mut transaction, &event).await
+        }
+        .await;
+        finish_transaction(transaction, result).await
     }
 
     pub(super) async fn set_status(

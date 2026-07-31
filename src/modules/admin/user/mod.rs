@@ -5,6 +5,8 @@ mod model;
 mod repository;
 mod service;
 
+use crate::config::SecuritySettings;
+use crate::modules::account::AuthRateLimiter;
 use repository::AdminRepository;
 use service::AdminService;
 use std::sync::Arc;
@@ -76,28 +78,36 @@ impl Module for AdminUserModule {
 }
 
 /// 构建平台账号 Module。
-pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
+pub(super) fn build_module(security: &SecuritySettings) -> Result<ModuleSpec, BaseError> {
     let module = AdminUserModule.into_spec();
     let table = module
         .table
         .as_ref()
         .ok_or(BaseError::TableDefinitionNotSet)?
         .table_definition()?;
-    let service = Arc::new(AdminService::new(AdminRepository::new(table)));
-    Ok(actions::register_all(module, service).presentation(
-        ModulePresentationSpec::new(
-            crate::modules::presentation::administrator_identity(),
-            "平台账号",
-            "admin_users",
-        )
-        .description("查询并维护平台管理账号")
-        .order(10)
-        .primary_action(yang_base::action!("admin.user.list"))
-        .present_action(
-            yang_base::action!("admin.user.add"),
-            ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
+    let password_reset_enabled = security.issue_refresh_credential_version;
+    let service = Arc::new(AdminService::new(
+        AdminRepository::new(table),
+        Arc::new(AuthRateLimiter::new(security)),
+        security.password_reset_ttl_seconds,
+        password_reset_enabled,
+    ));
+    Ok(
+        actions::register_all(module, service, password_reset_enabled).presentation(
+            ModulePresentationSpec::new(
+                crate::modules::presentation::administrator_identity(),
+                "平台账号",
+                "admin_users",
+            )
+            .description("查询并维护平台管理账号")
+            .order(10)
+            .primary_action(yang_base::action!("admin.user.list"))
+            .present_action(
+                yang_base::action!("admin.user.add"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
+            ),
         ),
-    ))
+    )
 }
 
 #[cfg(test)]

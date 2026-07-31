@@ -109,3 +109,41 @@ export async function logout(
     });
   }
 }
+
+export async function resetPassword(
+  resetToken: string,
+  newPassword: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${apiBase}/api/v1/users/reset-password`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      reset_token: resetToken,
+      new_password: newPassword,
+    }),
+    credentials: "include",
+    signal,
+  });
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+  const reloginRequired =
+    payload?.data !== null &&
+    typeof payload?.data === "object" &&
+    (payload.data as Record<string, unknown>).relogin_required === true;
+  if (!response.ok || payload?.code !== 0 || !reloginRequired) {
+    const message =
+      response.ok && payload?.code === 0 && !reloginRequired
+        ? "密码重置响应缺少重新登录确认"
+        : (payload?.message ?? `HTTP ${response.status}`);
+    throw new ApiError(message, {
+      status: response.status,
+      code: payload?.code,
+      requestId,
+      details: payload,
+    });
+  }
+}

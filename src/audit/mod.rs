@@ -11,7 +11,9 @@ pub use event::{
     AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult, AuditSummary,
 };
 
-pub(crate) use repository::{append_in_tx, entity, succeeded_event, summary};
+pub(crate) use repository::{
+    append_in_tx, entity, succeeded_event, succeeded_system_event, summary,
+};
 pub(crate) use schema::validate_schema;
 
 pub const AUDIT_EVENT_TABLE: &str = "audit_event";

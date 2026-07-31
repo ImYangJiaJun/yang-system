@@ -110,6 +110,7 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
     for table in [
+        "password_reset_token",
         "audit_event",
         "authorization_outbox",
         "work_task",
@@ -176,6 +177,7 @@ async fn build_harness(
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 1_000,
+        password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: false,
         trusted_proxy_cidrs: Vec::new(),
     });

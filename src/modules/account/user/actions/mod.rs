@@ -8,6 +8,7 @@ mod logout;
 mod me;
 mod refresh;
 mod register;
+mod reset_password;
 
 use super::service::UserService;
 use std::sync::Arc;
@@ -24,7 +25,8 @@ pub(super) fn register_all(
     let module = login::register(module, Arc::clone(&service))?;
     let module = refresh::register(module, Arc::clone(&service))?;
     let module = if credential_mutations_enabled {
-        change_password::register(module, Arc::clone(&service))?
+        let module = change_password::register(module, Arc::clone(&service))?;
+        reset_password::register(module, Arc::clone(&service))?
     } else {
         module
     };

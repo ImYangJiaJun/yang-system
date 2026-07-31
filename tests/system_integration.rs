@@ -286,6 +286,7 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
         "拒绝清理非测试数据库 {database:?}；数据库名必须以 _test 结尾"
     );
     for table in [
+        "password_reset_token",
         "audit_event",
         "authorization_outbox",
         "work_task",
@@ -353,6 +354,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
     });
@@ -374,6 +376,11 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     .await?;
     sqlx::raw_sql(include_str!(
         "../migrations/20260726_0007_create_audit_event.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260731_0011_create_password_reset_token.sql"
     ))
     .execute(tools.mysql()?.pool())
     .await?;
@@ -638,6 +645,436 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .is_some_and(|items| items.len() == 1),
         "刷新 Token 后应获得平台账号读取权限"
     );
+
+    let reset_username = format!("password_reset_{suffix}");
+    let reset_old_password = "reset-user-password-before";
+    let reset_new_password_one = "reset-user-password-after-one";
+    let reset_new_password_two = "reset-user-password-after-two";
+    let reset_user = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "register",
+            json!({
+                "username": reset_username.clone(),
+                "password": reset_old_password
+            }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let reset_user_id = reset_user["id"]
+        .as_i64()
+        .context("密码重置用户响应缺少 id")?;
+    let reset_login_response = dispatch(
+        &application.runtime,
+        "account.user",
+        "login",
+        json!({
+            "username": reset_username.clone(),
+            "password": reset_old_password
+        }),
+        &[],
+        &[],
+    )
+    .await?;
+    let reset_old_refresh = refresh_cookie(&reset_login_response)?;
+    let reset_login = data(reset_login_response)?;
+    let reset_old_access = reset_login["access_token"]
+        .as_str()
+        .context("密码重置用户登录响应缺少 access_token")?
+        .to_owned();
+    assert_authorization_error_with_body(
+        &application.runtime,
+        "admin.user",
+        "create_password_reset",
+        &reset_old_access,
+        json!({ "user_id": reset_user_id }),
+        700002,
+    )
+    .await?;
+
+    let first_reset_response = dispatch(
+        &application.runtime,
+        "admin.user",
+        "create_password_reset",
+        json!({ "user_id": reset_user_id }),
+        &[("authorization", &admin_authorization)],
+        &[],
+    )
+    .await?;
+    ensure!(
+        first_reset_response
+            .response_headers()
+            .iter()
+            .any(|(name, value)| {
+                name.eq_ignore_ascii_case("cache-control") && value == "no-store"
+            }),
+        "只返回一次的原始重置凭证响应必须禁止缓存"
+    );
+    let first_reset_created = data(first_reset_response)?;
+    let first_reset_token = first_reset_created["reset_token"]
+        .as_str()
+        .context("首次创建响应缺少重置凭证")?
+        .to_owned();
+    let first_reset_fingerprint = first_reset_created["reset_fingerprint"]
+        .as_str()
+        .context("首次创建响应缺少重置指纹")?
+        .to_owned();
+    ensure!(
+        first_reset_token.len() == 64
+            && first_reset_fingerprint.len() == 16
+            && first_reset_created.get("password").is_none(),
+        "管理员响应只能返回一次性重置凭证与短指纹，不能返回临时密码"
+    );
+    let raw_token_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM password_reset_token \
+         WHERE token_digest = ? OR token_fingerprint = ?",
+    )
+    .bind(&first_reset_token)
+    .bind(&first_reset_token)
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(raw_token_rows == 0, "原始重置凭证不得落库");
+    let stored_fingerprint: String = sqlx::query_scalar(
+        "SELECT CAST(token_fingerprint AS CHAR) FROM password_reset_token \
+         WHERE user_user = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(reset_user_id)
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        stored_fingerprint == first_reset_fingerprint,
+        "数据库只应保存可关联的短指纹"
+    );
+
+    let second_reset_created = data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "create_password_reset",
+            json!({ "user_id": reset_user_id }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    let second_reset_token = second_reset_created["reset_token"]
+        .as_str()
+        .context("第二次创建响应缺少重置凭证")?
+        .to_owned();
+    ensure!(
+        first_reset_token != second_reset_token,
+        "每次创建必须使用独立随机凭证"
+    );
+    let invalidated_prior: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM password_reset_token \
+         WHERE user_user = ? AND token_fingerprint = ? AND invalidated_at IS NOT NULL",
+    )
+    .bind(reset_user_id)
+    .bind(&first_reset_fingerprint)
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        invalidated_prior == 1,
+        "创建新凭证必须原子失效旧的未消费凭证"
+    );
+    ensure!(
+        matches!(
+            dispatch_raw(
+                &application.runtime,
+                "account.user",
+                "reset_password",
+                json!({
+                    "reset_token": first_reset_token,
+                    "new_password": reset_new_password_one
+                }),
+                &[],
+                &[],
+            )
+            .await,
+            Err(BaseError::Unauthorized(_))
+        ),
+        "已被新凭证替换的旧凭证必须拒绝"
+    );
+
+    let reset_authz_before = database_authz_version(tools.mysql()?.pool(), reset_user_id).await?;
+    let reset_credential_before =
+        database_credential_version(tools.mysql()?.pool(), reset_user_id).await?;
+    let reset_once = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "reset_password",
+        json!({
+            "reset_token": second_reset_token.clone(),
+            "new_password": reset_new_password_one
+        }),
+        &[],
+        &[],
+    );
+    let reset_twice = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "reset_password",
+        json!({
+            "reset_token": second_reset_token.clone(),
+            "new_password": reset_new_password_two
+        }),
+        &[],
+        &[],
+    );
+    let (reset_once_result, reset_twice_result) = tokio::join!(reset_once, reset_twice);
+    ensure!(
+        reset_once_result.is_ok() ^ reset_twice_result.is_ok(),
+        "同一重置凭证并发消费必须恰好一次成功: first={reset_once_result:?}, second={reset_twice_result:?}"
+    );
+    let (reset_winning_password, reset_success, reset_loser) = match reset_once_result {
+        Ok(response) => (
+            reset_new_password_one,
+            response,
+            reset_twice_result.err().context("第二次消费应失败")?,
+        ),
+        Err(first_error) => (
+            reset_new_password_two,
+            reset_twice_result.context("第二次消费应成功")?,
+            first_error,
+        ),
+    };
+    ensure!(
+        matches!(reset_loser, BaseError::Unauthorized(_)),
+        "并发失败请求必须看到统一的无效凭证错误"
+    );
+    ensure!(
+        reset_success
+            .data
+            .as_ref()
+            .and_then(|value| value.get("relogin_required"))
+            .and_then(Value::as_bool)
+            == Some(true),
+        "重置成功必须要求重新登录"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), reset_user_id).await?
+            == reset_authz_before + 1
+            && database_credential_version(tools.mysql()?.pool(), reset_user_id).await?
+                == reset_credential_before + 1,
+        "成功消费必须在同一事务中恰好递增两个版本"
+    );
+    ensure!(
+        matches!(
+            dispatch_raw(
+                &application.runtime,
+                "account.user",
+                "reset_password",
+                json!({
+                    "reset_token": second_reset_token,
+                    "new_password": "reset-user-password-after-reuse"
+                }),
+                &[],
+                &[],
+            )
+            .await,
+            Err(BaseError::Unauthorized(_))
+        ),
+        "成功消费后的同一凭证必须永久拒绝复用"
+    );
+    wait_for_cached_version(
+        &authorization_cache_probe,
+        reset_user_id,
+        reset_authz_before + 1,
+    )
+    .await?;
+    assert_authorization_error(
+        &application.runtime,
+        "account.user",
+        "ui_catalog",
+        &reset_old_access,
+        400009,
+    )
+    .await?;
+    let reset_old_cookie = format!("yang_refresh={reset_old_refresh}");
+    ensure!(
+        matches!(
+            dispatch_raw(
+                &application.runtime,
+                "account.user",
+                "refresh",
+                json!({}),
+                &[("cookie", reset_old_cookie.as_str())],
+                &[],
+            )
+            .await,
+            Err(BaseError::Unauthorized(_))
+        ),
+        "密码重置前的 Refresh Token 必须失效"
+    );
+    dispatch(
+        &application.runtime,
+        "account.user",
+        "login",
+        json!({
+            "username": reset_username.clone(),
+            "password": reset_winning_password
+        }),
+        &[],
+        &[],
+    )
+    .await
+    .context("重置后的新密码必须可登录")?;
+    ensure!(
+        dispatch_raw(
+            &application.runtime,
+            "account.user",
+            "login",
+            json!({
+                "username": reset_username,
+                "password": reset_old_password
+            }),
+            &[],
+            &[],
+        )
+        .await
+        .is_err(),
+        "重置前的旧密码必须失效"
+    );
+
+    let expired_username = format!("reset_expired_{suffix}");
+    let expired_user = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "register",
+            json!({
+                "username": expired_username,
+                "password": "reset-expired-password-before"
+            }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let expired_user_id = expired_user["id"]
+        .as_i64()
+        .context("过期对抗用户响应缺少 id")?;
+    let expired_reset = data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "create_password_reset",
+            json!({ "user_id": expired_user_id }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    let expired_token = expired_reset["reset_token"]
+        .as_str()
+        .context("过期对抗响应缺少重置凭证")?;
+    sqlx::query(
+        "UPDATE password_reset_token \
+         SET created_at = UNIX_TIMESTAMP() - 10, expires_at = UNIX_TIMESTAMP() - 1 \
+         WHERE user_user = ? AND consumed_at IS NULL AND invalidated_at IS NULL",
+    )
+    .bind(expired_user_id)
+    .execute(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        matches!(
+            dispatch_raw(
+                &application.runtime,
+                "account.user",
+                "reset_password",
+                json!({
+                    "reset_token": expired_token,
+                    "new_password": "reset-expired-password-after"
+                }),
+                &[],
+                &[],
+            )
+            .await,
+            Err(BaseError::Unauthorized(_))
+        ),
+        "到期凭证必须拒绝且不得消费"
+    );
+
+    let rollback_reset_username = format!("reset_rollback_{suffix}");
+    let rollback_reset_user = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "register",
+            json!({
+                "username": rollback_reset_username.clone(),
+                "password": "reset-rollback-password-before"
+            }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let rollback_reset_user_id = rollback_reset_user["id"]
+        .as_i64()
+        .context("重置回滚用户响应缺少 id")?;
+    let rollback_reset = data(
+        dispatch(
+            &application.runtime,
+            "admin.user",
+            "create_password_reset",
+            json!({ "user_id": rollback_reset_user_id }),
+            &[("authorization", &admin_authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    let rollback_reset_token = rollback_reset["reset_token"]
+        .as_str()
+        .context("重置回滚响应缺少凭证")?
+        .to_owned();
+    let rollback_reset_authz =
+        database_authz_version(tools.mysql()?.pool(), rollback_reset_user_id).await?;
+    let rollback_reset_credential =
+        database_credential_version(tools.mysql()?.pool(), rollback_reset_user_id).await?;
+    sqlx::query("RENAME TABLE audit_event TO audit_event_unavailable")
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let reset_audit_failure = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "reset_password",
+        json!({
+            "reset_token": rollback_reset_token.clone(),
+            "new_password": "reset-rollback-password-after"
+        }),
+        &[],
+        &[],
+    )
+    .await;
+    let restore_audit = sqlx::query("RENAME TABLE audit_event_unavailable TO audit_event")
+        .execute(tools.mysql()?.pool())
+        .await;
+    restore_audit.context("恢复重置回滚审计表失败")?;
+    ensure!(reset_audit_failure.is_err(), "审计失败必须中止凭证消费");
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), rollback_reset_user_id).await?
+            == rollback_reset_authz
+            && database_credential_version(tools.mysql()?.pool(), rollback_reset_user_id).await?
+                == rollback_reset_credential,
+        "审计失败回滚后摘要、双版本和消费状态都必须保持不变"
+    );
+    dispatch(
+        &application.runtime,
+        "account.user",
+        "reset_password",
+        json!({
+            "reset_token": rollback_reset_token,
+            "new_password": "reset-rollback-password-after"
+        }),
+        &[],
+        &[],
+    )
+    .await
+    .context("审计恢复后同一未消费凭证必须仍可成功一次")?;
 
     let member_username = format!("member_{suffix}");
     let member = data(
@@ -1367,6 +1804,33 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         "Redis 失败不得改变密码相关版本"
     );
 
+    let reset_rate_outage_attempt = dispatch_raw(
+        &rate_outage_app.runtime,
+        "account.user",
+        "reset_password",
+        json!({
+            "reset_token": "0".repeat(64),
+            "new_password": "reset-password-after-outage"
+        }),
+        &[],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(
+            reset_rate_outage_attempt,
+            Err(BaseError::RedisConnectionFailed(_)) | Err(BaseError::RedisOperationFailed(_))
+        ),
+        "Redis 限流不可用时公共密码重置入口必须失败关闭"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), change_user_id).await?
+            == before_rate_outage_authz
+            && database_credential_version(tools.mysql()?.pool(), change_user_id).await?
+                == before_rate_outage_credential,
+        "密码重置限流失败不得改变任何凭据版本"
+    );
+
     let rollback_username = format!("change_rollback_{suffix}");
     let rollback_password = "rollback-password-before";
     let rollback_user = data(
@@ -1500,8 +1964,10 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     };
     for (action, minimum) in [
         ("account.user.change_password", 1),
+        ("account.user.reset_password", 2),
         ("admin.user.bootstrap", 1),
         ("admin.user.add", 1),
+        ("admin.user.create_password_reset", 4),
         ("admin.user.set_admin", 2),
         ("admin.user.set_status", 2),
         ("org.tenant.create", 1),
@@ -1516,7 +1982,8 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     }
     let invalid_audit_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM audit_event \
-         WHERE actor_type <> 'user' OR result <> 'succeeded' \
+         WHERE (actor_type <> 'user' AND NOT (actor_type = 'system' AND action = 'account.user.reset_password')) \
+            OR result <> 'succeeded' \
             OR subject_type <> 'user' OR subject_id IS NULL \
             OR (before_summary IS NULL AND after_summary IS NULL) \
             OR (before_summary IS NOT NULL AND JSON_TYPE(before_summary) <> 'OBJECT') \
@@ -1541,6 +2008,20 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     ensure!(
         sensitive_change_audit_rows == 0,
         "改密成功审计不得包含密码、Token、Cookie、摘要或版本敏感字段"
+    );
+    let sensitive_reset_audit_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_event \
+         WHERE action IN ('admin.user.create_password_reset', 'account.user.reset_password') \
+           AND LOWER(CONCAT( \
+               COALESCE(CAST(before_summary AS CHAR), ''), \
+               COALESCE(CAST(after_summary AS CHAR), '') \
+           )) REGEXP 'password|token|cookie|secret|hash|credential|authorization'",
+    )
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        sensitive_reset_audit_rows == 0,
+        "密码重置审计只能记录短指纹和非敏感元数据"
     );
     let (audit_rows, distinct_events, distinct_requests): (i64, i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COUNT(DISTINCT event_id), COUNT(DISTINCT request_id) FROM audit_event",
@@ -1805,6 +2286,7 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
     });

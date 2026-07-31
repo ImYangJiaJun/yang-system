@@ -4,6 +4,7 @@ mod grants;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
+use crate::config::SecuritySettings;
 use crate::modules::account;
 use crate::modules::account::GrantResolver;
 use grants::AdminGrantResolver;
@@ -19,9 +20,10 @@ pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {
 
 /// 构建平台账号 Addon。
 pub fn build_addon(
+    security: Arc<SecuritySettings>,
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<AddonSpec, BaseError> {
-    let users = user::build_module()?.middleware(
+    let users = user::build_module(&security)?.middleware(
         TokenAuthMiddleware::new(account::user_from_claims)
             .with_claims_validator(authorization_validator),
     );

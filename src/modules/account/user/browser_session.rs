@@ -13,6 +13,11 @@ pub(super) struct BrowserAccessToken {
     pub(super) access_token: String,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct ReloginRequired {
+    pub(super) relogin_required: bool,
+}
+
 pub(super) fn refresh_token(request: &Request) -> Result<String, BaseError> {
     request
         .cookie()
@@ -77,6 +82,18 @@ pub(super) fn clear_response(
     secure: bool,
 ) -> Result<ApiResponse, BaseError> {
     no_store(response.with_header("set-cookie", clear_refresh_cookie(secure))?)
+}
+
+pub(super) fn relogin_response(message: &str, secure: bool) -> Result<ApiResponse, BaseError> {
+    clear_response(
+        ApiResponse::success(
+            ReloginRequired {
+                relogin_required: true,
+            },
+            message,
+        )?,
+        secure,
+    )
 }
 
 fn no_store(response: ApiResponse) -> Result<ApiResponse, BaseError> {

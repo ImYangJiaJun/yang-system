@@ -66,6 +66,8 @@ argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
 auth_rate_limit_ip_attempts = 30
 auth_rate_limit_username_attempts = 10
+# 密码重置凭证只返回一次，建议保持短 TTL；允许范围 60..=3600 秒。
+password_reset_ttl_seconds = 900
 # 三阶段发布：先保持 false 部署兼容读取；确认无旧实例后改为 true，同时开启
 # Refresh 凭据版本签发与会递增该版本的 change_password Action。
 issue_refresh_credential_version = false

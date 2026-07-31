@@ -14,7 +14,11 @@ const BUSINESS_TABLES: [&str; 6] = [
     "admin_user",
     "users",
 ];
-const INTERNAL_TABLES: [&str; 2] = ["audit_event", "authorization_outbox"];
+const INTERNAL_TABLES: [&str; 3] = [
+    "password_reset_token",
+    "audit_event",
+    "authorization_outbox",
+];
 
 fn database_config() -> DatabaseConfig {
     DatabaseConfig::default()
@@ -29,6 +33,7 @@ fn security_settings() -> Arc<SecuritySettings> {
         auth_rate_limit_window_seconds: 60,
         auth_rate_limit_ip_attempts: 1_000,
         auth_rate_limit_username_attempts: 100,
+        password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: false,
         trusted_proxy_cidrs: Vec::new(),
     })
@@ -141,7 +146,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 10, "应记录 10 个 applied 版本");
+        ensure!(migration_count == 11, "应记录 11 个 applied 版本");
         let authz_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'authz_version'",
         )
@@ -206,6 +211,26 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
             .all(|index| audit_indexes.contains(index)),
             "审计表必须具备幂等、检索和保留游标索引: {audit_indexes:?}"
         );
+        let reset_indexes: BTreeSet<String> = sqlx::query_scalar(
+            "SELECT DISTINCT INDEX_NAME FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'password_reset_token'",
+        )
+        .fetch_all(control.pool())
+        .await
+        .context("读取密码重置凭证索引失败")?
+        .into_iter()
+        .collect();
+        ensure!(
+            [
+                "PRIMARY",
+                "uk_password_reset_token_digest",
+                "idx_password_reset_token_user_active",
+                "idx_password_reset_token_expiry",
+                "idx_password_reset_token_requester",
+            ]
+            .into_iter()
+            .all(|index| reset_indexes.contains(index)),
+            "密码重置表必须具备唯一摘要、活动凭证、到期清理与发起者索引: {reset_indexes:?}"
+        );
         let invalid_request_id = sqlx::query(
             "INSERT INTO `audit_event` (`event_id`, `schema_version`, `occurred_at`, \
              `actor_type`, `actor_id`, `action`, `target_type`, `target_id`, \
@@ -260,7 +285,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         );
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version', '20260731_0011_create_password_reset_token')",
         )
         .execute(control.pool())
         .await
