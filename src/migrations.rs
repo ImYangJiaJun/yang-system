@@ -1,7 +1,7 @@
 //! 生产发布使用的版本化、前向数据库迁移作业。
 //! raw-sql-boundary: schema-validator migration-preflight
 
-use crate::app::build_app;
+use crate::app::build_schema_app;
 use crate::config::{MigrationSettings, SecuritySettings};
 use anyhow::{ensure, Context};
 use std::path::{Path, PathBuf};
@@ -368,7 +368,7 @@ pub async fn execute_with_database(
     );
     let validation = async {
         let application =
-            build_app(Arc::clone(&tools), security).context("构建 Schema 定义失败")?;
+            build_schema_app(Arc::clone(&tools), security).context("构建 Schema 定义失败")?;
         let definitions = application
             .runtime
             .table_definitions()

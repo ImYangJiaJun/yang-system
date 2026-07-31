@@ -35,6 +35,35 @@ end
 return { exceeded, retry_after }
 "#;
 
+const FAILURE_COUNT_SCRIPT: &str = r#"
+local exceeded = 0
+local retry_after = 0
+local window = tonumber(ARGV[1])
+
+for index, key in ipairs(KEYS) do
+    local current = redis.call('INCR', key)
+    if current == 1 then
+        redis.call('EXPIRE', key, window)
+    end
+
+    local ttl = redis.call('TTL', key)
+    if ttl < 1 then
+        redis.call('EXPIRE', key, window)
+        ttl = window
+    end
+
+    local limit = tonumber(ARGV[index + 1])
+    if current > limit then
+        exceeded = 1
+        if ttl > retry_after then
+            retry_after = ttl
+        end
+    end
+end
+
+return { exceeded, retry_after }
+"#;
+
 #[derive(Clone, Copy)]
 pub(crate) enum AuthOperation {
     ChangePassword,
@@ -42,6 +71,7 @@ pub(crate) enum AuthOperation {
     PasswordResetConsume,
     Login,
     Register,
+    StepUpComplete,
 }
 
 impl AuthOperation {
@@ -52,6 +82,7 @@ impl AuthOperation {
             Self::PasswordResetConsume => "password-reset-consume",
             Self::Login => "login",
             Self::Register => "register",
+            Self::StepUpComplete => "step-up-complete",
         }
     }
 
@@ -60,7 +91,7 @@ impl AuthOperation {
             Self::ChangePassword => "user",
             Self::PasswordResetCreate => "actor-target",
             Self::PasswordResetConsume => "fingerprint",
-            Self::Login | Self::Register => "username",
+            Self::Login | Self::Register | Self::StepUpComplete => "username",
         }
     }
 }
@@ -123,6 +154,49 @@ impl AuthRateLimiter {
             }
         }
     }
+
+    pub(crate) async fn record_failure(
+        &self,
+        ctx: &ActionContext,
+        operation: AuthOperation,
+        identity: &str,
+    ) -> Result<(), BaseError> {
+        let keys = self.failure_keys(ctx, operation, identity);
+        let args = [
+            self.window_seconds.to_string(),
+            self.ip_attempts.to_string(),
+            self.username_attempts.to_string(),
+        ];
+        let cache = ctx.tools().cache()?;
+        let script = cache.script(FAILURE_COUNT_SCRIPT);
+        let decision: (i64, i64) = cache.eval_script(&script, &keys, &args).await?;
+        rate_limit_result(decision.0, decision.1)
+    }
+
+    pub(crate) async fn clear_failures(
+        &self,
+        ctx: &ActionContext,
+        operation: AuthOperation,
+        identity: &str,
+    ) -> Result<(), BaseError> {
+        let keys = self.failure_keys(ctx, operation, identity);
+        ctx.tools().cache()?.del(&keys).await?;
+        Ok(())
+    }
+
+    fn failure_keys(
+        &self,
+        ctx: &ActionContext,
+        operation: AuthOperation,
+        identity: &str,
+    ) -> [String; 2] {
+        let source = client_ip_identity(ctx);
+        let prefix = format!("yang-system:auth-failure:{}", operation.key());
+        [
+            format!("{prefix}:ip:{source}"),
+            format!("{prefix}:{}:{identity}", operation.identity_key()),
+        ]
+    }
 }
 
 fn client_ip_identity(ctx: &ActionContext) -> Cow<'_, str> {
@@ -181,6 +255,11 @@ mod tests {
         );
         assert_eq!(AuthOperation::ChangePassword.identity_key(), "user");
         assert_eq!(AuthOperation::Login.identity_key(), "username");
+        assert_ne!(
+            AuthOperation::StepUpComplete.key(),
+            AuthOperation::Login.key()
+        );
+        assert_eq!(AuthOperation::StepUpComplete.identity_key(), "username");
     }
 
     #[test]
@@ -204,5 +283,33 @@ mod tests {
         assert_eq!(client_ip_identity(&context), "10.0.0.2");
         context.request_meta.peer_addr = None;
         assert_eq!(client_ip_identity(&context), "unknown");
+    }
+
+    #[test]
+    fn step_up_failure_keys_are_separate_from_login_attempt_keys() {
+        let settings = SecuritySettings {
+            argon2_max_concurrency: 1,
+            auth_rate_limit_window_seconds: 60,
+            auth_rate_limit_ip_attempts: 10,
+            auth_rate_limit_username_attempts: 5,
+            password_reset_ttl_seconds: 900,
+            issue_refresh_credential_version: true,
+            trusted_proxy_cidrs: Vec::new(),
+        };
+        let limiter = AuthRateLimiter::new(&settings);
+        let tools = ToolsBuilder::new()
+            .build()
+            .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}"));
+        let context = ActionContext::new(Request::new(serde_json::Value::Null), Arc::new(tools));
+        let keys = limiter.failure_keys(&context, AuthOperation::StepUpComplete, "alice");
+
+        assert_eq!(
+            keys,
+            [
+                "yang-system:auth-failure:step-up-complete:ip:unknown".to_string(),
+                "yang-system:auth-failure:step-up-complete:username:alice".to_string(),
+            ]
+        );
+        assert!(keys.iter().all(|key| !key.contains("auth-rate:login")));
     }
 }

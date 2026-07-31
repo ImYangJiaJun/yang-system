@@ -111,6 +111,51 @@ impl UserService {
         Ok(AuthenticatedUser { id: user.id })
     }
 
+    pub(super) async fn authenticate_step_up(
+        &self,
+        ctx: &ActionContext,
+        username: &str,
+        plain_password: &str,
+    ) -> Result<AuthenticatedUser, BaseError> {
+        let username = normalize_username(username)?;
+        let operation = AuthOperation::StepUpComplete;
+        self.rate_limiter.check(ctx, operation, &username).await?;
+
+        let user = match self
+            .users
+            .find_credentials_by_username(ctx, &username)
+            .await?
+        {
+            Some(user) => user,
+            None => {
+                self.rate_limiter
+                    .record_failure(ctx, operation, &username)
+                    .await?;
+                return Err(BaseError::InvalidPassword);
+            }
+        };
+        if !self
+            .passwords
+            .verify(plain_password, &user.password_hash)
+            .await?
+        {
+            self.rate_limiter
+                .record_failure(ctx, operation, &username)
+                .await?;
+            return Err(BaseError::InvalidPassword);
+        }
+        if let Err(error) = ensure_active_status(user.status) {
+            self.rate_limiter
+                .record_failure(ctx, operation, &username)
+                .await?;
+            return Err(error);
+        }
+        self.rate_limiter
+            .clear_failures(ctx, operation, &username)
+            .await?;
+        Ok(AuthenticatedUser { id: user.id })
+    }
+
     pub(super) async fn change_password(
         &self,
         ctx: &ActionContext,

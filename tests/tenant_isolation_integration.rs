@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta};
+use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
 use yang_base::database::DatabaseInitializer;
 use yang_base::definition::{ActionHandle, ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
@@ -17,6 +17,17 @@ use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVe
 use yang_system::config::SecuritySettings;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
+
+fn integration_step_up_manager() -> Arc<StepUpManager> {
+    Arc::new(
+        StepUpManager::new(
+            "independent-tenant-step-up-secret-32-bytes",
+            "tenant-integration-step-up",
+            "tenant-integration-sensitive-actions",
+        )
+        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
+    )
+}
 
 struct Harness {
     application: Application,
@@ -152,6 +163,7 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
             .mysql(mysql)
             .cache(redis)
             .extension(authorization_cache)
+            .extension(integration_step_up_manager())
             .token(TokenManager::new_symmetric(
                 "tenant-isolation-integration-secret",
                 Algorithm::HS256,

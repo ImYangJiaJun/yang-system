@@ -4,6 +4,7 @@ use crate::modules::{account, admin, observability, org, work};
 use crate::observability::logging::{ActionLogMiddleware, LogIdentity};
 use anyhow::Context;
 use std::sync::Arc;
+use yang_base::action::StepUpManager;
 use yang_base::definition::{AppBuilder, BuiltApp};
 use yang_base::tools::Tools;
 
@@ -14,6 +15,25 @@ pub struct Application {
 pub fn build_app(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
+) -> anyhow::Result<Application> {
+    let step_up_manager = tools
+        .extension::<Arc<StepUpManager>>()
+        .context("运行应用缺少 StepUpManager 扩展")?
+        .clone();
+    build_application(tools, security, Some(step_up_manager))
+}
+
+pub(crate) fn build_schema_app(
+    tools: Arc<Tools>,
+    security: Arc<SecuritySettings>,
+) -> anyhow::Result<Application> {
+    build_application(tools, security, None)
+}
+
+fn build_application(
+    tools: Arc<Tools>,
+    security: Arc<SecuritySettings>,
+    step_up_manager: Option<Arc<StepUpManager>>,
 ) -> anyhow::Result<Application> {
     let authorization_cache = match tools.cache() {
         Ok(_) => Some(
@@ -38,6 +58,7 @@ pub fn build_app(
                     work::grant_resolver(),
                 ])),
                 authorization_validator.clone(),
+                step_up_manager,
             )
             .context("构建 account Addon 失败")?
             .middleware(action_logging.clone()),
@@ -96,6 +117,14 @@ mod tests {
                     "test-api".to_string(),
                     60,
                     120,
+                ))
+                .extension(Arc::new(
+                    StepUpManager::new(
+                        "independent-step-up-test-secret-0123456789abcdef",
+                        "test-step-up",
+                        "test-sensitive-actions",
+                    )
+                    .unwrap_or_else(|error| panic!("测试 Step-up manager 应有效: {error}")),
                 ))
                 .build()
                 .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
@@ -166,12 +195,19 @@ mod tests {
         assert!(tables.contains(&"org_user"));
         assert!(tables.contains(&"work_project"));
         assert!(tables.contains(&"work_task"));
-        assert_eq!(operations.len(), 8);
+        assert_eq!(operations.len(), 9);
         assert!(operations.contains(&(
             "account.user.register",
             "POST",
             "/api/v1/users/register",
             201,
+            true,
+        )));
+        assert!(operations.contains(&(
+            "account.user.step_up_complete",
+            "POST",
+            "/api/v1/users/step-up/complete",
+            200,
             true,
         )));
         assert!(operations.contains(&(

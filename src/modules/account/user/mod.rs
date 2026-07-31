@@ -19,7 +19,7 @@ use password::PasswordEngine;
 use repository::UserRepository;
 use service::UserService;
 use std::sync::Arc;
-use yang_base::action::{TokenAuthMiddleware, UiCatalogAction};
+use yang_base::action::{StepUpManager, TokenAuthMiddleware, UiCatalogAction};
 use yang_base::definition::{
     ActionInteraction, ActionPlacement, ActionPresentationSpec, ModuleName, ModulePresentationSpec,
     ModuleSpec,
@@ -37,6 +37,7 @@ pub(super) fn build_module(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     authorization_validator: AuthorizationVersionValidator,
+    step_up_manager: Option<Arc<StepUpManager>>,
 ) -> Result<ModuleSpec, BaseError> {
     let table = schema::user_table_spec()?;
     let users = Arc::new(UserRepository::new(table.table_definition()?));
@@ -64,7 +65,13 @@ pub(super) fn build_module(
     .native_action(UiCatalogAction);
 
     let credential_mutations_enabled = security.issue_refresh_credential_version;
-    actions::register_all(module, service, credential_mutations_enabled).map(|module| {
+    actions::register_all(
+        module,
+        service,
+        credential_mutations_enabled,
+        step_up_manager,
+    )
+    .map(|module| {
         let mut presentation = ModulePresentationSpec::new(
             crate::modules::presentation::user_identity(),
             "用户中心",

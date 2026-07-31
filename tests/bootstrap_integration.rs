@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_subscriber::fmt::MakeWriter;
-use yang_base::action::{ApiResponse, Request, RequestMeta};
+use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
 use yang_base::database::DatabaseInitializer;
 use yang_base::definition::{ActionHandle, ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
@@ -19,6 +19,17 @@ use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVe
 use yang_system::config::SecuritySettings;
 
 const WRONG_SECRET: &str = "wrong-bootstrap-secret-with-sufficient-length";
+
+fn integration_step_up_manager() -> Arc<StepUpManager> {
+    Arc::new(
+        StepUpManager::new(
+            "independent-bootstrap-step-up-secret-32-bytes",
+            "bootstrap-integration-step-up",
+            "bootstrap-integration-sensitive-actions",
+        )
+        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
+    )
+}
 
 #[derive(Clone, Default)]
 struct SharedLogWriter {
@@ -161,6 +172,7 @@ async fn build_harness(
             .mysql(mysql)
             .cache(redis)
             .extension(authorization_cache)
+            .extension(integration_step_up_manager())
             .token(TokenManager::new_symmetric(
                 "bootstrap-integration-token-secret",
                 Algorithm::HS256,

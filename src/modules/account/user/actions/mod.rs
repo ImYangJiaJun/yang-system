@@ -9,6 +9,7 @@ mod me;
 mod refresh;
 mod register;
 mod reset_password;
+mod step_up;
 
 use super::service::UserService;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub(super) fn register_all(
     module: ModuleSpec,
     service: Arc<UserService>,
     credential_mutations_enabled: bool,
+    step_up_manager: Option<Arc<yang_base::action::StepUpManager>>,
 ) -> Result<ModuleSpec, BaseError> {
     let module = register::register(module, Arc::clone(&service))?;
     let module = login::register(module, Arc::clone(&service))?;
@@ -31,6 +33,10 @@ pub(super) fn register_all(
         module
     };
     let module = logout::register(module)?;
+    let module = match step_up_manager {
+        Some(manager) => step_up::register(module, Arc::clone(&service), manager),
+        None => module,
+    };
     let module = me::register(module, service)?;
     // scaffold:action-registration
     Ok(module)

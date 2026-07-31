@@ -5,7 +5,7 @@ use sqlx::{MySql, QueryBuilder};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta};
+use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
 use yang_base::database::DatabaseInitializer;
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
@@ -32,6 +32,19 @@ fn integration_token_manager() -> TokenManager {
         3600,
     )
     .unwrap_or_else(|error| panic!("集成测试 Token keyring 应构建成功: {error}"))
+}
+
+fn integration_step_up_manager() -> Arc<StepUpManager> {
+    Arc::new(
+        StepUpManager::new_with_keyring(
+            "integration-step-up-active",
+            "independent-integration-step-up-secret-32-bytes",
+            std::iter::empty::<(&str, &str)>(),
+            "yang-system-integration-step-up",
+            "yang-system-integration-sensitive-actions",
+        )
+        .unwrap_or_else(|error| panic!("集成测试 Step-up keyring 应构建成功: {error}")),
+    )
 }
 
 fn action_handle(
@@ -346,6 +359,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .mysql(mysql)
             .cache(redis.clone())
             .extension(authorization_cache)
+            .extension(integration_step_up_manager())
             .token(integration_token_manager())
             .config(bootstrap_verifier)
             .build()?,
@@ -448,6 +462,94 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         token_credential_version(&tools, &refresh_token)? == 0,
         "开启签发后 Refresh Token 必须携带数据库凭据版本"
     );
+
+    let step_up_manager = tools.extension::<Arc<StepUpManager>>()?.clone();
+    let step_up_action = ActionRef::new(
+        ModuleName::new("admin.user")
+            .map_err(|error| anyhow::anyhow!("Step-up ModuleName 无效: {error}"))?,
+        ActionName::new("set_admin")
+            .map_err(|error| anyhow::anyhow!("Step-up ActionName 无效: {error}"))?,
+    );
+    let step_up_resource = "admin_user:integration-target:admin=true";
+    let step_up_challenge =
+        step_up_manager.issue_challenge(user_id.to_string(), &step_up_action, step_up_resource)?;
+    let wrong_step_up = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "step_up_complete",
+        json!({
+            "challenge": step_up_challenge.challenge.clone(),
+            "credentials": { "username": username, "password": "wrong-step-up-password" }
+        }),
+        &[],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(wrong_step_up, Err(BaseError::InvalidPassword)),
+        "错误 Step-up 密码必须返回统一凭据错误"
+    );
+    let failure_keys = [
+        "yang-system:auth-failure:step-up-complete:ip:127.0.0.1".to_string(),
+        format!("yang-system:auth-failure:step-up-complete:username:{username}"),
+    ];
+    for key in &failure_keys {
+        ensure!(
+            redis.get(key).await?.as_deref() == Some("1"),
+            "Step-up 失败必须写入独立失败计数: {key}"
+        );
+    }
+    let completed_step_up = data(
+        dispatch(
+            &application.runtime,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": step_up_challenge.challenge,
+                "credentials": { "username": username, "password": password }
+            }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let proof = completed_step_up["proof"]
+        .as_str()
+        .context("Step-up 完成响应缺少 proof")?;
+    step_up_manager.verify_proof(
+        proof,
+        &user_id.to_string(),
+        &step_up_action,
+        step_up_resource,
+    )?;
+    for key in &failure_keys {
+        ensure!(
+            redis.get(key).await?.is_none(),
+            "正确 Step-up 密码必须清除当前身份的连续失败计数: {key}"
+        );
+    }
+    let cross_subject = step_up_manager.issue_challenge(
+        (user_id + 1).to_string(),
+        &step_up_action,
+        step_up_resource,
+    )?;
+    let cross_subject_attempt = dispatch_raw(
+        &application.runtime,
+        "account.user",
+        "step_up_complete",
+        json!({
+            "challenge": cross_subject.challenge,
+            "credentials": { "username": username, "password": password }
+        }),
+        &[],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(cross_subject_attempt, Err(BaseError::Unauthorized(_))),
+        "正确密码也不得完成其他主体的 Step-up challenge"
+    );
+
     let bootstrap = data(
         dispatch(
             &application.runtime,
@@ -1445,6 +1547,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .cache(redis.clone())
             .extension(authorization_cache_probe.clone())
             .extension(precheck_probe.clone())
+            .extension(integration_step_up_manager())
             .token(integration_token_manager())
             .build()?,
     );
@@ -1506,6 +1609,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .cache(redis.clone())
             .extension(authorization_cache_probe.clone())
             .extension(linearized_probe.clone())
+            .extension(integration_step_up_manager())
             .token(integration_token_manager())
             .build()?,
     );
@@ -1915,6 +2019,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .mysql(rate_outage_database)
             .cache(unavailable_rate_cache)
             .extension(authorization_cache_probe.clone())
+            .extension(integration_step_up_manager())
             .token(integration_token_manager())
             .build()?,
     );
@@ -2262,6 +2367,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .mysql(redis_outage_database)
             .cache(redis.clone())
             .extension(redis_outage_cache)
+            .extension(integration_step_up_manager())
             .token(integration_token_manager())
             .build()?,
     );
@@ -2302,6 +2408,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
             .mysql(mysql_outage_database)
             .cache(redis.clone())
             .extension(mysql_outage_cache)
+            .extension(integration_step_up_manager())
             .token(integration_token_manager())
             .build()?,
     );
@@ -2423,6 +2530,7 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
             .mysql(mysql)
             .cache(redis)
             .extension(authorization_cache)
+            .extension(integration_step_up_manager())
             .token(integration_token_manager())
             .build()?,
     );

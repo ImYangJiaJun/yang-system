@@ -71,12 +71,19 @@ async fn run_after_telemetry_initialized(
         AuthorizationVersionCache::new(cache.clone(), settings.authorization.deployment.clone())
             .context("构建授权版本缓存失败")?;
 
+    let step_up_manager = Arc::new(
+        settings
+            .step_up
+            .build_manager()
+            .context("构建 Step-up manager 失败")?,
+    );
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(cache)
             .token(token_manager)
             .extension(authorization_cache)
+            .extension(step_up_manager)
             .config(log_identity)
             .config(bootstrap_verifier)
             .build()
