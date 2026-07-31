@@ -166,22 +166,43 @@ async fn dispatch_raw(
     app.dispatch_context(handle, context).await
 }
 
+struct StepUpRequest<'a> {
+    module: &'a str,
+    action: &'a str,
+    body: Value,
+    authorization: &'a str,
+    target_headers: Vec<(&'a str, &'a str)>,
+    username: &'a str,
+    password: &'a str,
+}
+
 async fn acquire_step_up_proof(
     app: &BuiltApp,
-    module: &str,
-    action: &str,
-    body: Value,
-    authorization: &str,
-    target_headers: &[(&str, &str)],
-    username: &str,
-    password: &str,
+    request: StepUpRequest<'_>,
 ) -> anyhow::Result<String> {
-    let mut headers = vec![("authorization", authorization)];
-    headers.extend_from_slice(target_headers);
-    let challenge = match dispatch_raw(app, module, action, body, &headers, &[]).await {
+    let mut headers = vec![("authorization", request.authorization)];
+    headers.extend(request.target_headers);
+    let challenge = match dispatch_raw(
+        app,
+        request.module,
+        request.action,
+        request.body,
+        &headers,
+        &[],
+    )
+    .await
+    {
         Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
-        Err(error) => anyhow::bail!("{module}.{action} 获取 Step-up challenge 失败: {error}"),
-        Ok(_) => anyhow::bail!("{module}.{action} 缺少 proof 时不得执行"),
+        Err(error) => anyhow::bail!(
+            "{}.{} 获取 Step-up challenge 失败: {error}",
+            request.module,
+            request.action
+        ),
+        Ok(_) => anyhow::bail!(
+            "{}.{} 缺少 proof 时不得执行",
+            request.module,
+            request.action
+        ),
     };
     let completed = data(
         dispatch(
@@ -190,9 +211,12 @@ async fn acquire_step_up_proof(
             "step_up_complete",
             json!({
                 "challenge": challenge,
-                "credentials": { "username": username, "password": password }
+                "credentials": {
+                    "username": request.username,
+                    "password": request.password
+                }
             }),
-            &[("authorization", authorization)],
+            &[("authorization", request.authorization)],
             &[],
         )
         .await?,
@@ -749,13 +773,15 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         database_credential_version(tools.mysql()?.pool(), admin_id).await?;
     let rejected_disable_proof = acquire_step_up_proof(
         &first.runtime,
-        "account.user",
-        "disable_self",
-        json!({}),
-        authorization.as_str(),
-        &[],
-        admin_username.as_str(),
-        password,
+        StepUpRequest {
+            module: "account.user",
+            action: "disable_self",
+            body: json!({}),
+            authorization: authorization.as_str(),
+            target_headers: Vec::new(),
+            username: admin_username.as_str(),
+            password,
+        },
     )
     .await?;
     let rejected_disable = dispatch_raw(
@@ -790,13 +816,15 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
     });
     let target_org_proof = acquire_step_up_proof(
         &first.runtime,
-        "org.user",
-        "add",
-        target_org_body.clone(),
-        authorization.as_str(),
-        &[("x-tenant-id", tenant_id.as_str())],
-        admin_username.as_str(),
-        password,
+        StepUpRequest {
+            module: "org.user",
+            action: "add",
+            body: target_org_body.clone(),
+            authorization: authorization.as_str(),
+            target_headers: vec![("x-tenant-id", tenant_id.as_str())],
+            username: admin_username.as_str(),
+            password,
+        },
     )
     .await?;
     data(
@@ -943,13 +971,15 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         database_credential_version(tools.mysql()?.pool(), admin_id).await?;
     let disable_proof = acquire_step_up_proof(
         &first.runtime,
-        "account.user",
-        "disable_self",
-        json!({}),
-        disable_authorization.as_str(),
-        &[],
-        admin_username.as_str(),
-        password,
+        StepUpRequest {
+            module: "account.user",
+            action: "disable_self",
+            body: json!({}),
+            authorization: disable_authorization.as_str(),
+            target_headers: Vec::new(),
+            username: admin_username.as_str(),
+            password,
+        },
     )
     .await?;
     let disabled = data(
