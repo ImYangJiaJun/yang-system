@@ -1,5 +1,6 @@
 //! pre-tenant 查询的持久化边界。
 //! raw-sql-boundary: domain-repository org-access-repository
+//! authorization-writer: org-onboarding-authorization-facts
 
 use super::service::TenantSummary;
 use crate::audit;

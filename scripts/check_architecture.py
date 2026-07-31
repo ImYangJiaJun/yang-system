@@ -127,6 +127,34 @@ RAW_SQL_INVOCATION_RE = re.compile(
     r"\bsqlx::query(?:_as|_scalar)?(?:\s*::\s*<[^\n;]*>)?\s*\("
 )
 RAW_SQL_BOUNDARY_DOCUMENT = Path("docs/architecture/raw-sql-boundaries.md")
+AUTHORIZATION_WRITER_DOCUMENT = Path("docs/architecture/authorization-writers.md")
+AUTHORIZATION_WRITER_ALLOWLIST = {
+    "src/modules/account/user/repository.rs": "account-user-facts",
+    "src/modules/account/authz_version.rs": "account-security-version",
+    "src/modules/admin/user/repository.rs": "admin-authorization-facts",
+    "src/modules/org/user/repository.rs": "org-membership-authorization-facts",
+    "src/modules/org/access/repository.rs": "org-onboarding-authorization-facts",
+}
+AUTHORIZATION_WRITER_CODE_RE = re.compile(
+    r"(?m)^//!\s*authorization-writer:\s*([a-z][a-z0-9-]*)\s*$"
+)
+AUTHORIZATION_WRITER_DOC_RE = re.compile(
+    r"<!--\s*authorization-writer:\s*([a-z][a-z0-9-]*)\s+"
+    r"([a-zA-Z0-9_./-]+)\s*-->"
+)
+AUTHORIZATION_FACT_SQL_WRITE_RE = re.compile(
+    r"(?is)\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+`?"
+    r"(users|admin_user|org_user)`?\b"
+)
+GENERIC_TABLE_WRITE_RE = re.compile(
+    r"\.(?:insert(?:_returning_id)?(?:_in_tx)?|update(?:_in_tx)?|"
+    r"delete(?:_in_tx)?)\s*\("
+)
+PROTECTED_MODULE_PATHS = (
+    "src/modules/account/user/",
+    "src/modules/admin/user/",
+    "src/modules/org/user/",
+)
 
 
 def derived_action_count(source: str) -> int:
@@ -559,6 +587,69 @@ def check_raw_sql_boundaries(root: Path) -> list[str]:
     return errors
 
 
+def check_authorization_writer_boundaries(root: Path) -> list[str]:
+    """授权事实只能由显式 allowlist writer 变更。"""
+
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return []
+    errors: list[str] = []
+    code_entries: set[tuple[str, str]] = set()
+    for path in sorted(source_root.rglob("*.rs")):
+        relative = path.relative_to(root).as_posix()
+        source = production_source(path.read_text(encoding="utf-8"))
+        sql_writes = sorted(set(AUTHORIZATION_FACT_SQL_WRITE_RE.findall(source)))
+        generic_write = GENERIC_TABLE_WRITE_RE.search(source) is not None and (
+            relative in AUTHORIZATION_WRITER_ALLOWLIST
+            or (
+                relative.startswith(PROTECTED_MODULE_PATHS)
+                and "table_query()" in source
+            )
+        )
+        declarations = AUTHORIZATION_WRITER_CODE_RE.findall(source)
+        writes_authorization_fact = bool(sql_writes) or generic_write
+
+        if writes_authorization_fact:
+            expected = AUTHORIZATION_WRITER_ALLOWLIST.get(relative)
+            if expected is None:
+                detail = f"授权事实表 {','.join(sql_writes)}" if sql_writes else "通用表写入口"
+                errors.append(f"{relative}: {detail} 不在 typed writer allowlist")
+                continue
+            if declarations != [expected]:
+                errors.append(
+                    f"{relative}: 授权 writer 必须恰好声明 "
+                    f"`//! authorization-writer: {expected}`"
+                )
+                continue
+            code_entries.add((expected, relative))
+        elif declarations:
+            errors.append(f"{relative}: 声明了授权 writer 但没有受保护写入口")
+
+    document = root / AUTHORIZATION_WRITER_DOCUMENT
+    if not document.is_file():
+        if not code_entries and not errors:
+            return []
+        return [*errors, f"{AUTHORIZATION_WRITER_DOCUMENT}: 缺少授权 writer 清单"]
+    documented_entries = AUTHORIZATION_WRITER_DOC_RE.findall(
+        document.read_text(encoding="utf-8")
+    )
+    documented = set(documented_entries)
+    documented_ids = [writer_id for writer_id, _ in documented_entries]
+    for writer_id in sorted(
+        {value for value in documented_ids if documented_ids.count(value) > 1}
+    ):
+        errors.append(f"{AUTHORIZATION_WRITER_DOCUMENT}: writer {writer_id} 重复")
+    for writer_id, path in sorted(code_entries - documented):
+        errors.append(
+            f"{AUTHORIZATION_WRITER_DOCUMENT}: 缺少代码 writer {writer_id} {path}"
+        )
+    for writer_id, path in sorted(documented - code_entries):
+        errors.append(
+            f"{AUTHORIZATION_WRITER_DOCUMENT}: 已记录不存在的 writer {writer_id} {path}"
+        )
+    return errors
+
+
 def check_frontend_boundaries(root: Path) -> list[str]:
     frontend = root / "frontend" / "src"
     if not frontend.is_dir():
@@ -639,6 +730,7 @@ def check(root: Path) -> list[str]:
     errors.extend(check_tenant_isolation_evidence(root))
     errors.extend(check_audit_append_only(root))
     errors.extend(check_raw_sql_boundaries(root))
+    errors.extend(check_authorization_writer_boundaries(root))
     errors.extend(check_frontend_boundaries(root))
     return errors
 
@@ -946,6 +1038,62 @@ def self_test() -> None:
         errors = check_tenant_isolation_evidence(root)
         assert any("必须是 #[ignore]" in error for error in errors), (
             "必须拒绝失去真实库属性的矩阵测试"
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        writer_sources = {
+            "src/modules/account/user/repository.rs": (
+                "account-user-facts",
+                "fn write(q: Query) { q.insert(value); }\n",
+            ),
+            "src/modules/account/authz_version.rs": (
+                "account-security-version",
+                'fn write() { sqlx::query("UPDATE users SET authz_version = 2"); }\n',
+            ),
+            "src/modules/admin/user/repository.rs": (
+                "admin-authorization-facts",
+                'fn write() { sqlx::query("UPDATE admin_user SET admin = TRUE"); }\n',
+            ),
+            "src/modules/org/user/repository.rs": (
+                "org-membership-authorization-facts",
+                "fn write(q: Query) { q.update(value); }\n",
+            ),
+            "src/modules/org/access/repository.rs": (
+                "org-onboarding-authorization-facts",
+                "fn write(q: Query) { q.insert_in_tx(tx, value); }\n",
+            ),
+        }
+        document = "# writers\n"
+        for path, (writer_id, body) in writer_sources.items():
+            write(
+                root / path,
+                f"//! authorization-writer: {writer_id}\n{body}",
+            )
+            document += f"<!-- authorization-writer: {writer_id} {path} -->\n"
+        write(root / AUTHORIZATION_WRITER_DOCUMENT, document)
+        assert check_authorization_writer_boundaries(root) == [], (
+            "完整 typed writer allowlist 应通过"
+        )
+
+        evil_action = root / "src/modules/account/user/actions/evil.rs"
+        write(
+            evil_action,
+            "fn bypass(ctx: Context) { ctx.table_query().update(value); }\n",
+        )
+        errors = check_authorization_writer_boundaries(root)
+        assert any("不在 typed writer allowlist" in error for error in errors), (
+            "必须拒绝受保护 Module 新增通用写入口"
+        )
+
+        evil_action.unlink()
+        write(
+            root / "src/modules/work/bypass.rs",
+            'fn bypass() { sqlx::query("DELETE FROM org_user WHERE id = 1"); }\n',
+        )
+        errors = check_authorization_writer_boundaries(root)
+        assert any("授权事实表 org_user" in error for error in errors), (
+            "必须拒绝跨模块 raw SQL 写授权事实"
         )
 
 

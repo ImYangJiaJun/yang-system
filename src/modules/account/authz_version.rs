@@ -1,5 +1,6 @@
 //! 授权事实 writer 共享的用户版本锁与递增原语。
 //! raw-sql-boundary: domain-service account-authz-version
+//! authorization-writer: account-security-version
 
 use sqlx::MySqlPool;
 use yang_base::BaseError;

@@ -3,6 +3,7 @@
 //! 对外 `TableQuery` 始终遵守请求用户的字段权限；只有本 Repository 能以
 //! `system` 能力读写密码摘要，避免公开注册和登录被字段权限拦截，也避免把通用
 //! 提权查询暴露给 Action。
+//! authorization-writer: account-user-facts
 
 use super::schema::{
     AUTHZ_VERSION, CREDENTIAL_VERSION, PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID,
