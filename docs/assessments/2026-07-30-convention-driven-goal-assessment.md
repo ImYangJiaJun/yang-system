@@ -23,7 +23,7 @@
 | 自定义页面安全降级 | 已验证 | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面 |
 | 自定义页面只新增一个文件 | 未达成 | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点 |
 | Vue/Quasar/Pinia/Zod 技术选型 | 合理 | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益 |
-| 完整生产就绪 | 未达成 | 已有较强工程基础，但 CI 浏览器门禁、部署契约、端到端可观测性、a11y 和真实业务压力证据仍不完整 |
+| 完整生产就绪 | 未达成 | 已有较强工程基础，但本提交尚无远程 CI 终态，部署契约、端到端可观测性、a11y 和真实业务压力证据仍不完整 |
 
 ### 1.2 对两个评估问题的直接回答
 
@@ -193,7 +193,7 @@
 | 浏览器 XSS 会话边界 | 已闭环 | access token 已改为仅驻留内存，Refresh Token 仍为 host-only HttpOnly Cookie；生产入口启用 enforce CSP，并用 Web Locks、版本化跨标签页结束信号闭环刷新轮换与退出同步 |
 | 正式页面契约完备性 | 已闭环 | Module 多 View、统一 Action executor、custom/bulk、fail-closed 与显式产品外壳接口均有正式路由和矩阵测试证据 |
 | 正式产物 E2E | 已闭环 | 独立 Playwright 配置每次重建并启动 `dist/spa`，验证正式模块深链接、生产路由裁剪、无 dev runtime，以及静态/API 404 不被 history fallback 掩盖 |
-| CI 浏览器门禁 | 未闭环 | `run_ci.py full` 与当前 GitHub Actions quality job 不执行 Playwright |
+| CI 浏览器门禁 | 已闭环（实现） | `run_ci.py full` 串行执行隔离 dev 与 production Playwright；quality job 安装 Chromium 后复用同一 full 门禁；本提交未 push，远程 job 终态仍未验证 |
 | 部署契约 | 未闭环 | history fallback、安全头、HTML/静态资源缓存策略和深链接 smoke test 未入门禁 |
 | 端到端可观测性 | 部分具备 | 后端已有 tracing/request id 等基础信号，前端也提取 request id；尚无统一错误上报、关联检索和告警验收 |
 | 无障碍 | 未闭环 | 无 axe 等自动检查，也没有键盘/焦点关键旅程门禁 |
@@ -220,7 +220,7 @@
 ### 7.2 “生产就绪”的通过条件
 
 1. **已满足（2026-07-31）：** access token 内存化；enforce CSP 下已验证登录、刷新、上传和静态自定义组件；多标签页并发刷新与退出同步已有浏览器对抗测试。
-2. Playwright 在 CI 中使用唯一端口或由测试框架分配端口，禁止误复用开发者已有服务。
+2. **已满足（2026-07-31）：** Playwright 在本地 full 与 CI 中使用两组专用且互斥的端口，两个配置都禁止复用既有服务；日常手工调试只有显式设置 `YANG_E2E_REUSE_EXISTING_SERVER=true` 才允许复用。
 3. **产物行为已满足（2026-07-31）：** 浏览器 smoke 会构建 `dist/spa`，以隔离 history fallback 服务器启动并验证深链接；安全响应头与分层缓存策略仍由“部署契约”门槛验收。
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
 5. 前端错误上报包含 request id，能够与后端 trace/log/metric 关联，并完成一次告警演练。
@@ -239,8 +239,8 @@
 
 ### P0：把 E2E 变成可信门禁
 
-1. CI 执行 Playwright；
-2. 本地与 CI 都使用隔离端口；
+1. CI quality job 已通过 `run_ci.py full` 执行 dev 与 production Playwright，并预装 Chromium 与系统依赖；
+2. 本地与 CI 的两套 Playwright 使用互斥专用端口且禁止复用旧服务；
 3. 生产构建与深链接 smoke 已纳入 `e2e:production`；安全响应头和缓存策略仍需在部署契约中闭环。
 
 ### P0：闭环浏览器安全与诊断
@@ -282,7 +282,7 @@ git diff -- docs/assessments/2026-07-30-convention-driven-goal-assessment.md
 
 注意：
 
-- `playwright.config.ts` 在本地使用 `reuseExistingServer: true`；默认 5173/18080 端口已被旧服务占用时，测试可能连到错误实例。隔离端口结果才可作为本次证据。
+- `playwright.config.ts` 已改为默认 `reuseExistingServer: false`；只有手工显式设置 `YANG_E2E_REUSE_EXISTING_SERVER=true` 才允许调试复用，full 门禁不会设置该开关。
 - 本评估没有把未在本次运行的 `python scripts/run_ci.py full`、真实 MySQL/Redis integration 或远程 CI 状态写成当前通过。
 - 文档优化不会自动改变代码能力；只有 §7 的验收条件真实通过后，才可以升级结论。
 
@@ -376,10 +376,44 @@ pnpm --dir frontend e2e:production
 
 本项不把测试夹具服务器写成目标环境的生产流量服务器，也不据此关闭部署契约：当前夹具只使用最小 `nosniff` 与 `no-cache`，尚未验收响应头 CSP、`frame-ancestors`、HTML 不缓存、哈希资产 immutable、反向代理边界和目标平台配置。
 
+### 9.4 2026-07-31 增量闭环：CI 浏览器门禁实现
+
+本项采用的不变量是：本地 `full` 与 GitHub quality job 必须消费同一浏览器命令集合；dev 与 production 两套 E2E 必须使用不同专用端口并禁止复用既有服务；CI 必须在运行前安装 Playwright Chromium 与系统依赖；自测必须在任一步骤被删除时 fail-closed。
+
+实现证据：
+
+- `scripts/run_ci.py` 的 `FULL` 新增 `Frontend isolated dev-server E2E` 和 `Frontend isolated production-build E2E`，命令分别固定使用 5310/18310 与 5311/18311，并设置 `CI=true`；
+- `Command.env` 让端口和 CI 语义成为门禁声明的一部分，而不是依赖调用者手工设置；
+- `frontend/playwright.config.ts` 默认禁止 `reuseExistingServer`；只有显式调试开关才允许复用；
+- `.github/workflows/ci.yml` 的 quality job 在 `run_ci.py full` 前执行 `playwright install --with-deps chromium`；
+- `run_ci.py --self-test` 交叉检查 full 中的两个命令、两组互斥端口、执行顺序和 workflow 的浏览器安装步骤。
+
+对抗性验证：
+
+```powershell
+# 新合同断言加入后，旧 FULL 预期失败
+python scripts/run_ci.py --self-test
+
+# 与 FULL 完全一致的 dev E2E 环境
+$env:CI="true"
+$env:YANG_E2E_FRONTEND_PORT="5310"
+$env:YANG_E2E_BACKEND_PORT="18310"
+pnpm --dir frontend e2e
+
+# 与 FULL 完全一致的 production E2E 环境
+$env:YANG_PRODUCTION_E2E_FRONTEND_PORT="5311"
+$env:YANG_PRODUCTION_E2E_BACKEND_PORT="18311"
+pnpm --dir frontend e2e:production
+```
+
+红测失败信息为“full 门禁必须同时执行 dev-server 与 production-build Playwright”；实现后合同自测通过，CI 语义下 dev E2E 21/21、production E2E 2/2 通过。两套 Playwright 都启动并关闭了自己的 demo backend/frontend，结束后对应端口没有监听进程。
+
+本项只证明门禁定义与本地等价执行已闭环。本提交按用户要求只创建 Git commit、没有 push，因此不能声称 GitHub Actions quality job 已取得远程成功终态；该证据必须在后续推送后逐 job 检查。
+
 ## 十、最终结论
 
 yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明一个或多个可用 View 与 presentation”的契约范围内，多 View 和模块级交互的零前端修改交付已经可行。
 
 当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，自定义页面仍有两个手工触点，尚无独立真实业务 Addon 的零前端业务 diff 证据，前端产品外壳也仍显式持有账号/租户入口知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性和正式产物 E2E 已有本地对抗证据；整体结论升级仍必须由隔离 CI、部署、可观测性、无障碍与真实规模证据共同支持。
+技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E 和 CI 浏览器门禁实现已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、部署、可观测性、无障碍与真实规模证据共同支持。

@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 const frontendPort = process.env.YANG_E2E_FRONTEND_PORT || "5173";
 const backendPort = process.env.YANG_E2E_BACKEND_PORT || "18080";
+const reuseExistingServer =
+  process.env.YANG_E2E_REUSE_EXISTING_SERVER === "true";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -21,7 +23,7 @@ export default defineConfig({
       cwd: "..",
       url: `http://127.0.0.1:${backendPort}/health/live`,
       timeout: 180_000,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer,
       env: {
         YANG_DEMO_BIND: `127.0.0.1:${backendPort}`,
       },
@@ -30,7 +32,7 @@ export default defineConfig({
       command: "pnpm dev",
       url: `http://127.0.0.1:${frontendPort}`,
       timeout: 120_000,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer,
       env: {
         VITE_DEV_PORT: frontendPort,
         VITE_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,

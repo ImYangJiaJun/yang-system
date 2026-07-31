@@ -47,6 +47,8 @@ jobs:
           cache-dependency-path: project/yang-system/frontend/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm --dir frontend exec playwright install --with-deps chromium
       - name: Verify local CI contract
         run: python scripts/run_ci.py --self-test
       - name: Full quality gate

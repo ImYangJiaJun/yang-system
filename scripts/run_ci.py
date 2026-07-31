@@ -16,6 +16,7 @@ from dataclasses import dataclass
 class Command:
     name: str
     argv: tuple[str, ...]
+    env: tuple[tuple[str, str], ...] = ()
 
 
 ARCHITECTURE = (
@@ -49,6 +50,26 @@ FRONTEND_PRODUCTION_AUDIT = Command(
     ),
 )
 
+FRONTEND_DEV_E2E = Command(
+    "Frontend isolated dev-server E2E",
+    ("pnpm", "--dir", "frontend", "e2e"),
+    (
+        ("CI", "true"),
+        ("YANG_E2E_FRONTEND_PORT", "5310"),
+        ("YANG_E2E_BACKEND_PORT", "18310"),
+    ),
+)
+
+FRONTEND_PRODUCTION_E2E = Command(
+    "Frontend isolated production-build E2E",
+    ("pnpm", "--dir", "frontend", "e2e:production"),
+    (
+        ("CI", "true"),
+        ("YANG_PRODUCTION_E2E_FRONTEND_PORT", "5311"),
+        ("YANG_PRODUCTION_E2E_BACKEND_PORT", "18311"),
+    ),
+)
+
 FULL = (
     *ARCHITECTURE,
     Command("Rust formatting", ("cargo", "fmt", "--", "--check")),
@@ -68,6 +89,8 @@ FULL = (
     ),
     FRONTEND_PRODUCTION_AUDIT,
     Command("Frontend full check", ("pnpm", "--dir", "frontend", "check")),
+    FRONTEND_DEV_E2E,
+    FRONTEND_PRODUCTION_E2E,
 )
 
 INTEGRATION = (
@@ -176,14 +199,42 @@ def executable(name: str) -> str:
 
 def run(command: Command) -> None:
     argv = [executable(command.argv[0]), *command.argv[1:]]
+    environment = os.environ.copy()
+    environment.update(command.env)
     print(f"\n==> {command.name}\n    {shlex.join(argv)}", flush=True)
-    subprocess.run(argv, check=True, env=os.environ.copy())
+    subprocess.run(argv, check=True, env=environment)
 
 
 def self_test() -> None:
     workflow = open(".github/workflows/ci.yml", encoding="utf-8").read()
     assert "python scripts/run_ci.py full" in workflow
     assert "python scripts/run_ci.py integration" in workflow
+    required_browser_commands = {
+        ("pnpm", "--dir", "frontend", "e2e"),
+        ("pnpm", "--dir", "frontend", "e2e:production"),
+    }
+    actual_full_commands = {command.argv for command in FULL}
+    assert required_browser_commands <= actual_full_commands, (
+        "full 门禁必须同时执行 dev-server 与 production-build Playwright"
+    )
+    assert workflow.count(
+        "pnpm --dir frontend exec playwright install --with-deps chromium"
+    ) == 1, "quality job 必须安装 Playwright Chromium 与系统依赖"
+    assert FRONTEND_DEV_E2E.env == (
+        ("CI", "true"),
+        ("YANG_E2E_FRONTEND_PORT", "5310"),
+        ("YANG_E2E_BACKEND_PORT", "18310"),
+    )
+    assert FRONTEND_PRODUCTION_E2E.env == (
+        ("CI", "true"),
+        ("YANG_PRODUCTION_E2E_FRONTEND_PORT", "5311"),
+        ("YANG_PRODUCTION_E2E_BACKEND_PORT", "18311"),
+    )
+    dev_ports = {value for name, value in FRONTEND_DEV_E2E.env if name.endswith("_PORT")}
+    production_ports = {
+        value for name, value in FRONTEND_PRODUCTION_E2E.env if name.endswith("_PORT")
+    }
+    assert dev_ports.isdisjoint(production_ports), "两套浏览器门禁不得复用端口值"
     assert workflow.count("ssh-key: ${{ secrets.LIB_YANG_SSH_KEY }}") == 3, (
         "每个 lib_yang 跨仓库 checkout 都必须使用只读 Deploy Key"
     )
@@ -204,6 +255,7 @@ def self_test() -> None:
     assert FULL.index(FRONTEND_PRODUCTION_AUDIT) < next(
         index for index, command in enumerate(FULL) if command.name == "Frontend full check"
     )
+    assert FULL.index(FRONTEND_DEV_E2E) < FULL.index(FRONTEND_PRODUCTION_E2E)
     for command in (*QUICK, *FULL, *INTEGRATION):
         if command.argv[0] == "cargo" and command.argv[1] != "fmt":
             assert "--locked" in command.argv, f"Cargo 命令缺少 --locked: {command.name}"
