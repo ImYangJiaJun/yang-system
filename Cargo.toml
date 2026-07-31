@@ -11,6 +11,8 @@ argon2 = "0.5.3"
 async-trait = "0.1.89"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 jsonwebtoken = "=9.3.1"
+lettre = { version = "=0.11.22", default-features = false, features = ["builder", "pool", "ring", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
+hmac = "0.12.1"
 metrics = "0.24.2"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }

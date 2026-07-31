@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
@@ -15,6 +17,8 @@ use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
 use yang_system::migrations::{execute_with_database, MigrationCommand};
+
+use common::{take_registration_code, RegistrationEmailToolsExt};
 
 const CONCURRENCY: usize = 10;
 const REFRESHES_PER_SESSION: usize = 100;
@@ -241,6 +245,7 @@ async fn refresh_rotation_load_has_zero_errors_and_reports_percentiles() -> anyh
                     database_config(),
                 )?)
                 .cache(redis.clone())
+                .with_registration_email(format!("email-{deployment}"))
                 .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
                 .extension(step_up_manager())
                 .token(token_manager())
@@ -253,11 +258,27 @@ async fn refresh_rotation_load_has_zero_errors_and_reports_percentiles() -> anyh
         let mut sessions = Vec::with_capacity(CONCURRENCY);
         for index in 0..CONCURRENCY {
             let username = format!("refresh_benchmark_{suffix}_{index}");
+            let email = format!("{username}@example.test");
+            dispatch(
+                &app.runtime,
+                "account.user",
+                "request_registration_email",
+                json!({ "email": email }),
+                &[],
+                42_000 + u16::try_from(index)?,
+            )
+            .await?;
+            let email_code = take_registration_code(&email)?;
             dispatch(
                 &app.runtime,
                 "account.user",
                 "register",
-                json!({ "username": username, "password": BENCHMARK_PASSWORD }),
+                json!({
+                    "username": username,
+                    "password": BENCHMARK_PASSWORD,
+                    "email": email,
+                    "email_code": email_code,
+                }),
                 &[],
                 42_000 + u16::try_from(index)?,
             )

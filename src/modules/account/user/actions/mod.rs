@@ -9,6 +9,7 @@ mod logout;
 mod me;
 mod refresh;
 mod register;
+mod request_registration_email;
 mod reset_password;
 mod step_up;
 
@@ -24,6 +25,7 @@ pub(super) fn register_all(
     credential_mutations_enabled: bool,
     step_up_manager: Option<Arc<yang_base::action::StepUpManager>>,
 ) -> Result<ModuleSpec, BaseError> {
+    let module = request_registration_email::register(module, Arc::clone(&service))?;
     let module = register::register(module, Arc::clone(&service))?;
     let module = login::register(module, Arc::clone(&service))?;
     let module = refresh::register(module, Arc::clone(&service))?;

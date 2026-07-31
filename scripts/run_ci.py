@@ -174,6 +174,19 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "Registration email verification integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "registration_email_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Real MySQL/Redis system integration",
         (
             "cargo",
@@ -292,6 +305,7 @@ def self_test() -> None:
     assert integration_tests == {
         "bootstrap_integration",
         "migration_job_integration",
+        "registration_email_integration",
         "schema_apply_integration",
         "system_integration",
         "tenant_isolation_integration",

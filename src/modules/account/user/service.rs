@@ -2,6 +2,9 @@
 //!
 //! Action 只负责传输适配；注册、登录、刷新和当前用户用例在此集中。
 
+use super::email_verification::{
+    normalize_email, RegistrationEmailCodeAccepted, RegistrationEmailVerification,
+};
 use super::password::PasswordEngine;
 use super::policy::{normalize_username, validate_new_password, validate_password};
 use super::rate_limit::{AuthOperation, AuthRateLimiter};
@@ -17,6 +20,7 @@ use crate::modules::account::{
 };
 use serde_json::json;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use yang_base::action::auth::TokenPairClaims;
 use yang_base::action::ActionContext;
 use yang_base::table::Record;
@@ -65,8 +69,11 @@ impl UserService {
         ctx: &ActionContext,
         username: &str,
         plain_password: &str,
+        email: &str,
+        email_code: &str,
     ) -> Result<UserView, BaseError> {
         let username = normalize_username(username)?;
+        let email = normalize_email(email)?;
         validate_password(plain_password)?;
         self.rate_limiter
             .check(ctx, AuthOperation::Register, &username)
@@ -74,15 +81,35 @@ impl UserService {
         if self.users.username_exists(ctx, &username).await? {
             return Err(username_exists_error());
         }
+        RegistrationEmailVerification::from_context(ctx)?
+            .consume(ctx, &email, email_code)
+            .await?;
         let password_hash = self.passwords.hash(plain_password).await?;
-        let id = match self.users.insert(ctx, &username, &password_hash).await {
+        let email_verified_at = current_unix_timestamp()?;
+        let id = match self
+            .users
+            .insert(ctx, &username, &password_hash, &email, email_verified_at)
+            .await
+        {
             Ok(id) => id,
             Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
-                return Err(username_exists_error());
+                return Err(registration_identity_exists_error());
             }
             Err(error) => return Err(error),
         };
         self.view_by_id(ctx, id).await
+    }
+
+    pub(super) async fn request_registration_email(
+        &self,
+        ctx: &ActionContext,
+        email: &str,
+    ) -> Result<RegistrationEmailCodeAccepted, BaseError> {
+        let email = normalize_email(email)?;
+        let deliver = !self.users.email_exists(ctx, &email).await?;
+        RegistrationEmailVerification::from_context(ctx)?
+            .request(ctx, &email, deliver)
+            .await
     }
 
     pub(super) async fn authenticate(
@@ -523,6 +550,21 @@ fn ensure_active_status(status: UserStatus) -> Result<(), BaseError> {
 
 fn username_exists_error() -> BaseError {
     BaseError::ParamInvalid("username".to_string(), "用户名已存在".to_string())
+}
+
+fn registration_identity_exists_error() -> BaseError {
+    BaseError::ParamInvalid(
+        "registration".to_string(),
+        "用户名或邮箱已被其他请求注册，请重新获取验证码".to_string(),
+    )
+}
+
+fn current_unix_timestamp() -> Result<i64, BaseError> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| BaseError::ConfigError("系统时间早于 Unix epoch".to_string()))?
+        .as_secs();
+    i64::try_from(seconds).map_err(|_| BaseError::ConfigError("系统时间超出 i64 范围".to_string()))
 }
 
 fn invalid_audit_event(error: anyhow::Error) -> BaseError {

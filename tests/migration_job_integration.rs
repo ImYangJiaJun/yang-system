@@ -201,7 +201,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 16, "应记录 16 个 applied 版本");
+        ensure!(migration_count == 17, "应记录 17 个 applied 版本");
         let server_identity: (String, String) =
             sqlx::query_as("SELECT CAST(VERSION() AS CHAR), CAST(@@version_comment AS CHAR)")
                 .fetch_one(control.pool())

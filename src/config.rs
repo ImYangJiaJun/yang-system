@@ -25,6 +25,7 @@ pub struct Settings {
     pub token: TokenSettings,
     pub step_up: StepUpSettings,
     pub bootstrap: BootstrapSettings,
+    pub email: EmailSettings,
     pub security: SecuritySettings,
     #[serde(default)]
     pub shutdown: ShutdownSettings,
@@ -166,6 +167,83 @@ pub struct StepUpSettings {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapSettings {
     pub secret_digest: BootstrapSecretDigest,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailSettings {
+    pub smtp: SmtpSettings,
+    pub verification: EmailVerificationSettings,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpSettings {
+    pub relay: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub from_address: String,
+    pub from_name: String,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailVerificationSettings {
+    /// Redis key namespace，隔离共享 Redis 上的部署环境。
+    pub namespace: String,
+    /// 验证码摘要的独立服务端密钥，不得与 Token/Step-up 密钥复用。
+    pub secret: String,
+    pub ttl_seconds: u64,
+    pub resend_cooldown_seconds: u64,
+    pub max_attempts: u32,
+    pub send_window_seconds: u64,
+    pub send_ip_attempts: u64,
+    pub send_email_attempts: u64,
+    pub send_global_attempts: u64,
+}
+
+impl std::fmt::Debug for EmailSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmailSettings")
+            .field("smtp", &self.smtp)
+            .field("verification", &self.verification)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SmtpSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SmtpSettings")
+            .field("relay", &self.relay)
+            .field("port", &self.port)
+            .field("username", &"[REDACTED]")
+            .field("password", &"[REDACTED]")
+            .field("from_address", &self.from_address)
+            .field("from_name", &self.from_name)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for EmailVerificationSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmailVerificationSettings")
+            .field("namespace", &self.namespace)
+            .field("secret", &"[REDACTED]")
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("resend_cooldown_seconds", &self.resend_cooldown_seconds)
+            .field("max_attempts", &self.max_attempts)
+            .field("send_window_seconds", &self.send_window_seconds)
+            .field("send_ip_attempts", &self.send_ip_attempts)
+            .field("send_email_attempts", &self.send_email_attempts)
+            .field("send_global_attempts", &self.send_global_attempts)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for TokenSettings {
@@ -396,6 +474,7 @@ impl Settings {
         }
         self.token.validate()?;
         self.step_up.validate(&self.token)?;
+        self.email.validate(&self.token, &self.step_up)?;
         self.security.validate()?;
         if !(1..=300).contains(&self.shutdown.total_timeout_seconds) {
             bail!("shutdown.total_timeout_seconds 必须在 1..=300 范围内");
@@ -547,6 +626,100 @@ impl StepUpSettings {
     }
 }
 
+impl EmailSettings {
+    fn validate(&self, token: &TokenSettings, step_up: &StepUpSettings) -> anyhow::Result<()> {
+        self.smtp.validate()?;
+        self.verification.validate()?;
+        let secret = self.verification.secret.as_str();
+        let collides_with_token = std::iter::once(token.active_secret.as_str())
+            .chain(token.retiring_keys.iter().map(|key| key.secret.as_str()))
+            .any(|candidate| candidate == secret);
+        let collides_with_step_up = std::iter::once(step_up.active_secret.as_str())
+            .chain(step_up.retiring_keys.iter().map(|key| key.secret.as_str()))
+            .any(|candidate| candidate == secret);
+        if collides_with_token || collides_with_step_up {
+            bail!("email.verification.secret 不得复用 Token 或 Step-up 密钥");
+        }
+        Ok(())
+    }
+}
+
+impl SmtpSettings {
+    fn validate(&self) -> anyhow::Result<()> {
+        let relay = self.relay.trim();
+        if relay.is_empty()
+            || relay.len() > 253
+            || relay.bytes().any(|byte| byte.is_ascii_whitespace())
+            || relay.contains('/')
+            || relay.contains(':')
+        {
+            bail!("email.smtp.relay 必须是无 scheme、端口或路径的 SMTP 主机名");
+        }
+        if self.port == 0 {
+            bail!("email.smtp.port 必须大于 0");
+        }
+        let username_empty = self.username.trim().is_empty();
+        let password_empty = self.password.is_empty();
+        if username_empty != password_empty {
+            bail!("email.smtp.username 与 password 必须同时配置或同时留空");
+        }
+        if matches!(
+            self.username.trim().to_ascii_lowercase().as_str(),
+            "replace-with-smtp-username" | "changeme"
+        ) || matches!(
+            self.password.trim().to_ascii_lowercase().as_str(),
+            "replace-with-smtp-password" | "changeme"
+        ) {
+            bail!("email.smtp 凭据不能使用示例占位值");
+        }
+        if self.from_name.trim().is_empty() || self.from_name.chars().count() > 100 {
+            bail!("email.smtp.from_name 必须是 1..=100 个字符");
+        }
+        self.from_address
+            .parse::<lettre::Address>()
+            .map_err(|_| anyhow::anyhow!("email.smtp.from_address 不是合法邮箱地址"))?;
+        if !(1..=30).contains(&self.timeout_seconds) {
+            bail!("email.smtp.timeout_seconds 必须在 1..=30 范围内");
+        }
+        Ok(())
+    }
+}
+
+impl EmailVerificationSettings {
+    fn validate(&self) -> anyhow::Result<()> {
+        crate::authorization::validate_deployment_name(&self.namespace)
+            .context("email.verification.namespace 无效")?;
+        validate_token_secret(&self.secret).context("email.verification.secret 无效")?;
+        if !(60..=1_800).contains(&self.ttl_seconds) {
+            bail!("email.verification.ttl_seconds 必须在 60..=1800 范围内");
+        }
+        if self.resend_cooldown_seconds == 0 || self.resend_cooldown_seconds > self.ttl_seconds {
+            bail!("email.verification.resend_cooldown_seconds 必须在 1..=ttl_seconds 范围内");
+        }
+        if !(1..=10).contains(&self.max_attempts) {
+            bail!("email.verification.max_attempts 必须在 1..=10 范围内");
+        }
+        if !(60..=3_600).contains(&self.send_window_seconds) {
+            bail!("email.verification.send_window_seconds 必须在 60..=3600 范围内");
+        }
+        for (name, value) in [
+            ("send_ip_attempts", self.send_ip_attempts),
+            ("send_email_attempts", self.send_email_attempts),
+            ("send_global_attempts", self.send_global_attempts),
+        ] {
+            if value == 0 || value > 1_000_000 {
+                bail!("email.verification.{name} 必须在 1..=1000000 范围内");
+            }
+        }
+        if self.send_global_attempts < self.send_ip_attempts
+            || self.send_global_attempts < self.send_email_attempts
+        {
+            bail!("email.verification.send_global_attempts 不得小于单 IP 或单邮箱额度");
+        }
+        Ok(())
+    }
+}
+
 impl MigrationSettings {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let settings: Self = crate::config_source::load(path, "读取迁移配置文件失败")?;
@@ -632,6 +805,7 @@ fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
             | "replace-me"
             | "replace_with_a_random_secret"
             | "replace-with-at-least-32-random-bytes"
+            | "replace-with-independent-email-verification-secret"
             | "example-secret"
     );
     let repeated_byte = secret
@@ -737,6 +911,24 @@ challenge_ttl_seconds = 120
 proof_ttl_seconds = 300
 [bootstrap]
 secret_digest = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
+[email.smtp]
+relay = "smtp.example.test"
+port = 587
+username = "test-smtp-user"
+password = "test-smtp-password"
+from_address = "no-reply@example.test"
+from_name = "YANG Test"
+timeout_seconds = 5
+[email.verification]
+namespace = "test-local"
+secret = "email-verification-0123456789abcdef0123456789abcdef"
+ttl_seconds = 600
+resend_cooldown_seconds = 60
+max_attempts = 5
+send_window_seconds = 3600
+send_ip_attempts = 20
+send_email_attempts = 5
+send_global_attempts = 1000
 [security]
 argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
@@ -787,6 +979,14 @@ filter = "info"
         assert!(
             !format!("{:?}", settings.step_up).contains(&settings.step_up.active_secret),
             "step-up active secret 不得进入 Debug"
+        );
+        assert!(
+            !format!("{:?}", settings.email).contains(&settings.email.verification.secret),
+            "邮箱验证 secret 不得进入 Debug"
+        );
+        assert!(
+            !format!("{:?}", settings.email).contains(&settings.email.smtp.password),
+            "SMTP password 不得进入 Debug"
         );
         assert_eq!(
             settings.bootstrap.secret_digest.as_str(),

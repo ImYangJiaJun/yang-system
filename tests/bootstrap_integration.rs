@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
@@ -17,6 +19,8 @@ use yang_system::app::{build_app, Application};
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
+
+use common::{take_registration_code, RegistrationEmailToolsExt};
 
 const WRONG_SECRET: &str = "wrong-bootstrap-secret-with-sufficient-length";
 
@@ -171,6 +175,7 @@ async fn build_harness(
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis)
+            .with_registration_email(format!("bootstrap-email-{cache_namespace}"))
             .extension(authorization_cache)
             .extension(integration_step_up_manager())
             .token(TokenManager::new_symmetric(
@@ -219,12 +224,29 @@ async fn register_and_login(
     username: &str,
     password: &str,
 ) -> anyhow::Result<(i64, String)> {
+    let email = format!("{username}@example.test");
+    data(
+        dispatch(
+            app,
+            "account.user",
+            "request_registration_email",
+            json!({ "email": email }),
+            &[],
+        )
+        .await?,
+    )?;
+    let email_code = take_registration_code(&email)?;
     let registered = data(
         dispatch(
             app,
             "account.user",
             "register",
-            json!({ "username": username, "password": password }),
+            json!({
+                "username": username,
+                "password": password,
+                "email": email,
+                "email_code": email_code,
+            }),
             &[],
         )
         .await?,

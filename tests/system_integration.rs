@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
@@ -19,6 +21,8 @@ use yang_system::authorization::{
 };
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::{AuthorizationSettings, SecuritySettings};
+
+use common::{take_registration_code, RegistrationEmailToolsExt};
 
 const INTEGRATION_PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -75,6 +79,31 @@ async fn dispatch(
     dispatch_raw_with_step_up(app, module, action, body, headers, query)
         .await
         .map_err(|error| anyhow::anyhow!("{module}.{action} 调用失败: {error}"))
+}
+
+async fn verified_registration_body(
+    app: &BuiltApp,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<Value> {
+    let email = format!("{username}@example.test");
+    let response = dispatch(
+        app,
+        "account.user",
+        "request_registration_email",
+        json!({ "email": email }),
+        &[],
+        &[],
+    )
+    .await?;
+    ensure!(response.code == 0, "注册验证码请求必须成功");
+    let email_code = take_registration_code(&email)?;
+    Ok(json!({
+        "username": username,
+        "password": password,
+        "email": email,
+        "email_code": email_code,
+    }))
 }
 
 fn dispatch_raw_with_step_up<'a>(
@@ -489,6 +518,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis.clone())
+            .with_registration_email(format!("email-{deployment}"))
             .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
             .extension(integration_step_up_manager())
             .token(integration_token_manager())
@@ -535,7 +565,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             &first.runtime,
             "account.user",
             "register",
-            json!({ "username": admin_username, "password": password }),
+            verified_registration_body(&first.runtime, &admin_username, password).await?,
             &[],
             &[],
         )
@@ -547,7 +577,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             &first.runtime,
             "account.user",
             "register",
-            json!({ "username": target_username, "password": password }),
+            verified_registration_body(&first.runtime, &target_username, password).await?,
             &[],
             &[],
         )
@@ -1298,6 +1328,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis.clone())
+            .with_registration_email(format!("email-{deployment}"))
             .extension(authorization_cache)
             .extension(integration_step_up_manager())
             .token(integration_token_manager())
@@ -1366,7 +1397,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({ "username": username, "password": password }),
+            verified_registration_body(&application.runtime, &username, password).await?,
             &[],
             &[],
         )
@@ -1741,10 +1772,8 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({
-                "username": reset_username.clone(),
-                "password": reset_old_password
-            }),
+            verified_registration_body(&application.runtime, &reset_username, reset_old_password)
+                .await?,
             &[],
             &[],
         )
@@ -2031,10 +2060,12 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({
-                "username": expired_username,
-                "password": "reset-expired-password-before"
-            }),
+            verified_registration_body(
+                &application.runtime,
+                &expired_username,
+                "reset-expired-password-before",
+            )
+            .await?,
             &[],
             &[],
         )
@@ -2090,10 +2121,12 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({
-                "username": rollback_reset_username.clone(),
-                "password": "reset-rollback-password-before"
-            }),
+            verified_registration_body(
+                &application.runtime,
+                &rollback_reset_username,
+                "reset-rollback-password-before",
+            )
+            .await?,
             &[],
             &[],
         )
@@ -2168,7 +2201,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({ "username": member_username.clone(), "password": password }),
+            verified_registration_body(&application.runtime, &member_username, password).await?,
             &[],
             &[],
         )
@@ -2742,7 +2775,8 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({ "username": replacement_username, "password": password }),
+            verified_registration_body(&application.runtime, &replacement_username, password)
+                .await?,
             &[],
             &[],
         )
@@ -2807,7 +2841,8 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({ "username": change_username.clone(), "password": change_password }),
+            verified_registration_body(&application.runtime, &change_username, change_password)
+                .await?,
             &[],
             &[],
         )
@@ -3071,7 +3106,8 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "account.user",
             "register",
-            json!({ "username": rollback_username.clone(), "password": rollback_password }),
+            verified_registration_body(&application.runtime, &rollback_username, rollback_password)
+                .await?,
             &[],
             &[],
         )
@@ -3547,11 +3583,12 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
         "work-scale-{}",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
-    let authorization_cache = AuthorizationVersionCache::new(redis.clone(), deployment)?;
+    let authorization_cache = AuthorizationVersionCache::new(redis.clone(), deployment.clone())?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis)
+            .with_registration_email(format!("email-{deployment}"))
             .extension(authorization_cache)
             .extension(integration_step_up_manager())
             .token(integration_token_manager())
@@ -3594,7 +3631,7 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
             &runtime,
             "account.user",
             "register",
-            json!({ "username": username, "password": password }),
+            verified_registration_body(&runtime, &username, password).await?,
             &[],
             &[],
         )
@@ -3883,7 +3920,7 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
             &runtime,
             "account.user",
             "register",
-            json!({ "username": other_username, "password": password }),
+            verified_registration_body(&runtime, &other_username, password).await?,
             &[],
             &[],
         )

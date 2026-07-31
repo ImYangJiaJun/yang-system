@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 16);
+    assert_eq!(manifest.migrations().len(), 17);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -203,6 +203,27 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
         "ALTER TABLE `admin_user` ADD CONSTRAINT `chk_admin_user_bootstrap_key` CHECK (`bootstrap_key` IS NULL OR `bootstrap_key` = 'initial-admin')"
     );
     assert!(bootstrap_key_check.completion_check().is_some());
+
+    let verified_email = manifest
+        .migrations()
+        .get(16)
+        .unwrap_or_else(|| panic!("应存在全局账户已验证邮箱迁移"));
+    assert_eq!(
+        verified_email.version(),
+        "20260731_0017_add_users_verified_email"
+    );
+    for required in [
+        "ADD COLUMN `email` VARCHAR(254) NULL",
+        "ADD COLUMN `email_verified_at` BIGINT NULL",
+        "ADD UNIQUE KEY `uk_users_email` (`email`)",
+        "CONSTRAINT `chk_users_verified_email_pair`",
+    ] {
+        assert!(
+            verified_email.sql().contains(required),
+            "已验证邮箱迁移缺少兼容扩展或数据库约束: {required}"
+        );
+    }
+    assert!(verified_email.completion_check().is_some());
 }
 
 #[test]

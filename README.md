@@ -25,7 +25,7 @@ pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 `
 脚本会启动 Compose 中的 MySQL 8.0 与 Redis 7、等待健康检查、安装前端依赖，
 并仅在不存在时生成被 Git 忽略的 `config.toml`。生成配置始终使用 `validate`；
 `-RunMigrations` 对新旧配置都执行独立迁移作业，不会把应用启动模式改为 `apply`。
-已有配置若缺少当前 JWT keyring、bootstrap、授权或可观测字段，脚本默认拒绝覆盖；
+已有配置若缺少当前 JWT keyring、bootstrap、邮箱、授权或可观测字段，脚本默认拒绝覆盖；
 `-UpgradeLegacyConfig` 会先备份到 `target/local-config-backups/`，再以当前模板补齐
 字段、迁移 `token.secret` 并对齐本仓库 Compose 的 loopback URL。若需要新建
 bootstrap 摘要，原始 secret 仍只在当前终端显示一次。
@@ -187,7 +187,7 @@ cargo run --locked --bin yang-system
 
 应用进程内部启动顺序为：
 
-1. 只读取 `config.toml`；运行配置不接受环境变量覆盖。
+1. 按 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成并验证不可变运行配置。
 2. 创建 MySQL `Database`、Redis `RedisClient` 和 `TokenManager`。
 3. 用 `ToolsBuilder` 构建当前应用独占的不可变 `Tools`。
 4. 用 `AppBuilder` 校验 Addon 依赖、关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
@@ -219,19 +219,22 @@ $tokenBytes = New-Object byte[] 32
 $tokenSecret = [Convert]::ToBase64String($tokenBytes)
 # 生成器只在当前终端显示一次原始 bootstrap secret；配置只填写 digest。
 cargo run --quiet --locked --bin yang-bootstrap-secret
-# 编辑 config.toml：填写 mysql.url、redis.url，把 token.active_secret 替换为 $tokenSecret，
-# 并把 bootstrap.secret_digest 替换为生成器输出的 digest；安全保存原始 secret。
+# 编辑 config.toml：填写 MySQL、Redis、SMTP、独立邮箱验证码密钥与 Token 密钥，
+# 再把 bootstrap.secret_digest 替换为生成器输出的 digest；安全保存原始 secret。
 cargo run --locked --bin yang-migrate -- apply
 cargo run --locked --bin yang-system
 ```
 
 `config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。MySQL、
-Redis、Token、Bootstrap、Schema 模式等运行参数按
+Redis、SMTP、邮箱验证码、Token、Bootstrap、Schema 模式等运行参数按
 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成。
 `bootstrap.secret_digest` 只接受带强度边界的 Argon2id PHC 摘要，
 原始一次性 secret 不得写入配置、日志或普通响应。缺失、明文、弱参数或非法摘要
 都会在连接外部资源前阻止应用启动。部署时应限制 `config.toml` 的读取权限，并通过
 部署系统生成或挂载该文件。
+
+注册邮箱验证码的接口、防枚举/重放边界、SMTP/secret provider 配置与真实集成门禁见
+[`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)。
 
 `admin.user.bootstrap` 仍要求已登录身份，并额外要求请求体携带生成器输出的原始
 `secret`。服务端在受并发限制的阻塞线程中执行 Argon2id 常量时间校验；缺失、错误

@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod bootstrap_secret;
 pub mod config;
 mod config_source;
+pub mod email;
 pub mod migrations;
 pub mod modules;
 mod observability;

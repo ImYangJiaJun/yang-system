@@ -4,7 +4,9 @@ import {
   disableAccount,
   login,
   logout,
+  register,
   refreshSession,
+  requestRegistrationEmail,
   resetPassword,
 } from "./auth";
 
@@ -85,6 +87,76 @@ describe("login", () => {
     await expect(login("alice", "correct-password")).rejects.toThrow(
       "登录响应缺少有效 Token",
     );
+  });
+});
+
+describe("registration email verification", () => {
+  it("请求验证码只发送邮箱并验证通用 202 响应", async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("/api/v1/users/registration-email-verifications");
+      expect(init.method).toBe("POST");
+      expect(init.credentials).toBe("include");
+      expect(init.body).toBe(JSON.stringify({ email: "alice@example.com" }));
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "成功",
+          data: { accepted: true, expires_in: 600, resend_after: 60 },
+        }),
+        { status: 202, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      requestRegistrationEmail("alice@example.com"),
+    ).resolves.toEqual({ expiresIn: 600, resendAfter: 60 });
+  });
+
+  it("注册提交邮箱所有权证明并拒绝畸形成功响应", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              id: 42,
+              username: "alice",
+              email: "alice@example.com",
+              email_verified_at: 1_785_000_000,
+            },
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 0, data: { id: 43 } }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      register("alice", "correct-password", "alice@example.com", "123456"),
+    ).resolves.toEqual({
+      id: 42,
+      username: "alice",
+      email: "alice@example.com",
+      emailVerifiedAt: 1_785_000_000,
+    });
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(
+      JSON.stringify({
+        username: "alice",
+        password: "correct-password",
+        email: "alice@example.com",
+        email_code: "123456",
+      }),
+    );
+    await expect(
+      register("bob", "correct-password", "bob@example.com", "654321"),
+    ).rejects.toThrow("注册响应缺少已验证账户");
   });
 });
 

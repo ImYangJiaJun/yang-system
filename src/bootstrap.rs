@@ -2,6 +2,7 @@ use crate::app::build_app;
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
+use crate::email::{RegistrationEmailSenderHandle, SmtpRegistrationEmailSender};
 use crate::observability::logging::LogIdentity;
 use crate::observability::telemetry::TelemetryRuntime;
 use crate::shutdown::{ShutdownBudget, ShutdownPhase, ShutdownTrigger};
@@ -77,6 +78,8 @@ async fn run_after_telemetry_initialized(
             .build_manager()
             .context("构建 Step-up manager 失败")?,
     );
+    let registration_email_sender = SmtpRegistrationEmailSender::new(&settings.email.smtp)
+        .context("构建注册邮件 SMTP 投递器失败")?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
@@ -84,8 +87,12 @@ async fn run_after_telemetry_initialized(
             .token(token_manager)
             .extension(authorization_cache)
             .extension(step_up_manager)
+            .extension(RegistrationEmailSenderHandle::new(
+                registration_email_sender,
+            ))
             .config(log_identity)
             .config(bootstrap_verifier)
+            .config(settings.email.verification.clone())
             .build()
             .context("构建应用 Tools 失败")?,
     );

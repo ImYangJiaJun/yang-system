@@ -17,6 +17,9 @@ const errorMessage = ref(
       ? "登录状态已过期，请重新登录"
       : "",
 );
+const successMessage = ref(
+  route.query.registered === "1" ? "账号已创建，请登录" : "",
+);
 const passwordVisible = ref(false);
 
 async function submit() {
@@ -87,6 +90,14 @@ async function submit() {
           <q-banner v-if="errorMessage" rounded class="bg-red-1 text-negative">
             {{ errorMessage }}
           </q-banner>
+          <q-banner
+            v-if="successMessage"
+            rounded
+            class="bg-green-1 text-positive"
+            aria-live="polite"
+          >
+            {{ successMessage }}
+          </q-banner>
           <q-btn
             type="submit"
             color="primary"
@@ -102,6 +113,7 @@ async function submit() {
             class="full-width"
             to="/reset-password"
           />
+          <q-btn flat label="创建账号" class="full-width" to="/register" />
         </q-form>
         <q-card-section class="login-footer text-center text-grey-7">
           YANG 生态 · 契约驱动企业应用

@@ -38,6 +38,9 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
   Handler 的完整 Action 链；
 - `yang_system_auth_rate_limit_total{operation,result}`：认证限流的允许、拒绝和
   Redis 不可用结果；
+- `yang_system_registration_email_total{result}` 与
+  `yang_system_registration_email_verify_total{result}`：注册邮件的投递/抑制/限流/失败
+  及验证码消费/拒绝结果；标签只使用冻结的有限枚举，绝不包含邮箱、IP 或验证码；
 - `yang_system_resource_pool_connections{resource,state}`：MySQL/Redis 连接池的
   `max/open/available/waiting` 快照；
 - `yang_system_readiness_*`：管理面探针结果、耗时和各依赖健康状态；

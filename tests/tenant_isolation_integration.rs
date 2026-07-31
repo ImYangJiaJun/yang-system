@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
@@ -15,6 +17,8 @@ use yang_system::app::{build_app, Application};
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
+
+use common::{take_registration_code, RegistrationEmailToolsExt};
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -217,6 +221,7 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis)
+            .with_registration_email(format!("tenant-email-{cache_namespace}"))
             .extension(authorization_cache)
             .extension(integration_step_up_manager())
             .token(TokenManager::new_symmetric(
@@ -265,12 +270,29 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
 }
 
 async fn register_user(app: &BuiltApp, username: &str) -> anyhow::Result<i64> {
+    let email = format!("{username}@example.test");
+    data(
+        dispatch(
+            app,
+            "account.user",
+            "request_registration_email",
+            json!({ "email": email }),
+            &[],
+        )
+        .await?,
+    )?;
+    let email_code = take_registration_code(&email)?;
     let registered = data(
         dispatch(
             app,
             "account.user",
             "register",
-            json!({ "username": username, "password": PASSWORD }),
+            json!({
+                "username": username,
+                "password": PASSWORD,
+                "email": email,
+                "email_code": email_code,
+            }),
             &[],
         )
         .await?,

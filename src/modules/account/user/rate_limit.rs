@@ -199,7 +199,7 @@ impl AuthRateLimiter {
     }
 }
 
-fn client_ip_identity(ctx: &ActionContext) -> Cow<'_, str> {
+pub(crate) fn client_ip_identity(ctx: &ActionContext) -> Cow<'_, str> {
     ctx.request_meta
         .extensions
         .get(CLIENT_IP_META_KEY)

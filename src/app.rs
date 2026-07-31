@@ -208,7 +208,14 @@ mod tests {
         assert!(tables.contains(&"org_user"));
         assert!(tables.contains(&"work_project"));
         assert!(tables.contains(&"work_task"));
-        assert_eq!(operations.len(), 10);
+        assert_eq!(operations.len(), 11);
+        assert!(operations.contains(&(
+            "account.user.request_registration_email",
+            "POST",
+            "/api/v1/users/registration-email-verifications",
+            202,
+            true,
+        )));
         assert!(operations.contains(&(
             "account.user.register",
             "POST",

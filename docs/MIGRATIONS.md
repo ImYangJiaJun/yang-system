@@ -96,6 +96,13 @@ Action，防止版本大于 0 的用户拿到无法继续刷新的兼容期 Toke
 匹配约束名、表达式和 `ENFORCED`。该迁移不会把 bootstrap 状态拆到新表，也不改变现有
 API；DDL 锁预算仍须在生产等量 staging 评估。
 
+`20260731_0017_add_users_verified_email` 为全局账户增加可空 `email`、
+`email_verified_at`、邮箱唯一索引和成对强制 CHECK。可空扩展保留旧账户登录兼容性；
+新注册由应用强制邮箱验证码，不能把租户资料字段 `org_user.email` 当作全局身份。该
+版本的精确完成探针核对 CHECK 名称、表达式与 `ENFORCED`；唯一索引构建仍可能取得
+metadata lock，发布前必须在生产等量 staging 测量写入阻塞和复制延迟。运行与恢复契约
+见 [`REGISTRATION_EMAIL_VERIFICATION.md`](REGISTRATION_EMAIL_VERIFICATION.md)。
+
 ```powershell
 $env:YANG_SYSTEM_TEST_DATABASE_URL='mysql://<staging-test-database>'
 $env:YANG_SYSTEM_BOOTSTRAP_DDL_SCALE_ROWS='<admin_user 生产等量行数>'

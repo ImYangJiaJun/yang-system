@@ -73,6 +73,30 @@ proof_ttl_seconds = 300
 # 该占位值会被启动校验拒绝。
 secret_digest = "replace-with-yang-bootstrap-secret-digest"
 
+[email.smtp]
+# 仅接受强制 STARTTLS 的 SMTP relay 主机名；不要填写 scheme 或把凭据写入 URL。
+relay = "smtp.example.com"
+port = 587
+username = "replace-with-smtp-username"
+password = "replace-with-smtp-password"
+from_address = "no-reply@example.com"
+from_name = "YANG System"
+timeout_seconds = 10
+
+[email.verification]
+# 共享 Redis 时按部署隔离 key；只允许 ASCII 字母、数字、点、下划线与连字符。
+namespace = "local"
+# 必须使用独立随机密钥，不得与 Token 或 Step-up 复用；该占位值会被启动拒绝。
+secret = "replace-with-independent-email-verification-secret"
+ttl_seconds = 600
+resend_cooldown_seconds = 60
+max_attempts = 5
+send_window_seconds = 3600
+send_ip_attempts = 20
+send_email_attempts = 5
+# 全局容量闸门高于单 IP/邮箱额度，避免单个攻击者耗尽邮件服务。
+send_global_attempts = 1000
+
 [security]
 argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60

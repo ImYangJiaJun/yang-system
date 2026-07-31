@@ -151,7 +151,7 @@ impl MigrationDescriptor {
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 16] = [
+const MIGRATIONS: [MigrationDescriptor; 17] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -334,6 +334,21 @@ const MIGRATIONS: [MigrationDescriptor; 16] = [
                 table: "admin_user",
                 constraint: "chk_admin_user_bootstrap_key",
                 expression: "(bootstrap_key IS NULL) OR (bootstrap_key = 'initial-admin')",
+                enforced: true,
+            },
+        )),
+    },
+    MigrationDescriptor {
+        version: "20260731_0017_add_users_verified_email",
+        sql: include_str!("../migrations/20260731_0017_add_users_verified_email.sql"),
+        description: "为全局账号增加唯一已验证邮箱事实，保留历史账号空值兼容窗口",
+        prerequisite: "0016 已完成；MySQL 8.0.16+；在生产等量 staging 记录唯一索引构建耗时、元数据锁等待与重复邮箱预检",
+        recovery: "前向恢复；核对 nullable email/email_verified_at、uk_users_email 与成对 CHECK；失败时修复部分 DDL 后重跑原版本",
+        completion_check: Some(CompletionDescriptor::CheckConstraint(
+            CheckConstraintCompletionDescriptor {
+                table: "users",
+                constraint: "chk_users_verified_email_pair",
+                expression: "((email IS NULL) AND (email_verified_at IS NULL)) OR ((email IS NOT NULL) AND (email_verified_at IS NOT NULL))",
                 enforced: true,
             },
         )),
@@ -833,21 +848,18 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_key_check_is_the_last_forward_only_migration() {
+    fn verified_email_expand_is_the_last_forward_only_migration() {
         let descriptor = descriptors()
             .last()
             .unwrap_or_else(|| panic!("迁移清单不得为空"));
-        assert_eq!(
-            descriptor.version,
-            "20260731_0016_add_admin_bootstrap_key_check"
-        );
+        assert_eq!(descriptor.version, "20260731_0017_add_users_verified_email");
         assert!(matches!(
             descriptor.completion_check,
             Some(CompletionDescriptor::CheckConstraint(check))
-                if check.table == "admin_user"
-                    && check.constraint == "chk_admin_user_bootstrap_key"
+                if check.table == "users"
+                    && check.constraint == "chk_users_verified_email_pair"
                     && check.expression
-                        == "(bootstrap_key IS NULL) OR (bootstrap_key = 'initial-admin')"
+                        == "((email IS NULL) AND (email_verified_at IS NULL)) OR ((email IS NOT NULL) AND (email_verified_at IS NOT NULL))"
                     && check.enforced
         ));
     }

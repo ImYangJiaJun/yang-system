@@ -47,6 +47,62 @@ test("默认入口是登录界面", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "用户登录" })).toBeVisible();
 });
 
+test("注册必须先获取邮箱验证码并提交所有权证明", async ({ page }) => {
+  await page.route(
+    "**/api/v1/users/registration-email-verifications",
+    async (route) => {
+      expect(route.request().postDataJSON()).toEqual({
+        email: "alice@example.com",
+      });
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: 0,
+          message: "成功",
+          data: { accepted: true, expires_in: 600, resend_after: 60 },
+        }),
+      });
+    },
+  );
+  await page.route("**/api/v1/users/register", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      username: "alice",
+      password: "correct-password",
+      email: "alice@example.com",
+      email_code: "123456",
+    });
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          id: 42,
+          username: "alice",
+          email: "alice@example.com",
+          email_verified_at: 1_785_000_000,
+        },
+      }),
+    });
+  });
+
+  await page.goto("/register");
+  await expect(page.getByRole("heading", { name: "创建账号" })).toBeVisible();
+  await page.getByLabel("邮箱", { exact: true }).fill(" Alice@Example.COM ");
+  await page.getByRole("button", { name: "发送验证码" }).click();
+  await expect(page.getByText(/若邮箱可用于注册/)).toBeVisible();
+  await page.getByLabel("帐号").fill("alice");
+  await page.getByLabel("密码", { exact: true }).fill("correct-password");
+  await page.getByLabel("确认密码").fill("correct-password");
+  await page.getByLabel("邮箱验证码").fill("123456");
+  await page.getByRole("button", { name: "创建账号" }).click();
+
+  await expect(page).toHaveURL("/login?registered=1");
+  await expect(page.getByText("账号已创建，请登录")).toBeVisible();
+});
+
 test("一次性凭证不进入 URL 且重置成功后清空旧会话", async ({ page }) => {
   const resetToken = "a".repeat(64);
   await page.addInitScript(() => {

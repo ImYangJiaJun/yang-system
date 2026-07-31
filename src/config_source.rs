@@ -249,6 +249,92 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "secret_digest",
         Text
     ),
+    environment_binding!("YANG_SYSTEM_EMAIL_SMTP_RELAY", "email.smtp", "relay", Text),
+    environment_binding!("YANG_SYSTEM_EMAIL_SMTP_PORT", "email.smtp", "port", Integer),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_SMTP_USERNAME",
+        "email.smtp",
+        "username",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_SMTP_PASSWORD",
+        "email.smtp",
+        "password",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_SMTP_FROM_ADDRESS",
+        "email.smtp",
+        "from_address",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_SMTP_FROM_NAME",
+        "email.smtp",
+        "from_name",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_SMTP_TIMEOUT_SECONDS",
+        "email.smtp",
+        "timeout_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_NAMESPACE",
+        "email.verification",
+        "namespace",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_SECRET",
+        "email.verification",
+        "secret",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_TTL_SECONDS",
+        "email.verification",
+        "ttl_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS",
+        "email.verification",
+        "resend_cooldown_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_MAX_ATTEMPTS",
+        "email.verification",
+        "max_attempts",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_SEND_WINDOW_SECONDS",
+        "email.verification",
+        "send_window_seconds",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_SEND_IP_ATTEMPTS",
+        "email.verification",
+        "send_ip_attempts",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_SEND_EMAIL_ATTEMPTS",
+        "email.verification",
+        "send_email_attempts",
+        Integer
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_VERIFICATION_SEND_GLOBAL_ATTEMPTS",
+        "email.verification",
+        "send_global_attempts",
+        Integer
+    ),
     environment_binding!(
         "YANG_SYSTEM_SECURITY_ARGON2_MAX_CONCURRENCY",
         "security",
@@ -340,6 +426,8 @@ pub(crate) enum SecretKey {
     StepUpActiveSecret,
     StepUpRetiringKeys,
     BootstrapSecretDigest,
+    EmailSmtpPassword,
+    EmailVerificationSecret,
 }
 
 impl SecretKey {
@@ -352,6 +440,8 @@ impl SecretKey {
             Self::StepUpActiveSecret => "step_up_active_secret",
             Self::StepUpRetiringKeys => "step_up_retiring_keys_json",
             Self::BootstrapSecretDigest => "bootstrap_secret_digest",
+            Self::EmailSmtpPassword => "email_smtp_password",
+            Self::EmailVerificationSecret => "email_verification_secret",
         }
     }
 
@@ -364,6 +454,8 @@ impl SecretKey {
             Self::StepUpActiveSecret => ("step_up", "active_secret"),
             Self::StepUpRetiringKeys => ("step_up", "retiring_keys"),
             Self::BootstrapSecretDigest => ("bootstrap", "secret_digest"),
+            Self::EmailSmtpPassword => ("email.smtp", "password"),
+            Self::EmailVerificationSecret => ("email.verification", "secret"),
         }
     }
 
@@ -380,6 +472,8 @@ const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::StepUpActiveSecret,
     SecretKey::StepUpRetiringKeys,
     SecretKey::BootstrapSecretDigest,
+    SecretKey::EmailSmtpPassword,
+    SecretKey::EmailVerificationSecret,
 ];
 
 pub(crate) trait SecretProvider {
@@ -658,31 +752,41 @@ fn apply_secrets(document: &mut Value, provider: &dyn SecretProvider) -> anyhow:
 }
 
 fn set_value(document: &mut Value, section: &str, field: &str, value: Value) -> anyhow::Result<()> {
-    let root = document
-        .as_table_mut()
-        .context("配置文件顶层必须是 TOML table")?;
-    let section_value = root
-        .entry(section.to_owned())
-        .or_insert_with(|| Value::Table(Map::new()));
-    let table = section_value
-        .as_table_mut()
+    let table = section_table_mut(document, section, true)?
         .with_context(|| format!("配置项 {section} 必须是 TOML table"))?;
     table.insert(field.to_owned(), value);
     Ok(())
 }
 
 fn remove_value(document: &mut Value, section: &str, field: &str) -> anyhow::Result<()> {
-    let root = document
-        .as_table_mut()
-        .context("配置文件顶层必须是 TOML table")?;
-    let Some(section_value) = root.get_mut(section) else {
+    let Some(table) = section_table_mut(document, section, false)? else {
         return Ok(());
     };
-    let table = section_value
-        .as_table_mut()
-        .with_context(|| format!("配置项 {section} 必须是 TOML table"))?;
     table.remove(field);
     Ok(())
+}
+
+fn section_table_mut<'a>(
+    document: &'a mut Value,
+    section: &str,
+    create: bool,
+) -> anyhow::Result<Option<&'a mut Map<String, Value>>> {
+    let mut current = document;
+    for segment in section.split('.') {
+        let table = current
+            .as_table_mut()
+            .with_context(|| format!("配置项 {section} 必须是 TOML table"))?;
+        if !table.contains_key(segment) && !create {
+            return Ok(None);
+        }
+        current = table
+            .entry(segment.to_owned())
+            .or_insert_with(|| Value::Table(Map::new()));
+    }
+    current
+        .as_table_mut()
+        .map(Some)
+        .with_context(|| format!("配置项 {section} 必须是 TOML table"))
 }
 
 #[cfg(test)]
@@ -718,12 +822,79 @@ mod tests {
         secret: String,
     }
 
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestEmailConfig {
+        email: TestEmail,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestEmail {
+        smtp: TestSmtp,
+        verification: TestEmailVerification,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestSmtp {
+        relay: String,
+        password: String,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestEmailVerification {
+        secret: String,
+        ttl_seconds: u64,
+    }
+
     struct StaticSecretProvider(BTreeMap<SecretKey, String>);
 
     impl SecretProvider for StaticSecretProvider {
         fn read(&self, key: SecretKey) -> anyhow::Result<Option<String>> {
             Ok(self.0.get(&key).cloned())
         }
+    }
+
+    #[test]
+    fn nested_email_environment_and_secret_provider_preserve_precedence() {
+        let raw = r#"
+[email.smtp]
+relay = "smtp.file.example"
+password = "file-password"
+[email.verification]
+secret = "file-verification-secret"
+ttl_seconds = 600
+"#;
+        let environment = BTreeMap::from([
+            (
+                "YANG_SYSTEM_EMAIL_SMTP_RELAY".to_owned(),
+                "smtp.environment.example".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_EMAIL_SMTP_PASSWORD".to_owned(),
+                "environment-password".to_owned(),
+            ),
+            (
+                "YANG_SYSTEM_EMAIL_VERIFICATION_TTL_SECONDS".to_owned(),
+                "900".to_owned(),
+            ),
+        ]);
+        let provider = StaticSecretProvider(BTreeMap::from([
+            (SecretKey::EmailSmtpPassword, "provider-password".to_owned()),
+            (
+                SecretKey::EmailVerificationSecret,
+                "provider-verification-secret".to_owned(),
+            ),
+        ]));
+
+        let config: TestEmailConfig = parse_with_sources(raw, &environment, Some(&provider))
+            .unwrap_or_else(|error| panic!("嵌套邮箱配置应成功合成: {error:#}"));
+
+        assert_eq!(config.email.smtp.relay, "smtp.environment.example");
+        assert_eq!(config.email.smtp.password, "provider-password");
+        assert_eq!(
+            config.email.verification.secret,
+            "provider-verification-secret"
+        );
+        assert_eq!(config.email.verification.ttl_seconds, 900);
     }
 
     #[test]

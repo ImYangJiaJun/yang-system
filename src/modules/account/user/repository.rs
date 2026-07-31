@@ -6,8 +6,8 @@
 //! authorization-writer: account-user-facts
 
 use super::schema::{
-    AUTHZ_VERSION, CREDENTIAL_VERSION, PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID,
-    USER_VIEW_FIELDS,
+    AUTHZ_VERSION, CREDENTIAL_VERSION, EMAIL, EMAIL_VERIFIED_AT, PASSWORD_HASH, STATUS,
+    SYSTEM_ROLE, USERNAME, USER_ID, USER_VIEW_FIELDS,
 };
 use super::status::UserStatus;
 use std::sync::Arc;
@@ -70,11 +70,6 @@ impl UserRepository {
         Ok(self.users.bind(pool).query([SYSTEM_ROLE]))
     }
 
-    fn public_query(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {
-        let pool = Arc::new(ctx.tools().mysql()?.pool().clone());
-        Ok(self.users.bind(pool).query(std::iter::empty::<&str>()))
-    }
-
     pub(super) async fn username_exists(
         &self,
         ctx: &ActionContext,
@@ -84,6 +79,21 @@ impl UserRepository {
             .trusted_query(ctx)?
             .select_fields(&[USER_ID])?
             .where_eq(USERNAME, serde_json::Value::String(username.to_string()))?
+            .page(1, 1)?
+            .all()
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
+    pub(super) async fn email_exists(
+        &self,
+        ctx: &ActionContext,
+        email: &str,
+    ) -> Result<bool, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(&[USER_ID])?
+            .where_eq(EMAIL, serde_json::Value::String(email.to_string()))?
             .page(1, 1)?
             .all()
             .await?;
@@ -126,7 +136,7 @@ impl UserRepository {
         id: i64,
     ) -> Result<Option<Record>, BaseError> {
         let rows = self
-            .public_query(ctx)?
+            .trusted_query(ctx)?
             .select_fields(USER_VIEW_FIELDS)?
             .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
             .page(1, 1)?
@@ -158,10 +168,14 @@ impl UserRepository {
         ctx: &ActionContext,
         username: &str,
         password_hash: &str,
+        email: &str,
+        email_verified_at: i64,
     ) -> Result<i64, BaseError> {
         let record = Record::new()
             .set(USERNAME, username)
             .set(PASSWORD_HASH, password_hash)
+            .set(EMAIL, email)
+            .set(EMAIL_VERIFIED_AT, email_verified_at)
             .set(STATUS, UserStatus::Active.as_str());
         let (_, id) = self.trusted_query(ctx)?.insert_returning_id(record).await?;
         i64::try_from(id).map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))

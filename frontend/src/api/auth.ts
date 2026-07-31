@@ -14,6 +14,18 @@ export type DisableAccountResult = {
   immediateConvergence: boolean;
 };
 
+export type RegistrationEmailChallenge = {
+  expiresIn: number;
+  resendAfter: number;
+};
+
+export type RegisteredUser = {
+  id: number;
+  username: string;
+  email: string;
+  emailVerifiedAt: number;
+};
+
 type ApiEnvelope = {
   code?: number;
   message?: string;
@@ -79,6 +91,114 @@ export async function login(
     "登录响应缺少有效 Token",
     signal,
   );
+}
+
+export async function requestRegistrationEmail(
+  email: string,
+  signal?: AbortSignal,
+): Promise<RegistrationEmailChallenge> {
+  const result = await requestPublicAction(
+    "/api/v1/users/registration-email-verifications",
+    { email },
+    signal,
+  );
+  const { payload } = result;
+  const data = recordData(payload.data);
+  if (
+    data?.accepted !== true ||
+    typeof data.expires_in !== "number" ||
+    !Number.isSafeInteger(data.expires_in) ||
+    data.expires_in <= 0 ||
+    typeof data.resend_after !== "number" ||
+    !Number.isSafeInteger(data.resend_after) ||
+    data.resend_after <= 0
+  ) {
+    throw new ApiError("验证码响应缺少有效时限", {
+      status: result.status,
+      code: payload.code,
+      requestId: result.requestId,
+      details: payload,
+    });
+  }
+  return {
+    expiresIn: data.expires_in,
+    resendAfter: data.resend_after,
+  };
+}
+
+export async function register(
+  username: string,
+  password: string,
+  email: string,
+  emailCode: string,
+  signal?: AbortSignal,
+): Promise<RegisteredUser> {
+  const result = await requestPublicAction(
+    "/api/v1/users/register",
+    { username, password, email, email_code: emailCode },
+    signal,
+  );
+  const { payload } = result;
+  const data = recordData(payload.data);
+  if (
+    typeof data?.id !== "number" ||
+    !Number.isSafeInteger(data.id) ||
+    data.id <= 0 ||
+    typeof data.username !== "string" ||
+    !data.username ||
+    typeof data.email !== "string" ||
+    !data.email ||
+    typeof data.email_verified_at !== "number" ||
+    !Number.isSafeInteger(data.email_verified_at) ||
+    data.email_verified_at <= 0
+  ) {
+    throw new ApiError("注册响应缺少已验证账户", {
+      status: result.status,
+      code: payload.code,
+      requestId: result.requestId,
+      details: payload,
+    });
+  }
+  return {
+    id: data.id,
+    username: data.username,
+    email: data.email,
+    emailVerifiedAt: data.email_verified_at,
+  };
+}
+
+async function requestPublicAction(
+  path: string,
+  body: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<{ payload: ApiEnvelope; status: number; requestId?: string }> {
+  const response = await fetch(`${apiBase}${path}`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    credentials: "include",
+    signal,
+  });
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+  if (!response.ok || payload?.code !== 0) {
+    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+      status: response.status,
+      code: payload?.code,
+      requestId,
+      details: payload,
+    });
+  }
+  return { payload, status: response.status, requestId };
+}
+
+function recordData(data: unknown): Record<string, unknown> | undefined {
+  return data !== null && typeof data === "object" && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : undefined;
 }
 
 export async function refreshSession(

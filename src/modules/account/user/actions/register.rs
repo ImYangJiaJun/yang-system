@@ -24,6 +24,17 @@ yang_base::params! {
             .require(true)
             .min_length(PASSWORD_MIN_LENGTH)
             .max_length(PASSWORD_MAX_LENGTH),
+        email: Str::new()
+            .title("注册邮箱")
+            .require(true)
+            .max_length(254)
+            .email(),
+        email_code: Str::new()
+            .title("邮箱验证码")
+            .require(true)
+            .min_length(6)
+            .max_length(6)
+            .pattern(r"^[0-9]{6}$"),
     }
 }
 
@@ -52,7 +63,13 @@ impl ActionHandler for RegisterAction {
         input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
         self.service
-            .register(&ctx, &input.username, &input.password)
+            .register(
+                &ctx,
+                &input.username,
+                &input.password,
+                &input.email,
+                &input.email_code,
+            )
             .await
     }
 }
@@ -62,4 +79,23 @@ pub(super) fn register(
     service: Arc<UserService>,
 ) -> Result<ModuleSpec, BaseError> {
     Ok(module.native_action(RegisterAction { service }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yang_base::definition::ParamInput;
+
+    #[test]
+    fn registration_contract_requires_email_ownership_proof() {
+        let params = <RegisterInput as ParamInput>::params();
+        let names = params
+            .as_slice()
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["username", "password", "email", "email_code"]);
+        assert!(params.as_slice().iter().all(|param| param.required));
+    }
 }

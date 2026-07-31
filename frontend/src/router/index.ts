@@ -23,13 +23,14 @@ export default defineRouter(({ store }) => {
   router.beforeEach(async (to) => {
     if (
       to.name !== "login" &&
+      to.name !== "register" &&
       to.name !== "role-selection" &&
       !to.meta.requiresRole
     ) {
       return undefined;
     }
     const target: AccessTarget =
-      to.name === "login"
+      to.name === "login" || to.name === "register"
         ? "login"
         : to.name === "role-selection"
           ? "role-selection"

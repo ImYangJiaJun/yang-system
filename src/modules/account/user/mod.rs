@@ -3,6 +3,7 @@
 mod actions;
 mod browser_session;
 mod claims;
+mod email_verification;
 mod lifecycle;
 mod password;
 mod policy;

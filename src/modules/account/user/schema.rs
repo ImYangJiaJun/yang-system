@@ -11,19 +11,31 @@ use yang_base::BaseError;
 pub(super) const SYSTEM_ROLE: &str = "system";
 pub(super) const USER_ID: &str = "id";
 pub(super) const USERNAME: &str = "username";
+pub(super) const EMAIL: &str = "email";
+pub(super) const EMAIL_VERIFIED_AT: &str = "email_verified_at";
 pub(super) const PASSWORD_HASH: &str = "password_hash";
 pub(super) const STATUS: &str = "status";
 pub(super) const AUTHZ_VERSION: &str = "authz_version";
 pub(super) const CREDENTIAL_VERSION: &str = "credential_version";
 pub(super) const CREATED_AT: &str = "created_at";
 pub(super) const UPDATED_AT: &str = "updated_at";
-pub(super) const USER_VIEW_FIELDS: &[&str] = &[USER_ID, USERNAME, STATUS, CREATED_AT, UPDATED_AT];
+pub(super) const USER_VIEW_FIELDS: &[&str] = &[
+    USER_ID,
+    USERNAME,
+    EMAIL,
+    EMAIL_VERIFIED_AT,
+    STATUS,
+    CREATED_AT,
+    UPDATED_AT,
+];
 
 /// 可安全返回给客户端的用户视图，不包含密码摘要。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub(super) struct UserView {
     id: i64,
     username: String,
+    email: Option<String>,
+    email_verified_at: Option<i64>,
     status: UserStatus,
     created_at: i64,
     updated_at: i64,
@@ -36,6 +48,8 @@ impl TryFrom<&Record> for UserView {
         Ok(Self {
             id: user.require(USER_ID)?,
             username: user.require(USERNAME)?,
+            email: user.optional(EMAIL)?,
+            email_verified_at: user.optional(EMAIL_VERIFIED_AT)?,
             status: UserStatus::from_storage(&user.require::<String>(STATUS)?)?,
             created_at: user.require(CREATED_AT)?,
             updated_at: user.require(UPDATED_AT)?,
@@ -55,6 +69,18 @@ pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
                 .pattern(USERNAME_PATTERN)
                 .unique(true)
                 .filterable(true),
+        email => Str::new()
+                .title("已验证邮箱")
+                .max_length(254)
+                .email()
+                .unique(true)
+                .filterable(true)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+        email_verified_at => Timestamp::new()
+                .title("邮箱验证时间")
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
         password_hash => Str::new()
                 .title("密码摘要")
                 .require(true)
@@ -123,6 +149,12 @@ mod tests {
         let username = definition
             .field(USERNAME)
             .unwrap_or_else(|| panic!("应存在 username 字段"));
+        let email = definition
+            .field(EMAIL)
+            .unwrap_or_else(|| panic!("应存在 email 字段"));
+        let email_verified_at = definition
+            .field(EMAIL_VERIFIED_AT)
+            .unwrap_or_else(|| panic!("应存在 email_verified_at 字段"));
         let authz_version = definition
             .field(AUTHZ_VERSION)
             .unwrap_or_else(|| panic!("应存在 authz_version 字段"));
@@ -135,6 +167,8 @@ mod tests {
         assert!(id.is_auto_increment());
         assert!(id.is_filterable());
         assert!(username.is_filterable());
+        assert!(email.is_filterable());
+        assert!(!email_verified_at.is_filterable());
         assert!(!password.is_filterable());
         assert!(!password.is_sortable());
         assert_eq!(
@@ -163,7 +197,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
         let table = definition.bind(Arc::new(pool));
 
-        for field_name in [PASSWORD_HASH, AUTHZ_VERSION, CREDENTIAL_VERSION] {
+        for field_name in [
+            EMAIL,
+            EMAIL_VERIFIED_AT,
+            PASSWORD_HASH,
+            AUTHZ_VERSION,
+            CREDENTIAL_VERSION,
+        ] {
             let denied = table.query(["user"]).select_fields(&[field_name]);
             assert!(matches!(
                 denied,
