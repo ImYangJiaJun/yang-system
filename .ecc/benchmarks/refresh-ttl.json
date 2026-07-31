@@ -1,0 +1,79 @@
+{
+  "benchmark": "account-refresh-rotation",
+  "captured_at": "2026-07-31",
+  "status": "passed",
+  "command": "cargo test --test refresh_load_benchmark refresh_rotation_load_has_zero_errors_and_reports_percentiles -- --ignored --nocapture --test-threads=1",
+  "environment": {
+    "os": "Windows",
+    "cpu": "AMD Ryzen 9 5900HX with Radeon Graphics",
+    "mysql": "mysql:8.0",
+    "redis": "redis:7-alpine",
+    "database_transport": "127.0.0.1:3306",
+    "redis_transport": "127.0.0.1:6379/15"
+  },
+  "dataset": {
+    "concurrent_sessions": 10,
+    "refreshes_per_session": 100,
+    "measured_requests_per_run": 1000,
+    "runs": 3,
+    "protocol": "Each session rotates sequentially; no stale JTI is reused concurrently."
+  },
+  "runs": [
+    {
+      "elapsed_ms": 974,
+      "throughput_rps": 1026.36,
+      "p50_us": 9085,
+      "p95_us": 11032,
+      "p99_us": 12643,
+      "errors": 0
+    },
+    {
+      "elapsed_ms": 977,
+      "throughput_rps": 1023.11,
+      "p50_us": 9241,
+      "p95_us": 10617,
+      "p99_us": 11722,
+      "errors": 0
+    },
+    {
+      "elapsed_ms": 901,
+      "throughput_rps": 1108.8,
+      "p50_us": 8650,
+      "p95_us": 9910,
+      "p99_us": 10771,
+      "errors": 0
+    }
+  ],
+  "median": {
+    "elapsed_ms": 974,
+    "throughput_rps": 1026.36,
+    "p50_us": 9085,
+    "p95_us": 10617,
+    "p99_us": 11722,
+    "errors": 0
+  },
+  "ttl_load_amplification": [
+    {
+      "access_ttl_seconds": 3600,
+      "relative_refresh_load": 1
+    },
+    {
+      "access_ttl_seconds": 900,
+      "relative_refresh_load": 4
+    },
+    {
+      "access_ttl_seconds": 600,
+      "relative_refresh_load": 6
+    },
+    {
+      "access_ttl_seconds": 300,
+      "relative_refresh_load": 12
+    }
+  ],
+  "decision": {
+    "access_ttl_seconds": 3600,
+    "change": "none",
+    "reason": "Local latency is healthy, but production concurrent-session counts, proxy/network latency, pool wait, failure rate, and Redis capacity are not available. Reducing TTL would multiply load without enough production evidence."
+  },
+  "scope": "Local reproducible Action-pipeline baseline with real MySQL and Redis. It excludes reverse proxy and network latency and is not a production capacity claim."
+}
