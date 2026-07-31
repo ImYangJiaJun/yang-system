@@ -1608,6 +1608,84 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
         "深层任务树必须拒绝形成关系环"
     );
 
+    let race_a = data(
+        dispatch(
+            &runtime,
+            "work.task",
+            "add",
+            json!({
+                "project_project": tree_project,
+                "title": "并发环检测-A",
+                "status": "todo",
+                "priority": "normal"
+            }),
+            &headers,
+            &[],
+        )
+        .await?,
+    )?["id"]
+        .as_i64()
+        .context("并发任务 A 缺少 id")?;
+    let race_b = data(
+        dispatch(
+            &runtime,
+            "work.task",
+            "add",
+            json!({
+                "project_project": tree_project,
+                "title": "并发环检测-B",
+                "status": "todo",
+                "priority": "normal"
+            }),
+            &headers,
+            &[],
+        )
+        .await?,
+    )?["id"]
+        .as_i64()
+        .context("并发任务 B 缺少 id")?;
+    let (race_left, race_right) = tokio::join!(
+        dispatch_token_body_action(
+            &runtime,
+            "work.task",
+            "put",
+            &access_token,
+            json!({ "id": race_a, "data": { "parent_task": race_b } }),
+        ),
+        dispatch_token_body_action(
+            &runtime,
+            "work.task",
+            "put",
+            &access_token,
+            json!({ "id": race_b, "data": { "parent_task": race_a } }),
+        ),
+    );
+    let race_successes = [race_left, race_right]
+        .into_iter()
+        .filter(|result| result.as_ref().is_ok_and(|response| response.code == 0))
+        .count();
+    ensure!(
+        race_successes == 1,
+        "两个相反的并发父关系必须恰好一个成功，实际成功 {race_successes}"
+    );
+    let parent_a: Option<i64> =
+        sqlx::query_scalar("SELECT parent_task FROM work_task WHERE id = ? AND owner_user = ?")
+            .bind(race_a)
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    let parent_b: Option<i64> =
+        sqlx::query_scalar("SELECT parent_task FROM work_task WHERE id = ? AND owner_user = ?")
+            .bind(race_b)
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    ensure!(
+        (parent_a == Some(race_b) && parent_b.is_none())
+            || (parent_b == Some(race_a) && parent_a.is_none()),
+        "并发父关系最终态必须无环且只保留一条边"
+    );
+
     let other_username = format!("work_scale_other_{suffix}");
     let other = data(
         dispatch(
