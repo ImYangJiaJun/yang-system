@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 12);
+    assert_eq!(manifest.migrations().len(), 15);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -147,6 +147,48 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
         "ALTER TABLE `users` ADD CONSTRAINT `chk_users_status` CHECK (`status` IN ('active', 'disabled'))"
     );
     assert!(user_status_check.completion_check().is_some());
+
+    for (index, version, constraint, column, parent) in [
+        (
+            12,
+            "20260731_0013_add_admin_user_user_fk",
+            "fk_admin_user_user_user",
+            "user_user",
+            "users",
+        ),
+        (
+            13,
+            "20260731_0014_add_org_user_user_fk",
+            "fk_org_user_user_user",
+            "user_user",
+            "users",
+        ),
+        (
+            14,
+            "20260731_0015_add_org_user_org_fk",
+            "fk_org_user_org_org",
+            "org_org",
+            "org_org",
+        ),
+    ] {
+        let migration = manifest
+            .migrations()
+            .get(index)
+            .unwrap_or_else(|| panic!("应存在授权关系外键迁移 {version}"));
+        assert_eq!(migration.version(), version);
+        for required in [
+            format!("CONSTRAINT `{constraint}`"),
+            format!("FOREIGN KEY (`{column}`)"),
+            format!("REFERENCES `{parent}` (`id`)"),
+            "ON UPDATE RESTRICT ON DELETE RESTRICT".to_string(),
+        ] {
+            assert!(
+                migration.sql().contains(&required),
+                "外键迁移 {version} 缺少契约: {required}"
+            );
+        }
+        assert!(migration.completion_check().is_some());
+    }
 }
 
 #[test]

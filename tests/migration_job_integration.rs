@@ -100,6 +100,29 @@ async fn users_status_check(database: &Database) -> anyhow::Result<Option<(Strin
     .context("读取 users.status CHECK 元数据失败")
 }
 
+async fn foreign_key_metadata(
+    database: &Database,
+    constraint: &str,
+) -> anyhow::Result<Vec<(String, String, String, String, String, String)>> {
+    sqlx::query_as(
+        "SELECT CAST(rc.TABLE_NAME AS CHAR), CAST(kcu.COLUMN_NAME AS CHAR), \
+                CAST(kcu.REFERENCED_TABLE_NAME AS CHAR), \
+                CAST(kcu.REFERENCED_COLUMN_NAME AS CHAR), \
+                CAST(rc.UPDATE_RULE AS CHAR), CAST(rc.DELETE_RULE AS CHAR) \
+         FROM information_schema.referential_constraints AS rc \
+         INNER JOIN information_schema.key_column_usage AS kcu \
+           ON kcu.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA \
+          AND kcu.TABLE_NAME = rc.TABLE_NAME \
+          AND kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME \
+         WHERE rc.CONSTRAINT_SCHEMA = DATABASE() AND rc.CONSTRAINT_NAME = ? \
+         ORDER BY kcu.ORDINAL_POSITION",
+    )
+    .bind(constraint)
+    .fetch_all(database.pool())
+    .await
+    .with_context(|| format!("读取外键 {constraint} 元数据失败"))
+}
+
 fn finish_with_cleanup(
     outcome: anyhow::Result<()>,
     cleanup: anyhow::Result<()>,
@@ -164,7 +187,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 12, "应记录 12 个 applied 版本");
+        ensure!(migration_count == 15, "应记录 15 个 applied 版本");
         let server_identity: (String, String) =
             sqlx::query_as("SELECT CAST(VERSION() AS CHAR), CAST(@@version_comment AS CHAR)")
                 .fetch_one(control.pool())
@@ -191,6 +214,56 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
             matches!(&status_check, Some((enforced, clause)) if enforced == "YES" && clause.contains("active") && clause.contains("disabled")),
             "用户状态 CHECK 必须存在并强制执行: {status_check:?}"
         );
+        for (constraint, expected) in [
+            (
+                "fk_admin_user_user_user",
+                (
+                    "admin_user",
+                    "user_user",
+                    "users",
+                    "id",
+                    "RESTRICT",
+                    "RESTRICT",
+                ),
+            ),
+            (
+                "fk_org_user_user_user",
+                (
+                    "org_user",
+                    "user_user",
+                    "users",
+                    "id",
+                    "RESTRICT",
+                    "RESTRICT",
+                ),
+            ),
+            (
+                "fk_org_user_org_org",
+                (
+                    "org_user",
+                    "org_org",
+                    "org_org",
+                    "id",
+                    "RESTRICT",
+                    "RESTRICT",
+                ),
+            ),
+        ] {
+            let rows = foreign_key_metadata(&control, constraint).await?;
+            ensure!(
+                rows.len() == 1
+                    && rows[0]
+                        == (
+                            expected.0.to_string(),
+                            expected.1.to_string(),
+                            expected.2.to_string(),
+                            expected.3.to_string(),
+                            expected.4.to_string(),
+                            expected.5.to_string(),
+                        ),
+                "外键 {constraint} 必须精确匹配单列目标与双 RESTRICT: {rows:?}"
+            );
+        }
         let invalid_status = sqlx::query(
             "INSERT INTO users (username, password_hash, status, created_at, updated_at) \
              VALUES ('invalid_status_sentinel', 'hash', 'pending', 1, 1)",
@@ -336,7 +409,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         );
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version', '20260731_0011_create_password_reset_token', '20260731_0012_add_users_status_check')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version', '20260731_0011_create_password_reset_token', '20260731_0012_add_users_status_check', '20260731_0013_add_admin_user_user_fk', '20260731_0014_add_org_user_user_fk', '20260731_0015_add_org_user_org_fk')",
         )
         .execute(control.pool())
         .await
@@ -496,6 +569,366 @@ async fn status_check_upgrade_rejects_dirty_data_and_same_name_drift() -> anyhow
                 && (mismatch_text.contains("表达式")
                     || mismatch_text.contains("Duplicate check constraint name")),
             "完成探针必须拒绝并定位同名异义 CHECK: {mismatch_text}"
+        );
+        Ok(())
+    }
+    .await;
+
+    let cleanup = reset_test_database(&control).await;
+    finish_with_cleanup(outcome, cleanup)
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 指向 _test MySQL 数据库"]
+async fn authorization_foreign_key_upgrade_rejects_orphans_and_recovers_completed_ddl(
+) -> anyhow::Result<()> {
+    let control = connect_test_database().await?;
+    reset_test_database(&control).await?;
+
+    let outcome = async {
+        run_job(MigrationCommand::Apply).await?;
+        for (table, constraint) in [
+            ("admin_user", "fk_admin_user_user_user"),
+            ("org_user", "fk_org_user_user_user"),
+            ("org_user", "fk_org_user_org_org"),
+        ] {
+            let statement = format!("ALTER TABLE `{table}` DROP FOREIGN KEY `{constraint}`");
+            sqlx::query(&statement)
+                .execute(control.pool())
+                .await
+                .with_context(|| format!("移除外键 {constraint} 以准备升级测试失败"))?;
+        }
+        sqlx::query(
+            "DELETE FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version IN ('20260731_0013_add_admin_user_user_fk', \
+                             '20260731_0014_add_org_user_user_fk', \
+                             '20260731_0015_add_org_user_org_fk')",
+        )
+        .execute(control.pool())
+        .await
+        .context("准备授权外键升级起点失败")?;
+
+        sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, admin, status, created_at, updated_at) \
+             VALUES (999999, 'orphan_admin', 0, 'active', 1, 1)",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造孤儿平台授权事实失败")?;
+        let orphan_error = match run_job(MigrationCommand::Apply).await {
+            Ok(_) => anyhow::bail!("孤儿授权事实必须阻止外键 DDL"),
+            Err(error) => error,
+        };
+        let orphan_text = format!("{orphan_error:#}");
+        ensure!(
+            orphan_text.contains("fk_admin_user_user_user")
+                && orphan_text.contains("1 行孤儿授权事实"),
+            "外键发布预检必须定位约束并报告孤儿计数: {orphan_text}"
+        );
+        let first_fk_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version = '20260731_0013_add_admin_user_user_fk'",
+        )
+        .fetch_optional(control.pool())
+        .await
+        .context("读取孤儿预检失败后的迁移状态失败")?;
+        ensure!(
+            first_fk_status.as_deref() != Some("applied"),
+            "孤儿预检失败不得把 0013 标记为 applied: {first_fk_status:?}"
+        );
+        ensure!(
+            foreign_key_metadata(&control, "fk_admin_user_user_user")
+                .await?
+                .is_empty(),
+            "孤儿预检失败不得遗留半完成外键"
+        );
+
+        sqlx::query("DELETE FROM admin_user WHERE name = 'orphan_admin'")
+            .execute(control.pool())
+            .await
+            .context("修复孤儿平台授权事实失败")?;
+        let upgraded = run_job(MigrationCommand::Apply).await?;
+        ensure!(
+            upgraded
+                .plan
+                .entries
+                .iter()
+                .all(|entry| entry.status == MigrationPlanStatus::Applied),
+            "修复孤儿数据后授权外键升级必须完成"
+        );
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, status, created_at, updated_at) \
+             VALUES ('fk_parent_user', 'hash', 'active', 1, 1)",
+        )
+        .execute(control.pool())
+        .await
+        .context("写入外键父用户失败")?;
+        let user_id: i64 =
+            sqlx::query_scalar("SELECT id FROM users WHERE username = 'fk_parent_user'")
+                .fetch_one(control.pool())
+                .await
+                .context("读取外键父用户失败")?;
+        sqlx::query(
+            "INSERT INTO org_org (code, name, status, created_at) \
+             VALUES ('fk_parent_org', 'FK Parent Org', 'active', 1)",
+        )
+        .execute(control.pool())
+        .await
+        .context("写入外键父企业失败")?;
+        let org_id: i64 = sqlx::query_scalar("SELECT id FROM org_org WHERE code = 'fk_parent_org'")
+            .fetch_one(control.pool())
+            .await
+            .context("读取外键父企业失败")?;
+        sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, admin, status, created_at, updated_at) \
+             VALUES (?, 'fk_admin', 0, 'active', 1, 1)",
+        )
+        .bind(user_id)
+        .execute(control.pool())
+        .await
+        .context("写入受保护平台授权事实失败")?;
+        sqlx::query(
+            "INSERT INTO org_user \
+             (org_org, user_user, name, admin, status, created_at, updated_at) \
+             VALUES (?, ?, 'fk_member', 0, 'active', 1, 1)",
+        )
+        .bind(org_id)
+        .bind(user_id)
+        .execute(control.pool())
+        .await
+        .context("写入受保护企业授权事实失败")?;
+
+        ensure!(
+            sqlx::query("DELETE FROM users WHERE id = ?")
+                .bind(user_id)
+                .execute(control.pool())
+                .await
+                .is_err(),
+            "RESTRICT 必须拒绝删除仍被授权事实引用的用户"
+        );
+        ensure!(
+            sqlx::query("UPDATE users SET id = id + 1000000 WHERE id = ?")
+                .bind(user_id)
+                .execute(control.pool())
+                .await
+                .is_err(),
+            "RESTRICT 必须拒绝修改仍被授权事实引用的用户主键"
+        );
+        ensure!(
+            sqlx::query("DELETE FROM org_org WHERE id = ?")
+                .bind(org_id)
+                .execute(control.pool())
+                .await
+                .is_err(),
+            "RESTRICT 必须拒绝删除仍被成员事实引用的企业"
+        );
+        ensure!(
+            sqlx::query("UPDATE org_org SET id = id + 1000000 WHERE id = ?")
+                .bind(org_id)
+                .execute(control.pool())
+                .await
+                .is_err(),
+            "RESTRICT 必须拒绝修改仍被成员事实引用的企业主键"
+        );
+
+        sqlx::query(
+            "UPDATE `_migrations` SET status = 'running' \
+             WHERE module_name = 'yang-system' \
+             AND version IN ('20260731_0013_add_admin_user_user_fk', \
+                             '20260731_0014_add_org_user_user_fk', \
+                             '20260731_0015_add_org_user_org_fk')",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造授权外键 DDL 已完成但迁移状态中断失败")?;
+        let recovered = run_job(MigrationCommand::Apply).await?;
+        ensure!(
+            recovered
+                .plan
+                .entries
+                .iter()
+                .all(|entry| entry.status == MigrationPlanStatus::Applied),
+            "精确完成探针必须恢复三个已完成外键的迁移状态"
+        );
+
+        sqlx::query("ALTER TABLE admin_user DROP FOREIGN KEY fk_admin_user_user_user")
+            .execute(control.pool())
+            .await
+            .context("移除正确平台用户外键失败")?;
+        sqlx::query(
+            "ALTER TABLE admin_user ADD CONSTRAINT fk_admin_user_user_user \
+             FOREIGN KEY (user_user) REFERENCES users(id) \
+             ON UPDATE RESTRICT ON DELETE CASCADE",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造同名异义平台用户外键失败")?;
+        sqlx::query(
+            "UPDATE `_migrations` SET status = 'running' \
+             WHERE module_name = 'yang-system' \
+             AND version = '20260731_0013_add_admin_user_user_fk'",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造 0013 同名异义 DDL 中断状态失败")?;
+        let mismatch = match run_job(MigrationCommand::Apply).await {
+            Ok(_) => anyhow::bail!("同名异义外键必须阻止中断恢复"),
+            Err(error) => error,
+        };
+        let mismatch_text = format!("{mismatch:#}");
+        ensure!(
+            mismatch_text.contains("fk_admin_user_user_user"),
+            "完成探针必须拒绝并定位同名异义外键: {mismatch_text}"
+        );
+        Ok(())
+    }
+    .await;
+
+    let cleanup = reset_test_database(&control).await;
+    finish_with_cleanup(outcome, cleanup)
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL；staging 应设置 YANG_SYSTEM_AUTHZ_FK_DDL_SCALE_ROWS 与 YANG_SYSTEM_AUTHZ_FK_DDL_BUDGET_MS"]
+async fn authorization_foreign_key_ddl_rehearsal_obeys_configured_budget() -> anyhow::Result<()> {
+    let control = connect_test_database().await?;
+    reset_test_database(&control).await?;
+
+    let outcome = async {
+        run_job(MigrationCommand::Apply).await?;
+        for (table, constraint) in [
+            ("admin_user", "fk_admin_user_user_user"),
+            ("org_user", "fk_org_user_user_user"),
+            ("org_user", "fk_org_user_org_org"),
+        ] {
+            let statement = format!("ALTER TABLE `{table}` DROP FOREIGN KEY `{constraint}`");
+            sqlx::query(&statement)
+                .execute(control.pool())
+                .await
+                .with_context(|| format!("移除外键 {constraint} 以准备 DDL 演练失败"))?;
+        }
+        sqlx::query(
+            "DELETE FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version IN ('20260731_0013_add_admin_user_user_fk', \
+                             '20260731_0014_add_org_user_user_fk', \
+                             '20260731_0015_add_org_user_org_fk')",
+        )
+        .execute(control.pool())
+        .await
+        .context("准备授权外键 DDL 演练迁移起点失败")?;
+
+        let row_count = std::env::var("YANG_SYSTEM_AUTHZ_FK_DDL_SCALE_ROWS")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .context("YANG_SYSTEM_AUTHZ_FK_DDL_SCALE_ROWS 必须是正整数")?
+            .unwrap_or(10_000);
+        ensure!(row_count > 0, "授权外键 DDL 演练行数必须大于 0");
+        let budget_ms = std::env::var("YANG_SYSTEM_AUTHZ_FK_DDL_BUDGET_MS")
+            .ok()
+            .map(|value| value.parse::<u128>())
+            .transpose()
+            .context("YANG_SYSTEM_AUTHZ_FK_DDL_BUDGET_MS 必须是正整数")?
+            .unwrap_or(30_000);
+        ensure!(budget_ms > 0, "授权外键 DDL 预算必须大于 0ms");
+
+        sqlx::query(
+            "INSERT INTO org_org (code, name, status, created_at) \
+             VALUES ('fk_scale_org', 'FK Scale Org', 'active', 1)",
+        )
+        .execute(control.pool())
+        .await
+        .context("写入授权外键 DDL 演练企业失败")?;
+        let org_id: i64 = sqlx::query_scalar("SELECT id FROM org_org WHERE code = 'fk_scale_org'")
+            .fetch_one(control.pool())
+            .await
+            .context("读取授权外键 DDL 演练企业失败")?;
+
+        for batch_start in (0..row_count).step_by(500) {
+            let batch_end = (batch_start + 500).min(row_count);
+            let mut builder = sqlx::QueryBuilder::<sqlx::MySql>::new(
+                "INSERT INTO users (username, password_hash, status, created_at, updated_at) ",
+            );
+            builder.push_values(batch_start..batch_end, |mut row, index| {
+                row.push_bind(format!("fk_scale_{index}"))
+                    .push_bind("hash")
+                    .push_bind("active")
+                    .push_bind(1_i64)
+                    .push_bind(1_i64);
+            });
+            builder
+                .build()
+                .execute(control.pool())
+                .await
+                .with_context(|| {
+                    format!("写入授权外键 DDL 演练用户失败: {batch_start}..{batch_end}")
+                })?;
+        }
+        sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, admin, status, created_at, updated_at) \
+             SELECT id, CONCAT('admin_', id), 0, 'active', 1, 1 \
+             FROM users WHERE username LIKE 'fk_scale_%'",
+        )
+        .execute(control.pool())
+        .await
+        .context("写入平台授权关系规模数据失败")?;
+        sqlx::query(
+            "INSERT INTO org_user \
+             (org_org, user_user, name, admin, status, created_at, updated_at) \
+             SELECT ?, id, CONCAT('member_', id), 0, 'active', 1, 1 \
+             FROM users WHERE username LIKE 'fk_scale_%'",
+        )
+        .bind(org_id)
+        .execute(control.pool())
+        .await
+        .context("写入企业授权关系规模数据失败")?;
+
+        let before_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT CONCAT(TABLE_NAME, ':', INDEX_NAME)) \
+             FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() \
+               AND table_name IN ('admin_user', 'org_user')",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取授权外键 DDL 演练前索引规模失败")?;
+        let started = Instant::now();
+        run_job(MigrationCommand::Apply).await?;
+        let elapsed_ms = started.elapsed().as_millis();
+        let after_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT CONCAT(TABLE_NAME, ':', INDEX_NAME)) \
+             FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() \
+               AND table_name IN ('admin_user', 'org_user')",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取授权外键 DDL 演练后索引规模失败")?;
+        ensure!(
+            before_indexes == after_indexes,
+            "三个授权外键必须复用已有索引，不得隐式增加索引: {before_indexes} -> {after_indexes}"
+        );
+        ensure!(
+            elapsed_ms <= budget_ms,
+            "授权外键 DDL 耗时 {elapsed_ms}ms 超过预算 {budget_ms}ms；不得直接发布，应调整发布窗口或采用在线 Schema 变更"
+        );
+        for constraint in [
+            "fk_admin_user_user_user",
+            "fk_org_user_user_user",
+            "fk_org_user_org_org",
+        ] {
+            ensure!(
+                foreign_key_metadata(&control, constraint).await?.len() == 1,
+                "DDL 演练完成后外键 {constraint} 必须精确存在"
+            );
+        }
+        eprintln!(
+            "authorization FK DDL rehearsal: rows_per_relation={row_count}, relation_rows={}, indexes={before_indexes}, elapsed_ms={elapsed_ms}, budget_ms={budget_ms}",
+            row_count * 2
         );
         Ok(())
     }

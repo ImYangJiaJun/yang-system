@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use yang_base::database::{
     DatabaseInitializer, Migration, MigrationCheckConstraint, MigrationColumnCheck,
-    MigrationManifest, MigrationPlan, MigrationPlanStatus,
+    MigrationForeignKeyCheck, MigrationManifest, MigrationPlan, MigrationPlanStatus,
 };
 use yang_base::tools::ToolsBuilder;
 use yang_db::{Database, DatabaseConfig};
@@ -67,6 +67,7 @@ pub struct MigrationDescriptor {
 enum CompletionDescriptor {
     Column(ColumnCompletionDescriptor),
     CheckConstraint(CheckConstraintCompletionDescriptor),
+    ForeignKey(ForeignKeyCompletionDescriptor),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +85,17 @@ struct CheckConstraintCompletionDescriptor {
     constraint: &'static str,
     expression: &'static str,
     enforced: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ForeignKeyCompletionDescriptor {
+    table: &'static str,
+    constraint: &'static str,
+    column: &'static str,
+    referenced_table: &'static str,
+    referenced_column: &'static str,
+    update_rule: &'static str,
+    delete_rule: &'static str,
 }
 
 impl MigrationDescriptor {
@@ -123,12 +135,23 @@ impl MigrationDescriptor {
                     check.enforced,
                 ))
             }
+            Some(CompletionDescriptor::ForeignKey(check)) => {
+                migration.with_completion_check(MigrationForeignKeyCheck::new(
+                    check.table,
+                    check.constraint,
+                    check.column,
+                    check.referenced_table,
+                    check.referenced_column,
+                    check.update_rule,
+                    check.delete_rule,
+                ))
+            }
             None => migration,
         }
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 12] = [
+const MIGRATIONS: [MigrationDescriptor; 15] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -246,6 +269,60 @@ const MIGRATIONS: [MigrationDescriptor; 12] = [
             },
         )),
     },
+    MigrationDescriptor {
+        version: "20260731_0013_add_admin_user_user_fk",
+        sql: include_str!("../migrations/20260731_0013_add_admin_user_user_fk.sql"),
+        description: "用 RESTRICT 外键固化平台授权关系必须引用真实用户",
+        prerequisite: "20260731_0012_add_users_status_check 已完成；孤儿预检为零；在与生产 admin_user 行数相当的 staging 记录 ALTER 耗时与元数据锁等待",
+        recovery: "前向恢复；外键完成探针精确核对本地列、users.id 与双 RESTRICT；DDL 已提交时只恢复迁移状态，同名异义约束须人工修复",
+        completion_check: Some(CompletionDescriptor::ForeignKey(
+            ForeignKeyCompletionDescriptor {
+                table: "admin_user",
+                constraint: "fk_admin_user_user_user",
+                column: "user_user",
+                referenced_table: "users",
+                referenced_column: "id",
+                update_rule: "RESTRICT",
+                delete_rule: "RESTRICT",
+            },
+        )),
+    },
+    MigrationDescriptor {
+        version: "20260731_0014_add_org_user_user_fk",
+        sql: include_str!("../migrations/20260731_0014_add_org_user_user_fk.sql"),
+        description: "用 RESTRICT 外键固化企业成员必须引用真实用户",
+        prerequisite: "0013 已完成；org_user.user_user 孤儿预检为零；在生产等量 staging 演练 ALTER 锁预算",
+        recovery: "前向恢复；精确完成探针核对 org_user.user_user 到 users.id 与双 RESTRICT；同名异义约束须人工修复",
+        completion_check: Some(CompletionDescriptor::ForeignKey(
+            ForeignKeyCompletionDescriptor {
+                table: "org_user",
+                constraint: "fk_org_user_user_user",
+                column: "user_user",
+                referenced_table: "users",
+                referenced_column: "id",
+                update_rule: "RESTRICT",
+                delete_rule: "RESTRICT",
+            },
+        )),
+    },
+    MigrationDescriptor {
+        version: "20260731_0015_add_org_user_org_fk",
+        sql: include_str!("../migrations/20260731_0015_add_org_user_org_fk.sql"),
+        description: "用 RESTRICT 外键固化企业成员必须引用真实企业",
+        prerequisite: "0014 已完成；org_user.org_org 孤儿预检为零；在生产等量 staging 演练 ALTER 锁预算",
+        recovery: "前向恢复；精确完成探针核对 org_user.org_org 到 org_org.id 与双 RESTRICT；同名异义约束须人工修复",
+        completion_check: Some(CompletionDescriptor::ForeignKey(
+            ForeignKeyCompletionDescriptor {
+                table: "org_user",
+                constraint: "fk_org_user_org_org",
+                column: "org_org",
+                referenced_table: "org_org",
+                referenced_column: "id",
+                update_rule: "RESTRICT",
+                delete_rule: "RESTRICT",
+            },
+        )),
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +421,7 @@ pub async fn execute_with_database(
     }
 
     preflight_users_status_check(database.pool()).await?;
+    preflight_authorization_foreign_keys(database.pool()).await?;
 
     initializer
         .apply_manifest(&manifest)
@@ -430,6 +508,186 @@ async fn preflight_users_status_check(pool: &sqlx::MySqlPool) -> anyhow::Result<
     ensure!(
         dirty_rows == 0,
         "用户状态 CHECK 发布预检发现 {dirty_rows} 行领域集合之外的数据；必须先清洗并复核 status 分组计数"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ForeignKeyPreflight {
+    name: &'static str,
+    child_table: &'static str,
+    child_column: &'static str,
+    parent_table: &'static str,
+    parent_column: &'static str,
+}
+
+const AUTHORIZATION_FOREIGN_KEYS: [ForeignKeyPreflight; 3] = [
+    ForeignKeyPreflight {
+        name: "fk_admin_user_user_user",
+        child_table: "admin_user",
+        child_column: "user_user",
+        parent_table: "users",
+        parent_column: "id",
+    },
+    ForeignKeyPreflight {
+        name: "fk_org_user_user_user",
+        child_table: "org_user",
+        child_column: "user_user",
+        parent_table: "users",
+        parent_column: "id",
+    },
+    ForeignKeyPreflight {
+        name: "fk_org_user_org_org",
+        child_table: "org_user",
+        child_column: "org_org",
+        parent_table: "org_org",
+        parent_column: "id",
+    },
+];
+
+async fn preflight_authorization_foreign_keys(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
+    for relation in AUTHORIZATION_FOREIGN_KEYS {
+        let child_exists = table_exists(pool, relation.child_table).await?;
+        if !child_exists {
+            continue;
+        }
+        ensure_innodb(pool, relation.child_table).await?;
+
+        let parent_exists = table_exists(pool, relation.parent_table).await?;
+        let orphan_rows = if parent_exists {
+            ensure_innodb(pool, relation.parent_table).await?;
+            ensure_compatible_column_types(pool, relation).await?;
+            authorization_orphan_count(pool, relation.name).await?
+        } else {
+            authorization_child_count(pool, relation.name).await?
+        };
+        ensure!(
+            orphan_rows == 0,
+            "外键 {} 发布预检发现 {} 行孤儿授权事实；必须先修复并复核后再执行 DDL",
+            relation.name,
+            orphan_rows
+        );
+    }
+    Ok(())
+}
+
+async fn authorization_orphan_count(
+    pool: &sqlx::MySqlPool,
+    constraint: &str,
+) -> anyhow::Result<i64> {
+    let result = match constraint {
+        "fk_admin_user_user_user" => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM admin_user AS child \
+             LEFT JOIN users AS parent ON parent.id = child.user_user \
+             WHERE parent.id IS NULL",
+            )
+            .fetch_one(pool)
+            .await
+        }
+        "fk_org_user_user_user" => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM org_user AS child \
+             LEFT JOIN users AS parent ON parent.id = child.user_user \
+             WHERE parent.id IS NULL",
+            )
+            .fetch_one(pool)
+            .await
+        }
+        "fk_org_user_org_org" => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM org_user AS child \
+             LEFT JOIN org_org AS parent ON parent.id = child.org_org \
+             WHERE parent.id IS NULL",
+            )
+            .fetch_one(pool)
+            .await
+        }
+        _ => anyhow::bail!("未知授权外键预检: {constraint}"),
+    };
+    result.with_context(|| format!("外键 {constraint} 发布预检无法统计孤儿行"))
+}
+
+async fn authorization_child_count(
+    pool: &sqlx::MySqlPool,
+    constraint: &str,
+) -> anyhow::Result<i64> {
+    let result = match constraint {
+        "fk_admin_user_user_user" => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_user")
+                .fetch_one(pool)
+                .await
+        }
+        "fk_org_user_user_user" | "fk_org_user_org_org" => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM org_user")
+                .fetch_one(pool)
+                .await
+        }
+        _ => anyhow::bail!("未知授权外键预检: {constraint}"),
+    };
+    result.with_context(|| format!("外键 {constraint} 发布预检无法统计子表行"))
+}
+
+async fn table_exists(pool: &sqlx::MySqlPool, table: &str) -> anyhow::Result<bool> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables \
+         WHERE table_schema = DATABASE() AND table_name = ? AND table_type = 'BASE TABLE'",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("外键发布预检无法确认表 {table}"))?;
+    Ok(count == 1)
+}
+
+async fn ensure_innodb(pool: &sqlx::MySqlPool, table: &str) -> anyhow::Result<()> {
+    let engine: String = sqlx::query_scalar(
+        "SELECT CAST(engine AS CHAR) FROM information_schema.tables \
+         WHERE table_schema = DATABASE() AND table_name = ? AND table_type = 'BASE TABLE'",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("外键发布预检无法读取表 {table} 的存储引擎"))?;
+    ensure!(
+        engine.eq_ignore_ascii_case("InnoDB"),
+        "外键发布预检要求表 {table} 使用 InnoDB，实际为 {engine}"
+    );
+    Ok(())
+}
+
+async fn ensure_compatible_column_types(
+    pool: &sqlx::MySqlPool,
+    relation: ForeignKeyPreflight,
+) -> anyhow::Result<()> {
+    let child_type: String = sqlx::query_scalar(
+        "SELECT CAST(column_type AS CHAR) FROM information_schema.columns \
+         WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+    )
+    .bind(relation.child_table)
+    .bind(relation.child_column)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("外键 {} 发布预检缺少子列", relation.name))?;
+    let parent_type: String = sqlx::query_scalar(
+        "SELECT CAST(column_type AS CHAR) FROM information_schema.columns \
+         WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+    )
+    .bind(relation.parent_table)
+    .bind(relation.parent_column)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("外键 {} 发布预检缺少父列", relation.name))?;
+    ensure!(
+        child_type.eq_ignore_ascii_case(&parent_type),
+        "外键 {} 发布预检发现列类型不兼容: {}.{}={}，{}.{}={}",
+        relation.name,
+        relation.child_table,
+        relation.child_column,
+        child_type,
+        relation.parent_table,
+        relation.parent_column,
+        parent_type
     );
     Ok(())
 }

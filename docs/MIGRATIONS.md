@@ -72,6 +72,38 @@ Action，防止版本大于 0 的用户拿到无法继续刷新的兼容期 Toke
 用户的其他未消费凭证。该迁移可先发布，但创建与消费 Action 和改密一样只在
 `security.issue_refresh_credential_version = true` 时注册。
 
+`20260731_0012_add_users_status_check` 把 `users.status` 的 `active/disabled` 领域集合
+固化为强制 CHECK。执行前会拒绝未经验证的 MySQL 实现/版本和全部越界状态；精确完成
+探针同时核对约束名、表达式与 `ENFORCED`，不能用同名异义约束恢复中断记录。
+
+`20260731_0013` 至 `0015` 为三个授权关系增加单列外键：
+
+- `admin_user.user_user -> users.id`；
+- `org_user.user_user -> users.id`；
+- `org_user.org_org -> org_org.id`。
+
+三个外键都使用 `ON UPDATE RESTRICT ON DELETE RESTRICT`。授权关系和审计事实不能因
+父记录删除而静默级联消失；业务若需要删除父记录，必须先通过显式生命周期 writer 处理
+关系、版本与审计。`apply` 在 DDL 前逐项核对父子表均为 InnoDB、列类型完全兼容并统计
+孤儿行；任一计数非零即在建约束前失败。完成探针精确核对约束名、本地列、目标列以及
+双 `RESTRICT`，可恢复“DDL 已提交、迁移记录仍为 running”的 MySQL 中断窗口，同时拒绝
+同名异义外键。
+
+发布前必须在生产等量 staging 运行授权外键 DDL 演练，并用发布窗口设置预算：
+
+```powershell
+$env:YANG_SYSTEM_TEST_DATABASE_URL='mysql://<staging-test-database>'
+$env:YANG_SYSTEM_AUTHZ_FK_DDL_SCALE_ROWS='<每张授权关系的生产等量行数>'
+$env:YANG_SYSTEM_AUTHZ_FK_DDL_BUDGET_MS='<允许的DDL毫秒预算>'
+cargo test -p yang-system --test migration_job_integration --locked `
+  authorization_foreign_key_ddl_rehearsal_obeys_configured_budget -- `
+  --ignored --nocapture --test-threads=1
+```
+
+演练会确认三个外键复用既有索引并输出实际耗时。该耗时不能代替并发流量下的元数据锁
+观测；正式发布还必须在 staging 同时施加代表性读写负载，观察 metadata lock wait、事务
+超时和复制延迟。超过预算时不得直接上线，应调整发布窗口或采用在线 Schema 变更。
+
 ## 中断、并发与恢复
 
 - 同一数据库的显式迁移作业由 MySQL advisory lock 串行化；后到作业等待锁并重新
