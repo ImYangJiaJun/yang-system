@@ -25,7 +25,7 @@ import {
   groupPresentedActions,
 } from "../table-view-model";
 import ActionConfirmationDialog from "../ActionConfirmationDialog.vue";
-import StepUpDialog from "../StepUpDialog.vue";
+import { requestStepUpProof } from "src/components/step-up/requestStepUpProof";
 
 interface UsePresentedActionsOptions {
   presentations: MaybeRefOrGetter<ActionPresentationSchema[]>;
@@ -225,23 +225,6 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
     submitAction,
     dispose,
   };
-}
-
-function requestStepUpProof(
-  challenge: string,
-  session: SessionContext,
-): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    Dialog.create({
-      component: StepUpDialog,
-      componentProps: { challenge, session },
-    })
-      .onOk((proof: unknown) =>
-        resolve(typeof proof === "string" && proof ? proof : undefined),
-      )
-      .onCancel(() => resolve(undefined))
-      .onDismiss(() => resolve(undefined));
-  });
 }
 
 export function useTableActions(options: UseTableActionsOptions) {

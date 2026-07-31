@@ -356,17 +356,60 @@ test("多标签页串行轮换 Refresh Cookie 并同步退出且不共享持久�
       }),
     }),
   );
-  await context.route("**/api/v1/users/logout", (route) =>
-    route.fulfill({
+  let logoutAttempts = 0;
+  await context.route("**/api/v1/users/logout", (route) => {
+    logoutAttempts += 1;
+    if (logoutAttempts === 1) {
+      return route.fulfill({
+        status: 428,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: 700010,
+          message: "退出全部会话需要重新认证",
+          data: { challenge: "logout-challenge", expires_in: 120 },
+        }),
+      });
+    }
+    expect(route.request().headers()["x-step-up-proof"]).toBe(
+      "logout-one-shot-proof",
+    );
+    return route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ code: 0, message: "成功", data: null }),
+      body: JSON.stringify({
+        code: 0,
+        message: "已撤销全部会话",
+        data: {
+          revoked_all_sessions: true,
+          immediate_convergence: true,
+          relogin_required: true,
+        },
+      }),
       headers: {
         "Set-Cookie":
           "yang_refresh=; Path=/api/v1/users; HttpOnly; SameSite=Strict; Max-Age=0",
       },
-    }),
-  );
+    });
+  });
+  await context.route("**/api/v1/users/step-up/complete", async (route) => {
+    const body = route.request().postDataJSON() as {
+      challenge?: string;
+      credentials?: { username?: string; password?: string };
+    };
+    expect(body).toEqual({
+      challenge: "logout-challenge",
+      credentials: { username: "alice", password: "correct-password" },
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "重认证成功",
+        data: { proof: "logout-one-shot-proof", expires_in: 60 },
+      }),
+    });
+  });
   const otherPage = await context.newPage();
 
   await Promise.all([page.goto("/roles"), otherPage.goto("/roles")]);
@@ -381,7 +424,11 @@ test("多标签页串行轮换 Refresh Cookie 并同步退出且不共享持久�
     .toBeNull();
 
   await page.getByRole("button", { name: "退出登录" }).click();
+  await page.getByLabel("用户名").fill("alice");
+  await page.getByLabel("密码").fill("correct-password");
+  await page.getByRole("button", { name: "验证并继续" }).click();
 
   await expect(page).toHaveURL("/login");
   await expect(otherPage).toHaveURL(/\/login\?reason=session-expired$/);
+  expect(logoutAttempts).toBe(2);
 });

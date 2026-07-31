@@ -281,6 +281,80 @@ impl UserService {
         finish_transaction(transaction, result).await
     }
 
+    /// 持久撤销当前用户的全部会话；返回 Redis 水位线是否已经即时写入。
+    pub(super) async fn revoke_all_sessions(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+    ) -> Result<bool, BaseError> {
+        if !self.issue_refresh_credential_version {
+            return Err(BaseError::ConfigError(
+                "全量会话撤销必须在全部实例签发 Refresh 凭据版本后启用".to_string(),
+            ));
+        }
+        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let result = async {
+            let locked = lock_user_credential(&mut transaction, user_id).await?;
+            ensure_active_status(locked.status())?;
+            increment_locked_credential_versions(&mut transaction, &locked).await?;
+            let event = audit::succeeded_event(
+                ctx,
+                None,
+                Some(audit::entity("user", user_id)?),
+                audit::entity("session_set", user_id)?,
+                None,
+                Some(audit::summary([
+                    ("relogin_required", json!(true)),
+                    ("revocation_requested", json!(true)),
+                ])?),
+            )?;
+            audit::append_in_tx(&mut transaction, &event).await?;
+            Ok(())
+        }
+        .await;
+        finish_transaction(transaction, result).await?;
+
+        match ctx
+            .tools()
+            .token()?
+            .revoke_by_subject(&user_id.to_string())
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let audit_event = audit::AuditEvent::new(
+                    audit::AuditEventContext::new(
+                        audit::AuditActor::user(user_id).map_err(invalid_audit_event)?,
+                        None,
+                        ctx.request_id(),
+                    )
+                    .map_err(invalid_audit_event)?,
+                    "account.user.logout",
+                    Some(audit::entity("user", user_id)?),
+                    audit::entity("session_set", user_id)?,
+                    audit::AuditResult::Failed,
+                    None,
+                    Some(audit::summary([
+                        ("error_code", json!(error.code_str())),
+                        ("outcome_code", json!("redis_convergence_pending")),
+                    ])?),
+                )
+                .map_err(invalid_audit_event)?;
+                if let Err(audit_error) =
+                    audit::append_independent(ctx.tools().mysql()?.pool(), &audit_event).await
+                {
+                    tracing::error!(
+                        error_code = error.code_str(),
+                        audit_error_code = audit_error.code_str(),
+                        user_id,
+                        "全量会话 Redis 收敛与失败审计均未完成"
+                    );
+                }
+                Ok(false)
+            }
+        }
+    }
+
     pub(super) async fn claims_for(
         &self,
         ctx: &ActionContext,
@@ -422,6 +496,10 @@ fn ensure_active_status(status: UserStatus) -> Result<(), BaseError> {
 
 fn username_exists_error() -> BaseError {
     BaseError::ParamInvalid("username".to_string(), "用户名已存在".to_string())
+}
+
+fn invalid_audit_event(error: anyhow::Error) -> BaseError {
+    BaseError::ConfigError(format!("构建账号生命周期审计事件失败: {error}"))
 }
 
 fn ensure_password_hash_unchanged(

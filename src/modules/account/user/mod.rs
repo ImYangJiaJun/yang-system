@@ -14,12 +14,12 @@ mod status;
 use crate::authorization::AuthorizationVersionValidator;
 use crate::config::SecuritySettings;
 use crate::modules::account::GrantResolver;
-use crate::security::TrustedClientIpMiddleware;
+use crate::security::{RequestFingerprintResolver, StepUpServices, TrustedClientIpMiddleware};
 use password::PasswordEngine;
 use repository::UserRepository;
 use service::UserService;
 use std::sync::Arc;
-use yang_base::action::{StepUpManager, TokenAuthMiddleware, UiCatalogAction};
+use yang_base::action::{TokenAuthMiddleware, UiCatalogAction};
 use yang_base::definition::{
     ActionInteraction, ActionPlacement, ActionPresentationSpec, ModuleName, ModulePresentationSpec,
     ModuleSpec,
@@ -37,7 +37,7 @@ pub(super) fn build_module(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     authorization_validator: AuthorizationVersionValidator,
-    step_up_manager: Option<Arc<StepUpManager>>,
+    step_up: Option<StepUpServices>,
 ) -> Result<ModuleSpec, BaseError> {
     let table = schema::user_table_spec()?;
     let users = Arc::new(UserRepository::new(table.table_definition()?));
@@ -65,13 +65,23 @@ pub(super) fn build_module(
     .native_action(UiCatalogAction);
 
     let credential_mutations_enabled = security.issue_refresh_credential_version;
-    actions::register_all(
+    let step_up_manager = step_up.as_ref().map(StepUpServices::manager);
+    let module = actions::register_all(
         module,
         service,
         credential_mutations_enabled,
         step_up_manager,
-    )
-    .map(|module| {
+    )?;
+    let mut module = module;
+    if let Some(step_up) = step_up {
+        for target in step_up_targets() {
+            module = module.middleware(step_up.middleware(
+                target,
+                RequestFingerprintResolver::global("account-session"),
+            ));
+        }
+    }
+    Ok({
         let mut presentation = ModulePresentationSpec::new(
             crate::modules::presentation::user_identity(),
             "用户中心",
@@ -92,4 +102,21 @@ pub(super) fn build_module(
         }
         module.presentation(presentation)
     })
+}
+
+pub(crate) fn step_up_targets() -> [yang_base::definition::ActionRef; 1] {
+    [yang_base::action!("account.user.logout")]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_account_security_mutation_is_explicitly_step_up_protected() {
+        assert_eq!(
+            step_up_targets(),
+            [yang_base::action!("account.user.logout")]
+        );
+    }
 }

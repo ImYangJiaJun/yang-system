@@ -32,7 +32,7 @@ pub(super) fn register_all(
     } else {
         module
     };
-    let module = logout::register(module)?;
+    let module = logout::register(module, Arc::clone(&service))?;
     let module = match step_up_manager {
         Some(manager) => step_up::register(module, Arc::clone(&service), manager),
         None => module,

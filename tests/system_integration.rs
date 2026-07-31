@@ -448,17 +448,17 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         )
         .await?,
     )?;
-    let admin_login = data(
-        dispatch(
-            &first.runtime,
-            "account.user",
-            "login",
-            json!({ "username": admin_username, "password": password }),
-            &[],
-            &[],
-        )
-        .await?,
-    )?;
+    let admin_login_response = dispatch(
+        &first.runtime,
+        "account.user",
+        "login",
+        json!({ "username": admin_username, "password": password }),
+        &[],
+        &[],
+    )
+    .await?;
+    let admin_refresh = refresh_cookie(&admin_login_response)?;
+    let admin_login = data(admin_login_response)?;
     let access_token = admin_login["access_token"]
         .as_str()
         .context("Step-up 管理员登录缺少 Access Token")?
@@ -544,13 +544,171 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "另一个实例必须把同一 proof 作为重放拒绝"
     );
 
+    let target_membership_id: i64 =
+        sqlx::query_scalar("SELECT id FROM admin_user WHERE user_user = ?")
+            .bind(target_id)
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    let promote_body = json!({ "id": target_membership_id, "admin": true });
+    let promote_challenge = match dispatch_raw(
+        &first.runtime,
+        "admin.user",
+        "set_admin",
+        promote_body.clone(),
+        &[("authorization", authorization.as_str())],
+        &[],
+    )
+    .await
+    {
+        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+        Err(error) => anyhow::bail!("提升备用管理员应先返回 challenge，实际: {error}"),
+        Ok(_) => anyhow::bail!("缺少 proof 不得提升备用管理员"),
+    };
+    let promote_completed = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": promote_challenge,
+                "credentials": { "username": admin_username, "password": password }
+            }),
+            &[("authorization", authorization.as_str())],
+            &[],
+        )
+        .await?,
+    )?;
+    let promote_proof = promote_completed["proof"]
+        .as_str()
+        .context("备用管理员提升 proof 缺失")?;
+    data(
+        dispatch(
+            &first.runtime,
+            "admin.user",
+            "set_admin",
+            promote_body,
+            &[
+                ("authorization", authorization.as_str()),
+                ("x-step-up-proof", promote_proof),
+            ],
+            &[],
+        )
+        .await?,
+    )?;
+    let recovery_login = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "login",
+            json!({ "username": target_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let recovery_access = recovery_login["access_token"]
+        .as_str()
+        .context("备用管理员登录缺少 Access Token")?;
+    let recovery_authorization = format!("Bearer {recovery_access}");
+
+    let authz_before_logout = database_authz_version(tools.mysql()?.pool(), admin_id).await?;
+    let credential_before_logout =
+        database_credential_version(tools.mysql()?.pool(), admin_id).await?;
+    let logout_challenge = match dispatch_raw(
+        &first.runtime,
+        "account.user",
+        "logout",
+        json!({}),
+        &[("authorization", authorization.as_str())],
+        &[],
+    )
+    .await
+    {
+        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+        Err(error) => anyhow::bail!("全量会话撤销应先返回 challenge，实际: {error}"),
+        Ok(_) => anyhow::bail!("缺少 proof 不得撤销全部会话"),
+    };
+    let logout_completed = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": logout_challenge,
+                "credentials": { "username": admin_username, "password": password }
+            }),
+            &[("authorization", authorization.as_str())],
+            &[],
+        )
+        .await?,
+    )?;
+    let logout_proof = logout_completed["proof"]
+        .as_str()
+        .context("全量会话撤销 proof 缺失")?;
+    let logout = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "logout",
+            json!({}),
+            &[
+                ("authorization", authorization.as_str()),
+                ("x-step-up-proof", logout_proof),
+            ],
+            &[],
+        )
+        .await?,
+    )?;
+    ensure!(
+        logout["revoked_all_sessions"] == true
+            && logout["immediate_convergence"] == true
+            && logout["relogin_required"] == true,
+        "全量会话撤销响应必须明确持久撤销、即时收敛和重新登录语义"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), admin_id).await? == authz_before_logout + 1,
+        "全量会话撤销必须递增授权版本"
+    );
+    ensure!(
+        database_credential_version(tools.mysql()?.pool(), admin_id).await?
+            == credential_before_logout + 1,
+        "全量会话撤销必须递增凭据版本"
+    );
+    ensure!(
+        dispatch_raw(
+            &first.runtime,
+            "account.user",
+            "me",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            &[],
+        )
+        .await
+        .is_err(),
+        "全量撤销后旧 Access Token 必须失败"
+    );
+    let stale_refresh_cookie = format!("yang_refresh={admin_refresh}");
+    ensure!(
+        dispatch_raw(
+            &first.runtime,
+            "account.user",
+            "refresh",
+            json!({}),
+            &[("cookie", stale_refresh_cookie.as_str())],
+            &[],
+        )
+        .await
+        .is_err(),
+        "全量撤销后旧 Refresh Token 必须失败"
+    );
+
     let failed_body = json!({ "id": admin_id, "status": "active" });
     let failed_challenge = match dispatch_raw(
         &first.runtime,
         "admin.user",
         "set_status",
         failed_body.clone(),
-        &[("authorization", authorization.as_str())],
+        &[("authorization", recovery_authorization.as_str())],
         &[],
     )
     .await
@@ -566,9 +724,9 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             "step_up_complete",
             json!({
                 "challenge": failed_challenge,
-                "credentials": { "username": admin_username, "password": password }
+                "credentials": { "username": target_username, "password": password }
             }),
-            &[("authorization", authorization.as_str())],
+            &[("authorization", recovery_authorization.as_str())],
             &[],
         )
         .await?,
@@ -586,7 +744,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "set_status",
         failed_body.clone(),
         &[
-            ("authorization", authorization.as_str()),
+            ("authorization", recovery_authorization.as_str()),
             ("x-step-up-proof", failed_proof.as_str()),
         ],
         &[],
@@ -605,7 +763,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "admin.user",
         "set_status",
         failed_body.clone(),
-        &[("authorization", authorization.as_str())],
+        &[("authorization", recovery_authorization.as_str())],
         &[],
     )
     .await
@@ -621,9 +779,9 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             "step_up_complete",
             json!({
                 "challenge": outage_challenge,
-                "credentials": { "username": admin_username, "password": password }
+                "credentials": { "username": target_username, "password": password }
             }),
-            &[("authorization", authorization.as_str())],
+            &[("authorization", recovery_authorization.as_str())],
             &[],
         )
         .await?,
@@ -639,7 +797,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "set_status",
         failed_body,
         &[
-            ("authorization", authorization.as_str()),
+            ("authorization", recovery_authorization.as_str()),
             ("x-step-up-proof", outage_proof.as_str()),
         ],
         &[],

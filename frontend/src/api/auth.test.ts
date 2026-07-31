@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError } from "./errors";
-import { login, refreshSession, resetPassword } from "./auth";
+import { ApiError, StepUpRequiredError } from "./errors";
+import { login, logout, refreshSession, resetPassword } from "./auth";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -105,6 +105,81 @@ describe("refreshSession", () => {
       accessToken: "access-new",
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/users/refresh");
+  });
+});
+
+describe("logout", () => {
+  it("把合法 428 固化为 StepUp challenge 且不泄露到 details", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 700010,
+              message: "需要重认证",
+              data: { challenge: "signed-challenge", expires_in: 120 },
+            }),
+            {
+              status: 428,
+              headers: {
+                "content-type": "application/json",
+                "x-request-id": "logout-request",
+              },
+            },
+          ),
+      ),
+    );
+
+    const error = await logout("access-token").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(StepUpRequiredError);
+    expect(error).toMatchObject({
+      challenge: "signed-challenge",
+      expiresIn: 120,
+      details: undefined,
+    });
+  });
+
+  it("proof 只进入本次请求头并验证全量撤销响应", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const headers = new Headers(init.headers);
+      expect(headers.get("authorization")).toBe("Bearer access-token");
+      expect(headers.get("x-step-up-proof")).toBe("one-shot-proof");
+      expect(init.body).toBe("{}");
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "已撤销全部会话",
+          data: {
+            revoked_all_sessions: true,
+            immediate_convergence: true,
+            relogin_required: true,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      logout("access-token", undefined, "one-shot-proof"),
+    ).resolves.toEqual({ immediateConvergence: true });
+    expect(sessionStorage.getItem("yang.step-up-proof")).toBeNull();
+  });
+
+  it("拒绝缺少全量撤销语义的畸形成功响应", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ code: 0, data: {} }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+
+    await expect(logout("access-token")).rejects.toBeInstanceOf(ApiError);
   });
 });
 

@@ -61,7 +61,7 @@ fn build_application(
                     work::grant_resolver(),
                 ])),
                 authorization_validator.clone(),
-                step_up.as_ref().map(StepUpServices::manager),
+                step_up.clone(),
             )
             .context("构建 account Addon 失败")?
             .middleware(action_logging.clone()),

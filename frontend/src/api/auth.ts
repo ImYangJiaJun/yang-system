@@ -1,8 +1,13 @@
 import { ApiError } from "./errors";
 import { apiBase, parseJson } from "./http";
+import { stepUpRequiredError } from "./step-up-response";
 
 export type LoginResult = {
   accessToken: string;
+};
+
+export type LogoutResult = {
+  immediateConvergence: boolean;
 };
 
 type ApiEnvelope = {
@@ -86,13 +91,15 @@ export async function refreshSession(
 export async function logout(
   accessToken: string | undefined,
   signal?: AbortSignal,
-): Promise<void> {
+  stepUpProof?: string,
+): Promise<LogoutResult> {
   const response = await fetch(`${apiBase}/api/v1/users/logout`, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...(stepUpProof ? { "x-step-up-proof": stepUpProof } : {}),
     },
     body: "{}",
     credentials: "include",
@@ -100,7 +107,19 @@ export async function logout(
   });
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
+  const stepUpRequired = stepUpRequiredError(response, payload);
+  if (stepUpRequired) throw stepUpRequired;
+  const data =
+    payload?.data !== null &&
+    typeof payload?.data === "object" &&
+    !Array.isArray(payload.data)
+      ? (payload.data as Record<string, unknown>)
+      : undefined;
+  const validResult =
+    data?.revoked_all_sessions === true &&
+    typeof data.immediate_convergence === "boolean" &&
+    data.relogin_required === true;
+  if (!response.ok || payload?.code !== 0 || !validResult) {
     throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
       status: response.status,
       code: payload?.code,
@@ -108,6 +127,7 @@ export async function logout(
       details: payload,
     });
   }
+  return { immediateConvergence: data.immediate_convergence as boolean };
 }
 
 export async function resetPassword(

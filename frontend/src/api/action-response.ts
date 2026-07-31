@@ -1,7 +1,8 @@
 import type { ActionDemoSchema } from "src/contracts/ui-catalog";
-import { ApiError, StepUpRequiredError } from "./errors";
+import { ApiError } from "./errors";
 import { parseJson } from "./http";
 import type { InvocationResult } from "./types";
+import { stepUpRequiredError } from "./step-up-response";
 
 function filenameFromDisposition(
   disposition: string | null,
@@ -64,35 +65,8 @@ export async function parseActionResponse(
   const payload = await parseJson(response);
   const envelope = payload as
     { code?: number; message?: string; data?: unknown } | undefined;
-  if (response.status === 428) {
-    const data = envelope?.data;
-    const challenge =
-      data !== null && typeof data === "object" && !Array.isArray(data)
-        ? (data as Record<string, unknown>).challenge
-        : undefined;
-    const expiresIn =
-      data !== null && typeof data === "object" && !Array.isArray(data)
-        ? (data as Record<string, unknown>).expires_in
-        : undefined;
-    if (
-      typeof challenge === "string" &&
-      challenge.length > 0 &&
-      typeof expiresIn === "number" &&
-      Number.isInteger(expiresIn) &&
-      expiresIn > 0 &&
-      expiresIn <= 300
-    ) {
-      throw new StepUpRequiredError(
-        envelope?.message ?? "敏感操作需要重新认证",
-        {
-          code: envelope?.code,
-          requestId,
-          challenge,
-          expiresIn,
-        },
-      );
-    }
-  }
+  const stepUpRequired = stepUpRequiredError(response, envelope);
+  if (stepUpRequired) throw stepUpRequired;
   if (!response.ok || envelope?.code !== 0) {
     throw new ApiError(envelope?.message ?? `HTTP ${response.status}`, {
       status: response.status,

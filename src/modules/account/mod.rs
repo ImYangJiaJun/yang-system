@@ -7,8 +7,8 @@ mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
 use crate::config::SecuritySettings;
+use crate::security::StepUpServices;
 use std::sync::Arc;
-use yang_base::action::StepUpManager;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
@@ -34,14 +34,14 @@ pub fn build_addon(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     authorization_validator: AuthorizationVersionValidator,
-    step_up_manager: Option<Arc<StepUpManager>>,
+    step_up: Option<StepUpServices>,
 ) -> Result<AddonSpec, BaseError> {
     Ok(
         AddonSpec::new(yang_base::addon!("account")).module(user::build_module(
             security,
             grant_resolver,
             authorization_validator,
-            step_up_manager,
+            step_up,
         )?),
     )
 }

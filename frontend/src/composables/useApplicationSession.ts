@@ -8,6 +8,8 @@ import { useApplicationLifecycleStore } from "src/stores/application-lifecycle";
 import { useSessionStore } from "src/stores/session";
 import { useTenantStore } from "src/stores/tenant";
 import { publishSessionEnd } from "src/api/session-coordination";
+import { StepUpRequiredError } from "src/api/client";
+import { requestStepUpProof } from "src/components/step-up/requestStepUpProof";
 
 export function useApplicationSession() {
   const sessionStore = useSessionStore();
@@ -41,10 +43,17 @@ export function useApplicationSession() {
   async function endSession() {
     try {
       await logout(sessionStore.token || undefined);
-    } finally {
-      clearSession();
-      publishSessionEnd("logout");
+    } catch (error: unknown) {
+      if (!(error instanceof StepUpRequiredError)) throw error;
+      const proof = await requestStepUpProof(error.challenge, {
+        token: sessionStore.token || undefined,
+        tenantId: tenantStore.tenantId || undefined,
+      });
+      if (!proof) return;
+      await logout(sessionStore.token || undefined, undefined, proof);
     }
+    clearSession();
+    publishSessionEnd("logout");
   }
 
   return {
