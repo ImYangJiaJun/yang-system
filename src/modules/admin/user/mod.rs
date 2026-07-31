@@ -11,8 +11,9 @@ use repository::AdminRepository;
 use service::AdminService;
 use std::sync::Arc;
 use yang_base::definition::{
-    ActionInteraction, ActionPlacement, ActionPresentationSpec, Fields, Module, ModuleName,
-    ModulePresentationSpec, ModuleSpec, Radio, Str, Switch, Table, TableName, Timestamp,
+    ActionInteraction, ActionPlacement, ActionPresentationSpec, ActionRef, Fields, Module,
+    ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Switch, Table, TableName,
+    Timestamp,
 };
 use yang_base::BaseError;
 
@@ -77,6 +78,14 @@ impl Module for AdminUserModule {
     }
 }
 
+pub(super) fn step_up_targets() -> [ActionRef; 3] {
+    [
+        yang_base::action!("admin.user.add"),
+        yang_base::action!("admin.user.set_status"),
+        yang_base::action!("admin.user.set_admin"),
+    ]
+}
+
 /// 构建平台账号 Module。
 pub(super) fn build_module(security: &SecuritySettings) -> Result<ModuleSpec, BaseError> {
     let module = AdminUserModule.into_spec();
@@ -137,5 +146,20 @@ mod tests {
                 .unwrap_or_else(|| panic!("应存在字段 {name}"));
             assert!(field.access.filterable, "管理查询字段 {name} 必须可筛选");
         }
+    }
+
+    #[test]
+    fn every_platform_privilege_mutation_is_explicitly_step_up_protected() {
+        let protected = step_up_targets()
+            .into_iter()
+            .map(|target| target.action().as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            protected,
+            ["add", "set_admin", "set_status"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
     }
 }

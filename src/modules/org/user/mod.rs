@@ -120,6 +120,10 @@ fn resource_authorizer_targets() -> [ActionRef; 3] {
     ]
 }
 
+pub(super) fn step_up_targets() -> [ActionRef; 3] {
+    resource_authorizer_targets()
+}
+
 /// 在认证与租户解析之后，为每个成员 mutation 注册确定目标的资源授权器。
 pub(super) fn register_resource_authorizers(mut module: ModuleSpec) -> ModuleSpec {
     for target in resource_authorizer_targets() {
@@ -187,5 +191,10 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(mutation_names, guarded_names);
+        let step_up_names = step_up_targets()
+            .into_iter()
+            .map(|target| target.action().as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(mutation_names, step_up_names);
     }
 }

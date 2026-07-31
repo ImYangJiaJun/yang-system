@@ -7,6 +7,7 @@ use crate::authorization::AuthorizationVersionValidator;
 use crate::config::SecuritySettings;
 use crate::modules::account;
 use crate::modules::account::GrantResolver;
+use crate::security::{RequestFingerprintResolver, StepUpServices};
 use grants::AdminGrantResolver;
 use std::sync::Arc;
 use yang_base::action::TokenAuthMiddleware;
@@ -22,11 +23,19 @@ pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {
 pub fn build_addon(
     security: Arc<SecuritySettings>,
     authorization_validator: AuthorizationVersionValidator,
+    step_up: Option<StepUpServices>,
 ) -> Result<AddonSpec, BaseError> {
-    let users = user::build_module(&security)?.middleware(
+    let mut users = user::build_module(&security)?.middleware(
         TokenAuthMiddleware::new(account::user_from_claims)
             .with_claims_validator(authorization_validator),
     );
+    if let Some(step_up) = step_up {
+        for target in user::step_up_targets() {
+            users = users.middleware(
+                step_up.middleware(target, RequestFingerprintResolver::global("admin-user")),
+            );
+        }
+    }
 
     Ok(AddonSpec::new(yang_base::addon!("admin"))
         .depends_on(yang_base::addon!("account"))

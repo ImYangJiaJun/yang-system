@@ -2,6 +2,7 @@ use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValida
 use crate::config::SecuritySettings;
 use crate::modules::{account, admin, observability, org, work};
 use crate::observability::logging::{ActionLogMiddleware, LogIdentity};
+use crate::security::StepUpServices;
 use anyhow::Context;
 use std::sync::Arc;
 use yang_base::action::StepUpManager;
@@ -20,7 +21,9 @@ pub fn build_app(
         .extension::<Arc<StepUpManager>>()
         .context("运行应用缺少 StepUpManager 扩展")?
         .clone();
-    build_application(tools, security, Some(step_up_manager))
+    let step_up = StepUpServices::production(step_up_manager, tools.cache()?.clone())
+        .context("构建生产 Step-up proof store 失败")?;
+    build_application(tools, security, Some(step_up))
 }
 
 pub(crate) fn build_schema_app(
@@ -33,7 +36,7 @@ pub(crate) fn build_schema_app(
 fn build_application(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
-    step_up_manager: Option<Arc<StepUpManager>>,
+    step_up: Option<StepUpServices>,
 ) -> anyhow::Result<Application> {
     let authorization_cache = match tools.cache() {
         Ok(_) => Some(
@@ -58,13 +61,13 @@ fn build_application(
                     work::grant_resolver(),
                 ])),
                 authorization_validator.clone(),
-                step_up_manager,
+                step_up.as_ref().map(StepUpServices::manager),
             )
             .context("构建 account Addon 失败")?
             .middleware(action_logging.clone()),
         )
         .addon(
-            admin::build_addon(security, authorization_validator.clone())
+            admin::build_addon(security, authorization_validator.clone(), step_up.clone())
                 .context("构建 admin Addon 失败")?
                 .middleware(action_logging.clone()),
         )
@@ -74,7 +77,7 @@ fn build_application(
                 .middleware(action_logging.clone()),
         )
         .addon(
-            org::build_addon(authorization_validator.clone())
+            org::build_addon(authorization_validator.clone(), step_up)
                 .context("构建 org Addon 失败")?
                 .middleware(action_logging.clone()),
         )
@@ -142,8 +145,18 @@ mod tests {
             issue_refresh_credential_version: false,
             ..(*security).clone()
         });
-        let compatibility_app = build_app(Arc::clone(&tools), compatibility_security)
-            .unwrap_or_else(|error| panic!("兼容阶段应用应构建成功: {error:#}"));
+        let test_step_up = StepUpServices::in_memory(
+            tools
+                .extension::<Arc<StepUpManager>>()
+                .unwrap_or_else(|error| panic!("测试 Tools 应有 Step-up manager: {error}"))
+                .clone(),
+        );
+        let compatibility_app = build_application(
+            Arc::clone(&tools),
+            compatibility_security,
+            Some(test_step_up.clone()),
+        )
+        .unwrap_or_else(|error| panic!("兼容阶段应用应构建成功: {error:#}"));
         let change_password_ref = ActionRef::new(
             ModuleName::new("account.user")
                 .unwrap_or_else(|error| panic!("ModuleName 应有效: {error}")),
@@ -158,8 +171,8 @@ mod tests {
                 .is_none(),
             "协议兼容阶段不得开放会制造非零凭据版本的 Action"
         );
-        let app =
-            build_app(tools, security).unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
+        let app = build_application(tools, security, Some(test_step_up))
+            .unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
         let module = app
             .runtime
             .catalog()

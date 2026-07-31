@@ -10,6 +10,7 @@ mod user;
 use crate::authorization::AuthorizationVersionValidator;
 use crate::modules::account;
 use crate::modules::account::GrantResolver;
+use crate::security::{RequestFingerprintResolver, StepUpServices};
 use grants::OrgGrantResolver;
 use std::sync::Arc;
 use yang_base::action::{TenantResolverMiddleware, TokenAuthMiddleware};
@@ -27,6 +28,7 @@ pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {
 /// 租户校验分别由子模块维护，避免 `mod.rs` 演变为业务实现文件。
 pub fn build_addon(
     authorization_validator: AuthorizationVersionValidator,
+    step_up: Option<StepUpServices>,
 ) -> Result<AddonSpec, BaseError> {
     let organization = organization::build_module();
     let members = user::build_module()?;
@@ -64,6 +66,14 @@ pub fn build_addon(
         )
         .middleware(TenantResolverMiddleware::new(resolver));
     let members = user::register_resource_authorizers(members);
+    let mut members = members;
+    if let Some(step_up) = step_up {
+        for target in user::step_up_targets() {
+            members = members.middleware(
+                step_up.middleware(target, RequestFingerprintResolver::tenant("org-user")),
+            );
+        }
+    }
 
     Ok(AddonSpec::new(yang_base::addon!("org"))
         .depends_on(yang_base::addon!("account"))
