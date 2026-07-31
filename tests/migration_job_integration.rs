@@ -1,6 +1,7 @@
 use anyhow::{ensure, Context};
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Instant;
 use yang_base::database::MigrationPlanStatus;
 use yang_db::{Database, DatabaseConfig};
 use yang_system::config::SecuritySettings;
@@ -82,6 +83,23 @@ async fn reset_test_database(database: &Database) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn users_status_check(database: &Database) -> anyhow::Result<Option<(String, String)>> {
+    sqlx::query_as(
+        "SELECT CAST(tc.ENFORCED AS CHAR), CAST(cc.CHECK_CLAUSE AS CHAR) \
+         FROM information_schema.table_constraints tc \
+         JOIN information_schema.check_constraints cc \
+           ON cc.constraint_schema = tc.constraint_schema \
+          AND cc.constraint_name = tc.constraint_name \
+         WHERE tc.table_schema = DATABASE() \
+           AND tc.table_name = 'users' \
+           AND tc.constraint_type = 'CHECK' \
+           AND tc.constraint_name = 'chk_users_status'",
+    )
+    .fetch_optional(database.pool())
+    .await
+    .context("读取 users.status CHECK 元数据失败")
+}
+
 fn finish_with_cleanup(
     outcome: anyhow::Result<()>,
     cleanup: anyhow::Result<()>,
@@ -146,7 +164,40 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         .fetch_one(control.pool())
         .await
         .context("统计迁移执行记录失败")?;
-        ensure!(migration_count == 11, "应记录 11 个 applied 版本");
+        ensure!(migration_count == 12, "应记录 12 个 applied 版本");
+        let server_identity: (String, String) =
+            sqlx::query_as("SELECT CAST(VERSION() AS CHAR), CAST(@@version_comment AS CHAR)")
+                .fetch_one(control.pool())
+                .await
+                .context("读取 MySQL 版本与发行标识失败")?;
+        ensure!(
+            !server_identity.0.trim().is_empty() && !server_identity.1.trim().is_empty(),
+            "发布前必须能识别 MySQL 版本与发行实现"
+        );
+        let status_counts: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT status, COUNT(*) FROM users GROUP BY status ORDER BY status",
+        )
+        .fetch_all(control.pool())
+        .await
+        .context("执行用户状态分布预检失败")?;
+        ensure!(
+            status_counts
+                .iter()
+                .all(|(status, _)| status == "active" || status == "disabled"),
+            "用户状态预检发现领域集合之外的值: {status_counts:?}"
+        );
+        let status_check = users_status_check(&control).await?;
+        ensure!(
+            matches!(&status_check, Some((enforced, clause)) if enforced == "YES" && clause.contains("active") && clause.contains("disabled")),
+            "用户状态 CHECK 必须存在并强制执行: {status_check:?}"
+        );
+        let invalid_status = sqlx::query(
+            "INSERT INTO users (username, password_hash, status, created_at, updated_at) \
+             VALUES ('invalid_status_sentinel', 'hash', 'pending', 1, 1)",
+        )
+        .execute(control.pool())
+        .await;
+        ensure!(invalid_status.is_err(), "数据库必须拒绝领域集合之外的用户状态");
         let authz_version_shape: Option<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT CAST(COLUMN_TYPE AS CHAR), CAST(IS_NULLABLE AS CHAR), CAST(COLUMN_DEFAULT AS CHAR) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'authz_version'",
         )
@@ -285,7 +336,7 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         );
 
         sqlx::query(
-            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version', '20260731_0011_create_password_reset_token')",
+            "UPDATE `_migrations` SET status = 'running' WHERE module_name = 'yang-system' AND version IN ('20260726_0004_create_org_user', '20260726_0005_add_user_authz_version', '20260726_0006_create_authorization_outbox', '20260726_0007_create_audit_event', '20260731_0008_create_work_project', '20260731_0009_create_work_task', '20260731_0010_add_user_credential_version', '20260731_0011_create_password_reset_token', '20260731_0012_add_users_status_check')",
         )
         .execute(control.pool())
         .await
@@ -343,6 +394,199 @@ async fn versioned_job_is_read_only_in_plan_and_safe_across_apply_retry_and_drif
         ensure!(
             format!("{error:#}").contains("20260726_0001_create_users"),
             "漂移错误必须定位具体版本: {error:#}"
+        );
+        Ok(())
+    }
+    .await;
+
+    let cleanup = reset_test_database(&control).await;
+    finish_with_cleanup(outcome, cleanup)
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 指向 _test MySQL 数据库"]
+async fn status_check_upgrade_rejects_dirty_data_and_same_name_drift() -> anyhow::Result<()> {
+    let control = connect_test_database().await?;
+    reset_test_database(&control).await?;
+
+    let outcome = async {
+        run_job(MigrationCommand::Apply).await?;
+        sqlx::query("ALTER TABLE users DROP CHECK chk_users_status")
+            .execute(control.pool())
+            .await
+            .context("构造 0011 到 0012 的既有库升级起点失败")?;
+        sqlx::query(
+            "DELETE FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version = '20260731_0012_add_users_status_check'",
+        )
+        .execute(control.pool())
+        .await
+        .context("移除 0012 迁移记录失败")?;
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, status, created_at, updated_at) \
+             VALUES ('dirty_status_sentinel', 'hash', 'pending', 1, 1)",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造用户状态脏数据失败")?;
+
+        let dirty_error = match run_job(MigrationCommand::Apply).await {
+            Ok(_) => anyhow::bail!("脏状态数据必须阻止 CHECK 迁移"),
+            Err(error) => error,
+        };
+        ensure!(
+            format!("{dirty_error:#}").contains("用户状态 CHECK 发布预检发现 1 行"),
+            "脏数据失败必须在 DDL 前给出计数诊断: {dirty_error:#}"
+        );
+        let migration_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version = '20260731_0012_add_users_status_check'",
+        )
+        .fetch_optional(control.pool())
+        .await
+        .context("读取脏数据失败后的迁移状态失败")?;
+        ensure!(
+            migration_status.as_deref() != Some("applied"),
+            "DDL 失败不得把 0012 标记为 applied: {migration_status:?}"
+        );
+        ensure!(
+            users_status_check(&control).await?.is_none(),
+            "脏数据失败后不得遗留半完成 CHECK"
+        );
+
+        sqlx::query(
+            "UPDATE users SET status = 'disabled' WHERE username = 'dirty_status_sentinel'",
+        )
+        .execute(control.pool())
+        .await
+        .context("修复用户状态脏数据失败")?;
+        let upgraded = run_job(MigrationCommand::Apply).await?;
+        ensure!(
+            upgraded
+                .plan
+                .entries
+                .iter()
+                .all(|entry| entry.status == MigrationPlanStatus::Applied),
+            "修复脏数据后的既有库升级必须完成"
+        );
+
+        sqlx::query("ALTER TABLE users DROP CHECK chk_users_status")
+            .execute(control.pool())
+            .await
+            .context("移除正确状态 CHECK 失败")?;
+        sqlx::query("ALTER TABLE users ADD CONSTRAINT chk_users_status CHECK (status <> '')")
+            .execute(control.pool())
+            .await
+            .context("构造同名异义 CHECK 失败")?;
+        sqlx::query(
+            "UPDATE `_migrations` SET status = 'running' \
+             WHERE module_name = 'yang-system' \
+             AND version = '20260731_0012_add_users_status_check'",
+        )
+        .execute(control.pool())
+        .await
+        .context("构造 0012 DDL 中断状态失败")?;
+        let mismatch = match run_job(MigrationCommand::Apply).await {
+            Ok(_) => anyhow::bail!("同名异义 CHECK 必须阻止中断恢复"),
+            Err(error) => error,
+        };
+        let mismatch_text = format!("{mismatch:#}");
+        ensure!(
+            mismatch_text.contains("chk_users_status")
+                && (mismatch_text.contains("表达式")
+                    || mismatch_text.contains("Duplicate check constraint name")),
+            "完成探针必须拒绝并定位同名异义 CHECK: {mismatch_text}"
+        );
+        Ok(())
+    }
+    .await;
+
+    let cleanup = reset_test_database(&control).await;
+    finish_with_cleanup(outcome, cleanup)
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL；staging 应设置 YANG_SYSTEM_STATUS_DDL_SCALE_ROWS 与 YANG_SYSTEM_STATUS_DDL_LOCK_BUDGET_MS"]
+async fn status_check_ddl_rehearsal_obeys_configured_lock_budget() -> anyhow::Result<()> {
+    let control = connect_test_database().await?;
+    reset_test_database(&control).await?;
+
+    let outcome = async {
+        run_job(MigrationCommand::Apply).await?;
+        sqlx::query("ALTER TABLE users DROP CHECK chk_users_status")
+            .execute(control.pool())
+            .await
+            .context("移除状态 CHECK 以准备 DDL 演练失败")?;
+        sqlx::query(
+            "DELETE FROM `_migrations` WHERE module_name = 'yang-system' \
+             AND version = '20260731_0012_add_users_status_check'",
+        )
+        .execute(control.pool())
+        .await
+        .context("准备 DDL 演练迁移起点失败")?;
+
+        let row_count = std::env::var("YANG_SYSTEM_STATUS_DDL_SCALE_ROWS")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .context("YANG_SYSTEM_STATUS_DDL_SCALE_ROWS 必须是正整数")?
+            .unwrap_or(10_000);
+        ensure!(row_count > 0, "DDL 演练行数必须大于 0");
+        let budget_ms = std::env::var("YANG_SYSTEM_STATUS_DDL_LOCK_BUDGET_MS")
+            .ok()
+            .map(|value| value.parse::<u128>())
+            .transpose()
+            .context("YANG_SYSTEM_STATUS_DDL_LOCK_BUDGET_MS 必须是正整数")?
+            .unwrap_or(30_000);
+        ensure!(budget_ms > 0, "DDL 锁预算必须大于 0ms");
+
+        for batch_start in (0..row_count).step_by(500) {
+            let batch_end = (batch_start + 500).min(row_count);
+            let mut builder = sqlx::QueryBuilder::<sqlx::MySql>::new(
+                "INSERT INTO users (username, password_hash, status, created_at, updated_at) ",
+            );
+            builder.push_values(batch_start..batch_end, |mut row, index| {
+                row.push_bind(format!("status_scale_{index}"))
+                    .push_bind("hash")
+                    .push_bind(if index % 2 == 0 { "active" } else { "disabled" })
+                    .push_bind(1_i64)
+                    .push_bind(1_i64);
+            });
+            builder
+                .build()
+                .execute(control.pool())
+                .await
+                .with_context(|| format!("写入 DDL 演练数据失败: {batch_start}..{batch_end}"))?;
+        }
+        let before_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND table_name = 'users'",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取 DDL 演练前索引规模失败")?;
+
+        let started = Instant::now();
+        run_job(MigrationCommand::Apply).await?;
+        let elapsed_ms = started.elapsed().as_millis();
+        let after_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND table_name = 'users'",
+        )
+        .fetch_one(control.pool())
+        .await
+        .context("读取 DDL 演练后索引规模失败")?;
+        ensure!(before_indexes == after_indexes, "增加 CHECK 不得改变 users 索引集合");
+        ensure!(
+            elapsed_ms <= budget_ms,
+            "状态 CHECK DDL 耗时 {elapsed_ms}ms 超过预算 {budget_ms}ms；不得直接发布，应改用在线 DDL 或 expand-contract"
+        );
+        ensure!(
+            users_status_check(&control).await?.is_some(),
+            "DDL 演练完成后精确 CHECK 必须存在"
+        );
+        eprintln!(
+            "users.status CHECK DDL rehearsal: rows={row_count}, indexes={before_indexes}, elapsed_ms={elapsed_ms}, budget_ms={budget_ms}"
         );
         Ok(())
     }

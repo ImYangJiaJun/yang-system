@@ -9,6 +9,7 @@ mod rate_limit;
 mod repository;
 mod schema;
 mod service;
+mod status;
 
 use crate::authorization::AuthorizationVersionValidator;
 use crate::config::SecuritySettings;
@@ -27,6 +28,7 @@ use yang_base::BaseError;
 
 pub(crate) use claims::user_from_claims;
 pub(crate) use rate_limit::{AuthOperation, AuthRateLimiter};
+pub(crate) use status::UserStatus;
 
 /// 构建用户 Module。
 ///

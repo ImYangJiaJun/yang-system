@@ -7,6 +7,7 @@ use super::policy::{normalize_username, validate_new_password, validate_password
 use super::rate_limit::{AuthOperation, AuthRateLimiter};
 use super::repository::{AuthorizationStateRecord, UserRepository};
 use super::schema::{UserView, STATUS};
+use super::status::UserStatus;
 use crate::audit;
 use crate::modules::account::{
     consume_password_reset_in_tx, find_password_reset_target_user,
@@ -106,7 +107,7 @@ impl UserService {
         {
             return Err(BaseError::InvalidPassword);
         }
-        ensure_active_status(&user.status)?;
+        ensure_active_status(user.status)?;
         Ok(AuthenticatedUser { id: user.id })
     }
 
@@ -132,7 +133,7 @@ impl UserService {
             .find_credentials_by_id(ctx, user_id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
-        ensure_active_status(&observed.status)?;
+        ensure_active_status(observed.status)?;
         if !self
             .passwords
             .verify(old_password, &observed.password_hash)
@@ -300,8 +301,8 @@ impl UserService {
             .find_by_id(ctx, id)
             .await?
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
-        let status: String = user.require(STATUS)?;
-        ensure_active_status(&status)?;
+        let status = UserStatus::from_storage(&user.require::<String>(STATUS)?)?;
+        ensure_active_status(status)?;
         Ok(user)
     }
 
@@ -357,7 +358,7 @@ impl UserService {
 }
 
 fn validate_authorization_state(state: &AuthorizationStateRecord) -> Result<(), BaseError> {
-    ensure_active_status(&state.status)?;
+    ensure_active_status(state.status)?;
     if state.authz_version < 1 {
         return Err(BaseError::Unauthorized("用户授权版本无效".to_string()));
     }
@@ -367,8 +368,8 @@ fn validate_authorization_state(state: &AuthorizationStateRecord) -> Result<(), 
     Ok(())
 }
 
-fn ensure_active_status(status: &str) -> Result<(), BaseError> {
-    if status != "active" {
+fn ensure_active_status(status: UserStatus) -> Result<(), BaseError> {
+    if !status.is_active() {
         return Err(BaseError::Unauthorized("用户已停用".to_string()));
     }
     Ok(())

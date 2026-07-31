@@ -23,6 +23,7 @@ pub(crate) use password_reset::{
     lock_in_tx as lock_password_reset_in_tx, GeneratedPasswordReset, PasswordResetReference,
 };
 pub(crate) use user::user_from_claims;
+pub(crate) use user::UserStatus;
 pub(crate) use user::{AuthOperation, AuthRateLimiter};
 
 /// 构建账号 Addon。

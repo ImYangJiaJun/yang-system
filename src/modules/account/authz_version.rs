@@ -5,10 +5,12 @@ use sqlx::MySqlPool;
 use yang_base::BaseError;
 use yang_db::Transaction;
 
+use super::UserStatus;
+
 /// 已在当前事务中锁定的用户授权状态。
 pub(crate) struct LockedUserAuthorization {
     user_id: i64,
-    status: String,
+    status: UserStatus,
     authz_version: i64,
 }
 
@@ -17,7 +19,7 @@ pub(crate) struct LockedUserAuthorization {
 /// 密码摘要只允许在此窄边界内用于并发复核，不提供读取接口。
 pub(crate) struct LockedUserCredential {
     user_id: i64,
-    status: String,
+    status: UserStatus,
     password_hash: String,
     authz_version: i64,
     credential_version: i64,
@@ -25,8 +27,8 @@ pub(crate) struct LockedUserCredential {
 
 impl LockedUserCredential {
     /// 返回锁定时观察到的用户状态。
-    pub(crate) fn status(&self) -> &str {
-        &self.status
+    pub(crate) fn status(&self) -> UserStatus {
+        self.status
     }
 
     /// 比较事务外观察到的摘要，防止并发改密覆盖。
@@ -42,8 +44,8 @@ impl LockedUserAuthorization {
     }
 
     /// 返回锁定时观察到的用户状态。
-    pub(crate) fn status(&self) -> &str {
-        &self.status
+    pub(crate) fn status(&self) -> UserStatus {
+        self.status
     }
 }
 
@@ -51,8 +53,8 @@ impl LockedUserAuthorization {
 pub(crate) async fn find_authorization_version(
     pool: &MySqlPool,
     user_id: i64,
-) -> Result<Option<(String, i64)>, BaseError> {
-    sqlx::query_as(
+) -> Result<Option<(UserStatus, i64)>, BaseError> {
+    let row: Option<(String, i64)> = sqlx::query_as(
         "SELECT status, authz_version \
          FROM users \
          WHERE id = ? \
@@ -62,7 +64,9 @@ pub(crate) async fn find_authorization_version(
     .fetch_optional(pool)
     .await
     .map_err(yang_db::DbError::from)
-    .map_err(BaseError::from)
+    .map_err(BaseError::from)?;
+    row.map(|(status, version)| Ok((UserStatus::from_storage(&status)?, version)))
+        .transpose()
 }
 
 /// 锁定用户行，并读取授权 writer 所需的最小状态。
@@ -85,7 +89,7 @@ pub(crate) async fn lock_user_authorization(
     }
     Ok(LockedUserAuthorization {
         user_id,
-        status,
+        status: UserStatus::from_storage(&status)?,
         authz_version,
     })
 }
@@ -110,7 +114,7 @@ pub(crate) async fn lock_user_credential(
     }
     Ok(LockedUserCredential {
         user_id,
-        status,
+        status: UserStatus::from_storage(&status)?,
         password_hash,
         authz_version,
         credential_version,
@@ -279,7 +283,7 @@ mod tests {
     fn locked_credential_detects_a_concurrent_digest_change() {
         let locked = LockedUserCredential {
             user_id: 7,
-            status: "active".to_string(),
+            status: UserStatus::Active,
             password_hash: "new-digest".to_string(),
             authz_version: 2,
             credential_version: 1,

@@ -9,8 +9,6 @@ use yang_base::BaseError;
 use super::{AuthorizationVersionCache, CachedAuthorizationVersion};
 use crate::modules::account;
 
-const ACTIVE_STATUS: &str = "active";
-
 #[derive(Clone)]
 pub struct AuthorizationVersionValidator {
     cache: Option<AuthorizationVersionCache>,
@@ -145,7 +143,7 @@ impl TokenClaimsValidator for AuthorizationVersionValidator {
                 return Err(BaseError::AuthorizationVersionInvalid);
             }
         };
-        if status != ACTIVE_STATUS || current_version < 1 {
+        if !status.is_active() || current_version < 1 {
             record_check("invalid", "mysql");
             tracing::warn!(
                 request_id = %ctx.request_id,

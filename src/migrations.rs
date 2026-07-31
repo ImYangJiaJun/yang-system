@@ -1,4 +1,5 @@
 //! 生产发布使用的版本化、前向数据库迁移作业。
+//! raw-sql-boundary: schema-validator migration-preflight
 
 use crate::app::build_app;
 use crate::config::{MigrationSettings, SecuritySettings};
@@ -6,8 +7,8 @@ use anyhow::{ensure, Context};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use yang_base::database::{
-    DatabaseInitializer, Migration, MigrationColumnCheck, MigrationManifest, MigrationPlan,
-    MigrationPlanStatus,
+    DatabaseInitializer, Migration, MigrationCheckConstraint, MigrationColumnCheck,
+    MigrationManifest, MigrationPlan, MigrationPlanStatus,
 };
 use yang_base::tools::ToolsBuilder;
 use yang_db::{Database, DatabaseConfig};
@@ -59,7 +60,13 @@ pub struct MigrationDescriptor {
     description: &'static str,
     prerequisite: &'static str,
     recovery: &'static str,
-    completion_check: Option<ColumnCompletionDescriptor>,
+    completion_check: Option<CompletionDescriptor>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CompletionDescriptor {
+    Column(ColumnCompletionDescriptor),
+    CheckConstraint(CheckConstraintCompletionDescriptor),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +76,14 @@ struct ColumnCompletionDescriptor {
     column_type: &'static str,
     nullable: bool,
     default: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CheckConstraintCompletionDescriptor {
+    table: &'static str,
+    constraint: &'static str,
+    expression: &'static str,
+    enforced: bool,
 }
 
 impl MigrationDescriptor {
@@ -91,19 +106,29 @@ impl MigrationDescriptor {
     fn migration(&self) -> Migration {
         let migration = Migration::new(self.version, self.sql);
         match self.completion_check {
-            Some(check) => migration.with_completion_check(MigrationColumnCheck::new(
-                check.table,
-                check.column,
-                check.column_type,
-                check.nullable,
-                check.default,
-            )),
+            Some(CompletionDescriptor::Column(check)) => {
+                migration.with_completion_check(MigrationColumnCheck::new(
+                    check.table,
+                    check.column,
+                    check.column_type,
+                    check.nullable,
+                    check.default,
+                ))
+            }
+            Some(CompletionDescriptor::CheckConstraint(check)) => {
+                migration.with_completion_check(MigrationCheckConstraint::new(
+                    check.table,
+                    check.constraint,
+                    check.expression,
+                    check.enforced,
+                ))
+            }
             None => migration,
         }
     }
 }
 
-const MIGRATIONS: [MigrationDescriptor; 11] = [
+const MIGRATIONS: [MigrationDescriptor; 12] = [
     MigrationDescriptor {
         version: "20260726_0001_create_users",
         sql: include_str!("../migrations/20260726_0001_create_users.sql"),
@@ -142,13 +167,13 @@ const MIGRATIONS: [MigrationDescriptor; 11] = [
         description: "为用户增加单调授权版本，作为长生命周期 Token 的失效依据",
         prerequisite: "20260726_0001_create_users 已完成；应用仍兼容默认版本 1",
         recovery: "列完成探针精确核对 bigint、NOT NULL 与默认值 1；原子 DDL 已提交时只恢复迁移状态",
-        completion_check: Some(ColumnCompletionDescriptor {
+        completion_check: Some(CompletionDescriptor::Column(ColumnCompletionDescriptor {
             table: "users",
             column: "authz_version",
             column_type: "bigint",
             nullable: false,
             default: Some("1"),
-        }),
+        })),
     },
     MigrationDescriptor {
         version: "20260726_0006_create_authorization_outbox",
@@ -188,13 +213,13 @@ const MIGRATIONS: [MigrationDescriptor; 11] = [
         description: "为用户增加独立的凭据与全量会话单调版本",
         prerequisite: "20260731_0009_create_work_task 已完成；先部署兼容读取版本，再开启新字段签发",
         recovery: "列完成探针精确核对 bigint、NOT NULL 与默认值 0；原子 DDL 已提交时只恢复迁移状态",
-        completion_check: Some(ColumnCompletionDescriptor {
+        completion_check: Some(CompletionDescriptor::Column(ColumnCompletionDescriptor {
             table: "users",
             column: "credential_version",
             column_type: "bigint",
             nullable: false,
             default: Some("0"),
-        }),
+        })),
     },
     MigrationDescriptor {
         version: "20260731_0011_create_password_reset_token",
@@ -205,6 +230,21 @@ const MIGRATIONS: [MigrationDescriptor; 11] = [
         recovery:
             "DDL 可重入；失败时核对摘要唯一键、活动凭证索引、时间约束和两个用户外键后原版本重跑",
         completion_check: None,
+    },
+    MigrationDescriptor {
+        version: "20260731_0012_add_users_status_check",
+        sql: include_str!("../migrations/20260731_0012_add_users_status_check.sql"),
+        description: "把用户状态的 active/disabled 领域集合固化为数据库强制 CHECK",
+        prerequisite: "20260731_0011_create_password_reset_token 已完成；发布前核对 MySQL VERSION()/VERSION_COMMENT() 支持并强制执行 CHECK，且按 status 分组计数仅含 active/disabled；在与生产行数和索引规模相当的 staging 表记录 ALTER 耗时和元数据锁等待，超过发布窗口则改用在线 DDL 或 expand-contract",
+        recovery: "前向恢复；精确完成探针核对 chk_users_status 名称、表达式与 ENFORCED；脏数据或同名异义约束必须先人工修复，禁止修改已发布 SQL 或回滚到无约束状态",
+        completion_check: Some(CompletionDescriptor::CheckConstraint(
+            CheckConstraintCompletionDescriptor {
+                table: "users",
+                constraint: "chk_users_status",
+                expression: "status IN ('active', 'disabled')",
+                enforced: true,
+            },
+        )),
     },
 ];
 
@@ -303,6 +343,8 @@ pub async fn execute_with_database(
         });
     }
 
+    preflight_users_status_check(database.pool()).await?;
+
     initializer
         .apply_manifest(&manifest)
         .await
@@ -357,6 +399,63 @@ pub async fn execute_with_database(
     })
 }
 
+async fn preflight_users_status_check(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
+    let (version, version_comment): (String, String) =
+        sqlx::query_as("SELECT CAST(VERSION() AS CHAR), CAST(@@version_comment AS CHAR)")
+            .fetch_one(pool)
+            .await
+            .context("用户状态 CHECK 发布预检无法读取 MySQL 版本")?;
+    ensure!(
+        supports_enforced_check(&version, &version_comment),
+        "用户状态 CHECK 要求 MySQL 8.0.16 及以上且不能是未纳入验证的兼容实现"
+    );
+
+    let users_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables \
+         WHERE table_schema = DATABASE() AND table_name = 'users' AND table_type = 'BASE TABLE'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("用户状态 CHECK 发布预检无法确认 users 表")?;
+    if users_exists == 0 {
+        return Ok(());
+    }
+
+    let dirty_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE status IS NULL OR status NOT IN ('active', 'disabled')",
+    )
+    .fetch_one(pool)
+    .await
+    .context("用户状态 CHECK 发布预检无法统计脏数据")?;
+    ensure!(
+        dirty_rows == 0,
+        "用户状态 CHECK 发布预检发现 {dirty_rows} 行领域集合之外的数据；必须先清洗并复核 status 分组计数"
+    );
+    Ok(())
+}
+
+fn supports_enforced_check(version: &str, version_comment: &str) -> bool {
+    if version.to_ascii_lowercase().contains("mariadb")
+        || version_comment.to_ascii_lowercase().contains("mariadb")
+    {
+        return false;
+    }
+    let numeric = version
+        .split_once('-')
+        .map_or(version, |(numeric, _)| numeric);
+    let mut parts = numeric.split('.').map(str::parse::<u64>);
+    let Some(Ok(major)) = parts.next() else {
+        return false;
+    };
+    let Some(Ok(minor)) = parts.next() else {
+        return false;
+    };
+    let Some(Ok(patch)) = parts.next() else {
+        return false;
+    };
+    (major, minor, patch) >= (8, 0, 16)
+}
+
 pub fn print_report(command: MigrationCommand, report: &MigrationRunReport) {
     for entry in &report.plan.entries {
         let descriptor = MIGRATIONS
@@ -396,5 +495,30 @@ fn status_name(status: MigrationPlanStatus) -> &'static str {
         MigrationPlanStatus::ChecksumMismatch => "checksum_mismatch",
         MigrationPlanStatus::InProgress => "in_progress",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supports_enforced_check;
+
+    #[test]
+    fn check_preflight_accepts_only_verified_mysql_version_floor() {
+        assert!(supports_enforced_check(
+            "8.0.16",
+            "MySQL Community Server - GPL"
+        ));
+        assert!(supports_enforced_check(
+            "8.4.5",
+            "MySQL Community Server - GPL"
+        ));
+        assert!(!supports_enforced_check(
+            "8.0.15",
+            "MySQL Community Server - GPL"
+        ));
+        assert!(!supports_enforced_check("8.0.36-MariaDB", "MariaDB Server"));
+        for invalid in ["", "8", "8.0", "not-a-version"] {
+            assert!(!supports_enforced_check(invalid, "MySQL"));
+        }
     }
 }

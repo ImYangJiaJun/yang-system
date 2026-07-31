@@ -10,7 +10,7 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
     let descriptors = descriptors();
 
     assert_eq!(manifest.module(), "yang-system");
-    assert_eq!(manifest.migrations().len(), 11);
+    assert_eq!(manifest.migrations().len(), 12);
     assert_eq!(manifest.migrations().len(), descriptors.len());
     for (migration, descriptor) in manifest.migrations().iter().zip(descriptors) {
         assert_eq!(migration.version(), descriptor.version());
@@ -134,6 +134,19 @@ fn manifest_and_operational_metadata_are_ordered_and_one_to_one() {
             "密码重置迁移缺少单次消费、清理索引或外键契约: {required}"
         );
     }
+    let user_status_check = manifest
+        .migrations()
+        .get(11)
+        .unwrap_or_else(|| panic!("应存在用户状态约束迁移"));
+    assert_eq!(
+        user_status_check.version(),
+        "20260731_0012_add_users_status_check"
+    );
+    assert_eq!(
+        user_status_check.sql().trim(),
+        "ALTER TABLE `users` ADD CONSTRAINT `chk_users_status` CHECK (`status` IN ('active', 'disabled'))"
+    );
+    assert!(user_status_check.completion_check().is_some());
 }
 
 #[test]

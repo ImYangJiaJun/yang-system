@@ -476,7 +476,7 @@ fn ensure_not_last_active_admin(
 }
 
 fn ensure_active_user(locked: &LockedUserAuthorization) -> Result<(), BaseError> {
-    if locked.status() != ACTIVE_STATUS {
+    if !locked.status().is_active() {
         return Err(BaseError::UserNotFound(locked.user_id().to_string()));
     }
     Ok(())

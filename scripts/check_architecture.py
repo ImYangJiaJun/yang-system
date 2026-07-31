@@ -460,7 +460,7 @@ def raw_sql_boundary_path_allowed(kind: str, relative: Path) -> bool:
             "src/authorization/outbox.rs",
         }
     if kind == "schema-validator":
-        return value == "src/audit/schema.rs"
+        return value in {"src/audit/schema.rs", "src/migrations.rs"}
     return False
 
 

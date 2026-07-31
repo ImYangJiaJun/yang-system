@@ -1,9 +1,10 @@
 //! 用户表 Schema 与对外 DTO。
 
 use super::policy::{USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_PATTERN};
+use super::status::UserStatus;
 use schemars::JsonSchema;
 use serde::Serialize;
-use yang_base::definition::{Int, Key, Str, TableName, TableSpec, Timestamp};
+use yang_base::definition::{Int, Key, Radio, Str, TableName, TableSpec, Timestamp};
 use yang_base::table::Record;
 use yang_base::BaseError;
 
@@ -23,7 +24,7 @@ pub(super) const USER_VIEW_FIELDS: &[&str] = &[USER_ID, USERNAME, STATUS, CREATE
 pub(super) struct UserView {
     id: i64,
     username: String,
-    status: String,
+    status: UserStatus,
     created_at: i64,
     updated_at: i64,
 }
@@ -35,7 +36,7 @@ impl TryFrom<&Record> for UserView {
         Ok(Self {
             id: user.require(USER_ID)?,
             username: user.require(USERNAME)?,
-            status: user.require(STATUS)?,
+            status: UserStatus::from_storage(&user.require::<String>(STATUS)?)?,
             created_at: user.require(CREATED_AT)?,
             updated_at: user.require(UPDATED_AT)?,
         })
@@ -61,7 +62,14 @@ pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
                 .secret(true)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
-        status => Str::new().title("状态").require(true).max_length(16),
+        status => Radio::<UserStatus>::new()
+                .title("状态")
+                .require(true)
+                .varchar(16)
+                .options([
+                    (UserStatus::Active, "启用"),
+                    (UserStatus::Disabled, "停用"),
+                ]),
         authz_version => Int::new()
                 .title("授权版本")
                 .require(true)
@@ -89,8 +97,22 @@ mod tests {
 
     #[test]
     fn user_schema_uses_generated_id_and_protects_internal_fields() {
-        let definition = user_table_spec()
-            .and_then(|spec| spec.table_definition())
+        let spec = user_table_spec().unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
+        let status_spec = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == STATUS)
+            .unwrap_or_else(|| panic!("应存在 status 字段"));
+        assert_eq!(status_spec.kind, yang_base::definition::FieldKind::Radio);
+        assert_eq!(
+            status_spec.options,
+            [
+                ("active".to_string(), "启用".to_string()),
+                ("disabled".to_string(), "停用".to_string()),
+            ]
+        );
+        let definition = spec
+            .table_definition()
             .unwrap_or_else(|error| panic!("用户表定义应有效: {error}"));
         let id = definition
             .field(USER_ID)

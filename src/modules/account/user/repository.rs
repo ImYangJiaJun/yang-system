@@ -8,6 +8,7 @@ use super::schema::{
     AUTHZ_VERSION, CREDENTIAL_VERSION, PASSWORD_HASH, STATUS, SYSTEM_ROLE, USERNAME, USER_ID,
     USER_VIEW_FIELDS,
 };
+use super::status::UserStatus;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
@@ -19,7 +20,7 @@ const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION, CR
 pub(super) struct CredentialRecord {
     pub(super) id: i64,
     pub(super) password_hash: String,
-    pub(super) status: String,
+    pub(super) status: UserStatus,
 }
 
 impl TryFrom<&Record> for CredentialRecord {
@@ -29,14 +30,14 @@ impl TryFrom<&Record> for CredentialRecord {
         Ok(Self {
             id: record.require(USER_ID)?,
             password_hash: record.require(PASSWORD_HASH)?,
-            status: record.require(STATUS)?,
+            status: UserStatus::from_storage(&record.require::<String>(STATUS)?)?,
         })
     }
 }
 
 pub(super) struct AuthorizationStateRecord {
     pub(super) username: String,
-    pub(super) status: String,
+    pub(super) status: UserStatus,
     pub(super) authz_version: i64,
     pub(super) credential_version: i64,
 }
@@ -47,7 +48,7 @@ impl TryFrom<&Record> for AuthorizationStateRecord {
     fn try_from(record: &Record) -> Result<Self, Self::Error> {
         Ok(Self {
             username: record.require(USERNAME)?,
-            status: record.require(STATUS)?,
+            status: UserStatus::from_storage(&record.require::<String>(STATUS)?)?,
             authz_version: record.require(AUTHZ_VERSION)?,
             credential_version: record.require(CREDENTIAL_VERSION)?,
         })
@@ -160,7 +161,7 @@ impl UserRepository {
         let record = Record::new()
             .set(USERNAME, username)
             .set(PASSWORD_HASH, password_hash)
-            .set(STATUS, "active");
+            .set(STATUS, UserStatus::Active.as_str());
         let (_, id) = self.trusted_query(ctx)?.insert_returning_id(record).await?;
         i64::try_from(id).map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))
     }
