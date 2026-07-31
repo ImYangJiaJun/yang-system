@@ -3,6 +3,7 @@
 mod actions;
 mod browser_session;
 mod claims;
+mod lifecycle;
 mod password;
 mod policy;
 mod rate_limit;
@@ -74,7 +75,7 @@ pub(super) fn build_module(
     )?;
     let mut module = module;
     if let Some(step_up) = step_up {
-        for target in step_up_targets() {
+        for target in step_up_targets(credential_mutations_enabled) {
             module = module.middleware(step_up.middleware(
                 target,
                 RequestFingerprintResolver::global("account-session"),
@@ -95,17 +96,31 @@ pub(super) fn build_module(
             ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Invoke),
         );
         if credential_mutations_enabled {
-            presentation = presentation.present_action(
-                yang_base::action!("account.user.change_password"),
-                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
-            );
+            presentation = presentation
+                .present_action(
+                    yang_base::action!("account.user.change_password"),
+                    ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
+                )
+                .present_action(
+                    yang_base::action!("account.user.disable_self"),
+                    ActionPresentationSpec::new(
+                        ActionPlacement::Toolbar,
+                        ActionInteraction::Invoke,
+                    ),
+                );
         }
         module.presentation(presentation)
     })
 }
 
-pub(crate) fn step_up_targets() -> [yang_base::definition::ActionRef; 1] {
-    [yang_base::action!("account.user.logout")]
+pub(crate) fn step_up_targets(
+    credential_mutations_enabled: bool,
+) -> Vec<yang_base::definition::ActionRef> {
+    let mut targets = vec![yang_base::action!("account.user.logout")];
+    if credential_mutations_enabled {
+        targets.insert(0, yang_base::action!("account.user.disable_self"));
+    }
+    targets
 }
 
 #[cfg(test)]
@@ -115,8 +130,15 @@ mod tests {
     #[test]
     fn every_account_security_mutation_is_explicitly_step_up_protected() {
         assert_eq!(
-            step_up_targets(),
-            [yang_base::action!("account.user.logout")]
+            step_up_targets(true),
+            vec![
+                yang_base::action!("account.user.disable_self"),
+                yang_base::action!("account.user.logout"),
+            ]
+        );
+        assert_eq!(
+            step_up_targets(false),
+            vec![yang_base::action!("account.user.logout")]
         );
     }
 }

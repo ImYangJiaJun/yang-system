@@ -13,7 +13,7 @@ import { useIdentityStore } from "stores/identity";
 import { useSessionStore } from "stores/session";
 import { useTenantStore } from "stores/tenant";
 
-const emit = defineEmits<{ logout: [] }>();
+const emit = defineEmits<{ disable: []; logout: [] }>();
 const router = useRouter();
 const catalogStore = useCatalogStore();
 const identityStore = useIdentityStore();
@@ -245,6 +245,13 @@ watch(menuOpen, (open) => {
           </q-item>
           <q-separator inset />
           <q-card-actions align="center">
+            <q-btn
+              flat
+              color="negative"
+              icon="person_off"
+              label="停用帐号"
+              @click="emit('disable')"
+            />
             <q-btn
               flat
               color="negative"

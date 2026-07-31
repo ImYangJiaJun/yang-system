@@ -101,6 +101,43 @@ async fn dispatch_raw(
     app.dispatch_context(handle, context).await
 }
 
+async fn acquire_step_up_proof(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    body: Value,
+    authorization: &str,
+    target_headers: &[(&str, &str)],
+    username: &str,
+    password: &str,
+) -> anyhow::Result<String> {
+    let mut headers = vec![("authorization", authorization)];
+    headers.extend_from_slice(target_headers);
+    let challenge = match dispatch_raw(app, module, action, body, &headers, &[]).await {
+        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+        Err(error) => anyhow::bail!("{module}.{action} 获取 Step-up challenge 失败: {error}"),
+        Ok(_) => anyhow::bail!("{module}.{action} 缺少 proof 时不得执行"),
+    };
+    let completed = data(
+        dispatch(
+            app,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": challenge,
+                "credentials": { "username": username, "password": password }
+            }),
+            &[("authorization", authorization)],
+            &[],
+        )
+        .await?,
+    )?;
+    completed["proof"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .context("Step-up 完成响应缺少 proof")
+}
+
 async fn dispatch_token_action(
     app: &BuiltApp,
     module: &str,
@@ -317,6 +354,14 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn reset_test_redis(redis: &RedisClient) -> anyhow::Result<()> {
+    let keys = redis.keys("*").await?;
+    if !keys.is_empty() {
+        redis.del(&keys).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis(
@@ -344,6 +389,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             .with_connect_timeout(10),
     )
     .await?;
+    reset_test_redis(&redis).await?;
     let deployment = format!(
         "step-up-integration-{}",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
@@ -457,7 +503,6 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         &[],
     )
     .await?;
-    let admin_refresh = refresh_cookie(&admin_login_response)?;
     let admin_login = data(admin_login_response)?;
     let access_token = admin_login["access_token"]
         .as_str()
@@ -595,6 +640,116 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         )
         .await?,
     )?;
+
+    let organization = data(
+        dispatch(
+            &first.runtime,
+            "org.tenant",
+            "create",
+            json!({
+                "name": "Self-disable adversarial organization",
+                "code": format!("SD{suffix}")
+            }),
+            &[("authorization", authorization.as_str())],
+            &[],
+        )
+        .await?,
+    )?;
+    let organization_id = organization["id"]
+        .as_i64()
+        .context("自助停用对抗企业缺少 ID")?;
+    let tenant_id = organization_id.to_string();
+
+    // onboarding 递增了管理员授权版本，重新登录获取包含企业身份的新快照。
+    let lifecycle_login_response = dispatch(
+        &first.runtime,
+        "account.user",
+        "login",
+        json!({ "username": admin_username, "password": password }),
+        &[],
+        &[],
+    )
+    .await?;
+    let admin_refresh = refresh_cookie(&lifecycle_login_response)?;
+    let lifecycle_login = data(lifecycle_login_response)?;
+    let lifecycle_access = lifecycle_login["access_token"]
+        .as_str()
+        .context("账号生命周期登录缺少 Access Token")?
+        .to_owned();
+    let authorization = format!("Bearer {lifecycle_access}");
+
+    let authz_before_rejected_disable =
+        database_authz_version(tools.mysql()?.pool(), admin_id).await?;
+    let credential_before_rejected_disable =
+        database_credential_version(tools.mysql()?.pool(), admin_id).await?;
+    let rejected_disable_proof = acquire_step_up_proof(
+        &first.runtime,
+        "account.user",
+        "disable_self",
+        json!({}),
+        authorization.as_str(),
+        &[],
+        admin_username.as_str(),
+        password,
+    )
+    .await?;
+    let rejected_disable = dispatch_raw(
+        &first.runtime,
+        "account.user",
+        "disable_self",
+        json!({}),
+        &[
+            ("authorization", authorization.as_str()),
+            ("x-step-up-proof", rejected_disable_proof.as_str()),
+        ],
+        &[],
+    )
+    .await;
+    ensure!(
+        matches!(rejected_disable, Err(BaseError::PermissionDenied(_))),
+        "企业唯一管理员不得停用自身: {rejected_disable:?}"
+    );
+    ensure!(
+        database_authz_version(tools.mysql()?.pool(), admin_id).await?
+            == authz_before_rejected_disable
+            && database_credential_version(tools.mysql()?.pool(), admin_id).await?
+                == credential_before_rejected_disable,
+        "最后企业管理员保护失败时不得留下版本副作用"
+    );
+
+    let target_org_body = json!({
+        "user_user": target_id,
+        "name": "Self-disable backup administrator",
+        "admin": true,
+        "status": "active"
+    });
+    let target_org_proof = acquire_step_up_proof(
+        &first.runtime,
+        "org.user",
+        "add",
+        target_org_body.clone(),
+        authorization.as_str(),
+        &[("x-tenant-id", tenant_id.as_str())],
+        admin_username.as_str(),
+        password,
+    )
+    .await?;
+    data(
+        dispatch(
+            &first.runtime,
+            "org.user",
+            "add",
+            target_org_body,
+            &[
+                ("authorization", authorization.as_str()),
+                ("x-tenant-id", tenant_id.as_str()),
+                ("x-step-up-proof", target_org_proof.as_str()),
+            ],
+            &[],
+        )
+        .await?,
+    )?;
+
     let recovery_login = data(
         dispatch(
             &first.runtime,
@@ -702,7 +857,133 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "全量撤销后旧 Refresh Token 必须失败"
     );
 
-    let failed_body = json!({ "id": admin_id, "status": "active" });
+    let disable_login_response = dispatch(
+        &first.runtime,
+        "account.user",
+        "login",
+        json!({ "username": admin_username, "password": password }),
+        &[],
+        &[],
+    )
+    .await?;
+    let disable_refresh = refresh_cookie(&disable_login_response)?;
+    let disable_login = data(disable_login_response)?;
+    let disable_access = disable_login["access_token"]
+        .as_str()
+        .context("自助停用登录缺少 Access Token")?
+        .to_owned();
+    let disable_authorization = format!("Bearer {disable_access}");
+    let authz_before_disable = database_authz_version(tools.mysql()?.pool(), admin_id).await?;
+    let credential_before_disable =
+        database_credential_version(tools.mysql()?.pool(), admin_id).await?;
+    let disable_proof = acquire_step_up_proof(
+        &first.runtime,
+        "account.user",
+        "disable_self",
+        json!({}),
+        disable_authorization.as_str(),
+        &[],
+        admin_username.as_str(),
+        password,
+    )
+    .await?;
+    let disabled = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "disable_self",
+            json!({}),
+            &[
+                ("authorization", disable_authorization.as_str()),
+                ("x-step-up-proof", disable_proof.as_str()),
+            ],
+            &[],
+        )
+        .await?,
+    )?;
+    ensure!(
+        disabled["account_disabled"] == true
+            && disabled["immediate_convergence"] == true
+            && disabled["relogin_required"] == true,
+        "自助停用响应必须明确账号停用、即时收敛和重新登录语义"
+    );
+    let disabled_state: (String, i64, i64) =
+        sqlx::query_as("SELECT status, authz_version, credential_version FROM users WHERE id = ?")
+            .bind(admin_id)
+            .fetch_one(tools.mysql()?.pool())
+            .await?;
+    ensure!(
+        disabled_state
+            == (
+                "disabled".to_string(),
+                authz_before_disable + 1,
+                credential_before_disable + 1,
+            ),
+        "自助停用必须原子写入用户状态并各递增一次安全版本"
+    );
+    let disabled_platform_relations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_user WHERE user_user = ? AND status = 'disabled'",
+    )
+    .bind(admin_id)
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    let disabled_org_relations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM org_user WHERE user_user = ? AND status = 'disabled'",
+    )
+    .bind(admin_id)
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    let backup_platform_admins: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_user \
+         WHERE user_user = ? AND status = 'active' AND admin = TRUE",
+    )
+    .bind(target_id)
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    let backup_org_admins: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM org_user \
+         WHERE user_user = ? AND org_org = ? AND status = 'active' AND admin = TRUE",
+    )
+    .bind(target_id)
+    .bind(organization_id)
+    .fetch_one(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        disabled_platform_relations == 1
+            && disabled_org_relations == 1
+            && backup_platform_admins == 1
+            && backup_org_admins == 1,
+        "自助停用必须只停用当前用户关系，并保留平台/企业备用管理员"
+    );
+    ensure!(
+        dispatch_raw(
+            &first.runtime,
+            "account.user",
+            "me",
+            json!({}),
+            &[("authorization", disable_authorization.as_str())],
+            &[],
+        )
+        .await
+        .is_err(),
+        "自助停用后旧 Access Token 必须失败"
+    );
+    let disabled_refresh_cookie = format!("yang_refresh={disable_refresh}");
+    ensure!(
+        dispatch_raw(
+            &first.runtime,
+            "account.user",
+            "refresh",
+            json!({}),
+            &[("cookie", disabled_refresh_cookie.as_str())],
+            &[],
+        )
+        .await
+        .is_err(),
+        "自助停用后旧 Refresh Token 必须失败"
+    );
+
+    let failed_body = json!({ "id": target_membership_id, "status": "active" });
     let failed_challenge = match dispatch_raw(
         &first.runtime,
         "admin.user",
@@ -812,7 +1093,8 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "SELECT action, result, target_type, CAST(after_summary AS CHAR) \
          FROM audit_event \
          WHERE action IN ('security.step_up', 'account.user.step_up_complete', \
-                          'admin.user.add', 'admin.user.set_status') \
+                          'account.user.disable_self', 'admin.user.add', \
+                          'admin.user.set_status') \
          ORDER BY id",
     )
     .fetch_all(tools.mysql()?.pool())
@@ -847,12 +1129,27 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         }),
         "proof 接受后的业务故障必须留下独立 failed 审计"
     );
+    ensure!(
+        audit_rows.iter().any(|(action, result, target, summary)| {
+            action == "account.user.disable_self"
+                && result == "succeeded"
+                && target == "user"
+                && summary.as_deref().is_some_and(|value| {
+                    value.contains("organization_relations_disabled")
+                        && value.contains("platform_relations_disabled")
+                })
+        }),
+        "自助停用必须留下关系数量去敏摘要的 succeeded 审计"
+    );
     let serialized_audits = serde_json::to_string(&audit_rows)?;
     for sensitive in [
         admin_username.as_str(),
         target_username.as_str(),
         password,
         proof.as_str(),
+        rejected_disable_proof.as_str(),
+        target_org_proof.as_str(),
+        disable_proof.as_str(),
         failed_proof.as_str(),
         outage_proof.as_str(),
     ] {
@@ -896,6 +1193,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     )
     .await
     .context("连接测试 Redis 失败")?;
+    reset_test_redis(&redis).await?;
     let cache_namespace = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let deployment = format!("system-integration-{cache_namespace}");
     let authorization_cache = AuthorizationVersionCache::new(redis.clone(), deployment.clone())?;
@@ -3112,6 +3410,7 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
     )
     .await
     .context("连接规模测试 Redis 失败")?;
+    reset_test_redis(&redis).await?;
     let deployment = format!(
         "work-scale-{}",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()

@@ -314,6 +314,33 @@ impl UserService {
         .await;
         finish_transaction(transaction, result).await?;
 
+        self.converge_subject_revocation(ctx, user_id, "account.user.logout", "session_set")
+            .await
+    }
+
+    /// 在持锁事务内停用账号及全部授权关系；提交后尽力即时收敛 Redis 水位线。
+    pub(super) async fn disable_self(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+    ) -> Result<bool, BaseError> {
+        if !self.issue_refresh_credential_version {
+            return Err(BaseError::ConfigError(
+                "账号停用必须在全部实例签发 Refresh 凭据版本后启用".to_string(),
+            ));
+        }
+        super::lifecycle::disable_self(ctx, user_id).await?;
+        self.converge_subject_revocation(ctx, user_id, "account.user.disable_self", "user")
+            .await
+    }
+
+    async fn converge_subject_revocation(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        action: &'static str,
+        target_kind: &'static str,
+    ) -> Result<bool, BaseError> {
         match ctx
             .tools()
             .token()?
@@ -329,9 +356,9 @@ impl UserService {
                         ctx.request_id(),
                     )
                     .map_err(invalid_audit_event)?,
-                    "account.user.logout",
+                    action,
                     Some(audit::entity("user", user_id)?),
-                    audit::entity("session_set", user_id)?,
+                    audit::entity(target_kind, user_id)?,
                     audit::AuditResult::Failed,
                     None,
                     Some(audit::summary([
@@ -347,7 +374,7 @@ impl UserService {
                         error_code = error.code_str(),
                         audit_error_code = audit_error.code_str(),
                         user_id,
-                        "全量会话 Redis 收敛与失败审计均未完成"
+                        "账号会话 Redis 收敛与失败审计均未完成"
                     );
                 }
                 Ok(false)

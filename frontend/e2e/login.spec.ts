@@ -432,3 +432,99 @@ test("多标签页串行轮换 Refresh Cookie 并同步退出且不共享持久�
   await expect(otherPage).toHaveURL(/\/login\?reason=session-expired$/);
   expect(logoutAttempts).toBe(2);
 });
+
+test("停用帐号必须二次确认并完成 Step-up 后清空本地会话", async ({ page }) => {
+  await page.route("**/api/v1/users/refresh", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { access_token: "disable-access" },
+      }),
+    }),
+  );
+  await page.route("**/.well-known/yang/ui-catalog", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: {
+          schema_version: "2.3",
+          revision: "f".repeat(64),
+          actions: [catalogAction("account.user.me")],
+          table_views: [],
+          modules: [catalogModule("account.user", "user", "account.user.me")],
+        },
+      }),
+    }),
+  );
+  const observedProofs: Array<string | undefined> = [];
+  await page.route("**/api/v1/users/disable", (route) => {
+    observedProofs.push(route.request().headers()["x-step-up-proof"]);
+    if (observedProofs.length === 1) {
+      return route.fulfill({
+        status: 428,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: 700010,
+          message: "停用帐号需要重新认证",
+          data: { challenge: "disable-challenge", expires_in: 120 },
+        }),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "账号已停用",
+        data: {
+          account_disabled: true,
+          immediate_convergence: true,
+          relogin_required: true,
+        },
+      }),
+    });
+  });
+  await page.route("**/api/v1/users/step-up/complete", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      challenge: "disable-challenge",
+      credentials: { username: "alice", password: "correct-password" },
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "重认证成功",
+        data: { proof: "disable-one-shot-proof", expires_in: 60 },
+      }),
+    });
+  });
+
+  await page.goto("/roles");
+  await page.getByRole("button", { name: "选择个人账户角色" }).click();
+  await page.getByRole("button", { name: "账号菜单" }).click();
+  await page.getByRole("button", { name: "停用帐号" }).click();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  expect(observedProofs).toEqual([]);
+
+  await page.getByRole("button", { name: "停用帐号" }).click();
+  await page.getByRole("button", { name: "确认停用", exact: true }).click();
+  const stepUpDialog = page.getByRole("dialog", {
+    name: "敏感操作重新认证",
+  });
+  await stepUpDialog.getByLabel("用户名").fill("alice");
+  await stepUpDialog.getByLabel("密码").fill("correct-password");
+  await stepUpDialog.getByRole("button", { name: "验证并继续" }).click();
+
+  await expect(page).toHaveURL("/login");
+  expect(observedProofs).toEqual([undefined, "disable-one-shot-proof"]);
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
+    .toBeNull();
+});

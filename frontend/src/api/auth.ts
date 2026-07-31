@@ -10,6 +10,10 @@ export type LogoutResult = {
   immediateConvergence: boolean;
 };
 
+export type DisableAccountResult = {
+  immediateConvergence: boolean;
+};
+
 type ApiEnvelope = {
   code?: number;
   message?: string;
@@ -93,7 +97,37 @@ export async function logout(
   signal?: AbortSignal,
   stepUpProof?: string,
 ): Promise<LogoutResult> {
-  const response = await fetch(`${apiBase}/api/v1/users/logout`, {
+  return requestAccountTermination(
+    "/api/v1/users/logout",
+    "revoked_all_sessions",
+    accessToken,
+    signal,
+    stepUpProof,
+  );
+}
+
+export async function disableAccount(
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+  stepUpProof?: string,
+): Promise<DisableAccountResult> {
+  return requestAccountTermination(
+    "/api/v1/users/disable",
+    "account_disabled",
+    accessToken,
+    signal,
+    stepUpProof,
+  );
+}
+
+async function requestAccountTermination(
+  path: string,
+  confirmationField: "revoked_all_sessions" | "account_disabled",
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+  stepUpProof?: string,
+): Promise<{ immediateConvergence: boolean }> {
+  const response = await fetch(`${apiBase}${path}`, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -116,7 +150,7 @@ export async function logout(
       ? (payload.data as Record<string, unknown>)
       : undefined;
   const validResult =
-    data?.revoked_all_sessions === true &&
+    data?.[confirmationField] === true &&
     typeof data.immediate_convergence === "boolean" &&
     data.relogin_required === true;
   if (!response.ok || payload?.code !== 0 || !validResult) {

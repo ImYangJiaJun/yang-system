@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute, useRouter } from "vue-router";
+import { useQuasar } from "quasar";
 import AccountSwitcher from "components/account/AccountSwitcher.vue";
 import {
   buildAccountModulePages,
@@ -17,6 +18,7 @@ import { useSessionStore } from "stores/session";
 const drawerOpen = ref(true);
 const route = useRoute();
 const router = useRouter();
+const $q = useQuasar();
 const catalogStore = useCatalogStore();
 const navigationStore = useCatalogNavigationStore();
 const identityStore = useIdentityStore();
@@ -66,6 +68,30 @@ async function endSession() {
   await applicationSession.endSession();
   await router.push("/login");
 }
+
+function confirmDisableAccount() {
+  $q.dialog({
+    title: "停用帐号",
+    message: "停用后全部平台与企业身份都会失效，且不能自行恢复。确定继续吗？",
+    cancel: true,
+    persistent: true,
+    ok: { color: "negative", label: "确认停用" },
+  }).onOk(() => {
+    void disableAccount();
+  });
+}
+
+async function disableAccount() {
+  try {
+    const disabled = await applicationSession.disableAccount();
+    if (disabled) await router.push("/login");
+  } catch (error: unknown) {
+    $q.notify({
+      type: "negative",
+      message: error instanceof Error ? error.message : "停用帐号失败",
+    });
+  }
+}
 </script>
 
 <template>
@@ -96,7 +122,11 @@ async function endSession() {
           }}</strong>
         </div>
         <q-space />
-        <AccountSwitcher v-if="loggedIn" @logout="endSession" />
+        <AccountSwitcher
+          v-if="loggedIn"
+          @disable="confirmDisableAccount"
+          @logout="endSession"
+        />
         <q-btn
           v-else
           flat

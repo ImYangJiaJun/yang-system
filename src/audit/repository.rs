@@ -1,8 +1,8 @@
-//! 审计事件的事务内追加边界。
+//! 审计事件的 append-only 追加边界。
 //! raw-sql-boundary: infrastructure-repository audit-event-repository
 //!
-//! 本模块刻意不提供独立事务或连接池写入口，确保调用方只能把审计事实与业务
-//! 变更放进同一个 MySQL 事务。
+//! 业务成功必须使用调用方事务，与状态变更原子提交；业务尚未开始或已经失败的
+//! 拒绝/失败结果可使用独立连接追加。两条路径都不提供 UPDATE/DELETE。
 
 use super::{AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult, AuditSummary};
 use serde_json::Value;

@@ -22,6 +22,12 @@ struct LockedMembership {
     admin: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LockedActiveOrgAdmin {
+    membership_id: i64,
+    user_id: i64,
+}
+
 struct MembershipAuthorizationChange {
     next_org_id: i64,
     next_user_id: i64,
@@ -38,7 +44,7 @@ pub(super) async fn add(ctx: &ActionContext, input: Record) -> Result<InsertResu
     // tenant-boundary: database org-member-add-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
-        lock_active_org_admin(ctx, &mut transaction, org_id).await?;
+        let _active_admins = lock_active_org_admin(ctx, &mut transaction, org_id).await?;
         lock_active_organization(&mut transaction, org_id).await?;
         let locked = lock_user_authorizations(&mut transaction, [user_id]).await?;
         let (affected, id) = ctx
@@ -83,7 +89,7 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
     // tenant-boundary: database org-member-put-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
-        lock_active_org_admin(ctx, &mut transaction, org_id).await?;
+        let active_admins = lock_active_org_admin(ctx, &mut transaction, org_id).await?;
         lock_active_organization(&mut transaction, org_id).await?;
         let Some(membership) = lock_membership(ctx, &mut transaction, id).await? else {
             return Ok(AffectedResult { affected: 0 });
@@ -93,6 +99,9 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
             return Err(BaseError::PermissionDenied(
                 "企业成员归属不可跨资源授权边界修改".to_string(),
             ));
+        }
+        if removes_active_admin(&membership, &change) {
+            ensure_not_last_active_org_admin(&active_admins, id)?;
         }
         let locked = if change.changed {
             lock_user_authorizations(&mut transaction, [membership.user_id, change.next_user_id])
@@ -147,7 +156,7 @@ pub(super) async fn delete(
     // tenant-boundary: database org-member-delete-database
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
-        lock_active_org_admin(ctx, &mut transaction, org_id).await?;
+        let active_admins = lock_active_org_admin(ctx, &mut transaction, org_id).await?;
         lock_active_organization(&mut transaction, org_id).await?;
         let Some(membership) = lock_membership(ctx, &mut transaction, id).await? else {
             return Ok(AffectedResult { affected: 0 });
@@ -156,6 +165,9 @@ pub(super) async fn delete(
             return Err(BaseError::PermissionDenied(
                 "企业成员在资源解析后已迁移，必须重新授权".to_string(),
             ));
+        }
+        if membership.status == super::ACTIVE_STATUS && membership.admin {
+            ensure_not_last_active_org_admin(&active_admins, id)?;
         }
         let locked = lock_user_authorizations(&mut transaction, [membership.user_id]).await?;
         let affected = ctx
@@ -216,10 +228,27 @@ async fn lock_active_org_admin(
     ctx: &ActionContext,
     transaction: &mut Transaction,
     org_id: i64,
-) -> Result<(), BaseError> {
+) -> Result<Vec<LockedActiveOrgAdmin>, BaseError> {
     let user = ctx
         .authenticated_user()
         .ok_or_else(|| BaseError::Unauthorized("企业成员管理需要已认证用户".to_string()))?;
+    let active_admins =
+        // tenant-boundary: raw-sql org-member-admin-linearization
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT id, user_user FROM org_user \
+             WHERE org_org = ? AND status = 'active' AND admin = TRUE \
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(org_id)
+        .fetch_all(executor(transaction)?)
+        .await
+        .map_err(yang_db::DbError::from)?
+        .into_iter()
+        .map(|(membership_id, user_id)| LockedActiveOrgAdmin {
+            membership_id,
+            user_id,
+        })
+        .collect::<Vec<_>>();
     if user.has_role("system") {
         // tenant-boundary: system-capability org-member-linearization-system
         let capability = ctx.system_tenant()?;
@@ -229,20 +258,7 @@ async fn lock_active_org_admin(
             ));
         }
     } else {
-        let authorized =
-            // tenant-boundary: raw-sql org-member-admin-linearization
-            sqlx::query_scalar::<_, i64>(
-                "SELECT id FROM org_user \
-                 WHERE org_org = ? AND user_user = ? \
-                   AND status = 'active' AND admin = TRUE \
-                 FOR UPDATE",
-            )
-            .bind(org_id)
-            .bind(user.id)
-            .fetch_optional(executor(transaction)?)
-            .await
-            .map_err(yang_db::DbError::from)?;
-        if authorized.is_none() {
+        if !active_admins.iter().any(|admin| admin.user_id == user.id) {
             return Err(BaseError::PermissionDenied(
                 "当前用户在写事务内已不是该企业的有效管理员".to_string(),
             ));
@@ -250,6 +266,27 @@ async fn lock_active_org_admin(
     }
     resource_authorization_checkpoint(ctx, ResourceAuthorizationCheckpoint::AfterLinearization)
         .await;
+    Ok(active_admins)
+}
+
+fn removes_active_admin(
+    membership: &LockedMembership,
+    change: &MembershipAuthorizationChange,
+) -> bool {
+    membership.status == super::ACTIVE_STATUS
+        && membership.admin
+        && (change.next_status != super::ACTIVE_STATUS || !change.next_admin)
+}
+
+fn ensure_not_last_active_org_admin(
+    active_admins: &[LockedActiveOrgAdmin],
+    membership_id: i64,
+) -> Result<(), BaseError> {
+    if active_admins.len() == 1 && active_admins[0].membership_id == membership_id {
+        return Err(BaseError::PermissionDenied(
+            "不能移除企业最后一个启用中的管理员".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -493,5 +530,27 @@ mod tests {
                     .changed
             );
         }
+    }
+
+    #[test]
+    fn last_active_org_admin_cannot_be_demoted_or_deleted() {
+        let mut current = membership();
+        current.admin = true;
+        let demotion = authorization_change(&current, &Record::new().set(IS_ADMIN, false))
+            .unwrap_or_else(|error| panic!("降级变更应可解析: {error}"));
+        assert!(removes_active_admin(&current, &demotion));
+
+        let sole = [LockedActiveOrgAdmin {
+            membership_id: 7,
+            user_id: current.user_id,
+        }];
+        assert!(ensure_not_last_active_org_admin(&sole, 7).is_err());
+
+        let backup = LockedActiveOrgAdmin {
+            membership_id: 8,
+            user_id: 21,
+        };
+        assert!(ensure_not_last_active_org_admin(&[sole[0], backup], 7).is_ok());
+        assert!(ensure_not_last_active_org_admin(&sole, 9).is_ok());
     }
 }

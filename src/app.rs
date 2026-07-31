@@ -208,7 +208,7 @@ mod tests {
         assert!(tables.contains(&"org_user"));
         assert!(tables.contains(&"work_project"));
         assert!(tables.contains(&"work_task"));
-        assert_eq!(operations.len(), 9);
+        assert_eq!(operations.len(), 10);
         assert!(operations.contains(&(
             "account.user.register",
             "POST",
@@ -227,6 +227,13 @@ mod tests {
             "account.user.change_password",
             "POST",
             "/api/v1/users/change-password",
+            200,
+            false,
+        )));
+        assert!(operations.contains(&(
+            "account.user.disable_self",
+            "POST",
+            "/api/v1/users/disable",
             200,
             false,
         )));

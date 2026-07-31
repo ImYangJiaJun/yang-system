@@ -1,5 +1,5 @@
 import type { LoginResult } from "src/api/auth";
-import { logout } from "src/api/auth";
+import { disableAccount as requestDisableAccount, logout } from "src/api/auth";
 import { storeToRefs } from "pinia";
 import { useCatalogStore } from "src/stores/catalog";
 import { useCatalogNavigationStore } from "src/stores/catalog-navigation";
@@ -41,19 +41,41 @@ export function useApplicationSession() {
   }
 
   async function endSession() {
+    const completed = await runStepUpProtectedSessionMutation(logout);
+    if (!completed) return;
+    clearSession();
+    publishSessionEnd("logout");
+  }
+
+  async function disableAccount() {
+    const completed = await runStepUpProtectedSessionMutation(
+      requestDisableAccount,
+    );
+    if (!completed) return false;
+    clearSession();
+    publishSessionEnd("logout");
+    return true;
+  }
+
+  async function runStepUpProtectedSessionMutation(
+    request: (
+      accessToken: string | undefined,
+      signal?: AbortSignal,
+      proof?: string,
+    ) => Promise<unknown>,
+  ) {
     try {
-      await logout(sessionStore.token || undefined);
+      await request(sessionStore.token || undefined);
     } catch (error: unknown) {
       if (!(error instanceof StepUpRequiredError)) throw error;
       const proof = await requestStepUpProof(error.challenge, {
         token: sessionStore.token || undefined,
         tenantId: tenantStore.tenantId || undefined,
       });
-      if (!proof) return;
-      await logout(sessionStore.token || undefined, undefined, proof);
+      if (!proof) return false;
+      await request(sessionStore.token || undefined, undefined, proof);
     }
-    clearSession();
-    publishSessionEnd("logout");
+    return true;
   }
 
   return {
@@ -61,6 +83,7 @@ export function useApplicationSession() {
     beginSession,
     acceptRefreshedTokenPair,
     clearSession,
+    disableAccount,
     endSession,
   };
 }

@@ -186,6 +186,36 @@ pub(crate) async fn increment_locked_credential_versions(
     Ok((next_authz, next_credential))
 }
 
+/// 在账号停用事务中同时写入状态、两个安全版本与授权 Outbox。
+pub(crate) async fn disable_locked_user_and_increment_versions(
+    transaction: &mut Transaction,
+    locked: &LockedUserCredential,
+) -> Result<(i64, i64), BaseError> {
+    let next_authz = next_authz_version(locked.authz_version)?;
+    let next_credential = next_credential_version(locked.credential_version)?;
+    let result = sqlx::query(
+        "UPDATE users SET status = ?, authz_version = ?, credential_version = ? \
+         WHERE id = ? AND status = ? AND authz_version = ? AND credential_version = ?",
+    )
+    .bind(UserStatus::Disabled.as_str())
+    .bind(next_authz)
+    .bind(next_credential)
+    .bind(locked.user_id)
+    .bind(locked.status.as_str())
+    .bind(locked.authz_version)
+    .bind(locked.credential_version)
+    .execute(executor(transaction)?)
+    .await
+    .map_err(yang_db::DbError::from)?;
+    if result.rows_affected() != 1 {
+        return Err(BaseError::from(yang_db::DbError::TransactionError(
+            format!("用户 {} 停用事实在持锁事务内发生意外变化", locked.user_id),
+        )));
+    }
+    append_authorization_outbox(transaction, locked.user_id, next_authz).await?;
+    Ok((next_authz, next_credential))
+}
+
 async fn append_authorization_outbox(
     transaction: &mut Transaction,
     user_id: i64,

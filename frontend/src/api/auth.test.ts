@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, StepUpRequiredError } from "./errors";
-import { login, logout, refreshSession, resetPassword } from "./auth";
+import {
+  disableAccount,
+  login,
+  logout,
+  refreshSession,
+  resetPassword,
+} from "./auth";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -180,6 +186,57 @@ describe("logout", () => {
     );
 
     await expect(logout("access-token")).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("disableAccount", () => {
+  it("proof 仅进入停用请求头并要求服务端确认账号已停用", async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("/api/v1/users/disable");
+      const headers = new Headers(init.headers);
+      expect(headers.get("authorization")).toBe("Bearer access-token");
+      expect(headers.get("x-step-up-proof")).toBe("one-shot-proof");
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          data: {
+            account_disabled: true,
+            immediate_convergence: false,
+            relogin_required: true,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      disableAccount("access-token", undefined, "one-shot-proof"),
+    ).resolves.toEqual({ immediateConvergence: false });
+  });
+
+  it("拒绝未确认账号停用的畸形成功响应", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 0,
+              data: {
+                revoked_all_sessions: true,
+                immediate_convergence: true,
+                relogin_required: true,
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    await expect(disableAccount("access-token")).rejects.toBeInstanceOf(
+      ApiError,
+    );
   });
 });
 

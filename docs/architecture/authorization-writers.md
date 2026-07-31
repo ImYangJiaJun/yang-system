@@ -17,12 +17,14 @@
 | ID | 文件 | 责任 |
 |---|---|---|
 | `account-user-facts` | `src/modules/account/user/repository.rs` | 用户注册的固定初始状态与密码摘要写入；不暴露用户状态更新 API |
+| `account-user-lifecycle` | `src/modules/account/user/lifecycle.rs` | 自助停用时锁定最后管理员不变量，并在同一事务停用用户、平台/企业关系、递增双版本、追加 Outbox 与审计 |
 | `account-security-version` | `src/modules/account/authz_version.rs` | 用户状态锁、授权/凭据版本单调递增与 Outbox |
 | `admin-authorization-facts` | `src/modules/admin/user/repository.rs` | 平台账号创建、状态和管理员事实变更 |
 | `org-membership-authorization-facts` | `src/modules/org/user/repository.rs` | 企业成员新增、更新、删除及受影响用户版本 |
 | `org-onboarding-authorization-facts` | `src/modules/org/access/repository.rs` | 企业创建时首个管理员成员事实与创建者版本 |
 
 <!-- authorization-writer: account-user-facts src/modules/account/user/repository.rs -->
+<!-- authorization-writer: account-user-lifecycle src/modules/account/user/lifecycle.rs -->
 <!-- authorization-writer: account-security-version src/modules/account/authz_version.rs -->
 <!-- authorization-writer: admin-authorization-facts src/modules/admin/user/repository.rs -->
 <!-- authorization-writer: org-membership-authorization-facts src/modules/org/user/repository.rs -->

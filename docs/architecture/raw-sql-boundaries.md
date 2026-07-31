@@ -20,6 +20,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | ID | 类型 | 文件 | 保留原因与不变量 |
 |---|---|---|---|
 | `account-authz-version` | domain-service | `src/modules/account/authz_version.rs` | 用户授权版本的行锁、单调递增与 Outbox 写入必须处于同一事务 |
+| `account-user-lifecycle` | domain-service | `src/modules/account/user/lifecycle.rs` | 自助停用跨用户、平台与企业授权关系，必须统一锁序并与双版本、Outbox、成功审计原子提交 |
 | `password-reset-token` | domain-repository | `src/modules/account/password_reset/repository.rs` | 重置凭证摘要的目标用户查询、行锁、单次消费和旧凭证失效必须在调用方事务内完成 |
 | `admin-grant-snapshot` | domain-service | `src/modules/admin/grants.rs` | Token 签发事务内读取平台管理员授权快照 |
 | `admin-user-repository` | domain-repository | `src/modules/admin/user/repository.rs` | 跨表列表、管理员行锁和与审计同事务的受控更新 |
@@ -28,12 +29,13 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | `org-member-guard` | domain-service | `src/modules/org/user/guard.rs` | 写操作前按可信租户与 actor 实时验证企业管理员身份 |
 | `org-member-repository` | domain-repository | `src/modules/org/user/repository.rs` | 成员关系行锁、同租户校验、批量 writer 与审计原子性 |
 | `work-task-repository` | domain-repository | `src/modules/work/task/repository.rs` | 任务关系同租户校验、递归防环和批量完成事务 |
-| `audit-event-repository` | infrastructure-repository | `src/audit/repository.rs` | 只提供事务内追加，不提供 UPDATE/DELETE 或独立提交入口 |
+| `audit-event-repository` | infrastructure-repository | `src/audit/repository.rs` | 业务成功走事务内追加；业务尚未开始或已失败的拒绝/失败结果可独立追加；两条路径都只允许 INSERT，不提供 UPDATE/DELETE |
 | `audit-schema-validator` | schema-validator | `src/audit/schema.rs` | 启动期只读 `information_schema`，验证审计表不可变约束 |
 | `authorization-outbox` | infrastructure-repository | `src/authorization/outbox.rs` | claim/lease/retry 状态机必须使用锁与条件更新 |
 | `migration-preflight` | schema-validator | `src/migrations.rs` | apply 前只读核对 MySQL CHECK 能力与用户状态脏数据，避免不可回滚 DDL 带病执行 |
 
 <!-- raw-sql-boundary: domain-service account-authz-version src/modules/account/authz_version.rs -->
+<!-- raw-sql-boundary: domain-service account-user-lifecycle src/modules/account/user/lifecycle.rs -->
 <!-- raw-sql-boundary: domain-repository password-reset-token src/modules/account/password_reset/repository.rs -->
 <!-- raw-sql-boundary: domain-service admin-grant-snapshot src/modules/admin/grants.rs -->
 <!-- raw-sql-boundary: domain-repository admin-user-repository src/modules/admin/user/repository.rs -->

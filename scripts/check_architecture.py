@@ -130,6 +130,7 @@ RAW_SQL_BOUNDARY_DOCUMENT = Path("docs/architecture/raw-sql-boundaries.md")
 AUTHORIZATION_WRITER_DOCUMENT = Path("docs/architecture/authorization-writers.md")
 AUTHORIZATION_WRITER_ALLOWLIST = {
     "src/modules/account/user/repository.rs": "account-user-facts",
+    "src/modules/account/user/lifecycle.rs": "account-user-lifecycle",
     "src/modules/account/authz_version.rs": "account-security-version",
     "src/modules/admin/user/repository.rs": "admin-authorization-facts",
     "src/modules/org/user/repository.rs": "org-membership-authorization-facts",
@@ -508,7 +509,8 @@ def raw_sql_boundary_path_allowed(kind: str, relative: Path) -> bool:
     if kind == "domain-service":
         return (
             value.startswith("src/modules/")
-            and relative.stem in {"authz_version", "grants", "guard", "service"}
+            and relative.stem
+            in {"authz_version", "grants", "guard", "lifecycle", "service"}
         )
     if kind == "infrastructure-repository":
         return value in {
@@ -1094,6 +1096,10 @@ def self_test() -> None:
             "src/modules/account/user/repository.rs": (
                 "account-user-facts",
                 "fn write(q: Query) { q.insert(value); }\n",
+            ),
+            "src/modules/account/user/lifecycle.rs": (
+                "account-user-lifecycle",
+                'fn write() { sqlx::query("UPDATE users SET status = \'disabled\'"); }\n',
             ),
             "src/modules/account/authz_version.rs": (
                 "account-security-version",

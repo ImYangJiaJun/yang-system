@@ -3,6 +3,7 @@
 //! 所有 Action 只在这里进入 `ModuleSpec`，新增接口时无需在多层字符串路由表中重复登记。
 
 mod change_password;
+mod disable_self;
 mod login;
 mod logout;
 mod me;
@@ -28,6 +29,7 @@ pub(super) fn register_all(
     let module = refresh::register(module, Arc::clone(&service))?;
     let module = if credential_mutations_enabled {
         let module = change_password::register(module, Arc::clone(&service))?;
+        let module = disable_self::register(module, Arc::clone(&service))?;
         reset_password::register(module, Arc::clone(&service))?
     } else {
         module
