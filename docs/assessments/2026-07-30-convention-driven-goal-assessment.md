@@ -23,7 +23,7 @@
 | 自定义页面安全降级 | 已验证 | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面 |
 | 自定义页面只新增一个文件 | 未达成 | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点 |
 | Vue/Quasar/Pinia/Zod 技术选型 | 合理 | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益 |
-| 完整生产就绪 | 未达成 | 已有较强工程基础，但本提交尚无远程 CI 终态，端到端可观测性、a11y 和真实业务压力证据仍不完整 |
+| 完整生产就绪 | 未达成 | 已有较强工程基础，但本提交尚无远程 CI 终态，a11y 和真实业务压力证据仍不完整 |
 
 ### 1.2 对两个评估问题的直接回答
 
@@ -195,7 +195,7 @@
 | 正式产物 E2E | 已闭环 | 独立 Playwright 配置每次重建并启动 `dist/spa`，验证正式模块深链接、生产路由裁剪、无 dev runtime，以及静态/API 404 不被 history fallback 掩盖 |
 | CI 浏览器门禁 | 已闭环（实现） | `run_ci.py full` 串行执行隔离 dev 与 production Playwright；quality job 安装 Chromium 后复用同一 full 门禁；本提交未 push，远程 job 终态仍未验证 |
 | 部署契约 | 已闭环（仓库合同） | 可执行 Nginx 配置、共享响应合同、生产构建 E2E 与变异测试覆盖 history fallback、安全头、HTML/资产缓存和严格 404；真实域名 TLS/边缘 smoke 仍须在首次部署后取证 |
-| 端到端可观测性 | 部分具备 | 后端已有 tracing/request id 等基础信号，前端也提取 request id；尚无统一错误上报、关联检索和告警验收 |
+| 端到端可观测性 | 已闭环（仓库链路） | 已认证前端统一上报无敏感正文错误指纹，`related_request_id` 关联原 Action log/trace，低基数 metric 与真实 promtool firing/silent 演练入 CI；真实 Alertmanager 送达仍须目标环境取证 |
 | 无障碍 | 未闭环 | 无 axe 等自动检查，也没有键盘/焦点关键旅程门禁 |
 | 真实业务与规模 | 未验证 | 深层 relation、大树、大分页、复杂批量、弱网和并发边界尚无基线 |
 | i18n | 按产品需求决定 | 当前文案硬编码中文；只有明确多语言需求时才是上线阻塞项 |
@@ -223,7 +223,7 @@
 2. **已满足（2026-07-31）：** Playwright 在本地 full 与 CI 中使用两组专用且互斥的端口，两个配置都禁止复用既有服务；日常手工调试只有显式设置 `YANG_E2E_REUSE_EXISTING_SERVER=true` 才允许复用。
 3. **已满足（仓库合同，2026-07-31）：** 浏览器 smoke 构建并启动 `dist/spa`，验收深链接、响应头 CSP/`frame-ancestors`/HSTS 等安全头、HTML `no-store`、`/assets` 一年 immutable、严格资产 404 和 API 代理边界；真实域名的 TLS/证书/DNS/边缘终态只可在目标环境发布后验收。
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
-5. 前端错误上报包含 request id，能够与后端 trace/log/metric 关联，并完成一次告警演练。
+5. **已满足（仓库链路，2026-07-31）：** 前端错误上报携带原后端 request id；后端 `frontend.error` 日志、Action trace 与低基数 metric 可关联；promtool 演练验证达到阈值 firing、低于阈值 silent。真实 Alertmanager 接收器送达仍属于目标环境验收。
 6. 增加关键页面 a11y、键盘导航和焦点恢复门禁。
 7. 为大分页、relation options、树节点上限和批量 Action 建立数据规模与响应时间基线。
 8. 推送前运行 `python scripts/run_ci.py full`、隔离 Playwright、必要的真实 MySQL/Redis integration；远程 CI 每个 job 都必须有终态成功证据。
@@ -245,8 +245,8 @@
 
 ### P0：闭环浏览器安全与诊断
 
-1. access token 存储与 CSP 联合设计；
-2. 前端错误、request id、后端 trace 和告警形成完整诊断链。
+1. access token 内存化与 enforce CSP 已联合闭环；
+2. 前端无敏感正文错误指纹、原 request id、后端 Action log/trace、低基数指标和告警 firing/silent 演练已形成仓库内完整诊断链。
 
 ### P1：证明通用渲染上限
 
@@ -447,10 +447,51 @@ docker run --rm `
 
 本项闭环的是仓库内可交付部署合同，不虚构尚不存在的公网环境。真实域名的证书链、HTTP 到 HTTPS 重定向、HSTS 浏览器执行、DNS/CDN 和远程 smoke 必须在选定目标并发布后取得终态；它们属于环境发布证据，不再是仓库缺少实现。
 
+### 9.6 2026-07-31 增量闭环：端到端错误可观测性
+
+本项采用的不变量是：已被页面捕获的 API 错误也必须进入统一诊断链；浏览器不得上报错误正文、堆栈、URL/query、body 或凭据；原后端 `request_id` 必须作为独立关联字段保留；指标标签只能使用有限枚举；告警规则必须由真实 Prometheus 解析并同时证明 firing 与 silent 边界。
+
+实现证据：
+
+- `frontend/src/observability/error-reporter.ts` 统一规范 API/合同/网络/Vue/全局错误，只在内存 Access Token 存在时发送；事件包含 UUID、route name、稳定 operation、16 位十六进制指纹、status/code 和可选 `related_request_id`，错误正文和非白名单 Error name 不参与指纹，同指纹 10 秒内去重且去重表上限 256 项；
+- `frontend/src/boot/observability.ts` 接入 Vue error handler、`window.error` 和 `unhandledrejection`；API client 对页面正常捕获的失败也主动上报，避免只覆盖 uncaught exception；
+- `system.observability.report_frontend_error` 是非公开 Action，输入 `deny_unknown_fields` 并对白名单字符和长度 fail-closed；后端日志同时记录上报请求自己的 `request_id` 与原请求 `related_request_id`，指标只使用 `kind/linked`，每用户每实例每分钟 30 次和最多 4096 个活跃用户的边界防止已认证日志放大；
+- `ops/prometheus/yang-system.rules.yml` 增加 `YangSystemFrontendErrorBurst`，测试文件同时模拟五分钟 5 次 firing 与 4 次 silent；
+- GitHub quality job 以版本和摘要固定的 Prometheus 3.11.3 官方镜像执行 `promtool check rules` 与 `promtool test rules`，本地 CI 自测防止演练被静默删除。
+
+对抗性验证：
+
+```powershell
+# 红测一：契约错误未保留显式 request id，且正文/Error.name 会改变指纹
+pnpm --dir frontend exec vitest run src/observability/error-reporter.test.ts
+
+# 红测二：只有演练、没有告警规则时，promtool 得到 got: []
+docker run --rm --entrypoint /bin/promtool `
+  -v "${PWD}\ops\prometheus:/rules:ro" -w /rules `
+  prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3 `
+  test rules yang-system.rules.test.yml
+
+# 单元、真实浏览器 request-id 关联与 Rust 输入边界
+pnpm --dir frontend exec vitest run src/observability/error-reporter.test.ts
+$env:CI="true"
+$env:YANG_E2E_FRONTEND_PORT="5312"
+$env:YANG_E2E_BACKEND_PORT="18312"
+pnpm --dir frontend exec playwright test e2e/observability.spec.ts
+cargo test --locked --lib
+
+# 真实规则解析和 firing/silent 演练
+promtool check rules yang-system.rules.yml
+promtool test rules yang-system.rules.test.yml
+```
+
+前端红测在变化的敏感正文与伪造 `Error.name` 上得到 `expected false, received true`，证明旧指纹会被不可信错误文本改变；告警红测明确显示期望 `YangSystemFrontendErrorBurst`、实际 `got: []`。实现后 reporter 5/5、前端全门禁 22 个测试文件/96 项 Vitest、浏览器关联 2/2、Rust observability 3/3 与完整 lib 99 通过/3 个真实依赖用例按设计 ignored。浏览器证明 Bearer Token 只进入 Authorization header，API、成功 HTTP 后的合同错误与全局运行时事件都不含敏感 message/details，却保留可用的 32 位 `related_request_id`；单测还覆盖显式 request id 关联、敏感正文与伪造 Error.name 不改变指纹，以及没有 `crypto.randomUUID` 的旧目标浏览器回退。Rust 对抗测试证明第 31 次同用户上报被限流而另一用户不受影响。全量 dev E2E 23/23、production E2E 2/2 通过。Prometheus 3.11.3 `check rules` 解析 14 条规则，firing/silent 演练全部通过。
+
+本项不把规则单测写成真实值班送达：Alertmanager receiver、通知渠道、升级路径和告警恢复时间线必须在目标环境演练。仓库内从浏览器错误到 request id、Action log/trace、metric 和告警阈值的实现与可执行证据已经闭环。
+
 ## 十、最终结论
 
 yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明一个或多个可用 View 与 presentation”的契约范围内，多 View 和模块级交互的零前端修改交付已经可行。
 
 当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，自定义页面仍有两个手工触点，尚无独立真实业务 Addon 的零前端业务 diff 证据，前端产品外壳也仍显式持有账号/租户入口知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E、CI 浏览器门禁实现和仓库部署合同已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、目标环境发布证据、可观测性、无障碍与真实规模证据共同支持。
+技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性、正式产物 E2E、CI 浏览器门禁实现、仓库部署合同和端到端错误可观测性已有本地对抗证据；整体结论升级仍必须由远程 CI 终态、目标环境发布/告警送达证据、无障碍与真实规模证据共同支持。

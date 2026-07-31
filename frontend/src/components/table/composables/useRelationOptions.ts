@@ -1,10 +1,11 @@
 import { onScopeDispose, ref, toValue, type MaybeRefOrGetter } from "vue";
-import { invokeAction, type SessionContext } from "src/api/client";
+import { ApiError, invokeAction, type SessionContext } from "src/api/client";
 import { parseRelationOptions } from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
   TableViewSchema,
 } from "src/contracts/ui-catalog";
+import { captureFrontendError } from "src/observability/error-reporter";
 import { flattenDisplayRows } from "../table-view-model";
 
 type RelationOption = { value: string | number; label: string };
@@ -61,6 +62,7 @@ export function useRelationOptions(options: UseRelationOptionsOptions) {
             error: `目录缺少关系 Action：${operationId}`,
           };
         }
+        let relatedRequestId: string | undefined;
         try {
           const result = await invoke(
             action,
@@ -74,6 +76,7 @@ export function useRelationOptions(options: UseRelationOptionsOptions) {
             { ...toValue(options.session) },
             request.controller.signal,
           );
+          relatedRequestId = result.requestId;
           if (result.kind !== "json") {
             throw new Error("关系 Action 必须返回 JSON");
           }
@@ -84,6 +87,13 @@ export function useRelationOptions(options: UseRelationOptionsOptions) {
         } catch (cause) {
           if (cause instanceof Error && cause.name === "AbortError") {
             return { operationId, aborted: true };
+          }
+          if (!(cause instanceof ApiError)) {
+            captureFrontendError(cause, {
+              kind: "contract",
+              operation: operationId,
+              relatedRequestId,
+            });
           }
           return {
             operationId,

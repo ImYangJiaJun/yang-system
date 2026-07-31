@@ -72,3 +72,34 @@ Redis span 位于同一条下游链路。
 `otel.kind=client`。禁止记录 SQL 文本、绑定参数、Redis command/key/value 或 Lua
 脚本。关闭 tracer provider 和指标监听器复用进程唯一关闭预算，确保批量 exporter
 有界刷新，不另行累加超时。
+
+## 浏览器错误关联
+
+前端在 Quasar boot 阶段统一接入 Vue error handler、`window.error` 与
+`unhandledrejection`，API client 还会捕获已被页面正常处理的 API/合同/网络错误。
+只有内存中存在已认证 Access Token 时才向
+`POST /api/v1/observability/frontend-errors` 上报；该 Action 本身也要求有效身份，
+上报失败不会递归产生第二次上报。
+
+事件只包含有界的 `event_id`、错误种类、Vue route name、稳定 operation id、
+16 位错误指纹、HTTP status/error code，以及可选的原后端 `related_request_id`。
+协议明确不接受错误 message、stack、URL/query、请求/响应 body、Token 或 Cookie；
+错误 message 和非白名单 Error name 也不参与指纹。后端用 `deny_unknown_fields`
+拒绝额外字段。相同指纹在单标签页 10 秒内只发送一次，去重表最多保留 256 项，
+避免异常循环放大内存、日志和指标。服务端再按已认证用户限制为每实例每分钟 30 次，
+并把跟踪表限制为 4096 个活跃用户；超限统一返回 429，浏览器静默丢弃而不递归上报。
+
+后端在当前上报 Action 的 trace span 中写一条 `event_type=frontend.error` 结构化事件：
+
+- `request_id` 是错误上报 Action 自己的请求标识；
+- `related_request_id` 是原失败 Action 响应头中的标识，可直接检索原
+  `Action 执行完成` 日志及其 trace；
+- `frontend_*` 字段只保存经过白名单/长度校验的路由、operation、状态、错误码和指纹；
+- `yang_system_frontend_errors_total{kind,linked}` 只使用有限枚举标签，不把 request id、
+  route、operation 或指纹放入指标标签。
+
+排障时先用告警时间窗和 `kind/linked` 指标确认范围，再从 `frontend.error` 日志取得
+`related_request_id`，检索同值的原 Action 规范事件，最后进入该 Action span 的
+下游 MySQL/Redis trace。机器可加载告警与 firing/silent 演练分别位于
+`ops/prometheus/yang-system.rules.yml` 和
+`ops/prometheus/yang-system.rules.test.yml`。

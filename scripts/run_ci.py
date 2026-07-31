@@ -227,6 +227,14 @@ def self_test() -> None:
         "frontend/deploy/nginx.conf:/etc/nginx/nginx.conf:ro"
     ) == 1, "Nginx 语法检查必须只读加载仓库内的生产配置"
     assert workflow.count("nginx -t") == 1, "quality job 必须执行真实 Nginx 语法检查"
+    assert workflow.count(
+        "prom/prometheus:v3.11.3@sha256:"
+    ) == 2, "quality job 必须用版本与摘要双重固定的 Prometheus 镜像执行两项校验"
+    assert workflow.count("--entrypoint /bin/promtool") == 2, (
+        "quality job 必须用真实 promtool 校验规则与告警演练"
+    )
+    assert "check rules yang-system.rules.yml" in workflow
+    assert "test rules yang-system.rules.test.yml" in workflow
     assert FRONTEND_DEV_E2E.env == (
         ("CI", "true"),
         ("YANG_E2E_FRONTEND_PORT", "5310"),

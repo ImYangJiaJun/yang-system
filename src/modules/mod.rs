@@ -5,5 +5,6 @@
 
 pub mod account;
 pub mod admin;
+pub mod observability;
 pub mod org;
 mod presentation;

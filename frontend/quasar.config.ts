@@ -1,6 +1,7 @@
 import { defineConfig } from "#q-app/wrappers";
 
 export default defineConfig(() => ({
+  boot: ["observability"],
   css: ["app.css"],
   extras: ["material-icons"],
   build: {

@@ -1,6 +1,6 @@
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
-use crate::modules::{account, admin, org};
+use crate::modules::{account, admin, observability, org};
 use crate::observability::logging::{ActionLogMiddleware, LogIdentity};
 use anyhow::Context;
 use std::sync::Arc;
@@ -44,6 +44,11 @@ pub fn build_app(
         .addon(
             admin::build_addon(authorization_validator.clone())
                 .context("构建 admin Addon 失败")?
+                .middleware(action_logging.clone()),
+        )
+        .addon(
+            observability::build_addon(authorization_validator.clone())
+                .context("构建 observability Addon 失败")?
                 .middleware(action_logging.clone()),
         )
         .addon(
@@ -239,6 +244,32 @@ mod tests {
                 && operation.2 == "/.well-known/yang/ui-catalog"
                 && operation.4
         }));
+
+        let observability_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "system.observability")
+            .unwrap_or_else(|| panic!("应存在 system.observability 模块"));
+        let frontend_error_report = observability_module
+            .actions()
+            .iter()
+            .find(|action| action.name.as_str() == "report_frontend_error")
+            .unwrap_or_else(|| panic!("应存在前端错误关联 Action"));
+        assert_eq!(
+            frontend_error_report.route.operation_id,
+            "system.observability.report_frontend_error"
+        );
+        assert_eq!(
+            frontend_error_report.route.path,
+            "/api/v1/observability/frontend-errors"
+        );
+        assert!(
+            !frontend_error_report.is_public,
+            "前端错误上报必须要求已认证会话，避免公开日志与指标放大"
+        );
 
         let admin_user_module = app
             .runtime

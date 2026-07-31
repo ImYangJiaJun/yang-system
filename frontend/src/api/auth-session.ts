@@ -24,6 +24,10 @@ export class SessionExpiredError extends Error {
   }
 }
 
+export function activeAccessToken(): string | undefined {
+  return currentAccessToken;
+}
+
 function storage(): Storage | undefined {
   return typeof sessionStorage === "undefined" ? undefined : sessionStorage;
 }
