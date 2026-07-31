@@ -11,6 +11,7 @@ import { useApplicationLifecycleStore } from "stores/application-lifecycle";
 import { useCatalogStore } from "stores/catalog";
 import { useCatalogNavigationStore } from "stores/catalog-navigation";
 import { useIdentityStore } from "stores/identity";
+import { productLowerCase } from "src/product-locale";
 
 const router = useRouter();
 const catalogStore = useCatalogStore();
@@ -28,22 +29,22 @@ const identityModules = computed(() =>
 );
 const businessViews = computed(() => unassignedViews(catalog.value));
 const filteredModules = computed(() => {
-  const keyword = query.value.trim().toLocaleLowerCase();
+  const keyword = productLowerCase(query.value.trim());
   if (!keyword) return identityModules.value;
   return identityModules.value.filter((module) =>
     [module.id, module.title, module.description]
+      .map(productLowerCase)
       .join(" ")
-      .toLocaleLowerCase()
       .includes(keyword),
   );
 });
 const filteredViews = computed(() => {
-  const keyword = query.value.trim().toLocaleLowerCase();
+  const keyword = productLowerCase(query.value.trim());
   if (!keyword) return businessViews.value;
   return businessViews.value.filter((view) =>
     [view.title, view.table, view.view_id]
       .filter(Boolean)
-      .some((value) => value.toLocaleLowerCase().includes(keyword)),
+      .some((value) => productLowerCase(value).includes(keyword)),
   );
 });
 

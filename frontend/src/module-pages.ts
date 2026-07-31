@@ -4,6 +4,7 @@ import type {
   TableViewSchema,
   UiCatalog,
 } from "src/contracts/ui-catalog";
+import { compareProductText } from "src/product-locale";
 
 export type AccountIdentity = string;
 
@@ -84,7 +85,7 @@ export function buildAccountModulePages(
     })
     .sort(
       (left, right) =>
-        left.order - right.order || left.id.localeCompare(right.id),
+        left.order - right.order || compareProductText(left.id, right.id),
     );
 }
 
@@ -155,7 +156,7 @@ export function visibleAccountIdentities(
   }
   return [...identities.values()].sort(
     (left, right) =>
-      left.order - right.order || left.id.localeCompare(right.id),
+      left.order - right.order || compareProductText(left.id, right.id),
   );
 }
 

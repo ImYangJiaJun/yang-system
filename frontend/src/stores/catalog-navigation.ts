@@ -1,6 +1,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 import type { UiCatalog } from "src/contracts/ui-catalog";
+import { productLowerCase } from "src/product-locale";
 import { useCatalogStore } from "./catalog";
 
 export type NavigationMode = "views" | "actions";
@@ -23,22 +24,22 @@ export const useCatalogNavigationStore = defineStore(
     const navigationMode = ref<NavigationMode>("views");
 
     const actions = computed(() => {
-      const keyword = query.value.trim().toLocaleLowerCase();
+      const keyword = productLowerCase(query.value.trim());
       if (!keyword) return catalogStore.catalog?.actions ?? [];
       return (catalogStore.catalog?.actions ?? []).filter((action) =>
         [action.operation_id, action.title, action.description, action.path]
+          .map(productLowerCase)
           .join(" ")
-          .toLocaleLowerCase()
           .includes(keyword),
       );
     });
     const views = computed(() => {
-      const keyword = query.value.trim().toLocaleLowerCase();
+      const keyword = productLowerCase(query.value.trim());
       if (!keyword) return catalogStore.catalog?.table_views ?? [];
       return (catalogStore.catalog?.table_views ?? []).filter((view) =>
         [view.view_id, view.title, view.table, view.data_action]
+          .map(productLowerCase)
           .join(" ")
-          .toLocaleLowerCase()
           .includes(keyword),
       );
     });

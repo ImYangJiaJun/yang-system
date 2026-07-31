@@ -2,6 +2,7 @@ import type {
   TableColumnDisplaySchema,
   TableColumnSchema,
 } from "src/contracts/ui-catalog";
+import { PRODUCT_LOCALE } from "src/product-locale";
 import { formatCell } from "./table-view-model";
 
 type DisplayKind = NonNullable<TableColumnDisplaySchema["kind"]>;
@@ -28,7 +29,7 @@ export function inferDisplayKind(column: TableColumnSchema): DisplayKind {
 function formatDate(value: unknown, withTime: boolean): string {
   const date = new Date(String(value));
   if (Number.isNaN(date.getTime())) return formatCell(value);
-  return new Intl.DateTimeFormat("zh-CN", {
+  return new Intl.DateTimeFormat(PRODUCT_LOCALE, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

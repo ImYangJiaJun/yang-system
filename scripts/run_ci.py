@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -207,6 +208,15 @@ def run(command: Command) -> None:
 
 def self_test() -> None:
     workflow = open(".github/workflows/ci.yml", encoding="utf-8").read()
+    with open("frontend/package.json", encoding="utf-8") as package_file:
+        frontend_package = json.load(package_file)
+    frontend_check_steps = frontend_package["scripts"]["check"].split(" && ")
+    assert "pnpm verify:locale-contract" in frontend_check_steps, (
+        "frontend check 必须执行单语言产品合同门禁"
+    )
+    assert frontend_check_steps.index("pnpm verify:locale-contract") < frontend_check_steps.index(
+        "pnpm build"
+    ), "单语言产品合同门禁必须在生产构建前执行"
     assert "python scripts/run_ci.py full" in workflow
     assert "python scripts/run_ci.py integration" in workflow
     required_browser_commands = {
