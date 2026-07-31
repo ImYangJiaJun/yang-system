@@ -56,30 +56,30 @@ impl ActionHandler for CompleteTasksAction {
             .iter()
             .map(|id| serde_json::json!(id))
             .collect::<Vec<_>>();
+        let requested = u64::try_from(ids.len())
+            .map_err(|_| BaseError::Unknown("批量任务数量超出 u64".to_string()))?;
         // tenant-boundary: transaction work-task-complete-transaction
         let mut transaction = context.begin_transaction().await?;
-        if let Err(error) =
-            repository::lock_tasks_for_completion(&context, &ids, &mut transaction).await
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(BaseError::DatabaseTransactionFailed)?;
-            return Err(error);
+        let result = async {
+            repository::lock_workspace(&context, &mut transaction).await?;
+            repository::lock_tasks_for_completion(&context, &ids, &mut transaction).await?;
+            let affected = context
+                .table_query()?
+                .where_in("id", values)?
+                .update_in_tx(&mut transaction, Record::new().set("status", "done"))
+                .await?;
+            if affected != requested {
+                return Err(BaseError::from(yang_db::DbError::TransactionError(
+                    "批量完成期间任务集合发生变化，已整体回滚".to_string(),
+                )));
+            }
+            Ok(CompleteTasksOutput {
+                requested: ids.len(),
+                affected,
+            })
         }
-        let affected = context
-            .table_query()?
-            .where_in("id", values)?
-            .update_in_tx(&mut transaction, Record::new().set("status", "done"))
-            .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(BaseError::DatabaseTransactionFailed)?;
-        Ok(CompleteTasksOutput {
-            requested: ids.len(),
-            affected,
-        })
+        .await;
+        repository::finish_transaction(transaction, result).await
     }
 }
 
