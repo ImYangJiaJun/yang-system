@@ -16,6 +16,12 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     clearMocks: true,
-    exclude: ["e2e/**", "node_modules/**", "dist/**", ".quasar/**"],
+    exclude: [
+      "e2e/**",
+      "e2e-production/**",
+      "node_modules/**",
+      "dist/**",
+      ".quasar/**",
+    ],
   },
 });

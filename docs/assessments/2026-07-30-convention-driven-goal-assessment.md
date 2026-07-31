@@ -23,7 +23,7 @@
 | 自定义页面安全降级 | 已验证 | 静态 registry 未命中或加载失败时，`ModulePage`、`BusinessPage`、`WorkbenchPage` 都保留通用页面 |
 | 自定义页面只新增一个文件 | 未达成 | 当前需要新增组件文件并修改 `custom/registry.ts`，共两个手工触点 |
 | Vue/Quasar/Pinia/Zod 技术选型 | 合理 | 与登录后的元数据驱动 SPA 匹配，当前没有足以抵消迁移成本的替代框架收益 |
-| 完整生产就绪 | 未达成 | 已有较强工程基础，但正式产物 E2E、CI 浏览器门禁、部署契约、端到端可观测性、a11y 和真实业务压力证据仍不完整 |
+| 完整生产就绪 | 未达成 | 已有较强工程基础，但 CI 浏览器门禁、部署契约、端到端可观测性、a11y 和真实业务压力证据仍不完整 |
 
 ### 1.2 对两个评估问题的直接回答
 
@@ -192,7 +192,7 @@
 |---|---|---|
 | 浏览器 XSS 会话边界 | 已闭环 | access token 已改为仅驻留内存，Refresh Token 仍为 host-only HttpOnly Cookie；生产入口启用 enforce CSP，并用 Web Locks、版本化跨标签页结束信号闭环刷新轮换与退出同步 |
 | 正式页面契约完备性 | 已闭环 | Module 多 View、统一 Action executor、custom/bulk、fail-closed 与显式产品外壳接口均有正式路由和矩阵测试证据 |
-| 正式产物 E2E | 未闭环 | Playwright 当前启动 Quasar dev server 和 demo backend，不测试 `dist/spa` 部署行为 |
+| 正式产物 E2E | 已闭环 | 独立 Playwright 配置每次重建并启动 `dist/spa`，验证正式模块深链接、生产路由裁剪、无 dev runtime，以及静态/API 404 不被 history fallback 掩盖 |
 | CI 浏览器门禁 | 未闭环 | `run_ci.py full` 与当前 GitHub Actions quality job 不执行 Playwright |
 | 部署契约 | 未闭环 | history fallback、安全头、HTML/静态资源缓存策略和深链接 smoke test 未入门禁 |
 | 端到端可观测性 | 部分具备 | 后端已有 tracing/request id 等基础信号，前端也提取 request id；尚无统一错误上报、关联检索和告警验收 |
@@ -221,7 +221,7 @@
 
 1. **已满足（2026-07-31）：** access token 内存化；enforce CSP 下已验证登录、刷新、上传和静态自定义组件；多标签页并发刷新与退出同步已有浏览器对抗测试。
 2. Playwright 在 CI 中使用唯一端口或由测试框架分配端口，禁止误复用开发者已有服务。
-3. 增加针对生产构建的浏览器 smoke：构建 `dist/spa`，以真实 history fallback 服务器启动，验证深链接、缓存头和安全头。
+3. **产物行为已满足（2026-07-31）：** 浏览器 smoke 会构建 `dist/spa`，以隔离 history fallback 服务器启动并验证深链接；安全响应头与分层缓存策略仍由“部署契约”门槛验收。
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
 5. 前端错误上报包含 request id，能够与后端 trace/log/metric 关联，并完成一次告警演练。
 6. 增加关键页面 a11y、键盘导航和焦点恢复门禁。
@@ -241,7 +241,7 @@
 
 1. CI 执行 Playwright；
 2. 本地与 CI 都使用隔离端口；
-3. 将生产构建 history fallback、安全头和深链接 smoke 纳入验证。
+3. 生产构建与深链接 smoke 已纳入 `e2e:production`；安全响应头和缓存策略仍需在部署契约中闭环。
 
 ### P0：闭环浏览器安全与诊断
 
@@ -354,10 +354,32 @@ git diff --check
 
 本项不外推为“约定式交付目标已经普遍达成”：独立真实业务 Addon、严格只新增一个 custom 文件和大数据规模仍是单独验收项；也不把 dev server E2E 当作正式产物或部署契约证据。
 
+### 9.3 2026-07-31 增量闭环：正式产物 E2E
+
+本项采用的不变量是：浏览器测试必须消费本次命令刚生成的 `dist/spa`，不能复用 Quasar dev server 或既有端口；合法 history 深链接必须返回 SPA 入口并启动正式路由；带扩展名的缺失静态资源和 API 404 不得被 fallback 伪装为 200 HTML；DEV-only Workbench 与 Vite runtime 不得出现在运行路径。
+
+实现证据：
+
+- `frontend/playwright.production.config.ts` 使用独立测试目录、结果目录和端口变量，`reuseExistingServer: false`；每次先执行 `pnpm build`，再启动产物服务器和 demo backend；
+- `frontend/scripts/serve-production-build.mjs` 只读取 `dist/spa`，对页面路由执行显式 history fallback，对 `/assets` 缺失文件严格返回 404，并把 `/api`、`/.well-known`、`/health` 转发到同源后端；
+- `frontend/e2e-production/production-build.spec.ts` 从 `/module/account.user` 深链接启动正式模块，检查脚本不包含 Vite dev runtime；再验证 `/workbench` 被生产路由移除、缺失 JS 返回 404、缺失 API 保持后端 404 而不是首页 HTML。
+
+对抗性验证：
+
+```powershell
+$env:YANG_PRODUCTION_E2E_FRONTEND_PORT="5305"
+$env:YANG_PRODUCTION_E2E_BACKEND_PORT="18305"
+pnpm --dir frontend e2e:production
+```
+
+红测先在 Vite preview 上真实进入断言并出现两个失败：深链接响应没有可审计 fallback 标记，且缺失 JS 被 history fallback 错误返回 200 HTML。替换为边界明确的产物服务器后，首次绿测又暴露 `account.user` 被 `path.extname()` 误判为静态扩展；最终只把 `/assets` 作为严格静态资源命名空间，并增加 `/module/report.json` 反例，2/2 通过。全门禁还发现 Vitest 会误收集新 Playwright 目录；`vitest.config.ts` 显式排除 `e2e-production/**` 后，21 个测试文件/91 项 Vitest 与生产构建重新通过。
+
+本项不把测试夹具服务器写成目标环境的生产流量服务器，也不据此关闭部署契约：当前夹具只使用最小 `nosniff` 与 `no-cache`，尚未验收响应头 CSP、`frame-ancestors`、HTML 不缓存、哈希资产 immutable、反向代理边界和目标平台配置。
+
 ## 十、最终结论
 
 yang-system 的显式契约路线正确，后端 Catalog、权限投影、通用 TableView、表单和会话基础设施也已经形成可信骨架；在“显式声明一个或多个可用 View 与 presentation”的契约范围内，多 View 和模块级交互的零前端修改交付已经可行。
 
 当前仍不能宣称目标普遍达成：任意 Action 不会自动进入正式页面，自定义页面仍有两个手工触点，尚无独立真实业务 Addon 的零前端业务 diff 证据，前端产品外壳也仍显式持有账号/租户入口知识。
 
-技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界和正式页面契约完备性已有本地对抗证据；整体结论升级仍必须由生产产物 E2E、隔离 CI、部署、可观测性、无障碍与真实规模证据共同支持。
+技术选型合理，不建议换框架。当前阶段应定义为“准生产、等待其余关键门禁闭环”，而不是“已经完整生产就绪”。浏览器 XSS 会话边界、正式页面契约完备性和正式产物 E2E 已有本地对抗证据；整体结论升级仍必须由隔离 CI、部署、可观测性、无障碍与真实规模证据共同支持。
