@@ -319,6 +319,397 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
 
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis(
+) -> anyhow::Result<()> {
+    let mysql_url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
+        .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
+    let redis_url =
+        std::env::var("YANG_SYSTEM_TEST_REDIS_URL").context("缺少 YANG_SYSTEM_TEST_REDIS_URL")?;
+    ensure!(
+        redis_url.trim_end_matches('/').ends_with("/15"),
+        "Step-up 集成测试 Redis URL 必须使用独立 DB 15"
+    );
+    let database_config = DatabaseConfig::default()
+        .with_max_connections(8)
+        .with_min_connections(0)
+        .with_connect_timeout(10);
+    let mysql = Database::connect_with_config(&mysql_url, database_config.clone()).await?;
+    reset_test_database(mysql.pool()).await?;
+    let initializer_database = Database::from_pool(mysql.pool().clone(), database_config)?;
+    let redis = RedisClient::connect_with_config(
+        &redis_url,
+        RedisConfig::default()
+            .with_max_connections(8)
+            .with_min_connections(0)
+            .with_connect_timeout(10),
+    )
+    .await?;
+    let deployment = format!(
+        "step-up-integration-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    );
+    let bootstrap = generate_bootstrap_secret()?;
+    let bootstrap_secret = bootstrap.secret().to_owned();
+    let tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(mysql)
+            .cache(redis.clone())
+            .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
+            .extension(integration_step_up_manager())
+            .token(integration_token_manager())
+            .config(BootstrapSecretVerifier::new(bootstrap.digest().clone(), 2)?)
+            .build()?,
+    );
+    let security = Arc::new(SecuritySettings {
+        argon2_max_concurrency: 2,
+        auth_rate_limit_window_seconds: 60,
+        auth_rate_limit_ip_attempts: 1_000,
+        auth_rate_limit_username_attempts: 100,
+        password_reset_ttl_seconds: 900,
+        issue_refresh_credential_version: true,
+        trusted_proxy_cidrs: Vec::new(),
+    });
+    let first = build_app(Arc::clone(&tools), Arc::clone(&security))?;
+    let initializer = DatabaseInitializer::new(initializer_database, false);
+    initializer
+        .sync_table_definitions(&first.runtime.table_definitions().iter().collect::<Vec<_>>())
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0006_create_authorization_outbox.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260726_0007_create_audit_event.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260731_0011_create_password_reset_token.sql"
+    ))
+    .execute(tools.mysql()?.pool())
+    .await?;
+    let second = build_app(Arc::clone(&tools), security)?;
+
+    let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let admin_username = format!("step_up_admin_{suffix}");
+    let target_username = format!("step_up_target_{suffix}");
+    let password = "correct-horse-battery-staple";
+    let admin = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "register",
+            json!({ "username": admin_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let admin_id = admin["id"].as_i64().context("Step-up 管理员缺少 ID")?;
+    let target = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "register",
+            json!({ "username": target_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let target_id = target["id"].as_i64().context("Step-up 目标用户缺少 ID")?;
+    let initial_login = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "login",
+            json!({ "username": admin_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let initial_access = initial_login["access_token"]
+        .as_str()
+        .context("Step-up 初始登录缺少 Access Token")?;
+    data(
+        dispatch(
+            &first.runtime,
+            "admin.user",
+            "bootstrap",
+            json!({
+                "secret": bootstrap_secret,
+                "name": "Step-up Administrator",
+                "position": "Owner"
+            }),
+            &[("authorization", &format!("Bearer {initial_access}"))],
+            &[],
+        )
+        .await?,
+    )?;
+    let admin_login = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "login",
+            json!({ "username": admin_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let access_token = admin_login["access_token"]
+        .as_str()
+        .context("Step-up 管理员登录缺少 Access Token")?
+        .to_owned();
+    let authorization = format!("Bearer {access_token}");
+    let body = json!({
+        "user_user": target_id,
+        "name": "Step-up Target",
+        "admin": false
+    });
+    let challenge = match dispatch_raw(
+        &first.runtime,
+        "admin.user",
+        "add",
+        body.clone(),
+        &[("authorization", authorization.as_str())],
+        &[],
+    )
+    .await
+    {
+        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+        Err(error) => anyhow::bail!("缺少 proof 应返回 StepUpRequired，实际: {error}"),
+        Ok(_) => anyhow::bail!("缺少 proof 不得执行平台用户新增"),
+    };
+    let completed = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": challenge,
+                "credentials": { "username": admin_username, "password": password }
+            }),
+            &[("authorization", authorization.as_str())],
+            &[],
+        )
+        .await?,
+    )?;
+    let proof = completed["proof"]
+        .as_str()
+        .context("Step-up 完成响应缺少 proof")?
+        .to_owned();
+    let proof_headers = [
+        ("authorization", authorization.as_str()),
+        ("x-step-up-proof", proof.as_str()),
+    ];
+    let (first_result, second_result) = tokio::join!(
+        dispatch_raw(
+            &first.runtime,
+            "admin.user",
+            "add",
+            body.clone(),
+            &proof_headers,
+            &[],
+        ),
+        dispatch_raw(
+            &second.runtime,
+            "admin.user",
+            "add",
+            body.clone(),
+            &proof_headers,
+            &[],
+        )
+    );
+    let outcomes = [first_result, second_result];
+    let outcome_codes = outcomes
+        .iter()
+        .map(|result| match result {
+            Ok(response) => format!("ok:{}", response.code),
+            Err(error) => format!("error:{}", error.code()),
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        outcomes.iter().filter(|result| result.is_ok()).count() == 1,
+        "两个实例并发消费同一 proof 必须恰好一个成功: {outcome_codes:?}"
+    );
+    ensure!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(BaseError::Unauthorized(_))))
+            .count()
+            == 1,
+        "另一个实例必须把同一 proof 作为重放拒绝"
+    );
+
+    let failed_body = json!({ "id": admin_id, "status": "active" });
+    let failed_challenge = match dispatch_raw(
+        &first.runtime,
+        "admin.user",
+        "set_status",
+        failed_body.clone(),
+        &[("authorization", authorization.as_str())],
+        &[],
+    )
+    .await
+    {
+        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+        Err(error) => anyhow::bail!("数据库故障前应获得 challenge，实际: {error}"),
+        Ok(_) => anyhow::bail!("缺少 proof 不得执行状态更新"),
+    };
+    let failed_completed = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": failed_challenge,
+                "credentials": { "username": admin_username, "password": password }
+            }),
+            &[("authorization", authorization.as_str())],
+            &[],
+        )
+        .await?,
+    )?;
+    let failed_proof = failed_completed["proof"]
+        .as_str()
+        .context("数据库故障 proof 缺失")?
+        .to_owned();
+    sqlx::query("RENAME TABLE admin_user TO admin_user_unavailable")
+        .execute(tools.mysql()?.pool())
+        .await?;
+    let failed_result = dispatch_raw(
+        &first.runtime,
+        "admin.user",
+        "set_status",
+        failed_body.clone(),
+        &[
+            ("authorization", authorization.as_str()),
+            ("x-step-up-proof", failed_proof.as_str()),
+        ],
+        &[],
+    )
+    .await;
+    sqlx::query("RENAME TABLE admin_user_unavailable TO admin_user")
+        .execute(tools.mysql()?.pool())
+        .await?;
+    ensure!(
+        failed_result.is_err(),
+        "业务数据库故障时高危写入必须失败关闭"
+    );
+
+    let outage_challenge = match dispatch_raw(
+        &first.runtime,
+        "admin.user",
+        "set_status",
+        failed_body.clone(),
+        &[("authorization", authorization.as_str())],
+        &[],
+    )
+    .await
+    {
+        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+        Err(error) => anyhow::bail!("Redis 故障前应获得 challenge，实际: {error}"),
+        Ok(_) => anyhow::bail!("缺少 proof 不得执行状态更新"),
+    };
+    let outage_completed = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": outage_challenge,
+                "credentials": { "username": admin_username, "password": password }
+            }),
+            &[("authorization", authorization.as_str())],
+            &[],
+        )
+        .await?,
+    )?;
+    let outage_proof = outage_completed["proof"]
+        .as_str()
+        .context("Redis 故障 proof 缺失")?
+        .to_owned();
+    redis.close().await;
+    let outage_result = dispatch_raw(
+        &first.runtime,
+        "admin.user",
+        "set_status",
+        failed_body,
+        &[
+            ("authorization", authorization.as_str()),
+            ("x-step-up-proof", outage_proof.as_str()),
+        ],
+        &[],
+    )
+    .await;
+    ensure!(
+        outage_result.is_err(),
+        "Redis proof store 不可用时高危写入必须失败关闭"
+    );
+
+    let audit_rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT action, result, target_type, CAST(after_summary AS CHAR) \
+         FROM audit_event \
+         WHERE action IN ('security.step_up', 'account.user.step_up_complete', \
+                          'admin.user.add', 'admin.user.set_status') \
+         ORDER BY id",
+    )
+    .fetch_all(tools.mysql()?.pool())
+    .await?;
+    ensure!(
+        audit_rows.iter().any(|(action, result, _, summary)| {
+            action == "security.step_up"
+                && result == "succeeded"
+                && summary
+                    .as_deref()
+                    .is_some_and(|value| value.contains("proof_accepted"))
+        }),
+        "proof 接受必须在业务 Action 前留下 succeeded 审计"
+    );
+    ensure!(
+        audit_rows.iter().any(|(action, result, _, summary)| {
+            action == "security.step_up"
+                && result == "denied"
+                && summary
+                    .as_deref()
+                    .is_some_and(|value| value.contains("proof_replayed"))
+        }),
+        "跨实例重放必须留下 denied 审计"
+    );
+    ensure!(
+        audit_rows.iter().any(|(action, result, _, summary)| {
+            action == "admin.user.set_status"
+                && result == "failed"
+                && summary
+                    .as_deref()
+                    .is_some_and(|value| value.contains("action_rejected"))
+        }),
+        "proof 接受后的业务故障必须留下独立 failed 审计"
+    );
+    let serialized_audits = serde_json::to_string(&audit_rows)?;
+    for sensitive in [
+        admin_username.as_str(),
+        target_username.as_str(),
+        password,
+        proof.as_str(),
+        failed_proof.as_str(),
+        outage_proof.as_str(),
+    ] {
+        ensure!(
+            !serialized_audits.contains(sensitive),
+            "Step-up 审计不得包含账号、密码或 proof"
+        );
+    }
+
+    tools.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Result<()> {
     let mysql_url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
         .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
@@ -473,6 +864,7 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
     let step_up_resource = "admin_user:integration-target:admin=true";
     let step_up_challenge =
         step_up_manager.issue_challenge(user_id.to_string(), &step_up_action, step_up_resource)?;
+    let signed_step_up_challenge = step_up_challenge.challenge.clone();
     let wrong_step_up = dispatch_raw(
         &application.runtime,
         "account.user",
@@ -549,6 +941,48 @@ async fn real_mysql_redis_support_account_and_tenant_lifecycle() -> anyhow::Resu
         matches!(cross_subject_attempt, Err(BaseError::Unauthorized(_))),
         "正确密码也不得完成其他主体的 Step-up challenge"
     );
+    let step_up_completion_audits: Vec<(String, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT result, actor_type, subject_id, CAST(after_summary AS CHAR) \
+             FROM audit_event \
+             WHERE action = 'account.user.step_up_complete' \
+             ORDER BY id",
+        )
+        .fetch_all(tools.mysql()?.pool())
+        .await?;
+    ensure!(
+        step_up_completion_audits.len() == 3,
+        "错误密码、成功和跨主体尝试必须各持久化一条 Step-up 完成审计"
+    );
+    ensure!(
+        step_up_completion_audits
+            .iter()
+            .filter(|(result, _, _, _)| result == "denied")
+            .count()
+            == 2,
+        "错误密码与跨主体尝试必须记为 denied"
+    );
+    ensure!(
+        step_up_completion_audits
+            .iter()
+            .filter(|(result, _, _, _)| result == "succeeded")
+            .count()
+            == 1,
+        "正确凭据必须记为 succeeded"
+    );
+    let serialized_step_up_audits = serde_json::to_string(&step_up_completion_audits)?;
+    for sensitive in [
+        username.as_str(),
+        password,
+        "wrong-step-up-password",
+        signed_step_up_challenge.as_str(),
+        completed_step_up["proof"].as_str().unwrap_or_default(),
+    ] {
+        ensure!(
+            !serialized_step_up_audits.contains(sensitive),
+            "Step-up 持久审计不得包含用户名、密码、challenge 或 proof"
+        );
+    }
 
     let bootstrap = data(
         dispatch(

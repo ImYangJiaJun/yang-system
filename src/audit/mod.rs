@@ -12,7 +12,7 @@ pub use event::{
 };
 
 pub(crate) use repository::{
-    append_in_tx, entity, succeeded_event, succeeded_system_event, summary,
+    append_in_tx, append_independent, entity, succeeded_event, succeeded_system_event, summary,
 };
 pub(crate) use schema::validate_schema;
 

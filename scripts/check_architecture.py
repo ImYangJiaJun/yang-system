@@ -155,6 +155,11 @@ PROTECTED_MODULE_PATHS = (
     "src/modules/admin/user/",
     "src/modules/org/user/",
 )
+INTERNAL_ACTION_BYPASS_PATTERNS = {
+    "ActionContext.plugins": re.compile(r"\.\s*plugins\s*\("),
+    "Registry.resolve_typed": re.compile(r"\.\s*resolve_typed\s*(?:::\s*<[^;]+?>)?\s*\("),
+    "TypedActionHandle": re.compile(r"\bTypedActionHandle\b"),
+}
 
 
 def derived_action_count(source: str) -> int:
@@ -468,6 +473,29 @@ def check_audit_append_only(root: Path) -> list[str]:
     return errors
 
 
+def check_internal_action_bypass(root: Path) -> list[str]:
+    """应用生产代码不得绕过 Step-up 中间件直接调用 Registry Action。
+
+    当前 allowlist 为空。若未来出现真实内部编排需求，必须先提供只接受已审计安全
+    决策的集中调用器，再把该调用器而不是业务文件加入机械白名单。
+    """
+
+    errors: list[str] = []
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return errors
+    for path in sorted(source_root.rglob("*.rs")):
+        source = production_source(path.read_text(encoding="utf-8"))
+        for name, pattern in INTERNAL_ACTION_BYPASS_PATTERNS.items():
+            for match in pattern.finditer(source):
+                line_number = source.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{path.relative_to(root)}:{line_number}: 禁止通过 {name} "
+                    "绕过 Action 中间件；内部高危调用必须先建设集中审计调用器"
+                )
+    return errors
+
+
 def raw_sql_boundary_path_allowed(kind: str, relative: Path) -> bool:
     """只允许领域 repository/service 与两个显式基础设施边界持有原始 SQL。"""
 
@@ -729,6 +757,7 @@ def check(root: Path) -> list[str]:
     errors.extend(check_tenant_boundaries(root))
     errors.extend(check_tenant_isolation_evidence(root))
     errors.extend(check_audit_append_only(root))
+    errors.extend(check_internal_action_bypass(root))
     errors.extend(check_raw_sql_boundaries(root))
     errors.extend(check_authorization_writer_boundaries(root))
     errors.extend(check_frontend_boundaries(root))
@@ -822,6 +851,25 @@ def self_test() -> None:
         )
         (root / "src" / "audit_mutation.rs").unlink()
         assert check_audit_append_only(root) == [], "审计 INSERT 必须允许"
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        write(
+            root / "src" / "bypass.rs",
+            "async fn bypass(ctx: ActionContext) { ctx.plugins().unwrap(); }\n",
+        )
+        errors = check_internal_action_bypass(root)
+        assert any("绕过 Action 中间件" in error for error in errors), (
+            "必须拒绝未经集中审计的内部 Action 调用"
+        )
+        write(
+            root / "src" / "bypass.rs",
+            "fn resolve(registry: Registry) { registry.resolve_typed(reference); }\n",
+        )
+        errors = check_internal_action_bypass(root)
+        assert any("Registry.resolve_typed" in error for error in errors), (
+            "必须拒绝预解析内部 Action handle"
+        )
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

@@ -6,6 +6,7 @@
 
 use super::{AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult, AuditSummary};
 use serde_json::Value;
+use sqlx::MySqlPool;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
 use yang_db::Transaction;
@@ -145,6 +146,66 @@ pub(crate) async fn append_in_tx(
     if result.rows_affected() != 1 {
         return Err(BaseError::Unknown(
             "审计事件追加未精确影响一行，拒绝提交业务事务".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 使用连接池自动提交一条与业务事务解耦的审计事实。
+///
+/// 仅用于已被拒绝或已失败、因而没有可提交业务事务的安全事件。调用方不得用它
+/// 替代成功业务写入的 `append_in_tx`；Step-up proof 接受事件是业务执行前的独立
+/// 安全决策，必须先成功落库才能继续执行受保护 Action。
+pub(crate) async fn append_independent(
+    pool: &MySqlPool,
+    event: &AuditEvent,
+) -> Result<(), BaseError> {
+    let before_summary = event
+        .before_summary()
+        .map(|summary| serde_json::to_string(&summary.as_json()))
+        .transpose()
+        .map_err(|error| {
+            BaseError::ConfigError(format!("序列化审计 before_summary 失败: {error}"))
+        })?;
+    let after_summary = event
+        .after_summary()
+        .map(|summary| serde_json::to_string(&summary.as_json()))
+        .transpose()
+        .map_err(|error| {
+            BaseError::ConfigError(format!("序列化审计 after_summary 失败: {error}"))
+        })?;
+    let (subject_type, subject_id) = event
+        .subject()
+        .map(|subject| (Some(subject.kind()), Some(subject.id())))
+        .unwrap_or((None, None));
+    let result = sqlx::query(
+        "INSERT INTO audit_event \
+         (event_id, schema_version, occurred_at, actor_type, actor_id, tenant_id, action, \
+          subject_type, subject_id, target_type, target_id, before_summary, after_summary, \
+          request_id, result) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(event.event_id())
+    .bind(event.schema_version())
+    .bind(event.occurred_at())
+    .bind(event.context().actor().kind())
+    .bind(event.context().actor().id())
+    .bind(event.context().tenant_id())
+    .bind(event.action())
+    .bind(subject_type)
+    .bind(subject_id)
+    .bind(event.target().kind())
+    .bind(event.target().id())
+    .bind(before_summary)
+    .bind(after_summary)
+    .bind(event.context().request_id().to_string())
+    .bind(event.result().as_str())
+    .execute(pool)
+    .await
+    .map_err(yang_db::DbError::from)?;
+    if result.rows_affected() != 1 {
+        return Err(BaseError::Unknown(
+            "独立审计事件追加未精确影响一行".to_string(),
         ));
     }
     Ok(())

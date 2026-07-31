@@ -1,5 +1,6 @@
 //! 应用级 Step-up 运行时与资源指纹。
 
+use crate::audit::{self, AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult};
 use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -7,11 +8,12 @@ use std::sync::Arc;
 #[cfg(test)]
 use yang_base::action::InMemoryStepUpProofStore;
 use yang_base::action::{
-    ActionContext, RedisStepUpProofStore, StepUpManager, StepUpMiddleware, StepUpProofStore,
-    StepUpResourceResolver, StepUpVerification,
+    ActionContext, ApiResponse, RedisStepUpProofStore, StepUpManager, StepUpProofStore,
+    StepUpResourceResolver, StepUpVerification, STEP_UP_PROOF_HEADER,
 };
 use yang_base::definition::ActionRef;
-use yang_base::BaseError;
+use yang_base::router::{Middleware, MiddlewareRole, Next};
+use yang_base::{BaseError, ErrorCategory};
 
 #[derive(Clone)]
 enum ApplicationProofStore {
@@ -64,13 +66,239 @@ impl StepUpServices {
         Arc::clone(&self.manager)
     }
 
-    pub(crate) fn middleware<R>(&self, target: ActionRef, resolver: R) -> StepUpMiddleware<R>
-    where
-        R: StepUpResourceResolver,
-    {
-        StepUpMiddleware::new(Arc::clone(&self.manager), target, resolver)
-            .with_proof_store(self.proof_store.clone())
+    pub(crate) fn middleware(
+        &self,
+        target: ActionRef,
+        resolver: RequestFingerprintResolver,
+    ) -> AuditedStepUpMiddleware {
+        AuditedStepUpMiddleware {
+            manager: Arc::clone(&self.manager),
+            action: target,
+            resolver,
+            proof_store: self.proof_store.clone(),
+        }
     }
+}
+
+/// 把 proof 验证结果与后续高危 Action 拒绝/失败写入独立持久审计。
+///
+/// proof 接受事件必须先落库再进入业务 Action（fail-closed）；已经拒绝或失败的请求
+/// 即使审计库不可用也保持原错误，避免审计故障改变安全决定。
+pub(crate) struct AuditedStepUpMiddleware {
+    manager: Arc<StepUpManager>,
+    action: ActionRef,
+    resolver: RequestFingerprintResolver,
+    proof_store: ApplicationProofStore,
+}
+
+#[async_trait]
+impl Middleware for AuditedStepUpMiddleware {
+    fn role(&self) -> MiddlewareRole {
+        MiddlewareRole::StepUpProtection
+    }
+
+    fn target_action(&self) -> Option<&ActionRef> {
+        Some(&self.action)
+    }
+
+    async fn handle(
+        &self,
+        context: ActionContext,
+        next: Next<'_>,
+    ) -> Result<ApiResponse, BaseError> {
+        let subject = context.actor()?.user_id();
+        let resource = self.resolver.resolve(&context).await?;
+        if resource.trim().is_empty() {
+            return Err(BaseError::ConfigError(
+                "Step-up 资源解析器返回了空标识".to_string(),
+            ));
+        }
+        let facts = StepUpAuditFacts::from_context(&context, &self.action, resource)?;
+
+        let Some(proof) = context.request.get_header(STEP_UP_PROOF_HEADER) else {
+            let challenge = self.manager.issue_challenge(
+                subject.to_string(),
+                &self.action,
+                facts.resource(),
+            )?;
+            facts
+                .record_best_effort(
+                    "security.step_up",
+                    AuditResult::Denied,
+                    "challenge_required",
+                    Some("step_up_required"),
+                )
+                .await;
+            return Err(BaseError::StepUpRequired(challenge));
+        };
+
+        let verification = match self.manager.verify_proof(
+            proof,
+            &subject.to_string(),
+            &self.action,
+            facts.resource(),
+        ) {
+            Ok(verification) => verification,
+            Err(error) => {
+                facts
+                    .record_error_best_effort("security.step_up", "proof_denied", &error)
+                    .await;
+                return Err(error);
+            }
+        };
+        let consumed = match self.proof_store.consume(&verification).await {
+            Ok(consumed) => consumed,
+            Err(error) => {
+                facts
+                    .record_error_best_effort("security.step_up", "proof_store_failed", &error)
+                    .await;
+                return Err(error);
+            }
+        };
+        if !consumed {
+            let error = BaseError::Unauthorized("Step-up proof 已被消费".to_string());
+            facts
+                .record_error_best_effort("security.step_up", "proof_replayed", &error)
+                .await;
+            return Err(error);
+        }
+
+        // proof 已被共享存储消费；审计失败时拒绝进入业务写入，不能制造未审计的高危操作。
+        facts
+            .record(
+                "security.step_up",
+                AuditResult::Succeeded,
+                "proof_accepted",
+                None,
+            )
+            .await?;
+
+        let result = next.run(context).await;
+        if let Err(error) = &result {
+            facts
+                .record_error_best_effort(facts.target_action(), "action_rejected", error)
+                .await;
+        }
+        result
+    }
+}
+
+struct StepUpAuditFacts {
+    pool: sqlx::MySqlPool,
+    context: AuditEventContext,
+    subject: AuditEntity,
+    target: AuditEntity,
+    target_action: String,
+    resource: String,
+}
+
+impl StepUpAuditFacts {
+    fn from_context(
+        context: &ActionContext,
+        target_action: &ActionRef,
+        resource: String,
+    ) -> Result<Self, BaseError> {
+        let actor_id = context.actor()?.user_id();
+        let tenant_id = context.tenant().ok().map(|tenant| tenant.id().get());
+        let audit_context = AuditEventContext::new(
+            AuditActor::user(actor_id).map_err(invalid_audit_event)?,
+            tenant_id,
+            context.request_id(),
+        )
+        .map_err(invalid_audit_event)?;
+        Ok(Self {
+            pool: context.tools().mysql()?.pool().clone(),
+            context: audit_context,
+            subject: AuditEntity::new("user", actor_id.to_string()).map_err(invalid_audit_event)?,
+            target: AuditEntity::new("step_up_resource", resource.clone())
+                .map_err(invalid_audit_event)?,
+            target_action: target_action.to_string(),
+            resource,
+        })
+    }
+
+    fn resource(&self) -> &str {
+        &self.resource
+    }
+
+    fn target_action(&self) -> &str {
+        &self.target_action
+    }
+
+    async fn record(
+        &self,
+        action: &str,
+        result: AuditResult,
+        outcome_code: &'static str,
+        error_code: Option<&str>,
+    ) -> Result<(), BaseError> {
+        let mut fields = vec![
+            ("outcome_code", serde_json::json!(outcome_code)),
+            ("target_action", serde_json::json!(self.target_action)),
+        ];
+        if let Some(error_code) = error_code {
+            fields.push(("error_code", serde_json::json!(error_code)));
+        }
+        let event = AuditEvent::new(
+            self.context.clone(),
+            action,
+            Some(self.subject.clone()),
+            self.target.clone(),
+            result,
+            None,
+            Some(audit::AuditSummary::try_from_fields(fields).map_err(invalid_audit_event)?),
+        )
+        .map_err(invalid_audit_event)?;
+        audit::append_independent(&self.pool, &event).await
+    }
+
+    async fn record_best_effort(
+        &self,
+        action: &str,
+        result: AuditResult,
+        outcome_code: &'static str,
+        error_code: Option<&str>,
+    ) {
+        if let Err(audit_error) = self.record(action, result, outcome_code, error_code).await {
+            tracing::error!(
+                target_action = %self.target_action,
+                result = result.as_str(),
+                audit_error_code = audit_error.code_str(),
+                "Step-up 拒绝或失败事件持久化失败，保留原安全结果"
+            );
+        }
+    }
+
+    async fn record_error_best_effort(
+        &self,
+        action: &str,
+        outcome_code: &'static str,
+        error: &BaseError,
+    ) {
+        self.record_best_effort(
+            action,
+            audit_result_for_error(error),
+            outcome_code,
+            Some(error.code_str()),
+        )
+        .await;
+    }
+}
+
+pub(crate) fn audit_result_for_error(error: &BaseError) -> AuditResult {
+    match error.category() {
+        ErrorCategory::Auth | ErrorCategory::Client | ErrorCategory::NotFound => {
+            AuditResult::Denied
+        }
+        ErrorCategory::Conflict | ErrorCategory::Transient | ErrorCategory::Server => {
+            AuditResult::Failed
+        }
+        _ => AuditResult::Failed,
+    }
+}
+
+fn invalid_audit_event(error: anyhow::Error) -> BaseError {
+    BaseError::ConfigError(format!("构建 Step-up 审计事件失败: {error}"))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,6 +384,17 @@ mod tests {
     use yang_base::action::{Request, TenantContext, TenantId};
     use yang_base::tools::ToolsBuilder;
 
+    fn manager() -> Arc<StepUpManager> {
+        Arc::new(
+            StepUpManager::new(
+                "independent-step-up-audit-test-secret-0123456789abcdef",
+                "test-step-up-audit",
+                "test-sensitive-actions",
+            )
+            .unwrap_or_else(|error| panic!("测试 Step-up manager 应有效: {error}")),
+        )
+    }
+
     fn context(body: Value) -> ActionContext {
         ActionContext::new(
             Request::new(body),
@@ -216,5 +455,38 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.contains("tenant=7"));
         assert!(!first.contains("999"));
+    }
+
+    #[test]
+    fn audited_middleware_is_bound_to_one_target_and_security_role() {
+        let services = StepUpServices::in_memory(manager());
+        let target = yang_base::action!("admin.user.set_admin");
+        let middleware = services.middleware(
+            target.clone(),
+            RequestFingerprintResolver::global("admin-user"),
+        );
+
+        assert_eq!(middleware.target_action(), Some(&target));
+        assert_eq!(middleware.role(), MiddlewareRole::StepUpProtection);
+    }
+
+    #[test]
+    fn audit_classification_separates_refusals_from_infrastructure_failures() {
+        assert_eq!(
+            audit_result_for_error(&BaseError::Unauthorized("bad proof".to_string())),
+            AuditResult::Denied
+        );
+        assert_eq!(
+            audit_result_for_error(&BaseError::PermissionDenied("forbidden".to_string())),
+            AuditResult::Denied
+        );
+        assert_eq!(
+            audit_result_for_error(&BaseError::RedisNotInitialized),
+            AuditResult::Failed
+        );
+        assert_eq!(
+            audit_result_for_error(&BaseError::Unknown("boom".to_string())),
+            AuditResult::Failed
+        );
     }
 }
