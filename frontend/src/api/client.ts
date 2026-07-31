@@ -11,11 +11,11 @@ import {
   requestWithTokenRefresh,
   requireCredentialRelogin,
 } from "./auth-session";
-import { ApiError } from "./errors";
+import { ApiError, StepUpRequiredError } from "./errors";
 import { apiBase, contextHeaders, parseJson } from "./http";
 import type { InvocationResult, SessionContext } from "./types";
 
-export { ApiError } from "./errors";
+export { ApiError, StepUpRequiredError } from "./errors";
 export type { InvocationResult, SessionContext } from "./types";
 
 export async function fetchUiCatalog(
@@ -69,12 +69,18 @@ export async function invokeAction(
   values: Record<string, unknown>,
   context: SessionContext,
   signal?: AbortSignal,
+  options: { stepUpProof?: string } = {},
 ): Promise<InvocationResult> {
   let relatedRequestId: string | undefined;
   try {
     const startedAt = performance.now();
     const response = await requestWithTokenRefresh(context.token, (token) => {
       const request = buildActionRequest(action, values, { ...context, token });
+      if (options.stepUpProof) {
+        const headers = new Headers(request.init.headers);
+        headers.set("x-step-up-proof", options.stepUpProof);
+        request.init.headers = headers;
+      }
       return fetch(request.url, { ...request.init, signal });
     });
     relatedRequestId = response.headers.get("x-request-id") ?? undefined;
@@ -85,7 +91,10 @@ export async function invokeAction(
     }
     return result;
   } catch (cause) {
-    if (!(cause instanceof Error && cause.name === "AbortError")) {
+    if (
+      !(cause instanceof Error && cause.name === "AbortError") &&
+      !(cause instanceof StepUpRequiredError)
+    ) {
       captureFrontendError(cause, {
         kind: failureKind(cause),
         operation: action.operation_id,

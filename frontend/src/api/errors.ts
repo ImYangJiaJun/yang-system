@@ -21,3 +21,27 @@ export class ApiError extends Error {
     this.details = options.details;
   }
 }
+
+export class StepUpRequiredError extends ApiError {
+  readonly challenge: string;
+  readonly expiresIn: number;
+
+  constructor(
+    message: string,
+    options: {
+      code?: number;
+      requestId?: string;
+      challenge: string;
+      expiresIn: number;
+    },
+  ) {
+    super(message, {
+      status: 428,
+      code: options.code,
+      requestId: options.requestId,
+    });
+    this.name = "StepUpRequiredError";
+    this.challenge = options.challenge;
+    this.expiresIn = options.expiresIn;
+  }
+}

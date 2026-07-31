@@ -9,6 +9,7 @@ import { Dialog, Notify } from "quasar";
 import {
   ApiError,
   invokeAction,
+  StepUpRequiredError,
   type InvocationResult,
   type SessionContext,
 } from "src/api/client";
@@ -24,6 +25,7 @@ import {
   groupPresentedActions,
 } from "../table-view-model";
 import ActionConfirmationDialog from "../ActionConfirmationDialog.vue";
+import StepUpDialog from "../StepUpDialog.vue";
 
 interface UsePresentedActionsOptions {
   presentations: MaybeRefOrGetter<ActionPresentationSchema[]>;
@@ -41,6 +43,10 @@ interface UsePresentedActionsOptions {
   notify?: (type: "positive" | "negative", message: string) => void;
   handleAttachment?: (result: InvocationResult) => void;
   redirect?: (location: string) => void;
+  reauthenticate?: (
+    challenge: string,
+    session: SessionContext,
+  ) => Promise<string | undefined>;
 }
 
 interface UseTableActionsOptions extends Omit<
@@ -62,6 +68,7 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
   const redirect =
     options.redirect ??
     ((location: string) => window.location.assign(location));
+  const reauthenticate = options.reauthenticate ?? requestStepUpProof;
   const actionDialog = ref(false);
   const actionLoading = ref(false);
   const activePresentation = ref<ActionPresentationSchema>();
@@ -146,12 +153,27 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
     controller = requestController;
     try {
       if (!(await confirm(presentation))) return;
-      const result = await invoke(
-        action,
-        actionValues.value,
-        { ...toValue(options.session) },
-        requestController.signal,
-      );
+      const session = { ...toValue(options.session) };
+      let result: InvocationResult;
+      try {
+        result = await invoke(
+          action,
+          actionValues.value,
+          session,
+          requestController.signal,
+        );
+      } catch (cause) {
+        if (!(cause instanceof StepUpRequiredError)) throw cause;
+        const proof = await reauthenticate(cause.challenge, session);
+        if (!proof) return;
+        result = await invoke(
+          action,
+          actionValues.value,
+          session,
+          requestController.signal,
+          { stepUpProof: proof },
+        );
+      }
       handleAttachment(result);
       if (result.kind === "redirect" && result.location) {
         redirect(result.location);
@@ -203,6 +225,23 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
     submitAction,
     dispose,
   };
+}
+
+function requestStepUpProof(
+  challenge: string,
+  session: SessionContext,
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    Dialog.create({
+      component: StepUpDialog,
+      componentProps: { challenge, session },
+    })
+      .onOk((proof: unknown) =>
+        resolve(typeof proof === "string" && proof ? proof : undefined),
+      )
+      .onCancel(() => resolve(undefined))
+      .onDismiss(() => resolve(undefined));
+  });
 }
 
 export function useTableActions(options: UseTableActionsOptions) {

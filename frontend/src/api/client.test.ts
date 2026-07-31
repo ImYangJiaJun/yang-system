@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, fetchUiCatalog, invokeAction } from "./client";
+import {
+  ApiError,
+  fetchUiCatalog,
+  invokeAction,
+  StepUpRequiredError,
+} from "./client";
 import {
   activeAccessToken,
   clearStoredSession,
@@ -81,6 +86,77 @@ describe("fetchUiCatalog", () => {
 });
 
 describe("invokeAction", () => {
+  it("把合法 428 解析为不携带 details 的 Step-up challenge", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 40110,
+              message: "敏感操作需要重新认证",
+              data: { challenge: "signed-challenge", expires_in: 120 },
+            }),
+            { status: 428, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    const error = await invokeAction(action, { id: 1, name: "A" }, {}).catch(
+      (cause: unknown) => cause,
+    );
+    expect(error).toBeInstanceOf(StepUpRequiredError);
+    expect(error).toMatchObject({
+      status: 428,
+      challenge: "signed-challenge",
+      expiresIn: 120,
+      details: undefined,
+    });
+  });
+
+  it("仅把调用方提供的临时 proof 注入当前请求头", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(new Headers(init.headers).get("x-step-up-proof")).toBe(
+        "one-shot-proof",
+      );
+      return new Response(
+        JSON.stringify({ code: 0, message: "成功", data: { ok: true } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await invokeAction(action, { id: 1, name: "A" }, {}, undefined, {
+      stepUpProof: "one-shot-proof",
+    });
+    expect(JSON.stringify({ ...sessionStorage })).not.toContain(
+      "one-shot-proof",
+    );
+    expect(JSON.stringify({ ...localStorage })).not.toContain("one-shot-proof");
+  });
+
+  it("拒绝缺字段或越界 TTL 的伪 428 契约", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: 40110,
+              data: { challenge: "signed-challenge", expires_in: 301 },
+            }),
+            { status: 428, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    const error = await invokeAction(action, { id: 1, name: "A" }, {}).catch(
+      (cause: unknown) => cause,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(StepUpRequiredError);
+  });
+
   it("凭据变更成功后清除 Access 状态并发出重新登录事件", async () => {
     persistTokenPair({ accessToken: "access-before-change" });
     const relogin = vi.fn();

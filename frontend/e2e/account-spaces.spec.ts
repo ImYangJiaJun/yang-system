@@ -251,6 +251,90 @@ test("登录后无需刷新即可获得完整账号身份目录", async ({ page 
   await expect(page.getByRole("heading", { name: "用户中心" })).toBeVisible();
 });
 
+test("敏感操作收到 428 后重认证，并只携带内存 proof 重试一次", async ({
+  page,
+}) => {
+  const actions = [
+    action("admin.user.list", "平台账号列表", "分页查看平台账号"),
+    action("admin.user.add", "添加平台账号", "创建平台账号", "POST"),
+  ];
+  await serveCatalog(page, actions, "admin");
+  await page.route("**/api/v1/admin/user/list**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { items: [], total: 0, page: 1, limit: 20 },
+      }),
+    }),
+  );
+  let protectedAttempts = 0;
+  const observedProofs: Array<string | undefined> = [];
+  await page.route("**/api/v1/admin/user/add", (route) => {
+    protectedAttempts += 1;
+    observedProofs.push(route.request().headers()["x-step-up-proof"]);
+    if (protectedAttempts === 1) {
+      return route.fulfill({
+        status: 428,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: 40110,
+          message: "敏感操作需要重新认证",
+          data: { challenge: "browser-signed-challenge", expires_in: 120 },
+        }),
+      });
+    }
+    return route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ code: 0, message: "创建成功", data: { id: 7 } }),
+    });
+  });
+  await page.route("**/api/v1/users/step-up/complete", async (route) => {
+    const body = route.request().postDataJSON();
+    expect(body).toEqual({
+      challenge: "browser-signed-challenge",
+      credentials: { username: "admin", password: "correct-password" },
+    });
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 0,
+        message: "成功",
+        data: { proof: "browser-one-shot-proof", expires_in: 300 },
+      }),
+    });
+  });
+
+  await page.goto("/module/admin.user");
+  await page.getByRole("button", { name: "添加平台账号" }).click();
+  const actionDialog = page.getByRole("dialog", { name: "添加平台账号" });
+  await actionDialog.getByRole("button", { name: "添加平台账号" }).click();
+
+  const stepUpDialog = page.getByRole("dialog", {
+    name: "敏感操作重新认证",
+  });
+  await stepUpDialog.getByLabel("用户名").fill("admin");
+  await stepUpDialog.getByLabel("密码").fill("correct-password");
+  await stepUpDialog.getByRole("button", { name: "验证并继续" }).click();
+
+  await expect(stepUpDialog).toBeHidden();
+  await expect(actionDialog).toBeHidden();
+  expect(protectedAttempts).toBe(2);
+  expect(observedProofs).toEqual([undefined, "browser-one-shot-proof"]);
+  const stored = await page.evaluate(() =>
+    JSON.stringify({
+      session: { ...sessionStorage },
+      local: { ...localStorage },
+    }),
+  );
+  expect(stored).not.toContain("browser-one-shot-proof");
+  expect(stored).not.toContain("correct-password");
+});
+
 test("每个已授权后端 Module 都生成对应的 BR 页面", async ({ page }) => {
   await serveCatalog(page, [
     action("account.user.me", "当前用户", "查看当前登录账号"),

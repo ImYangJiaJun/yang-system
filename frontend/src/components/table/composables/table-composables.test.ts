@@ -1,6 +1,10 @@
 import { effectScope, nextTick, ref, type EffectScope } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { InvocationResult, SessionContext } from "src/api/client";
+import {
+  StepUpRequiredError,
+  type InvocationResult,
+  type SessionContext,
+} from "src/api/client";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
@@ -16,6 +20,97 @@ const scopes: EffectScope[] = [];
 
 afterEach(() => {
   for (const scope of scopes.splice(0)) scope.stop();
+});
+
+describe("Step-up action orchestration", () => {
+  it("只在 428 后获取 proof，并仅重试原操作一次", async () => {
+    const protectedAction = action("admin.user.set_admin");
+    const protectedPresentation = presentation("admin.user.set_admin", {
+      placement: "toolbar",
+      interaction: "invoke",
+    });
+    const result: InvocationResult = {
+      kind: "json",
+      status: 200,
+      durationMs: 1,
+      data: { ok: true },
+    };
+    const invoke = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new StepUpRequiredError("需要重新认证", {
+          challenge: "signed-challenge",
+          expiresIn: 120,
+        }),
+      )
+      .mockResolvedValueOnce(result);
+    const reauthenticate = vi.fn().mockResolvedValue("one-shot-proof");
+    const reload = vi.fn().mockResolvedValue(undefined);
+    const actions = inScope(() =>
+      usePresentedActions({
+        presentations: () => [protectedPresentation],
+        businessFields: () => [],
+        actions: () => [protectedAction],
+        session: () => ({ token: "access-token", tenantId: "7" }),
+        selectedRows: () => [],
+        reload,
+        emitCustom: vi.fn(),
+        invoke,
+        confirm: async () => true,
+        reauthenticate,
+        notify: vi.fn(),
+      }),
+    );
+
+    await actions.openAction(protectedPresentation);
+
+    expect(reauthenticate).toHaveBeenCalledOnce();
+    expect(reauthenticate).toHaveBeenCalledWith("signed-challenge", {
+      token: "access-token",
+      tenantId: "7",
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[0]?.[4]).toBeUndefined();
+    expect(invoke.mock.calls[1]?.[4]).toEqual({
+      stepUpProof: "one-shot-proof",
+    });
+    expect(reload).toHaveBeenCalledOnce();
+    expect(JSON.stringify({ ...sessionStorage })).not.toContain(
+      "one-shot-proof",
+    );
+  });
+
+  it("取消重认证时不重试敏感操作", async () => {
+    const protectedAction = action("org.user.del");
+    const protectedPresentation = presentation("org.user.del", {
+      placement: "row",
+      interaction: "invoke",
+    });
+    const invoke = vi.fn().mockRejectedValue(
+      new StepUpRequiredError("需要重新认证", {
+        challenge: "signed-challenge",
+        expiresIn: 120,
+      }),
+    );
+    const actions = inScope(() =>
+      usePresentedActions({
+        presentations: () => [protectedPresentation],
+        businessFields: () => [],
+        actions: () => [protectedAction],
+        session: () => ({ token: "access-token", tenantId: "7" }),
+        selectedRows: () => [],
+        reload: vi.fn(),
+        emitCustom: vi.fn(),
+        invoke,
+        confirm: async () => true,
+        reauthenticate: vi.fn().mockResolvedValue(undefined),
+        notify: vi.fn(),
+      }),
+    );
+
+    await actions.openAction(protectedPresentation, { id: 9 });
+    expect(invoke).toHaveBeenCalledOnce();
+  });
 });
 
 function inScope<T>(create: () => T): T {
