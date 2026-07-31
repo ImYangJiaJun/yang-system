@@ -50,7 +50,7 @@ async function logout() {
         flat
         color="white"
         icon="logout"
-        label="退出登录"
+        label="退出全部设备"
         @click="logout"
       />
     </header>

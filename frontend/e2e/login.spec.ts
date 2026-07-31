@@ -423,7 +423,7 @@ test("多标签页串行轮换 Refresh Cookie 并同步退出且不共享持久�
     .poll(() => otherPage.evaluate(() => sessionStorage.getItem("yang.token")))
     .toBeNull();
 
-  await page.getByRole("button", { name: "退出登录" }).click();
+  await page.getByRole("button", { name: "退出全部设备" }).click();
   await page.getByLabel("用户名").fill("alice");
   await page.getByLabel("密码").fill("correct-password");
   await page.getByRole("button", { name: "验证并继续" }).click();

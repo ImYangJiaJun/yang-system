@@ -86,7 +86,7 @@ async function endSession() {
             v-if="loggedIn"
             flat
             color="white"
-            label="退出"
+            label="退出全部设备"
             @click="endSession"
           />
           <q-btn

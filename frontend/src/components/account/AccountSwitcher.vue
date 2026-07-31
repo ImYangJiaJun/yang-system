@@ -256,7 +256,7 @@ watch(menuOpen, (open) => {
               flat
               color="negative"
               icon="logout"
-              label="退出帐号"
+              label="退出全部设备"
               @click="emit('logout')"
             />
           </q-card-actions>
