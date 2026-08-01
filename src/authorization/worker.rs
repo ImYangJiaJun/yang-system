@@ -343,8 +343,7 @@ mod tests {
             database.pool().clone(),
             DatabaseConfig::default().with_max_connections(8),
         )?;
-        let initializer =
-            yang_base::database::DatabaseInitializer::new(initializer_database, false);
+        let initializer = yang_base::database::DatabaseInitializer::new(initializer_database);
         let definition = crate::schema::authorization_outbox()?;
         initializer.sync_table_definitions(&[&definition]).await?;
         let redis = RedisClient::connect_with_config(

@@ -149,7 +149,7 @@ async fn build_harness(
         trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), security)?;
-    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let initializer = DatabaseInitializer::new(initializer_database);
     let definitions = yang_system::schema::definitions(&application.runtime)?;
     initializer
         .sync_table_definitions(&definitions.iter().collect::<Vec<_>>())

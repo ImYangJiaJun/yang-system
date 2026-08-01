@@ -241,7 +241,7 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
         trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), security)?;
-    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let initializer = DatabaseInitializer::new(initializer_database);
     let definitions = yang_system::schema::definitions(&application.runtime)?;
     let definitions = definitions.iter().collect::<Vec<_>>();
     initializer.sync_table_definitions(&definitions).await?;

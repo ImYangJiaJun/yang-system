@@ -28,7 +28,7 @@ pub async fn sync_with_database(
 ) -> anyhow::Result<SchemaSyncReport> {
     let initializer_database = Database::from_pool(database.pool().clone(), database_config)
         .map_err(anyhow::Error::from)?;
-    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let initializer = DatabaseInitializer::new(initializer_database);
     let tools = Arc::new(ToolsBuilder::new().mysql(database).build()?);
     let result = async {
         let application = crate::app::build_schema_app(Arc::clone(&tools), security)?;

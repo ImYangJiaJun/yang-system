@@ -83,11 +83,11 @@ async fn concurrent_schema_apply_is_serialized_across_instances() -> anyhow::Res
             schema_lock_name(&database_name.context("schema lock 控制连接没有选择数据库")?);
         let first_database = connect_test_database().await?;
         let first_pool = first_database.pool().clone();
-        let first = DatabaseInitializer::new(first_database, false);
+        let first = DatabaseInitializer::new(first_database);
         let first_definition = schema_table(CONCURRENT_TABLE)?;
         let second_database = connect_test_database().await?;
         let second_pool = second_database.pool().clone();
-        let second = DatabaseInitializer::new(second_database, false);
+        let second = DatabaseInitializer::new(second_database);
         let second_definition = schema_table(CONCURRENT_TABLE)?;
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
         let first_barrier = Arc::clone(&barrier);
@@ -206,7 +206,7 @@ async fn concurrent_schema_apply_is_serialized_across_instances() -> anyhow::Res
             left.is_noop() ^ right.is_noop(),
             "并发实例应由一个应用变更、另一个在锁后观察到 noop"
         );
-        let verifier = DatabaseInitializer::new(connect_test_database().await?, false);
+        let verifier = DatabaseInitializer::new(connect_test_database().await?);
         let definition = schema_table(CONCURRENT_TABLE)?;
         ensure!(
             verifier
@@ -238,7 +238,7 @@ async fn failed_schema_apply_releases_lock_and_allows_clean_retry() -> anyhow::R
         .await
         .context("创建不兼容 schema 失败夹具失败")?;
         let definition = schema_table(RETRY_TABLE)?;
-        let failed_initializer = DatabaseInitializer::new(connect_test_database().await?, false);
+        let failed_initializer = DatabaseInitializer::new(connect_test_database().await?);
 
         let error = match failed_initializer
             .sync_table_definitions(&[&definition])
@@ -256,7 +256,7 @@ async fn failed_schema_apply_releases_lock_and_allows_clean_retry() -> anyhow::R
             .execute(control.pool())
             .await
             .context("修复失败夹具失败")?;
-        let retry_initializer = DatabaseInitializer::new(connect_test_database().await?, false);
+        let retry_initializer = DatabaseInitializer::new(connect_test_database().await?);
         let report = retry_initializer
             .sync_table_definitions(&[&definition])
             .await

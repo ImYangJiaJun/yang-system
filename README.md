@@ -310,7 +310,7 @@ apply、审计/最终管理员信任根、邮箱验证码对抗边界、注册/�
 | `modules/work/` | 个人租户、项目/任务关系、树与分页 View、批量完成 |
 | `app.rs` 测试 | Catalog/Registry/OpenAPI 同源、条件 Action、权限、View 与租户 fail-closed |
 
-BR 到 YANG 的完整机械映射和 codemod 使用方式见 `../../docs/br-to-yang-migration.md`。
+数据库结构由 [`src/schema.rs`](src/schema.rs) 的声明统一驱动，不依赖 SQL 迁移文件或源码 codemod。
 
 安全与运行契约继续拆分在专门文档中：授权失效见
 [`docs/architecture/authorization-freshness-adr.md`](docs/architecture/authorization-freshness-adr.md)，

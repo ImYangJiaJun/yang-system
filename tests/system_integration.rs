@@ -533,7 +533,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         trusted_proxy_cidrs: Vec::new(),
     });
     let first = build_app(Arc::clone(&tools), Arc::clone(&security))?;
-    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let initializer = DatabaseInitializer::new(initializer_database);
     let definitions = yang_system::schema::definitions(&first.runtime)?;
     initializer
         .sync_table_definitions(&definitions.iter().collect::<Vec<_>>())
@@ -1310,7 +1310,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
         trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), Arc::clone(&security))?;
-    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let initializer = DatabaseInitializer::new(initializer_database);
     let definitions = yang_system::schema::definitions(&application.runtime)?;
     let definitions = definitions.iter().collect::<Vec<_>>();
 
@@ -3503,7 +3503,7 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
         trusted_proxy_cidrs: Vec::new(),
     });
     let application = build_app(Arc::clone(&tools), security)?;
-    let initializer = DatabaseInitializer::new(initializer_database, false);
+    let initializer = DatabaseInitializer::new(initializer_database);
     let definitions = yang_system::schema::definitions(&application.runtime)?;
     let definitions = definitions.iter().collect::<Vec<_>>();
     initializer.sync_table_definitions(&definitions).await?;

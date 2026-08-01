@@ -152,7 +152,7 @@ async fn run_after_tools_created(
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
 
-    let initializer = DatabaseInitializer::new(initializer_mysql, false);
+    let initializer = DatabaseInitializer::new(initializer_mysql);
     let definitions =
         crate::schema::definitions(&application.runtime).context("构建完整数据库 schema 失败")?;
     let schema = definitions.iter().collect::<Vec<_>>();
