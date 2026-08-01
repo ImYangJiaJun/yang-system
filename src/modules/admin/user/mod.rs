@@ -104,7 +104,7 @@ pub(super) fn build_module(security: &SecuritySettings) -> Result<ModuleSpec, Ba
     Ok(
         actions::register_all(module, service, password_reset_enabled).presentation(
             ModulePresentationSpec::new(
-                crate::modules::presentation::administrator_identity(),
+                crate::modules::administrator_identity(),
                 "平台账号",
                 "admin_users",
             )

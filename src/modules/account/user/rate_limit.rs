@@ -1,9 +1,9 @@
 //! 认证入口的 Redis 原子限流。
 
 use crate::config::SecuritySettings;
-use crate::security::CLIENT_IP_META_KEY;
 use std::borrow::Cow;
 use yang_base::action::ActionContext;
+use yang_base::transport::client_ip::CLIENT_IP_META_KEY;
 use yang_base::BaseError;
 
 const RATE_LIMIT_SCRIPT: &str = r#"

@@ -1,13 +1,14 @@
 //! 平台账号 Addon 的公开组装入口。
 
+pub mod bootstrap_secret;
 mod grants;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
+use crate::authorization::{RequestFingerprintResolver, StepUpServices};
 use crate::config::SecuritySettings;
 use crate::modules::account;
 use crate::modules::account::GrantResolver;
-use crate::security::{RequestFingerprintResolver, StepUpServices};
 use grants::AdminGrantResolver;
 use std::sync::Arc;
 use yang_base::action::TokenAuthMiddleware;

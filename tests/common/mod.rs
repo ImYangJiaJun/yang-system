@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use yang_base::tools::ToolsBuilder;
 use yang_system::config::EmailVerificationSettings;
-use yang_system::email::{
+use yang_system::modules::account::email_delivery::{
     EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
 };
 

@@ -1,7 +1,7 @@
 //! 一次性初始化首个平台超级管理员。
 
 use super::super::service::{AdminService, BootstrapResult};
-use crate::bootstrap_secret::BootstrapSecretVerifier;
+use crate::modules::admin::bootstrap_secret::BootstrapSecretVerifier;
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::{Action as ActionHandler, ActionContext};
@@ -100,7 +100,9 @@ pub(super) fn register(module: ModuleSpec, service: Arc<AdminService>) -> Module
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
+    use crate::modules::admin::bootstrap_secret::{
+        generate_bootstrap_secret, BootstrapSecretVerifier,
+    };
     use yang_base::action::Request;
     use yang_base::definition::{ParamInput, WidgetHint};
     use yang_base::tools::ToolsBuilder;

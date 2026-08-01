@@ -96,7 +96,7 @@ pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
         .into_spec()
         .presentation(
             ModulePresentationSpec::new(
-                crate::modules::presentation::organization_identity(),
+                crate::modules::organization_identity(),
                 "企业成员",
                 "organization_members",
             )

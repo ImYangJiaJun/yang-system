@@ -1,6 +1,6 @@
 use super::super::service::UserService;
 use crate::audit::{self, AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult};
-use crate::security::audit_result_for_error;
+use crate::authorization::audit_result_for_error;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;

@@ -79,13 +79,9 @@ pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
     WorkProjectModule
         .into_spec()
         .presentation(
-            ModulePresentationSpec::new(
-                crate::modules::presentation::user_identity(),
-                "项目组合",
-                "workspaces",
-            )
-            .description("维护个人项目，并作为任务关系选择的数据源")
-            .order(40),
+            ModulePresentationSpec::new(crate::modules::user_identity(), "项目组合", "workspaces")
+                .description("维护个人项目，并作为任务关系选择的数据源")
+                .order(40),
         )
         .view(view::build()?)
         .native_action(actions::ProjectOptionsAction::new()?)

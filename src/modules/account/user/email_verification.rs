@@ -2,7 +2,7 @@
 
 use super::rate_limit::client_ip_identity;
 use crate::config::EmailVerificationSettings;
-use crate::email::RegistrationEmailSenderHandle;
+use crate::modules::account::email_delivery::RegistrationEmailSenderHandle;
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use schemars::JsonSchema;

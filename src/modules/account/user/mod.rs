@@ -14,9 +14,9 @@ mod service;
 mod status;
 
 use crate::authorization::AuthorizationVersionValidator;
+use crate::authorization::{RequestFingerprintResolver, StepUpServices};
 use crate::config::SecuritySettings;
 use crate::modules::account::GrantResolver;
-use crate::security::{RequestFingerprintResolver, StepUpServices, TrustedClientIpMiddleware};
 use password::PasswordEngine;
 use repository::UserRepository;
 use service::UserService;
@@ -26,6 +26,7 @@ use yang_base::definition::{
     ActionInteraction, ActionPlacement, ActionPresentationSpec, ModuleName, ModulePresentationSpec,
     ModuleSpec,
 };
+use yang_base::transport::client_ip::TrustedClientIpMiddleware;
 use yang_base::BaseError;
 
 pub(crate) use claims::user_from_claims;
@@ -84,18 +85,18 @@ pub(super) fn build_module(
         }
     }
     Ok({
-        let mut presentation = ModulePresentationSpec::new(
-            crate::modules::presentation::user_identity(),
-            "用户中心",
-            "account",
-        )
-        .description("查看当前登录账号与管理会话")
-        .order(10)
-        .primary_action(yang_base::action!("account.user.me"))
-        .present_action(
-            yang_base::action!("account.user.logout"),
-            ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Invoke),
-        );
+        let mut presentation =
+            ModulePresentationSpec::new(crate::modules::user_identity(), "用户中心", "account")
+                .description("查看当前登录账号与管理会话")
+                .order(10)
+                .primary_action(yang_base::action!("account.user.me"))
+                .present_action(
+                    yang_base::action!("account.user.logout"),
+                    ActionPresentationSpec::new(
+                        ActionPlacement::Toolbar,
+                        ActionInteraction::Invoke,
+                    ),
+                );
         if credential_mutations_enabled {
             presentation = presentation
                 .present_action(

@@ -101,13 +101,9 @@ impl Module for WorkTaskModule {
 
 pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
     let mut module = WorkTaskModule.into_spec().presentation(
-        ModulePresentationSpec::new(
-            crate::modules::presentation::user_identity(),
-            "任务规划",
-            "account_tree",
-        )
-        .description("在树形大纲与分页清单中维护个人任务")
-        .order(50),
+        ModulePresentationSpec::new(crate::modules::user_identity(), "任务规划", "account_tree")
+            .description("在树形大纲与分页清单中维护个人任务")
+            .order(50),
     );
     for view in view::build_all()? {
         module = module.view(view);

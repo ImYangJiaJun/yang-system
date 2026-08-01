@@ -40,7 +40,7 @@ pub(super) fn build_module(
     actions::register_all(module, service).map(|module| {
         module.presentation(
             ModulePresentationSpec::new(
-                crate::modules::presentation::organization_identity(),
+                crate::modules::organization_identity(),
                 "我的企业",
                 "organizations",
             )

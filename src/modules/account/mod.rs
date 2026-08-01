@@ -1,13 +1,14 @@
 //! 账号 Addon 的公开组装入口。
 
 mod authz_version;
+pub mod email_delivery;
 mod grants;
 mod password_reset;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
+use crate::authorization::StepUpServices;
 use crate::config::SecuritySettings;
-use crate::security::StepUpServices;
 use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;

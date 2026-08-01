@@ -14,9 +14,11 @@ use yang_base::tools::ToolsBuilder;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
-use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::SecuritySettings;
 use yang_system::migrations::{execute_with_database, MigrationCommand};
+use yang_system::modules::admin::bootstrap_secret::{
+    generate_bootstrap_secret, BootstrapSecretVerifier,
+};
 
 use common::{take_registration_code, RegistrationEmailToolsExt};
 

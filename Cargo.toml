@@ -14,10 +14,6 @@ jsonwebtoken = "=9.3.1"
 lettre = { version = "=0.11.22", default-features = false, features = ["builder", "pool", "ring", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
 hmac = "0.12.1"
 metrics = "0.24.2"
-metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
-opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "tls-ring", "trace"] }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 schemars = "0.8"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -27,10 +23,12 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 toml = "0.8"
 tracing = "0.1.41"
-tracing-opentelemetry = { version = "0.33", default-features = false }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics"] }
 yang-db = { version = "0.1.4", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
+yang-runtime = { version = "0.1.0", path = "../../crates/yang-runtime" }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["json"] }
 
 [lints.rust]
 unsafe_code = "forbid"

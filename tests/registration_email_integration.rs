@@ -15,12 +15,14 @@ use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
-use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::{EmailVerificationSettings, SecuritySettings};
-use yang_system::email::{
+use yang_system::migrations::{execute_with_database, MigrationCommand};
+use yang_system::modules::account::email_delivery::{
     EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
 };
-use yang_system::migrations::{execute_with_database, MigrationCommand};
+use yang_system::modules::admin::bootstrap_secret::{
+    generate_bootstrap_secret, BootstrapSecretVerifier,
+};
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 

@@ -3,46 +3,31 @@
 //! 本模块只在进程启动时工作。合成完成后，业务代码仍只消费不可变的强类型
 //! `Settings`，不会形成第二套动态配置运行时。
 
-use anyhow::{bail, Context};
 use serde::de::DeserializeOwned;
+#[cfg(test)]
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::ffi::OsString;
+#[cfg(test)]
 use std::fs::File;
+#[cfg(test)]
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use toml::map::Map;
-use toml::Value;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use yang_runtime::config::ConfigSourceError;
+use yang_runtime::config::{
+    ConfigSources, EnvironmentBinding, EnvironmentValueKind, SecretBinding,
+};
 
 const SECRET_DIRECTORY_ENV: &str = "YANG_SYSTEM_SECRET_DIR";
+#[cfg(test)]
 const MAX_SECRET_BYTES: u64 = 64 * 1024;
-
-#[derive(Debug, Clone, Copy)]
-enum EnvironmentValueKind {
-    Text,
-    Integer,
-    Float,
-    OptionalInteger,
-    Boolean,
-    StringList,
-    Json,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EnvironmentBinding {
-    variable: &'static str,
-    section: &'static str,
-    field: &'static str,
-    kind: EnvironmentValueKind,
-}
 
 macro_rules! environment_binding {
     ($variable:literal, $section:literal, $field:literal, $kind:ident) => {
-        EnvironmentBinding {
-            variable: $variable,
-            section: $section,
-            field: $field,
-            kind: EnvironmentValueKind::$kind,
-        }
+        EnvironmentBinding::new($variable, $section, $field, EnvironmentValueKind::$kind)
     };
 }
 
@@ -417,6 +402,7 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
 ];
 
 /// secret provider 只允许覆盖明确标记为敏感的字段。
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SecretKey {
     MysqlUrl,
@@ -430,6 +416,7 @@ pub(crate) enum SecretKey {
     EmailVerificationSecret,
 }
 
+#[cfg(test)]
 impl SecretKey {
     fn file_name(self) -> &'static str {
         match self {
@@ -444,26 +431,9 @@ impl SecretKey {
             Self::EmailVerificationSecret => "email_verification_secret",
         }
     }
-
-    fn destination(self) -> (&'static str, &'static str) {
-        match self {
-            Self::MysqlUrl => ("mysql", "url"),
-            Self::RedisUrl => ("redis", "url"),
-            Self::TokenActiveSecret => ("token", "active_secret"),
-            Self::TokenRetiringKeys => ("token", "retiring_keys"),
-            Self::StepUpActiveSecret => ("step_up", "active_secret"),
-            Self::StepUpRetiringKeys => ("step_up", "retiring_keys"),
-            Self::BootstrapSecretDigest => ("bootstrap", "secret_digest"),
-            Self::EmailSmtpPassword => ("email.smtp", "password"),
-            Self::EmailVerificationSecret => ("email.verification", "secret"),
-        }
-    }
-
-    fn is_json(self) -> bool {
-        matches!(self, Self::TokenRetiringKeys | Self::StepUpRetiringKeys)
-    }
 }
 
+#[cfg(test)]
 const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::MysqlUrl,
     SecretKey::RedisUrl,
@@ -476,92 +446,36 @@ const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::EmailVerificationSecret,
 ];
 
+const SECRET_BINDINGS: &[SecretBinding] = &[
+    SecretBinding::text("mysql_url", "mysql", "url"),
+    SecretBinding::text("redis_url", "redis", "url"),
+    SecretBinding::text("token_active_secret", "token", "active_secret"),
+    SecretBinding::json("token_retiring_keys_json", "token", "retiring_keys"),
+    SecretBinding::text("step_up_active_secret", "step_up", "active_secret"),
+    SecretBinding::json("step_up_retiring_keys_json", "step_up", "retiring_keys"),
+    SecretBinding::text("bootstrap_secret_digest", "bootstrap", "secret_digest"),
+    SecretBinding::text("email_smtp_password", "email.smtp", "password"),
+    SecretBinding::text("email_verification_secret", "email.verification", "secret"),
+];
+
+const CONFIG_SOURCES: ConfigSources = ConfigSources::new(
+    "YANG_SYSTEM_",
+    SECRET_DIRECTORY_ENV,
+    ENVIRONMENT_BINDINGS,
+    SECRET_BINDINGS,
+)
+.with_ignored_environment_prefixes(&["YANG_SYSTEM_TEST_"]);
+
+#[cfg(test)]
 pub(crate) trait SecretProvider {
     fn read(&self, key: SecretKey) -> anyhow::Result<Option<String>>;
-}
-
-struct DirectorySecretProvider {
-    directory: PathBuf,
-}
-
-impl DirectorySecretProvider {
-    fn new(directory: PathBuf) -> anyhow::Result<Self> {
-        let metadata = std::fs::metadata(&directory).with_context(|| {
-            format!(
-                "{SECRET_DIRECTORY_ENV} 指定的 secret 目录不可访问: {}",
-                directory.display()
-            )
-        })?;
-        if !metadata.is_dir() {
-            bail!(
-                "{SECRET_DIRECTORY_ENV} 必须指向目录: {}",
-                directory.display()
-            );
-        }
-        Ok(Self { directory })
-    }
-}
-
-impl SecretProvider for DirectorySecretProvider {
-    fn read(&self, key: SecretKey) -> anyhow::Result<Option<String>> {
-        let path = self.directory.join(key.file_name());
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("读取 secret 文件失败: {}", path.display()));
-            }
-        };
-        let mut bytes = Vec::new();
-        file.take(MAX_SECRET_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("读取 secret 文件失败: {}", path.display()))?;
-        if bytes.len() as u64 > MAX_SECRET_BYTES {
-            bail!(
-                "secret 文件超过 {} 字节上限: {}",
-                MAX_SECRET_BYTES,
-                path.display()
-            );
-        }
-        let value = String::from_utf8(bytes)
-            .map_err(|_| anyhow::anyhow!("secret 文件必须是 UTF-8 文本: {}", path.display()))?;
-        let value = value
-            .strip_suffix("\r\n")
-            .or_else(|| value.strip_suffix('\n'))
-            .or_else(|| value.strip_suffix('\r'))
-            .unwrap_or(&value);
-        if value.is_empty() {
-            bail!("secret 文件不能为空: {}", path.display());
-        }
-        if value
-            .chars()
-            .any(|character| matches!(character, '\0' | '\r' | '\n'))
-        {
-            bail!("secret 文件只能包含单行文本: {}", path.display());
-        }
-        Ok(Some(value.to_owned()))
-    }
-}
-
-enum ResolvedOverride {
-    Set(Value),
-    Remove,
 }
 
 pub(crate) fn load<T>(path: &Path, read_context: &str) -> anyhow::Result<T>
 where
     T: DeserializeOwned,
 {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("{read_context}: {}", path.display()))?;
-    let environment = process_environment()?;
-    let provider = process_secret_provider()?;
-    parse_with_sources(
-        &raw,
-        &environment,
-        provider.as_ref().map(|value| value as &dyn SecretProvider),
-    )
+    CONFIG_SOURCES.load(path, read_context).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -569,9 +483,10 @@ pub(crate) fn parse_file_only<T>(raw: &str) -> anyhow::Result<T>
 where
     T: DeserializeOwned,
 {
-    parse_with_sources(raw, &BTreeMap::new(), None)
+    CONFIG_SOURCES.parse_file_only(raw).map_err(Into::into)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_with_sources<T>(
     raw: &str,
     environment: &BTreeMap<String, String>,
@@ -580,213 +495,85 @@ pub(crate) fn parse_with_sources<T>(
 where
     T: DeserializeOwned,
 {
-    let mut document: Value = toml::from_str(raw).context("解析配置文件失败")?;
-    ensure_document_table(&document)?;
-    apply_environment(&mut document, environment)?;
-    if let Some(provider) = provider {
-        apply_secrets(&mut document, provider)?;
-    }
-    document.try_into().context("解析配置文件失败")
+    let adapter = provider.map(SecretProviderAdapter);
+    CONFIG_SOURCES
+        .parse_with_sources(
+            raw,
+            environment,
+            adapter
+                .as_ref()
+                .map(|value| value as &dyn yang_runtime::config::SecretProvider),
+        )
+        .map_err(Into::into)
 }
 
-fn process_environment() -> anyhow::Result<BTreeMap<String, String>> {
-    collect_environment(std::env::vars_os())
-}
-
+#[cfg(test)]
 fn collect_environment<I>(variables: I) -> anyhow::Result<BTreeMap<String, String>>
 where
     I: IntoIterator<Item = (OsString, OsString)>,
 {
-    let mut environment = BTreeMap::new();
-    for (name, value) in variables {
-        let Ok(name) = name.into_string() else {
-            continue;
-        };
-        if !name.starts_with("YANG_SYSTEM_")
-            || name == SECRET_DIRECTORY_ENV
-            || name.starts_with("YANG_SYSTEM_TEST_")
-        {
-            continue;
-        }
-        let Some(binding) = ENVIRONMENT_BINDINGS
+    CONFIG_SOURCES
+        .collect_environment_variables(variables)
+        .map_err(Into::into)
+}
+
+#[cfg(test)]
+struct SecretProviderAdapter<'a>(&'a dyn SecretProvider);
+
+#[cfg(test)]
+impl yang_runtime::config::SecretProvider for SecretProviderAdapter<'_> {
+    fn read(&self, file_name: &str) -> Result<Option<String>, ConfigSourceError> {
+        let Some(key) = SECRET_KEYS
             .iter()
-            .find(|binding| binding.variable == name)
+            .copied()
+            .find(|key| key.file_name() == file_name)
         else {
-            bail!("不支持的 YANG System 环境变量: {name}");
+            return Err(ConfigSourceError::Invalid(format!(
+                "未声明的 secret 文件: {file_name}"
+            )));
         };
-        environment.insert(
-            binding.variable.to_owned(),
-            unicode_environment(binding.variable, value)?,
+        self.0
+            .read(key)
+            .map_err(|error| ConfigSourceError::Invalid(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+struct DirectorySecretProvider {
+    directory: PathBuf,
+}
+
+#[cfg(test)]
+impl DirectorySecretProvider {
+    fn new(directory: PathBuf) -> anyhow::Result<Self> {
+        anyhow::ensure!(directory.is_dir(), "secret provider 必须指向目录");
+        Ok(Self { directory })
+    }
+}
+
+#[cfg(test)]
+impl SecretProvider for DirectorySecretProvider {
+    fn read(&self, key: SecretKey) -> anyhow::Result<Option<String>> {
+        let path = self.directory.join(key.file_name());
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_SECRET_BYTES + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 <= MAX_SECRET_BYTES, "secret 文件过大");
+        let value = String::from_utf8(bytes)?;
+        let value = value.trim_end_matches(['\r', '\n']);
+        anyhow::ensure!(!value.is_empty(), "secret 文件不能为空");
+        anyhow::ensure!(
+            !value
+                .chars()
+                .any(|value| matches!(value, '\0' | '\r' | '\n')),
+            "secret 文件只能包含单行文本"
         );
+        Ok(Some(value.to_owned()))
     }
-    Ok(environment)
-}
-
-fn process_secret_provider() -> anyhow::Result<Option<DirectorySecretProvider>> {
-    let Some(value) = std::env::var_os(SECRET_DIRECTORY_ENV) else {
-        return Ok(None);
-    };
-    let directory = unicode_environment(SECRET_DIRECTORY_ENV, value)?;
-    if directory.trim().is_empty() {
-        bail!("{SECRET_DIRECTORY_ENV} 不能为空");
-    }
-    DirectorySecretProvider::new(PathBuf::from(directory)).map(Some)
-}
-
-fn unicode_environment(variable: &str, value: OsString) -> anyhow::Result<String> {
-    value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("环境变量 {variable} 必须是 Unicode 文本"))
-}
-
-fn ensure_document_table(document: &Value) -> anyhow::Result<()> {
-    if !document.is_table() {
-        bail!("配置文件顶层必须是 TOML table");
-    }
-    Ok(())
-}
-
-fn apply_environment(
-    document: &mut Value,
-    environment: &BTreeMap<String, String>,
-) -> anyhow::Result<()> {
-    for binding in ENVIRONMENT_BINDINGS {
-        let Some(raw) = environment.get(binding.variable) else {
-            continue;
-        };
-        match parse_environment_value(binding, raw)? {
-            ResolvedOverride::Set(value) => {
-                set_value(document, binding.section, binding.field, value)?;
-            }
-            ResolvedOverride::Remove => {
-                remove_value(document, binding.section, binding.field)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn parse_environment_value(
-    binding: &EnvironmentBinding,
-    raw: &str,
-) -> anyhow::Result<ResolvedOverride> {
-    let value = match binding.kind {
-        EnvironmentValueKind::Text => Value::String(raw.to_owned()),
-        EnvironmentValueKind::Integer => {
-            Value::Integer(parse_non_negative_integer(binding.variable, raw)?)
-        }
-        EnvironmentValueKind::Float => Value::Float(
-            raw.trim()
-                .parse::<f64>()
-                .ok()
-                .filter(|value| value.is_finite())
-                .with_context(|| format!("环境变量 {} 必须是有限浮点数", binding.variable))?,
-        ),
-        EnvironmentValueKind::OptionalInteger
-            if raw.trim().is_empty() || raw.trim().eq_ignore_ascii_case("none") =>
-        {
-            return Ok(ResolvedOverride::Remove);
-        }
-        EnvironmentValueKind::OptionalInteger => {
-            Value::Integer(parse_non_negative_integer(binding.variable, raw)?)
-        }
-        EnvironmentValueKind::Boolean => {
-            let parsed = match raw.trim() {
-                "true" => true,
-                "false" => false,
-                _ => bail!("环境变量 {} 必须是小写 true 或 false", binding.variable),
-            };
-            Value::Boolean(parsed)
-        }
-        EnvironmentValueKind::StringList => {
-            let values = if raw.trim().is_empty() {
-                Vec::new()
-            } else {
-                raw.split(',')
-                    .map(str::trim)
-                    .map(|item| {
-                        if item.is_empty() {
-                            bail!("环境变量 {} 包含空列表项", binding.variable);
-                        }
-                        Ok(Value::String(item.to_owned()))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?
-            };
-            Value::Array(values)
-        }
-        EnvironmentValueKind::Json => parse_json_override(binding.variable, raw)?,
-    };
-    Ok(ResolvedOverride::Set(value))
-}
-
-fn parse_non_negative_integer(variable: &str, raw: &str) -> anyhow::Result<i64> {
-    raw.trim()
-        .parse::<i64>()
-        .ok()
-        .filter(|value| *value >= 0)
-        .with_context(|| format!("环境变量 {variable} 必须是非负十进制整数"))
-}
-
-fn parse_json_override(source: &str, raw: &str) -> anyhow::Result<Value> {
-    let json: serde_json::Value =
-        serde_json::from_str(raw).with_context(|| format!("{source} 必须是合法 JSON"))?;
-    Value::try_from(json).with_context(|| format!("{source} JSON 不能转换为 TOML 配置值"))
-}
-
-fn apply_secrets(document: &mut Value, provider: &dyn SecretProvider) -> anyhow::Result<()> {
-    for key in SECRET_KEYS {
-        if let Some(value) = provider
-            .read(*key)
-            .with_context(|| format!("加载 secret {} 失败", key.file_name()))?
-        {
-            let (section, field) = key.destination();
-            let value = if key.is_json() {
-                parse_json_override(key.file_name(), &value)?
-            } else {
-                Value::String(value)
-            };
-            set_value(document, section, field, value)?;
-        }
-    }
-    Ok(())
-}
-
-fn set_value(document: &mut Value, section: &str, field: &str, value: Value) -> anyhow::Result<()> {
-    let table = section_table_mut(document, section, true)?
-        .with_context(|| format!("配置项 {section} 必须是 TOML table"))?;
-    table.insert(field.to_owned(), value);
-    Ok(())
-}
-
-fn remove_value(document: &mut Value, section: &str, field: &str) -> anyhow::Result<()> {
-    let Some(table) = section_table_mut(document, section, false)? else {
-        return Ok(());
-    };
-    table.remove(field);
-    Ok(())
-}
-
-fn section_table_mut<'a>(
-    document: &'a mut Value,
-    section: &str,
-    create: bool,
-) -> anyhow::Result<Option<&'a mut Map<String, Value>>> {
-    let mut current = document;
-    for segment in section.split('.') {
-        let table = current
-            .as_table_mut()
-            .with_context(|| format!("配置项 {section} 必须是 TOML table"))?;
-        if !table.contains_key(segment) && !create {
-            return Ok(None);
-        }
-        current = table
-            .entry(segment.to_owned())
-            .or_insert_with(|| Value::Table(Map::new()));
-    }
-    current
-        .as_table_mut()
-        .map(Some)
-        .with_context(|| format!("配置项 {section} 必须是 TOML table"))
 }
 
 #[cfg(test)]

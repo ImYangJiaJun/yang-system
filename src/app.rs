@@ -1,13 +1,24 @@
+use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
 use crate::modules::{account, admin, observability, org, work};
-use crate::observability::logging::{ActionLogMiddleware, LogIdentity};
-use crate::security::StepUpServices;
 use anyhow::Context;
 use std::sync::Arc;
 use yang_base::action::StepUpManager;
 use yang_base::definition::{AppBuilder, BuiltApp};
 use yang_base::tools::Tools;
+use yang_runtime::observability::{ActionLogMiddleware, LogIdentity, RuntimeMetricNames};
+
+pub(crate) const YANG_SYSTEM_METRIC_NAMES: RuntimeMetricNames = RuntimeMetricNames::new(
+    "yang_system_action_requests_total",
+    "yang_system_action_duration_seconds",
+    "yang_system_build_info",
+    "yang_system_readiness_checks_total",
+    "yang_system_readiness_duration_seconds",
+    "yang_system_readiness_ready",
+    "yang_system_readiness_resource_healthy",
+    "yang_system_resource_pool_connections",
+);
 
 pub struct Application {
     pub runtime: BuiltApp,

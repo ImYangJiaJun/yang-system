@@ -60,7 +60,7 @@ impl Module for OrganizationModule {
 pub(super) fn build_module() -> ModuleSpec {
     OrganizationModule.into_spec().presentation(
         ModulePresentationSpec::new(
-            crate::modules::presentation::organization_identity(),
+            crate::modules::organization_identity(),
             "企业资料",
             "organization_profile",
         )

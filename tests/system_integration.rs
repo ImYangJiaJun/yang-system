@@ -19,8 +19,10 @@ use yang_system::authorization::{
     AuthorizationOutboxWorker, AuthorizationVersionCache, CachedAuthorizationVersion,
     ResourceAuthorizationCheckpoint, ResourceAuthorizationProbe,
 };
-use yang_system::bootstrap_secret::{generate_bootstrap_secret, BootstrapSecretVerifier};
 use yang_system::config::{AuthorizationSettings, SecuritySettings};
+use yang_system::modules::admin::bootstrap_secret::{
+    generate_bootstrap_secret, BootstrapSecretVerifier,
+};
 
 use common::{take_registration_code, RegistrationEmailToolsExt};
 

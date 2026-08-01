@@ -1,12 +1,10 @@
-use crate::app::build_app;
+use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
-use crate::bootstrap_secret::BootstrapSecretVerifier;
 use crate::config::{SchemaMode, Settings};
-use crate::email::{RegistrationEmailSenderHandle, SmtpRegistrationEmailSender};
-use crate::observability::logging::LogIdentity;
-use crate::observability::telemetry::TelemetryRuntime;
-use crate::shutdown::{ShutdownBudget, ShutdownPhase, ShutdownTrigger};
-use crate::transport::http;
+use crate::modules::account::email_delivery::{
+    RegistrationEmailSenderHandle, SmtpRegistrationEmailSender,
+};
+use crate::modules::admin::bootstrap_secret::BootstrapSecretVerifier;
 use anyhow::Context;
 use std::future::Future;
 use std::path::Path;
@@ -14,11 +12,26 @@ use std::sync::Arc;
 use std::time::Duration;
 use yang_base::database::DatabaseInitializer;
 use yang_base::tools::{Tools, ToolsBuilder};
+use yang_base::transport::axum::{serve_with_shutdown, AxumTransportConfig};
 use yang_db::{Database, RedisClient};
+use yang_runtime::observability::{LogIdentity, TelemetryRuntime};
+use yang_runtime::shutdown::ShutdownBudget;
+
+const TRIGGER_SIGNAL: &str = "signal";
+const TRIGGER_OPERATION_EXIT: &str = "operation_exit";
+const PHASE_HTTP_DRAIN: &str = "http_drain";
+const PHASE_AUTHORIZATION_OUTBOX_WORKER: &str = "authorization_outbox_worker";
+const PHASE_TOOLS_CLOSE: &str = "tools_close";
+const PHASE_OBSERVABILITY: &str = "observability";
 
 pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let settings = Settings::load(config_path)?;
-    let log_identity = LogIdentity::new(&settings.app.name, settings.app.environment);
+    let log_identity = LogIdentity::new(
+        &settings.app.name,
+        env!("CARGO_PKG_VERSION"),
+        settings.app.environment.as_str(),
+    )
+    .with_metric_names(YANG_SYSTEM_METRIC_NAMES);
     let mut telemetry = TelemetryRuntime::initialize(
         &settings.observability,
         &settings.logging.filter,
@@ -40,10 +53,11 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         shutdown_budget.clone(),
     )
     .await;
-    shutdown_budget.begin(ShutdownTrigger::OperationExit).await;
+    shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;
     let telemetry_result = shutdown_budget
-        .run_phase(ShutdownPhase::Observability, telemetry.shutdown())
-        .await;
+        .run_phase(PHASE_OBSERVABILITY, telemetry.shutdown())
+        .await
+        .map_err(anyhow::Error::from);
     combine_operation_and_cleanup(result, telemetry_result, "可观测性运行时")
 }
 
@@ -200,9 +214,19 @@ async fn run_after_tools_created(
     let shutdown_signal = async move {
         yang_base::lifecycle::wait_for_shutdown_signal().await;
         signal_readiness.mark_not_ready();
-        signal_budget.begin(ShutdownTrigger::Signal).await;
+        signal_budget.begin(TRIGGER_SIGNAL).await;
     };
-    let serve = http::serve_with_shutdown(bind, runtime, &settings.http, shutdown_signal);
+    let transport_config = AxumTransportConfig {
+        max_body_bytes: settings.http.max_body_bytes,
+        request_timeout: Some(Duration::from_secs(settings.http.request_timeout_seconds)),
+        max_concurrency: Some(settings.http.max_concurrency),
+        ..AxumTransportConfig::default()
+    };
+    let serve = async move {
+        serve_with_shutdown(bind, runtime, transport_config, shutdown_signal)
+            .await
+            .context("HTTP 服务运行失败")
+    };
     tokio::pin!(serve);
     let budget_started = shutdown_budget.wait_started();
     tokio::pin!(budget_started);
@@ -211,18 +235,17 @@ async fn run_after_tools_created(
         result = &mut serve => result,
         _ = &mut budget_started => {
             shutdown_budget
-                .run_phase(ShutdownPhase::HttpDrain, &mut serve)
+                .run_phase(PHASE_HTTP_DRAIN, &mut serve)
                 .await
+                .map_err(anyhow::Error::from)
         }
     };
     readiness_gate.mark_not_ready();
-    shutdown_budget.begin(ShutdownTrigger::OperationExit).await;
+    shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;
     let shutdown_result = shutdown_budget
-        .run_phase(
-            ShutdownPhase::AuthorizationOutboxWorker,
-            outbox_worker.shutdown(),
-        )
-        .await;
+        .run_phase(PHASE_AUTHORIZATION_OUTBOX_WORKER, outbox_worker.shutdown())
+        .await
+        .map_err(anyhow::Error::from);
     match (serve_result, shutdown_result) {
         (Err(serve_error), Err(worker_error)) => {
             tracing::error!(
@@ -247,13 +270,14 @@ async fn run_then_cleanup<T>(
     shutdown_budget: &ShutdownBudget,
 ) -> anyhow::Result<T> {
     let result = operation.await;
-    shutdown_budget.begin(ShutdownTrigger::OperationExit).await;
+    shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;
     let cleanup_result = shutdown_budget
-        .run_phase(ShutdownPhase::ToolsClose, async {
+        .run_phase(PHASE_TOOLS_CLOSE, async {
             cleanup.await;
             Ok(())
         })
-        .await;
+        .await
+        .map_err(anyhow::Error::from);
 
     match (result, cleanup_result) {
         (Ok(value), Ok(())) => Ok(value),

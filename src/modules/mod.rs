@@ -7,5 +7,18 @@ pub mod account;
 pub mod admin;
 pub mod observability;
 pub mod org;
-mod presentation;
 pub mod work;
+
+use yang_base::definition::AccountIdentitySpec;
+
+pub(crate) fn user_identity() -> AccountIdentitySpec {
+    AccountIdentitySpec::new("user", "个人账户", "person").order(10)
+}
+
+pub(crate) fn organization_identity() -> AccountIdentitySpec {
+    AccountIdentitySpec::new("org", "企业账号", "organization").order(20)
+}
+
+pub(crate) fn administrator_identity() -> AccountIdentitySpec {
+    AccountIdentitySpec::new("admin", "管理平台", "administrator").order(30)
+}

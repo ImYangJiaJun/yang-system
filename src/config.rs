@@ -1,4 +1,4 @@
-use crate::bootstrap_secret::BootstrapSecretDigest;
+use crate::modules::admin::bootstrap_secret::BootstrapSecretDigest;
 use anyhow::{bail, Context};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -8,6 +8,7 @@ use std::time::Duration;
 use yang_base::action::StepUpManager;
 use yang_base::token::TokenManager;
 use yang_db::{DatabaseConfig, RedisConfig};
+pub use yang_runtime::observability::ObservabilitySettings;
 
 const MAX_ACCESS_TTL_SECONDS: u64 = 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
@@ -326,39 +327,6 @@ pub struct LoggingSettings {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ObservabilitySettings {
-    #[serde(default)]
-    pub metrics_enabled: bool,
-    #[serde(default = "default_metrics_bind")]
-    pub metrics_bind: String,
-    #[serde(default)]
-    pub traces_enabled: bool,
-    #[serde(default = "default_traces_otlp_endpoint")]
-    pub traces_otlp_endpoint: String,
-    #[serde(default = "default_traces_sample_ratio")]
-    pub traces_sample_ratio: f64,
-    #[serde(default = "default_traces_export_timeout_seconds")]
-    pub traces_export_timeout_seconds: u64,
-    #[serde(default = "default_readiness_budget_ms")]
-    pub readiness_budget_ms: u64,
-}
-
-impl Default for ObservabilitySettings {
-    fn default() -> Self {
-        Self {
-            metrics_enabled: false,
-            metrics_bind: default_metrics_bind(),
-            traces_enabled: false,
-            traces_otlp_endpoint: default_traces_otlp_endpoint(),
-            traces_sample_ratio: default_traces_sample_ratio(),
-            traces_export_timeout_seconds: default_traces_export_timeout_seconds(),
-            readiness_budget_ms: default_readiness_budget_ms(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ShutdownSettings {
     #[serde(default = "default_shutdown_total_timeout_seconds")]
     pub total_timeout_seconds: u64,
@@ -374,26 +342,6 @@ impl Default for ShutdownSettings {
 
 const fn default_shutdown_total_timeout_seconds() -> u64 {
     30
-}
-
-fn default_metrics_bind() -> String {
-    "127.0.0.1:9090".to_string()
-}
-
-fn default_traces_otlp_endpoint() -> String {
-    "http://127.0.0.1:4317".to_string()
-}
-
-const fn default_traces_sample_ratio() -> f64 {
-    0.1
-}
-
-const fn default_traces_export_timeout_seconds() -> u64 {
-    5
-}
-
-const fn default_readiness_budget_ms() -> u64 {
-    2_000
 }
 
 impl Settings {
@@ -484,41 +432,6 @@ impl Settings {
             && !self.observability.metrics_enabled
         {
             bail!("production 环境必须启用 observability.metrics_enabled 管理面与预算化 readiness");
-        }
-        Ok(())
-    }
-}
-
-impl ObservabilitySettings {
-    pub fn metrics_bind_addr(&self) -> anyhow::Result<SocketAddr> {
-        self.metrics_bind
-            .parse()
-            .with_context(|| format!("observability.metrics_bind 地址无效: {}", self.metrics_bind))
-    }
-
-    fn validate(&self, http_bind: SocketAddr) -> anyhow::Result<()> {
-        let metrics_bind = self.metrics_bind_addr()?;
-        if self.metrics_enabled && metrics_bind == http_bind {
-            bail!("observability.metrics_bind 必须与 http.bind 使用不同地址");
-        }
-        if !(0.0..=1.0).contains(&self.traces_sample_ratio) || !self.traces_sample_ratio.is_finite()
-        {
-            bail!("observability.traces_sample_ratio 必须在 0.0..=1.0 范围内");
-        }
-        if !(1..=60).contains(&self.traces_export_timeout_seconds) {
-            bail!("observability.traces_export_timeout_seconds 必须在 1..=60 范围内");
-        }
-        if !(50..=10_000).contains(&self.readiness_budget_ms) {
-            bail!("observability.readiness_budget_ms 必须在 50..=10000 范围内");
-        }
-        if self.traces_enabled {
-            let endpoint = self.traces_otlp_endpoint.trim();
-            if endpoint.is_empty()
-                || endpoint.bytes().any(|byte| byte.is_ascii_whitespace())
-                || !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
-            {
-                bail!("observability.traces_otlp_endpoint 必须是非空的 http:// 或 https:// 地址");
-            }
         }
         Ok(())
     }
@@ -759,7 +672,8 @@ impl SecuritySettings {
         if !(60..=3_600).contains(&self.password_reset_ttl_seconds) {
             bail!("security.password_reset_ttl_seconds 必须在 60..=3600 范围内");
         }
-        crate::security::validate_trusted_proxy_cidrs(&self.trusted_proxy_cidrs)?;
+        yang_base::transport::client_ip::validate_trusted_proxy_cidrs(&self.trusted_proxy_cidrs)
+            .map_err(|error| anyhow::anyhow!("security.trusted_proxy_cidrs 配置无效: {error}"))?;
         Ok(())
     }
 }

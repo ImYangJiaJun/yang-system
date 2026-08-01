@@ -8,9 +8,9 @@ mod tenant;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
+use crate::authorization::{RequestFingerprintResolver, StepUpServices};
 use crate::modules::account;
 use crate::modules::account::GrantResolver;
-use crate::security::{RequestFingerprintResolver, StepUpServices};
 use grants::OrgGrantResolver;
 use std::sync::Arc;
 use yang_base::action::{TenantResolverMiddleware, TokenAuthMiddleware};
