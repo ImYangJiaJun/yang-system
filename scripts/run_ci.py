@@ -122,19 +122,6 @@ INTEGRATION = (
         ),
     ),
     Command(
-        "Versioned migration job integration",
-        (
-            "cargo",
-            "test",
-            "--test",
-            "migration_job_integration",
-            "--locked",
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ),
-    ),
-    Command(
         "Schema apply concurrency and retry integration",
         (
             "cargo",
@@ -304,7 +291,6 @@ def self_test() -> None:
     }
     assert integration_tests == {
         "bootstrap_integration",
-        "migration_job_integration",
         "registration_email_integration",
         "schema_apply_integration",
         "system_integration",

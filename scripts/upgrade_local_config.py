@@ -93,6 +93,7 @@ def inspect_config(raw: str, template_raw: str) -> Inspection:
         and token_secret not in (MISSING, TOKEN_PLACEHOLDER)
         and step_up_secret not in (MISSING, STEP_UP_PLACEHOLDER)
         and mysql_url not in (MISSING, MYSQL_PLACEHOLDER)
+        and nested_value(document, "schema") is MISSING
     )
     if not isinstance(template_document, dict):
         raise AssertionError("模板解析结果必须是 table")

@@ -339,11 +339,14 @@ mod tests {
         sqlx::query("DROP TABLE IF EXISTS authorization_outbox")
             .execute(database.pool())
             .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/20260726_0006_create_authorization_outbox.sql"
-        ))
-        .execute(database.pool())
-        .await?;
+        let initializer_database = Database::from_pool(
+            database.pool().clone(),
+            DatabaseConfig::default().with_max_connections(8),
+        )?;
+        let initializer =
+            yang_base::database::DatabaseInitializer::new(initializer_database, false);
+        let definition = crate::schema::authorization_outbox()?;
+        initializer.sync_table_definitions(&[&definition]).await?;
         let redis = RedisClient::connect_with_config(
             &redis_url,
             RedisConfig::default()
@@ -433,8 +436,8 @@ mod tests {
         .await?;
         ensure!(retry.retried == 1, "发布失败必须安排重试");
         ensure!(failing.calls.load(Ordering::Relaxed) == 1);
-        let retry_row: (String, u32, Option<String>) = sqlx::query_as(
-            "SELECT state, attempts, last_error FROM authorization_outbox \
+        let retry_row: (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT state, CAST(attempts AS SIGNED), last_error FROM authorization_outbox \
              WHERE user_id = 800002 AND authz_version = 3",
         )
         .fetch_one(database.pool())

@@ -1,1 +1,0 @@
-ALTER TABLE `users` ADD COLUMN `authz_version` BIGINT NOT NULL DEFAULT 1

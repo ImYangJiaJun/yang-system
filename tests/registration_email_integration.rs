@@ -16,10 +16,10 @@ use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::{EmailVerificationSettings, SecuritySettings};
-use yang_system::migrations::{execute_with_database, MigrationCommand};
 use yang_system::modules::account::email_delivery::{
     EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
 };
+use yang_system::schema::sync_with_database;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -161,7 +161,6 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "org_org",
         "admin_user",
         "users",
-        "_migrations",
     ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
             .execute(database.pool())
@@ -284,8 +283,7 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
     reset_redis(&redis).await?;
 
     let outcome = async {
-        execute_with_database(
-            MigrationCommand::Apply,
+        sync_with_database(
             connect_database().await?,
             database_config(),
             security_settings(),

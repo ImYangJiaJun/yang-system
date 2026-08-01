@@ -13,7 +13,7 @@ use std::sync::Arc;
 use yang_base::definition::{
     ActionInteraction, ActionPlacement, ActionPresentationSpec, ActionRef, Fields, Module,
     ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Switch, Table, TableName,
-    Timestamp,
+    TableSpec, Timestamp,
 };
 use yang_base::BaseError;
 
@@ -71,6 +71,7 @@ impl Module for AdminUserModule {
             owner_key => Str::new()
                 .title("最终管理员占位")
                 .max_length(32)
+                .renamed_from("bootstrap_key")
                 .unique(true)
                 .secret(true)
                 .readable_by([SYSTEM_ROLE])
@@ -78,6 +79,19 @@ impl Module for AdminUserModule {
             created_at => Timestamp::new().title("创建时间").created_at(),
             updated_at => Timestamp::new().title("更新时间").updated_at(),
         }
+    }
+
+    fn configure_table(&self, table: TableSpec) -> TableSpec {
+        table
+            .check_named(
+                "chk_admin_user_owner_key",
+                "(`owner_key` IS NULL) OR (`owner_key` = 'system-owner')",
+            )
+            .foreign_key_named(
+                "fk_admin_user_user_user",
+                [yang_base::field!("admin_user.user_user")],
+                [yang_base::field!("users.id")],
+            )
     }
 }
 

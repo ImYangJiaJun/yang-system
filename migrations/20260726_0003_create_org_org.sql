@@ -1,1 +1,0 @@
-CREATE TABLE IF NOT EXISTS `org_org` (`code` VARCHAR(32) NOT NULL, `created_at` BIGINT NOT NULL, `id` BIGINT NOT NULL AUTO_INCREMENT, `name` VARCHAR(100) NOT NULL, `status` ENUM('active', 'disabled') NOT NULL DEFAULT 'active', PRIMARY KEY (`id`), UNIQUE KEY `uk_org_org_code` (`code`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci

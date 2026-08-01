@@ -45,7 +45,7 @@ TLS 端口，若供应商只有其他传输模式，应增加并审计新的显�
 
 ## 发布、观测与恢复
 
-先运行 `yang-migrate plan/apply` 应用
+启动应用，由声明式 Schema 预检并同步
 `20260731_0017_add_users_verified_email`，再滚动应用。迁移只新增可空列、唯一索引和
 “邮箱与验证时间同时为空或同时非空”的强制 CHECK，因此旧账户继续可登录；新注册
 必须完成邮箱验证。生产等量 staging 仍需测量唯一索引 DDL 的 metadata lock、复制延迟

@@ -52,7 +52,7 @@ Debug 只展示摘要字段名，不展示值。
 
 | 主体 | `audit_event` 权限 | 用途 |
 |---|---|---|
-| migration owner | DDL | 只在版本化迁移作业使用 |
+| application owner | DDL | 只在启动期声明式 Schema 同步使用 |
 | application runtime | `SELECT, INSERT` | 在线服务只读、追加 |
 | retention/export job | `SELECT, DELETE` | 归档校验和到期批量清理 |
 

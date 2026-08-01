@@ -534,24 +534,10 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
     });
     let first = build_app(Arc::clone(&tools), Arc::clone(&security))?;
     let initializer = DatabaseInitializer::new(initializer_database, false);
+    let definitions = yang_system::schema::definitions(&first.runtime)?;
     initializer
-        .sync_table_definitions(&first.runtime.table_definitions().iter().collect::<Vec<_>>())
+        .sync_table_definitions(&definitions.iter().collect::<Vec<_>>())
         .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0006_create_authorization_outbox.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0007_create_audit_event.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260731_0011_create_password_reset_token.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
     let second = build_app(Arc::clone(&tools), security)?;
 
     let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -1325,30 +1311,12 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
     });
     let application = build_app(Arc::clone(&tools), Arc::clone(&security))?;
     let initializer = DatabaseInitializer::new(initializer_database, false);
-    let definitions = application
-        .runtime
-        .table_definitions()
-        .iter()
-        .collect::<Vec<_>>();
+    let definitions = yang_system::schema::definitions(&application.runtime)?;
+    let definitions = definitions.iter().collect::<Vec<_>>();
 
     let pending = initializer.plan_table_definitions(&definitions).await?;
     ensure!(!pending.is_noop(), "空测试数据库应产生 schema 变更计划");
     initializer.sync_table_definitions(&definitions).await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0006_create_authorization_outbox.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0007_create_audit_event.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260731_0011_create_password_reset_token.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
     ensure!(
         initializer
             .plan_table_definitions(&definitions)
@@ -3536,22 +3504,9 @@ async fn work_addon_scale_and_adversarial_boundaries_hold() -> anyhow::Result<()
     });
     let application = build_app(Arc::clone(&tools), security)?;
     let initializer = DatabaseInitializer::new(initializer_database, false);
-    let definitions = application
-        .runtime
-        .table_definitions()
-        .iter()
-        .collect::<Vec<_>>();
+    let definitions = yang_system::schema::definitions(&application.runtime)?;
+    let definitions = definitions.iter().collect::<Vec<_>>();
     initializer.sync_table_definitions(&definitions).await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0006_create_authorization_outbox.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0007_create_audit_event.sql"
-    ))
-    .execute(tools.mysql()?.pool())
-    .await?;
     let runtime = Arc::new(application.runtime);
 
     let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();

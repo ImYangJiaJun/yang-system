@@ -4,7 +4,7 @@
 use crate::config::AuthorizationSettings;
 use anyhow::{ensure, Context};
 use sqlx::MySqlPool;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_LAST_ERROR_CHARS: usize = 1_024;
 
@@ -49,9 +49,14 @@ impl AuthorizationOutboxRepository {
             "published_at",
             "last_error",
         ];
+        let columns = columns.into_iter().collect::<BTreeSet<_>>();
+        let expected_columns = expected_columns
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
         ensure!(
-            columns.iter().map(String::as_str).eq(expected_columns),
-            "authorization_outbox 列未对齐，请先执行版本化迁移: {columns:?}"
+            columns == expected_columns,
+            "authorization_outbox 列未对齐: {columns:?}"
         );
 
         let index_rows: Vec<(String, i64, String)> = sqlx::query_as(
@@ -88,7 +93,7 @@ impl AuthorizationOutboxRepository {
         ] {
             ensure!(
                 indexes.get(name) == Some(&(non_unique, columns.to_string())),
-                "authorization_outbox 索引 {name} 未对齐，请先执行版本化迁移: {indexes:?}"
+                "authorization_outbox 索引 {name} 未对齐: {indexes:?}"
             );
         }
         Ok(())
@@ -113,8 +118,8 @@ impl AuthorizationOutboxRepository {
             .await
             .context("读取 Outbox claim 数据库时钟失败")?;
         ensure!(now > 0, "Outbox claim 数据库时钟无效");
-        let rows: Vec<(i64, i64, i64, u32, i64)> = sqlx::query_as(
-            "SELECT id, user_id, authz_version, attempts, created_at \
+        let rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT id, user_id, authz_version, CAST(attempts AS SIGNED), created_at \
              FROM authorization_outbox \
              WHERE (state = 'pending' AND available_at <= ?) \
                 OR (state = 'processing' AND lease_until <= ?) \
@@ -134,7 +139,8 @@ impl AuthorizationOutboxRepository {
                 id > 0 && user_id > 0 && authz_version > 0,
                 "授权 Outbox 事件字段无效"
             );
-            let attempts = attempts
+            let attempts = u32::try_from(attempts)
+                .context("授权 Outbox 事件重试次数超出 u32 范围")?
                 .checked_add(1)
                 .context("授权 Outbox 事件重试次数已耗尽")?;
             let result = sqlx::query(
@@ -143,7 +149,7 @@ impl AuthorizationOutboxRepository {
                      lease_until = ? + ?, worker_id = ?, last_error = NULL \
                  WHERE id = ?",
             )
-            .bind(attempts)
+            .bind(i64::from(attempts))
             .bind(now)
             .bind(settings.outbox_lease_seconds)
             .bind(worker_id)
@@ -302,11 +308,14 @@ mod tests {
         sqlx::query("DROP TABLE IF EXISTS authorization_outbox")
             .execute(database.pool())
             .await?;
-        sqlx::raw_sql(include_str!(
-            "../../migrations/20260726_0006_create_authorization_outbox.sql"
-        ))
-        .execute(database.pool())
-        .await?;
+        let initializer_database = Database::from_pool(
+            database.pool().clone(),
+            DatabaseConfig::default().with_max_connections(1),
+        )?;
+        let initializer =
+            yang_base::database::DatabaseInitializer::new(initializer_database, false);
+        let definition = crate::schema::authorization_outbox()?;
+        initializer.sync_table_definitions(&[&definition]).await?;
 
         let repository = AuthorizationOutboxRepository::new(database.pool().clone());
         let settings = AuthorizationSettings {

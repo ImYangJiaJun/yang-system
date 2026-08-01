@@ -17,8 +17,6 @@ const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 pub struct Settings {
     pub app: AppSettings,
     pub authorization: AuthorizationSettings,
-    #[serde(default)]
-    pub schema: SchemaSettings,
     pub http: HttpSettings,
     pub mysql: MysqlSettings,
     pub redis: RedisSettings,
@@ -31,15 +29,6 @@ pub struct Settings {
     #[serde(default)]
     pub observability: ObservabilitySettings,
     pub logging: LoggingSettings,
-}
-
-/// 独立迁移作业所需的最小配置投影。
-///
-/// 迁移不依赖 HTTP、Redis 或 Token；只读取构建应用 Schema 所需的 MySQL 与安全参数。
-#[derive(Clone, Deserialize)]
-pub struct MigrationSettings {
-    pub mysql: MysqlSettings,
-    pub security: SecuritySettings,
 }
 
 #[derive(Clone, Deserialize)]
@@ -77,22 +66,6 @@ pub struct AuthorizationSettings {
     pub outbox_batch_size: u32,
     pub outbox_lease_seconds: u64,
     pub outbox_max_retry_seconds: u64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SchemaSettings {
-    #[serde(default)]
-    pub mode: SchemaMode,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SchemaMode {
-    Apply,
-    #[default]
-    Validate,
-    Off,
 }
 
 #[derive(Clone, Deserialize)]
@@ -377,14 +350,6 @@ impl Settings {
             bail!("app.name 不能为空");
         }
         self.authorization.validate()?;
-        if self.schema.mode == SchemaMode::Apply
-            && !matches!(
-                self.app.environment,
-                DeploymentEnvironment::Development | DeploymentEnvironment::Test
-            )
-        {
-            bail!("production 环境禁止 schema.mode=apply；请使用独立迁移作业并保持 validate");
-        }
         self.bind_addr()?;
         if self.http.max_body_bytes == 0 || self.http.max_body_bytes > 16 * 1024 * 1024 {
             bail!("http.max_body_bytes 必须在 1..=16777216 范围内");
@@ -625,22 +590,6 @@ impl EmailVerificationSettings {
     }
 }
 
-impl MigrationSettings {
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let settings: Self = crate::config_source::load(path, "读取迁移配置文件失败")?;
-        settings
-            .mysql_config()
-            .validate()
-            .context("mysql 配置无效")?;
-        settings.security.validate()?;
-        Ok(settings)
-    }
-
-    pub fn mysql_config(&self) -> DatabaseConfig {
-        self.mysql.database_config()
-    }
-}
-
 impl MysqlSettings {
     fn database_config(&self) -> DatabaseConfig {
         DatabaseConfig::default()
@@ -769,8 +718,6 @@ outbox_poll_interval_ms = 250
 outbox_batch_size = 100
 outbox_lease_seconds = 10
 outbox_max_retry_seconds = 60
-[schema]
-mode = "validate"
 [http]
 bind = "127.0.0.1:8080"
 max_body_bytes = 1024
@@ -858,7 +805,6 @@ filter = "info"
             "mysql://config-user:config-password@config-mysql/config-database"
         );
         assert_eq!(settings.redis.url, "redis://config-redis/3");
-        assert_eq!(settings.schema.mode, SchemaMode::Validate);
         assert_eq!(settings.app.environment, DeploymentEnvironment::Development);
         assert_eq!(settings.authorization.deployment, "test-local");
         assert_eq!(settings.authorization.outbox_poll_interval_ms, 250);
@@ -1129,40 +1075,6 @@ filter = "info"
     }
 
     #[test]
-    fn defaults_schema_mode_to_validate_when_section_or_mode_is_omitted() {
-        let without_section = valid_config().replace("[schema]\nmode = \"validate\"\n", "");
-        let without_mode = valid_config().replace("mode = \"validate\"\n", "");
-
-        for raw in [without_section, without_mode] {
-            let settings = Settings::parse(&raw)
-                .unwrap_or_else(|error| panic!("缺省 schema 配置应使用安全默认值: {error}"));
-            assert_eq!(settings.schema.mode, SchemaMode::Validate);
-        }
-    }
-
-    #[test]
-    fn accepts_apply_and_off_only_when_explicitly_selected() {
-        for (raw_mode, expected) in [("apply", SchemaMode::Apply), ("off", SchemaMode::Off)] {
-            let raw =
-                valid_config().replace("mode = \"validate\"", &format!("mode = \"{raw_mode}\""));
-            let settings = Settings::parse(&raw)
-                .unwrap_or_else(|error| panic!("显式 schema mode 应解析成功: {error}"));
-            assert_eq!(settings.schema.mode, expected);
-        }
-    }
-
-    #[test]
-    fn allows_schema_apply_in_test_environment() {
-        let raw = valid_config()
-            .replace("environment = \"development\"", "environment = \"test\"")
-            .replace("mode = \"validate\"", "mode = \"apply\"");
-        let settings = Settings::parse(&raw)
-            .unwrap_or_else(|error| panic!("测试环境应允许显式 schema apply: {error}"));
-        assert_eq!(settings.app.environment, DeploymentEnvironment::Test);
-        assert_eq!(settings.schema.mode, SchemaMode::Apply);
-    }
-
-    #[test]
     fn deployment_environment_defaults_to_production() {
         let raw = valid_config()
             .replace("environment = \"development\"\n", "")
@@ -1250,32 +1162,6 @@ filter = "info"
     }
 
     #[test]
-    fn rejects_schema_apply_in_production_or_without_environment_marker() {
-        let explicit_production = valid_config()
-            .replace(
-                "environment = \"development\"",
-                "environment = \"production\"",
-            )
-            .replace("mode = \"validate\"", "mode = \"apply\"");
-        let implicit_production = valid_config()
-            .replace("environment = \"development\"\n", "")
-            .replace("mode = \"validate\"", "mode = \"apply\"");
-
-        for raw in [explicit_production, implicit_production] {
-            let error = match Settings::parse(&raw) {
-                Ok(_) => panic!("生产环境必须拒绝 schema apply"),
-                Err(error) => error,
-            };
-            assert!(
-                error
-                    .to_string()
-                    .contains("production 环境禁止 schema.mode=apply"),
-                "应返回明确的生产 DDL 保护错误: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn rejects_unknown_deployment_environment() {
         let raw =
             valid_config().replace("environment = \"development\"", "environment = \"staging\"");
@@ -1287,16 +1173,10 @@ filter = "info"
     }
 
     #[test]
-    fn example_config_uses_validate_schema_mode() {
+    fn example_config_has_no_schema_mode() {
         let value: toml::Value = toml::from_str(include_str!("../config.example.toml"))
             .unwrap_or_else(|error| panic!("示例配置必须是合法 TOML: {error}"));
-        assert_eq!(
-            value
-                .get("schema")
-                .and_then(|schema| schema.get("mode"))
-                .and_then(toml::Value::as_str),
-            Some("validate")
-        );
+        assert!(value.get("schema").is_none());
         assert_eq!(
             value
                 .get("app")
@@ -1336,23 +1216,10 @@ filter = "info"
     }
 
     #[test]
-    fn rejects_unknown_schema_mode_from_config_file() {
-        let raw = valid_config().replace("mode = \"validate\"", "mode = \"unsafe\"");
+    fn rejects_removed_schema_mode_from_config_file() {
+        let raw = valid_config().replace("[http]", "[schema]\nmode = \"off\"\n[http]");
         let error = match Settings::parse(&raw) {
-            Ok(_) => panic!("未知 schema mode 必须被拒绝"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("解析配置文件失败"));
-    }
-
-    #[test]
-    fn rejects_unknown_schema_field_when_safe_defaults_are_enabled() {
-        let raw = valid_config().replace(
-            "mode = \"validate\"",
-            "mode = \"validate\"\nunexpected = true",
-        );
-        let error = match Settings::parse(&raw) {
-            Ok(_) => panic!("未知 schema 字段必须被拒绝"),
+            Ok(_) => panic!("已删除的 schema mode 必须被拒绝，不能绕过启动同步"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("解析配置文件失败"));

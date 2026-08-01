@@ -87,6 +87,16 @@ impl Module for OrgUserModule {
                     yang_base::field!("org_user.admin"),
                 ],
             )
+            .foreign_key_named(
+                "fk_org_user_user_user",
+                [yang_base::field!("org_user.user_user")],
+                [yang_base::field!("users.id")],
+            )
+            .foreign_key_named(
+                "fk_org_user_org_org",
+                [yang_base::field!("org_user.org_org")],
+                [yang_base::field!("org_org.id")],
+            )
     }
 }
 

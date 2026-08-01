@@ -1,6 +1,6 @@
 # 启动配置契约
 
-yang-system 与 `yang-migrate` 共用一个启动期配置合成器，优先级固定为：
+yang-system 使用单一启动期配置合成器，优先级固定为：
 
 ```text
 config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider

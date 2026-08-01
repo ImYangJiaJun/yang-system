@@ -2,7 +2,6 @@
 param(
     [switch]$CheckOnly,
     [switch]$SkipFrontendInstall,
-    [switch]$RunMigrations,
     [switch]$UpgradeLegacyConfig
 )
 
@@ -14,8 +13,8 @@ $composePath = Join-Path $projectRoot "compose.yaml"
 $databaseInitPath = Join-Path $projectRoot "docker/mysql/init/001-create-databases.sql"
 $configUpgradePath = Join-Path $PSScriptRoot "upgrade_local_config.py"
 
-if ($CheckOnly -and ($RunMigrations -or $UpgradeLegacyConfig)) {
-    throw "-CheckOnly 不能与 -RunMigrations/-UpgradeLegacyConfig 同时使用。"
+if ($CheckOnly -and $UpgradeLegacyConfig) {
+    throw "-CheckOnly 不能与 -UpgradeLegacyConfig 同时使用。"
 }
 
 function Assert-Command {
@@ -91,12 +90,10 @@ try {
     if (-not (Test-Path -LiteralPath $configPath)) {
         $mysqlPlaceholder = "mysql://root:password@127.0.0.1:3306/yang_system"
         $tokenPlaceholder = "replace-with-at-least-32-random-bytes"
-        $schemaValidate = 'mode = "validate"'
         $config = Get-Content -Raw -LiteralPath $configExamplePath
         if (
             -not $config.Contains($mysqlPlaceholder) -or
-            -not $config.Contains($tokenPlaceholder) -or
-            -not $config.Contains($schemaValidate)
+            -not $config.Contains($tokenPlaceholder)
         ) {
             throw "config.example.toml 缺少预期占位值，无法安全生成本机配置。"
         }
@@ -110,7 +107,7 @@ try {
         )
         $config = $config.Replace($tokenPlaceholder, $tokenSecret)
         Set-Content -LiteralPath $configPath -Value $config -Encoding utf8NoBOM
-        Write-Host "已生成本机 config.toml（schema.mode=validate）。"
+        Write-Host "已生成本机 config.toml。"
     } else {
         $inspection = Get-LocalConfigInspection
         if (-not $inspection.current) {
@@ -148,20 +145,10 @@ try {
         pnpm --dir frontend install --frozen-lockfile
         Assert-LastExitCode "前端依赖安装失败。"
     }
-    if ($RunMigrations) {
-        cargo run --locked --bin yang-migrate -- apply --config $configPath
-        Assert-LastExitCode "本地版本化迁移失败。"
-    }
 } finally {
     Pop-Location
 }
 
 Write-Host "本地环境初始化完成。"
-if ($RunMigrations) {
-    Write-Host "版本化迁移与 Schema 校验已完成。后端: Set-Location project/yang-system; cargo run --locked"
-} else {
-    Write-Host "后端启动前提: 数据库 Schema 已对齐；首次建表或升级请先运行 yang-migrate apply。"
-    Write-Host "迁移: Set-Location project/yang-system; cargo run --locked --bin yang-migrate -- apply"
-    Write-Host "后端: Set-Location project/yang-system; cargo run --locked"
-}
+Write-Host "后端启动会先预检旧数据并同步 Schema: Set-Location project/yang-system; cargo run --locked"
 Write-Host "前端: Set-Location project/yang-system; pnpm --dir frontend dev"

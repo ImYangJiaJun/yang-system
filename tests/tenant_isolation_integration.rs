@@ -242,22 +242,9 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
     });
     let application = build_app(Arc::clone(&tools), security)?;
     let initializer = DatabaseInitializer::new(initializer_database, false);
-    let definitions = application
-        .runtime
-        .table_definitions()
-        .iter()
-        .collect::<Vec<_>>();
+    let definitions = yang_system::schema::definitions(&application.runtime)?;
+    let definitions = definitions.iter().collect::<Vec<_>>();
     initializer.sync_table_definitions(&definitions).await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0006_create_authorization_outbox.sql"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0007_create_audit_event.sql"
-    ))
-    .execute(&pool)
-    .await?;
     Ok(Harness {
         application,
         tools,

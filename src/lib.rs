@@ -7,5 +7,5 @@ pub mod audit;
 pub mod bootstrap;
 pub mod config;
 mod config_source;
-pub mod migrations;
 pub mod modules;
+pub mod schema;

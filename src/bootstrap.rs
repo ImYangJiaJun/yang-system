@@ -1,6 +1,6 @@
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
-use crate::config::{SchemaMode, Settings};
+use crate::config::Settings;
 use crate::modules::account::email_delivery::{
     RegistrationEmailSenderHandle, SmtpRegistrationEmailSender,
 };
@@ -153,37 +153,18 @@ async fn run_after_tools_created(
         .context("构建应用模块失败")?;
 
     let initializer = DatabaseInitializer::new(initializer_mysql, false);
-    let schema: Vec<_> = application.runtime.table_definitions().iter().collect();
-    match settings.schema.mode {
-        SchemaMode::Apply => {
-            let report = initializer
-                .sync_table_definitions(&schema)
-                .await
-                .context("启动期同步数据库 schema 失败")?;
-            tracing::info!(
-                tables = ?report.tables,
-                changes = report.changes.len(),
-                "数据库 schema 同步完成"
-            );
-        }
-        SchemaMode::Validate => {
-            let report = initializer
-                .plan_table_definitions(&schema)
-                .await
-                .context("启动期校验数据库 schema 失败")?;
-            if !report.is_noop() {
-                anyhow::bail!(
-                    "数据库 schema 未对齐，存在 {} 项待应用变更: {:?}",
-                    report.changes.len(),
-                    report.changes
-                );
-            }
-            tracing::info!(tables = ?report.tables, "数据库 schema 校验通过");
-        }
-        SchemaMode::Off => {
-            tracing::warn!("已按配置跳过数据库 schema 同步与校验");
-        }
-    }
+    let definitions =
+        crate::schema::definitions(&application.runtime).context("构建完整数据库 schema 失败")?;
+    let schema = definitions.iter().collect::<Vec<_>>();
+    let report = initializer
+        .sync_table_definitions(&schema)
+        .await
+        .context("启动期同步数据库 schema 失败；请按错误中的表名、约束名和主键修复旧数据后重启")?;
+    tracing::info!(
+        tables = ?report.tables,
+        changes = report.changes.len(),
+        "数据库 schema 同步完成"
+    );
     crate::audit::validate_schema(tools.mysql()?.pool())
         .await
         .context("启动期校验高权限审计表失败")?;

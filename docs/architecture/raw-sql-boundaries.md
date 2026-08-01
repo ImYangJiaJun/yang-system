@@ -33,7 +33,6 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | `audit-event-repository` | infrastructure-repository | `src/audit/repository.rs` | 业务成功走事务内追加；业务尚未开始或已失败的拒绝/失败结果可独立追加；两条路径都只允许 INSERT，不提供 UPDATE/DELETE |
 | `audit-schema-validator` | schema-validator | `src/audit/schema.rs` | 启动期只读 `information_schema`，验证审计表不可变约束 |
 | `authorization-outbox` | infrastructure-repository | `src/authorization/outbox.rs` | claim/lease/retry 状态机必须使用锁与条件更新 |
-| `migration-preflight` | schema-validator | `src/migrations.rs` | apply 前只读核对 MySQL CHECK 能力与用户状态脏数据，避免不可回滚 DDL 带病执行 |
 
 <!-- raw-sql-boundary: domain-service account-authz-version src/modules/account/authz_version.rs -->
 <!-- raw-sql-boundary: domain-service account-user-lifecycle src/modules/account/user/lifecycle.rs -->
@@ -49,7 +48,6 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 <!-- raw-sql-boundary: infrastructure-repository audit-event-repository src/audit/repository.rs -->
 <!-- raw-sql-boundary: schema-validator audit-schema-validator src/audit/schema.rs -->
 <!-- raw-sql-boundary: infrastructure-repository authorization-outbox src/authorization/outbox.rs -->
-<!-- raw-sql-boundary: schema-validator migration-preflight src/migrations.rs -->
 
 ## 证据与变更流程
 

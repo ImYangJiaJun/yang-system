@@ -15,7 +15,7 @@ use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
-use yang_system::migrations::{execute_with_database, MigrationCommand};
+use yang_system::schema::sync_with_database;
 
 use common::{take_registration_code, RegistrationEmailToolsExt};
 
@@ -121,10 +121,6 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("清理 Refresh 基准表失败: {table}"))?;
     }
-    sqlx::query("DROP TABLE IF EXISTS `_migrations`")
-        .execute(database.pool())
-        .await
-        .context("清理 Refresh 基准迁移记录失败")?;
     Ok(())
 }
 
@@ -225,8 +221,7 @@ async fn refresh_rotation_load_has_zero_errors_and_reports_percentiles() -> anyh
     reset_redis(&redis).await?;
 
     let outcome = async {
-        execute_with_database(
-            MigrationCommand::Apply,
+        sync_with_database(
             connect_test_database().await?,
             database_config(),
             security_settings(),

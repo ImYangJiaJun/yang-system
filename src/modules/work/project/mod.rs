@@ -72,6 +72,11 @@ impl Module for WorkProjectModule {
                     yang_base::field!("work_project.name"),
                 ],
             )
+            .foreign_key_named(
+                "fk_work_project_owner",
+                [yang_base::field!("work_project.owner_user")],
+                [yang_base::field!("users.id")],
+            )
     }
 }
 

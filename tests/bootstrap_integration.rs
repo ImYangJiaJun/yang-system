@@ -150,25 +150,10 @@ async fn build_harness(
     });
     let application = build_app(Arc::clone(&tools), security)?;
     let initializer = DatabaseInitializer::new(initializer_database, false);
+    let definitions = yang_system::schema::definitions(&application.runtime)?;
     initializer
-        .sync_table_definitions(
-            &application
-                .runtime
-                .table_definitions()
-                .iter()
-                .collect::<Vec<_>>(),
-        )
+        .sync_table_definitions(&definitions.iter().collect::<Vec<_>>())
         .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0006_create_authorization_outbox.sql"
-    ))
-    .execute(&pool)
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260726_0007_create_audit_event.sql"
-    ))
-    .execute(&pool)
-    .await?;
     Ok((application, tools, pool))
 }
 

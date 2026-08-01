@@ -113,7 +113,17 @@ pub(super) fn user_table_spec() -> Result<TableSpec, BaseError> {
     };
     let table_name =
         TableName::new("users").map_err(|error| BaseError::ConfigError(error.to_string()))?;
-    Ok(TableSpec::new(table_name).title("用户").fields(fields))
+    Ok(TableSpec::new(table_name)
+        .title("用户")
+        .fields(fields)
+        .check_named(
+            "chk_users_status",
+            "`status` IN ('active', 'disabled')",
+        )
+        .check_named(
+            "chk_users_verified_email_pair",
+            "((`email` IS NULL) AND (`email_verified_at` IS NULL)) OR ((`email` IS NOT NULL) AND (`email_verified_at` IS NOT NULL))",
+        ))
 }
 
 #[cfg(test)]

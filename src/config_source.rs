@@ -64,7 +64,6 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "outbox_max_retry_seconds",
         Integer
     ),
-    environment_binding!("YANG_SYSTEM_SCHEMA_MODE", "schema", "mode", Text),
     environment_binding!("YANG_SYSTEM_HTTP_BIND", "http", "bind", Text),
     environment_binding!(
         "YANG_SYSTEM_HTTP_MAX_BODY_BYTES",

@@ -96,6 +96,35 @@ impl Module for WorkTaskModule {
                     yang_base::field!("work_task.parent_task"),
                 ],
             )
+            .foreign_key_named(
+                "fk_work_task_owner",
+                [yang_base::field!("work_task.owner_user")],
+                [yang_base::field!("users.id")],
+            )
+            .foreign_key_named(
+                "fk_work_task_project_owner",
+                [
+                    yang_base::field!("work_task.project_project"),
+                    yang_base::field!("work_task.owner_user"),
+                ],
+                [
+                    yang_base::field!("work_project.id"),
+                    yang_base::field!("work_project.owner_user"),
+                ],
+            )
+            .foreign_key_named(
+                "fk_work_task_parent_project_owner",
+                [
+                    yang_base::field!("work_task.parent_task"),
+                    yang_base::field!("work_task.project_project"),
+                    yang_base::field!("work_task.owner_user"),
+                ],
+                [
+                    yang_base::field!("work_task.id"),
+                    yang_base::field!("work_task.project_project"),
+                    yang_base::field!("work_task.owner_user"),
+                ],
+            )
     }
 }
 
