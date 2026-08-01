@@ -1,7 +1,6 @@
 //! 平台账号 Action 清单。
 
 mod add;
-mod bootstrap;
 mod create_password_reset;
 mod list;
 mod set_admin;
@@ -16,7 +15,6 @@ pub(super) fn register_all(
     service: Arc<AdminService>,
     password_reset_enabled: bool,
 ) -> ModuleSpec {
-    let module = bootstrap::register(module, Arc::clone(&service));
     let module = list::register(module, Arc::clone(&service));
     let module = add::register(module, Arc::clone(&service));
     let module = if password_reset_enabled {

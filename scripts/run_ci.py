@@ -148,7 +148,7 @@ INTEGRATION = (
         ),
     ),
     Command(
-        "Bootstrap trust-root integration",
+        "System-owner registration integration",
         (
             "cargo",
             "test",

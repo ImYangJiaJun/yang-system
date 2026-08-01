@@ -19,7 +19,7 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 请求会省略尚不存在的 actor/tenant 值；普通租户记录可信解析后的正整数 ID，系统级
 旁路只记录 `tenant_scope=system`，不会把请求 header 当作可信租户。
 
-日志禁止记录请求体、Authorization/Cookie header、密码、Token、bootstrap secret、
+日志禁止记录请求体、Authorization/Cookie header、密码、Token、
 数据库连接串或 Redis URL。高权限追责仍以 `audit_event` 为事实源，结构化日志不能
 替代事务内审计。
 

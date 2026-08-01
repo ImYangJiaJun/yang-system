@@ -163,9 +163,10 @@ impl UserRepository {
             .transpose()
     }
 
-    pub(super) async fn insert(
+    pub(super) async fn insert_in_tx(
         &self,
         ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
         username: &str,
         password_hash: &str,
         email: &str,
@@ -177,7 +178,10 @@ impl UserRepository {
             .set(EMAIL, email)
             .set(EMAIL_VERIFIED_AT, email_verified_at)
             .set(STATUS, UserStatus::Active.as_str());
-        let (_, id) = self.trusted_query(ctx)?.insert_returning_id(record).await?;
+        let (_, id) = self
+            .trusted_query(ctx)?
+            .insert_returning_id_in_tx(transaction, record)
+            .await?;
         i64::try_from(id).map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))
     }
 

@@ -23,6 +23,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 | `account-user-lifecycle` | domain-service | `src/modules/account/user/lifecycle.rs` | 自助停用跨用户、平台与企业授权关系，必须统一锁序并与双版本、Outbox、成功审计原子提交 |
 | `password-reset-token` | domain-repository | `src/modules/account/password_reset/repository.rs` | 重置凭证摘要的目标用户查询、行锁、单次消费和旧凭证失效必须在调用方事务内完成 |
 | `admin-grant-snapshot` | domain-service | `src/modules/admin/grants.rs` | Token 签发事务内读取平台管理员授权快照 |
+| `admin-system-owner-invariant` | domain-service | `src/modules/admin/guard.rs` | 启动期核对用户与唯一最终管理员哨兵的一致性，损坏状态必须失败关闭并交由人工修复 |
 | `admin-user-repository` | domain-repository | `src/modules/admin/user/repository.rs` | 跨表列表、管理员行锁和与审计同事务的受控更新 |
 | `org-grant-snapshot` | domain-service | `src/modules/org/grants.rs` | Token 签发前按用户有效成员关系聚合授权，不接受请求租户 |
 | `org-access-repository` | domain-repository | `src/modules/org/access/repository.rs` | pre-tenant 企业发现 Join，范围固定为已认证 actor |
@@ -38,6 +39,7 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；只有 Join�
 <!-- raw-sql-boundary: domain-service account-user-lifecycle src/modules/account/user/lifecycle.rs -->
 <!-- raw-sql-boundary: domain-repository password-reset-token src/modules/account/password_reset/repository.rs -->
 <!-- raw-sql-boundary: domain-service admin-grant-snapshot src/modules/admin/grants.rs -->
+<!-- raw-sql-boundary: domain-service admin-system-owner-invariant src/modules/admin/guard.rs -->
 <!-- raw-sql-boundary: domain-repository admin-user-repository src/modules/admin/user/repository.rs -->
 <!-- raw-sql-boundary: domain-service org-grant-snapshot src/modules/org/grants.rs -->
 <!-- raw-sql-boundary: domain-repository org-access-repository src/modules/org/access/repository.rs -->

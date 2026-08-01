@@ -10,16 +10,6 @@ use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub(super) struct BootstrapResult {
-    id: i64,
-    user_user: i64,
-    username: String,
-    status: String,
-    admin: bool,
-    refresh_token_required: bool,
-}
-
 #[derive(Serialize, JsonSchema)]
 pub(super) struct PasswordResetCreated {
     user_id: i64,
@@ -60,34 +50,6 @@ impl AdminService {
             password_reset_ttl_seconds,
             password_reset_enabled,
         }
-    }
-
-    pub(super) async fn bootstrap(
-        &self,
-        ctx: &ActionContext,
-        name: &str,
-        position: Option<&str>,
-    ) -> Result<BootstrapResult, BaseError> {
-        let user = ctx
-            .authenticated_user()
-            .ok_or_else(|| BaseError::Unauthorized("初始化平台账号需要登录".to_string()))?;
-        let user_id = user.id;
-        let username = user.username.clone();
-        let name = normalize_required("name", name, 50)?;
-        let position = normalize_optional("position", position, 50)?;
-        let id = self
-            .repository
-            .bootstrap(ctx, user_id, &name, position.as_deref())
-            .await?;
-
-        Ok(BootstrapResult {
-            id,
-            user_user: user_id,
-            username,
-            status: super::ACTIVE_STATUS.to_string(),
-            admin: true,
-            refresh_token_required: true,
-        })
     }
 
     pub(super) async fn list(

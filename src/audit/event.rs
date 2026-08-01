@@ -498,7 +498,7 @@ mod tests {
         .is_err());
         assert!(AuditEvent::new(
             valid_context(),
-            "admin.user.bootstrap",
+            "account.user.register",
             None,
             AuditEntity::new("admin_account", "1")
                 .unwrap_or_else(|error| panic!("target 应有效: {error}")),

@@ -3,13 +3,14 @@
 //! authorization-writer: admin-authorization-facts
 
 use super::model::{AdminAccountPage, AdminAccountView, PageRequest};
-use super::{ACTIVE_STATUS, BOOTSTRAP_KEY, IS_ADMIN, NAME, POSITION, STATUS, SYSTEM_ROLE, USER_ID};
+use super::{ACTIVE_STATUS, IS_ADMIN, NAME, POSITION, STATUS, SYSTEM_ROLE, USER_ID};
 use crate::audit;
 use crate::authorization::{resource_authorization_checkpoint, ResourceAuthorizationCheckpoint};
 use crate::modules::account::{
     create_password_reset_in_tx, increment_locked_authz_version, lock_user_authorization,
-    GeneratedPasswordReset, LockedUserAuthorization,
+    GeneratedPasswordReset, LockedUserAuthorization, OwnerClaimOutcome, SystemOwnerClaimer,
 };
+use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
@@ -17,9 +18,61 @@ use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
 use yang_db::Transaction;
 
-/// 数据库只允许这一种非空初始化哨兵；`NULL UNIQUE` 允许普通授权关系共存，
-/// 唯一非空值使并发 bootstrap 最多一个事务成功。
-const INITIAL_BOOTSTRAP_KEY: &str = "initial-admin";
+/// 数据库只允许这一种非空最终管理员哨兵。
+pub(super) const SYSTEM_OWNER_KEY: &str = "system-owner";
+
+/// 无状态的最终管理员声明器。
+pub(crate) struct AdminSystemOwnerClaimer;
+
+#[async_trait]
+impl SystemOwnerClaimer for AdminSystemOwnerClaimer {
+    async fn claim(
+        &self,
+        transaction: &mut Transaction,
+        user_id: i64,
+        username: &str,
+    ) -> Result<OwnerClaimOutcome, BaseError> {
+        let result = sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, status, admin, owner_key, created_at, updated_at) \
+             VALUES (?, ?, 'active', TRUE, ?, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())",
+        )
+        .bind(user_id)
+        .bind(username)
+        .bind(SYSTEM_OWNER_KEY)
+        .execute(executor(transaction)?)
+        .await;
+
+        match result {
+            Ok(result) => {
+                let admin_id = i64::try_from(result.last_insert_id())
+                    .map_err(|_| BaseError::Unknown("最终管理员主键超出 i64 范围".to_string()))?;
+                Ok(OwnerClaimOutcome::Claimed { admin_id })
+            }
+            Err(error) => {
+                let unique_violation = matches!(
+                    &error,
+                    sqlx::Error::Database(database_error)
+                        if database_error.is_unique_violation()
+                );
+                if !unique_violation {
+                    return Err(BaseError::from(yang_db::DbError::from(error)));
+                }
+                let owner_exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM admin_user WHERE owner_key = 'system-owner')",
+                )
+                .fetch_one(executor(transaction)?)
+                .await
+                .map_err(yang_db::DbError::from)?;
+                if owner_exists {
+                    Ok(OwnerClaimOutcome::AlreadyClaimed)
+                } else {
+                    Err(BaseError::from(yang_db::DbError::from(error)))
+                }
+            }
+        }
+    }
+}
 
 type AdminRow = (
     i64,
@@ -89,67 +142,6 @@ impl AdminRepository {
             total,
             request,
         ))
-    }
-
-    pub(super) async fn bootstrap(
-        &self,
-        ctx: &ActionContext,
-        user_id: i64,
-        name: &str,
-        position: Option<&str>,
-    ) -> Result<i64, BaseError> {
-        let mut transaction = ctx.tools().mysql()?.transaction().await?;
-        let result = async {
-            let initialized =
-                sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM `admin_user` LIMIT 1)")
-                    .fetch_one(executor(&mut transaction)?)
-                    .await
-                    .map_err(yang_db::DbError::from)?;
-            if initialized {
-                return Err(BaseError::PermissionDenied(
-                    "平台账号已经完成初始化".to_string(),
-                ));
-            }
-
-            let locked = lock_user_authorization(&mut transaction, user_id).await?;
-            ensure_active_user(&locked)?;
-            let mut account = Record::new()
-                .set(USER_ID, user_id)
-                .set(NAME, name)
-                .set(STATUS, ACTIVE_STATUS)
-                .set(IS_ADMIN, true)
-                .set(BOOTSTRAP_KEY, INITIAL_BOOTSTRAP_KEY);
-            if let Some(position) = position {
-                account = account.set(POSITION, position);
-            }
-            let (_, id) = match self
-                .trusted_query(ctx)?
-                .insert_returning_id_in_tx(&mut transaction, account)
-                .await
-            {
-                Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
-                    return Err(BaseError::PermissionDenied(
-                        "平台账号已经完成初始化".to_string(),
-                    ));
-                }
-                result => result?,
-            };
-            increment_locked_authz_version(&mut transaction, &locked).await?;
-            let id = i64::try_from(id)
-                .map_err(|_| BaseError::Unknown("平台账号主键超出 i64 范围".to_string()))?;
-            append_admin_event(
-                &mut transaction,
-                ctx,
-                id,
-                user_id,
-                None,
-                Some(admin_summary(ACTIVE_STATUS, true, user_id)?),
-            )
-            .await?;
-            Ok(id)
-        }
-        .await;
-        finish_transaction(transaction, result).await
     }
 
     pub(super) async fn add(
@@ -263,6 +255,9 @@ impl AdminRepository {
             if status == target.status {
                 return Ok(id);
             }
+            if status != ACTIVE_STATUS {
+                ensure_owner_mutation_allowed(target.owner_key.as_deref(), OwnerMutation::Disable)?;
+            }
             if status != ACTIVE_STATUS && target.status == ACTIVE_STATUS && target.admin {
                 ensure_not_last_active_admin(&active_admins, id)?;
             }
@@ -310,6 +305,9 @@ impl AdminRepository {
             let target = lock_target(&mut transaction, id).await?;
             if admin == target.admin {
                 return Ok(id);
+            }
+            if !admin {
+                ensure_owner_mutation_allowed(target.owner_key.as_deref(), OwnerMutation::Demote)?;
             }
             if !admin && target.status == ACTIVE_STATUS && target.admin {
                 ensure_not_last_active_admin(&active_admins, id)?;
@@ -378,6 +376,29 @@ struct LockedAdminTarget {
     status: String,
     admin: bool,
     user_id: i64,
+    owner_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerMutation {
+    Disable,
+    Demote,
+}
+
+fn ensure_owner_mutation_allowed(
+    owner_key: Option<&str>,
+    mutation: OwnerMutation,
+) -> Result<(), BaseError> {
+    if owner_key != Some(SYSTEM_OWNER_KEY) {
+        return Ok(());
+    }
+    let operation = match mutation {
+        OwnerMutation::Disable => "停用",
+        OwnerMutation::Demote => "降级",
+    };
+    Err(BaseError::PermissionDenied(format!(
+        "系统最终管理员不能被{operation}"
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,17 +456,18 @@ async fn lock_target(
     transaction: &mut Transaction,
     id: i64,
 ) -> Result<LockedAdminTarget, BaseError> {
-    sqlx::query_as::<_, (String, bool, i64)>(
-        "SELECT status, admin, user_user FROM admin_user WHERE id = ? FOR UPDATE",
+    sqlx::query_as::<_, (String, bool, i64, Option<String>)>(
+        "SELECT status, admin, user_user, owner_key FROM admin_user WHERE id = ? FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(executor(transaction)?)
     .await
     .map_err(yang_db::DbError::from)?
-    .map(|(status, admin, user_id)| LockedAdminTarget {
+    .map(|(status, admin, user_id, owner_key)| LockedAdminTarget {
         status,
         admin,
         user_id,
+        owner_key,
     })
     .ok_or_else(|| BaseError::RecordNotFound(format!("平台账号 {id}")))
 }
@@ -547,10 +569,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bootstrap_record_uses_stable_database_guard() {
-        assert_eq!(INITIAL_BOOTSTRAP_KEY, "initial-admin");
-        for field in [USER_ID, NAME, POSITION, STATUS, IS_ADMIN, BOOTSTRAP_KEY] {
+    fn system_owner_uses_one_stable_guard_and_cannot_be_mutated() {
+        assert_eq!(SYSTEM_OWNER_KEY, "system-owner");
+        for field in [USER_ID, NAME, POSITION, STATUS, IS_ADMIN, "owner_key"] {
             assert!(!field.is_empty());
         }
+
+        for mutation in [OwnerMutation::Disable, OwnerMutation::Demote] {
+            assert!(matches!(
+                ensure_owner_mutation_allowed(Some(SYSTEM_OWNER_KEY), mutation),
+                Err(BaseError::PermissionDenied(message))
+                    if message.contains("最终管理员")
+            ));
+        }
+        assert!(ensure_owner_mutation_allowed(None, OwnerMutation::Disable).is_ok());
     }
 }

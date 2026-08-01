@@ -17,12 +17,15 @@ use yang_base::definition::{
 };
 use yang_base::BaseError;
 
+pub(crate) use repository::AdminSystemOwnerClaimer;
+
 pub(super) const USER_ID: &str = "user_user";
 pub(super) const NAME: &str = "name";
 pub(super) const POSITION: &str = "position";
 pub(super) const STATUS: &str = "status";
 pub(super) const IS_ADMIN: &str = "admin";
-pub(super) const BOOTSTRAP_KEY: &str = "bootstrap_key";
+#[cfg(test)]
+const OWNER_KEY: &str = "owner_key";
 pub(super) const ACTIVE_STATUS: &str = "active";
 pub(super) const SYSTEM_ROLE: &str = "system";
 
@@ -65,8 +68,8 @@ impl Module for AdminUserModule {
                 .require(true)
                 .default(false)
                 .filterable(true),
-            bootstrap_key => Str::new()
-                .title("初始化占位")
+            owner_key => Str::new()
+                .title("最终管理员占位")
                 .max_length(32)
                 .unique(true)
                 .secret(true)
@@ -124,7 +127,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admin_schema_keeps_identity_and_bootstrap_invariants_in_database() {
+    fn admin_schema_keeps_identity_and_owner_invariants_in_database() {
         let table = AdminUserModule
             .into_spec()
             .table
@@ -136,7 +139,7 @@ mod tests {
             .iter()
             .any(|field| { field.name.as_str() == USER_ID && field.storage.unique }));
         assert!(table.fields.iter().any(|field| {
-            field.name.as_str() == BOOTSTRAP_KEY && field.storage.unique && field.access.secret
+            field.name.as_str() == OWNER_KEY && field.storage.unique && field.access.secret
         }));
         for name in [USER_ID, STATUS, IS_ADMIN] {
             let field = table

@@ -4,6 +4,7 @@ mod authz_version;
 pub mod email_delivery;
 mod grants;
 mod password_reset;
+mod system_owner;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
@@ -25,6 +26,7 @@ pub(crate) use password_reset::{
     find_target_user as find_password_reset_target_user, invalid_reset_token,
     lock_in_tx as lock_password_reset_in_tx, GeneratedPasswordReset, PasswordResetReference,
 };
+pub(crate) use system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
 pub(crate) use user::user_from_claims;
 pub(crate) use user::UserStatus;
 pub(crate) use user::{AuthOperation, AuthRateLimiter};
@@ -32,9 +34,10 @@ pub(crate) use user::{AuthOperation, AuthRateLimiter};
 /// 构建账号 Addon。
 ///
 /// Addon 边界负责声明产品能力及其 Module；应用层不应直接拼装 `account.user`。
-pub fn build_addon(
+pub(crate) fn build_addon(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
+    system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     authorization_validator: AuthorizationVersionValidator,
     step_up: Option<StepUpServices>,
 ) -> Result<AddonSpec, BaseError> {
@@ -42,6 +45,7 @@ pub fn build_addon(
         AddonSpec::new(yang_base::addon!("account")).module(user::build_module(
             security,
             grant_resolver,
+            system_owner_claimer,
             authorization_validator,
             step_up,
         )?),

@@ -71,6 +71,7 @@ fn build_application(
                     org::grant_resolver(),
                     work::grant_resolver(),
                 ])),
+                admin::system_owner_claimer(),
                 authorization_validator.clone(),
                 step_up.clone(),
             )
@@ -421,15 +422,13 @@ mod tests {
             "/api/v1/admin/users/password-reset"
         );
         assert!(!create_password_reset.is_public);
-        let bootstrap = admin_user_module
-            .actions()
-            .iter()
-            .find(|action| action.name.as_str() == "bootstrap")
-            .unwrap_or_else(|| panic!("应存在 admin.user.bootstrap"));
-        assert_eq!(bootstrap.route.path.as_str(), "/api/v1/admin/bootstrap");
-        assert_eq!(bootstrap.success_status, 201);
-        assert!(!bootstrap.is_public);
-        assert!(bootstrap.permissions.is_empty());
+        assert!(
+            admin_user_module
+                .actions()
+                .iter()
+                .all(|action| action.name.as_str() != "bootstrap"),
+            "最终管理员必须由首个注册事务声明，不得保留独立初始化 Action"
+        );
         let admin_action = |name: &str| {
             admin_user_module
                 .actions()

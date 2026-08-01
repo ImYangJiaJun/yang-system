@@ -228,12 +228,6 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "proof_ttl_seconds",
         Integer
     ),
-    environment_binding!(
-        "YANG_SYSTEM_BOOTSTRAP_SECRET_DIGEST",
-        "bootstrap",
-        "secret_digest",
-        Text
-    ),
     environment_binding!("YANG_SYSTEM_EMAIL_SMTP_RELAY", "email.smtp", "relay", Text),
     environment_binding!("YANG_SYSTEM_EMAIL_SMTP_PORT", "email.smtp", "port", Integer),
     environment_binding!(
@@ -411,7 +405,6 @@ pub(crate) enum SecretKey {
     TokenRetiringKeys,
     StepUpActiveSecret,
     StepUpRetiringKeys,
-    BootstrapSecretDigest,
     EmailSmtpPassword,
     EmailVerificationSecret,
 }
@@ -426,7 +419,6 @@ impl SecretKey {
             Self::TokenRetiringKeys => "token_retiring_keys_json",
             Self::StepUpActiveSecret => "step_up_active_secret",
             Self::StepUpRetiringKeys => "step_up_retiring_keys_json",
-            Self::BootstrapSecretDigest => "bootstrap_secret_digest",
             Self::EmailSmtpPassword => "email_smtp_password",
             Self::EmailVerificationSecret => "email_verification_secret",
         }
@@ -441,7 +433,6 @@ const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::TokenRetiringKeys,
     SecretKey::StepUpActiveSecret,
     SecretKey::StepUpRetiringKeys,
-    SecretKey::BootstrapSecretDigest,
     SecretKey::EmailSmtpPassword,
     SecretKey::EmailVerificationSecret,
 ];
@@ -453,7 +444,6 @@ const SECRET_BINDINGS: &[SecretBinding] = &[
     SecretBinding::json("token_retiring_keys_json", "token", "retiring_keys"),
     SecretBinding::text("step_up_active_secret", "step_up", "active_secret"),
     SecretBinding::json("step_up_retiring_keys_json", "step_up", "retiring_keys"),
-    SecretBinding::text("bootstrap_secret_digest", "bootstrap", "secret_digest"),
     SecretBinding::text("email_smtp_password", "email.smtp", "password"),
     SecretBinding::text("email_verification_secret", "email.verification", "secret"),
 ];

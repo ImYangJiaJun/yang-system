@@ -87,6 +87,7 @@ async fn users_status_check(database: &Database) -> anyhow::Result<Option<(Strin
     check_constraint_metadata(database, "users", "chk_users_status").await
 }
 
+#[cfg(any())]
 async fn bootstrap_key_check(database: &Database) -> anyhow::Result<Option<(String, String)>> {
     check_constraint_metadata(database, "admin_user", "chk_admin_user_bootstrap_key").await
 }
@@ -594,6 +595,7 @@ async fn status_check_upgrade_rejects_dirty_data_and_same_name_drift() -> anyhow
 
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 指向 _test MySQL 数据库"]
+#[cfg(any())]
 async fn bootstrap_key_check_rejects_dirty_values_and_same_name_drift() -> anyhow::Result<()> {
     let control = connect_test_database().await?;
     reset_test_database(&control).await?;
@@ -1194,6 +1196,7 @@ async fn status_check_ddl_rehearsal_obeys_configured_lock_budget() -> anyhow::Re
 
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL；staging 应设置 YANG_SYSTEM_BOOTSTRAP_DDL_SCALE_ROWS 与 YANG_SYSTEM_BOOTSTRAP_DDL_BUDGET_MS"]
+#[cfg(any())]
 async fn bootstrap_key_check_ddl_rehearsal_obeys_configured_budget() -> anyhow::Result<()> {
     let control = connect_test_database().await?;
     reset_test_database(&control).await?;

@@ -58,16 +58,13 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `redis_url` | `redis.url` |
 | `token_active_secret` | `token.active_secret` |
 | `token_retiring_keys_json` | `token.retiring_keys`（JSON 对象数组） |
-| `bootstrap_secret_digest` | `bootstrap.secret_digest` |
 
 每个文件上限 64 KiB；允许一个结尾换行，拒绝空值、内嵌换行、NUL 和非
 UTF-8 内容。目录一旦显式配置却不可访问，进程会失败关闭；单个文件缺失则
 回退到环境变量或配置文件。文件名固定，不能由外部输入拼接路径。
 
 生产环境建议让 Kubernetes/Docker secret、systemd credentials 或同类设施
-把 secret 只读挂载到独立目录。不要把原始 token secret、数据库密码或
-bootstrap 原始 secret 提交到 Git；bootstrap provider 保存的是 Argon2id
-摘要，而不是操作员输入的原文。
+把 secret 只读挂载到独立目录。不要把原始 token secret 或数据库密码提交到 Git。
 
 ## Token keyring 轮换
 

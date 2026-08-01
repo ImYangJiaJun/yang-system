@@ -326,14 +326,14 @@ const MIGRATIONS: [MigrationDescriptor; 17] = [
     MigrationDescriptor {
         version: "20260731_0016_add_admin_bootstrap_key_check",
         sql: include_str!("../migrations/20260731_0016_add_admin_bootstrap_key_check.sql"),
-        description: "把平台初始化占位值固化为 NULL 或唯一 initial-admin",
-        prerequisite: "0015 已完成；发布前核对 MySQL 8.0.16+ 且 admin_user.bootstrap_key 非空值只含 initial-admin；在生产等量 staging 记录 ALTER 耗时与元数据锁等待",
-        recovery: "前向恢复；精确完成探针核对 chk_admin_user_bootstrap_key 名称、表达式与 ENFORCED；脏数据或同名异义约束须先人工修复",
+        description: "把最终管理员哨兵固化为 NULL 或唯一 system-owner",
+        prerequisite: "0015 已完成；发布前核对 MySQL 8.0.16+ 且 admin_user.owner_key 非空值只含 system-owner；在生产等量 staging 记录 ALTER 耗时与元数据锁等待",
+        recovery: "前向恢复；精确完成探针核对 chk_admin_user_owner_key 名称、表达式与 ENFORCED；脏数据或同名异义约束须先人工修复",
         completion_check: Some(CompletionDescriptor::CheckConstraint(
             CheckConstraintCompletionDescriptor {
                 table: "admin_user",
-                constraint: "chk_admin_user_bootstrap_key",
-                expression: "(bootstrap_key IS NULL) OR (bootstrap_key = 'initial-admin')",
+                constraint: "chk_admin_user_owner_key",
+                expression: "(owner_key IS NULL) OR (owner_key = 'system-owner')",
                 enforced: true,
             },
         )),
@@ -567,7 +567,7 @@ async fn preflight_admin_bootstrap_key_check(pool: &sqlx::MySqlPool) -> anyhow::
 
     let dirty_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM admin_user \
-         WHERE bootstrap_key IS NOT NULL AND bootstrap_key <> 'initial-admin'",
+         WHERE owner_key IS NOT NULL AND owner_key <> 'system-owner'",
     )
     .fetch_one(pool)
     .await

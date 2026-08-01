@@ -20,9 +20,6 @@ use yang_system::migrations::{execute_with_database, MigrationCommand};
 use yang_system::modules::account::email_delivery::{
     EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
 };
-use yang_system::modules::admin::bootstrap_secret::{
-    generate_bootstrap_secret, BootstrapSecretVerifier,
-};
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -300,7 +297,6 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
         );
         let sender = CapturingEmailSender::default();
-        let bootstrap = generate_bootstrap_secret()?;
         let tools = Arc::new(
             ToolsBuilder::new()
                 .mysql(Database::from_pool(
@@ -316,7 +312,6 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
                 .extension(step_up_manager())
                 .extension(RegistrationEmailSenderHandle::new(sender.clone()))
                 .config(email_settings(namespace))
-                .config(BootstrapSecretVerifier::new(bootstrap.digest().clone(), 4)?)
                 .build()?,
         );
         let application = build_app(Arc::clone(&tools), security_settings())?;

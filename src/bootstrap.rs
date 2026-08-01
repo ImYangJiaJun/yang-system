@@ -4,7 +4,6 @@ use crate::config::{SchemaMode, Settings};
 use crate::modules::account::email_delivery::{
     RegistrationEmailSenderHandle, SmtpRegistrationEmailSender,
 };
-use crate::modules::admin::bootstrap_secret::BootstrapSecretVerifier;
 use anyhow::Context;
 use std::future::Future;
 use std::path::Path;
@@ -67,11 +66,6 @@ async fn run_after_telemetry_initialized(
     telemetry: &mut TelemetryRuntime,
     shutdown_budget: ShutdownBudget,
 ) -> anyhow::Result<()> {
-    let bootstrap_verifier = BootstrapSecretVerifier::new(
-        settings.bootstrap.secret_digest.clone(),
-        settings.security.argon2_max_concurrency,
-    )
-    .context("构建 bootstrap secret 校验器失败")?;
     let token_manager = settings.token.build_manager()?;
 
     let mysql = Database::connect_with_config(&settings.mysql.url, settings.mysql_config())
@@ -105,7 +99,6 @@ async fn run_after_telemetry_initialized(
                 registration_email_sender,
             ))
             .config(log_identity)
-            .config(bootstrap_verifier)
             .config(settings.email.verification.clone())
             .build()
             .context("构建应用 Tools 失败")?,
@@ -194,6 +187,9 @@ async fn run_after_tools_created(
     crate::audit::validate_schema(tools.mysql()?.pool())
         .await
         .context("启动期校验高权限审计表失败")?;
+    crate::modules::admin::validate_system_owner_state(tools.mysql()?.pool())
+        .await
+        .context("启动期校验系统最终管理员状态失败")?;
     drop(initializer);
 
     let bind = settings.bind_addr()?;

@@ -1,7 +1,7 @@
 //! 平台账号 Addon 的公开组装入口。
 
-pub mod bootstrap_secret;
 mod grants;
+mod guard;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
@@ -15,9 +15,16 @@ use yang_base::action::TokenAuthMiddleware;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
+pub(crate) use guard::validate_system_owner_state;
+
 /// 返回平台账号域的 Token 授权解析器。
 pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {
     Arc::new(AdminGrantResolver)
+}
+
+/// 返回首个注册账号使用的最终管理员声明器。
+pub(crate) fn system_owner_claimer() -> Arc<dyn account::SystemOwnerClaimer> {
+    Arc::new(user::AdminSystemOwnerClaimer)
 }
 
 /// 构建平台账号 Addon。

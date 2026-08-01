@@ -20,7 +20,7 @@
 
 摘要只允许有界标量或标量数组，禁止嵌套对象；字段名命中 password、secret、token、
 nonce、credential、authorization、cookie 或 hash 时在进入数据库前失败。密码、
-Token、bootstrap secret/nonce、Cookie 和完整请求体不得通过改名绕过该边界。事件
+Token、Cookie 和完整请求体不得通过改名绕过该边界。事件
 Debug 只展示摘要字段名，不展示值。
 
 数据库 CHECK 约束固定 event/request ID 形状、tenant 正数语义以及 subject 字段成对

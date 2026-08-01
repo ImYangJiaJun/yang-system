@@ -16,7 +16,7 @@ mod status;
 use crate::authorization::AuthorizationVersionValidator;
 use crate::authorization::{RequestFingerprintResolver, StepUpServices};
 use crate::config::SecuritySettings;
-use crate::modules::account::GrantResolver;
+use crate::modules::account::{GrantResolver, SystemOwnerClaimer};
 use password::PasswordEngine;
 use repository::UserRepository;
 use service::UserService;
@@ -39,6 +39,7 @@ pub(crate) use status::UserStatus;
 pub(super) fn build_module(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
+    system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     authorization_validator: AuthorizationVersionValidator,
     step_up: Option<StepUpServices>,
 ) -> Result<ModuleSpec, BaseError> {
@@ -52,6 +53,7 @@ pub(super) fn build_module(
         passwords,
         rate_limiter,
         grant_resolver,
+        system_owner_claimer,
         security.issue_refresh_credential_version,
     ));
     let module = ModuleSpec::new(

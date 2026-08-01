@@ -20,9 +20,6 @@ use yang_system::authorization::{
     ResourceAuthorizationCheckpoint, ResourceAuthorizationProbe,
 };
 use yang_system::config::{AuthorizationSettings, SecuritySettings};
-use yang_system::modules::admin::bootstrap_secret::{
-    generate_bootstrap_secret, BootstrapSecretVerifier,
-};
 
 use common::{take_registration_code, RegistrationEmailToolsExt};
 
@@ -514,17 +511,16 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "step-up-integration-{}",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
-    let bootstrap = generate_bootstrap_secret()?;
-    let bootstrap_secret = bootstrap.secret().to_owned();
+    let authorization_cache = AuthorizationVersionCache::new(redis.clone(), deployment.clone())?;
+    let authorization_cache_probe = authorization_cache.clone();
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis.clone())
             .with_registration_email(format!("email-{deployment}"))
-            .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
+            .extension(authorization_cache)
             .extension(integration_step_up_manager())
             .token(integration_token_manager())
-            .config(BootstrapSecretVerifier::new(bootstrap.digest().clone(), 2)?)
             .build()?,
     );
     let security = Arc::new(SecuritySettings {
@@ -586,35 +582,6 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         .await?,
     )?;
     let target_id = target["id"].as_i64().context("Step-up 目标用户缺少 ID")?;
-    let initial_login = data(
-        dispatch(
-            &first.runtime,
-            "account.user",
-            "login",
-            json!({ "username": admin_username, "password": password }),
-            &[],
-            &[],
-        )
-        .await?,
-    )?;
-    let initial_access = initial_login["access_token"]
-        .as_str()
-        .context("Step-up 初始登录缺少 Access Token")?;
-    data(
-        dispatch(
-            &first.runtime,
-            "admin.user",
-            "bootstrap",
-            json!({
-                "secret": bootstrap_secret,
-                "name": "Step-up Administrator",
-                "position": "Owner"
-            }),
-            &[("authorization", &format!("Bearer {initial_access}"))],
-            &[],
-        )
-        .await?,
-    )?;
     let admin_login_response = dispatch(
         &first.runtime,
         "account.user",
@@ -798,7 +765,21 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         .context("账号生命周期登录缺少 Access Token")?
         .to_owned();
     let authorization = format!("Bearer {lifecycle_access}");
-
+    let lifecycle_token_version = token_authz_version(&tools, &lifecycle_access)?;
+    let lifecycle_database_version =
+        database_authz_version(tools.mysql()?.pool(), admin_id).await?;
+    let lifecycle_cached_version = authorization_cache_probe.read(admin_id).await?;
+    ensure!(
+        lifecycle_token_version == lifecycle_database_version,
+        "账号生命周期登录必须签发数据库当前授权版本: token={lifecycle_token_version}, database={lifecycle_database_version}"
+    );
+    ensure!(
+        !matches!(
+            lifecycle_cached_version,
+            CachedAuthorizationVersion::Version(version) if version > lifecycle_token_version
+        ),
+        "授权缓存不得领先于登录快照: token={lifecycle_token_version}, cache={lifecycle_cached_version:?}"
+    );
     let authz_before_rejected_disable =
         database_authz_version(tools.mysql()?.pool(), admin_id).await?;
     let credential_before_rejected_disable =
@@ -830,14 +811,14 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
     .await;
     ensure!(
         matches!(rejected_disable, Err(BaseError::PermissionDenied(_))),
-        "企业唯一管理员不得停用自身: {rejected_disable:?}"
+        "系统最终管理员必须被永久拒绝停用: {rejected_disable:?}"
     );
     ensure!(
         database_authz_version(tools.mysql()?.pool(), admin_id).await?
             == authz_before_rejected_disable
             && database_credential_version(tools.mysql()?.pool(), admin_id).await?
                 == credential_before_rejected_disable,
-        "最后企业管理员保护失败时不得留下版本副作用"
+        "最终管理员保护失败时不得留下版本副作用"
     );
 
     let target_org_body = json!({
@@ -874,22 +855,6 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         )
         .await?,
     )?;
-
-    let recovery_login = data(
-        dispatch(
-            &first.runtime,
-            "account.user",
-            "login",
-            json!({ "username": target_username, "password": password }),
-            &[],
-            &[],
-        )
-        .await?,
-    )?;
-    let recovery_access = recovery_login["access_token"]
-        .as_str()
-        .context("备用管理员登录缺少 Access Token")?;
-    let recovery_authorization = format!("Bearer {recovery_access}");
 
     let authz_before_logout = database_authz_version(tools.mysql()?.pool(), admin_id).await?;
     let credential_before_logout =
@@ -986,7 +951,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         &first.runtime,
         "account.user",
         "login",
-        json!({ "username": admin_username, "password": password }),
+        json!({ "username": target_username, "password": password }),
         &[],
         &[],
     )
@@ -998,9 +963,9 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         .context("自助停用登录缺少 Access Token")?
         .to_owned();
     let disable_authorization = format!("Bearer {disable_access}");
-    let authz_before_disable = database_authz_version(tools.mysql()?.pool(), admin_id).await?;
+    let authz_before_disable = database_authz_version(tools.mysql()?.pool(), target_id).await?;
     let credential_before_disable =
-        database_credential_version(tools.mysql()?.pool(), admin_id).await?;
+        database_credential_version(tools.mysql()?.pool(), target_id).await?;
     let disable_proof = acquire_step_up_proof(
         &first.runtime,
         StepUpRequest {
@@ -1009,7 +974,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             body: json!({}),
             authorization: disable_authorization.as_str(),
             target_headers: Vec::new(),
-            username: admin_username.as_str(),
+            username: target_username.as_str(),
             password,
         },
     )
@@ -1036,7 +1001,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
     );
     let disabled_state: (String, i64, i64) =
         sqlx::query_as("SELECT status, authz_version, credential_version FROM users WHERE id = ?")
-            .bind(admin_id)
+            .bind(target_id)
             .fetch_one(tools.mysql()?.pool())
             .await?;
     ensure!(
@@ -1051,27 +1016,27 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
     let disabled_platform_relations: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM admin_user WHERE user_user = ? AND status = 'disabled'",
     )
-    .bind(admin_id)
+    .bind(target_id)
     .fetch_one(tools.mysql()?.pool())
     .await?;
     let disabled_org_relations: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM org_user WHERE user_user = ? AND status = 'disabled'",
     )
-    .bind(admin_id)
+    .bind(target_id)
     .fetch_one(tools.mysql()?.pool())
     .await?;
     let backup_platform_admins: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM admin_user \
          WHERE user_user = ? AND status = 'active' AND admin = TRUE",
     )
-    .bind(target_id)
+    .bind(admin_id)
     .fetch_one(tools.mysql()?.pool())
     .await?;
     let backup_org_admins: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM org_user \
          WHERE user_user = ? AND org_org = ? AND status = 'active' AND admin = TRUE",
     )
-    .bind(target_id)
+    .bind(admin_id)
     .bind(organization_id)
     .fetch_one(tools.mysql()?.pool())
     .await?;
@@ -1080,7 +1045,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             && disabled_org_relations == 1
             && backup_platform_admins == 1
             && backup_org_admins == 1,
-        "自助停用必须只停用当前用户关系，并保留平台/企业备用管理员"
+        "普通管理员自助停用必须只停用自身关系，并保留最终管理员"
     );
     ensure!(
         dispatch_raw(
@@ -1110,6 +1075,22 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
         "自助停用后旧 Refresh Token 必须失败"
     );
 
+    let recovery_login = data(
+        dispatch(
+            &first.runtime,
+            "account.user",
+            "login",
+            json!({ "username": admin_username, "password": password }),
+            &[],
+            &[],
+        )
+        .await?,
+    )?;
+    let recovery_access = recovery_login["access_token"]
+        .as_str()
+        .context("最终管理员恢复登录缺少 Access Token")?;
+    let recovery_authorization = format!("Bearer {recovery_access}");
+
     let failed_body = json!({ "id": target_membership_id, "status": "active" });
     let failed_challenge = match dispatch_raw(
         &first.runtime,
@@ -1132,7 +1113,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             "step_up_complete",
             json!({
                 "challenge": failed_challenge,
-                "credentials": { "username": target_username, "password": password }
+                "credentials": { "username": admin_username, "password": password }
             }),
             &[("authorization", recovery_authorization.as_str())],
             &[],
@@ -1187,7 +1168,7 @@ async fn step_up_is_audited_once_across_instances_and_fails_closed_without_redis
             "step_up_complete",
             json!({
                 "challenge": outage_challenge,
-                "credentials": { "username": target_username, "password": password }
+                "credentials": { "username": admin_username, "password": password }
             }),
             &[("authorization", recovery_authorization.as_str())],
             &[],
@@ -1323,9 +1304,6 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
     let deployment = format!("system-integration-{cache_namespace}");
     let authorization_cache = AuthorizationVersionCache::new(redis.clone(), deployment.clone())?;
     let authorization_cache_probe = authorization_cache.clone();
-    let generated_bootstrap = generate_bootstrap_secret()?;
-    let bootstrap_secret = generated_bootstrap.secret().to_owned();
-    let bootstrap_verifier = BootstrapSecretVerifier::new(generated_bootstrap.digest().clone(), 2)?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
@@ -1334,7 +1312,6 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             .extension(authorization_cache)
             .extension(integration_step_up_manager())
             .token(integration_token_manager())
-            .config(bootstrap_verifier)
             .build()?,
     );
     let security = Arc::new(SecuritySettings {
@@ -1566,32 +1543,11 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
         );
     }
 
-    let bootstrap = data(
-        dispatch(
-            &application.runtime,
-            "admin.user",
-            "bootstrap",
-            json!({
-                "secret": bootstrap_secret.clone(),
-                "name": "Integration Administrator",
-                "position": "Owner"
-            }),
-            &[("authorization", &format!("Bearer {access_token}"))],
-            &[],
-        )
-        .await?,
-    )?;
-    let bootstrap_admin_id = bootstrap["id"]
-        .as_i64()
-        .context("平台管理员初始化响应缺少 id")?;
-    assert_authorization_error_with_body(
-        &application.runtime,
-        "admin.user",
-        "bootstrap",
-        access_token,
-        json!({ "secret": bootstrap_secret, "name": "Second Administrator" }),
-        700002,
+    let owner_admin_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM admin_user WHERE user_user = ? AND owner_key = 'system-owner'",
     )
+    .bind(user_id)
+    .fetch_one(tools.mysql()?.pool())
     .await?;
 
     let refresh_cookie_header = format!("yang_refresh={refresh_token}");
@@ -1614,26 +1570,15 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
         "refresh 签发的新 Refresh Token 必须保持当前凭据版本"
     );
     ensure!(
-        token_authz_version(&tools, admin_access_token)? == login_authz_version + 1,
-        "bootstrap 必须在同一事务中递增目标用户授权版本"
+        token_authz_version(&tools, admin_access_token)? == login_authz_version,
+        "首个注册事务提交后登录与刷新必须读取同一授权版本"
     );
     ensure!(
         database_authz_version(tools.mysql()?.pool(), user_id).await?
             == token_authz_version(&tools, admin_access_token)?,
-        "bootstrap 提交后的数据库版本必须与刷新快照一致"
+        "首个注册提交后的数据库版本必须与刷新快照一致"
     );
-    wait_for_cached_version(&authorization_cache_probe, user_id, login_authz_version + 1).await?;
-    for (module, action) in [
-        ("account.user", "ui_catalog"),
-        ("admin.user", "list"),
-        ("org.tenant", "list"),
-        ("org.org", "list"),
-        ("org.user", "select"),
-    ] {
-        assert_authorization_error(&application.runtime, module, action, access_token, 400009)
-            .await?;
-    }
-    let admin_authz_version = login_authz_version + 1;
+    let admin_authz_version = login_authz_version;
     let admin_cache_key = authorization_cache_key(&deployment, user_id);
     let admin_cache_keys = [admin_cache_key.clone()];
 
@@ -1663,22 +1608,6 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
         authorization_cache_probe.read(user_id).await?
             == CachedAuthorizationVersion::Version(admin_authz_version),
         "缓存值损坏时必须回源 MySQL 并修复缓存"
-    );
-
-    redis
-        .set(&admin_cache_key, login_authz_version.to_string())
-        .await?;
-    assert_authorization_success(
-        &application.runtime,
-        "account.user",
-        "ui_catalog",
-        admin_access_token,
-    )
-    .await?;
-    ensure!(
-        authorization_cache_probe.read(user_id).await?
-            == CachedAuthorizationVersion::Version(admin_authz_version),
-        "缓存落后时必须以 MySQL 事实版本为准并推进缓存"
     );
 
     redis
@@ -2250,7 +2179,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
         .context("平台成员登录响应缺少 access_token")?;
 
     sqlx::query("UPDATE admin_user SET admin = FALSE WHERE id = ?")
-        .bind(bootstrap_admin_id)
+        .bind(owner_admin_id)
         .execute(tools.mysql()?.pool())
         .await?;
     let stale_platform_write = dispatch_raw_with_step_up(
@@ -2263,7 +2192,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
     )
     .await;
     sqlx::query("UPDATE admin_user SET admin = TRUE WHERE id = ?")
-        .bind(bootstrap_admin_id)
+        .bind(owner_admin_id)
         .execute(tools.mysql()?.pool())
         .await?;
     ensure!(
@@ -2278,7 +2207,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
             &application.runtime,
             "admin.user",
             "set_admin",
-            json!({ "id": bootstrap_admin_id, "admin": false }),
+            json!({ "id": owner_admin_id, "admin": false }),
             &[("authorization", &admin_authorization)],
             &[],
         )
@@ -3236,7 +3165,7 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
     for (action, minimum) in [
         ("account.user.change_password", 1),
         ("account.user.reset_password", 2),
-        ("admin.user.bootstrap", 1),
+        ("account.user.register", 1),
         ("admin.user.add", 1),
         ("admin.user.create_password_reset", 4),
         ("admin.user.set_admin", 2),
@@ -3255,12 +3184,12 @@ async fn account_and_tenant_lifecycle_scenario() -> anyhow::Result<()> {
         "SELECT COUNT(*) FROM audit_event \
          WHERE action IN ( \
                'account.user.change_password', 'account.user.reset_password', \
-               'admin.user.bootstrap', 'admin.user.add', \
+               'account.user.register', 'admin.user.add', \
                'admin.user.create_password_reset', 'admin.user.set_admin', \
                'admin.user.set_status', 'org.tenant.create', \
                'org.user.add', 'org.user.put', 'org.user.del') \
            AND result = 'succeeded' \
-           AND ((actor_type <> 'user' AND NOT (actor_type = 'system' AND action = 'account.user.reset_password')) \
+           AND ((actor_type <> 'user' AND NOT (actor_type = 'system' AND action IN ('account.user.reset_password', 'account.user.register'))) \
              OR subject_type <> 'user' OR subject_id IS NULL \
              OR (before_summary IS NULL AND after_summary IS NULL) \
              OR (before_summary IS NOT NULL AND JSON_TYPE(before_summary) <> 'OBJECT') \

@@ -16,9 +16,6 @@ use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
 use yang_system::migrations::{execute_with_database, MigrationCommand};
-use yang_system::modules::admin::bootstrap_secret::{
-    generate_bootstrap_secret, BootstrapSecretVerifier,
-};
 
 use common::{take_registration_code, RegistrationEmailToolsExt};
 
@@ -239,7 +236,6 @@ async fn refresh_rotation_load_has_zero_errors_and_reports_percentiles() -> anyh
             "refresh-benchmark-{}",
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
         );
-        let bootstrap = generate_bootstrap_secret()?;
         let tools = Arc::new(
             ToolsBuilder::new()
                 .mysql(Database::from_pool(
@@ -251,7 +247,6 @@ async fn refresh_rotation_load_has_zero_errors_and_reports_percentiles() -> anyh
                 .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
                 .extension(step_up_manager())
                 .token(token_manager())
-                .config(BootstrapSecretVerifier::new(bootstrap.digest().clone(), 4)?)
                 .build()?,
         );
         let app = build_app(tools, security_settings())?;

@@ -22,7 +22,6 @@ SECTION_PATTERN = re.compile(r"^\[([^\]]+)\]$")
 SCALAR_PATTERN = re.compile(r"^([A-Za-z0-9_]+)\s*=\s*(.+)$")
 TOKEN_PLACEHOLDER = "replace-with-at-least-32-random-bytes"
 STEP_UP_PLACEHOLDER = "replace-with-independent-step-up-secret"
-BOOTSTRAP_PLACEHOLDER = "replace-with-yang-bootstrap-secret-digest"
 MYSQL_PLACEHOLDER = "mysql://root:password@127.0.0.1:3306/yang_system"
 LOCAL_MYSQL_URL = "mysql://root:yang-local@127.0.0.1:3306/yang_system"
 LOCAL_REDIS_URL = "redis://127.0.0.1:6379"
@@ -34,7 +33,6 @@ class Inspection:
     """仅包含配置形状，不包含任何配置值。"""
 
     current: bool
-    needs_bootstrap_digest: bool
     has_legacy_token_secret: bool
 
 
@@ -84,7 +82,6 @@ def inspect_config(raw: str, template_raw: str) -> Inspection:
     required = set(scalar_values(template_raw))
     token_secret = nested_value(document, "token.active_secret")
     step_up_secret = nested_value(document, "step_up.active_secret")
-    bootstrap_digest = nested_value(document, "bootstrap.secret_digest")
     mysql_url = nested_value(document, "mysql.url")
     token_table = nested_value(document, "token")
     has_legacy_token_secret = (
@@ -95,15 +92,12 @@ def inspect_config(raw: str, template_raw: str) -> Inspection:
         and not has_legacy_token_secret
         and token_secret not in (MISSING, TOKEN_PLACEHOLDER)
         and step_up_secret not in (MISSING, STEP_UP_PLACEHOLDER)
-        and bootstrap_digest not in (MISSING, BOOTSTRAP_PLACEHOLDER)
         and mysql_url not in (MISSING, MYSQL_PLACEHOLDER)
     )
     if not isinstance(template_document, dict):
         raise AssertionError("模板解析结果必须是 table")
     return Inspection(
         current=current,
-        needs_bootstrap_digest=bootstrap_digest
-        in (MISSING, BOOTSTRAP_PLACEHOLDER),
         has_legacy_token_secret=has_legacy_token_secret,
     )
 
@@ -117,8 +111,6 @@ def quote_toml_string(value: str) -> str:
 def upgrade_text(
     raw: str,
     template_raw: str,
-    *,
-    bootstrap_digest: str | None,
 ) -> str:
     """以当前模板为骨架迁移已知旧字段，并保留仍有效的旧 scalar。"""
 
@@ -138,12 +130,6 @@ def upgrade_text(
     existing_step_up_secret = nested_value(document, "step_up.active_secret")
     if existing_step_up_secret in (MISSING, STEP_UP_PLACEHOLDER):
         values["step_up.active_secret"] = quote_toml_string(secrets.token_urlsafe(48))
-
-    existing_digest = nested_value(document, "bootstrap.secret_digest")
-    if existing_digest in (MISSING, BOOTSTRAP_PLACEHOLDER):
-        if not bootstrap_digest:
-            raise ValueError("旧配置缺少 bootstrap 摘要")
-        values["bootstrap.secret_digest"] = quote_toml_string(bootstrap_digest)
 
     # 对无法用单行 RHS 无损表达的自定义数组/table 拒绝静默降级为模板默认值。
     for path in template_values:
@@ -180,18 +166,12 @@ def upgrade_text(
 def upgrade_file(
     config_path: Path,
     template_path: Path,
-    *,
-    bootstrap_digest: str | None,
 ) -> Path:
     """备份后原子替换配置，返回不含敏感值的备份路径。"""
 
     raw = config_path.read_text(encoding="utf-8")
     template_raw = template_path.read_text(encoding="utf-8")
-    upgraded = upgrade_text(
-        raw,
-        template_raw,
-        bootstrap_digest=bootstrap_digest,
-    )
+    upgraded = upgrade_text(raw, template_raw)
 
     backup_directory = config_path.parent / "target" / "local-config-backups"
     backup_directory.mkdir(parents=True, exist_ok=True)
@@ -283,11 +263,7 @@ filter = "yang_system=debug"
     ) -> None:
         legacy = self.legacy_config()
         self.assertFalse(inspect_config(legacy, self.template).current)
-        upgraded = upgrade_text(
-            legacy,
-            self.template,
-            bootstrap_digest="$argon2id$v=19$m=19456,t=2,p=1$test$test",
-        )
+        upgraded = upgrade_text(legacy, self.template)
         values = scalar_values(upgraded)
         self.assertEqual(
             values["token.active_secret"],
@@ -315,11 +291,7 @@ filter = "yang_system=debug"
             original = self.legacy_config()
             config_path.write_text(original, encoding="utf-8")
             template_path.write_text(self.template, encoding="utf-8")
-            backup_path = upgrade_file(
-                config_path,
-                template_path,
-                bootstrap_digest="$argon2id$v=19$m=19456,t=2,p=1$test$test",
-            )
+            backup_path = upgrade_file(config_path, template_path)
             self.assertEqual(backup_path.read_text(encoding="utf-8"), original)
             self.assertTrue(
                 inspect_config(
@@ -337,11 +309,7 @@ filter = "yang_system=debug"
             "[security]",
         )
         with self.assertRaisesRegex(ValueError, "复杂 TOML 结构"):
-            upgrade_text(
-                legacy,
-                self.template,
-                bootstrap_digest="$argon2id$v=19$m=19456,t=2,p=1$test$test",
-            )
+            upgrade_text(legacy, self.template)
 
     def test_current_config_accepts_multiline_retiring_key_array(self) -> None:
         current = (
@@ -349,10 +317,6 @@ filter = "yang_system=debug"
             .replace(
                 STEP_UP_PLACEHOLDER,
                 "independent-step-up-secret-32-bytes-or-more-value",
-            )
-            .replace(
-                BOOTSTRAP_PLACEHOLDER,
-                "$argon2id$v=19$m=19456,t=2,p=1$test$test",
             )
             .replace(MYSQL_PLACEHOLDER, LOCAL_MYSQL_URL)
             .replace("retiring_keys = []\n", "", 1)
@@ -383,7 +347,6 @@ def main() -> int:
     upgrade_parser = subparsers.add_parser("upgrade")
     upgrade_parser.add_argument("--config", type=Path, required=True)
     upgrade_parser.add_argument("--template", type=Path, required=True)
-    upgrade_parser.add_argument("--bootstrap-digest")
 
     args = parser.parse_args()
     if args.self_test:
@@ -397,18 +360,13 @@ def main() -> int:
             json.dumps(
                 {
                     "current": inspection.current,
-                    "needs_bootstrap_digest": inspection.needs_bootstrap_digest,
                     "has_legacy_token_secret": inspection.has_legacy_token_secret,
                 }
             )
         )
         return 0
     if args.command == "upgrade":
-        backup_path = upgrade_file(
-            args.config,
-            args.template,
-            bootstrap_digest=args.bootstrap_digest,
-        )
+        backup_path = upgrade_file(args.config, args.template)
         print(f"backup={backup_path}")
         return 0
     parser.error("必须指定 --self-test、inspect 或 upgrade")

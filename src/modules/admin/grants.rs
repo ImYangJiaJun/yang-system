@@ -24,8 +24,8 @@ impl GrantResolver for AdminGrantResolver {
                 "授权快照事务已结束".to_string(),
             ))
         })?;
-        let admin = sqlx::query_scalar::<_, bool>(
-            "SELECT `admin` FROM `admin_user` \
+        let admin = sqlx::query_as::<_, (bool, bool)>(
+            "SELECT `admin`, COALESCE(`owner_key` = 'system-owner', FALSE) FROM `admin_user` \
              WHERE `user_user` = ? AND `status` = ? LIMIT 1",
         )
         .bind(user_id)
@@ -34,16 +34,23 @@ impl GrantResolver for AdminGrantResolver {
         .await
         .map_err(yang_db::DbError::from)?;
 
-        Ok(admin.map(grants_for_admin).unwrap_or_default())
+        Ok(admin
+            .map(|(super_admin, system_owner)| grants_for_admin(super_admin, system_owner))
+            .unwrap_or_default())
     }
 }
 
-fn grants_for_admin(super_admin: bool) -> AuthorizationGrants {
+fn grants_for_admin(super_admin: bool, system_owner: bool) -> AuthorizationGrants {
     let grants = AuthorizationGrants::default()
         .role("admin_user")
         .permission("admin.user:read");
-    if super_admin {
+    let grants = if super_admin {
         grants.role("admin").permission("admin.user:write")
+    } else {
+        grants
+    };
+    if system_owner {
+        grants.role("system_owner")
     } else {
         grants
     }
@@ -55,18 +62,24 @@ mod tests {
 
     #[test]
     fn only_super_admin_receives_platform_write_permission() {
-        let member = grants_for_admin(false);
+        let member = grants_for_admin(false, false);
         assert_eq!(member.roles().collect::<Vec<_>>(), ["admin_user"]);
         assert_eq!(
             member.permissions().collect::<Vec<_>>(),
             ["admin.user:read"]
         );
 
-        let admin = grants_for_admin(true);
+        let admin = grants_for_admin(true, false);
         assert_eq!(admin.roles().collect::<Vec<_>>(), ["admin", "admin_user"]);
         assert_eq!(
             admin.permissions().collect::<Vec<_>>(),
             ["admin.user:read", "admin.user:write"]
+        );
+
+        let owner = grants_for_admin(true, true);
+        assert_eq!(
+            owner.roles().collect::<Vec<_>>(),
+            ["admin", "admin_user", "system_owner"]
         );
     }
 }

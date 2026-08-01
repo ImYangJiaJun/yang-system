@@ -1,4 +1,3 @@
-use crate::modules::admin::bootstrap_secret::BootstrapSecretDigest;
 use anyhow::{bail, Context};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -25,7 +24,6 @@ pub struct Settings {
     pub redis: RedisSettings,
     pub token: TokenSettings,
     pub step_up: StepUpSettings,
-    pub bootstrap: BootstrapSettings,
     pub email: EmailSettings,
     pub security: SecuritySettings,
     #[serde(default)]
@@ -162,12 +160,6 @@ pub struct StepUpSettings {
     pub audience: String,
     pub challenge_ttl_seconds: u64,
     pub proof_ttl_seconds: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BootstrapSettings {
-    pub secret_digest: BootstrapSecretDigest,
 }
 
 #[derive(Clone, Deserialize)]
@@ -766,12 +758,6 @@ mod tests {
     use crate::config_source::{SecretKey, SecretProvider};
     use std::collections::BTreeMap;
 
-    const VALID_BOOTSTRAP_DIGEST: &str = concat!(
-        "$argon2id$v=19$m=19456,t=2,p=1$",
-        "MDEyMzQ1Njc4OWFiY2RlZg$",
-        "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
-    );
-
     fn valid_config() -> &'static str {
         r#"
 [app]
@@ -823,8 +809,6 @@ issuer = "test-step-up"
 audience = "test-sensitive-actions"
 challenge_ttl_seconds = 120
 proof_ttl_seconds = 300
-[bootstrap]
-secret_digest = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
 [email.smtp]
 relay = "smtp.example.test"
 port = 587
@@ -902,14 +886,6 @@ filter = "info"
             !format!("{:?}", settings.email).contains(&settings.email.smtp.password),
             "SMTP password 不得进入 Debug"
         );
-        assert_eq!(
-            settings.bootstrap.secret_digest.as_str(),
-            VALID_BOOTSTRAP_DIGEST
-        );
-        assert!(
-            !format!("{:?}", settings.bootstrap.secret_digest).contains(VALID_BOOTSTRAP_DIGEST),
-            "bootstrap 摘要不得进入 Debug"
-        );
     }
 
     #[test]
@@ -957,10 +933,6 @@ filter = "info"
                 "environment-secret-0123456789abcdef".to_owned(),
             ),
             (
-                "YANG_SYSTEM_BOOTSTRAP_SECRET_DIGEST".to_owned(),
-                "invalid-environment-digest".to_owned(),
-            ),
-            (
                 "YANG_SYSTEM_HTTP_MAX_CONCURRENCY".to_owned(),
                 "128".to_owned(),
             ),
@@ -991,10 +963,6 @@ filter = "info"
                 r#"[{"key_id":"provider-retiring","secret":"provider-retiring-secret-0123456789abcdef"}]"#
                     .to_owned(),
             ),
-            (
-                SecretKey::BootstrapSecretDigest,
-                VALID_BOOTSTRAP_DIGEST.to_owned(),
-            ),
         ]));
 
         let settings: Settings =
@@ -1017,10 +985,6 @@ filter = "info"
         );
         assert_eq!(settings.token.retiring_keys.len(), 1);
         assert_eq!(settings.token.retiring_keys[0].key_id, "provider-retiring");
-        assert_eq!(
-            settings.bootstrap.secret_digest.as_str(),
-            VALID_BOOTSTRAP_DIGEST
-        );
         assert_eq!(settings.http.max_concurrency, 128);
         assert_eq!(settings.shutdown.total_timeout_seconds, 45);
         assert_eq!(settings.observability.traces_sample_ratio, 0.25);
@@ -1342,20 +1306,6 @@ filter = "info"
         );
         assert_eq!(
             value
-                .get("bootstrap")
-                .and_then(|bootstrap| bootstrap.get("secret_digest"))
-                .and_then(toml::Value::as_str),
-            Some("replace-with-yang-bootstrap-secret-digest")
-        );
-        assert!(
-            value
-                .get("bootstrap")
-                .and_then(|bootstrap| bootstrap.get("secret"))
-                .is_none(),
-            "示例配置不得保存原始 bootstrap secret"
-        );
-        assert_eq!(
-            value
                 .get("security")
                 .and_then(|security| security.get("trusted_proxy_cidrs"))
                 .and_then(toml::Value::as_array)
@@ -1429,31 +1379,6 @@ filter = "info"
             Err(error) => error,
         };
         assert!(error.to_string().contains("占位值"));
-    }
-
-    #[test]
-    fn rejects_missing_weak_or_invalid_bootstrap_digest() {
-        let section = format!("[bootstrap]\nsecret_digest = \"{VALID_BOOTSTRAP_DIGEST}\"\n");
-        let missing = valid_config().replace(&section, "");
-        let invalid = [
-            "operator-raw-secret-must-not-be-stored",
-            "$argon2i$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
-            "$argon2id$v=19$m=8192,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
-            "$argon2id$v=19$m=19456,t=1,p=1$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
-            "$argon2id$v=19$m=19456,t=2,p=1$short$short",
-        ]
-        .map(|digest| valid_config().replace(VALID_BOOTSTRAP_DIGEST, digest));
-
-        for raw in std::iter::once(missing).chain(invalid) {
-            let error = match Settings::parse(&raw) {
-                Ok(_) => panic!("缺失、弱或非法 bootstrap 摘要必须在启动前被拒绝"),
-                Err(error) => error,
-            };
-            assert!(
-                format!("{error:#}").contains("bootstrap"),
-                "错误必须定位 bootstrap 配置: {error:#}"
-            );
-        }
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::modules::account::{
     consume_password_reset_in_tx, find_password_reset_target_user,
     increment_locked_credential_versions, invalid_reset_token, lock_password_reset_in_tx,
     lock_user_credential, AuthorizationGrants, GrantResolver, LockedUserCredential,
-    PasswordResetReference,
+    OwnerClaimOutcome, PasswordResetReference, SystemOwnerClaimer,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -44,6 +44,7 @@ pub(super) struct UserService {
     passwords: Arc<PasswordEngine>,
     rate_limiter: Arc<AuthRateLimiter>,
     grant_resolver: Arc<dyn GrantResolver>,
+    system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     issue_refresh_credential_version: bool,
 }
 
@@ -53,6 +54,7 @@ impl UserService {
         passwords: Arc<PasswordEngine>,
         rate_limiter: Arc<AuthRateLimiter>,
         grant_resolver: Arc<dyn GrantResolver>,
+        system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
         issue_refresh_credential_version: bool,
     ) -> Self {
         Self {
@@ -60,6 +62,7 @@ impl UserService {
             passwords,
             rate_limiter,
             grant_resolver,
+            system_owner_claimer,
             issue_refresh_credential_version,
         }
     }
@@ -86,17 +89,50 @@ impl UserService {
             .await?;
         let password_hash = self.passwords.hash(plain_password).await?;
         let email_verified_at = current_unix_timestamp()?;
-        let id = match self
-            .users
-            .insert(ctx, &username, &password_hash, &email, email_verified_at)
-            .await
-        {
-            Ok(id) => id,
-            Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
-                return Err(registration_identity_exists_error());
+        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let result = async {
+            let id = match self
+                .users
+                .insert_in_tx(
+                    ctx,
+                    &mut transaction,
+                    &username,
+                    &password_hash,
+                    &email,
+                    email_verified_at,
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
+                    return Err(registration_identity_exists_error());
+                }
+                Err(error) => return Err(error),
+            };
+            if let OwnerClaimOutcome::Claimed { admin_id } = self
+                .system_owner_claimer
+                .claim(&mut transaction, id, &username)
+                .await?
+            {
+                let event = audit::succeeded_system_event(
+                    ctx,
+                    "first-registration",
+                    None,
+                    Some(audit::entity("user", id)?),
+                    audit::entity("admin_account", admin_id)?,
+                    None,
+                    Some(audit::summary([
+                        ("admin", json!(true)),
+                        ("system_owner", json!(true)),
+                        ("user_id", json!(id)),
+                    ])?),
+                )?;
+                audit::append_in_tx(&mut transaction, &event).await?;
             }
-            Err(error) => return Err(error),
-        };
+            Ok(id)
+        }
+        .await;
+        let id = finish_registration_transaction(transaction, result).await?;
         self.view_by_id(ctx, id).await
     }
 
@@ -526,6 +562,24 @@ impl UserService {
                 }
                 Err(error)
             }
+        }
+    }
+}
+
+async fn finish_registration_transaction<T>(
+    transaction: yang_db::Transaction,
+    result: Result<T, BaseError>,
+) -> Result<T, BaseError> {
+    match result {
+        Ok(value) => {
+            transaction.commit().await.map_err(BaseError::from)?;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = transaction.rollback().await {
+                tracing::error!(error = %rollback_error, "用户注册事务回滚失败");
+            }
+            Err(error)
         }
     }
 }

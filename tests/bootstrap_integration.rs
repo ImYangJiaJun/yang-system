@@ -3,11 +3,9 @@ mod common;
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
-use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing_subscriber::fmt::MakeWriter;
 use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
 use yang_base::database::DatabaseInitializer;
 use yang_base::definition::{ActionHandle, ActionName, ActionRef, BuiltApp, ModuleName};
@@ -18,61 +16,18 @@ use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::{build_app, Application};
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
-use yang_system::modules::admin::bootstrap_secret::{
-    generate_bootstrap_secret, BootstrapSecretVerifier,
-};
 
 use common::{take_registration_code, RegistrationEmailToolsExt};
-
-const WRONG_SECRET: &str = "wrong-bootstrap-secret-with-sufficient-length";
 
 fn integration_step_up_manager() -> Arc<StepUpManager> {
     Arc::new(
         StepUpManager::new(
-            "independent-bootstrap-step-up-secret-32-bytes",
-            "bootstrap-integration-step-up",
-            "bootstrap-integration-sensitive-actions",
+            "independent-owner-step-up-secret-32-bytes",
+            "owner-integration-step-up",
+            "owner-integration-sensitive-actions",
         )
         .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
     )
-}
-
-#[derive(Clone, Default)]
-struct SharedLogWriter {
-    bytes: Arc<Mutex<Vec<u8>>>,
-}
-
-impl SharedLogWriter {
-    fn contents(&self) -> anyhow::Result<String> {
-        let bytes = self
-            .bytes
-            .lock()
-            .map_err(|_| anyhow::anyhow!("测试日志缓冲区锁已损坏"))?;
-        String::from_utf8(bytes.clone()).context("测试日志不是合法 UTF-8")
-    }
-}
-
-impl Write for SharedLogWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let mut bytes = self
-            .bytes
-            .lock()
-            .map_err(|_| io::Error::other("测试日志缓冲区锁已损坏"))?;
-        bytes.extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> MakeWriter<'writer> for SharedLogWriter {
-    type Writer = Self;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
-    }
 }
 
 fn action_handle(app: &BuiltApp, module: &str, action: &str) -> Result<ActionHandle, BaseError> {
@@ -81,9 +36,9 @@ fn action_handle(app: &BuiltApp, module: &str, action: &str) -> Result<ActionHan
     let action = ActionName::new(action)
         .map_err(|error| BaseError::ConfigError(format!("ActionName 无效: {error}")))?;
     let reference = ActionRef::new(module, action);
-    app.registry().resolve(&reference).ok_or_else(|| {
-        BaseError::ConfigError(format!("bootstrap 集成测试 Action 未注册: {reference}"))
-    })
+    app.registry()
+        .resolve(&reference)
+        .ok_or_else(|| BaseError::ConfigError(format!("测试 Action 未注册: {reference}")))
 }
 
 async fn dispatch(
@@ -91,17 +46,12 @@ async fn dispatch(
     module: &str,
     action: &str,
     body: Value,
-    headers: &[(&str, &str)],
 ) -> Result<ApiResponse, BaseError> {
-    let mut request = Request::new(body);
-    for (name, value) in headers {
-        request = request.header(*name, *value);
-    }
     let peer: SocketAddr = "127.0.0.1:42000"
         .parse()
         .map_err(|error| BaseError::ConfigError(format!("测试 peer 地址无效: {error}")))?;
     let context = app
-        .context(request)
+        .context(Request::new(body))
         .with_request_meta(RequestMeta::new().with_peer_addr(peer));
     app.dispatch_context(action_handle(app, module, action)?, context)
         .await
@@ -147,7 +97,6 @@ async fn reset_test_database(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
 async fn build_harness(
     mysql_url: &str,
     redis_url: &str,
-    verifier: BootstrapSecretVerifier,
 ) -> anyhow::Result<(Application, Arc<Tools>, sqlx::MySqlPool)> {
     let database_config = DatabaseConfig::default()
         .with_max_connections(8)
@@ -155,7 +104,7 @@ async fn build_harness(
         .with_connect_timeout(10);
     let mysql = Database::connect_with_config(mysql_url, database_config.clone())
         .await
-        .context("连接 bootstrap 测试 MySQL 失败")?;
+        .context("连接最终管理员测试 MySQL 失败")?;
     let pool = mysql.pool().clone();
     reset_test_database(&pool).await?;
     let initializer_database = Database::from_pool(pool.clone(), database_config)?;
@@ -167,28 +116,27 @@ async fn build_harness(
             .with_connect_timeout(10),
     )
     .await
-    .context("连接 bootstrap 测试 Redis 失败")?;
+    .context("连接最终管理员测试 Redis 失败")?;
     let cache_namespace = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let authorization_cache = AuthorizationVersionCache::new(
         redis.clone(),
-        format!("bootstrap-integration-{cache_namespace}"),
+        format!("owner-integration-{cache_namespace}"),
     )?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
             .cache(redis)
-            .with_registration_email(format!("bootstrap-email-{cache_namespace}"))
+            .with_registration_email(format!("owner-email-{cache_namespace}"))
             .extension(authorization_cache)
             .extension(integration_step_up_manager())
             .token(TokenManager::new_symmetric(
-                "bootstrap-integration-token-secret",
+                "owner-integration-token-secret",
                 Algorithm::HS256,
-                "yang-system-bootstrap-integration".to_string(),
-                "yang-system-bootstrap-api".to_string(),
+                "yang-system-owner-integration".to_string(),
+                "yang-system-owner-api".to_string(),
                 300,
                 3600,
             ))
-            .config(verifier)
             .build()?,
     );
     let security = Arc::new(SecuritySettings {
@@ -202,12 +150,15 @@ async fn build_harness(
     });
     let application = build_app(Arc::clone(&tools), security)?;
     let initializer = DatabaseInitializer::new(initializer_database, false);
-    let definitions = application
-        .runtime
-        .table_definitions()
-        .iter()
-        .collect::<Vec<_>>();
-    initializer.sync_table_definitions(&definitions).await?;
+    initializer
+        .sync_table_definitions(
+            &application
+                .runtime
+                .table_definitions()
+                .iter()
+                .collect::<Vec<_>>(),
+        )
+        .await?;
     sqlx::raw_sql(include_str!(
         "../migrations/20260726_0006_create_authorization_outbox.sql"
     ))
@@ -221,11 +172,11 @@ async fn build_harness(
     Ok((application, tools, pool))
 }
 
-async fn register_and_login(
+async fn registration_body(
     app: &BuiltApp,
     username: &str,
     password: &str,
-) -> anyhow::Result<(i64, String)> {
+) -> anyhow::Result<Value> {
     let email = format!("{username}@example.test");
     data(
         dispatch(
@@ -233,58 +184,37 @@ async fn register_and_login(
             "account.user",
             "request_registration_email",
             json!({ "email": email }),
-            &[],
         )
         .await?,
     )?;
     let email_code = take_registration_code(&email)?;
-    let registered = data(
-        dispatch(
-            app,
-            "account.user",
-            "register",
-            json!({
-                "username": username,
-                "password": password,
-                "email": email,
-                "email_code": email_code,
-            }),
-            &[],
-        )
-        .await?,
-    )?;
-    let user_id = registered["id"].as_i64().context("注册响应缺少用户 id")?;
-    let login = data(
+    Ok(json!({
+        "username": username,
+        "password": password,
+        "email": email,
+        "email_code": email_code,
+    }))
+}
+
+async fn login(app: &BuiltApp, username: &str, password: &str) -> anyhow::Result<String> {
+    let response = data(
         dispatch(
             app,
             "account.user",
             "login",
             json!({ "username": username, "password": password }),
-            &[],
         )
         .await?,
     )?;
-    let access_token = login["access_token"]
+    response["access_token"]
         .as_str()
-        .context("登录响应缺少 access_token")?
-        .to_string();
-    Ok((user_id, access_token))
+        .map(str::to_string)
+        .context("登录响应缺少 access_token")
 }
 
-fn merge_outcome(outcome: anyhow::Result<()>, cleanup: anyhow::Result<()>) -> anyhow::Result<()> {
-    match (outcome, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(error), Err(cleanup_error)) => {
-            Err(error.context(format!("bootstrap 测试失败后清理也失败: {cleanup_error:#}")))
-        }
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn bootstrap_requires_operator_secret_and_is_single_use_under_concurrency(
-) -> anyhow::Result<()> {
+async fn first_concurrent_registration_claims_exactly_one_permanent_owner() -> anyhow::Result<()> {
     let mysql_url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
         .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
     let redis_url =
@@ -294,170 +224,118 @@ async fn bootstrap_requires_operator_secret_and_is_single_use_under_concurrency(
         "集成测试 Redis URL 必须使用独立 DB 15"
     );
 
-    let generated = generate_bootstrap_secret()?;
-    let secret = generated.secret().to_owned();
-    let digest = generated.digest().as_str().to_owned();
-    let verifier = BootstrapSecretVerifier::new(generated.digest().clone(), 2)?;
-    let (application, tools, pool) = build_harness(&mysql_url, &redis_url, verifier).await?;
-    let log_writer = SharedLogWriter::default();
-    let subscriber = tracing_subscriber::fmt()
-        .json()
-        .flatten_event(true)
-        .with_ansi(false)
-        .without_time()
-        .with_writer(log_writer.clone())
-        .finish();
-    let default_guard = tracing::subscriber::set_default(subscriber);
-
+    let (application, tools, pool) = build_harness(&mysql_url, &redis_url).await?;
     let outcome = async {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let first_username = format!("owner_a_{suffix}");
+        let second_username = format!("owner_b_{suffix}");
         let password = "correct-horse-battery-staple";
-        let (first_id, first_token) = register_and_login(
-            &application.runtime,
-            &format!("bootstrap_a_{suffix}"),
-            password,
-        )
-        .await?;
-        let (second_id, second_token) = register_and_login(
-            &application.runtime,
-            &format!("bootstrap_b_{suffix}"),
-            password,
-        )
-        .await?;
-        let first_authorization = format!("Bearer {first_token}");
-        let second_authorization = format!("Bearer {second_token}");
+        let first_body = registration_body(&application.runtime, &first_username, password).await?;
+        let second_body =
+            registration_body(&application.runtime, &second_username, password).await?;
 
-        let wrong = dispatch(
-            &application.runtime,
-            "admin.user",
-            "bootstrap",
-            json!({ "secret": WRONG_SECRET, "name": "Wrong Credential" }),
-            &[("authorization", &first_authorization)],
-        )
-        .await;
-        ensure!(
-            matches!(wrong, Err(BaseError::Unauthorized(_))),
-            "错误 bootstrap secret 必须返回 Unauthorized: {wrong:?}"
-        );
-        let after_wrong: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM `admin_user`")
-            .fetch_one(&pool)
-            .await?;
-        ensure!(after_wrong == 0, "错误 secret 不得写入平台账号");
-
-        let first_headers = [("authorization", first_authorization.as_str())];
-        let second_headers = [("authorization", second_authorization.as_str())];
-        let first = dispatch(
-            &application.runtime,
-            "admin.user",
-            "bootstrap",
-            json!({ "secret": secret, "name": "First Concurrent Operator" }),
-            &first_headers,
-        );
+        let first = dispatch(&application.runtime, "account.user", "register", first_body);
         let second = dispatch(
             &application.runtime,
-            "admin.user",
-            "bootstrap",
-            json!({ "secret": secret, "name": "Second Concurrent Operator" }),
-            &second_headers,
+            "account.user",
+            "register",
+            second_body,
         );
-        let (first_result, second_result) = tokio::join!(first, second);
-        let successes = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());
-        ensure!(
-            successes == 1,
-            "并发 bootstrap 必须恰好一个成功: first={first_result:?}, second={second_result:?}"
-        );
+        let (first, second) = tokio::join!(first, second);
+        let first = data(first?)?;
+        let second = data(second?)?;
+        let user_ids = [
+            first["id"].as_i64().context("首个响应缺少 id")?,
+            second["id"].as_i64().context("第二个响应缺少 id")?,
+        ];
 
-        let rows: Vec<(i64, String, bool, String)> =
-            sqlx::query_as("SELECT user_user, status, admin, bootstrap_key FROM `admin_user`")
-                .fetch_all(&pool)
-                .await?;
-        ensure!(rows.len() == 1, "并发后必须只有一个平台账号: {rows:?}");
+        let owners: Vec<(i64, String, bool, String)> = sqlx::query_as(
+            "SELECT user_user, status, admin, owner_key FROM admin_user \
+             WHERE owner_key IS NOT NULL",
+        )
+        .fetch_all(&pool)
+        .await?;
         ensure!(
-            [first_id, second_id].contains(&rows[0].0)
-                && rows[0].1 == "active"
-                && rows[0].2
-                && rows[0].3 == "initial-admin",
-            "成功记录必须保持一次性初始化数据库不变量: {rows:?}"
+            owners.len() == 1,
+            "并发注册后必须恰好一个 owner: {owners:?}"
         );
-
-        for authorization in [&first_authorization, &second_authorization] {
-            let replay = dispatch(
-                &application.runtime,
-                "admin.user",
-                "bootstrap",
-                json!({ "secret": secret, "name": "Replay Operator" }),
-                &[("authorization", authorization)],
-            )
-            .await;
-            ensure!(
-                replay.is_err(),
-                "成功后的 bootstrap secret 重放必须永久失败"
-            );
-        }
-        let after_replay: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM `admin_user`")
+        ensure!(
+            user_ids.contains(&owners[0].0)
+                && owners[0].1 == "active"
+                && owners[0].2
+                && owners[0].3 == "system-owner",
+            "owner 必须绑定成功注册用户并保持永久管理员不变量: {owners:?}"
+        );
+        let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
             .fetch_one(&pool)
             .await?;
-        ensure!(after_replay == 1, "重放不得新增平台账号");
+        ensure!(user_count == 2, "owner 竞争失败不得导致普通注册回滚");
+
+        let duplicate = sqlx::query(
+            "INSERT INTO admin_user \
+             (user_user, name, status, admin, owner_key, created_at, updated_at) \
+             VALUES (?, 'duplicate-owner', 'active', TRUE, 'system-owner', 1, 1)",
+        )
+        .bind(
+            user_ids
+                .into_iter()
+                .find(|id| *id != owners[0].0)
+                .context("缺少普通用户")?,
+        )
+        .execute(&pool)
+        .await;
+        ensure!(duplicate.is_err(), "数据库唯一约束必须拒绝第二个 owner");
+
+        let first_token = login(&application.runtime, &first_username, password).await?;
+        let second_token = login(&application.runtime, &second_username, password).await?;
+        let first_roles = tools.token()?.verify_token(&first_token)?.custom["roles"].clone();
+        let second_roles = tools.token()?.verify_token(&second_token)?.custom["roles"].clone();
+        let owner_role_count = [first_roles, second_roles]
+            .iter()
+            .filter(|roles| {
+                roles
+                    .as_array()
+                    .is_some_and(|roles| roles.iter().any(|role| role == "system_owner"))
+            })
+            .count();
+        ensure!(
+            owner_role_count == 1,
+            "只有 owner Token 可以携带 system_owner 角色"
+        );
+
+        let bootstrap_ref = ActionRef::new(
+            ModuleName::new("admin.user")
+                .map_err(|error| anyhow::anyhow!("ModuleName 无效: {error}"))?,
+            ActionName::new("bootstrap")
+                .map_err(|error| anyhow::anyhow!("ActionName 无效: {error}"))?,
+        );
+        ensure!(
+            application
+                .runtime
+                .registry()
+                .resolve(&bootstrap_ref)
+                .is_none(),
+            "系统不得保留独立管理员初始化 Action"
+        );
+        let owner_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event \
+             WHERE action = 'account.user.register' \
+               AND JSON_EXTRACT(after_summary, '$.system_owner') = TRUE",
+        )
+        .fetch_one(&pool)
+        .await?;
+        ensure!(owner_audits == 1, "owner 声明必须且只能产生一条成功审计");
         Ok(())
     }
     .await;
 
-    drop(default_guard);
-    let log_output = log_writer.contents()?;
-    let log_verification = (|| {
-        ensure!(
-            log_output.contains("credential_rejected")
-                && log_output.contains("succeeded")
-                && log_output.contains("failed"),
-            "日志必须记录错误凭证、成功与失败结果: {log_output}"
-        );
-        for sensitive in [&secret, &digest, WRONG_SECRET] {
-            ensure!(
-                !log_output.contains(sensitive),
-                "bootstrap 日志不得泄露 secret 或摘要"
-            );
-        }
-        let action_logs = log_output
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|event| event["message"] == "Action 执行完成")
-            .collect::<Vec<_>>();
-        ensure!(
-            !action_logs.is_empty(),
-            "每次 Action 派发必须输出 JSON 完成事件: {log_output}"
-        );
-        for event in action_logs {
-            for field in [
-                "service",
-                "version",
-                "environment",
-                "operation",
-                "request_id",
-                "result",
-                "error_code",
-                "error",
-                "duration_ms",
-            ] {
-                ensure!(
-                    event.get(field).is_some(),
-                    "Action 完成事件缺少固定字段 {field}: {event}"
-                );
-            }
-            ensure!(
-                event["span"]["name"] == "action.request",
-                "Action 完成事件必须关联可继承远端 parent 的 action.request span: {event}"
-            );
-            ensure!(
-                event["spans"]
-                    .as_array()
-                    .is_some_and(|spans| spans.iter().any(|span| span["name"] == "dispatch")),
-                "Action 完成事件的祖先链必须保留原生 dispatch span: {event}"
-            );
-        }
-        Ok(())
-    })();
-    let outcome = outcome.and(log_verification);
     let cleanup = reset_test_database(&pool).await;
     tools.close().await;
-    merge_outcome(outcome, cleanup)
+    match (outcome, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            Err(error.context(format!("测试失败后清理也失败: {cleanup_error:#}")))
+        }
+    }
 }

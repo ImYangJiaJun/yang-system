@@ -34,24 +34,6 @@ function Assert-LastExitCode {
     }
 }
 
-function New-LocalBootstrapSecretPair {
-    $bootstrapOutput = @(& cargo run --quiet --locked --bin yang-bootstrap-secret)
-    Assert-LastExitCode "生成本地 bootstrap secret 失败。"
-    $bootstrapSecretLine = $bootstrapOutput |
-        Where-Object { $_.StartsWith("secret=") } |
-        Select-Object -First 1
-    $bootstrapDigestLine = $bootstrapOutput |
-        Where-Object { $_.StartsWith("digest=") } |
-        Select-Object -First 1
-    if ($null -eq $bootstrapSecretLine -or $null -eq $bootstrapDigestLine) {
-        throw "bootstrap secret 生成器输出格式无效。"
-    }
-    return [pscustomobject]@{
-        Secret = $bootstrapSecretLine.Substring("secret=".Length)
-        Digest = $bootstrapDigestLine.Substring("digest=".Length)
-    }
-}
-
 function Get-LocalConfigInspection {
     $inspectionOutput = @(
         & python $configUpgradePath inspect `
@@ -109,13 +91,11 @@ try {
     if (-not (Test-Path -LiteralPath $configPath)) {
         $mysqlPlaceholder = "mysql://root:password@127.0.0.1:3306/yang_system"
         $tokenPlaceholder = "replace-with-at-least-32-random-bytes"
-        $bootstrapPlaceholder = "replace-with-yang-bootstrap-secret-digest"
         $schemaValidate = 'mode = "validate"'
         $config = Get-Content -Raw -LiteralPath $configExamplePath
         if (
             -not $config.Contains($mysqlPlaceholder) -or
             -not $config.Contains($tokenPlaceholder) -or
-            -not $config.Contains($bootstrapPlaceholder) -or
             -not $config.Contains($schemaValidate)
         ) {
             throw "config.example.toml 缺少预期占位值，无法安全生成本机配置。"
@@ -124,16 +104,13 @@ try {
         $tokenBytes = [byte[]]::new(48)
         [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
         $tokenSecret = [Convert]::ToBase64String($tokenBytes)
-        $bootstrapPair = New-LocalBootstrapSecretPair
         $config = $config.Replace(
             $mysqlPlaceholder,
             "mysql://root:yang-local@127.0.0.1:3306/yang_system"
         )
         $config = $config.Replace($tokenPlaceholder, $tokenSecret)
-        $config = $config.Replace($bootstrapPlaceholder, $bootstrapPair.Digest)
         Set-Content -LiteralPath $configPath -Value $config -Encoding utf8NoBOM
         Write-Host "已生成本机 config.toml（schema.mode=validate）。"
-        Write-Host "本地 bootstrap secret（仅显示一次，请立即保存）: $($bootstrapPair.Secret)"
     } else {
         $inspection = Get-LocalConfigInspection
         if (-not $inspection.current) {
@@ -141,7 +118,6 @@ try {
                 throw "已有 config.toml 与当前启动契约不兼容。请备份后使用 -UpgradeLegacyConfig 显式升级。"
             }
 
-            $bootstrapPair = $null
             $upgradeArguments = @(
                 $configUpgradePath,
                 "upgrade",
@@ -150,13 +126,6 @@ try {
                 "--template",
                 $configExamplePath
             )
-            if ($inspection.needs_bootstrap_digest) {
-                $bootstrapPair = New-LocalBootstrapSecretPair
-                $upgradeArguments += @(
-                    "--bootstrap-digest",
-                    $bootstrapPair.Digest
-                )
-            }
             $upgradeOutput = @(& python @upgradeArguments)
             Assert-LastExitCode "升级旧版 config.toml 失败。"
             $inspection = Get-LocalConfigInspection
@@ -169,9 +138,6 @@ try {
                 Select-Object -First 1
             if ($null -ne $backupLine) {
                 Write-Host "旧配置备份: $($backupLine.Substring("backup=".Length))"
-            }
-            if ($null -ne $bootstrapPair) {
-                Write-Host "本地 bootstrap secret（仅显示一次，请立即保存）: $($bootstrapPair.Secret)"
             }
         } else {
             Write-Host "保留已有 config.toml。"

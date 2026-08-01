@@ -68,11 +68,6 @@ audience = "yang-system-sensitive-actions"
 challenge_ttl_seconds = 120
 proof_ttl_seconds = 300
 
-[bootstrap]
-# 运行 yang-bootstrap-secret 生成；配置只保存摘要，原始 secret 由运维安全保管。
-# 该占位值会被启动校验拒绝。
-secret_digest = "replace-with-yang-bootstrap-secret-digest"
-
 [email.smtp]
 # 仅接受强制 STARTTLS 的 SMTP relay 主机名；不要填写 scheme 或把凭据写入 URL。
 relay = "smtp.example.com"

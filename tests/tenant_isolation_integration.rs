@@ -16,9 +16,6 @@ use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::{build_app, Application};
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
-use yang_system::modules::admin::bootstrap_secret::{
-    generate_bootstrap_secret, BootstrapSecretVerifier,
-};
 
 use common::{take_registration_code, RegistrationEmailToolsExt};
 
@@ -217,8 +214,6 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
         redis.clone(),
         format!("tenant-integration-{cache_namespace}"),
     )?;
-    let generated_bootstrap = generate_bootstrap_secret()?;
-    let verifier = BootstrapSecretVerifier::new(generated_bootstrap.digest().clone(), 2)?;
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
@@ -234,7 +229,6 @@ async fn build_harness(mysql_url: &str, redis_url: &str) -> anyhow::Result<Harne
                 300,
                 3600,
             ))
-            .config(verifier)
             .build()?,
     );
     let security = Arc::new(SecuritySettings {

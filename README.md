@@ -50,10 +50,9 @@ pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1 `
 脚本会启动 Compose 中的 MySQL 8.0 与 Redis 7、等待健康检查、安装前端依赖，
 并仅在不存在时生成被 Git 忽略的 `config.toml`。生成配置始终使用 `validate`；
 `-RunMigrations` 对新旧配置都执行独立迁移作业，不会把应用启动模式改为 `apply`。
-已有配置若缺少当前 JWT keyring、bootstrap、邮箱、授权或可观测字段，脚本默认拒绝覆盖；
+已有配置若缺少当前 JWT keyring、邮箱、授权或可观测字段，脚本默认拒绝覆盖；
 `-UpgradeLegacyConfig` 会先备份到 `target/local-config-backups/`，再以当前模板补齐
-字段、迁移 `token.secret` 并对齐本仓库 Compose 的 loopback URL。若需要新建
-bootstrap 摘要，原始 secret 仍只在当前终端显示一次。
+字段、迁移 `token.secret` 并对齐本仓库 Compose 的 loopback URL。
 只检查必需工具时使用：
 
 ```powershell
@@ -175,7 +174,7 @@ src/
 ├── config_source.rs         # 本应用环境变量与 secret 白名单，合成机制来自 yang-runtime
 └── modules/
     ├── account/              # 注册/会话/邮件投递、授权快照与用户生命周期
-    ├── admin/                # 平台初始化、bootstrap secret 与最后管理员保护
+    ├── admin/                # 首个注册账号的唯一最终管理员与平台授权保护
     ├── observability/        # 浏览器错误与服务端 request_id 关联
     ├── org/                  # 企业创建/选择、可信租户解析与成员管理
     └── work/                 # 个人项目、任务树、关系与批量完成
@@ -237,7 +236,7 @@ cargo run --locked --bin yang-system
 
 1. 按 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成并验证不可变运行配置。
 2. 初始化 JSON 日志与可选 OTLP tracing，并建立整个进程共享的关闭总预算。
-3. 创建 MySQL、Redis、Token/Step-up manager、SMTP sender、Bootstrap verifier 和授权缓存。
+3. 创建 MySQL、Redis、Token/Step-up manager、SMTP sender 和授权缓存。
 4. 用 `ToolsBuilder` 冻结当前应用独占资源，再由 `AppBuilder` 校验 Addon 依赖、
    关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
 5. `DatabaseInitializer` 根据 `schema.mode` 对 `BuiltApp::table_definitions()` 执行
@@ -271,28 +270,23 @@ Copy-Item config.example.toml config.toml
 $tokenBytes = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
 $tokenSecret = [Convert]::ToBase64String($tokenBytes)
-# 生成器只在当前终端显示一次原始 bootstrap secret；配置只填写 digest。
-cargo run --quiet --locked --bin yang-bootstrap-secret
-# 编辑 config.toml：填写 MySQL、Redis、SMTP、独立邮箱验证码密钥与 Token 密钥，
-# 再把 bootstrap.secret_digest 替换为生成器输出的 digest；安全保存原始 secret。
+# 编辑 config.toml：填写 MySQL、Redis、SMTP、独立邮箱验证码密钥与 Token 密钥。
 cargo run --locked --bin yang-migrate -- apply
 cargo run --locked --bin yang-system
 ```
 
 `config.toml` 被 Git 忽略；仓库只保留不含真实凭据的 `config.example.toml`。MySQL、
-Redis、SMTP、邮箱验证码、Token、Bootstrap、Schema 模式等运行参数按
+Redis、SMTP、邮箱验证码、Token、Schema 模式等运行参数按
 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成。
-`bootstrap.secret_digest` 只接受带强度边界的 Argon2id PHC 摘要，
-原始一次性 secret 不得写入配置、日志或普通响应。缺失、明文、弱参数或非法摘要
-都会在连接外部资源前阻止应用启动。部署时应限制 `config.toml` 的读取权限，并通过
-部署系统生成或挂载该文件。
+部署时应限制 `config.toml` 的读取权限，并通过部署系统生成或挂载该文件。
 
 注册邮箱验证码的接口、防枚举/重放边界、SMTP/secret provider 配置与真实集成门禁见
 [`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)。
 
-`admin.user.bootstrap` 仍要求已登录身份，并额外要求请求体携带生成器输出的原始
-`secret`。服务端在受并发限制的阻塞线程中执行 Argon2id 常量时间校验；缺失、错误
-或未注入 verifier 均失败关闭，只有正确凭证才会进入数据库的一次性初始化事务。
+首个成功提交注册事务的账号会通过数据库唯一 `owner_key=system-owner` 哨兵原子成为
+唯一且不可降级、停用或删除的系统最终管理员。已有用户却没有 owner、存在多个 owner
+或 owner 状态损坏时启动失败并要求人工修复。首次注册前必须使用本机监听、防火墙或
+反向代理限制不可信访问；没有外部身份凭证时，系统无法判断哪个公网注册者是预期所有者。
 
 `schema.mode` 支持 `apply|validate|off`。省略整个 `[schema]` 或只省略 `mode` 时均
 默认 `validate`：它不执行 DDL，发现任何待应用变更就拒绝启动，适合由独立迁移任务
@@ -323,7 +317,7 @@ python scripts/run_ci.py integration
 
 该门禁覆盖授权缓存单调性与 Outbox 并发重放、迁移
 dry-run/version/checksum/幂等与中断重跑、Schema plan/apply/validate、跨实例并发
-apply、审计/Bootstrap 信任根、邮箱验证码对抗边界、注册/登录/Refresh/会话失效、
+apply、审计/最终管理员信任根、邮箱验证码对抗边界、注册/登录/Refresh/会话失效、
 原子创建企业、租户隔离和业务系统路径，不使用 mock 替代 MySQL 或 Redis。
 
 ## 参考能力
