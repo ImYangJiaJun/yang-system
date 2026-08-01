@@ -1,6 +1,31 @@
 # yang-system
 
-`yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用，覆盖账号认证、Addon/Module、强类型 Action、Fields/Params、Tables、内部 Action 调用、租户上下文、Schema、Catalog、Registry 与 OpenAPI。
+`yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用和 Quasar 管理控制台。当前
+应用以同一份 Addon/Module 定义构建强类型 Action、Schema、Catalog、Registry、
+OpenAPI 与前端页面，覆盖账号与会话、平台管理、企业成员、个人任务、授权失效传播、
+高权限审计和生产可观测性。
+
+## 当前能力
+
+| Addon / Module | 控制台入口 | 当前能力 |
+|---|---|---|
+| `account.user` | 个人账户 / 用户中心 | 邮箱验证码注册、登录、Refresh Cookie、全设备退出、当前用户、Step-up；启用凭据版本切换后还提供改密、自助停用和密码重置 |
+| `admin.user` | 管理平台 / 平台账号 | 一次性平台初始化、账号查询与新增、状态和超级管理员变更；启用凭据版本切换后可签发单次密码重置凭证 |
+| `org.tenant` | 企业账号 / 我的企业 | 发现可访问企业、原子创建企业与首位管理员 |
+| `org.org` / `org.user` | 企业资料 / 企业成员 | 当前企业资料、成员查询与增改删、关系选择和租户隔离 |
+| `work.project` / `work.task` | 个人账户 / 项目组合、任务规划 | 个人项目、任务树与分页清单、关系选择、批量完成 |
+| `system.observability` | 无导航入口 | 已认证的浏览器错误关联上报 |
+
+安全边界不是只依赖前端隐藏按钮：Access Token 的授权快照通过
+`authz_version` 与 MySQL/Redis 当前事实比较，授权 writer 在同一事务中更新业务事实、
+单调递增版本并追加 Outbox；企业成员写操作还会在持锁事务内复核资源授权。全设备退出、
+自助停用、平台账号新增/状态/管理员变更和企业成员增改删按各自契约使用 Step-up、
+最后管理员保护、会话撤销或审计事件。
+
+`security.issue_refresh_credential_version` 是三阶段发布开关。示例配置保持 `false`，
+此时服务兼容读取旧 Refresh Token，且不会注册依赖新版凭据版本契约的改密、自助停用、
+用户密码重置和管理员重置凭证 Action；确认没有旧实例后切换为 `true`，才同时启用
+Refresh 凭据版本签发和这些 Action。该开关不能在新旧实例混跑时提前打开。
 
 ## 本地环境
 
@@ -77,8 +102,10 @@ python scripts/check_architecture.py
 验证。
 
 本地质量门禁与 `.github/workflows/ci.yml` 共用同一入口：提交前运行
-`python scripts/run_ci.py quick`，推送前运行 `python scripts/run_ci.py full`；真实依赖
-环境准备完成后可运行 `python scripts/run_ci.py integration`。
+`python scripts/run_ci.py quick`，推送前运行 `python scripts/run_ci.py full`；`full`
+还会执行生产依赖审计、前端完整检查，以及端口隔离的 dev-server 和 production-build
+两套 Playwright。真实依赖环境准备完成后可运行
+`python scripts/run_ci.py integration`。
 
 新增 Action 使用脚手架一次完成文件创建、`mod.rs` 声明和注册；生成器拒绝覆盖
 已有文件，并要求业务路径显式位于 `/api/v1/`：
@@ -93,24 +120,33 @@ python scripts/new_action.py src/modules/org/organization/actions archive `
 
 ## BR 生态前端
 
-`frontend/` 使用 Quasar 构建与 BR 生态一致的账号管理入口。前端不维护另一套固定
-菜单，而是读取后端 Catalog，将可访问的 Addon/Module 直接投影为页面：
+`frontend/` 使用 Quasar 构建正式控制台。登录、注册、密码重置、身份选择和应用壳由
+前端静态维护；登录后的业务导航读取后端 Catalog，将当前身份可访问的 Module 投影
+为页面：
 
-| 后端模块 | 前端页面 | 账号身份 |
+| 账号身份 | 后端模块 | 前端页面 |
 |---|---|---|
-| `account.user` | 用户中心 | 个人账户 |
-| `admin.user` | 平台账号 | 管理平台 |
-| `org.tenant` | 我的企业 | 企业账户 |
-| `org.org` | 企业资料 | 企业账户 |
-| `org.user` | 企业成员 | 企业账户 |
+| 个人账户 | `account.user` | 用户中心 |
+| 个人账户 | `work.project` | 项目组合 |
+| 个人账户 | `work.task` | 任务规划 |
+| 企业账号 | `org.tenant` | 我的企业 |
+| 企业账号 | `org.org` | 企业资料 |
+| 企业账号 | `org.user` | 企业成员 |
+| 管理平台 | `admin.user` | 平台账号 |
 
-只有 Action、没有 TableView 的模块也会生成页面：列表或详情 Action 负责初始数据，
-其余 Action 按 Catalog 中的展示位置生成页面操作或行操作。后端权限投影中不存在的
-模块和操作不会出现在前端；直接访问无权模块时同样 fail-closed。
+通用 `ModulePage` 解释 Catalog 中的主 Action、TableView、JSON Schema 表单、关系选项、
+工具栏/行/批量操作和确认语义。只有 Action、没有 TableView 的模块也可由主 Action
+提供初始数据；需要特殊交互的页面必须在静态自定义视图注册表中显式登记，未登记或
+加载失败时回退到通用 TableView。后端权限投影中不存在的模块和操作不会出现在前端，
+直接访问无权模块时同样 fail-closed。
 
-右上角账号菜单对应 BR 的 `user/admin/org` 账号模型。企业身份从
+右上角账号菜单对应 `user/admin/org` 身份模型。企业身份从
 `org.tenant.list` 加载当前用户可访问的企业名称，选择企业后由前端保存其内部
 tenant ID 并重新加载 Catalog；用户无需看到或手动输入企业 ID。
+
+后端返回 Step-up challenge 时，通用操作链会打开重认证对话框，用当前账号凭据完成
+challenge 后携带一次性 proof 重试原操作。`/workbench` 是仅开发环境开放的 Catalog
+契约工作台；生产构建使用身份选择、模块页和业务视图，不把工作台当作正式交付证明。
 
 本地联调前端：
 
@@ -120,32 +156,34 @@ pnpm install
 pnpm dev
 ```
 
-默认通过 Vite 代理访问 `http://127.0.0.1:18080` 的后端。提交前可运行
-`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 和 `pnpm e2e`。
+`pnpm dev` 默认通过 Vite 代理访问 `http://127.0.0.1:8080` 的真实后端；Playwright
+门禁会自行启动数据库无关的 `examples/frontend_demo/`，并用独立端口隔离 dev-server
+与 production-build 两套环境。提交前优先从仓库根目录运行
+`python scripts/run_ci.py full`；单独排查前端时可运行 `pnpm check`、`pnpm e2e` 和
+`pnpm e2e:production`。
 
 ## 原生结构
 
 ```text
 src/
 ├── main.rs
-├── bootstrap.rs             # 创建 Tools、同步 Schema、启动 HTTP、优雅关闭
-├── app.rs                   # AppBuilder 唯一组装入口
-├── transport/http.rs        # Catalog 驱动的 Axum 传输与健康检查
+├── bootstrap.rs             # 配置、Telemetry、Tools、Schema、Worker、HTTP 与关闭顺序
+├── app.rs                   # account/admin/system/org/work 的唯一组合根
+├── authorization/           # 授权版本缓存、事务 Outbox 与后台发布 Worker
+├── audit/                   # append-only 高权限审计事件与启动期 Schema 校验
+├── config.rs                # 不可变运行设置及字段级校验
+├── config_source.rs         # 本应用环境变量与 secret 白名单，合成机制来自 yang-runtime
 └── modules/
-    ├── account/
-    │   ├── mod.rs           # account Addon 唯一组装入口
-    │   └── user/
-    │       ├── mod.rs       # account.user Module 聚合
-    │       ├── schema.rs    # 用户表 Schema 与安全 DTO
-    │       ├── service.rs   # 跨 Action 共享的领域服务
-    │       ├── claims.rs    # Token Claims 到可信用户上下文的投影
-    │       └── actions/     # 注册、登录、刷新、退出与当前用户 Action
-    └── org/
-        ├── mod.rs           # org Addon 唯一组装入口与中间件顺序
-        ├── tenant.rs        # 企业成员校验与可信租户解析
-        ├── organization/    # org.org Module；每个自定义 Action 独立文件
-        └── user/            # org.user Schema、CRUD 与 View
+    ├── account/              # 注册/会话/邮件投递、授权快照与用户生命周期
+    ├── admin/                # 平台初始化、bootstrap secret 与最后管理员保护
+    ├── observability/        # 浏览器错误与服务端 request_id 关联
+    ├── org/                  # 企业创建/选择、可信租户解析与成员管理
+    └── work/                 # 个人项目、任务树、关系与批量完成
 ```
+
+JSON 日志、Prometheus/OTLP、共享关闭预算和配置源合成由根 workspace 的
+`yang-runtime` 提供；可信代理客户端 IP 中间件位于 `yang-base::transport`，应用只保留
+指标名、环境变量、secret 和关闭阶段等系统策略。
 
 核心路径只有一条：
 
@@ -159,7 +197,13 @@ Addon/Module/fields!/params!
     Catalog Registry   TableDefinition/View
        │    │              │
        ▼    ▼              ▼
-   OpenAPI HTTP dispatch  Schema/Tables
+ OpenAPI/UI  HTTP dispatch  Schema/Tables
+                 │
+                 ▼
+ auth → authz_version → tenant/permission → Step-up/resource guard → Action
+                                                               │
+                                                               ▼
+                                              business fact + version + Outbox/audit
 ```
 
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；没有进程级数据库/Redis/Tools 单例。
@@ -168,6 +212,10 @@ Addon/Module/fields!/params!
 - `ActionLink<I, O>` 在 `AppBuilder::build` 绑定 Registry slot；请求期内部调用不查字符串名称、不做 JSON 往返；完整样例位于 `yang-base` 定义层测试。
 - `ctx.tables()` 统一执行字段权限、筛选、排序、分页、关系批量加载与租户条件。
 - `org_user.org_org` 是租户键；普通上下文缺少 `TenantContext` 时查询 fail-closed，只有显式 system 上下文可绕过。
+- Token 授权快照同时包含角色、权限与 `authz_version`；Redis 只做短 TTL 加速，MySQL
+  保持最终事实源，Outbox 重放不能让版本回退。
+- Step-up challenge/proof 使用独立 keyring，生产 proof 通过 Redis 原子单次消费；它不
+  替代 Action 内的事务授权、最后管理员保护或审计写入。
 
 ## 生产发布与启动顺序
 
@@ -188,13 +236,16 @@ cargo run --locked --bin yang-system
 应用进程内部启动顺序为：
 
 1. 按 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成并验证不可变运行配置。
-2. 创建 MySQL `Database`、Redis `RedisClient` 和 `TokenManager`。
-3. 用 `ToolsBuilder` 构建当前应用独占的不可变 `Tools`。
-4. 用 `AppBuilder` 校验 Addon 依赖、关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
+2. 初始化 JSON 日志与可选 OTLP tracing，并建立整个进程共享的关闭总预算。
+3. 创建 MySQL、Redis、Token/Step-up manager、SMTP sender、Bootstrap verifier 和授权缓存。
+4. 用 `ToolsBuilder` 冻结当前应用独占资源，再由 `AppBuilder` 校验 Addon 依赖、
+   关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
 5. `DatabaseInitializer` 根据 `schema.mode` 对 `BuiltApp::table_definitions()` 执行
    additive 同步、只读校验或显式跳过。
-6. 从同一 Catalog 投影 Axum route、OpenAPI 和默认后台 View。
-7. 停机时按当前应用资源的生命周期关闭连接。
+6. 校验 append-only 审计表，启动独立 Prometheus/readiness 管理面和授权 Outbox Worker。
+7. readiness 置为就绪后，从同一 Catalog 投影并启动 Axum 业务路由。
+8. 停机时先撤销 readiness，再在同一总预算内排空 HTTP、停止 Worker、关闭资源并
+   flush Telemetry。
 
 ## 本地启动
 
@@ -207,7 +258,10 @@ cargo run --locked
 ```
 
 后端位于 `http://127.0.0.1:8080`，存活与就绪检查分别位于
-`/health/live` 和 `/health/ready`。前端开发服务器位于 `http://127.0.0.1:5173`。
+`/health/live` 和 `/health/ready`。启用指标时，独立管理面默认位于
+`http://127.0.0.1:9090`，提供 `/metrics` 与带生命周期门闩、MySQL/Redis 检查和总预算
+的 `/health/ready`；生产编排应使用这个管理面 readiness。前端开发服务器位于
+`http://127.0.0.1:5173`。
 
 需要手工配置时，先创建 MySQL 数据库和 Redis，再复制配置示例。示例保持安全的
 `schema.mode = "validate"`；迁移作业创建业务表，但不会创建数据库本身。
@@ -252,6 +306,10 @@ Redis、SMTP、邮箱验证码、Token、Bootstrap、Schema 模式等运行参�
 配置必须显式复核该标识。升级前已有的本地 `apply` 配置还需补充
 `app.environment = "development"`，否则会按安全缺省值视为生产环境并拒绝启动。
 
+完整环境变量、目录型 secret provider、Token/Step-up keyring 轮换和关闭预算见
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)；指标、readiness、日志与 tracing 契约见
+[`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)。
+
 ## 真实依赖集成测试
 
 集成测试要求专用 MySQL 数据库名以 `_test` 结尾，并强制 Redis 使用 DB 15；测试会
@@ -263,17 +321,27 @@ $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
 python scripts/run_ci.py integration
 ```
 
-该门禁覆盖迁移 dry-run/version/checksum/幂等与中断重跑、Schema
-plan/apply/validate、跨实例并发 apply、锁内失败后跨实例重跑、注册、登录、
-refresh、原子创建企业、租户发现和租户作用域查询，不使用 mock 替代 MySQL 或 Redis。
+该门禁覆盖授权缓存单调性与 Outbox 并发重放、迁移
+dry-run/version/checksum/幂等与中断重跑、Schema plan/apply/validate、跨实例并发
+apply、审计/Bootstrap 信任根、邮箱验证码对抗边界、注册/登录/Refresh/会话失效、
+原子创建企业、租户隔离和业务系统路径，不使用 mock 替代 MySQL 或 Redis。
 
 ## 参考能力
 
 | 位置 | 展示能力 |
 |---|---|
-| `modules/account/user/actions/register.rs` | `params!`、类型化 `Action::index`、Fields 约束复用 |
-| `modules/account/user/{schema,service,claims}.rs` | 密码保护字段、TableQuery、Token 用户投影 |
-| `modules/org/` | 原生 `Addon/Module/actions!`、关系字段、可信租户、Tables 列表与选择器 |
-| `app.rs` 测试 | Catalog/Registry 同源、OpenAPI、默认 View、租户 fail-closed |
+| `modules/account/user/` | 邮箱注册、Cookie 会话、凭据/授权版本、Step-up、停用与全量撤销 |
+| `authorization/` | Redis 单调缓存、MySQL 回源、事务 Outbox 与发布 Worker |
+| `modules/admin/` | 平台初始化、权限快照、最后管理员保护与密码重置凭证 |
+| `modules/org/` | 原子建企业、可信租户、成员资源授权和事务内最终复核 |
+| `modules/work/` | 个人租户、项目/任务关系、树与分页 View、批量完成 |
+| `app.rs` 测试 | Catalog/Registry/OpenAPI 同源、条件 Action、权限、View 与租户 fail-closed |
 
 BR 到 YANG 的完整机械映射和 codemod 使用方式见 `../../docs/br-to-yang-migration.md`。
+
+安全与运行契约继续拆分在专门文档中：授权失效见
+[`docs/architecture/authorization-freshness-adr.md`](docs/architecture/authorization-freshness-adr.md)，
+高权限审计见 [`docs/AUDIT.md`](docs/AUDIT.md)，迁移见
+[`docs/MIGRATIONS.md`](docs/MIGRATIONS.md)，注册邮件见
+[`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)，SLO 见
+[`docs/SLO.md`](docs/SLO.md)。
