@@ -1,9 +1,9 @@
+use crate::addon::account::email_delivery::{
+    RegistrationEmailSenderHandle, SmtpRegistrationEmailSender,
+};
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
-use crate::modules::account::email_delivery::{
-    RegistrationEmailSenderHandle, SmtpRegistrationEmailSender,
-};
 use anyhow::Context;
 use std::future::Future;
 use std::path::Path;
@@ -168,7 +168,7 @@ async fn run_after_tools_created(
     crate::audit::validate_schema(tools.mysql()?.pool())
         .await
         .context("启动期校验高权限审计表失败")?;
-    crate::modules::admin::validate_system_owner_state(tools.mysql()?.pool())
+    crate::addon::admin::validate_system_owner_state(tools.mysql()?.pool())
         .await
         .context("启动期校验系统最终管理员状态失败")?;
     drop(initializer);

@@ -128,13 +128,16 @@ RAW_SQL_INVOCATION_RE = re.compile(
 )
 RAW_SQL_BOUNDARY_DOCUMENT = Path("docs/architecture/raw-sql-boundaries.md")
 AUTHORIZATION_WRITER_DOCUMENT = Path("docs/architecture/authorization-writers.md")
+
+SOURCE_ROOT_DIRECTORIES = {"addon", "config", "infrastructure"}
+SOURCE_ROOT_FILES = {"app.rs", "bootstrap.rs", "lib.rs", "main.rs"}
 AUTHORIZATION_WRITER_ALLOWLIST = {
-    "src/modules/account/user/repository.rs": "account-user-facts",
-    "src/modules/account/user/lifecycle.rs": "account-user-lifecycle",
-    "src/modules/account/authz_version.rs": "account-security-version",
-    "src/modules/admin/user/repository.rs": "admin-authorization-facts",
-    "src/modules/org/user/repository.rs": "org-membership-authorization-facts",
-    "src/modules/org/access/repository.rs": "org-onboarding-authorization-facts",
+    "src/addon/account/user/repository.rs": "account-user-facts",
+    "src/addon/account/user/lifecycle.rs": "account-user-lifecycle",
+    "src/addon/account/authz_version.rs": "account-security-version",
+    "src/addon/admin/user/repository.rs": "admin-authorization-facts",
+    "src/addon/org/user/repository.rs": "org-membership-authorization-facts",
+    "src/addon/org/access/repository.rs": "org-onboarding-authorization-facts",
 }
 AUTHORIZATION_WRITER_CODE_RE = re.compile(
     r"(?m)^//!\s*authorization-writer:\s*([a-z][a-z0-9-]*)\s*$"
@@ -152,9 +155,9 @@ GENERIC_TABLE_WRITE_RE = re.compile(
     r"delete(?:_in_tx)?)\s*\("
 )
 PROTECTED_MODULE_PATHS = (
-    "src/modules/account/user/",
-    "src/modules/admin/user/",
-    "src/modules/org/user/",
+    "src/addon/account/user/",
+    "src/addon/admin/user/",
+    "src/addon/org/user/",
 )
 INTERNAL_ACTION_BYPASS_PATTERNS = {
     "ActionContext.plugins": re.compile(r"\.\s*plugins\s*\("),
@@ -177,7 +180,7 @@ def action_definition_count(source: str) -> int:
 
 def action_directories(root: Path) -> list[Path]:
     directories: set[Path] = set()
-    for search_root in (root / "src" / "modules", root / "examples"):
+    for search_root in (root / "src" / "addon", root / "examples"):
         if search_root.is_dir():
             directories.update(
                 path for path in search_root.rglob("actions") if path.is_dir()
@@ -215,7 +218,7 @@ def check_action_directory(root: Path, directory: Path) -> list[str]:
 
 def check_actions_outside_directories(root: Path) -> list[str]:
     errors: list[str] = []
-    modules = root / "src" / "modules"
+    modules = root / "src" / "addon"
     if not modules.is_dir():
         return errors
     for path in modules.rglob("*.rs"):
@@ -256,9 +259,9 @@ def preceding_tenant_boundary(
 
 def tenant_code_boundaries(root: Path) -> tuple[set[tuple[str, str]], list[str]]:
     tenant_roots = [
-        root / "src" / "modules" / name
+        root / "src" / "addon" / name
         for name in ("org", "work")
-        if (root / "src" / "modules" / name).is_dir()
+        if (root / "src" / "addon" / name).is_dir()
     ]
     if not tenant_roots:
         return set(), []
@@ -320,7 +323,7 @@ def tenant_code_boundaries(root: Path) -> tuple[set[tuple[str, str]], list[str]]
 
 def check_tenant_boundaries(root: Path) -> list[str]:
     code_boundaries, errors = tenant_code_boundaries(root)
-    org_root = root / "src" / "modules" / "org"
+    org_root = root / "src" / "addon" / "org"
     if not org_root.is_dir():
         return errors
 
@@ -355,7 +358,7 @@ def check_tenant_boundaries(root: Path) -> list[str]:
 def check_tenant_isolation_evidence(root: Path) -> list[str]:
     """锁定真实库租户矩阵的测试入口、证据点和文档映射。"""
 
-    if not (root / "src" / "modules" / "org").is_dir():
+    if not (root / "src" / "addon" / "org").is_dir():
         return []
 
     errors: list[str] = []
@@ -503,22 +506,22 @@ def raw_sql_boundary_path_allowed(kind: str, relative: Path) -> bool:
     value = relative.as_posix()
     if kind == "domain-repository":
         return (
-            value.startswith("src/modules/")
+            value.startswith("src/addon/")
             and relative.name == "repository.rs"
         )
     if kind == "domain-service":
         return (
-            value.startswith("src/modules/")
+            value.startswith("src/addon/")
             and relative.stem
             in {"authz_version", "grants", "guard", "lifecycle", "service", "tenant"}
         )
     if kind == "infrastructure-repository":
         return value in {
-            "src/audit/repository.rs",
-            "src/authorization/outbox.rs",
+            "src/infrastructure/audit/repository.rs",
+            "src/infrastructure/authorization/outbox.rs",
         }
     if kind == "schema-validator":
-        return value == "src/audit/schema.rs"
+        return value == "src/infrastructure/audit/schema.rs"
     return False
 
 
@@ -748,8 +751,29 @@ def check_frontend_boundaries(root: Path) -> list[str]:
     return errors
 
 
+def check_source_layout(root: Path) -> list[str]:
+    """锁定应用组合根，防止基础设施和业务文件重新散落到 src 顶层。"""
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return ["src/: 源码目录不存在"]
+
+    actual_directories = {path.name for path in source_root.iterdir() if path.is_dir()}
+    actual_files = {path.name for path in source_root.iterdir() if path.is_file()}
+    errors: list[str] = []
+    for name in sorted(SOURCE_ROOT_DIRECTORIES - actual_directories):
+        errors.append(f"src/{name}/: 缺少约定顶层目录")
+    for name in sorted(actual_directories - SOURCE_ROOT_DIRECTORIES):
+        errors.append(f"src/{name}/: 不允许新增顶层目录")
+    for name in sorted(SOURCE_ROOT_FILES - actual_files):
+        errors.append(f"src/{name}: 缺少约定组合根文件")
+    for name in sorted(actual_files - SOURCE_ROOT_FILES):
+        errors.append(f"src/{name}: 不允许新增顶层源码文件")
+    return errors
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
+    errors.extend(check_source_layout(root))
     directories = action_directories(root)
     if not directories:
         return ["未找到任何 actions/ 目录，检查路径是否为 yang-system 根目录"]
@@ -772,6 +796,24 @@ def write(path: Path, content: str) -> None:
 
 
 def self_test() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        for directory in SOURCE_ROOT_DIRECTORIES:
+            (root / "src" / directory).mkdir(parents=True)
+        for file_name in SOURCE_ROOT_FILES:
+            write(root / "src" / file_name, "")
+        assert check_source_layout(root) == [], "约定的精简 src 顶层结构应通过"
+
+        write(root / "src" / "forgotten_helper.rs", "")
+        (root / "src" / "bin").mkdir()
+        errors = check_source_layout(root)
+        assert any("forgotten_helper.rs" in error for error in errors), (
+            "必须拒绝重新散落的顶层源码文件"
+        )
+        assert any("src/bin/" in error for error in errors), (
+            "必须拒绝重新引入顶层 bin 目录"
+        )
+
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         write(
@@ -808,7 +850,11 @@ def self_test() -> None:
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        actions = root / "src" / "modules" / "demo" / "actions"
+        for directory in SOURCE_ROOT_DIRECTORIES:
+            (root / "src" / directory).mkdir(parents=True)
+        for file_name in SOURCE_ROOT_FILES:
+            write(root / "src" / file_name, "")
+        actions = root / "src" / "addon" / "demo" / "actions"
         write(actions / "mod.rs", "mod list;\n")
         write(actions / "list.rs", "#[derive(Action)]\nstruct ListAction;\n")
         errors = check(root)
@@ -831,7 +877,7 @@ def self_test() -> None:
         assert any("未在" in error for error in errors), "必须拒绝未登记文件"
 
         write(
-            root / "src" / "modules" / "demo" / "leaked.rs",
+            root / "src" / "addon" / "demo" / "leaked.rs",
             "#[derive(Action)]\nstruct LeakedAction;\n",
         )
         errors = check(root)
@@ -875,7 +921,7 @@ def self_test() -> None:
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        repository = root / "src" / "modules" / "demo" / "repository.rs"
+        repository = root / "src" / "addon" / "demo" / "repository.rs"
         write(
             repository,
             "//! raw-sql-boundary: domain-repository demo-read\n"
@@ -887,7 +933,7 @@ def self_test() -> None:
         write(
             root / RAW_SQL_BOUNDARY_DOCUMENT,
             "<!-- raw-sql-boundary: domain-repository demo-read "
-            "src/modules/demo/repository.rs -->\n",
+            "src/addon/demo/repository.rs -->\n",
         )
         assert check_raw_sql_boundaries(root) == [], "已登记静态查询边界应通过"
 
@@ -916,7 +962,7 @@ def self_test() -> None:
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        repository = root / "src" / "modules" / "org" / "demo" / "repository.rs"
+        repository = root / "src" / "addon" / "org" / "demo" / "repository.rs"
         write(
             repository,
             "async fn load(pool: &sqlx::MySqlPool) {\n"
@@ -1019,7 +1065,7 @@ def self_test() -> None:
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        (root / "src" / "modules" / "org").mkdir(parents=True)
+        (root / "src" / "addon" / "org").mkdir(parents=True)
         test_source = ""
         document_source = ""
         for test_name, evidence_ids in REQUIRED_TENANT_EVIDENCE.items():
@@ -1093,27 +1139,27 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         writer_sources = {
-            "src/modules/account/user/repository.rs": (
+            "src/addon/account/user/repository.rs": (
                 "account-user-facts",
                 "fn write(q: Query) { q.insert(value); }\n",
             ),
-            "src/modules/account/user/lifecycle.rs": (
+            "src/addon/account/user/lifecycle.rs": (
                 "account-user-lifecycle",
                 'fn write() { sqlx::query("UPDATE users SET status = \'disabled\'"); }\n',
             ),
-            "src/modules/account/authz_version.rs": (
+            "src/addon/account/authz_version.rs": (
                 "account-security-version",
                 'fn write() { sqlx::query("UPDATE users SET authz_version = 2"); }\n',
             ),
-            "src/modules/admin/user/repository.rs": (
+            "src/addon/admin/user/repository.rs": (
                 "admin-authorization-facts",
                 'fn write() { sqlx::query("UPDATE admin_user SET admin = TRUE"); }\n',
             ),
-            "src/modules/org/user/repository.rs": (
+            "src/addon/org/user/repository.rs": (
                 "org-membership-authorization-facts",
                 "fn write(q: Query) { q.update(value); }\n",
             ),
-            "src/modules/org/access/repository.rs": (
+            "src/addon/org/access/repository.rs": (
                 "org-onboarding-authorization-facts",
                 "fn write(q: Query) { q.insert_in_tx(tx, value); }\n",
             ),
@@ -1130,7 +1176,7 @@ def self_test() -> None:
             "完整 typed writer allowlist 应通过"
         )
 
-        evil_action = root / "src/modules/account/user/actions/evil.rs"
+        evil_action = root / "src/addon/account/user/actions/evil.rs"
         write(
             evil_action,
             "fn bypass(ctx: Context) { ctx.table_query().update(value); }\n",
@@ -1142,7 +1188,7 @@ def self_test() -> None:
 
         evil_action.unlink()
         write(
-            root / "src/modules/work/bypass.rs",
+            root / "src/addon/work/bypass.rs",
             'fn bypass() { sqlx::query("DELETE FROM org_user WHERE id = 1"); }\n',
         )
         errors = check_authorization_writer_boundaries(root)

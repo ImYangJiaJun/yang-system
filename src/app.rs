@@ -1,7 +1,7 @@
+use crate::addon::{account, admin, observability, org, work};
 use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
-use crate::modules::{account, admin, observability, org, work};
 use anyhow::Context;
 use std::sync::Arc;
 use yang_base::action::StepUpManager;

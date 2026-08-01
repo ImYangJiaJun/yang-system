@@ -105,7 +105,7 @@ python scripts/check_architecture.py
 已有文件，并要求业务路径显式位于 `/api/v1/`：
 
 ```powershell
-python scripts/new_action.py src/modules/org/organization/actions archive `
+python scripts/new_action.py src/addon/org/organization/actions archive `
   --title "归档企业" --method POST --path /api/v1/orgs/archive
 ```
 
@@ -160,19 +160,18 @@ pnpm dev
 
 ```text
 src/
-├── main.rs
+├── addon/                   # 业务 Addon；目录内继续按 Module/Action 拆分
+│   ├── account/              # 注册/会话/邮件投递、授权快照与用户生命周期
+│   ├── admin/                # 首个注册账号的唯一最终管理员与平台授权保护
+│   ├── observability/        # 浏览器错误与服务端 request_id 关联
+│   ├── org/                  # 企业创建/选择、可信租户解析与成员管理
+│   └── work/                 # 个人项目、任务树、关系与批量完成
+├── config/                  # 不可变设置、环境变量与 secret 白名单
+├── infrastructure/          # 审计、授权一致性与声明式数据库 Schema
+├── app.rs                   # 所有业务 Addon 的唯一组合根
 ├── bootstrap.rs             # 配置、Telemetry、Tools、Schema、Worker、HTTP 与关闭顺序
-├── app.rs                   # account/admin/system/org/work 的唯一组合根
-├── authorization/           # 授权版本缓存、事务 Outbox 与后台发布 Worker
-├── audit/                   # append-only 高权限审计事件与启动期 Schema 校验
-├── config.rs                # 不可变运行设置及字段级校验
-├── config_source.rs         # 本应用环境变量与 secret 白名单，合成机制来自 yang-runtime
-└── modules/
-    ├── account/              # 注册/会话/邮件投递、授权快照与用户生命周期
-    ├── admin/                # 首个注册账号的唯一最终管理员与平台授权保护
-    ├── observability/        # 浏览器错误与服务端 request_id 关联
-    ├── org/                  # 企业创建/选择、可信租户解析与成员管理
-    └── work/                 # 个人项目、任务树、关系与批量完成
+├── lib.rs
+└── main.rs
 ```
 
 JSON 日志、Prometheus/OTLP、共享关闭预算和配置源合成由根 workspace 的
@@ -294,8 +293,7 @@ $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
 python scripts/run_ci.py integration
 ```
 
-该门禁覆盖授权缓存单调性与 Outbox 并发重放、迁移
-dry-run/version/checksum/幂等与中断重跑、Schema plan/apply/validate、跨实例并发
+该门禁覆盖授权缓存单调性与 Outbox 并发重放、Schema 预检/apply/validate、跨实例并发
 apply、审计/最终管理员信任根、邮箱验证码对抗边界、注册/登录/Refresh/会话失效、
 原子创建企业、租户隔离和业务系统路径，不使用 mock 替代 MySQL 或 Redis。
 
@@ -303,14 +301,14 @@ apply、审计/最终管理员信任根、邮箱验证码对抗边界、注册/�
 
 | 位置 | 展示能力 |
 |---|---|
-| `modules/account/user/` | 邮箱注册、Cookie 会话、凭据/授权版本、Step-up、停用与全量撤销 |
-| `authorization/` | Redis 单调缓存、MySQL 回源、事务 Outbox 与发布 Worker |
-| `modules/admin/` | 首个注册最终管理员、权限快照、最后管理员保护与密码重置凭证 |
-| `modules/org/` | 原子建企业、可信租户、成员资源授权和事务内最终复核 |
-| `modules/work/` | 个人租户、项目/任务关系、树与分页 View、批量完成 |
+| `addon/account/user/` | 邮箱注册、Cookie 会话、凭据/授权版本、Step-up、停用与全量撤销 |
+| `infrastructure/authorization/` | Redis 单调缓存、MySQL 回源、事务 Outbox 与发布 Worker |
+| `addon/admin/` | 首个注册最终管理员、权限快照、最终管理员保护与密码重置凭证 |
+| `addon/org/` | 原子建企业、可信租户、成员资源授权和事务内最终复核 |
+| `addon/work/` | 个人租户、项目/任务关系、树与分页 View、批量完成 |
 | `app.rs` 测试 | Catalog/Registry/OpenAPI 同源、条件 Action、权限、View 与租户 fail-closed |
 
-数据库结构由 [`src/schema.rs`](src/schema.rs) 的声明统一驱动，不依赖 SQL 迁移文件或源码 codemod。
+数据库结构由 [`src/infrastructure/schema.rs`](src/infrastructure/schema.rs) 的声明统一驱动，不依赖 SQL 迁移文件或源码 codemod。
 
 安全与运行契约继续拆分在专门文档中：授权失效见
 [`docs/architecture/authorization-freshness-adr.md`](docs/architecture/authorization-freshness-adr.md)，

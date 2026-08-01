@@ -13,12 +13,12 @@ use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
 use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
+use yang_system::addon::account::email_delivery::{
+    EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
+};
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::{EmailVerificationSettings, SecuritySettings};
-use yang_system::modules::account::email_delivery::{
-    EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
-};
 use yang_system::schema::sync_with_database;
 
 const PASSWORD: &str = "correct-horse-battery-staple";

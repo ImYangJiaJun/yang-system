@@ -1,7 +1,7 @@
 # 租户数据路径与旁路清单
 
 状态：C2-final capability 模型
-适用范围：`src/modules/org/` 与 `src/modules/work/` 的生产代码
+适用范围：`src/addon/org/` 与 `src/addon/work/` 的生产代码
 
 ## 1. 边界模型
 
@@ -153,8 +153,8 @@ pre-tenant 模块，但仍强制认证。
 
 ## 6. 机械门禁
 
-`python scripts/check_architecture.py` 对 `src/modules/org/**/*.rs` 与
-`src/modules/work/**/*.rs` 的非测试生产段扫描：
+`python scripts/check_architecture.py` 对 `src/addon/org/**/*.rs` 与
+`src/addon/work/**/*.rs` 的非测试生产段扫描：
 
 - raw `sqlx::query*`；
 - 直接取得 `Tools.mysql()` 数据库 capability；

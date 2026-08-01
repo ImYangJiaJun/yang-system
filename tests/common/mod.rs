@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use yang_base::tools::ToolsBuilder;
-use yang_system::config::EmailVerificationSettings;
-use yang_system::modules::account::email_delivery::{
+use yang_system::addon::account::email_delivery::{
     EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
 };
+use yang_system::config::EmailVerificationSettings;
 
 #[derive(Clone, Default)]
 struct CapturingRegistrationEmailSender {

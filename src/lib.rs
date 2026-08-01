@@ -1,11 +1,9 @@
 //! 基于 `yang-base` 的模块化单体基础系统。
 
-pub mod authorization;
-
+pub mod addon;
 pub mod app;
-pub mod audit;
 pub mod bootstrap;
 pub mod config;
-mod config_source;
-pub mod modules;
-pub mod schema;
+mod infrastructure;
+
+pub use infrastructure::{audit, authorization, schema};

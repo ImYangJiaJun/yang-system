@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`src/` contains the Rust service. `app.rs` assembles the application, `bootstrap.rs` owns startup and schema synchronization, and `transport/` exposes HTTP. Business code is grouped under `src/modules/account/` and `src/modules/org/`; keep each custom Action in its own file under an `actions/` directory and use `mod.rs` only for module assembly and shared declarations. Rust integration coverage lives in `tests/system_integration.rs`. `examples/frontend_demo/` provides the database-free backend used by browser tests.
+`src/` contains the Rust service. `app.rs` assembles the application and `bootstrap.rs` owns startup and shutdown. Business code lives under `src/addon/`; application-level audit, authorization consistency, and declarative schema assembly live under `src/infrastructure/`; settings and source precedence live under `src/config/`. Keep each custom Action in its own file under an `actions/` directory and use `mod.rs` only for assembly and shared declarations. Rust integration coverage lives in `tests/system_integration.rs`. `examples/frontend_demo/` provides the database-free backend used by browser tests.
 
 The Quasar/Vue application is in `frontend/`. Place API clients and contracts in `frontend/src/api/` and `frontend/src/contracts/`, reusable UI in `components/`, page orchestration in `pages/` and `layouts/`, and Pinia state in `stores/`. Unit tests are colocated as `*.test.ts`; Playwright specs live in `frontend/e2e/`.
 
