@@ -92,6 +92,12 @@ async function disableAccount() {
     });
   }
 }
+
+// 切换深浅色并持久化偏好，启动时由 boot/theme.ts 恢复
+function toggleDark() {
+  $q.dark.toggle();
+  localStorage.setItem("ys-theme", $q.dark.isActive ? "dark" : "light");
+}
 </script>
 
 <template>
@@ -122,6 +128,14 @@ async function disableAccount() {
           }}</strong>
         </div>
         <q-space />
+        <q-btn
+          flat
+          dense
+          round
+          :icon="$q.dark.isActive ? 'light_mode' : 'dark_mode'"
+          aria-label="切换深浅色"
+          @click="toggleDark"
+        />
         <AccountSwitcher
           v-if="loggedIn"
           @disable="confirmDisableAccount"
@@ -130,7 +144,7 @@ async function disableAccount() {
         <q-btn
           v-else
           flat
-          color="white"
+          color="primary"
           icon="login"
           label="登录"
           to="/login"

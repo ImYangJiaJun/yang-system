@@ -86,7 +86,7 @@ watch(menuOpen, (open) => {
   <div class="account-switcher">
     <span class="account-context-label">{{ contextLabel }}</span>
     <q-btn flat round dense aria-label="账号菜单">
-      <q-avatar size="32px" color="white" text-color="primary">Y</q-avatar>
+      <q-avatar size="32px" color="primary" text-color="white">Y</q-avatar>
       <q-menu
         v-model="menuOpen"
         fit

@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
+import { useQuasar } from "quasar";
 import { useApplicationSession } from "src/composables/useApplicationSession";
 import { useApplicationLifecycleStore } from "stores/application-lifecycle";
 import { useCatalogStore } from "stores/catalog";
@@ -14,6 +15,7 @@ import { useTenantStore } from "stores/tenant";
 
 const drawerOpen = ref(true);
 const router = useRouter();
+const $q = useQuasar();
 const catalogStore = useCatalogStore();
 const navigationStore = useCatalogNavigationStore();
 const sessionStore = useSessionStore();
@@ -41,6 +43,12 @@ async function endSession() {
   await applicationSession.endSession();
   await router.push("/login");
 }
+
+// 切换深浅色并持久化偏好，启动时由 boot/theme.ts 恢复
+function toggleDark() {
+  $q.dark.toggle();
+  localStorage.setItem("ys-theme", $q.dark.isActive ? "dark" : "light");
+}
 </script>
 
 <template>
@@ -62,22 +70,30 @@ async function endSession() {
             <small>后端注册即可演示，复杂场景允许覆盖</small>
           </div>
         </div>
-        <q-badge outline color="cyan-2" text-color="cyan-2" label="开发工具" />
+        <q-badge outline color="primary" label="开发工具" />
         <q-space />
+        <q-btn
+          flat
+          dense
+          round
+          :icon="$q.dark.isActive ? 'light_mode' : 'dark_mode'"
+          aria-label="切换深浅色"
+          @click="toggleDark"
+        />
         <div class="session-settings">
           <q-input
             :model-value="tenantId"
             dense
-            standout="bg-white text-dark"
+            outlined
             placeholder="租户 ID（可选）"
             clearable
             class="tenant-input"
             @update:model-value="tenantStore.setTenantId(String($event ?? ''))"
           />
-          <q-btn flat color="white" icon="home" label="正式控制台" to="/" />
+          <q-btn flat color="primary" icon="home" label="正式控制台" to="/" />
           <q-btn
             outline
-            color="white"
+            color="primary"
             label="刷新目录"
             :loading="loading"
             @click="lifecycleStore.reloadCatalog"
@@ -85,18 +101,11 @@ async function endSession() {
           <q-btn
             v-if="loggedIn"
             flat
-            color="white"
+            color="primary"
             label="退出全部设备"
             @click="endSession"
           />
-          <q-btn
-            v-else
-            unelevated
-            color="white"
-            text-color="primary"
-            label="登录"
-            to="/login"
-          />
+          <q-btn v-else unelevated color="primary" label="登录" to="/login" />
         </div>
       </q-toolbar>
     </q-header>

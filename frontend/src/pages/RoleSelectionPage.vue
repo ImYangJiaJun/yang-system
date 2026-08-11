@@ -43,12 +43,12 @@ async function logout() {
   <main class="role-selection-page">
     <header class="role-selection-header">
       <router-link to="/roles" class="role-selection-brand">
-        <q-avatar size="38px" color="white" text-color="primary">Y</q-avatar>
+        <q-avatar size="38px" color="primary" text-color="white">Y</q-avatar>
         <strong>YANG System</strong>
       </router-link>
       <q-btn
         flat
-        color="white"
+        color="primary"
         icon="logout"
         label="退出全部设备"
         @click="logout"

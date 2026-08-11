@@ -1,0 +1,61 @@
+/* 方案 D：强化现有渐变科技风（Stripe / Raycast 风）
+ * 目标：不推翻现有设计，统一两套渐变与主色，强化玻璃拟态一致性。 */
+:root {
+  /* 统一主色（与 quasar.config.ts 的 brand.primary 对齐，二选一） */
+  --ys-primary: #0e7490;
+  --ys-primary-strong: #155e75;
+  --ys-accent: #2dd4bf;
+
+  /* 全站唯一的头部渐变 token，app-header 与 formal-header 共用 */
+  --ys-gradient-header: linear-gradient(
+    120deg,
+    #0c1f3f 0%,
+    #0e4a5f 55%,
+    #0f766e 100%
+  );
+  --ys-gradient-hero:
+    radial-gradient(circle at 82% 18%, rgb(45 212 191 / 22%), transparent 34%),
+    linear-gradient(135deg, #0c1f3f, #10405c 58%, #0e5d68);
+
+  /* 玻璃拟态 token */
+  --ys-glass: rgb(255 255 255 / 8%);
+  --ys-glass-border: rgb(255 255 255 / 14%);
+  --ys-glass-blur: blur(16px);
+}
+
+.app-header,
+.formal-header {
+  background: var(--ys-gradient-header);
+}
+
+/* Hero / 洞察卡片统一使用玻璃语言 */
+.dashboard-hero,
+.custom-insight {
+  background: var(--ys-gradient-hero);
+  border: 1px solid var(--ys-glass-border);
+}
+
+.insight-metrics article {
+  background: var(--ys-glass);
+  border: 1px solid var(--ys-glass-border);
+  backdrop-filter: var(--ys-glass-blur);
+}
+
+/* 导航激活态延续品牌 teal */
+.formal-nav-list .formal-nav-active {
+  color: var(--ys-primary);
+  background: rgb(45 212 191 / 10%);
+  box-shadow: inset 3px 0 0 var(--ys-accent);
+}
+
+/* 品牌标记使用统一 accent 渐变 */
+.brand-mark,
+.formal-brand-mark {
+  background: linear-gradient(145deg, #5eead4, #14b8a6);
+  box-shadow: 0 8px 20px rgb(45 212 191 / 25%);
+}
+
+/* ---------- 表单控件交互 ----------
+ * 输入框大圆角（10px）+ 浅灰底 #f8fafc，hover 边框 #9fb3c8
+ * focus：边框 #14b8a6 + 3px teal 大光环 rgb(45 212 191/22%)，过渡柔和
+ * 错误：#dc2626 + 红环 rgb(220 38 38/14%)；开关关闭轨道 #c3cedb */

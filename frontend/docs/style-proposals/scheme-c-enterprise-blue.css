@@ -1,0 +1,73 @@
+/* 方案 C：企业蓝高密度（Ant Design Pro / 云控制台风）
+ * 同时需把 quasar.config.ts 的 brand.primary 改为 #1677ff，保证 Quasar 组件同色。 */
+:root {
+  --ys-primary: #1677ff;
+  --ys-primary-strong: #0958d9;
+  --ys-accent: #1677ff;
+  --ys-canvas: #f5f5f5;
+  --ys-surface: #ffffff;
+  --ys-surface-muted: #fafafa;
+  --ys-border: #d9d9d9;
+  --ys-text: rgb(0 0 0 / 88%);
+  --ys-text-muted: rgb(0 0 0 / 45%);
+  --ys-radius-sm: 4px;
+  --ys-radius-md: 6px;
+  --ys-radius-lg: 8px;
+  --ys-shadow-sm: 0 1px 2px rgb(0 0 0 / 4%);
+  --ys-shadow-md: 0 4px 12px rgb(0 0 0 / 8%);
+}
+
+/* 头部：白底细边框，AntD Pro 风格 */
+.formal-header {
+  color: var(--ys-text);
+  background: var(--ys-surface);
+  border-bottom: 1px solid #f0f0f0;
+  box-shadow: none;
+}
+
+/* 导航激活态：浅蓝底 */
+.formal-nav-list .formal-nav-active {
+  color: var(--ys-primary);
+  background: #e6f4ff;
+  box-shadow: none;
+}
+
+/* 表格提密度：行高 56/48 → 40 */
+.business-table thead th {
+  height: 40px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.business-table tbody td {
+  height: 40px;
+}
+
+.business-table thead tr {
+  background: #fafafa;
+}
+
+/* 状态徽章改圆角小胶囊 */
+.business-status {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* 表单栅格更紧凑 */
+.schema-form {
+  gap: 12px;
+}
+
+.action-demo,
+.table-view {
+  padding: 20px 24px;
+  border-radius: var(--ys-radius-lg);
+  box-shadow: var(--ys-shadow-sm);
+}
+
+/* ---------- 表单控件交互（AntD 范式） ----------
+ * hover：边框变 #4096ff；focus：边框 #1677ff + 2px 窄蓝环 rgb(22 119 255/12%)
+ * 错误：边框 #ff4d4f + 红环 rgb(255 77 79/10%)
+ * 禁用底色 rgb(0 0 0/4%)；开关关闭轨道 rgb(0 0 0/25%)
+ * 输入框 padding 收紧至 5px 11px，配合整体高密度 */

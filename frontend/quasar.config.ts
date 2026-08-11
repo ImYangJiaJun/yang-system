@@ -1,7 +1,7 @@
 import { defineConfig } from "#q-app/wrappers";
 
 export default defineConfig(() => ({
-  boot: ["observability"],
+  boot: ["observability", "theme"],
   css: ["app.css"],
   extras: ["material-icons"],
   build: {
@@ -30,9 +30,9 @@ export default defineConfig(() => ({
   framework: {
     config: {
       brand: {
-        primary: "#004976",
-        secondary: "#26a69a",
-        accent: "#9c27b0",
+        primary: "#0f766e",
+        secondary: "#14b8a6",
+        accent: "#0f766e",
         positive: "#3f9667",
         negative: "#b7312c",
         warning: "#bd862f",
@@ -40,6 +40,6 @@ export default defineConfig(() => ({
       notify: { position: "top-right", timeout: 2500 },
     },
     lang: "zh-CN",
-    plugins: ["Dialog", "Notify"],
+    plugins: ["Dark", "Dialog", "Notify"],
   },
 }));
