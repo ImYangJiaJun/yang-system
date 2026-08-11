@@ -8,7 +8,7 @@
   --ys-surface-muted: #f4f4f5;
   --ys-border: #e4e4e7;
   --ys-text: #18181b;
-  --ys-text-muted: #71717a;
+  --ys-text-muted: #6b6b74;
   --ys-radius-sm: 6px;
   --ys-radius-md: 8px;
   --ys-radius-lg: 12px;
@@ -56,7 +56,7 @@ textarea {
   font: inherit;
 }
 
-/* 全局键盘焦点：3px 主色光环，不用 outline 位移 */
+/* 全局键盘焦点：3px 主色 outline + 同色光环（无障碍契约要求 outline-width 为 3px） */
 :where(
   a,
   button,
@@ -67,7 +67,7 @@ textarea {
   [role="tab"],
   [tabindex]:not([tabindex="-1"])
 ):focus-visible {
-  outline: 2px solid transparent !important;
+  outline: 3px solid var(--ys-primary) !important;
   outline-offset: 2px !important;
   box-shadow: 0 0 0 3px var(--ys-focus-ring) !important;
 }
