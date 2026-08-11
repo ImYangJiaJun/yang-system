@@ -1,14 +1,15 @@
-# yang-system 账号与授权体系第一性原理评审（最终可实施版）
+# yang-system 账号与授权体系第一性原理评审（事实对齐与实施版）
 
-> - 评估对象：`D:\code\lib_yang\project\yang-system` 的 account、org、admin Addon、授权新鲜度链路，以及根仓库 `yang-base` 的 Token/Step-up/中间件契约
-> - 原始评估快照：`464f1693fdf447f24bdda1d95d71b818ee839afc`
-> - 本次复核快照：`677e127daf18a39a4d7aefdcb0efd4e386d0f90e`
-> - 评估日期：2026-07-30
+> - 评估对象：`D:\code\lib_yang\project\yang-system` 的 account、org、admin Addon、浏览器会话与授权新鲜度链路，以及根仓库 `yang-base` 的 Token/Step-up/中间件契约
+> - 原始评估快照（嵌套仓库）：`464f1693fdf447f24bdda1d95d71b818ee839afc`
+> - 当前代码快照（嵌套仓库）：`d73a6779360d418a6e423754931341015b48a26d`
+> - 当前框架快照（根仓库）：`9ed932700facdbf8ab164d613205cbc9eac94ccd`
+> - 复核日期：2026-07-31
 > - 文档性质：基于当前源码的设计评审与实施规范，不表示下述改造已经完成
 
 ## 一、结论
 
-当前系统已经具备可信的账号与授权基础，但不能据此认定为“生命周期闭环”或“权限体系已经完整”。
+当前系统已经具备可信的账号与授权基础，但不能据此认定为“生命周期闭环”或“权限体系已经完整”。浏览器凭据持久化风险已经明显收敛，但这不改变 Refresh 会话版本、资源授权线性化点和 Step-up 仍未闭环的事实。
 
 已经成立的核心能力：
 
@@ -17,15 +18,16 @@
 - 授权事实变更、版本递增和 outbox 写入可以处于同一 MySQL 事务；
 - Redis 授权版本读取失败时会回源 MySQL；只有事实源也不可用时才 fail-closed；
 - Refresh Token 轮换以 Redis `SET NX EX` 原子消费旧 JTI，可阻止并发重复刷新；
+- 浏览器 Refresh Token 已收敛到 host-only、`HttpOnly`、`SameSite=Strict` Cookie，Access Token 仅保存在前端进程内存；登录、刷新和登出请求执行同源校验；
 - 租户成员身份和企业状态按请求从数据库确认，组织成员写操作另有实时管理员校验；
 - 现有 logout 使用 subject 撤销水位，语义实际上是“该用户全部既有 Token 失效”，不是只退出当前设备。
 
 尚未成立的关键能力：
 
-1. `authz_version` 能让旧 Access Token 失效，但当前 Refresh 流程不比较旧 Refresh Token 中的版本；旧 Refresh Token仍可按最新账号与权限重新签发 Token。因此“递增授权版本等于踢掉全部会话”不成立。
+1. `authz_version` 能让旧 Access Token 失效，但当前 Refresh 流程不比较旧 Refresh Token 中的版本；旧 Refresh Token 仍可按最新账号与权限重新签发 Token。因此“递增授权版本等于踢掉全部会话”不成立。
 2. 组织管理员 guard 仍通过 Action 名称判断覆盖范围，而且校验发生在业务事务之前；这既有漏挂风险，也存在管理员身份在校验后被撤销的并发窗口。
 3. 平台管理员高危写操作只有 Token 权限检查，没有与组织成员写路径同等级的实时管理员事实校验。
-4. Step-up 基础组件已存在，但生产接入还缺凭据复核、独立密钥、Redis proof 一次性消费、资源指纹、HTTP 428 交互、限流和前端流程，不能按“低成本挂上即可”估算。
+4. `yang-base` 已提供 Step-up challenge/proof、资源绑定、Redis proof store 和 HTTP 428 映射，但 `yang-system` 尚未配置或注册这些组件；应用侧仍缺独立密钥、凭据复核、目标 Action/资源解析器、Redis 接线、限流、审计和前端流程，不能把“框架已有”写成“生产已启用”。
 5. 用户改密、可信重置、自停用、跨域“最后管理员”不变量和高风险失败审计尚未闭环。
 6. `users.status`、外键策略和授权事实写边界仍依赖应用纪律；这类约束应由类型、数据库和架构门禁共同承担。
 
@@ -63,6 +65,7 @@
 
 - `src/modules/account/user/claims.rs`
 - `src/modules/account/user/actions/{refresh,logout}.rs`
+- `src/modules/account/user/browser_session.rs`
 - `src/modules/account/authz_version.rs`
 - `src/authorization/{request_validator,version_cache,worker}.rs`
 - `src/modules/org/{tenant.rs,user/guard.rs,user/repository.rs}`
@@ -71,19 +74,50 @@
 - 根仓库 `crates/yang-base/src/action/{auth.rs,step_up.rs}`
 - 根仓库 `crates/yang-base/src/token/{manager.rs,revocation.rs}`
 - 根仓库 `crates/yang-base/src/router/middleware.rs`
-- 迁移约束文档 `docs/MIGRATIONS.md`
+- `frontend/src/api/{auth,auth-session,session-coordination}.ts`
+- `frontend/src/stores/session.ts`
+- 迁移清单 `src/migrations.rs` 与约束文档 `docs/MIGRATIONS.md`
 
 复核时执行：
 
 ```text
 python scripts/check_architecture.py
-# 通过
+# architecture check: passed
 
 cargo test --lib
-# 99 个测试：96 passed，3 ignored
+# 104 passed，3 ignored
+
+cargo test --lib -p yang-base
+# 562 passed，4 ignored
+
+pnpm --dir frontend exec vitest run \
+  src/api/auth-session.test.ts src/api/auth.test.ts \
+  src/stores/session.test.ts src/application/startApplication.test.ts
+# 4 files / 19 tests passed
 ```
 
-3 个 ignored 测试依赖真实 MySQL/Redis，不能算作已通过。本次没有连接生产数据库，也没有验证生产 MySQL 精确版本、表规模、锁等待、Redis 容量、真实流量或远程 CI；涉及这些事实的方案均设置了部署前门禁。
+嵌套仓库的 3 个 ignored 与根仓库的 4 个 ignored 涉及真实 Redis、MySQL 或 Docker，不能算作已通过。本次没有连接生产数据库，也没有验证生产 MySQL 精确版本、表规模、锁等待、Redis 容量、真实流量、浏览器 E2E 或远程 CI；涉及这些事实的方案均设置了部署前门禁。上述结果证明当前源码通过了对应本地门禁，不证明生产部署已完成。
+
+### 2.3 事实台账与用语
+
+本文按以下规则陈述，避免把目标状态写成当前能力：
+
+- **已观察**：由当前源码、配置或本次命令输出直接支持；
+- **可推断**：由已观察的调用顺序或事务边界推出，并明确剩余并发/部署条件；
+- **未实现**：当前仓库没有生产接线或持久事实，不能用框架类型或测试夹具替代；
+- **提案**：尚待实现与验收的设计，不作为安全闭环证据。
+
+| 结论 | 状态 | 当前证据 |
+|---|---|---|
+| Access 授权版本以 MySQL 为事实源、Redis 为缓存，双源不可用返回 503 | 已观察 | `src/authorization/request_validator.rs`、根仓库 `transport/axum.rs` |
+| Refresh 只把旧 Token 的 `sub` 交给应用 resolver，未比较旧 Refresh 自定义版本 | 已观察 | 根仓库 `action/auth.rs`、`src/modules/account/user/actions/refresh.rs` |
+| logout 使用 subject 水位撤销该用户既有 Token | 已观察 | 根仓库 `action/auth.rs`、`token/revocation.rs` |
+| subject 撤销水位只有 Redis TTL 状态，没有 MySQL 持久事实或 outbox | 已观察 | 根仓库 `token/revocation.rs`、当前迁移清单 |
+| 浏览器 Refresh 在 HttpOnly Cookie，Access 只在前端内存 | 已观察 | `browser_session.rs`、`frontend/src/api/auth-session.ts` |
+| 组织 guard 是事务外名称匹配，repository 未在写事务内复核操作者管理员事实 | 已观察 | `src/modules/org/user/{guard,repository}.rs` |
+| 平台写事务保护目标与最后管理员，但未锁定并复核当前操作者管理员事实 | 已观察 | `src/modules/admin/user/repository.rs` |
+| Step-up 框架能力存在，但 `yang-system` 未注册 `StepUpManager`、完成 Action 或目标 middleware | 未实现 | 根仓库 `action/step_up.rs`；`src/app.rs` 与各 Addon 无接线 |
+| `credential_version`、改密、可信重置与单设备会话台账 | 未实现 | 当前用户 schema、迁移清单与 Action 集合均无对应事实 |
 
 ## 三、当前运行时真相
 
@@ -127,7 +161,39 @@ AuthorizationVersionValidator
 
 当前 logout 已调用 `TokenManager::revoke_by_subject`，本质上已经是 logout-all。若产品将其展示为“退出当前设备”，文案和行为是不一致的。没有正向会话台账时，系统也无法可靠列出或单独撤销某台设备。
 
-### 3.3 租户与管理员边界
+但“subject 级”不等于“持久事实级”：当前撤销水位只写 Redis，TTL 等于 Refresh Token 有效期，没有 MySQL 记录或 outbox。Redis 暂时不可用时 Token 校验会 fail-closed；Redis 数据丢失、错误清库或无持久化恢复为空时，仍在签名有效期内的旧 Token 可能重新通过。这正是持久 `credential_version` 的必要性之一，不能仅靠 Redis 运维策略把该风险写成已消除。
+
+### 3.3 浏览器会话边界
+
+当前浏览器链路已经从“Web Storage 持久化 Bearer Token”收敛为：
+
+```text
+login / refresh
+  ├─ Set-Cookie: yang_refresh=...; HttpOnly; SameSite=Strict; Path=/api/v1/users
+  └─ JSON: access_token
+              ↓
+        Pinia / 模块进程内存
+              ↓
+        Authorization: Bearer ...
+```
+
+已观察到的安全属性：
+
+- 前端启动时主动删除遗留的 `yang.token` 与 `yang.refresh-token` Web Storage 项；
+- Refresh Token 不进入前端 JavaScript 可读状态，Access Token 在页面刷新后通过 Cookie 刷新恢复；
+- 登录、刷新、登出均使用 `credentials: "include"`，后端以 `Sec-Fetch-Site` 与 `Origin/Referer + Host` 做同源校验；
+- Refresh Cookie 是 host-only、`HttpOnly`、`SameSite=Strict`，路径限制为 `/api/v1/users`；HTTPS 同源请求会追加 `Secure`；
+- 同一页面的并发刷新由共享 Promise 合并，支持 Web Locks 的浏览器还会用 `navigator.locks` 串行化同源执行上下文的刷新；
+- 一个携带 Access Token 的请求收到 401 后只刷新并重试一次；再次 401 会清空内存会话；跨标签页只广播版本化的“会话结束”元数据，不广播凭据。
+
+这些措施降低了持久化凭据被读取和跨站请求伪造的风险，但不是 XSS 防线的替代品。运行中的恶意脚本仍可读取内存 Access Token、发起同源请求，并借浏览器自动携带的 HttpOnly Cookie 调用 Refresh。生产闭环仍依赖 CSP/依赖治理、输出编码、短期 Access、Step-up，以及本评审提出的凭证版本。
+
+还有两个必须如实记录的运行约束：
+
+1. 当前后端 Action 描述仍写“撤销当前 Token”，实际行为是 subject 级全量撤销；这是契约命名缺陷，不是单设备 logout。
+2. `Secure` 取决于后端从可信请求头看到的来源 scheme；反向代理必须保留正确的 Host/Origin 语义并只在 HTTPS 暴露生产站点。当前本地单元测试不能替代真实代理/E2E 验证。
+
+### 3.4 租户与管理员边界
 
 当前租户链路的优点：
 
@@ -144,7 +210,7 @@ AuthorizationVersionValidator
 
 因此“所有危险写操作都不信 Token 快照”并不成立。组织成员三条既有写路径做了实时预检，但平台管理写路径没有统一做到，而且预检还不是事务内最终授权判断。
 
-### 3.4 持久层隔离
+### 3.5 持久层隔离
 
 `password_hash` 和 `authz_version` 通过字段角色限制并由私有 repository 操作，这提供了强应用边界和逻辑隔离。它不是数据库物理隔离：应用使用的数据库账号仍可能拥有底层表权限，raw SQL 或错误仓储代码仍能绕开 schema 投影。
 
@@ -164,15 +230,17 @@ AuthorizationVersionValidator
 
 #### 最终方案
 
-增加独立、持久、单调的 `users.credential_version BIGINT NOT NULL DEFAULT 0`：
+增加独立、持久、单调的 `users.credential_version BIGINT NOT NULL DEFAULT 0`。按当前 0001–0009 清单且没有其他迁移先合入时，应使用 `20260731_0010_add_user_credential_version`，并复用现有列结构 completion probe：
 
 - `authz_version`：授权事实版本；
 - `credential_version`：认证凭证/全量会话版本；
 - Access Token 继续用 `authz_version` 做请求级授权新鲜度；
-- Access 与 Refresh Token 都携带 `credential_version`；
+- Refresh Token 携带 `credential_version`；Access Token 不增加未被请求校验器消费的冗余声明，凭证事件通过同步递增 `authz_version` 使旧 Access 失效；
 - Refresh 前必须比较旧 Token 的 `credential_version` 与 MySQL 当前值；
 - 改密、可信密码重置、账号安全全量登出在事务内递增 `credential_version`；
 - 改密和账号停用还要递增 `authz_version` 并写授权 outbox，使既有 Access 尽快失效。
+
+全量登出不能只选择其中一个机制。建议的提交顺序是：事务内递增 `credential_version` 与 `authz_version`、写授权 outbox 和成功审计；提交后再调用现有 `revoke_by_subject` 形成 Redis 即时拒绝。这样 Redis 水位负责快路径，MySQL 版本负责持久恢复。若提交后的 Redis 写失败，应返回可识别的部分完成状态并由可靠任务重试；不能回滚已经提交的版本，也不能向调用方宣称所有边缘节点已经瞬时收敛。
 
 根仓库需要扩展刷新契约。推荐将：
 
@@ -190,10 +258,10 @@ resolve_pair(ctx, old_claims)
 
 #### Token 协议滚动发布
 
-当前 claims 使用严格反序列化，新增字段是协议变更，不能直接混部。采用三阶段发布：
+Access `AppClaims` 使用严格反序列化，因此不要为了“字段对称”把未使用的 `credential_version` 塞入 Access。Refresh 自定义声明虽然是开放 JSON，但旧实例会在轮换时重新生成一份不含新字段的 Refresh Token，仍然存在混部降级。采用三阶段发布：
 
 1. 数据库先增加 `credential_version DEFAULT 0`；
-2. 全部实例先部署兼容读取版本：新字段在应用 claims 中可缺省为 0，但暂不签发新字段；
+2. 全部实例先部署兼容读取版本：Refresh 中新字段缺省为 0，但暂不签发新字段；
 3. 确认没有旧实例后，再开启签发和 Refresh 强制校验。
 
 旧 Token 缺字段按 0 解释；某用户首次改密后数据库变为 1，其旧 Refresh 自然失效。等最长 Refresh TTL 过去后，才可考虑把字段改为必填。若无法保证无旧实例，应采用维护窗口切换并显式让所有用户重新登录。
@@ -280,16 +348,23 @@ resolve_pair(ctx, old_claims)
 
 ### 5.1 P1：生产级 Step-up 接入
 
-Step-up 不是“已有框架，低成本挂载”。完整接入至少包括：
+这里必须分开评价框架与应用：
 
-1. 独立于 Access Token 的 step-up 密钥、issuer、audience 和轮换策略；
-2. 可复用的 `CredentialVerifier`，使用账号密码策略与限流；
-3. `StepUpCompleteAction` 和明确的 HTTP 428 challenge/proof 契约；
-4. 生产多实例必须使用 `RedisStepUpProofStore`；`StepUpMiddleware::new` 默认内存 store 只能用于单进程测试/开发；
-5. proof 必须绑定用户、目标 `ActionRef`、资源/关键参数指纹和短过期时间；
-6. proof 单次消费，跨用户、跨 Action、跨资源和重放均拒绝；
-7. 前端只在收到 428 时弹出重认证，不保存 proof；
+- **框架已观察**：`StepUpManager` 使用独立签名域；challenge/proof 绑定主体、`ActionRef` 和资源哈希；`StepUpMiddleware` 支持一次性 proof store；`RedisStepUpProofStore` 使用 `SET NX EX`；Axum 已把 `StepUpRequired` 映射为 428 并返回 challenge；AppBuilder 会检查认证中间件必须先于 Step-up；
+- **应用未实现**：`yang-system` 的配置、`src/app.rs` 和各 Addon 尚未构造 `StepUpManager`、注册 `StepUpCompleteAction`、为目标 Action 提供资源解析器或挂载 `StepUpMiddleware`，前端也没有 428 重认证编排。
+
+因此完整接入至少包括：
+
+1. 在配置边界增加独立于 Access Token 的 step-up active/retiring key、issuer、audience、TTL 和轮换校验；
+2. 复用账号域 `CredentialVerifier`，但为 Step-up 使用独立限流键和失败计数；
+3. 注册 `StepUpCompleteAction`，把框架现有 428 数据结构固化成前后端契约测试；
+4. 对每个高危 Action 显式构造目标 `ActionRef` 和服务端资源解析器，资源指纹必须覆盖会改变操作语义的关键参数；
+5. 生产多实例必须显式注入 `RedisStepUpProofStore`；`StepUpMiddleware::new` 的默认内存 store 只能用于单进程测试/开发；
+6. 前端只在收到 428 时弹出重认证，proof 只保存在完成当前操作所需的内存中，不进入 Web Storage、日志或遥测；
+7. 持久化 success/denied/failed 审计，并验证 Redis 故障、过期、跨用户、跨 Action、跨资源和重放行为；
 8. 内部 Registry 调用按框架设计可绕过 Step-up，因此只能由受信代码发起，并需单独审计。
+
+当前 `StepUpManager` 只接受单个对称密钥，不支持 active/retiring keyring。若要求无感滚动轮换，需要先在根仓库增加 `kid` 与 retiring keys；若不扩框架，只能采用短 TTL 清空观测窗口加协调重启，并接受切换期间旧 challenge/proof 失效。不能只在配置里声明两把密钥却让运行时仍只验证一把。
 
 首批保护目标：
 
@@ -301,7 +376,7 @@ Step-up 不是“已有框架，低成本挂载”。完整接入至少包括：
 
 用户改密码已经要求旧密码，通常不再叠加第二次 Step-up。bootstrap 已有独立 operator secret，可在上述路径稳定后再接入。
 
-验收必须覆盖多实例并发消费，而不只是单进程单元测试。
+验收必须覆盖多实例并发消费、真实 428 浏览器流程和独立密钥轮换，而不只是根仓库的单进程单元测试。
 
 ### 5.2 P1：`UserStatus` 类型与数据库约束
 
@@ -310,10 +385,12 @@ Step-up 不是“已有框架，低成本挂载”。完整接入至少包括：
 最终方案：
 
 - 在账号领域定义单一 `UserStatus` 类型，当前只允许 `active`、`disabled`；
-- repository、claims 构造、授权校验和 schema 投影只使用该类型；
+- repository、claims 构造、授权校验和 schema 投影只使用该类型；YANG 字段由当前无枚举约束的 `Str` 收敛为与数据库候选值一致的枚举字段；
 - 数据库保留 VARCHAR，但增加 `CHECK (status IN ('active','disabled'))`，避免状态值继续散落；
-- 新迁移使用下一个空闲版本（当前至少为 0008），不得修改已发布迁移；
-- 每个迁移版本只含一个语句，并提供 `information_schema` completion probe。
+- 新迁移使用实施时的下一个空闲版本，不得修改已发布的 0001–0009；按第八节顺序，`credential_version` 会先占用 0010，因此状态 CHECK 不应再硬编码复用 0010；
+- 每个迁移版本只含一个语句，并提供能精确识别 CHECK 名称、表达式和 enforced 状态的 `information_schema` completion probe。
+
+当前迁移框架只实现了列结构 completion probe，尚不能表达 CHECK 约束完成状态。因此这不是只新增一条 SQL：必须先在根仓库为 `MigrationCompletionCheck` 增加约束探针，再在嵌套仓库的 `MigrationDescriptor` 接入。若不先补该能力，进程在 MySQL 已隐式提交 DDL、迁移记录仍为 `running` 时无法安全判断“恢复记录”还是“重跑并报重复约束”，该版本不得进入生产清单。
 
 部署前必须执行：
 
@@ -327,6 +404,7 @@ SELECT status, COUNT(*) FROM users GROUP BY status;
 
 - MySQL 必须支持并强制执行 CHECK；
 - 存量值不收敛时迁移直接停止，先走独立数据修复；
+- 约束 completion probe 的 fresh apply、DDL 后崩溃恢复、约束同名但表达式不一致三类集成测试必须通过；
 - 在与生产行数和索引规模相当的 staging 表演练 DDL，记录 metadata lock 与最长阻塞；
 - 超过变更窗口预算时，改用“新增受约束列 → 回填 → 双写 → 切读 → 后续删除旧列”的多版本 expand/contract，不在一个版本内强行完成。
 
@@ -437,9 +515,11 @@ SELECT status, COUNT(*) FROM users GROUP BY status;
 
 `bootstrap_key NULL UNIQUE + 'initial-admin'` 的并发守卫目前有效。短期应增加清晰注释和可选 CHECK，不需要为了“看起来更正规”立即改成另一张表。
 
-## 七、Access TTL 与可用性
+## 七、Access TTL、可用性与依赖约束
 
 示例配置当前 Access TTL 为 3600 秒、Refresh TTL 为 2592000 秒。把 Access TTL 从 60 分钟降为 10 分钟，会把稳定登录用户的刷新、MySQL claims 查询和 Redis 轮换负载大约放大 6 倍，不是“零功能成本”。
+
+Access 已改为仅驻留浏览器内存，这降低了页面关闭后的持久暴露，但不会让 TTL 失去意义：运行期 XSS 或被盗 Bearer 仍可在过期前使用。TTL 是限制暴露时间的纵深控制，不替代凭证版本、Step-up 或前端注入防护；反过来，也不能仅靠缩短 TTL 修复这些缺口。
 
 调整前必须压测和观测：
 
@@ -458,6 +538,10 @@ SELECT status, COUNT(*) FROM users GROUP BY status;
 4. 监控 `authz_version` Redis 回源率和 unavailable 指标；
 5. 明确 MySQL 与 Redis 都无法提供授权事实时返回 503，这是安全降级而非 401 认证失败。
 
+本评审的 P0/P1 推荐路径可以复用现有 Argon2、JWT、MySQL、Redis、Axum 和 Vue 依赖，不要求为安全闭环引入新的商业运行时组件，也没有依据宣称会新增框架许可费。这里的约束是技术兼容而非许可空白：授权 outbox 依赖 MySQL 8 的 `SKIP LOCKED`，状态约束依赖被实际执行的 CHECK，Step-up 多实例防重放依赖 Redis 原子写。
+
+未来若选择外部验证码、身份提供商、短信/邮件通道、KMS/HSM 或商业风控服务，必须单独评估许可、费用、数据驻留、隐私、SLA、供应商故障和退出迁移；不能把这些尚未选型的能力计入当前成熟度。
+
 ## 八、实施顺序与仓库边界
 
 根仓库 `D:\code\lib_yang` 与嵌套仓库
@@ -473,10 +557,10 @@ SELECT status, COUNT(*) FROM users GROUP BY status;
 
 嵌套仓库：
 
-- 新增 `credential_version` forward-only 迁移与 completion probe；
+- 若没有其他迁移先合入，以 0010 新增 `credential_version` forward-only 迁移与列 completion probe；
 - 实现兼容签发开关；
 - 实现 change_password 和单次重置凭证；
-- 明确当前 logout 是 logout-all，修正文案/API 文档；
+- 保留当前 HttpOnly Refresh Cookie 与内存 Access 边界；明确当前 logout 是 logout-all，修正 Action 描述、前端文案和 API 文档；
 - 增加 Access/Refresh 失效、改密竞争和审计测试。
 
 完成定义：旧 Refresh 无法跨越凭证版本；滚动发布不会产生节点间 Token 不兼容。
@@ -495,7 +579,7 @@ SELECT status, COUNT(*) FROM users GROUP BY status;
 
 - 引入 `UserStatus`；
 - 对生产 MySQL 做版本、脏数据、表规模和锁预算预检；
-- 新增状态 CHECK 迁移；
+- 先在根仓库扩展 CHECK 约束 completion probe，再在嵌套仓库新增状态 CHECK 迁移；
 - 收敛 typed authorization writer；
 - 增加 allowlist 架构检查和真实 MySQL 集成测试。
 
@@ -503,7 +587,7 @@ SELECT status, COUNT(*) FROM users GROUP BY status;
 
 ### 阶段 D：Step-up 与纵深防御
 
-- 完成 Redis proof store、凭据复核、428 契约、前端交互、限流和审计；
+- 使用框架现有 428/资源绑定能力，完成独立配置、Redis proof store、凭据复核、目标 Action 接线、前端交互、限流和审计；
 - 按风险逐个保护平台和组织高危 Action；
 - 验证多实例 proof 单次消费；
 - 再评估 Access TTL。
@@ -524,6 +608,7 @@ SELECT status, COUNT(*) FROM users GROUP BY status;
 | 变更 | 必需验证 |
 |---|---|
 | Refresh hook | legacy/new claims、过期、错误类型、已撤销、并发双刷新、版本落后/领先 |
+| 浏览器会话 | Cookie 属性、同源拒绝、启动恢复、内存 Access、遗留凭据清理、单次 401 重试、跨标签页只传播结束事件、真实反向代理 HTTPS E2E |
 | 改密 | 错旧密码、弱密码、并发改密、Redis 故障、事务回滚、旧 Access/Refresh |
 | 重置 | 过期、重放、并发消费、错误用户、限流、日志脱敏 |
 | 资源 guard | 漏绑构建失败、跨租户、管理员撤销竞争、平台最后管理员、死锁重试 |
@@ -546,6 +631,7 @@ Set-Location D:\code\lib_yang\project\yang-system
 cargo fmt --check
 cargo test --lib
 python scripts/check_architecture.py
+pnpm --dir frontend exec vitest run src/api/auth-session.test.ts src/api/auth.test.ts src/stores/session.test.ts src/application/startApplication.test.ts
 ```
 
 涉及 MySQL/Redis 的 ignored 集成测试必须在专用环境单线程执行；根仓库与嵌套仓库的远程 CI 都通过后，才能称为完成。修改 Cargo.lock、feature 或根仓库公共契约时，还要按各自仓库要求执行 full 门禁。
@@ -569,6 +655,8 @@ python scripts/check_architecture.py
 
 原分析对以下方向判断正确：MySQL 事实源、Redis 单调缓存、事务 outbox、租户实时解析、Refresh JTI 原子轮换、字段最小化和 fail-closed。
 
+相对 2026-07-30 复核快照，当前源码新增了浏览器会话收敛：Refresh Token 已进入 HttpOnly Cookie，Access Token 已退出 Web Storage 并仅驻留内存。该变化已经由源码和 19 个聚焦前端测试支持，但真实 HTTPS 反向代理与浏览器 E2E 尚未在本次复核中验证，因此只能认定“代码边界已形成”，不能认定“生产链路已证明”。
+
 原分析不正确或不完整的部分已经在本版修正：
 
 - 授权版本不等于 Refresh/会话撤销；
@@ -577,7 +665,7 @@ python scripts/check_architecture.py
 - 授权残余窗口不等于 outbox 延迟加 Access TTL；
 - guard 声明化需要明确的根仓库契约或 `target_action` 落地，不能假设 Registry 已可直接读取；
 - Step-up 是跨后端、Redis、配置和前端的完整功能，不是低成本挂载；
-- schema 迁移是 forward-only，并受生产版本、脏数据和锁预算约束；
+- schema 迁移是 forward-only，并受生产版本、脏数据和锁预算约束；当前框架还必须先补 CHECK 约束 completion probe，才能安全发布用户状态约束；
 - 企业停用无需为了当前安全性同步锁住全部成员；
 - 静态正则扫描不能证明授权版本与事实写入处于同一事务；
 - 自停用必须同时保护平台与组织的最后管理员不变量。
