@@ -71,8 +71,9 @@ MySQL 监听 `127.0.0.1:3306`，Redis 监听 `127.0.0.1:6379`。普通停止会�
 本项目是独立 Git/Cargo 项目，根 workspace 显式排除它。`Cargo.toml` 直接使用：
 
 ```toml
-yang-base = { path = "../../crates/yang-base", ... }
-yang-db = { path = "../../crates/yang-db", ... }
+yang-base    = { path = "../../crates/yang-base", ... }
+yang-db      = { path = "../../crates/yang-db", ... }
+yang-runtime = { path = "../../crates/yang-runtime", ... }
 ```
 
 因此在 `project/yang-system` 目录执行普通 Cargo 命令，就会直接编译同一份 `lib_yang` 工作树中的基础库修改：
@@ -312,6 +313,9 @@ apply、审计/最终管理员信任根、邮箱验证码对抗边界、注册/�
 
 安全与运行契约继续拆分在专门文档中：授权失效见
 [`docs/architecture/authorization-freshness-adr.md`](docs/architecture/authorization-freshness-adr.md)，
+裸 SQL 边界与租户数据路径见
+[`docs/architecture/raw-sql-boundaries.md`](docs/architecture/raw-sql-boundaries.md) 和
+[`docs/architecture/tenant-data-paths.md`](docs/architecture/tenant-data-paths.md)，
 高权限审计见 [`docs/AUDIT.md`](docs/AUDIT.md)，Schema 演进见
 [`docs/SCHEMA.md`](docs/SCHEMA.md)，注册邮件见
 [`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)，SLO 见
