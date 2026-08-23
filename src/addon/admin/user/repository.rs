@@ -1,5 +1,4 @@
 //! 平台账号持久化边界。
-//! raw-sql-boundary: domain-repository admin-user-repository
 //! authorization-writer: admin-authorization-facts
 
 use super::model::{AdminAccountPage, AdminAccountView, PageRequest};
@@ -16,7 +15,7 @@ use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, DbError, QueryBuilder, SortOrder, SqlExpr, Transaction};
 
 /// 数据库只允许这一种非空最终管理员哨兵。
 pub(super) const SYSTEM_OWNER_KEY: &str = "system-owner";
@@ -32,42 +31,39 @@ impl SystemOwnerClaimer for AdminSystemOwnerClaimer {
         user_id: i64,
         username: &str,
     ) -> Result<OwnerClaimOutcome, BaseError> {
-        let result = sqlx::query(
-            "INSERT INTO admin_user \
-             (user_user, name, status, admin, owner_key, created_at, updated_at) \
-             VALUES (?, ?, 'active', TRUE, ?, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())",
-        )
-        .bind(user_id)
-        .bind(username)
-        .bind(SYSTEM_OWNER_KEY)
-        .execute(executor(transaction)?)
-        .await;
+        let result = transaction
+            .table(table!("admin_user"))
+            .set_expr(field!("created_at"), SqlExpr::unix_timestamp())
+            .set_expr(field!("updated_at"), SqlExpr::unix_timestamp())
+            .insert_returning_id(&json!({
+                "user_user": user_id,
+                "name": username,
+                "status": ACTIVE_STATUS,
+                "admin": true,
+                "owner_key": SYSTEM_OWNER_KEY,
+            }))
+            .await;
 
         match result {
-            Ok(result) => {
-                let admin_id = i64::try_from(result.last_insert_id())
+            Ok(id) => {
+                let admin_id = i64::try_from(id)
                     .map_err(|_| BaseError::Unknown("最终管理员主键超出 i64 范围".to_string()))?;
                 Ok(OwnerClaimOutcome::Claimed { admin_id })
             }
             Err(error) => {
-                let unique_violation = matches!(
-                    &error,
-                    sqlx::Error::Database(database_error)
-                        if database_error.is_unique_violation()
-                );
-                if !unique_violation {
-                    return Err(BaseError::from(yang_db::DbError::from(error)));
+                // 唯一哨兵冲突经 DbError 约束错误分类识别，与原 is_unique_violation 判定等价。
+                if !matches!(&error, DbError::ConstraintError(_)) {
+                    return Err(BaseError::from(error));
                 }
-                let owner_exists = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM admin_user WHERE owner_key = 'system-owner')",
-                )
-                .fetch_one(executor(transaction)?)
-                .await
-                .map_err(yang_db::DbError::from)?;
-                if owner_exists {
+                let owner_count = transaction
+                    .table(table!("admin_user"))
+                    .where_and(field!("owner_key"), CompareOp::Eq, SYSTEM_OWNER_KEY)
+                    .count()
+                    .await?;
+                if owner_count > 0 {
                     Ok(OwnerClaimOutcome::AlreadyClaimed)
                 } else {
-                    Err(BaseError::from(yang_db::DbError::from(error)))
+                    Err(BaseError::from(error))
                 }
             }
         }
@@ -85,6 +81,29 @@ type AdminRow = (
     i64,
     i64,
 );
+
+/// 平台账号列表/总数共用的 JOIN 与可选搜索过滤。
+fn admin_account_join<'a>(pool: &'a sqlx::MySqlPool, pattern: Option<&str>) -> QueryBuilder<'a> {
+    let builder = QueryBuilder::from_pool(pool, table!("admin_user")).join(
+        table!("users"),
+        field!("users.id"),
+        field!("admin_user.user_user"),
+    );
+    match pattern {
+        Some(pattern) => builder
+            .where_and(
+                field!("admin_user.name"),
+                CompareOp::Like,
+                pattern.to_string(),
+            )
+            .where_or(
+                field!("users.username"),
+                CompareOp::Like,
+                pattern.to_string(),
+            ),
+        None => builder,
+    }
+}
 
 pub(super) struct AdminRepository {
     accounts: TableDefinition,
@@ -108,33 +127,25 @@ impl AdminRepository {
     ) -> Result<AdminAccountPage, BaseError> {
         let pattern = search.map(|value| format!("%{value}%"));
         let pool = ctx.tools().mysql()?.pool();
-        let rows = sqlx::query_as::<_, AdminRow>(
-            "SELECT a.id, a.user_user, u.username, a.name, a.position, a.status, a.admin, \
-                    a.created_at, a.updated_at \
-             FROM admin_user AS a \
-             INNER JOIN users AS u ON u.id = a.user_user \
-             WHERE (? IS NULL OR a.name LIKE ? OR u.username LIKE ?) \
-             ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?",
-        )
-        .bind(pattern.as_deref())
-        .bind(pattern.as_deref())
-        .bind(pattern.as_deref())
-        .bind(request.sql_limit()?)
-        .bind(request.offset)
-        .fetch_all(pool)
-        .await
-        .map_err(yang_db::DbError::from)?;
-        let total = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM admin_user AS a \
-             INNER JOIN users AS u ON u.id = a.user_user \
-             WHERE (? IS NULL OR a.name LIKE ? OR u.username LIKE ?)",
-        )
-        .bind(pattern.as_deref())
-        .bind(pattern.as_deref())
-        .bind(pattern.as_deref())
-        .fetch_one(pool)
-        .await
-        .map_err(yang_db::DbError::from)?;
+        // (? IS NULL OR name LIKE ? OR username LIKE ?) 改写为条件组装：
+        // 无搜索词时无 WHERE，与原谓词在 NULL 下恒真的语义一致。
+        let rows = admin_account_join(pool, pattern.as_deref())
+            .field(field!("admin_user.id"))
+            .field(field!("admin_user.user_user"))
+            .field(field!("users.username"))
+            .field(field!("admin_user.name"))
+            .field(field!("admin_user.position"))
+            .field(field!("admin_user.status"))
+            .field(field!("admin_user.admin"))
+            .field(field!("admin_user.created_at"))
+            .field(field!("admin_user.updated_at"))
+            .order(field!("admin_user.created_at"), SortOrder::Desc)
+            .order(field!("admin_user.id"), SortOrder::Desc)
+            .limit(request.sql_limit()?)
+            .offset(request.offset)
+            .select::<AdminRow>()
+            .await?;
+        let total = admin_account_join(pool, pattern.as_deref()).count().await?;
         let total = usize::try_from(total)
             .map_err(|_| BaseError::Unknown("平台账号总数超出 usize 范围".to_string()))?;
         Ok(AdminAccountPage::new(
@@ -152,10 +163,12 @@ impl AdminRepository {
         position: Option<&str>,
         admin: bool,
     ) -> Result<AdminAccountView, BaseError> {
-        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let database = ctx.tools().mysql()?;
+        let mut transaction = database.transaction().await?;
         let result = async {
-            lock_active_admin_actor(ctx, &mut transaction).await?;
-            let locked = lock_user_authorization(&mut transaction, user_id).await?;
+            lock_active_admin_actor(ctx, database.pool(), &mut transaction).await?;
+            let locked =
+                lock_user_authorization(database.pool(), &mut transaction, user_id).await?;
             ensure_active_user(&locked)?;
             let mut account = Record::new()
                 .set(USER_ID, user_id)
@@ -205,10 +218,12 @@ impl AdminRepository {
         reset: &GeneratedPasswordReset,
         ttl_seconds: u64,
     ) -> Result<(), BaseError> {
-        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let database = ctx.tools().mysql()?;
+        let mut transaction = database.transaction().await?;
         let result = async {
-            lock_active_admin_actor(ctx, &mut transaction).await?;
-            let locked = lock_user_authorization(&mut transaction, target_user_id).await?;
+            lock_active_admin_actor(ctx, database.pool(), &mut transaction).await?;
+            let locked =
+                lock_user_authorization(database.pool(), &mut transaction, target_user_id).await?;
             ensure_active_user(&locked)?;
             create_password_reset_in_tx(
                 &mut transaction,
@@ -242,16 +257,17 @@ impl AdminRepository {
         id: i64,
         status: &str,
     ) -> Result<AdminAccountView, BaseError> {
-        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let database = ctx.tools().mysql()?;
+        let mut transaction = database.transaction().await?;
         let result = async {
-            let active_admins = lock_active_admins(&mut transaction).await?;
+            let active_admins = lock_active_admins(database.pool(), &mut transaction).await?;
             ensure_active_admin_actor(ctx, &active_admins)?;
             resource_authorization_checkpoint(
                 ctx,
                 ResourceAuthorizationCheckpoint::AfterLinearization,
             )
             .await;
-            let target = lock_target(&mut transaction, id).await?;
+            let target = lock_target(database.pool(), &mut transaction, id).await?;
             if status == target.status {
                 return Ok(id);
             }
@@ -261,15 +277,14 @@ impl AdminRepository {
             if status != ACTIVE_STATUS && target.status == ACTIVE_STATUS && target.admin {
                 ensure_not_last_active_admin(&active_admins, id)?;
             }
-            let locked = lock_user_authorization(&mut transaction, target.user_id).await?;
-            sqlx::query(
-                "UPDATE admin_user SET status = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
-            )
-            .bind(status)
-            .bind(id)
-            .execute(executor(&mut transaction)?)
-            .await
-            .map_err(yang_db::DbError::from)?;
+            let locked =
+                lock_user_authorization(database.pool(), &mut transaction, target.user_id).await?;
+            transaction
+                .table(table!("admin_user"))
+                .set_expr(field!("updated_at"), SqlExpr::unix_timestamp())
+                .where_and(field!("id"), CompareOp::Eq, id)
+                .update(&json!({ "status": status }))
+                .await?;
             increment_locked_authz_version(&mut transaction, &locked).await?;
             append_admin_event(
                 &mut transaction,
@@ -293,16 +308,17 @@ impl AdminRepository {
         id: i64,
         admin: bool,
     ) -> Result<AdminAccountView, BaseError> {
-        let mut transaction = ctx.tools().mysql()?.transaction().await?;
+        let database = ctx.tools().mysql()?;
+        let mut transaction = database.transaction().await?;
         let result = async {
-            let active_admins = lock_active_admins(&mut transaction).await?;
+            let active_admins = lock_active_admins(database.pool(), &mut transaction).await?;
             ensure_active_admin_actor(ctx, &active_admins)?;
             resource_authorization_checkpoint(
                 ctx,
                 ResourceAuthorizationCheckpoint::AfterLinearization,
             )
             .await;
-            let target = lock_target(&mut transaction, id).await?;
+            let target = lock_target(database.pool(), &mut transaction, id).await?;
             if admin == target.admin {
                 return Ok(id);
             }
@@ -312,15 +328,14 @@ impl AdminRepository {
             if !admin && target.status == ACTIVE_STATUS && target.admin {
                 ensure_not_last_active_admin(&active_admins, id)?;
             }
-            let locked = lock_user_authorization(&mut transaction, target.user_id).await?;
-            sqlx::query(
-                "UPDATE admin_user SET admin = ?, updated_at = UNIX_TIMESTAMP() WHERE id = ?",
-            )
-            .bind(admin)
-            .bind(id)
-            .execute(executor(&mut transaction)?)
-            .await
-            .map_err(yang_db::DbError::from)?;
+            let locked =
+                lock_user_authorization(database.pool(), &mut transaction, target.user_id).await?;
+            transaction
+                .table(table!("admin_user"))
+                .set_expr(field!("updated_at"), SqlExpr::unix_timestamp())
+                .where_and(field!("id"), CompareOp::Eq, id)
+                .update(&json!({ "admin": admin }))
+                .await?;
             increment_locked_authz_version(&mut transaction, &locked).await?;
             append_admin_event(
                 &mut transaction,
@@ -343,17 +358,20 @@ impl AdminRepository {
         ctx: &ActionContext,
         id: i64,
     ) -> Result<AdminAccountView, BaseError> {
-        let row = sqlx::query_as::<_, AdminRow>(
-            "SELECT a.id, a.user_user, u.username, a.name, a.position, a.status, a.admin, \
-                    a.created_at, a.updated_at \
-             FROM admin_user AS a \
-             INNER JOIN users AS u ON u.id = a.user_user WHERE a.id = ?",
-        )
-        .bind(id)
-        .fetch_optional(ctx.tools().mysql()?.pool())
-        .await
-        .map_err(yang_db::DbError::from)?
-        .ok_or_else(|| BaseError::RecordNotFound(format!("平台账号 {id}")))?;
+        let row = admin_account_join(ctx.tools().mysql()?.pool(), None)
+            .field(field!("admin_user.id"))
+            .field(field!("admin_user.user_user"))
+            .field(field!("users.username"))
+            .field(field!("admin_user.name"))
+            .field(field!("admin_user.position"))
+            .field(field!("admin_user.status"))
+            .field(field!("admin_user.admin"))
+            .field(field!("admin_user.created_at"))
+            .field(field!("admin_user.updated_at"))
+            .where_and(field!("admin_user.id"), CompareOp::Eq, id)
+            .find::<AdminRow>()
+            .await?
+            .ok_or_else(|| BaseError::RecordNotFound(format!("平台账号 {id}")))?;
         Ok(admin_view(row))
     }
 }
@@ -409,17 +427,21 @@ struct LockedActiveAdmin {
 
 async fn lock_active_admin_actor(
     ctx: &ActionContext,
+    pool: &sqlx::MySqlPool,
     transaction: &mut Transaction,
 ) -> Result<(), BaseError> {
     let actor_user_id = authenticated_actor_user_id(ctx)?;
-    let actor = sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM admin_user \
-         WHERE user_user = ? AND status = 'active' AND admin = TRUE FOR UPDATE",
-    )
-    .bind(actor_user_id)
-    .fetch_optional(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    let actor = transaction
+        .select_for_update::<(i64,)>(
+            QueryBuilder::from_pool(pool, table!("admin_user"))
+                .field(field!("id"))
+                .where_and(field!("user_user"), CompareOp::Eq, actor_user_id)
+                .where_and(field!("status"), CompareOp::Eq, ACTIVE_STATUS)
+                .where_and(field!("admin"), CompareOp::Eq, true),
+        )
+        .await?
+        .into_iter()
+        .next();
     if actor.is_none() {
         return Err(BaseError::PermissionDenied(
             "当前用户在写事务内已不是有效平台超级管理员".to_string(),
@@ -453,35 +475,45 @@ fn authenticated_actor_user_id(ctx: &ActionContext) -> Result<i64, BaseError> {
 }
 
 async fn lock_target(
+    pool: &sqlx::MySqlPool,
     transaction: &mut Transaction,
     id: i64,
 ) -> Result<LockedAdminTarget, BaseError> {
-    sqlx::query_as::<_, (String, bool, i64, Option<String>)>(
-        "SELECT status, admin, user_user, owner_key FROM admin_user WHERE id = ? FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_optional(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?
-    .map(|(status, admin, user_id, owner_key)| LockedAdminTarget {
-        status,
-        admin,
-        user_id,
-        owner_key,
-    })
-    .ok_or_else(|| BaseError::RecordNotFound(format!("平台账号 {id}")))
+    transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("admin_user"))
+                .field(field!("status"))
+                .field(field!("admin"))
+                .field(field!("user_user"))
+                .field(field!("owner_key"))
+                .where_and(field!("id"), CompareOp::Eq, id),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|(status, admin, user_id, owner_key)| LockedAdminTarget {
+            status,
+            admin,
+            user_id,
+            owner_key,
+        })
+        .ok_or_else(|| BaseError::RecordNotFound(format!("平台账号 {id}")))
 }
 
 async fn lock_active_admins(
+    pool: &sqlx::MySqlPool,
     transaction: &mut Transaction,
 ) -> Result<Vec<LockedActiveAdmin>, BaseError> {
-    let rows = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT id, user_user FROM admin_user \
-         WHERE status = 'active' AND admin = TRUE ORDER BY id FOR UPDATE",
-    )
-    .fetch_all(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    let rows = transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("admin_user"))
+                .field(field!("id"))
+                .field(field!("user_user"))
+                .where_and(field!("status"), CompareOp::Eq, ACTIVE_STATUS)
+                .where_and(field!("admin"), CompareOp::Eq, true)
+                .order(field!("id"), SortOrder::Asc),
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(|(id, user_id)| LockedActiveAdmin { id, user_id })
@@ -536,14 +568,6 @@ async fn append_admin_event(
         after,
     )?;
     audit::append_in_tx(transaction, &event).await
-}
-
-fn executor(transaction: &mut Transaction) -> Result<&mut sqlx::MySqlConnection, BaseError> {
-    transaction.executor().ok_or_else(|| {
-        BaseError::from(yang_db::DbError::TransactionError(
-            "平台授权 writer 事务已结束".to_string(),
-        ))
-    })
 }
 
 async fn finish_transaction<T>(

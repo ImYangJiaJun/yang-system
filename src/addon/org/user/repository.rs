@@ -1,5 +1,4 @@
 //! 企业成员授权事实的显式事务 writer。
-//! raw-sql-boundary: domain-repository org-member-repository
 //! authorization-writer: org-membership-authorization-facts
 
 use super::{IS_ADMIN, ORG_ID, STATUS, USER_ID};
@@ -12,7 +11,7 @@ use yang_base::action::builtin::{AffectedResult, GetByPk, InsertResult, PutInput
 use yang_base::action::ActionContext;
 use yang_base::table::Record;
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, QueryBuilder, SortOrder, Transaction};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LockedMembership {
@@ -42,11 +41,13 @@ pub(super) async fn add(ctx: &ActionContext, input: Record) -> Result<InsertResu
     let status = proposed_string(&input, STATUS, super::ACTIVE_STATUS)?;
     let admin = proposed_bool(&input, IS_ADMIN, false)?;
     // tenant-boundary: database org-member-add-database
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let database = ctx.tools().mysql()?;
+    let mut transaction = database.transaction().await?;
     let result = async {
-        let _active_admins = lock_active_org_admin(ctx, &mut transaction, org_id).await?;
-        lock_active_organization(&mut transaction, org_id).await?;
-        let locked = lock_user_authorizations(&mut transaction, [user_id]).await?;
+        let _active_admins =
+            lock_active_org_admin(ctx, database.pool(), &mut transaction, org_id).await?;
+        lock_active_organization(database.pool(), &mut transaction, org_id).await?;
+        let locked = lock_user_authorizations(database.pool(), &mut transaction, [user_id]).await?;
         let (affected, id) = ctx
             .table_query()?
             .insert_returning_id_in_tx(&mut transaction, input)
@@ -87,11 +88,14 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
         .map(Value::String)
         .collect::<Vec<_>>();
     // tenant-boundary: database org-member-put-database
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let database = ctx.tools().mysql()?;
+    let mut transaction = database.transaction().await?;
     let result = async {
-        let active_admins = lock_active_org_admin(ctx, &mut transaction, org_id).await?;
-        lock_active_organization(&mut transaction, org_id).await?;
-        let Some(membership) = lock_membership(ctx, &mut transaction, id).await? else {
+        let active_admins =
+            lock_active_org_admin(ctx, database.pool(), &mut transaction, org_id).await?;
+        lock_active_organization(database.pool(), &mut transaction, org_id).await?;
+        let Some(membership) = lock_membership(ctx, database.pool(), &mut transaction, id).await?
+        else {
             return Ok(AffectedResult { affected: 0 });
         };
         let change = authorization_change(&membership, &input.data)?;
@@ -104,8 +108,12 @@ pub(super) async fn put(ctx: &ActionContext, input: PutInput) -> Result<Affected
             ensure_not_last_active_org_admin(&active_admins, id)?;
         }
         let locked = if change.changed {
-            lock_user_authorizations(&mut transaction, [membership.user_id, change.next_user_id])
-                .await?
+            lock_user_authorizations(
+                database.pool(),
+                &mut transaction,
+                [membership.user_id, change.next_user_id],
+            )
+            .await?
         } else {
             Vec::new()
         };
@@ -154,11 +162,14 @@ pub(super) async fn delete(
     let id = primary_key(&input.id)?;
     let org_id = membership_org_id(ctx, id).await?;
     // tenant-boundary: database org-member-delete-database
-    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let database = ctx.tools().mysql()?;
+    let mut transaction = database.transaction().await?;
     let result = async {
-        let active_admins = lock_active_org_admin(ctx, &mut transaction, org_id).await?;
-        lock_active_organization(&mut transaction, org_id).await?;
-        let Some(membership) = lock_membership(ctx, &mut transaction, id).await? else {
+        let active_admins =
+            lock_active_org_admin(ctx, database.pool(), &mut transaction, org_id).await?;
+        lock_active_organization(database.pool(), &mut transaction, org_id).await?;
+        let Some(membership) = lock_membership(ctx, database.pool(), &mut transaction, id).await?
+        else {
             return Ok(AffectedResult { affected: 0 });
         };
         if membership.org_id != org_id {
@@ -169,7 +180,9 @@ pub(super) async fn delete(
         if membership.status == super::ACTIVE_STATUS && membership.admin {
             ensure_not_last_active_org_admin(&active_admins, id)?;
         }
-        let locked = lock_user_authorizations(&mut transaction, [membership.user_id]).await?;
+        let locked =
+            lock_user_authorizations(database.pool(), &mut transaction, [membership.user_id])
+                .await?;
         let affected = ctx
             .table_query()?
             .where_primary_key_eq(input.id)?
@@ -214,35 +227,35 @@ async fn membership_org_id(ctx: &ActionContext, membership_id: i64) -> Result<i6
             "系统租户 capability 与当前操作者不匹配".to_string(),
         ));
     }
-    // tenant-boundary: raw-sql org-member-resource-resolve
-    sqlx::query_scalar::<_, i64>("SELECT org_org FROM org_user WHERE id = ?")
-        .bind(membership_id)
-        // tenant-boundary: database org-member-resource-resolve-database
-        .fetch_optional(ctx.tools().mysql()?.pool())
-        .await
-        .map_err(yang_db::DbError::from)?
+    // tenant-boundary: database org-member-resource-resolve-database
+    let pool = ctx.tools().mysql()?.pool();
+    QueryBuilder::from_pool(pool, table!("org_user"))
+        .where_and(field!("id"), CompareOp::Eq, membership_id)
+        .value::<i64>(field!("org_org"))
+        .await?
         .ok_or_else(|| BaseError::RecordNotFound(format!("企业成员 {membership_id}")))
 }
 
 async fn lock_active_org_admin(
     ctx: &ActionContext,
+    pool: &sqlx::MySqlPool,
     transaction: &mut Transaction,
     org_id: i64,
 ) -> Result<Vec<LockedActiveOrgAdmin>, BaseError> {
     let user = ctx
         .authenticated_user()
         .ok_or_else(|| BaseError::Unauthorized("企业成员管理需要已认证用户".to_string()))?;
-    let active_admins =
-        // tenant-boundary: raw-sql org-member-admin-linearization
-        sqlx::query_as::<_, (i64, i64)>(
-            "SELECT id, user_user FROM org_user \
-             WHERE org_org = ? AND status = 'active' AND admin = TRUE \
-             ORDER BY id FOR UPDATE",
+    let active_admins = transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("org_user"))
+                .field(field!("id"))
+                .field(field!("user_user"))
+                .where_and(field!("org_org"), CompareOp::Eq, org_id)
+                .where_and(field!("status"), CompareOp::Eq, super::ACTIVE_STATUS)
+                .where_and(field!("admin"), CompareOp::Eq, true)
+                .order(field!("id"), SortOrder::Asc),
         )
-        .bind(org_id)
-        .fetch_all(executor(transaction)?)
-        .await
-        .map_err(yang_db::DbError::from)?
+        .await?
         .into_iter()
         .map(|(membership_id, user_id)| LockedActiveOrgAdmin {
             membership_id,
@@ -309,17 +322,20 @@ fn add_org_id(ctx: &ActionContext, input: &Record) -> Result<i64, BaseError> {
 }
 
 async fn lock_active_organization(
+    pool: &sqlx::MySqlPool,
     transaction: &mut Transaction,
     org_id: i64,
 ) -> Result<(), BaseError> {
-    let query =
-        // tenant-boundary: raw-sql org-member-organization-lock
-        sqlx::query_scalar::<_, String>("SELECT status FROM org_org WHERE id = ? FOR UPDATE");
-    let status = query
-        .bind(org_id)
-        .fetch_optional(executor(transaction)?)
-        .await
-        .map_err(yang_db::DbError::from)?
+    let status = transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("org_org"))
+                .field(field!("status"))
+                .where_and(field!("id"), CompareOp::Eq, org_id),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|(status,): (String,)| status)
         .ok_or_else(|| BaseError::RecordNotFound(format!("企业 {org_id}")))?;
     if status != ACTIVE_ORG_STATUS {
         return Err(BaseError::PermissionDenied(format!(
@@ -331,32 +347,41 @@ async fn lock_active_organization(
 
 async fn lock_membership(
     ctx: &ActionContext,
+    pool: &sqlx::MySqlPool,
     transaction: &mut Transaction,
     id: i64,
 ) -> Result<Option<LockedMembership>, BaseError> {
-    let row = if let Ok(tenant) = ctx.tenant() {
-        // tenant-boundary: raw-sql org-member-tenant-lock
-        sqlx::query_as::<_, (i64, i64, i64, String, bool)>(
-            "SELECT id, org_org, user_user, status, admin \
-             FROM org_user WHERE id = ? AND org_org = ? FOR UPDATE",
-        )
-        .bind(id)
-        .bind(tenant.id().get())
-        .fetch_optional(executor(transaction)?)
-        .await
-        .map_err(yang_db::DbError::from)?
+    let row: Option<(i64, i64, i64, String, bool)> = if let Ok(tenant) = ctx.tenant() {
+        transaction
+            .select_for_update(
+                QueryBuilder::from_pool(pool, table!("org_user"))
+                    .field(field!("id"))
+                    .field(field!("org_org"))
+                    .field(field!("user_user"))
+                    .field(field!("status"))
+                    .field(field!("admin"))
+                    .where_and(field!("id"), CompareOp::Eq, id)
+                    .where_and(field!("org_org"), CompareOp::Eq, tenant.id().get()),
+            )
+            .await?
+            .into_iter()
+            .next()
     } else {
         // tenant-boundary: system-capability org-member-lock-system
         ctx.system_tenant()?;
-        // tenant-boundary: raw-sql org-member-system-lock
-        sqlx::query_as::<_, (i64, i64, i64, String, bool)>(
-            "SELECT id, org_org, user_user, status, admin \
-             FROM org_user WHERE id = ? FOR UPDATE",
-        )
-        .bind(id)
-        .fetch_optional(executor(transaction)?)
-        .await
-        .map_err(yang_db::DbError::from)?
+        transaction
+            .select_for_update(
+                QueryBuilder::from_pool(pool, table!("org_user"))
+                    .field(field!("id"))
+                    .field(field!("org_org"))
+                    .field(field!("user_user"))
+                    .field(field!("status"))
+                    .field(field!("admin"))
+                    .where_and(field!("id"), CompareOp::Eq, id),
+            )
+            .await?
+            .into_iter()
+            .next()
     };
     Ok(
         row.map(|(_id, org_id, user_id, status, admin)| LockedMembership {
@@ -456,14 +481,6 @@ fn value_as_i64(field: &str, value: &Value) -> Result<i64, BaseError> {
 
 fn primary_key(value: &Value) -> Result<i64, BaseError> {
     value_as_i64("id", value)
-}
-
-fn executor(transaction: &mut Transaction) -> Result<&mut sqlx::MySqlConnection, BaseError> {
-    transaction.executor().ok_or_else(|| {
-        BaseError::from(yang_db::DbError::TransactionError(
-            "企业成员授权 writer 事务已结束".to_string(),
-        ))
-    })
 }
 
 async fn finish_transaction<T>(

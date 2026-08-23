@@ -1,5 +1,4 @@
 //! pre-tenant 查询的持久化边界。
-//! raw-sql-boundary: domain-repository org-access-repository
 //! authorization-writer: org-onboarding-authorization-facts
 
 use super::service::TenantSummary;
@@ -16,6 +15,24 @@ use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
+use yang_db::{field, table, CompareOp, QueryBuilder, SortOrder};
+
+/// pre-tenant 租户发现共用的成员↔企业 JOIN 与 actor/状态收敛谓词。
+fn tenant_discovery_query(pool: &sqlx::MySqlPool, user_id: i64) -> QueryBuilder<'_> {
+    QueryBuilder::from_pool(pool, table!("org_user"))
+        .join(
+            table!("org_org"),
+            field!("org_org.id"),
+            field!("org_user.org_org"),
+        )
+        .where_and(field!("org_user.user_user"), CompareOp::Eq, user_id)
+        .where_and(
+            field!("org_user.status"),
+            CompareOp::Eq,
+            ACTIVE_MEMBERSHIP_STATUS,
+        )
+        .where_and(field!("org_org.status"), CompareOp::Eq, ACTIVE_ORG_STATUS)
+}
 
 pub(super) struct TenantRepository {
     organizations: TableDefinition,
@@ -58,35 +75,17 @@ impl TenantRepository {
             .map_err(|_| BaseError::ParamInvalid("page".to_string(), "参数超出范围".to_string()))?;
         // tenant-boundary: database tenant-discovery-database
         let pool = ctx.tools().mysql()?.pool();
-        // tenant-boundary: raw-sql tenant-discovery-page
-        let rows = sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT o.id, o.name, o.code \
-             FROM org_user AS m \
-             INNER JOIN org_org AS o ON o.id = m.org_org \
-             WHERE m.user_user = ? AND m.status = ? AND o.status = ? \
-             ORDER BY o.name ASC, o.id ASC LIMIT ? OFFSET ?",
-        )
-        .bind(user_id)
-        .bind(ACTIVE_MEMBERSHIP_STATUS)
-        .bind(ACTIVE_ORG_STATUS)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
-        .map_err(yang_db::DbError::from)?;
-        // tenant-boundary: raw-sql tenant-discovery-count
-        let total = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) \
-             FROM org_user AS m \
-             INNER JOIN org_org AS o ON o.id = m.org_org \
-             WHERE m.user_user = ? AND m.status = ? AND o.status = ?",
-        )
-        .bind(user_id)
-        .bind(ACTIVE_MEMBERSHIP_STATUS)
-        .bind(ACTIVE_ORG_STATUS)
-        .fetch_one(pool)
-        .await
-        .map_err(yang_db::DbError::from)?;
+        let rows = tenant_discovery_query(pool, user_id)
+            .field(field!("org_org.id"))
+            .field(field!("org_org.name"))
+            .field(field!("org_org.code"))
+            .order(field!("org_org.name"), SortOrder::Asc)
+            .order(field!("org_org.id"), SortOrder::Asc)
+            .limit(limit)
+            .offset(offset)
+            .select::<(i64, String, String)>()
+            .await?;
+        let total = tenant_discovery_query(pool, user_id).count().await?;
         let total = usize::try_from(total)
             .map_err(|_| BaseError::Unknown("租户总数超出 usize 范围".to_string()))?;
 
@@ -107,6 +106,8 @@ impl TenantRepository {
         name: &str,
         code: &str,
     ) -> Result<TenantSummary, BaseError> {
+        // tenant-boundary: database org-onboarding-database
+        let database = ctx.tools().mysql()?;
         // tenant-boundary: transaction tenant-onboarding-create
         let mut transaction = ctx.begin_transaction().await?;
         let result = async {
@@ -120,7 +121,8 @@ impl TenantRepository {
                 .await?;
             let org_id = i64::try_from(org_id)
                 .map_err(|_| BaseError::Unknown("企业主键超出 i64 范围".to_string()))?;
-            let locked = lock_user_authorization(&mut transaction, user_id).await?;
+            let locked =
+                lock_user_authorization(database.pool(), &mut transaction, user_id).await?;
             let membership = Record::new()
                 .set(ORG_ID, org_id)
                 .set(USER_ID, user_id)

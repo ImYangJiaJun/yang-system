@@ -1,28 +1,31 @@
 //! 最终管理员启动不变量。
-//! raw-sql-boundary: domain-service admin-system-owner-invariant
 
+use serde_json::json;
 use yang_base::BaseError;
+use yang_db::{field, table, CompareOp, Predicate, QueryBuilder};
 
 /// 校验最终管理员与用户数据之间的启动不变量。
 pub(crate) async fn validate_system_owner_state(pool: &sqlx::MySqlPool) -> Result<(), BaseError> {
-    let user_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
-        .fetch_one(pool)
-        .await
-        .map_err(yang_db::DbError::from)?;
-    let owner_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM admin_user WHERE owner_key = 'system-owner'",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(yang_db::DbError::from)?;
-    let invalid_owner_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM admin_user \
-         WHERE owner_key IS NOT NULL \
-           AND (owner_key <> 'system-owner' OR admin <> TRUE OR status <> 'active')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    let user_count = QueryBuilder::from_pool(pool, table!("users"))
+        .count()
+        .await?;
+    let owner_count = QueryBuilder::from_pool(pool, table!("admin_user"))
+        .where_and(field!("owner_key"), CompareOp::Eq, "system-owner")
+        .count()
+        .await?;
+    let invalid_owner_count = QueryBuilder::from_pool(pool, table!("admin_user"))
+        .where_not_null(field!("owner_key"))
+        .where_predicate(&Predicate::Or(vec![
+            Predicate::Compare(
+                field!("owner_key").clone(),
+                CompareOp::Ne,
+                json!("system-owner"),
+            ),
+            Predicate::Compare(field!("admin").clone(), CompareOp::Ne, json!(true)),
+            Predicate::Compare(field!("status").clone(), CompareOp::Ne, json!("active")),
+        ]))?
+        .count()
+        .await?;
     if invalid_owner_count > 0 {
         return Err(BaseError::ConfigError(format!(
             "最终管理员数据不满足 owner_key/admin/status 不变量，问题记录数: {invalid_owner_count}"

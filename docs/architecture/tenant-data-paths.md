@@ -37,7 +37,7 @@
 
 | Module.Action | 数据阶段 | 数据路径 | 当前隔离证据 |
 |---|---|---|---|
-| `org.tenant.list` | pre-tenant | raw SQL Join | 已认证 `user_id` + 有效成员状态 + 有效组织状态 |
+| `org.tenant.list` | pre-tenant | 查询构造器 Join | 已认证 `user_id` + 有效成员状态 + 有效组织状态 |
 | `org.tenant.create` | pre-tenant | 显式事务 + 无租户 TableQuery | 已认证 actor；同事务创建组织与 actor 的管理员成员关系 |
 | `org.org.list` | tenant | `scoped_org_tables` | 强制普通租户 capability，并显式限定 `org_org.id = tenant_id` |
 | `org.org.select` | tenant/relation | `scoped_org_tables` | 普通 capability 的分页、筛选和 selected 回填均重复施加同一 scope |
@@ -49,7 +49,7 @@
 | `org.user.table` | tenant | 只读契约 | 仍经过认证与租户解析，不访问业务记录 |
 | `work.project.*` | personal-tenant | 内置 CRUD / relation options | Token actor 被解析为 `owner_user`，客户端伪造其他 tenant 失败关闭 |
 | `work.task.get/select/table/del` | personal-tenant | 内置 CRUD `TableQuery` | `owner_user` tenant key 自动过滤；跨用户对象 ID 不可见 |
-| `work.task.add/put/options` | personal-tenant/relation | `TableQuery` + raw SQL 校验 | 项目和父任务重复限定可信 owner，拒绝跨项目父任务与关系环 |
+| `work.task.add/put/options` | personal-tenant/relation | `TableQuery` + 构造器行锁 + 递归 CTE 校验 | 项目和父任务重复限定可信 owner，拒绝跨项目父任务与关系环 |
 | `work.task.complete` | personal-tenant/batch | 显式事务 + `TableQuery` | 最多 100 个唯一 ID；事务内 tenant scope 锁定并全有或全无更新 |
 
 `org.org` 和 `org.user` 的中间件顺序固定为 Token 认证后再解析租户；成员写操作在此后增加
@@ -74,31 +74,22 @@ pre-tenant 模块，但仍强制认证。
 |---|---|---|---|
 | `pre-tenant-table-database` | database | `org/access/repository.rs` | pre-tenant repository 获取无范围数据库能力的唯一 TableQuery 构造点 |
 | `pre-tenant-table-query` | unscoped-query | `org/access/repository.rs` | 只供 pre-tenant repository 使用；具体方法必须按 actor 收敛或在创建事务内写入新租户 |
-| `tenant-discovery-database` | database | `org/access/repository.rs` | 只供同函数内按 actor 收敛的租户发现 raw SQL 使用 |
-| `tenant-discovery-page` | raw-sql | `org/access/repository.rs` | `membership.user_user = actor_id`，同时校验成员和组织为 active |
-| `tenant-discovery-count` | raw-sql | `org/access/repository.rs` | 与分页查询使用相同 Join 和三个状态/身份谓词 |
+| `tenant-discovery-database` | database | `org/access/repository.rs` | 只供同函数内按 actor 收敛的租户发现查询构造使用 |
+| `org-onboarding-database` | database | `org/access/repository.rs` | 只供 onboarding 事务内用户授权行锁的查询构造；不读取租户数据 |
 | `tenant-onboarding-create` | transaction | `org/access/repository.rs` | 新组织尚无 tenant id；组织和创建者管理员成员关系同事务提交 |
-| `tenant-membership-capability-database` | database | `org/tenant.rs` | 只供单次租户 capability JOIN 查询使用 |
-| `tenant-membership-capability` | raw-sql | `org/tenant.rs` | 同时限定请求 `org_id`、已认证 `user_id`、active 成员与 active 企业，并投影当前 admin 事实 |
-| `authorization-grant-snapshot` | raw-sql | `org/grants.rs` | 只按待签发 `user_id` 汇总“是否任一有效组织管理员”；请求 capability 和事务内最终复核仍使用实时事实 |
+| `tenant-membership-capability-database` | database | `org/tenant.rs` | 只供单次租户 capability JOIN 查询使用；同时限定请求 `org_id`、已认证 `user_id`、active 成员与 active 企业，并投影当前 admin 事实 |
 | `member-admin-system` | system-capability | `org/user/guard.rs` | system 管理操作必须消费当前请求 capability，并核对 capability actor 与已认证用户一致；不授予数据查询旁路 |
-| `org-member-add-database` | database | `org/user/repository.rs` | 只供 add writer 开启显式事务；普通租户仍由 `table_query()` 注入 tenant key |
-| `org-member-put-database` | database | `org/user/repository.rs` | 只供 put writer 开启显式事务；成员锁和后续更新重复限定同一 capability |
-| `org-member-delete-database` | database | `org/user/repository.rs` | 只供 delete writer 开启显式事务；成员锁和删除重复限定同一 capability |
+| `org-member-add-database` | database | `org/user/repository.rs` | 只供 add writer 开启显式事务并构造事务内行锁查询；普通租户仍由 `table_query()` 注入 tenant key |
+| `org-member-put-database` | database | `org/user/repository.rs` | 只供 put writer 开启显式事务并构造事务内行锁查询；成员锁和后续更新重复限定同一 capability |
+| `org-member-delete-database` | database | `org/user/repository.rs` | 只供 delete writer 开启显式事务并构造事务内行锁查询；成员锁和删除重复限定同一 capability |
 | `org-member-resource-resolve-database` | database | `org/user/repository.rs` | system capability 的 put/delete 在事务外只解析目标组织；事务内仍会重新按组织锁定目标成员 |
-| `org-member-resource-resolve` | raw-sql | `org/user/repository.rs` | 仅为已核对 actor 的 system capability 解析成员所属组织，不作为写入授权线性化点 |
 | `org-member-resource-resolve-system` | system-capability | `org/user/repository.rs` | system 资源解析必须核对 capability actor 与已认证用户一致 |
-| `org-member-admin-linearization` | raw-sql | `org/user/repository.rs` | 普通租户写事务内按 `org_id + actor user_id` 锁定 active 管理员成员事实，作为最终授权线性化点 |
 | `org-member-linearization-system` | system-capability | `org/user/repository.rs` | system 写事务在最终线性化点再次消费并核对 actor-bound capability |
-| `org-member-organization-lock` | raw-sql | `org/user/repository.rs` | mutation 在目标成员锁之前按组织主键锁定，并要求组织 active |
-| `org-member-tenant-lock` | raw-sql | `org/user/repository.rs` | 普通租户按 `id + tenant_id` 锁定成员事实，隐藏跨租户对象 ID |
-| `org-member-system-lock` | raw-sql | `org/user/repository.rs` | 仅在已消费 actor-bound system capability 后按成员主键锁定 |
 | `org-member-add-system` | system-capability | `org/user/repository.rs` | system add 必须显式提供目标组织，且组织存在并 active |
 | `org-member-lock-system` | system-capability | `org/user/repository.rs` | system put/delete 在无普通租户 capability 时必须显式消费 system capability |
-| `work-task-workspace-lock` | raw-sql | `work/task/repository.rs` | 任务关系写入先按可信 owner 锁定个人工作区，串行化同一用户的并发关系变更 |
-| `work-task-current-links-lock` | raw-sql | `work/task/repository.rs` | 更新前按可信 owner 与任务 ID 锁定当前项目/父任务关系 |
-| `work-task-project-ownership-lock` | raw-sql | `work/task/repository.rs` | 锁定目标项目，并要求项目 owner 等于可信个人工作区 |
-| `work-task-parent-ownership` | raw-sql | `work/task/repository.rs` | 父任务必须同 owner 且属于同一项目 |
+| `work-task-workspace-lock-database` | database | `work/task/repository.rs` | 任务关系写入先按可信 owner 锁定个人工作区，串行化同一用户的并发关系变更 |
+| `work-task-current-links-database` | database | `work/task/repository.rs` | 更新前按可信 owner 与任务 ID 锁定当前项目/父任务关系 |
+| `work-task-links-validation-database` | database | `work/task/repository.rs` | 锁定目标项目与父任务，并要求 owner 等于可信个人工作区 |
 | `work-task-cycle-check` | raw-sql | `work/task/repository.rs` | 递归链每层重复限定 owner，深度上限 100，并拒绝形成关系环 |
 | `work-task-add-transaction` | transaction | `work/task/actions/add.rs` | 工作区锁、项目/父任务校验和新增任务在同一事务提交 |
 | `work-task-put-transaction` | transaction | `work/task/actions/put.rs` | 工作区锁、当前关系锁、项目/父任务校验和更新任务在同一事务提交 |
@@ -108,30 +99,21 @@ pre-tenant 模块，但仍强制认证。
 <!-- tenant-boundary: database pre-tenant-table-database -->
 <!-- tenant-boundary: unscoped-query pre-tenant-table-query -->
 <!-- tenant-boundary: database tenant-discovery-database -->
-<!-- tenant-boundary: raw-sql tenant-discovery-page -->
-<!-- tenant-boundary: raw-sql tenant-discovery-count -->
+<!-- tenant-boundary: database org-onboarding-database -->
 <!-- tenant-boundary: transaction tenant-onboarding-create -->
 <!-- tenant-boundary: database tenant-membership-capability-database -->
-<!-- tenant-boundary: raw-sql tenant-membership-capability -->
-<!-- tenant-boundary: raw-sql authorization-grant-snapshot -->
 <!-- tenant-boundary: system-capability member-admin-system -->
 <!-- tenant-boundary: database org-member-add-database -->
 <!-- tenant-boundary: database org-member-put-database -->
 <!-- tenant-boundary: database org-member-delete-database -->
 <!-- tenant-boundary: database org-member-resource-resolve-database -->
-<!-- tenant-boundary: raw-sql org-member-resource-resolve -->
 <!-- tenant-boundary: system-capability org-member-resource-resolve-system -->
-<!-- tenant-boundary: raw-sql org-member-admin-linearization -->
 <!-- tenant-boundary: system-capability org-member-linearization-system -->
-<!-- tenant-boundary: raw-sql org-member-organization-lock -->
-<!-- tenant-boundary: raw-sql org-member-tenant-lock -->
-<!-- tenant-boundary: raw-sql org-member-system-lock -->
 <!-- tenant-boundary: system-capability org-member-add-system -->
 <!-- tenant-boundary: system-capability org-member-lock-system -->
-<!-- tenant-boundary: raw-sql work-task-workspace-lock -->
-<!-- tenant-boundary: raw-sql work-task-current-links-lock -->
-<!-- tenant-boundary: raw-sql work-task-project-ownership-lock -->
-<!-- tenant-boundary: raw-sql work-task-parent-ownership -->
+<!-- tenant-boundary: database work-task-workspace-lock-database -->
+<!-- tenant-boundary: database work-task-current-links-database -->
+<!-- tenant-boundary: database work-task-links-validation-database -->
 <!-- tenant-boundary: raw-sql work-task-cycle-check -->
 <!-- tenant-boundary: transaction work-task-add-transaction -->
 <!-- tenant-boundary: transaction work-task-put-transaction -->

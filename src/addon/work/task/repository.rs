@@ -3,7 +3,7 @@
 
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, QueryBuilder, Transaction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TaskLinks {
@@ -17,13 +17,18 @@ pub(super) async fn lock_workspace(
 ) -> Result<(), BaseError> {
     let owner = context.tenant()?.id().get();
     // 个人任务的关系写入以用户行为串行化，避免两个并发移动分别通过环检测。
-    let locked_owner: Option<i64> =
-        // tenant-boundary: raw-sql work-task-workspace-lock
-        sqlx::query_scalar("SELECT id FROM users WHERE id = ? FOR UPDATE")
-            .bind(owner)
-            .fetch_optional(executor(transaction)?)
-            .await
-            .map_err(yang_db::DbError::from)?;
+    // tenant-boundary: database work-task-workspace-lock-database
+    let pool = context.tools().mysql()?.pool();
+    let locked_owner = transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("users"))
+                .field(field!("id"))
+                .where_and(field!("id"), CompareOp::Eq, owner),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|(id,): (i64,)| id);
     if locked_owner != Some(owner) {
         return Err(BaseError::PermissionDenied(
             "个人工作区不存在或已失效".to_string(),
@@ -38,17 +43,20 @@ pub(super) async fn current_links_in_tx(
     task_id: i64,
 ) -> Result<TaskLinks, BaseError> {
     let owner = context.tenant()?.id().get();
-    // tenant-boundary: raw-sql work-task-current-links-lock
-    let row = sqlx::query_as::<_, (i64, Option<i64>)>(
-        "SELECT project_project, parent_task FROM work_task \
-         WHERE id = ? AND owner_user = ? LIMIT 1 FOR UPDATE",
-    )
-    .bind(task_id)
-    .bind(owner)
-    .fetch_optional(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?
-    .ok_or_else(|| BaseError::RecordNotFound(format!("任务 {task_id}")))?;
+    // tenant-boundary: database work-task-current-links-database
+    let pool = context.tools().mysql()?.pool();
+    let row: (i64, Option<i64>) = transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("work_task"))
+                .field(field!("project_project"))
+                .field(field!("parent_task"))
+                .where_and(field!("id"), CompareOp::Eq, task_id)
+                .where_and(field!("owner_user"), CompareOp::Eq, owner),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| BaseError::RecordNotFound(format!("任务 {task_id}")))?;
     Ok(TaskLinks {
         project_id: row.0,
         parent_id: row.1,
@@ -69,16 +77,19 @@ pub(super) async fn validate_task_links_in_tx(
         ));
     }
     let owner = context.tenant()?.id().get();
-    // tenant-boundary: raw-sql work-task-project-ownership-lock
-    let locked_project: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM work_project \
-         WHERE id = ? AND owner_user = ? LIMIT 1 FOR UPDATE",
-    )
-    .bind(project_id)
-    .bind(owner)
-    .fetch_optional(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    // tenant-boundary: database work-task-links-validation-database
+    let pool = context.tools().mysql()?.pool();
+    let locked_project = transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("work_project"))
+                .field(field!("id"))
+                .where_and(field!("id"), CompareOp::Eq, project_id)
+                .where_and(field!("owner_user"), CompareOp::Eq, owner),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|(id,): (i64,)| id);
     if locked_project != Some(project_id) {
         return Err(BaseError::PermissionDenied(
             "所属项目不存在或不属于当前工作区".to_string(),
@@ -100,16 +111,17 @@ pub(super) async fn validate_task_links_in_tx(
             "任务不能成为自己的父任务".to_string(),
         ));
     }
-    // tenant-boundary: raw-sql work-task-parent-ownership
-    let parent_project: Option<i64> = sqlx::query_scalar(
-        "SELECT project_project FROM work_task \
-         WHERE id = ? AND owner_user = ? LIMIT 1 FOR UPDATE",
-    )
-    .bind(parent_id)
-    .bind(owner)
-    .fetch_optional(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    let parent_project = transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("work_task"))
+                .field(field!("project_project"))
+                .where_and(field!("id"), CompareOp::Eq, parent_id)
+                .where_and(field!("owner_user"), CompareOp::Eq, owner),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|(project,): (i64,)| project);
     if parent_project != Some(project_id) {
         return Err(BaseError::PermissionDenied(
             "父任务不存在、跨工作区或不属于同一项目".to_string(),

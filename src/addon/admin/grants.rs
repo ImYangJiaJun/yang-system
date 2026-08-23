@@ -1,12 +1,11 @@
 //! 平台账号对 Token 授权快照的扩展。
-//! raw-sql-boundary: domain-service admin-grant-snapshot
 
 use super::user::ACTIVE_STATUS;
 use crate::addon::account::{AuthorizationGrants, GrantResolver};
 use async_trait::async_trait;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, Transaction};
 
 #[derive(Debug, Default)]
 pub(super) struct AdminGrantResolver;
@@ -19,23 +18,20 @@ impl GrantResolver for AdminGrantResolver {
         user_id: i64,
         transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError> {
-        let executor = transaction.executor().ok_or_else(|| {
-            BaseError::from(yang_db::DbError::TransactionError(
-                "授权快照事务已结束".to_string(),
-            ))
-        })?;
-        let admin = sqlx::query_as::<_, (bool, bool)>(
-            "SELECT `admin`, COALESCE(`owner_key` = 'system-owner', FALSE) FROM `admin_user` \
-             WHERE `user_user` = ? AND `status` = ? LIMIT 1",
-        )
-        .bind(user_id)
-        .bind(ACTIVE_STATUS)
-        .fetch_optional(executor)
-        .await
-        .map_err(yang_db::DbError::from)?;
+        let admin: Option<(bool, Option<String>)> = transaction
+            .table(table!("admin_user"))
+            .field(field!("admin"))
+            .field(field!("owner_key"))
+            .where_and(field!("user_user"), CompareOp::Eq, user_id)
+            .where_and(field!("status"), CompareOp::Eq, ACTIVE_STATUS)
+            .find()
+            .await?;
 
+        // 与原 `COALESCE(owner_key = 'system-owner', FALSE)` 一致：NULL owner_key 不是最终管理员。
         Ok(admin
-            .map(|(super_admin, system_owner)| grants_for_admin(super_admin, system_owner))
+            .map(|(super_admin, owner_key)| {
+                grants_for_admin(super_admin, owner_key.as_deref() == Some("system-owner"))
+            })
             .unwrap_or_default())
     }
 }

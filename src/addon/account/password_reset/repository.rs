@@ -1,11 +1,11 @@
 //! 密码重置凭证的生成、摘要与持久化仓储边界。
-//! raw-sql-boundary: domain-repository password-reset-token
 
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use sqlx::MySqlPool;
 use std::fmt::Write;
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr, Transaction};
 
 const RAW_TOKEN_BYTES: usize = 32;
 const RAW_TOKEN_CHARS: usize = RAW_TOKEN_BYTES * 2;
@@ -105,67 +105,83 @@ pub(crate) async fn create_in_tx(
 ) -> Result<(), BaseError> {
     let ttl_seconds = i64::try_from(ttl_seconds)
         .map_err(|_| BaseError::ConfigError("密码重置 TTL 超出 MySQL 范围".to_string()))?;
-    sqlx::query(
-        "UPDATE password_reset_token SET invalidated_at = UNIX_TIMESTAMP() \
-         WHERE user_user = ? AND consumed_at IS NULL AND invalidated_at IS NULL",
-    )
-    .bind(target_user_id)
-    .execute(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
-    sqlx::query(
-        "INSERT INTO password_reset_token \
-         (token_digest, token_fingerprint, user_user, requested_by_user, expires_at, created_at) \
-         VALUES (?, ?, ?, ?, UNIX_TIMESTAMP() + ?, UNIX_TIMESTAMP())",
-    )
-    .bind(&reset.reference.digest)
-    .bind(reset.reference.fingerprint())
-    .bind(target_user_id)
-    .bind(requested_by_user_id)
-    .bind(ttl_seconds)
-    .execute(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    transaction
+        .table(table!("password_reset_token"))
+        .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
+        .where_and(field!("user_user"), CompareOp::Eq, target_user_id)
+        .where_null(field!("consumed_at"))
+        .where_null(field!("invalidated_at"))
+        .update(&serde_json::json!({}))
+        .await?;
+    transaction
+        .table(table!("password_reset_token"))
+        .set_expr(
+            field!("expires_at"),
+            SqlExpr::unix_timestamp_add(ttl_seconds),
+        )
+        .set_expr(field!("created_at"), SqlExpr::unix_timestamp())
+        .insert(&serde_json::json!({
+            "token_digest": reset.reference.digest,
+            "token_fingerprint": reset.reference.fingerprint(),
+            "user_user": target_user_id,
+            "requested_by_user": requested_by_user_id,
+        }))
+        .await?;
     Ok(())
 }
 
 pub(crate) async fn find_target_user(
-    pool: &sqlx::MySqlPool,
+    pool: &MySqlPool,
     reference: &PasswordResetReference,
 ) -> Result<Option<i64>, BaseError> {
-    sqlx::query_scalar("SELECT user_user FROM password_reset_token WHERE token_digest = ? LIMIT 1")
-        .bind(&reference.digest)
-        .fetch_optional(pool)
+    QueryBuilder::from_pool(pool, table!("password_reset_token"))
+        .where_and(
+            field!("token_digest"),
+            CompareOp::Eq,
+            reference.digest.as_str(),
+        )
+        .value::<i64>(field!("user_user"))
         .await
-        .map_err(yang_db::DbError::from)
         .map_err(BaseError::from)
 }
 
+/// 锁定凭证行；`pool` 只用于构建查询，语句仍在事务连接上以 `FOR UPDATE` 执行。
 pub(crate) async fn lock_in_tx(
+    pool: &MySqlPool,
     transaction: &mut Transaction,
     reference: &PasswordResetReference,
 ) -> Result<LockedPasswordReset, BaseError> {
-    sqlx::query_as::<_, (i64, i64, i64, Option<i64>, Option<i64>, i64)>(
-        "SELECT id, user_user, expires_at, consumed_at, invalidated_at, UNIX_TIMESTAMP() \
-         FROM password_reset_token WHERE token_digest = ? FOR UPDATE",
-    )
-    .bind(&reference.digest)
-    .fetch_optional(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?
-    .map(
-        |(id, user_id, expires_at, consumed_at, invalidated_at, database_now)| {
-            LockedPasswordReset {
-                id,
-                user_id,
-                expires_at,
-                consumed_at,
-                invalidated_at,
-                database_now,
-            }
-        },
-    )
-    .ok_or_else(invalid_reset_token)
+    transaction
+        .select_for_update(
+            QueryBuilder::from_pool(pool, table!("password_reset_token"))
+                .field(field!("id"))
+                .field(field!("user_user"))
+                .field(field!("expires_at"))
+                .field(field!("consumed_at"))
+                .field(field!("invalidated_at"))
+                .select_expr(SqlExpr::unix_timestamp(), field!("database_now"))
+                .where_and(
+                    field!("token_digest"),
+                    CompareOp::Eq,
+                    reference.digest.as_str(),
+                ),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(
+            |(id, user_id, expires_at, consumed_at, invalidated_at, database_now)| {
+                LockedPasswordReset {
+                    id,
+                    user_id,
+                    expires_at,
+                    consumed_at,
+                    invalidated_at,
+                    database_now,
+                }
+            },
+        )
+        .ok_or_else(invalid_reset_token)
 }
 
 pub(crate) async fn consume_in_tx(
@@ -175,40 +191,36 @@ pub(crate) async fn consume_in_tx(
     if !locked.is_usable() {
         return Err(invalid_reset_token());
     }
-    let consumed = sqlx::query(
-        "UPDATE password_reset_token SET consumed_at = UNIX_TIMESTAMP() \
-         WHERE id = ? AND consumed_at IS NULL AND invalidated_at IS NULL \
-           AND expires_at > UNIX_TIMESTAMP()",
-    )
-    .bind(locked.id)
-    .execute(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
-    if consumed.rows_affected() != 1 {
+    let consumed = transaction
+        .table(table!("password_reset_token"))
+        .set_expr(field!("consumed_at"), SqlExpr::unix_timestamp())
+        .where_and(field!("id"), CompareOp::Eq, locked.id)
+        .where_null(field!("consumed_at"))
+        .where_null(field!("invalidated_at"))
+        .where_expr(
+            field!("expires_at"),
+            CompareOp::Gt,
+            SqlExpr::unix_timestamp(),
+        )?
+        .update(&serde_json::json!({}))
+        .await?;
+    if consumed != 1 {
         return Err(invalid_reset_token());
     }
-    sqlx::query(
-        "UPDATE password_reset_token SET invalidated_at = UNIX_TIMESTAMP() \
-         WHERE user_user = ? AND id <> ? AND consumed_at IS NULL AND invalidated_at IS NULL",
-    )
-    .bind(locked.user_id)
-    .bind(locked.id)
-    .execute(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    transaction
+        .table(table!("password_reset_token"))
+        .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
+        .where_and(field!("user_user"), CompareOp::Eq, locked.user_id)
+        .where_and(field!("id"), CompareOp::Ne, locked.id)
+        .where_null(field!("consumed_at"))
+        .where_null(field!("invalidated_at"))
+        .update(&serde_json::json!({}))
+        .await?;
     Ok(())
 }
 
 pub(crate) fn invalid_reset_token() -> BaseError {
     BaseError::Unauthorized("密码重置凭证无效或已过期".to_string())
-}
-
-fn executor(transaction: &mut Transaction) -> Result<&mut sqlx::MySqlConnection, BaseError> {
-    transaction.executor().ok_or_else(|| {
-        BaseError::from(yang_db::DbError::TransactionError(
-            "密码重置事务已结束".to_string(),
-        ))
-    })
 }
 
 fn encode_hex(bytes: &[u8]) -> Result<String, BaseError> {

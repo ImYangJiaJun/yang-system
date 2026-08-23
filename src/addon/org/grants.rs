@@ -1,5 +1,4 @@
 //! 企业管理员对 Token 授权快照的扩展。
-//! raw-sql-boundary: domain-service org-grant-snapshot
 
 use super::organization::ACTIVE_STATUS as ACTIVE_ORG_STATUS;
 use super::user::ACTIVE_STATUS as ACTIVE_MEMBERSHIP_STATUS;
@@ -7,7 +6,7 @@ use crate::addon::account::{AuthorizationGrants, GrantResolver};
 use async_trait::async_trait;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, Transaction};
 
 #[derive(Debug, Default)]
 pub(super) struct OrgGrantResolver;
@@ -20,32 +19,26 @@ impl GrantResolver for OrgGrantResolver {
         user_id: i64,
         transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError> {
-        let executor = transaction.executor().ok_or_else(|| {
-            BaseError::from(yang_db::DbError::TransactionError(
-                "授权快照事务已结束".to_string(),
-            ))
-        })?;
-        // tenant-boundary: raw-sql authorization-grant-snapshot
-        let is_admin = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(\
-                 SELECT 1 FROM `org_user` AS membership \
-                 INNER JOIN `org_org` AS organization \
-                     ON organization.`id` = membership.`org_org` \
-                 WHERE membership.`user_user` = ? \
-                   AND membership.`status` = ? \
-                   AND membership.`admin` = TRUE \
-                   AND organization.`status` = ? \
-                 LIMIT 1\
-             )",
-        )
-        .bind(user_id)
-        .bind(ACTIVE_MEMBERSHIP_STATUS)
-        .bind(ACTIVE_ORG_STATUS)
-        .fetch_one(executor)
-        .await
-        .map_err(yang_db::DbError::from)?;
+        // 原 SELECT EXISTS(... JOIN ...) 改写为同事务内的 join + count，保持事务快照可见性。
+        let admin_count = transaction
+            .table(table!("org_user"))
+            .join(
+                table!("org_org"),
+                field!("org_org.id"),
+                field!("org_user.org_org"),
+            )
+            .where_and(field!("org_user.user_user"), CompareOp::Eq, user_id)
+            .where_and(
+                field!("org_user.status"),
+                CompareOp::Eq,
+                ACTIVE_MEMBERSHIP_STATUS,
+            )
+            .where_and(field!("org_user.admin"), CompareOp::Eq, true)
+            .where_and(field!("org_org.status"), CompareOp::Eq, ACTIVE_ORG_STATUS)
+            .count()
+            .await?;
 
-        Ok(if is_admin {
+        Ok(if admin_count > 0 {
             org_admin_grants()
         } else {
             AuthorizationGrants::default()

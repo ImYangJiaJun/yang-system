@@ -1,5 +1,4 @@
 //! 企业租户的可信解析策略。
-//! raw-sql-boundary: domain-service org-tenant-capability
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -7,6 +6,7 @@ use yang_base::action::{
     ActionContext, ContextKey, TenantContext, TenantId, TenantResolution, TenantResolver,
 };
 use yang_base::BaseError;
+use yang_db::{field, table, CompareOp, QueryBuilder};
 
 pub(super) const ORG_MEMBERSHIP_CAPABILITY: ContextKey<OrgMembershipCapability> =
     ContextKey::new("org_membership_capability");
@@ -56,21 +56,22 @@ impl OrgMembershipReader for DatabaseMembershipReader {
         user_id: i64,
         org_id: TenantId,
     ) -> Result<Option<OrgMembershipCapability>, BaseError> {
-        // tenant-boundary: raw-sql tenant-membership-capability
-        let is_admin: Option<bool> = sqlx::query_scalar(
-            "SELECT membership.admin FROM org_user AS membership \
-             INNER JOIN org_org AS organization ON organization.id = membership.org_org \
-             WHERE membership.org_org = ? AND membership.user_user = ? \
-               AND membership.status = 'active' AND organization.status = 'active' \
-             LIMIT 1",
-        )
-        .bind(org_id.get())
-        .bind(user_id)
         // tenant-boundary: database tenant-membership-capability-database
-        .fetch_optional(context.tools().mysql()?.pool())
-        .await
-        .map_err(yang_db::DbError::from)
-        .map_err(BaseError::from)?;
+        let pool = context.tools().mysql()?.pool();
+        let is_admin: Option<bool> = QueryBuilder::from_pool(pool, table!("org_user"))
+            .field(field!("org_user.admin"))
+            .join(
+                table!("org_org"),
+                field!("org_org.id"),
+                field!("org_user.org_org"),
+            )
+            .where_and(field!("org_user.org_org"), CompareOp::Eq, org_id.get())
+            .where_and(field!("org_user.user_user"), CompareOp::Eq, user_id)
+            .where_and(field!("org_user.status"), CompareOp::Eq, "active")
+            .where_and(field!("org_org.status"), CompareOp::Eq, "active")
+            .find::<(bool,)>()
+            .await?
+            .map(|(admin,)| admin);
         Ok(is_admin.map(|admin| OrgMembershipCapability::new(user_id, org_id, admin)))
     }
 }

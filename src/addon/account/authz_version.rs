@@ -1,10 +1,9 @@
 //! 授权事实 writer 共享的用户版本锁与递增原语。
-//! raw-sql-boundary: domain-service account-authz-version
 //! authorization-writer: account-security-version
 
 use sqlx::MySqlPool;
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr, Transaction};
 
 use super::UserStatus;
 
@@ -55,34 +54,37 @@ pub(crate) async fn find_authorization_version(
     pool: &MySqlPool,
     user_id: i64,
 ) -> Result<Option<(UserStatus, i64)>, BaseError> {
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT status, authz_version \
-         FROM users \
-         WHERE id = ? \
-         LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(yang_db::DbError::from)
-    .map_err(BaseError::from)?;
+    let row: Option<(String, i64)> = QueryBuilder::from_pool(pool, table!("users"))
+        .field(field!("status"))
+        .field(field!("authz_version"))
+        .where_and(field!("id"), CompareOp::Eq, user_id)
+        .find()
+        .await
+        .map_err(BaseError::from)?;
     row.map(|(status, version)| Ok((UserStatus::from_storage(&status)?, version)))
         .transpose()
 }
 
 /// 锁定用户行，并读取授权 writer 所需的最小状态。
+///
+/// `pool` 只用于构建查询；语句仍在 `transaction` 的连接上以 `FOR UPDATE` 执行。
 pub(crate) async fn lock_user_authorization(
+    pool: &MySqlPool,
     transaction: &mut Transaction,
     user_id: i64,
 ) -> Result<LockedUserAuthorization, BaseError> {
-    let (status, authz_version) = sqlx::query_as::<_, (String, i64)>(
-        "SELECT status, authz_version FROM users WHERE id = ? FOR UPDATE",
-    )
-    .bind(user_id)
-    .fetch_optional(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?
-    .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
+    let (status, authz_version) = transaction
+        .select_for_update::<(String, i64)>(
+            QueryBuilder::from_pool(pool, table!("users"))
+                .field(field!("status"))
+                .field(field!("authz_version"))
+                .where_and(field!("id"), CompareOp::Eq, user_id),
+        )
+        .await
+        .map_err(BaseError::from)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
     if authz_version < 1 {
         return Err(BaseError::Unauthorized(
             "用户授权版本必须是正整数".to_string(),
@@ -97,18 +99,23 @@ pub(crate) async fn lock_user_authorization(
 
 /// 一次性锁定改密需要的摘要和两个版本，避免非锁定快照读取旧摘要。
 pub(crate) async fn lock_user_credential(
+    pool: &MySqlPool,
     transaction: &mut Transaction,
     user_id: i64,
 ) -> Result<LockedUserCredential, BaseError> {
-    let (status, password_hash, authz_version, credential_version) =
-        sqlx::query_as::<_, (String, String, i64, i64)>(
-            "SELECT status, password_hash, authz_version, credential_version \
-             FROM users WHERE id = ? FOR UPDATE",
+    let (status, password_hash, authz_version, credential_version) = transaction
+        .select_for_update::<(String, String, i64, i64)>(
+            QueryBuilder::from_pool(pool, table!("users"))
+                .field(field!("status"))
+                .field(field!("password_hash"))
+                .field(field!("authz_version"))
+                .field(field!("credential_version"))
+                .where_and(field!("id"), CompareOp::Eq, user_id),
         )
-        .bind(user_id)
-        .fetch_optional(executor(transaction)?)
         .await
-        .map_err(yang_db::DbError::from)?
+        .map_err(BaseError::from)?
+        .into_iter()
+        .next()
         .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
     if authz_version < 1 || credential_version < 0 {
         return Err(BaseError::Unauthorized("用户安全版本无效".to_string()));
@@ -124,13 +131,14 @@ pub(crate) async fn lock_user_credential(
 
 /// 按稳定用户 ID 顺序去重并锁定授权状态，避免多用户 writer 形成反向锁序。
 pub(crate) async fn lock_user_authorizations(
+    pool: &MySqlPool,
     transaction: &mut Transaction,
     user_ids: impl IntoIterator<Item = i64>,
 ) -> Result<Vec<LockedUserAuthorization>, BaseError> {
     let user_ids = stable_user_ids(user_ids);
     let mut locked = Vec::with_capacity(user_ids.len());
     for user_id in user_ids {
-        locked.push(lock_user_authorization(transaction, user_id).await?);
+        locked.push(lock_user_authorization(pool, transaction, user_id).await?);
     }
     Ok(locked)
 }
@@ -141,15 +149,13 @@ pub(crate) async fn increment_locked_authz_version(
     locked: &LockedUserAuthorization,
 ) -> Result<i64, BaseError> {
     let next = next_authz_version(locked.authz_version)?;
-    let result =
-        sqlx::query("UPDATE users SET authz_version = ? WHERE id = ? AND authz_version = ?")
-            .bind(next)
-            .bind(locked.user_id)
-            .bind(locked.authz_version)
-            .execute(executor(transaction)?)
-            .await
-            .map_err(yang_db::DbError::from)?;
-    if result.rows_affected() != 1 {
+    let affected = transaction
+        .table(table!("users"))
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .update(&serde_json::json!({ "authz_version": next }))
+        .await?;
+    if affected != 1 {
         return Err(BaseError::from(yang_db::DbError::TransactionError(
             format!("用户 {} 授权版本在持锁事务内发生意外变化", locked.user_id),
         )));
@@ -165,19 +171,21 @@ pub(crate) async fn increment_locked_credential_versions(
 ) -> Result<(i64, i64), BaseError> {
     let next_authz = next_authz_version(locked.authz_version)?;
     let next_credential = next_credential_version(locked.credential_version)?;
-    let result = sqlx::query(
-        "UPDATE users SET authz_version = ?, credential_version = ? \
-         WHERE id = ? AND authz_version = ? AND credential_version = ?",
-    )
-    .bind(next_authz)
-    .bind(next_credential)
-    .bind(locked.user_id)
-    .bind(locked.authz_version)
-    .bind(locked.credential_version)
-    .execute(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
-    if result.rows_affected() != 1 {
+    let affected = transaction
+        .table(table!("users"))
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(
+            field!("credential_version"),
+            CompareOp::Eq,
+            locked.credential_version,
+        )
+        .update(&serde_json::json!({
+            "authz_version": next_authz,
+            "credential_version": next_credential,
+        }))
+        .await?;
+    if affected != 1 {
         return Err(BaseError::from(yang_db::DbError::TransactionError(
             format!("用户 {} 安全版本在持锁事务内发生意外变化", locked.user_id),
         )));
@@ -193,21 +201,23 @@ pub(crate) async fn disable_locked_user_and_increment_versions(
 ) -> Result<(i64, i64), BaseError> {
     let next_authz = next_authz_version(locked.authz_version)?;
     let next_credential = next_credential_version(locked.credential_version)?;
-    let result = sqlx::query(
-        "UPDATE users SET status = ?, authz_version = ?, credential_version = ? \
-         WHERE id = ? AND status = ? AND authz_version = ? AND credential_version = ?",
-    )
-    .bind(UserStatus::Disabled.as_str())
-    .bind(next_authz)
-    .bind(next_credential)
-    .bind(locked.user_id)
-    .bind(locked.status.as_str())
-    .bind(locked.authz_version)
-    .bind(locked.credential_version)
-    .execute(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
-    if result.rows_affected() != 1 {
+    let affected = transaction
+        .table(table!("users"))
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
+        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(
+            field!("credential_version"),
+            CompareOp::Eq,
+            locked.credential_version,
+        )
+        .update(&serde_json::json!({
+            "status": UserStatus::Disabled.as_str(),
+            "authz_version": next_authz,
+            "credential_version": next_credential,
+        }))
+        .await?;
+    if affected != 1 {
         return Err(BaseError::from(yang_db::DbError::TransactionError(
             format!("用户 {} 停用事实在持锁事务内发生意外变化", locked.user_id),
         )));
@@ -221,16 +231,17 @@ async fn append_authorization_outbox(
     user_id: i64,
     authz_version: i64,
 ) -> Result<(), BaseError> {
-    sqlx::query(
-        "INSERT INTO authorization_outbox \
-         (user_id, authz_version, state, attempts, available_at, created_at) \
-         VALUES (?, ?, 'pending', 0, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())",
-    )
-    .bind(user_id)
-    .bind(authz_version)
-    .execute(executor(transaction)?)
-    .await
-    .map_err(yang_db::DbError::from)?;
+    transaction
+        .table(table!("authorization_outbox"))
+        .set_expr(field!("available_at"), SqlExpr::unix_timestamp())
+        .set_expr(field!("created_at"), SqlExpr::unix_timestamp())
+        .insert(&serde_json::json!({
+            "user_id": user_id,
+            "authz_version": authz_version,
+            "state": "pending",
+            "attempts": 0,
+        }))
+        .await?;
     Ok(())
 }
 
@@ -274,14 +285,6 @@ fn next_credential_version(current: i64) -> Result<i64, BaseError> {
                 "用户凭据版本已耗尽或无效".to_string(),
             ))
         })
-}
-
-fn executor(transaction: &mut Transaction) -> Result<&mut sqlx::MySqlConnection, BaseError> {
-    transaction.executor().ok_or_else(|| {
-        BaseError::from(yang_db::DbError::TransactionError(
-            "授权 writer 事务已结束".to_string(),
-        ))
-    })
 }
 
 #[cfg(test)]
