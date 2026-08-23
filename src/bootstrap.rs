@@ -99,7 +99,7 @@ async fn run_after_telemetry_initialized(
                 registration_email_sender,
             ))
             .config(log_identity)
-            .config(settings.email.verification.clone())
+            .config(settings.email.verification.engine_config())
             .build()
             .context("构建应用 Tools 失败")?,
     );

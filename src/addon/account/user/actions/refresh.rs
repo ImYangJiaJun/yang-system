@@ -2,7 +2,7 @@ use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::auth::{
-    RefreshAction, RefreshClaimsResolver, RefreshInput, TokenPairClaims,
+    BrowserSession, RefreshAction, RefreshClaimsResolver, RefreshInput, TokenPairClaims,
 };
 use yang_base::action::{Action as BusinessAction, ActionContext, ApiResponse, TypedHandler};
 use yang_base::definition::{ModuleSpec, ParamInput, Params};
@@ -74,13 +74,13 @@ impl BusinessAction for BrowserRefreshAction {
         ctx: ActionContext,
         _input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
-        let secure = super::super::browser_session::validate_same_origin(&ctx.request)?;
-        let refresh_token = super::super::browser_session::refresh_token(&ctx.request)?;
+        let secure = BrowserSession::validate_same_origin(&ctx.request)?;
+        let refresh_token = super::super::browser_session().refresh_token(&ctx.request)?;
         let tokens = self
             .inner
             .handle(ctx, RefreshInput { refresh_token })
             .await?;
-        super::super::browser_session::token_response(
+        super::super::browser_session().token_response(
             tokens.access_token,
             tokens.refresh_token,
             secure,

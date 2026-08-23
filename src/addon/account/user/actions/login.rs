@@ -1,7 +1,9 @@
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
-use yang_base::action::auth::{CredentialVerifier, LoginAction, LoginInput, VerifiedSubject};
+use yang_base::action::auth::{
+    BrowserSession, CredentialVerifier, LoginAction, LoginInput, VerifiedSubject,
+};
 use yang_base::action::{Action as BusinessAction, ActionContext, ApiResponse, TypedHandler};
 use yang_base::definition::{ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
@@ -51,7 +53,7 @@ impl BusinessAction for BrowserLoginAction {
         ctx: ActionContext,
         input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
-        let secure = super::super::browser_session::validate_same_origin(&ctx.request)?;
+        let secure = BrowserSession::validate_same_origin(&ctx.request)?;
         let tokens = self
             .inner
             .handle(
@@ -63,7 +65,7 @@ impl BusinessAction for BrowserLoginAction {
                 },
             )
             .await?;
-        super::super::browser_session::token_response(
+        super::super::browser_session().token_response(
             tokens.access_token,
             tokens.refresh_token,
             secure,

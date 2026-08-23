@@ -114,7 +114,7 @@ pub(super) fn build_module(security: &SecuritySettings) -> Result<ModuleSpec, Ba
     let password_reset_enabled = security.issue_refresh_credential_version;
     let service = Arc::new(AdminService::new(
         AdminRepository::new(table),
-        Arc::new(AuthRateLimiter::new(security)),
+        Arc::new(AuthRateLimiter::new(security.rate_limit_config())),
         security.password_reset_ttl_seconds,
         password_reset_enabled,
     ));

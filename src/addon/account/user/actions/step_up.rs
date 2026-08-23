@@ -4,7 +4,7 @@ use crate::authorization::audit_result_for_error;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use yang_base::action::auth::{CredentialVerifier, LoginInput, VerifiedSubject};
+use yang_base::action::auth::{BrowserSession, CredentialVerifier, LoginInput, VerifiedSubject};
 use yang_base::action::{Action as BusinessAction, ActionContext, StepUpManager, StepUpProof};
 use yang_base::definition::{ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
@@ -81,7 +81,7 @@ impl BusinessAction for BrowserStepUpCompleteAction {
             verified_user_id: Arc::clone(&verified_user_id),
         };
         let result = async {
-            super::super::browser_session::validate_same_origin(&ctx.request)?;
+            BrowserSession::validate_same_origin(&ctx.request)?;
             self.manager
                 .complete_challenge(
                     &ctx,

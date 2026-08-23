@@ -309,7 +309,7 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
                 )?)
                 .extension(step_up_manager())
                 .extension(RegistrationEmailSenderHandle::new(sender.clone()))
-                .config(email_settings(namespace))
+                .config(email_settings(namespace).engine_config())
                 .build()?,
         );
         let application = build_app(Arc::clone(&tools), security_settings())?;

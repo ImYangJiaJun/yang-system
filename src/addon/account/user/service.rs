@@ -2,12 +2,7 @@
 //!
 //! Action 只负责传输适配；注册、登录、刷新和当前用户用例在此集中。
 
-use super::email_verification::{
-    normalize_email, RegistrationEmailCodeAccepted, RegistrationEmailVerification,
-};
-use super::password::PasswordEngine;
 use super::policy::{normalize_username, validate_new_password, validate_password};
-use super::rate_limit::{AuthOperation, AuthRateLimiter};
 use super::repository::{AuthorizationStateRecord, UserRepository};
 use super::schema::{UserView, STATUS};
 use super::status::UserStatus;
@@ -21,7 +16,10 @@ use crate::audit;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::auth::TokenPairClaims;
+use yang_base::action::auth::{
+    normalize_email, AuthOperation, AuthRateLimiter, PasswordEngine, RegistrationEmailCodeAccepted,
+    RegistrationEmailVerification, TokenPairClaims,
+};
 use yang_base::action::ActionContext;
 use yang_base::table::Record;
 use yang_base::token::TokenClaims;
@@ -254,7 +252,9 @@ impl UserService {
 
         let mut transaction = ctx.tools().mysql()?.transaction().await?;
         let result = async {
-            let locked = lock_user_credential(&mut transaction, user_id).await?;
+            let locked =
+                lock_user_credential(ctx.tools().mysql()?.pool(), &mut transaction, user_id)
+                    .await?;
             ensure_active_status(locked.status())?;
             ensure_password_hash_unchanged(&locked, &observed.password_hash)?;
             self.users
@@ -308,9 +308,19 @@ impl UserService {
         let mut transaction = ctx.tools().mysql()?.transaction().await?;
         let result = async {
             // 所有创建与消费路径统一先锁用户、再锁凭证，避免同用户并发形成反向锁序。
-            let locked_user = lock_user_credential(&mut transaction, target_user_id).await?;
+            let locked_user = lock_user_credential(
+                ctx.tools().mysql()?.pool(),
+                &mut transaction,
+                target_user_id,
+            )
+            .await?;
             ensure_active_status(locked_user.status())?;
-            let locked_reset = lock_password_reset_in_tx(&mut transaction, &reference).await?;
+            let locked_reset = lock_password_reset_in_tx(
+                ctx.tools().mysql()?.pool(),
+                &mut transaction,
+                &reference,
+            )
+            .await?;
             if locked_reset.user_id() != target_user_id || !locked_reset.is_usable() {
                 return Err(invalid_reset_token());
             }
@@ -357,7 +367,9 @@ impl UserService {
         }
         let mut transaction = ctx.tools().mysql()?.transaction().await?;
         let result = async {
-            let locked = lock_user_credential(&mut transaction, user_id).await?;
+            let locked =
+                lock_user_credential(ctx.tools().mysql()?.pool(), &mut transaction, user_id)
+                    .await?;
             ensure_active_status(locked.status())?;
             increment_locked_credential_versions(&mut transaction, &locked).await?;
             let event = audit::succeeded_event(

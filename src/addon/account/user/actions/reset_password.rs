@@ -4,6 +4,7 @@ use super::super::policy::{PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH};
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
+use yang_base::action::auth::BrowserSession;
 use yang_base::action::{Action as ActionHandler, ActionContext, ApiResponse};
 use yang_base::definition::{ModuleSpec, Password, Str};
 use yang_base::{Action, BaseError};
@@ -47,11 +48,11 @@ impl ActionHandler for ResetPasswordAction {
         ctx: ActionContext,
         input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
-        let secure = super::super::browser_session::validate_same_origin(&ctx.request)?;
+        let secure = BrowserSession::validate_same_origin(&ctx.request)?;
         self.service
             .reset_password(&ctx, &input.reset_token, &input.new_password)
             .await?;
-        super::super::browser_session::relogin_response("密码已重置，请使用新密码登录", secure)
+        super::super::browser_session().relogin_response("密码已重置，请使用新密码登录", secure)
     }
 }
 

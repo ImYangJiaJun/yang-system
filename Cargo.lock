@@ -3383,14 +3383,18 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "yang-base"
 version = "0.2.1"
 dependencies = [
+ "argon2",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "hmac",
+ "http",
  "jsonwebtoken",
  "log",
  "matchit",
  "metrics",
+ "rand_core 0.6.4",
  "regex",
  "schemars",
  "serde",
@@ -3466,10 +3470,7 @@ name = "yang-system"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "argon2",
  "async-trait",
- "axum",
- "hmac",
  "jsonwebtoken",
  "lettre",
  "metrics",

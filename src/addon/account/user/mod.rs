@@ -1,13 +1,9 @@
 //! `account.user` Module 的定义与组装入口。
 
 mod actions;
-mod browser_session;
 mod claims;
-mod email_verification;
 mod lifecycle;
-mod password;
 mod policy;
-mod rate_limit;
 mod repository;
 mod schema;
 mod service;
@@ -17,10 +13,10 @@ use crate::addon::account::{GrantResolver, SystemOwnerClaimer};
 use crate::authorization::AuthorizationVersionValidator;
 use crate::authorization::{RequestFingerprintResolver, StepUpServices};
 use crate::config::SecuritySettings;
-use password::PasswordEngine;
 use repository::UserRepository;
 use service::UserService;
 use std::sync::Arc;
+use yang_base::action::auth::{BrowserSession, PasswordEngine};
 use yang_base::action::{TokenAuthMiddleware, UiCatalogAction};
 use yang_base::definition::{
     ActionInteraction, ActionPlacement, ActionPresentationSpec, ModuleName, ModulePresentationSpec,
@@ -30,8 +26,18 @@ use yang_base::transport::client_ip::TrustedClientIpMiddleware;
 use yang_base::BaseError;
 
 pub(crate) use claims::user_from_claims;
-pub(crate) use rate_limit::{AuthOperation, AuthRateLimiter};
 pub(crate) use status::UserStatus;
+pub(crate) use yang_base::action::auth::{AuthOperation, AuthRateLimiter};
+
+/// 浏览器刷新会话 Cookie 名称（Host-only、HttpOnly、SameSite=Strict）。
+const REFRESH_COOKIE_NAME: &str = "yang_refresh";
+/// 刷新会话 Cookie 的 Path 作用域。
+const REFRESH_COOKIE_PATH: &str = "/api/v1/users";
+
+/// 浏览器会话 Cookie 能力实例（无状态，按需构造）。
+pub(super) fn browser_session() -> BrowserSession {
+    BrowserSession::new(REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH)
+}
 
 /// 构建用户 Module。
 ///
@@ -46,7 +52,7 @@ pub(super) fn build_module(
     let table = schema::user_table_spec()?;
     let users = Arc::new(UserRepository::new(table.table_definition()?));
     let passwords = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
-    let rate_limiter = Arc::new(AuthRateLimiter::new(&security));
+    let rate_limiter = Arc::new(AuthRateLimiter::new(security.rate_limit_config()));
     let trusted_client_ip = TrustedClientIpMiddleware::from_cidrs(&security.trusted_proxy_cidrs)?;
     let service = Arc::new(UserService::new(
         Arc::clone(&users),

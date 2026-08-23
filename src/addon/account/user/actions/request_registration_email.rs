@@ -1,7 +1,7 @@
-use super::super::email_verification::RegistrationEmailCodeAccepted;
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
+use yang_base::action::auth::RegistrationEmailCodeAccepted;
 use yang_base::action::{Action as ActionHandler, ActionContext};
 use yang_base::definition::{ModuleSpec, Str};
 use yang_base::{Action, BaseError};

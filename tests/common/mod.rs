@@ -40,17 +40,20 @@ pub trait RegistrationEmailToolsExt {
 impl RegistrationEmailToolsExt for ToolsBuilder {
     fn with_registration_email(self, namespace: impl Into<String>) -> Self {
         self.extension(RegistrationEmailSenderHandle::new(sender()))
-            .config(EmailVerificationSettings {
-                namespace: namespace.into(),
-                secret: "integration-email-verification-secret-32-bytes-minimum".to_owned(),
-                ttl_seconds: 300,
-                resend_cooldown_seconds: 1,
-                max_attempts: 5,
-                send_window_seconds: 60,
-                send_ip_attempts: 10_000,
-                send_email_attempts: 1_000,
-                send_global_attempts: 100_000,
-            })
+            .config(
+                EmailVerificationSettings {
+                    namespace: namespace.into(),
+                    secret: "integration-email-verification-secret-32-bytes-minimum".to_owned(),
+                    ttl_seconds: 300,
+                    resend_cooldown_seconds: 1,
+                    max_attempts: 5,
+                    send_window_seconds: 60,
+                    send_ip_attempts: 10_000,
+                    send_email_attempts: 1_000,
+                    send_global_attempts: 100_000,
+                }
+                .engine_config(),
+            )
     }
 }
 

@@ -1,83 +1,19 @@
 //! 注册邮箱验证码的投递边界。
 //!
-//! 账户领域只依赖 [`RegistrationEmailSender`]；SMTP 是生产适配器，测试可注入内存实现。
+//! 投递契约（[`RegistrationEmailSender`] / [`RegistrationEmailSenderHandle`] /
+//! [`EmailDeliveryError`]）由 `yang_base::action::auth` 提供并在此再导出；
+//! 本模块只保留强制 STARTTLS 的生产 SMTP 适配器，测试可注入内存实现。
 
 use crate::config::SmtpSettings;
 use async_trait::async_trait;
 use lettre::message::{header::ContentType, Mailbox};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
-use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
-/// 邮件投递失败的脱敏类别；不携带 SMTP 响应、收件人或凭据。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmailDeliveryError {
-    /// 邮件内容或地址无法构造。
-    InvalidMessage,
-    /// SMTP 服务未接受邮件或暂不可用。
-    Unavailable,
-}
-
-impl fmt::Display for EmailDeliveryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidMessage => formatter.write_str("邮件内容无效"),
-            Self::Unavailable => formatter.write_str("邮件服务暂不可用"),
-        }
-    }
-}
-
-impl std::error::Error for EmailDeliveryError {}
-
-/// 注册验证码投递接口。实现方不得记录 `recipient` 或 `code` 原文。
-#[async_trait]
-pub trait RegistrationEmailSender: Send + Sync + 'static {
-    /// 投递一枚短期注册验证码。
-    async fn send_registration_code(
-        &self,
-        recipient: &str,
-        code: &str,
-        expires_in_seconds: u64,
-    ) -> Result<(), EmailDeliveryError>;
-}
-
-/// 可放入 `Tools` 的类型擦除投递句柄。
-#[derive(Clone)]
-pub struct RegistrationEmailSenderHandle(Arc<dyn RegistrationEmailSender>);
-
-impl RegistrationEmailSenderHandle {
-    pub fn new<T>(sender: T) -> Self
-    where
-        T: RegistrationEmailSender,
-    {
-        Self(Arc::new(sender))
-    }
-
-    pub fn from_arc(sender: Arc<dyn RegistrationEmailSender>) -> Self {
-        Self(sender)
-    }
-
-    pub(crate) async fn send_registration_code(
-        &self,
-        recipient: &str,
-        code: &str,
-        expires_in_seconds: u64,
-    ) -> Result<(), EmailDeliveryError> {
-        self.0
-            .send_registration_code(recipient, code, expires_in_seconds)
-            .await
-    }
-}
-
-impl fmt::Debug for RegistrationEmailSenderHandle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RegistrationEmailSenderHandle")
-            .finish_non_exhaustive()
-    }
-}
+pub use yang_base::action::auth::{
+    EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
+};
 
 /// 强制 STARTTLS 的生产 SMTP 适配器。
 #[derive(Clone)]

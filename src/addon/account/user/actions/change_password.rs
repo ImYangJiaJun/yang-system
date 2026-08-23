@@ -2,6 +2,7 @@ use super::super::policy::{PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH};
 use super::super::service::UserService;
 use async_trait::async_trait;
 use std::sync::Arc;
+use yang_base::action::auth::BrowserSession;
 use yang_base::action::{Action as ActionHandler, ActionContext, ApiResponse};
 use yang_base::definition::{ModuleSpec, Password};
 use yang_base::{Action, BaseError};
@@ -44,7 +45,7 @@ impl ActionHandler for ChangePasswordAction {
         ctx: ActionContext,
         input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
-        let secure = super::super::browser_session::validate_same_origin(&ctx.request)?;
+        let secure = BrowserSession::validate_same_origin(&ctx.request)?;
         let user_id = ctx
             .authenticated_user()
             .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
@@ -57,7 +58,7 @@ impl ActionHandler for ChangePasswordAction {
 }
 
 fn change_password_response(secure: bool) -> Result<ApiResponse, BaseError> {
-    super::super::browser_session::relogin_response("密码已修改，请重新登录", secure)
+    super::super::browser_session().relogin_response("密码已修改，请重新登录", secure)
 }
 
 pub(super) fn register(

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
+use yang_base::action::auth::{AuthRateLimitConfig, EmailVerificationConfig};
 use yang_base::action::StepUpManager;
 use yang_base::token::TokenManager;
 use yang_db::{DatabaseConfig, RedisConfig};
@@ -558,6 +559,26 @@ impl SmtpSettings {
 }
 
 impl EmailVerificationSettings {
+    /// 转换为框架验证码引擎的运行时配置。
+    ///
+    /// Redis key 前缀包含应用名与部署命名空间；指标名保持 yang-system 既有契约。
+    pub fn engine_config(&self) -> EmailVerificationConfig {
+        EmailVerificationConfig {
+            redis_key_prefix: format!("yang-system:{}:registration-email", self.namespace),
+            secret: self.secret.clone(),
+            ttl_seconds: self.ttl_seconds,
+            resend_cooldown_seconds: self.resend_cooldown_seconds,
+            max_attempts: self.max_attempts,
+            code_digits: 6,
+            send_window_seconds: self.send_window_seconds,
+            send_ip_attempts: self.send_ip_attempts,
+            send_email_attempts: self.send_email_attempts,
+            send_global_attempts: self.send_global_attempts,
+            send_metric_name: "yang_system_registration_email_total",
+            verify_metric_name: "yang_system_registration_email_verify_total",
+        }
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         crate::authorization::validate_deployment_name(&self.namespace)
             .context("email.verification.namespace 无效")?;
@@ -605,6 +626,17 @@ impl MysqlSettings {
 }
 
 impl SecuritySettings {
+    /// 转换为框架认证限流器的运行时配置；Redis key 前缀与指标名保持既有契约。
+    pub fn rate_limit_config(&self) -> AuthRateLimitConfig {
+        AuthRateLimitConfig {
+            window_seconds: self.auth_rate_limit_window_seconds,
+            ip_attempts: self.auth_rate_limit_ip_attempts,
+            username_attempts: self.auth_rate_limit_username_attempts,
+            key_prefix: "yang-system".to_string(),
+            metric_name: "yang_system_auth_rate_limit_total",
+        }
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         if self.argon2_max_concurrency == 0 {
             bail!("security.argon2_max_concurrency 必须大于 0");

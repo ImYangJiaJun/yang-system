@@ -2,6 +2,7 @@ use super::super::service::UserService;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::sync::Arc;
+use yang_base::action::auth::BrowserSession;
 use yang_base::action::{Action as BusinessAction, ActionContext, ApiResponse};
 use yang_base::definition::{ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
@@ -45,10 +46,10 @@ impl BusinessAction for DisableSelfAction {
         ctx: ActionContext,
         _input: Self::Input,
     ) -> Result<Self::Output, BaseError> {
-        let secure = super::super::browser_session::validate_same_origin(&ctx.request)?;
+        let secure = BrowserSession::validate_same_origin(&ctx.request)?;
         let user_id = ctx.actor()?.user_id();
         let immediate_convergence = self.service.disable_self(&ctx, user_id).await?;
-        super::super::browser_session::clear_response(
+        super::super::browser_session().clear_response(
             ApiResponse::success(
                 DisableSelfResult {
                     account_disabled: true,
