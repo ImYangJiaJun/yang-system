@@ -10,7 +10,10 @@ from pathlib import Path
 
 
 DERIVE_RE = re.compile(r"#\s*\[\s*derive\s*\((.*?)\)\s*\]", re.DOTALL)
-ACTION_SPEC_RE = re.compile(r"\bActionSpec\s*::\s*new\s*\(")
+# 函数式 Action 的唯一合法形态：pub(super) async fn handle(ctx, input, ...)
+ACTION_HANDLE_RE = re.compile(
+    r"(?m)^\s*pub\(super\)\s+async\s+fn\s+handle\s*\("
+)
 MODULE_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([a-z][a-z0-9_]*)\s*;", re.MULTILINE)
 TENANT_BOUNDARY_KINDS = (
     "database",
@@ -132,12 +135,12 @@ AUTHORIZATION_WRITER_DOCUMENT = Path("docs/architecture/authorization-writers.md
 SOURCE_ROOT_DIRECTORIES = {"addon", "config", "infrastructure"}
 SOURCE_ROOT_FILES = {"app.rs", "bootstrap.rs", "lib.rs", "main.rs"}
 AUTHORIZATION_WRITER_ALLOWLIST = {
-    "src/addon/account/user/repository.rs": "account-user-facts",
-    "src/addon/account/user/lifecycle.rs": "account-user-lifecycle",
-    "src/addon/account/authz_version.rs": "account-security-version",
-    "src/addon/admin/user/repository.rs": "admin-authorization-facts",
-    "src/addon/org/user/repository.rs": "org-membership-authorization-facts",
-    "src/addon/org/access/repository.rs": "org-onboarding-authorization-facts",
+    "src/addon/account/user/domain/repository.rs": "account-user-facts",
+    "src/addon/account/user/domain/lifecycle.rs": "account-user-lifecycle",
+    "src/addon/account/domain/authz_version.rs": "account-security-version",
+    "src/addon/admin/user/domain/repository.rs": "admin-authorization-facts",
+    "src/addon/org/user/domain/repository.rs": "org-membership-authorization-facts",
+    "src/addon/org/access/domain/repository.rs": "org-onboarding-authorization-facts",
 }
 AUTHORIZATION_WRITER_CODE_RE = re.compile(
     r"(?m)^//!\s*authorization-writer:\s*([a-z][a-z0-9-]*)\s*$"
@@ -175,7 +178,7 @@ def derived_action_count(source: str) -> int:
 
 
 def action_definition_count(source: str) -> int:
-    return derived_action_count(source) + len(ACTION_SPEC_RE.findall(source))
+    return len(ACTION_HANDLE_RE.findall(source))
 
 
 def action_directories(root: Path) -> list[Path]:
@@ -201,10 +204,16 @@ def check_action_directory(root: Path, directory: Path) -> list[str]:
     files = {path.stem: path for path in directory.glob("*.rs") if path.name != "mod.rs"}
 
     for name, path in sorted(files.items()):
-        count = action_definition_count(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        count = action_definition_count(source)
+        if derived_action_count(source):
+            errors.append(
+                f"{path.relative_to(root)}: 禁止使用 derive(Action) 过程宏，"
+                "Action 必须是 pub(super) async fn handle 函数式形态"
+            )
         if count != 1:
             errors.append(
-                f"{path.relative_to(root)}: 必须恰好定义一个 Action，实际 {count} 个"
+                f"{path.relative_to(root)}: 必须恰好定义一个 pub(super) async fn handle 主函数，实际 {count} 个"
             )
         if name not in declared:
             errors.append(f"{path.relative_to(root)}: 未在 {relative / 'mod.rs'} 中声明")
@@ -228,6 +237,62 @@ def check_actions_outside_directories(root: Path) -> list[str]:
         if derived_action_count(source):
             errors.append(
                 f"{path.relative_to(root)}: Action 必须移动到 actions/<action>.rs"
+            )
+        if action_definition_count(source):
+            errors.append(
+                f"{path.relative_to(root)}: Action 主函数必须移动到 actions/<action>.rs"
+            )
+    return errors
+
+
+MODULE_CONTAINER_ENTRIES = {"mod.rs", "actions", "domain"}
+
+
+def check_module_layout(root: Path) -> list[str]:
+    """addon/module 接口目录只承载 mod.rs、actions/ 与 domain/，机制代码一律进入 domain/。"""
+
+    errors: list[str] = []
+    addon_root = root / "src" / "addon"
+    if not addon_root.is_dir():
+        return errors
+    for addon_dir in sorted(path for path in addon_root.iterdir() if path.is_dir()):
+        # addon 根目录：mod.rs、domain/、模块目录；若 addon 根本身含 actions/，
+        # 则它同时是 module（如 observability），只允许三件套。
+        addon_has_actions = (addon_dir / "actions").is_dir()
+        for entry in sorted(addon_dir.iterdir()):
+            if entry.name in MODULE_CONTAINER_ENTRIES:
+                continue
+            if entry.is_dir() and not addon_has_actions:
+                continue
+            errors.append(
+                f"{entry.relative_to(root)}: 接口目录只允许 mod.rs、actions/ 与 domain/"
+            )
+        # module 目录（含 actions/ 子目录）同样只允许三件套。
+        for module_dir in sorted(
+            path
+            for path in addon_dir.rglob("*")
+            if path.is_dir() and (path / "actions").is_dir()
+        ):
+            relative_parts = module_dir.relative_to(addon_dir).parts
+            if "domain" in relative_parts or "actions" in relative_parts:
+                continue
+            for entry in sorted(module_dir.iterdir()):
+                if entry.name in MODULE_CONTAINER_ENTRIES:
+                    continue
+                errors.append(
+                    f"{entry.relative_to(root)}: 接口目录只允许 mod.rs、actions/ 与 domain/"
+                )
+        # actions/ 与 domain/ 之外不允许出现其他嵌套目录（如游离的 repository 目录）。
+        for nested in sorted(path for path in addon_dir.rglob("*") if path.is_dir()):
+            if nested == addon_dir:
+                continue
+            relative_parts = nested.relative_to(addon_dir).parts
+            if "domain" in relative_parts or "actions" in relative_parts:
+                continue
+            if (nested / "actions").is_dir():
+                continue
+            errors.append(
+                f"{nested.relative_to(root)}: 机制目录必须迁入所属 module 的 domain/"
             )
     return errors
 
@@ -780,6 +845,7 @@ def check(root: Path) -> list[str]:
     for directory in directories:
         errors.extend(check_action_directory(root, directory))
     errors.extend(check_actions_outside_directories(root))
+    errors.extend(check_module_layout(root))
     errors.extend(check_tenant_boundaries(root))
     errors.extend(check_tenant_isolation_evidence(root))
     errors.extend(check_audit_append_only(root))
@@ -856,32 +922,61 @@ def self_test() -> None:
             write(root / "src" / file_name, "")
         actions = root / "src" / "addon" / "demo" / "actions"
         write(actions / "mod.rs", "mod list;\n")
-        write(actions / "list.rs", "#[derive(Action)]\nstruct ListAction;\n")
+        write(actions / "list.rs", "pub(super) async fn handle() {}\n")
         errors = check(root)
         assert any("未在" in error and "注册" in error for error in errors), (
             "必须拒绝只声明未注册的 Action"
         )
-        write(actions / "mod.rs", "mod list;\nuse list::ListAction;\n")
+        write(actions / "mod.rs", "mod list;\nfn register() { let _ = list::handle; }\n")
         assert check(root) == [], "合法 fixture 应通过"
 
         write(
             actions / "list.rs",
-            "#[derive(Action)]\nstruct A;\n#[derive(Action)]\nstruct B;\n",
+            "pub(super) async fn handle() {}\npub(super) async fn handle() {}\n",
         )
         errors = check(root)
         assert any("实际 2 个" in error for error in errors), "必须拒绝多 Action 文件"
 
+        write(actions / "list.rs", "#[derive(Action)]\nstruct ListAction;\n")
+        errors = check(root)
+        assert any("禁止使用 derive(Action)" in error for error in errors), (
+            "必须拒绝 Action 过程宏形态"
+        )
+
+        write(actions / "list.rs", "pub(super) async fn handle() {}\n")
         write(actions / "support.rs", "fn helper() {}\n")
         errors = check(root)
         assert any("实际 0 个" in error for error in errors), "必须拒绝非 Action 文件"
         assert any("未在" in error for error in errors), "必须拒绝未登记文件"
+        (actions / "support.rs").unlink()
 
         write(
             root / "src" / "addon" / "demo" / "leaked.rs",
-            "#[derive(Action)]\nstruct LeakedAction;\n",
+            "pub(super) async fn handle() {}\n",
         )
         errors = check(root)
         assert any("必须移动到" in error for error in errors), "必须拒绝目录外 Action"
+
+        # module 目录白名单：接口目录只允许 mod.rs、actions/、domain/
+        (root / "src" / "addon" / "demo" / "leaked.rs").unlink()
+        write(root / "src" / "addon" / "demo" / "repository.rs", "fn repo() {}\n")
+        errors = check(root)
+        assert any("接口目录只允许" in error for error in errors), (
+            "必须拒绝 module 级机制文件"
+        )
+        (root / "src" / "addon" / "demo" / "repository.rs").unlink()
+        write(root / "src" / "addon" / "demo" / "helper" / "mod.rs", "")
+        errors = check(root)
+        assert any("机制目录必须迁入" in error for error in errors), (
+            "必须拒绝游离机制目录"
+        )
+        (root / "src" / "addon" / "demo" / "helper" / "mod.rs").unlink()
+        (root / "src" / "addon" / "demo" / "helper").rmdir()
+        write(
+            root / "src" / "addon" / "demo" / "domain" / "repository.rs",
+            "fn repo() {}\n",
+        )
+        assert check(root) == [], "domain/ 归位后应恢复通过"
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -1139,27 +1234,27 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         writer_sources = {
-            "src/addon/account/user/repository.rs": (
+            "src/addon/account/user/domain/repository.rs": (
                 "account-user-facts",
                 "fn write(q: Query) { q.insert(value); }\n",
             ),
-            "src/addon/account/user/lifecycle.rs": (
+            "src/addon/account/user/domain/lifecycle.rs": (
                 "account-user-lifecycle",
                 'fn write() { sqlx::query("UPDATE users SET status = \'disabled\'"); }\n',
             ),
-            "src/addon/account/authz_version.rs": (
+            "src/addon/account/domain/authz_version.rs": (
                 "account-security-version",
                 'fn write() { sqlx::query("UPDATE users SET authz_version = 2"); }\n',
             ),
-            "src/addon/admin/user/repository.rs": (
+            "src/addon/admin/user/domain/repository.rs": (
                 "admin-authorization-facts",
                 'fn write() { sqlx::query("UPDATE admin_user SET admin = TRUE"); }\n',
             ),
-            "src/addon/org/user/repository.rs": (
+            "src/addon/org/user/domain/repository.rs": (
                 "org-membership-authorization-facts",
                 "fn write(q: Query) { q.update(value); }\n",
             ),
-            "src/addon/org/access/repository.rs": (
+            "src/addon/org/access/domain/repository.rs": (
                 "org-onboarding-authorization-facts",
                 "fn write(q: Query) { q.insert_in_tx(tx, value); }\n",
             ),

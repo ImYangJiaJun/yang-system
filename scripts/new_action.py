@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按 yang-system 约定创建并注册一个强类型 Action。"""
+"""按 yang-system 约定创建并注册一个函数式 Action。"""
 
 from __future__ import annotations
 
@@ -13,42 +13,29 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 REGISTRATION_MARKER = "    // scaffold:action-registration"
 MODULE_RE = re.compile(r"^(mod\s+[a-z][a-z0-9_]*;\s*)$", re.MULTILINE)
-ACTIONS_MACRO_RE = re.compile(r"yang_base::actions!\[(?P<body>[^\]]*)\]")
 
 
 def pascal_case(value: str) -> str:
     return "".join(part.capitalize() for part in value.split("_"))
 
 
-def action_source(
-    name: str,
-    title: str,
-    method: str,
-    path: str,
-    chained_registration: bool,
-) -> str:
+def http_method_variant(method: str) -> str:
+    return method.capitalize()
+
+
+def action_source(name: str, title: str) -> str:
     action_type = f"{pascal_case(name)}Action"
-    register = (
-        "\n"
-        "pub(super) fn register(module: ModuleSpec) -> ModuleSpec {\n"
-        f"    module.native_action({action_type})\n"
-        "}\n"
-        if chained_registration
-        else ""
-    )
-    module_import = ", ModuleSpec" if chained_registration else ""
     return f'''//! {title} Action。
 
-use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{{Deserialize, Serialize}};
-use yang_base::action::{{Action as ActionHandler, ActionContext}};
-use yang_base::definition::{{ParamInput, Params{module_import}}};
-use yang_base::{{Action, BaseError}};
+use yang_base::action::ActionContext;
+use yang_base::definition::{{ParamInput, Params}};
+use yang_base::BaseError;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct {pascal_case(name)}Input {{}}
+pub(super) struct {pascal_case(name)}Input {{}}
 
 impl ParamInput for {pascal_case(name)}Input {{
     fn params() -> Params {{
@@ -57,36 +44,19 @@ impl ParamInput for {pascal_case(name)}Input {{
 }}
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct {pascal_case(name)}Output {{
+pub(super) struct {pascal_case(name)}Output {{
     accepted: bool,
 }}
 
-#[derive(Action)]
-#[action(
-    name = "{name}",
-    display_name = "{title}",
-    description = "TODO: 描述 {title} 的业务语义",
-    method = "{method}",
-    path = "{path}"
-)]
-pub(super) struct {action_type};
-
-#[async_trait]
-impl ActionHandler for {action_type} {{
-    type Input = {pascal_case(name)}Input;
-    type Output = {pascal_case(name)}Output;
-
-    async fn index(
-        &self,
-        _ctx: ActionContext,
-        _input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {{
-        Err(BaseError::ConfigError(
-            "{action_type} 尚未实现".to_string(),
-        ))
-    }}
+pub(super) async fn handle(
+    _ctx: ActionContext,
+    _input: {pascal_case(name)}Input,
+) -> Result<{pascal_case(name)}Output, BaseError> {{
+    Err(BaseError::ConfigError(
+        "{action_type} 尚未实现".to_string(),
+    ))
 }}
-{register}'''
+'''
 
 
 def insert_module(manifest: str, name: str) -> str:
@@ -101,28 +71,17 @@ def insert_module(manifest: str, name: str) -> str:
     return prefix + line + manifest[position:]
 
 
-def register_in_actions_macro(manifest: str, name: str, action_type: str) -> str:
-    match = ACTIONS_MACRO_RE.search(manifest)
-    if not match:
-        raise ValueError("mod.rs 既没有 actions! 清单，也没有 scaffold 注册标记")
-    use_line = f"use {name}::{action_type};\n"
-    first_yang_use = manifest.find("use yang_base::")
-    if first_yang_use < 0:
-        raise ValueError("actions! 风格 mod.rs 缺少 yang_base import")
-    manifest = manifest[:first_yang_use] + use_line + manifest[first_yang_use:]
-    match = ACTIONS_MACRO_RE.search(manifest)
-    if not match:
-        raise ValueError("无法重新定位 actions! 清单")
-    values = [value.strip() for value in match.group("body").split(",") if value.strip()]
-    values.append(action_type)
-    replacement = f"yang_base::actions![{', '.join(values)}]"
-    return manifest[: match.start()] + replacement + manifest[match.end() :]
-
-
-def register_in_chain(manifest: str, name: str) -> str:
+def register_in_route_table(manifest: str, name: str, title: str, method: str, path: str) -> str:
     if REGISTRATION_MARKER not in manifest:
-        raise ValueError("register_all 风格 mod.rs 缺少 scaffold:action-registration 标记")
-    registration = f"    let module = {name}::register(module);\n"
+        raise ValueError("mod.rs 缺少 scaffold:action-registration 标记")
+    registration = (
+        "    let module = module\n"
+        f'        .action_fn(action_name("{name}")?, {name}::handle)\n'
+        f'        .route(HttpMethod::{http_method_variant(method)}, "{path}")\n'
+        f'        .display_name("{title}")\n'
+        f'        .description("TODO: 描述 {title} 的业务语义")\n'
+        "        .register();\n"
+    )
     return manifest.replace(
         REGISTRATION_MARKER,
         registration + REGISTRATION_MARKER,
@@ -151,18 +110,10 @@ def generate(
         raise ValueError(f"拒绝覆盖已存在文件 {target}")
 
     original = manifest_path.read_text(encoding="utf-8")
-    action_type = f"{pascal_case(name)}Action"
-    chained = REGISTRATION_MARKER in original
     updated = insert_module(original, name)
-    if chained:
-        updated = register_in_chain(updated, name)
-    else:
-        updated = register_in_actions_macro(updated, name, action_type)
+    updated = register_in_route_table(updated, name, title, method, path)
 
-    target.write_text(
-        action_source(name, title, method, path, chained),
-        encoding="utf-8",
-    )
+    target.write_text(action_source(name, title), encoding="utf-8")
     manifest_path.write_text(updated, encoding="utf-8")
     return target
 
@@ -173,31 +124,34 @@ def self_test() -> None:
         listed = root / "listed"
         listed.mkdir()
         (listed / "mod.rs").write_text(
-            "mod list;\n\nuse list::ListAction;\nuse yang_base::definition::Actions;\n"
-            "fn all() -> Actions { yang_base::actions![ListAction] }\n",
-            encoding="utf-8",
-        )
-        target = generate(listed, "archive", "归档", "POST", "/api/v1/archive")
-        manifest = (listed / "mod.rs").read_text(encoding="utf-8")
-        assert target.is_file() and "use archive::ArchiveAction;" in manifest
-        assert "actions![ListAction, ArchiveAction]" in manifest
-
-        chained = root / "chained"
-        chained.mkdir()
-        (chained / "mod.rs").write_text(
             "mod list;\nfn register_all(module: ModuleSpec) -> Result<ModuleSpec, BaseError> {\n"
             f"{REGISTRATION_MARKER}\n    Ok(module)\n}}\n",
             encoding="utf-8",
         )
-        generate(chained, "disable", "停用", "PATCH", "/api/v1/disable")
-        manifest = (chained / "mod.rs").read_text(encoding="utf-8")
-        assert "let module = disable::register(module);" in manifest
+        target = generate(listed, "archive", "归档", "POST", "/api/v1/archive")
+        manifest = (listed / "mod.rs").read_text(encoding="utf-8")
+        source = target.read_text(encoding="utf-8")
+        assert target.is_file() and "mod archive;" in manifest
+        assert '.action_fn(action_name("archive")?, archive::handle)' in manifest
+        assert '.route(HttpMethod::Post, "/api/v1/archive")' in manifest
+        assert "pub(super) async fn handle(" in source
+        assert "尚未实现" in source
         try:
-            generate(chained, "disable", "停用", "PATCH", "/api/v1/disable")
+            generate(listed, "archive", "归档", "POST", "/api/v1/archive")
         except ValueError as error:
             assert "拒绝覆盖" in str(error)
         else:
             raise AssertionError("生成器必须拒绝覆盖")
+
+        no_marker = root / "no_marker"
+        no_marker.mkdir()
+        (no_marker / "mod.rs").write_text("mod list;\n", encoding="utf-8")
+        try:
+            generate(no_marker, "disable", "停用", "PATCH", "/api/v1/disable")
+        except ValueError as error:
+            assert "scaffold:action-registration" in str(error)
+        else:
+            raise AssertionError("缺少注册标记的 mod.rs 必须被拒绝")
 
 
 def main() -> int:
