@@ -1,11 +1,12 @@
+//! 为通用 TableView 提供标准分页数据。
+
 use super::super::model::{DemoItem, DemoItems};
-use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use yang_base::action::{Action as ActionHandler, ActionContext};
-use yang_base::definition::{ModuleSpec, ParamInput, Params, SortDirection};
-use yang_base::{Action, BaseError};
+use yang_base::action::ActionContext;
+use yang_base::definition::{ParamInput, Params, SortDirection};
+use yang_base::BaseError;
 
 fn default_page() -> usize {
     1
@@ -17,14 +18,14 @@ fn default_page_size() -> usize {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct DemoOrder {
+pub(super) struct DemoOrder {
     field: String,
     direction: SortDirection,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ListInput {
+pub(super) struct ListInput {
     #[serde(default = "default_page")]
     page: usize,
     #[serde(default = "default_page_size")]
@@ -46,24 +47,11 @@ impl ParamInput for ListInput {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct ListOutput {
+pub(super) struct ListOutput {
     items: Vec<DemoItem>,
     page: usize,
     page_size: usize,
     total: Option<usize>,
-}
-
-#[derive(Debug, Action)]
-#[action(
-    name = "list",
-    display_name = "项目列表数据",
-    description = "为通用 TableView 提供标准分页数据",
-    method = "POST",
-    path = "/api/v1/demo/items/query",
-    public
-)]
-struct ListAction {
-    items: DemoItems,
 }
 
 fn item_value(item: &DemoItem, field: &str) -> Option<Value> {
@@ -91,71 +79,60 @@ fn matches_condition(item: &DemoItem, condition: &yang_base::table::WhereConditi
     }
 }
 
-#[async_trait]
-impl ActionHandler for ListAction {
-    type Input = ListInput;
-    type Output = ListOutput;
-
-    async fn index(
-        &self,
-        _context: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        if input.page == 0 || input.page_size == 0 || input.page_size > 100 {
-            return Err(BaseError::ParamInvalid(
-                "page/page_size".to_string(),
-                "page>=1, 1<=page_size<=100".to_string(),
-            ));
-        }
-        let mut items = self
-            .items
-            .read()
-            .await
-            .iter()
-            .filter(|item| match input.search.as_ref() {
-                Some(search) => item
-                    .name
-                    .to_lowercase()
-                    .contains(&search.trim().to_lowercase()),
-                None => true,
-            })
-            .filter(|item| match input.where_clause.as_ref() {
-                Some(condition) => matches_condition(item, condition),
-                None => true,
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for order in input.order_by.iter().rev() {
-            items.sort_by(|left, right| {
-                let ordering = match order.field.as_str() {
-                    "name" => left.name.cmp(&right.name),
-                    "status" => left.status.cmp(&right.status),
-                    "id" => left.id.cmp(&right.id),
-                    _ => std::cmp::Ordering::Equal,
-                };
-                if order.direction == SortDirection::Desc {
-                    ordering.reverse()
-                } else {
-                    ordering
-                }
-            });
-        }
-        let total = items.len();
-        let start = input.page.saturating_sub(1).saturating_mul(input.page_size);
-        let items = items
-            .into_iter()
-            .skip(start)
-            .take(input.page_size)
-            .collect();
-        Ok(ListOutput {
-            items,
-            page: input.page,
-            page_size: input.page_size,
-            total: input.count_total.then_some(total),
-        })
+pub(super) async fn handle(
+    _ctx: ActionContext,
+    input: ListInput,
+    items: DemoItems,
+) -> Result<ListOutput, BaseError> {
+    if input.page == 0 || input.page_size == 0 || input.page_size > 100 {
+        return Err(BaseError::ParamInvalid(
+            "page/page_size".to_string(),
+            "page>=1, 1<=page_size<=100".to_string(),
+        ));
     }
-}
-
-pub(super) fn register(module: ModuleSpec, items: DemoItems) -> ModuleSpec {
-    module.native_action(ListAction { items })
+    let mut items = items
+        .read()
+        .await
+        .iter()
+        .filter(|item| match input.search.as_ref() {
+            Some(search) => item
+                .name
+                .to_lowercase()
+                .contains(&search.trim().to_lowercase()),
+            None => true,
+        })
+        .filter(|item| match input.where_clause.as_ref() {
+            Some(condition) => matches_condition(item, condition),
+            None => true,
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for order in input.order_by.iter().rev() {
+        items.sort_by(|left, right| {
+            let ordering = match order.field.as_str() {
+                "name" => left.name.cmp(&right.name),
+                "status" => left.status.cmp(&right.status),
+                "id" => left.id.cmp(&right.id),
+                _ => std::cmp::Ordering::Equal,
+            };
+            if order.direction == SortDirection::Desc {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+    }
+    let total = items.len();
+    let start = input.page.saturating_sub(1).saturating_mul(input.page_size);
+    let items = items
+        .into_iter()
+        .skip(start)
+        .take(input.page_size)
+        .collect();
+    Ok(ListOutput {
+        items,
+        page: input.page,
+        page_size: input.page_size,
+        total: input.count_total.then_some(total),
+    })
 }

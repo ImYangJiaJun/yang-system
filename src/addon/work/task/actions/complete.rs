@@ -1,14 +1,13 @@
 //! 受上限保护、租户原子的批量完成 Action。
 
-use super::super::repository;
-use async_trait::async_trait;
+use super::super::domain::repository;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use yang_base::action::{Action as ActionHandler, ActionContext};
+use yang_base::action::ActionContext;
 use yang_base::definition::{ParamInput, Params};
 use yang_base::table::Record;
-use yang_base::{Action, BaseError};
+use yang_base::BaseError;
 
 const MAX_BULK_TASKS: usize = 100;
 
@@ -30,57 +29,39 @@ pub(crate) struct CompleteTasksOutput {
     affected: u64,
 }
 
-#[derive(Debug, Action)]
-#[action(
-    name = "complete",
-    display_name = "批量完成",
-    description = "一次将最多 100 个当前工作区任务标记为完成",
-    method = "POST",
-    path = "/api/v1/work/tasks/complete",
-    permissions("work.task:write")
-)]
-pub(in crate::addon::work::task) struct CompleteTasksAction;
-
-#[async_trait]
-impl ActionHandler for CompleteTasksAction {
-    type Input = CompleteTasksInput;
-    type Output = CompleteTasksOutput;
-
-    async fn index(
-        &self,
-        context: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        let ids = selected_ids(&input.selected)?;
-        let values = ids
-            .iter()
-            .map(|id| serde_json::json!(id))
-            .collect::<Vec<_>>();
-        let requested = u64::try_from(ids.len())
-            .map_err(|_| BaseError::Unknown("批量任务数量超出 u64".to_string()))?;
-        // tenant-boundary: transaction work-task-complete-transaction
-        let mut transaction = context.begin_transaction().await?;
-        let result = async {
-            repository::lock_workspace(&context, &mut transaction).await?;
-            repository::lock_tasks_for_completion(&context, &ids, &mut transaction).await?;
-            let affected = context
-                .table_query()?
-                .where_in("id", values)?
-                .update_in_tx(&mut transaction, Record::new().set("status", "done"))
-                .await?;
-            if affected != requested {
-                return Err(BaseError::from(yang_db::DbError::TransactionError(
-                    "批量完成期间任务集合发生变化，已整体回滚".to_string(),
-                )));
-            }
-            Ok(CompleteTasksOutput {
-                requested: ids.len(),
-                affected,
-            })
+pub(super) async fn handle(
+    ctx: ActionContext,
+    input: CompleteTasksInput,
+) -> Result<CompleteTasksOutput, BaseError> {
+    let ids = selected_ids(&input.selected)?;
+    let values = ids
+        .iter()
+        .map(|id| serde_json::json!(id))
+        .collect::<Vec<_>>();
+    let requested = u64::try_from(ids.len())
+        .map_err(|_| BaseError::Unknown("批量任务数量超出 u64".to_string()))?;
+    // tenant-boundary: transaction work-task-complete-transaction
+    let mut transaction = ctx.begin_transaction().await?;
+    let result = async {
+        repository::lock_workspace(&ctx, &mut transaction).await?;
+        repository::lock_tasks_for_completion(&ctx, &ids, &mut transaction).await?;
+        let affected = ctx
+            .table_query()?
+            .where_in("id", values)?
+            .update_in_tx(&mut transaction, Record::new().set("status", "done"))
+            .await?;
+        if affected != requested {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                "批量完成期间任务集合发生变化，已整体回滚".to_string(),
+            )));
         }
-        .await;
-        repository::finish_transaction(transaction, result).await
+        Ok(CompleteTasksOutput {
+            requested: ids.len(),
+            affected,
+        })
     }
+    .await;
+    repository::finish_transaction(transaction, result).await
 }
 
 fn selected_ids(selected: &[Record]) -> Result<Vec<i64>, BaseError> {

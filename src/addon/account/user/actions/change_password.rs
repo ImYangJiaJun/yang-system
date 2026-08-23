@@ -1,11 +1,12 @@
-use super::super::policy::{PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH};
-use super::super::service::UserService;
-use async_trait::async_trait;
+//! 校验当前密码并使已有会话失效。
+
+use super::super::domain::policy::{PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH};
+use super::super::domain::service::UserService;
 use std::sync::Arc;
 use yang_base::action::auth::BrowserSession;
-use yang_base::action::{Action as ActionHandler, ActionContext, ApiResponse};
-use yang_base::definition::{ModuleSpec, Password};
-use yang_base::{Action, BaseError};
+use yang_base::action::{ActionContext, ApiResponse};
+use yang_base::definition::Password;
+use yang_base::BaseError;
 
 yang_base::params! {
     #[deny_unknown_fields]
@@ -23,49 +24,24 @@ yang_base::params! {
     }
 }
 
-#[derive(Action)]
-#[action(
-    name = "change_password",
-    display_name = "修改密码",
-    description = "校验当前密码并使已有会话失效",
-    method = "POST",
-    path = "/api/v1/users/change-password"
-)]
-struct ChangePasswordAction {
+pub(super) async fn handle(
+    ctx: ActionContext,
+    input: ChangePasswordInput,
     service: Arc<UserService>,
-}
-
-#[async_trait]
-impl ActionHandler for ChangePasswordAction {
-    type Input = ChangePasswordInput;
-    type Output = ApiResponse;
-
-    async fn index(
-        &self,
-        ctx: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        let secure = BrowserSession::validate_same_origin(&ctx.request)?;
-        let user_id = ctx
-            .authenticated_user()
-            .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
-            .id;
-        self.service
-            .change_password(&ctx, user_id, &input.old_password, &input.new_password)
-            .await?;
-        change_password_response(secure)
-    }
+) -> Result<ApiResponse, BaseError> {
+    let secure = BrowserSession::validate_same_origin(&ctx.request)?;
+    let user_id = ctx
+        .authenticated_user()
+        .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
+        .id;
+    service
+        .change_password(&ctx, user_id, &input.old_password, &input.new_password)
+        .await?;
+    change_password_response(secure)
 }
 
 fn change_password_response(secure: bool) -> Result<ApiResponse, BaseError> {
     super::super::browser_session().relogin_response("密码已修改，请重新登录", secure)
-}
-
-pub(super) fn register(
-    module: ModuleSpec,
-    service: Arc<UserService>,
-) -> Result<ModuleSpec, BaseError> {
-    Ok(module.native_action(ChangePasswordAction { service }))
 }
 
 #[cfg(test)]

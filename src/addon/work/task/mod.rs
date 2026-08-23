@@ -1,10 +1,8 @@
 //! `work.task` Module：具备树、关系、批量操作和双 View 的任务模型。
 
 mod actions;
-mod repository;
-mod view;
+mod domain;
 
-use yang_base::action::builtin::DelAction;
 use yang_base::definition::{
     Fields, Module, ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Table, TableName,
     TableSpec, Timestamp,
@@ -134,18 +132,10 @@ pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
             .description("在树形大纲与分页清单中维护个人任务")
             .order(50),
     );
-    for view in view::build_all()? {
+    for view in domain::build_views()? {
         module = module.view(view);
     }
-    let module = module
-        .native_action(actions::TaskOptionsAction::new()?)
-        .native_action(actions::CompleteTasksAction);
-    module.crud_at_with_mutations(
-        "/api/v1/work/tasks",
-        actions::AddTaskAction,
-        actions::PutTaskAction,
-        DelAction::new(),
-    )
+    actions::register_all(module)
 }
 
 #[cfg(test)]
@@ -201,5 +191,31 @@ mod tests {
                 .as_deref(),
             Some("work_task.id")
         );
+    }
+
+    #[test]
+    fn functional_mutations_keep_table_driven_crud_contracts() {
+        let module = build_module().unwrap_or_else(|error| panic!("任务 Module 应构建: {error}"));
+        let action = |name: &str| {
+            module
+                .actions()
+                .iter()
+                .find(|action| action.name.as_str() == name)
+                .unwrap_or_else(|| panic!("应存在 work.task.{name}"))
+        };
+        assert_eq!(action("add").success_status, 201);
+        for name in ["add", "put"] {
+            let spec = action(name);
+            assert!(
+                spec.input_schema["properties"].is_object()
+                    && !spec.input_schema["properties"]
+                        .as_object()
+                        .unwrap_or_else(|| panic!("properties 应为对象"))
+                        .is_empty(),
+                "{name} 的输入 Schema 应由表定义驱动而非函数式占位: {}",
+                spec.input_schema
+            );
+            assert_eq!(spec.permissions, ["work.task:write"]);
+        }
     }
 }

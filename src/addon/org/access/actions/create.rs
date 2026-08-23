@@ -1,11 +1,10 @@
 //! 创建企业并建立初始成员关系。
 
-use super::super::service::{TenantService, TenantSummary};
-use async_trait::async_trait;
+use super::super::domain::service::{TenantService, TenantSummary};
 use std::sync::Arc;
-use yang_base::action::{Action as ActionHandler, ActionContext};
-use yang_base::definition::{ModuleSpec, Str};
-use yang_base::{Action, BaseError};
+use yang_base::action::ActionContext;
+use yang_base::definition::Str;
+use yang_base::BaseError;
 
 yang_base::params! {
     #[deny_unknown_fields]
@@ -15,36 +14,10 @@ yang_base::params! {
     }
 }
 
-#[derive(Action)]
-#[action(
-    name = "create",
-    display_name = "创建企业",
-    description = "原子创建企业与当前用户的初始成员关系",
-    method = "POST",
-    path = "/api/v1/tenants",
-    success_status = 201
-)]
-struct TenantCreateAction {
+pub(super) async fn handle(
+    ctx: ActionContext,
+    input: TenantCreateInput,
     service: Arc<TenantService>,
-}
-
-#[async_trait]
-impl ActionHandler for TenantCreateAction {
-    type Input = TenantCreateInput;
-    type Output = TenantSummary;
-
-    async fn index(
-        &self,
-        ctx: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        self.service.create(&ctx, &input.name, &input.code).await
-    }
-}
-
-pub(super) fn register(
-    module: ModuleSpec,
-    service: Arc<TenantService>,
-) -> Result<ModuleSpec, BaseError> {
-    Ok(module.native_action(TenantCreateAction { service }))
+) -> Result<TenantSummary, BaseError> {
+    service.create(&ctx, &input.name, &input.code).await
 }

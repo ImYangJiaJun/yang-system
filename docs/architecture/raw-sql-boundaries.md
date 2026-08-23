@@ -22,11 +22,11 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；领域仓储
 
 | ID | 类型 | 文件 | 保留原因与不变量 |
 |---|---|---|---|
-| `work-task-repository` | domain-repository | `src/addon/work/task/repository.rs` | 任务关系递归 CTE 防环与 `JSON_TABLE` + `FOR UPDATE OF` 批量锁是构造器无法表达的方言特性；普通行锁读已改用构造器 |
+| `work-task-repository` | domain-repository | `src/addon/work/task/domain/repository.rs` | 任务关系递归 CTE 防环与 `JSON_TABLE` + `FOR UPDATE OF` 批量锁是构造器无法表达的方言特性；普通行锁读已改用构造器 |
 | `audit-schema-validator` | schema-validator | `src/infrastructure/audit/schema.rs` | 启动期只读 `information_schema`，验证审计表不可变约束 |
 | `authorization-outbox` | infrastructure-repository | `src/infrastructure/authorization/outbox.rs` | claim/lease/retry 状态机必须使用 `FOR UPDATE SKIP LOCKED`、内省与条件更新 |
 
-<!-- raw-sql-boundary: domain-repository work-task-repository src/addon/work/task/repository.rs -->
+<!-- raw-sql-boundary: domain-repository work-task-repository src/addon/work/task/domain/repository.rs -->
 <!-- raw-sql-boundary: schema-validator audit-schema-validator src/infrastructure/audit/schema.rs -->
 <!-- raw-sql-boundary: infrastructure-repository authorization-outbox src/infrastructure/authorization/outbox.rs -->
 

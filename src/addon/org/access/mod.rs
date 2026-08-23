@@ -1,13 +1,12 @@
 //! `org.tenant` pre-tenant 入口：在注入租户上下文之前发现与创建企业。
 
 mod actions;
-mod repository;
-mod service;
+mod domain;
 
 use crate::addon::account;
 use crate::authorization::AuthorizationVersionValidator;
-use repository::TenantRepository;
-use service::TenantService;
+use domain::repository::TenantRepository;
+use domain::service::TenantService;
 use std::sync::Arc;
 use yang_base::action::TokenAuthMiddleware;
 use yang_base::definition::{

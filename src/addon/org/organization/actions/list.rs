@@ -1,12 +1,11 @@
 //! 企业列表 Action。
 
-use super::super::model::OrganizationView;
-use super::super::query::scoped_org_tables;
-use crate::addon::org::pagination::{Page, PageRequest};
-use async_trait::async_trait;
-use yang_base::action::{Action as ActionHandler, ActionContext};
+use super::super::domain::model::OrganizationView;
+use super::super::domain::query::scoped_org_tables;
+use crate::addon::org::domain::{Page, PageRequest};
+use yang_base::action::ActionContext;
 use yang_base::definition::{Int, Str};
-use yang_base::{Action, BaseError};
+use yang_base::BaseError;
 
 yang_base::params! {
     /// 企业列表查询参数。
@@ -21,39 +20,21 @@ yang_base::params! {
     }
 }
 
-#[derive(Action)]
-#[action(
-    name = "list",
-    display_name = "企业列表",
-    description = "使用标准 Tables 分页、搜索和排序链查询企业",
-    method = "GET",
-    path = "/api/v1/orgs",
-    permissions("org.org:read")
-)]
-pub(super) struct OrgListAction;
-
-#[async_trait]
-impl ActionHandler for OrgListAction {
-    type Input = OrgListInput;
-    type Output = Page<OrganizationView>;
-
-    async fn index(
-        &self,
-        ctx: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        let request = PageRequest::parse(input.page, input.limit)?;
-        let result = scoped_org_tables(&ctx)?
-            .search(input.search.as_deref())?
-            .order("created_at", yang_base::table::SortOrder::Desc)?
-            .page(request.page, request.limit)?
-            .table_list()
-            .await?;
-        let items = result
-            .data
-            .iter()
-            .map(OrganizationView::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Page::new(items, result.total, request))
-    }
+pub(super) async fn handle(
+    ctx: ActionContext,
+    input: OrgListInput,
+) -> Result<Page<OrganizationView>, BaseError> {
+    let request = PageRequest::parse(input.page, input.limit)?;
+    let result = scoped_org_tables(&ctx)?
+        .search(input.search.as_deref())?
+        .order("created_at", yang_base::table::SortOrder::Desc)?
+        .page(request.page, request.limit)?
+        .table_list()
+        .await?;
+    let items = result
+        .data
+        .iter()
+        .map(OrganizationView::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Page::new(items, result.total, request))
 }

@@ -1,14 +1,11 @@
 //! `admin.user` Module：平台账号定义。
 
 mod actions;
-mod model;
-mod repository;
-mod service;
+mod domain;
 
 use crate::addon::account::AuthRateLimiter;
 use crate::config::SecuritySettings;
-use repository::AdminRepository;
-use service::AdminService;
+use domain::{AdminRepository, AdminService};
 use std::sync::Arc;
 use yang_base::definition::{
     ActionInteraction, ActionPlacement, ActionPresentationSpec, ActionRef, Fields, Module,
@@ -17,7 +14,7 @@ use yang_base::definition::{
 };
 use yang_base::BaseError;
 
-pub(crate) use repository::AdminSystemOwnerClaimer;
+pub(crate) use domain::AdminSystemOwnerClaimer;
 
 pub(super) const USER_ID: &str = "user_user";
 pub(super) const NAME: &str = "name";
@@ -119,7 +116,7 @@ pub(super) fn build_module(security: &SecuritySettings) -> Result<ModuleSpec, Ba
         password_reset_enabled,
     ));
     Ok(
-        actions::register_all(module, service, password_reset_enabled).presentation(
+        actions::register_all(module, service, password_reset_enabled)?.presentation(
             ModulePresentationSpec::new(
                 crate::addon::administrator_identity(),
                 "平台账号",

@@ -1,14 +1,15 @@
-use super::super::policy::{
+//! 创建一个新用户。
+
+use super::super::domain::policy::{
     PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH,
     USERNAME_PATTERN,
 };
-use super::super::schema::UserView;
-use super::super::service::UserService;
-use async_trait::async_trait;
+use super::super::domain::schema::UserView;
+use super::super::domain::service::UserService;
 use std::sync::Arc;
-use yang_base::action::{Action as ActionHandler, ActionContext};
-use yang_base::definition::{ModuleSpec, Password, Str};
-use yang_base::{Action, BaseError};
+use yang_base::action::ActionContext;
+use yang_base::definition::{Password, Str};
+use yang_base::BaseError;
 
 yang_base::params! {
     #[deny_unknown_fields]
@@ -38,47 +39,20 @@ yang_base::params! {
     }
 }
 
-#[derive(Action)]
-#[action(
-    name = "register",
-    display_name = "注册用户",
-    description = "创建一个新用户",
-    method = "POST",
-    path = "/api/v1/users/register",
-    success_status = 201,
-    public
-)]
-struct RegisterAction {
+pub(super) async fn handle(
+    ctx: ActionContext,
+    input: RegisterInput,
     service: Arc<UserService>,
-}
-
-#[async_trait]
-impl ActionHandler for RegisterAction {
-    type Input = RegisterInput;
-    type Output = UserView;
-
-    async fn index(
-        &self,
-        ctx: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        self.service
-            .register(
-                &ctx,
-                &input.username,
-                &input.password,
-                &input.email,
-                &input.email_code,
-            )
-            .await
-    }
-}
-
-pub(super) fn register(
-    module: ModuleSpec,
-    service: Arc<UserService>,
-) -> Result<ModuleSpec, BaseError> {
-    Ok(module.native_action(RegisterAction { service }))
+) -> Result<UserView, BaseError> {
+    service
+        .register(
+            &ctx,
+            &input.username,
+            &input.password,
+            &input.email,
+            &input.email_code,
+        )
+        .await
 }
 
 #[cfg(test)]

@@ -1,9 +1,8 @@
 //! 个人任务规划 Addon 的公开组装入口。
 
-mod grants;
+mod domain;
 mod project;
 mod task;
-mod tenant;
 
 use crate::addon::account;
 use crate::authorization::AuthorizationVersionValidator;
@@ -11,7 +10,7 @@ use yang_base::action::{TenantResolverMiddleware, TokenAuthMiddleware};
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
-pub(crate) use grants::grant_resolver;
+pub(crate) use domain::grant_resolver;
 
 /// 构建个人任务规划 Addon。
 ///
@@ -26,7 +25,7 @@ pub fn build_addon(
                 .with_claims_validator(authorization_validator.clone()),
         )
         .middleware(TenantResolverMiddleware::new(
-            tenant::PersonalWorkspaceResolver,
+            domain::PersonalWorkspaceResolver,
         ));
     let task = task::build_module()?
         .middleware(
@@ -34,7 +33,7 @@ pub fn build_addon(
                 .with_claims_validator(authorization_validator),
         )
         .middleware(TenantResolverMiddleware::new(
-            tenant::PersonalWorkspaceResolver,
+            domain::PersonalWorkspaceResolver,
         ));
 
     Ok(AddonSpec::new(yang_base::addon!("work"))

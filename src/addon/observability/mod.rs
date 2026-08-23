@@ -1,6 +1,7 @@
 //! 浏览器到后端的诊断关联边界。
 
 mod actions;
+mod domain;
 
 use crate::addon::account::user_from_claims;
 use crate::authorization::AuthorizationVersionValidator;
@@ -18,5 +19,5 @@ pub fn build_addon(
     .middleware(
         TokenAuthMiddleware::new(user_from_claims).with_claims_validator(authorization_validator),
     );
-    Ok(AddonSpec::new(yang_base::addon!("system")).module(actions::register_all(module)))
+    Ok(AddonSpec::new(yang_base::addon!("system")).module(actions::register_all(module)?))
 }

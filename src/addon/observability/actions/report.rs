@@ -1,15 +1,12 @@
 //! 接收已认证浏览器的最小化错误指纹，不接收错误正文或堆栈。
 
-use async_trait::async_trait;
+use super::super::domain::FrontendErrorRateLimiter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
-use yang_base::action::{Action as ActionHandler, ActionContext};
-use yang_base::definition::{ModuleSpec, ParamInput, Params};
-use yang_base::{Action, BaseError};
+use yang_base::action::ActionContext;
+use yang_base::definition::{ParamInput, Params};
+use yang_base::BaseError;
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -37,7 +34,7 @@ impl FrontendErrorKind {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct FrontendErrorInput {
+pub(super) struct FrontendErrorInput {
     event_id: String,
     kind: FrontendErrorKind,
     route: String,
@@ -123,124 +120,54 @@ impl FrontendErrorInput {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct FrontendErrorAccepted {
+pub(super) struct FrontendErrorAccepted {
     accepted: bool,
 }
 
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-const RATE_LIMIT_PER_USER: u32 = 30;
-const MAX_TRACKED_USERS: usize = 4096;
-
-#[derive(Debug)]
-struct RateWindow {
-    started_at: Instant,
-    count: u32,
-}
-
-#[derive(Debug, Default)]
-struct FrontendErrorRateLimiter {
-    windows: Mutex<HashMap<i64, RateWindow>>,
-}
-
-impl FrontendErrorRateLimiter {
-    async fn check(&self, actor_id: i64) -> Result<(), BaseError> {
-        let now = Instant::now();
-        let mut windows = self.windows.lock().await;
-        if windows.len() >= MAX_TRACKED_USERS && !windows.contains_key(&actor_id) {
-            windows.retain(|_, window| now.duration_since(window.started_at) < RATE_LIMIT_WINDOW);
-            if windows.len() >= MAX_TRACKED_USERS {
-                return Err(BaseError::RateLimitExceeded {
-                    retry_after_seconds: RATE_LIMIT_WINDOW.as_secs(),
-                });
-            }
-        }
-        let window = windows.entry(actor_id).or_insert(RateWindow {
-            started_at: now,
-            count: 0,
-        });
-        let elapsed = now.duration_since(window.started_at);
-        if elapsed >= RATE_LIMIT_WINDOW {
-            window.started_at = now;
-            window.count = 0;
-        }
-        if window.count >= RATE_LIMIT_PER_USER {
-            return Err(BaseError::RateLimitExceeded {
-                retry_after_seconds: RATE_LIMIT_WINDOW.saturating_sub(elapsed).as_secs().max(1),
-            });
-        }
-        window.count += 1;
-        Ok(())
-    }
-}
-
-#[derive(Action)]
-#[action(
-    name = "report_frontend_error",
-    display_name = "上报前端错误",
-    description = "记录已认证浏览器的无敏感正文错误指纹与后端请求关联",
-    method = "POST",
-    path = "/api/v1/observability/frontend-errors"
-)]
-struct FrontendErrorReportAction {
+pub(super) async fn handle(
+    ctx: ActionContext,
+    input: FrontendErrorInput,
     rate_limiter: Arc<FrontendErrorRateLimiter>,
-}
+) -> Result<FrontendErrorAccepted, BaseError> {
+    input.validate()?;
+    let actor_id = ctx
+        .authenticated_user()
+        .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
+        .id;
+    rate_limiter.check(actor_id).await?;
+    let request_id = ctx.request_id();
+    let related_request_id = input.related_request_id.as_deref().unwrap_or("");
+    let operation = input.operation.as_deref().unwrap_or("");
+    let status = input.status.unwrap_or(0);
+    let error_code = input.error_code.unwrap_or(0);
+    let linked = if input.related_request_id.is_some() {
+        "true"
+    } else {
+        "false"
+    };
 
-#[async_trait]
-impl ActionHandler for FrontendErrorReportAction {
-    type Input = FrontendErrorInput;
-    type Output = FrontendErrorAccepted;
+    tracing::error!(
+        event_type = "frontend.error",
+        %request_id,
+        %related_request_id,
+        client_event_id = %input.event_id,
+        frontend_kind = input.kind.as_str(),
+        frontend_route = %input.route,
+        frontend_operation = %operation,
+        frontend_status = status,
+        frontend_error_code = error_code,
+        frontend_fingerprint = %input.fingerprint,
+        actor_id,
+        "前端错误上报"
+    );
+    metrics::counter!(
+        "yang_system_frontend_errors_total",
+        "kind" => input.kind.as_str(),
+        "linked" => linked
+    )
+    .increment(1);
 
-    async fn index(
-        &self,
-        ctx: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        input.validate()?;
-        let actor_id = ctx
-            .authenticated_user()
-            .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
-            .id;
-        self.rate_limiter.check(actor_id).await?;
-        let request_id = ctx.request_id();
-        let related_request_id = input.related_request_id.as_deref().unwrap_or("");
-        let operation = input.operation.as_deref().unwrap_or("");
-        let status = input.status.unwrap_or(0);
-        let error_code = input.error_code.unwrap_or(0);
-        let linked = if input.related_request_id.is_some() {
-            "true"
-        } else {
-            "false"
-        };
-
-        tracing::error!(
-            event_type = "frontend.error",
-            %request_id,
-            %related_request_id,
-            client_event_id = %input.event_id,
-            frontend_kind = input.kind.as_str(),
-            frontend_route = %input.route,
-            frontend_operation = %operation,
-            frontend_status = status,
-            frontend_error_code = error_code,
-            frontend_fingerprint = %input.fingerprint,
-            actor_id,
-            "前端错误上报"
-        );
-        metrics::counter!(
-            "yang_system_frontend_errors_total",
-            "kind" => input.kind.as_str(),
-            "linked" => linked
-        )
-        .increment(1);
-
-        Ok(FrontendErrorAccepted { accepted: true })
-    }
-}
-
-pub(super) fn register(module: ModuleSpec) -> ModuleSpec {
-    module.native_action(FrontendErrorReportAction {
-        rate_limiter: Arc::new(FrontendErrorRateLimiter::default()),
-    })
+    Ok(FrontendErrorAccepted { accepted: true })
 }
 
 fn validate_ascii(
@@ -311,18 +238,5 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<FrontendErrorInput>(payload).is_err());
-    }
-
-    #[tokio::test]
-    async fn rate_limiter_bounds_authenticated_log_amplification() {
-        let limiter = FrontendErrorRateLimiter::default();
-        for _ in 0..RATE_LIMIT_PER_USER {
-            assert!(limiter.check(7).await.is_ok());
-        }
-        assert!(matches!(
-            limiter.check(7).await,
-            Err(BaseError::RateLimitExceeded { .. })
-        ));
-        assert!(limiter.check(8).await.is_ok());
     }
 }

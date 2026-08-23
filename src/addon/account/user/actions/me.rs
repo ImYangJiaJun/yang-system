@@ -1,16 +1,17 @@
-use super::super::schema::UserView;
-use super::super::service::UserService;
-use async_trait::async_trait;
+//! 读取当前已认证用户。
+
+use super::super::domain::schema::UserView;
+use super::super::domain::service::UserService;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
-use yang_base::action::{Action as ActionHandler, ActionContext};
-use yang_base::definition::{ModuleSpec, ParamInput, Params};
-use yang_base::{Action, BaseError};
+use yang_base::action::ActionContext;
+use yang_base::definition::{ParamInput, Params};
+use yang_base::BaseError;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct EmptyInput {}
+pub(super) struct EmptyInput {}
 
 impl ParamInput for EmptyInput {
     fn params() -> Params {
@@ -18,46 +19,21 @@ impl ParamInput for EmptyInput {
     }
 }
 
-#[derive(Action)]
-#[action(
-    name = "me",
-    display_name = "当前用户",
-    description = "读取当前已认证用户",
-    method = "GET",
-    path = "/api/v1/users/me"
-)]
-struct MeAction {
+pub(super) async fn handle(
+    ctx: ActionContext,
+    _input: EmptyInput,
     service: Arc<UserService>,
-}
-
-#[async_trait]
-impl ActionHandler for MeAction {
-    type Input = EmptyInput;
-    type Output = UserView;
-
-    async fn index(
-        &self,
-        ctx: ActionContext,
-        _input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        let id = ctx
-            .authenticated_user()
-            .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
-            .id;
-        self.service.view_by_id(&ctx, id).await
-    }
-}
-
-pub(super) fn register(
-    module: ModuleSpec,
-    service: Arc<UserService>,
-) -> Result<ModuleSpec, BaseError> {
-    Ok(module.native_action(MeAction { service }))
+) -> Result<UserView, BaseError> {
+    let id = ctx
+        .authenticated_user()
+        .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
+        .id;
+    service.view_by_id(&ctx, id).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::schema::{
+    use super::super::super::domain::schema::{
         CREATED_AT, PASSWORD_HASH, STATUS, UPDATED_AT, USERNAME, USER_ID,
     };
     use super::*;

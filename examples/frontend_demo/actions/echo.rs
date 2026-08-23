@@ -1,13 +1,14 @@
-use async_trait::async_trait;
+//! 用于验收默认 ActionDemo 的真实 HTTP 调用。
+
 use schemars::JsonSchema;
 use serde::Serialize;
-use yang_base::action::{Action as ActionHandler, ActionContext};
-use yang_base::definition::{ModuleSpec, Str};
-use yang_base::{Action, BaseError};
+use yang_base::action::ActionContext;
+use yang_base::definition::Str;
+use yang_base::BaseError;
 
 yang_base::params! {
     #[deny_unknown_fields]
-    EchoInput {
+    pub(super) EchoInput {
         message: Str::new()
             .title("消息")
             .description("服务端会原样返回该文本")
@@ -18,39 +19,14 @@ yang_base::params! {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-struct EchoOutput {
+pub(super) struct EchoOutput {
     message: String,
     length: usize,
 }
 
-#[derive(Debug, Action)]
-#[action(
-    name = "echo",
-    display_name = "回显输入",
-    description = "用于验收默认 ActionDemo 的真实 HTTP 调用",
-    method = "POST",
-    path = "/api/v1/demo/echo",
-    public
-)]
-struct EchoAction;
-
-#[async_trait]
-impl ActionHandler for EchoAction {
-    type Input = EchoInput;
-    type Output = EchoOutput;
-
-    async fn index(
-        &self,
-        _context: ActionContext,
-        input: Self::Input,
-    ) -> Result<Self::Output, BaseError> {
-        Ok(EchoOutput {
-            length: input.message.chars().count(),
-            message: input.message,
-        })
-    }
-}
-
-pub(super) fn register(module: ModuleSpec) -> ModuleSpec {
-    module.native_action(EchoAction)
+pub(super) async fn handle(_ctx: ActionContext, input: EchoInput) -> Result<EchoOutput, BaseError> {
+    Ok(EchoOutput {
+        length: input.message.chars().count(),
+        message: input.message,
+    })
 }

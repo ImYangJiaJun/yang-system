@@ -1,7 +1,6 @@
 //! 平台账号 Addon 的公开组装入口。
 
-mod grants;
-mod guard;
+mod domain;
 mod user;
 
 use crate::addon::account;
@@ -9,13 +8,13 @@ use crate::addon::account::GrantResolver;
 use crate::authorization::AuthorizationVersionValidator;
 use crate::authorization::{RequestFingerprintResolver, StepUpServices};
 use crate::config::SecuritySettings;
-use grants::AdminGrantResolver;
+use domain::AdminGrantResolver;
 use std::sync::Arc;
 use yang_base::action::TokenAuthMiddleware;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
-pub(crate) use guard::validate_system_owner_state;
+pub(crate) use domain::validate_system_owner_state;
 
 /// 返回平台账号域的 Token 授权解析器。
 pub(crate) fn grant_resolver() -> Arc<dyn GrantResolver> {

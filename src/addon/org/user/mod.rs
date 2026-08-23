@@ -1,9 +1,7 @@
 //! `org.user` Module：企业成员关系定义。
 
 mod actions;
-mod guard;
-mod repository;
-mod view;
+mod domain;
 
 use yang_base::definition::{
     ActionRef, Fields, Module, ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Switch,
@@ -102,7 +100,7 @@ impl Module for OrgUserModule {
 
 /// 构建成员 Module，并由框架统一生成标准 CRUD Action。
 pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
-    OrgUserModule
+    let module = OrgUserModule
         .into_spec()
         .presentation(
             ModulePresentationSpec::new(
@@ -113,13 +111,8 @@ pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
             .description("查询并维护当前企业成员")
             .order(30),
         )
-        .view(view::build()?)
-        .crud_at_with_mutations(
-            "/api/v1/org/users",
-            actions::AddMembershipAction,
-            actions::PutMembershipAction,
-            actions::DeleteMembershipAction,
-        )
+        .view(domain::build_list_view()?);
+    actions::register_all(module)
 }
 
 fn resource_authorizer_targets() -> [ActionRef; 3] {
@@ -137,7 +130,7 @@ pub(super) fn step_up_targets() -> [ActionRef; 3] {
 /// 在认证与租户解析之后，为每个成员 mutation 注册确定目标的资源授权器。
 pub(super) fn register_resource_authorizers(mut module: ModuleSpec) -> ModuleSpec {
     for target in resource_authorizer_targets() {
-        module = module.middleware(guard::OrgAdminGuardMiddleware::new(target));
+        module = module.middleware(domain::OrgAdminGuardMiddleware::new(target));
     }
     module
 }
@@ -206,5 +199,31 @@ mod tests {
             .map(|target| target.action().as_str().to_string())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(mutation_names, step_up_names);
+    }
+
+    #[test]
+    fn functional_mutations_keep_table_driven_crud_contracts() {
+        let module = build_module().unwrap_or_else(|error| panic!("成员模块应可构建: {error}"));
+        let action = |name: &str| {
+            module
+                .actions()
+                .iter()
+                .find(|action| action.name.as_str() == name)
+                .unwrap_or_else(|| panic!("应存在 org.user.{name}"))
+        };
+        assert_eq!(action("add").success_status, 201);
+        for name in ["add", "put", "del"] {
+            let spec = action(name);
+            assert!(
+                spec.input_schema["properties"].is_object()
+                    && !spec.input_schema["properties"]
+                        .as_object()
+                        .unwrap_or_else(|| panic!("properties 应为对象"))
+                        .is_empty(),
+                "{name} 的输入 Schema 应由表定义驱动而非函数式占位: {}",
+                spec.input_schema
+            );
+            assert_eq!(spec.permissions, ["org.user:write"]);
+        }
     }
 }

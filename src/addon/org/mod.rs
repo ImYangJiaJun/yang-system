@@ -1,17 +1,15 @@
 //! 企业 Addon 的公开组装入口。
 
 mod access;
-mod grants;
+mod domain;
 mod organization;
-mod pagination;
-mod tenant;
 mod user;
 
 use crate::addon::account;
 use crate::addon::account::GrantResolver;
 use crate::authorization::AuthorizationVersionValidator;
 use crate::authorization::{RequestFingerprintResolver, StepUpServices};
-use grants::OrgGrantResolver;
+use domain::OrgGrantResolver;
 use std::sync::Arc;
 use yang_base::action::{TenantResolverMiddleware, TokenAuthMiddleware};
 use yang_base::definition::AddonSpec;
@@ -30,7 +28,7 @@ pub fn build_addon(
     authorization_validator: AuthorizationVersionValidator,
     step_up: Option<StepUpServices>,
 ) -> Result<AddonSpec, BaseError> {
-    let organization = organization::build_module();
+    let organization = organization::build_module()?;
     let members = user::build_module()?;
     let organization_table = organization
         .table
@@ -42,7 +40,7 @@ pub fn build_addon(
         .as_ref()
         .ok_or(BaseError::TableDefinitionNotSet)?
         .table_definition()?;
-    let resolver = tenant::OrgTenantResolver::database();
+    let resolver = domain::OrgTenantResolver::database();
     let access = access::build_module(
         organization_table,
         membership_table,

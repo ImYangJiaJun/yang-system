@@ -1,20 +1,14 @@
 //! `account.user` Module 的定义与组装入口。
 
 mod actions;
-mod claims;
-mod lifecycle;
-mod policy;
-mod repository;
-mod schema;
-mod service;
-mod status;
+mod domain;
 
 use crate::addon::account::{GrantResolver, SystemOwnerClaimer};
 use crate::authorization::AuthorizationVersionValidator;
 use crate::authorization::{RequestFingerprintResolver, StepUpServices};
 use crate::config::SecuritySettings;
-use repository::UserRepository;
-use service::UserService;
+use domain::repository::UserRepository;
+use domain::service::UserService;
 use std::sync::Arc;
 use yang_base::action::auth::{BrowserSession, PasswordEngine};
 use yang_base::action::{TokenAuthMiddleware, UiCatalogAction};
@@ -25,8 +19,8 @@ use yang_base::definition::{
 use yang_base::transport::client_ip::TrustedClientIpMiddleware;
 use yang_base::BaseError;
 
-pub(crate) use claims::user_from_claims;
-pub(crate) use status::UserStatus;
+pub(crate) use domain::claims::user_from_claims;
+pub(crate) use domain::status::UserStatus;
 pub(crate) use yang_base::action::auth::{AuthOperation, AuthRateLimiter};
 
 /// 浏览器刷新会话 Cookie 名称（Host-only、HttpOnly、SameSite=Strict）。
@@ -49,7 +43,7 @@ pub(super) fn build_module(
     authorization_validator: AuthorizationVersionValidator,
     step_up: Option<StepUpServices>,
 ) -> Result<ModuleSpec, BaseError> {
-    let table = schema::user_table_spec()?;
+    let table = domain::schema::user_table_spec()?;
     let users = Arc::new(UserRepository::new(table.table_definition()?));
     let passwords = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
     let rate_limiter = Arc::new(AuthRateLimiter::new(security.rate_limit_config()));

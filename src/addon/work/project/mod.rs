@@ -1,7 +1,7 @@
 //! `work.project` Module：个人项目组合与关系选项。
 
 mod actions;
-mod view;
+mod domain;
 
 use yang_base::definition::{
     Fields, Module, ModuleName, ModulePresentationSpec, ModuleSpec, Radio, Str, Table, TableName,
@@ -81,16 +81,15 @@ impl Module for WorkProjectModule {
 }
 
 pub(super) fn build_module() -> Result<ModuleSpec, BaseError> {
-    WorkProjectModule
+    let module = WorkProjectModule
         .into_spec()
         .presentation(
             ModulePresentationSpec::new(crate::addon::user_identity(), "项目组合", "workspaces")
                 .description("维护个人项目，并作为任务关系选择的数据源")
                 .order(40),
         )
-        .view(view::build()?)
-        .native_action(actions::ProjectOptionsAction::new()?)
-        .crud_at("/api/v1/work/projects")
+        .view(domain::build_portfolio_view()?);
+    actions::register_all(module)?.crud_at("/api/v1/work/projects")
 }
 
 #[cfg(test)]

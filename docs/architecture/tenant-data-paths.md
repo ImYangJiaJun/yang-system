@@ -72,28 +72,28 @@ pre-tenant 模块，但仍强制认证。
 
 | ID | 类型 | 位置 | 收敛键/不变量 |
 |---|---|---|---|
-| `pre-tenant-table-database` | database | `org/access/repository.rs` | pre-tenant repository 获取无范围数据库能力的唯一 TableQuery 构造点 |
-| `pre-tenant-table-query` | unscoped-query | `org/access/repository.rs` | 只供 pre-tenant repository 使用；具体方法必须按 actor 收敛或在创建事务内写入新租户 |
-| `tenant-discovery-database` | database | `org/access/repository.rs` | 只供同函数内按 actor 收敛的租户发现查询构造使用 |
-| `org-onboarding-database` | database | `org/access/repository.rs` | 只供 onboarding 事务内用户授权行锁的查询构造；不读取租户数据 |
-| `tenant-onboarding-create` | transaction | `org/access/repository.rs` | 新组织尚无 tenant id；组织和创建者管理员成员关系同事务提交 |
-| `tenant-membership-capability-database` | database | `org/tenant.rs` | 只供单次租户 capability JOIN 查询使用；同时限定请求 `org_id`、已认证 `user_id`、active 成员与 active 企业，并投影当前 admin 事实 |
-| `member-admin-system` | system-capability | `org/user/guard.rs` | system 管理操作必须消费当前请求 capability，并核对 capability actor 与已认证用户一致；不授予数据查询旁路 |
-| `org-member-add-database` | database | `org/user/repository.rs` | 只供 add writer 开启显式事务并构造事务内行锁查询；普通租户仍由 `table_query()` 注入 tenant key |
-| `org-member-put-database` | database | `org/user/repository.rs` | 只供 put writer 开启显式事务并构造事务内行锁查询；成员锁和后续更新重复限定同一 capability |
-| `org-member-delete-database` | database | `org/user/repository.rs` | 只供 delete writer 开启显式事务并构造事务内行锁查询；成员锁和删除重复限定同一 capability |
-| `org-member-resource-resolve-database` | database | `org/user/repository.rs` | system capability 的 put/delete 在事务外只解析目标组织；事务内仍会重新按组织锁定目标成员 |
-| `org-member-resource-resolve-system` | system-capability | `org/user/repository.rs` | system 资源解析必须核对 capability actor 与已认证用户一致 |
-| `org-member-linearization-system` | system-capability | `org/user/repository.rs` | system 写事务在最终线性化点再次消费并核对 actor-bound capability |
-| `org-member-add-system` | system-capability | `org/user/repository.rs` | system add 必须显式提供目标组织，且组织存在并 active |
-| `org-member-lock-system` | system-capability | `org/user/repository.rs` | system put/delete 在无普通租户 capability 时必须显式消费 system capability |
-| `work-task-workspace-lock-database` | database | `work/task/repository.rs` | 任务关系写入先按可信 owner 锁定个人工作区，串行化同一用户的并发关系变更 |
-| `work-task-current-links-database` | database | `work/task/repository.rs` | 更新前按可信 owner 与任务 ID 锁定当前项目/父任务关系 |
-| `work-task-links-validation-database` | database | `work/task/repository.rs` | 锁定目标项目与父任务，并要求 owner 等于可信个人工作区 |
-| `work-task-cycle-check` | raw-sql | `work/task/repository.rs` | 递归链每层重复限定 owner，深度上限 100，并拒绝形成关系环 |
+| `pre-tenant-table-database` | database | `org/access/domain/repository.rs` | pre-tenant repository 获取无范围数据库能力的唯一 TableQuery 构造点 |
+| `pre-tenant-table-query` | unscoped-query | `org/access/domain/repository.rs` | 只供 pre-tenant repository 使用；具体方法必须按 actor 收敛或在创建事务内写入新租户 |
+| `tenant-discovery-database` | database | `org/access/domain/repository.rs` | 只供同函数内按 actor 收敛的租户发现查询构造使用 |
+| `org-onboarding-database` | database | `org/access/domain/repository.rs` | 只供 onboarding 事务内用户授权行锁的查询构造；不读取租户数据 |
+| `tenant-onboarding-create` | transaction | `org/access/domain/repository.rs` | 新组织尚无 tenant id；组织和创建者管理员成员关系同事务提交 |
+| `tenant-membership-capability-database` | database | `org/domain/tenant.rs` | 只供单次租户 capability JOIN 查询使用；同时限定请求 `org_id`、已认证 `user_id`、active 成员与 active 企业，并投影当前 admin 事实 |
+| `member-admin-system` | system-capability | `org/user/domain/guard.rs` | system 管理操作必须消费当前请求 capability，并核对 capability actor 与已认证用户一致；不授予数据查询旁路 |
+| `org-member-add-database` | database | `org/user/domain/repository.rs` | 只供 add writer 开启显式事务并构造事务内行锁查询；普通租户仍由 `table_query()` 注入 tenant key |
+| `org-member-put-database` | database | `org/user/domain/repository.rs` | 只供 put writer 开启显式事务并构造事务内行锁查询；成员锁和后续更新重复限定同一 capability |
+| `org-member-delete-database` | database | `org/user/domain/repository.rs` | 只供 delete writer 开启显式事务并构造事务内行锁查询；成员锁和删除重复限定同一 capability |
+| `org-member-resource-resolve-database` | database | `org/user/domain/repository.rs` | system capability 的 put/delete 在事务外只解析目标组织；事务内仍会重新按组织锁定目标成员 |
+| `org-member-resource-resolve-system` | system-capability | `org/user/domain/repository.rs` | system 资源解析必须核对 capability actor 与已认证用户一致 |
+| `org-member-linearization-system` | system-capability | `org/user/domain/repository.rs` | system 写事务在最终线性化点再次消费并核对 actor-bound capability |
+| `org-member-add-system` | system-capability | `org/user/domain/repository.rs` | system add 必须显式提供目标组织，且组织存在并 active |
+| `org-member-lock-system` | system-capability | `org/user/domain/repository.rs` | system put/delete 在无普通租户 capability 时必须显式消费 system capability |
+| `work-task-workspace-lock-database` | database | `work/task/domain/repository.rs` | 任务关系写入先按可信 owner 锁定个人工作区，串行化同一用户的并发关系变更 |
+| `work-task-current-links-database` | database | `work/task/domain/repository.rs` | 更新前按可信 owner 与任务 ID 锁定当前项目/父任务关系 |
+| `work-task-links-validation-database` | database | `work/task/domain/repository.rs` | 锁定目标项目与父任务，并要求 owner 等于可信个人工作区 |
+| `work-task-cycle-check` | raw-sql | `work/task/domain/repository.rs` | 递归链每层重复限定 owner，深度上限 100，并拒绝形成关系环 |
 | `work-task-add-transaction` | transaction | `work/task/actions/add.rs` | 工作区锁、项目/父任务校验和新增任务在同一事务提交 |
 | `work-task-put-transaction` | transaction | `work/task/actions/put.rs` | 工作区锁、当前关系锁、项目/父任务校验和更新任务在同一事务提交 |
-| `work-task-complete-lock` | raw-sql | `work/task/repository.rs` | JSON_TABLE 只承载绑定 ID 值；按可信 owner 全量锁行，缺失或跨工作区时批次失败 |
+| `work-task-complete-lock` | raw-sql | `work/task/domain/repository.rs` | JSON_TABLE 只承载绑定 ID 值；按可信 owner 全量锁行，缺失或跨工作区时批次失败 |
 | `work-task-complete-transaction` | transaction | `work/task/actions/complete.rs` | 最多 100 个唯一 ID 在 tenant-scoped 事务内全量可见后才原子更新 |
 
 <!-- tenant-boundary: database pre-tenant-table-database -->

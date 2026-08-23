@@ -1,10 +1,6 @@
 //! 账号 Addon 的公开组装入口。
 
-mod authz_version;
-pub mod email_delivery;
-mod grants;
-mod password_reset;
-mod system_owner;
+mod domain;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
@@ -14,19 +10,20 @@ use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
-pub(crate) use authz_version::{
+pub(crate) use domain::authz_version::{
     disable_locked_user_and_increment_versions, find_authorization_version,
     increment_locked_authz_version, increment_locked_authz_versions,
     increment_locked_credential_versions, lock_user_authorization, lock_user_authorizations,
     lock_user_credential, LockedUserAuthorization, LockedUserCredential,
 };
-pub(crate) use grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
-pub(crate) use password_reset::{
+pub use domain::email_delivery;
+pub(crate) use domain::grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
+pub(crate) use domain::password_reset::{
     consume_in_tx as consume_password_reset_in_tx, create_in_tx as create_password_reset_in_tx,
     find_target_user as find_password_reset_target_user, invalid_reset_token,
     lock_in_tx as lock_password_reset_in_tx, GeneratedPasswordReset, PasswordResetReference,
 };
-pub(crate) use system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
+pub(crate) use domain::system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
 pub(crate) use user::user_from_claims;
 pub(crate) use user::UserStatus;
 pub(crate) use user::{AuthOperation, AuthRateLimiter};
