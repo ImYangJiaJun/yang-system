@@ -1,4 +1,12 @@
-use crate::addon::{account, admin, observability, org, work};
+use crate::addon::account;
+#[cfg(feature = "admin")]
+use crate::addon::admin;
+#[cfg(feature = "observability")]
+use crate::addon::observability;
+#[cfg(feature = "org")]
+use crate::addon::org;
+#[cfg(feature = "work")]
+use crate::addon::work;
 use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
@@ -62,42 +70,55 @@ fn build_application(
     let authorization_validator = AuthorizationVersionValidator::new(authorization_cache);
     let action_logging = ActionLogMiddleware::new(LogIdentity::from_tools(&tools));
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
-    let runtime = AppBuilder::new()
-        .addon(
-            account::build_addon(
-                Arc::clone(&security),
-                Arc::new(account::CompositeGrantResolver::new(vec![
-                    admin::grant_resolver(),
-                    org::grant_resolver(),
-                    work::grant_resolver(),
-                ])),
-                admin::system_owner_claimer(),
-                authorization_validator.clone(),
-                step_up.clone(),
-            )
-            .context("构建 account Addon 失败")?
+    // 外围域的授权解析器按 feature 装配；account-only 组合下为空列表，授权快照退化为空授权。
+    let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> = vec![
+        #[cfg(feature = "admin")]
+        admin::grant_resolver(),
+        #[cfg(feature = "org")]
+        org::grant_resolver(),
+        #[cfg(feature = "work")]
+        work::grant_resolver(),
+    ];
+    #[cfg(feature = "admin")]
+    let system_owner_claimer = admin::system_owner_claimer();
+    #[cfg(not(feature = "admin"))]
+    let system_owner_claimer = account::no_system_owner_claimer();
+    let builder = AppBuilder::new().addon(
+        account::build_addon(
+            Arc::clone(&security),
+            Arc::new(account::CompositeGrantResolver::new(grant_resolvers)),
+            system_owner_claimer,
+            authorization_validator.clone(),
+            step_up.clone(),
+        )
+        .context("构建 account Addon 失败")?
+        .middleware(action_logging.clone()),
+    );
+    #[cfg(feature = "admin")]
+    let builder = builder.addon(
+        admin::build_addon(security, authorization_validator.clone(), step_up.clone())
+            .context("构建 admin Addon 失败")?
             .middleware(action_logging.clone()),
-        )
-        .addon(
-            admin::build_addon(security, authorization_validator.clone(), step_up.clone())
-                .context("构建 admin Addon 失败")?
-                .middleware(action_logging.clone()),
-        )
-        .addon(
-            observability::build_addon(authorization_validator.clone())
-                .context("构建 observability Addon 失败")?
-                .middleware(action_logging.clone()),
-        )
-        .addon(
-            org::build_addon(authorization_validator.clone(), step_up)
-                .context("构建 org Addon 失败")?
-                .middleware(action_logging.clone()),
-        )
-        .addon(
-            work::build_addon(authorization_validator)
-                .context("构建 work Addon 失败")?
-                .middleware(action_logging),
-        )
+    );
+    #[cfg(feature = "observability")]
+    let builder = builder.addon(
+        observability::build_addon(authorization_validator.clone())
+            .context("构建 observability Addon 失败")?
+            .middleware(action_logging.clone()),
+    );
+    #[cfg(feature = "org")]
+    let builder = builder.addon(
+        org::build_addon(authorization_validator.clone(), step_up.clone())
+            .context("构建 org Addon 失败")?
+            .middleware(action_logging.clone()),
+    );
+    #[cfg(feature = "work")]
+    let builder = builder.addon(
+        work::build_addon(authorization_validator)
+            .context("构建 work Addon 失败")?
+            .middleware(action_logging),
+    );
+    let runtime = builder
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
 
@@ -109,20 +130,34 @@ mod tests {
     use super::*;
     use jsonwebtoken::Algorithm;
     use sqlx::mysql::MySqlPoolOptions;
+    #[cfg(all(
+        feature = "account",
+        feature = "admin",
+        feature = "observability",
+        feature = "org",
+        feature = "work"
+    ))]
     use yang_base::action::{Request, TenantContext, TenantId};
-    use yang_base::definition::{ActionName, ActionRef, ModuleName, OpenApiInfo};
+    #[cfg(all(
+        feature = "account",
+        feature = "admin",
+        feature = "observability",
+        feature = "org",
+        feature = "work"
+    ))]
+    use yang_base::definition::OpenApiInfo;
+    use yang_base::definition::{ActionName, ActionRef, ModuleName};
     use yang_base::token::TokenManager;
     use yang_base::tools::ToolsBuilder;
     use yang_db::{Database, DatabaseConfig};
 
-    #[tokio::test]
-    async fn catalog_and_registry_are_built_from_the_same_actions() {
+    fn test_tools() -> Arc<Tools> {
         let pool = MySqlPoolOptions::new()
             .connect_lazy("mysql://root:test@127.0.0.1:3306/test")
             .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
         let mysql = Database::from_pool(pool.clone(), DatabaseConfig::default())
             .unwrap_or_else(|error| panic!("测试 Database 应构建成功: {error}"));
-        let tools = Arc::new(
+        Arc::new(
             ToolsBuilder::new()
                 .mysql(mysql)
                 .token(TokenManager::new_symmetric(
@@ -143,8 +178,11 @@ mod tests {
                 ))
                 .build()
                 .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
-        );
-        let security = Arc::new(SecuritySettings {
+        )
+    }
+
+    fn test_security() -> Arc<SecuritySettings> {
+        Arc::new(SecuritySettings {
             argon2_max_concurrency: 1,
             auth_rate_limit_window_seconds: 60,
             auth_rate_limit_ip_attempts: 30,
@@ -152,7 +190,53 @@ mod tests {
             password_reset_ttl_seconds: 900,
             issue_refresh_credential_version: true,
             trusted_proxy_cidrs: Vec::new(),
-        });
+        })
+    }
+
+    /// 最小 feature 组合冒烟：仅启用 account 时应用也必须可构建并产出 Catalog。
+    ///
+    /// 只断言 account 域事实，因此在任意 feature 组合下都应通过。
+    #[tokio::test]
+    async fn enabled_feature_combination_builds_and_exposes_account_catalog() {
+        let app = build_application(test_tools(), test_security(), None)
+            .unwrap_or_else(|error| panic!("当前 feature 组合的应用应构建成功: {error:#}"));
+        let module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "account.user")
+            .unwrap_or_else(|| panic!("应存在 account.user 模块"));
+        assert!(module
+            .actions()
+            .iter()
+            .any(|action| action.name.as_str() == "register"));
+        assert!(app
+            .runtime
+            .table_definitions()
+            .iter()
+            .any(|definition| definition.name() == "users"));
+        let reference = ActionRef::new(
+            ModuleName::new("account.user")
+                .unwrap_or_else(|error| panic!("ModuleName 应有效: {error}")),
+            ActionName::new("me").unwrap_or_else(|error| panic!("ActionName 应有效: {error}")),
+        );
+        assert!(app.runtime.registry().resolve(&reference).is_some());
+    }
+
+    /// 全量 Catalog/Registry 同源断言，只在全部 Addon 随 feature 启用时运行。
+    #[cfg(all(
+        feature = "account",
+        feature = "admin",
+        feature = "observability",
+        feature = "org",
+        feature = "work"
+    ))]
+    #[tokio::test]
+    async fn catalog_and_registry_are_built_from_the_same_actions() {
+        let tools = test_tools();
+        let security = test_security();
         let compatibility_security = Arc::new(SecuritySettings {
             issue_refresh_credential_version: false,
             ..(*security).clone()

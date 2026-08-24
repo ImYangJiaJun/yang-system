@@ -21,7 +21,9 @@ use yang_base::BaseError;
 
 pub(crate) use domain::claims::user_from_claims;
 pub(crate) use domain::status::UserStatus;
-pub(crate) use yang_base::action::auth::{AuthOperation, AuthRateLimiter};
+#[cfg(feature = "admin")]
+pub(crate) use yang_base::action::auth::AuthOperation;
+pub(crate) use yang_base::action::auth::AuthRateLimiter;
 
 /// 浏览器刷新会话 Cookie 名称（Host-only、HttpOnly、SameSite=Strict）。
 const REFRESH_COOKIE_NAME: &str = "yang_refresh";

@@ -8,8 +8,11 @@ use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr, Transaction};
 use crate::addon::account::UserStatus;
 
 /// 已在当前事务中锁定的用户授权状态。
+#[cfg(any(feature = "admin", feature = "org"))]
 pub(crate) struct LockedUserAuthorization {
     user_id: i64,
+    // 只有 admin 的最终管理员保护会复核锁定时的用户状态。
+    #[cfg_attr(not(feature = "admin"), allow(dead_code))]
     status: UserStatus,
     authz_version: i64,
 }
@@ -37,6 +40,7 @@ impl LockedUserCredential {
     }
 }
 
+#[cfg(any(feature = "admin", feature = "org"))]
 impl LockedUserAuthorization {
     /// 返回锁定的用户 ID。
     pub(crate) fn user_id(&self) -> i64 {
@@ -44,6 +48,7 @@ impl LockedUserAuthorization {
     }
 
     /// 返回锁定时观察到的用户状态。
+    #[cfg(feature = "admin")]
     pub(crate) fn status(&self) -> UserStatus {
         self.status
     }
@@ -68,6 +73,7 @@ pub(crate) async fn find_authorization_version(
 /// 锁定用户行，并读取授权 writer 所需的最小状态。
 ///
 /// `pool` 只用于构建查询；语句仍在 `transaction` 的连接上以 `FOR UPDATE` 执行。
+#[cfg(any(feature = "admin", feature = "org"))]
 pub(crate) async fn lock_user_authorization(
     pool: &MySqlPool,
     transaction: &mut Transaction,
@@ -130,6 +136,7 @@ pub(crate) async fn lock_user_credential(
 }
 
 /// 按稳定用户 ID 顺序去重并锁定授权状态，避免多用户 writer 形成反向锁序。
+#[cfg(feature = "org")]
 pub(crate) async fn lock_user_authorizations(
     pool: &MySqlPool,
     transaction: &mut Transaction,
@@ -144,6 +151,7 @@ pub(crate) async fn lock_user_authorizations(
 }
 
 /// 在持有用户行锁的同一事务中递增版本、写入 Outbox，并返回新版本。
+#[cfg(any(feature = "admin", feature = "org"))]
 pub(crate) async fn increment_locked_authz_version(
     transaction: &mut Transaction,
     locked: &LockedUserAuthorization,
@@ -246,6 +254,7 @@ async fn append_authorization_outbox(
 }
 
 /// 按已锁定顺序递增所有受影响用户，同一用户在调用前已经去重。
+#[cfg(feature = "org")]
 pub(crate) async fn increment_locked_authz_versions(
     transaction: &mut Transaction,
     locked: &[LockedUserAuthorization],
@@ -258,6 +267,7 @@ pub(crate) async fn increment_locked_authz_versions(
     Ok(versions)
 }
 
+#[cfg(feature = "org")]
 fn stable_user_ids(user_ids: impl IntoIterator<Item = i64>) -> Vec<i64> {
     let mut user_ids = user_ids.into_iter().collect::<Vec<_>>();
     user_ids.sort_unstable();
@@ -327,6 +337,7 @@ mod tests {
         assert!(!locked.password_hash_matches("observed-before-lock"));
     }
 
+    #[cfg(feature = "org")]
     #[test]
     fn authorization_users_are_locked_once_in_stable_order() {
         assert_eq!(stable_user_ids([9, 3, 9, 5, 3]), [3, 5, 9]);

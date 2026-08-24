@@ -24,6 +24,14 @@ yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-featur
 yang-db = { version = "0.1.4", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
 yang-runtime = { version = "0.1.0", path = "../../crates/yang-runtime" }
 
+[features]
+default = ["account", "admin", "observability", "org", "work"]
+account = []
+admin = ["account"]
+org = ["account"]
+work = ["account"]
+observability = ["account"]
+
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["json"] }
 

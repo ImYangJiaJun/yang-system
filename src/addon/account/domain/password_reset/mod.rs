@@ -3,6 +3,7 @@
 mod repository;
 
 pub(crate) use repository::{
-    consume_in_tx, create_in_tx, find_target_user, invalid_reset_token, lock_in_tx,
-    GeneratedPasswordReset, PasswordResetReference,
+    consume_in_tx, find_target_user, invalid_reset_token, lock_in_tx, PasswordResetReference,
 };
+#[cfg(feature = "admin")]
+pub(crate) use repository::{create_in_tx, GeneratedPasswordReset};

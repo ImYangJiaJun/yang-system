@@ -1,5 +1,6 @@
 //! 密码重置凭证的生成、摘要与持久化仓储边界。
 
+#[cfg(feature = "admin")]
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
@@ -11,11 +12,13 @@ const RAW_TOKEN_BYTES: usize = 32;
 const RAW_TOKEN_CHARS: usize = RAW_TOKEN_BYTES * 2;
 const FINGERPRINT_CHARS: usize = 16;
 
+#[cfg(feature = "admin")]
 pub(crate) struct GeneratedPasswordReset {
     raw_token: String,
     reference: PasswordResetReference,
 }
 
+#[cfg(feature = "admin")]
 impl GeneratedPasswordReset {
     pub(crate) fn generate() -> Result<Self, BaseError> {
         let mut random = [0_u8; RAW_TOKEN_BYTES];
@@ -96,6 +99,7 @@ impl LockedPasswordReset {
     }
 }
 
+#[cfg(feature = "admin")]
 pub(crate) async fn create_in_tx(
     transaction: &mut Transaction,
     target_user_id: i64,
@@ -248,6 +252,7 @@ fn decode_hex(value: &str) -> Option<[u8; RAW_TOKEN_BYTES]> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "admin")]
     #[test]
     fn generated_token_is_high_entropy_shaped_and_database_value_is_only_a_digest() {
         let reset = GeneratedPasswordReset::generate()

@@ -304,6 +304,7 @@ fn invalid_audit_event(error: anyhow::Error) -> BaseError {
 #[derive(Debug, Clone, Copy)]
 enum ResourceScope {
     Global,
+    #[cfg(feature = "org")]
     Tenant,
 }
 
@@ -321,6 +322,7 @@ impl RequestFingerprintResolver {
         }
     }
 
+    #[cfg(feature = "org")]
     pub(crate) const fn tenant(namespace: &'static str) -> Self {
         Self {
             namespace,
@@ -334,6 +336,7 @@ impl StepUpResourceResolver for RequestFingerprintResolver {
     async fn resolve(&self, context: &ActionContext) -> Result<String, BaseError> {
         let scope = match self.scope {
             ResourceScope::Global => "global".to_string(),
+            #[cfg(feature = "org")]
             ResourceScope::Tenant => match context.tenant() {
                 Ok(tenant) => format!("tenant={}", tenant.id().get()),
                 Err(_) => {
@@ -381,7 +384,9 @@ fn canonical_json(value: &Value) -> Result<String, BaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yang_base::action::{Request, TenantContext, TenantId};
+    use yang_base::action::Request;
+    #[cfg(feature = "org")]
+    use yang_base::action::{TenantContext, TenantId};
     use yang_base::tools::ToolsBuilder;
 
     fn manager() -> Arc<StepUpManager> {
@@ -436,6 +441,7 @@ mod tests {
         assert!(!left.contains("active"));
     }
 
+    #[cfg(feature = "org")]
     #[tokio::test]
     async fn tenant_fingerprint_uses_trusted_context_not_client_body() {
         let resolver = RequestFingerprintResolver::tenant("org-user");
