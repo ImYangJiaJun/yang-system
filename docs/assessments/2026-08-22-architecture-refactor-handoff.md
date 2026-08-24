@@ -194,16 +194,25 @@ observability = ["account"]
 
 阶段 1 是阶段 4 的硬前置；阶段 2 是阶段 3 的硬前置；阶段 5 放阶段 4 之后避免与 mod.rs 重写冲突。每阶段结束保持 quick 门禁绿；跨仓库改动（阶段 1/2/4.1 在 lib_yang）单独成批便于分别提交。
 
-## 六、当前进度（2026-08-22 更新）
+## 六、当前进度（2026-08-22 第二次更新）
 
-| 阶段 | 状态 | 说明 |
+| 阶段 | 状态 | 提交/说明 |
 |---|---|---|
-| 阶段 1 | **完成** | `crates/yang-base/src/action/functional.rs`（`FnAction`，pub(crate)）+ `ModuleSpec::action_fn` / `ActionFnBuilder`（`definition/interface.rs`，导出经 `definition/mod.rs`）；契约测试在 `src/action/__tests__/functional_test.rs`；`action/AGENTS.md` 已重写。验证：lib 578 passed、clippy/fmt 干净 |
-| 阶段 2 | **完成** | `yang_db::SqlExpr`（`reference.rs`，`UnixTimestamp`/`UnixTimestampAdd(i64)`，PG 有类型渲染未接构造器）；`QueryBuilder` 新增 `from_pool`（转正式公开入口）/`select_expr`/`set_expr`/`where_expr`/`insert_returning_id`；`Condition::ColumnExprComparison` 新变体；单测 `server_expr_test.rs` + 集成 `tests/integration_mysql_server_expr.rs`（`#[ignore]`，需真实 MySQL）。验证：lib 398 passed、clippy/fmt 干净 |
-| 阶段 1+2 联合验证 | **通过** | yang-base 全量测试 578 passed（含新增契约测试）+ yang-db lib 398 passed + 双 crate clippy `-D warnings` + fmt + yang-system `cargo check --locked` 兼容编译。唯一失败项：yang-db `integration_redis_string_list_ops` 5 个用例因本机无 Redis 失败，属既有环境问题、与本次改动无关 |
-| 阶段 3-7 | 未开始 | 按第四节描述执行。阶段 3 与阶段 4 的前置（1/2）均已就绪，可并行启动 |
+| 阶段 1 | **完成** | lib_yang `89ba536`：`FnAction` + `ModuleSpec::action_fn`/`ActionFnBuilder`；yang-base 578 测试通过 |
+| 阶段 2 | **完成** | lib_yang `461988b`：`SqlExpr`（unix_timestamp 系列）、`set_expr`/`select_expr`/`where_expr`/`insert_returning_id`、`from_pool` 公开 |
+| 阶段 3 | **完成** | `2958055`：约 10 处裸 SQL 换构造器，逃生口保留 3 个文件（work/task 递归 CTE+JSON_TABLE、outbox SKIP LOCKED、audit/outbox information_schema）；真实库集成测试通过 |
+| 阶段 4.1 | **完成** | lib_yang（机制下沉提交）+ `6d45b31`：PasswordEngine/AuthRateLimiter/邮箱验证码/BrowserSession 下沉 `yang_base::action::auth` |
+| 阶段 4.2 | **完成** | `4b18ab1`：门禁识别函数式形态（每文件恰好一个 `pub(super) async fn handle`、禁 derive）、module 目录白名单（只允许 mod.rs/actions/domain）、writer allowlist 迁入 domain/、new_action.py 生成函数式模板 |
+| 阶段 4.3 | **完成** | `fdcd1a2`：全部业务 Action 函数式重写（actions/mod.rs 变集中路由表）、机制文件迁入各级 domain/、frontend_demo 同步；门禁+106 单测+clippy+fmt+integration 全绿 |
+| 阶段 5 | **进行中** | Cargo feature 门控（agent-12 执行中） |
+| 阶段 6 | **部分完成** | AGENTS.md/README.md 已同步新结构；剩余：阶段 5 完成后的 feature 说明、handoff 归档 |
+| 阶段 7 | 未开始 | 全部完成后跑 quick/full/integration |
 
-**下次继续的第一步**：启动阶段 3（裸 SQL 收敛，依赖阶段 2 的 `SqlExpr`/`insert_returning_id`）与阶段 4（结构净化，依赖阶段 1 的 `action_fn`）——两者互不冲突可并行；阶段 4 内按 addon 串行（account → admin → org → work → observability），`examples/frontend_demo` 同批迁移。
+**已知遗留（后续优化，不阻塞）**：
+
+- `org/user/domain/fn_action.rs` 与 `work/task/domain/fn_action.rs` 各有一份约 110 行的 `FnAction` 受控桥接副本：CRUD 写覆盖（org.user add/put/del、work.task add/put）的输入是框架 `Record`/`PutInput`（未实现 `ParamInput`），且 Catalog 契约由 `crud_at_with_mutations` 从表定义动态生成，无法用 `action_fn` 表达。若 yang-base 后续公开函数式 CRUD 覆盖入口，可删除这两处桥接。
+- 函数式通道的 dispatch 不发 `yang_action_*` handler 级指标（与官方 `FnAction` 语义一致）；内置 CRUD（derive 通道）仍发。若需口径统一，在 yang-base `Registry::dispatch` 统一埋点。
+- `observability/actions/report.rs` 的 `no_store_response` 私有辅助留在 Action 文件内（handler 行为的一部分，门禁允许）。
 
 ## 七、风险备忘
 

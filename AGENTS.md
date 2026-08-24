@@ -27,8 +27,8 @@ yang-runtime = { path = "../../crates/yang-runtime", ... }
 
 ```text
 src/
-├── addon/                   # 业务 Addon；每个 Addon 下按 Module 拆分，Module 下按 actions/ 拆分
-│   ├── account/             # 注册/会话/邮件投递、授权快照、用户生命周期（user/）、密码重置（password_reset/）
+├── addon/                   # 业务 Addon；接口目录只含 mod.rs（装配+路由表）、actions/（纯接口）、domain/（业务机制）
+│   ├── account/             # 注册/会话/邮件投递、授权快照、用户生命周期（user/）、密码重置（domain/password_reset/）
 │   ├── admin/               # 首个注册账号的最终管理员与平台账号管理
 │   ├── observability/       # 浏览器错误与服务端 request_id 关联上报
 │   ├── org/                 # 企业创建/选择（access）、企业资料（organization）、成员（user）
@@ -70,7 +70,8 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 
 ## 代码组织与架构约定
 
-- **每个自定义 Action 独占一个文件**，放在所属 Module 的 `actions/` 目录下；`mod.rs` 只用于装配和共享声明。业务路径必须显式位于 `/api/v1/`。改动 `actions/` 后必须通过 `python scripts/check_architecture.py`。
+- **每个自定义 Action 独占一个文件**，放在所属 Module 的 `actions/` 目录下；Action 是函数式形态——文件只含输入声明（`params!` 或手写 Input）与恰好一个 `pub(super) async fn handle` 主函数，路由/权限/展示元数据集中在 `actions/mod.rs` 的 `action_fn` 路由表（终结式 builder，spec 与 handler 原子注册）。禁止在业务代码使用 `#[derive(Action)]` 过程宏（框架内置 CRUD 除外）。业务路径必须显式位于 `/api/v1/`。改动 `actions/` 后必须通过 `python scripts/check_architecture.py`。
+- Module/Addon 接口目录只承载 `mod.rs`、`actions/`、`domain/` 三件套；service/repository/policy 等业务机制一律放 `domain/`。通用机制（密码哈希、限流、邮箱验证码、浏览器会话 Cookie）由 `yang_base::action::auth` 框架能力提供，应用侧不重复实现。
 - 核心链路：`Addon/Module/fields!/params!` → `AppBuilder` → Catalog / Registry / TableDefinition → OpenAPI/UI、HTTP dispatch、Schema。请求处理顺序：auth → authz_version → tenant/permission → Step-up/resource guard → Action → 业务事实 + 版本 + Outbox/audit。
 - `fields!` 是 Schema、输入输出约束、OpenAPI 和查询策略的唯一字段事实来源；`params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；**禁止引入进程级数据库/Redis/Tools 单例**。

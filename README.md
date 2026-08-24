@@ -161,7 +161,7 @@ pnpm dev
 
 ```text
 src/
-├── addon/                   # 业务 Addon；目录内继续按 Module/Action 拆分
+├── addon/                   # 业务 Addon；接口目录只含 mod.rs（装配+路由表）、actions/（纯接口函数式 Action）、domain/（业务机制）
 │   ├── account/              # 注册/会话/邮件投递、授权快照与用户生命周期
 │   ├── admin/                # 首个注册账号的唯一最终管理员与平台授权保护
 │   ├── observability/        # 浏览器错误与服务端 request_id 关联
