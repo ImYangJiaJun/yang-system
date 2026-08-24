@@ -118,6 +118,16 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 - 生产启动：`cargo run --locked --bin yang-system`。启动顺序：配置合成验证 → Telemetry/关闭预算 → 资源创建 → AppBuilder 冻结 Catalog/Registry → Schema 预检与增量同步 → 审计表校验、管理面与 Outbox Worker → readiness 就绪后启动业务路由；停机时先撤销 readiness 再在同一总预算内排空。
 - 存活/就绪：`/health/live`、`/health/ready`；独立管理面默认 `http://127.0.0.1:9090`（`/metrics` 与带依赖检查的 `/health/ready`），生产编排应使用管理面 readiness。
 - 前端生产部署使用 `frontend/deploy/nginx.conf`（CI 校验语法与部署契约）。
+- **跨仓库推送顺序**：先推 `lib_yang`、确认推送完成后再推 `yang-system`。CI 在任务开始时按 `LIB_YANG_REF=master` 签出依赖仓库，两边推送间隔过近会拿到旧 master，使旧 `yang-base` 清单与新 `Cargo.lock` 不匹配，`--locked` 直接报 "cannot update the lock file"（2026-08-24 实际踩过，重跑即恢复）。
+- **MSRV 1.80 守护**：`.cargo/config.toml` 已配置 `resolver.incompatible-rust-versions = "fallback"`，解析依赖时优先选择兼容 `rust-version = "1.80"` 的版本；新增或升级依赖后必须冷缓存验证 MSRV，不能只信 CI 绿——Swatinem 缓存命中会跳过依赖清单解析，掩盖不兼容（且缓存闲置 7 天会被 GitHub 清除）。验证命令（与 CI 同环境）：
+
+  ```bash
+  docker run --rm -v /d/code/lib_yang:/ws -w /ws/project/yang-system \
+    -e CARGO_HOME=/tmp/ch -e CARGO_TARGET_DIR=/tmp/ct -e RUSTUP_TOOLCHAIN=1.80.1 \
+    rust:1.80.1-slim cargo check --all-targets --locked
+  ```
+
+  注意索引里的 `rust_version` 元数据不足以判定兼容性（存在缺元数据但清单声明 `edition2024` 的 crate，如 `ar_archive_writer 0.5.1`），只有用 1.80 实际编译才算数。已知的版本约束：`lettre` 精确锁 `=0.11.19`（0.11.20+ 需要 Rust 1.85）；`async-compression 0.4.33 + compression-codecs 0.4.32` 组合有宏展开缺陷，固定使用 0.4.32 + 0.4.31。
 
 ## 提交与 PR
 
