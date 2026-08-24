@@ -1,7 +1,7 @@
 # yang-system 架构净化改造：方案与进度暂存
 
 > 创建日期：2026-08-22
-> 状态：**进行中**——阶段 1/2 已由后台子代理开工，其余阶段未开始。
+> 状态：**全部完成**（2026-08-22）。七个阶段均已落地，`run_ci.py full` 与 `integration` 全绿。
 > 用途：会话中断后的续接手稿。下次继续任务时，把本文件交给新的会话即可恢复全部上下文。
 
 ## 一、改造背景（用户五个痛点与已确认方向）
@@ -204,9 +204,9 @@ observability = ["account"]
 | 阶段 4.1 | **完成** | lib_yang（机制下沉提交）+ `6d45b31`：PasswordEngine/AuthRateLimiter/邮箱验证码/BrowserSession 下沉 `yang_base::action::auth` |
 | 阶段 4.2 | **完成** | `4b18ab1`：门禁识别函数式形态（每文件恰好一个 `pub(super) async fn handle`、禁 derive）、module 目录白名单（只允许 mod.rs/actions/domain）、writer allowlist 迁入 domain/、new_action.py 生成函数式模板 |
 | 阶段 4.3 | **完成** | `fdcd1a2`：全部业务 Action 函数式重写（actions/mod.rs 变集中路由表）、机制文件迁入各级 domain/、frontend_demo 同步；门禁+106 单测+clippy+fmt+integration 全绿 |
-| 阶段 5 | **进行中** | Cargo feature 门控（agent-12 执行中） |
-| 阶段 6 | **部分完成** | AGENTS.md/README.md 已同步新结构；剩余：阶段 5 完成后的 feature 说明、handoff 归档 |
-| 阶段 7 | 未开始 | 全部完成后跑 quick/full/integration |
+| 阶段 5 | **完成** | `5a4c261`：addon 级 feature（default 全开，其余 implies account），noop claimer，run_ci 增加 account-only 检查 |
+| 阶段 6 | **完成** | `1828528`：AGENTS.md/README.md/handoff 同步 |
+| 阶段 7 | **完成** | `run_ci.py full`（含双套 Playwright、前端完整检查、审计、account-only 组合）与 `integration`（真实 MySQL/Redis）全部通过 |
 
 **已知遗留（后续优化，不阻塞）**：
 
