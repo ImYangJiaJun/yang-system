@@ -9,7 +9,8 @@ default-run = "yang-system"
 anyhow = "1.0"
 async-trait = "0.1.89"
 jsonwebtoken = "=9.3.1"
-lettre = { version = "=0.11.22", default-features = false, features = ["builder", "pool", "ring", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
+# 精确锁定：0.11.20+ 需要 Rust 1.85，受 MSRV 1.80 约束
+lettre = { version = "=0.11.19", default-features = false, features = ["builder", "pool", "ring", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
 metrics = "0.24.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 schemars = "0.8"

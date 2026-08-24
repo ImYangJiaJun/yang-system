@@ -1,2 +1,7 @@
 [net]
 git-fetch-with-cli = true
+
+# 解析依赖时优先选择与 rust-version（MSRV 1.80）兼容的版本，
+# 防止高版本工具链生成低版本工具链无法构建的 Cargo.lock。
+[resolver]
+incompatible-rust-versions = "fallback"
