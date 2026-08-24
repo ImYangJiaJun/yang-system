@@ -168,10 +168,6 @@ async fn run_after_tools_created(
     crate::audit::validate_schema(tools.mysql()?.pool())
         .await
         .context("启动期校验高权限审计表失败")?;
-    #[cfg(feature = "admin")]
-    crate::addon::admin::validate_system_owner_state(tools.mysql()?.pool())
-        .await
-        .context("启动期校验系统最终管理员状态失败")?;
     drop(initializer);
 
     let bind = settings.bind_addr()?;

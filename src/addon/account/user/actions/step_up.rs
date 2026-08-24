@@ -1,14 +1,17 @@
 //! 重新校验账号密码并把短期 challenge 升级为一次性 proof。
 
-use super::super::domain::auth_adapters::UserStepUpCredentialVerifier;
-use super::super::domain::service::UserService;
+use crate::addon::account::domain::policy::normalize_username;
+use crate::addon::account::Account;
 use crate::audit::{self, AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult};
 use crate::authorization::audit_result_for_error;
+use async_trait::async_trait;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use yang_base::action::auth::{BrowserSession, LoginInput};
+use yang_base::action::auth::{
+    AuthOperation, BrowserSession, CredentialVerifier, LoginInput, VerifiedSubject,
+};
 use yang_base::action::{ActionContext, StepUpManager, StepUpProof};
-use yang_base::definition::{ParamInput, Params};
+use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -31,14 +34,81 @@ impl ParamInput for CompleteStepUpInput {
     }
 }
 
+/// 把 Step-up 凭据复核接到框架 challenge 完成端口，并记录已验证用户供审计使用。
+#[derive(Clone)]
+struct UserStepUpCredentialVerifier {
+    account: Arc<Account>,
+    verified_user_id: Arc<AtomicI64>,
+}
+
+#[async_trait]
+impl CredentialVerifier for UserStepUpCredentialVerifier {
+    async fn verify(
+        &self,
+        ctx: &ActionContext,
+        input: &LoginInput,
+    ) -> Result<VerifiedSubject, BaseError> {
+        let username = normalize_username(&input.username)?;
+        let operation = AuthOperation::StepUpComplete;
+        self.account
+            .rate_limiter()
+            .check(ctx, operation, &username)
+            .await?;
+
+        let user = match self
+            .account
+            .users()
+            .find_credentials_by_username(ctx, &username)
+            .await?
+        {
+            Some(user) => user,
+            None => {
+                self.account
+                    .rate_limiter()
+                    .record_failure(ctx, operation, &username)
+                    .await?;
+                return Err(BaseError::InvalidPassword);
+            }
+        };
+        if !self
+            .account
+            .passwords()
+            .verify(&input.password, &user.password_hash)
+            .await?
+        {
+            self.account
+                .rate_limiter()
+                .record_failure(ctx, operation, &username)
+                .await?;
+            return Err(BaseError::InvalidPassword);
+        }
+        if let Err(error) = Account::ensure_active(user.status) {
+            self.account
+                .rate_limiter()
+                .record_failure(ctx, operation, &username)
+                .await?;
+            return Err(error);
+        }
+        self.account
+            .rate_limiter()
+            .clear_failures(ctx, operation, &username)
+            .await?;
+        self.verified_user_id.store(user.id, Ordering::Release);
+        Ok(VerifiedSubject::new(user.id.to_string()))
+    }
+}
+
 pub(super) async fn handle(
     ctx: ActionContext,
     input: CompleteStepUpInput,
-    service: Arc<UserService>,
+    account: Arc<Account>,
     manager: Arc<StepUpManager>,
 ) -> Result<StepUpProof, BaseError> {
     let verified_user_id = Arc::new(AtomicI64::new(0));
-    let verifier = UserStepUpCredentialVerifier::new(service, Arc::clone(&verified_user_id));
+    let verifier = UserStepUpCredentialVerifier {
+        account,
+        verified_user_id: Arc::clone(&verified_user_id),
+    };
     let result = async {
         BrowserSession::validate_same_origin(&ctx.request)?;
         manager
@@ -131,6 +201,24 @@ fn completion_audit_event(
 
 fn invalid_audit_event(error: anyhow::Error) -> BaseError {
     BaseError::ConfigError(format!("构建 Step-up 完成审计事件失败: {error}"))
+}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec {
+    // 组合根未配置 StepUpManager 时不注册。
+    let Some(manager) = account.step_up_manager() else {
+        return module;
+    };
+    module
+        .action_fn(
+            yang_base::action_name!("step_up_complete"),
+            move |ctx, input| handle(ctx, input, Arc::clone(&account), Arc::clone(&manager)),
+        )
+        .route(HttpMethod::Post, "/api/v1/users/step-up/complete")
+        .display_name("完成敏感操作重认证")
+        .description("重新校验账号密码并把短期 challenge 升级为一次性 proof")
+        .public()
+        .register()
 }
 
 #[cfg(test)]

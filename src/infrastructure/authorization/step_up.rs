@@ -304,8 +304,6 @@ fn invalid_audit_event(error: anyhow::Error) -> BaseError {
 #[derive(Debug, Clone, Copy)]
 enum ResourceScope {
     Global,
-    #[cfg(feature = "org")]
-    Tenant,
 }
 
 #[derive(Debug, Clone)]
@@ -321,14 +319,6 @@ impl RequestFingerprintResolver {
             scope: ResourceScope::Global,
         }
     }
-
-    #[cfg(feature = "org")]
-    pub(crate) const fn tenant(namespace: &'static str) -> Self {
-        Self {
-            namespace,
-            scope: ResourceScope::Tenant,
-        }
-    }
 }
 
 #[async_trait]
@@ -336,22 +326,6 @@ impl StepUpResourceResolver for RequestFingerprintResolver {
     async fn resolve(&self, context: &ActionContext) -> Result<String, BaseError> {
         let scope = match self.scope {
             ResourceScope::Global => "global".to_string(),
-            #[cfg(feature = "org")]
-            ResourceScope::Tenant => match context.tenant() {
-                Ok(tenant) => format!("tenant={}", tenant.id().get()),
-                Err(_) => {
-                    let user = context.authenticated_user().ok_or_else(|| {
-                        BaseError::Unauthorized("Step-up 资源解析需要已认证用户".to_string())
-                    })?;
-                    let capability = context.system_tenant()?;
-                    if capability.actor().user_id() != user.id {
-                        return Err(BaseError::PermissionDenied(
-                            "系统租户 capability 与 Step-up 操作者不匹配".to_string(),
-                        ));
-                    }
-                    "system".to_string()
-                }
-            },
         };
         let canonical = canonical_json(&context.request.body)?;
         let digest = Sha256::digest(canonical.as_bytes());
@@ -385,8 +359,6 @@ fn canonical_json(value: &Value) -> Result<String, BaseError> {
 mod tests {
     use super::*;
     use yang_base::action::Request;
-    #[cfg(feature = "org")]
-    use yang_base::action::{TenantContext, TenantId};
     use yang_base::tools::ToolsBuilder;
 
     fn manager() -> Arc<StepUpManager> {
@@ -439,28 +411,6 @@ mod tests {
         assert_eq!(left, reordered);
         assert_ne!(left, changed);
         assert!(!left.contains("active"));
-    }
-
-    #[cfg(feature = "org")]
-    #[tokio::test]
-    async fn tenant_fingerprint_uses_trusted_context_not_client_body() {
-        let resolver = RequestFingerprintResolver::tenant("org-user");
-        let first = context(serde_json::json!({ "id": 9, "org_org": 999 }))
-            .with_tenant(TenantContext::new(TenantId::new(7)));
-        let second = context(serde_json::json!({ "id": 9, "org_org": 999 }))
-            .with_tenant(TenantContext::new(TenantId::new(8)));
-
-        let first = resolver
-            .resolve(&first)
-            .await
-            .unwrap_or_else(|error| panic!("租户资源指纹应生成: {error}"));
-        let second = resolver
-            .resolve(&second)
-            .await
-            .unwrap_or_else(|error| panic!("租户资源指纹应生成: {error}"));
-        assert_ne!(first, second);
-        assert!(first.contains("tenant=7"));
-        assert!(!first.contains("999"));
     }
 
     #[test]

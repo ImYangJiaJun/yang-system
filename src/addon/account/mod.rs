@@ -1,6 +1,10 @@
-//! 账号 Addon 的公开组装入口。
+//! 账号 Addon（addon 层）：装配入口与对外端口。
+//!
+//! 两层结构：`user/` 是 module 层（`actions/` 里每个接口一个自包含文件，
+//! 业务用例内联其中）；`domain/` 是 addon 层共享机制，Action 所需的全部
+//! 能力经模块上下文 [`Account`] 单一出口提供。
 
-mod domain;
+pub(crate) mod domain;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
@@ -10,41 +14,22 @@ use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
-#[cfg(feature = "admin")]
-pub(crate) use domain::authz_version::LockedUserAuthorization;
-pub(crate) use domain::authz_version::{
-    disable_locked_user_and_increment_versions, find_authorization_version,
-    increment_locked_credential_versions, lock_user_credential, LockedUserCredential,
-};
-#[cfg(any(feature = "admin", feature = "org"))]
-pub(crate) use domain::authz_version::{increment_locked_authz_version, lock_user_authorization};
-#[cfg(feature = "org")]
-pub(crate) use domain::authz_version::{increment_locked_authz_versions, lock_user_authorizations};
+// 组合根与基础设施使用的账号端口。
+pub(crate) use domain::authz_version::find_authorization_version;
 pub use domain::email_delivery;
-pub(crate) use domain::grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
-pub(crate) use domain::password_reset::{
-    consume_in_tx as consume_password_reset_in_tx,
-    find_target_user as find_password_reset_target_user, invalid_reset_token,
-    lock_in_tx as lock_password_reset_in_tx, PasswordResetReference,
-};
-#[cfg(feature = "admin")]
-pub(crate) use domain::password_reset::{
-    create_in_tx as create_password_reset_in_tx, GeneratedPasswordReset,
-};
-pub(crate) use domain::system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
-#[cfg(any(
-    feature = "admin",
-    feature = "observability",
-    feature = "org",
-    feature = "work"
-))]
-pub(crate) use user::user_from_claims;
-pub(crate) use user::UserStatus;
-#[cfg(feature = "admin")]
-pub(crate) use user::{AuthOperation, AuthRateLimiter};
+pub(crate) use domain::grants::{CompositeGrantResolver, GrantResolver};
+pub(crate) use domain::system_owner::SystemOwnerClaimer;
 
-/// 返回不声明最终管理员的默认声明器（`admin` Addon 未启用时由组合根注入）。
-#[cfg(not(feature = "admin"))]
+// module 层（装配与 Action 文件）的统一入口：模块上下文与少量共享类型。
+pub(crate) use domain::authz_version::LockedUserCredential;
+pub(crate) use domain::context::Account;
+pub(crate) use domain::password_reset::PasswordResetReference;
+pub(crate) use domain::system_owner::OwnerClaimOutcome;
+
+/// 返回不声明最终管理员的默认声明器。
+///
+/// 当前骨架只保留 account Addon，没有平台管理域来声明最终管理员；
+/// 注册流程照常完成，任何账号都不会成为系统最终管理员。
 pub(crate) fn no_system_owner_claimer() -> Arc<dyn SystemOwnerClaimer> {
     Arc::new(domain::system_owner::NoSystemOwnerClaimer)
 }

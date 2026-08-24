@@ -1,7 +1,5 @@
 //! 密码重置凭证的生成、摘要与持久化仓储边界。
 
-#[cfg(feature = "admin")]
-use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
 use std::fmt::Write;
@@ -11,36 +9,6 @@ use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr, Transaction};
 const RAW_TOKEN_BYTES: usize = 32;
 const RAW_TOKEN_CHARS: usize = RAW_TOKEN_BYTES * 2;
 const FINGERPRINT_CHARS: usize = 16;
-
-#[cfg(feature = "admin")]
-pub(crate) struct GeneratedPasswordReset {
-    raw_token: String,
-    reference: PasswordResetReference,
-}
-
-#[cfg(feature = "admin")]
-impl GeneratedPasswordReset {
-    pub(crate) fn generate() -> Result<Self, BaseError> {
-        let mut random = [0_u8; RAW_TOKEN_BYTES];
-        OsRng
-            .try_fill_bytes(&mut random)
-            .map_err(|_| BaseError::Unknown("密码重置凭证随机源不可用".to_string()))?;
-        let raw_token = encode_hex(&random)?;
-        let reference = PasswordResetReference::from_bytes(&random)?;
-        Ok(Self {
-            raw_token,
-            reference,
-        })
-    }
-
-    pub(crate) fn raw_token(&self) -> &str {
-        &self.raw_token
-    }
-
-    pub(crate) fn reference(&self) -> &PasswordResetReference {
-        &self.reference
-    }
-}
 
 pub(crate) struct PasswordResetReference {
     digest: String,
@@ -97,41 +65,6 @@ impl LockedPasswordReset {
             && self.invalidated_at.is_none()
             && self.expires_at > self.database_now
     }
-}
-
-#[cfg(feature = "admin")]
-pub(crate) async fn create_in_tx(
-    transaction: &mut Transaction,
-    target_user_id: i64,
-    requested_by_user_id: i64,
-    reset: &GeneratedPasswordReset,
-    ttl_seconds: u64,
-) -> Result<(), BaseError> {
-    let ttl_seconds = i64::try_from(ttl_seconds)
-        .map_err(|_| BaseError::ConfigError("密码重置 TTL 超出 MySQL 范围".to_string()))?;
-    transaction
-        .table(table!("password_reset_token"))
-        .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
-        .where_and(field!("user_user"), CompareOp::Eq, target_user_id)
-        .where_null(field!("consumed_at"))
-        .where_null(field!("invalidated_at"))
-        .update(&serde_json::json!({}))
-        .await?;
-    transaction
-        .table(table!("password_reset_token"))
-        .set_expr(
-            field!("expires_at"),
-            SqlExpr::unix_timestamp_add(ttl_seconds),
-        )
-        .set_expr(field!("created_at"), SqlExpr::unix_timestamp())
-        .insert(&serde_json::json!({
-            "token_digest": reset.reference.digest,
-            "token_fingerprint": reset.reference.fingerprint(),
-            "user_user": target_user_id,
-            "requested_by_user": requested_by_user_id,
-        }))
-        .await?;
-    Ok(())
 }
 
 pub(crate) async fn find_target_user(
@@ -251,24 +184,6 @@ fn decode_hex(value: &str) -> Option<[u8; RAW_TOKEN_BYTES]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "admin")]
-    #[test]
-    fn generated_token_is_high_entropy_shaped_and_database_value_is_only_a_digest() {
-        let reset = GeneratedPasswordReset::generate()
-            .unwrap_or_else(|error| panic!("应生成重置凭证: {error}"));
-        assert_eq!(reset.raw_token().len(), RAW_TOKEN_CHARS);
-        assert!(reset
-            .raw_token()
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
-        assert_ne!(reset.raw_token(), reset.reference.digest);
-        assert_eq!(reset.reference.fingerprint().len(), FINGERPRINT_CHARS);
-        let reparsed = PasswordResetReference::parse(reset.raw_token())
-            .unwrap_or_else(|error| panic!("生成的凭证应可解析: {error}"));
-        assert_eq!(reparsed.digest, reset.reference.digest);
-        assert_eq!(reparsed.fingerprint, reset.reference.fingerprint);
-    }
 
     #[test]
     fn malformed_and_expired_or_consumed_tokens_fail_closed() {

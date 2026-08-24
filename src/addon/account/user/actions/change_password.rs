@@ -1,11 +1,15 @@
 //! 校验当前密码并使已有会话失效。
 
-use super::super::domain::policy::{PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH};
-use super::super::domain::service::UserService;
+use crate::addon::account::domain::policy::{
+    validate_new_password, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
+};
+use crate::addon::account::{Account, LockedUserCredential};
+use crate::audit;
+use serde_json::json;
 use std::sync::Arc;
-use yang_base::action::auth::BrowserSession;
+use yang_base::action::auth::{AuthOperation, BrowserSession};
 use yang_base::action::{ActionContext, ApiResponse};
-use yang_base::definition::Password;
+use yang_base::definition::{HttpMethod, ModuleSpec, Password};
 use yang_base::BaseError;
 
 yang_base::params! {
@@ -27,21 +31,101 @@ yang_base::params! {
 pub(super) async fn handle(
     ctx: ActionContext,
     input: ChangePasswordInput,
-    service: Arc<UserService>,
+    account: Arc<Account>,
 ) -> Result<ApiResponse, BaseError> {
     let secure = BrowserSession::validate_same_origin(&ctx.request)?;
     let user_id = ctx
         .authenticated_user()
         .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
         .id;
-    service
-        .change_password(&ctx, user_id, &input.old_password, &input.new_password)
+    if !account.credential_mutations_enabled() {
+        return Err(BaseError::ConfigError(
+            "改密能力必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
+        ));
+    }
+    validate_new_password(&input.new_password)?;
+    account
+        .rate_limiter()
+        .check(&ctx, AuthOperation::ChangePassword, &user_id.to_string())
         .await?;
+
+    let observed = account
+        .users()
+        .find_credentials_by_id(&ctx, user_id)
+        .await?
+        .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
+    Account::ensure_active(observed.status)?;
+    if !account
+        .passwords()
+        .verify(&input.old_password, &observed.password_hash)
+        .await?
+    {
+        return Err(BaseError::InvalidPassword);
+    }
+    // 两次昂贵 Argon2 运算均在事务和用户行锁之外完成。
+    let new_password_hash = account.passwords().hash(&input.new_password).await?;
+
+    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let result = async {
+        let locked = account
+            .lock_credential_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
+        Account::ensure_active(locked.status())?;
+        ensure_password_hash_unchanged(&locked, &observed.password_hash)?;
+        account
+            .users()
+            .update_password_hash_in_tx(&ctx, &mut transaction, user_id, &new_password_hash)
+            .await?;
+        Account::increment_versions_in_tx(&mut transaction, &locked).await?;
+        let event = audit::succeeded_event(
+            &ctx,
+            None,
+            Some(audit::entity("user", user_id)?),
+            audit::entity("user", user_id)?,
+            None,
+            Some(audit::summary([("relogin_required", json!(true))])?),
+        )?;
+        audit::append_in_tx(&mut transaction, &event).await?;
+        Ok(())
+    }
+    .await;
+    Account::finish_transaction(transaction, result).await?;
+
     change_password_response(secure)
 }
 
 fn change_password_response(secure: bool) -> Result<ApiResponse, BaseError> {
-    super::super::browser_session().relogin_response("密码已修改，请重新登录", secure)
+    Account::browser_session().relogin_response("密码已修改，请重新登录", secure)
+}
+
+fn ensure_password_hash_unchanged(
+    locked: &LockedUserCredential,
+    observed_password_hash: &str,
+) -> Result<(), BaseError> {
+    if locked.password_hash_matches(observed_password_hash) {
+        return Ok(());
+    }
+    Err(BaseError::ParamInvalid(
+        "old_password".to_string(),
+        "密码已被其他请求修改，请重新登录后重试".to_string(),
+    ))
+}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec {
+    // 发布开关关闭时不注册。
+    if !account.credential_mutations_enabled() {
+        return module;
+    }
+    module
+        .action_fn(
+            yang_base::action_name!("change_password"),
+            move |ctx, input| handle(ctx, input, Arc::clone(&account)),
+        )
+        .route(HttpMethod::Post, "/api/v1/users/change-password")
+        .display_name("修改密码")
+        .description("校验当前密码并使已有会话失效")
+        .register()
 }
 
 #[cfg(test)]

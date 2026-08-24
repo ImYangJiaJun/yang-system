@@ -8,7 +8,9 @@ use yang_db::Transaction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerClaimOutcome {
     /// 当前注册事务成功声明了唯一最终管理员。
-    #[cfg_attr(not(feature = "admin"), allow(dead_code))]
+    ///
+    /// 当前骨架没有平台管理域，该变体仅保留给未来重新引入声明器的 Addon。
+    #[allow(dead_code)]
     Claimed { admin_id: i64 },
     /// 最终管理员已经由另一个已提交或正在提交的事务声明。
     AlreadyClaimed,
@@ -28,12 +30,10 @@ pub(crate) trait SystemOwnerClaimer: Send + Sync {
 
 /// 不声明最终管理员的默认声明器。
 ///
-/// `admin` Addon 未随 feature 启用时由组合根注入：注册流程照常完成，
+/// 当前骨架只保留 account Addon：注册流程照常完成，
 /// 但任何账号都不会成为系统最终管理员。
-#[cfg(not(feature = "admin"))]
 pub(crate) struct NoSystemOwnerClaimer;
 
-#[cfg(not(feature = "admin"))]
 #[async_trait]
 impl SystemOwnerClaimer for NoSystemOwnerClaimer {
     async fn claim(

@@ -3,9 +3,8 @@
 本文档枚举 `yang-system` 生产代码中允许直接调用 SQLx 的持久化逃生口。通用
 CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；领域仓储与服务中的简单
 查询、行锁、JOIN、分页与条件更新已由 yang-db 查询构造器（含 `SqlExpr` 服务端
-时间表达式）承载。只有递归 CTE、`JSON_TABLE` 批量锁、Outbox `SKIP LOCKED`
-状态机、`information_schema` 内省和无 FROM 时钟采样等构造器无法表达的方言
-特性保留原始 SQL。
+时间表达式）承载。只有 Outbox `SKIP LOCKED` 状态机、`information_schema`
+内省等构造器无法表达的方言特性保留原始 SQL。
 
 ## 机械约束
 
@@ -22,18 +21,14 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；领域仓储
 
 | ID | 类型 | 文件 | 保留原因与不变量 |
 |---|---|---|---|
-| `work-task-repository` | domain-repository | `src/addon/work/task/domain/repository.rs` | 任务关系递归 CTE 防环与 `JSON_TABLE` + `FOR UPDATE OF` 批量锁是构造器无法表达的方言特性；普通行锁读已改用构造器 |
 | `audit-schema-validator` | schema-validator | `src/infrastructure/audit/schema.rs` | 启动期只读 `information_schema`，验证审计表不可变约束 |
 | `authorization-outbox` | infrastructure-repository | `src/infrastructure/authorization/outbox.rs` | claim/lease/retry 状态机必须使用 `FOR UPDATE SKIP LOCKED`、内省与条件更新 |
 
-<!-- raw-sql-boundary: domain-repository work-task-repository src/addon/work/task/domain/repository.rs -->
 <!-- raw-sql-boundary: schema-validator audit-schema-validator src/infrastructure/audit/schema.rs -->
 <!-- raw-sql-boundary: infrastructure-repository authorization-outbox src/infrastructure/authorization/outbox.rs -->
 
 ## 证据与变更流程
 
-- 租户相关旁路仍须同时登记在
-  [`tenant-data-paths.md`](tenant-data-paths.md)，并通过真实 MySQL 双租户负例；
 - 新增或移动 SQL 边界时，先更新代码声明和本清单，再运行
   `python scripts/check_architecture.py`；
 - SQLx 离线 metadata 只对 `query!` 系列编译期宏生效。当前生产查询使用运行时

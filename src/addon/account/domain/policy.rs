@@ -2,15 +2,13 @@
 
 use yang_base::BaseError;
 
-pub(in crate::addon::account::user) const USERNAME_MIN_LENGTH: usize = 3;
-pub(in crate::addon::account::user) const USERNAME_MAX_LENGTH: usize = 64;
-pub(in crate::addon::account::user) const USERNAME_PATTERN: &str = "^[A-Za-z0-9_-]+$";
-pub(in crate::addon::account::user) const PASSWORD_MIN_LENGTH: usize = 10;
-pub(in crate::addon::account::user) const PASSWORD_MAX_LENGTH: usize = 128;
+pub(crate) const USERNAME_MIN_LENGTH: usize = 3;
+pub(crate) const USERNAME_MAX_LENGTH: usize = 64;
+pub(crate) const USERNAME_PATTERN: &str = "^[A-Za-z0-9_-]+$";
+pub(crate) const PASSWORD_MIN_LENGTH: usize = 10;
+pub(crate) const PASSWORD_MAX_LENGTH: usize = 128;
 
-pub(in crate::addon::account::user) fn normalize_username(
-    username: &str,
-) -> Result<String, BaseError> {
+pub(crate) fn normalize_username(username: &str) -> Result<String, BaseError> {
     let normalized = username.trim().to_ascii_lowercase();
     let length = normalized.len();
     if !(USERNAME_MIN_LENGTH..=USERNAME_MAX_LENGTH).contains(&length) {
@@ -31,13 +29,11 @@ pub(in crate::addon::account::user) fn normalize_username(
     Ok(normalized)
 }
 
-pub(in crate::addon::account::user) fn validate_password(password: &str) -> Result<(), BaseError> {
+pub(crate) fn validate_password(password: &str) -> Result<(), BaseError> {
     validate_password_field("password", password)
 }
 
-pub(in crate::addon::account::user) fn validate_new_password(
-    password: &str,
-) -> Result<(), BaseError> {
+pub(crate) fn validate_new_password(password: &str) -> Result<(), BaseError> {
     validate_password_field("new_password", password)
 }
 

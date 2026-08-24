@@ -1,12 +1,12 @@
 //! 读取当前已认证用户。
 
-use super::super::domain::schema::UserView;
-use super::super::domain::service::UserService;
+use crate::addon::account::user::table::UserView;
+use crate::addon::account::Account;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::definition::{ParamInput, Params};
+use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -22,21 +22,33 @@ impl ParamInput for EmptyInput {
 pub(super) async fn handle(
     ctx: ActionContext,
     _input: EmptyInput,
-    service: Arc<UserService>,
+    account: Arc<Account>,
 ) -> Result<UserView, BaseError> {
     let id = ctx
         .authenticated_user()
         .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
         .id;
-    service.view_by_id(&ctx, id).await
+    account.view_by_id(&ctx, id).await
+}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec {
+    module
+        .action_fn(yang_base::action_name!("me"), move |ctx, input| {
+            handle(ctx, input, Arc::clone(&account))
+        })
+        .route(HttpMethod::Get, "/api/v1/users/me")
+        .display_name("当前用户")
+        .description("读取当前已认证用户")
+        .register()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::domain::schema::{
+    use super::*;
+    use crate::addon::account::user::table::{
         CREATED_AT, PASSWORD_HASH, STATUS, UPDATED_AT, USERNAME, USER_ID,
     };
-    use super::*;
     use yang_base::table::Record;
 
     #[test]

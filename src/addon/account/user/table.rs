@@ -1,25 +1,29 @@
-//! 用户表 Schema 与对外 DTO。
+//! users 表声明：字段定义、字段名常量与对外展示视图。
+//!
+//! 声明（模块是什么）位于模块层；机制（模块怎么做）位于 `domain/`。
 
-use super::policy::{USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_PATTERN};
-use super::status::UserStatus;
+use crate::addon::account::domain::policy::{
+    USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_PATTERN,
+};
+use crate::addon::account::domain::status::UserStatus;
 use schemars::JsonSchema;
 use serde::Serialize;
 use yang_base::definition::{Int, Key, Radio, Str, TableName, TableSpec, Timestamp};
 use yang_base::table::Record;
 use yang_base::BaseError;
 
-pub(in crate::addon::account::user) const SYSTEM_ROLE: &str = "system";
-pub(in crate::addon::account::user) const USER_ID: &str = "id";
-pub(in crate::addon::account::user) const USERNAME: &str = "username";
-pub(in crate::addon::account::user) const EMAIL: &str = "email";
-pub(in crate::addon::account::user) const EMAIL_VERIFIED_AT: &str = "email_verified_at";
-pub(in crate::addon::account::user) const PASSWORD_HASH: &str = "password_hash";
-pub(in crate::addon::account::user) const STATUS: &str = "status";
-pub(in crate::addon::account::user) const AUTHZ_VERSION: &str = "authz_version";
-pub(in crate::addon::account::user) const CREDENTIAL_VERSION: &str = "credential_version";
-pub(in crate::addon::account::user) const CREATED_AT: &str = "created_at";
-pub(in crate::addon::account::user) const UPDATED_AT: &str = "updated_at";
-pub(in crate::addon::account::user) const USER_VIEW_FIELDS: &[&str] = &[
+pub(crate) const SYSTEM_ROLE: &str = "system";
+pub(crate) const USER_ID: &str = "id";
+pub(crate) const USERNAME: &str = "username";
+pub(crate) const EMAIL: &str = "email";
+pub(crate) const EMAIL_VERIFIED_AT: &str = "email_verified_at";
+pub(crate) const PASSWORD_HASH: &str = "password_hash";
+pub(crate) const STATUS: &str = "status";
+pub(crate) const AUTHZ_VERSION: &str = "authz_version";
+pub(crate) const CREDENTIAL_VERSION: &str = "credential_version";
+pub(crate) const CREATED_AT: &str = "created_at";
+pub(crate) const UPDATED_AT: &str = "updated_at";
+pub(crate) const USER_VIEW_FIELDS: &[&str] = &[
     USER_ID,
     USERNAME,
     EMAIL,
@@ -31,7 +35,7 @@ pub(in crate::addon::account::user) const USER_VIEW_FIELDS: &[&str] = &[
 
 /// 可安全返回给客户端的用户视图，不包含密码摘要。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(in crate::addon::account::user) struct UserView {
+pub(crate) struct UserView {
     id: i64,
     username: String,
     email: Option<String>,
@@ -58,7 +62,7 @@ impl TryFrom<&Record> for UserView {
 }
 
 /// 构建用户表的唯一 Schema 定义。
-pub(in crate::addon::account::user) fn user_table_spec() -> Result<TableSpec, BaseError> {
+pub(crate) fn user_table_spec() -> Result<TableSpec, BaseError> {
     let fields = yang_base::fields! {
         id => Key::new().title("ID").filterable(true),
         username => Str::new()

@@ -1,6 +1,6 @@
 //! Token Claims 的唯一构造与可信用户投影。
 
-use crate::addon::account::AuthorizationGrants;
+use super::grants::AuthorizationGrants;
 use serde::{Deserialize, Serialize};
 use yang_base::action::auth::TokenPairClaims;
 use yang_base::action::User;
@@ -197,10 +197,7 @@ mod tests {
         assert_eq!(claims.access["authz_version"], 7);
         assert!(claims.access.get("credential_version").is_none());
         assert_eq!(claims.access["roles"], serde_json::json!(["user"]));
-        assert_eq!(
-            claims.access["permissions"],
-            serde_json::json!(["org.org:read", "org.user:read"])
-        );
+        assert_eq!(claims.access["permissions"], serde_json::json!([]));
         assert_eq!(claims.refresh, serde_json::json!({ "authz_version": 7 }));
         assert!(claims_for_user("alice", 0, 0, false, &AuthorizationGrants::user()).is_err());
         assert!(claims_for_user("alice", 7, -1, false, &AuthorizationGrants::user()).is_err());

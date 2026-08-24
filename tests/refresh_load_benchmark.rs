@@ -109,11 +109,6 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "password_reset_token",
         "audit_event",
         "authorization_outbox",
-        "work_task",
-        "work_project",
-        "org_user",
-        "org_org",
-        "admin_user",
         "users",
     ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))

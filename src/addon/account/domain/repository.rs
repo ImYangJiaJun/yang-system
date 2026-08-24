@@ -5,11 +5,11 @@
 //! 提权查询暴露给 Action。
 //! authorization-writer: account-user-facts
 
-use super::schema::{
+use super::status::UserStatus;
+use crate::addon::account::user::table::{
     AUTHZ_VERSION, CREDENTIAL_VERSION, EMAIL, EMAIL_VERIFIED_AT, PASSWORD_HASH, STATUS,
     SYSTEM_ROLE, USERNAME, USER_ID, USER_VIEW_FIELDS,
 };
-use super::status::UserStatus;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
@@ -18,10 +18,10 @@ use yang_base::BaseError;
 const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, PASSWORD_HASH, STATUS];
 const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION, CREDENTIAL_VERSION];
 
-pub(in crate::addon::account::user) struct CredentialRecord {
-    pub(in crate::addon::account::user) id: i64,
-    pub(in crate::addon::account::user) password_hash: String,
-    pub(in crate::addon::account::user) status: UserStatus,
+pub(crate) struct CredentialRecord {
+    pub(crate) id: i64,
+    pub(crate) password_hash: String,
+    pub(crate) status: UserStatus,
 }
 
 impl TryFrom<&Record> for CredentialRecord {
@@ -36,11 +36,11 @@ impl TryFrom<&Record> for CredentialRecord {
     }
 }
 
-pub(in crate::addon::account::user) struct AuthorizationStateRecord {
-    pub(in crate::addon::account::user) username: String,
-    pub(in crate::addon::account::user) status: UserStatus,
-    pub(in crate::addon::account::user) authz_version: i64,
-    pub(in crate::addon::account::user) credential_version: i64,
+pub(crate) struct AuthorizationStateRecord {
+    pub(crate) username: String,
+    pub(crate) status: UserStatus,
+    pub(crate) authz_version: i64,
+    pub(crate) credential_version: i64,
 }
 
 impl TryFrom<&Record> for AuthorizationStateRecord {
@@ -56,12 +56,12 @@ impl TryFrom<&Record> for AuthorizationStateRecord {
     }
 }
 
-pub(in crate::addon::account::user) struct UserRepository {
+pub(crate) struct UserRepository {
     users: TableDefinition,
 }
 
 impl UserRepository {
-    pub(in crate::addon::account::user) fn new(users: TableDefinition) -> Self {
+    pub(crate) fn new(users: TableDefinition) -> Self {
         Self { users }
     }
 
@@ -70,7 +70,7 @@ impl UserRepository {
         Ok(self.users.bind(pool).query([SYSTEM_ROLE]))
     }
 
-    pub(in crate::addon::account::user) async fn username_exists(
+    pub(crate) async fn username_exists(
         &self,
         ctx: &ActionContext,
         username: &str,
@@ -85,7 +85,7 @@ impl UserRepository {
         Ok(!rows.is_empty())
     }
 
-    pub(in crate::addon::account::user) async fn email_exists(
+    pub(crate) async fn email_exists(
         &self,
         ctx: &ActionContext,
         email: &str,
@@ -100,7 +100,7 @@ impl UserRepository {
         Ok(!rows.is_empty())
     }
 
-    pub(in crate::addon::account::user) async fn find_credentials_by_username(
+    pub(crate) async fn find_credentials_by_username(
         &self,
         ctx: &ActionContext,
         username: &str,
@@ -115,7 +115,7 @@ impl UserRepository {
         rows.first().map(CredentialRecord::try_from).transpose()
     }
 
-    pub(in crate::addon::account::user) async fn find_credentials_by_id(
+    pub(crate) async fn find_credentials_by_id(
         &self,
         ctx: &ActionContext,
         id: i64,
@@ -130,7 +130,7 @@ impl UserRepository {
         rows.first().map(CredentialRecord::try_from).transpose()
     }
 
-    pub(in crate::addon::account::user) async fn find_by_id(
+    pub(crate) async fn find_by_id(
         &self,
         ctx: &ActionContext,
         id: i64,
@@ -145,7 +145,7 @@ impl UserRepository {
         Ok(rows.into_iter().next())
     }
 
-    pub(in crate::addon::account::user) async fn find_authorization_state_in_tx(
+    pub(crate) async fn find_authorization_state_in_tx(
         &self,
         ctx: &ActionContext,
         transaction: &mut yang_db::Transaction,
@@ -163,7 +163,7 @@ impl UserRepository {
             .transpose()
     }
 
-    pub(in crate::addon::account::user) async fn insert_in_tx(
+    pub(crate) async fn insert_in_tx(
         &self,
         ctx: &ActionContext,
         transaction: &mut yang_db::Transaction,
@@ -185,7 +185,7 @@ impl UserRepository {
         i64::try_from(id).map_err(|_| BaseError::Unknown("用户主键超出 i64 范围".to_string()))
     }
 
-    pub(in crate::addon::account::user) async fn update_password_hash_in_tx(
+    pub(crate) async fn update_password_hash_in_tx(
         &self,
         ctx: &ActionContext,
         transaction: &mut yang_db::Transaction,
@@ -209,7 +209,7 @@ impl UserRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addon::account::user::domain::schema::user_table_spec;
+    use crate::addon::account::user::table::user_table_spec;
     use sqlx::mysql::MySqlPoolOptions;
     use yang_base::action::Request;
     use yang_base::tools::ToolsBuilder;

@@ -1037,8 +1037,8 @@ filter = "info"
         let challenge = manager
             .issue_challenge(
                 "7",
-                &yang_base::action!("admin.user.set_admin"),
-                "admin_user:42:admin=true",
+                &yang_base::action!("account.user.change_password"),
+                "users:42:password",
             )
             .unwrap_or_else(|error| panic!("Step-up challenge 应签发成功: {error}"));
 

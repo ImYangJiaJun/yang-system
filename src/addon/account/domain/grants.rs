@@ -17,10 +17,7 @@ pub struct AuthorizationGrants {
 impl AuthorizationGrants {
     /// 创建基础用户授权。
     pub fn user() -> Self {
-        Self::default()
-            .role("user")
-            .permission("org.org:read")
-            .permission("org.user:read")
+        Self::default().role("user")
     }
 
     /// 增加一个角色。
@@ -31,7 +28,11 @@ impl AuthorizationGrants {
     }
 
     /// 增加一个权限。
+    ///
+    /// 当前骨架只有 account Addon，基础授权不含权限项；本方法保留给未来
+    /// 外围 Addon 的 `GrantResolver` 扩展授权快照。
     #[must_use]
+    #[allow(dead_code)]
     pub fn permission(mut self, permission: impl Into<String>) -> Self {
         self.permissions.insert(permission.into());
         self
@@ -103,12 +104,12 @@ mod tests {
             .role("admin")
             .role("user")
             .permission("admin.user:read")
-            .permission("org.user:read");
+            .permission("account.user:write");
 
         assert_eq!(grants.roles().collect::<Vec<_>>(), ["admin", "user"]);
         assert_eq!(
             grants.permissions().collect::<Vec<_>>(),
-            ["admin.user:read", "org.org:read", "org.user:read"]
+            ["account.user:write", "admin.user:read"]
         );
     }
 }
