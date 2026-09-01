@@ -2,7 +2,7 @@
 
 状态：Accepted（C3-00）
 日期：2026-07-26
-适用范围：`account`、`admin`、`org` 的认证、授权快照和授权事实写入路径
+适用范围：`account` 的认证、授权快照和授权事实写入路径
 
 ## 1. 决策背景
 
@@ -11,20 +11,15 @@
 变化不会主动使已有 Access Token 失效：
 
 - `users.status` 停用；
-- `admin_user.status` 或 `admin_user.admin` 变化；
-- `org_user` 成员新增、停用、删除或管理员标记变化；
-- `org_org.status` 变化导致一组成员失去有效组织；
 - 后续新增的角色、策略或授权关系变化。
 
 refresh 会重新读取事实，只能在客户端主动刷新后纠正 claims，不能替代服务端撤销。
 逐 Token `jti` 黑名单适合单个会话撤销，但无法简洁覆盖“一个授权事实使该主体全部旧
 Access Token 失效”。
 
-当前源码还有两个一致性缺口：
-
-1. 用户状态、授权版本和各领域 grant resolver 不是在同一个数据库快照中读取；
-2. `admin_user` 写只有部分操作使用事务，`org_user` 写仍由通用 CRUD 承担，无法把业务
-   事实与授权版本递增原子提交。
+（历史注记：本 ADR 决策时还存在 `admin`/`org` 两个 Addon 及其授权事实表；2026-08-24
+骨架收敛后这两个 Addon 已删除，当前唯一的授权事实表是 `users`，writer 全部位于
+account 域。）
 
 ## 2. 决策
 
@@ -37,14 +32,14 @@ Access Token 失效”。
 3. 任何会改变该用户有效角色、权限或账号可用性的写操作，必须在同一 MySQL 事务内：
    写业务事实、递增版本、写入 outbox。
 4. Access Token 必须携带生成授权快照时读取的同一 `authz_version`。
-5. 受保护请求在权限判断和租户解析前比较 Token 版本与当前版本；不相等即失败关闭。
+5. 受保护请求在权限判断前比较 Token 版本与当前版本；不相等即失败关闭。
 6. Redis 只缓存版本，不缓存角色/权限，不成为授权事实源。
 7. outbox、Redis 重放、并发 writer 和缓存回填都不能使版本回退。
-8. C3-03、C3-04 的所有 writer 完成前，不启用请求期强制比较。
+8. 授权事实 writer 覆盖完成前，不启用请求期强制比较。
 
 这不是双授权运行时。最终只有一条请求授权链：
 
-`验证 JWT/撤销状态 → 比较 authz_version → 构造 User → 权限检查 → 租户解析 → Action`
+`验证 JWT/撤销状态 → 比较 authz_version → 构造 User → 权限检查 → Action`
 
 ## 3. 数据模型
 
@@ -64,8 +59,8 @@ authz_version BIGINT NOT NULL DEFAULT 1
 - 新用户从 1 开始；迁移时既有用户统一回填 1；
 - 不以时间戳代替版本，避免同秒并发、时钟回拨和多实例时钟差。
 
-单一用户版本足以覆盖当前授权模型。若未来组织策略本身成为高频、独立版本化事实，再通过
-新 ADR 引入策略版本；当前不预先维护多套版本或兼容链。
+单一用户版本足以覆盖当前授权模型。若未来出现高频、独立版本化的授权事实，再通过
+新 ADR 引入对应版本；当前不预先维护多套版本或兼容链。
 
 ### 3.2 `authorization_outbox`
 
@@ -98,45 +93,32 @@ worker 可以把 `FOR UPDATE SKIP LOCKED` 用于 outbox 队列 claim，但不得
 
 ## 4. 授权事实与 writer 覆盖
 
-只有“有效授权结果可能变化”的字段才递增版本。姓名、职务、邮箱、手机等纯展示字段不递增。
+只有“有效授权结果可能变化”的字段才递增版本。姓名等纯展示字段不递增。
 无实际值变化的幂等写不递增。
 
 | 事实路径 | 影响版本的变化 | 原子事务要求 |
 |---|---|---|
 | `users` | `status`；后续直接角色/策略字段 | 用户事实 + 本用户版本 + outbox |
-| `admin_user` | 新增、删除、`status`、`admin`、绑定用户变化 | 平台事实 + 目标用户版本 + outbox |
-| `org_user` | 新增、删除、`status`、`admin`、`user_user`、`org_org` | 成员事实 + 变更前后用户版本 + outbox |
-| `org_org` | `status` 或会改变成员授权的策略 | 组织事实 + 所有受影响用户版本 + 各自 outbox |
-| `org.tenant.create` | 创建者获得有效管理员成员关系 | 组织、成员、创建者版本和 outbox 同事务 |
+
+当前 writer 清单的机器可读事实源是
+[`authorization-writers.md`](authorization-writers.md)：注册只写固定初始状态，状态变更、
+授权/凭据版本递增与 Outbox 追加集中在 account 域的显式 repository 事务。
 
 实现约束：
 
-- `admin_user` 的 `bootstrap`、`add`、`set_status`、`set_admin` 全部进入显式 repository
-  事务，不能在事务提交后再补版本。
-- `org_user` 不再允许通用 CRUD 直接承担 `add/put/del`；保留读 Action，写 Action
-  迁移到显式 repository 事务，并保持现有稳定 Action 名、路由与前端契约。
 - 所有受影响的 `user_id` 去重后按升序锁定和递增；同一事务对同一用户最多递增一次。
 - 多行领域事实也按稳定主键顺序锁定；外部网络调用不得发生在 MySQL 事务内。
 - 死锁或 lock wait 只允许对整个事务做有界重试，不能只重试版本或 outbox 的一部分。
 
 ### 4.1 资源授权覆盖与线性化点
 
-组织成员 mutation 不再由一个运行时 Action 名单决定是否执行 guard。`add`、`put`、
-`del` 各自注册一个持有确定 `ActionRef` 的 middleware；模块测试把除已审计只读 Action
-外的所有 Action 默认视为 mutation，因此新增写 Action 未增加对应 authorizer target 时
-必须在构建测试阶段失败。
+账号高危写入（自助停用、改密、密码重置）采用以下线性化语义：
 
-middleware 对当前管理员事实的查询只承担快速拒绝，不能作为写入授权结论。组织和平台
-高危写入统一采用以下线性化语义：
-
-> 业务事务内最后一次锁定并复核操作者当前管理员事实，是该写入的授权线性化点。
-> 在线性化点前提交的撤权必须使写入失败；线性化点后到达的撤权等待在途事务提交，
+> 业务事务内最后一次锁定并复核账号当前状态，是该写入的授权线性化点。
+> 在线性化点前提交的停用必须使写入失败；线性化点后到达的变更等待在途事务提交，
 > 已线性化的写入可以完成。
 
-组织写事务按“操作者管理员成员行 → 组织行 → 目标成员行 → 受影响 users 行”的顺序
-获取锁。平台 `add` 和密码重置签发先锁操作者平台管理员行，再锁目标 users 行；
-`set_status` 和 `set_admin` 先按平台账号主键升序锁定全部 active 超级管理员，再锁目标
-平台账号和受影响 users 行。检查失败、死锁或 lock wait 都必须回滚整个业务、版本、
+检查失败、死锁或 lock wait 都必须回滚整个业务、版本、
 outbox 与成功审计事务，禁止只重试其中一段。
 
 单用户递增的逻辑顺序为：
@@ -165,7 +147,7 @@ subject + username + active status + authz_version + roles + permissions
 读取器在 MySQL 主库的同一个显式 `REPEATABLE READ` 只读事务中：
 
 1. 读取并校验 `users.status`、`users.authz_version`；
-2. 让 account/admin/org grant resolver 复用同一事务读取授权事实；
+2. 让 account grant resolver 复用同一事务读取授权事实；
 3. 组装稳定排序、去重的 roles/permissions；
 4. 提交只读事务后生成 Token 对。
 
@@ -282,8 +264,7 @@ Redis 单点故障扩大为全站故障，主库回退是可信比较而不是�
 |---|---|---|
 | C3-01 | `users.authz_version` Schema、迁移、repository 读取 | 不比较 |
 | C3-02 | 统一快照事务；登录/refresh Token 写版本 | 不比较 |
-| C3-03 | admin 全部授权 writer 原子递增 | 不比较 |
-| C3-04 | org 成员/角色/onboarding writer 原子递增 | 不比较 |
+| C3-03 | account 全部授权 writer 原子递增（历史含 admin/org writer，已随 Addon 删除） | 不比较 |
 | C3-05 | outbox worker、Redis 单调缓存、指标与重放 | 不比较 |
 | C3-06 | writer 覆盖门禁通过后，一次性启用所有受保护请求比较 | 强制 |
 | C3-07 | 停用、降级、移除、并发、Redis 重启真实集成矩阵 | 强制 |
@@ -295,8 +276,6 @@ C3-06 是破坏性安全切换：启用后，旧版无 `authz_version` 的 Acces
 ## 11. 验收矩阵
 
 - 用户停用后旧 Access Token 不超过 5 秒被拒绝，refresh 同样被拒绝；
-- 超级管理员降级、平台账号停用后，旧 Token 不能继续平台写；
-- 企业管理员降级、成员停用或移除后，旧 Token 不能继续成员写或租户访问；
 - 授权提升后旧 Token 也被判 stale，refresh 后才获得新权限；
 - 并发 writer 的版本严格递增，outbox 不缺失、不重复生效、不回退 Redis；
 - 业务事务回滚时版本和 outbox 一并回滚；
@@ -319,4 +298,4 @@ C3-06 是破坏性安全切换：启用后，旧版无 `authz_version` 的 Acces
 - Redis 保存完整权限并作为事实源：产生第二授权数据库和双写一致性问题；
 - 在业务事务提交后再递增版本或写 outbox：进程崩溃会永久漏失失效事件；
 - MySQL trigger 隐式递增：隐藏跨领域业务语义，不利于锁顺序、outbox 和代码审查；
-- 在 C3-03/C3-04 writer 未覆盖时提前比较：会制造“部分写会失效、部分写不会”的虚假安全。
+- 在授权 writer 未覆盖时提前比较：会制造“部分写会失效、部分写不会”的虚假安全。

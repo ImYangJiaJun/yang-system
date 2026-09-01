@@ -2,29 +2,23 @@
 
 `yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用和 Quasar 管理控制台。当前
 应用以同一份 Addon/Module 定义构建强类型 Action、Schema、Catalog、Registry、
-OpenAPI 与前端页面，覆盖账号与会话、平台管理、企业成员、个人任务、授权失效传播、
-高权限审计和生产可观测性。
+OpenAPI 与前端页面。骨架只保留 `account` 一个业务 Addon，覆盖账号与会话、
+授权失效传播、高权限审计和生产可观测性；没有平台管理、企业租户和业务对象域。
 
 ## 当前能力
 
 | Addon / Module | 控制台入口 | 当前能力 |
 |---|---|---|
 | `account.user` | 个人账户 / 用户中心 | 邮箱验证码注册、登录、Refresh Cookie、全设备退出、当前用户、Step-up；启用凭据版本切换后还提供改密、自助停用和密码重置 |
-| `admin.user` | 管理平台 / 平台账号 | 首个注册账号原子成为最终管理员；账号查询与新增、状态和超级管理员变更；启用凭据版本切换后可签发单次密码重置凭证 |
-| `org.tenant` | 企业账号 / 我的企业 | 发现可访问企业、原子创建企业与首位管理员 |
-| `org.org` / `org.user` | 企业资料 / 企业成员 | 当前企业资料、成员查询与增改删、关系选择和租户隔离 |
-| `work.project` / `work.task` | 个人账户 / 项目组合、任务规划 | 个人项目、任务树与分页清单、关系选择、批量完成 |
-| `system.observability` | 无导航入口 | 已认证的浏览器错误关联上报 |
 
 安全边界不是只依赖前端隐藏按钮：Access Token 的授权快照通过
 `authz_version` 与 MySQL/Redis 当前事实比较，授权 writer 在同一事务中更新业务事实、
-单调递增版本并追加 Outbox；企业成员写操作还会在持锁事务内复核资源授权。全设备退出、
-自助停用、平台账号新增/状态/管理员变更和企业成员增改删按各自契约使用 Step-up、
-最后管理员保护、会话撤销或审计事件。
+单调递增版本并追加 Outbox。全设备退出、自助停用、改密和密码重置按各自契约使用
+Step-up、会话撤销或审计事件。
 
 `security.issue_refresh_credential_version` 是三阶段发布开关。示例配置保持 `false`，
-此时服务兼容读取旧 Refresh Token，且不会注册依赖新版凭据版本契约的改密、自助停用、
-用户密码重置和管理员重置凭证 Action；确认没有旧实例后切换为 `true`，才同时启用
+此时服务兼容读取旧 Refresh Token，且不会注册依赖新版凭据版本契约的改密、自助停用和
+密码重置 Action；确认没有旧实例后切换为 `true`，才同时启用
 Refresh 凭据版本签发和这些 Action。该开关不能在新旧实例混跑时提前打开。
 
 ## 本地环境
@@ -106,8 +100,8 @@ python scripts/check_architecture.py
 已有文件，并要求业务路径显式位于 `/api/v1/`：
 
 ```powershell
-python scripts/new_action.py src/addon/org/organization/actions archive `
-  --title "归档企业" --method POST --path /api/v1/orgs/archive
+python scripts/new_action.py src/addon/account/user/actions disable_other `
+  --title "停用账号" --method POST --path /api/v1/users/disable-other
 ```
 
 生成代码会稳定返回“尚未实现”错误，开发者必须补齐强类型输入、输出和业务逻辑后
@@ -115,19 +109,13 @@ python scripts/new_action.py src/addon/org/organization/actions archive `
 
 ## BR 生态前端
 
-`frontend/` 使用 Quasar 构建正式控制台。登录、注册、密码重置、身份选择和应用壳由
+`frontend/` 使用 Quasar 构建正式控制台。登录、注册、密码重置和应用壳由
 前端静态维护；登录后的业务导航读取后端 Catalog，将当前身份可访问的 Module 投影
 为页面：
 
 | 账号身份 | 后端模块 | 前端页面 |
 |---|---|---|
 | 个人账户 | `account.user` | 用户中心 |
-| 个人账户 | `work.project` | 项目组合 |
-| 个人账户 | `work.task` | 任务规划 |
-| 企业账号 | `org.tenant` | 我的企业 |
-| 企业账号 | `org.org` | 企业资料 |
-| 企业账号 | `org.user` | 企业成员 |
-| 管理平台 | `admin.user` | 平台账号 |
 
 通用 `ModulePage` 解释 Catalog 中的主 Action、TableView、JSON Schema 表单、关系选项、
 工具栏/行/批量操作和确认语义。只有 Action、没有 TableView 的模块也可由主 Action
@@ -135,13 +123,9 @@ python scripts/new_action.py src/addon/org/organization/actions archive `
 加载失败时回退到通用 TableView。后端权限投影中不存在的模块和操作不会出现在前端，
 直接访问无权模块时同样 fail-closed。
 
-右上角账号菜单对应 `user/admin/org` 身份模型。企业身份从
-`org.tenant.list` 加载当前用户可访问的企业名称，选择企业后由前端保存其内部
-tenant ID 并重新加载 Catalog；用户无需看到或手动输入企业 ID。
-
 后端返回 Step-up challenge 时，通用操作链会打开重认证对话框，用当前账号凭据完成
 challenge 后携带一次性 proof 重试原操作。`/workbench` 是仅开发环境开放的 Catalog
-契约工作台；生产构建使用身份选择、模块页和业务视图，不把工作台当作正式交付证明。
+契约工作台；生产构建使用模块页和业务视图，不把工作台当作正式交付证明。
 
 本地联调前端：
 
@@ -161,15 +145,12 @@ pnpm dev
 
 ```text
 src/
-├── addon/                   # 业务 Addon；接口目录只含 mod.rs（装配+路由表）、actions/（纯接口函数式 Action）、domain/（业务机制）
-│   ├── account/              # 注册/会话/邮件投递、授权快照与用户生命周期
-│   ├── admin/                # 首个注册账号的唯一最终管理员与平台授权保护
-│   ├── observability/        # 浏览器错误与服务端 request_id 关联
-│   ├── org/                  # 企业创建/选择、可信租户解析与成员管理
-│   └── work/                 # 个人项目、任务树、关系与批量完成
+├── addon/                   # 业务 Addon；当前只有 account 一个
+│   └── account/             # 注册/会话/邮件投递、授权快照与密码重置；user/ 是 module 层
+│       └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
 ├── config/                  # 不可变设置、环境变量与 secret 白名单
 ├── infrastructure/          # 审计、授权一致性与声明式数据库 Schema
-├── app.rs                   # 所有业务 Addon 的唯一组合根
+├── app.rs                   # 业务 Addon 的唯一组合根
 ├── bootstrap.rs             # 配置、Telemetry、Tools、Schema、Worker、HTTP 与关闭顺序
 ├── lib.rs
 └── main.rs
@@ -194,22 +175,21 @@ Addon/Module/fields!/params!
  OpenAPI/UI  HTTP dispatch  Schema/Tables
                  │
                  ▼
- auth → authz_version → tenant/permission → Step-up/resource guard → Action
-                                                               │
-                                                               ▼
-                                              business fact + version + Outbox/audit
+ auth → authz_version → permission → Step-up guard → Action
+                                                     │
+                                                     ▼
+                                       business fact + version + Outbox/audit
 ```
 
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；没有进程级数据库/Redis/Tools 单例。
 - `params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
 - `fields!` 是 Schema、输入输出约束、OpenAPI、后台元数据和查询策略的字段事实来源。
 - `ActionLink<I, O>` 在 `AppBuilder::build` 绑定 Registry slot；请求期内部调用不查字符串名称、不做 JSON 往返；完整样例位于 `yang-base` 定义层测试。
-- `ctx.tables()` 统一执行字段权限、筛选、排序、分页、关系批量加载与租户条件。
-- `org_user.org_org` 是租户键；普通上下文缺少 `TenantContext` 时查询 fail-closed，只有显式 system 上下文可绕过。
+- `ctx.tables()` 统一执行字段权限、筛选、排序、分页与关系批量加载。
 - Token 授权快照同时包含角色、权限与 `authz_version`；Redis 只做短 TTL 加速，MySQL
   保持最终事实源，Outbox 重放不能让版本回退。
 - Step-up challenge/proof 使用独立 keyring，生产 proof 通过 Redis 原子单次消费；它不
-  替代 Action 内的事务授权、最后管理员保护或审计写入。
+  替代 Action 内的事务授权或审计写入。
 
 ## 生产发布与启动顺序
 
@@ -271,10 +251,9 @@ Redis、SMTP、邮箱验证码、Token 等运行参数按
 注册邮箱验证码的接口、防枚举/重放边界、SMTP/secret provider 配置与真实集成门禁见
 [`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)。
 
-首个成功提交注册事务的账号会通过数据库唯一 `owner_key=system-owner` 哨兵原子成为
-唯一且不可降级、停用或删除的系统最终管理员。已有用户却没有 owner、存在多个 owner
-或 owner 状态损坏时启动失败并要求人工修复。首次注册前必须使用本机监听、防火墙或
-反向代理限制不可信访问；没有外部身份凭证时，系统无法判断哪个公网注册者是预期所有者。
+当前骨架没有平台管理域，注册流程只创建普通账号，任何账号都不会成为系统最终管理员
+（组合根注入的是不声明最终管理员的默认声明器）。后续引入管理域时应重新评估首次
+注册前的访问限制。
 
 `app.environment` 支持 `development|test|production`，缺省时按 `production`
 处理。示例配置仅面向本地开发，部署配置必须显式复核该标识。
@@ -294,9 +273,10 @@ $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
 python scripts/run_ci.py integration
 ```
 
-该门禁覆盖授权缓存单调性与 Outbox 并发重放、Schema 预检/apply/validate、跨实例并发
-apply、审计/最终管理员信任根、邮箱验证码对抗边界、注册/登录/Refresh/会话失效、
-原子创建企业、租户隔离和业务系统路径，不使用 mock 替代 MySQL 或 Redis。
+该门禁覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例
+并发 apply，不使用 mock 替代 MySQL 或 Redis。入口为
+`tests/registration_email_integration.rs`、`tests/refresh_load_benchmark.rs` 和
+`tests/schema_apply_integration.rs`。
 
 ## 参考能力
 
@@ -304,18 +284,14 @@ apply、审计/最终管理员信任根、邮箱验证码对抗边界、注册/�
 |---|---|
 | `addon/account/user/` | 邮箱注册、Cookie 会话、凭据/授权版本、Step-up、停用与全量撤销 |
 | `infrastructure/authorization/` | Redis 单调缓存、MySQL 回源、事务 Outbox 与发布 Worker |
-| `addon/admin/` | 首个注册最终管理员、权限快照、最终管理员保护与密码重置凭证 |
-| `addon/org/` | 原子建企业、可信租户、成员资源授权和事务内最终复核 |
-| `addon/work/` | 个人租户、项目/任务关系、树与分页 View、批量完成 |
-| `app.rs` 测试 | Catalog/Registry/OpenAPI 同源、条件 Action、权限、View 与租户 fail-closed |
+| `app.rs` 测试 | Catalog/Registry/OpenAPI 同源与条件 Action |
 
 数据库结构由 [`src/infrastructure/schema.rs`](src/infrastructure/schema.rs) 的声明统一驱动，不依赖 SQL 迁移文件或源码 codemod。
 
 安全与运行契约继续拆分在专门文档中：授权失效见
 [`docs/architecture/authorization-freshness-adr.md`](docs/architecture/authorization-freshness-adr.md)，
-裸 SQL 边界与租户数据路径见
-[`docs/architecture/raw-sql-boundaries.md`](docs/architecture/raw-sql-boundaries.md) 和
-[`docs/architecture/tenant-data-paths.md`](docs/architecture/tenant-data-paths.md)，
+裸 SQL 边界见
+[`docs/architecture/raw-sql-boundaries.md`](docs/architecture/raw-sql-boundaries.md)，
 高权限审计见 [`docs/AUDIT.md`](docs/AUDIT.md)，Schema 演进见
 [`docs/SCHEMA.md`](docs/SCHEMA.md)，注册邮件见
 [`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)，SLO 见

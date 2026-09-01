@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + Quasar/Vue 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。业务覆盖：账号与会话（邮箱验证码注册、登录、Refresh Cookie、Step-up 重认证、密码重置）、平台管理（最终管理员）、企业租户与成员、个人项目/任务、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。
+`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + Quasar/Vue 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前骨架只保留 `account` 一个业务 Addon：账号与会话（邮箱验证码注册、登录、Refresh Cookie、Step-up 重认证、密码重置）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
 
 本仓库是**独立 Git/Cargo 项目**，但被签出在 `lib_yang` 仓库的 `project/yang-system/` 路径下（`lib_yang` 根 workspace 显式排除它）；`Cargo.toml` 通过相对路径直接依赖同工作树中的基础库：
 
@@ -27,12 +27,9 @@ yang-runtime = { path = "../../crates/yang-runtime", ... }
 
 ```text
 src/
-├── addon/                   # 业务 Addon；接口目录只含 mod.rs（装配+路由表）、actions/（纯接口）、domain/（业务机制）
-│   ├── account/             # 注册/会话/邮件投递、授权快照、用户生命周期（user/）、密码重置（domain/password_reset/）
-│   ├── admin/               # 首个注册账号的最终管理员与平台账号管理
-│   ├── observability/       # 浏览器错误与服务端 request_id 关联上报
-│   ├── org/                 # 企业创建/选择（access）、企业资料（organization）、成员（user）
-│   └── work/                # 个人项目（project）、任务树（task）
+├── addon/                   # 业务 Addon；当前只有 account 一个
+│   └── account/             # 注册/会话/邮件投递、授权快照、密码重置（domain/）；user/ 是 module 层
+│       └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
 ├── config/                  # 不可变运行配置、配置源合成（source.rs）
 ├── infrastructure/          # 审计（audit/）、授权一致性（authorization/）、声明式 Schema（schema.rs）
 ├── app.rs                   # 所有业务 Addon 的唯一组合根
@@ -61,8 +58,8 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 
 其他常用命令：
 
-- `cargo run --locked` — 启动后端（`http://127.0.0.1:8080`），需要已配置 `config.toml`。
-- `python scripts/check_architecture.py` — 架构门禁：保证 `actions/` 中一个文件只承载一个 Action、文件与 `mod.rs` 清单一致，裸 SQL/租户数据路径等有 `// tenant-boundary: <kind> <id>` 边界注释。
+- `cargo run --locked` — 启动后端（`http://127.0.0.1:8080`），需要已配置 `config.toml`。Cargo features 只剩 `default = ["account"]`，没有 addon 级 feature 组合。
+- `python scripts/check_architecture.py` — 架构门禁：保证 `actions/` 中一个文件只承载一个 Action（恰好一个 `pub(super) async fn handle` + 一个自包含 `pub(super) fn register`）、文件与 `mod.rs` 的 `ACTIONS` 注册表数组一致，裸 SQL 路径有 `// tenant-boundary: <kind> <id>` 边界注释。
 - `python scripts/new_action.py <module_actions_dir> <name> --title "..." --method POST --path /api/v1/...` — 新增 Action 脚手架（创建文件、声明 mod、注册）；生成器拒绝覆盖已有文件，生成的代码稳定返回“尚未实现”错误，必须补齐强类型输入、输出和业务逻辑后才算完成。
 - `pnpm --dir frontend dev` — 前端开发服务器（`http://127.0.0.1:5173`），默认通过 Vite 代理访问 `127.0.0.1:8080` 的真实后端。
 - `pnpm --dir frontend check` — 前端完整检查链；单独排查可用 `typecheck` / `lint` / `test` / `e2e` / `e2e:production`。
@@ -70,12 +67,12 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 
 ## 代码组织与架构约定
 
-- **每个自定义 Action 独占一个文件**，放在所属 Module 的 `actions/` 目录下；Action 是函数式形态——文件只含输入声明（`params!` 或手写 Input）与恰好一个 `pub(super) async fn handle` 主函数，路由/权限/展示元数据集中在 `actions/mod.rs` 的 `action_fn` 路由表（终结式 builder，spec 与 handler 原子注册）。禁止在业务代码使用 `#[derive(Action)]` 过程宏（框架内置 CRUD 除外）。业务路径必须显式位于 `/api/v1/`。改动 `actions/` 后必须通过 `python scripts/check_architecture.py`。
-- Module/Addon 接口目录只承载 `mod.rs`、`actions/`、`domain/` 三件套；service/repository/policy 等业务机制一律放 `domain/`。通用机制（密码哈希、限流、邮箱验证码、浏览器会话 Cookie）由 `yang_base::action::auth` 框架能力提供，应用侧不重复实现。
-- 核心链路：`Addon/Module/fields!/params!` → `AppBuilder` → Catalog / Registry / TableDefinition → OpenAPI/UI、HTTP dispatch、Schema。请求处理顺序：auth → authz_version → tenant/permission → Step-up/resource guard → Action → 业务事实 + 版本 + Outbox/audit。
+- **每个自定义 Action 独占一个文件**，放在所属 Module 的 `actions/` 目录下，形态是「自包含 register」：文件内含输入声明（`params!` 或手写 Input）、恰好一个 `pub(super) async fn handle` 主函数和一个 `pub(super) fn register(module, account)` 自包含注册函数（终结式 builder，spec 与 handler 原子绑定）；`actions/mod.rs` 只保留模块清单和 `ACTIONS` 注册表数组，新增接口加一行 `mod` 声明和一行数组项。禁止在业务代码使用 `#[derive(Action)]` 过程宏（框架内置 CRUD 除外）。业务路径必须显式位于 `/api/v1/`。改动 `actions/` 后必须通过 `python scripts/check_architecture.py`。
+- Addon 层目录只承载 `mod.rs`（装配+对外端口）、module 子目录与 `domain/`（addon 级共享机制）；module 层只承载 `mod.rs`（装配+展示投影）、`table.rs`（表声明）和 `actions/`。通用机制（密码哈希、限流、邮箱验证码、浏览器会话 Cookie）由 `yang_base::action::auth` 框架能力提供，应用侧不重复实现。
+- 核心链路：`Addon/Module/fields!/params!` → `AppBuilder` → Catalog / Registry / TableDefinition → OpenAPI/UI、HTTP dispatch、Schema。请求处理顺序：auth → authz_version → permission → Step-up guard → Action → 业务事实 + 版本 + Outbox/audit。
 - `fields!` 是 Schema、输入输出约束、OpenAPI 和查询策略的唯一字段事实来源；`params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；**禁止引入进程级数据库/Redis/Tools 单例**。
-- `org_user.org_org` 是租户键；普通上下文缺少 `TenantContext` 时查询 fail-closed，只有显式 system 上下文可绕过。裸 SQL 和租户数据路径的边界见 `docs/architecture/raw-sql-boundaries.md` 与 `tenant-data-paths.md`。
+- 当前没有租户域；裸 SQL 路径的边界登记见 `docs/architecture/raw-sql-boundaries.md`。
 - 数据库结构由 `src/infrastructure/schema.rs` 的声明统一驱动：启动时先只读计划和旧数据预检，全部安全后才保数据增量同步；冲突会输出表、对象和主键并拒绝启动。**不要新增 SQL 迁移文件**（`migrations/` 为空是有意的）。规则见 `docs/SCHEMA.md`。
 - 前端业务导航由后端 Catalog 投影驱动，通用 `ModulePage` 解释 TableView/JSON Schema 表单/操作语义；需要特殊交互的页面必须在 `frontend/src/custom/registry.ts` 静态注册表中显式登记，未登记或加载失败时回退到通用 TableView。**不要根据后端返回的字符串构造动态 import**。
 
@@ -98,7 +95,7 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
   python scripts/run_ci.py integration
   ```
 
-  覆盖授权缓存单调性/Outbox 并发重放、Schema 预检/apply、跨实例并发 apply、审计/最终管理员、邮箱验证码对抗边界、注册/登录/Refresh/会话失效、租户隔离和业务系统路径。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。
+  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下只有 `registration_email_integration.rs`、`refresh_load_benchmark.rs` 与 `schema_apply_integration.rs` 三个入口。
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
 
 ## 安全注意事项
@@ -107,10 +104,9 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 - Token、Step-up、邮箱验证码使用各自独立的 keyring/密钥，禁止复用；`config.example.toml` 中的占位密钥会被启动校验拒绝。
 - 授权快照（`authz_version`）以 MySQL 为最终事实源，Redis 只做短 TTL 单调加速；授权 writer 必须在同一事务中更新业务事实、单调递增版本并追加 Outbox，Outbox 重放不能让版本回退。
 - `security.issue_refresh_credential_version` 是三阶段发布开关，新旧实例混跑时不能提前打开（见 README）。
-- 首个注册账号通过数据库唯一 `owner_key=system-owner` 哨兵原子成为唯一且不可降级、停用或删除的最终管理员；首次注册前必须用本机监听/防火墙/反向代理限制不可信访问。
 - 默认不信任任何 `Forwarded`/`X-Forwarded-For`；只为真实反向代理配置最小 `trusted_proxy_cidrs`。
 - `app.environment` 支持 `development|test|production`，缺省按 `production` 处理；示例配置仅面向本地开发。
-- 高权限操作按契约使用 Step-up、最后管理员保护和 append-only 审计（`docs/AUDIT.md`）；Step-up proof 在生产通过 Redis 原子单次消费。
+- 高权限操作按契约使用 Step-up 和 append-only 审计（`docs/AUDIT.md`）；Step-up proof 在生产通过 Redis 原子单次消费。
 
 ## CI 与部署
 
@@ -131,7 +127,7 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 
 ## 提交与 PR
 
-- 遵循 Conventional Commits：`feat(frontend): ...`、`fix(schema): ...`、`refactor(org): ...`，保持提交范围单一。
+- 遵循 Conventional Commits：`feat(frontend): ...`、`fix(schema): ...`、`refactor(account): ...`，保持提交范围单一。
 - PR 需说明行为与验证方式，标注 schema/配置变更，可见的前端变更附截图；请求评审前跑过 `run_ci.py full`。
 
 ## 重要参考文档
@@ -142,4 +138,4 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 - `docs/OBSERVABILITY.md` — 指标、readiness、日志与 tracing 契约
 - `docs/AUDIT.md` — 高权限审计
 - `docs/REGISTRATION_EMAIL_VERIFICATION.md` — 注册邮箱验证码边界
-- `docs/architecture/` — 授权失效 ADR 与 writer 清单、裸 SQL 边界、租户数据路径、会话 TTL
+- `docs/architecture/` — 授权失效 ADR 与 writer 清单、裸 SQL 边界、会话 TTL

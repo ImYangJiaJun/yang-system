@@ -3,31 +3,6 @@ rule_files:
 
 evaluation_interval: 1m
 
-tests:
-  - name: frontend error burst fires a correlated warning
-    interval: 1m
-    input_series:
-      - series: 'yang_system_frontend_errors_total{job="yang-system",instance="drill",kind="api",linked="true"}'
-        values: "0 1 2 3 4 5"
-    alert_rule_test:
-      - eval_time: 5m
-        alertname: YangSystemFrontendErrorBurst
-        exp_alerts:
-          - exp_labels:
-              severity: warning
-              slo: client_reliability
-              job: yang-system
-              instance: drill
-            exp_annotations:
-              summary: "yang-system frontend errors exceed the five minute budget"
-              runbook: "docs/SLO.md"
-
-  - name: frontend errors below threshold stay silent
-    interval: 1m
-    input_series:
-      - series: 'yang_system_frontend_errors_total{job="yang-system",instance="drill",kind="runtime",linked="false"}'
-        values: "0 1 1 2 3 4"
-    alert_rule_test:
-      - eval_time: 5m
-        alertname: YangSystemFrontendErrorBurst
-        exp_alerts: []
+# 前端错误上报能力已随 observability Addon 删除，暂无针对单条规则的演练用例；
+# 文件保留以维持 CI 的 promtool test rules 入口。
+tests: []

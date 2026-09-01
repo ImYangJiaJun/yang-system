@@ -67,18 +67,6 @@ groups:
           summary: "yang-system Action p95 latency exceeds 500 ms"
           runbook: "docs/SLO.md"
 
-      - alert: YangSystemFrontendErrorBurst
-        expr: |
-          sum by (job, instance) (
-            increase(yang_system_frontend_errors_total[5m])
-          ) >= 5
-        labels:
-          severity: warning
-          slo: client_reliability
-        annotations:
-          summary: "yang-system frontend errors exceed the five minute budget"
-          runbook: "docs/SLO.md"
-
       - alert: YangSystemReadinessUnavailable
         expr: max_over_time(yang_system_readiness_ready[2m]) == 0
         for: 2m

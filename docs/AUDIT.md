@@ -11,7 +11,7 @@
 
 - 128 bit 随机 `event_id` 和当前 `schema_version`；
 - 非匿名 `actor_type + actor_id`；
-- 可空 `tenant_id`，平台级事件保持空值，租户事件必须填写；
+- 可空 `tenant_id`；当前只有账号域事件，保持空值，未来租户事件必须填写；
 - 稳定 `action`；
 - 可空且成对出现的 `subject_type + subject_id`；
 - 必填 `target_type + target_id`；
@@ -25,26 +25,24 @@ Debug 只展示摘要字段名，不展示值。
 
 数据库 CHECK 约束固定 event/request ID 形状、tenant 正数语义以及 subject 字段成对
 出现。索引分别覆盖 actor、subject、target、tenant、request_id，并用
-`(occurred_at,id)` 提供稳定保留游标。表不建立业务外键，避免用户或组织删除级联
+`(occurred_at,id)` 提供稳定保留游标。表不建立业务外键，避免用户删除级联
 破坏历史事实；资源标识按事件发生时的值永久保存。
 
 ## 必须覆盖的高权限变化
 
 以下成功变化必须接入审计，且审计插入失败时业务事务必须整体回滚：
 
-- 首个超级管理员 bootstrap；
-- 平台管理员新增、启停、授予或撤销超级管理员；
-- 用户启停；
-- 企业成员新增、移除、启停以及组织管理员授予/撤销；
-- 任何显式 system tenant capability 执行的业务写。
+- 用户注册；
+- 改密、密码重置、自助停用；
+- 全设备退出（logout 撤销会话水位）。
 
 当前 writer 从 Registry 注入的可信 `module + action` 生成事件 action，不接受请求体
-提供 action；平台账号、企业成员和租户 onboarding 都只能调用 `append_in_tx` 并传入
-自己持有的业务事务。幂等请求没有产生数据库变化时不生成成功事件。企业成员展示字段
-发生实际变化时只记录字段名，不记录姓名、邮箱、电话等值。
+提供 action；上述账号安全 Action 都只能调用 `append_in_tx` 并传入
+自己持有的业务事务。幂等请求没有产生数据库变化时不生成成功事件。
 
 拒绝和失败事件允许独立写入，但不能伪装成已提交的业务变化，也不能依赖已经回滚的
-事务。向 SIEM 投递属于派生副本；数据库事件始终是本系统事实源。
+事务。Step-up 凭据复核的失败结果按此通道记录。向 SIEM 投递属于派生副本；
+数据库事件始终是本系统事实源。
 
 ## 数据库权限
 
