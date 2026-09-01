@@ -2,6 +2,7 @@
 
 use serde_json::json;
 use yang_base::action::ActionContext;
+use yang_base::definition::{HttpMethod, ModuleSpec};
 use yang_base::table::{RelationOption, RelationOptionsRequest, RelationOptionsResponse};
 use yang_base::BaseError;
 
@@ -35,4 +36,15 @@ pub(super) async fn handle(
         limit: input.limit,
         total: Some(total),
     })
+}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+pub(super) fn register(module: ModuleSpec) -> ModuleSpec {
+    module
+        .action_fn(yang_base::action_name!("options"), handle)
+        .route(HttpMethod::Post, "/api/v1/demo/categories/options")
+        .display_name("分类选项")
+        .description("通用关系选择器 options")
+        .public()
+        .register()
 }

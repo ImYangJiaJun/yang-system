@@ -1,8 +1,9 @@
 //! 通用确认调用演示。
 
 use super::super::model::{DemoItems, MutationOutput};
+use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::definition::Int;
+use yang_base::definition::{HttpMethod, Int, ModuleSpec};
 use yang_base::BaseError;
 
 yang_base::params! {
@@ -27,4 +28,17 @@ pub(super) async fn handle(
         )));
     }
     Ok(MutationOutput { id: input.id })
+}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+pub(super) fn register(module: ModuleSpec, items: DemoItems) -> ModuleSpec {
+    module
+        .action_fn(yang_base::action_name!("delete"), move |ctx, input| {
+            handle(ctx, input, Arc::clone(&items))
+        })
+        .route(HttpMethod::Delete, "/api/v1/demo/items")
+        .display_name("删除项目")
+        .description("通用确认调用演示")
+        .public()
+        .register()
 }

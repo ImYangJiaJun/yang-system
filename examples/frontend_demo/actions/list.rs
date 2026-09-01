@@ -4,8 +4,9 @@ use super::super::model::{DemoItem, DemoItems};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::definition::{ParamInput, Params, SortDirection};
+use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params, SortDirection};
 use yang_base::BaseError;
 
 fn default_page() -> usize {
@@ -135,4 +136,17 @@ pub(super) async fn handle(
         page_size: input.page_size,
         total: input.count_total.then_some(total),
     })
+}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+pub(super) fn register(module: ModuleSpec, items: DemoItems) -> ModuleSpec {
+    module
+        .action_fn(yang_base::action_name!("list"), move |ctx, input| {
+            handle(ctx, input, Arc::clone(&items))
+        })
+        .route(HttpMethod::Post, "/api/v1/demo/items/query")
+        .display_name("项目列表数据")
+        .description("为通用 TableView 提供标准分页数据")
+        .public()
+        .register()
 }

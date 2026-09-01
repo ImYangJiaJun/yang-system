@@ -1,8 +1,9 @@
 //! 通用行表单编辑演示。
 
 use super::super::model::{DemoItems, MutationOutput};
+use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::definition::{Int, Str};
+use yang_base::definition::{HttpMethod, Int, ModuleSpec, Str};
 use yang_base::BaseError;
 
 yang_base::params! {
@@ -31,4 +32,17 @@ pub(super) async fn handle(
     item.status = input.status;
     item.parent_id = input.parent_id;
     Ok(MutationOutput { id: input.id })
+}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+pub(super) fn register(module: ModuleSpec, items: DemoItems) -> ModuleSpec {
+    module
+        .action_fn(yang_base::action_name!("edit"), move |ctx, input| {
+            handle(ctx, input, Arc::clone(&items))
+        })
+        .route(HttpMethod::Put, "/api/v1/demo/items")
+        .display_name("编辑项目")
+        .description("通用行表单编辑演示")
+        .public()
+        .register()
 }

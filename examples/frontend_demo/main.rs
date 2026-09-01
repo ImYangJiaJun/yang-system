@@ -25,13 +25,9 @@ async fn main() -> anyhow::Result<()> {
     let api = actions::register_api(
         ModuleSpec::new(ModuleName::new("demo.api").context("Module 名称无效")?),
         fixture,
-    )
-    .context("注册 demo.api Action 失败")?;
-    let category = actions::register_category(modules::category())
-        .context("注册 demo.category Action 失败")?;
-    let items = actions::register_items(modules::items(), items)
-        .context("注册 demo.items Action 失败")?
-        .view(view::item_view()?);
+    );
+    let category = actions::register_category(modules::category());
+    let items = actions::register_items(modules::items(), items).view(view::item_view()?);
     let app = AppBuilder::new()
         .addon(
             AddonSpec::new(AddonName::new("demo").context("Addon 名称无效")?)
