@@ -198,7 +198,6 @@ describe("invokeAction", () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const headers = new Headers(init.headers);
       expect(headers.get("authorization")).toBe("Bearer secret");
-      expect(headers.get("x-tenant-id")).toBe("7");
       expect(headers.get("trace")).toBe("abc");
       expect(init.body).toBe(JSON.stringify({ name: "A" }));
       return new Response(
@@ -217,7 +216,7 @@ describe("invokeAction", () => {
     const result = await invokeAction(
       action,
       { id: "a/b", page: 2, trace: "abc", name: "A" },
-      { token: "secret", tenantId: "7" },
+      { token: "secret" },
     );
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/items/a%2Fb?page=2");

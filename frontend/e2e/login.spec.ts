@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 function catalogAction(operationId: string) {
   return {
     operation_id: operationId,
-    title: operationId === "account.user.me" ? "当前用户" : "平台账号列表",
+    title: "当前用户",
     description: "",
     method: "GET",
     path: `/api/v1/${operationId.replaceAll(".", "/")}`,
@@ -16,22 +16,18 @@ function catalogAction(operationId: string) {
   };
 }
 
-function catalogModule(
-  moduleId: string,
-  identity: "user" | "admin",
-  primaryAction: string,
-) {
+function catalogModule(moduleId: string, primaryAction: string) {
   return {
     module_id: moduleId,
     identity: {
-      id: identity,
-      title: identity === "user" ? "个人账户" : "管理平台",
-      icon: identity === "user" ? "person" : "administrator",
-      order: identity === "user" ? 10 : 30,
+      id: "user",
+      title: "个人账户",
+      icon: "person",
+      order: 10,
     },
-    title: moduleId === "account.user" ? "用户中心" : "平台账号",
+    title: "用户中心",
     description: "",
-    icon: identity === "user" ? "account" : "admin_users",
+    icon: "account",
     order: 10,
     primary_action: primaryAction,
     actions: [],
@@ -106,8 +102,7 @@ test("注册必须先获取邮箱验证码并提交所有权证明", async ({ pa
 test("一次性凭证不进入 URL 且重置成功后清空旧会话", async ({ page }) => {
   const resetToken = "a".repeat(64);
   await page.addInitScript(() => {
-    sessionStorage.setItem("yang.tenant-id", "7");
-    sessionStorage.setItem("yang.account-identity", "admin");
+    sessionStorage.setItem("yang.account-identity", "user");
   });
   await page.route("**/api/v1/users/reset-password", async (route) => {
     expect(route.request().headers().authorization).toBeUndefined();
@@ -140,11 +135,11 @@ test("一次性凭证不进入 URL 且重置成功后清空旧会话", async ({ 
     page.getByText("凭据已变更，请使用新密码重新登录"),
   ).toBeVisible();
   expect(page.url()).not.toContain(resetToken);
-  for (const key of ["yang.tenant-id", "yang.account-identity"]) {
-    await expect
-      .poll(() => page.evaluate((name) => sessionStorage.getItem(name), key))
-      .toBeNull();
-  }
+  await expect
+    .poll(() =>
+      page.evaluate(() => sessionStorage.getItem("yang.account-identity")),
+    )
+    .toBeNull();
 });
 
 test("账号密码登录后先选择角色再进入对应模块", async ({ page }) => {
@@ -158,15 +153,9 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
         data: {
           schema_version: "2.3",
           revision: "a".repeat(64),
-          actions: [
-            catalogAction("account.user.me"),
-            catalogAction("admin.user.list"),
-          ],
+          actions: [catalogAction("account.user.me")],
           table_views: [],
-          modules: [
-            catalogModule("account.user", "user", "account.user.me"),
-            catalogModule("admin.user", "admin", "admin.user.list"),
-          ],
+          modules: [catalogModule("account.user", "account.user.me")],
         },
       }),
     }),
@@ -202,12 +191,11 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
   await expect(
     page.getByRole("heading", { name: "选择本次使用的角色" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "选择管理平台角色" }).click();
+  await page.getByRole("button", { name: "选择个人账户角色" }).click();
 
-  await expect(page).toHaveURL("/module/admin.user");
+  await expect(page).toHaveURL("/module/account.user");
   await expect(page.getByRole("tab")).toHaveCount(0);
-  await expect(page.getByTestId("module-nav-admin.user")).toBeVisible();
-  await expect(page.getByTestId("module-nav-account.user")).toHaveCount(0);
+  await expect(page.getByTestId("module-nav-account.user")).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => sessionStorage.getItem("yang.token")))
     .toBeNull();
@@ -220,7 +208,7 @@ test("账号密码登录后先选择角色再进入对应模块", async ({ page 
     .poll(() =>
       page.evaluate(() => sessionStorage.getItem("yang.account-identity")),
     )
-    .toBe("admin");
+    .toBe("user");
 });
 
 test("登录失败时停留在登录页且不保存凭据", async ({ page }) => {
@@ -269,7 +257,7 @@ test("访问令牌过期后自动刷新并留在当前流程", async ({ page }) 
           revision: "b".repeat(64),
           actions: [catalogAction("account.user.me")],
           table_views: [],
-          modules: [catalogModule("account.user", "user", "account.user.me")],
+          modules: [catalogModule("account.user", "account.user.me")],
         },
       }),
     });
@@ -319,8 +307,7 @@ test("伪造 Web Storage Token 且 Refresh Cookie 无效时保持未认证", asy
 }) => {
   await page.addInitScript(() => {
     sessionStorage.setItem("yang.token", "access-expired");
-    sessionStorage.setItem("yang.tenant-id", "7");
-    sessionStorage.setItem("yang.account-identity", "admin");
+    sessionStorage.setItem("yang.account-identity", "user");
   });
   await page.route("**/.well-known/yang/ui-catalog", (route) =>
     route.fulfill({
@@ -343,7 +330,6 @@ test("伪造 Web Storage Token 且 Refresh Cookie 无效时保持未认证", asy
   for (const key of [
     "yang.token",
     "yang.refresh-token",
-    "yang.tenant-id",
     "yang.account-identity",
   ]) {
     await expect
@@ -407,7 +393,7 @@ test("多标签页串行轮换 Refresh Cookie 并同步退出且不共享持久�
           revision: "e".repeat(64),
           actions: [catalogAction("account.user.me")],
           table_views: [],
-          modules: [catalogModule("account.user", "user", "account.user.me")],
+          modules: [catalogModule("account.user", "account.user.me")],
         },
       }),
     }),
@@ -513,7 +499,7 @@ test("停用帐号必须二次确认并完成 Step-up 后清空本地会话", as
           revision: "f".repeat(64),
           actions: [catalogAction("account.user.me")],
           table_views: [],
-          modules: [catalogModule("account.user", "user", "account.user.me")],
+          modules: [catalogModule("account.user", "account.user.me")],
         },
       }),
     }),

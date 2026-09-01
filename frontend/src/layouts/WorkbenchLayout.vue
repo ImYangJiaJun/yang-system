@@ -11,7 +11,6 @@ import {
   useCatalogNavigationStore,
 } from "stores/catalog-navigation";
 import { useSessionStore } from "stores/session";
-import { useTenantStore } from "stores/tenant";
 
 const drawerOpen = ref(true);
 const router = useRouter();
@@ -19,7 +18,6 @@ const $q = useQuasar();
 const catalogStore = useCatalogStore();
 const navigationStore = useCatalogNavigationStore();
 const sessionStore = useSessionStore();
-const tenantStore = useTenantStore();
 const lifecycleStore = useApplicationLifecycleStore();
 const applicationSession = useApplicationSession();
 const { catalog, loading } = storeToRefs(catalogStore);
@@ -34,7 +32,6 @@ const {
   views,
 } = storeToRefs(navigationStore);
 const { loggedIn } = storeToRefs(sessionStore);
-const { tenantId } = storeToRefs(tenantStore);
 
 const emptyMessage = computed(() =>
   navigationMode.value === "views" ? "没有匹配的业务页面" : "没有匹配的 Action",
@@ -81,15 +78,6 @@ function toggleDark() {
           @click="toggleDark"
         />
         <div class="session-settings">
-          <q-input
-            :model-value="tenantId"
-            dense
-            outlined
-            placeholder="租户 ID（可选）"
-            clearable
-            class="tenant-input"
-            @update:model-value="tenantStore.setTenantId(String($event ?? ''))"
-          />
           <q-btn flat color="primary" icon="home" label="正式控制台" to="/" />
           <q-btn
             outline

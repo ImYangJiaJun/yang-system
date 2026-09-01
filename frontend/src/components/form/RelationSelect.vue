@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ApiError, invokeAction, type SessionContext } from "src/api/client";
+import { invokeAction, type SessionContext } from "src/api/client";
 import { parseRelationOptions } from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
   FormFieldSchema,
 } from "src/contracts/ui-catalog";
-import { captureFrontendError } from "src/observability/error-reporter";
 
 const props = defineProps<{
   label: string;
@@ -45,7 +44,6 @@ async function load(search?: string) {
   controller = new AbortController();
   loading.value = true;
   error.value = "";
-  let relatedRequestId: string | undefined;
   try {
     const result = await invokeAction(
       props.action,
@@ -59,18 +57,10 @@ async function load(search?: string) {
       props.session,
       controller.signal,
     );
-    relatedRequestId = result.requestId;
     if (result.kind !== "json") throw new Error("关系 Action 必须返回 JSON");
     options.value = parseRelationOptions(result.data).items;
   } catch (cause) {
     if (cause instanceof Error && cause.name === "AbortError") return;
-    if (!(cause instanceof ApiError)) {
-      captureFrontendError(cause, {
-        kind: "contract",
-        operation: props.action.operation_id,
-        relatedRequestId,
-      });
-    }
     error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
     loading.value = false;

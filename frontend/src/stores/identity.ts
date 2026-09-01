@@ -7,9 +7,7 @@ const IDENTITY_KEY = "yang.account-identity";
 function storedIdentity(): AccountIdentity | undefined {
   if (typeof sessionStorage === "undefined") return undefined;
   const identity = sessionStorage.getItem(IDENTITY_KEY);
-  return identity === "user" || identity === "admin" || identity === "org"
-    ? identity
-    : undefined;
+  return identity === "user" ? identity : undefined;
 }
 
 export const useIdentityStore = defineStore("identity", () => {

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function restoreSession(page: Page, identity: "user" | "admin" | "org") {
+async function restoreSession(page: Page, identity: "user") {
   await page.addInitScript((selectedIdentity) => {
     sessionStorage.setItem("yang.account-identity", selectedIdentity);
   }, identity);

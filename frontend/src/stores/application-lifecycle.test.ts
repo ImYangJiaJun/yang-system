@@ -52,7 +52,6 @@ describe("application lifecycle", () => {
     expect(fetchUiCatalogMock).toHaveBeenCalledTimes(2);
     expect(fetchUiCatalogMock.mock.calls[1]?.[0]).toEqual({
       token: "access-2",
-      tenantId: undefined,
     });
   });
 

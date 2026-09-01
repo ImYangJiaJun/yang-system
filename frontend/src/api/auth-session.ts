@@ -8,7 +8,6 @@ export const SESSION_RELOGIN_REQUIRED_EVENT = "yang:session-relogin-required";
 const SESSION_KEYS = [
   "yang.token",
   "yang.refresh-token",
-  "yang.tenant-id",
   "yang.account-identity",
 ] as const;
 const CREDENTIAL_KEYS = ["yang.token", "yang.refresh-token"] as const;

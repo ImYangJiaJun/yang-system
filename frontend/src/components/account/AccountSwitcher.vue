@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
 import {
@@ -7,28 +7,15 @@ import {
   visibleAccountIdentities,
   type AccountIdentity,
 } from "src/module-pages";
-import type { OrganizationSummary } from "src/contracts/account-data";
 import { useCatalogStore } from "stores/catalog";
 import { useIdentityStore } from "stores/identity";
-import { useSessionStore } from "stores/session";
-import { useTenantStore } from "stores/tenant";
 
 const emit = defineEmits<{ disable: []; logout: [] }>();
 const router = useRouter();
 const catalogStore = useCatalogStore();
 const identityStore = useIdentityStore();
-const sessionStore = useSessionStore();
-const tenantStore = useTenantStore();
 const { catalog } = storeToRefs(catalogStore);
 const { accountIdentity } = storeToRefs(identityStore);
-const { token } = storeToRefs(sessionStore);
-const {
-  organizations,
-  error: organizationsError,
-  loading: organizationsLoading,
-  selectedOrganization,
-  tenantId,
-} = storeToRefs(tenantStore);
 const menuOpen = ref(false);
 
 const modulePages = computed(() => buildAccountModulePages(catalog.value));
@@ -36,15 +23,10 @@ const identities = computed(() =>
   visibleAccountIdentities(modulePages.value, catalog.value),
 );
 const activeIdentity = computed(() => accountIdentity.value);
-const activeIdentityTitle = computed(
+const contextLabel = computed(
   () =>
     identities.value.find((identity) => identity.id === activeIdentity.value)
       ?.title ?? "未选择角色",
-);
-const contextLabel = computed(() =>
-  activeIdentity.value === "org" && selectedOrganization.value
-    ? selectedOrganization.value.name
-    : activeIdentityTitle.value,
 );
 
 async function switchIdentity(identity: AccountIdentity) {
@@ -56,30 +38,6 @@ async function switchIdentity(identity: AccountIdentity) {
   menuOpen.value = false;
   await router.push(`/module/${first.id}`);
 }
-
-async function switchOrganization(organization: OrganizationSummary) {
-  identityStore.select("org");
-  tenantStore.selectOrganization(organization);
-  menuOpen.value = false;
-  await router.push("/module/org.tenant");
-}
-
-async function openOrganizationManagement() {
-  identityStore.select("org");
-  menuOpen.value = false;
-  await router.push("/module/org.tenant");
-}
-
-function loadOrganizations() {
-  return tenantStore.loadOrganizations(
-    catalog.value?.actions ?? [],
-    token.value,
-  );
-}
-
-watch(menuOpen, (open) => {
-  if (open) void loadOrganizations();
-});
 </script>
 
 <template>
@@ -130,7 +88,7 @@ watch(menuOpen, (open) => {
           <q-list padding>
             <q-item-label header>切换角色</q-item-label>
             <q-item
-              v-for="identity in identities.filter((item) => item.id !== 'org')"
+              v-for="identity in identities"
               :key="identity.id"
               clickable
               :active="activeIdentity === identity.id"
@@ -149,89 +107,9 @@ watch(menuOpen, (open) => {
                   name="check_circle"
                   color="primary"
                 />
-                <q-badge
-                  v-else-if="identity.id === 'admin'"
-                  outline
-                  color="primary"
-                  label="平台"
-                />
               </q-item-section>
             </q-item>
           </q-list>
-
-          <q-card-section
-            v-if="identities.some((identity) => identity.id === 'org')"
-            class="q-pt-none"
-          >
-            <q-item-label header class="q-px-none">企业账户</q-item-label>
-            <q-list bordered separator class="organization-switch-list">
-              <q-item v-if="organizationsLoading">
-                <q-item-section avatar
-                  ><q-spinner color="primary"
-                /></q-item-section>
-                <q-item-section>正在加载我的企业</q-item-section>
-              </q-item>
-              <q-item v-else-if="organizationsError">
-                <q-item-section avatar>
-                  <q-icon name="error" color="negative" />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label>企业列表加载失败</q-item-label>
-                  <q-item-label caption>{{ organizationsError }}</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                  <q-btn
-                    flat
-                    color="primary"
-                    label="重试"
-                    @click="loadOrganizations"
-                  />
-                </q-item-section>
-              </q-item>
-              <q-item
-                v-for="organization in organizations"
-                v-else
-                :key="organization.id"
-                clickable
-                :active="tenantId === String(organization.id)"
-                active-class="account-switcher-active"
-                @click="switchOrganization(organization)"
-              >
-                <q-item-section avatar>
-                  <q-icon name="domain" />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label>{{ organization.name }}</q-item-label>
-                  <q-item-label caption>{{ organization.code }}</q-item-label>
-                </q-item-section>
-                <q-item-section
-                  v-if="tenantId === String(organization.id)"
-                  side
-                >
-                  <q-icon name="check_circle" color="primary" />
-                </q-item-section>
-              </q-item>
-              <q-item v-if="!organizationsLoading && !organizations.length">
-                <q-item-section avatar
-                  ><q-icon name="domain_add"
-                /></q-item-section>
-                <q-item-section>
-                  <q-item-label>尚未加入企业</q-item-label>
-                  <q-item-label caption
-                    >进入我的企业页面创建企业账户</q-item-label
-                  >
-                </q-item-section>
-              </q-item>
-            </q-list>
-            <q-btn
-              flat
-              color="primary"
-              icon="settings"
-              label="管理企业账户"
-              class="full-width q-mt-sm"
-              @click="openOrganizationManagement"
-            />
-          </q-card-section>
 
           <q-separator inset />
           <q-item v-close-popup clickable to="/workbench">

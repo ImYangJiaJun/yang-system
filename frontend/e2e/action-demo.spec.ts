@@ -67,19 +67,3 @@ test("multipart Action 生成受限文件表单并真实上传", async ({ page }
   await expect(page.locator(".result-panel")).toContainText("report.txt");
   await expect(page.locator(".result-panel")).toContainText("上传验收");
 });
-
-test("身份或租户切换会重新获取请求级目录", async ({ page }) => {
-  let catalogRequests = 0;
-  page.on("request", (request) => {
-    if (request.url().includes("/.well-known/yang/ui-catalog"))
-      catalogRequests += 1;
-  });
-  await page.goto("/workbench");
-  await expect.poll(() => catalogRequests).toBeGreaterThanOrEqual(1);
-  const initialRequests = catalogRequests;
-
-  await page.getByPlaceholder("租户 ID（可选）").fill("tenant-42");
-  await expect
-    .poll(() => catalogRequests, { timeout: 5_000 })
-    .toBeGreaterThan(initialRequests);
-});

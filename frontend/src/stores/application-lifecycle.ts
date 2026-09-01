@@ -3,13 +3,11 @@ import { defineStore } from "pinia";
 import { useCatalogStore } from "./catalog";
 import { useCatalogNavigationStore } from "./catalog-navigation";
 import { useSessionStore } from "./session";
-import { useTenantStore } from "./tenant";
 
 export const useApplicationLifecycleStore = defineStore(
   "application-lifecycle",
   () => {
     const sessionStore = useSessionStore();
-    const tenantStore = useTenantStore();
     const catalogStore = useCatalogStore();
     const navigationStore = useCatalogNavigationStore();
     let stopContextWatcher: (() => void) | undefined;
@@ -18,7 +16,6 @@ export const useApplicationLifecycleStore = defineStore(
 
     const session = computed(() => ({
       token: sessionStore.token || undefined,
-      tenantId: tenantStore.tenantId || undefined,
     }));
 
     async function reloadCatalog() {
@@ -39,7 +36,6 @@ export const useApplicationLifecycleStore = defineStore(
       stopContextWatcher = undefined;
       if (reloadTimer !== undefined) clearTimeout(reloadTimer);
       reloadTimer = undefined;
-      tenantStore.cancelRequests();
       catalogStore.reset();
       started = false;
     }
@@ -47,10 +43,7 @@ export const useApplicationLifecycleStore = defineStore(
     function start() {
       if (started) return dispose;
       started = true;
-      stopContextWatcher = watch(
-        [() => sessionStore.token, () => tenantStore.tenantId],
-        scheduleReload,
-      );
+      stopContextWatcher = watch(() => sessionStore.token, scheduleReload);
       void reloadCatalog();
       return dispose;
     }

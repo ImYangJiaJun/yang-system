@@ -1,6 +1,5 @@
 export type SessionContext = {
   token?: string;
-  tenantId?: string;
 };
 
 export type InvocationResult = {

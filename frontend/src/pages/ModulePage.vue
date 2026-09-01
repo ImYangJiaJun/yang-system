@@ -29,7 +29,6 @@ import type {
 } from "src/contracts/ui-catalog";
 import { resolveCustomView } from "src/custom/registry";
 import { buildAccountModulePages, moduleView } from "src/module-pages";
-import { useProductModuleExtensions } from "src/product-shell/module-extensions";
 import { formatCell } from "components/table/table-view-model";
 import { useCatalogStore } from "stores/catalog";
 import { useIdentityStore } from "stores/identity";
@@ -73,10 +72,6 @@ const effectiveView = computed(() => {
 const primaryAction = computed(() =>
   effectiveView.value ? undefined : modulePage.value?.primaryAction,
 );
-const productExtensions = useProductModuleExtensions({
-  actions: () => catalog.value?.actions ?? [],
-  session,
-});
 
 async function openCustomAction(presentation: ActionPresentationSchema) {
   const loader = resolveCustomView(presentation.view_id);
@@ -107,9 +102,6 @@ async function openCustomAction(presentation: ActionPresentationSchema) {
 
 async function reloadModule() {
   await loadPrimary();
-  if (modulePage.value) {
-    await productExtensions.afterMutation(modulePage.value.id);
-  }
 }
 
 const moduleActions = usePresentedActions({
@@ -174,14 +166,7 @@ const primaryColumns = computed<QTableColumn[]>(() => {
     align: "left",
     sortable: true,
   }));
-  const hasProductActions = rows.value.some(
-    (row) => productExtensions.rowActions(moduleId.value, row).length > 0,
-  );
-  if (
-    directRowActions.value.length ||
-    rowActionGroups.value.overflow.length ||
-    hasProductActions
-  ) {
+  if (directRowActions.value.length || rowActionGroups.value.overflow.length) {
     values.push({
       name: "__actions",
       label: "操作",
@@ -334,14 +319,6 @@ function isDangerAction(presentation: ActionPresentationSchema) {
 
 function actionColor(presentation: ActionPresentationSchema) {
   return isDangerAction(presentation) ? "negative" : "primary";
-}
-
-function runProductRowAction(action: { execute: () => void }) {
-  try {
-    action.execute();
-  } catch (cause) {
-    dataError.value = cause instanceof Error ? cause.message : String(cause);
-  }
 }
 
 watch(
@@ -552,19 +529,6 @@ onBeforeUnmount(() => controller?.abort());
           </template>
           <template #body-cell-__actions="props">
             <q-td :props="props">
-              <q-btn
-                v-for="action in productExtensions.rowActions(
-                  modulePage.id,
-                  props.row,
-                )"
-                :key="action.id"
-                flat
-                dense
-                color="primary"
-                :disable="action.disabled"
-                :label="action.label"
-                @click="runProductRowAction(action)"
-              />
               <q-btn
                 v-for="presentation in directRowActions"
                 :key="presentation.operation_id"

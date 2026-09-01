@@ -152,10 +152,6 @@ textarea {
   flex: 1;
 }
 
-.tenant-input {
-  max-width: 180px;
-}
-
 .action-sidebar {
   height: 100%;
   background: var(--ys-surface);
@@ -1348,8 +1344,7 @@ textarea {
     flex-basis: 100%;
   }
 
-  .brand small,
-  .session-settings .tenant-input {
+  .brand small {
     display: none;
   }
 

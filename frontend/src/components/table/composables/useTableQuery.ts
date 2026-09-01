@@ -6,14 +6,13 @@ import {
   watch,
   type MaybeRefOrGetter,
 } from "vue";
-import { ApiError, invokeAction, type SessionContext } from "src/api/client";
+import { invokeAction, type SessionContext } from "src/api/client";
 import { parseTableData } from "src/contracts/table-data";
 import type {
   ActionDemoSchema,
   TableFilterOperator,
   TableViewSchema,
 } from "src/contracts/ui-catalog";
-import { captureFrontendError } from "src/observability/error-reporter";
 import {
   buildWhereClause,
   createTableFilters,
@@ -103,7 +102,6 @@ export function useTableQuery(options: UseTableQueryOptions) {
     activeRequest = request;
     loading.value = true;
     error.value = "";
-    let relatedRequestId: string | undefined;
     try {
       const result = await invoke(
         dataAction,
@@ -124,7 +122,6 @@ export function useTableQuery(options: UseTableQueryOptions) {
         { ...toValue(options.session) },
         request.controller.signal,
       );
-      relatedRequestId = result.requestId;
       if (activeRequest?.id !== request.id) return;
       if (result.kind !== "json") throw new Error("数据 Action 必须返回 JSON");
       const data = parseTableData(result.data);
@@ -139,13 +136,6 @@ export function useTableQuery(options: UseTableQueryOptions) {
         return;
       }
       error.value = cause instanceof Error ? cause.message : String(cause);
-      if (!(cause instanceof ApiError)) {
-        captureFrontendError(cause, {
-          kind: "contract",
-          operation: dataAction.operation_id,
-          relatedRequestId,
-        });
-      }
       rows.value = [];
       total.value = 0;
       options.onLoadError?.();

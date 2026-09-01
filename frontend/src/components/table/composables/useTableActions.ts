@@ -7,7 +7,6 @@ import {
 } from "vue";
 import { Dialog, Notify } from "quasar";
 import {
-  ApiError,
   invokeAction,
   StepUpRequiredError,
   type InvocationResult,
@@ -19,7 +18,6 @@ import type {
   FormFieldSchema,
   TableViewSchema,
 } from "src/contracts/ui-catalog";
-import { captureFrontendError } from "src/observability/error-reporter";
 import {
   buildActionInitialValues,
   groupPresentedActions,
@@ -183,12 +181,6 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
       await options.reload();
     } catch (cause) {
       if (cause instanceof Error && cause.name === "AbortError") return;
-      if (!(cause instanceof ApiError)) {
-        captureFrontendError(cause, {
-          kind: "runtime",
-          operation: action.operation_id,
-        });
-      }
       notify(
         "negative",
         cause instanceof Error ? cause.message : String(cause),

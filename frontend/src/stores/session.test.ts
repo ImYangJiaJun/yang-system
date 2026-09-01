@@ -7,7 +7,6 @@ import { useCatalogStore } from "./catalog";
 import { useCatalogNavigationStore } from "./catalog-navigation";
 import { useIdentityStore } from "./identity";
 import { useSessionStore } from "./session";
-import { useTenantStore } from "./tenant";
 
 const emptyCatalog: UiCatalog = {
   schema_version: "2.2",
@@ -24,15 +23,13 @@ describe("application session", () => {
     vi.unstubAllGlobals();
   });
 
-  it("登录通过显式协调动作清空旧身份、租户、Catalog 和导航", () => {
+  it("登录通过显式协调动作清空旧身份、Catalog 和导航", () => {
     const session = useSessionStore();
     const identity = useIdentityStore();
-    const tenant = useTenantStore();
     const catalog = useCatalogStore();
     const navigation = useCatalogNavigationStore();
     const applicationSession = useApplicationSession();
-    identity.select("admin");
-    tenant.setTenantId("tenant-7");
+    identity.select("user");
     catalog.catalog = emptyCatalog;
     navigation.query = "old";
 
@@ -42,13 +39,11 @@ describe("application session", () => {
 
     expect(session.token).toBe("access-token");
     expect(identity.accountIdentity).toBeUndefined();
-    expect(tenant.tenantId).toBe("");
     expect(catalog.catalog).toBeUndefined();
     expect(navigation.query).toBe("");
     expect(sessionStorage.getItem("yang.token")).toBeNull();
     expect(sessionStorage.getItem("yang.refresh-token")).toBeNull();
     expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
-    expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
   });
 
   it("忽略 Web Storage 中注入的旧 Access Token", () => {
@@ -61,21 +56,18 @@ describe("application session", () => {
     expect(session.loggedIn).toBe(false);
   });
 
-  it("自动刷新 Token 时保留当前身份和租户上下文", () => {
+  it("自动刷新 Token 时保留当前身份上下文", () => {
     const session = useSessionStore();
     const identity = useIdentityStore();
-    const tenant = useTenantStore();
     const applicationSession = useApplicationSession();
-    identity.select("org");
-    tenant.setTenantId("tenant-7");
+    identity.select("user");
 
     applicationSession.acceptRefreshedTokenPair({
       accessToken: "access-new",
     });
 
     expect(session.token).toBe("access-new");
-    expect(identity.accountIdentity).toBe("org");
-    expect(tenant.tenantId).toBe("tenant-7");
+    expect(identity.accountIdentity).toBe("user");
   });
 
   it("页面重载只通过 HttpOnly Refresh Cookie 恢复内存会话", async () => {
@@ -103,8 +95,7 @@ describe("application session", () => {
 
   it("伪造旧 Token 且 Refresh Cookie 无效时保持未认证并清除上下文", async () => {
     sessionStorage.setItem("yang.token", "forged-access");
-    sessionStorage.setItem("yang.account-identity", "admin");
-    sessionStorage.setItem("yang.tenant-id", "tenant-7");
+    sessionStorage.setItem("yang.account-identity", "user");
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -126,27 +117,23 @@ describe("application session", () => {
     expect(session.loggedIn).toBe(false);
     expect(sessionStorage.getItem("yang.token")).toBeNull();
     expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
-    expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
   });
 
   it("退出确定性级联清空所有会话相关 owner", () => {
     const session = useSessionStore();
     const identity = useIdentityStore();
-    const tenant = useTenantStore();
     const catalog = useCatalogStore();
     const applicationSession = useApplicationSession();
     session.setTokenPair({
       accessToken: "access-token",
     });
-    identity.select("admin");
-    tenant.setTenantId("tenant-7");
+    identity.select("user");
     catalog.catalog = emptyCatalog;
 
     applicationSession.clearSession();
 
     expect(session.token).toBe("");
     expect(identity.accountIdentity).toBeUndefined();
-    expect(tenant.tenantId).toBe("");
     expect(catalog.catalog).toBeUndefined();
     expect(sessionStorage.length).toBe(0);
   });

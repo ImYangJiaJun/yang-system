@@ -36,7 +36,7 @@ describe("completeStepUp", () => {
       completeStepUp(
         "signed-challenge",
         { username: "alice", password: "correct-password" },
-        { token: "access-token", tenantId: "7" },
+        { token: "access-token" },
       ),
     ).resolves.toEqual({ proof: "one-shot-proof", expiresIn: 300 });
     expect(JSON.stringify({ ...sessionStorage })).not.toContain(

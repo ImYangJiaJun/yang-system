@@ -84,8 +84,7 @@ describe("requestWithTokenRefresh", () => {
 
   it("刷新被拒绝时清空会话并只发出一次过期事件", async () => {
     persistTokenPair({ accessToken: "access-old" });
-    sessionStorage.setItem("yang.tenant-id", "7");
-    sessionStorage.setItem("yang.account-identity", "admin");
+    sessionStorage.setItem("yang.account-identity", "user");
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -112,7 +111,6 @@ describe("requestWithTokenRefresh", () => {
     expect(expired).toHaveBeenCalledTimes(1);
     expect(sessionStorage.getItem("yang.token")).toBeNull();
     expect(sessionStorage.getItem("yang.refresh-token")).toBeNull();
-    expect(sessionStorage.getItem("yang.tenant-id")).toBeNull();
     expect(sessionStorage.getItem("yang.account-identity")).toBeNull();
     window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   });

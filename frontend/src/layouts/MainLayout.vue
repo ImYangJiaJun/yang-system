@@ -72,7 +72,7 @@ async function endSession() {
 function confirmDisableAccount() {
   $q.dialog({
     title: "停用帐号",
-    message: "停用后全部平台与企业身份都会失效，且不能自行恢复。确定继续吗？",
+    message: "停用后当前账号的全部会话都会失效，且不能自行恢复。确定继续吗？",
     cancel: true,
     persistent: true,
     ok: { color: "negative", label: "确认停用" },

@@ -10,8 +10,6 @@ export function contextHeaders(context: SessionContext): Headers {
   const headers = new Headers({ Accept: "application/json" });
   if (context.token?.trim())
     headers.set("Authorization", `Bearer ${context.token.trim()}`);
-  if (context.tenantId?.trim())
-    headers.set("x-tenant-id", context.tenantId.trim());
   return headers;
 }
 

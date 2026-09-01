@@ -51,7 +51,7 @@ describe("Step-up action orchestration", () => {
         presentations: () => [protectedPresentation],
         businessFields: () => [],
         actions: () => [protectedAction],
-        session: () => ({ token: "access-token", tenantId: "7" }),
+        session: () => ({ token: "access-token" }),
         selectedRows: () => [],
         reload,
         emitCustom: vi.fn(),
@@ -67,7 +67,6 @@ describe("Step-up action orchestration", () => {
     expect(reauthenticate).toHaveBeenCalledOnce();
     expect(reauthenticate).toHaveBeenCalledWith("signed-challenge", {
       token: "access-token",
-      tenantId: "7",
     });
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(invoke.mock.calls[0]?.[4]).toBeUndefined();
@@ -97,7 +96,7 @@ describe("Step-up action orchestration", () => {
         presentations: () => [protectedPresentation],
         businessFields: () => [],
         actions: () => [protectedAction],
-        session: () => ({ token: "access-token", tenantId: "7" }),
+        session: () => ({ token: "access-token" }),
         selectedRows: () => [],
         reload: vi.fn(),
         emitCustom: vi.fn(),
