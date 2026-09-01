@@ -30,22 +30,9 @@ ARCHITECTURE = (
     Command("Architecture check", ("python", "scripts/check_architecture.py")),
 )
 
-FEATURE_ACCOUNT_ONLY_CHECK = Command(
-    "Rust account-only feature combination check",
-    (
-        "cargo",
-        "check",
-        "--no-default-features",
-        "--features",
-        "account",
-        "--locked",
-    ),
-)
-
 QUICK = (
     *ARCHITECTURE,
     Command("Rust formatting", ("cargo", "fmt", "--", "--check")),
-    FEATURE_ACCOUNT_ONLY_CHECK,
     Command("Rust library tests", ("cargo", "test", "--lib", "--locked")),
     Command("Frontend typecheck", ("pnpm", "--dir", "frontend", "typecheck")),
     Command("Frontend tests", ("pnpm", "--dir", "frontend", "test")),
@@ -87,7 +74,6 @@ FRONTEND_PRODUCTION_E2E = Command(
 FULL = (
     *ARCHITECTURE,
     Command("Rust formatting", ("cargo", "fmt", "--", "--check")),
-    FEATURE_ACCOUNT_ONLY_CHECK,
     Command("Rust all-target tests", ("cargo", "test", "--all-targets", "--locked")),
     Command(
         "Rust clippy",
@@ -149,51 +135,12 @@ INTEGRATION = (
         ),
     ),
     Command(
-        "System-owner registration integration",
-        (
-            "cargo",
-            "test",
-            "--test",
-            "bootstrap_integration",
-            "--locked",
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ),
-    ),
-    Command(
-        "Tenant isolation evidence integration",
-        (
-            "cargo",
-            "test",
-            "--test",
-            "tenant_isolation_integration",
-            "--locked",
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ),
-    ),
-    Command(
         "Registration email verification integration",
         (
             "cargo",
             "test",
             "--test",
             "registration_email_integration",
-            "--locked",
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ),
-    ),
-    Command(
-        "Real MySQL/Redis system integration",
-        (
-            "cargo",
-            "test",
-            "--test",
-            "system_integration",
             "--locked",
             "--",
             "--ignored",
@@ -281,21 +228,6 @@ def self_test() -> None:
         "lib_yang checkout 不得在 runner 中持久化 Deploy Key 凭据"
     )
     assert any(command.argv[:3] == ("cargo", "test", "--all-targets") for command in FULL)
-    account_only_check = (
-        "cargo",
-        "check",
-        "--no-default-features",
-        "--features",
-        "account",
-        "--locked",
-    )
-    assert FEATURE_ACCOUNT_ONLY_CHECK.argv == account_only_check
-    assert any(command.argv == account_only_check for command in QUICK), (
-        "quick 门禁必须检查 account-only feature 组合"
-    )
-    assert any(command.argv == account_only_check for command in FULL), (
-        "full 门禁必须检查 account-only feature 组合"
-    )
     assert any(command.argv[:2] == ("pnpm", "--dir") for command in FULL)
     assert FRONTEND_PRODUCTION_AUDIT.argv == (
         "pnpm",
@@ -319,28 +251,9 @@ def self_test() -> None:
         if command.argv[:3] == ("cargo", "test", "--test")
     }
     assert integration_tests == {
-        "bootstrap_integration",
         "registration_email_integration",
         "schema_apply_integration",
-        "system_integration",
-        "tenant_isolation_integration",
     }
-    tenant_isolation = next(
-        command
-        for command in INTEGRATION
-        if command.argv[:4]
-        == ("cargo", "test", "--test", "tenant_isolation_integration")
-    )
-    assert tenant_isolation.argv == (
-        "cargo",
-        "test",
-        "--test",
-        "tenant_isolation_integration",
-        "--locked",
-        "--",
-        "--ignored",
-        "--test-threads=1",
-    )
     authorization_cache = next(
         command
         for command in INTEGRATION

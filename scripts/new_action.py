@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按 yang-system 约定创建并注册一个函数式 Action。"""
+"""按 yang-system 约定创建并注册一个自包含的函数式 Action。"""
 
 from __future__ import annotations
 
@@ -23,14 +23,16 @@ def http_method_variant(method: str) -> str:
     return method.capitalize()
 
 
-def action_source(name: str, title: str) -> str:
+def action_source(name: str, title: str, method: str, path: str) -> str:
     action_type = f"{pascal_case(name)}Action"
     return f'''//! {title} Action。
 
+use crate::addon::account::Account;
 use schemars::JsonSchema;
 use serde::{{Deserialize, Serialize}};
+use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::definition::{{ParamInput, Params}};
+use yang_base::definition::{{HttpMethod, ModuleSpec, ParamInput, Params}};
 use yang_base::BaseError;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -56,6 +58,17 @@ pub(super) async fn handle(
         "{action_type} 尚未实现".to_string(),
     ))
 }}
+
+/// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
+/// 签名必须与所属模块 mod.rs 的 Register 类型一致（account 模块携带 Arc<Account>）。
+pub(super) fn register(module: ModuleSpec, _account: Arc<Account>) -> ModuleSpec {{
+    module
+        .action_fn(yang_base::action_name!("{name}"), handle)
+        .route(HttpMethod::{http_method_variant(method)}, "{path}")
+        .display_name("{title}")
+        .description("TODO: 描述 {title} 的业务语义")
+        .register()
+}}
 '''
 
 
@@ -71,20 +84,12 @@ def insert_module(manifest: str, name: str) -> str:
     return prefix + line + manifest[position:]
 
 
-def register_in_route_table(manifest: str, name: str, title: str, method: str, path: str) -> str:
+def register_in_action_registry(manifest: str, name: str) -> str:
     if REGISTRATION_MARKER not in manifest:
         raise ValueError("mod.rs 缺少 scaffold:action-registration 标记")
-    registration = (
-        "    let module = module\n"
-        f'        .action_fn(action_name("{name}")?, {name}::handle)\n'
-        f'        .route(HttpMethod::{http_method_variant(method)}, "{path}")\n'
-        f'        .display_name("{title}")\n'
-        f'        .description("TODO: 描述 {title} 的业务语义")\n'
-        "        .register();\n"
-    )
     return manifest.replace(
         REGISTRATION_MARKER,
-        registration + REGISTRATION_MARKER,
+        f"    {name},\n" + REGISTRATION_MARKER,
         1,
     )
 
@@ -111,9 +116,9 @@ def generate(
 
     original = manifest_path.read_text(encoding="utf-8")
     updated = insert_module(original, name)
-    updated = register_in_route_table(updated, name, title, method, path)
+    updated = register_in_action_registry(updated, name)
 
-    target.write_text(action_source(name, title), encoding="utf-8")
+    target.write_text(action_source(name, title, method, path), encoding="utf-8")
     manifest_path.write_text(updated, encoding="utf-8")
     return target
 
@@ -124,17 +129,19 @@ def self_test() -> None:
         listed = root / "listed"
         listed.mkdir()
         (listed / "mod.rs").write_text(
-            "mod list;\nfn register_all(module: ModuleSpec) -> Result<ModuleSpec, BaseError> {\n"
-            f"{REGISTRATION_MARKER}\n    Ok(module)\n}}\n",
+            "mod list;\n\nconst ACTIONS: &[Register] = action_registry![\n    list,\n"
+            f"{REGISTRATION_MARKER}\n];\n",
             encoding="utf-8",
         )
         target = generate(listed, "archive", "归档", "POST", "/api/v1/archive")
         manifest = (listed / "mod.rs").read_text(encoding="utf-8")
         source = target.read_text(encoding="utf-8")
         assert target.is_file() and "mod archive;" in manifest
-        assert '.action_fn(action_name("archive")?, archive::handle)' in manifest
-        assert '.route(HttpMethod::Post, "/api/v1/archive")' in manifest
+        assert "    archive,\n" in manifest
+        assert 'yang_base::action_name!("archive")' in source
+        assert '.route(HttpMethod::Post, "/api/v1/archive")' in source
         assert "pub(super) async fn handle(" in source
+        assert "pub(super) fn register(" in source
         assert "尚未实现" in source
         try:
             generate(listed, "archive", "归档", "POST", "/api/v1/archive")
@@ -172,7 +179,7 @@ def main() -> int:
     title = args.title or pascal_case(args.name)
     path = args.path or f"/api/v1/{args.name.replace('_', '-')}"
     try:
-        target = generate(args.actions_dir.resolve(), args.name, title, args.method, path)
+        target = generate(args.actions_dir.resolve(), args.name, title, args.method, args.path)
     except ValueError as error:
         parser.error(str(error))
     print(f"created {target}")

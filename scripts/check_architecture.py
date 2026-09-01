@@ -14,6 +14,8 @@ DERIVE_RE = re.compile(r"#\s*\[\s*derive\s*\((.*?)\)\s*\]", re.DOTALL)
 ACTION_HANDLE_RE = re.compile(
     r"(?m)^\s*pub\(super\)\s+async\s+fn\s+handle\s*\("
 )
+# 每个 Action 文件同时自包含一个 pub(super) fn register(module, ...) 注册函数
+ACTION_REGISTER_RE = re.compile(r"(?m)^\s*pub\(super\)\s+fn\s+register\s*\(")
 MODULE_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([a-z][a-z0-9_]*)\s*;", re.MULTILINE)
 TENANT_BOUNDARY_KINDS = (
     "database",
@@ -135,12 +137,8 @@ AUTHORIZATION_WRITER_DOCUMENT = Path("docs/architecture/authorization-writers.md
 SOURCE_ROOT_DIRECTORIES = {"addon", "config", "infrastructure"}
 SOURCE_ROOT_FILES = {"app.rs", "bootstrap.rs", "lib.rs", "main.rs"}
 AUTHORIZATION_WRITER_ALLOWLIST = {
-    "src/addon/account/user/domain/repository.rs": "account-user-facts",
-    "src/addon/account/user/domain/lifecycle.rs": "account-user-lifecycle",
+    "src/addon/account/domain/repository.rs": "account-user-facts",
     "src/addon/account/domain/authz_version.rs": "account-security-version",
-    "src/addon/admin/user/domain/repository.rs": "admin-authorization-facts",
-    "src/addon/org/user/domain/repository.rs": "org-membership-authorization-facts",
-    "src/addon/org/access/domain/repository.rs": "org-onboarding-authorization-facts",
 }
 AUTHORIZATION_WRITER_CODE_RE = re.compile(
     r"(?m)^//!\s*authorization-writer:\s*([a-z][a-z0-9-]*)\s*$"
@@ -151,17 +149,13 @@ AUTHORIZATION_WRITER_DOC_RE = re.compile(
 )
 AUTHORIZATION_FACT_SQL_WRITE_RE = re.compile(
     r"(?is)\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+`?"
-    r"(users|admin_user|org_user)`?\b"
+    r"(users)`?\b"
 )
 GENERIC_TABLE_WRITE_RE = re.compile(
     r"\.(?:insert(?:_returning_id)?(?:_in_tx)?|update(?:_in_tx)?|"
     r"delete(?:_in_tx)?)\s*\("
 )
-PROTECTED_MODULE_PATHS = (
-    "src/addon/account/user/",
-    "src/addon/admin/user/",
-    "src/addon/org/user/",
-)
+PROTECTED_MODULE_PATHS = ("src/addon/account/",)
 INTERNAL_ACTION_BYPASS_PATTERNS = {
     "ActionContext.plugins": re.compile(r"\.\s*plugins\s*\("),
     "Registry.resolve_typed": re.compile(r"\.\s*resolve_typed\s*(?:::\s*<[^;]+?>)?\s*\("),
@@ -179,6 +173,10 @@ def derived_action_count(source: str) -> int:
 
 def action_definition_count(source: str) -> int:
     return len(ACTION_HANDLE_RE.findall(source))
+
+
+def action_register_count(source: str) -> int:
+    return len(ACTION_REGISTER_RE.findall(source))
 
 
 def action_directories(root: Path) -> list[Path]:
@@ -215,9 +213,15 @@ def check_action_directory(root: Path, directory: Path) -> list[str]:
             errors.append(
                 f"{path.relative_to(root)}: 必须恰好定义一个 pub(super) async fn handle 主函数，实际 {count} 个"
             )
+        register_count = action_register_count(source)
+        if register_count != 1:
+            errors.append(
+                f"{path.relative_to(root)}: 必须恰好定义一个 pub(super) fn register 自包含注册函数，"
+                f"实际 {register_count} 个"
+            )
         if name not in declared:
             errors.append(f"{path.relative_to(root)}: 未在 {relative / 'mod.rs'} 中声明")
-        elif not re.search(rf"\b(?:use\s+)?{re.escape(name)}\s*::", registrations):
+        elif not re.search(rf"\b{re.escape(name)}\b", registrations):
             errors.append(f"{path.relative_to(root)}: 未在 {relative / 'mod.rs'} 中注册")
 
     for name in sorted(declared - files.keys()):
@@ -245,11 +249,11 @@ def check_actions_outside_directories(root: Path) -> list[str]:
     return errors
 
 
-MODULE_CONTAINER_ENTRIES = {"mod.rs", "actions", "domain"}
+MODULE_CONTAINER_ENTRIES = {"mod.rs", "table.rs", "actions", "domain"}
 
 
 def check_module_layout(root: Path) -> list[str]:
-    """addon/module 接口目录只承载 mod.rs、actions/ 与 domain/，机制代码一律进入 domain/。"""
+    """addon/module 接口目录只承载 mod.rs、table.rs、actions/ 与 domain/，机制代码一律进入 domain/。"""
 
     errors: list[str] = []
     addon_root = root / "src" / "addon"
@@ -922,17 +926,24 @@ def self_test() -> None:
             write(root / "src" / file_name, "")
         actions = root / "src" / "addon" / "demo" / "actions"
         write(actions / "mod.rs", "mod list;\n")
-        write(actions / "list.rs", "pub(super) async fn handle() {}\n")
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\npub(super) fn register() {}\n",
+        )
         errors = check(root)
         assert any("未在" in error and "注册" in error for error in errors), (
             "必须拒绝只声明未注册的 Action"
         )
-        write(actions / "mod.rs", "mod list;\nfn register() { let _ = list::handle; }\n")
+        write(
+            actions / "mod.rs",
+            "mod list;\nfn register_all() { let _ = list::register; }\n",
+        )
         assert check(root) == [], "合法 fixture 应通过"
 
         write(
             actions / "list.rs",
-            "pub(super) async fn handle() {}\npub(super) async fn handle() {}\n",
+            "pub(super) async fn handle() {}\npub(super) fn register() {}\n"
+            "pub(super) async fn handle() {}\n",
         )
         errors = check(root)
         assert any("实际 2 个" in error for error in errors), "必须拒绝多 Action 文件"
@@ -943,7 +954,10 @@ def self_test() -> None:
             "必须拒绝 Action 过程宏形态"
         )
 
-        write(actions / "list.rs", "pub(super) async fn handle() {}\n")
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\npub(super) fn register() {}\n",
+        )
         write(actions / "support.rs", "fn helper() {}\n")
         errors = check(root)
         assert any("实际 0 个" in error for error in errors), "必须拒绝非 Action 文件"
@@ -1234,29 +1248,13 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         writer_sources = {
-            "src/addon/account/user/domain/repository.rs": (
+            "src/addon/account/domain/repository.rs": (
                 "account-user-facts",
                 "fn write(q: Query) { q.insert(value); }\n",
-            ),
-            "src/addon/account/user/domain/lifecycle.rs": (
-                "account-user-lifecycle",
-                'fn write() { sqlx::query("UPDATE users SET status = \'disabled\'"); }\n',
             ),
             "src/addon/account/domain/authz_version.rs": (
                 "account-security-version",
                 'fn write() { sqlx::query("UPDATE users SET authz_version = 2"); }\n',
-            ),
-            "src/addon/admin/user/domain/repository.rs": (
-                "admin-authorization-facts",
-                'fn write() { sqlx::query("UPDATE admin_user SET admin = TRUE"); }\n',
-            ),
-            "src/addon/org/user/domain/repository.rs": (
-                "org-membership-authorization-facts",
-                "fn write(q: Query) { q.update(value); }\n",
-            ),
-            "src/addon/org/access/domain/repository.rs": (
-                "org-onboarding-authorization-facts",
-                "fn write(q: Query) { q.insert_in_tx(tx, value); }\n",
             ),
         }
         document = "# writers\n"
@@ -1284,10 +1282,10 @@ def self_test() -> None:
         evil_action.unlink()
         write(
             root / "src/addon/work/bypass.rs",
-            'fn bypass() { sqlx::query("DELETE FROM org_user WHERE id = 1"); }\n',
+            'fn bypass() { sqlx::query("DELETE FROM users WHERE id = 1"); }\n',
         )
         errors = check_authorization_writer_boundaries(root)
-        assert any("授权事实表 org_user" in error for error in errors), (
+        assert any("授权事实表 users" in error for error in errors), (
             "必须拒绝跨模块 raw SQL 写授权事实"
         )
 
