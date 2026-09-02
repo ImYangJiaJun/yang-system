@@ -3,6 +3,142 @@ rule_files:
 
 evaluation_interval: 1m
 
-# 前端错误上报能力已随 observability Addon 删除，暂无针对单条规则的演练用例；
-# 文件保留以维持 CI 的 promtool test rules 入口。
-tests: []
+# 告警演练：覆盖快速 burn、readiness、注册邮件投递失败率与 shutdown 超时的
+# 触发/不触发正反用例。输入序列只使用真实指标名与冻结的 label 枚举，
+# job/instance 模拟 Prometheus 抓取目标标签。
+tests:
+  # 快速 burn：5m 与 1h 错误率同时超过 14.4 倍预算（0.0144），应触发 critical。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="error"}'
+        values: '0+4x14'
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="success"}'
+        values: '0+196x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: YangSystemAvailabilityErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              severity: critical
+              slo: availability
+            exp_annotations:
+              summary: "yang-system availability error budget is burning quickly"
+              runbook: "docs/SLO.md"
+
+  # 快速 burn 反例：错误率 0.005 低于 0.0144 阈值，不应触发。
+  # （该比率高于慢速 burn 的 0.001，但慢速 burn for=30m，10m 时尚未 firing。）
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="error"}'
+        values: '0+1x14'
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="success"}'
+        values: '0+199x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: YangSystemAvailabilityErrorBudgetFastBurn
+        exp_alerts: []
+
+  # readiness：连续两分钟没有一次就绪，应触发 critical。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_readiness_ready{job="yang-system", instance="127.0.0.1:9090"}'
+        values: '0+0x9'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: YangSystemReadinessUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              instance: 127.0.0.1:9090
+              severity: critical
+              slo: readiness
+            exp_annotations:
+              summary: "yang-system instance has not passed readiness for two minutes"
+              runbook: "docs/SLO.md"
+
+  # readiness 反例：中途一次 0 抖动后恢复，2m 窗口内已有就绪，不应触发。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_readiness_ready{job="yang-system", instance="127.0.0.1:9090"}'
+        values: '1+0x4 0+0x0 1+0x4'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: YangSystemReadinessUnavailable
+        exp_alerts: []
+
+  # 注册邮件：25% 投递失败率（sent 3/min、failed 1/min）持续超过 10 分钟，应触发 warning。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_registration_email_total{job="yang-system", instance="127.0.0.1:9090", result="sent"}'
+        values: '0+3x34'
+      - series: 'yang_system_registration_email_total{job="yang-system", instance="127.0.0.1:9090", result="failed"}'
+        values: '0+1x34'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: YangSystemRegistrationEmailDeliveryFailing
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              severity: warning
+              slo: dependency_availability
+            exp_annotations:
+              summary: "yang-system registration email delivery failure ratio exceeds 10%"
+              runbook: "docs/SLO.md"
+
+  # 注册邮件反例一：全部投递成功，不应触发。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_registration_email_total{job="yang-system", instance="127.0.0.1:9090", result="sent"}'
+        values: '0+4x34'
+      - series: 'yang_system_registration_email_total{job="yang-system", instance="127.0.0.1:9090", result="failed"}'
+        values: '0+0x34'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: YangSystemRegistrationEmailDeliveryFailing
+        exp_alerts: []
+
+  # 注册邮件反例二：无成功流量且失败量极低（约 1 封/10min），失败率比值虽为 1.0，
+  # 但 15m 窗口失败增量不足 3，流量下限守卫生效，不应触发。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_registration_email_total{job="yang-system", instance="127.0.0.1:9090", result="sent"}'
+        values: '0+0x34'
+      - series: 'yang_system_registration_email_total{job="yang-system", instance="127.0.0.1:9090", result="failed"}'
+        values: '0+0x9 1+0x9 2+0x9 3+0x6'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: YangSystemRegistrationEmailDeliveryFailing
+        exp_alerts: []
+
+  # shutdown 超时：15m 窗口内出现 result="timeout" 计数，应立即触发（无 for）。
+  - interval: 1m
+    input_series:
+      - series: 'yang_runtime_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="timeout"}'
+        values: '0+0x9 1+0x5'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: YangSystemShutdownPhaseTimedOut
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              instance: 127.0.0.1:9090
+              phase: http_drain
+              result: timeout
+              severity: warning
+              slo: graceful_shutdown
+            exp_annotations:
+              summary: "yang-system shutdown phase exhausted the process budget"
+              runbook: "docs/SLO.md"
+
+  # shutdown 反例：各阶段均正常完成，timeout 计数恒为 0，不应触发。
+  - interval: 1m
+    input_series:
+      - series: 'yang_runtime_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="timeout"}'
+        values: '0+0x14'
+      - series: 'yang_runtime_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="success"}'
+        values: '0+1x14'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: YangSystemShutdownPhaseTimedOut
+        exp_alerts: []

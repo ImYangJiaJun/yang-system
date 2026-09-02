@@ -115,8 +115,28 @@ groups:
           summary: "authentication rate limiter cannot reach Redis"
           runbook: "docs/SLO.md"
 
+      # 注册邮件 SMTP 投递失败率：分母只计真实投递尝试（sent|failed），
+      # suppressed/cooldown/limited 是投递前结果，不代表 SMTP 故障；
+      # increase >= 3 防止低流量环境单次偶发失败触发不稳定百分比（见 SLO.md 口径说明）。
+      - alert: YangSystemRegistrationEmailDeliveryFailing
+        expr: |
+          (
+            sum by (job) (rate(yang_system_registration_email_total{result="failed"}[15m]))
+            /
+            clamp_min(sum by (job) (rate(yang_system_registration_email_total{result=~"sent|failed"}[15m])), 0.001)
+          ) > 0.1
+          and on (job)
+          sum by (job) (increase(yang_system_registration_email_total{result="failed"}[15m])) >= 3
+        for: 10m
+        labels:
+          severity: warning
+          slo: dependency_availability
+        annotations:
+          summary: "yang-system registration email delivery failure ratio exceeds 10%"
+          runbook: "docs/SLO.md"
+
       - alert: YangSystemShutdownPhaseTimedOut
-        expr: increase(shutdown_phase_total{result="timeout"}[15m]) > 0
+        expr: increase(yang_runtime_shutdown_phase_total{result="timeout"}[15m]) > 0
         labels:
           severity: warning
           slo: graceful_shutdown
