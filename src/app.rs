@@ -1,4 +1,4 @@
-use crate::addon::{access, account};
+use crate::addon::{access, account, demo};
 use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
@@ -77,6 +77,8 @@ fn build_application(
     .context("构建 access Addon 失败")?;
     let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> = vec![access.grant_resolver()];
     let system_owner_claimer = account::no_system_owner_claimer();
+    let demo =
+        demo::build_addon(authorization_validator.clone()).context("构建 demo Addon 失败")?;
     let builder = AppBuilder::new()
         .addon(
             account::build_addon(
@@ -93,7 +95,8 @@ fn build_application(
             access
                 .into_spec()
                 .middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))),
-        );
+        )
+        .addon(demo.middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))));
     let runtime = builder
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
@@ -224,5 +227,76 @@ mod tests {
         let projected: Vec<&str> = entries.iter().map(|entry| entry.permission()).collect();
         assert!(projected.contains(&"access.grants.read"));
         assert!(projected.contains(&"access.grants.write"));
+    }
+
+    /// P7 演示 addon 冒烟：demo.notes 全流程接入（Catalog、表、权限目录、投影边界）。
+    #[tokio::test]
+    async fn demo_addon_builds_and_projects_only_for_authorized_identities() {
+        use yang_base::action::Request;
+
+        let app = build_application(test_tools(), test_security(), None)
+            .unwrap_or_else(|error| panic!("当前 feature 组合的应用应构建成功: {error:#}"));
+        let demo_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "demo.notes")
+            .unwrap_or_else(|| panic!("应存在 demo.notes 模块"));
+        assert!(app
+            .runtime
+            .table_definitions()
+            .iter()
+            .any(|definition| definition.name() == "demo_note"));
+        for action_name in ["create_note", "update_note", "delete_note", "list_notes"] {
+            assert!(
+                demo_module
+                    .actions()
+                    .iter()
+                    .any(|action| action.name.as_str() == action_name),
+                "demo.notes 应注册 {action_name}"
+            );
+        }
+        // 权限目录投影必须包含演示 Action 声明的权限（access 管线对新业务生效）。
+        let entries = access::project_permissions(app.runtime.catalog().addons());
+        let projected: Vec<&str> = entries.iter().map(|entry| entry.permission()).collect();
+        assert!(projected.contains(&"demo.notes.read"));
+        assert!(projected.contains(&"demo.notes.write"));
+
+        // 投影边界：匿名请求的 UI Catalog 不得出现任何 demo.notes 内容；
+        // 持有 demo.notes.* 权限的请求由同一投影逻辑放行（授权身份只能经
+        // TokenAuthMiddleware 注入，应用单测无法伪造，授权路径由框架投影测试覆盖）。
+        let anonymous = app
+            .runtime
+            .ui_catalog(&app.runtime.context(Request::new(serde_json::json!({}))))
+            .unwrap_or_else(|error| panic!("匿名 UI Catalog 应可计算: {error}"));
+        assert!(anonymous
+            .modules
+            .iter()
+            .all(|module| module.module_id != "demo.notes"));
+        assert!(anonymous
+            .table_views
+            .iter()
+            .all(|view| !view.view_id.starts_with("demo.notes")));
+        assert!(anonymous
+            .actions
+            .iter()
+            .all(|action| !action.operation_id.starts_with("demo.notes.")));
+
+        // 冻结 Catalog 中 demo.notes 声明了一个通用 TableView（前端零代码的载体）。
+        assert_eq!(
+            demo_module.views.len(),
+            1,
+            "demo.notes 应声明一个主 TableView"
+        );
+        let view = &demo_module.views[0];
+        assert_eq!(
+            view.data_action
+                .as_ref()
+                .map(|action| action.action().as_str()),
+            Some("list_notes")
+        );
+        assert_eq!(view.fields.len(), 5);
     }
 }
