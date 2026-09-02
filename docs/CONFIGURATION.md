@@ -79,6 +79,46 @@ keyring 最多 8 把密钥，`key_id` 必须唯一。生产 Token 强制携带 `
 缺失或未知 `kid` 均失败关闭。首次从旧单密钥版本升级时，既有无 `kid`
 会话会失效并要求重新登录；系统不保留隐式逐密钥试签名的兼容回退链。
 
+## 服务凭据轮换（MySQL / Redis / SMTP）
+
+Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
+`email.smtp.username` / `email.smtp.password`）没有 keyring 机制：新值只在
+**进程启动期**合成一次，不支持热更新。轮换的通用步骤固定为：
+
+1. 在依赖侧先让新凭据生效（不要先吊销旧凭据）；
+2. 更新 secret 目录文件或 `YANG_SYSTEM_*` 环境变量；
+3. **滚动重启**应用实例：逐个实例替换，依赖管理面 `/health/ready` 确认新实例
+   就绪后再下线旧实例，保证零停机；
+4. 确认全部实例已用新凭据运行后，回依赖侧吊销旧凭据。
+
+连接池内已建立的旧连接最长存活 `max_lifetime_seconds`（MySQL/Redis 默认
+1800 秒），吊销旧凭据前预留至少一个该周期，避免池内连接被集中踢断。
+
+### MySQL
+
+- 推荐为应用使用专用账号（非 root）。轮换时优先「新建账号 → 切换 → 删除旧账号」；
+  若必须原地 `ALTER USER ... IDENTIFIED BY ...`，先执行改密再立即滚动重启，
+  因为旧连接不受影响但新连接会立刻要求新密码。
+- 连接串经 secret 文件 `mysql_url` 或 `YANG_SYSTEM_MYSQL_URL` 注入；
+  不要把新密码写进 `config.toml`。
+
+### Redis
+
+- 凭据内嵌在 `redis.url`（`redis://[:password@]host:port/db`，或 ACL 用户
+  `redis://user:password@...`），经 secret 文件 `redis_url` 或
+  `YANG_SYSTEM_REDIS_URL` 注入，轮换流程同上。
+- Redis 只是加速层（授权最终事实在 MySQL，含 Outbox）：轮换窗口内 Redis 短暂
+  不可用只影响限流计数、Step-up proof 与缓存命中率，不丢业务数据；但应用对
+  Redis 连接失败按失败关闭处理，重启期间保持 Redis 可达。
+
+### SMTP
+
+- `email.smtp` 凭据用于注册/验证码邮件投递。先在 relay 侧添加新凭据，再按
+  通用步骤滚动重启，最后吊销旧凭据。
+- 轮换失误（旧凭据提前失效）不会导致启动失败，但会让邮件投递失败；通过
+  `yang_system_registration_email_total{result}` 指标观察 `error` 结果突增
+  即可发现，修复方式是部署正确凭据并再次滚动重启。
+
 ## 关闭总预算
 
 `shutdown.total_timeout_seconds` 是进程关闭的唯一总预算，默认 30 秒，允许

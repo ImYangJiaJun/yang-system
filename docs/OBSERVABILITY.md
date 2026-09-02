@@ -19,7 +19,8 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 
 日志禁止记录请求体、Authorization/Cookie header、密码、Token、
 数据库连接串或 Redis URL。高权限追责仍以 `audit_event` 为事实源，结构化日志不能
-替代事务内审计。
+替代事务内审计。采集器接入、字段保留/脱敏与保留期约定见
+[`LOG_SHIPPING.md`](LOG_SHIPPING.md)。
 
 ## Prometheus 指标
 

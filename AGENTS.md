@@ -39,10 +39,11 @@ tests/                       # Rust 集成测试（真实 MySQL/Redis）与 benc
 examples/frontend_demo/      # 数据库无关的演示后端，供 Playwright 浏览器测试使用
 migrations/                  # 空目录：本项目不用 SQL 迁移文件，Schema 由代码声明驱动
 scripts/                     # run_ci.py / check_architecture.py / new_action.py / setup_local.ps1 / upgrade_local_config.py
-docs/                        # 安全与运行契约：SCHEMA/AUDIT/CONFIGURATION/OBSERVABILITY/SLO 等
+docs/                        # 安全与运行契约：SCHEMA/AUDIT/CONFIGURATION/OBSERVABILITY/SLO/RUNBOOK_BACKUP/LOG_SHIPPING 等
 frontend/                    # Quasar 控制台（见下）
 ops/prometheus/              # Prometheus 告警规则与演练（CI 用 promtool 校验）
-frontend/deploy/             # 生产 Nginx 配置与部署契约校验
+frontend/deploy/             # 生产 Nginx 配置、前端镜像 Dockerfile 与部署契约校验
+docker/app/                  # 后端生产镜像 Dockerfile（构建上下文为 lib_yang 仓库根）
 ```
 
 前端内部约定：API 客户端与契约在 `frontend/src/api/` 和 `frontend/src/contracts/`，可复用 UI 在 `components/`，页面编排在 `pages/` 和 `layouts/`，Pinia 状态在 `stores/`。业务导航投影定义在 `module-pages.ts`；需要特殊交互的自定义视图在 `custom/`（`custom/registry.ts` 是静态注册表，禁止按后端字符串动态 import）；单语言产品文案集中在 `product-locale.ts`。单元测试与源码同目录（`*.test.ts`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。
@@ -114,6 +115,8 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 - 生产启动：`cargo run --locked --bin yang-system`。启动顺序：配置合成验证 → Telemetry/关闭预算 → 资源创建 → AppBuilder 冻结 Catalog/Registry → Schema 预检与增量同步 → 审计表校验、管理面与 Outbox Worker → readiness 就绪后启动业务路由；停机时先撤销 readiness 再在同一总预算内排空。
 - 存活/就绪：`/health/live`、`/health/ready`；独立管理面默认 `http://127.0.0.1:9090`（`/metrics` 与带依赖检查的 `/health/ready`），生产编排应使用管理面 readiness。
 - 前端生产部署使用 `frontend/deploy/nginx.conf`（CI 校验语法与部署契约）。
+- 生产镜像：后端 `docker/app/Dockerfile`（构建上下文必须是 lib_yang 仓库根：`docker build -f project/yang-system/docker/app/Dockerfile -t yang-system:local .`，配套根目录 `.dockerignore`；工具链与 CI 同为 1.97.1，debian-slim 运行时 + 非 root 用户）；前端 `frontend/deploy/Dockerfile`（构建上下文为 `frontend/`：corepack 按 `packageManager` 固定 pnpm，运行时复用 CI 校验过的同一 Nginx 镜像与 `nginx.conf`）。注意前端 nginx 按契约只监听 loopback，镜像须与后端共享网络命名空间（同 Pod / `--network container:`）运行。
+- 备份/恢复与日志聚合运维约定分别见 `docs/RUNBOOK_BACKUP.md`（MySQL 为唯一事实源、Redis 不备份、`down -v` 毁卷警告）与 `docs/LOG_SHIPPING.md`。
 - **跨仓库推送顺序**：先推 `lib_yang`、确认推送完成后再推 `yang-system`。CI 在任务开始时按 `LIB_YANG_REF=master` 签出依赖仓库，两边推送间隔过近会拿到旧 master，使旧 `yang-base` 清单与新 `Cargo.lock` 不匹配，`--locked` 直接报 "cannot update the lock file"（2026-08-24 实际踩过，重跑即恢复）。
 - **MSRV 1.80 守护**：`.cargo/config.toml` 已配置 `resolver.incompatible-rust-versions = "fallback"`，解析依赖时优先选择兼容 `rust-version = "1.80"` 的版本；新增或升级依赖后必须冷缓存验证 MSRV，不能只信 CI 绿——Swatinem 缓存命中会跳过依赖清单解析，掩盖不兼容（且缓存闲置 7 天会被 GitHub 清除）。验证命令（与 CI 同环境）：
 
@@ -134,8 +137,10 @@ frontend/deploy/             # 生产 Nginx 配置与部署契约校验
 
 - `README.md` — 能力清单、本地环境、启动顺序、安全模型的权威说明
 - `docs/SCHEMA.md` — 声明式 Schema 演进规则
-- `docs/CONFIGURATION.md` — 环境变量、secret provider、keyring 轮换、关闭预算
+- `docs/CONFIGURATION.md` — 环境变量、secret provider、keyring 与服务凭据轮换、关闭预算
 - `docs/OBSERVABILITY.md` — 指标、readiness、日志与 tracing 契约
+- `docs/LOG_SHIPPING.md` — 日志采集接入、字段保留/脱敏与保留期约定
+- `docs/RUNBOOK_BACKUP.md` — MySQL 备份/恢复演练、RPO/RTO 与毁卷警告
 - `docs/AUDIT.md` — 高权限审计
 - `docs/REGISTRATION_EMAIL_VERIFICATION.md` — 注册邮箱验证码边界
 - `docs/architecture/` — 授权失效 ADR 与 writer 清单、裸 SQL 边界、会话 TTL
