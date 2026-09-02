@@ -139,6 +139,7 @@ SOURCE_ROOT_FILES = {"app.rs", "bootstrap.rs", "lib.rs", "main.rs"}
 AUTHORIZATION_WRITER_ALLOWLIST = {
     "src/addon/account/domain/repository.rs": "account-user-facts",
     "src/addon/account/domain/authz_version.rs": "account-security-version",
+    "src/addon/access/domain/repository.rs": "access-grant-lifecycle",
 }
 AUTHORIZATION_WRITER_CODE_RE = re.compile(
     r"(?m)^//!\s*authorization-writer:\s*([a-z][a-z0-9-]*)\s*$"

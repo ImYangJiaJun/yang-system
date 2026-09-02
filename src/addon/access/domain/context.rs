@@ -1,0 +1,62 @@
+//! access 模块上下文 `Access`：授权存储、权限目录与事务收尾的单一出口。
+//!
+//! 业务用例流程内联在各 Action 文件的 `handle` 中；Action 只从 `Access`
+//! 获取能力，与 account 的 `Account` 上下文同构。
+
+use super::permission_catalog::PermissionCatalogHandle;
+use super::repository::GrantRepository;
+use yang_base::BaseError;
+use yang_db::Transaction;
+
+/// access 模块上下文：聚合授权存储与权限目录投影。
+pub(crate) struct Access {
+    grants: GrantRepository,
+    // P3 授权管理 Action 消费；接入后移除 allow。
+    #[allow(dead_code)]
+    permission_catalog: PermissionCatalogHandle,
+}
+
+impl Access {
+    pub(crate) fn new(
+        grants: GrantRepository,
+        permission_catalog: PermissionCatalogHandle,
+    ) -> Self {
+        Self {
+            grants,
+            permission_catalog,
+        }
+    }
+
+    /// 授权事实表的唯一持久化边界。
+    pub(crate) fn grants(&self) -> &GrantRepository {
+        &self.grants
+    }
+
+    /// 运行期权限目录投影（决策 D3：Catalog 是唯一事实来源）。
+    // P3 授权管理 Action 消费；接入后移除 allow。
+    #[allow(dead_code)]
+    pub(crate) fn permission_catalog(&self) -> &PermissionCatalogHandle {
+        &self.permission_catalog
+    }
+
+    /// 提交或回滚一个业务事务，回滚失败只记录日志不覆盖原错误。
+    // P3 授权管理 Action 消费；接入后移除 allow。
+    #[allow(dead_code)]
+    pub(crate) async fn finish_transaction<T>(
+        transaction: Transaction,
+        result: Result<T, BaseError>,
+    ) -> Result<T, BaseError> {
+        match result {
+            Ok(value) => {
+                transaction.commit().await.map_err(BaseError::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    tracing::error!(error = %rollback_error, "access 用例事务回滚失败");
+                }
+                Err(error)
+            }
+        }
+    }
+}

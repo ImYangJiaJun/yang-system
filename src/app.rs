@@ -1,4 +1,4 @@
-use crate::addon::account;
+use crate::addon::{access, account};
 use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
@@ -62,23 +62,36 @@ fn build_application(
     let authorization_validator = AuthorizationVersionValidator::new(authorization_cache);
     let action_logging = ActionLogMiddleware::new(LogIdentity::from_tools(&tools));
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
-    // 当前骨架只保留 account：授权快照没有外围域扩展，grant_resolvers 为空列表。
-    let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> = Vec::new();
+    // access 提供授权存储与权限目录；账号域在 Token 签发时经 GrantResolver 合并直授权限。
+    let permission_catalog = access::PermissionCatalogHandle::new();
+    let access = access::build_addon(authorization_validator.clone(), permission_catalog.clone())
+        .context("构建 access Addon 失败")?;
+    let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> = vec![access.grant_resolver()];
     let system_owner_claimer = account::no_system_owner_claimer();
-    let builder = AppBuilder::new().addon(
-        account::build_addon(
-            Arc::clone(&security),
-            Arc::new(account::CompositeGrantResolver::new(grant_resolvers)),
-            system_owner_claimer,
-            authorization_validator,
-            step_up,
+    let builder = AppBuilder::new()
+        .addon(
+            account::build_addon(
+                Arc::clone(&security),
+                Arc::new(account::CompositeGrantResolver::new(grant_resolvers)),
+                system_owner_claimer,
+                authorization_validator,
+                step_up,
+            )
+            .context("构建 account Addon 失败")?
+            .middleware(action_logging),
         )
-        .context("构建 account Addon 失败")?
-        .middleware(action_logging),
-    );
+        .addon(
+            access
+                .into_spec()
+                .middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))),
+        );
     let runtime = builder
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
+    // 决策 D3：Catalog 冻结后投影权限目录并安装一次，运行期只读。
+    permission_catalog
+        .install(access::project_permissions(runtime.catalog().addons()))
+        .context("安装权限目录投影失败")?;
 
     Ok(Application { runtime })
 }
@@ -135,7 +148,7 @@ mod tests {
         })
     }
 
-    /// account-only 骨架冒烟：应用必须可构建并产出 account Catalog。
+    /// account + access 骨架冒烟：应用必须可构建并产出两个 Addon 的 Catalog 与授权事实表。
     #[tokio::test]
     async fn enabled_feature_combination_builds_and_exposes_account_catalog() {
         let app = build_application(test_tools(), test_security(), None)
@@ -154,9 +167,21 @@ mod tests {
             .any(|action| action.name.as_str() == "register"));
         assert!(app
             .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .any(|module| module.name.as_str() == "access.grants"));
+        assert!(app
+            .runtime
             .table_definitions()
             .iter()
             .any(|definition| definition.name() == "users"));
+        assert!(app
+            .runtime
+            .table_definitions()
+            .iter()
+            .any(|definition| definition.name() == "authz_grant"));
         let reference = ActionRef::new(
             ModuleName::new("account.user")
                 .unwrap_or_else(|error| panic!("ModuleName 应有效: {error}")),

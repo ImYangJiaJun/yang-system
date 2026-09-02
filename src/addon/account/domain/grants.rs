@@ -29,10 +29,8 @@ impl AuthorizationGrants {
 
     /// 增加一个权限。
     ///
-    /// 当前骨架只有 account Addon，基础授权不含权限项；本方法保留给未来
-    /// 外围 Addon 的 `GrantResolver` 扩展授权快照。
+    /// 外围授权域（如 access）的 `GrantResolver` 经本方法扩展授权快照。
     #[must_use]
-    #[allow(dead_code)]
     pub fn permission(mut self, permission: impl Into<String>) -> Self {
         self.permissions.insert(permission.into());
         self
