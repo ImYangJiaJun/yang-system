@@ -6,8 +6,10 @@ const IDENTITY_KEY = "yang.account-identity";
 
 function storedIdentity(): AccountIdentity | undefined {
   if (typeof sessionStorage === "undefined") return undefined;
-  const identity = sessionStorage.getItem(IDENTITY_KEY);
-  return identity === "user" ? identity : undefined;
+  const identity = sessionStorage.getItem(IDENTITY_KEY)?.trim();
+  // 身份取值由后端 Catalog 投影（module.identity.id）决定，前端不维护硬编码清单；
+  // 下游 module-pages 的可见性过滤会忽略 Catalog 中不存在的身份
+  return identity ? identity : undefined;
 }
 
 export const useIdentityStore = defineStore("identity", () => {
