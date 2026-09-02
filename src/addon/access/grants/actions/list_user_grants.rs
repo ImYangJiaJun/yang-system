@@ -1,7 +1,6 @@
 //! 查询目标用户的全部直授权限。
 
 use crate::addon::access::domain::context::Access;
-use crate::addon::account;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::sync::Arc;
@@ -46,7 +45,9 @@ pub(super) async fn handle(
         ));
     }
     // 目标用户必须存在；停用用户的授权事实仍允许查询（审计需要）。
-    if account::find_authorization_version(ctx.tools().mysql()?.pool(), input.user_id)
+    if access
+        .authorization()
+        .find_authorization_version(ctx.tools().mysql()?.pool(), input.user_id)
         .await?
         .is_none()
     {

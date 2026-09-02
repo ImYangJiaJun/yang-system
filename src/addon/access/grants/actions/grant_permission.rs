@@ -2,7 +2,6 @@
 
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::permission_catalog::{PERMISSION_MAX_LENGTH, PERMISSION_PATTERN};
-use crate::addon::account;
 use crate::audit;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -54,12 +53,14 @@ pub(super) async fn handle(
     // 同一事务：写授权事实 + 递增目标用户授权版本 + 追加 Outbox（writer 契约）。
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
-        let locked = account::lock_authorization_version(
-            ctx.tools().mysql()?.pool(),
-            &mut transaction,
-            input.user_id,
-        )
-        .await?;
+        let locked = access
+            .authorization()
+            .lock_authorization_version(
+                ctx.tools().mysql()?.pool(),
+                &mut transaction,
+                input.user_id,
+            )
+            .await?;
         if !locked.is_active() {
             return Err(BaseError::Unauthorized("目标用户已停用".to_string()));
         }
@@ -80,7 +81,10 @@ pub(super) async fn handle(
                 operator_id,
             )
             .await?;
-        account::increment_locked_authorization_version(&mut transaction, &locked).await?;
+        access
+            .authorization()
+            .increment_locked_authorization_version(&mut transaction, &locked)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,

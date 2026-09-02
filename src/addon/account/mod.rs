@@ -15,15 +15,11 @@ use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
 // 组合根与基础设施使用的账号端口。
-pub(crate) use domain::authz_version::find_authorization_version;
 pub use domain::email_delivery;
 pub(crate) use domain::grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
 pub(crate) use domain::system_owner::SystemOwnerClaimer;
 
-// 外围授权域（access）使用的账号端口：授权版本锁/递增原语、授权快照类型与可信用户投影。
-pub(crate) use domain::authz_version::{
-    increment_locked_authorization_version, lock_authorization_version,
-};
+// 外围授权域（access）使用的账号端口：授权快照类型与可信用户投影。
 pub(crate) use domain::claims::user_from_claims;
 
 // module 层（装配与 Action 文件）的统一入口：模块上下文与少量共享类型。
@@ -38,6 +34,15 @@ pub(crate) use domain::system_owner::OwnerClaimOutcome;
 /// 注册流程照常完成，任何账号都不会成为系统最终管理员。
 pub(crate) fn no_system_owner_claimer() -> Arc<dyn SystemOwnerClaimer> {
     Arc::new(domain::system_owner::NoSystemOwnerClaimer)
+}
+
+/// 装配授权失效公共端口（组合根调用一次）。
+///
+/// 读/写两个端口由同一账号域实现承载：`users.authz_version` 的 SQL 仍只在
+/// `domain/authz_version.rs` 一个 writer 文件、一条执行路径。
+pub(crate) fn authorization_port() -> crate::authorization::AuthorizationPort {
+    let port = Arc::new(domain::authz_version::AccountAuthorizationPort);
+    crate::authorization::AuthorizationPort::new(port.clone(), port)
 }
 
 /// 构建账号 Addon。

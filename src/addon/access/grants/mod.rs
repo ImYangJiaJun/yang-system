@@ -12,7 +12,7 @@ use super::domain::permission_catalog::PermissionCatalogHandle;
 use super::domain::repository::GrantRepository;
 use crate::addon::account::user_from_claims;
 use crate::authorization::{
-    AuthorizationVersionValidator, RequestFingerprintResolver, StepUpServices,
+    AuthorizationPort, AuthorizationVersionValidator, RequestFingerprintResolver, StepUpServices,
 };
 use std::sync::Arc;
 use yang_base::action::TokenAuthMiddleware;
@@ -29,11 +29,13 @@ pub(super) fn build_module(
     authorization_validator: AuthorizationVersionValidator,
     step_up: Option<StepUpServices>,
     permission_catalog: PermissionCatalogHandle,
+    authorization: AuthorizationPort,
 ) -> Result<(ModuleSpec, Arc<Access>), BaseError> {
     let table = table::grants_table_spec()?;
     let access = Arc::new(Access::new(
         GrantRepository::new(table.table_definition()?),
         permission_catalog,
+        authorization,
     ));
 
     let mut module = ModuleSpec::new(

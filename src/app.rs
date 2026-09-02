@@ -59,7 +59,11 @@ fn build_application(
         Err(yang_base::BaseError::RedisNotInitialized) => None,
         Err(error) => return Err(error).context("检查授权版本缓存运行态失败"),
     };
-    let authorization_validator = AuthorizationVersionValidator::new(authorization_cache);
+    // 授权失效公共端口：account 域提供唯一实现（单一 writer 语义不变），
+    // 校验器只依赖读端口抽象，业务 Addon 经 AuthorizationPort 句柄使用。
+    let authorization_port = account::authorization_port();
+    let authorization_validator =
+        AuthorizationVersionValidator::new(authorization_cache, Some(authorization_port.source()));
     let action_logging = ActionLogMiddleware::new(LogIdentity::from_tools(&tools));
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     // access 提供授权存储与权限目录；账号域在 Token 签发时经 GrantResolver 合并直授权限。
@@ -68,6 +72,7 @@ fn build_application(
         authorization_validator.clone(),
         step_up.clone(),
         permission_catalog.clone(),
+        authorization_port,
     )
     .context("构建 access Addon 失败")?;
     let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> = vec![access.grant_resolver()];

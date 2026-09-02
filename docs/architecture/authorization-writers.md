@@ -14,6 +14,19 @@
 当前骨架的外围授权域（access）已登记在下方清单；未来其它 Addon（平台/企业等）
 新增授权事实表与 writer 时，必须先在下方清单登记再写代码。
 
+## 公共端口分层
+
+`src/infrastructure/authorization/ports.rs` 定义授权失效公共端口（只含抽象，不含 SQL）：
+
+- `AuthorizationVersionSource`：授权版本回源读取（Token 校验 fallback 与管理查询共享）；
+- `AuthorizationVersionWriter`：事务内 `FOR UPDATE` 锁定 + 单调递增 `authz_version` + 追加 Outbox；
+- `AuthorizationPort`：组合根（`src/app.rs`）装配一次后分发给校验器与业务 Addon 的句柄。
+
+两个端口由 `account-security-version` writer（`src/addon/account/domain/authz_version.rs`
+的 `AccountAuthorizationPort`）唯一实现，`users.authz_version` 仍只有上述一个 writer
+文件、一条执行路径。业务 Addon 使某用户 Token 失效时只能经 `AuthorizationPort`，
+不得直接依赖账号域函数或自写版本 SQL。
+
 ## 允许边界
 
 | ID | 文件 | 责任 |

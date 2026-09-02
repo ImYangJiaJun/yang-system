@@ -1,11 +1,16 @@
 //! 授权事实 writer 共享的用户版本锁与递增原语。
 //! authorization-writer: account-security-version
 
+use async_trait::async_trait;
 use sqlx::MySqlPool;
 use yang_base::BaseError;
 use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr, Transaction};
 
 use super::status::UserStatus;
+use crate::authorization::{
+    AuthorizationVersionSnapshot, AuthorizationVersionSource, AuthorizationVersionWriter,
+    LockedAuthorization,
+};
 
 /// 已在当前事务中锁定的用户凭据与版本状态。
 ///
@@ -30,20 +35,104 @@ impl LockedUserCredential {
     }
 }
 
-/// 读取 Token 校验所需的最小授权事实。
-pub(crate) async fn find_authorization_version(
-    pool: &MySqlPool,
-    user_id: i64,
-) -> Result<Option<(UserStatus, i64)>, BaseError> {
-    let row: Option<(String, i64)> = QueryBuilder::from_pool(pool, table!("users"))
-        .field(field!("status"))
-        .field(field!("authz_version"))
-        .where_and(field!("id"), CompareOp::Eq, user_id)
-        .find()
-        .await
-        .map_err(BaseError::from)?;
-    row.map(|(status, version)| Ok((UserStatus::from_storage(&status)?, version)))
+/// 授权失效公共端口（infrastructure 抽象）的账号域唯一实现。
+///
+/// 端口抽象定义在 `infrastructure/authorization/ports.rs`；全部 SQL 仍收敛在
+/// 本文件，`users.authz_version` 的单一 writer 语义不变（一个 writer 文件、
+/// 一条执行路径）。
+pub(crate) struct AccountAuthorizationPort;
+
+#[async_trait]
+impl AuthorizationVersionSource for AccountAuthorizationPort {
+    /// 读取 Token 校验所需的最小授权事实。
+    async fn find_authorization_version(
+        &self,
+        pool: &MySqlPool,
+        user_id: i64,
+    ) -> Result<Option<AuthorizationVersionSnapshot>, BaseError> {
+        let row: Option<(String, i64)> = QueryBuilder::from_pool(pool, table!("users"))
+            .field(field!("status"))
+            .field(field!("authz_version"))
+            .where_and(field!("id"), CompareOp::Eq, user_id)
+            .find()
+            .await
+            .map_err(BaseError::from)?;
+        row.map(|(status, version)| {
+            let status = UserStatus::from_storage(&status)?;
+            Ok(AuthorizationVersionSnapshot::new(
+                status.as_str(),
+                status.is_active(),
+                version,
+            ))
+        })
         .transpose()
+    }
+}
+
+#[async_trait]
+impl AuthorizationVersionWriter for AccountAuthorizationPort {
+    /// 一次性锁定授权事实变更所需的用户状态与授权版本（FOR UPDATE）。
+    ///
+    /// 外围授权域（如 access）变更授权事实前，必须在同一事务中持有这把用户行锁。
+    async fn lock_authorization_version(
+        &self,
+        pool: &MySqlPool,
+        transaction: &mut Transaction,
+        user_id: i64,
+    ) -> Result<LockedAuthorization, BaseError> {
+        let (status, authz_version) = transaction
+            .select_for_update::<(String, i64)>(
+                QueryBuilder::from_pool(pool, table!("users"))
+                    .field(field!("status"))
+                    .field(field!("authz_version"))
+                    .where_and(field!("id"), CompareOp::Eq, user_id),
+            )
+            .await
+            .map_err(BaseError::from)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
+        if authz_version < 1 {
+            return Err(BaseError::Unauthorized("用户授权版本无效".to_string()));
+        }
+        let status = UserStatus::from_storage(&status)?;
+        Ok(LockedAuthorization::new(
+            user_id,
+            status.is_active(),
+            authz_version,
+        ))
+    }
+
+    /// 在持有的用户行锁内仅单调递增授权版本，并写入授权 Outbox。
+    ///
+    /// 凭据版本保持不变：授权事实（如直授权限）变化只让 Access Token 过期，
+    /// Refresh 会话继续有效，用户经刷新透明获得新授权快照。
+    async fn increment_locked_authorization_version(
+        &self,
+        transaction: &mut Transaction,
+        locked: &LockedAuthorization,
+    ) -> Result<i64, BaseError> {
+        let next_authz = next_authz_version(locked.authz_version())?;
+        let affected = transaction
+            .table(table!("users"))
+            .where_and(field!("id"), CompareOp::Eq, locked.user_id())
+            .where_and(
+                field!("authz_version"),
+                CompareOp::Eq,
+                locked.authz_version(),
+            )
+            .update(&serde_json::json!({
+                "authz_version": next_authz,
+            }))
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {} 授权版本在持锁事务内发生意外变化", locked.user_id()),
+            )));
+        }
+        append_authorization_outbox(transaction, locked.user_id(), next_authz).await?;
+        Ok(next_authz)
+    }
 }
 
 /// 一次性锁定改密需要的摘要和两个版本，避免非锁定快照读取旧摘要。
@@ -140,77 +229,6 @@ pub(crate) async fn disable_locked_user_and_increment_versions(
     Ok((next_authz, next_credential))
 }
 
-/// 已在当前事务中锁定的用户授权状态。
-///
-/// 外围授权域（如 access）变更授权事实前，必须在同一事务中持有这把用户行锁；
-/// 本类型不暴露读取接口，只承载递增所需的锁内快照。
-pub(crate) struct LockedAuthorizationVersion {
-    user_id: i64,
-    status: UserStatus,
-    authz_version: i64,
-}
-
-impl LockedAuthorizationVersion {
-    /// 锁定时观察到的用户是否处于启用状态。
-    pub(crate) fn is_active(&self) -> bool {
-        self.status.is_active()
-    }
-}
-
-/// 一次性锁定授权事实变更所需的用户状态与授权版本（FOR UPDATE）。
-pub(crate) async fn lock_authorization_version(
-    pool: &MySqlPool,
-    transaction: &mut Transaction,
-    user_id: i64,
-) -> Result<LockedAuthorizationVersion, BaseError> {
-    let (status, authz_version) = transaction
-        .select_for_update::<(String, i64)>(
-            QueryBuilder::from_pool(pool, table!("users"))
-                .field(field!("status"))
-                .field(field!("authz_version"))
-                .where_and(field!("id"), CompareOp::Eq, user_id),
-        )
-        .await
-        .map_err(BaseError::from)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
-    if authz_version < 1 {
-        return Err(BaseError::Unauthorized("用户授权版本无效".to_string()));
-    }
-    Ok(LockedAuthorizationVersion {
-        user_id,
-        status: UserStatus::from_storage(&status)?,
-        authz_version,
-    })
-}
-
-/// 在持有的用户行锁内仅单调递增授权版本，并写入授权 Outbox。
-///
-/// 凭据版本保持不变：授权事实（如直授权限）变化只让 Access Token 过期，
-/// Refresh 会话继续有效，用户经刷新透明获得新授权快照。
-pub(crate) async fn increment_locked_authorization_version(
-    transaction: &mut Transaction,
-    locked: &LockedAuthorizationVersion,
-) -> Result<i64, BaseError> {
-    let next_authz = next_authz_version(locked.authz_version)?;
-    let affected = transaction
-        .table(table!("users"))
-        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
-        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
-        .update(&serde_json::json!({
-            "authz_version": next_authz,
-        }))
-        .await?;
-    if affected != 1 {
-        return Err(BaseError::from(yang_db::DbError::TransactionError(
-            format!("用户 {} 授权版本在持锁事务内发生意外变化", locked.user_id),
-        )));
-    }
-    append_authorization_outbox(transaction, locked.user_id, next_authz).await?;
-    Ok(next_authz)
-}
-
 async fn append_authorization_outbox(
     transaction: &mut Transaction,
     user_id: i64,
@@ -255,6 +273,7 @@ fn next_credential_version(current: i64) -> Result<i64, BaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn authorization_version_is_positive_monotonic_and_overflow_safe() {
@@ -279,20 +298,10 @@ mod tests {
     }
 
     #[test]
-    fn locked_authorization_version_exposes_only_activity() {
-        let active = LockedAuthorizationVersion {
-            user_id: 7,
-            status: UserStatus::Active,
-            authz_version: 3,
-        };
-        let disabled = LockedAuthorizationVersion {
-            user_id: 8,
-            status: UserStatus::Disabled,
-            authz_version: 1,
-        };
-
-        assert!(active.is_active());
-        assert!(!disabled.is_active());
+    fn account_port_implements_both_authorization_port_traits() {
+        // 类型级契约：组合根装配的端口实现必须同时满足读/写两个端口抽象。
+        let _source: Arc<dyn AuthorizationVersionSource> = Arc::new(AccountAuthorizationPort);
+        let _writer: Arc<dyn AuthorizationVersionWriter> = Arc::new(AccountAuthorizationPort);
     }
 
     #[test]
