@@ -2,7 +2,11 @@
 //!
 //! 每个 Action 的输入、路由、权限与业务用例都自包含在同名文件中；
 //! 这里只有模块清单和注册表数组，新增接口时加 `mod` 声明和数组一行即可。
-//! P3 阶段在此注册授权/撤销/查询接口。
+
+mod grant_permission;
+mod list_permissions;
+mod list_user_grants;
+mod revoke_permission;
 
 use crate::addon::access::domain::context::Access;
 use std::sync::Arc;
@@ -20,6 +24,10 @@ macro_rules! action_registry {
 
 /// access.grants 的全部 Action，按可审查的顺序排列。
 const ACTIONS: &[Register] = action_registry![
+    grant_permission,
+    revoke_permission,
+    list_user_grants,
+    list_permissions,
     // scaffold:action-registration
 ];
 

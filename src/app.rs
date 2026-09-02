@@ -64,8 +64,12 @@ fn build_application(
     // 应用组合根只决定启用哪些 Addon；Addon 内部包含哪些 Module 由各领域自己维护。
     // access 提供授权存储与权限目录；账号域在 Token 签发时经 GrantResolver 合并直授权限。
     let permission_catalog = access::PermissionCatalogHandle::new();
-    let access = access::build_addon(authorization_validator.clone(), permission_catalog.clone())
-        .context("构建 access Addon 失败")?;
+    let access = access::build_addon(
+        authorization_validator.clone(),
+        step_up.clone(),
+        permission_catalog.clone(),
+    )
+    .context("构建 access Addon 失败")?;
     let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> = vec![access.grant_resolver()];
     let system_owner_claimer = account::no_system_owner_claimer();
     let builder = AppBuilder::new()
@@ -188,5 +192,32 @@ mod tests {
             ActionName::new("me").unwrap_or_else(|error| panic!("ActionName 应有效: {error}")),
         );
         assert!(app.runtime.registry().resolve(&reference).is_some());
+        let access_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "access.grants")
+            .unwrap_or_else(|| panic!("应存在 access.grants 模块"));
+        for action_name in [
+            "grant_permission",
+            "revoke_permission",
+            "list_user_grants",
+            "list_permissions",
+        ] {
+            assert!(
+                access_module
+                    .actions()
+                    .iter()
+                    .any(|action| action.name.as_str() == action_name),
+                "access.grants 应注册 {action_name}"
+            );
+        }
+        // 决策 D3：权限目录投影自 Catalog，必须包含管理 Action 声明的权限。
+        let entries = access::project_permissions(app.runtime.catalog().addons());
+        let projected: Vec<&str> = entries.iter().map(|entry| entry.permission()).collect();
+        assert!(projected.contains(&"access.grants.read"));
+        assert!(projected.contains(&"access.grants.write"));
     }
 }

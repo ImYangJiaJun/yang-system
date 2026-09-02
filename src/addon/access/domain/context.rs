@@ -11,8 +11,6 @@ use yang_db::Transaction;
 /// access 模块上下文：聚合授权存储与权限目录投影。
 pub(crate) struct Access {
     grants: GrantRepository,
-    // P3 授权管理 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     permission_catalog: PermissionCatalogHandle,
 }
 
@@ -33,15 +31,11 @@ impl Access {
     }
 
     /// 运行期权限目录投影（决策 D3：Catalog 是唯一事实来源）。
-    // P3 授权管理 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) fn permission_catalog(&self) -> &PermissionCatalogHandle {
         &self.permission_catalog
     }
 
     /// 提交或回滚一个业务事务，回滚失败只记录日志不覆盖原错误。
-    // P3 授权管理 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) async fn finish_transaction<T>(
         transaction: Transaction,
         result: Result<T, BaseError>,

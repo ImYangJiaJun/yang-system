@@ -8,7 +8,7 @@ pub(crate) mod domain;
 mod grants;
 
 use crate::addon::account::GrantResolver;
-use crate::authorization::AuthorizationVersionValidator;
+use crate::authorization::{AuthorizationVersionValidator, StepUpServices};
 use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
@@ -39,9 +39,11 @@ impl AccessAddon {
 /// Addon 边界负责声明产品能力及其 Module；应用层不应直接拼装 `access.grants`。
 pub(crate) fn build_addon(
     authorization_validator: AuthorizationVersionValidator,
+    step_up: Option<StepUpServices>,
     permission_catalog: PermissionCatalogHandle,
 ) -> Result<AccessAddon, BaseError> {
-    let (module, access) = grants::build_module(authorization_validator, permission_catalog)?;
+    let (module, access) =
+        grants::build_module(authorization_validator, step_up, permission_catalog)?;
     Ok(AccessAddon {
         spec: AddonSpec::new(yang_base::addon!("access")).module(module),
         grant_resolver: Arc::new(AuthzGrantResolver::new(access)),

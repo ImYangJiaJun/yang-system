@@ -20,7 +20,10 @@ pub use domain::email_delivery;
 pub(crate) use domain::grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
 pub(crate) use domain::system_owner::SystemOwnerClaimer;
 
-// 外围授权域（access）使用的账号端口：授权快照类型与可信用户投影。
+// 外围授权域（access）使用的账号端口：授权版本锁/递增原语、授权快照类型与可信用户投影。
+pub(crate) use domain::authz_version::{
+    increment_locked_authorization_version, lock_authorization_version,
+};
 pub(crate) use domain::claims::user_from_claims;
 
 // module 层（装配与 Action 文件）的统一入口：模块上下文与少量共享类型。

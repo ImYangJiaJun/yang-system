@@ -23,9 +23,9 @@
 | 阶段 | 内容 | 对应缺口 | 状态 |
 |------|------|----------|------|
 | P0 | 本文档：边界、决策、验收标准 | — | ✅ |
-| P1 | 权限基础设施：`access` addon（权限目录 + 授权存储 + GrantResolver 实现 + 管理 Action 声明 `.permissions(...)`） | P0-1 | 进行中 |
+| P1 | 权限基础设施：`access` addon（权限目录 + 授权存储 + GrantResolver 实现 + 管理 Action 声明 `.permissions(...)`） | P0-1 | ✅ |
 | P2 | 授权失效 writer 公共端口（解除 infrastructure → account 反向依赖） | P0-2 | 待办 |
-| P3 | 平台管理面：`access` addon 管理 Action（授权/撤销/查询）+ 权限目录投影 | P0-3 | 待办 |
+| P3 | 平台管理面：`access` addon 管理 Action（授权/撤销/查询）+ 权限目录投影 | P0-3 | ✅ |
 | P4 | 前端身份扩展（`identity.ts` 改为 catalog 驱动） | P0-4 | 待办 |
 | P5 | 部署产物：Dockerfile + 备份恢复 runbook + 日志聚合约定 | P0-5 | 待办 |
 | P6 | 运维补齐：SMTP 失败告警、promtool 演练 | P1 | 待办 |

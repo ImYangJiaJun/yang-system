@@ -23,8 +23,6 @@ pub(crate) struct PermissionEntry {
 }
 
 impl PermissionEntry {
-    // P3 权限目录查询 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) fn permission(&self) -> &str {
         &self.permission
     }
@@ -94,8 +92,6 @@ impl PermissionCatalogHandle {
     }
 
     /// 读取已安装的目录；未安装时 fail-closed（Schema-only 应用不服务权限查询）。
-    // P3 权限目录查询 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) fn entries(&self) -> Result<&[PermissionEntry], BaseError> {
         self.projection
             .get()
@@ -104,8 +100,6 @@ impl PermissionCatalogHandle {
     }
 
     /// 权限必须存在于目录中；未声明的权限不能被授予，fail-closed。
-    // P3 授权管理 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) fn ensure_declared(&self, permission: &str) -> Result<(), BaseError> {
         if self
             .entries()?

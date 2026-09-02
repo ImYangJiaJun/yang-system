@@ -13,11 +13,8 @@ use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
 
 /// 一条直授权限事实。
-// P3 授权管理 Action 消费全部字段；接入后移除 allow。
-#[allow(dead_code)]
 pub(crate) struct GrantRecord {
     pub(crate) id: i64,
-    pub(crate) user_id: i64,
     pub(crate) permission: String,
     pub(crate) granted_by: i64,
     pub(crate) occurred_at: i64,
@@ -29,7 +26,6 @@ impl TryFrom<&Record> for GrantRecord {
     fn try_from(record: &Record) -> Result<Self, Self::Error> {
         Ok(Self {
             id: record.require(GRANT_ID)?,
-            user_id: record.require(USER_ID)?,
             permission: record.require(PERMISSION)?,
             granted_by: record.require(GRANTED_BY)?,
             occurred_at: record.require(OCCURRED_AT)?,
@@ -68,8 +64,6 @@ impl GrantRepository {
     }
 
     /// 判断目标用户是否已持有某权限的直授事实。
-    // P3 授权管理 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) async fn exists_in_tx(
         &self,
         ctx: &ActionContext,
@@ -92,8 +86,6 @@ impl GrantRepository {
     }
 
     /// 写入一条直授权限事实；调用方必须已在同事务持有目标用户行锁。
-    // P3 授权管理 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) async fn insert_in_tx(
         &self,
         ctx: &ActionContext,
@@ -113,8 +105,6 @@ impl GrantRepository {
     }
 
     /// 删除一条直授权限事实，返回影响行数（0 表示目标用户本就没有该权限）。
-    // P3 授权管理 Action 消费；接入后移除 allow。
-    #[allow(dead_code)]
     pub(crate) async fn delete_in_tx(
         &self,
         ctx: &ActionContext,
@@ -154,7 +144,7 @@ mod tests {
             .set(OCCURRED_AT, 1_700_000_000_i64);
         let grant = GrantRecord::try_from(&record)
             .unwrap_or_else(|error| panic!("完整记录应转换为授权事实: {error}"));
-        assert_eq!(grant.user_id, 7);
+        assert_eq!(grant.id, 1);
         assert_eq!(grant.permission, "access.grants.read");
 
         let incomplete = Record::new().set(GRANT_ID, 1_i64);

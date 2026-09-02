@@ -140,6 +140,77 @@ pub(crate) async fn disable_locked_user_and_increment_versions(
     Ok((next_authz, next_credential))
 }
 
+/// 已在当前事务中锁定的用户授权状态。
+///
+/// 外围授权域（如 access）变更授权事实前，必须在同一事务中持有这把用户行锁；
+/// 本类型不暴露读取接口，只承载递增所需的锁内快照。
+pub(crate) struct LockedAuthorizationVersion {
+    user_id: i64,
+    status: UserStatus,
+    authz_version: i64,
+}
+
+impl LockedAuthorizationVersion {
+    /// 锁定时观察到的用户是否处于启用状态。
+    pub(crate) fn is_active(&self) -> bool {
+        self.status.is_active()
+    }
+}
+
+/// 一次性锁定授权事实变更所需的用户状态与授权版本（FOR UPDATE）。
+pub(crate) async fn lock_authorization_version(
+    pool: &MySqlPool,
+    transaction: &mut Transaction,
+    user_id: i64,
+) -> Result<LockedAuthorizationVersion, BaseError> {
+    let (status, authz_version) = transaction
+        .select_for_update::<(String, i64)>(
+            QueryBuilder::from_pool(pool, table!("users"))
+                .field(field!("status"))
+                .field(field!("authz_version"))
+                .where_and(field!("id"), CompareOp::Eq, user_id),
+        )
+        .await
+        .map_err(BaseError::from)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
+    if authz_version < 1 {
+        return Err(BaseError::Unauthorized("用户授权版本无效".to_string()));
+    }
+    Ok(LockedAuthorizationVersion {
+        user_id,
+        status: UserStatus::from_storage(&status)?,
+        authz_version,
+    })
+}
+
+/// 在持有的用户行锁内仅单调递增授权版本，并写入授权 Outbox。
+///
+/// 凭据版本保持不变：授权事实（如直授权限）变化只让 Access Token 过期，
+/// Refresh 会话继续有效，用户经刷新透明获得新授权快照。
+pub(crate) async fn increment_locked_authorization_version(
+    transaction: &mut Transaction,
+    locked: &LockedAuthorizationVersion,
+) -> Result<i64, BaseError> {
+    let next_authz = next_authz_version(locked.authz_version)?;
+    let affected = transaction
+        .table(table!("users"))
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .update(&serde_json::json!({
+            "authz_version": next_authz,
+        }))
+        .await?;
+    if affected != 1 {
+        return Err(BaseError::from(yang_db::DbError::TransactionError(
+            format!("用户 {} 授权版本在持锁事务内发生意外变化", locked.user_id),
+        )));
+    }
+    append_authorization_outbox(transaction, locked.user_id, next_authz).await?;
+    Ok(next_authz)
+}
+
 async fn append_authorization_outbox(
     transaction: &mut Transaction,
     user_id: i64,
@@ -205,6 +276,23 @@ mod tests {
         );
         assert!(next_credential_version(-1).is_err());
         assert!(next_credential_version(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn locked_authorization_version_exposes_only_activity() {
+        let active = LockedAuthorizationVersion {
+            user_id: 7,
+            status: UserStatus::Active,
+            authz_version: 3,
+        };
+        let disabled = LockedAuthorizationVersion {
+            user_id: 8,
+            status: UserStatus::Disabled,
+            authz_version: 1,
+        };
+
+        assert!(active.is_active());
+        assert!(!disabled.is_active());
     }
 
     #[test]
