@@ -3,3 +3,4 @@
 /.env
 /config.toml
 /config.local.toml
+.codex/
