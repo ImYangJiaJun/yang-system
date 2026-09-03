@@ -2,7 +2,7 @@
 
 用法（仓库根目录）：python scripts/dump_openapi.py
 步骤：
-  1. cargo run --locked --bin openapi-dump frontend-v2/contracts/openapi.json
+  1. cargo run --locked --example openapi-dump frontend-v2/contracts/openapi.json
   2. 语义保持的 definitions 提升：后端 input/output schema 是自包含的 draft-07
      文档（definitions 嵌在子 Schema 内，$ref 写作 "#/definitions/X" 的局部引用），
      openapi-typescript 无法解析这种局部引用。生成类型前在临时副本上把本地
@@ -90,7 +90,7 @@ def rebase_local_definition_refs(document: object) -> object:
 
 
 def main() -> int:
-    run(("cargo", "run", "--locked", "--bin", "openapi-dump", str(SPEC)))
+    run(("cargo", "run", "--locked", "--example", "openapi-dump", str(SPEC)))
     document = json.loads(SPEC.read_text(encoding="utf-8"))
     rebased = rebase_local_definition_refs(document)
     with tempfile.NamedTemporaryFile(
