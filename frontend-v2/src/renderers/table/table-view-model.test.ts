@@ -6,6 +6,7 @@ import type {
 } from "@/contracts/ui-catalog";
 import {
   buildActionInitialValues,
+  resolveDisplayRows,
   buildWhereClause,
   createTableFilters,
   flattenDisplayRows,
@@ -177,5 +178,49 @@ describe("table view model", () => {
     expect(formatCell(null)).toBe("—");
     expect(formatCell(false)).toBe("否");
     expect(formatCell({ id: 1 })).toBe('{"id":1}');
+  });
+});
+
+describe("树形表格安全降级", () => {
+  const tree = {
+    id_field: "id",
+    parent_field: "parent_id",
+    label_field: "name",
+    max_nodes: 3,
+  };
+
+  it("无查询条件时构造树，超过 max_nodes 回退平铺并警告", () => {
+    const rows = [
+      { id: 1, parent_id: null, name: "root" },
+      { id: 2, parent_id: 1, name: "child" },
+    ];
+    const nested = resolveDisplayRows({ tree }, rows, false);
+    expect(nested.warning).toBe("");
+    expect(nested.rows[0]?.children).toHaveLength(1);
+
+    const overflow = [
+      { id: 1, parent_id: null },
+      { id: 2, parent_id: null },
+      { id: 3, parent_id: null },
+      { id: 4, parent_id: null },
+    ];
+    const degraded = resolveDisplayRows({ tree }, overflow, false);
+    expect(degraded.warning).toContain("超过契约上限");
+    expect(degraded.warning).toContain("已安全降级为普通表格");
+    expect(degraded.rows).toBe(overflow);
+  });
+
+  it("循环父子关系回退平铺；有活动查询时始终平铺", () => {
+    const cyclic = [
+      { id: 1, parent_id: 2 },
+      { id: 2, parent_id: 1 },
+    ];
+    const degraded = resolveDisplayRows({ tree }, cyclic, false);
+    expect(degraded.warning).toContain("循环父子关系");
+    expect(degraded.rows).toBe(cyclic);
+
+    const queried = resolveDisplayRows({ tree }, cyclic, true);
+    expect(queried.warning).toBe("");
+    expect(queried.rows).toBe(cyclic);
   });
 });

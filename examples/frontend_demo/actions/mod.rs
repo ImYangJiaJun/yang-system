@@ -4,6 +4,7 @@
 //! 这里只有模块清单和注册表数组，新增接口时加 `mod` 声明和数组一行即可。
 
 mod add;
+mod bulk_delete;
 mod category_options;
 mod delete;
 mod download;
@@ -58,6 +59,7 @@ const ITEMS_ACTIONS: &[ItemsRegister] = action_registry![ItemsRegister;
     add,
     edit,
     delete,
+    bulk_delete,
     insight,
     // scaffold:action-registration
 ];

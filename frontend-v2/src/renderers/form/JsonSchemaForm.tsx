@@ -19,6 +19,7 @@ export function JsonSchemaForm({
   actions,
   defaultValues,
   onSubmit,
+  multipart,
 }: {
   formId: string;
   schema: unknown;
@@ -27,6 +28,7 @@ export function JsonSchemaForm({
   actions?: ActionDemoSchema[];
   defaultValues: Record<string, unknown>;
   onSubmit: (values: Record<string, unknown>) => void;
+  multipart?: ActionDemoSchema["multipart"];
 }) {
   const root = useMemo(() => asJsonSchema(schema), [schema]);
   const resolved = useMemo(() => effectiveSchema(root, root), [root]);
@@ -82,6 +84,7 @@ export function JsonSchemaForm({
           description={paramByName.get(name)?.description}
           businessField={businessFieldByName.get(name)}
           actions={actions}
+          multipart={multipart}
         />
       ))}
     </form>

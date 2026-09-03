@@ -48,6 +48,30 @@ pub(super) fn item_view() -> anyhow::Result<ViewSpec> {
                 yang_base::action!("demo.items.insight"),
                 ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Custom)
                     .view_id("demo.items.insight"),
+            )
+            .present_action(
+                yang_base::action!("demo.items.bulk_delete"),
+                ActionPresentationSpec::new(ActionPlacement::Bulk, ActionInteraction::Invoke)
+                    .confirmation(ActionConfirmation::new(
+                        "确认批量删除",
+                        "将删除所有选中项目，此操作无法撤销",
+                    )),
+            )
+            .present_action(
+                yang_base::action!("demo.api.download"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Download),
+            )
+            .present_action(
+                yang_base::action!("demo.api.preview"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Preview),
+            )
+            .present_action(
+                yang_base::action!("demo.api.redirect"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Navigate),
+            )
+            .present_action(
+                yang_base::action!("demo.api.upload"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
             ),
     )
 }

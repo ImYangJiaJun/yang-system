@@ -3,12 +3,14 @@ import {
   effectiveSchema,
   initialObject,
 } from "@/contracts/json-schema";
+import { buildTreeRows } from "@/contracts/table-data";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
   FormFieldSchema,
   TableColumnSchema,
   TableFilterOperator,
+  TableViewSchema,
 } from "@/contracts/ui-catalog";
 
 export type SourceRow = Record<string, unknown>;
@@ -209,4 +211,25 @@ export function formatCell(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "boolean") return value ? "是" : "否";
   return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+/**
+ * 树形表格安全降级（旧 TableView.vue treeResult 语义）：
+ * view 声明 tree 且无活动查询时把扁平行构造为树；构造违反契约
+ * （超 max_nodes/循环引用/悬空父节点）时回退平铺并携带警告文案。
+ */
+export function resolveDisplayRows(
+  view: Pick<TableViewSchema, "tree">,
+  rows: SourceRow[],
+  queryActive: boolean,
+): { rows: SourceRow[]; warning: string } {
+  if (!view.tree || queryActive) return { rows, warning: "" };
+  try {
+    return { rows: buildTreeRows(rows, view.tree), warning: "" };
+  } catch (cause) {
+    return {
+      rows,
+      warning: `${cause instanceof Error ? cause.message : String(cause)}；已安全降级为普通表格`,
+    };
+  }
 }

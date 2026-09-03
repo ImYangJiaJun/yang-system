@@ -1,14 +1,16 @@
 import { useMemo, useState } from "react";
-import { MoreHorizontal, RefreshCw } from "lucide-react";
+import { MoreHorizontal, RefreshCw, SlidersHorizontal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { buildTreeRows } from "@/contracts/table-data";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
@@ -19,12 +21,19 @@ import {
   ConfirmActionDialog,
 } from "@/renderers/action/ActionDialog";
 import { usePresentedActions } from "@/renderers/action/use-presented-actions";
+import {
+  allColumnFields,
+  loadVisibleColumns,
+  saveVisibleColumns,
+  setColumnVisible,
+} from "./column-preferences";
 import { DataGrid } from "./DataGrid";
 import { TableQueryPanel } from "./TableQueryPanel";
 import { hasActiveQuery } from "./table-query";
 import {
   createTableFilters,
   flattenDisplayRows,
+  resolveDisplayRows,
   type SourceRow,
 } from "./table-view-model";
 import { useRelationOptions } from "./use-relation-options";
@@ -41,9 +50,15 @@ function actionLabel(presentation: ActionPresentationSchema) {
 export function TableView({
   view,
   actions,
+  actionEffects,
 }: {
   view: TableViewSchema;
   actions: ActionDemoSchema[];
+  /// 副作用注入点（测试用）：替换真实下载/跳转。
+  actionEffects?: {
+    handleAttachment?: (result: import("@/api/types").InvocationResult) => void;
+    redirect?: (location: string) => void;
+  };
 }) {
   const dataAction = actions.find(
     (action) => action.operation_id === view.data_action,
@@ -51,21 +66,33 @@ export function TableView({
   const query = useTableQuery(view, dataAction);
   const [dense, setDense] = useState(false);
   const [selectedRows, setSelectedRows] = useState<SourceRow[]>([]);
+  // 列显示偏好：localStorage 按 view_id 持久化，至少保留一列。
+  const allFields = useMemo(() => allColumnFields(view), [view]);
+  const [visibleFields, setVisibleFields] = useState<string[]>(() =>
+    loadVisibleColumns(view.view_id, allFields),
+  );
+  const visibleView = useMemo<TableViewSchema>(
+    () => ({
+      ...view,
+      columns: view.columns.filter((column) =>
+        visibleFields.includes(column.field),
+      ),
+    }),
+    [view, visibleFields],
+  );
+  const toggleColumn = (field: string, flag: boolean) => {
+    setVisibleFields((prev) => {
+      const next = setColumnVisible(prev, field, flag);
+      saveVisibleColumns(view.view_id, next);
+      return next;
+    });
+  };
 
   // 树视图在无查询条件时把扁平行构造为树；构造失败安全降级为普通表格。
-  const treeResult = useMemo(() => {
-    if (!view.tree || hasActiveQuery(query.state)) {
-      return { rows: query.rows, warning: "" };
-    }
-    try {
-      return { rows: buildTreeRows(query.rows, view.tree), warning: "" };
-    } catch (cause) {
-      return {
-        rows: query.rows,
-        warning: `${cause instanceof Error ? cause.message : String(cause)}；已安全降级为普通表格`,
-      };
-    }
-  }, [view.tree, query.state, query.rows]);
+  const treeResult = useMemo(
+    () => resolveDisplayRows(view, query.rows, hasActiveQuery(query.state)),
+    [view, query.state, query.rows],
+  );
   const displayRows = useMemo(
     () => flattenDisplayRows(treeResult.rows),
     [treeResult.rows],
@@ -79,6 +106,8 @@ export function TableView({
     actions,
     selectedRows,
     reload: query.reload,
+    handleAttachment: actionEffects?.handleAttachment,
+    redirect: actionEffects?.redirect,
   });
 
   const sort = {
@@ -140,11 +169,34 @@ export function TableView({
           >
             <RefreshCw className="size-4" />
           </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" aria-label="列显示设置">
+                <SlidersHorizontal className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel>显示列</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {view.columns.map((column) => (
+                <DropdownMenuCheckboxItem
+                  key={column.field}
+                  checked={visibleFields.includes(column.field)}
+                  onCheckedChange={(checked) =>
+                    toggleColumn(column.field, checked === true)
+                  }
+                  onSelect={(event) => event.preventDefault()}
+                >
+                  {column.title || column.field}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </header>
 
       <TableQueryPanel
-        view={view}
+        view={visibleView}
         state={query.state}
         dense={dense}
         onDenseChange={setDense}
@@ -208,7 +260,7 @@ export function TableView({
       )}
 
       <DataGrid
-        view={view}
+        view={visibleView}
         rows={displayRows}
         loading={query.loading}
         dense={dense}

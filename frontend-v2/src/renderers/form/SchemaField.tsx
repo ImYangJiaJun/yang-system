@@ -4,6 +4,13 @@ import { Controller, type Control } from "react-hook-form";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { effectiveSchema, type JsonSchemaNode } from "@/contracts/json-schema";
 import type { ActionDemoSchema, FormFieldSchema } from "@/contracts/ui-catalog";
 import { RelationSelect } from "./RelationSelect";
@@ -11,7 +18,8 @@ import { resolveFormControl } from "./form-control";
 
 /**
  * 单字段控件分支表（对齐旧 SchemaField.vue）：widget hint → 显式控件落点，
- * 无 hint 时按 JSON Schema 类型/格式选择（分支逻辑见 form-control.ts）。
+ * 无 hint 时按 JSON Schema 类型/格式选择（分支逻辑见 form-control.ts）；
+ * format=binary（含 array of binary）优先落入文件选择（multipart 契约）。
  */
 export function SchemaField({
   name,
@@ -23,6 +31,7 @@ export function SchemaField({
   description,
   businessField,
   actions,
+  multipart,
 }: {
   name: string;
   schema: JsonSchemaNode;
@@ -33,6 +42,7 @@ export function SchemaField({
   description?: string;
   businessField?: FormFieldSchema;
   actions?: ActionDemoSchema[];
+  multipart?: ActionDemoSchema["multipart"];
 }) {
   const id = useId();
   const resolved = effectiveSchema(rootSchema, schema);
@@ -46,6 +56,10 @@ export function SchemaField({
     Boolean(resolved.enum),
     resolved.format,
   );
+  const isBinary =
+    resolved.format === "binary" ||
+    (type === "array" &&
+      effectiveSchema(rootSchema, resolved.items ?? {}).format === "binary");
   const relationAction = businessField?.relation
     ? actions?.find(
         (action) =>
@@ -78,6 +92,9 @@ export function SchemaField({
             label={label}
             businessField={businessField}
             relationAction={relationAction}
+            isBinary={isBinary}
+            isMultipleFiles={isBinary && type === "array"}
+            multipart={multipart}
           />
           {help && <p className="text-xs text-muted-foreground">{help}</p>}
           {fieldState.error && (
@@ -102,6 +119,9 @@ function FieldControl({
   label,
   businessField,
   relationAction,
+  isBinary,
+  isMultipleFiles,
+  multipart,
 }: {
   id: string;
   control: ReturnType<typeof resolveFormControl>;
@@ -113,7 +133,23 @@ function FieldControl({
   label: string;
   businessField?: FormFieldSchema;
   relationAction?: ActionDemoSchema;
+  isBinary: boolean;
+  isMultipleFiles: boolean;
+  multipart?: ActionDemoSchema["multipart"];
 }) {
+  if (isBinary) {
+    return (
+      <FileInput
+        id={id}
+        value={value}
+        onChange={onChange}
+        multiple={isMultipleFiles}
+        disabled={disabled}
+        multipart={multipart}
+      />
+    );
+  }
+
   if (control === "relation") {
     if (!businessField?.relation) {
       return (
@@ -122,7 +158,6 @@ function FieldControl({
     }
     return (
       <RelationSelect
-        id={id}
         value={value}
         onChange={onChange}
         label={label}
@@ -141,28 +176,29 @@ function FieldControl({
     }));
     const selected = JSON.stringify(value);
     return (
-      <select
-        id={id}
-        aria-label={label}
-        className="border-input flex h-9 w-full rounded-md border bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:opacity-50"
+      <Select
         disabled={disabled}
         value={
-          options.some((option) => option.key === selected) ? selected : ""
+          options.some((option) => option.key === selected)
+            ? selected
+            : undefined
         }
-        onChange={(event) => {
-          const option = options.find(
-            (candidate) => candidate.key === event.target.value,
-          );
+        onValueChange={(key) => {
+          const option = options.find((candidate) => candidate.key === key);
           onChange(option?.value);
         }}
       >
-        <option value="">未选择</option>
-        {options.map((option) => (
-          <option key={option.key} value={option.key}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger aria-label={label} className="w-full">
+          <SelectValue placeholder="未选择" />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option) => (
+            <SelectItem key={option.key} value={option.key}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     );
   }
 
@@ -265,6 +301,57 @@ function FieldControl({
       value={typeof value === "string" ? value : String(value ?? "")}
       onChange={(event) => onChange(event.target.value || undefined)}
     />
+  );
+}
+
+/// 文件选择控件（multipart 契约）：accept 限制 MIME、展示已选文件名与边界提示。
+function FileInput({
+  id,
+  value,
+  onChange,
+  multiple,
+  disabled,
+  multipart,
+}: {
+  id: string;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  multiple: boolean;
+  disabled?: boolean;
+  multipart?: ActionDemoSchema["multipart"];
+}) {
+  const fileNames =
+    value instanceof File
+      ? value.name
+      : Array.isArray(value)
+        ? value
+            .filter((item) => item instanceof File)
+            .map((file) => file.name)
+            .join("、")
+        : "";
+  return (
+    <div className="space-y-1">
+      <Input
+        id={id}
+        type="file"
+        multiple={multiple}
+        disabled={disabled}
+        accept={multipart?.allowed_content_types.join(",")}
+        onChange={(event) => {
+          const files = Array.from(event.target.files ?? []);
+          onChange(multiple ? files : files[0]);
+        }}
+      />
+      {fileNames && (
+        <p className="text-xs text-muted-foreground">已选择：{fileNames}</p>
+      )}
+      {multipart && (
+        <p className="text-xs text-muted-foreground">
+          单文件不超过 {multipart.max_file_bytes} bytes；最多{" "}
+          {multipart.max_files} 个文件
+        </p>
+      )}
+    </div>
   );
 }
 

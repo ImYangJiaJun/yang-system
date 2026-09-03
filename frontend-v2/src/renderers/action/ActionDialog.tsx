@@ -60,6 +60,7 @@ export function ActionDialog({
             params={state.action.params}
             businessFields={businessFields}
             actions={actions}
+            multipart={state.action.multipart}
             defaultValues={state.initialValues}
             onSubmit={onSubmit}
           />

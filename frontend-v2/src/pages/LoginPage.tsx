@@ -3,7 +3,7 @@ import { Eye, EyeOff, Lock, User } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { login } from "@/api/auth";
-import { useSessionController } from "@/api/use-session";
+import { useSessionController, useSessionSnapshot } from "@/api/use-session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,17 +13,20 @@ export default function LoginPage() {
   const controller = useSessionController();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const snapshot = useSessionSnapshot();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [errorMessage, setErrorMessage] = useState(
-    searchParams.get("reason") === "credentials-changed"
+  const [errorMessage, setErrorMessage] = useState("");
+  // 会话结束原因优先读控制器快照（失效传播），兼容外部链接的 ?reason= 参数。
+  const endReason = snapshot.sessionEndReason ?? searchParams.get("reason");
+  const reasonMessage =
+    endReason === "credentials-changed"
       ? "凭据已变更，请使用新密码重新登录"
-      : searchParams.get("reason") === "session-expired"
+      : endReason === "session-expired"
         ? "登录状态已过期，请重新登录"
-        : "",
-  );
+        : "";
   const successMessage =
     searchParams.get("registered") === "1" ? "账号已创建，请登录" : "";
 
@@ -122,6 +125,14 @@ export default function LoginPage() {
               </div>
             </div>
 
+            {reasonMessage && !errorMessage && (
+              <p
+                role="alert"
+                className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
+              >
+                {reasonMessage}
+              </p>
+            )}
             {errorMessage && (
               <p
                 role="alert"

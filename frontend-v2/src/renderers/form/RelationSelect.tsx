@@ -2,6 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import { invokeAction } from "@/api/client";
 import { useSessionCredentials } from "@/api/use-session";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { parseRelationOptions } from "@/contracts/table-data";
 import type { ActionDemoSchema, FormFieldSchema } from "@/contracts/ui-catalog";
 
@@ -9,11 +17,10 @@ type RelationOption = { value: string | number; label: string };
 
 /**
  * 关系选择器（旧 RelationSelect 语义）：初始/选中值加载 + 250ms 防抖远程搜索，
- * 请求契约 {search, selected, filter, page, limit} 与旧实现一致。
- * M1 用原生 select 承载选项（jsdom 可测、无障碍语义完整），搜索框独立于选择器。
+ * 请求契约 {search, selected, filter, page, limit} 与旧实现一致；
+ * 选项控件为 Radix Select（shadcn 组件）。
  */
 export function RelationSelect({
-  id,
   value,
   onChange,
   label,
@@ -21,7 +28,6 @@ export function RelationSelect({
   action,
   disabled,
 }: {
-  id?: string;
   value: unknown;
   onChange: (value: unknown) => void;
   label: string;
@@ -92,37 +98,40 @@ export function RelationSelect({
   }, [options, selectedValues]);
 
   return (
-    <div className="space-y-1">
-      <input
-        className="border-input mb-1 flex h-8 w-full rounded-md border bg-transparent px-2 text-sm outline-none focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+    <div className="space-y-1.5">
+      <Input
         placeholder={`搜索${label}`}
         aria-label={`搜索${label}`}
+        className="h-8"
         value={search}
         onChange={(event) => setSearch(event.target.value)}
         disabled={disabled || !action}
       />
-      <select
-        id={id}
-        aria-label={label}
-        className="border-input flex h-9 w-full rounded-md border bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:opacity-50"
+      <Select
         disabled={disabled || !action}
-        value={selectedValues[0] === undefined ? "" : String(selectedValues[0])}
-        onChange={(event) => {
-          const raw = event.target.value;
-          if (!raw) return onChange(undefined);
+        value={
+          selectedValues[0] === undefined
+            ? undefined
+            : String(selectedValues[0])
+        }
+        onValueChange={(raw) => {
           const option = displayOptions.find(
             (candidate) => String(candidate.value) === raw,
           );
           onChange(option?.value);
         }}
       >
-        <option value="">未选择</option>
-        {displayOptions.map((option) => (
-          <option key={String(option.value)} value={String(option.value)}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger aria-label={label} className="w-full">
+          <SelectValue placeholder="未选择" />
+        </SelectTrigger>
+        <SelectContent>
+          {displayOptions.map((option) => (
+            <SelectItem key={String(option.value)} value={String(option.value)}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );

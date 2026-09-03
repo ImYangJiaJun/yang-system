@@ -144,12 +144,12 @@ describe("模块页垂直切片", () => {
 
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText(/名称/), "集成测试项目");
-    // 分类是 relation_select：等待远程选项加载（3 个选项 + 1 个占位）。
-    const categorySelect = within(dialog).getByLabelText("分类");
-    await waitFor(() =>
-      expect(within(categorySelect).getAllByRole("option")).toHaveLength(4),
-    );
-    await user.selectOptions(categorySelect, "2");
+    // 分类是 relation_select（Radix Select）：等待远程选项加载后打开并选「业务」。
+    const categoryTrigger = within(dialog).getByRole("combobox", {
+      name: "分类",
+    });
+    await user.click(categoryTrigger);
+    await user.click(await screen.findByRole("option", { name: "业务" }));
     await user.type(within(dialog).getByLabelText(/状态/), "active");
 
     await user.click(within(dialog).getByRole("button", { name: "提交" }));

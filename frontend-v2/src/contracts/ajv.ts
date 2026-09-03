@@ -139,6 +139,10 @@ export function createDynamicSchemaAjv(): Ajv2020 {
         Number.isInteger(value) && value >= min && value <= max,
     });
   }
+  // multipart 上传的 UploadedFile 投影为 {type: "string", format: "binary"}；
+  // 显式注册为已知格式（文件的 MIME/大小边界由 action-request 的 multipart
+  // 契约在请求构造时强制执行，见 appendMultipart）。
+  ajv.addFormat("binary", { type: "string", validate: () => true });
   // 后端 input_schema 以 draft-07 方言标记（$schema + 本地 definitions），
   // 注册 draft-07 元 Schema 让 Ajv 2020-12 实例显式接受该方言而非静默忽略。
   ajv.addMetaSchema(draft7MetaSchema);

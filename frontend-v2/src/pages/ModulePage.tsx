@@ -5,6 +5,7 @@ import { buildNavigationPages } from "@/app/navigation";
 import type { ShellContext } from "@/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { TableView } from "@/renderers/table/TableView";
+import { PrimaryActionPanel } from "@/renderers/module/primary-action-panel";
 
 export default function ModulePage() {
   const { catalog } = useOutletContext<ShellContext>();
@@ -63,9 +64,8 @@ export default function ModulePage() {
           actions={catalog.actions}
         />
       ) : (
-        <p className="text-sm text-muted-foreground">
-          该模块未声明任何 TableView，通用模块页无法渲染。
-        </p>
+        // 无视图模块：回退为 primaryAction 数据卡片（旧 ModulePage.vue 语义）。
+        <PrimaryActionPanel page={page} actions={catalog.actions} />
       )}
     </div>
   );

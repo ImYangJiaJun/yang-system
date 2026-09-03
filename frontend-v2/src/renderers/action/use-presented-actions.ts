@@ -40,6 +40,9 @@ interface UsePresentedActionsOptions {
   selectedRows: SourceRow[];
   reload: () => void | Promise<unknown>;
   onCustom?: (presentation: ActionPresentationSchema, row?: SourceRow) => void;
+  /// 副作用注入点（对齐旧 usePresentedActions）：默认真实下载/跳转，测试可替换。
+  handleAttachment?: (result: import("@/api/types").InvocationResult) => void;
+  redirect?: (location: string) => void;
 }
 
 export function usePresentedActions(options: UsePresentedActionsOptions) {
@@ -166,9 +169,11 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
         if (!proof) return;
         result = await invoke(proof);
       }
-      handleInvocationAttachment(result);
+      (options.handleAttachment ?? handleInvocationAttachment)(result);
       if (result.kind === "redirect" && result.location) {
-        window.location.assign(result.location);
+        (options.redirect ?? ((location) => window.location.assign(location)))(
+          result.location,
+        );
       }
       setNotice({
         type: "positive",

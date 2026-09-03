@@ -23,10 +23,14 @@ import type { SessionContext } from "./types";
 
 export type SessionRestoreState = "pending" | "authenticated" | "anonymous";
 
+/// 会话结束原因：失效传播到登录页时展示对应提示（避免 URL reason 的导航竞态）。
+export type SessionEndReason = "session-expired" | "credentials-changed";
+
 export interface SessionSnapshot {
   readonly token: string;
   readonly restoreState: SessionRestoreState;
   readonly loggedIn: boolean;
+  readonly sessionEndReason?: SessionEndReason;
 }
 
 /// Step-up proof 获取是 UI 交互（旧实现为 Quasar Dialog），以回调注入保持 core 纯净；
@@ -84,10 +88,10 @@ export class SessionController {
     this.setTokenPair(tokens);
   }
 
-  clearSession(): void {
+  clearSession(reason?: SessionEndReason): void {
     clearStoredSession();
     this.options.onSessionReset?.();
-    this.commit("", "anonymous");
+    this.commit("", "anonymous", reason);
   }
 
   async restoreFromCookie(): Promise<boolean> {
@@ -165,13 +169,18 @@ export class SessionController {
     this.commit(tokens.accessToken, "authenticated");
   }
 
-  private commit(token: string, restoreState: SessionRestoreState): void {
+  private commit(
+    token: string,
+    restoreState: SessionRestoreState,
+    sessionEndReason?: SessionEndReason,
+  ): void {
     this.token = token;
     this.restoreState = restoreState;
     this.snapshot = {
       token,
       restoreState,
       loggedIn: Boolean(token.trim()),
+      sessionEndReason,
     };
     for (const listener of this.listeners) listener();
   }
