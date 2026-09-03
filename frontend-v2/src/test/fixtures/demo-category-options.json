@@ -1,0 +1,14 @@
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "items": [
+      { "label": "平台", "value": 1 },
+      { "label": "业务", "value": 2 },
+      { "label": "实验", "value": 3 }
+    ],
+    "limit": 20,
+    "page": 1,
+    "total": 3
+  }
+}

@@ -1,0 +1,1063 @@
+{
+  "code": 0,
+  "message": "获取 UI 目录成功",
+  "data": {
+    "actions": [
+      {
+        "description": "验证附件下载不会被 JSON 解析",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "title": "NoInput",
+          "type": "object"
+        },
+        "method": "GET",
+        "multipart": null,
+        "operation_id": "demo.api.download",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "description": "Action 的特殊业务响应体：文件下载、文件预览、重定向。\n\nAction 将本类型作为 `type Output` 返回时，派发边界 （[`DynAction::dispatch`](crate::action::DynAction)）会识别并把它转为 [`ApiResponse::attachment`]，普通输出的 JSON 线格式不受影响。\n\n# 示例\n\n```rust,ignore use yang_base::action::ResponseBody;\n\nasync fn index(&self, ctx: ActionContext, input: Self::Input) -> Result<Self::Output, BaseError> { // 文件下载 Ok(ResponseBody::download(\"/data/report.pdf\", \"report.pdf\")) // 文件预览 // Ok(ResponseBody::preview(\"/data/a.png\")) // 重定向 // Ok(ResponseBody::redirect(\"https://example.com/next\")) } ```",
+          "oneOf": [
+            {
+              "description": "文件下载：传输层以 `Content-Disposition: attachment` 返回文件字节。",
+              "properties": {
+                "filename": {
+                  "description": "下载文件名（写入 Content-Disposition 的 filename 参数）。",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "服务器本地文件路径。",
+                  "type": "string"
+                },
+                "type": { "enum": ["download"], "type": "string" }
+              },
+              "required": ["filename", "path", "type"],
+              "type": "object"
+            },
+            {
+              "description": "文件预览：传输层以 `Content-Disposition: inline` 返回文件字节。",
+              "properties": {
+                "path": {
+                  "description": "服务器本地文件路径。",
+                  "type": "string"
+                },
+                "type": { "enum": ["preview"], "type": "string" }
+              },
+              "required": ["path", "type"],
+              "type": "object"
+            },
+            {
+              "description": "重定向：传输层返回 302 状态码与 `Location` 头。",
+              "properties": {
+                "type": { "enum": ["redirect"], "type": "string" },
+                "url": { "description": "目标地址。", "type": "string" }
+              },
+              "required": ["type", "url"],
+              "type": "object"
+            }
+          ],
+          "title": "ResponseBody"
+        },
+        "params": [],
+        "path": "/api/v1/demo/download",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "download",
+        "title": "下载验收文件"
+      },
+      {
+        "description": "用于验收默认 ActionDemo 的真实 HTTP 调用",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "properties": { "message": { "type": "string" } },
+          "required": ["message"],
+          "title": "EchoInput",
+          "type": "object"
+        },
+        "method": "POST",
+        "multipart": null,
+        "operation_id": "demo.api.echo",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "properties": {
+            "length": { "format": "uint", "minimum": 0.0, "type": "integer" },
+            "message": { "type": "string" }
+          },
+          "required": ["length", "message"],
+          "title": "EchoOutput",
+          "type": "object"
+        },
+        "params": [
+          {
+            "description": "服务端会原样返回该文本",
+            "name": "message",
+            "required": true,
+            "source": "body",
+            "title": "消息"
+          }
+        ],
+        "path": "/api/v1/demo/echo",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "回显输入"
+      },
+      {
+        "description": "验证浏览器内联预览通道",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "title": "NoInput",
+          "type": "object"
+        },
+        "method": "GET",
+        "multipart": null,
+        "operation_id": "demo.api.preview",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "description": "Action 的特殊业务响应体：文件下载、文件预览、重定向。\n\nAction 将本类型作为 `type Output` 返回时，派发边界 （[`DynAction::dispatch`](crate::action::DynAction)）会识别并把它转为 [`ApiResponse::attachment`]，普通输出的 JSON 线格式不受影响。\n\n# 示例\n\n```rust,ignore use yang_base::action::ResponseBody;\n\nasync fn index(&self, ctx: ActionContext, input: Self::Input) -> Result<Self::Output, BaseError> { // 文件下载 Ok(ResponseBody::download(\"/data/report.pdf\", \"report.pdf\")) // 文件预览 // Ok(ResponseBody::preview(\"/data/a.png\")) // 重定向 // Ok(ResponseBody::redirect(\"https://example.com/next\")) } ```",
+          "oneOf": [
+            {
+              "description": "文件下载：传输层以 `Content-Disposition: attachment` 返回文件字节。",
+              "properties": {
+                "filename": {
+                  "description": "下载文件名（写入 Content-Disposition 的 filename 参数）。",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "服务器本地文件路径。",
+                  "type": "string"
+                },
+                "type": { "enum": ["download"], "type": "string" }
+              },
+              "required": ["filename", "path", "type"],
+              "type": "object"
+            },
+            {
+              "description": "文件预览：传输层以 `Content-Disposition: inline` 返回文件字节。",
+              "properties": {
+                "path": {
+                  "description": "服务器本地文件路径。",
+                  "type": "string"
+                },
+                "type": { "enum": ["preview"], "type": "string" }
+              },
+              "required": ["path", "type"],
+              "type": "object"
+            },
+            {
+              "description": "重定向：传输层返回 302 状态码与 `Location` 头。",
+              "properties": {
+                "type": { "enum": ["redirect"], "type": "string" },
+                "url": { "description": "目标地址。", "type": "string" }
+              },
+              "required": ["type", "url"],
+              "type": "object"
+            }
+          ],
+          "title": "ResponseBody"
+        },
+        "params": [],
+        "path": "/api/v1/demo/preview",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "preview",
+        "title": "预览验收文件"
+      },
+      {
+        "description": "验证前端展示 Location 而不是静默跳走",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "title": "NoInput",
+          "type": "object"
+        },
+        "method": "GET",
+        "multipart": null,
+        "operation_id": "demo.api.redirect",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "description": "Action 的特殊业务响应体：文件下载、文件预览、重定向。\n\nAction 将本类型作为 `type Output` 返回时，派发边界 （[`DynAction::dispatch`](crate::action::DynAction)）会识别并把它转为 [`ApiResponse::attachment`]，普通输出的 JSON 线格式不受影响。\n\n# 示例\n\n```rust,ignore use yang_base::action::ResponseBody;\n\nasync fn index(&self, ctx: ActionContext, input: Self::Input) -> Result<Self::Output, BaseError> { // 文件下载 Ok(ResponseBody::download(\"/data/report.pdf\", \"report.pdf\")) // 文件预览 // Ok(ResponseBody::preview(\"/data/a.png\")) // 重定向 // Ok(ResponseBody::redirect(\"https://example.com/next\")) } ```",
+          "oneOf": [
+            {
+              "description": "文件下载：传输层以 `Content-Disposition: attachment` 返回文件字节。",
+              "properties": {
+                "filename": {
+                  "description": "下载文件名（写入 Content-Disposition 的 filename 参数）。",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "服务器本地文件路径。",
+                  "type": "string"
+                },
+                "type": { "enum": ["download"], "type": "string" }
+              },
+              "required": ["filename", "path", "type"],
+              "type": "object"
+            },
+            {
+              "description": "文件预览：传输层以 `Content-Disposition: inline` 返回文件字节。",
+              "properties": {
+                "path": {
+                  "description": "服务器本地文件路径。",
+                  "type": "string"
+                },
+                "type": { "enum": ["preview"], "type": "string" }
+              },
+              "required": ["path", "type"],
+              "type": "object"
+            },
+            {
+              "description": "重定向：传输层返回 302 状态码与 `Location` 头。",
+              "properties": {
+                "type": { "enum": ["redirect"], "type": "string" },
+                "url": { "description": "目标地址。", "type": "string" }
+              },
+              "required": ["type", "url"],
+              "type": "object"
+            }
+          ],
+          "title": "ResponseBody"
+        },
+        "params": [],
+        "path": "/api/v1/demo/redirect",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "redirect",
+        "title": "重定向验收"
+      },
+      {
+        "description": "返回当前请求身份可访问的 Action 演示契约",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "description": "UI 目录端点的空输入。",
+          "title": "UiCatalogInput",
+          "type": "object"
+        },
+        "method": "GET",
+        "multipart": null,
+        "operation_id": "demo.api.ui_catalog",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+          "properties": {
+            "code": {
+              "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+              "format": "int32",
+              "type": "integer"
+            },
+            "data": {
+              "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+            },
+            "message": {
+              "description": "响应消息\n\n描述操作结果的文本信息",
+              "type": "string"
+            }
+          },
+          "required": ["code", "message"],
+          "title": "ApiResponse",
+          "type": "object"
+        },
+        "params": [],
+        "path": "/.well-known/yang/ui-catalog",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "UI 目录"
+      },
+      {
+        "description": "验证受限 multipart 表单与请求作用域文件",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "definitions": {
+            "UploadedFile": { "format": "binary", "type": "string" }
+          },
+          "properties": {
+            "file": { "$ref": "#/definitions/UploadedFile" },
+            "title": { "type": "string" }
+          },
+          "required": ["file", "title"],
+          "title": "UploadInput",
+          "type": "object"
+        },
+        "method": "POST",
+        "multipart": {
+          "allowed_content_types": ["text/plain"],
+          "lifecycle": "request_scoped",
+          "max_fields": 1,
+          "max_file_bytes": 1024,
+          "max_files": 1,
+          "max_text_field_bytes": 65536,
+          "max_total_bytes": 131072
+        },
+        "operation_id": "demo.api.upload",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "properties": {
+            "content": { "type": "string" },
+            "content_type": { "type": "string" },
+            "filename": { "type": "string" },
+            "size": { "format": "uint64", "minimum": 0.0, "type": "integer" },
+            "title": { "type": "string" }
+          },
+          "required": ["content", "content_type", "filename", "size", "title"],
+          "title": "UploadOutput",
+          "type": "object"
+        },
+        "params": [],
+        "path": "/api/v1/demo/upload",
+        "request_media_type": "multipart",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "上传验收文件"
+      },
+      {
+        "description": "通用关系选择器 options",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "description": "关系选项请求。\n\n`filter` 只表示字段到值的声明式精确筛选；执行器仍必须按目标表字段白名单、当前 用户权限和租户范围逐项校验，不能把字段名直接拼接进 SQL。",
+          "properties": {
+            "filter": {
+              "additionalProperties": true,
+              "default": {},
+              "description": "声明式精确筛选字段。",
+              "type": "object"
+            },
+            "limit": {
+              "default": 20,
+              "description": "每页数量，上限与通用查询一致。",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "page": {
+              "default": 1,
+              "description": "从 1 开始的页码。",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "search": {
+              "default": null,
+              "description": "模糊搜索文本。",
+              "type": ["string", "null"]
+            },
+            "selected": {
+              "default": [],
+              "description": "需要回填的已选主键；即使不在当前搜索页也应返回。",
+              "items": true,
+              "type": "array"
+            }
+          },
+          "title": "RelationOptionsRequest",
+          "type": "object"
+        },
+        "method": "POST",
+        "multipart": null,
+        "operation_id": "demo.category.options",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "definitions": {
+            "RelationOption": {
+              "description": "单个关系选项的稳定 `{value,label}` 形状。",
+              "properties": {
+                "label": { "description": "用户可见标签。", "type": "string" },
+                "value": { "description": "真实主键值。" }
+              },
+              "required": ["label", "value"],
+              "type": "object"
+            }
+          },
+          "description": "分页关系选项响应。",
+          "properties": {
+            "items": {
+              "description": "当前页选项；回填项可由执行器合并并去重。",
+              "items": { "$ref": "#/definitions/RelationOption" },
+              "type": "array"
+            },
+            "limit": {
+              "description": "实际每页数量。",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "page": {
+              "description": "当前页码。",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "total": {
+              "description": "可选总数；执行器不做 count 时为 `None`。",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": ["integer", "null"]
+            }
+          },
+          "required": ["items", "limit", "page"],
+          "title": "RelationOptionsResponse",
+          "type": "object"
+        },
+        "params": [],
+        "path": "/api/v1/demo/categories/options",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "分类选项"
+      },
+      {
+        "description": "通用表单新增演示",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "properties": {
+            "category_id": { "format": "int64", "type": "integer" },
+            "name": { "type": "string" },
+            "parent_id": {
+              "default": null,
+              "format": "int64",
+              "type": ["integer", "null"]
+            },
+            "status": { "type": "string" }
+          },
+          "required": ["category_id", "name", "status"],
+          "title": "AddInput",
+          "type": "object"
+        },
+        "method": "POST",
+        "multipart": null,
+        "operation_id": "demo.items.add",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "properties": { "id": { "format": "int64", "type": "integer" } },
+          "required": ["id"],
+          "title": "MutationOutput",
+          "type": "object"
+        },
+        "params": [
+          {
+            "description": "",
+            "name": "category_id",
+            "required": true,
+            "source": "body",
+            "title": "分类"
+          },
+          {
+            "description": "",
+            "name": "name",
+            "required": true,
+            "source": "body",
+            "title": "名称"
+          },
+          {
+            "description": "",
+            "name": "parent_id",
+            "required": false,
+            "source": "body",
+            "title": "父节点"
+          },
+          {
+            "description": "",
+            "name": "status",
+            "required": true,
+            "source": "body",
+            "title": "状态"
+          }
+        ],
+        "path": "/api/v1/demo/items",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "新增项目"
+      },
+      {
+        "description": "通用确认调用演示",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "properties": { "id": { "format": "int64", "type": "integer" } },
+          "required": ["id"],
+          "title": "DeleteInput",
+          "type": "object"
+        },
+        "method": "DELETE",
+        "multipart": null,
+        "operation_id": "demo.items.delete",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "properties": { "id": { "format": "int64", "type": "integer" } },
+          "required": ["id"],
+          "title": "MutationOutput",
+          "type": "object"
+        },
+        "params": [
+          {
+            "description": "",
+            "name": "id",
+            "required": true,
+            "source": "body",
+            "title": "ID"
+          }
+        ],
+        "path": "/api/v1/demo/items",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "删除项目"
+      },
+      {
+        "description": "通用行表单编辑演示",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "properties": {
+            "category_id": { "format": "int64", "type": "integer" },
+            "id": { "format": "int64", "type": "integer" },
+            "name": { "type": "string" },
+            "parent_id": {
+              "default": null,
+              "format": "int64",
+              "type": ["integer", "null"]
+            },
+            "status": { "type": "string" }
+          },
+          "required": ["category_id", "id", "name", "status"],
+          "title": "EditInput",
+          "type": "object"
+        },
+        "method": "PUT",
+        "multipart": null,
+        "operation_id": "demo.items.edit",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "properties": { "id": { "format": "int64", "type": "integer" } },
+          "required": ["id"],
+          "title": "MutationOutput",
+          "type": "object"
+        },
+        "params": [
+          {
+            "description": "",
+            "name": "category_id",
+            "required": true,
+            "source": "body",
+            "title": "分类"
+          },
+          {
+            "description": "",
+            "name": "id",
+            "required": true,
+            "source": "body",
+            "title": "ID"
+          },
+          {
+            "description": "",
+            "name": "name",
+            "required": true,
+            "source": "body",
+            "title": "名称"
+          },
+          {
+            "description": "",
+            "name": "parent_id",
+            "required": false,
+            "source": "body",
+            "title": "父节点"
+          },
+          {
+            "description": "",
+            "name": "status",
+            "required": true,
+            "source": "body",
+            "title": "状态"
+          }
+        ],
+        "path": "/api/v1/demo/items",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "编辑项目"
+      },
+      {
+        "description": "展示静态 view_id 自定义页面覆盖",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "title": "NoInput",
+          "type": "object"
+        },
+        "method": "GET",
+        "multipart": null,
+        "operation_id": "demo.items.insight",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "properties": {
+            "active": { "format": "uint", "minimum": 0.0, "type": "integer" },
+            "draft": { "format": "uint", "minimum": 0.0, "type": "integer" },
+            "total": { "format": "uint", "minimum": 0.0, "type": "integer" }
+          },
+          "required": ["active", "draft", "total"],
+          "title": "InsightOutput",
+          "type": "object"
+        },
+        "params": [],
+        "path": "/api/v1/demo/items/insight",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "项目洞察"
+      },
+      {
+        "description": "为通用 TableView 提供标准分页数据",
+        "input_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "additionalProperties": false,
+          "definitions": {
+            "DemoOrder": {
+              "additionalProperties": false,
+              "properties": {
+                "direction": { "$ref": "#/definitions/SortDirection" },
+                "field": { "type": "string" }
+              },
+              "required": ["direction", "field"],
+              "type": "object"
+            },
+            "SortDirection": {
+              "description": "通用表格排序方向。",
+              "oneOf": [
+                { "description": "降序。", "enum": ["desc"], "type": "string" },
+                {
+                  "description": "升序，也是未知值的兼容降级。",
+                  "enum": ["asc"],
+                  "type": "string"
+                }
+              ]
+            },
+            "WhereCondition": {
+              "description": "WHERE 条件枚举\n\n定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。\n\n# 变体\n\n- `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)\n\n# 示例\n\n```rust use yang_base::table::WhereCondition; use serde_json::json;\n\n// 等于条件 let eq_condition = WhereCondition::Eq { field: \"status\".to_string(), value: json!(\"active\"), };\n\n// 包含条件 let in_condition = WhereCondition::In { field: \"role\".to_string(), values: vec![json!(\"admin\"), json!(\"user\")], };\n\n// 模糊匹配 let like_condition = WhereCondition::Like { field: \"name\".to_string(), pattern: \"%alice%\".to_string(), };\n\n// 大于条件 let gt_condition = WhereCondition::Gt { field: \"age\".to_string(), value: json!(18), };\n\n// 空值判断 let is_null_condition = WhereCondition::IsNull { field: \"deleted_at\".to_string(), }; ```",
+              "oneOf": [
+                {
+                  "description": "等于条件 (field = value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["eq"], "type": "string" },
+                    "value": { "description": "比较值" }
+                  },
+                  "required": ["field", "type", "value"],
+                  "type": "object"
+                },
+                {
+                  "description": "包含于列表条件 (field IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["in"], "type": "string" },
+                    "values": {
+                      "description": "值列表",
+                      "items": true,
+                      "type": "array"
+                    }
+                  },
+                  "required": ["field", "type", "values"],
+                  "type": "object"
+                },
+                {
+                  "description": "模糊匹配条件 (field LIKE pattern)\n\n# 字段\n\n- `field`：字段名 - `pattern`：匹配模式，支持 % 和 _ 通配符",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "pattern": { "description": "匹配模式", "type": "string" },
+                    "type": { "enum": ["like"], "type": "string" }
+                  },
+                  "required": ["field", "pattern", "type"],
+                  "type": "object"
+                },
+                {
+                  "description": "大于条件 (field > value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["gt"], "type": "string" },
+                    "value": { "description": "比较值" }
+                  },
+                  "required": ["field", "type", "value"],
+                  "type": "object"
+                },
+                {
+                  "description": "大于等于条件 (field >= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["gte"], "type": "string" },
+                    "value": { "description": "比较值" }
+                  },
+                  "required": ["field", "type", "value"],
+                  "type": "object"
+                },
+                {
+                  "description": "小于条件 (field < value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["lt"], "type": "string" },
+                    "value": { "description": "比较值" }
+                  },
+                  "required": ["field", "type", "value"],
+                  "type": "object"
+                },
+                {
+                  "description": "小于等于条件 (field <= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["lte"], "type": "string" },
+                    "value": { "description": "比较值" }
+                  },
+                  "required": ["field", "type", "value"],
+                  "type": "object"
+                },
+                {
+                  "description": "空值判断 (field IS NULL)\n\n# 字段\n\n- `field`：字段名",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["is_null"], "type": "string" }
+                  },
+                  "required": ["field", "type"],
+                  "type": "object"
+                },
+                {
+                  "description": "非空值判断 (field IS NOT NULL)\n\n# 字段\n\n- `field`：字段名",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["is_not_null"], "type": "string" }
+                  },
+                  "required": ["field", "type"],
+                  "type": "object"
+                },
+                {
+                  "description": "不等于条件 (field <> value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["ne"], "type": "string" },
+                    "value": { "description": "比较值" }
+                  },
+                  "required": ["field", "type", "value"],
+                  "type": "object"
+                },
+                {
+                  "description": "区间条件 (field BETWEEN lo AND hi)\n\n# 字段\n\n- `field`：字段名 - `lo`：区间下界 - `hi`：区间上界",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "hi": { "description": "区间上界" },
+                    "lo": { "description": "区间下界" },
+                    "type": { "enum": ["between"], "type": "string" }
+                  },
+                  "required": ["field", "hi", "lo", "type"],
+                  "type": "object"
+                },
+                {
+                  "description": "不在列表条件 (field NOT IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                  "properties": {
+                    "field": { "description": "字段名", "type": "string" },
+                    "type": { "enum": ["not_in"], "type": "string" },
+                    "values": {
+                      "description": "值列表",
+                      "items": true,
+                      "type": "array"
+                    }
+                  },
+                  "required": ["field", "type", "values"],
+                  "type": "object"
+                },
+                {
+                  "description": "逻辑与组（嵌套子条件全部成立），SQL 渲染为 `(c1 AND c2 AND ...)`\n\n空组等价于恒真（`1=1`），与顶层「无条件」语义一致。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                  "properties": {
+                    "conditions": {
+                      "description": "子条件列表",
+                      "items": { "$ref": "#/definitions/WhereCondition" },
+                      "type": "array"
+                    },
+                    "type": { "enum": ["and"], "type": "string" }
+                  },
+                  "required": ["conditions", "type"],
+                  "type": "object"
+                },
+                {
+                  "description": "逻辑或组（嵌套子条件任一成立），SQL 渲染为 `(c1 OR c2 OR ...)`\n\n空组等价于恒假（`1=0`），避免拼出非法的空括号。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                  "properties": {
+                    "conditions": {
+                      "description": "子条件列表",
+                      "items": { "$ref": "#/definitions/WhereCondition" },
+                      "type": "array"
+                    },
+                    "type": { "enum": ["or"], "type": "string" }
+                  },
+                  "required": ["conditions", "type"],
+                  "type": "object"
+                }
+              ]
+            }
+          },
+          "properties": {
+            "count_total": { "default": false, "type": "boolean" },
+            "order_by": {
+              "items": { "$ref": "#/definitions/DemoOrder" },
+              "type": "array"
+            },
+            "page": {
+              "default": 1,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "page_size": {
+              "default": 20,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "search": { "default": null, "type": ["string", "null"] },
+            "where": {
+              "anyOf": [
+                { "$ref": "#/definitions/WhereCondition" },
+                { "type": "null" }
+              ],
+              "default": null
+            }
+          },
+          "title": "ListInput",
+          "type": "object"
+        },
+        "method": "POST",
+        "multipart": null,
+        "operation_id": "demo.items.list",
+        "output_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "definitions": {
+            "DemoItem": {
+              "properties": {
+                "category_id": { "format": "int64", "type": "integer" },
+                "id": { "format": "int64", "type": "integer" },
+                "name": { "type": "string" },
+                "parent_id": { "format": "int64", "type": ["integer", "null"] },
+                "status": { "type": "string" }
+              },
+              "required": ["category_id", "id", "name", "status"],
+              "type": "object"
+            }
+          },
+          "properties": {
+            "items": {
+              "items": { "$ref": "#/definitions/DemoItem" },
+              "type": "array"
+            },
+            "page": { "format": "uint", "minimum": 0.0, "type": "integer" },
+            "page_size": {
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "total": {
+              "format": "uint",
+              "minimum": 0.0,
+              "type": ["integer", "null"]
+            }
+          },
+          "required": ["items", "page", "page_size"],
+          "title": "ListOutput",
+          "type": "object"
+        },
+        "params": [],
+        "path": "/api/v1/demo/items/query",
+        "request_media_type": "json",
+        "requires_auth": false,
+        "response_kind": "json",
+        "title": "项目列表数据"
+      }
+    ],
+    "modules": [],
+    "revision": "bf6bc56b8d9a9c00c68e9cbd2d4c9447d2c06785079c70f0149011b18c68c36d",
+    "schema_version": "2.3",
+    "table_views": [
+      {
+        "action_presentations": [
+          {
+            "availability": null,
+            "confirmation": null,
+            "interaction": "form",
+            "operation_id": "demo.items.add",
+            "placement": "toolbar",
+            "record_parameter": null,
+            "title": "新增项目",
+            "view_id": null
+          },
+          {
+            "availability": null,
+            "confirmation": null,
+            "interaction": "form",
+            "operation_id": "demo.items.edit",
+            "placement": "row",
+            "record_parameter": "id",
+            "title": "编辑项目",
+            "view_id": null
+          },
+          {
+            "availability": null,
+            "confirmation": {
+              "message": "此操作无法撤销",
+              "title": "确认删除项目"
+            },
+            "interaction": "invoke",
+            "operation_id": "demo.items.delete",
+            "placement": "row",
+            "record_parameter": "id",
+            "title": "删除项目",
+            "view_id": null
+          },
+          {
+            "availability": null,
+            "confirmation": null,
+            "interaction": "custom",
+            "operation_id": "demo.items.insight",
+            "placement": "toolbar",
+            "record_parameter": null,
+            "title": "项目洞察",
+            "view_id": "demo.items.insight"
+          }
+        ],
+        "actions": [
+          "demo.items.add",
+          "demo.items.edit",
+          "demo.items.delete",
+          "demo.items.insight"
+        ],
+        "columns": [
+          {
+            "description": "",
+            "field": "id",
+            "filterable": false,
+            "required": false,
+            "searchable": false,
+            "sortable": false,
+            "title": "ID",
+            "widget": "integer"
+          },
+          {
+            "description": "",
+            "field": "name",
+            "filterable": true,
+            "required": true,
+            "searchable": true,
+            "sortable": true,
+            "title": "名称",
+            "widget": "text"
+          },
+          {
+            "description": "",
+            "field": "category_id",
+            "filterable": false,
+            "relation": {
+              "label_fields": ["demo_category.name"],
+              "operation_id": "demo.category.options",
+              "value_field": "demo_category.id"
+            },
+            "required": true,
+            "searchable": false,
+            "sortable": false,
+            "title": "分类",
+            "widget": "relation_select"
+          },
+          {
+            "description": "",
+            "field": "status",
+            "filterable": true,
+            "required": true,
+            "searchable": false,
+            "sortable": true,
+            "title": "状态",
+            "widget": "text"
+          },
+          {
+            "description": "",
+            "field": "parent_id",
+            "filterable": false,
+            "required": false,
+            "searchable": false,
+            "sortable": false,
+            "title": "父节点",
+            "widget": "integer"
+          }
+        ],
+        "data_action": "demo.items.list",
+        "form": {
+          "fields": [
+            {
+              "description": "",
+              "field": "id",
+              "read_only": true,
+              "required": false,
+              "title": "ID",
+              "widget": "integer",
+              "write_only": false
+            },
+            {
+              "description": "",
+              "field": "name",
+              "read_only": false,
+              "required": true,
+              "title": "名称",
+              "widget": "text",
+              "write_only": false
+            },
+            {
+              "description": "",
+              "field": "category_id",
+              "read_only": false,
+              "relation": {
+                "label_fields": ["demo_category.name"],
+                "operation_id": "demo.category.options",
+                "value_field": "demo_category.id"
+              },
+              "required": true,
+              "title": "分类",
+              "widget": "relation_select",
+              "write_only": false
+            },
+            {
+              "description": "",
+              "field": "status",
+              "read_only": false,
+              "required": true,
+              "title": "状态",
+              "widget": "text",
+              "write_only": false
+            },
+            {
+              "description": "",
+              "field": "parent_id",
+              "read_only": false,
+              "required": false,
+              "title": "父节点",
+              "widget": "integer",
+              "write_only": false
+            }
+          ]
+        },
+        "query": {
+          "default_page_size": 10,
+          "default_sort": [{ "direction": "asc", "field": "name" }],
+          "filter_fields": ["name", "status"],
+          "max_page_size": 100,
+          "search_fields": ["name"]
+        },
+        "table": "demo_items",
+        "title": "项目目录",
+        "tree": {
+          "id_field": "id",
+          "label_field": "name",
+          "max_nodes": 100,
+          "parent_field": "parent_id"
+        },
+        "view_id": "demo.items.main"
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "code": 0,
+  "message": "成功",
+  "data": {
+    "items": [
+      {
+        "category_id": 1,
+        "id": 1,
+        "name": "平台能力",
+        "parent_id": null,
+        "status": "active"
+      },
+      {
+        "category_id": 2,
+        "id": 2,
+        "name": "通用渲染器",
+        "parent_id": 1,
+        "status": "draft"
+      }
+    ],
+    "page": 1,
+    "page_size": 20,
+    "total": 2
+  }
+}
