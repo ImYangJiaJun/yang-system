@@ -44,6 +44,15 @@ pub(crate) fn build_schema_app(
     build_application(tools, security, None)
 }
 
+/// 构建仅用于元数据导出的应用（无 Step-up、无 Redis 依赖），
+/// 供 `openapi-dump` 等开发期契约工具使用；目录内容与运行时同源。
+pub fn build_metadata_app(
+    tools: Arc<Tools>,
+    security: Arc<SecuritySettings>,
+) -> anyhow::Result<Application> {
+    build_application(tools, security, None)
+}
+
 fn build_application(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
@@ -298,5 +307,88 @@ mod tests {
             Some("list_notes")
         );
         assert_eq!(view.fields.len(), 5);
+    }
+
+    /// OpenAPI spike（前端重构 ADR-4 检查点 0）：Catalog 投影的 OpenAPI 3.1 文档
+    /// 必须覆盖全部已注册 Action 的路由与方法，operationId 与 Catalog 一致，
+    /// 且写操作携带非空输入 Schema。该契约是前端 openapi-typescript 轨道的前提。
+    #[tokio::test]
+    async fn openapi_projection_covers_all_catalog_actions() {
+        let app = build_application(test_tools(), test_security(), None)
+            .unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
+        let document = app
+            .runtime
+            .catalog()
+            .to_openapi(yang_base::definition::OpenApiInfo::new(
+                "yang-system",
+                "0.1.0",
+            ))
+            .unwrap_or_else(|error| panic!("Catalog 应投影 OpenAPI 文档: {error}"));
+        assert_eq!(document["openapi"], "3.1.0", "应为 OpenAPI 3.1 文档");
+        let paths = document["paths"]
+            .as_object()
+            .unwrap_or_else(|| panic!("OpenAPI 文档应包含 paths 对象"));
+        let mut checked = 0usize;
+        let mut write_with_input_schema = 0usize;
+        for module in app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+        {
+            for action in module.actions() {
+                let path_item = paths.get(&action.route.path).unwrap_or_else(|| {
+                    panic!(
+                        "OpenAPI 缺少路径 {}（{}）",
+                        action.route.path, action.route.operation_id
+                    )
+                });
+                let operation = path_item
+                    .get(action.route.method.as_str().to_lowercase())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "OpenAPI 路径 {} 缺少 {} 操作",
+                            action.route.path,
+                            action.route.method.as_str()
+                        )
+                    });
+                assert_eq!(
+                    operation["operationId"],
+                    serde_json::json!(action.route.operation_id),
+                    "operationId 应与 Catalog 一致"
+                );
+                if matches!(
+                    action.route.method,
+                    yang_base::definition::HttpMethod::Post
+                        | yang_base::definition::HttpMethod::Put
+                        | yang_base::definition::HttpMethod::Patch
+                ) && !action.input_schema.is_null()
+                {
+                    let schema = &operation["requestBody"]["content"][if action.request_media_type
+                        == yang_base::definition::ActionMediaType::Multipart
+                    {
+                        "multipart/form-data"
+                    } else {
+                        "application/json"
+                    }]["schema"];
+                    assert!(
+                        !schema.is_null(),
+                        "写操作 {} 的 OpenAPI requestBody 应携带输入 Schema",
+                        action.route.operation_id
+                    );
+                    write_with_input_schema += 1;
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 15,
+            "覆盖检查应实际执行足够数量的 Action（实际 {checked}）"
+        );
+        assert!(
+            write_with_input_schema >= 5,
+            "应有足够写操作携带输入 Schema（实际 {write_with_input_schema}）"
+        );
     }
 }
