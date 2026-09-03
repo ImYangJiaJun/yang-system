@@ -90,3 +90,17 @@ vs 估算 2–2.5 周），核心解释器的两个最大风险项（表格查�
 的集成测试、无视图模块的 primaryAction 回退、enum/relation 控件从原生 select
 升级为 Radix Select（需补 jsdom pointer-capture mock）、bundle 分包优化
 （当前产物 812 kB，目标值 350 kB，硬上限 450 kB 需 code-splitting 后达标）。
+
+### 2026-08-27 M2 完成（能力清单 5–12）
+
+bulk Action 真实链路（演示后端补 bulk-delete + Bulk placement）、
+download/preview/redirect 集成测试、无视图模块 primaryAction 回退、
+enum/relation 升级 Radix Select（jsdom pointer-capture mock）、树形表格安全降级
+（resolveDisplayRows 纯函数）、StepUpDialog + Promise 化宿主（proof 单次消费、
+取消不破坏会话）、失效传播（session-bridge + clearSession(reason) 修复导航竞态）、
+multipart 上传（MIME 白名单后端强制）、列偏好持久化。前端 146 用例 / 后端 104 用例
+全绿；演示后端 bulk/upload/download 真机 curl 验证通过。
+
+**决策记录**：`openapi-dump` 从 `src/bin/` 迁至 `examples/`（`c90bd45`）——架构门禁
+锁定 src/ 为纯组合根且明确拒绝 src/bin/，开发期契约工具按 frontend_demo 先例归位，
+比给检查器开白名单更符合门禁原意。
