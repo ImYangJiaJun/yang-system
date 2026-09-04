@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 
@@ -18,6 +19,9 @@ class Command:
     name: str
     argv: tuple[str, ...]
     env: tuple[tuple[str, str], ...] = ()
+    # 依赖外网的命令（如 pnpm audit）允许有限重试；仅网络错误重试，
+    # 真实失败（如漏洞命中）立即上报，不掩盖。
+    network_retries: int = 0
 
 
 ARCHITECTURE = (
@@ -49,6 +53,14 @@ FRONTEND_PRODUCTION_AUDIT = Command(
         "--audit-level",
         "moderate",
     ),
+    # audit 需要向 registry 提交完整依赖树，CI 网络抖动是已知故障源；
+    # 放宽 pnpm 抓取超时并允许有限重试（仅网络错误，见 run()）。
+    (
+        ("npm_config_fetch_retries", "5"),
+        ("npm_config_fetch_retry_maxtimeout", "120000"),
+        ("npm_config_fetch_timeout", "300000"),
+    ),
+    2,
 )
 
 FRONTEND_DEV_E2E = Command(
@@ -159,12 +171,44 @@ def executable(name: str) -> str:
     return resolved
 
 
+NETWORK_ERROR_MARKERS = (
+    "ERR_SOCKET_TIMEOUT",
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EAI_AGAIN",
+    "FetchError",
+    "socket hang up",
+)
+
+
 def run(command: Command) -> None:
     argv = [executable(command.argv[0]), *command.argv[1:]]
     environment = os.environ.copy()
     environment.update(command.env)
     print(f"\n==> {command.name}\n    {shlex.join(argv)}", flush=True)
-    subprocess.run(argv, check=True, env=environment)
+    if command.network_retries <= 0:
+        subprocess.run(argv, check=True, env=environment)
+        return
+    for attempt in range(1, command.network_retries + 2):
+        completed = subprocess.run(
+            argv, check=False, env=environment, capture_output=True, text=True
+        )
+        output = f"{completed.stdout}\n{completed.stderr}"
+        if completed.returncode == 0:
+            if output.strip():
+                print(output, flush=True)
+            return
+        print(output, flush=True)
+        network_error = any(marker in output for marker in NETWORK_ERROR_MARKERS)
+        if not network_error or attempt > command.network_retries:
+            raise subprocess.CalledProcessError(completed.returncode, argv)
+        wait_seconds = 30 * attempt
+        print(
+            f"    网络错误，{wait_seconds} 秒后重试（第 {attempt} 次）",
+            flush=True,
+        )
+        time.sleep(wait_seconds)
 
 
 def self_test() -> None:
