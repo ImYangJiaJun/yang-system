@@ -1,7 +1,11 @@
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useOutletContext } from "react-router";
 
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import type { ActionPresentationSchema } from "@/contracts/ui-catalog";
+import { CustomViewBoundary } from "@/custom/custom-view-boundary";
+import { resolveCustomView } from "@/custom/registry";
 import type { ShellContext } from "@/layout/AppLayout";
 import { productLowerCase } from "@/lib/product-locale";
 import { ActionInvokePanel } from "@/renderers/action/ActionInvokePanel";
@@ -23,6 +27,23 @@ export default function WorkbenchPage() {
   const [query, setQuery] = useState("");
   const [selectedViewId, setSelectedViewId] = useState("");
   const [selectedOperationId, setSelectedOperationId] = useState("");
+  const [custom, setCustom] = useState<ActionPresentationSchema | null>(null);
+  const [notice, setNotice] = useState("");
+
+  const openCustom = (presentation: ActionPresentationSchema) => {
+    if (!resolveCustomView(presentation.view_id)) {
+      setNotice(
+        `自定义页面 ${presentation.view_id ?? "未声明"} 未注册，已保留通用 TableView`,
+      );
+      return;
+    }
+    setNotice("");
+    setCustom(presentation);
+  };
+
+  const CustomComponent = custom
+    ? resolveCustomView(custom.view_id)
+    : undefined;
 
   const keyword = productLowerCase(query.trim());
   const views = useMemo(
@@ -120,11 +141,43 @@ export default function WorkbenchPage() {
       </aside>
 
       <div className="min-w-0 flex-1 overflow-y-auto p-6">
-        {mode === "views" && selectedView ? (
+        {notice && (
+          <p
+            role="status"
+            className="mb-3 rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
+          >
+            {notice}
+          </p>
+        )}
+        {custom && CustomComponent ? (
+          <CustomViewBoundary
+            resetKey={custom.operation_id}
+            onError={(message) => {
+              setCustom(null);
+              setNotice(`自定义页面加载失败，已回退通用 TableView：${message}`);
+            }}
+          >
+            <Suspense
+              fallback={
+                <div className="space-y-3" aria-label="自定义页面加载中">
+                  <Skeleton className="h-8 w-64" />
+                  <Skeleton className="h-40 w-full" />
+                </div>
+              }
+            >
+              <CustomComponent
+                presentation={custom}
+                actions={catalog.actions}
+                onClose={() => setCustom(null)}
+              />
+            </Suspense>
+          </CustomViewBoundary>
+        ) : mode === "views" && selectedView ? (
           <TableView
             key={selectedView.view_id}
             view={selectedView}
             actions={catalog.actions}
+            onCustom={openCustom}
           />
         ) : mode === "actions" && selectedAction ? (
           <ActionInvokePanel action={selectedAction} />

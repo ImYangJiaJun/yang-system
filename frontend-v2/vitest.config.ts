@@ -16,5 +16,7 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test-setup.ts"],
+    // e2e/ 与 e2e-production/ 是 Playwright 规格，不走 Vitest。
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
 });

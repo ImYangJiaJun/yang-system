@@ -9,6 +9,9 @@ export default tseslint.config(
     ignores: [
       "dist/**",
       "node_modules/**",
+      "test-results/**",
+      "test-results-production/**",
+      "playwright-report/**",
       // 生成物：契约快照与类型由 scripts/dump_openapi.py 统一产出
       "src/contracts/api-types.ts",
     ],

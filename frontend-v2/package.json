@@ -13,9 +13,14 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "e2e": "playwright test",
+    "e2e:production": "playwright test --config playwright.production.config.ts",
     "gen:contracts": "python ../scripts/dump_openapi.py",
     "verify:locale-contract": "node scripts/verify-locale-contract.mjs",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:locale-contract && pnpm build"
+    "verify:production-build": "node scripts/verify-production-build.mjs",
+    "verify:bundle-budget": "node scripts/verify-bundle-budget.mjs",
+    "verify:deployment-contract": "node scripts/verify-deployment-contract.mjs",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:locale-contract && pnpm build && pnpm verify:production-build && pnpm verify:bundle-budget && pnpm verify:deployment-contract"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.11",
@@ -42,7 +47,9 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.61.1",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",

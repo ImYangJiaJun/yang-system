@@ -65,7 +65,7 @@ export default function LoginPage() {
             Y
           </div>
           <h1 className="text-3xl font-bold tracking-tight">YANG System</h1>
-          <p className="text-muted-foreground">
+          <p className="text-foreground/70">
             统一管理个人账号、平台账号与企业组织。
           </p>
         </div>
