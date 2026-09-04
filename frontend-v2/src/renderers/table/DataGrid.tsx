@@ -39,7 +39,6 @@ interface DataGridProps {
   view: TableViewSchema;
   rows: DisplayRow[];
   loading: boolean;
-  dense: boolean;
   sort: { field: string | null; descending: boolean };
   onSortChange: (field: string | null, descending: boolean) => void;
   labelFor: (operationId: string, value: unknown) => string | undefined;
@@ -60,7 +59,6 @@ export function DataGrid({
   view,
   rows,
   loading,
-  dense,
   sort,
   onSortChange,
   labelFor,
@@ -282,7 +280,6 @@ export function DataGrid({
                 {row.getVisibleCells().map((cell, cellIndex) => (
                   <TableCell
                     key={cell.id}
-                    className={cn(dense && "py-1")}
                     style={
                       cellIndex === (selectionEnabled ? 1 : 0) &&
                       row.original.depth > 0

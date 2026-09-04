@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type {
@@ -24,8 +23,6 @@ const OPERATOR_LABELS: Record<TableFilterOperator, string> = {
 interface TableQueryPanelProps {
   view: TableViewSchema;
   state: TableQueryState;
-  dense: boolean;
-  onDenseChange: (dense: boolean) => void;
   onStateChange: (patch: Partial<TableQueryState>) => void;
   onApply: () => void;
   onReset: () => void;
@@ -34,8 +31,6 @@ interface TableQueryPanelProps {
 export function TableQueryPanel({
   view,
   state,
-  dense,
-  onDenseChange,
   onStateChange,
   onApply,
   onReset,
@@ -77,14 +72,6 @@ export function TableQueryPanel({
             {activeFilterCount} 个活动条件
           </span>
         )}
-        <label className="ml-auto flex items-center gap-2 text-sm text-muted-foreground">
-          <Checkbox
-            checked={dense}
-            onCheckedChange={(checked) => onDenseChange(checked === true)}
-            aria-label="紧凑模式"
-          />
-          紧凑
-        </label>
       </div>
       {filterColumns.length > 0 && (
         <div className="flex flex-wrap items-end gap-3 rounded-md border border-border p-3">

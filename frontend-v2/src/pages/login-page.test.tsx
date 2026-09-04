@@ -1,13 +1,10 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { createSessionController } from "@/api/session-controller";
 import { clearStoredSession } from "@/api/auth-session";
-import { SessionControllerContext } from "@/api/use-session";
-import { appRoutes } from "@/app/routes";
+import { renderTestApp } from "@/test/render-app";
 
 import catalogFixture from "@/test/fixtures/ui-catalog.json";
 
@@ -22,17 +19,11 @@ function jsonResponse(payload: unknown, status = 200) {
 
 function renderLogin() {
   const controller = createSessionController();
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+  const { router } = renderTestApp({
+    path: "/login",
+    authenticated: false,
+    controller,
   });
-  const router = createMemoryRouter(appRoutes, { initialEntries: ["/login"] });
-  render(
-    <SessionControllerContext.Provider value={controller}>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>
-    </SessionControllerContext.Provider>,
-  );
   return { controller, router };
 }
 

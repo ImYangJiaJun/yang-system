@@ -1,13 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createMemoryRouter, RouterProvider } from "react-router";
 
-import { createSessionController } from "@/api/session-controller";
 import { clearStoredSession } from "@/api/auth-session";
-import { SessionControllerContext } from "@/api/use-session";
-import { appRoutes } from "@/app/routes";
+import { renderTestApp } from "@/test/render-app";
 
 import addFixture from "@/test/fixtures/demo-items-add.json";
 import listFixture from "@/test/fixtures/demo-items-list.json";
@@ -72,25 +68,11 @@ function renderApp(
   initialPath: string,
   options: { authenticated?: boolean } = {},
 ) {
-  const controller = createSessionController();
   // 门控路由要求认证会话；默认直接注入内存 Token（不走登录流程）。
-  if (options.authenticated ?? true) {
-    controller.beginSession({ accessToken: "test-access" });
-  }
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+  return renderTestApp({
+    path: initialPath,
+    authenticated: options.authenticated ?? true,
   });
-  const router = createMemoryRouter(appRoutes, {
-    initialEntries: [initialPath],
-  });
-  render(
-    <SessionControllerContext.Provider value={controller}>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>
-    </SessionControllerContext.Provider>,
-  );
-  return router;
 }
 
 beforeEach(() => {
@@ -107,19 +89,19 @@ afterEach(() => {
 });
 
 describe("模块页垂直切片", () => {
-  it("Catalog → 导航 → 表格行渲染（含关系标签与树缩进）", async () => {
+  it("Catalog → 应用中心 → 业务页 → 表格行渲染（含关系标签与树缩进）", async () => {
     installFetchMock();
     renderApp("/");
 
-    // 导航投影：无 Module 的演示 Catalog 兜底为工作台分组下的单视图模块页，
-    // “/” 重定向到第一个模块页。
-    await screen.findByRole("link", { name: "项目目录" });
+    // “/” 是应用中心（Dashboard）；未分配视图以卡片入口出现。
     expect(
-      await screen.findByRole("heading", { name: "项目目录", level: 1 }),
+      await screen.findByRole("heading", { name: "应用中心", level: 1 }),
     ).toBeInTheDocument();
+    const card = await screen.findByTestId("view-card-demo.items.main");
 
-    // 表格行渲染：树结构下子行（通用渲染器）也展平展示。
-    // 关系标签异步到达会触发表格重渲染，用 waitFor 内联查询避免陈旧节点。
+    // 点击进入业务页，通用表格渲染树形行。
+    const user = userEvent.setup();
+    await user.click(card);
     await waitFor(() =>
       expect(screen.getByText("平台能力")).toBeInTheDocument(),
     );

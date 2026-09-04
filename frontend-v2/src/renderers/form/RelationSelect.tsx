@@ -109,11 +109,8 @@ export function RelationSelect({
       />
       <Select
         disabled={disabled || !action}
-        value={
-          selectedValues[0] === undefined
-            ? undefined
-            : String(selectedValues[0])
-        }
+        // 受控空值用 ""（Radix Select 允许根值 ""，Item 不允许），避免受控/非受控切换。
+        value={selectedValues[0] === undefined ? "" : String(selectedValues[0])}
         onValueChange={(raw) => {
           const option = displayOptions.find(
             (candidate) => String(candidate.value) === raw,

@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useSyncExternalStore,
 } from "react";
 
@@ -32,9 +33,13 @@ export function useSessionSnapshot(): SessionSnapshot {
 }
 
 /// 供 API 客户端使用的会话凭据视图；匿名会话 token 为 undefined。
+/// 按 token memo：对象引用稳定，供 effect 依赖使用（不 memo 会导致请求 effect 无限重发）。
 export function useSessionCredentials(): SessionContext {
   const snapshot = useSessionSnapshot();
-  return { token: snapshot.token || undefined };
+  return useMemo(
+    () => ({ token: snapshot.token || undefined }),
+    [snapshot.token],
+  );
 }
 
 /**

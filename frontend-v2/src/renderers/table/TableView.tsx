@@ -51,6 +51,7 @@ export function TableView({
   view,
   actions,
   actionEffects,
+  onCustom,
 }: {
   view: TableViewSchema;
   actions: ActionDemoSchema[];
@@ -59,12 +60,13 @@ export function TableView({
     handleAttachment?: (result: import("@/api/types").InvocationResult) => void;
     redirect?: (location: string) => void;
   };
+  /// custom interaction 的 presentation 上抛给页面层（注册表解析在 ModulePage）。
+  onCustom?: (presentation: ActionPresentationSchema, row?: SourceRow) => void;
 }) {
   const dataAction = actions.find(
     (action) => action.operation_id === view.data_action,
   );
   const query = useTableQuery(view, dataAction);
-  const [dense, setDense] = useState(false);
   const [selectedRows, setSelectedRows] = useState<SourceRow[]>([]);
   // 列显示偏好：localStorage 按 view_id 持久化，至少保留一列。
   const allFields = useMemo(() => allColumnFields(view), [view]);
@@ -108,6 +110,7 @@ export function TableView({
     reload: query.reload,
     handleAttachment: actionEffects?.handleAttachment,
     redirect: actionEffects?.redirect,
+    onCustom,
   });
 
   const sort = {
@@ -198,8 +201,6 @@ export function TableView({
       <TableQueryPanel
         view={visibleView}
         state={query.state}
-        dense={dense}
-        onDenseChange={setDense}
         onStateChange={(patch) => {
           if (patch.filters) query.setFilters(patch.filters);
           if (patch.search !== undefined) query.setSearch(patch.search);
@@ -263,7 +264,6 @@ export function TableView({
         view={visibleView}
         rows={displayRows}
         loading={query.loading}
-        dense={dense}
         sort={sort}
         onSortChange={query.changeSort}
         labelFor={relation.labelFor}

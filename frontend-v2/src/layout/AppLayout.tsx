@@ -1,6 +1,8 @@
 import { useEffect, useState, type ComponentType } from "react";
 import {
   Building2,
+  Check,
+  ChevronsUpDown,
   CircleUser,
   LogOut,
   Moon,
@@ -10,13 +12,37 @@ import {
   Table2,
   Users,
 } from "lucide-react";
-import { NavLink, Outlet } from "react-router";
+import { NavLink, Outlet, useNavigate } from "react-router";
 
 import { useUiCatalog } from "@/api/use-catalog";
 import { useSessionController } from "@/api/use-session";
-import { buildNavigationPages, groupNavigationPages } from "@/app/navigation";
+import {
+  applyDensity,
+  DENSITY_OPTIONS,
+  loadDensity,
+  persistDensity,
+  type Density,
+} from "@/app/density";
+import { useIdentity } from "@/app/use-identity";
+import {
+  buildNavigationPages,
+  groupNavigationPages,
+  WORKSPACE_IDENTITY,
+} from "@/app/navigation";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  buildAccountModulePages,
+  visibleAccountIdentities,
+} from "@/catalog/module-pages";
 import type { UiCatalog } from "@/contracts/ui-catalog";
 import { cn } from "@/lib/utils";
 
@@ -41,6 +67,93 @@ const ICONS: Record<string, ComponentType<{ className?: string }>> = {
 function ModuleIcon({ token }: { token: string }) {
   const Icon = ICONS[token] ?? Puzzle;
   return <Icon className="size-4 shrink-0" />;
+}
+
+/// 身份切换器（旧 AccountSwitcher.vue 语义）：当前身份 + 切换列表。
+function AccountSwitcher({ catalog }: { catalog: UiCatalog | undefined }) {
+  const { identity, select } = useIdentity();
+  const navigate = useNavigate();
+  const modulePages = buildAccountModulePages(catalog);
+  const identities = visibleAccountIdentities(modulePages, catalog);
+  const active = identities.find((candidate) => candidate.id === identity);
+
+  const switchIdentity = (next: string) => {
+    const first = modulePages.find((module) => module.identity === next);
+    if (!first) return;
+    select(next);
+    navigate(`/m/${first.id}`);
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
+          aria-label="账号菜单"
+        >
+          <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+            Y
+          </span>
+          <span className="min-w-0 flex-1 truncate text-left">
+            {active?.title ?? "未选择角色"}
+          </span>
+          <ChevronsUpDown className="size-3.5 text-muted-foreground" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-56">
+        <DropdownMenuLabel>切换角色</DropdownMenuLabel>
+        {identities.map((candidate) => (
+          <DropdownMenuItem
+            key={candidate.id}
+            onClick={() => switchIdentity(candidate.id)}
+          >
+            <span className="flex-1">{candidate.title}</span>
+            {candidate.id === identity && <Check className="size-4" />}
+          </DropdownMenuItem>
+        ))}
+        {identities.length > 1 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => navigate("/select-identity")}>
+              查看全部角色
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/// 密度三档切换（ADR-5 §2.1）：localStorage 持久化 + 文档根 data-density。
+function DensityMenu() {
+  const [density, setDensity] = useState<Density>(() => loadDensity());
+  const apply = (next: Density) => {
+    setDensity(next);
+    persistDensity(next);
+    applyDensity(next);
+  };
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" aria-label="密度设置">
+          密度
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>表格密度</DropdownMenuLabel>
+        {DENSITY_OPTIONS.map((option) => (
+          <DropdownMenuItem
+            key={option.value}
+            onClick={() => apply(option.value)}
+          >
+            <span className="flex-1">{option.label}</span>
+            {density === option.value && <Check className="size-4" />}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 /// 侧边栏底部用户区：登出入口（endSession 清空会话后由认证门控自动跳 /login）。
@@ -86,12 +199,19 @@ export default function AppLayout() {
   const [dark, setDark] = useState(false);
   const catalogQuery = useUiCatalog();
   const catalog = catalogQuery.data;
+  const { identity } = useIdentity();
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
 
-  const pages = buildNavigationPages(catalog);
+  // 身份过滤：工作台兜底视图（未分配视图）不受身份约束，始终可见。
+  const pages = buildNavigationPages(catalog).filter(
+    (page) =>
+      page.identity === WORKSPACE_IDENTITY ||
+      !identity ||
+      page.identity === identity,
+  );
   const groups = groupNavigationPages(pages, catalog);
 
   return (
@@ -101,6 +221,9 @@ export default function AppLayout() {
           <span className="text-sm font-semibold tracking-tight">
             YANG System 控制台
           </span>
+        </div>
+        <div className="border-b border-border p-2">
+          <AccountSwitcher catalog={catalog} />
         </div>
         <nav className="flex-1 space-y-4 overflow-y-auto p-3">
           {groups.map((group) => (
@@ -138,6 +261,7 @@ export default function AppLayout() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-end gap-2 border-b border-border px-4 py-2">
+          <DensityMenu />
           <Button
             variant="outline"
             size="icon"

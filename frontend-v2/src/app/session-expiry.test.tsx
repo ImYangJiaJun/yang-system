@@ -1,18 +1,14 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { clearStoredSession } from "@/api/auth-session";
-import { createSessionController } from "@/api/session-controller";
-import { SessionControllerContext } from "@/api/use-session";
-import { appRoutes } from "@/app/routes";
+import { renderTestApp } from "@/test/render-app";
 
 import catalogFixture from "@/test/fixtures/ui-catalog.json";
 
 /**
  * 失效传播（能力 11）：业务请求 401 → 刷新被拒 → yang:session-expired
- * → SessionBridge 跳 /login?reason=session-expired，登录页展示对应提示。
+ * → SessionBridge 清空会话并跳 /login，登录页展示对应提示（reason 经快照传递）。
  */
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -23,20 +19,7 @@ function jsonResponse(payload: unknown, status = 200) {
 }
 
 function renderAppAuthenticated(path: string) {
-  const controller = createSessionController();
-  controller.beginSession({ accessToken: "stale-access" });
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  const router = createMemoryRouter(appRoutes, { initialEntries: [path] });
-  render(
-    <SessionControllerContext.Provider value={controller}>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>
-    </SessionControllerContext.Provider>,
-  );
-  return { controller, router };
+  return renderTestApp({ path, authenticated: true });
 }
 
 afterEach(() => {
@@ -47,7 +30,7 @@ afterEach(() => {
 });
 
 describe("会话失效传播", () => {
-  it("业务 401 且刷新被拒 → 清空会话并跳 /login?reason=session-expired", async () => {
+  it("业务 401 且刷新被拒 → 清空会话并跳登录页（reason 经快照传递）", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Eye, EyeOff, Lock, User } from "lucide-react";
-import { useNavigate, useSearchParams } from "react-router";
+import { useNavigate, useSearchParams, Link } from "react-router";
 
 import { login } from "@/api/auth";
 import { useSessionController, useSessionSnapshot } from "@/api/use-session";
@@ -153,6 +153,21 @@ export default function LoginPage() {
             <Button type="submit" className="w-full" disabled={submitting}>
               {submitting ? "登录中…" : "登录"}
             </Button>
+
+            <div className="flex justify-between text-sm">
+              <Link
+                to="/reset-password"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                使用重置凭证
+              </Link>
+              <Link
+                to="/register"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                创建账号
+              </Link>
+            </div>
           </form>
 
           <p className="mt-6 text-center text-xs text-muted-foreground">

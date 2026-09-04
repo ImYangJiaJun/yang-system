@@ -117,3 +117,14 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* 密度主题（ADR-5 §2.1）：表格行高与单元格留白由 --density-cell-y 驱动 */
+:root {
+  --density-cell-y: 0.625rem;
+}
+html[data-density="compact"] {
+  --density-cell-y: 0.25rem;
+}
+html[data-density="loose"] {
+  --density-cell-y: 1rem;
+}

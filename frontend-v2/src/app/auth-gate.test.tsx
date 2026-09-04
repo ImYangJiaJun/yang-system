@@ -1,12 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { clearStoredSession } from "@/api/auth-session";
 import { createSessionController } from "@/api/session-controller";
-import { SessionControllerContext } from "@/api/use-session";
-import { appRoutes } from "@/app/routes";
+import { renderTestApp } from "@/test/render-app";
 
 import catalogFixture from "@/test/fixtures/ui-catalog.json";
 
@@ -20,18 +17,8 @@ function jsonResponse(payload: unknown, status = 200) {
 }
 
 function renderAt(path: string, controller = createSessionController()) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  const router = createMemoryRouter(appRoutes, { initialEntries: [path] });
-  render(
-    <SessionControllerContext.Provider value={controller}>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>
-    </SessionControllerContext.Provider>,
-  );
-  return { controller, router };
+  const authenticated = controller.getSnapshot().loggedIn;
+  return renderTestApp({ path, authenticated, controller });
 }
 
 afterEach(() => {
@@ -108,10 +95,13 @@ describe("认证门控", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).not.toBe("/login");
     });
-    // 首页重定向到第一个模块页。
+    // 首页是应用中心（Dashboard）。
     await waitFor(() => {
-      expect(router.state.location.pathname).toBe("/m/demo.items.main");
+      expect(router.state.location.pathname).toBe("/");
     });
+    expect(
+      await screen.findByRole("heading", { name: "应用中心", level: 1 }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "用户登录" })).toBeNull();
   });
 
