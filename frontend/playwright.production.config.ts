@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const frontendPort = process.env.YANG_PRODUCTION_E2E_FRONTEND_PORT || "5300";
-const backendPort = process.env.YANG_PRODUCTION_E2E_BACKEND_PORT || "18300";
+const frontendPort = process.env.YANG_PRODUCTION_E2E_FRONTEND_PORT || "5311";
+const backendPort = process.env.YANG_PRODUCTION_E2E_BACKEND_PORT || "18311";
 
 export default defineConfig({
   testDir: "./e2e-production",
@@ -12,13 +12,13 @@ export default defineConfig({
   workers: 1,
   reporter: "list",
   use: {
-    baseURL: `http://127.0.0.1:${frontendPort}`,
+    baseURL: `http://localhost:${frontendPort}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   webServer: [
     {
-      command: "cargo run --example frontend_demo",
+      command: "cargo run --locked --example frontend_demo",
       cwd: "..",
       url: `http://127.0.0.1:${backendPort}/health/live`,
       timeout: 180_000,
@@ -29,7 +29,7 @@ export default defineConfig({
     },
     {
       command: "pnpm build && node scripts/serve-production-build.mjs",
-      url: `http://127.0.0.1:${frontendPort}`,
+      url: `http://localhost:${frontendPort}`,
       timeout: 180_000,
       reuseExistingServer: false,
       env: {

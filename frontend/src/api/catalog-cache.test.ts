@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CatalogCache } from "./catalog-cache";
-import type { UiCatalog } from "src/contracts/ui-catalog";
+import type { UiCatalog } from "@/contracts/ui-catalog";
 
 function catalog(revision: string): UiCatalog {
   return {

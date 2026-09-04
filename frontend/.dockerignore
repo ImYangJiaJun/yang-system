@@ -1,9 +1,0 @@
-# 前端镜像构建上下文裁剪（只影响 docker build，不改变 .gitignore 语义）。
-node_modules
-.quasar
-dist
-coverage
-playwright-report
-test-results
-test-results-production
-*.local

@@ -1,4 +1,4 @@
-import type { ActionDemoSchema } from "src/contracts/ui-catalog";
+import type { ActionDemoSchema } from "@/contracts/ui-catalog";
 import { ApiError } from "./errors";
 import { parseJson } from "./http";
 import type { InvocationResult } from "./types";

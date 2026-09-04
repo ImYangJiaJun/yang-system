@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + Quasar/Vue 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前骨架只保留 `account` 一个业务 Addon：账号与会话（邮箱验证码注册、登录、Refresh Cookie、Step-up 重认证、密码重置）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
+`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + React 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前骨架只保留 `account` 一个业务 Addon：账号与会话（邮箱验证码注册、登录、Refresh Cookie、Step-up 重认证、密码重置）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
 
 本仓库是**独立 Git/Cargo 项目**，但被签出在 `lib_yang` 仓库的 `project/yang-system/` 路径下（`lib_yang` 根 workspace 显式排除它）；`Cargo.toml` 通过相对路径直接依赖同工作树中的基础库：
 
@@ -19,7 +19,7 @@ yang-runtime = { path = "../../crates/yang-runtime", ... }
 ### 技术栈
 
 - 后端：Rust 2021（`rust-version = "1.80"`；仓库没有 `rust-toolchain` 文件，1.97.1 工具链由 `scripts/setup_local.ps1` 在本地安装、由 CI 的 `RUST_VERSION` 环境变量固定），axum 0.8、tokio、sqlx (MySQL)、Redis、jsonwebtoken、argon2、lettre (SMTP)、tracing、metrics。
-- 前端：Quasar 2 / Vue 3.5 / Vite / Pinia / vue-router / zod，TypeScript，pnpm 10.33.1（`frontend/package.json` 的 `packageManager` 字段固定），Node.js 24+。
+- 前端：React 19 / Vite / Tailwind CSS 4 / shadcn/ui（组件源码入库 `frontend/src/components/ui/`）/ TanStack Query + Table / react-router / zod / Ajv（动态 JSON Schema 校验）/ react-hook-form，TypeScript，pnpm 10.33.1（`frontend/package.json` 的 `packageManager` 字段固定），Node.js 24+。技术选型决策见 `docs/architecture/frontend-rebuild/` ADR 组。浏览器契约：Chrome/Edge ≥ 111、Firefox ≥ 128、Safari ≥ 16.4。
 - 依赖服务：MySQL 8.0（`127.0.0.1:3306`）与 Redis 7（`127.0.0.1:6379`），由根目录 `compose.yaml` 提供；`docker/mysql/init/` 会同时创建 `yang_system` 和 `yang_system_test` 两个库。注意 `docker compose down -v` 会永久删除本地数据卷。
 - 辅助脚本：Python 3.11+（质量门禁、架构检查、Action 脚手架、本地初始化）。
 
@@ -40,13 +40,13 @@ examples/frontend_demo/      # 数据库无关的演示后端，供 Playwright �
 migrations/                  # 空目录：本项目不用 SQL 迁移文件，Schema 由代码声明驱动
 scripts/                     # run_ci.py / check_architecture.py / new_action.py / setup_local.ps1 / upgrade_local_config.py
 docs/                        # 安全与运行契约：SCHEMA/AUDIT/CONFIGURATION/OBSERVABILITY/SLO/RUNBOOK_BACKUP/LOG_SHIPPING 等
-frontend/                    # Quasar 控制台（见下）
+frontend/                    # React 控制台（见下）
 ops/prometheus/              # Prometheus 告警规则与演练（CI 用 promtool 校验）
 frontend/deploy/             # 生产 Nginx 配置、前端镜像 Dockerfile 与部署契约校验
 docker/app/                  # 后端生产镜像 Dockerfile（构建上下文为 lib_yang 仓库根）
 ```
 
-前端内部约定：API 客户端与契约在 `frontend/src/api/` 和 `frontend/src/contracts/`，可复用 UI 在 `components/`，页面编排在 `pages/` 和 `layouts/`，Pinia 状态在 `stores/`。业务导航投影定义在 `module-pages.ts`；需要特殊交互的自定义视图在 `custom/`（`custom/registry.ts` 是静态注册表，禁止按后端字符串动态 import）；单语言产品文案集中在 `product-locale.ts`。单元测试与源码同目录（`*.test.ts`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。
+前端内部约定：API 客户端与会话状态机在 `frontend/src/api/`（SessionController 为纯 TS 会话状态机，`use-session.ts` 是唯一允许 import react 的会话薄壳），契约在 `frontend/src/contracts/`（zod + Ajv 白名单 + OpenAPI 生成类型），业务导航投影在 `frontend/src/catalog/module-pages.ts`，通用解释器在 `frontend/src/renderers/`（table/form/action），shadcn 源码组件在 `frontend/src/components/ui/`，页面编排在 `pages/` 和 `layout/`，应用外壳与路由在 `app/`。需要特殊交互的自定义视图在 `custom/`（`custom/registry.ts` 是静态注册表，禁止按后端字符串动态 import）；单语言产品文案集中在 `lib/product-locale.ts`。单元测试与源码同目录（`*.test.ts`/`*.test.tsx`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。
 
 ## 构建、测试与开发命令
 
@@ -62,7 +62,8 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 - `cargo run --locked` — 启动后端（`http://127.0.0.1:8080`），需要已配置 `config.toml`。Cargo features 只剩 `default = ["account"]`，没有 addon 级 feature 组合。
 - `python scripts/check_architecture.py` — 架构门禁：保证 `actions/` 中一个文件只承载一个 Action（恰好一个 `pub(super) async fn handle` + 一个自包含 `pub(super) fn register`）、文件与 `mod.rs` 的 `ACTIONS` 注册表数组一致，裸 SQL 路径有 `// tenant-boundary: <kind> <id>` 边界注释。
 - `python scripts/new_action.py <module_actions_dir> <name> --title "..." --method POST --path /api/v1/...` — 新增 Action 脚手架（创建文件、声明 mod、注册）；生成器拒绝覆盖已有文件，生成的代码稳定返回“尚未实现”错误，必须补齐强类型输入、输出和业务逻辑后才算完成。
-- `pnpm --dir frontend dev` — 前端开发服务器（`http://127.0.0.1:5173`），默认通过 Vite 代理访问 `127.0.0.1:8080` 的真实后端。
+- `pnpm --dir frontend dev` — 前端开发服务器（`http://localhost:5273`），默认通过 Vite 代理访问 `127.0.0.1:8080` 的真实后端（`VITE_DEV_API_ORIGIN` 可改代理目标；代理禁止开 `changeOrigin`，后端 BrowserSession 同源校验比对 Origin 与 Host）。
+- `python scripts/dump_openapi.py` — 导出后端 OpenAPI 3.1 契约快照（`frontend/contracts/openapi.json`）并再生成 TypeScript 类型；后端 Action/输入输出契约变更后必须重跑并提交两个生成物。
 - `pnpm --dir frontend check` — 前端完整检查链；单独排查可用 `typecheck` / `lint` / `test` / `e2e` / `e2e:production`。
 - 首次环境初始化（Windows PowerShell 7，在 `lib_yang` 仓库根目录执行）：`pwsh -NoProfile -File project/yang-system/scripts/setup_local.ps1`，会启动 Compose 依赖、安装前端依赖并生成被 Git 忽略的 `config.toml`；`-CheckOnly` 只检查工具，`-UpgradeLegacyConfig` 迁移旧配置（先备份到 `target/local-config-backups/`）。
 
@@ -82,7 +83,7 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 - Rust 2021，标准 `rustfmt`（四空格缩进）；文件/函数用 `snake_case`，类型用 `PascalCase`，Action 文件名用描述性名称（如 `actions/register.rs`）。
 - `Cargo.toml` 已配置：`unsafe_code = "forbid"`、`unused_must_use = "deny"`，Clippy `unwrap_used` / `expect_used` 均为 deny。生产 Rust 代码禁止 `unsafe`、`unwrap()`、`expect()`，用 `anyhow` 传播错误。
 - 仓库文档与注释使用中文，新增注释和文档保持中文风格。
-- 前端代码必须通过 Prettier、ESLint（`--max-warnings 0`）和 `vue-tsc`；Vue 组件用 `PascalCase`；产品文案受单语言产品契约门禁（`verify:locale-contract`，在 build 之前执行）约束。
+- 前端代码必须通过 Prettier、ESLint（`--max-warnings 0`）和 `tsc --noEmit`（strict）；React 组件用 `PascalCase`；产品文案受单语言产品契约门禁（`verify:locale-contract`，在 build 之前执行）约束；首屏 bundle 受 `verify:bundle-budget` 双层预算（目标 350 kB / 硬上限 450 kB gzip）约束。
 
 ## 测试策略
 

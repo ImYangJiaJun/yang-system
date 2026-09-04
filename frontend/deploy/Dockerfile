@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-# yang-system 前端（Quasar SPA）生产镜像。
+# yang-system 前端（frontend-v2，React/Vite SPA）生产镜像。
 #
-# 构建上下文是 frontend/ 目录本身：
+# 构建上下文是 frontend-v2/ 目录本身：
 #
-#   cd project/yang-system/frontend
-#   docker build -f deploy/Dockerfile -t yang-system-frontend:local .
+#   cd project/yang-system/frontend-v2
+#   docker build -f deploy/Dockerfile -t yang-system-frontend-v2:local .
 #
 # pnpm 版本由 package.json 的 packageManager 字段（pnpm@10.33.1）经 corepack 固定；
 # Node 大版本与 CI 一致（24）。nginx 镜像版本与摘要和 CI 语法校验步骤完全同源。
@@ -12,17 +12,16 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 RUN corepack enable
-# 依赖层缓存：--ignore-scripts 跳过 postinstall（quasar prepare 需要完整工程
-# 文件，无法在本层执行）；拷贝全部源码后再显式补跑 quasar prepare。
+# 依赖层缓存：--ignore-scripts 跳过 postinstall；Vite 构建无需工程级 prepare 步骤。
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY . .
-RUN pnpm exec quasar prepare && pnpm build
+RUN pnpm build
 
 # 运行时直接使用 CI 校验 nginx.conf 的同一镜像（固定版本 + 摘要）。
 FROM nginx:1.30.4-alpine3.24@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46 AS runtime
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
-COPY --from=build /app/dist/spa /usr/share/nginx/html
+COPY --from=build /app/dist /usr/share/nginx/html
 
 # 注意：nginx.conf 有意只监听 127.0.0.1:8081，upstream 也指向 127.0.0.1:8080
 #（部署契约见 deploy/README.md，CI 对该文件做只读 nginx -t，不要修改）。

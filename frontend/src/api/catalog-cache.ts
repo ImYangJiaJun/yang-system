@@ -1,4 +1,4 @@
-import type { UiCatalog } from "src/contracts/ui-catalog";
+import type { UiCatalog } from "@/contracts/ui-catalog";
 
 /// 每次请求仍会到达服务端完成重新授权；这里只复用最近一次内容完全相同的不可变
 /// 目录对象。revision 描述应用定义版本，不代表请求级授权投影，因此不能单独作为

@@ -1,17 +1,17 @@
-"""导出后端 OpenAPI 3.1 契约快照并再生成 frontend-v2 的 TypeScript 类型（ADR-4 §2.2）。
+"""导出后端 OpenAPI 3.1 契约快照并再生成 frontend 的 TypeScript 类型（ADR-4 §2.2）。
 
 用法（仓库根目录）：python scripts/dump_openapi.py
 步骤：
-  1. cargo run --locked --example openapi-dump frontend-v2/contracts/openapi.json
+  1. cargo run --locked --example openapi-dump frontend/contracts/openapi.json
   2. 语义保持的 definitions 提升：后端 input/output schema 是自包含的 draft-07
      文档（definitions 嵌在子 Schema 内，$ref 写作 "#/definitions/X" 的局部引用），
      openapi-typescript 无法解析这种局部引用。生成类型前在临时副本上把本地
      definitions 提升为 components.schemas 命名类型并重写 $ref。
      入库的 openapi.json 保持后端原始输出，不做改写。
-  3. pnpm --dir frontend-v2 exec openapi-typescript <临时副本> -o src/contracts/api-types.ts
+  3. pnpm --dir frontend exec openapi-typescript <临时副本> -o src/contracts/api-types.ts
 
 openapi-typescript 只生成类型，不生成客户端运行时；openapi.json 与 api-types.ts
-均入库作为契约快照，前端 HTTP 客户端保持自有实现（frontend-v2/src/api/）。
+均入库作为契约快照，前端 HTTP 客户端保持自有实现（frontend/src/api/）。
 """
 
 import json
@@ -22,8 +22,8 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = ROOT / "frontend-v2" / "contracts" / "openapi.json"
-OUTPUT = ROOT / "frontend-v2" / "src" / "contracts" / "api-types.ts"
+SPEC = ROOT / "frontend" / "contracts" / "openapi.json"
+OUTPUT = ROOT / "frontend" / "src" / "contracts" / "api-types.ts"
 
 
 def run(argv: tuple[str, ...], cwd: Path = ROOT) -> None:
@@ -103,7 +103,7 @@ def main() -> int:
             (
                 "pnpm",
                 "--dir",
-                "frontend-v2",
+                "frontend",
                 "exec",
                 "openapi-typescript",
                 temp_path,

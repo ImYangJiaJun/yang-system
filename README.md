@@ -1,6 +1,6 @@
 # yang-system
 
-`yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用和 Quasar 管理控制台。当前
+`yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用和 React 管理控制台。当前
 应用以同一份 Addon/Module 定义构建强类型 Action、Schema、Catalog、Registry、
 OpenAPI 与前端页面。骨架只保留 `account` 一个业务 Addon，覆盖账号与会话、
 授权失效传播、高权限审计和生产可观测性；没有平台管理、企业租户和业务对象域。
@@ -109,7 +109,9 @@ python scripts/new_action.py src/addon/account/user/actions disable_other `
 
 ## BR 生态前端
 
-`frontend/` 使用 Quasar 构建正式控制台。登录、注册、密码重置和应用壳由
+`frontend/` 使用 React 19 + Vite + Tailwind CSS 4 + shadcn/ui 构建正式控制台
+（选型决策见 `docs/architecture/frontend-rebuild/` ADR 组；浏览器契约：
+Chrome/Edge ≥ 111、Firefox ≥ 128、Safari ≥ 16.4）。登录、注册、密码重置和应用壳由
 前端静态维护；登录后的业务导航读取后端 Catalog，将当前身份可访问的 Module 投影
 为页面：
 
@@ -229,7 +231,7 @@ cargo run --locked
 `/health/live` 和 `/health/ready`。启用指标时，独立管理面默认位于
 `http://127.0.0.1:9090`，提供 `/metrics` 与带生命周期门闩、MySQL/Redis 检查和总预算
 的 `/health/ready`；生产编排应使用这个管理面 readiness。前端开发服务器位于
-`http://127.0.0.1:5173`。
+`http://localhost:5273`。
 
 需要手工配置时，先创建 MySQL 数据库和 Redis，再复制配置示例。应用只管理所选
 数据库内的表结构，不创建数据库本身。

@@ -1,8 +1,7 @@
 node_modules/
-.quasar/
 dist/
-coverage/
-playwright-report/
+*.local
 test-results/
 test-results-production/
-*.local
+playwright-report/
+.vite/

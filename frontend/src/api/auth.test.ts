@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, StepUpRequiredError } from "./errors";
+
 import {
   disableAccount,
   login,
   logout,
   register,
-  refreshSession,
   requestRegistrationEmail,
   resetPassword,
+  refreshSession,
 } from "./auth";
+import { ApiError, StepUpRequiredError } from "./errors";
 
 afterEach(() => vi.unstubAllGlobals());
 

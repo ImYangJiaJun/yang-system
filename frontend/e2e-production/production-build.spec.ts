@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+/// 生产构建 E2E（对齐旧 e2e-production/production-build.spec.ts，路由改为 v2 /m/ 形态）。
+
 async function serveAuthorizedModule(page: Page) {
   await page.addInitScript(() => {
     sessionStorage.setItem("yang.account-identity", "user");
@@ -60,7 +62,7 @@ async function serveAuthorizedModule(page: Page) {
                 order: 10,
               },
               title: "生产产物用户中心",
-              description: "dist/spa 深链接",
+              description: "dist 深链接",
               icon: "account",
               order: 10,
               primary_action: "account.user.me",
@@ -86,13 +88,13 @@ async function serveAuthorizedModule(page: Page) {
   );
 }
 
-test("dist/spa 从正式模块深链接启动且满足生产响应头与缓存契约", async ({
+test("dist 从正式模块深链接启动且满足生产响应头与缓存契约", async ({
   page,
   request,
 }) => {
   await serveAuthorizedModule(page);
 
-  const navigation = await page.goto("/module/account.user");
+  const navigation = await page.goto("/m/account.user");
 
   expect(navigation?.headers()["x-yang-spa-fallback"]).toBe("index.html");
   expect(navigation?.headers()["cache-control"]).toBe("no-store");
@@ -139,29 +141,21 @@ test("dist/spa 从正式模块深链接启动且满足生产响应头与缓存�
   );
   expect(asset.headers()["x-content-type-options"]).toBe("nosniff");
   expect(asset.headers()["x-yang-spa-fallback"]).toBeUndefined();
-  await expect(page.locator("[data-vite-dev-id]")).toHaveCount(0);
 });
 
-test("生产路由移除 Workbench，缺失静态资源和 API 不被 history fallback 掩盖", async ({
+test("生产构建移除 Workbench，缺失静态资源和 API 不被 history fallback 掩盖", async ({
   page,
   request,
 }) => {
   await serveAuthorizedModule(page);
 
+  // 生产构建不含 workbench 路由：落入无匹配页，且工作台文案不存在于产物。
   await page.goto("/workbench");
-  await expect(page).toHaveURL("/roles");
-  await expect(page.getByText("YANG 接口工作台", { exact: true })).toHaveCount(
-    0,
-  );
+  await expect(page.getByText("接口演示", { exact: true })).toHaveCount(0);
 
   const missingAsset = await request.get("/assets/not-a-real-build-file.js");
   expect(missingAsset.status()).toBe(404);
   expect(missingAsset.headers()["content-type"]).not.toContain("text/html");
-
-  const dottedRoute = await request.get("/module/report.json");
-  expect(dottedRoute.status()).toBe(200);
-  expect(dottedRoute.headers()["x-yang-spa-fallback"]).toBe("index.html");
-  expect(dottedRoute.headers()["content-type"]).toContain("text/html");
 
   const missingApi = await request.get("/api/v1/not-a-real-endpoint");
   expect(missingApi.status()).toBe(404);

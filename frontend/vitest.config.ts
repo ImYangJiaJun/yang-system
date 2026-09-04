@@ -1,27 +1,22 @@
-import { fileURLToPath, URL } from "node:url";
-import vue from "@vitejs/plugin-vue";
 import { defineConfig } from "vitest/config";
+import react from "@vitejs/plugin-react";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [react()],
   resolve: {
     alias: {
-      src: fileURLToPath(new URL("./src", import.meta.url)),
-      components: fileURLToPath(new URL("./src/components", import.meta.url)),
-      layouts: fileURLToPath(new URL("./src/layouts", import.meta.url)),
-      pages: fileURLToPath(new URL("./src/pages", import.meta.url)),
-      stores: fileURLToPath(new URL("./src/stores", import.meta.url)),
+      "@": path.resolve(__dirname, "src"),
     },
   },
   test: {
     environment: "jsdom",
-    clearMocks: true,
-    exclude: [
-      "e2e/**",
-      "e2e-production/**",
-      "node_modules/**",
-      "dist/**",
-      ".quasar/**",
-    ],
+    globals: true,
+    setupFiles: ["./src/test-setup.ts"],
+    // e2e/ 与 e2e-production/ 是 Playwright 规格，不走 Vitest。
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
 });

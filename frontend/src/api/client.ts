@@ -2,7 +2,7 @@ import {
   parseUiCatalog,
   type ActionDemoSchema,
   type UiCatalog,
-} from "src/contracts/ui-catalog";
+} from "@/contracts/ui-catalog";
 import { buildActionRequest } from "./action-request";
 import { parseActionResponse } from "./action-response";
 import {

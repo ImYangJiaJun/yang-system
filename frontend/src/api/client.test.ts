@@ -11,7 +11,7 @@ import {
   persistTokenPair,
   SESSION_RELOGIN_REQUIRED_EVENT,
 } from "./auth-session";
-import type { ActionDemoSchema, UiCatalog } from "src/contracts/ui-catalog";
+import type { ActionDemoSchema, UiCatalog } from "@/contracts/ui-catalog";
 
 const action: ActionDemoSchema = {
   operation_id: "demo.update",

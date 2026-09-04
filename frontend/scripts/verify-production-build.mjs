@@ -2,11 +2,10 @@ import { readdir, readFile } from "node:fs/promises";
 import { extname, relative, resolve } from "node:path";
 import { stdout } from "node:process";
 
-const buildRoot = resolve("dist/spa");
-const forbiddenWorkbenchMarkers = [
-  "YANG 接口工作台",
-  "后端注册即可演示，复杂场景允许覆盖",
-];
+/// 生产构建校验（旧 verify-production-build.mjs 的 Vite 产物适配版：dist/ 布局）。
+
+const buildRoot = resolve("dist");
+const forbiddenWorkbenchMarkers = ["发起真实调用", "接口演示"];
 
 async function filesUnder(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -27,7 +26,10 @@ const cspMatch = indexHtml.match(
 if (!cspMatch) {
   throw new Error("生产入口必须包含 enforce 模式 Content-Security-Policy");
 }
-const csp = cspMatch[1];
+const csp = cspMatch[1]
+  .replaceAll("&#39;", "'")
+  .replaceAll("&quot;", '"')
+  .replaceAll("&amp;", "&");
 for (const directive of [
   "default-src 'self'",
   "base-uri 'none'",

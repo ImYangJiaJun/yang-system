@@ -2,7 +2,7 @@
 
 `nginx.conf` 是 YANG System SPA 的可审计完整 Nginx 配置，可直接安装为
 `/etc/nginx/nginx.conf`。`deployment-contract.mjs` 是生产构建 E2E 使用的
-同一响应合同。发布时必须把 `dist/spa` 挂载到 `/usr/share/nginx/html`，
+同一响应合同。发布时必须把 `dist` 挂载到 `/usr/share/nginx/html`，
 Rust 服务监听 `127.0.0.1:8080`，Nginx 只监听 `127.0.0.1:8081`。
 
 公网入口必须由受信任的 TLS 终止层提供 HTTPS，并满足以下前置条件：

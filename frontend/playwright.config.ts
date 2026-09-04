@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const frontendPort = process.env.YANG_E2E_FRONTEND_PORT || "5173";
-const backendPort = process.env.YANG_E2E_BACKEND_PORT || "18080";
+const frontendPort = process.env.YANG_E2E_FRONTEND_PORT || "5310";
+const backendPort = process.env.YANG_E2E_BACKEND_PORT || "18310";
 const reuseExistingServer =
   process.env.YANG_E2E_REUSE_EXISTING_SERVER === "true";
 
@@ -13,13 +13,14 @@ export default defineConfig({
   workers: 1,
   reporter: "list",
   use: {
-    baseURL: `http://127.0.0.1:${frontendPort}`,
+    baseURL: `http://localhost:${frontendPort}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   webServer: [
     {
-      command: "cargo run --example frontend_demo",
+      // 演示后端绑定隔离端口（YANG_DEMO_BIND 契约见 examples/frontend_demo）。
+      command: "cargo run --locked --example frontend_demo",
       cwd: "..",
       url: `http://127.0.0.1:${backendPort}/health/live`,
       timeout: 180_000,
@@ -30,12 +31,12 @@ export default defineConfig({
     },
     {
       command: "pnpm dev",
-      url: `http://127.0.0.1:${frontendPort}`,
+      url: `http://localhost:${frontendPort}`,
       timeout: 120_000,
       reuseExistingServer,
       env: {
         VITE_DEV_PORT: frontendPort,
-        VITE_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
+        VITE_DEV_API_ORIGIN: `http://127.0.0.1:${backendPort}`,
       },
     },
   ],
@@ -44,5 +45,8 @@ export default defineConfig({
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },
+    // Firefox/WebKit 暂不启用：演示后端是跨 project 共享的内存态单例，
+    // 表格类用例会真实增删数据，多浏览器并发会产生顺序耦合（firefox 实测全军覆没）。
+    // 与旧前端一致只跑 chromium；浏览器已安装，用例改造为状态无关后可放开。
   ],
 });

@@ -2,17 +2,26 @@ import { readdir, readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { stdout } from "node:process";
 
+/**
+ * 单语言产品合同校验（对齐旧 frontend/scripts/verify-locale-contract.mjs 语义）：
+ * - HTML 文档语言固定 zh-CN；
+ * - 产品 locale 唯一权威常量（src/lib/product-locale.ts）；
+ * - 大小写归一/文本排序/Intl 格式化必须显式使用产品 locale；
+ * - 应用代码（src/ 下 .ts/.tsx）禁止依赖浏览器环境的隐式 locale API；
+ * - docs/LOCALE.md 携带三个机器标记；
+ * 并对每个断言做破坏性变异自检（变异必须被拒绝）。
+ */
+
 const supportedLocale = "zh-CN";
 const frontendRoot = resolve(".");
 const sources = {
   index: await readFile(resolve(frontendRoot, "index.html"), "utf8"),
-  quasar: await readFile(resolve(frontendRoot, "quasar.config.ts"), "utf8"),
   locale: await readFile(
-    resolve(frontendRoot, "src/product-locale.ts"),
+    resolve(frontendRoot, "src/lib/product-locale.ts"),
     "utf8",
   ),
   cell: await readFile(
-    resolve(frontendRoot, "src/components/table/business-cell-model.ts"),
+    resolve(frontendRoot, "src/renderers/table/business-cell-model.ts"),
     "utf8",
   ),
   document: await readFile(resolve(frontendRoot, "docs/LOCALE.md"), "utf8"),
@@ -23,7 +32,6 @@ verifyLocaleContract(sources);
 
 const mutations = [
   ["HTML language", "index", 'lang="zh-CN"', 'lang="en-US"'],
-  ["Quasar language", "quasar", 'lang: "zh-CN"', 'lang: "en-US"'],
   [
     "product locale",
     "locale",
@@ -64,7 +72,7 @@ for (const [name, key, target, replacement] of mutations) {
 }
 
 stdout.write(
-  `locale contract verification: ${supportedLocale} single-locale product, explicit browser and Quasar locale, ${mutations.length} adversarial mutations rejected\n`,
+  `locale contract verification: ${supportedLocale} single-locale product, explicit browser locale, ${mutations.length} adversarial mutations rejected\n`,
 );
 
 function verifyLocaleContract(candidate) {
@@ -72,11 +80,6 @@ function verifyLocaleContract(candidate) {
     candidate.index,
     `<html lang="${supportedLocale}">`,
     "HTML 文档语言必须固定为 zh-CN",
-  );
-  requireText(
-    candidate.quasar,
-    `lang: "${supportedLocale}"`,
-    "Quasar 组件语言必须固定为 zh-CN",
   );
   requireText(
     candidate.locale,
@@ -130,7 +133,7 @@ async function applicationSource(directory) {
     entries.map(async (entry) => {
       const path = resolve(directory, entry.name);
       if (entry.isDirectory()) return applicationSource(path);
-      return [".ts", ".vue"].includes(extname(path))
+      return [".ts", ".tsx"].includes(extname(path))
         ? readFile(path, "utf8")
         : "";
     }),

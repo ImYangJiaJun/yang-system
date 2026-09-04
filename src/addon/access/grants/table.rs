@@ -59,7 +59,7 @@ pub(crate) fn grants_table_spec() -> Result<TableSpec, BaseError> {
         )
         .check_named(
             "chk_authz_grant_permission_format",
-            "`permission` REGEXP '^[a-z][a-z0-9_]*(\\\\.[a-z][a-z0-9_]*)+$'",
+            "regexp_like(`permission`, '^[a-z][a-z0-9_]*(\\\\.[a-z][a-z0-9_]*)+$')",
         ))
 }
 

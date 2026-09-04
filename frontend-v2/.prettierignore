@@ -1,3 +1,0 @@
-# 生成物：契约快照与类型由 scripts/dump_openapi.py 统一产出，不纳入格式门禁
-contracts/openapi.json
-src/contracts/api-types.ts

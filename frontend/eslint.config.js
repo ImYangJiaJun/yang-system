@@ -1,29 +1,46 @@
 import js from "@eslint/js";
+import reactHooks from "eslint-plugin-react-hooks";
+import reactRefresh from "eslint-plugin-react-refresh";
 import globals from "globals";
-import pluginVue from "eslint-plugin-vue";
 import tseslint from "typescript-eslint";
 
-export default [
+export default tseslint.config(
   {
     ignores: [
       "dist/**",
-      ".quasar/**",
+      "node_modules/**",
       "test-results/**",
+      "test-results-production/**",
       "playwright-report/**",
-      "src/*.d.ts",
+      // 生成物：契约快照与类型由 scripts/dump_openapi.py 统一产出
+      "src/contracts/api-types.ts",
     ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
-  ...pluginVue.configs["flat/essential"],
   {
-    files: ["**/*.{ts,vue}"],
+    files: ["**/*.{ts,tsx}"],
+    ...reactHooks.configs.flat.recommended,
     languageOptions: {
+      ecmaVersion: 2022,
       globals: { ...globals.browser, ...globals.node },
-      parserOptions: { parser: tseslint.parser },
+    },
+    plugins: {
+      "react-refresh": reactRefresh,
     },
     rules: {
-      "vue/multi-word-component-names": "off",
+      "react-refresh/only-export-components": [
+        "warn",
+        { allowConstantExport: true },
+      ],
     },
   },
-];
+  {
+    // shadcn/ui 组件按官方约定同时导出组件与 variants 辅助函数；
+    // src/test 是测试 helper（组件与渲染函数混合导出），无需 fast refresh。
+    files: ["src/components/ui/**", "src/test/**"],
+    rules: {
+      "react-refresh/only-export-components": "off",
+    },
+  },
+);

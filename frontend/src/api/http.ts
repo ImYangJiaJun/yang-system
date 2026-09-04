@@ -1,4 +1,4 @@
-import { ContractError } from "src/contracts/ui-catalog";
+import { ContractError } from "@/contracts/ui-catalog";
 import type { SessionContext } from "./types";
 
 export const apiBase = (import.meta.env.VITE_API_BASE_URL ?? "").replace(

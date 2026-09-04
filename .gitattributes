@@ -1,1 +1,3 @@
 frontend/** text eol=lf
+# 视觉回归基线等二进制资源不得做文本行尾归一化
+frontend/**/*.png binary

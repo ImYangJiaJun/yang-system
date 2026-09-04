@@ -1,5 +1,5 @@
-import type { ActionDemoSchema } from "src/contracts/ui-catalog";
-import { ContractError } from "src/contracts/ui-catalog";
+import type { ActionDemoSchema } from "@/contracts/ui-catalog";
+import { ContractError } from "@/contracts/ui-catalog";
 import { apiBase, contextHeaders } from "./http";
 import type { SessionContext } from "./types";
 

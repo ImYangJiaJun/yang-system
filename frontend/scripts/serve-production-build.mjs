@@ -21,7 +21,7 @@ const backendPort = positivePort(
   "YANG_PRODUCTION_E2E_BACKEND_PORT",
   18300,
 );
-const buildRoot = resolve(env.YANG_PRODUCTION_BUILD_ROOT || "dist/spa");
+const buildRoot = resolve(env.YANG_PRODUCTION_BUILD_ROOT || "dist");
 const indexPath = resolve(buildRoot, "index.html");
 const backendOrigin = `http://127.0.0.1:${backendPort}`;
 const proxyPrefixes = ["/api", "/.well-known", "/health"];
