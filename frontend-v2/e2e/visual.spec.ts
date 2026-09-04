@@ -10,6 +10,10 @@ import { mockSessionRestore } from "./support";
 // 视觉基线仅限 chromium 项目采集（跨浏览器字体栅格化差异不构成产品信号）。
 test.skip(({ browserName }) => browserName !== "chromium");
 
+// 基线在 Windows + chromium 采集；CI（Linux）字体栅格化差异会误报，CI 环境跳过，
+// 视觉回归作为本地/提交前检查运行（ADR-5 §2.5 决策记录）。
+test.skip(Boolean(process.env.CI), "视觉基线仅本地比对，CI 平台字体差异会误报");
+
 // 截图基线写入与多场景截图较慢，放宽用例超时。
 test.setTimeout(90_000);
 
