@@ -1,6 +1,6 @@
 # 前端技术栈重构 ADR 组
 
-状态：Proposed（二审）
+状态：Accepted
 日期：2026-08-27
 适用范围：`frontend/` 控制台整体重构（破坏性，需求方明确授权 Big Bang，不做渐进绞杀与可逆切换）
 
@@ -104,3 +104,31 @@ multipart 上传（MIME 白名单后端强制）、列偏好持久化。前端 1
 **决策记录**：`openapi-dump` 从 `src/bin/` 迁至 `examples/`（`c90bd45`）——架构门禁
 锁定 src/ 为纯组合根且明确拒绝 src/bin/，开发期契约工具按 frontend_demo 先例归位，
 比给检查器开白名单更符合门禁原意。
+
+### 2026-09-04 M3 完成（能力清单 13–17）
+
+注册（邮箱验证码 + 冷却）/密码重置（query token 双通道）、身份切换（IdentityStore
+纯 TS + SelectIdentityPage + AccountSwitcher）、Dashboard/Business/Workbench
+（DEV 门控 + lazy，生产产物无 workbench chunk）、custom 静态注册表（加载失败回退
+通用表格）、locale 契约门禁平移、密度三档（36/44/54px）。176 用例绿。
+
+**决策记录**：身份/会话状态用外置 store 而非 useState——select+navigate 在事件
+处理器内被 useSyncExternalStore 拆成不一致帧会触发路由守卫误跳；ModulePage 身份
+守卫改为不一致帧渲染空 + 宏任务延迟跳转。
+
+### 2026-09-04 M4 完成与一次性切换（ADR-5 §6 执行）
+
+- **M4a 门禁平移**：Playwright 双环境（5310/18310、5311/18311）18+2 用例全绿；
+  axe WCAG 2.2 AA 零 critical/serious；视觉回归基线 6 张入库（CI 跳过——Windows
+  采集基线在 Linux 字体栅格化差异会误报，`a987211`）；部署契约逐字沿用
+  （7 安全响应头、loopback-only、缓存策略）；bundle 双层预算落地，实测首屏 JS
+  gzip **257.9 kB**（目标 350 / 硬上限 450）。
+- **切换**（`60359ac`）：frontend-v2/ 更名为 frontend/，旧 Quasar 前端删除
+  （git 历史保留）；check_architecture.py 前端规则改写为 React 结构语义
+  （main.tsx 唯一 createRoot、workbench DEV 门控、TableView 行为边界、custom
+  注册表静态字面量 import）并同步 self-test；`.gitattributes` 补
+  `frontend/**/*.png binary`（防止基线截图被文本归一化损坏）；AGENTS.md /
+  README.md 同步。`run_ci.py quick` 与 self-test 全绿。
+- 需求方确认项登记表中的浏览器契约收紧已随切换生效。
+
+ADR-1 至 ADR-5 状态翻转为 **Accepted**。

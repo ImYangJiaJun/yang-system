@@ -1,6 +1,6 @@
 # ADR-2：表格引擎——TanStack Table headless
 
-状态：Proposed（二审）
+状态：Accepted
 日期：2026-08-27
 适用范围：TableView 解释器、查询面板、列偏好、选择模型
 

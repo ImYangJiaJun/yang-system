@@ -1,6 +1,6 @@
 # ADR-4：契约与运行时验证边界
 
-状态：Proposed（二审）
+状态：Accepted
 日期：2026-08-27
 适用范围：OpenAPI 类型生成、zod、动态 JSON Schema 表单校验
 
