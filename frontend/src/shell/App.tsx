@@ -1,0 +1,61 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createBrowserRouter, RouterProvider } from "react-router";
+
+import { createSessionController } from "@/engine/session/session-controller";
+import { SessionControllerContext } from "@/engine/session/use-session";
+import { applyDensity, loadDensity } from "@/shell/density";
+import { createIdentityStore } from "@/features/auth/identity";
+import { IdentityStoreContext } from "@/features/auth/use-identity";
+import {
+  StepUpDialogHost,
+  type StepUpProofHandler,
+} from "@/features/auth/components/step-up-host";
+import { appRoutes } from "./routes";
+
+export default function App() {
+  // SessionController 在 React 树外创建；Step-up UI 通过 delegate ref 晚绑定，
+  // 宿主未挂载时 fail-loud 而不是静默吞掉 428。
+  const stepUpDelegate = useRef<StepUpProofHandler | undefined>(undefined);
+  // 身份选择与 SessionController 同为外置 store；会话建立/清空时级联清空身份。
+  const [identityStore] = useState(() => createIdentityStore());
+  const identityResetRef = useRef<() => void>(() => undefined);
+  const [controller] = useState(() =>
+    createSessionController({
+      requestStepUpProof: (challenge, session) => {
+        const handler = stepUpDelegate.current;
+        if (!handler) {
+          return Promise.reject(new Error("Step-up 交互组件未就绪"));
+        }
+        return handler(challenge, session);
+      },
+      onSessionReset: () => identityResetRef.current(),
+    }),
+  );
+  const [queryClient] = useState(
+    () => new QueryClient({ defaultOptions: { queries: { retry: 1 } } }),
+  );
+  const router = useMemo(() => createBrowserRouter(appRoutes), []);
+
+  useEffect(() => {
+    identityResetRef.current = () => identityStore.clear();
+  }, [identityStore]);
+  useEffect(() => {
+    applyDensity(loadDensity());
+  }, []);
+
+  return (
+    <SessionControllerContext.Provider value={controller}>
+      <IdentityStoreContext.Provider value={identityStore}>
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
+          <StepUpDialogHost
+            onReady={(handler) => {
+              stepUpDelegate.current = handler;
+            }}
+          />
+        </QueryClientProvider>
+      </IdentityStoreContext.Provider>
+    </SessionControllerContext.Provider>
+  );
+}

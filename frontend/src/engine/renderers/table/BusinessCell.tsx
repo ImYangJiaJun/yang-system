@@ -1,4 +1,4 @@
-import { Badge } from "@/components/ui/badge";
+import { Badge } from "@/shared/ui/badge";
 import type { TableColumnSchema } from "@/engine/contracts/ui-catalog";
 import { resolveCellPresentation } from "./business-cell-model";
 

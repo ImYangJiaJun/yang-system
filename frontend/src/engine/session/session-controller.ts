@@ -2,7 +2,7 @@ import {
   disableAccount as requestDisableAccount,
   logout as requestLogout,
   type LoginResult,
-} from "./auth";
+} from "./lifecycle";
 import {
   clearStoredSession,
   discardLegacyStoredCredentials,

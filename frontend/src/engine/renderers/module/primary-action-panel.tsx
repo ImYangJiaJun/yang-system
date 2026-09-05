@@ -3,9 +3,9 @@ import { RefreshCw, Search } from "lucide-react";
 
 import { invokeAction } from "@/engine/http/client";
 import { useSessionCredentials } from "@/engine/session/use-session";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
+import { Skeleton } from "@/shared/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -13,7 +13,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
+} from "@/shared/ui/table";
 import type { ModulePageDefinition } from "@/engine/catalog/module-pages";
 import type { ActionDemoSchema } from "@/engine/contracts/ui-catalog";
 import {

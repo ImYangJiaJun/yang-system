@@ -17,7 +17,7 @@ const frontendRoot = resolve(".");
 const sources = {
   index: await readFile(resolve(frontendRoot, "index.html"), "utf8"),
   locale: await readFile(
-    resolve(frontendRoot, "src/lib/product-locale.ts"),
+    resolve(frontendRoot, "src/shared/lib/product-locale.ts"),
     "utf8",
   ),
   cell: await readFile(

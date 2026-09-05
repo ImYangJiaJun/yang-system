@@ -4,7 +4,7 @@ import type {
   TableViewSchema,
   UiCatalog,
 } from "@/engine/contracts/ui-catalog";
-import { compareProductText } from "@/lib/product-locale";
+import { compareProductText } from "@/shared/lib/product-locale";
 
 export type AccountIdentity = string;
 

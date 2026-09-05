@@ -773,15 +773,13 @@ def check_frontend_boundaries(root: Path) -> list[str]:
     if main_source.count("createRoot(") != 1:
         errors.append("frontend/src/main.tsx: 应存在且唯一持有 createRoot 应用启动入口")
 
-    for directory in ("layout", "pages", "components"):
-        base = frontend / directory
-        if not base.is_dir():
+    for source in sorted(frontend.rglob("*.tsx")):
+        if source == main:
             continue
-        for source in sorted(base.rglob("*.tsx")):
-            if "createRoot(" in source.read_text(encoding="utf-8"):
-                errors.append(
-                    f"{source.relative_to(root).as_posix()}: 页面/布局/组件不得启动全局生命周期"
-                )
+        if "createRoot(" in source.read_text(encoding="utf-8"):
+            errors.append(
+                f"{source.relative_to(root).as_posix()}: 页面/布局/组件不得启动全局生命周期"
+            )
 
     table_view = frontend / "engine" / "renderers" / "table" / "TableView.tsx"
     if table_view.is_file():
@@ -804,23 +802,23 @@ def check_frontend_boundaries(root: Path) -> list[str]:
                     f"顶层组件不得直接拥有异步状态机 {forbidden}"
                 )
 
-    routes = frontend / "app" / "routes.tsx"
+    routes = frontend / "shell" / "routes.tsx"
     routes_source = routes.read_text(encoding="utf-8") if routes.is_file() else ""
     if "workbench" in routes_source and "import.meta.env.DEV" not in routes_source:
         errors.append(
-            "frontend/src/app/routes.tsx: Workbench 必须由开发构建条件门控"
+            "frontend/src/shell/routes.tsx: Workbench 必须由开发构建条件门控"
         )
 
-    registry = frontend / "custom" / "registry.ts"
+    registry = frontend / "features" / "registry.ts"
     if not registry.is_file():
-        errors.append("frontend/src/custom/registry.ts: 自定义视图静态注册表必须存在")
+        errors.append("frontend/src/features/registry.ts: 自定义视图静态注册表必须存在")
     else:
         for line in registry.read_text(encoding="utf-8").splitlines():
             if "import(" in line:
                 argument = line.split("import(", 1)[1].lstrip()
                 if not (argument.startswith('"') or argument.startswith("'")):
                     errors.append(
-                        "frontend/src/custom/registry.ts: "
+                        "frontend/src/features/registry.ts: "
                         "自定义视图加载只允许静态字符串字面量 import，禁止动态拼接"
                     )
                     break
@@ -897,33 +895,33 @@ def self_test() -> None:
             root / "frontend/src/main.tsx",
             'import { createRoot } from "react-dom/client";\ncreateRoot(container).render();\n',
         )
-        write(root / "frontend/src/layout/AppLayout.tsx", "export function AppLayout() {}\n")
+        write(root / "frontend/src/shell/AppLayout.tsx", "export function AppLayout() {}\n")
         write(
             root / "frontend/src/engine/renderers/table/TableView.tsx",
             "useTableQuery(view, action);\nuseRelationOptions(view);\nusePresentedActions(view);\n",
         )
         write(
-            root / "frontend/src/app/routes.tsx",
+            root / "frontend/src/shell/routes.tsx",
             'const dev = import.meta.env.DEV ? [{ path: "/workbench" }] : [];\n',
         )
         write(
-            root / "frontend/src/custom/registry.ts",
+            root / "frontend/src/features/registry.ts",
             'const r = { "demo.items.insight": lazy(() => import("./views/DemoItemInsight")) };\n',
         )
         assert check_frontend_boundaries(root) == [], (
             "合法前端生命周期和 Table 编排边界应通过"
         )
         write(
-            root / "frontend/src/layout/AppLayout.tsx",
+            root / "frontend/src/shell/AppLayout.tsx",
             'import { createRoot } from "react-dom/client";\ncreateRoot(x);\n',
         )
         errors = check_frontend_boundaries(root)
         assert any("不得启动全局生命周期" in error for error in errors), (
             "必须拒绝布局重复启动全局生命周期"
         )
-        write(root / "frontend/src/layout/AppLayout.tsx", "export function AppLayout() {}\n")
+        write(root / "frontend/src/shell/AppLayout.tsx", "export function AppLayout() {}\n")
         write(
-            root / "frontend/src/custom/registry.ts",
+            root / "frontend/src/features/registry.ts",
             'const r = { x: lazy(() => import(`./views/${name}`)) };\n',
         )
         errors = check_frontend_boundaries(root)

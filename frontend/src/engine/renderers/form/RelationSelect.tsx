@@ -2,14 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import { invokeAction } from "@/engine/http/client";
 import { useSessionCredentials } from "@/engine/session/use-session";
-import { Input } from "@/components/ui/input";
+import { Input } from "@/shared/ui/input";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@/shared/ui/select";
 import { parseRelationOptions } from "@/engine/contracts/table-data";
 import type {
   ActionDemoSchema,

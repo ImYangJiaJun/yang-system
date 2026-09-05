@@ -6,8 +6,8 @@ import {
   type InvocationResult,
 } from "@/engine/http/client";
 import { useSessionCredentials } from "@/engine/session/use-session";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import { ContractError } from "@/engine/contracts/ui-catalog";
 import type { ActionDemoSchema } from "@/engine/contracts/ui-catalog";
 import { initialObject } from "@/engine/contracts/json-schema";

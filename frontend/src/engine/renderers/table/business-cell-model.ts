@@ -2,7 +2,7 @@ import type {
   TableColumnDisplaySchema,
   TableColumnSchema,
 } from "@/engine/contracts/ui-catalog";
-import { PRODUCT_LOCALE } from "@/lib/product-locale";
+import { PRODUCT_LOCALE } from "@/shared/lib/product-locale";
 import { formatCell } from "./table-view-model";
 
 type DisplayKind = NonNullable<TableColumnDisplaySchema["kind"]>;

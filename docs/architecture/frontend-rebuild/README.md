@@ -149,3 +149,40 @@ ADR-1 至 ADR-5 状态翻转为 **Accepted**。
   locale 契约扫描范围显式扩到 `tests/`，保证门禁强度不下降。
 - `tests/contracts/openapi-contract.test.ts` 的 `../../contracts/openapi.json`
   因镜像深度不变天然继续有效（指向 `frontend/contracts/` 生成物）。
+
+### 2026-09-05 src/ 引擎/应用分离（方案六，两个提交：`16a8546` + 本条目所属提交）
+
+`src/` 从按技术类型分层（api/app/catalog/components/...）重构为按架构角色分层，
+与 react-admin / Strapi / Directus 等 Schema 驱动管理台的「引擎/应用分离」范式同构：
+
+- `engine/`：与业务无关的通用解释引擎——renderers（table/form/action/module）、
+  contracts（zod + Ajv + OpenAPI 类型）、catalog（导航投影与缓存）、http（Action
+  调用协议）、session（浏览器会话协议全家桶）；`engine/index.ts` 是约定公共出口。
+- `features/auth/`：唯一业务域——登录/注册/重置/身份选择页面、注册与密码重置
+  流程请求（`api.ts`）、StepUpDialog、身份 store；`features/registry.ts` 是自定义
+  视图静态注册表，自定义视图按域放 `features/<域>/views/`。
+- `shell/`：应用外壳（routes/auth-gate/session-bridge/AppLayout/通用页面编排）。
+- `shared/`：shadcn 源码组件与产品文案。
+- 依赖方向约定：`shared` ← `engine` ← `features` ← `shell`。
+
+**决策记录**：
+
+- **会话协议归 engine 而非 features/auth**：renderers 有 6 处直接消费
+  `useSessionCredentials`（表格查询、表单关系选项、Action 调用都需要凭据视图）；
+  且后端 `yang_base::action::auth` 将浏览器会话 Cookie 作为框架能力提供，前端
+  会话协议是其镜像，属平台能力。对照 react-admin 的 `useGetIdentity` 也在 ra-core。
+- **auth.ts 沿职责拆分为二**：会话生命周期（login/refresh/logout/disable，被
+  SessionController 直接依赖）留 `engine/session/lifecycle.ts`；注册与密码重置
+  流程（账户域业务，无会话状态机依赖）迁至 `features/auth/api.ts`。拆分后
+  engine 不反向依赖 features，分层成立。
+- **createRoot 门禁升级**：从「扫描 layout/pages/components 三个目录」改为
+  「扫描 src/ 全部 tsx、唯一豁免 main.tsx」，不再依赖目录名，对结构演进免疫。
+- **自定义页面的承载方式**：registry 保持单一静态注册表（门禁不变），值指向
+  `features/<域>/views/` 的懒加载组件；复杂业务页面的私有组件/hooks 收拢在
+  本域目录，两个域共享的逻辑才下沉 shared/。
+- **后续增强（未做，记录在案）**：engine 深度路径 import 的机器禁令
+  （eslint-plugin-boundaries 或 check_architecture 扩展）、features 间禁止互相
+  import 的机器强制。
+- 门禁同步：check_architecture.py 三处路径（TableView/routes/registry）+
+  self-test fixture；verify-locale-contract 两处路径；components.json shadcn
+  别名；eslint react-refresh 豁免路径；dump_openapi.py 生成目标路径。

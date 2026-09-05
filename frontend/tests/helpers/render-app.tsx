@@ -5,9 +5,9 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 
 import { createSessionController } from "@/engine/session/session-controller";
 import { SessionControllerContext } from "@/engine/session/use-session";
-import { createIdentityStore, storeIdentity } from "@/app/identity";
-import { IdentityStoreContext } from "@/app/use-identity";
-import { appRoutes } from "@/app/routes";
+import { createIdentityStore, storeIdentity } from "@/features/auth/identity";
+import { IdentityStoreContext } from "@/features/auth/use-identity";
+import { appRoutes } from "@/shell/routes";
 
 /**
  * 测试渲染 helper：与 App.tsx 相同的 provider 组合

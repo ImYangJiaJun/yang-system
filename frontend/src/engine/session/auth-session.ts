@@ -1,4 +1,4 @@
-import { refreshSession, type LoginResult } from "./auth";
+import { refreshSession, type LoginResult } from "./lifecycle";
 import { ApiError } from "../http/errors";
 
 export const SESSION_EXPIRED_EVENT = "yang:session-expired";

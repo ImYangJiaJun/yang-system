@@ -39,7 +39,7 @@ export {
   type LoginResult,
   type LogoutResult,
   type DisableAccountResult,
-} from "./session/auth";
+} from "./session/lifecycle";
 export { completeStepUp, type StepUpProofResult } from "./session/step-up";
 export { SessionExpiredError } from "./session/auth-session";
 
