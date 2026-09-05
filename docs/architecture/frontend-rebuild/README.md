@@ -33,23 +33,23 @@
 
 ## 决策索引
 
-| ADR | 决策 | 结论 |
-|---|---|---|
-| [ADR-1](adr-1-build-and-ui-primitives.md) | 构建链与 UI 原语 | 解除 Quasar 耦合；原生 Vite + Tailwind 4 + shadcn/ui（源码自有） |
-| [ADR-2](adr-2-table-engine.md) | 表格引擎 | TanStack Table v8 headless；虚拟滚动按需引入，非一期硬依赖 |
-| [ADR-3](adr-3-framework-and-state.md) | 视图框架、路由与状态分层 | React 19 + react-router；Query / SessionController / 本地状态三层分离 |
-| [ADR-4](adr-4-contracts-and-validation.md) | 契约与运行时验证边界 | OpenAPI codegen（静态类型）+ zod（固定协议 envelope）+ Ajv（动态 JSON Schema）三轨分离 |
-| [ADR-5](adr-5-acceptance-and-cutover.md) | 验收指标与切换策略 | 量化视觉/性能/无障碍指标；能力清单驱动的工作量估算；一次性 cutover |
+| ADR                                        | 决策                     | 结论                                                                                   |
+| ------------------------------------------ | ------------------------ | -------------------------------------------------------------------------------------- |
+| [ADR-1](adr-1-build-and-ui-primitives.md)  | 构建链与 UI 原语         | 解除 Quasar 耦合；原生 Vite + Tailwind 4 + shadcn/ui（源码自有）                       |
+| [ADR-2](adr-2-table-engine.md)             | 表格引擎                 | TanStack Table v8 headless；虚拟滚动按需引入，非一期硬依赖                             |
+| [ADR-3](adr-3-framework-and-state.md)      | 视图框架、路由与状态分层 | React 19 + react-router；Query / SessionController / 本地状态三层分离                  |
+| [ADR-4](adr-4-contracts-and-validation.md) | 契约与运行时验证边界     | OpenAPI codegen（静态类型）+ zod（固定协议 envelope）+ Ajv（动态 JSON Schema）三轨分离 |
+| [ADR-5](adr-5-acceptance-and-cutover.md)   | 验收指标与切换策略       | 量化视觉/性能/无障碍指标；能力清单驱动的工作量估算；一次性 cutover                     |
 
 ## 需求方显式确认项登记（二审新增）
 
 以下为影响真实用户或产品节奏、必须由需求方显式确认的决策，不视为技术默认：
 
-| 决策 | 内容 | 状态 |
-|---|---|---|
-| **功能冻结窗口** | 重构期（预计 6–8 周，并行期硬上限 10 周）内旧前端只接安全与关键修复（双写 v2），普通新功能等待切换后实现（ADR-5 §5） | ✅ 需求方已确认（2026-08-27） |
-| **浏览器契约收紧** | 放弃 Safari ≤ 14 等旧浏览器，影响不可升级的存量设备可达性（ADR-1 §5） | ✅ 需求方已确认（2026-08-27） |
-| **Big Bang 一次性切换** | 不建渐进绞杀/金丝雀/可逆切换机制，仅保留制品级回退底线 + 三件安全网（ADR-5 §6） | ✅ 需求方已确认（2026-08-27） |
+| 决策                    | 内容                                                                                                                 | 状态                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| **功能冻结窗口**        | 重构期（预计 6–8 周，并行期硬上限 10 周）内旧前端只接安全与关键修复（双写 v2），普通新功能等待切换后实现（ADR-5 §5） | ✅ 需求方已确认（2026-08-27） |
+| **浏览器契约收紧**      | 放弃 Safari ≤ 14 等旧浏览器，影响不可升级的存量设备可达性（ADR-1 §5）                                                | ✅ 需求方已确认（2026-08-27） |
+| **Big Bang 一次性切换** | 不建渐进绞杀/金丝雀/可逆切换机制，仅保留制品级回退底线 + 三件安全网（ADR-5 §6）                                      | ✅ 需求方已确认（2026-08-27） |
 
 ## 二审状态
 
@@ -144,7 +144,7 @@ ADR-1 至 ADR-5 状态翻转为 **Accepted**。
 - 测试经 `@/` 别名引用被测源码，新增 `@test/` 别名指向 `tests/`（仅
   vitest.config + tsconfig 注册，构建不含 tests/）；被测单元 import 统一从
   `./xxx` 改写为 `@/<dir>/xxx`，消除相对路径对文件位置的耦合。
-- 选「顶层 tests/ 镜像」而非「src/ 下 __tests__ 子目录」：前者让 `src/` 目录树
+- 选「顶层 tests/ 镜像」而非「src/ 下 **tests** 子目录」：前者让 `src/` 目录树
   只表达生产结构，且 locale 契约等扫 `src/` 的门禁语义保持「生产代码」；
   locale 契约扫描范围显式扩到 `tests/`，保证门禁强度不下降。
 - `tests/contracts/openapi-contract.test.ts` 的 `../../contracts/openapi.json`
@@ -186,3 +186,6 @@ ADR-1 至 ADR-5 状态翻转为 **Accepted**。
 - 门禁同步：check_architecture.py 三处路径（TableView/routes/registry）+
   self-test fixture；verify-locale-contract 两处路径；components.json shadcn
   别名；eslint react-refresh 豁免路径；dump_openapi.py 生成目标路径。
+- 结构规则落成约束性文件 `frontend/AGENTS.md`（分层职责、依赖方向、新文件
+  归位判断、门禁对照表），根 AGENTS.md 指向其为权威记录；后续结构演进须
+  同提交同步该文件与门禁。

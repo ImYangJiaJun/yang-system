@@ -46,7 +46,7 @@ frontend/deploy/             # 生产 Nginx 配置、前端镜像 Dockerfile 与
 docker/app/                  # 后端生产镜像 Dockerfile（构建上下文为 lib_yang 仓库根）
 ```
 
-前端内部约定：`frontend/src/` 按「引擎/应用分离」组织（与 react-admin/Strapi 等 Schema 驱动管理台同构，决策见 `docs/architecture/frontend-rebuild/README.md` 进度日志）：`engine/` 是与业务无关的通用解释引擎——`engine/renderers/`（table/form/action/module 解释器）、`engine/contracts/`（zod + Ajv 白名单 + OpenAPI 生成类型）、`engine/catalog/`（后端 Catalog 的导航投影与缓存）、`engine/http/`（Action 调用协议与 HTTP 基础设施）、`engine/session/`（浏览器会话协议：SessionController 纯 TS 状态机 + `use-session.ts` 唯一允许 import react 的薄壳 + 生命周期请求），公共出口是 `engine/index.ts`；`features/auth/` 是唯一的业务域（登录/注册/重置密码/身份选择页面、注册流程请求、StepUpDialog、身份 store），自定义视图注册表在 `features/registry.ts`（静态注册表，禁止按后端字符串动态 import），自定义视图按域放在 `features/<域>/views/`；`shell/` 是应用外壳（routes/auth-gate/AppLayout/通用页面编排）；`shared/` 是 shadcn 源码组件（`shared/ui/`）与单语言产品文案（`shared/lib/product-locale.ts`）。依赖方向：`shared` ← `engine` ← `features` ← `shell`。`frontend/src/` 只承载生产代码；单元测试集中在 `frontend/tests/`（镜像 src 目录结构，经 `@/` 别名引用被测源码，共享 helper 与 fixture 在 `tests/helpers/`、`tests/fixtures/`，`@test/` 别名指向 `tests/`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。
+前端内部约定：`frontend/src/` 按「引擎/应用分离」组织（与 react-admin/Strapi 等 Schema 驱动管理台同构，决策见 `docs/architecture/frontend-rebuild/README.md` 进度日志）：`engine/` 是与业务无关的通用解释引擎——`engine/renderers/`（table/form/action/module 解释器）、`engine/contracts/`（zod + Ajv 白名单 + OpenAPI 生成类型）、`engine/catalog/`（后端 Catalog 的导航投影与缓存）、`engine/http/`（Action 调用协议与 HTTP 基础设施）、`engine/session/`（浏览器会话协议：SessionController 纯 TS 状态机 + `use-session.ts` 唯一允许 import react 的薄壳 + 生命周期请求），公共出口是 `engine/index.ts`；`features/auth/` 是唯一的业务域（登录/注册/重置密码/身份选择页面、注册流程请求、StepUpDialog、身份 store），自定义视图注册表在 `features/registry.ts`（静态注册表，禁止按后端字符串动态 import），自定义视图按域放在 `features/<域>/views/`；`shell/` 是应用外壳（routes/auth-gate/AppLayout/通用页面编排）；`shared/` 是 shadcn 源码组件（`shared/ui/`）与单语言产品文案（`shared/lib/product-locale.ts`）。依赖方向：`shared` ← `engine` ← `features` ← `shell`。`frontend/src/` 只承载生产代码；单元测试集中在 `frontend/tests/`（镜像 src 目录结构，经 `@/` 别名引用被测源码，共享 helper 与 fixture 在 `tests/helpers/`、`tests/fixtures/`，`@test/` 别名指向 `tests/`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。**前端结构规则的约束性权威记录是 `frontend/AGENTS.md`**（分层职责、依赖方向、新文件归位判断、门禁对照表）；任何结构演进必须在同一提交内同步该文件、本文件、ADR 进度日志与门禁脚本。
 
 ## 构建、测试与开发命令
 
@@ -98,6 +98,7 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
   ```
 
   覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下只有 `registration_email_integration.rs`、`refresh_load_benchmark.rs` 与 `schema_apply_integration.rs` 三个入口。
+
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
 
 ## 安全注意事项
