@@ -4,3 +4,4 @@
 /config.toml
 /config.local.toml
 .codex/
+__pycache__/
