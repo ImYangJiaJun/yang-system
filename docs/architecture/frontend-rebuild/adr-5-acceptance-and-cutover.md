@@ -136,7 +136,7 @@ M2–M4。初版 ADR 的"3 周"估算作废——其低估了会话/Step-up/失�
 | `vue-tsc --noEmit` | `tsc --noEmit`（strict） |
 | ESLint `--max-warnings 0` + eslint-plugin-vue | ESLint + typescript-eslint + react 规则集，阈值不变 |
 | Prettier format:check | 不变 |
-| Vitest 同目录测试 | 不变；React 组件层配 Testing Library |
+| Vitest 同目录测试 | ~~不变；React 组件层配 Testing Library~~（2026-09 修订：单元测试集中至 `frontend/tests/` 镜像目录，见 README 进度日志）React 组件层配 Testing Library |
 | `verify:locale-contract` | 保留脚本思路，适配新文案入口 |
 | `verify:production-build` / `verify:deployment-contract` | 保留，适配 Vite 产物布局 |
 | `pnpm audit --prod --audit-level moderate` | 不变 |

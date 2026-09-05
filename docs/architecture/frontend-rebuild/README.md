@@ -132,3 +132,20 @@ multipart 上传（MIME 白名单后端强制）、列偏好持久化。前端 1
 - 需求方确认项登记表中的浏览器契约收紧已随切换生效。
 
 ADR-1 至 ADR-5 状态翻转为 **Accepted**。
+
+### 2026-09-05 单元测试与生产源码隔离（修订 ADR-5 §7「同目录测试」）
+
+37 个 Vitest 文件从 `src/` 同目录迁移至 `frontend/tests/`（镜像 src 目录结构，
+`git mv` 保留历史）；共享 helper/fixture 从 `src/test/` 迁为 `tests/helpers/` 与
+`tests/fixtures/`，setup 迁为 `tests/setup.ts`。`src/` 自此为纯生产代码。
+
+**决策记录**：
+
+- 测试经 `@/` 别名引用被测源码，新增 `@test/` 别名指向 `tests/`（仅
+  vitest.config + tsconfig 注册，构建不含 tests/）；被测单元 import 统一从
+  `./xxx` 改写为 `@/<dir>/xxx`，消除相对路径对文件位置的耦合。
+- 选「顶层 tests/ 镜像」而非「src/ 下 __tests__ 子目录」：前者让 `src/` 目录树
+  只表达生产结构，且 locale 契约等扫 `src/` 的门禁语义保持「生产代码」；
+  locale 契约扫描范围显式扩到 `tests/`，保证门禁强度不下降。
+- `tests/contracts/openapi-contract.test.ts` 的 `../../contracts/openapi.json`
+  因镜像深度不变天然继续有效（指向 `frontend/contracts/` 生成物）。

@@ -37,8 +37,8 @@ export default tseslint.config(
   },
   {
     // shadcn/ui 组件按官方约定同时导出组件与 variants 辅助函数；
-    // src/test 是测试 helper（组件与渲染函数混合导出），无需 fast refresh。
-    files: ["src/components/ui/**", "src/test/**"],
+    // tests/helpers 是测试 helper（组件与渲染函数混合导出），无需 fast refresh。
+    files: ["src/components/ui/**", "tests/helpers/**"],
     rules: {
       "react-refresh/only-export-components": "off",
     },

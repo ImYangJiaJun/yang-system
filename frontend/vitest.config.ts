@@ -10,13 +10,15 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
+      "@test": path.resolve(__dirname, "tests"),
     },
   },
   test: {
     environment: "jsdom",
     globals: true,
-    setupFiles: ["./src/test-setup.ts"],
+    setupFiles: ["./tests/setup.ts"],
     // e2e/ 与 e2e-production/ 是 Playwright 规格，不走 Vitest。
-    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // 单元测试与 src/ 生产代码隔离，集中在 tests/ 并镜像 src 目录结构。
+    include: ["tests/**/*.{test,spec}.{ts,tsx}"],
   },
 });

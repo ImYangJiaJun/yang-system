@@ -46,7 +46,7 @@ frontend/deploy/             # 生产 Nginx 配置、前端镜像 Dockerfile 与
 docker/app/                  # 后端生产镜像 Dockerfile（构建上下文为 lib_yang 仓库根）
 ```
 
-前端内部约定：API 客户端与会话状态机在 `frontend/src/api/`（SessionController 为纯 TS 会话状态机，`use-session.ts` 是唯一允许 import react 的会话薄壳），契约在 `frontend/src/contracts/`（zod + Ajv 白名单 + OpenAPI 生成类型），业务导航投影在 `frontend/src/catalog/module-pages.ts`，通用解释器在 `frontend/src/renderers/`（table/form/action），shadcn 源码组件在 `frontend/src/components/ui/`，页面编排在 `pages/` 和 `layout/`，应用外壳与路由在 `app/`。需要特殊交互的自定义视图在 `custom/`（`custom/registry.ts` 是静态注册表，禁止按后端字符串动态 import）；单语言产品文案集中在 `lib/product-locale.ts`。单元测试与源码同目录（`*.test.ts`/`*.test.tsx`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。
+前端内部约定：API 客户端与会话状态机在 `frontend/src/api/`（SessionController 为纯 TS 会话状态机，`use-session.ts` 是唯一允许 import react 的会话薄壳），契约在 `frontend/src/contracts/`（zod + Ajv 白名单 + OpenAPI 生成类型），业务导航投影在 `frontend/src/catalog/module-pages.ts`，通用解释器在 `frontend/src/renderers/`（table/form/action），shadcn 源码组件在 `frontend/src/components/ui/`，页面编排在 `pages/` 和 `layout/`，应用外壳与路由在 `app/`。需要特殊交互的自定义视图在 `custom/`（`custom/registry.ts` 是静态注册表，禁止按后端字符串动态 import）；单语言产品文案集中在 `lib/product-locale.ts`。`frontend/src/` 只承载生产代码；单元测试集中在 `frontend/tests/`（镜像 src 目录结构，经 `@/` 别名引用被测源码，共享 helper 与 fixture 在 `tests/helpers/`、`tests/fixtures/`，`@test/` 别名指向 `tests/`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。
 
 ## 构建、测试与开发命令
 
@@ -88,7 +88,7 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 ## 测试策略
 
 - Rust：逻辑旁加 `#[cfg(test)]` 单元测试；`cargo test --lib --locked` 属于 quick 门禁，必须始终通过。
-- 前端：改动的契约或状态逻辑要有同目录 `*.test.ts` 回归测试（Vitest）；浏览器行为用 `frontend/e2e/*.spec.ts`（Playwright），E2E 使用 `examples/frontend_demo/` 的无数据库后端，dev-server 与 production-build 两套环境用独立端口隔离，门禁会自行启动演示后端。
+- 前端：改动的契约或状态逻辑要有 `frontend/tests/` 下镜像路径的 `*.test.ts` 回归测试（Vitest）；浏览器行为用 `frontend/e2e/*.spec.ts`（Playwright），E2E 使用 `examples/frontend_demo/` 的无数据库后端，dev-server 与 production-build 两套环境用独立端口隔离，门禁会自行启动演示后端。
 - 真实集成测试（`tests/*.rs` 与部分 `--lib --ignored` 测试）要求专用 MySQL 数据库名以 `_test` 结尾、Redis 强制 DB 15，不用 mock 替代：
 
   ```powershell
