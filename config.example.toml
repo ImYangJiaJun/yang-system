@@ -99,9 +99,10 @@ auth_rate_limit_ip_attempts = 30
 auth_rate_limit_username_attempts = 10
 # 密码重置凭证只返回一次，建议保持短 TTL；允许范围 60..=3600 秒。
 password_reset_ttl_seconds = 900
-# 三阶段发布：先保持 false 部署兼容读取；确认无旧实例后改为 true，同时开启
-# Refresh 凭据版本签发与会递增该版本的 change_password Action。
-issue_refresh_credential_version = false
+# 三阶段发布已完成：本系统无旧实例，示例配置直接开启 Refresh 凭据版本签发，
+# 同时启用会递增该版本的 change_password / disable / reset_password Action。
+# 接入存量旧部署时必须先保持 false 兼容读取，确认无旧实例后再改为 true。
+issue_refresh_credential_version = true
 # 默认不信任任何 Forwarded/X-Forwarded-For；仅填写实际反向代理的最小 CIDR。
 # 示例：trusted_proxy_cidrs = ["127.0.0.1/32", "10.42.0.0/24"]
 trusted_proxy_cidrs = []

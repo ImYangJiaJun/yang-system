@@ -875,7 +875,7 @@ argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
 auth_rate_limit_ip_attempts = 30
 auth_rate_limit_username_attempts = 10
-issue_refresh_credential_version = false
+issue_refresh_credential_version = true
 [shutdown]
 total_timeout_seconds = 30
 [observability]
@@ -906,7 +906,7 @@ filter = "info"
         assert_eq!(settings.authorization.outbox_poll_interval_ms, 250);
         assert_eq!(settings.authorization.outbox_batch_size, 100);
         assert!(settings.security.trusted_proxy_cidrs.is_empty());
-        assert!(!settings.security.issue_refresh_credential_version);
+        assert!(settings.security.issue_refresh_credential_version);
         assert_eq!(settings.security.password_reset_ttl_seconds, 900);
         assert_eq!(
             settings.email.password_reset.link_base_url,

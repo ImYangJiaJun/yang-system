@@ -16,10 +16,10 @@ OpenAPI 与前端页面。骨架只保留 `account` 一个业务 Addon，覆盖�
 单调递增版本并追加 Outbox。全设备退出、自助停用、改密和密码重置按各自契约使用
 Step-up、会话撤销或审计事件。
 
-`security.issue_refresh_credential_version` 是三阶段发布开关。示例配置保持 `false`，
-此时服务兼容读取旧 Refresh Token，且不会注册依赖新版凭据版本契约的改密、自助停用和
-密码重置 Action；确认没有旧实例后切换为 `true`，才同时启用
-Refresh 凭据版本签发和这些 Action。该开关不能在新旧实例混跑时提前打开。
+`security.issue_refresh_credential_version` 是三阶段发布开关。本系统无旧实例，
+示例配置已为 `true`：同时启用 Refresh 凭据版本签发与依赖新版凭据版本契约的
+改密、自助停用和密码重置 Action。接入存量旧部署时需先保持 `false` 兼容读取旧
+Refresh Token，确认没有旧实例后才切换为 `true`；该开关不能在新旧实例混跑时提前打开。
 
 ## 本地环境
 
