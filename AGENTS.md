@@ -146,3 +146,4 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 - `docs/AUDIT.md` — 高权限审计
 - `docs/REGISTRATION_EMAIL_VERIFICATION.md` — 注册邮箱验证码边界
 - `docs/architecture/` — 授权失效 ADR 与 writer 清单、裸 SQL 边界、会话 TTL
+- `docs/architecture/account-system-roadmap.md` — 账户系统补全路线图（通用业务底座定位，分阶段方案与开放决策点）
