@@ -5,7 +5,7 @@ import { stdout } from "node:process";
 /**
  * 单语言产品合同校验（对齐旧 frontend/scripts/verify-locale-contract.mjs 语义）：
  * - HTML 文档语言固定 zh-CN；
- * - 产品 locale 唯一权威常量（src/lib/product-locale.ts）；
+ * - 产品 locale 唯一权威常量（src/shared/lib/product-locale.ts）；
  * - 大小写归一/文本排序/Intl 格式化必须显式使用产品 locale；
  * - 应用代码与单元测试（src/ 与 tests/ 下 .ts/.tsx）禁止依赖浏览器环境的隐式 locale API；
  * - docs/LOCALE.md 携带三个机器标记；

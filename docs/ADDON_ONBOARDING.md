@@ -126,7 +126,7 @@ VALUES (1, 'demo.notes.read', 0, UNIX_TIMESTAMP())
    `TableActionDialog` 依据 Action 输入 JSON Schema 通用渲染。
 
 需要特殊交互（向导、图形编辑器、复杂联动）时才在
-`frontend/src/custom/registry.ts` 静态注册自定义视图；禁止按后端字符串动态
+`frontend/src/features/registry.ts` 静态注册自定义视图；禁止按后端字符串动态
 import。demo addon 未触碰 `frontend/` 任何文件。
 
 ### 9. 门禁命令

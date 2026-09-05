@@ -19,7 +19,7 @@ yang-runtime = { path = "../../crates/yang-runtime", ... }
 ### 技术栈
 
 - 后端：Rust 2021（`rust-version = "1.80"`；仓库没有 `rust-toolchain` 文件，1.97.1 工具链由 `scripts/setup_local.ps1` 在本地安装、由 CI 的 `RUST_VERSION` 环境变量固定），axum 0.8、tokio、sqlx (MySQL)、Redis、jsonwebtoken、argon2、lettre (SMTP)、tracing、metrics。
-- 前端：React 19 / Vite / Tailwind CSS 4 / shadcn/ui（组件源码入库 `frontend/src/components/ui/`）/ TanStack Query + Table / react-router / zod / Ajv（动态 JSON Schema 校验）/ react-hook-form，TypeScript，pnpm 10.33.1（`frontend/package.json` 的 `packageManager` 字段固定），Node.js 24+。技术选型决策见 `docs/architecture/frontend-rebuild/` ADR 组。浏览器契约：Chrome/Edge ≥ 111、Firefox ≥ 128、Safari ≥ 16.4。
+- 前端：React 19 / Vite / Tailwind CSS 4 / shadcn/ui（组件源码入库 `frontend/src/shared/ui/`）/ TanStack Query + Table / react-router / zod / Ajv（动态 JSON Schema 校验）/ react-hook-form，TypeScript，pnpm 10.33.1（`frontend/package.json` 的 `packageManager` 字段固定），Node.js 24+。技术选型决策见 `docs/architecture/frontend-rebuild/` ADR 组。浏览器契约：Chrome/Edge ≥ 111、Firefox ≥ 128、Safari ≥ 16.4。
 - 依赖服务：MySQL 8.0（`127.0.0.1:3306`）与 Redis 7（`127.0.0.1:6379`），由根目录 `compose.yaml` 提供；`docker/mysql/init/` 会同时创建 `yang_system` 和 `yang_system_test` 两个库。注意 `docker compose down -v` 会永久删除本地数据卷。
 - 辅助脚本：Python 3.11+（质量门禁、架构检查、Action 脚手架、本地初始化）。
 
@@ -76,7 +76,7 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；**禁止引入进程级数据库/Redis/Tools 单例**。
 - 当前没有租户域；裸 SQL 路径的边界登记见 `docs/architecture/raw-sql-boundaries.md`。
 - 数据库结构由 `src/infrastructure/schema.rs` 的声明统一驱动：启动时先只读计划和旧数据预检，全部安全后才保数据增量同步；冲突会输出表、对象和主键并拒绝启动。**不要新增 SQL 迁移文件**（`migrations/` 为空是有意的）。规则见 `docs/SCHEMA.md`。
-- 前端业务导航由后端 Catalog 投影驱动，通用 `ModulePage` 解释 TableView/JSON Schema 表单/操作语义；需要特殊交互的页面必须在 `frontend/src/custom/registry.ts` 静态注册表中显式登记，未登记或加载失败时回退到通用 TableView。**不要根据后端返回的字符串构造动态 import**。
+- 前端业务导航由后端 Catalog 投影驱动，通用 `ModulePage` 解释 TableView/JSON Schema 表单/操作语义；需要特殊交互的页面必须在 `frontend/src/features/registry.ts` 静态注册表中显式登记，未登记或加载失败时回退到通用 TableView。**不要根据后端返回的字符串构造动态 import**。
 
 ## 代码风格
 
