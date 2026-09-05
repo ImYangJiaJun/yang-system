@@ -100,6 +100,33 @@ impl UserRepository {
         Ok(!rows.is_empty())
     }
 
+    /// 按已验证邮箱定位启用状态的用户 ID；停用用户与不存在一样返回 None，
+    /// 供防枚举的自助找回流程使用（不外泄邮箱是否注册）。
+    pub(crate) async fn find_active_user_by_email(
+        &self,
+        ctx: &ActionContext,
+        email: &str,
+    ) -> Result<Option<i64>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(&[USER_ID, STATUS])?
+            .where_eq(EMAIL, serde_json::Value::String(email.to_string()))?
+            .page(1, 1)?
+            .all()
+            .await?;
+        rows.first()
+            .map(|record| -> Result<Option<i64>, BaseError> {
+                let status = UserStatus::from_storage(&record.require::<String>(STATUS)?)?;
+                if status.is_active() {
+                    Ok(Some(record.require(USER_ID)?))
+                } else {
+                    Ok(None)
+                }
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
     pub(crate) async fn find_credentials_by_username(
         &self,
         ctx: &ActionContext,

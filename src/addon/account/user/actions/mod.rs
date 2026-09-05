@@ -10,6 +10,7 @@ mod logout;
 mod me;
 mod refresh;
 mod register;
+mod request_password_reset;
 mod request_registration_email;
 mod reset_password;
 mod step_up;
@@ -36,7 +37,8 @@ const ACTIONS: &[Register] = action_registry![
     refresh,
     change_password, // 发布开关：credential_mutations_enabled
     disable_self,    // 发布开关：credential_mutations_enabled
-    reset_password,  // 发布开关：credential_mutations_enabled
+    request_password_reset,
+    reset_password, // 发布开关：credential_mutations_enabled
     logout,
     step_up, // 条件：组合根配置了 StepUpManager
     me,

@@ -87,6 +87,11 @@ send_email_attempts = 5
 # 全局容量闸门高于单 IP/邮箱额度，避免单个攻击者耗尽邮件服务。
 send_global_attempts = 1000
 
+[email.password_reset]
+# 密码重置邮件中链接指向的前端控制台入口（scheme + host[:port]，无路径与查询串）。
+# 生产环境必须使用 https；不得从请求 Host 头推导（Host 头可被攻击者伪造）。
+link_base_url = "http://localhost:5273"
+
 [security]
 argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60

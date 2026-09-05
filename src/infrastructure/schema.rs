@@ -149,7 +149,8 @@ fn password_reset_token() -> Result<TableDefinition, BaseError> {
             Field::string("token_digest", 64).required(),
             Field::string("token_fingerprint", 16).required(),
             Field::bigint("user_user").required(),
-            Field::bigint("requested_by_user").required(),
+            // 自助找回场景没有请求者，写 NULL；管理签发（路线图阶段 D）再写入操作者。
+            Field::bigint("requested_by_user"),
             Field::bigint("expires_at").required(),
             Field::bigint("consumed_at"),
             Field::bigint("invalidated_at"),

@@ -13,8 +13,8 @@ use crate::addon::account::domain::authz_version::{
 };
 use crate::addon::account::domain::grants::{AuthorizationGrants, GrantResolver};
 use crate::addon::account::domain::password_reset::{
-    consume_in_tx, find_target_user, invalid_reset_token, lock_in_tx, LockedPasswordReset,
-    PasswordResetReference,
+    consume_in_tx, find_target_user, insert_issued, invalid_reset_token, lock_in_tx,
+    IssuedPasswordReset, LockedPasswordReset, PasswordResetReference,
 };
 use crate::addon::account::domain::system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
 use crate::addon::account::user::table::{UserView, STATUS};
@@ -42,6 +42,7 @@ pub(crate) struct Account {
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     step_up_manager: Option<Arc<StepUpManager>>,
     issue_refresh_credential_version: bool,
+    password_reset_ttl_seconds: u64,
 }
 
 impl Account {
@@ -61,6 +62,7 @@ impl Account {
             system_owner_claimer,
             step_up_manager,
             issue_refresh_credential_version: security.issue_refresh_credential_version,
+            password_reset_ttl_seconds: security.password_reset_ttl_seconds,
         })
     }
 
@@ -206,6 +208,28 @@ impl Account {
     /// 密码重置凭证无效或已过期的统一错误。
     pub(crate) fn invalid_reset_token() -> BaseError {
         invalid_reset_token()
+    }
+
+    /// 自助密码重置凭证的有效期（秒）。
+    pub(crate) fn password_reset_ttl_seconds(&self) -> u64 {
+        self.password_reset_ttl_seconds
+    }
+
+    /// 为启用用户签发一条自助密码重置凭证并入库（只存摘要与指纹）。
+    pub(crate) async fn issue_password_reset(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+    ) -> Result<IssuedPasswordReset, BaseError> {
+        let issued = IssuedPasswordReset::generate()?;
+        insert_issued(
+            ctx.tools().mysql()?.pool(),
+            user_id,
+            &issued,
+            self.password_reset_ttl_seconds,
+        )
+        .await?;
+        Ok(issued)
     }
 
     /// 持久撤销后尽力把 Redis 水位线即时收敛；失败时补失败审计并返回 false，

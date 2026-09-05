@@ -314,6 +314,12 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         Integer
     ),
     environment_binding!(
+        "YANG_SYSTEM_EMAIL_PASSWORD_RESET_LINK_BASE_URL",
+        "email.password_reset",
+        "link_base_url",
+        Text
+    ),
+    environment_binding!(
         "YANG_SYSTEM_SECURITY_ARGON2_MAX_CONCURRENCY",
         "security",
         "argon2_max_concurrency",

@@ -344,6 +344,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/users/request-password-reset": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 请求密码重置
+     * @description 向已验证邮箱投递一次性密码重置链接；响应不暴露邮箱是否注册
+     */
+    post: operations["account.user.request_password_reset"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/users/reset-password": {
     parameters: {
       query?: never;
@@ -2187,6 +2207,85 @@ export interface operations {
                * @description 重发冷却（秒）。
                */
               resend_after: number;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "account.user.request_password_reset": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          email: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * RequestPasswordResetAccepted
+             * @description 请求被接受后的统一响应（不暴露邮箱是否注册）。
+             */
+            data: {
+              /** @description 请求已被接受（不保证邮件真实投递）。 */
+              accepted: boolean;
+              /**
+               * Format: uint64
+               * @description 重置凭证有效期（秒）。
+               */
+              expires_in: number;
             };
             message: string;
           };

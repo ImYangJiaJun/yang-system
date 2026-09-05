@@ -18,6 +18,7 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `app.environment` | `YANG_SYSTEM_APP_ENVIRONMENT` |
 | `http.max_concurrency` | `YANG_SYSTEM_HTTP_MAX_CONCURRENCY` |
 | `mysql.url` | `YANG_SYSTEM_MYSQL_URL` |
+| `email.password_reset.link_base_url` | `YANG_SYSTEM_EMAIL_PASSWORD_RESET_LINK_BASE_URL` |
 | `token.active_secret` | `YANG_SYSTEM_TOKEN_ACTIVE_SECRET` |
 | `security.trusted_proxy_cidrs` | `YANG_SYSTEM_SECURITY_TRUSTED_PROXY_CIDRS` |
 | `shutdown.total_timeout_seconds` | `YANG_SYSTEM_SHUTDOWN_TOTAL_TIMEOUT_SECONDS` |
@@ -113,11 +114,15 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
 
 ### SMTP
 
-- `email.smtp` 凭据用于注册/验证码邮件投递。先在 relay 侧添加新凭据，再按
+- `email.smtp` 凭据用于注册验证码与密码重置两类事务性邮件投递。先在 relay 侧添加新凭据，再按
   通用步骤滚动重启，最后吊销旧凭据。
 - 轮换失误（旧凭据提前失效）不会导致启动失败，但会让邮件投递失败；通过
   `yang_system_registration_email_total{result}` 指标观察 `error` 结果突增
   即可发现，修复方式是部署正确凭据并再次滚动重启。
+- `email.password_reset.link_base_url` 是密码重置邮件中链接指向的前端控制台入口
+  （scheme + host[:port]，无路径与查询串），生产环境强制 `https`。该地址只从配置
+  注入，不得从请求 `Host` 头推导——Host 头可被攻击者伪造，伪造链接会把一次性
+  重置凭证导向攻击者控制的站点。
 
 ## 关闭总预算
 

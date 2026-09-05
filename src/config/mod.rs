@@ -143,6 +143,7 @@ pub struct StepUpSettings {
 pub struct EmailSettings {
     pub smtp: SmtpSettings,
     pub verification: EmailVerificationSettings,
+    pub password_reset: PasswordResetEmailSettings,
 }
 
 #[derive(Clone, Deserialize)]
@@ -173,12 +174,21 @@ pub struct EmailVerificationSettings {
     pub send_global_attempts: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordResetEmailSettings {
+    /// 密码重置邮件中链接指向的前端控制台入口（scheme + host[:port]，无路径与查询串）。
+    /// 必须从配置注入，不得从请求 Host 头推导（Host 头可被攻击者伪造）。
+    pub link_base_url: String,
+}
+
 impl std::fmt::Debug for EmailSettings {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("EmailSettings")
             .field("smtp", &self.smtp)
             .field("verification", &self.verification)
+            .field("password_reset", &self.password_reset)
             .finish()
     }
 }
@@ -382,7 +392,8 @@ impl Settings {
         }
         self.token.validate()?;
         self.step_up.validate(&self.token)?;
-        self.email.validate(&self.token, &self.step_up)?;
+        self.email
+            .validate(self.app.environment, &self.token, &self.step_up)?;
         self.security.validate()?;
         if !(1..=300).contains(&self.shutdown.total_timeout_seconds) {
             bail!("shutdown.total_timeout_seconds 必须在 1..=300 范围内");
@@ -500,9 +511,15 @@ impl StepUpSettings {
 }
 
 impl EmailSettings {
-    fn validate(&self, token: &TokenSettings, step_up: &StepUpSettings) -> anyhow::Result<()> {
+    fn validate(
+        &self,
+        environment: DeploymentEnvironment,
+        token: &TokenSettings,
+        step_up: &StepUpSettings,
+    ) -> anyhow::Result<()> {
         self.smtp.validate()?;
         self.verification.validate()?;
+        self.password_reset.validate(environment)?;
         let secret = self.verification.secret.as_str();
         let collides_with_token = std::iter::once(token.active_secret.as_str())
             .chain(token.retiring_keys.iter().map(|key| key.secret.as_str()))
@@ -608,6 +625,49 @@ impl EmailVerificationSettings {
             || self.send_global_attempts < self.send_email_attempts
         {
             bail!("email.verification.send_global_attempts 不得小于单 IP 或单邮箱额度");
+        }
+        Ok(())
+    }
+}
+
+impl PasswordResetEmailSettings {
+    /// 转换为密码重置邮件链接的运行时配置（经 Tools config 槽注入）。
+    pub fn link_config(&self) -> crate::addon::account::email_delivery::PasswordResetLinkConfig {
+        crate::addon::account::email_delivery::PasswordResetLinkConfig {
+            base_url: self.link_base_url.trim().to_string(),
+        }
+    }
+
+    fn validate(&self, environment: DeploymentEnvironment) -> anyhow::Result<()> {
+        let value = self.link_base_url.trim();
+        let Some((scheme, authority)) = value.split_once("://") else {
+            bail!("email.password_reset.link_base_url 必须包含 scheme（如 https://console.example.com）");
+        };
+        match scheme {
+            "https" => {}
+            "http" if environment != DeploymentEnvironment::Production => {}
+            _ => bail!(
+                "email.password_reset.link_base_url 必须使用 https（仅开发与测试环境允许 http）"
+            ),
+        }
+        let authority_valid = !authority.is_empty()
+            && authority.len() <= 253
+            && authority
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':'));
+        if !authority_valid {
+            bail!(
+                "email.password_reset.link_base_url 只能是 host[:port]，不允许路径、查询串、用户信息或非 ASCII 字符"
+            );
+        }
+        if let Some((_, port)) = authority.rsplit_once(':') {
+            let port_valid = !port.is_empty()
+                && port.len() <= 5
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|port| port > 0);
+            if !port_valid {
+                bail!("email.password_reset.link_base_url 的端口必须是 1..=65535");
+            }
         }
         Ok(())
     }
@@ -808,6 +868,8 @@ send_window_seconds = 3600
 send_ip_attempts = 20
 send_email_attempts = 5
 send_global_attempts = 1000
+[email.password_reset]
+link_base_url = "http://localhost:5273"
 [security]
 argon2_max_concurrency = 4
 auth_rate_limit_window_seconds = 60
@@ -846,6 +908,10 @@ filter = "info"
         assert!(settings.security.trusted_proxy_cidrs.is_empty());
         assert!(!settings.security.issue_refresh_credential_version);
         assert_eq!(settings.security.password_reset_ttl_seconds, 900);
+        assert_eq!(
+            settings.email.password_reset.link_base_url,
+            "http://localhost:5273"
+        );
         assert_eq!(settings.shutdown.total_timeout_seconds, 30);
         assert!(!settings.observability.metrics_enabled);
         assert!(!settings.observability.traces_enabled);
@@ -891,6 +957,54 @@ filter = "info"
         assert!(error
             .to_string()
             .contains("security.password_reset_ttl_seconds"));
+    }
+
+    #[test]
+    fn rejects_password_reset_link_base_url_outside_the_safe_shape() {
+        for bad in [
+            "",
+            "console.example.com",
+            "https://console.example.com/reset",
+            "https://console.example.com?x=1",
+            "https://user@console.example.com",
+            "https://console.example.com:99999",
+        ] {
+            let mut settings = Settings::parse(valid_config())
+                .unwrap_or_else(|error| panic!("测试配置应可解析: {error}"));
+            settings.email.password_reset.link_base_url = bad.to_string();
+            let error = match settings.validate() {
+                Ok(()) => panic!("非法 link_base_url 必须拒绝: {bad:?}"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("email.password_reset.link_base_url"),
+                "错误应指明配置项: {error}"
+            );
+        }
+
+        // 生产环境强制 https；开发/测试环境允许 http。
+        let mut production = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("测试配置应可解析: {error}"));
+        production.app.environment = DeploymentEnvironment::Production;
+        production.observability.metrics_enabled = true;
+        production.email.password_reset.link_base_url = "http://console.example.com".to_string();
+        let error = match production.validate() {
+            Ok(()) => panic!("生产环境的 http 重置链接必须拒绝"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("email.password_reset.link_base_url"));
+
+        let mut production_https = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("测试配置应可解析: {error}"));
+        production_https.app.environment = DeploymentEnvironment::Production;
+        production_https.observability.metrics_enabled = true;
+        production_https.email.password_reset.link_base_url =
+            "https://console.example.com:8443".to_string();
+        assert!(production_https.validate().is_ok());
     }
 
     struct TestSecretProvider(BTreeMap<SecretKey, String>);
@@ -1113,7 +1227,11 @@ filter = "info"
     fn deployment_environment_defaults_to_production() {
         let raw = valid_config()
             .replace("environment = \"development\"\n", "")
-            .replace("metrics_enabled = false", "metrics_enabled = true");
+            .replace("metrics_enabled = false", "metrics_enabled = true")
+            .replace(
+                "link_base_url = \"http://localhost:5273\"",
+                "link_base_url = \"https://console.example.test\"",
+            );
         let settings = Settings::parse(&raw)
             .unwrap_or_else(|error| panic!("缺省部署环境应采用安全默认值: {error}"));
         assert_eq!(settings.app.environment, DeploymentEnvironment::Production);
@@ -1182,10 +1300,15 @@ filter = "info"
 
     #[test]
     fn production_requires_the_budgeted_management_probe() {
-        let disabled = valid_config().replace(
-            "environment = \"development\"",
-            "environment = \"production\"",
-        );
+        let disabled = valid_config()
+            .replace(
+                "environment = \"development\"",
+                "environment = \"production\"",
+            )
+            .replace(
+                "link_base_url = \"http://localhost:5273\"",
+                "link_base_url = \"https://console.example.test\"",
+            );
         let error = Settings::parse(&disabled)
             .err()
             .unwrap_or_else(|| panic!("production 不得在无管理面 readiness 时启动"));
