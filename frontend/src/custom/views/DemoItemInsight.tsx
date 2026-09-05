@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 
-import { invokeAction } from "@/api/client";
-import { useSessionCredentials } from "@/api/use-session";
+import { invokeAction } from "@/engine/http/client";
+import { useSessionCredentials } from "@/engine/session/use-session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";

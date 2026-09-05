@@ -4,8 +4,8 @@ import { Outlet, useNavigate } from "react-router";
 import {
   SESSION_EXPIRED_EVENT,
   SESSION_RELOGIN_REQUIRED_EVENT,
-} from "@/api/auth-session";
-import { useSessionController } from "@/api/use-session";
+} from "@/engine/session/auth-session";
+import { useSessionController } from "@/engine/session/use-session";
 
 /**
  * 会话失效传播桥（能力 11）：

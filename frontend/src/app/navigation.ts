@@ -1,9 +1,9 @@
-import type { TableViewSchema, UiCatalog } from "@/contracts/ui-catalog";
+import type { TableViewSchema, UiCatalog } from "@/engine/contracts/ui-catalog";
 import {
   buildAccountModulePages,
   unassignedViews,
   type ModulePageDefinition,
-} from "@/catalog/module-pages";
+} from "@/engine/catalog/module-pages";
 
 /**
  * 导航投影：后端 Catalog → 侧边栏条目。

@@ -1,6 +1,6 @@
 import { createContext, useContext, useSyncExternalStore } from "react";
 
-import type { AccountIdentity } from "@/catalog/module-pages";
+import type { AccountIdentity } from "@/engine/catalog/module-pages";
 import type { IdentityStore } from "./identity";
 
 /// 身份上下文的 React 绑定（纯逻辑在 identity.ts 的 IdentityStore；本文件不导出组件）。

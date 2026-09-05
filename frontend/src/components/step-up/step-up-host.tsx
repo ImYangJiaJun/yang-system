@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { SessionContext } from "@/api/types";
+import type { SessionContext } from "@/engine/http/types";
 import { StepUpDialog, type StepUpRequest } from "./StepUpDialog";
 
 /// 与 SessionControllerOptions.requestStepUpProof 同形的 UI 回调签名。

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { TableViewSchema, UiCatalog } from "@/contracts/ui-catalog";
+import type { TableViewSchema, UiCatalog } from "@/engine/contracts/ui-catalog";
 import {
   buildNavigationPages,
   groupNavigationPages,

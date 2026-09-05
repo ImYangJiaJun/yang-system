@@ -3,8 +3,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 
-import { createSessionController } from "@/api/session-controller";
-import { SessionControllerContext } from "@/api/use-session";
+import { createSessionController } from "@/engine/session/session-controller";
+import { SessionControllerContext } from "@/engine/session/use-session";
 import { createIdentityStore, storeIdentity } from "@/app/identity";
 import { IdentityStoreContext } from "@/app/use-identity";
 import { appRoutes } from "@/app/routes";

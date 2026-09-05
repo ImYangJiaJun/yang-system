@@ -783,24 +783,24 @@ def check_frontend_boundaries(root: Path) -> list[str]:
                     f"{source.relative_to(root).as_posix()}: 页面/布局/组件不得启动全局生命周期"
                 )
 
-    table_view = frontend / "renderers" / "table" / "TableView.tsx"
+    table_view = frontend / "engine" / "renderers" / "table" / "TableView.tsx"
     if table_view.is_file():
         source = table_view.read_text(encoding="utf-8")
         if len(source.splitlines()) > 400:
             errors.append(
-                "frontend/src/renderers/table/TableView.tsx: 顶层编排组件不得超过 400 行"
+                "frontend/src/engine/renderers/table/TableView.tsx: 顶层编排组件不得超过 400 行"
             )
         required_hooks = ("useTableQuery(", "useRelationOptions(", "usePresentedActions(")
         for hook in required_hooks:
             if hook not in source:
                 errors.append(
-                    "frontend/src/renderers/table/TableView.tsx: "
+                    "frontend/src/engine/renderers/table/TableView.tsx: "
                     f"缺少行为边界 {hook}"
                 )
         for forbidden in ("new AbortController(", "fetch("):
             if forbidden in source:
                 errors.append(
-                    "frontend/src/renderers/table/TableView.tsx: "
+                    "frontend/src/engine/renderers/table/TableView.tsx: "
                     f"顶层组件不得直接拥有异步状态机 {forbidden}"
                 )
 
@@ -899,7 +899,7 @@ def self_test() -> None:
         )
         write(root / "frontend/src/layout/AppLayout.tsx", "export function AppLayout() {}\n")
         write(
-            root / "frontend/src/renderers/table/TableView.tsx",
+            root / "frontend/src/engine/renderers/table/TableView.tsx",
             "useTableQuery(view, action);\nuseRelationOptions(view);\nusePresentedActions(view);\n",
         )
         write(

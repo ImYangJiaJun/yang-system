@@ -1,9 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 
-import { resetPassword } from "@/api/auth";
-import { publishSessionEnd } from "@/api/session-coordination";
-import { useSessionController } from "@/api/use-session";
+import { resetPassword } from "@/engine/session/auth";
+import { publishSessionEnd } from "@/engine/session/session-coordination";
+import { useSessionController } from "@/engine/session/use-session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

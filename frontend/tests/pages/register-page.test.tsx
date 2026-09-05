@@ -2,7 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { clearStoredSession } from "@/api/auth-session";
+import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
 
 /// 注册页：邮箱验证码流程（冷却/提交契约/成功跳转）。

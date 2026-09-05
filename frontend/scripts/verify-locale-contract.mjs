@@ -21,7 +21,7 @@ const sources = {
     "utf8",
   ),
   cell: await readFile(
-    resolve(frontendRoot, "src/renderers/table/business-cell-model.ts"),
+    resolve(frontendRoot, "src/engine/renderers/table/business-cell-model.ts"),
     "utf8",
   ),
   document: await readFile(resolve(frontendRoot, "docs/LOCALE.md"), "utf8"),

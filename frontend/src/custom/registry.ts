@@ -3,7 +3,7 @@ import { lazy, type LazyExoticComponent, type ComponentType } from "react";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
-} from "@/contracts/ui-catalog";
+} from "@/engine/contracts/ui-catalog";
 
 /// 自定义 View 的 props 契约（对齐旧 DemoItemInsight.vue 的 props/emit）。
 export interface CustomViewProps {

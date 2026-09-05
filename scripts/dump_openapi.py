@@ -8,7 +8,7 @@
      openapi-typescript 无法解析这种局部引用。生成类型前在临时副本上把本地
      definitions 提升为 components.schemas 命名类型并重写 $ref。
      入库的 openapi.json 保持后端原始输出，不做改写。
-  3. pnpm --dir frontend exec openapi-typescript <临时副本> -o src/contracts/api-types.ts
+  3. pnpm --dir frontend exec openapi-typescript <临时副本> -o src/engine/contracts/api-types.ts
 
 openapi-typescript 只生成类型，不生成客户端运行时；openapi.json 与 api-types.ts
 均入库作为契约快照，前端 HTTP 客户端保持自有实现（frontend/src/api/）。
@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "frontend" / "contracts" / "openapi.json"
-OUTPUT = ROOT / "frontend" / "src" / "contracts" / "api-types.ts"
+OUTPUT = ROOT / "frontend" / "src" / "engine" / "contracts" / "api-types.ts"
 
 
 def run(argv: tuple[str, ...], cwd: Path = ROOT) -> None:

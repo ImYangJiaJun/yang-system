@@ -1,7 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { clearStoredSession } from "@/api/auth-session";
+import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
 
 import catalogFixture from "@test/fixtures/ui-catalog.json";

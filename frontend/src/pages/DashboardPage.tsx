@@ -9,7 +9,7 @@ import {
   modulesForIdentity,
   unassignedViews,
   visibleAccountIdentities,
-} from "@/catalog/module-pages";
+} from "@/engine/catalog/module-pages";
 import type { ShellContext } from "@/layout/AppLayout";
 import { productLowerCase } from "@/lib/product-locale";
 

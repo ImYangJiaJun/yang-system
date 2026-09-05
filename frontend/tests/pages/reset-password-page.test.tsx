@@ -2,7 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { clearStoredSession } from "@/api/auth-session";
+import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
 
 /// 重置密码页：query token 预填 + 成功后清空会话 + 跳登录页。

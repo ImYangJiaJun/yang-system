@@ -1,17 +1,17 @@
 import { Suspense, useEffect, useState } from "react";
 import { Link, useNavigate, useOutletContext, useParams } from "react-router";
 
-import { moduleView } from "@/catalog/module-pages";
+import { moduleView } from "@/engine/catalog/module-pages";
 import { buildNavigationPages, WORKSPACE_IDENTITY } from "@/app/navigation";
 import { useIdentity } from "@/app/use-identity";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CustomViewBoundary } from "@/custom/custom-view-boundary";
 import { resolveCustomView } from "@/custom/registry";
-import type { ActionPresentationSchema } from "@/contracts/ui-catalog";
+import type { ActionPresentationSchema } from "@/engine/contracts/ui-catalog";
 import type { ShellContext } from "@/layout/AppLayout";
-import { PrimaryActionPanel } from "@/renderers/module/primary-action-panel";
-import { TableView } from "@/renderers/table/TableView";
+import { PrimaryActionPanel } from "@/engine/renderers/module/primary-action-panel";
+import { TableView } from "@/engine/renderers/table/TableView";
 
 export default function ModulePage() {
   const { catalog } = useOutletContext<ShellContext>();

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createBrowserRouter, RouterProvider } from "react-router";
 
-import { createSessionController } from "@/api/session-controller";
-import { SessionControllerContext } from "@/api/use-session";
+import { createSessionController } from "@/engine/session/session-controller";
+import { SessionControllerContext } from "@/engine/session/use-session";
 import { applyDensity, loadDensity } from "@/app/density";
 import { createIdentityStore } from "@/app/identity";
 import { IdentityStoreContext } from "@/app/use-identity";

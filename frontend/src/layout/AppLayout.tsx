@@ -14,8 +14,8 @@ import {
 } from "lucide-react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 
-import { useUiCatalog } from "@/api/use-catalog";
-import { useSessionController } from "@/api/use-session";
+import { useUiCatalog } from "@/engine/catalog/use-catalog";
+import { useSessionController } from "@/engine/session/use-session";
 import {
   applyDensity,
   DENSITY_OPTIONS,
@@ -42,8 +42,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   buildAccountModulePages,
   visibleAccountIdentities,
-} from "@/catalog/module-pages";
-import type { UiCatalog } from "@/contracts/ui-catalog";
+} from "@/engine/catalog/module-pages";
+import type { UiCatalog } from "@/engine/contracts/ui-catalog";
 import { cn } from "@/lib/utils";
 
 export type ShellContext = { catalog: UiCatalog };

@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { clearStoredSession } from "@/api/auth-session";
+import { clearStoredSession } from "@/engine/session/auth-session";
 import {
   StepUpDialogHost,
   type StepUpProofHandler,

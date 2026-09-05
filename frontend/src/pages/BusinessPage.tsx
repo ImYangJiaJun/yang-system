@@ -3,11 +3,11 @@ import { Link, useOutletContext, useSearchParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { ActionPresentationSchema } from "@/contracts/ui-catalog";
+import type { ActionPresentationSchema } from "@/engine/contracts/ui-catalog";
 import { CustomViewBoundary } from "@/custom/custom-view-boundary";
 import { resolveCustomView } from "@/custom/registry";
 import type { ShellContext } from "@/layout/AppLayout";
-import { TableView } from "@/renderers/table/TableView";
+import { TableView } from "@/engine/renderers/table/TableView";
 
 /**
  * 未分配视图承载页（旧 BusinessPage.vue 语义）：?view=<viewId> 指定，

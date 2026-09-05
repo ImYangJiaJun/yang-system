@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 
-import { completeStepUp } from "@/api/step-up";
-import type { SessionContext } from "@/api/types";
+import { completeStepUp } from "@/engine/session/step-up";
+import type { SessionContext } from "@/engine/http/types";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,

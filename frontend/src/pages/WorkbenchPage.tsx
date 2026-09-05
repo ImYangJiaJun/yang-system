@@ -3,13 +3,13 @@ import { useOutletContext } from "react-router";
 
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { ActionPresentationSchema } from "@/contracts/ui-catalog";
+import type { ActionPresentationSchema } from "@/engine/contracts/ui-catalog";
 import { CustomViewBoundary } from "@/custom/custom-view-boundary";
 import { resolveCustomView } from "@/custom/registry";
 import type { ShellContext } from "@/layout/AppLayout";
 import { productLowerCase } from "@/lib/product-locale";
-import { ActionInvokePanel } from "@/renderers/action/ActionInvokePanel";
-import { TableView } from "@/renderers/table/TableView";
+import { ActionInvokePanel } from "@/engine/renderers/action/ActionInvokePanel";
+import { TableView } from "@/engine/renderers/table/TableView";
 import { cn } from "@/lib/utils";
 
 type NavigationMode = "views" | "actions";

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router";
 
-import { register, requestRegistrationEmail } from "@/api/auth";
+import { register, requestRegistrationEmail } from "@/engine/session/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

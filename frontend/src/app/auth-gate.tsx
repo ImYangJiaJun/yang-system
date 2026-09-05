@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Navigate } from "react-router";
 
-import { useRestoredSession } from "@/api/use-session";
+import { useRestoredSession } from "@/engine/session/use-session";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /// 会话恢复进行中的全屏骨架（restoreState === "pending"）。

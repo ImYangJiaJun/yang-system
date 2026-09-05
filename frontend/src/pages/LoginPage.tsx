@@ -2,8 +2,11 @@ import { useState, type FormEvent } from "react";
 import { Eye, EyeOff, Lock, User } from "lucide-react";
 import { useNavigate, useSearchParams, Link } from "react-router";
 
-import { login } from "@/api/auth";
-import { useSessionController, useSessionSnapshot } from "@/api/use-session";
+import { login } from "@/engine/session/auth";
+import {
+  useSessionController,
+  useSessionSnapshot,
+} from "@/engine/session/use-session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

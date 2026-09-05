@@ -2,15 +2,15 @@ import { useState } from "react";
 import { ArrowRight, LogOut, UserRoundX } from "lucide-react";
 import { useNavigate } from "react-router";
 
-import { useSessionController } from "@/api/use-session";
-import { useUiCatalog } from "@/api/use-catalog";
+import { useSessionController } from "@/engine/session/use-session";
+import { useUiCatalog } from "@/engine/catalog/use-catalog";
 import { useIdentity } from "@/app/use-identity";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   buildAccountModulePages,
   visibleAccountIdentities,
-} from "@/catalog/module-pages";
+} from "@/engine/catalog/module-pages";
 
 /// 工作身份选择页（旧 RoleSelectionPage.vue 语义）：多身份账号登录后的入口。
 export default function SelectIdentityPage() {

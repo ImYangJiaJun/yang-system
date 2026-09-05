@@ -1,4 +1,4 @@
-import type { AccountIdentity } from "@/catalog/module-pages";
+import type { AccountIdentity } from "@/engine/catalog/module-pages";
 
 /**
  * 身份选择状态（旧 stores/identity.ts 语义平移）：
