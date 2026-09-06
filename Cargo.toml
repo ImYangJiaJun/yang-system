@@ -8,6 +8,7 @@ default-run = "yang-system"
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1.89"
+base64 = "0.22"
 jsonwebtoken = "=9.3.1"
 # 精确锁定：0.11.20+ 需要 Rust 1.85，受 MSRV 1.80 约束
 lettre = { version = "=0.11.19", default-features = false, features = ["builder", "pool", "ring", "smtp-transport", "tokio1-rustls", "webpki-roots"] }
@@ -20,6 +21,7 @@ sha2 = "0.10.9"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "mysql"] }
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 toml = "0.8"
+uuid = { version = "=1.12.1", features = ["v4"] }
 tracing = "0.1.41"
 yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics"] }
 yang-db = { version = "0.1.4", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }

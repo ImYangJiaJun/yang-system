@@ -3566,6 +3566,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "jsonwebtoken",
  "lettre",
  "metrics",
@@ -3579,6 +3580,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "yang-base",
  "yang-db",
  "yang-runtime",

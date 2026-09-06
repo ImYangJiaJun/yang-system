@@ -9,6 +9,7 @@ pub(super) mod table;
 
 use super::domain::context::Account;
 use super::domain::repository::UserRepository;
+use super::domain::session::SessionRepository;
 use super::{GrantResolver, SystemOwnerClaimer};
 use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionValidator, RequestFingerprintResolver};
@@ -31,8 +32,10 @@ pub(super) fn build_module(
     step_up: Option<StepUpServices>,
 ) -> Result<ModuleSpec, BaseError> {
     let table = table::user_table_spec()?;
+    let session_repository = SessionRepository::new(crate::schema::user_session()?);
     let account = Arc::new(Account::new(
         UserRepository::new(table.table_definition()?),
+        session_repository,
         &security,
         grant_resolver,
         system_owner_claimer,
@@ -102,9 +105,10 @@ fn presentation(credential_mutations_enabled: bool) -> ModulePresentationSpec {
 fn step_up_targets(credential_mutations_enabled: bool) -> Vec<yang_base::definition::ActionRef> {
     let mut targets = vec![yang_base::action!("account.user.logout")];
     if credential_mutations_enabled {
-        targets.insert(0, yang_base::action!("account.user.change_email"));
-        targets.insert(1, yang_base::action!("account.user.change_username"));
-        targets.insert(2, yang_base::action!("account.user.disable_self"));
+        targets.insert(0, yang_base::action!("account.user.revoke_session"));
+        targets.insert(1, yang_base::action!("account.user.change_email"));
+        targets.insert(2, yang_base::action!("account.user.change_username"));
+        targets.insert(3, yang_base::action!("account.user.disable_self"));
     }
     targets
 }
@@ -118,6 +122,7 @@ mod tests {
         assert_eq!(
             step_up_targets(true),
             vec![
+                yang_base::action!("account.user.revoke_session"),
                 yang_base::action!("account.user.change_email"),
                 yang_base::action!("account.user.change_username"),
                 yang_base::action!("account.user.disable_self"),

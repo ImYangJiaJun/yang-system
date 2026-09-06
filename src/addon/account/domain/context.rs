@@ -6,6 +6,7 @@
 
 use super::claims;
 use super::repository::UserRepository;
+use super::session::SessionRepository;
 use super::status::UserStatus;
 use crate::addon::account::domain::authz_version::{
     disable_locked_user_and_increment_versions, increment_locked_credential_versions,
@@ -36,6 +37,7 @@ const REFRESH_COOKIE_PATH: &str = "/api/v1/users";
 /// 账号模块上下文：聚合共享资源，并以方法承载跨用例机制。
 pub(crate) struct Account {
     users: Arc<UserRepository>,
+    sessions: Arc<SessionRepository>,
     passwords: Arc<PasswordEngine>,
     rate_limiter: Arc<AuthRateLimiter>,
     grant_resolver: Arc<dyn GrantResolver>,
@@ -49,6 +51,7 @@ impl Account {
     /// 由安全配置派生密码引擎与限流器，装配处只提供有信息量的部分。
     pub(crate) fn new(
         users: UserRepository,
+        sessions: SessionRepository,
         security: &SecuritySettings,
         grant_resolver: Arc<dyn GrantResolver>,
         system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
@@ -56,6 +59,7 @@ impl Account {
     ) -> Result<Self, BaseError> {
         Ok(Self {
             users: Arc::new(users),
+            sessions: Arc::new(sessions),
             passwords: Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?),
             rate_limiter: Arc::new(AuthRateLimiter::new(security.rate_limit_config())),
             grant_resolver,
@@ -70,6 +74,10 @@ impl Account {
 
     pub(crate) fn users(&self) -> &UserRepository {
         &self.users
+    }
+
+    pub(crate) fn sessions(&self) -> &SessionRepository {
+        &self.sessions
     }
 
     pub(crate) fn passwords(&self) -> &PasswordEngine {
@@ -96,6 +104,17 @@ impl Account {
     }
 
     /// 在注册事务中竞争唯一最终管理员哨兵（当前骨架为不声明的默认实现）。
+    /// 从当前请求 access token 的 claims 提取会话标识（无 token/老格式返回 None）。
+    pub(crate) fn session_id_from_request(&self, ctx: &ActionContext) -> Option<String> {
+        let token = ctx.request.token()?;
+        let claims = ctx.tools().token().ok()?.verify_token(token).ok()?;
+        claims
+            .custom
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
     pub(crate) async fn claim_system_owner(
         &self,
         transaction: &mut Transaction,
@@ -285,13 +304,17 @@ impl Account {
     // ---- 授权快照与 Token 声明（login 与 refresh 共享）----
 
     /// 按用户 ID 组装 Token 对声明（登录签发时使用）。
+    ///
+    /// 每次登录生成新的 `session_id`（跨 Refresh 轮换稳定，`user_session` 表
+    /// 以它为键）；换绑/改密/停用等凭据变更递增 credential_version 使会话失效。
     pub(crate) async fn claims_for(
         &self,
         ctx: &ActionContext,
         user_id: i64,
     ) -> Result<TokenPairClaims, BaseError> {
         let snapshot = self.authorization_snapshot(ctx, user_id).await?;
-        self.claims_from_snapshot(&snapshot)
+        let session_id = new_session_id()?;
+        self.claims_from_snapshot(&snapshot, Some(&session_id))
     }
 
     /// 按 Token subject 组装声明（刷新时按 subject 解析时使用）。
@@ -307,6 +330,9 @@ impl Account {
     }
 
     /// 按旧 Refresh Token 声明组装新声明，并校验凭据版本未失效。
+    ///
+    /// `session_id` 从旧 claims 继承（老 Token 无该字段时按无会话记录降级，
+    /// 不拒绝既有会话），保证「踢出某设备」在轮换后仍能定位同一会话行。
     pub(crate) async fn claims_for_refresh(
         &self,
         ctx: &ActionContext,
@@ -318,12 +344,14 @@ impl Account {
             .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
         let snapshot = self.authorization_snapshot(ctx, user_id).await?;
         claims::validate_refresh_credential_version(old_claims, snapshot.credential_version)?;
-        self.claims_from_snapshot(&snapshot)
+        let inherited_session_id = claims::session_id_from_claims(old_claims)?;
+        self.claims_from_snapshot(&snapshot, inherited_session_id.as_deref())
     }
 
     fn claims_from_snapshot(
         &self,
         snapshot: &AuthorizationSnapshot,
+        session_id: Option<&str>,
     ) -> Result<TokenPairClaims, BaseError> {
         claims::claims_for_user(
             &snapshot.username,
@@ -331,6 +359,7 @@ impl Account {
             snapshot.credential_version,
             self.issue_refresh_credential_version,
             &snapshot.grants,
+            session_id,
         )
     }
 
@@ -403,4 +432,9 @@ struct AuthorizationSnapshot {
 /// 账号审计事件构建失败的统一错误形态。
 fn invalid_audit_event(error: anyhow::Error) -> BaseError {
     BaseError::ConfigError(format!("构建账号生命周期审计事件失败: {error}"))
+}
+
+/// 生成跨 Refresh 轮换稳定的会话标识（UUID v4，`user_session` 表主键）。
+fn new_session_id() -> Result<String, BaseError> {
+    Ok(uuid::Uuid::new_v4().to_string())
 }

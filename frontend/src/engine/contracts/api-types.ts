@@ -444,6 +444,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/users/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 登录设备
+         * @description 列出当前用户活跃会话并标记当前设备
+         */
+        get: operations["account.user.list_sessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/sessions/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 撤销会话
+         * @description 按 session_id 撤销单个登录设备
+         */
+        post: operations["account.user.revoke_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users/step-up/complete": {
         parameters: {
             query?: never;
@@ -621,6 +661,19 @@ export interface components {
          * @enum {string}
          */
         UserStatus: "active" | "disabled";
+        /** @description 单条会话展示视图（供 GET /users/sessions 返回）。 */
+        SessionView: {
+            /** Format: int64 */
+            created_at: number;
+            current: boolean;
+            ip: string;
+            /** Format: int64 */
+            last_seen_at: number;
+            /** Format: int64 */
+            revoked_at?: number | null;
+            session_id: string;
+            user_agent: string;
+        };
         CompleteStepUpCredentials: {
             password: string;
             username: string;
@@ -2710,6 +2763,184 @@ export interface operations {
                 "application/json": {
                     new_password: string;
                     reset_token: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.list_sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * SessionsList
+                         * @description 会话列表响应；`current` 标记请求发起的当前设备。
+                         */
+                        data: {
+                            sessions: components["schemas"]["SessionView"][];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.revoke_session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    session_id: string;
                 };
             };
         };

@@ -14,5 +14,6 @@ pub(crate) mod grants;
 pub(crate) mod password_reset;
 pub(crate) mod policy;
 pub(crate) mod repository;
+pub(crate) mod session;
 pub(crate) mod status;
 pub(crate) mod system_owner;

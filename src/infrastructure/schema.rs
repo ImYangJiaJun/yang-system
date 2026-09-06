@@ -44,11 +44,13 @@ pub async fn sync_with_database(
     result
 }
 
-fn infrastructure_definitions() -> Result<[TableDefinition; 3], BaseError> {
+fn infrastructure_definitions() -> Result<[TableDefinition; 5], BaseError> {
     Ok([
         authorization_outbox()?,
         audit_event()?,
         password_reset_token()?,
+        user_session()?,
+        login_event()?,
     ])
 }
 
@@ -199,6 +201,56 @@ fn password_reset_token() -> Result<TableDefinition, BaseError> {
         .build()
 }
 
+/// 跨 Refresh 轮换稳定的会话记录（路线图 C-1）。
+///
+/// `session_id` 是 Token access claims 中的稳定标识，登录生成、refresh 继承；
+/// `current_jti` 随每次轮换更新，供精确撤销（踢出设备）时黑名单定位。
+/// 该表不属于任何 UI Catalog 业务表，与 authorization_outbox 等同列运行支撑。
+pub(crate) fn user_session() -> Result<TableDefinition, BaseError> {
+    Table::new("user_session")
+        .fields([
+            Field::string("session_id", 64).required().primary_key(),
+            Field::bigint("user_id").required(),
+            Field::string("current_jti", 64).required(),
+            Field::bigint("created_at").required(),
+            Field::bigint("last_seen_at").required(),
+            Field::string("ip", 64).required(),
+            Field::string("user_agent", 512).required(),
+            Field::bigint("revoked_at"),
+        ])
+        .unique_named("uk_user_session_id", ["session_id"])
+        .index_named(
+            "idx_user_session_user_active",
+            ["user_id", "revoked_at", "last_seen_at", "session_id"],
+        )
+        .build()
+}
+
+/// 登录成功/失败的安全事件（路线图 C-2）。
+///
+/// 不落审计库（保留期清理会牵连用户可见历史），自带保留策略；
+/// `failure_reason` 只记粗粒度原因，不记录明文凭据。
+fn login_event() -> Result<TableDefinition, BaseError> {
+    Table::new("login_event")
+        .fields([
+            Field::id("id"),
+            Field::bigint("user_id").required(),
+            Field::bigint("occurred_at").required(),
+            Field::string("ip", 64).required(),
+            Field::string("user_agent", 512).required(),
+            Field::enumeration("result", ["succeeded", "failed"]).required(),
+            Field::enumeration(
+                "failure_reason",
+                ["invalid_password", "user_not_found", "disabled", "rate_limited"],
+            ),
+        ])
+        .index_named(
+            "idx_login_event_user_time",
+            ["user_id", "occurred_at", "id"],
+        )
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +265,8 @@ mod tests {
                 "authorization_outbox",
                 "audit_event",
                 "password_reset_token",
+                "user_session",
+                "login_event",
             ]
         );
     }

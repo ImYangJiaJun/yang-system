@@ -7,6 +7,7 @@ mod change_email;
 mod change_password;
 mod change_username;
 mod disable_self;
+mod list_sessions;
 mod login;
 mod logout;
 mod me;
@@ -16,6 +17,7 @@ mod request_change_email;
 mod request_password_reset;
 mod request_registration_email;
 mod reset_password;
+mod revoke_session;
 mod step_up;
 
 use crate::addon::account::Account;
@@ -37,6 +39,7 @@ const ACTIONS: &[Register] = action_registry![
     request_registration_email,
     register,
     login,
+    list_sessions,
     refresh,
     change_password, // 发布开关：credential_mutations_enabled
     change_username,  // 发布开关：credential_mutations_enabled
@@ -47,6 +50,7 @@ const ACTIONS: &[Register] = action_registry![
     reset_password, // 发布开关：credential_mutations_enabled
     logout,
     step_up, // 条件：组合根配置了 StepUpManager
+    revoke_session,
     me,
     // scaffold:action-registration
 ];

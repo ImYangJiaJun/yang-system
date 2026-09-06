@@ -15,6 +15,12 @@ struct AppClaims {
     version: u8,
     username: String,
     authz_version: i64,
+    /// 跨 Refresh 轮换稳定的会话标识（路线图 C-1）。
+    ///
+    /// 登录时生成、refresh 时从旧 claims 继承；`user_session` 表以它为键。
+    /// 老 Token 无此字段（`Option`）时按「无会话记录」降级处理。
+    #[serde(default)]
+    session_id: Option<String>,
     roles: Vec<String>,
     permissions: Vec<String>,
 }
@@ -25,6 +31,7 @@ pub(super) fn claims_for_user(
     credential_version: i64,
     issue_refresh_credential_version: bool,
     grants: &AuthorizationGrants,
+    session_id: Option<&str>,
 ) -> Result<TokenPairClaims, BaseError> {
     if authz_version < 1 {
         return Err(BaseError::Unauthorized(
@@ -40,6 +47,7 @@ pub(super) fn claims_for_user(
         version: APP_CLAIMS_VERSION,
         username: username.to_string(),
         authz_version,
+        session_id: session_id.map(str::to_string),
         roles: grants.roles().map(str::to_string).collect(),
         permissions: grants.permissions().map(str::to_string).collect(),
     })
@@ -74,6 +82,23 @@ pub(super) fn validate_refresh_credential_version(
         ));
     }
     Ok(())
+}
+
+/// 从旧 Token claims 提取会话标识（refresh 轮换继承用）。
+///
+/// 老 Token 无 `session_id` 字段时返回 `None`，调用方按「无会话记录」降级，
+/// 不拒绝既有会话（增量数据兼容，路线图 Rollback 一节）。
+pub(crate) fn session_id_from_claims(claims: &TokenClaims) -> Result<Option<String>, BaseError> {
+    let Some(value) = claims.custom.get("session_id") else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(session_id) if !session_id.is_empty() => {
+            Ok(Some(session_id.clone()))
+        }
+        _ => Err(BaseError::Unauthorized("Token 会话标识无效".to_string())),
+    }
 }
 
 pub(crate) fn user_from_claims(claims: &TokenClaims) -> Result<User, BaseError> {
@@ -191,21 +216,22 @@ mod tests {
 
     #[test]
     fn login_and_refresh_share_the_same_claims_snapshot() {
-        let claims = claims_for_user("alice", 7, 0, false, &AuthorizationGrants::user())
+        let claims = claims_for_user("alice", 7, 0, false, &AuthorizationGrants::user(), None)
             .unwrap_or_else(|error| panic!("用户声明应可序列化: {error}"));
         assert_eq!(claims.access["version"], APP_CLAIMS_VERSION);
         assert_eq!(claims.access["authz_version"], 7);
+        assert_eq!(claims.access["session_id"], serde_json::Value::Null);
         assert!(claims.access.get("credential_version").is_none());
         assert_eq!(claims.access["roles"], serde_json::json!(["user"]));
         assert_eq!(claims.access["permissions"], serde_json::json!([]));
         assert_eq!(claims.refresh, serde_json::json!({ "authz_version": 7 }));
-        assert!(claims_for_user("alice", 0, 0, false, &AuthorizationGrants::user()).is_err());
-        assert!(claims_for_user("alice", 7, -1, false, &AuthorizationGrants::user()).is_err());
+        assert!(claims_for_user("alice", 0, 0, false, &AuthorizationGrants::user(), None).is_err());
+        assert!(claims_for_user("alice", 7, -1, false, &AuthorizationGrants::user(), None).is_err());
     }
 
     #[test]
     fn enforced_protocol_only_adds_credential_version_to_refresh() {
-        let claims = claims_for_user("alice", 7, 3, true, &AuthorizationGrants::user())
+        let claims = claims_for_user("alice", 7, 3, true, &AuthorizationGrants::user(), None)
             .unwrap_or_else(|error| panic!("开启签发后声明应可序列化: {error}"));
 
         assert!(claims.access.get("credential_version").is_none());
@@ -213,6 +239,85 @@ mod tests {
             claims.refresh,
             serde_json::json!({ "credential_version": 3 })
         );
+    }
+
+    #[test]
+    fn session_id_is_written_to_access_claims_and_inherited_on_refresh() {
+        // 登录：session_id 写入 access claims。
+        let claims = claims_for_user("alice", 7, 0, true, &AuthorizationGrants::user(), Some("sess-1"))
+            .unwrap_or_else(|error| panic!("带会话标识的声明应可序列化: {error}"));
+        assert_eq!(claims.access["session_id"], serde_json::json!("sess-1"));
+
+        // 老 Token 无 session_id（None）→ 序列化为 null，刷新时按无会话记录降级。
+        let legacy = claims_for_user("alice", 7, 0, true, &AuthorizationGrants::user(), None)
+            .unwrap_or_else(|error| panic!("无会话标识的声明应可序列化: {error}"));
+        assert_eq!(legacy.access["session_id"], serde_json::Value::Null);
+
+        // 轮换继承：从旧 claims 提取 session_id。
+        let token_claims = TokenClaims::new(
+            "test",
+            "7",
+            "test-api",
+            60,
+            0,
+            0,
+            "test-jti",
+            TokenType::Access,
+            serde_json::json!({
+                "version": 1,
+                "username": "alice",
+                "authz_version": 7,
+                "session_id": "sess-1",
+                "roles": ["user"],
+                "permissions": []
+            }),
+        );
+        assert_eq!(
+            session_id_from_claims(&token_claims)
+                .unwrap_or_else(|error| panic!("会话标识应可提取: {error}")),
+            Some("sess-1".to_string())
+        );
+
+        // 老 claims 无 session_id → None；畸形类型 → 拒绝。
+        let no_session = TokenClaims::new(
+            "test",
+            "7",
+            "test-api",
+            60,
+            0,
+            0,
+            "test-jti",
+            TokenType::Access,
+            serde_json::json!({
+                "version": 1,
+                "username": "alice",
+                "authz_version": 7,
+                "roles": ["user"],
+                "permissions": []
+            }),
+        );
+        assert!(session_id_from_claims(&no_session)
+            .unwrap_or_else(|error| panic!("无会话标识应返回 None: {error}"))
+            .is_none());
+        let malformed = TokenClaims::new(
+            "test",
+            "7",
+            "test-api",
+            60,
+            0,
+            0,
+            "test-jti",
+            TokenType::Access,
+            serde_json::json!({
+                "version": 1,
+                "username": "alice",
+                "authz_version": 7,
+                "session_id": 42,
+                "roles": ["user"],
+                "permissions": []
+            }),
+        );
+        assert!(session_id_from_claims(&malformed).is_err());
     }
 
     #[test]
@@ -225,7 +330,7 @@ mod tests {
             60,
             120,
         );
-        let custom = claims_for_user("alice", 7, 3, true, &AuthorizationGrants::user())
+        let custom = claims_for_user("alice", 7, 3, true, &AuthorizationGrants::user(), None)
             .unwrap_or_else(|error| panic!("授权快照应可序列化: {error}"));
         let (access, refresh) = manager
             .generate_token_pair_with_refresh_claims("7", custom.access, custom.refresh)

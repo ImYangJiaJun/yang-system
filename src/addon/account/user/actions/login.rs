@@ -10,7 +10,9 @@ use yang_base::action::auth::{
 };
 use yang_base::action::{ActionContext, ApiResponse, TypedHandler};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
+use yang_base::transport::client_ip::client_ip_identity;
 use yang_base::BaseError;
+use yang_base::token::TokenType;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(super) struct BrowserLoginInput {
@@ -97,17 +99,86 @@ pub(super) async fn handle(
     account: Arc<Account>,
 ) -> Result<ApiResponse, BaseError> {
     let secure = BrowserSession::validate_same_origin(&ctx.request)?;
-    let tokens = LoginAction::new(UserCredentialVerifier { account })
-        .handle(
+    // 会话持久化所需信息在 ctx 被 move 进 LoginAction 前提取；
+    // `ActionContext` 现可 Clone（框架支持），record_ctx 供签发后落会话行。
+    let session_ip = client_ip_identity(&ctx).into_owned();
+    let session_user_agent = ctx
+        .request
+        .get_header("user-agent")
+        .unwrap_or_default()
+        .to_string();
+    let record_ctx = ctx.clone();
+    let tokens = LoginAction::new(UserCredentialVerifier {
+        account: Arc::clone(&account),
+    })
+    .handle(
+        ctx,
+        LoginInput {
+            username: input.username,
+            password: input.password,
+            extra: input.extra,
+        },
+    )
+    .await?;
+    // 登录成功：解析 access claims 中的 session_id/jti 并落一条会话行；
+    // upsert 失败只记日志，不阻塞登录（会话可见性为 best-effort 增强）。
+    if let Err(error) = record_login_session(
+        &record_ctx,
+        &account,
+        &tokens.access_token,
+        &session_ip,
+        &session_user_agent,
+    )
+    .await
+    {
+        tracing::warn!(error = %error, "登录会话持久化失败");
+    }
+    Account::browser_session().token_response(tokens.access_token, tokens.refresh_token, secure)
+}
+
+/// 从新签发的 access token 提取 session_id/jti 并写入 `user_session` 表。
+async fn record_login_session(
+    ctx: &ActionContext,
+    account: &Account,
+    access_token: &str,
+    ip: &str,
+    user_agent: &str,
+) -> Result<(), BaseError> {
+    let claims = ctx.tools().token()?.verify_token(access_token)?;
+    if claims.token_type != TokenType::Access {
+        return Ok(()); // 防御性：只处理 access token
+    }
+    let Some(session_id) = claims.custom.get("session_id").and_then(|value| value.as_str()) else {
+        return Ok(()); // 老逻辑无 session_id（登录 always 生成，不应发生）
+    };
+    let session_id = session_id.to_string();
+    let user_id = claims
+        .sub
+        .parse::<i64>()
+        .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+    let now = current_unix_timestamp()?;
+    account
+        .sessions()
+        .upsert(
             ctx,
-            LoginInput {
-                username: input.username,
-                password: input.password,
-                extra: input.extra,
+            crate::addon::account::domain::session::NewSession {
+                session_id,
+                user_id,
+                jti: claims.jti,
+                ip: ip.to_string(),
+                user_agent: user_agent.to_string(),
+                now,
             },
         )
-        .await?;
-    Account::browser_session().token_response(tokens.access_token, tokens.refresh_token, secure)
+        .await
+}
+
+fn current_unix_timestamp() -> Result<i64, BaseError> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| BaseError::ConfigError("系统时间早于 Unix epoch".to_string()))?
+        .as_secs();
+    i64::try_from(seconds).map_err(|_| BaseError::ConfigError("系统时间超出 i64 范围".to_string()))
 }
 
 /// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
