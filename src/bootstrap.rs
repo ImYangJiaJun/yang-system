@@ -1,6 +1,7 @@
 use crate::addon::account::email_delivery::{
-    PasswordResetEmailSender, PasswordResetEmailSenderHandle, RegistrationEmailSender,
-    RegistrationEmailSenderHandle, SmtpEmailSender,
+    NewDeviceEmailSender, NewDeviceEmailSenderHandle, PasswordResetEmailSender,
+    PasswordResetEmailSenderHandle, RegistrationEmailSender, RegistrationEmailSenderHandle,
+    SmtpEmailSender,
 };
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
@@ -90,7 +91,8 @@ async fn run_after_telemetry_initialized(
     let email_sender: Arc<SmtpEmailSender> =
         Arc::new(SmtpEmailSender::new(&settings.email.smtp).context("构建 SMTP 邮件投递器失败")?);
     let registration_sender: Arc<dyn RegistrationEmailSender> = email_sender.clone();
-    let password_reset_sender: Arc<dyn PasswordResetEmailSender> = email_sender;
+    let password_reset_sender: Arc<dyn PasswordResetEmailSender> = email_sender.clone();
+    let new_device_sender: Arc<dyn NewDeviceEmailSender> = email_sender;
     let mut tools_builder = ToolsBuilder::new()
         .mysql(mysql)
         .cache(cache)
@@ -99,6 +101,7 @@ async fn run_after_telemetry_initialized(
         .extension(step_up_manager)
         .extension(RegistrationEmailSenderHandle::from_arc(registration_sender))
         .extension(PasswordResetEmailSenderHandle::from_arc(password_reset_sender))
+        .extension(NewDeviceEmailSenderHandle::from_arc(new_device_sender))
         .config(log_identity)
         .config(settings.email.verification.engine_config())
         .config(settings.email.password_reset.link_config());

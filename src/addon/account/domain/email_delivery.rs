@@ -73,6 +73,59 @@ impl fmt::Debug for PasswordResetEmailSenderHandle {
     }
 }
 
+/// 新设备登录提醒邮件投递接口（路线图 C-3，best-effort 不阻塞登录路径）。
+#[async_trait]
+pub trait NewDeviceEmailSender: Send + Sync + 'static {
+    /// 通知用户一次来自新设备的成功登录。
+    async fn send_new_device_login(
+        &self,
+        recipient: &str,
+        ip: &str,
+        user_agent: &str,
+        _occurred_at_unix: i64,
+    ) -> Result<(), EmailDeliveryError>;
+}
+
+/// 可放入 `Tools` 扩展槽的类型擦除投递句柄。
+#[derive(Clone)]
+pub struct NewDeviceEmailSenderHandle(Arc<dyn NewDeviceEmailSender>);
+
+impl NewDeviceEmailSenderHandle {
+    /// 用业务投递器创建句柄。
+    pub fn new<T>(sender: T) -> Self
+    where
+        T: NewDeviceEmailSender,
+    {
+        Self(Arc::new(sender))
+    }
+
+    /// 从已共享的投递器创建句柄。
+    pub fn from_arc(sender: Arc<dyn NewDeviceEmailSender>) -> Self {
+        Self(sender)
+    }
+
+    /// 投递一封新设备登录提醒邮件。
+    pub async fn send_new_device_login(
+        &self,
+        recipient: &str,
+        ip: &str,
+        user_agent: &str,
+        _occurred_at_unix: i64,
+    ) -> Result<(), EmailDeliveryError> {
+        self.0
+            .send_new_device_login(recipient, ip, user_agent, _occurred_at_unix)
+            .await
+    }
+}
+
+impl fmt::Debug for NewDeviceEmailSenderHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NewDeviceEmailSenderHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 /// 密码重置邮件链接的地址配置，经 `Tools` config 槽注入。
 ///
 /// 地址必须是部署方显式配置的前端控制台入口，不得从请求头推导（Host 头可被攻击者伪造）。
@@ -183,3 +236,34 @@ impl PasswordResetEmailSender for SmtpEmailSender {
         .await
     }
 }
+
+#[async_trait]
+impl NewDeviceEmailSender for SmtpEmailSender {
+    async fn send_new_device_login(
+        &self,
+        recipient: &str,
+        ip: &str,
+        user_agent: &str,
+        _occurred_at_unix: i64,
+    ) -> Result<(), EmailDeliveryError> {
+        let agent = if user_agent.trim().is_empty() {
+            "未知设备".to_string()
+        } else {
+            user_agent.chars().take(120).collect()
+        };
+        self.deliver(
+            recipient,
+            "YANG System 新设备登录提醒",
+            format!(
+                "你的账号刚刚从一台新设备成功登录。
+
+IP：{ip}
+设备：{agent}
+
+如果这是你本人的操作，可以忽略本邮件；如果不是，请立即修改密码并检查会话列表。"
+            ),
+        )
+        .await
+    }
+}
+

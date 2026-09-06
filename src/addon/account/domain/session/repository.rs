@@ -192,6 +192,22 @@ impl SessionRepository {
             .transpose()
     }
 
+    /// 统计用户活跃会话数（新设备判断用：无历史会话 = 新设备）。
+    pub(crate) async fn active_count_for_user(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+    ) -> Result<u64, BaseError> {
+        let rows = self
+            .query(ctx)?
+            .select_fields(&[SESSION_ID])?
+            .where_eq(USER_ID, serde_json::Value::Number(user_id.into()))?
+            .where_null(REVOKED_AT)?
+            .all()
+            .await?;
+        Ok(rows.len() as u64)
+    }
+
     /// 撤销单个会话（行标记；jti 黑名单由 Action 层完成）。
     pub(crate) async fn revoke(
         &self,

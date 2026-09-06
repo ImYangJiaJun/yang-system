@@ -4,6 +4,7 @@ use crate::addon::account::domain::policy::normalize_username;
 use crate::addon::account::Account;
 use async_trait::async_trait;
 use std::sync::Arc;
+use crate::addon::account::email_delivery::NewDeviceEmailSenderHandle;
 use yang_base::action::auth::{
     normalize_email, AuthOperation, BrowserSession, CredentialVerifier, LoginAction, LoginInput,
     VerifiedSubject,
@@ -247,7 +248,41 @@ async fn record_login_session(
             },
         )
         .await;
+    // 新设备判断（路线图 C-3）：本次 upsert 后若用户活跃会话数恰为 1，
+    // 说明这是该用户第一台设备（无历史会话指纹）→ best-effort 邮件提醒。
+    let active_count = account
+        .sessions()
+        .active_count_for_user(ctx, user_id)
+        .await
+        .unwrap_or(0);
+    if active_count <= 1 {
+        if let Err(error) = notify_new_device(ctx, account, user_id, ip, user_agent).await {
+            tracing::warn!(error = %error, "新设备登录提醒投递失败");
+        }
+    }
     Ok(())
+}
+
+/// 新设备登录成功提醒（best-effort，不阻塞登录路径）。
+async fn notify_new_device(
+    ctx: &ActionContext,
+    account: &Account,
+    user_id: i64,
+    ip: &str,
+    user_agent: &str,
+) -> Result<(), BaseError> {
+    let sender = ctx.tools().extension::<NewDeviceEmailSenderHandle>()?;
+    let Some(record) = account.users().find_by_id(ctx, user_id).await? else {
+        return Ok(());
+    };
+    let Some(email) = record.optional::<String>(crate::addon::account::user::table::EMAIL)? else {
+        return Ok(()); // 无邮箱（如已匿名化）不提醒
+    };
+    let now = current_unix_timestamp()?;
+    sender
+        .send_new_device_login(&email, ip, user_agent, now)
+        .await
+        .map_err(|error| BaseError::Unknown(format!("新设备提醒投递失败: {error}")))
 }
 
 fn current_unix_timestamp() -> Result<i64, BaseError> {
