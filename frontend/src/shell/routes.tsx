@@ -1,4 +1,5 @@
 import AppLayout from "@/shell/AppLayout";
+import AccountSettingsPage from "@/features/account/AccountSettingsPage";
 import BusinessPage from "@/shell/pages/BusinessPage";
 import DashboardPage from "@/shell/pages/DashboardPage";
 import LoginPage from "@/features/auth/pages/LoginPage";
@@ -68,6 +69,7 @@ export const appRoutes = [
         ),
         children: [
           { index: true, element: <DashboardPage /> },
+          { path: "account", element: <AccountSettingsPage /> },
           { path: "m/:moduleId", element: <ModulePage /> },
           { path: "m/:moduleId/v/:viewId", element: <ModulePage /> },
           { path: "business", element: <BusinessPage /> },

@@ -226,6 +226,28 @@ export default function AppLayout() {
           <AccountSwitcher catalog={catalog} />
         </div>
         <nav className="flex-1 space-y-4 overflow-y-auto p-3">
+          <div>
+            <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+              个人
+            </p>
+            <ul className="space-y-0.5">
+              <li>
+                <NavLink
+                  to="/account"
+                  className={({ isActive }) =>
+                    cn(
+                      "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                      isActive &&
+                        "bg-accent font-medium text-accent-foreground",
+                    )
+                  }
+                >
+                  <CircleUser className="size-4 shrink-0" />
+                  账号设置
+                </NavLink>
+              </li>
+            </ul>
+          </div>
           {groups.map((group) => (
             <div key={group.identity}>
               <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">

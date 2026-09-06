@@ -1,0 +1,293 @@
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useNavigate } from "react-router";
+
+import type { CurrentUser } from "./api";
+import { changePassword, changeUsername, fetchCurrentUser } from "./api";
+import {
+  useSessionController,
+  useSessionSnapshot,
+} from "@/engine/session/use-session";
+import { StepUpRequiredError } from "@/engine/http/errors";
+import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
+import { Label } from "@/shared/ui/label";
+
+/// 账号设置页：资料展示 + 修改密码 + 修改用户名 + 停用账号。
+///
+/// 受 Step-up 保护的动作（改密/改用户名/停用）在 428 时经
+/// SessionController.requestStepUpProof 弹重认证对话框，换到一次性
+/// proof 后重放原请求；用户取消则放弃本次操作。
+export default function AccountSettingsPage() {
+  const controller = useSessionController();
+  const session = useSessionSnapshot();
+  const token = session.token || undefined;
+  const navigate = useNavigate();
+
+  const [profile, setProfile] = useState<CurrentUser | null>(null);
+  const [profileError, setProfileError] = useState("");
+
+  // 修改密码表单
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+
+  // 修改用户名表单
+  const [newUsername, setNewUsername] = useState("");
+
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const loadProfile = useCallback(async () => {
+    setProfileError("");
+    try {
+      const current = await fetchCurrentUser(token);
+      setProfile(current);
+      setNewUsername(current.username);
+    } catch (cause) {
+      setProfileError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void loadProfile();
+  }, [loadProfile]);
+
+  /// 受 Step-up 保护动作的通用执行器：请求 → 428 换 proof 重放。
+  const runProtected = useCallback(
+    async <T,>(
+      request: (proof: string | undefined) => Promise<T>,
+    ): Promise<T | undefined> => {
+      try {
+        return await request(undefined);
+      } catch (cause) {
+        if (!(cause instanceof StepUpRequiredError)) throw cause;
+        const proof = await controller.requestStepUpProof(cause.challenge);
+        if (!proof) return undefined; // 用户取消重认证
+        return await request(proof);
+      }
+    },
+    [controller],
+  );
+
+  const submitPassword = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setMessage("");
+    setErrorMessage("");
+    if (newPassword.length < 10) {
+      setErrorMessage("新密码至少 10 个字符");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setErrorMessage("两次输入的新密码不一致");
+      return;
+    }
+    setBusy("password");
+    try {
+      const result = await runProtected((proof) =>
+        changePassword(oldPassword, newPassword, token, undefined, proof),
+      );
+      if (result === undefined) return; // 用户取消
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setMessage("密码已修改。凭据已变更，请使用新密码重新登录。");
+      controller.clearSession("credentials-changed");
+      navigate("/login", { replace: true });
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const submitUsername = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setMessage("");
+    setErrorMessage("");
+    if (!newUsername.trim()) {
+      setErrorMessage("用户名不能为空");
+      return;
+    }
+    setBusy("username");
+    try {
+      const result = await runProtected((proof) =>
+        changeUsername(newUsername.trim(), token, undefined, proof),
+      );
+      if (result === undefined) return; // 用户取消
+      setMessage("用户名已修改。凭据已变更，请使用新用户名重新登录。");
+      controller.clearSession("credentials-changed");
+      navigate("/login", { replace: true });
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disableAccount = async () => {
+    if (busy) return;
+    setMessage("");
+    setErrorMessage("");
+    if (!profile) return;
+    if (
+      !window.confirm(
+        `确定停用账号「${profile.username}」吗？此操作将撤销全部会话。`,
+      )
+    ) {
+      return;
+    }
+    setBusy("disable");
+    try {
+      const disabled = await controller.disableAccount();
+      if (disabled) navigate("/login", { replace: true });
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const emailText =
+    profile?.email && profile.emailVerifiedAt
+      ? `${profile.email}（已验证）`
+      : "未绑定邮箱";
+
+  return (
+    <main className="mx-auto w-full max-w-2xl space-y-6 p-6">
+      <div className="space-y-1">
+        <h1 className="text-xl font-semibold">账号设置</h1>
+        <p className="text-sm text-muted-foreground">
+          管理你的登录凭据与账号安全选项
+        </p>
+      </div>
+
+      {profileError && (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {profileError}
+        </p>
+      )}
+
+      {message && (
+        <p
+          aria-live="polite"
+          className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
+        >
+          {message}
+        </p>
+      )}
+
+      {profile && (
+        <section className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-medium">基本资料</h2>
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+            <dt className="text-muted-foreground">用户名</dt>
+            <dd>{profile.username}</dd>
+            <dt className="text-muted-foreground">邮箱</dt>
+            <dd>{emailText}</dd>
+            <dt className="text-muted-foreground">注册时间</dt>
+            <dd>{new Date(profile.createdAt * 1000).toLocaleString()}</dd>
+          </dl>
+        </section>
+      )}
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <h2 className="text-base font-medium">修改密码</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          修改后全部会话将失效，需使用新密码重新登录
+        </p>
+        <form className="mt-3 space-y-3" onSubmit={submitPassword} noValidate>
+          <div className="space-y-1.5">
+            <Label htmlFor="account-old-password">当前密码</Label>
+            <Input
+              id="account-old-password"
+              type="password"
+              autoComplete="current-password"
+              value={oldPassword}
+              disabled={busy !== null}
+              onChange={(event) => setOldPassword(event.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="account-new-password">新密码（至少 10 位）</Label>
+            <Input
+              id="account-new-password"
+              type="password"
+              autoComplete="new-password"
+              value={newPassword}
+              disabled={busy !== null}
+              onChange={(event) => setNewPassword(event.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="account-confirm-password">确认新密码</Label>
+            <Input
+              id="account-confirm-password"
+              type="password"
+              autoComplete="new-password"
+              value={confirmPassword}
+              disabled={busy !== null}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+            />
+          </div>
+          <Button type="submit" disabled={busy !== null}>
+            {busy === "password" ? "提交中…" : "修改密码"}
+          </Button>
+        </form>
+      </section>
+
+      {profile && (
+        <section className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-medium">修改用户名</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            修改后需使用新用户名重新登录；用户名只能包含字母、数字、下划线与连字符
+          </p>
+          <form className="mt-3 space-y-3" onSubmit={submitUsername} noValidate>
+            <div className="space-y-1.5">
+              <Label htmlFor="account-new-username">新用户名</Label>
+              <Input
+                id="account-new-username"
+                autoComplete="username"
+                value={newUsername}
+                disabled={busy !== null}
+                onChange={(event) => setNewUsername(event.target.value)}
+              />
+            </div>
+            <Button type="submit" disabled={busy !== null}>
+              {busy === "username" ? "提交中…" : "修改用户名"}
+            </Button>
+          </form>
+        </section>
+      )}
+
+      <section className="rounded-xl border border-destructive/40 bg-destructive/5 p-5">
+        <h2 className="text-base font-medium text-destructive">危险区</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          停用当前账号将撤销全部会话，账号将无法登录。此操作不可自助恢复。
+        </p>
+        <Button
+          variant="destructive"
+          className="mt-3"
+          disabled={busy !== null}
+          onClick={() => void disableAccount()}
+        >
+          {busy === "disable" ? "停用中…" : "停用账号"}
+        </Button>
+      </section>
+
+      {errorMessage && (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {errorMessage}
+        </p>
+      )}
+    </main>
+  );
+}

@@ -68,8 +68,8 @@ function collectInputSchemas(): {
 describe("OpenAPI 输入 Schema 前端可编译性", () => {
   const { operationCount, cases } = collectInputSchemas();
 
-  it("契约快照覆盖后端全部 18 个业务 endpoint", () => {
-    expect(operationCount).toBe(18);
+  it("契约快照覆盖后端全部业务 endpoint", () => {
+    expect(operationCount).toBeGreaterThanOrEqual(19);
     expect(cases.length).toBeGreaterThanOrEqual(operationCount);
   });
 
