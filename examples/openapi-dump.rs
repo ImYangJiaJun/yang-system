@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
+        totp: None,
     });
     let application =
         yang_system::app::build_metadata_app(tools, security).context("构建应用定义失败")?;

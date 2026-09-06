@@ -26,6 +26,9 @@ pub(super) struct CompleteStepUpInput {
 pub(super) struct CompleteStepUpCredentials {
     username: String,
     password: String,
+    /// 账号启用 TOTP 时必填的第二因子一次性码（验收：不得降级为单因子）。
+    #[serde(default)]
+    mfa_code: Option<String>,
 }
 
 impl ParamInput for CompleteStepUpInput {
@@ -89,6 +92,38 @@ impl CredentialVerifier for UserStepUpCredentialVerifier {
                 .await?;
             return Err(error);
         }
+        // E-1d 验收：账号启用 TOTP 时，Step-up 必须同时要求第二因子，
+        // 否则高权限操作防护降级回单因子。
+        let totp_state = self
+            .account
+            .users()
+            .find_totp_state_by_id(ctx, user.id)
+            .await?;
+        if let Some(state) = totp_state {
+            if state.totp_activated_at.is_some() {
+                let secret = self
+                    .account
+                    .users()
+                    .decrypt_totp_secret(ctx, &state)
+                    .await?;
+                let mfa_code = mfa_code_from_extra(&input.extra);
+                let accepted = match &mfa_code {
+                    Some(code) => self
+                        .account
+                        .verify_second_factor(ctx, user.id, &state, &secret, code)
+                        .await
+                        .is_ok(),
+                    None => false,
+                };
+                if !accepted {
+                    self.account
+                        .rate_limiter()
+                        .record_failure(ctx, operation, &username)
+                        .await?;
+                    return Err(BaseError::InvalidPassword);
+                }
+            }
+        }
         self.account
             .rate_limiter()
             .clear_failures(ctx, operation, &username)
@@ -96,6 +131,14 @@ impl CredentialVerifier for UserStepUpCredentialVerifier {
         self.verified_user_id.store(user.id, Ordering::Release);
         Ok(VerifiedSubject::new(user.id.to_string()))
     }
+}
+
+/// 从 Step-up 输入的 `extra` 提取第二因子码。
+fn mfa_code_from_extra(extra: &serde_json::Value) -> Option<String> {
+    extra
+        .get("mfa_code")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 pub(super) async fn handle(
@@ -118,7 +161,7 @@ pub(super) async fn handle(
                 &LoginInput {
                     username: input.credentials.username,
                     password: input.credentials.password,
-                    extra: serde_json::Value::Null,
+                    extra: serde_json::json!({ "mfa_code": input.credentials.mfa_code }),
                 },
                 &input.challenge,
             )

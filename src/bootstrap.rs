@@ -113,6 +113,10 @@ async fn run_after_telemetry_initialized(
             change.change_engine_config(),
         ));
     }
+    // TOTP 密钥域（AEAD）；未配置时 MFA Action 不注册。
+    if let Some(totp) = settings.security.totp.as_ref() {
+        tools_builder = tools_builder.config(totp.clone());
+    }
     let tools = Arc::new(tools_builder.build().context("构建应用 Tools 失败")?);
 
     run_then_cleanup(

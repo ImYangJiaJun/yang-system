@@ -299,6 +299,27 @@ pub struct SecuritySettings {
     /// 允许提供 `Forwarded`/`X-Forwarded-For` 的 TCP 对端网段；空列表表示完全忽略。
     #[serde(default)]
     pub trusted_proxy_cidrs: Vec<String>,
+    /// TOTP 第二因子配置域（E-1）；`None` 时 MFA Action 不注册。
+    #[serde(default)]
+    pub totp: Option<TotpSettings>,
+}
+
+/// TOTP 第二因子配置（路线图 E-1b）：AEAD 密钥域与码位。
+///
+/// `aead_key` 是加密 `users.totp_secret` 的独立密钥域（32 字节），
+/// **禁止**与 token/step-up/邮箱验证码密钥复用——启动校验做交叉隔离检查。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TotpSettings {
+    /// AEAD 加密密钥（32 字节；hex 或 base64 或原文均可，取原始字节前 32 位）。
+    pub aead_key: String,
+    /// TOTP 一次性码位数（默认 6，允许 6..=8）。
+    #[serde(default = "default_totp_digits")]
+    pub digits: u32,
+}
+
+const fn default_totp_digits() -> u32 {
+    6
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -753,6 +774,9 @@ impl SecuritySettings {
         }
         yang_base::transport::client_ip::validate_trusted_proxy_cidrs(&self.trusted_proxy_cidrs)
             .map_err(|error| anyhow::anyhow!("security.trusted_proxy_cidrs 配置无效: {error}"))?;
+        if let Some(totp) = &self.totp {
+            validate_totp_settings(totp)?;
+        }
         Ok(())
     }
 }
@@ -835,6 +859,31 @@ fn validate_step_up_key_id(key_id: &str) -> anyhow::Result<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         bail!("step_up key_id 必须是 1..=64 字节的 ASCII 字母、数字、下划线或连字符");
+    }
+    Ok(())
+}
+
+fn validate_totp_settings(totp: &TotpSettings) -> anyhow::Result<()> {
+    if !(6..=8).contains(&totp.digits) {
+        bail!("security.totp.digits 必须在 6..=8 范围内");
+    }
+    if totp.aead_key.len() < 32 {
+        bail!("security.totp.aead_key 至少需要 32 字节");
+    }
+    let normalized = totp.aead_key.trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "changeme" | "replace-me" | "replace_with_a_random_secret" | "example-secret"
+    ) {
+        bail!("security.totp.aead_key 不能使用示例值或占位值");
+    }
+    let repeated_byte = totp
+        .aead_key
+        .as_bytes()
+        .first()
+        .is_some_and(|first| totp.aead_key.as_bytes().iter().all(|byte| byte == first));
+    if repeated_byte {
+        bail!("security.totp.aead_key 不能使用重复字符");
     }
     Ok(())
 }

@@ -8,7 +8,8 @@
 use super::status::UserStatus;
 use crate::addon::account::user::table::{
     AUTHZ_VERSION, CREDENTIAL_VERSION, EMAIL, EMAIL_VERIFIED_AT, PASSWORD_HASH, STATUS,
-    SYSTEM_ROLE, USERNAME, USER_ID, USER_VIEW_FIELDS,
+    SYSTEM_ROLE, TOTP_ACTIVATED_AT, TOTP_RECOVERY_DIGEST, TOTP_SECRET, USERNAME, USER_ID,
+    USER_VIEW_FIELDS,
 };
 use std::sync::Arc;
 use yang_base::action::ActionContext;
@@ -17,6 +18,40 @@ use yang_base::BaseError;
 
 const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, PASSWORD_HASH, STATUS];
 const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION, CREDENTIAL_VERSION];
+/// TOTP 状态投影：**不**进登录热路径（`USER_CREDENTIAL_FIELDS`），只在
+/// MFA 端点与 Step-up 重认证需要时单独拉取。
+const USER_TOTP_FIELDS: &[&str] = &[
+    USER_ID,
+    USERNAME,
+    STATUS,
+    TOTP_SECRET,
+    TOTP_ACTIVATED_AT,
+    TOTP_RECOVERY_DIGEST,
+];
+
+/// TOTP 状态记录：`totp_secret` 为 AEAD 密文（Base64），`totp_activated_at`
+/// 为空表示未激活；`totp_recovery_digest` 为恢复码摘要 JSON 数组（激活后非空）。
+pub(crate) struct TotpStateRecord {
+    pub(crate) username: String,
+    pub(crate) status: UserStatus,
+    pub(crate) totp_secret: Option<String>,
+    pub(crate) totp_activated_at: Option<i64>,
+    pub(crate) totp_recovery_digest: Option<String>,
+}
+
+impl TryFrom<&Record> for TotpStateRecord {
+    type Error = BaseError;
+
+    fn try_from(record: &Record) -> Result<Self, Self::Error> {
+        Ok(Self {
+            username: record.require(USERNAME)?,
+            status: UserStatus::from_storage(&record.require::<String>(STATUS)?)?,
+            totp_secret: record.optional(TOTP_SECRET)?,
+            totp_activated_at: record.optional(TOTP_ACTIVATED_AT)?,
+            totp_recovery_digest: record.optional(TOTP_RECOVERY_DIGEST)?,
+        })
+    }
+}
 
 pub(crate) struct CredentialRecord {
     pub(crate) id: i64,
@@ -274,6 +309,115 @@ impl UserRepository {
     ///
     /// 邮箱与验证时间成对更新（保持 `chk_users_verified_email_pair` 检查约束），
     /// 唯一约束冲突由数据库约束错误返回。该方法是 users 事实的授权 writer 入口之一。
+    /// 读取 TOTP 状态（MFA 端点与 Step-up 重认证使用；不污染登录热路径）。
+    pub(crate) async fn find_totp_state_by_id(
+        &self,
+        ctx: &ActionContext,
+        id: i64,
+    ) -> Result<Option<TotpStateRecord>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(USER_TOTP_FIELDS)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .page(1, 1)?
+            .all()
+            .await?;
+        rows.first().map(TotpStateRecord::try_from).transpose()
+    }
+
+    /// 事务内写入 TOTP 激活状态：密文密钥、激活时间、恢复码摘要。
+    ///
+    /// 只在激活流程调用一次；停用/重新配置走覆盖写。
+    pub(crate) async fn activate_totp_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+        encrypted_secret: &str,
+        activated_at: i64,
+        recovery_digests_json: &str,
+    ) -> Result<(), BaseError> {
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .update_in_tx(
+                transaction,
+                Record::new()
+                    .set(TOTP_SECRET, encrypted_secret)
+                    .set(TOTP_ACTIVATED_AT, activated_at)
+                    .set(TOTP_RECOVERY_DIGEST, recovery_digests_json),
+            )
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {id} TOTP 激活未精确影响一行"),
+            )));
+        }
+        Ok(())
+    }
+
+    /// 解密 TOTP 密钥（AEAD；密钥域来自 `security.totp.aead_key`）。
+    pub(crate) async fn decrypt_totp_secret(
+        &self,
+        ctx: &ActionContext,
+        state: &TotpStateRecord,
+    ) -> Result<String, BaseError> {
+        let stored = state
+            .totp_secret
+            .as_ref()
+            .ok_or_else(|| BaseError::ConfigError("TOTP 已激活但缺少密钥密文".to_string()))?;
+        let totp_settings = ctx.tools().config::<crate::config::TotpSettings>()?;
+        let cipher = crate::addon::account::domain::mfa::TotpSecretCipher::new(totp_settings)?;
+        let plaintext = cipher.decrypt(stored)?;
+        String::from_utf8(plaintext)
+            .map_err(|_| BaseError::ConfigError("TOTP 密钥密文解码失败".to_string()))
+    }
+
+    /// 事务内单次消费一次性恢复码：命中摘要则移除该项回写；
+    /// 全部消费完时置 NULL。未命中返回 `Ok(false)`（不做任何修改）。
+    pub(crate) async fn consume_recovery_code_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+        code: &str,
+    ) -> Result<bool, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(USER_TOTP_FIELDS)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .page(1, 1)?
+            .all_in_tx(transaction)
+            .await?;
+        let Some(record) = rows.first().map(TotpStateRecord::try_from).transpose()? else {
+            return Ok(false);
+        };
+        let Some(digests_json) = record.totp_recovery_digest.as_deref() else {
+            return Ok(false);
+        };
+        let Some(updated) =
+            crate::addon::account::domain::mfa::remove_recovery_digest(digests_json, code)
+        else {
+            return Ok(false);
+        };
+        let update = if updated == "[]" {
+            Record::new().set(TOTP_RECOVERY_DIGEST, serde_json::Value::Null)
+        } else {
+            Record::new().set(TOTP_RECOVERY_DIGEST, updated)
+        };
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .update_in_tx(transaction, update)
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {id} 恢复码消费未精确影响一行"),
+            )));
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn update_email_in_tx(
         &self,
         ctx: &ActionContext,

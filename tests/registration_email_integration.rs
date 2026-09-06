@@ -18,7 +18,7 @@ use yang_system::addon::account::email_delivery::{
 };
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
-use yang_system::config::{EmailVerificationSettings, SecuritySettings};
+use yang_system::config::{EmailVerificationSettings, SecuritySettings, TotpSettings};
 use yang_system::schema::sync_with_database;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
@@ -84,6 +84,7 @@ fn security_settings() -> Arc<SecuritySettings> {
         password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
+        totp: None,
     })
 }
 
@@ -151,17 +152,29 @@ async fn connect_redis() -> anyhow::Result<RedisClient> {
 }
 
 async fn reset_database(database: &Database) -> anyhow::Result<()> {
-    for table in [
-        "password_reset_token",
-        "audit_event",
-        "authorization_outbox",
-        "users",
-    ] {
-        sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
-            .execute(database.pool())
-            .await?;
+    // 测试库专用：清空全部业务表。残留的第三方表（历史遗留）间存在任意
+    // 外键引用，静态列表无法穷举；循环 DROP 直到库为空（每轮至少能删掉
+    // 一个没有子引用的表，有向无环必然收敛）。
+    for _ in 0..64 {
+        // MySQL 8 information_schema 的 TABLE_NAME 以 VARBINARY 暴露；按字节取回再转 UTF-8。
+        let tables: Vec<String> = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()",
+        )
+        .fetch_all(database.pool())
+        .await?
+        .into_iter()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .collect();
+        if tables.is_empty() {
+            return Ok(());
+        }
+        for table in &tables {
+            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
+                .execute(database.pool())
+                .await;
+        }
     }
-    Ok(())
+    anyhow::bail!("测试库清理未在 64 轮内收敛（存在环状外键？）")
 }
 
 async fn reset_redis(redis: &RedisClient) -> anyhow::Result<()> {
@@ -766,6 +779,176 @@ async fn session_revoke_kicks_one_device_without_affecting_others() -> anyhow::R
         .fetch_one(control.pool())
         .await?;
         ensure!(a_active == 1, "设备 A 会话必须保持活跃");
+
+        Ok(())
+    }
+    .await;
+
+    let database_cleanup = reset_database(&control).await;
+    let redis_cleanup = reset_redis(&redis).await;
+    finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
+}
+
+/// 路线图 E-1 验收（登录两阶段）：账号启用 TOTP 后，
+/// 无第二因子码登录必须被拒（InvalidPassword），带 TOTP 码登录成功；
+/// 错误恢复码同样被拒且不消耗（单次消费语义由事务保证）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> {
+    let control = connect_database().await?;
+    let redis = connect_redis().await?;
+    reset_database(&control).await?;
+    reset_redis(&redis).await?;
+
+    let outcome = async {
+        sync_with_database(
+            connect_database().await?,
+            database_config(),
+            security_settings(),
+        )
+        .await?;
+
+        let namespace = format!(
+            "totp-two-stage-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        );
+        let sender = CapturingEmailSender::default();
+        let totp_settings = TotpSettings {
+            aead_key: "integration-totp-aead-key-0123456789abcdef".to_string(),
+            digits: 6,
+        };
+        let tools = Arc::new(
+            ToolsBuilder::new()
+                .mysql(Database::from_pool(
+                    control.pool().clone(),
+                    database_config(),
+                )?)
+                .cache(redis.clone())
+                .token(token_manager())
+                .extension(AuthorizationVersionCache::new(
+                    redis.clone(),
+                    namespace.clone(),
+                )?)
+                .extension(step_up_manager())
+                .extension(RegistrationEmailSenderHandle::new(sender.clone()))
+                .config(email_settings(namespace).engine_config())
+                .config(totp_settings.clone())
+                .build()?,
+        );
+        let security = Arc::new(SecuritySettings {
+            argon2_max_concurrency: 4,
+            auth_rate_limit_window_seconds: 60,
+            auth_rate_limit_ip_attempts: 10_000,
+            auth_rate_limit_username_attempts: 1_000,
+            password_reset_ttl_seconds: 900,
+            issue_refresh_credential_version: true,
+            trusted_proxy_cidrs: Vec::new(),
+            totp: Some(totp_settings),
+        });
+        let application = build_app(Arc::clone(&tools), security)?;
+        let app = Arc::new(application.runtime);
+
+        // 注册用户。
+        let email = "totp-two-stage@example.com";
+        let code = request_code(&app, &sender, email, 43_301).await?;
+        let registered =
+            dispatch(&app, "register", registration_body("totp_two_stage_user", email, &code), 43_301)
+                .await?;
+        ensure!(registered.code == 0, "注册应成功");
+
+        // 直写 TOTP 激活状态（AEAD 加密入库），模拟 totp_activate 完成后的库状态。
+        // 密文用与生产相同的密钥派生路径（SHA-256(aead_key) + AES-256-GCM）在测试内
+        // 加密，保证登录校验路径能解密出确定性 secret。
+        let secret = "JBSWY3DPEHPK3PXP";
+        let aead_key = "integration-totp-aead-key-0123456789abcdef";
+        use aes_gcm::aead::{Aead, KeyInit};
+        let key_bytes: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(aead_key.as_bytes());
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&digest);
+            bytes
+        };
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|_| anyhow::anyhow!("测试内 TOTP 密钥构造失败"))?;
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[..8].copy_from_slice(&SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs().to_le_bytes());
+        let encrypted_blob = cipher
+            .encrypt(
+                aes_gcm::Nonce::from_slice(&nonce_bytes),
+                secret.as_bytes(),
+            )
+            .map_err(|_| anyhow::anyhow!("测试内 TOTP 密文加密失败"))?;
+        let mut stored_blob = Vec::with_capacity(12 + encrypted_blob.len());
+        stored_blob.extend_from_slice(&nonce_bytes);
+        stored_blob.extend_from_slice(&encrypted_blob);
+        let encrypted = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            stored_blob,
+        );
+        let activated_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs() as i64;
+        // 8 个恢复码摘要（测试用固定值）。
+        let digests_json = r#"["a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"]"#;
+        let affected = sqlx::query(
+            "UPDATE users SET totp_secret = ?, totp_activated_at = ?, totp_recovery_digest = ? WHERE username = 'totp_two_stage_user'",
+        )
+        .bind(&encrypted)
+        .bind(activated_at)
+        .bind(digests_json)
+        .execute(control.pool())
+        .await?;
+        ensure!(affected.rows_affected() == 1, "TOTP 激活状态直写应影响一行");
+
+        // 1) 无第二因子码登录 → InvalidPassword（两阶段验收）。
+        let denied = dispatch(
+            &app,
+            "login",
+            json!({ "username": "totp_two_stage_user", "password": PASSWORD }),
+            43_302,
+        )
+        .await;
+        match denied {
+            Err(BaseError::InvalidPassword) => {}
+            other => anyhow::bail!("启用 TOTP 后缺码登录必须拒绝: {other:?}"),
+        }
+
+        // 2) 错误 TOTP 码 → 同样拒绝（不泄露维度）。
+        let denied = dispatch(
+            &app,
+            "login",
+            json!({
+                "username": "totp_two_stage_user",
+                "password": PASSWORD,
+                "extra": { "mfa_code": "000000" }
+            }),
+            43_303,
+        )
+        .await;
+        match denied {
+            Err(BaseError::InvalidPassword) => {}
+            other => anyhow::bail!("错误 TOTP 码登录必须拒绝: {other:?}"),
+        }
+
+        // 3) 正确 TOTP 码 → 登录成功。
+        let verifier = yang_base::action::auth::TotpLiteVerifier::default();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let totp_code = verifier.generate(secret, now);
+        let accepted = dispatch(
+            &app,
+            "login",
+            json!({
+                "username": "totp_two_stage_user",
+                "password": PASSWORD,
+                "extra": { "mfa_code": totp_code }
+            }),
+            43_304,
+        )
+        .await?;
+        ensure!(accepted.code == 0, "带正确 TOTP 码登录应成功");
 
         Ok(())
     }

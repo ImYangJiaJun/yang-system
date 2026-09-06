@@ -21,6 +21,9 @@ pub(crate) const PASSWORD_HASH: &str = "password_hash";
 pub(crate) const STATUS: &str = "status";
 pub(crate) const AUTHZ_VERSION: &str = "authz_version";
 pub(crate) const CREDENTIAL_VERSION: &str = "credential_version";
+pub(crate) const TOTP_SECRET: &str = "totp_secret";
+pub(crate) const TOTP_ACTIVATED_AT: &str = "totp_activated_at";
+pub(crate) const TOTP_RECOVERY_DIGEST: &str = "totp_recovery_digest";
 pub(crate) const CREATED_AT: &str = "created_at";
 pub(crate) const UPDATED_AT: &str = "updated_at";
 pub(crate) const USER_VIEW_FIELDS: &[&str] = &[
@@ -111,6 +114,22 @@ pub(crate) fn user_table_spec() -> Result<TableSpec, BaseError> {
                 .title("凭据版本")
                 .require(true)
                 .default(0_i64)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+        totp_secret => Str::new()
+                .title("TOTP 共享密钥（AEAD 加密）")
+                .max_length(512)
+                .secret(true)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+        totp_activated_at => Timestamp::new()
+                .title("TOTP 激活时间")
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+        totp_recovery_digest => Str::new()
+                .title("恢复码摘要（JSON 数组）")
+                .max_length(2048)
+                .secret(true)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
         created_at => Timestamp::new().title("创建时间").created_at(),

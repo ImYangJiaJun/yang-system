@@ -182,6 +182,7 @@ mod tests {
             password_reset_ttl_seconds: 900,
             issue_refresh_credential_version: true,
             trusted_proxy_cidrs: Vec::new(),
+            totp: None,
         })
     }
 

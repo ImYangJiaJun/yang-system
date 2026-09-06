@@ -89,6 +89,50 @@ impl CredentialVerifier for UserCredentialVerifier {
         // verify_or_dummy 对 None 恒返回 false，能走到这里说明用户一定存在。
         let user = user.ok_or(BaseError::InvalidPassword)?;
         Account::ensure_active(user.status)?;
+        // E-1a/E-1d：账号启用 TOTP 时，登录必须同时完成第二因子挑战；
+        // 缺少或错误的一次性码与密码错误同响应（InvalidPassword，防枚举）。
+        let totp_state = self
+            .account
+            .users()
+            .find_totp_state_by_id(ctx, user.id)
+            .await?;
+        if let Some(state) = totp_state {
+            if state.totp_activated_at.is_some() {
+                let secret = self
+                    .account
+                    .users()
+                    .decrypt_totp_secret(ctx, &state)
+                    .await?;
+                let mfa_code = input
+                    .extra
+                    .get("mfa_code")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                match mfa_code {
+                    Some(code) => {
+                        let accepted = self
+                            .account
+                            .verify_second_factor(ctx, user.id, &state, &secret, &code)
+                            .await
+                            .is_ok();
+                        if !accepted {
+                            self.account
+                                .rate_limiter()
+                                .record_failure(ctx, AuthOperation::Login, &limit_key)
+                                .await?;
+                            return Err(BaseError::InvalidPassword);
+                        }
+                    }
+                    None => {
+                        self.account
+                            .rate_limiter()
+                            .record_failure(ctx, AuthOperation::Login, &limit_key)
+                            .await?;
+                        return Err(BaseError::InvalidPassword);
+                    }
+                }
+            }
+        }
         let claims = self.account.claims_for(ctx, user.id).await?;
         Ok(VerifiedSubject::new(user.id.to_string()).with_token_pair_claims(claims))
     }

@@ -23,7 +23,7 @@ use crate::addon::account::domain::password_reset::{
 use crate::addon::account::domain::system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
 use crate::addon::account::user::table::{UserView, STATUS};
 use crate::audit;
-use crate::config::SecuritySettings;
+use crate::config::{SecuritySettings, TotpSettings};
 use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::auth::{AuthRateLimiter, BrowserSession, PasswordEngine, TokenPairClaims};
@@ -49,6 +49,7 @@ pub(crate) struct Account {
     step_up_manager: Option<Arc<StepUpManager>>,
     issue_refresh_credential_version: bool,
     password_reset_ttl_seconds: u64,
+    totp_settings: Option<TotpSettings>,
 }
 
 impl Account {
@@ -73,6 +74,7 @@ impl Account {
             step_up_manager,
             issue_refresh_credential_version: security.issue_refresh_credential_version,
             password_reset_ttl_seconds: security.password_reset_ttl_seconds,
+            totp_settings: security.totp.clone(),
         })
     }
 
@@ -111,6 +113,11 @@ impl Account {
     /// 组合根配置的 Step-up manager；未配置时 step_up_complete 不注册。
     pub(crate) fn step_up_manager(&self) -> Option<Arc<StepUpManager>> {
         self.step_up_manager.as_ref().map(Arc::clone)
+    }
+
+    /// TOTP 配置域；未配置时 MFA Action 不注册。
+    pub(crate) fn totp_settings(&self) -> Option<&TotpSettings> {
+        self.totp_settings.as_ref()
     }
 
     /// 在注册事务中竞争唯一最终管理员哨兵（当前骨架为不声明的默认实现）。
@@ -152,6 +159,46 @@ impl Account {
         let status = UserStatus::from_storage(&user.require::<String>(STATUS)?)?;
         Self::ensure_active(status)?;
         UserView::try_from(&user)
+    }
+
+    /// 校验账号第二因子（E-1c/E-1d 验收）：TOTP 码优先，失败后试一次性
+    /// 恢复码（命中则独立事务单次消费）。任何失败返回 `InvalidPassword`，
+    /// 与密码错误同响应（防枚举）。
+    ///
+    /// 恢复码消费是独立事务：与登录/Step-up 的签发路径无共享写，单次
+    /// 消费语义由事务内「摘要移除 + 回写」保证。
+    pub(crate) async fn verify_second_factor(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        state: &crate::addon::account::domain::repository::TotpStateRecord,
+        secret: &str,
+        code: &str,
+    ) -> Result<(), BaseError> {
+        let verifier = yang_base::action::auth::TotpLiteVerifier::default();
+        if yang_base::action::auth::TotpVerifier::verify(&verifier, secret, code)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // TOTP 码失败 → 尝试一次性恢复码（单次消费）。
+        if crate::addon::account::domain::mfa::recovery_digest_matches(
+            state.totp_recovery_digest.as_deref().unwrap_or("[]"),
+            code,
+        ) {
+            let mut transaction = ctx.tools().mysql()?.transaction().await?;
+            let consumed = self
+                .users()
+                .consume_recovery_code_in_tx(ctx, &mut transaction, user_id, code)
+                .await?;
+            if consumed {
+                transaction.commit().await.map_err(BaseError::from)?;
+                return Ok(());
+            }
+            let _ = transaction.rollback().await;
+        }
+        Err(BaseError::InvalidPassword)
     }
 
     /// 提交或回滚一个业务事务，回滚失败只记录日志不覆盖原错误。

@@ -25,6 +25,8 @@ mod reset_password;
 mod revoke_session;
 mod security_events;
 mod step_up;
+mod totp_activate;
+mod totp_setup;
 
 use crate::addon::account::Account;
 use std::sync::Arc;
@@ -63,6 +65,8 @@ const ACTIONS: &[Register] = action_registry![
     step_up, // 条件：组合根配置了 StepUpManager
     revoke_session,
     security_events,
+    totp_setup,    // 条件：security.totp 配置段
+    totp_activate, // 条件：security.totp 配置段
     me,
     // scaffold:action-registration
 ];
