@@ -444,6 +444,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/users/security-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 安全事件
+         * @description 查询当前用户的登录安全事件（分页、仅本人）
+         */
+        get: operations["account.user.security_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users/sessions": {
         parameters: {
             query?: never;
@@ -661,6 +681,15 @@ export interface components {
          * @enum {string}
          */
         UserStatus: "active" | "disabled";
+        /** @description 用户可见的安全事件视图。 */
+        LoginEventView: {
+            failure_reason?: string | null;
+            ip: string;
+            /** Format: int64 */
+            occurred_at: number;
+            result: string;
+            user_agent: string;
+        };
         /** @description 单条会话展示视图（供 GET /users/sessions 返回）。 */
         SessionView: {
             /** Format: int64 */
@@ -2816,6 +2845,88 @@ export interface operations {
                              *     描述操作结果的文本信息
                              */
                             message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.security_events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: int64
+                     * @default null
+                     */
+                    page?: number | null;
+                    /**
+                     * Format: int64
+                     * @default null
+                     */
+                    page_size?: number | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * SecurityEventsPage
+                         * @description 分页的安全事件列表。
+                         */
+                        data: {
+                            events: components["schemas"]["LoginEventView"][];
                         };
                         message: string;
                     };

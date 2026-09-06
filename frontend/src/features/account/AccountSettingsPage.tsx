@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
 
-import type { CurrentUser } from "./api";
+import type { CurrentUser, SessionInfo } from "./api";
 import {
   changeEmail,
   changePassword,
   changeUsername,
   fetchCurrentUser,
+  listSessions,
   requestChangeEmail,
+  revokeSession,
 } from "./api";
 import {
   useSessionController,
@@ -50,6 +52,10 @@ export default function AccountSettingsPage() {
   const [message, setMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
 
+  // 登录设备
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [sessionsError, setSessionsError] = useState("");
+
   const loadProfile = useCallback(async () => {
     setProfileError("");
     try {
@@ -64,6 +70,39 @@ export default function AccountSettingsPage() {
   useEffect(() => {
     void loadProfile();
   }, [loadProfile]);
+
+  const loadSessions = useCallback(async () => {
+    setSessionsError("");
+    try {
+      const found = await listSessions(token);
+      setSessions(found);
+    } catch (cause) {
+      setSessionsError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void loadSessions();
+  }, [loadSessions]);
+
+  const kickSession = async (sessionId: string) => {
+    if (busy) return;
+    setMessage("");
+    setErrorMessage("");
+    setBusy(`kick-${sessionId}`);
+    try {
+      const done = await runProtected((proof) =>
+        revokeSession(sessionId, token, undefined, proof),
+      );
+      if (done === undefined) return; // 用户取消 Step-up
+      setMessage("该设备已退出登录");
+      void loadSessions();
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   /// 受 Step-up 保护动作的通用执行器：请求 → 428 换 proof 重放。
   const runProtected = useCallback(
@@ -380,6 +419,66 @@ export default function AccountSettingsPage() {
           </form>
         </section>
       )}
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-medium">登录设备</h2>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() => void loadSessions()}
+          >
+            刷新
+          </Button>
+        </div>
+        <p className="mt-1 text-sm text-muted-foreground">
+          当前会话所在的设备列表；可逐台退出其他设备
+        </p>
+        {sessionsError && (
+          <p role="alert" className="mt-2 text-sm text-destructive">
+            {sessionsError}
+          </p>
+        )}
+        <ul className="mt-3 space-y-2">
+          {sessions.map((session) => (
+            <li
+              key={session.sessionId}
+              className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm"
+            >
+              <div className="min-w-0">
+                <p className="truncate font-medium">
+                  {session.userAgent || "未知设备"}
+                  {session.current && (
+                    <span className="ml-2 rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary">
+                      当前设备
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {session.ip} · 最近活动{" "}
+                  {new Date(session.lastSeenAt * 1000).toLocaleString()}
+                </p>
+              </div>
+              {!session.current && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => void kickSession(session.sessionId)}
+                >
+                  {busy === `kick-${session.sessionId}` ? "退出中…" : "退出"}
+                </Button>
+              )}
+            </li>
+          ))}
+          {sessions.length === 0 && !sessionsError && (
+            <li className="text-sm text-muted-foreground">暂无活跃会话</li>
+          )}
+        </ul>
+      </section>
 
       <section className="rounded-xl border border-destructive/40 bg-destructive/5 p-5">
         <h2 className="text-base font-medium text-destructive">危险区</h2>

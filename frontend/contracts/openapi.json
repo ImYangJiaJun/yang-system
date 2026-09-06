@@ -3394,6 +3394,170 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/users/security-events": {
+      "get": {
+        "description": "查询当前用户的登录安全事件（分页、仅本人）",
+        "operationId": "account.user.security_events",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "page": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "page_size": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "definitions": {
+                        "LoginEventView": {
+                          "description": "用户可见的安全事件视图。",
+                          "properties": {
+                            "failure_reason": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "ip": {
+                              "type": "string"
+                            },
+                            "occurred_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "result": {
+                              "type": "string"
+                            },
+                            "user_agent": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "ip",
+                            "occurred_at",
+                            "result",
+                            "user_agent"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "description": "分页的安全事件列表。",
+                      "properties": {
+                        "events": {
+                          "items": {
+                            "$ref": "#/definitions/LoginEventView"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "events"
+                      ],
+                      "title": "SecurityEventsPage",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "安全事件",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/users/sessions": {
       "get": {
         "description": "列出当前用户活跃会话并标记当前设备",

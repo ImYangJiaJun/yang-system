@@ -230,7 +230,7 @@ pub(crate) fn user_session() -> Result<TableDefinition, BaseError> {
 ///
 /// 不落审计库（保留期清理会牵连用户可见历史），自带保留策略；
 /// `failure_reason` 只记粗粒度原因，不记录明文凭据。
-fn login_event() -> Result<TableDefinition, BaseError> {
+pub(crate) fn login_event() -> Result<TableDefinition, BaseError> {
     Table::new("login_event")
         .fields([
             Field::id("id"),

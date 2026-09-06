@@ -211,3 +211,79 @@ export async function changeEmail(
     immediateConvergence: data?.immediate_convergence === true,
   };
 }
+
+export type SessionInfo = {
+  sessionId: string;
+  createdAt: number;
+  lastSeenAt: number;
+  ip: string;
+  userAgent: string;
+  revokedAt: number | null;
+  current: boolean;
+};
+
+export async function listSessions(
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<SessionInfo[]> {
+  const response = await fetch(`${apiBase}/api/v1/users/sessions`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    credentials: "include",
+    signal,
+  });
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+  if (!response.ok || payload?.code !== 0) {
+    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+      status: response.status,
+      code: payload?.code,
+      requestId,
+      details: payload,
+    });
+  }
+  const data = recordData(payload.data);
+  const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+  return sessions.map((raw) => {
+    const session = raw as Record<string, unknown>;
+    return {
+      sessionId: String(session.session_id),
+      createdAt: session.created_at as number,
+      lastSeenAt: session.last_seen_at as number,
+      ip: String(session.ip),
+      userAgent: String(session.user_agent),
+      revokedAt:
+        typeof session.revoked_at === "number"
+          ? (session.revoked_at as number)
+          : null,
+      current: session.current === true,
+    };
+  });
+}
+
+export async function revokeSession(
+  sessionId: string,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+  stepUpProof?: string,
+): Promise<void> {
+  const result = await postAuthenticated(
+    "/api/v1/users/sessions/revoke",
+    { session_id: sessionId },
+    accessToken,
+    signal,
+    stepUpProof,
+  );
+  const data = recordData(result.payload.data);
+  if (data?.session_revoked !== true) {
+    throw new ApiError("撤销会话响应缺少确认", {
+      status: result.status,
+      code: result.payload.code,
+      requestId: result.requestId,
+      details: result.payload,
+    });
+  }
+}

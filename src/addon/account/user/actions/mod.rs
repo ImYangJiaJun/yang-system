@@ -18,6 +18,7 @@ mod request_password_reset;
 mod request_registration_email;
 mod reset_password;
 mod revoke_session;
+mod security_events;
 mod step_up;
 
 use crate::addon::account::Account;
@@ -51,6 +52,7 @@ const ACTIONS: &[Register] = action_registry![
     logout,
     step_up, // 条件：组合根配置了 StepUpManager
     revoke_session,
+    security_events,
     me,
     // scaffold:action-registration
 ];

@@ -6,6 +6,7 @@
 
 use super::claims;
 use super::repository::UserRepository;
+use super::login_event::LoginEventRepository;
 use super::session::SessionRepository;
 use super::status::UserStatus;
 use crate::addon::account::domain::authz_version::{
@@ -38,6 +39,7 @@ const REFRESH_COOKIE_PATH: &str = "/api/v1/users";
 pub(crate) struct Account {
     users: Arc<UserRepository>,
     sessions: Arc<SessionRepository>,
+    login_events: Arc<LoginEventRepository>,
     passwords: Arc<PasswordEngine>,
     rate_limiter: Arc<AuthRateLimiter>,
     grant_resolver: Arc<dyn GrantResolver>,
@@ -52,6 +54,7 @@ impl Account {
     pub(crate) fn new(
         users: UserRepository,
         sessions: SessionRepository,
+        login_events: LoginEventRepository,
         security: &SecuritySettings,
         grant_resolver: Arc<dyn GrantResolver>,
         system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
@@ -60,6 +63,7 @@ impl Account {
         Ok(Self {
             users: Arc::new(users),
             sessions: Arc::new(sessions),
+            login_events: Arc::new(login_events),
             passwords: Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?),
             rate_limiter: Arc::new(AuthRateLimiter::new(security.rate_limit_config())),
             grant_resolver,
@@ -78,6 +82,10 @@ impl Account {
 
     pub(crate) fn sessions(&self) -> &SessionRepository {
         &self.sessions
+    }
+
+    pub(crate) fn login_events(&self) -> &LoginEventRepository {
+        &self.login_events
     }
 
     pub(crate) fn passwords(&self) -> &PasswordEngine {

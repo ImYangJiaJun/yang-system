@@ -8,6 +8,7 @@ mod actions;
 pub(super) mod table;
 
 use super::domain::context::Account;
+use super::domain::login_event::LoginEventRepository;
 use super::domain::repository::UserRepository;
 use super::domain::session::SessionRepository;
 use super::{GrantResolver, SystemOwnerClaimer};
@@ -33,9 +34,12 @@ pub(super) fn build_module(
 ) -> Result<ModuleSpec, BaseError> {
     let table = table::user_table_spec()?;
     let session_repository = SessionRepository::new(crate::schema::user_session()?);
+    let login_event_repository =
+        LoginEventRepository::new(crate::schema::login_event()?);
     let account = Arc::new(Account::new(
         UserRepository::new(table.table_definition()?),
         session_repository,
+        login_event_repository,
         &security,
         grant_resolver,
         system_owner_claimer,
