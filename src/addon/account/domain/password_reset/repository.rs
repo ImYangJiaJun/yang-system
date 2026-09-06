@@ -97,23 +97,40 @@ pub(crate) async fn insert_issued(
     issued: &IssuedPasswordReset,
     ttl_seconds: u64,
 ) -> Result<(), BaseError> {
+    insert_issued_by(pool, user_id, issued, ttl_seconds, None).await
+}
+
+/// 以数据库时钟写入一条管理签发的密码重置凭证（路线图 D-2）。
+///
+/// `requested_by_user` 写入操作者 ID（审计管理动作），其余与自助签发一致。
+pub(crate) async fn insert_issued_by(
+    pool: &MySqlPool,
+    user_id: i64,
+    issued: &IssuedPasswordReset,
+    ttl_seconds: u64,
+    requested_by_user: Option<i64>,
+) -> Result<(), BaseError> {
     let ttl = i64::try_from(ttl_seconds)
         .map_err(|_| BaseError::ConfigError("密码重置凭证 TTL 超出 i64 范围".to_string()))?;
     QueryBuilder::from_pool(pool, table!("password_reset_token"))
         .set_expr(field!("created_at"), SqlExpr::unix_timestamp())
         .set_expr(field!("expires_at"), SqlExpr::unix_timestamp_add(ttl))
-        .insert(&insert_data(user_id, issued.reference()))
+        .insert(&insert_data(user_id, issued.reference(), requested_by_user))
         .await?;
     Ok(())
 }
 
 /// 组装签发 INSERT 的列值；时间两列由 `set_expr` 以数据库时钟写入。
-fn insert_data(user_id: i64, reference: &PasswordResetReference) -> serde_json::Value {
+fn insert_data(
+    user_id: i64,
+    reference: &PasswordResetReference,
+    requested_by_user: Option<i64>,
+) -> serde_json::Value {
     serde_json::json!({
         "token_digest": reference.digest(),
         "token_fingerprint": reference.fingerprint(),
         "user_user": user_id,
-        "requested_by_user": serde_json::Value::Null,
+        "requested_by_user": requested_by_user.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
     })
 }
 
@@ -308,7 +325,7 @@ mod tests {
     fn insert_data_stores_only_digest_and_marks_self_service_requester_as_null() {
         let reference = PasswordResetReference::from_bytes(&[7_u8; RAW_TOKEN_BYTES])
             .unwrap_or_else(|error| panic!("固定输入应可派生摘要: {error}"));
-        let data = insert_data(42, &reference);
+        let data = insert_data(42, &reference, None);
 
         assert_eq!(data["user_user"], serde_json::json!(42));
         assert!(data["requested_by_user"].is_null());

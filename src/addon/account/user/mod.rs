@@ -107,7 +107,13 @@ fn presentation(credential_mutations_enabled: bool) -> ModulePresentationSpec {
 
 /// 需要 Step-up 重认证的账号安全 Action。
 fn step_up_targets(credential_mutations_enabled: bool) -> Vec<yang_base::definition::ActionRef> {
-    let mut targets = vec![yang_base::action!("account.user.logout")];
+    // 管理写操作（D-1/D-2）与自助安全操作都要求 Step-up。
+    let mut targets = vec![
+        yang_base::action!("account.user.logout"),
+        yang_base::action!("account.user.admin_disable_user"),
+        yang_base::action!("account.user.admin_enable_user"),
+        yang_base::action!("account.user.admin_issue_password_reset"),
+    ];
     if credential_mutations_enabled {
         targets.insert(0, yang_base::action!("account.user.revoke_session"));
         targets.insert(1, yang_base::action!("account.user.change_email"));
@@ -131,11 +137,19 @@ mod tests {
                 yang_base::action!("account.user.change_username"),
                 yang_base::action!("account.user.disable_self"),
                 yang_base::action!("account.user.logout"),
+                yang_base::action!("account.user.admin_disable_user"),
+                yang_base::action!("account.user.admin_enable_user"),
+                yang_base::action!("account.user.admin_issue_password_reset"),
             ]
         );
         assert_eq!(
             step_up_targets(false),
-            vec![yang_base::action!("account.user.logout")]
+            vec![
+                yang_base::action!("account.user.logout"),
+                yang_base::action!("account.user.admin_disable_user"),
+                yang_base::action!("account.user.admin_enable_user"),
+                yang_base::action!("account.user.admin_issue_password_reset"),
+            ]
         );
     }
 }

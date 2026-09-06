@@ -379,8 +379,10 @@ mod tests {
                     yang_base::definition::HttpMethod::Post
                         | yang_base::definition::HttpMethod::Put
                         | yang_base::definition::HttpMethod::Patch
-                ) && !action.input_schema.is_null()
+                ) && !operation["requestBody"].is_null()
                 {
+                    // 仅带 path/query 参数、无 body 的写操作（如管理端 {id}/disable）
+                    // 不强制 requestBody；凡有 requestBody 的必须携带可编译输入 Schema。
                     let schema = &operation["requestBody"]["content"][if action.request_media_type
                         == yang_base::definition::ActionMediaType::Multipart
                     {

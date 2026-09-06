@@ -10,13 +10,13 @@ use super::login_event::LoginEventRepository;
 use super::session::SessionRepository;
 use super::status::UserStatus;
 use crate::addon::account::domain::authz_version::{
-    disable_locked_user_and_increment_versions, increment_locked_credential_versions,
-    lock_user_credential, LockedUserCredential,
+    activate_locked_user_and_increment_versions, disable_locked_user_and_increment_versions,
+    increment_locked_credential_versions, lock_user_credential, LockedUserCredential,
 };
 use crate::addon::account::domain::grants::{AuthorizationGrants, GrantResolver};
 use crate::addon::account::domain::password_reset::{
-    consume_in_tx, find_target_user, insert_issued, invalid_reset_token, lock_in_tx,
-    IssuedPasswordReset, LockedPasswordReset, PasswordResetReference,
+    consume_in_tx, find_target_user, insert_issued, insert_issued_by, invalid_reset_token,
+    lock_in_tx, IssuedPasswordReset, LockedPasswordReset, PasswordResetReference,
 };
 use crate::addon::account::domain::system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
 use crate::addon::account::user::table::{UserView, STATUS};
@@ -197,6 +197,14 @@ impl Account {
         increment_locked_credential_versions(transaction, locked).await
     }
 
+    /// 在持有的用户行锁内启用账号并递增两个安全版本（管理动作 D-1）。
+    pub(crate) async fn activate_locked_in_tx(
+        transaction: &mut Transaction,
+        locked: &LockedUserCredential,
+    ) -> Result<(i64, i64), BaseError> {
+        activate_locked_user_and_increment_versions(transaction, locked).await
+    }
+
     /// 在持有的用户行锁内停用账号并递增两个安全版本。
     pub(crate) async fn disable_locked_in_tx(
         transaction: &mut Transaction,
@@ -254,6 +262,25 @@ impl Account {
             user_id,
             &issued,
             self.password_reset_ttl_seconds,
+        )
+        .await?;
+        Ok(issued)
+    }
+
+    /// 签发密码重置凭证并记录操作者（管理签发路线图 D-2）。
+    pub(crate) async fn issue_password_reset_by(
+        &self,
+        ctx: &ActionContext,
+        user_id: i64,
+        requested_by_user: Option<i64>,
+    ) -> Result<IssuedPasswordReset, BaseError> {
+        let issued = IssuedPasswordReset::generate()?;
+        insert_issued_by(
+            ctx.tools().mysql()?.pool(),
+            user_id,
+            &issued,
+            self.password_reset_ttl_seconds,
+            requested_by_user,
         )
         .await?;
         Ok(issued)

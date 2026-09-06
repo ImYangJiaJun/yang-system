@@ -1684,6 +1684,192 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/users": {
+      "get": {
+        "description": "管理端分页列出用户（邮箱字段遵循 system 角色可见性）",
+        "operationId": "account.user.list_users",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "page": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "page_size": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "definitions": {
+                        "UserStatus": {
+                          "description": "用户账号只允许处于启用或停用状态。",
+                          "enum": [
+                            "active",
+                            "disabled"
+                          ],
+                          "type": "string"
+                        },
+                        "UserView": {
+                          "description": "可安全返回给客户端的用户视图，不包含密码摘要。",
+                          "properties": {
+                            "created_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "email": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "email_verified_at": {
+                              "format": "int64",
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "id": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "status": {
+                              "$ref": "#/definitions/UserStatus"
+                            },
+                            "updated_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "username": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "created_at",
+                            "id",
+                            "status",
+                            "updated_at",
+                            "username"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "properties": {
+                        "users": {
+                          "items": {
+                            "$ref": "#/definitions/UserView"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "users"
+                      ],
+                      "title": "UsersPage",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "用户列表",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "account.users.read"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/users/change-email": {
       "post": {
         "description": "校验新邮箱验证码并完成换绑，撤销已有会话",
@@ -3984,6 +4170,369 @@
         "x-permission-mode": "all",
         "x-permissions": [],
         "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/{id}/disable": {
+      "post": {
+        "description": "管理端停用目标账号并撤销其全部会话",
+        "operationId": "account.user.admin_disable_user",
+        "parameters": [
+          {
+            "description": "",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "停用用户",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "account.users.manage"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/{id}/enable": {
+      "post": {
+        "description": "管理端启用被停用的目标账号",
+        "operationId": "account.user.admin_enable_user",
+        "parameters": [
+          {
+            "description": "",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "启用用户",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "account.users.manage"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/{id}/password-reset-tokens": {
+      "post": {
+        "description": "管理端为目标用户签发一次性密码重置凭证（明文只回显一次）",
+        "operationId": "account.user.admin_issue_password_reset",
+        "parameters": [
+          {
+            "description": "",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "签发重置凭证",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "account.users.manage"
+        ],
+        "x-public": false,
         "x-yang-response-kind": "json"
       }
     }

@@ -176,6 +176,25 @@ impl UserRepository {
         rows.first().map(CredentialRecord::try_from).transpose()
     }
 
+    /// 分页列出用户（管理查询，路线图 D-3）。
+    ///
+    /// 使用 system 角色查询以读取 email 等受保护字段；调用方必须持有
+    /// `account.users.read` 权限（Action 层校验）。按 id 升序分页。
+    pub(crate) async fn list_page(
+        &self,
+        ctx: &ActionContext,
+        page: usize,
+        page_size: usize,
+    ) -> Result<Vec<Record>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(USER_VIEW_FIELDS)?
+            .page(page, page_size)?
+            .all()
+            .await?;
+        Ok(rows)
+    }
+
     pub(crate) async fn find_by_id(
         &self,
         ctx: &ActionContext,

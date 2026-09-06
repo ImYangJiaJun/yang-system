@@ -197,6 +197,42 @@ pub(crate) async fn increment_locked_credential_versions(
     Ok((next_authz, next_credential))
 }
 
+/// 在账号启用事务中同时写入状态、两个安全版本与授权 Outbox。
+///
+/// 与停用对称：管理端启用被停用账号时使用（路线图 D-1）。启用不重置
+/// 凭据版本——用户可用原密码登录；授权版本递增使旧 Access Token 失效，
+/// 新登录重新获得当前授权快照。
+pub(crate) async fn activate_locked_user_and_increment_versions(
+    transaction: &mut Transaction,
+    locked: &LockedUserCredential,
+) -> Result<(i64, i64), BaseError> {
+    let next_authz = next_authz_version(locked.authz_version)?;
+    let next_credential = next_credential_version(locked.credential_version)?;
+    let affected = transaction
+        .table(table!("users"))
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
+        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(
+            field!("credential_version"),
+            CompareOp::Eq,
+            locked.credential_version,
+        )
+        .update(&serde_json::json!({
+            "status": UserStatus::Active.as_str(),
+            "authz_version": next_authz,
+            "credential_version": next_credential,
+        }))
+        .await?;
+    if affected != 1 {
+        return Err(BaseError::from(yang_db::DbError::TransactionError(
+            format!("用户 {} 启用事实在持锁事务内发生意外变化", locked.user_id),
+        )));
+    }
+    append_authorization_outbox(transaction, locked.user_id, next_authz).await?;
+    Ok((next_authz, next_credential))
+}
+
 /// 在账号停用事务中同时写入状态、两个安全版本与授权 Outbox。
 pub(crate) async fn disable_locked_user_and_increment_versions(
     transaction: &mut Transaction,
