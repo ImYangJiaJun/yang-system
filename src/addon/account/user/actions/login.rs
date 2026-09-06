@@ -50,16 +50,25 @@ impl CredentialVerifier for UserCredentialVerifier {
             .account
             .users()
             .find_credentials_by_username(ctx, &username)
-            .await?
-            .ok_or(BaseError::InvalidPassword)?;
-        if !self
+            .await?;
+        // 等时校验：用户不存在时也必须执行一次完整的 Argon2 校验。
+        // 若 miss 分支跳过哈希直接返回错误，「用户不存在」与「密码错误」的响应时间
+        // 会相差一次 Argon2 运算（几十到几百毫秒），攻击者可据此枚举用户名是否存在。
+        // 因此把 Option<密码哈希> 交给框架等时端口：None 时对内置 dummy 哈希走同一条
+        // 校验代码路径，两条分支耗时分布一致，且对外返回同一个 InvalidPassword 错误。
+        let password_matches = self
             .account
             .passwords()
-            .verify(&input.password, &user.password_hash)
-            .await?
-        {
+            .verify_or_dummy(
+                &input.password,
+                user.as_ref().map(|user| user.password_hash.as_str()),
+            )
+            .await?;
+        if !password_matches {
             return Err(BaseError::InvalidPassword);
         }
+        // verify_or_dummy 对 None 恒返回 false，能走到这里说明用户一定存在。
+        let user = user.ok_or(BaseError::InvalidPassword)?;
         Account::ensure_active(user.status)?;
         let claims = self.account.claims_for(ctx, user.id).await?;
         Ok(VerifiedSubject::new(user.id.to_string()).with_token_pair_claims(claims))

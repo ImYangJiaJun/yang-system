@@ -44,13 +44,29 @@ pub(crate) fn build_schema_app(
     build_application(tools, security, None)
 }
 
-/// 构建仅用于元数据导出的应用（无 Step-up、无 Redis 依赖），
+/// 构建仅用于元数据导出的应用（无 Redis 依赖），
 /// 供 `openapi-dump` 等开发期契约工具使用；目录内容与运行时同源。
+///
+/// Step-up 端点（`step_up_complete`）必须在导出中可见，因此本路径构造一个
+/// 独立占位密钥的 [`StepUpManager`] 并以内存 proof 存储装配
+/// [`StepUpServices::metadata`]——不连接 Redis，proof 单次消费语义由
+/// 进程内存储承担（本路径不处理真实请求，无跨实例问题）。
 pub fn build_metadata_app(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
 ) -> anyhow::Result<Application> {
-    build_application(tools, security, None)
+    // 占位密钥：元数据导出不签发/校验任何真实 challenge/proof，密钥只影响
+    // Catalog 的注册形态，不进入任何生产数据面。
+    let metadata_manager = Arc::new(
+        StepUpManager::new(
+            "openapi-metadata-placeholder-secret-0123456789abcdef",
+            "yang-system-metadata",
+            "yang-sensitive-actions",
+        )
+        .context("构建元数据导出 Step-up manager 失败")?,
+    );
+    let metadata_step_up = StepUpServices::metadata(metadata_manager);
+    build_application(tools, security, Some(metadata_step_up))
 }
 
 fn build_application(
@@ -389,6 +405,38 @@ mod tests {
         assert!(
             write_with_input_schema >= 5,
             "应有足够写操作携带输入 Schema（实际 {write_with_input_schema}）"
+        );
+    }
+
+    /// OpenAPI 契约快照必须覆盖 step-up 端点（路线图 A-5）：
+    /// 元数据导出路径（build_metadata_app）现在以内存 proof 存储装配
+    /// StepUpServices，使 `POST /api/v1/users/step-up/complete` 进入 Catalog，
+    /// 否则前端已依赖的 step-up 契约会从快照中消失。
+    #[tokio::test]
+    async fn openapi_projection_includes_step_up_complete_endpoint() {
+        let app = build_metadata_app(test_tools(), test_security())
+            .unwrap_or_else(|error| panic!("元数据应用应构建成功: {error:#}"));
+        let document = app
+            .runtime
+            .catalog()
+            .to_openapi(yang_base::definition::OpenApiInfo::new(
+                "yang-system",
+                "0.1.0",
+            ))
+            .unwrap_or_else(|error| panic!("Catalog 应投影 OpenAPI 文档: {error}"));
+        let paths = document["paths"]
+            .as_object()
+            .unwrap_or_else(|| panic!("OpenAPI 文档应包含 paths 对象"));
+        let path_item = paths
+            .get("/api/v1/users/step-up/complete")
+            .unwrap_or_else(|| panic!("OpenAPI 应包含 /api/v1/users/step-up/complete 路径"));
+        let operation = path_item
+            .get("post")
+            .unwrap_or_else(|| panic!("step-up 路径应包含 POST 操作"));
+        assert_eq!(
+            operation["operationId"],
+            serde_json::json!("account.user.step_up_complete"),
+            "step-up operationId 应与 Catalog 一致"
         );
     }
 }

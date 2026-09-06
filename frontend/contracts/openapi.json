@@ -3003,6 +3003,151 @@
         "x-public": true,
         "x-yang-response-kind": "json"
       }
+    },
+    "/api/v1/users/step-up/complete": {
+      "post": {
+        "description": "重新校验账号密码并把短期 challenge 升级为一次性 proof",
+        "operationId": "account.user.step_up_complete",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "CompleteStepUpCredentials": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "password": {
+                        "type": "string"
+                      },
+                      "username": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "password",
+                      "username"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "challenge": {
+                    "type": "string"
+                  },
+                  "credentials": {
+                    "$ref": "#/definitions/CompleteStepUpCredentials"
+                  }
+                },
+                "required": [
+                  "challenge",
+                  "credentials"
+                ],
+                "title": "CompleteStepUpInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "凭据重认证成功后签发的短期 proof。",
+                      "properties": {
+                        "expires_in": {
+                          "description": "从重认证成功时刻起的有效秒数。",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "proof": {
+                          "description": "提交给敏感 Action 的签名 proof。",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "expires_in",
+                        "proof"
+                      ],
+                      "title": "StepUpProof",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "完成敏感操作重认证",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
     }
   }
 }

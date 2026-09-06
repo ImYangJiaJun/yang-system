@@ -384,6 +384,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/users/step-up/complete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 完成敏感操作重认证
+     * @description 重新校验账号密码并把短期 challenge 升级为一次性 proof
+     */
+    post: operations["account.user.step_up_complete"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -555,6 +575,10 @@ export interface components {
      * @enum {string}
      */
     UserStatus: "active" | "disabled";
+    CompleteStepUpCredentials: {
+      password: string;
+      username: string;
+    };
   };
   responses: never;
   parameters: never;
@@ -2394,6 +2418,86 @@ export interface operations {
                *     描述操作结果的文本信息
                */
               message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "account.user.step_up_complete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          challenge: string;
+          credentials: components["schemas"]["CompleteStepUpCredentials"];
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * StepUpProof
+             * @description 凭据重认证成功后签发的短期 proof。
+             */
+            data: {
+              /**
+               * Format: uint64
+               * @description 从重认证成功时刻起的有效秒数。
+               */
+              expires_in: number;
+              /** @description 提交给敏感 Action 的签名 proof。 */
+              proof: string;
             };
             message: string;
           };

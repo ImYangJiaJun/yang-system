@@ -5,11 +5,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-#[cfg(test)]
-use yang_base::action::InMemoryStepUpProofStore;
 use yang_base::action::{
-    ActionContext, ApiResponse, RedisStepUpProofStore, StepUpManager, StepUpProofStore,
-    StepUpResourceResolver, StepUpVerification, STEP_UP_PROOF_HEADER,
+    ActionContext, ApiResponse, InMemoryStepUpProofStore, RedisStepUpProofStore, StepUpManager,
+    StepUpProofStore, StepUpResourceResolver, StepUpVerification, STEP_UP_PROOF_HEADER,
 };
 use yang_base::definition::ActionRef;
 use yang_base::router::{Middleware, MiddlewareRole, Next};
@@ -18,8 +16,11 @@ use yang_base::{BaseError, ErrorCategory};
 #[derive(Clone)]
 enum ApplicationProofStore {
     Redis(RedisStepUpProofStore),
-    #[cfg(test)]
-    Memory(Arc<InMemoryStepUpProofStore>),
+    /// 单进程内存消费存储：仅用于元数据导出等无 Redis 依赖的构建路径。
+    ///
+    /// 该变体**不得**用于生产请求路径——多实例部署无法共享已消费状态，
+    /// 生产路径必须使用 [`ApplicationProofStore::Redis`]。
+    Metadata(Arc<InMemoryStepUpProofStore>),
 }
 
 #[async_trait]
@@ -27,8 +28,7 @@ impl StepUpProofStore for ApplicationProofStore {
     async fn consume(&self, proof: &StepUpVerification) -> Result<bool, BaseError> {
         match self {
             Self::Redis(store) => store.consume(proof).await,
-            #[cfg(test)]
-            Self::Memory(store) => store.consume(proof).await,
+            Self::Metadata(store) => store.consume(proof).await,
         }
     }
 }
@@ -52,11 +52,25 @@ impl StepUpServices {
         })
     }
 
+    /// 构建仅用于元数据导出（OpenAPI 快照等）的 Step-up 服务。
+    ///
+    /// 元数据路径不连接 Redis，因此 proof 消费使用进程内内存存储；导出的
+    /// 只有 Catalog/OpenAPI 形态（路由、输入 Schema、operationId），不会在
+    /// 该路径处理任何真实请求，内存存储不会造成跨实例语义问题。
+    pub(crate) fn metadata(manager: Arc<StepUpManager>) -> Self {
+        Self {
+            manager,
+            proof_store: ApplicationProofStore::Metadata(Arc::new(
+                InMemoryStepUpProofStore::default(),
+            )),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn in_memory(manager: Arc<StepUpManager>) -> Self {
         Self {
             manager,
-            proof_store: ApplicationProofStore::Memory(Arc::new(
+            proof_store: ApplicationProofStore::Metadata(Arc::new(
                 InMemoryStepUpProofStore::default(),
             )),
         }
