@@ -83,6 +83,10 @@ fn presentation(credential_mutations_enabled: bool) -> ModulePresentationSpec {
                 ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
             )
             .present_action(
+                yang_base::action!("account.user.change_username"),
+                ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
+            )
+            .present_action(
                 yang_base::action!("account.user.disable_self"),
                 ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Invoke),
             );
@@ -94,7 +98,8 @@ fn presentation(credential_mutations_enabled: bool) -> ModulePresentationSpec {
 fn step_up_targets(credential_mutations_enabled: bool) -> Vec<yang_base::definition::ActionRef> {
     let mut targets = vec![yang_base::action!("account.user.logout")];
     if credential_mutations_enabled {
-        targets.insert(0, yang_base::action!("account.user.disable_self"));
+        targets.insert(0, yang_base::action!("account.user.change_username"));
+        targets.insert(1, yang_base::action!("account.user.disable_self"));
     }
     targets
 }
@@ -108,6 +113,7 @@ mod tests {
         assert_eq!(
             step_up_targets(true),
             vec![
+                yang_base::action!("account.user.change_username"),
                 yang_base::action!("account.user.disable_self"),
                 yang_base::action!("account.user.logout"),
             ]

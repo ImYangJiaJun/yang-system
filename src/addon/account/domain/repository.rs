@@ -231,6 +231,31 @@ impl UserRepository {
         }
         Ok(())
     }
+
+    /// 在事务内改写用户名（改用户名 Action 使用）。
+    ///
+    /// 用户名受唯一约束保护，冲突由数据库约束错误返回；调用方在持锁事务内
+    /// 先更新用户名再递增双版本。该方法是 users 事实的授权 writer 入口之一，
+    /// 只允许在 `account-security-version` 锁定的同一事务内调用。
+    pub(crate) async fn update_username_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+        username: &str,
+    ) -> Result<(), BaseError> {
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .update_in_tx(transaction, Record::new().set(USERNAME, username))
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {id} 用户名更新未精确影响一行"),
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

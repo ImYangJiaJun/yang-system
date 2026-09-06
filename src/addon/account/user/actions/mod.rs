@@ -4,6 +4,7 @@
 //! 这里只有模块清单和注册表数组，新增接口时加 `mod` 声明和数组一行即可。
 
 mod change_password;
+mod change_username;
 mod disable_self;
 mod login;
 mod logout;
@@ -36,6 +37,7 @@ const ACTIONS: &[Register] = action_registry![
     login,
     refresh,
     change_password, // 发布开关：credential_mutations_enabled
+    change_username,  // 发布开关：credential_mutations_enabled
     disable_self,    // 发布开关：credential_mutations_enabled
     request_password_reset,
     reset_password, // 发布开关：credential_mutations_enabled
