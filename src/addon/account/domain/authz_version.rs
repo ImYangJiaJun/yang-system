@@ -197,6 +197,47 @@ pub(crate) async fn increment_locked_credential_versions(
     Ok((next_authz, next_credential))
 }
 
+/// 在账号匿名化删除事务中改写身份标识并递增两个安全版本（路线图 E-2b）。
+///
+/// `deleted_username` 由调用方生成（如 `deleted_<id>`，保唯一约束）；
+/// email 与 email_verified_at 成对置 NULL（释放可再注册，保持
+/// `chk_users_verified_email_pair` 检查约束）；status 置 deleted，
+/// 双版本递增使全部存量 Token/Refresh 失效。
+pub(crate) async fn anonymize_locked_user_and_increment_versions(
+    transaction: &mut Transaction,
+    locked: &LockedUserCredential,
+    deleted_username: &str,
+) -> Result<(i64, i64), BaseError> {
+    let next_authz = next_authz_version(locked.authz_version)?;
+    let next_credential = next_credential_version(locked.credential_version)?;
+    let affected = transaction
+        .table(table!("users"))
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
+        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(
+            field!("credential_version"),
+            CompareOp::Eq,
+            locked.credential_version,
+        )
+        .update(&serde_json::json!({
+            "username": deleted_username,
+            "email": serde_json::Value::Null,
+            "email_verified_at": serde_json::Value::Null,
+            "status": UserStatus::Deleted.as_str(),
+            "authz_version": next_authz,
+            "credential_version": next_credential,
+        }))
+        .await?;
+    if affected != 1 {
+        return Err(BaseError::from(yang_db::DbError::TransactionError(
+            format!("用户 {} 匿名化事实在持锁事务内发生意外变化", locked.user_id),
+        )));
+    }
+    append_authorization_outbox(transaction, locked.user_id, next_authz).await?;
+    Ok((next_authz, next_credential))
+}
+
 /// 在账号启用事务中同时写入状态、两个安全版本与授权 Outbox。
 ///
 /// 与停用对称：管理端启用被停用账号时使用（路线图 D-1）。启用不重置

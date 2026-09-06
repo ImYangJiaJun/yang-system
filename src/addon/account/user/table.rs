@@ -99,6 +99,7 @@ pub(crate) fn user_table_spec() -> Result<TableSpec, BaseError> {
                 .options([
                     (UserStatus::Active, "启用"),
                     (UserStatus::Disabled, "停用"),
+                    (UserStatus::Deleted, "已删除"),
                 ]),
         authz_version => Int::new()
                 .title("授权版本")
@@ -122,7 +123,7 @@ pub(crate) fn user_table_spec() -> Result<TableSpec, BaseError> {
         .fields(fields)
         .check_named(
             "chk_users_status",
-            "`status` IN ('active', 'disabled')",
+            "`status` IN ('active', 'disabled', 'deleted')",
         )
         .check_named(
             "chk_users_verified_email_pair",
@@ -149,6 +150,7 @@ mod tests {
             [
                 ("active".to_string(), "启用".to_string()),
                 ("disabled".to_string(), "停用".to_string()),
+                ("deleted".to_string(), "已删除".to_string()),
             ]
         );
         let definition = spec

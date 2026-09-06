@@ -244,6 +244,25 @@ pub(crate) async fn consume_in_tx(
     Ok(())
 }
 
+/// 在事务内作废某用户的全部未消费重置凭证（匿名化删除前置清理，路线图 E-2a）。
+///
+/// 幂等：已消费/已作废的凭证不受影响；该用户的待用凭证立即不可用，
+/// 避免删除/匿名化后残留可消费的重置入口。
+pub(crate) async fn invalidate_all_for_user_in_tx(
+    transaction: &mut Transaction,
+    user_id: i64,
+) -> Result<(), BaseError> {
+    transaction
+        .table(table!("password_reset_token"))
+        .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
+        .where_and(field!("user_user"), CompareOp::Eq, user_id)
+        .where_null(field!("consumed_at"))
+        .where_null(field!("invalidated_at"))
+        .update(&serde_json::json!({}))
+        .await?;
+    Ok(())
+}
+
 pub(crate) fn invalid_reset_token() -> BaseError {
     BaseError::Unauthorized("密码重置凭证无效或已过期".to_string())
 }

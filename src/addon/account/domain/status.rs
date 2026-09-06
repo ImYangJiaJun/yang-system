@@ -5,23 +5,26 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use yang_base::BaseError;
 
-/// 用户账号只允许处于启用或停用状态。
+/// 用户账号状态：启用、停用或已删除（匿名化，路线图 E-2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UserStatus {
     Active,
     Disabled,
+    Deleted,
 }
 
 impl UserStatus {
     pub(crate) const ACTIVE: &'static str = "active";
     pub(crate) const DISABLED: &'static str = "disabled";
+    pub(crate) const DELETED: &'static str = "deleted";
 
     /// 从持久化字符串恢复领域值；未知值按数据库类型损坏失败关闭。
     pub(crate) fn from_storage(value: &str) -> Result<Self, BaseError> {
         match value {
             Self::ACTIVE => Ok(Self::Active),
             Self::DISABLED => Ok(Self::Disabled),
+            Self::DELETED => Ok(Self::Deleted),
             other => Err(BaseError::from(yang_db::DbError::TypeConversionError(
                 format!("users.status 包含未知值: {other:?}"),
             ))),
@@ -32,6 +35,7 @@ impl UserStatus {
         match self {
             Self::Active => Self::ACTIVE,
             Self::Disabled => Self::DISABLED,
+            Self::Deleted => Self::DELETED,
         }
     }
 
@@ -61,6 +65,11 @@ mod tests {
             UserStatus::from_storage("disabled")
                 .unwrap_or_else(|error| panic!("disabled 应有效: {error}")),
             UserStatus::Disabled
+        );
+        assert_eq!(
+            UserStatus::from_storage("deleted")
+                .unwrap_or_else(|error| panic!("deleted 应有效: {error}")),
+            UserStatus::Deleted
         );
         for invalid in ["ACTIVE", "pending", "", " active"] {
             assert!(

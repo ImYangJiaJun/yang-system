@@ -10,13 +10,15 @@ use super::login_event::LoginEventRepository;
 use super::session::SessionRepository;
 use super::status::UserStatus;
 use crate::addon::account::domain::authz_version::{
-    activate_locked_user_and_increment_versions, disable_locked_user_and_increment_versions,
-    increment_locked_credential_versions, lock_user_credential, LockedUserCredential,
+    activate_locked_user_and_increment_versions, anonymize_locked_user_and_increment_versions,
+    disable_locked_user_and_increment_versions, increment_locked_credential_versions,
+    lock_user_credential, LockedUserCredential,
 };
 use crate::addon::account::domain::grants::{AuthorizationGrants, GrantResolver};
 use crate::addon::account::domain::password_reset::{
     consume_in_tx, find_target_user, insert_issued, insert_issued_by, invalid_reset_token,
-    lock_in_tx, IssuedPasswordReset, LockedPasswordReset, PasswordResetReference,
+    invalidate_all_for_user_in_tx, lock_in_tx, IssuedPasswordReset, LockedPasswordReset,
+    PasswordResetReference,
 };
 use crate::addon::account::domain::system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
 use crate::addon::account::user::table::{UserView, STATUS};
@@ -197,6 +199,15 @@ impl Account {
         increment_locked_credential_versions(transaction, locked).await
     }
 
+    /// 在持有的用户行锁内匿名化删除账号并递增两个安全版本（路线图 E-2b）。
+    pub(crate) async fn anonymize_locked_in_tx(
+        transaction: &mut Transaction,
+        locked: &LockedUserCredential,
+        deleted_username: &str,
+    ) -> Result<(i64, i64), BaseError> {
+        anonymize_locked_user_and_increment_versions(transaction, locked, deleted_username).await
+    }
+
     /// 在持有的用户行锁内启用账号并递增两个安全版本（管理动作 D-1）。
     pub(crate) async fn activate_locked_in_tx(
         transaction: &mut Transaction,
@@ -243,6 +254,14 @@ impl Account {
     /// 密码重置凭证无效或已过期的统一错误。
     pub(crate) fn invalid_reset_token() -> BaseError {
         invalid_reset_token()
+    }
+
+    /// 在事务内作废某用户的全部未消费重置凭证（匿名化删除前置清理）。
+    pub(crate) async fn invalidate_resets_in_tx(
+        transaction: &mut Transaction,
+        user_id: i64,
+    ) -> Result<(), BaseError> {
+        invalidate_all_for_user_in_tx(transaction, user_id).await
     }
 
     /// 自助密码重置凭证的有效期（秒）。

@@ -115,10 +115,11 @@ fn step_up_targets(credential_mutations_enabled: bool) -> Vec<yang_base::definit
         yang_base::action!("account.user.admin_issue_password_reset"),
     ];
     if credential_mutations_enabled {
-        targets.insert(0, yang_base::action!("account.user.revoke_session"));
-        targets.insert(1, yang_base::action!("account.user.change_email"));
-        targets.insert(2, yang_base::action!("account.user.change_username"));
-        targets.insert(3, yang_base::action!("account.user.disable_self"));
+        targets.insert(0, yang_base::action!("account.user.delete_account"));
+        targets.insert(1, yang_base::action!("account.user.revoke_session"));
+        targets.insert(2, yang_base::action!("account.user.change_email"));
+        targets.insert(3, yang_base::action!("account.user.change_username"));
+        targets.insert(4, yang_base::action!("account.user.disable_self"));
     }
     targets
 }
@@ -132,6 +133,7 @@ mod tests {
         assert_eq!(
             step_up_targets(true),
             vec![
+                yang_base::action!("account.user.delete_account"),
                 yang_base::action!("account.user.revoke_session"),
                 yang_base::action!("account.user.change_email"),
                 yang_base::action!("account.user.change_username"),

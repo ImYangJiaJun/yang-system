@@ -13,6 +13,7 @@ pub mod email_delivery;
 pub(crate) mod grants;
 pub(crate) mod login_event;
 pub(crate) mod password_reset;
+pub(crate) mod oidc;
 pub(crate) mod policy;
 pub(crate) mod repository;
 pub(crate) mod session;
