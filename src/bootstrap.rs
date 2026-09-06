@@ -91,20 +91,25 @@ async fn run_after_telemetry_initialized(
         Arc::new(SmtpEmailSender::new(&settings.email.smtp).context("构建 SMTP 邮件投递器失败")?);
     let registration_sender: Arc<dyn RegistrationEmailSender> = email_sender.clone();
     let password_reset_sender: Arc<dyn PasswordResetEmailSender> = email_sender;
+    let mut tools_builder = ToolsBuilder::new()
+        .mysql(mysql)
+        .cache(cache)
+        .token(token_manager)
+        .extension(authorization_cache)
+        .extension(step_up_manager)
+        .extension(RegistrationEmailSenderHandle::from_arc(registration_sender))
+        .extension(PasswordResetEmailSenderHandle::from_arc(password_reset_sender))
+        .config(log_identity)
+        .config(settings.email.verification.engine_config())
+        .config(settings.email.password_reset.link_config());
+    // 邮箱换绑验证码使用独立 config 槽与 key 域；未配置时 change_email Action 不注册。
+    if let Some(change) = settings.email.change.as_ref() {
+        tools_builder = tools_builder.config(crate::config::ChangeEmailVerificationConfig(
+            change.change_engine_config(),
+        ));
+    }
     let tools = Arc::new(
-        ToolsBuilder::new()
-            .mysql(mysql)
-            .cache(cache)
-            .token(token_manager)
-            .extension(authorization_cache)
-            .extension(step_up_manager)
-            .extension(RegistrationEmailSenderHandle::from_arc(registration_sender))
-            .extension(PasswordResetEmailSenderHandle::from_arc(
-                password_reset_sender,
-            ))
-            .config(log_identity)
-            .config(settings.email.verification.engine_config())
-            .config(settings.email.password_reset.link_config())
+        tools_builder
             .build()
             .context("构建应用 Tools 失败")?,
     );

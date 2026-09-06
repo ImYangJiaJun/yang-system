@@ -3,6 +3,7 @@
 //! 每个 Action 的输入、路由、权限与业务用例都自包含在同名文件中；
 //! 这里只有模块清单和注册表数组，新增接口时加 `mod` 声明和数组一行即可。
 
+mod change_email;
 mod change_password;
 mod change_username;
 mod disable_self;
@@ -11,6 +12,7 @@ mod logout;
 mod me;
 mod refresh;
 mod register;
+mod request_change_email;
 mod request_password_reset;
 mod request_registration_email;
 mod reset_password;
@@ -38,7 +40,9 @@ const ACTIONS: &[Register] = action_registry![
     refresh,
     change_password, // 发布开关：credential_mutations_enabled
     change_username,  // 发布开关：credential_mutations_enabled
+    change_email,     // 发布开关：credential_mutations_enabled
     disable_self,    // 发布开关：credential_mutations_enabled
+    request_change_email,
     request_password_reset,
     reset_password, // 发布开关：credential_mutations_enabled
     logout,

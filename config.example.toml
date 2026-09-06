@@ -87,6 +87,19 @@ send_email_attempts = 5
 # 全局容量闸门高于单 IP/邮箱额度，避免单个攻击者耗尽邮件服务。
 send_global_attempts = 1000
 
+[email.change]
+# 邮箱换绑验证码的独立命名空间与密钥：绝不复用 [email.verification] 的密钥，
+# 否则换绑验证码可被注册验证码的 key 域重放（同一 Redis 前缀冲突）。
+namespace = "local"
+secret = "replace-with-independent-change-email-secret"
+ttl_seconds = 600
+resend_cooldown_seconds = 60
+max_attempts = 5
+send_window_seconds = 3600
+send_ip_attempts = 20
+send_email_attempts = 5
+send_global_attempts = 1000
+
 [email.password_reset]
 # 密码重置邮件中链接指向的前端控制台入口（scheme + host[:port]，无路径与查询串）。
 # 生产环境必须使用 https；不得从请求 Host 头推导（Host 头可被攻击者伪造）。

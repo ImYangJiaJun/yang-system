@@ -163,3 +163,51 @@ export async function changeUsername(
     immediateConvergence: data?.immediate_convergence === true,
   };
 }
+
+export async function requestChangeEmail(
+  newEmail: string,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ expiresIn: number; resendAfter: number }> {
+  const result = await postAuthenticated(
+    "/api/v1/users/change-email-verifications",
+    { new_email: newEmail },
+    accessToken,
+    signal,
+  );
+  const data = recordData(result.payload.data);
+  if (
+    data?.accepted !== true ||
+    typeof data.expires_in !== "number" ||
+    typeof data.resend_after !== "number"
+  ) {
+    throw new ApiError("换绑验证码响应缺少有效时限", {
+      status: result.status,
+      code: result.payload.code,
+      requestId: result.requestId,
+      details: result.payload,
+    });
+  }
+  return { expiresIn: data.expires_in, resendAfter: data.resend_after };
+}
+
+export async function changeEmail(
+  newEmail: string,
+  emailCode: string,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+  stepUpProof?: string,
+): Promise<CredentialMutationResult> {
+  const result = await postAuthenticated(
+    "/api/v1/users/change-email",
+    { new_email: newEmail, email_code: emailCode },
+    accessToken,
+    signal,
+    stepUpProof,
+  );
+  const data = recordData(result.payload.data);
+  return {
+    reloginRequired: data?.relogin_required === true,
+    immediateConvergence: data?.immediate_convergence === true,
+  };
+}

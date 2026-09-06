@@ -2,7 +2,13 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
 
 import type { CurrentUser } from "./api";
-import { changePassword, changeUsername, fetchCurrentUser } from "./api";
+import {
+  changeEmail,
+  changePassword,
+  changeUsername,
+  fetchCurrentUser,
+  requestChangeEmail,
+} from "./api";
 import {
   useSessionController,
   useSessionSnapshot,
@@ -33,6 +39,12 @@ export default function AccountSettingsPage() {
 
   // 修改用户名表单
   const [newUsername, setNewUsername] = useState("");
+
+  // 更换邮箱表单
+  const [newEmail, setNewEmail] = useState("");
+  const [emailCode, setEmailCode] = useState("");
+  const [emailCodeSent, setEmailCodeSent] = useState(false);
+  const [emailCooldown, setEmailCooldown] = useState(0);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
@@ -118,6 +130,60 @@ export default function AccountSettingsPage() {
       );
       if (result === undefined) return; // 用户取消
       setMessage("用户名已修改。凭据已变更，请使用新用户名重新登录。");
+      controller.clearSession("credentials-changed");
+      navigate("/login", { replace: true });
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const sendEmailCode = async () => {
+    if (busy || emailCooldown > 0) return;
+    setMessage("");
+    setErrorMessage("");
+    if (!newEmail.trim()) {
+      setErrorMessage("请输入新邮箱");
+      return;
+    }
+    setBusy("send-code");
+    try {
+      const challenge = await requestChangeEmail(newEmail.trim(), token);
+      setEmailCodeSent(true);
+      setEmailCooldown(challenge.resendAfter);
+      setMessage("换绑验证码已发送，请在 10 分钟内输入");
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    if (emailCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setEmailCooldown((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [emailCooldown > 0]);
+
+  const submitEmail = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setMessage("");
+    setErrorMessage("");
+    if (!emailCodeSent || !emailCode.trim()) {
+      setErrorMessage("请先获取换绑验证码并输入");
+      return;
+    }
+    setBusy("email");
+    try {
+      const result = await runProtected((proof) =>
+        changeEmail(newEmail.trim(), emailCode.trim(), token, undefined, proof),
+      );
+      if (result === undefined) return; // 用户取消
+      setMessage("邮箱已更换。凭据已变更，请使用新邮箱重新登录。");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
     } catch (cause) {
@@ -260,6 +326,56 @@ export default function AccountSettingsPage() {
             </div>
             <Button type="submit" disabled={busy !== null}>
               {busy === "username" ? "提交中…" : "修改用户名"}
+            </Button>
+          </form>
+        </section>
+      )}
+
+      {profile && (
+        <section className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-medium">更换邮箱</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            向新邮箱发送一次性验证码（与注册验证码独立），验证通过后完成换绑并重新登录
+          </p>
+          <form className="mt-3 space-y-3" onSubmit={submitEmail} noValidate>
+            <div className="space-y-1.5">
+              <Label htmlFor="account-new-email">新邮箱</Label>
+              <Input
+                id="account-new-email"
+                type="email"
+                autoComplete="email"
+                value={newEmail}
+                disabled={busy !== null}
+                onChange={(event) => setNewEmail(event.target.value)}
+              />
+            </div>
+            <div className="flex items-end gap-2">
+              <div className="flex-1 space-y-1.5">
+                <Label htmlFor="account-email-code">验证码</Label>
+                <Input
+                  id="account-email-code"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={emailCode}
+                  disabled={busy !== null}
+                  onChange={(event) => setEmailCode(event.target.value)}
+                />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy !== null || emailCooldown > 0}
+                onClick={() => void sendEmailCode()}
+              >
+                {emailCooldown > 0
+                  ? `${emailCooldown}s 后重发`
+                  : emailCodeSent
+                    ? "重新发送"
+                    : "发送验证码"}
+              </Button>
+            </div>
+            <Button type="submit" disabled={busy !== null}>
+              {busy === "email" ? "提交中…" : "更换邮箱"}
             </Button>
           </form>
         </section>

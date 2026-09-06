@@ -102,6 +102,24 @@ function stubAccountApi(
           },
         });
       }
+      if (url.endsWith("/api/v1/users/change-email-verifications")) {
+        return jsonResponse({
+          code: 0,
+          message: "成功",
+          data: { accepted: true, expires_in: 600, resend_after: 60 },
+        });
+      }
+      if (url.endsWith("/api/v1/users/change-email")) {
+        return jsonResponse({
+          code: 0,
+          message: "成功",
+          data: {
+            email_changed: true,
+            immediate_convergence: true,
+            relogin_required: true,
+          },
+        });
+      }
       if (url.endsWith("/api/v1/users/step-up/complete")) {
         return jsonResponse({
           code: 0,
@@ -230,4 +248,27 @@ describe("账号设置页", () => {
 
     await waitFor(() => expect(controller.getSnapshot().loggedIn).toBe(false));
   });
+});
+
+it("更换邮箱：发送验证码 → 输入验证码 → 换绑成功清空会话", async () => {
+  stubAccountApi();
+  const { controller } = renderTestApp({
+    path: "/account",
+    authenticated: true,
+  });
+
+  const user = userEvent.setup();
+  await waitFor(() => expect(screen.getByText("alice")).toBeInTheDocument());
+  await user.type(screen.getByLabelText("新邮箱"), "bob@example.com");
+  await user.click(screen.getByRole("button", { name: "发送验证码" }));
+
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: /重发|s 后重发/ }),
+    ).toBeInTheDocument(),
+  );
+  await user.type(screen.getByLabelText("验证码"), "123456");
+  await user.click(screen.getByRole("button", { name: "更换邮箱" }));
+
+  await waitFor(() => expect(controller.getSnapshot().loggedIn).toBe(false));
 });

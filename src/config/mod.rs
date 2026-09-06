@@ -143,6 +143,9 @@ pub struct StepUpSettings {
 pub struct EmailSettings {
     pub smtp: SmtpSettings,
     pub verification: EmailVerificationSettings,
+    /// 邮箱换绑验证码的独立配置段：命名空间与密钥必须与注册验证码隔离。
+    #[serde(default)]
+    pub change: Option<EmailVerificationSettings>,
     pub password_reset: PasswordResetEmailSettings,
 }
 
@@ -188,6 +191,7 @@ impl std::fmt::Debug for EmailSettings {
             .debug_struct("EmailSettings")
             .field("smtp", &self.smtp)
             .field("verification", &self.verification)
+            .field("change", &self.change)
             .field("password_reset", &self.password_reset)
             .finish()
     }
@@ -520,18 +524,40 @@ impl EmailSettings {
         self.smtp.validate()?;
         self.verification.validate()?;
         self.password_reset.validate(environment)?;
-        let secret = self.verification.secret.as_str();
-        let collides_with_token = std::iter::once(token.active_secret.as_str())
-            .chain(token.retiring_keys.iter().map(|key| key.secret.as_str()))
-            .any(|candidate| candidate == secret);
-        let collides_with_step_up = std::iter::once(step_up.active_secret.as_str())
-            .chain(step_up.retiring_keys.iter().map(|key| key.secret.as_str()))
-            .any(|candidate| candidate == secret);
-        if collides_with_token || collides_with_step_up {
-            bail!("email.verification.secret 不得复用 Token 或 Step-up 密钥");
+        validate_verification_secret(
+            "email.verification.secret",
+            &self.verification.secret,
+            token,
+            step_up,
+        )?;
+        if let Some(change) = &self.change {
+            change.validate()?;
+            if change.secret == self.verification.secret {
+                bail!("email.change.secret 不得复用注册验证码密钥（email.verification.secret）");
+            }
+            validate_verification_secret("email.change.secret", &change.secret, token, step_up)?;
         }
         Ok(())
     }
+}
+
+/// 校验一枚邮箱验证码密钥不与其他 keyring（Token/Step-up）冲突。
+fn validate_verification_secret(
+    name: &str,
+    secret: &str,
+    token: &TokenSettings,
+    step_up: &StepUpSettings,
+) -> anyhow::Result<()> {
+    let collides_with_token = std::iter::once(token.active_secret.as_str())
+        .chain(token.retiring_keys.iter().map(|key| key.secret.as_str()))
+        .any(|candidate| candidate == secret);
+    let collides_with_step_up = std::iter::once(step_up.active_secret.as_str())
+        .chain(step_up.retiring_keys.iter().map(|key| key.secret.as_str()))
+        .any(|candidate| candidate == secret);
+    if collides_with_token || collides_with_step_up {
+        bail!("{name} 不得复用 Token 或 Step-up 密钥");
+    }
+    Ok(())
 }
 
 impl SmtpSettings {
@@ -593,6 +619,24 @@ impl EmailVerificationSettings {
             send_global_attempts: self.send_global_attempts,
             send_metric_name: "yang_system_registration_email_total",
             verify_metric_name: "yang_system_registration_email_verify_total",
+        }
+    }
+
+    /// 转换为邮箱换绑验证码引擎的运行时配置（独立 key 域与指标名）。
+    pub fn change_engine_config(&self) -> EmailVerificationConfig {
+        EmailVerificationConfig {
+            redis_key_prefix: format!("yang-system:{}:change-email", self.namespace),
+            secret: self.secret.clone(),
+            ttl_seconds: self.ttl_seconds,
+            resend_cooldown_seconds: self.resend_cooldown_seconds,
+            max_attempts: self.max_attempts,
+            code_digits: 6,
+            send_window_seconds: self.send_window_seconds,
+            send_ip_attempts: self.send_ip_attempts,
+            send_email_attempts: self.send_email_attempts,
+            send_global_attempts: self.send_global_attempts,
+            send_metric_name: "yang_system_change_email_total",
+            verify_metric_name: "yang_system_change_email_verify_total",
         }
     }
 
@@ -793,6 +837,20 @@ fn validate_step_up_key_id(key_id: &str) -> anyhow::Result<()> {
         bail!("step_up key_id 必须是 1..=64 字节的 ASCII 字母、数字、下划线或连字符");
     }
     Ok(())
+}
+
+/// 邮箱换绑验证码的独立 config 槽类型。
+///
+/// `Tools` 的 config 按具体 Rust 类型索引，注册验证码与换绑验证码都是
+/// [`EmailVerificationConfig`] 实例，必须用 distinct 类型区分两个槽。
+#[derive(Clone, Debug)]
+pub struct ChangeEmailVerificationConfig(pub EmailVerificationConfig);
+
+impl ChangeEmailVerificationConfig {
+    /// 取内部框架配置。
+    pub fn engine_config(&self) -> &EmailVerificationConfig {
+        &self.0
+    }
 }
 
 #[cfg(test)]

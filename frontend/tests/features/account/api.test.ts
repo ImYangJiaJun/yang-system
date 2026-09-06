@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, StepUpRequiredError } from "@/engine/http/errors";
 import {
+  changeEmail,
   changePassword,
   changeUsername,
   fetchCurrentUser,
+  requestChangeEmail,
 } from "@/features/account/api";
 
 /// account 账号中心 API 契约：路径、鉴权头、Step-up 428 重放、响应校验。
@@ -174,6 +176,64 @@ describe("changeUsername", () => {
     expect(result).toEqual({
       reloginRequired: true,
       immediateConvergence: false,
+    });
+  });
+});
+
+describe("requestChangeEmail", () => {
+  it("POST change-email-verifications 携带新邮箱", async () => {
+    let capturedBody: unknown;
+    stubFetch((_url, init) => {
+      capturedBody = JSON.parse(String(init.body));
+      return Promise.resolve(
+        jsonResponse({
+          code: 0,
+          message: "成功",
+          data: { accepted: true, expires_in: 600, resend_after: 60 },
+        }),
+      );
+    });
+    const result = await requestChangeEmail("bob@example.com", "tok");
+    expect(capturedBody).toEqual({ new_email: "bob@example.com" });
+    expect(result).toEqual({ expiresIn: 600, resendAfter: 60 });
+  });
+});
+
+describe("changeEmail", () => {
+  it("POST change-email 提交新邮箱与验证码，透传 Step-up proof", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    stubFetch((url, init) => {
+      captured = { url, init };
+      return Promise.resolve(
+        jsonResponse({
+          code: 0,
+          message: "成功",
+          data: {
+            email_changed: true,
+            immediate_convergence: true,
+            relogin_required: true,
+          },
+        }),
+      );
+    });
+    const result = await changeEmail(
+      "bob@example.com",
+      "123456",
+      "tok",
+      undefined,
+      "proof-x",
+    );
+    expect(captured?.url).toContain("/api/v1/users/change-email");
+    expect(JSON.parse(String(captured?.init.body))).toEqual({
+      new_email: "bob@example.com",
+      email_code: "123456",
+    });
+    expect(
+      (captured?.init.headers as Record<string, string>)["x-step-up-proof"],
+    ).toBe("proof-x");
+    expect(result).toEqual({
+      reloginRequired: true,
+      immediateConvergence: true,
     });
   });
 });

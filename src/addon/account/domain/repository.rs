@@ -232,6 +232,36 @@ impl UserRepository {
         Ok(())
     }
 
+    /// 在事务内改写已验证邮箱（邮箱换绑 Action 使用）。
+    ///
+    /// 邮箱与验证时间成对更新（保持 `chk_users_verified_email_pair` 检查约束），
+    /// 唯一约束冲突由数据库约束错误返回。该方法是 users 事实的授权 writer 入口之一。
+    pub(crate) async fn update_email_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+        email: &str,
+        email_verified_at: i64,
+    ) -> Result<(), BaseError> {
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .update_in_tx(
+                transaction,
+                Record::new()
+                    .set(EMAIL, email)
+                    .set(EMAIL_VERIFIED_AT, email_verified_at),
+            )
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {id} 邮箱更新未精确影响一行"),
+            )));
+        }
+        Ok(())
+    }
+
     /// 在事务内改写用户名（改用户名 Action 使用）。
     ///
     /// 用户名受唯一约束保护，冲突由数据库约束错误返回；调用方在持锁事务内
