@@ -120,6 +120,13 @@ issue_refresh_credential_version = true
 # 示例：trusted_proxy_cidrs = ["127.0.0.1/32", "10.42.0.0/24"]
 trusted_proxy_cidrs = []
 
+# TOTP 第二因子（MFA）。aead_key 是加密 users.totp_secret 的独立密钥域：
+# 禁止与 token/step-up/邮箱验证码密钥复用（启动校验拒绝占位值与重复字节）。
+# 删除此段则 MFA Action 不注册。
+[security.totp]
+aead_key = "replace-with-an-independent-32-byte-totp-aead-key"
+digits = 6
+
 [shutdown]
 # 从收到退出信号起，HTTP 排空、后台任务退出和资源关闭共享这一总预算。
 total_timeout_seconds = 30

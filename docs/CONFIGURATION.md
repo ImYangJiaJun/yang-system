@@ -134,6 +134,16 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   Action 不注册，换绑能力不可用；显式配置后需重启生效。
 - 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度）。
 
+### TOTP 第二因子（`security.totp`）
+
+- `security.totp.aead_key` 是加密 `users.totp_secret` 的**独立密钥域**（32 字节）。
+  **启动校验拒绝**占位值、重复字节，且该密钥域不得与 token/step-up/邮箱验证码
+  密钥复用——AEAD 解密失败（密钥域不匹配）会按配置损坏拒绝登录的 MFA 阶段。
+- 该段可省略：省略时 `totp_setup`/`totp_activate` Action 不注册，登录与 Step-up
+  回退单因子（既有无 TOTP 账号不受影响）。
+- 密钥轮换：滚动更新 `aead_key` 会让已存 TOTP 密文无法解密（用户在下次登录时
+  被要求重新 setup）——属预期行为；如需无缝轮换需先实现多 keyring 版本化。
+
 ## 关闭总预算
 
 `shutdown.total_timeout_seconds` 是进程关闭的唯一总预算，默认 30 秒，允许

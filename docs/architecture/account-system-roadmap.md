@@ -22,7 +22,7 @@
 | C-2 登录历史 | ✅ 已完成 | `login_event` 表 + 成功/失败粗粒度记录 + `GET /users/security-events` |
 | C-3 新设备登录提醒 | ✅ 已完成 | `NewDeviceEmailSender` SMTP 实现，best-effort 不阻塞登录 |
 | D 管理动作 | ✅ 已完成 | admin_disable/enable + 管理签发重置凭证 + 用户列表（`.permissions` + Step-up + 审计） |
-| E-1 TOTP MFA | ⬜ **未完成** | 框架两阶段登录（LoginAction partial）+ TOTP 全链路 + Step-up 第二因子验收；本次会话未实施，需独立会话推进（跨仓库推送顺序：先 lib_yang） |
+| E-1 TOTP MFA | ✅ 已完成 | `[security.totp]` AEAD 密钥域 + users 三列 + setup/activate Action + 登录两阶段（mfa_code 承载）+ Step-up 第二因子强制 + 恢复码单次消费；框架侧 `action::auth::mfa`（TotpVerifier 端口 + totp-lite）先推 lib_yang |
 | E-2 账号删除 | ✅ 已完成 | 匿名化（username 改写 + email 置 NULL + status=deleted + 双版本）+ FK 前置清理 |
 | E-3 OIDC 端口 | ✅ 已完成 | `domain/oidc.rs::ExternalIdentityProvider` 端口定义（不建表不接 Client） |
 

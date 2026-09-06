@@ -46,7 +46,11 @@ async fn main() -> anyhow::Result<()> {
         password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
-        totp: None,
+        // 占位密钥：元数据导出只影响 Catalog 注册形态，不进入生产数据面。
+        totp: Some(yang_system::config::TotpSettings {
+            aead_key: "openapi-metadata-totp-aead-key-0123456789abcdef".to_string(),
+            digits: 6,
+        }),
     });
     let application =
         yang_system::app::build_metadata_app(tools, security).context("构建应用定义失败")?;
