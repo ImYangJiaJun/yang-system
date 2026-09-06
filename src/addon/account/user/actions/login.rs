@@ -5,7 +5,8 @@ use crate::addon::account::Account;
 use async_trait::async_trait;
 use std::sync::Arc;
 use yang_base::action::auth::{
-    AuthOperation, BrowserSession, CredentialVerifier, LoginAction, LoginInput, VerifiedSubject,
+    normalize_email, AuthOperation, BrowserSession, CredentialVerifier, LoginAction, LoginInput,
+    VerifiedSubject,
 };
 use yang_base::action::{ActionContext, ApiResponse, TypedHandler};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
@@ -41,16 +42,31 @@ impl CredentialVerifier for UserCredentialVerifier {
         ctx: &ActionContext,
         input: &LoginInput,
     ) -> Result<VerifiedSubject, BaseError> {
-        let username = normalize_username(&input.username)?;
+        // 标识归一化后按是否含 @ 分派：邮箱走 email 唯一约束查询，其余按用户名。
+        // 两种标识统一归一化后落入同一查找函数族，限流键沿用归一化标识，
+        // 防止攻击者经邮箱维度绕过用户名维度的限流与枚举防护。
+        let identifier = input.username.trim().to_ascii_lowercase();
+        let limit_key = if identifier.contains('@') {
+            normalize_email(&identifier)?
+        } else {
+            normalize_username(&identifier)?
+        };
         self.account
             .rate_limiter()
-            .check(ctx, AuthOperation::Login, &username)
+            .check(ctx, AuthOperation::Login, &limit_key)
             .await?;
-        let user = self
-            .account
-            .users()
-            .find_credentials_by_username(ctx, &username)
-            .await?;
+        // 分派查询：邮箱或用户名命中同一凭据投影（限流键已用归一化标识）。
+        let user = if identifier.contains('@') {
+            self.account
+                .users()
+                .find_credentials_by_email(ctx, &limit_key)
+                .await?
+        } else {
+            self.account
+                .users()
+                .find_credentials_by_username(ctx, &limit_key)
+                .await?
+        };
         // 等时校验：用户不存在时也必须执行一次完整的 Argon2 校验。
         // 若 miss 分支跳过哈希直接返回错误，「用户不存在」与「密码错误」的响应时间
         // 会相差一次 Argon2 运算（几十到几百毫秒），攻击者可据此枚举用户名是否存在。

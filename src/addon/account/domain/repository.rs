@@ -142,6 +142,25 @@ impl UserRepository {
         rows.first().map(CredentialRecord::try_from).transpose()
     }
 
+    /// 按已验证邮箱定位凭据记录（邮箱登录使用，路线图 B-2）。
+    ///
+    /// 与用户名查找共享 `USER_CREDENTIAL_FIELDS` 投影与 `trusted_query` 信任边界；
+    /// 查询以归一化后的邮箱精确匹配（users.email 唯一约束）。
+    pub(crate) async fn find_credentials_by_email(
+        &self,
+        ctx: &ActionContext,
+        email: &str,
+    ) -> Result<Option<CredentialRecord>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(USER_CREDENTIAL_FIELDS)?
+            .where_eq(EMAIL, serde_json::Value::String(email.to_string()))?
+            .page(1, 1)?
+            .all()
+            .await?;
+        rows.first().map(CredentialRecord::try_from).transpose()
+    }
+
     pub(crate) async fn find_credentials_by_id(
         &self,
         ctx: &ActionContext,

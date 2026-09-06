@@ -1,7 +1,7 @@
 //! 创建一个新用户。
 
 use crate::addon::account::domain::policy::{
-    normalize_username, validate_password, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
+    normalize_username, validate_password_field, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
     USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_PATTERN,
 };
 use crate::addon::account::user::table::UserView;
@@ -50,7 +50,7 @@ pub(super) async fn handle(
 ) -> Result<UserView, BaseError> {
     let username = normalize_username(&input.username)?;
     let email = normalize_email(&input.email)?;
-    validate_password(&input.password)?;
+    validate_password_field("password", &input.password, Some(&username))?;
     account
         .rate_limiter()
         .check(&ctx, AuthOperation::Register, &username)

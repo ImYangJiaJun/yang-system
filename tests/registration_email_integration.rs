@@ -508,3 +508,116 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
     let redis_cleanup = reset_redis(&redis).await;
     finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
 }
+
+/// 路线图 B-2：登录标识归一化后可按邮箱或用户名分派；限流键沿用归一化标识，
+/// 邮箱登录与用户名登录命中同一用户（users.email 唯一约束）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn login_accepts_both_username_and_normalized_email() -> anyhow::Result<()> {
+    let control = connect_database().await?;
+    let redis = connect_redis().await?;
+    reset_database(&control).await?;
+    reset_redis(&redis).await?;
+
+    let outcome = async {
+        sync_with_database(
+            connect_database().await?,
+            database_config(),
+            security_settings(),
+        )
+        .await?;
+
+        let namespace = format!(
+            "login-email-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        );
+        let sender = CapturingEmailSender::default();
+        let tools = Arc::new(
+            ToolsBuilder::new()
+                .mysql(Database::from_pool(
+                    control.pool().clone(),
+                    database_config(),
+                )?)
+                .cache(redis.clone())
+                .token(token_manager())
+                .extension(AuthorizationVersionCache::new(
+                    redis.clone(),
+                    namespace.clone(),
+                )?)
+                .extension(step_up_manager())
+                .extension(RegistrationEmailSenderHandle::new(sender.clone()))
+                .config(email_settings(namespace).engine_config())
+                .build()?,
+        );
+        let application = build_app(Arc::clone(&tools), security_settings())?;
+        let app = Arc::new(application.runtime);
+
+        // 注册一个用户（邮箱大小写混合验证归一化）。
+        let email = "Login.ByEmail@Example.COM";
+        let code = request_code(&app, &sender, email, 43_101).await?;
+        let registered = dispatch(
+            &app,
+            "register",
+            registration_body("login_email_user", email, &code),
+            43_101,
+        )
+        .await?;
+        ensure!(registered.code == 0, "注册应成功");
+
+        // 1) 用归一化邮箱登录成功。
+        let by_email = dispatch(
+            &app,
+            "login",
+            json!({ "username": "  Login.ByEmail@Example.COM  ", "password": PASSWORD }),
+            43_102,
+        )
+        .await?;
+        ensure!(by_email.code == 0, "邮箱登录应成功");
+        let email_token = by_email
+            .data
+            .as_ref()
+            .and_then(|data| data.get("access_token"))
+            .and_then(Value::as_str)
+            .context("邮箱登录响应缺少 access_token")?;
+        ensure!(!email_token.is_empty(), "邮箱登录 token 不得为空");
+
+        // 2) 用用户名登录同样成功。
+        let by_username = dispatch(
+            &app,
+            "login",
+            json!({ "username": "login_email_user", "password": PASSWORD }),
+            43_103,
+        )
+        .await?;
+        ensure!(by_username.code == 0, "用户名登录应成功");
+
+        // 3) 大小写混写邮箱（规范化前）也能登录，证明归一化分派。
+        let by_mixed_case = dispatch(
+            &app,
+            "login",
+            json!({ "username": "LOGIN.BYEMAIL@example.com", "password": PASSWORD }),
+            43_104,
+        )
+        .await?;
+        ensure!(by_mixed_case.code == 0, "大小写混写邮箱登录应成功");
+
+        // 4) 未知邮箱与未知用户名返回同一 InvalidPassword（防枚举统一响应）。
+        for unknown in [
+            json!({ "username": "nobody@example.com", "password": PASSWORD }),
+            json!({ "username": "no_such_user", "password": PASSWORD }),
+        ] {
+            let denied = dispatch(&app, "login", unknown, 43_105).await;
+            match denied {
+                Err(BaseError::InvalidPassword) => {}
+                other => anyhow::bail!("未知标识必须统一返回 InvalidPassword: {other:?}"),
+            }
+        }
+
+        Ok(())
+    }
+    .await;
+
+    let database_cleanup = reset_database(&control).await;
+    let redis_cleanup = reset_redis(&redis).await;
+    finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
+}
