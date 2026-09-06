@@ -34,8 +34,7 @@ pub(super) fn build_module(
 ) -> Result<ModuleSpec, BaseError> {
     let table = table::user_table_spec()?;
     let session_repository = SessionRepository::new(crate::schema::user_session()?);
-    let login_event_repository =
-        LoginEventRepository::new(crate::schema::login_event()?);
+    let login_event_repository = LoginEventRepository::new(crate::schema::login_event()?);
     let account = Arc::new(Account::new(
         UserRepository::new(table.table_definition()?),
         session_repository,

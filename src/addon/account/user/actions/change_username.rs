@@ -71,10 +71,7 @@ pub(super) async fn handle(
             .await
             .map_err(|error| match error {
                 BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_)) => {
-                    BaseError::ParamInvalid(
-                        "new_username".to_string(),
-                        "用户名已存在".to_string(),
-                    )
+                    BaseError::ParamInvalid("new_username".to_string(), "用户名已存在".to_string())
                 }
                 other => other,
             })?;

@@ -1,19 +1,19 @@
 //! 校验账号密码并签发 Token。
 
 use crate::addon::account::domain::policy::normalize_username;
+use crate::addon::account::email_delivery::NewDeviceEmailSenderHandle;
 use crate::addon::account::Account;
 use async_trait::async_trait;
 use std::sync::Arc;
-use crate::addon::account::email_delivery::NewDeviceEmailSenderHandle;
 use yang_base::action::auth::{
     normalize_email, AuthOperation, BrowserSession, CredentialVerifier, LoginAction, LoginInput,
     VerifiedSubject,
 };
 use yang_base::action::{ActionContext, ApiResponse, TypedHandler};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
+use yang_base::token::TokenType;
 use yang_base::transport::client_ip::client_ip_identity;
 use yang_base::BaseError;
-use yang_base::token::TokenType;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(super) struct BrowserLoginInput {
@@ -210,7 +210,11 @@ async fn record_login_session(
     if claims.token_type != TokenType::Access {
         return Ok(()); // 防御性：只处理 access token
     }
-    let Some(session_id) = claims.custom.get("session_id").and_then(|value| value.as_str()) else {
+    let Some(session_id) = claims
+        .custom
+        .get("session_id")
+        .and_then(|value| value.as_str())
+    else {
         return Ok(()); // 老逻辑无 session_id（登录 always 生成，不应发生）
     };
     let session_id = session_id.to_string();

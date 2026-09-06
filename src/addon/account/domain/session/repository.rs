@@ -113,7 +113,10 @@ impl SessionRepository {
         let rows = self
             .query(ctx)?
             .select_fields(&[LAST_SEEN_AT])?
-            .where_eq(SESSION_ID, serde_json::Value::String(session_id.to_string()))?
+            .where_eq(
+                SESSION_ID,
+                serde_json::Value::String(session_id.to_string()),
+            )?
             .where_null(REVOKED_AT)?
             .page(1, 1)?
             .all()
@@ -130,7 +133,10 @@ impl SessionRepository {
             update = update.set(LAST_SEEN_AT, now);
         }
         self.query(ctx)?
-            .where_eq(SESSION_ID, serde_json::Value::String(session_id.to_string()))?
+            .where_eq(
+                SESSION_ID,
+                serde_json::Value::String(session_id.to_string()),
+            )?
             .update(update)
             .await?;
         Ok(())
@@ -180,15 +186,16 @@ impl SessionRepository {
         let rows = self
             .query(ctx)?
             .select_fields(&[USER_ID, CURRENT_JTI])?
-            .where_eq(SESSION_ID, serde_json::Value::String(session_id.to_string()))?
+            .where_eq(
+                SESSION_ID,
+                serde_json::Value::String(session_id.to_string()),
+            )?
             .where_null(REVOKED_AT)?
             .page(1, 1)?
             .all()
             .await?;
         rows.first()
-            .map(|record| {
-                Ok((record.require(USER_ID)?, record.require(CURRENT_JTI)?))
-            })
+            .map(|record| Ok((record.require(USER_ID)?, record.require(CURRENT_JTI)?)))
             .transpose()
     }
 
@@ -217,7 +224,10 @@ impl SessionRepository {
     ) -> Result<u64, BaseError> {
         let affected = self
             .query(ctx)?
-            .where_eq(SESSION_ID, serde_json::Value::String(session_id.to_string()))?
+            .where_eq(
+                SESSION_ID,
+                serde_json::Value::String(session_id.to_string()),
+            )?
             .where_null(REVOKED_AT)?
             .update(Record::new().set(REVOKED_AT, now))
             .await?;
@@ -240,7 +250,8 @@ mod tests {
             revoked_at: None,
             current: false,
         };
-        let json = serde_json::to_value(view).unwrap_or_else(|error| panic!("会话视图应可序列化: {error}"));
+        let json = serde_json::to_value(view)
+            .unwrap_or_else(|error| panic!("会话视图应可序列化: {error}"));
         assert_eq!(json["session_id"], "s");
         assert_eq!(json["current"], false);
         assert!(json.get("revoked_at").is_some());

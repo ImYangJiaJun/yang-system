@@ -100,7 +100,9 @@ async fn run_after_telemetry_initialized(
         .extension(authorization_cache)
         .extension(step_up_manager)
         .extension(RegistrationEmailSenderHandle::from_arc(registration_sender))
-        .extension(PasswordResetEmailSenderHandle::from_arc(password_reset_sender))
+        .extension(PasswordResetEmailSenderHandle::from_arc(
+            password_reset_sender,
+        ))
         .extension(NewDeviceEmailSenderHandle::from_arc(new_device_sender))
         .config(log_identity)
         .config(settings.email.verification.engine_config())
@@ -111,11 +113,7 @@ async fn run_after_telemetry_initialized(
             change.change_engine_config(),
         ));
     }
-    let tools = Arc::new(
-        tools_builder
-            .build()
-            .context("构建应用 Tools 失败")?,
-    );
+    let tools = Arc::new(tools_builder.build().context("构建应用 Tools 失败")?);
 
     run_then_cleanup(
         run_after_tools_created(

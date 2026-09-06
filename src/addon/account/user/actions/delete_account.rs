@@ -47,7 +47,9 @@ pub(super) async fn handle(
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)
             .await?;
         if !locked.status().is_active() {
-            return Err(BaseError::PermissionDenied("账号已停用或已删除".to_string()));
+            return Err(BaseError::PermissionDenied(
+                "账号已停用或已删除".to_string(),
+            ));
         }
         // FK 前置清理：作废该用户全部未消费重置凭证（匿名化后不允许再重置）。
         Account::invalidate_resets_in_tx(&mut transaction, user_id).await?;

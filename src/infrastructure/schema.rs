@@ -241,7 +241,12 @@ pub(crate) fn login_event() -> Result<TableDefinition, BaseError> {
             Field::enumeration("result", ["succeeded", "failed"]).required(),
             Field::enumeration(
                 "failure_reason",
-                ["invalid_password", "user_not_found", "disabled", "rate_limited"],
+                [
+                    "invalid_password",
+                    "user_not_found",
+                    "disabled",
+                    "rate_limited",
+                ],
             ),
         ])
         .index_named(

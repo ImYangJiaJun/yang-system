@@ -4,6 +4,5 @@ pub(crate) mod repository;
 
 #[allow(unused_imports)] // C-1d 会话列表/撤销 Action 使用
 pub(crate) use repository::{
-    NewSession, SessionRepository, SessionView,
-    SESSION_LAST_SEEN_THROTTLE_SECONDS,
+    NewSession, SessionRepository, SessionView, SESSION_LAST_SEEN_THROTTLE_SECONDS,
 };

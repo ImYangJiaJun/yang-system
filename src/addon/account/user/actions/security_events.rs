@@ -41,8 +41,9 @@ pub(super) async fn handle(
     // 只允许查询本人事件；分页上限由输入约束保证。
     let page = usize::try_from(input.page.unwrap_or(1))
         .map_err(|_| BaseError::ParamInvalid("page".to_string(), "页码无效".to_string()))?;
-    let page_size = usize::try_from(input.page_size.unwrap_or(20))
-        .map_err(|_| BaseError::ParamInvalid("page_size".to_string(), "每页条数无效".to_string()))?;
+    let page_size = usize::try_from(input.page_size.unwrap_or(20)).map_err(|_| {
+        BaseError::ParamInvalid("page_size".to_string(), "每页条数无效".to_string())
+    })?;
     if page_size > 100 {
         return Err(BaseError::ParamInvalid(
             "page_size".to_string(),

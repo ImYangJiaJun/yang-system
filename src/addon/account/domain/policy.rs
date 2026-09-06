@@ -145,7 +145,11 @@ mod tests {
             Err(BaseError::ParamInvalid(field, message)) if field == "new_password" && message.contains("用户名")
         ));
         // 包含用户名子串但整体不同的长口令允许（弱口令字典覆盖高频组合）。
-        assert!(validate_password_field("new_password", "alice-secret-2024", Some("alice")).is_ok());
-        assert!(validate_password_field("new_password", "correct-horse-battery", Some("alice")).is_ok());
+        assert!(
+            validate_password_field("new_password", "alice-secret-2024", Some("alice")).is_ok()
+        );
+        assert!(
+            validate_password_field("new_password", "correct-horse-battery", Some("alice")).is_ok()
+        );
     }
 }

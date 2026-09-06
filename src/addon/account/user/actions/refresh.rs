@@ -85,7 +85,11 @@ async fn touch_session_on_refresh(
     if claims.token_type != TokenType::Access {
         return Ok(());
     }
-    let Some(session_id) = claims.custom.get("session_id").and_then(|value| value.as_str()) else {
+    let Some(session_id) = claims
+        .custom
+        .get("session_id")
+        .and_then(|value| value.as_str())
+    else {
         return Ok(()); // 老 Token 无 session_id：按无会话记录降级
     };
     let now = current_unix_timestamp()?;

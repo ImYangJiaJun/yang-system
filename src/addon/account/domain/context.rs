@@ -5,8 +5,8 @@
 //! 它的方法或关联函数，不再有多层自由函数和 re-export 墙。
 
 use super::claims;
-use super::repository::UserRepository;
 use super::login_event::LoginEventRepository;
+use super::repository::UserRepository;
 use super::session::SessionRepository;
 use super::status::UserStatus;
 use crate::addon::account::domain::authz_version::{

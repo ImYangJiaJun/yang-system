@@ -37,8 +37,9 @@ pub(super) async fn handle(
 ) -> Result<UsersPage, BaseError> {
     let page = usize::try_from(input.page.unwrap_or(1))
         .map_err(|_| BaseError::ParamInvalid("page".to_string(), "页码无效".to_string()))?;
-    let page_size = usize::try_from(input.page_size.unwrap_or(20))
-        .map_err(|_| BaseError::ParamInvalid("page_size".to_string(), "每页条数无效".to_string()))?;
+    let page_size = usize::try_from(input.page_size.unwrap_or(20)).map_err(|_| {
+        BaseError::ParamInvalid("page_size".to_string(), "每页条数无效".to_string())
+    })?;
     if page_size > 100 {
         return Err(BaseError::ParamInvalid(
             "page_size".to_string(),
@@ -72,10 +73,9 @@ pub(super) async fn handle(
 /// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec {
     module
-        .action_fn(
-            yang_base::action_name!("list_users"),
-            move |ctx, input| handle(ctx, input, Arc::clone(&account)),
-        )
+        .action_fn(yang_base::action_name!("list_users"), move |ctx, input| {
+            handle(ctx, input, Arc::clone(&account))
+        })
         .route(HttpMethod::Get, "/api/v1/users")
         .display_name("用户列表")
         .description("管理端分页列出用户（邮箱字段遵循 system 角色可见性）")
@@ -109,7 +109,10 @@ mod tests {
         let record = yang_base::table::Record::new()
             .set(crate::addon::account::user::table::USER_ID, 7)
             .set(crate::addon::account::user::table::USERNAME, "alice")
-            .set(crate::addon::account::user::table::EMAIL, "alice@example.com")
+            .set(
+                crate::addon::account::user::table::EMAIL,
+                "alice@example.com",
+            )
             .set(crate::addon::account::user::table::EMAIL_VERIFIED_AT, 1000)
             .set(crate::addon::account::user::table::STATUS, "active")
             .set(crate::addon::account::user::table::CREATED_AT, 10)

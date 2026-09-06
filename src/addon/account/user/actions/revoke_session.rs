@@ -72,10 +72,7 @@ pub(super) async fn handle(
     )?;
     audit::append_independent(ctx.tools().mysql()?.pool(), &event).await?;
 
-    ApiResponse::success(
-        json!({ "session_revoked": true }),
-        "该设备已退出登录",
-    )
+    ApiResponse::success(json!({ "session_revoked": true }), "该设备已退出登录")
 }
 
 fn current_unix_timestamp() -> Result<i64, BaseError> {

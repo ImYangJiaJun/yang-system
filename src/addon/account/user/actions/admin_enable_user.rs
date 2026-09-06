@@ -37,7 +37,9 @@ pub(super) async fn handle(
             .lock_credential_in_tx(&ctx, &mut transaction, input.id)
             .await?;
         if locked.status().is_active() {
-            return Err(BaseError::PermissionDenied("目标账号已是启用状态".to_string()));
+            return Err(BaseError::PermissionDenied(
+                "目标账号已是启用状态".to_string(),
+            ));
         }
         Account::activate_locked_in_tx(&mut transaction, &locked).await?;
         let event = audit::succeeded_event(
@@ -59,7 +61,10 @@ pub(super) async fn handle(
     }
     .await;
     Account::finish_transaction(transaction, result).await?;
-    ApiResponse::success(json!({ "user_id": input.id, "enabled": true }), "账号已启用")
+    ApiResponse::success(
+        json!({ "user_id": input.id, "enabled": true }),
+        "账号已启用",
+    )
 }
 
 /// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。

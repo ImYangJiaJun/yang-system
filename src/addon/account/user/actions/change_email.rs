@@ -68,7 +68,13 @@ pub(super) async fn handle(
         Account::ensure_active(locked.status())?;
         account
             .users()
-            .update_email_in_tx(&ctx, &mut transaction, user_id, &new_email, email_verified_at)
+            .update_email_in_tx(
+                &ctx,
+                &mut transaction,
+                user_id,
+                &new_email,
+                email_verified_at,
+            )
             .await
             .map_err(|error| match error {
                 BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_)) => {

@@ -226,7 +226,9 @@ mod tests {
         assert_eq!(claims.access["permissions"], serde_json::json!([]));
         assert_eq!(claims.refresh, serde_json::json!({ "authz_version": 7 }));
         assert!(claims_for_user("alice", 0, 0, false, &AuthorizationGrants::user(), None).is_err());
-        assert!(claims_for_user("alice", 7, -1, false, &AuthorizationGrants::user(), None).is_err());
+        assert!(
+            claims_for_user("alice", 7, -1, false, &AuthorizationGrants::user(), None).is_err()
+        );
     }
 
     #[test]
@@ -244,8 +246,15 @@ mod tests {
     #[test]
     fn session_id_is_written_to_access_claims_and_inherited_on_refresh() {
         // 登录：session_id 写入 access claims。
-        let claims = claims_for_user("alice", 7, 0, true, &AuthorizationGrants::user(), Some("sess-1"))
-            .unwrap_or_else(|error| panic!("带会话标识的声明应可序列化: {error}"));
+        let claims = claims_for_user(
+            "alice",
+            7,
+            0,
+            true,
+            &AuthorizationGrants::user(),
+            Some("sess-1"),
+        )
+        .unwrap_or_else(|error| panic!("带会话标识的声明应可序列化: {error}"));
         assert_eq!(claims.access["session_id"], serde_json::json!("sess-1"));
 
         // 老 Token 无 session_id（None）→ 序列化为 null，刷新时按无会话记录降级。
