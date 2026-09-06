@@ -15,10 +15,16 @@
 | A-3 前端账号中心 | ✅ 已完成 | `frontend/src/features/account/` + `/account` 路由 + 侧边栏入口（提交 c803071 之后） |
 | A-4 修改用户名 | ✅ 已完成 | `POST /api/v1/users/change-username`（Step-up + 双版本 + Outbox + 审计） |
 | A-5 OpenAPI step-up 快照 | ✅ 已完成 | `build_metadata_app` 内存 proof 存储装配 StepUpServices（提交 bc808b2） |
-| B（邮箱换绑/登录/密码策略） | ⬜ 待实施 | |
-| C（会话可见性/登录历史/通知） | ⬜ 待实施 | |
-| D（管理动作） | ⬜ 待实施 | |
-| E（TOTP/删除/OIDC 端口） | ⬜ 待实施 | |
+| B-1 邮箱换绑 | ✅ 已完成 | `[email.change]` 独立验证码段 + `change_email.rs`/`request_change_email.rs` + 前端区块 |
+| B-2 邮箱登录 | ✅ 已完成 | `find_credentials_by_email` + login 归一化按 `@` 分派，限流键沿用归一化标识 |
+| B-3 密码策略 | ✅ 已完成 | 内置弱密码字典 + 禁止与用户名相同（`policy.rs::WEAK_PASSWORDS`） |
+| C-1 会话持久化 | ✅ 已完成 | `user_session` 表 + claims `session_id`（登录生成/refresh 继承）+ 60s 节流 + 设备列表/逐台撤销 |
+| C-2 登录历史 | ✅ 已完成 | `login_event` 表 + 成功/失败粗粒度记录 + `GET /users/security-events` |
+| C-3 新设备登录提醒 | ✅ 已完成 | `NewDeviceEmailSender` SMTP 实现，best-effort 不阻塞登录 |
+| D 管理动作 | ✅ 已完成 | admin_disable/enable + 管理签发重置凭证 + 用户列表（`.permissions` + Step-up + 审计） |
+| E-1 TOTP MFA | ⬜ **未完成** | 框架两阶段登录（LoginAction partial）+ TOTP 全链路 + Step-up 第二因子验收；本次会话未实施，需独立会话推进（跨仓库推送顺序：先 lib_yang） |
+| E-2 账号删除 | ✅ 已完成 | 匿名化（username 改写 + email 置 NULL + status=deleted + 双版本）+ FK 前置清理 |
+| E-3 OIDC 端口 | ✅ 已完成 | `domain/oidc.rs::ExternalIdentityProvider` 端口定义（不建表不接 Client） |
 
 > **外键现状修正**：路线图 3.2 第 10 条「无外键」已不成立——`src/infrastructure/schema.rs:187-198`
 > 声明了 `fk_password_reset_token_user` 与 `fk_password_reset_token_requested_by` 两条外键，

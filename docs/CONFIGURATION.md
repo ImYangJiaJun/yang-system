@@ -124,6 +124,16 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   注入，不得从请求 `Host` 头推导——Host 头可被攻击者伪造，伪造链接会把一次性
   重置凭证导向攻击者控制的站点。
 
+### 邮箱换绑验证码（`email.change`）
+
+- `email.change` 是邮箱换绑验证码的独立配置段（与 `email.verification` 注册验证码
+  完全隔离）：独立 `namespace`（Redis key 前缀 `yang-system:<ns>:change-email`）、
+  独立 `secret`。**启动校验拒绝** `email.change.secret` 复用注册验证码、Token 或
+  Step-up 密钥——否则换绑验证码可被注册验证码的 key 域重放，或跨密钥域混淆。
+- 该段可省略（`#[serde(default)]`）：省略时 `change_email`/`request_change_email`
+  Action 不注册，换绑能力不可用；显式配置后需重启生效。
+- 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度）。
+
 ## 关闭总预算
 
 `shutdown.total_timeout_seconds` 是进程关闭的唯一总预算，默认 30 秒，允许
