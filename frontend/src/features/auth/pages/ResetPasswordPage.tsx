@@ -61,7 +61,7 @@ export default function ResetPasswordPage() {
         <div className="mb-6 space-y-1">
           <h1 className="text-xl font-semibold">重置密码</h1>
           <p className="text-sm text-muted-foreground">
-            输入管理员通过受控渠道交付的一次性凭证。凭证成功使用后立即失效。
+            输入自助找回邮件中收到的一次性凭证。凭证成功使用后立即失效。
           </p>
         </div>
         <form className="space-y-4" onSubmit={submit} noValidate>

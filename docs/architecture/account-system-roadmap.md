@@ -5,6 +5,26 @@
 > - 依据：2026-09-05 对 `src/addon/account/`、`src/infrastructure/`、`frontend/src/`、`crates/yang-base` 的源码核实，以及 Ory Kratos / ZITADEL / Keycloak / Logto / better-auth / SuperTokens 等成熟方案的横评
 > - 关联文档：`docs/assessments/2026-07-30-account-authz-first-principles-review.md`（账号与授权体系评审）、`docs/architecture/session-ttl.md`、`docs/architecture/authorization-writers.md`
 
+## 实施进度（按阶段更新）
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| A-0 三阶段发布开关 | ✅ 已完成 | 示例配置 `issue_refresh_credential_version = true`（`config.example.toml:105`、`src/config/mod.rs:878`） |
+| A-1 自助密码找回 | ✅ 已完成 | `request_password_reset.rs` + `repository.rs::insert_issued`（2026-09-05 提交 40e5904） |
+| A-2 登录等时校验 | ✅ 已完成 | `PasswordEngine::verify_or_dummy` + `login.rs` 接入（2026-09-06 提交 bc808b2） |
+| A-3 前端账号中心 | ✅ 已完成 | `frontend/src/features/account/` + `/account` 路由 + 侧边栏入口（提交 c803071 之后） |
+| A-4 修改用户名 | ✅ 已完成 | `POST /api/v1/users/change-username`（Step-up + 双版本 + Outbox + 审计） |
+| A-5 OpenAPI step-up 快照 | ✅ 已完成 | `build_metadata_app` 内存 proof 存储装配 StepUpServices（提交 bc808b2） |
+| B（邮箱换绑/登录/密码策略） | ⬜ 待实施 | |
+| C（会话可见性/登录历史/通知） | ⬜ 待实施 | |
+| D（管理动作） | ⬜ 待实施 | |
+| E（TOTP/删除/OIDC 端口） | ⬜ 待实施 | |
+
+> **外键现状修正**：路线图 3.2 第 10 条「无外键」已不成立——`src/infrastructure/schema.rs:187-198`
+> 声明了 `fk_password_reset_token_user` 与 `fk_password_reset_token_requested_by` 两条外键，
+> E-2 账号删除/匿名化必须先清理该用户的重置凭证行。
+
+
 ## 一、定位与设计前提
 
 ### 1.1 定位修正带来的前提变化
