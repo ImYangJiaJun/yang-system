@@ -36,7 +36,7 @@ test("已认证用户可进入 /account 并查看资料", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "账号设置", level: 1 }),
   ).toBeVisible();
-  await expect(page.getByText("alice")).toBeVisible();
+  await expect(page.getByText("alice", { exact: true })).toBeVisible();
   await expect(page.getByText("alice@example.com（已验证）")).toBeVisible();
 });
 
