@@ -45,3 +45,20 @@ export class StepUpRequiredError extends ApiError {
     this.expiresIn = options.expiresIn;
   }
 }
+
+/// 第一因子（账号密码）已通过、需要第二因子（TOTP 动态码或恢复码）的登录中间态。
+/// 对应后端 BaseError::SecondFactorRequired（错误码 700012，HTTP 401）；
+/// 登录页捕获后弹出第二因子输入框，而非当作登录失败。
+export class SecondFactorRequiredError extends ApiError {
+  constructor(
+    message: string,
+    options: { code?: number; requestId?: string } = {},
+  ) {
+    super(message, {
+      status: 401,
+      code: options.code,
+      requestId: options.requestId,
+    });
+    this.name = "SecondFactorRequiredError";
+  }
+}

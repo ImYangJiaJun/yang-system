@@ -789,9 +789,9 @@ async fn session_revoke_kicks_one_device_without_affecting_others() -> anyhow::R
     finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
 }
 
-/// 路线图 E-1 验收（登录两阶段）：账号启用 TOTP 后，
-/// 无第二因子码登录必须被拒（InvalidPassword），带 TOTP 码登录成功；
-/// 错误恢复码同样被拒且不消耗（单次消费语义由事务保证）。
+/// 路线图 E-1 验收（登录两段式）：账号启用 TOTP 后，
+/// 密码正确但缺第二因子码返回 SecondFactorRequired（前端据此进入验证码阶段）；
+/// 错误码按参数错误拒绝，正确码登录成功；恢复码错误同样被拒且不消耗。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> {
@@ -903,7 +903,7 @@ async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> 
         .await?;
         ensure!(affected.rows_affected() == 1, "TOTP 激活状态直写应影响一行");
 
-        // 1) 无第二因子码登录 → InvalidPassword（两阶段验收）。
+        // 1) 密码正确但缺第二因子码 → SecondFactorRequired（两段式第一阶段信号）。
         let denied = dispatch(
             &app,
             "login",
@@ -912,11 +912,11 @@ async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> 
         )
         .await;
         match denied {
-            Err(BaseError::InvalidPassword) => {}
-            other => anyhow::bail!("启用 TOTP 后缺码登录必须拒绝: {other:?}"),
+            Err(BaseError::SecondFactorRequired) => {}
+            other => anyhow::bail!("启用 TOTP 后缺码登录必须返回 SecondFactorRequired: {other:?}"),
         }
 
-        // 2) 错误 TOTP 码 → 同样拒绝（不泄露维度）。
+        // 2) 错误 TOTP 码 → 参数错误拒绝（第一因子已通过，不再是防枚举面）。
         let denied = dispatch(
             &app,
             "login",
@@ -929,11 +929,28 @@ async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> 
         )
         .await;
         match denied {
-            Err(BaseError::InvalidPassword) => {}
+            Err(BaseError::ParamInvalid(field, _)) if field == "mfa_code" => {}
             other => anyhow::bail!("错误 TOTP 码登录必须拒绝: {other:?}"),
         }
 
-        // 3) 正确 TOTP 码 → 登录成功。
+        // 3) 密码错误 + 任意 mfa_code → InvalidPassword（防枚举边界不变）。
+        let denied = dispatch(
+            &app,
+            "login",
+            json!({
+                "username": "totp_two_stage_user",
+                "password": "wrong-password",
+                "extra": { "mfa_code": "123456" }
+            }),
+            43_304,
+        )
+        .await;
+        match denied {
+            Err(BaseError::InvalidPassword) => {}
+            other => anyhow::bail!("密码错误必须返回 InvalidPassword: {other:?}"),
+        }
+
+        // 4) 正确 TOTP 码 → 登录成功。
         let verifier = yang_base::action::auth::TotpLiteVerifier::default();
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let totp_code = verifier.generate(secret, now);
@@ -945,7 +962,7 @@ async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> 
                 "password": PASSWORD,
                 "extra": { "mfa_code": totp_code }
             }),
-            43_304,
+            43_305,
         )
         .await?;
         ensure!(accepted.code == 0, "带正确 TOTP 码登录应成功");

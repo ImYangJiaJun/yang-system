@@ -1,7 +1,9 @@
-//! 事务性邮件的投递边界：注册验证码与密码重置链接。
+//! 事务性邮件的投递边界：注册验证码、密码重置链接、新设备提醒与 MFA 登录验证码。
 //!
 //! 注册验证码的投递契约（[`RegistrationEmailSender`] / [`RegistrationEmailSenderHandle`] /
-//! [`EmailDeliveryError`]）由 `yang_base::action::auth` 提供并在此再导出；
+//! [`EmailDeliveryError`]）与通用验证码投递契约（[`VerificationCodeSender`] /
+//! [`VerificationCodeSenderHandle`]，供登录 MFA 备用邮箱验证码使用）由
+//! `yang_base::action::auth` 提供并在此再导出；
 //! 密码重置链接的投递契约（[`PasswordResetEmailSender`] /
 //! [`PasswordResetEmailSenderHandle`]）由本模块定义，链接地址经
 //! [`PasswordResetLinkConfig`] 从 `Tools` config 槽注入。
@@ -18,6 +20,7 @@ use std::time::Duration;
 
 pub use yang_base::action::auth::{
     EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
+    VerificationCodeSender, VerificationCodeSenderHandle,
 };
 
 /// 密码重置邮件投递接口，由业务实现并注入。
@@ -261,6 +264,26 @@ IP：{ip}
 设备：{agent}
 
 如果这是你本人的操作，可以忽略本邮件；如果不是，请立即修改密码并检查会话列表。"
+            ),
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl VerificationCodeSender for SmtpEmailSender {
+    async fn send_verification_code(
+        &self,
+        recipient: &str,
+        code: &str,
+        expires_in_seconds: u64,
+    ) -> Result<(), EmailDeliveryError> {
+        let minutes = expires_in_seconds.div_ceil(60);
+        self.deliver(
+            recipient,
+            "YANG System 登录验证码",
+            format!(
+                "你的登录验证码是：{code}\n\n你正在使用邮箱验证码完成双重验证登录。验证码将在 {minutes} 分钟后失效，且只能使用一次。若非本人操作，请立即修改密码并检查账号安全。"
             ),
         )
         .await

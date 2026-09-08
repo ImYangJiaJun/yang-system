@@ -146,6 +146,10 @@ pub struct EmailSettings {
     /// 邮箱换绑验证码的独立配置段：命名空间与密钥必须与注册验证码隔离。
     #[serde(default)]
     pub change: Option<EmailVerificationSettings>,
+    /// 登录 MFA 备用邮箱验证码的独立配置段：命名空间与密钥必须与注册/换绑
+    /// 验证码隔离；未配置时邮箱验证码登录不可用（Action 返回未启用错误）。
+    #[serde(default)]
+    pub mfa: Option<EmailVerificationSettings>,
     pub password_reset: PasswordResetEmailSettings,
 }
 
@@ -192,6 +196,7 @@ impl std::fmt::Debug for EmailSettings {
             .field("smtp", &self.smtp)
             .field("verification", &self.verification)
             .field("change", &self.change)
+            .field("mfa", &self.mfa)
             .field("password_reset", &self.password_reset)
             .finish()
     }
@@ -420,6 +425,12 @@ impl Settings {
         self.email
             .validate(self.app.environment, &self.token, &self.step_up)?;
         self.security.validate()?;
+        // 跨段密钥域隔离：MFA 邮箱验证码密钥不得与 TOTP AEAD 密钥复用。
+        if let (Some(mfa), Some(totp)) = (&self.email.mfa, &self.security.totp) {
+            if mfa.secret == totp.aead_key {
+                bail!("email.mfa.secret 不得复用 security.totp.aead_key");
+            }
+        }
         if !(1..=300).contains(&self.shutdown.total_timeout_seconds) {
             bail!("shutdown.total_timeout_seconds 必须在 1..=300 范围内");
         }
@@ -558,6 +569,18 @@ impl EmailSettings {
             }
             validate_verification_secret("email.change.secret", &change.secret, token, step_up)?;
         }
+        if let Some(mfa) = &self.mfa {
+            mfa.validate()?;
+            if mfa.secret == self.verification.secret {
+                bail!("email.mfa.secret 不得复用注册验证码密钥（email.verification.secret）");
+            }
+            if let Some(change) = &self.change {
+                if mfa.secret == change.secret {
+                    bail!("email.mfa.secret 不得复用换绑验证码密钥（email.change.secret）");
+                }
+            }
+            validate_verification_secret("email.mfa.secret", &mfa.secret, token, step_up)?;
+        }
         Ok(())
     }
 }
@@ -658,6 +681,24 @@ impl EmailVerificationSettings {
             send_global_attempts: self.send_global_attempts,
             send_metric_name: "yang_system_change_email_total",
             verify_metric_name: "yang_system_change_email_verify_total",
+        }
+    }
+
+    /// 转换为登录 MFA 备用邮箱验证码引擎的运行时配置（独立 key 域与指标名）。
+    pub fn mfa_engine_config(&self) -> EmailVerificationConfig {
+        EmailVerificationConfig {
+            redis_key_prefix: format!("yang-system:{}:mfa-email", self.namespace),
+            secret: self.secret.clone(),
+            ttl_seconds: self.ttl_seconds,
+            resend_cooldown_seconds: self.resend_cooldown_seconds,
+            max_attempts: self.max_attempts,
+            code_digits: 6,
+            send_window_seconds: self.send_window_seconds,
+            send_ip_attempts: self.send_ip_attempts,
+            send_email_attempts: self.send_email_attempts,
+            send_global_attempts: self.send_global_attempts,
+            send_metric_name: "yang_system_mfa_email_total",
+            verify_metric_name: "yang_system_mfa_email_verify_total",
         }
     }
 
@@ -902,6 +943,17 @@ impl ChangeEmailVerificationConfig {
     }
 }
 
+/// 登录 MFA 备用邮箱验证码的独立 config 槽类型（与注册/换绑验证码隔离）。
+#[derive(Clone, Debug)]
+pub struct MfaEmailVerificationConfig(pub EmailVerificationConfig);
+
+impl MfaEmailVerificationConfig {
+    /// 取内部框架配置。
+    pub fn engine_config(&self) -> &EmailVerificationConfig {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,6 +1164,63 @@ filter = "info"
         production_https.email.password_reset.link_base_url =
             "https://console.example.com:8443".to_string();
         assert!(production_https.validate().is_ok());
+    }
+
+    /// MFA 备用邮箱验证码配置段：独立 key 域/指标名，密钥跨域复用一律拒绝。
+    #[test]
+    fn mfa_email_verification_section_is_isolated_and_cross_checked() {
+        let with_mfa = |secret: &str| {
+            format!(
+                "{}\n[email.mfa]\nnamespace = \"test-local\"\nsecret = \"{secret}\"\nttl_seconds = 600\nresend_cooldown_seconds = 60\nmax_attempts = 5\nsend_window_seconds = 3600\nsend_ip_attempts = 20\nsend_email_attempts = 5\nsend_global_attempts = 1000\n",
+                valid_config()
+            )
+        };
+        // 合法独立密钥：解析成功且引擎配置使用独立 key 域与指标名。
+        let settings = Settings::parse(&with_mfa("mfa-email-0123456789abcdef0123456789abcdef"))
+            .unwrap_or_else(|error| panic!("合法 email.mfa 配置应解析成功: {error}"));
+        let engine = settings
+            .email
+            .mfa
+            .as_ref()
+            .unwrap_or_else(|| panic!("email.mfa 段应解析存在"))
+            .mfa_engine_config();
+        assert_eq!(engine.redis_key_prefix, "yang-system:test-local:mfa-email");
+        assert_eq!(engine.send_metric_name, "yang_system_mfa_email_total");
+        assert_eq!(
+            engine.verify_metric_name,
+            "yang_system_mfa_email_verify_total"
+        );
+
+        // 复用注册验证码密钥 / Token 密钥 → 拒绝。
+        for reused in [
+            "email-verification-0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef",
+        ] {
+            let error = match Settings::parse(&with_mfa(reused)) {
+                Ok(_) => panic!("email.mfa 复用其他密钥域必须拒绝: {reused}"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("email.mfa.secret"),
+                "错误应指明配置项: {error}"
+            );
+        }
+
+        // 复用 TOTP AEAD 密钥 → 拒绝（跨段校验在 Settings::validate 顶层）。
+        let mut settings = Settings::parse(&with_mfa("totp-aead-0123456789abcdef0123456789abcdef"))
+            .unwrap_or_else(|error| panic!("测试配置应可解析: {error}"));
+        settings.security.totp = Some(TotpSettings {
+            aead_key: "totp-aead-0123456789abcdef0123456789abcdef".to_string(),
+            digits: 6,
+        });
+        let error = match settings.validate() {
+            Ok(()) => panic!("email.mfa 复用 TOTP AEAD 密钥必须拒绝"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("email.mfa.secret"),
+            "错误应指明配置项: {error}"
+        );
     }
 
     struct TestSecretProvider(BTreeMap<SecretKey, String>);

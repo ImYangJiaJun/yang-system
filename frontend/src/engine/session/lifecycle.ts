@@ -1,10 +1,13 @@
-import { ApiError } from "../http/errors";
+import { ApiError, SecondFactorRequiredError } from "../http/errors";
 import { apiBase, parseJson } from "../http/http";
 import { stepUpRequiredError } from "./step-up-response";
 
 export type LoginResult = {
   accessToken: string;
 };
+
+/// 后端 BaseError::SecondFactorRequired 的错误码：第一因子已通过，等待第二因子。
+const SECOND_FACTOR_REQUIRED_CODE = 700012;
 
 export type LogoutResult = {
   immediateConvergence: boolean;
@@ -32,7 +35,7 @@ function accessToken(data: unknown): LoginResult | undefined {
 
 async function requestAccessToken(
   path: string,
-  body: Record<string, string>,
+  body: Record<string, unknown>,
   missingTokenMessage: string,
   signal?: AbortSignal,
 ): Promise<LoginResult> {
@@ -82,14 +85,34 @@ export async function refreshSession(
 export async function login(
   username: string,
   password: string,
+  mfaCode?: string,
   signal?: AbortSignal,
 ): Promise<LoginResult> {
-  return requestAccessToken(
-    "/api/v1/users/login",
-    { username, password },
-    "登录响应缺少有效 Token",
-    signal,
-  );
+  // 两段式登录：账号启用 TOTP 时，密码正确但缺第二因子码会得到
+  // SecondFactorRequiredError（错误码 700012），调用方据此进入验证码阶段；
+  // 第二阶段经 extra.mfa_code 携带动态码或一次性恢复码重新提交。
+  const trimmedCode = mfaCode?.trim();
+  try {
+    return await requestAccessToken(
+      "/api/v1/users/login",
+      trimmedCode
+        ? { username, password, extra: { mfa_code: trimmedCode } }
+        : { username, password },
+      "登录响应缺少有效 Token",
+      signal,
+    );
+  } catch (cause) {
+    if (
+      cause instanceof ApiError &&
+      cause.code === SECOND_FACTOR_REQUIRED_CODE
+    ) {
+      throw new SecondFactorRequiredError(cause.message, {
+        code: cause.code,
+        requestId: cause.requestId,
+      });
+    }
+    throw cause;
+  }
 }
 
 export async function logout(

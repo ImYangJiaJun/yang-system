@@ -30,12 +30,14 @@ export function StepUpDialog({
 }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
   const close = (proof: string | undefined) => {
     setUsername("");
     setPassword("");
+    setMfaCode("");
     setErrorMessage("");
     onResolve(proof);
   };
@@ -48,12 +50,13 @@ export function StepUpDialog({
     try {
       const result = await completeStepUp(
         request.challenge,
-        { username: username.trim(), password },
+        { username: username.trim(), password, mfaCode },
         request.session,
       );
       close(result.proof);
     } catch (cause) {
       setPassword("");
+      setMfaCode("");
       setErrorMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
@@ -98,6 +101,20 @@ export function StepUpDialog({
                 disabled={loading}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="step-up-mfa-code">
+                双重验证码（已启用时必填）
+              </Label>
+              <Input
+                id="step-up-mfa-code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="6 位动态码或恢复码"
+                disabled={loading}
+                value={mfaCode}
+                onChange={(event) => setMfaCode(event.target.value)}
               />
             </div>
             {errorMessage && (

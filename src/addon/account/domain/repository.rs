@@ -19,11 +19,13 @@ use yang_base::BaseError;
 const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, PASSWORD_HASH, STATUS];
 const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION, CREDENTIAL_VERSION];
 /// TOTP 状态投影：**不**进登录热路径（`USER_CREDENTIAL_FIELDS`），只在
-/// MFA 端点与 Step-up 重认证需要时单独拉取。
+/// MFA 端点与 Step-up 重认证需要时单独拉取。`email` 供登录 MFA 备用
+/// 邮箱验证码定位投递地址（只读，不回显给客户端）。
 const USER_TOTP_FIELDS: &[&str] = &[
     USER_ID,
     USERNAME,
     STATUS,
+    EMAIL,
     TOTP_SECRET,
     TOTP_ACTIVATED_AT,
     TOTP_RECOVERY_DIGEST,
@@ -34,6 +36,9 @@ const USER_TOTP_FIELDS: &[&str] = &[
 pub(crate) struct TotpStateRecord {
     pub(crate) username: String,
     pub(crate) status: UserStatus,
+    /// 已验证邮箱（`chk_users_verified_email_pair` 保证与验证时间成对）；
+    /// 匿名化账号为 None。
+    pub(crate) email: Option<String>,
     pub(crate) totp_secret: Option<String>,
     pub(crate) totp_activated_at: Option<i64>,
     pub(crate) totp_recovery_digest: Option<String>,
@@ -46,6 +51,7 @@ impl TryFrom<&Record> for TotpStateRecord {
         Ok(Self {
             username: record.require(USERNAME)?,
             status: UserStatus::from_storage(&record.require::<String>(STATUS)?)?,
+            email: record.optional(EMAIL)?,
             totp_secret: record.optional(TOTP_SECRET)?,
             totp_activated_at: record.optional(TOTP_ACTIVATED_AT)?,
             totp_recovery_digest: record.optional(TOTP_RECOVERY_DIGEST)?,
@@ -327,7 +333,7 @@ impl UserRepository {
 
     /// 事务内写入 TOTP 激活状态：密文密钥、激活时间、恢复码摘要。
     ///
-    /// 只在激活流程调用一次；停用/重新配置走覆盖写。
+    /// 只在激活流程调用一次；停用走 `deactivate_totp_in_tx` 置空三列。
     pub(crate) async fn activate_totp_in_tx(
         &self,
         ctx: &ActionContext,
@@ -351,6 +357,34 @@ impl UserRepository {
         if affected != 1 {
             return Err(BaseError::from(yang_db::DbError::TransactionError(
                 format!("用户 {id} TOTP 激活未精确影响一行"),
+            )));
+        }
+        Ok(())
+    }
+
+    /// 事务内清除 TOTP 激活状态：密钥密文、激活时间与恢复码摘要全部置 NULL。
+    ///
+    /// 只在停用流程调用；调用方必须在同一事务内递增双版本（凭据面变更）。
+    pub(crate) async fn deactivate_totp_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+    ) -> Result<(), BaseError> {
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(id.into()))?
+            .update_in_tx(
+                transaction,
+                Record::new()
+                    .set(TOTP_SECRET, serde_json::Value::Null)
+                    .set(TOTP_ACTIVATED_AT, serde_json::Value::Null)
+                    .set(TOTP_RECOVERY_DIGEST, serde_json::Value::Null),
+            )
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {id} TOTP 停用未精确影响一行"),
             )));
         }
         Ok(())

@@ -8,6 +8,7 @@ import {
 } from "@/engine/session/lifecycle";
 import {
   register,
+  requestMfaEmailCode,
   requestRegistrationEmail,
   resetPassword,
 } from "@/features/auth/api";
@@ -93,7 +94,7 @@ describe("login", () => {
   });
 });
 
-describe("registration email verification", () => {
+describe("email verification requests（注册 / 登录 MFA）", () => {
   it("请求验证码只发送邮箱并验证通用 202 响应", async () => {
     const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe("/api/v1/users/registration-email-verifications");
@@ -114,6 +115,50 @@ describe("registration email verification", () => {
     await expect(
       requestRegistrationEmail("alice@example.com"),
     ).resolves.toEqual({ expiresIn: 600, resendAfter: 60 });
+  });
+
+  it("请求 MFA 邮箱验证码携带账号密码并验证通用 202 响应", async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("/api/v1/users/mfa/email-code");
+      expect(init.method).toBe("POST");
+      expect(init.credentials).toBe("include");
+      // 后端等时重验密码（防枚举），因此请求必须携带完整凭据。
+      expect(init.body).toBe(
+        JSON.stringify({ username: "alice", password: "correct-password" }),
+      );
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "成功",
+          data: { accepted: true, expires_in: 600, resend_after: 60 },
+        }),
+        { status: 202, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      requestMfaEmailCode("alice", "correct-password"),
+    ).resolves.toEqual({ expiresIn: 600, resendAfter: 60 });
+  });
+
+  it("密码错误的响应保留服务端统一错误信息", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ code: 40101, message: "账号或密码错误" }),
+            { status: 401, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    const error = await requestMfaEmailCode("alice", "wrong-password").catch(
+      (cause: unknown) => cause,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 401, message: "账号或密码错误" });
   });
 
   it("注册提交邮箱所有权证明并拒绝畸形成功响应", async () => {

@@ -215,8 +215,8 @@ export default function AppLayout() {
   const groups = groupNavigationPages(pages, catalog);
 
   return (
-    <div className="flex min-h-svh bg-background text-foreground">
-      <aside className="flex w-60 shrink-0 flex-col border-r border-border">
+    <div className="flex h-svh overflow-hidden bg-background text-foreground">
+      <aside className="flex h-full w-60 shrink-0 flex-col border-r border-border">
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <span className="text-sm font-semibold tracking-tight">
             YANG System 控制台

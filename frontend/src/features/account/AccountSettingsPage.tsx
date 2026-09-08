@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
 
-import type { CurrentUser, SessionInfo } from "./api";
+import type { CurrentUser, SessionInfo, TotpSetupResult } from "./api";
 import {
+  activateTotp,
   changeEmail,
   changePassword,
   changeUsername,
+  deactivateTotp,
   fetchCurrentUser,
   listSessions,
   requestChangeEmail,
   revokeSession,
+  setupTotp,
 } from "./api";
+import { TotpSetupDialog } from "./TotpSetupDialog";
 import {
   useSessionController,
   useSessionSnapshot,
@@ -55,6 +59,14 @@ export default function AccountSettingsPage() {
   // 登录设备
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsError, setSessionsError] = useState("");
+
+  // TOTP 双重验证：setup（弹窗展示二维码/密钥待验码）→ activated（一次性回显恢复码）
+  const [totpSetup, setTotpSetup] = useState<TotpSetupResult | null>(null);
+  const [totpError, setTotpError] = useState("");
+  const [totpRecoveryCodes, setTotpRecoveryCodes] = useState<string[] | null>(
+    null,
+  );
+  const [totpCodesCopied, setTotpCodesCopied] = useState(false);
 
   const loadProfile = useCallback(async () => {
     setProfileError("");
@@ -223,6 +235,92 @@ export default function AccountSettingsPage() {
       );
       if (result === undefined) return; // 用户取消
       setMessage("邮箱已更换。凭据已变更，请使用新邮箱重新登录。");
+      controller.clearSession("credentials-changed");
+      navigate("/login", { replace: true });
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const startTotpSetup = async () => {
+    if (busy) return;
+    setMessage("");
+    setErrorMessage("");
+    setTotpError("");
+    setBusy("totp-setup");
+    try {
+      const setup = await runProtected((proof) =>
+        setupTotp(token, undefined, proof),
+      );
+      if (setup === undefined) return; // 用户取消 Step-up
+      setTotpSetup(setup);
+      setTotpRecoveryCodes(null);
+      setTotpCodesCopied(false);
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /// 弹窗内验码激活：失败保留弹窗并回传错误（弹窗自动清空输入）。
+  const activateTotpWithCode = async (code: string) => {
+    if (busy || !totpSetup) return;
+    setTotpError("");
+    setBusy("totp-activate");
+    try {
+      const result = await runProtected((proof) =>
+        activateTotp(totpSetup.secret, code, token, undefined, proof),
+      );
+      if (result === undefined) return; // 用户取消 Step-up，保留弹窗
+      // 激活成功：会话已失效，关闭弹窗，进入恢复码一次性回显。
+      setTotpSetup(null);
+      setTotpRecoveryCodes(result.recoveryCodes);
+      setTotpCodesCopied(false);
+    } catch (cause) {
+      setTotpError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const copyTotpRecoveryCodes = async () => {
+    if (!totpRecoveryCodes) return;
+    try {
+      await navigator.clipboard.writeText(totpRecoveryCodes.join("\n"));
+      setTotpCodesCopied(true);
+    } catch {
+      setErrorMessage("复制失败，请手动抄录恢复码");
+    }
+  };
+
+  const finishTotpActivation = () => {
+    controller.clearSession("credentials-changed");
+    navigate("/login", { replace: true });
+  };
+
+  /// 关闭双重验证：Step-up 重认证（已激活账号需同时出示第二因子）后停用，
+  /// 全部恢复码作废、会话失效，回到登录页。
+  const closeTotp = async () => {
+    if (busy) return;
+    setMessage("");
+    setErrorMessage("");
+    if (
+      !window.confirm(
+        "确定关闭双重验证吗？关闭后登录与敏感操作只需密码，全部恢复码立即作废，且所有会话失效需重新登录。",
+      )
+    ) {
+      return;
+    }
+    setBusy("totp-deactivate");
+    try {
+      const result = await runProtected((proof) =>
+        deactivateTotp(token, undefined, proof),
+      );
+      if (result === undefined) return; // 用户取消 Step-up
+      setMessage("双重验证已关闭，请重新登录。");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
     } catch (cause) {
@@ -420,6 +518,69 @@ export default function AccountSettingsPage() {
         </section>
       )}
 
+      {profile && (
+        <section className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-medium">双重验证（TOTP）</h2>
+          {totpRecoveryCodes ? (
+            <div className="mt-3 space-y-3">
+              <p className="text-sm text-muted-foreground">
+                双重验证已启用。以下恢复码<strong>仅此一次显示</strong>
+                ，请立即抄录并妥善保管；认证器不可用时可用恢复码登录（每码一次性）。
+              </p>
+              <ul className="grid grid-cols-2 gap-2 rounded-md border border-border bg-muted/50 p-3 font-mono text-sm">
+                {totpRecoveryCodes.map((code) => (
+                  <li key={code}>{code}</li>
+                ))}
+              </ul>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void copyTotpRecoveryCodes()}
+                >
+                  {totpCodesCopied ? "已复制" : "复制恢复码"}
+                </Button>
+                <Button type="button" onClick={finishTotpActivation}>
+                  我已保存恢复码，重新登录
+                </Button>
+              </div>
+            </div>
+          ) : profile.totpActivated ? (
+            <div className="mt-3 space-y-3">
+              <p className="text-sm">
+                <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary">
+                  已启用
+                </span>{" "}
+                登录与敏感操作需输入认证器动态码、恢复码或邮箱验证码。如需更换认证器，
+                可先关闭后重新启用。
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy !== null}
+                onClick={() => void closeTotp()}
+              >
+                {busy === "totp-deactivate" ? "关闭中…" : "关闭双重验证"}
+              </Button>
+            </div>
+          ) : (
+            <div className="mt-3 space-y-3">
+              <p className="text-sm text-muted-foreground">
+                启用后，登录与敏感操作除密码外还需输入认证器动态码，可显著提升账号安全性。
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy !== null}
+                onClick={() => void startTotpSetup()}
+              >
+                {busy === "totp-setup" ? "生成密钥中…" : "启用双重验证"}
+              </Button>
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="rounded-xl border border-border bg-card p-5">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-medium">登录设备</h2>
@@ -503,6 +664,17 @@ export default function AccountSettingsPage() {
           {errorMessage}
         </p>
       )}
+
+      <TotpSetupDialog
+        setup={totpSetup}
+        submitting={busy === "totp-activate"}
+        errorMessage={totpError}
+        onActivate={(code) => void activateTotpWithCode(code)}
+        onCancel={() => {
+          setTotpSetup(null);
+          setTotpError("");
+        }}
+      />
     </main>
   );
 }

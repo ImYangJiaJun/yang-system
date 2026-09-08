@@ -1,7 +1,7 @@
 use crate::addon::account::email_delivery::{
     NewDeviceEmailSender, NewDeviceEmailSenderHandle, PasswordResetEmailSender,
     PasswordResetEmailSenderHandle, RegistrationEmailSender, RegistrationEmailSenderHandle,
-    SmtpEmailSender,
+    SmtpEmailSender, VerificationCodeSender, VerificationCodeSenderHandle,
 };
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
@@ -92,6 +92,7 @@ async fn run_after_telemetry_initialized(
         Arc::new(SmtpEmailSender::new(&settings.email.smtp).context("构建 SMTP 邮件投递器失败")?);
     let registration_sender: Arc<dyn RegistrationEmailSender> = email_sender.clone();
     let password_reset_sender: Arc<dyn PasswordResetEmailSender> = email_sender.clone();
+    let verification_code_sender: Arc<dyn VerificationCodeSender> = email_sender.clone();
     let new_device_sender: Arc<dyn NewDeviceEmailSender> = email_sender;
     let mut tools_builder = ToolsBuilder::new()
         .mysql(mysql)
@@ -103,6 +104,9 @@ async fn run_after_telemetry_initialized(
         .extension(PasswordResetEmailSenderHandle::from_arc(
             password_reset_sender,
         ))
+        .extension(VerificationCodeSenderHandle::from_arc(
+            verification_code_sender,
+        ))
         .extension(NewDeviceEmailSenderHandle::from_arc(new_device_sender))
         .config(log_identity)
         .config(settings.email.verification.engine_config())
@@ -111,6 +115,13 @@ async fn run_after_telemetry_initialized(
     if let Some(change) = settings.email.change.as_ref() {
         tools_builder = tools_builder.config(crate::config::ChangeEmailVerificationConfig(
             change.change_engine_config(),
+        ));
+    }
+    // 登录 MFA 备用邮箱验证码使用独立 config 槽与 key 域；
+    // 未配置时 request_mfa_email_code 返回未启用错误。
+    if let Some(mfa) = settings.email.mfa.as_ref() {
+        tools_builder = tools_builder.config(crate::config::MfaEmailVerificationConfig(
+            mfa.mfa_engine_config(),
         ));
     }
     // TOTP 密钥域（AEAD）；未配置时 MFA Action 不注册。

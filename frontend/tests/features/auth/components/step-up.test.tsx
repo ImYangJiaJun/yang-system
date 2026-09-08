@@ -51,7 +51,7 @@ describe("StepUpDialog", () => {
         expect(url).toBe("/api/v1/users/step-up/complete");
         expect(JSON.parse(String(init?.body))).toEqual({
           challenge: "challenge-1",
-          credentials: { username: "alice", password: "pw" },
+          credentials: { username: "alice", password: "pw", mfa_code: null },
         });
         expect(new Headers(init?.headers).get("authorization")).toBe(
           "Bearer access-token",
@@ -88,6 +88,44 @@ describe("StepUpDialog", () => {
       "one-shot-proof",
     );
     expect(JSON.stringify({ ...localStorage })).not.toContain("one-shot-proof");
+  });
+
+  it("启用 TOTP 的账号可提交双重验证码", async () => {
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        expect(url).toBe("/api/v1/users/step-up/complete");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          challenge: "challenge-mfa",
+          credentials: {
+            username: "alice",
+            password: "pw",
+            mfa_code: "123456",
+          },
+        });
+        return jsonResponse({
+          code: 0,
+          message: "成功",
+          data: { proof: "mfa-proof", expires_in: 120 },
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { request } = renderHost("access-token");
+    const promise = request("challenge-mfa");
+
+    await screen.findByRole("dialog");
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("用户名"), "alice");
+    await user.type(screen.getByLabelText("密码"), "pw");
+    await user.type(
+      screen.getByLabelText("双重验证码（已启用时必填）"),
+      "123456",
+    );
+    await user.click(screen.getByRole("button", { name: "验证并继续" }));
+
+    await expect(promise).resolves.toBe("mfa-proof");
   });
 
   it("取消返回 undefined 且不发起请求", async () => {

@@ -17,6 +17,7 @@ export type CurrentUser = {
   email: string | null;
   emailVerifiedAt: number | null;
   status: "active" | "disabled";
+  totpActivated: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -118,6 +119,7 @@ export async function fetchCurrentUser(
         ? data.email_verified_at
         : null,
     status: data.status === "disabled" ? "disabled" : "active",
+    totpActivated: data.totp_activated === true,
     createdAt: data.created_at as number,
     updatedAt: data.updated_at as number,
   };
@@ -286,4 +288,128 @@ export async function revokeSession(
       details: result.payload,
     });
   }
+}
+
+export type TotpSetupResult = {
+  secret: string;
+  otpauthUri: string;
+  digits: number;
+};
+
+/// TOTP 配置初始化：生成共享密钥与 otpauth URI（未激活，需 Step-up）。
+export async function setupTotp(
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+  stepUpProof?: string,
+): Promise<TotpSetupResult> {
+  const result = await postAuthenticated(
+    "/api/v1/users/mfa/totp/setup",
+    {},
+    accessToken,
+    signal,
+    stepUpProof,
+  ).catch((cause: unknown) => {
+    // 服务端未配置 [security.totp] 时 MFA Action 不注册（404），转为可操作的提示。
+    if (cause instanceof ApiError && cause.status === 404) {
+      throw new ApiError(
+        "服务端未启用双重验证（缺少 [security.totp] 配置），请联系管理员",
+        { status: cause.status, code: cause.code },
+      );
+    }
+    throw cause;
+  });
+  const data = recordData(result.payload.data);
+  if (
+    typeof data?.secret !== "string" ||
+    !data.secret ||
+    typeof data.otpauth_uri !== "string" ||
+    data.activated !== false ||
+    typeof data.digits !== "number"
+  ) {
+    throw new ApiError("TOTP 初始化响应缺少有效密钥", {
+      status: result.status,
+      code: result.payload.code,
+      requestId: result.requestId,
+      details: result.payload,
+    });
+  }
+  return {
+    secret: data.secret,
+    otpauthUri: data.otpauth_uri,
+    digits: data.digits,
+  };
+}
+
+export type TotpActivateResult = {
+  recoveryCodes: string[];
+  immediateConvergence: boolean;
+};
+
+/// TOTP 激活：验码启用第二因子并签发一次性恢复码（明文仅此响应回显一次）。
+/// 成功后既有会话全部失效，调用方必须引导重新登录。
+export async function activateTotp(
+  secret: string,
+  code: string,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+  stepUpProof?: string,
+): Promise<TotpActivateResult> {
+  const result = await postAuthenticated(
+    "/api/v1/users/mfa/totp/activate",
+    { secret, code },
+    accessToken,
+    signal,
+    stepUpProof,
+  );
+  const data = recordData(result.payload.data);
+  const recoveryCodes = Array.isArray(data?.recovery_codes)
+    ? data.recovery_codes.filter(
+        (code): code is string => typeof code === "string" && code.length > 0,
+      )
+    : [];
+  if (
+    data?.totp_activated !== true ||
+    recoveryCodes.length === 0 ||
+    data.relogin_required !== true
+  ) {
+    throw new ApiError("TOTP 激活响应缺少恢复码", {
+      status: result.status,
+      code: result.payload.code,
+      requestId: result.requestId,
+      details: result.payload,
+    });
+  }
+  return {
+    recoveryCodes,
+    immediateConvergence: data.immediate_convergence === true,
+  };
+}
+
+/// TOTP 停用：关闭第二因子并作废全部恢复码（需登录 + Step-up 重认证）。
+/// 成功后既有会话全部失效，调用方必须引导重新登录。
+export async function deactivateTotp(
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+  stepUpProof?: string,
+): Promise<CredentialMutationResult> {
+  const result = await postAuthenticated(
+    "/api/v1/users/mfa/totp/deactivate",
+    {},
+    accessToken,
+    signal,
+    stepUpProof,
+  );
+  const data = recordData(result.payload.data);
+  if (data?.totp_activated !== false || data.relogin_required !== true) {
+    throw new ApiError("TOTP 停用响应缺少确认", {
+      status: result.status,
+      code: result.payload.code,
+      requestId: result.requestId,
+      details: result.payload,
+    });
+  }
+  return {
+    reloginRequired: true,
+    immediateConvergence: data.immediate_convergence === true,
+  };
 }

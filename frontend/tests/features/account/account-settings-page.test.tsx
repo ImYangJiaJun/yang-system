@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -7,6 +7,13 @@ import { createSessionController } from "@/engine/session/session-controller";
 import { renderTestApp } from "@test/helpers/render-app";
 
 /// 账号设置页：资料加载、修改密码/用户名表单、Step-up 428 重放、停用账号入口。
+
+// jsdom 无 canvas 实现：二维码生成替换为固定 data URL。
+// 命名导出与 default 导出同时给出，覆盖 vitest/rolldown 两种互操作形态。
+vi.mock("qrcode", () => {
+  const toDataURL = vi.fn(async () => "data:image/png;base64,qr-stub");
+  return { toDataURL, default: { toDataURL } };
+});
 
 function jsonResponse(
   payload: unknown,
@@ -39,9 +46,12 @@ function stubAccountApi(
   options: {
     changePassword428?: boolean;
     changeUsername428?: boolean;
+    totpActivateFailsOnce?: boolean;
+    totpActivated?: boolean;
   } = {},
 ) {
   const calls: Array<{ url: string; proof?: string }> = [];
+  let activateAttempts = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -64,7 +74,12 @@ function stubAccountApi(
         });
       }
       if (url.endsWith("/api/v1/users/me")) {
-        return jsonResponse(mePayload());
+        return jsonResponse({
+          code: 0,
+          data: options.totpActivated
+            ? { ...mePayload().data, totp_activated: true }
+            : mePayload().data,
+        });
       }
       if (url.endsWith("/api/v1/users/change-password")) {
         if (options.changePassword428 && !proof) {
@@ -124,6 +139,52 @@ function stubAccountApi(
         return jsonResponse({
           code: 0,
           data: { proof: "proof-ok", expires_in: 300 },
+        });
+      }
+      if (url.endsWith("/api/v1/users/mfa/totp/setup")) {
+        return jsonResponse({
+          code: 0,
+          message: "请在认证器应用中扫描二维码或手动输入密钥",
+          data: {
+            secret: "JBSWY3DPEHPK3PXP",
+            otpauth_uri:
+              "otpauth://totp/yang-system:alice?secret=JBSWY3DPEHPK3PXP",
+            activated: false,
+            digits: 6,
+          },
+        });
+      }
+      if (url.endsWith("/api/v1/users/mfa/totp/activate")) {
+        activateAttempts += 1;
+        if (options.totpActivateFailsOnce && activateAttempts === 1) {
+          return jsonResponse(
+            { code: 700005, message: "参数无效 [code]: 一次性验证码无效" },
+            400,
+          );
+        }
+        return jsonResponse({
+          code: 0,
+          message: "TOTP 已启用，请妥善保存恢复码并重新登录",
+          data: {
+            totp_activated: true,
+            recovery_codes: [
+              "aaaa1111-bbbb2222-cccc3333-dddd4444",
+              "eeee5555-ffff6666-00007777-11118888",
+            ],
+            immediate_convergence: true,
+            relogin_required: true,
+          },
+        });
+      }
+      if (url.endsWith("/api/v1/users/mfa/totp/deactivate")) {
+        return jsonResponse({
+          code: 0,
+          message: "双重验证已关闭，请重新登录",
+          data: {
+            totp_activated: false,
+            immediate_convergence: true,
+            relogin_required: true,
+          },
         });
       }
       if (
@@ -248,6 +309,159 @@ describe("账号设置页", () => {
 
     await waitFor(() => expect(controller.getSnapshot().loggedIn).toBe(false));
   });
+});
+
+it("TOTP：弹窗展示二维码/密钥 → 满 6 位自动激活 → 一次性回显恢复码 → 重新登录", async () => {
+  const calls = stubAccountApi();
+  const { controller } = renderTestApp({
+    path: "/account",
+    authenticated: true,
+  });
+
+  const user = userEvent.setup();
+  await waitFor(() => expect(screen.getByText("alice")).toBeInTheDocument());
+  await user.click(screen.getByRole("button", { name: "启用双重验证" }));
+
+  // 弹窗内展示二维码（img，qrcode 已 mock 为固定 data URL）、密钥（带复制按钮）与验证码输入。
+  const dialog = await screen.findByRole("dialog");
+  expect(
+    await within(dialog).findByRole("img", { name: "TOTP 二维码" }),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByText("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole("button", { name: "复制" }),
+  ).toBeInTheDocument();
+
+  // 满 6 位自动提交激活，无需点击按钮。
+  await user.type(within(dialog).getByLabelText(/认证器验证码/), "123456");
+
+  // 激活成功：弹窗关闭，恢复码在页面一次性回显。
+  expect(
+    await screen.findByText("aaaa1111-bbbb2222-cccc3333-dddd4444"),
+  ).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(calls.map((call) => call.url)).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining("/api/v1/users/mfa/totp/setup"),
+      expect.stringContaining("/api/v1/users/mfa/totp/activate"),
+    ]),
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "我已保存恢复码，重新登录" }),
+  );
+  await waitFor(() => expect(controller.getSnapshot().loggedIn).toBe(false));
+});
+
+it("TOTP：验证码错误时弹窗内提示并清空输入，可重试", async () => {
+  stubAccountApi({ totpActivateFailsOnce: true });
+  renderTestApp({ path: "/account", authenticated: true });
+
+  const user = userEvent.setup();
+  await waitFor(() => expect(screen.getByText("alice")).toBeInTheDocument());
+  await user.click(screen.getByRole("button", { name: "启用双重验证" }));
+
+  const dialog = await screen.findByRole("dialog");
+  const codeInput = within(dialog).getByLabelText(/认证器验证码/);
+  await user.type(codeInput, "000000");
+
+  // 错误提示出现在弹窗内，输入框被清空，弹窗保持打开。
+  expect(
+    await within(dialog).findByText(/一次性验证码无效/),
+  ).toBeInTheDocument();
+  expect(codeInput).toHaveValue("");
+
+  // 重试正确验证码 → 激活成功。
+  await user.type(codeInput, "123456");
+  expect(
+    await screen.findByText("aaaa1111-bbbb2222-cccc3333-dddd4444"),
+  ).toBeInTheDocument();
+});
+
+it("TOTP：已激活账号展示状态而非设置入口", async () => {
+  stubAccountApi();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/.well-known/yang/ui-catalog")) {
+        return jsonResponse({
+          code: 0,
+          message: "成功",
+          data: {
+            schema_version: "2.3",
+            revision: "a".repeat(64),
+            actions: [],
+            table_views: [],
+            modules: [],
+          },
+        });
+      }
+      if (url.endsWith("/api/v1/users/me")) {
+        return jsonResponse({
+          code: 0,
+          data: { ...mePayload().data, totp_activated: true },
+        });
+      }
+      if (url.endsWith("/api/v1/users/sessions")) {
+        return jsonResponse({
+          code: 0,
+          message: "成功",
+          data: { sessions: [] },
+        });
+      }
+      void init;
+      throw new Error(`测试未覆盖的请求：${url}`);
+    }),
+  );
+  renderTestApp({ path: "/account", authenticated: true });
+
+  expect(await screen.findByText("已启用")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "启用双重验证" }),
+  ).not.toBeInTheDocument();
+  // 已激活账号提供自助关闭入口。
+  expect(
+    screen.getByRole("button", { name: "关闭双重验证" }),
+  ).toBeInTheDocument();
+});
+
+it("TOTP：关闭双重验证 → 确认后经 Step-up 通道停用，会话清空回到登录页", async () => {
+  const calls = stubAccountApi({ totpActivated: true });
+  const { controller } = renderTestApp({
+    path: "/account",
+    authenticated: true,
+  });
+
+  const user = userEvent.setup();
+  await waitFor(() => expect(screen.getByText("alice")).toBeInTheDocument());
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  await user.click(screen.getByRole("button", { name: "关闭双重验证" }));
+
+  await waitFor(() => expect(controller.getSnapshot().loggedIn).toBe(false));
+  expect(calls.map((call) => call.url)).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining("/api/v1/users/mfa/totp/deactivate"),
+    ]),
+  );
+});
+
+it("TOTP：关闭双重验证在确认框取消时不发起请求", async () => {
+  const calls = stubAccountApi({ totpActivated: true });
+  const { controller } = renderTestApp({
+    path: "/account",
+    authenticated: true,
+  });
+
+  const user = userEvent.setup();
+  await waitFor(() => expect(screen.getByText("alice")).toBeInTheDocument());
+  vi.spyOn(window, "confirm").mockReturnValue(false);
+  await user.click(screen.getByRole("button", { name: "关闭双重验证" }));
+
+  expect(calls.some((call) => call.url.includes("/mfa/totp/deactivate"))).toBe(
+    false,
+  );
+  expect(controller.getSnapshot().loggedIn).toBe(true);
 });
 
 it("更换邮箱：发送验证码 → 输入验证码 → 换绑成功清空会话", async () => {

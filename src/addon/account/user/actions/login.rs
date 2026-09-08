@@ -89,8 +89,10 @@ impl CredentialVerifier for UserCredentialVerifier {
         // verify_or_dummy 对 None 恒返回 false，能走到这里说明用户一定存在。
         let user = user.ok_or(BaseError::InvalidPassword)?;
         Account::ensure_active(user.status)?;
-        // E-1a/E-1d：账号启用 TOTP 时，登录必须同时完成第二因子挑战；
-        // 缺少或错误的一次性码与密码错误同响应（InvalidPassword，防枚举）。
+        // E-1a/E-1d：账号启用 TOTP 时登录为两段式——密码校验通过后，
+        // 缺少第二因子码返回 SecondFactorRequired（前端据此弹出验证码输入框）；
+        // 码错误按参数错误拒绝并计一次失败。暴露 MFA 状态以第一因子通过为前提，
+        // 「用户不存在/密码错误」仍统一为 InvalidPassword（防枚举边界不变）。
         let totp_state = self
             .account
             .users()
@@ -120,15 +122,16 @@ impl CredentialVerifier for UserCredentialVerifier {
                                 .rate_limiter()
                                 .record_failure(ctx, AuthOperation::Login, &limit_key)
                                 .await?;
-                            return Err(BaseError::InvalidPassword);
+                            return Err(BaseError::ParamInvalid(
+                                "mfa_code".to_string(),
+                                "双重验证码错误或已过期".to_string(),
+                            ));
                         }
                     }
                     None => {
-                        self.account
-                            .rate_limiter()
-                            .record_failure(ctx, AuthOperation::Login, &limit_key)
-                            .await?;
-                        return Err(BaseError::InvalidPassword);
+                        // 两段式协议步骤而非攻击信号：不计失败，
+                        // 避免正常登录的首阶段消耗失败额度。
+                        return Err(BaseError::SecondFactorRequired);
                     }
                 }
             }
@@ -170,16 +173,19 @@ pub(super) async fn handle(
     let tokens = match login_result {
         Ok(tokens) => tokens,
         Err(error) => {
-            if let Err(record_error) = record_login_failure(
-                &record_ctx,
-                &account,
-                &input.username,
-                &session_ip,
-                &session_user_agent,
-            )
-            .await
-            {
-                tracing::warn!(error = %record_error, "登录失败事件记录失败");
+            // 两段式登录的第一阶段通过（等待第二因子输入）不是失败事件，不记录。
+            if !matches!(error, BaseError::SecondFactorRequired) {
+                if let Err(record_error) = record_login_failure(
+                    &record_ctx,
+                    &account,
+                    &input.username,
+                    &session_ip,
+                    &session_user_agent,
+                )
+                .await
+                {
+                    tracing::warn!(error = %record_error, "登录失败事件记录失败");
+                }
             }
             return Err(error);
         }
@@ -201,7 +207,10 @@ pub(super) async fn handle(
 }
 
 /// 记录一次失败的登录尝试（best-effort；失败原因粗粒度）。
-async fn record_login_failure(
+///
+/// `pub(super)`：登录 MFA 邮箱验证码端点（`request_mfa_email_code`）同样是在线
+/// 密码校验入口，失败事件沿用同一记录路径。
+pub(super) async fn record_login_failure(
     ctx: &ActionContext,
     account: &Account,
     identifier: &str,

@@ -61,7 +61,10 @@ pub(super) fn build_module(
     .native_action(UiCatalogAction);
     module = actions::register_all(module, Arc::clone(&account));
     if let Some(step_up) = step_up {
-        for target in step_up_targets(account.credential_mutations_enabled()) {
+        for target in step_up_targets(
+            account.credential_mutations_enabled(),
+            account.totp_settings().is_some(),
+        ) {
             module = module.middleware(step_up.middleware(
                 target,
                 RequestFingerprintResolver::global("account-session"),
@@ -105,14 +108,25 @@ fn presentation(credential_mutations_enabled: bool) -> ModulePresentationSpec {
 }
 
 /// 需要 Step-up 重认证的账号安全 Action。
-fn step_up_targets(credential_mutations_enabled: bool) -> Vec<yang_base::definition::ActionRef> {
-    // 管理写操作（D-1/D-2）与自助安全操作都要求 Step-up。
+///
+/// `totp_enabled` 对应 `security.totp` 配置段：TOTP Action 未注册时
+/// 不能为其挂 Step-up 中间件（构建期会校验 ActionRef 有效性）。
+fn step_up_targets(
+    credential_mutations_enabled: bool,
+    totp_enabled: bool,
+) -> Vec<yang_base::definition::ActionRef> {
+    // 管理写操作（D-1/D-2）与自助安全操作要求 Step-up；
+    // 退出登录（logout）是收敛性操作，不制造新的风险面，无需重认证。
     let mut targets = vec![
-        yang_base::action!("account.user.logout"),
         yang_base::action!("account.user.admin_disable_user"),
         yang_base::action!("account.user.admin_enable_user"),
         yang_base::action!("account.user.admin_issue_password_reset"),
     ];
+    // TOTP 停用是安全降级操作，不受凭据写开关影响（激活同样不受其门控），
+    // 必须始终重认证；已激活账号的 Step-up 会同时要求出示第二因子。
+    if totp_enabled {
+        targets.push(yang_base::action!("account.user.totp_deactivate"));
+    }
     if credential_mutations_enabled {
         targets.insert(0, yang_base::action!("account.user.delete_account"));
         targets.insert(1, yang_base::action!("account.user.revoke_session"));
@@ -130,23 +144,32 @@ mod tests {
     #[test]
     fn every_account_security_mutation_is_explicitly_step_up_protected() {
         assert_eq!(
-            step_up_targets(true),
+            step_up_targets(true, true),
             vec![
                 yang_base::action!("account.user.delete_account"),
                 yang_base::action!("account.user.revoke_session"),
                 yang_base::action!("account.user.change_email"),
                 yang_base::action!("account.user.change_username"),
                 yang_base::action!("account.user.disable_self"),
-                yang_base::action!("account.user.logout"),
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.totp_deactivate"),
             ]
         );
         assert_eq!(
-            step_up_targets(false),
+            step_up_targets(false, true),
             vec![
-                yang_base::action!("account.user.logout"),
+                yang_base::action!("account.user.admin_disable_user"),
+                yang_base::action!("account.user.admin_enable_user"),
+                yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.totp_deactivate"),
+            ]
+        );
+        // TOTP 配置段缺失时 deactivate 不注册，step-up 清单不得引用它。
+        assert_eq!(
+            step_up_targets(false, false),
+            vec![
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),

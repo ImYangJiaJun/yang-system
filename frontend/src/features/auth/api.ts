@@ -91,6 +91,48 @@ export async function requestRegistrationEmail(
   };
 }
 
+export type MfaEmailCodeChallenge = {
+  expiresIn: number;
+  resendAfter: number;
+};
+
+/// 登录 MFA 备用邮箱验证码：认证器不可用时请求向注册邮箱发送一次性登录验证码。
+/// 后端等时重验密码（失败响应与登录一致，防枚举）；只有 TOTP 已激活的账号
+/// 才会真实投递，其余情况返回统一 accepted 响应。
+export async function requestMfaEmailCode(
+  username: string,
+  password: string,
+  signal?: AbortSignal,
+): Promise<MfaEmailCodeChallenge> {
+  const result = await requestPublicAction(
+    "/api/v1/users/mfa/email-code",
+    { username, password },
+    signal,
+  );
+  const { payload } = result;
+  const data = recordData(payload.data);
+  if (
+    data?.accepted !== true ||
+    typeof data.expires_in !== "number" ||
+    !Number.isSafeInteger(data.expires_in) ||
+    data.expires_in <= 0 ||
+    typeof data.resend_after !== "number" ||
+    !Number.isSafeInteger(data.resend_after) ||
+    data.resend_after <= 0
+  ) {
+    throw new ApiError("验证码响应缺少有效时限", {
+      status: result.status,
+      code: payload.code,
+      requestId: result.requestId,
+      details: payload,
+    });
+  }
+  return {
+    expiresIn: data.expires_in,
+    resendAfter: data.resend_after,
+  };
+}
+
 export async function register(
   username: string,
   password: string,

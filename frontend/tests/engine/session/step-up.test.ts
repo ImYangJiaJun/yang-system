@@ -19,7 +19,11 @@ describe("completeStepUp", () => {
       expect(init.credentials).toBe("include");
       expect(JSON.parse(String(init.body))).toEqual({
         challenge: "signed-challenge",
-        credentials: { username: "alice", password: "correct-password" },
+        credentials: {
+          username: "alice",
+          password: "correct-password",
+          mfa_code: null,
+        },
       });
       return new Response(
         JSON.stringify({
@@ -43,6 +47,40 @@ describe("completeStepUp", () => {
       "one-shot-proof",
     );
     expect(JSON.stringify({ ...localStorage })).not.toContain("one-shot-proof");
+  });
+
+  it("启用 TOTP 的账号随凭据透传 mfa_code", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(JSON.parse(String(init.body))).toEqual({
+        challenge: "signed-challenge",
+        credentials: {
+          username: "alice",
+          password: "correct-password",
+          mfa_code: "123456",
+        },
+      });
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "成功",
+          data: { proof: "mfa-proof", expires_in: 300 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      completeStepUp(
+        "signed-challenge",
+        {
+          username: "alice",
+          password: "correct-password",
+          mfaCode: " 123456 ",
+        },
+        { token: "access-token" },
+      ),
+    ).resolves.toEqual({ proof: "mfa-proof", expiresIn: 300 });
   });
 
   it("拒绝缺 proof 或超出服务端上限的成功响应", async () => {

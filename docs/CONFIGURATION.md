@@ -134,13 +134,32 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   Action 不注册，换绑能力不可用；显式配置后需重启生效。
 - 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度）。
 
+### 登录 MFA 备用邮箱验证码（`email.mfa`）
+
+- `email.mfa` 是登录 MFA 备用邮箱验证码的独立配置段（与注册/换绑验证码完全隔离）：
+  独立 `namespace`（Redis key 前缀 `yang-system:<ns>:mfa-email`）、独立 `secret`。
+  **启动校验拒绝** `email.mfa.secret` 复用注册验证码、换绑验证码、Token、Step-up
+  或 `security.totp.aead_key` 密钥——否则验证码可跨场景重放。
+- 用途：账号已激活 TOTP 但认证器不可用时，登录第二因子可改用注册邮箱接收的
+  一次性验证码（`POST /api/v1/users/mfa/email-code` 请求发码，等时密码校验防枚举，
+  失败计数与登录共用同一限流预算）。**这是弱于 TOTP 的降级通道**：邮箱失守 +
+  密码泄露即等于账号失守，定位与恢复码同级；验证码单次消费、短 TTL、尝试
+  次数用尽即销毁。
+- 该段可省略（`#[serde(default)]`）：省略时发码端点返回「未启用」错误，
+  登录第二因子仅接受认证器动态码与恢复码；显式配置后需重启生效。
+- 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度）。
+
 ### TOTP 第二因子（`security.totp`）
 
 - `security.totp.aead_key` 是加密 `users.totp_secret` 的**独立密钥域**（32 字节）。
   **启动校验拒绝**占位值、重复字节，且该密钥域不得与 token/step-up/邮箱验证码
   密钥复用——AEAD 解密失败（密钥域不匹配）会按配置损坏拒绝登录的 MFA 阶段。
-- 该段可省略：省略时 `totp_setup`/`totp_activate` Action 不注册，登录与 Step-up
-  回退单因子（既有无 TOTP 账号不受影响）。
+- 该段可省略：省略时 `totp_setup`/`totp_activate`/`totp_deactivate` Action 不注册，
+  登录与 Step-up 回退单因子（既有无 TOTP 账号不受影响）。
+- `totp_deactivate`（自助关闭双重验证）要求登录 + Step-up 重认证；已激活账号的
+  Step-up 会同时要求出示第二因子（动态码/恢复码/邮箱验证码），即必须证明仍持有
+  第二因子才能关闭它。停用成功后密钥、激活时间与全部恢复码即时作废，既有会话
+  全部失效（凭据版本递增），需重新登录。
 - 密钥轮换：滚动更新 `aead_key` 会让已存 TOTP 密文无法解密（用户在下次登录时
   被要求重新 setup）——属预期行为；如需无缝轮换需先实现多 keyring 版本化。
 

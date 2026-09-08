@@ -3,15 +3,20 @@ import { Eye, EyeOff, Lock, User } from "lucide-react";
 import { useNavigate, useSearchParams, Link } from "react-router";
 
 import { login } from "@/engine/session/lifecycle";
+import { SecondFactorRequiredError } from "@/engine/http/errors";
 import {
   useSessionController,
   useSessionSnapshot,
 } from "@/engine/session/use-session";
+import { requestMfaEmailCode } from "@/features/auth/api";
+import { MfaChallengeDialog } from "@/features/auth/components/MfaChallengeDialog";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
 
 /// 登录页（对齐旧 LoginPage.vue 语义）：品牌面板 + 凭据表单 + 错误/提示横幅。
+/// 两段式登录：账号启用 TOTP 时，密码校验通过（SecondFactorRequired）后
+/// 弹出双重验证对话框，输入动态码/恢复码带原凭据重新提交。
 export default function LoginPage() {
   const controller = useSessionController();
   const navigate = useNavigate();
@@ -22,6 +27,9 @@ export default function LoginPage() {
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  // 第二因子阶段：密码已通过，等待动态码/恢复码。
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaError, setMfaError] = useState("");
   // 会话结束原因优先读控制器快照（失效传播），兼容外部链接的 ?reason= 参数。
   const endReason = snapshot.sessionEndReason ?? searchParams.get("reason");
   const reasonMessage =
@@ -32,6 +40,35 @@ export default function LoginPage() {
         : "";
   const successMessage =
     searchParams.get("registered") === "1" ? "账号已创建，请登录" : "";
+
+  /// 统一的登录尝试：第一阶段（无码）或第二阶段（带 mfaCode）。
+  const attemptLogin = async (mfaCode?: string) => {
+    setErrorMessage("");
+    setMfaError("");
+    setSubmitting(true);
+    try {
+      const result = await login(username.trim(), password, mfaCode);
+      controller.beginSession(result);
+      navigate("/", { replace: true });
+    } catch (cause) {
+      if (cause instanceof SecondFactorRequiredError) {
+        // 密码已通过：进入第二因子阶段。
+        setMfaRequired(true);
+      } else if (mfaCode !== undefined) {
+        // 第二阶段失败：留在对话框内提示，输入框由对话框自动清空。
+        setMfaError(
+          cause instanceof Error ? cause.message : "登录失败，请稍后重试",
+        );
+      } else {
+        // 后端错误（401/错误码 envelope）已由 api/auth 映射为 ApiError.message
+        setErrorMessage(
+          cause instanceof Error ? cause.message : "登录失败，请稍后重试",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -44,20 +81,7 @@ export default function LoginPage() {
       setErrorMessage("请输入密码");
       return;
     }
-    setErrorMessage("");
-    setSubmitting(true);
-    try {
-      const result = await login(username.trim(), password);
-      controller.beginSession(result);
-      navigate("/", { replace: true });
-    } catch (cause) {
-      // 后端错误（401/错误码 envelope）已由 api/auth 映射为 ApiError.message
-      setErrorMessage(
-        cause instanceof Error ? cause.message : "登录失败，请稍后重试",
-      );
-    } finally {
-      setSubmitting(false);
-    }
+    await attemptLogin();
   };
 
   return (
@@ -178,6 +202,18 @@ export default function LoginPage() {
           </p>
         </div>
       </aside>
+
+      <MfaChallengeDialog
+        open={mfaRequired}
+        submitting={submitting}
+        errorMessage={mfaError}
+        onSubmit={(code) => void attemptLogin(code)}
+        onCancel={() => {
+          setMfaRequired(false);
+          setMfaError("");
+        }}
+        onSendEmailCode={() => requestMfaEmailCode(username.trim(), password)}
+      />
     </main>
   );
 }

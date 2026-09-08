@@ -384,6 +384,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/users/mfa/email-code": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 请求登录 MFA 邮箱验证码
+     * @description 认证器不可用时向注册邮箱发送一次性登录验证码（等时密码校验防枚举）
+     */
+    post: operations["account.user.request_mfa_email_code"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/users/mfa/totp/activate": {
     parameters: {
       query?: never;
@@ -398,6 +418,26 @@ export interface paths {
      * @description 校验一次性码后启用 TOTP 第二因子，签发恢复码
      */
     post: operations["account.user.totp_activate"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/users/mfa/totp/deactivate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * TOTP 停用
+     * @description 关闭 TOTP 第二因子并作废全部恢复码，既有会话失效
+     */
+    post: operations["account.user.totp_deactivate"];
     delete?: never;
     options?: never;
     head?: never;
@@ -835,7 +875,7 @@ export interface components {
      * @enum {string}
      */
     UserStatus: "active" | "disabled" | "deleted";
-    /** @description 可安全返回给客户端的用户视图，不包含密码摘要。 */
+    /** @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。 */
     UserView: {
       /** Format: int64 */
       created_at: number;
@@ -845,6 +885,8 @@ export interface components {
       /** Format: int64 */
       id: number;
       status: components["schemas"]["UserStatus"];
+      /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
+      totp_activated: boolean;
       /** Format: int64 */
       updated_at: number;
       username: string;
@@ -2729,7 +2771,7 @@ export interface operations {
             code: 0;
             /**
              * UserView
-             * @description 可安全返回给客户端的用户视图，不包含密码摘要。
+             * @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。
              */
             data: {
               /** Format: int64 */
@@ -2740,9 +2782,98 @@ export interface operations {
               /** Format: int64 */
               id: number;
               status: components["schemas"]["UserStatus"];
+              /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
+              totp_activated: boolean;
               /** Format: int64 */
               updated_at: number;
               username: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "account.user.request_mfa_email_code": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /** @description 登录凭据。 */
+          password: string;
+          /** @description 用户名、邮箱或其他登录标识。 */
+          username: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * RegistrationEmailCodeAccepted
+             * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
+             */
+            data: {
+              /** @description 请求已被接受（不保证邮件真实投递）。 */
+              accepted: boolean;
+              /**
+               * Format: uint64
+               * @description 验证码有效期（秒）。
+               */
+              expires_in: number;
+              /**
+               * Format: uint64
+               * @description 重发冷却（秒）。
+               */
+              resend_after: number;
             };
             message: string;
           };
@@ -2799,6 +2930,111 @@ export interface operations {
           code: string;
           secret: string;
         };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "account.user.totp_deactivate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": Record<string, never>;
       };
     };
     responses: {
@@ -3133,7 +3369,7 @@ export interface operations {
             code: 0;
             /**
              * UserView
-             * @description 可安全返回给客户端的用户视图，不包含密码摘要。
+             * @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。
              */
             data: {
               /** Format: int64 */
@@ -3144,6 +3380,8 @@ export interface operations {
               /** Format: int64 */
               id: number;
               status: components["schemas"]["UserStatus"];
+              /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
+              totp_activated: boolean;
               /** Format: int64 */
               updated_at: number;
               username: string;

@@ -32,11 +32,12 @@ pub(crate) const USER_VIEW_FIELDS: &[&str] = &[
     EMAIL,
     EMAIL_VERIFIED_AT,
     STATUS,
+    TOTP_ACTIVATED_AT,
     CREATED_AT,
     UPDATED_AT,
 ];
 
-/// 可安全返回给客户端的用户视图，不包含密码摘要。
+/// 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub(crate) struct UserView {
     id: i64,
@@ -44,6 +45,8 @@ pub(crate) struct UserView {
     email: Option<String>,
     email_verified_at: Option<i64>,
     status: UserStatus,
+    /// TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。
+    totp_activated: bool,
     created_at: i64,
     updated_at: i64,
 }
@@ -58,6 +61,7 @@ impl TryFrom<&Record> for UserView {
             email: user.optional(EMAIL)?,
             email_verified_at: user.optional(EMAIL_VERIFIED_AT)?,
             status: UserStatus::from_storage(&user.require::<String>(STATUS)?)?,
+            totp_activated: user.optional::<i64>(TOTP_ACTIVATED_AT)?.is_some(),
             created_at: user.require(CREATED_AT)?,
             updated_at: user.require(UPDATED_AT)?,
         })

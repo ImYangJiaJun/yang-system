@@ -161,9 +161,10 @@ impl Account {
         UserView::try_from(&user)
     }
 
-    /// 校验账号第二因子（E-1c/E-1d 验收）：TOTP 码优先，失败后试一次性
-    /// 恢复码（命中则独立事务单次消费）。任何失败返回 `InvalidPassword`，
-    /// 与密码错误同响应（防枚举）。
+    /// 校验账号第二因子（E-1c/E-1d 验收）：TOTP 码优先，失败后依次尝试一次性
+    /// 恢复码（命中则独立事务单次消费）与登录 MFA 备用邮箱验证码（Redis 原子
+    /// 单次消费；`[email.mfa]` 未配置时跳过该段）。任何失败返回
+    /// `InvalidPassword`，与密码错误同响应（防枚举）。
     ///
     /// 恢复码消费是独立事务：与登录/Step-up 的签发路径无共享写，单次
     /// 消费语义由事务内「摘要移除 + 回写」保证。
@@ -197,6 +198,22 @@ impl Account {
                 return Ok(());
             }
             let _ = transaction.rollback().await;
+        }
+        // 恢复码未命中 → 尝试 MFA 备用邮箱验证码（认证器丢失的逃生通道；
+        // 引擎 consume 内部原子单次消费，错误尝试达上限即销毁该码）。
+        if let Some(email) = state.email.as_deref() {
+            if let Ok(mfa_config) = ctx
+                .tools()
+                .config::<crate::config::MfaEmailVerificationConfig>()
+            {
+                let verification =
+                    yang_base::action::auth::RegistrationEmailVerification::from_config(
+                        mfa_config.engine_config(),
+                    )?;
+                if verification.consume(ctx, email, code).await.is_ok() {
+                    return Ok(());
+                }
+            }
         }
         Err(BaseError::InvalidPassword)
     }

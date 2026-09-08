@@ -47,7 +47,8 @@ pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec 
 mod tests {
     use super::*;
     use crate::addon::account::user::table::{
-        CREATED_AT, PASSWORD_HASH, STATUS, UPDATED_AT, USERNAME, USER_ID,
+        CREATED_AT, PASSWORD_HASH, STATUS, TOTP_ACTIVATED_AT, TOTP_SECRET, UPDATED_AT, USERNAME,
+        USER_ID,
     };
     use yang_base::table::Record;
 
@@ -67,7 +68,29 @@ mod tests {
             .unwrap_or_else(|error| panic!("用户视图应可序列化: {error}"));
 
         assert_eq!(value.get(USERNAME), Some(&serde_json::json!("alice")));
+        assert_eq!(value.get("totp_activated"), Some(&serde_json::json!(false)));
         assert!(value.get(PASSWORD_HASH).is_none());
+    }
+
+    #[test]
+    fn user_view_projects_totp_activation_without_secret() {
+        let record = Record::new()
+            .set(USER_ID, 7)
+            .set(USERNAME, "alice")
+            .set(STATUS, "active")
+            .set(TOTP_SECRET, "aead-ciphertext")
+            .set(TOTP_ACTIVATED_AT, 1_700_000_000_i64)
+            .set(CREATED_AT, 10)
+            .set(UPDATED_AT, 11);
+
+        let view = UserView::try_from(&record)
+            .unwrap_or_else(|error| panic!("含 TOTP 状态的记录应转换为视图: {error}"));
+        let value = serde_json::to_value(view)
+            .unwrap_or_else(|error| panic!("用户视图应可序列化: {error}"));
+
+        assert_eq!(value.get("totp_activated"), Some(&serde_json::json!(true)));
+        assert!(value.get(TOTP_SECRET).is_none());
+        assert!(value.get(TOTP_ACTIVATED_AT).is_none());
     }
 
     #[test]

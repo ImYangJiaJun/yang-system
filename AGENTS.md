@@ -97,7 +97,7 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
   python scripts/run_ci.py integration
   ```
 
-  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下只有 `registration_email_integration.rs`、`refresh_load_benchmark.rs` 与 `schema_apply_integration.rs` 三个入口。
+  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下只有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs` 与 `mfa_email_code_integration.rs` 四个入口。
 
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
 

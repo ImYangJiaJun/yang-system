@@ -100,6 +100,21 @@ send_ip_attempts = 20
 send_email_attempts = 5
 send_global_attempts = 1000
 
+[email.mfa]
+# 登录 MFA 备用邮箱验证码的独立命名空间与密钥：认证器不可用时，登录第二因子
+# 可改用注册邮箱接收的一次性验证码。绝不复用 [email.verification]/[email.change]
+# 或 security.totp 的密钥，否则验证码可跨场景重放。删除整段即关闭该能力
+#（请求端点返回「未启用」错误）。
+namespace = "local"
+secret = "replace-with-independent-mfa-email-secret"
+ttl_seconds = 600
+resend_cooldown_seconds = 60
+max_attempts = 5
+send_window_seconds = 3600
+send_ip_attempts = 20
+send_email_attempts = 5
+send_global_attempts = 1000
+
 [email.password_reset]
 # 密码重置邮件中链接指向的前端控制台入口（scheme + host[:port]，无路径与查询串）。
 # 生产环境必须使用 https；不得从请求 Host 头推导（Host 头可被攻击者伪造）。

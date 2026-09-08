@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, StepUpRequiredError } from "@/engine/http/errors";
 import {
+  activateTotp,
   changeEmail,
   changePassword,
   changeUsername,
+  deactivateTotp,
   fetchCurrentUser,
   requestChangeEmail,
+  setupTotp,
 } from "@/features/account/api";
 
 /// account 账号中心 API 契约：路径、鉴权头、Step-up 428 重放、响应校验。
@@ -53,6 +56,7 @@ describe("fetchCurrentUser", () => {
               email: "alice@example.com",
               email_verified_at: 1000,
               status: "active",
+              totp_activated: true,
               created_at: 500,
               updated_at: 600,
             },
@@ -70,9 +74,34 @@ describe("fetchCurrentUser", () => {
       email: "alice@example.com",
       emailVerifiedAt: 1000,
       status: "active",
+      totpActivated: true,
       createdAt: 500,
       updatedAt: 600,
     });
+  });
+
+  it("未启用 TOTP 时投影 totpActivated=false", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/users/me")) {
+        return Promise.resolve(
+          jsonResponse({
+            code: 0,
+            data: {
+              id: 7,
+              username: "alice",
+              status: "active",
+              totp_activated: false,
+              created_at: 500,
+              updated_at: 600,
+            },
+          }),
+        );
+      }
+      return Promise.reject(new Error(`未覆盖请求: ${url}`));
+    });
+
+    const user = await fetchCurrentUser("tok-1");
+    expect(user.totpActivated).toBe(false);
   });
 
   it("缺少用户名时拒绝响应", async () => {
@@ -196,6 +225,144 @@ describe("requestChangeEmail", () => {
     const result = await requestChangeEmail("bob@example.com", "tok");
     expect(capturedBody).toEqual({ new_email: "bob@example.com" });
     expect(result).toEqual({ expiresIn: 600, resendAfter: 60 });
+  });
+});
+
+describe("setupTotp", () => {
+  it("POST mfa/totp/setup 并透传 Step-up proof，返回密钥与 URI", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    stubFetch((url, init) => {
+      captured = { url, init };
+      return Promise.resolve(
+        jsonResponse({
+          code: 0,
+          message: "请在认证器应用中扫描二维码或手动输入密钥",
+          data: {
+            secret: "JBSWY3DPEHPK3PXP",
+            otpauth_uri:
+              "otpauth://totp/yang-system:alice?secret=JBSWY3DPEHPK3PXP",
+            activated: false,
+            digits: 6,
+          },
+        }),
+      );
+    });
+
+    const result = await setupTotp("tok", undefined, "proof-x");
+    expect(captured?.url).toContain("/api/v1/users/mfa/totp/setup");
+    expect(
+      (captured?.init.headers as Record<string, string>)["x-step-up-proof"],
+    ).toBe("proof-x");
+    expect(result).toEqual({
+      secret: "JBSWY3DPEHPK3PXP",
+      otpauthUri: "otpauth://totp/yang-system:alice?secret=JBSWY3DPEHPK3PXP",
+      digits: 6,
+    });
+  });
+
+  it("缺少密钥的成功响应被拒绝", async () => {
+    stubFetch(() =>
+      Promise.resolve(jsonResponse({ code: 0, data: { activated: false } })),
+    );
+    await expect(setupTotp("tok")).rejects.toThrow(/缺少有效密钥/);
+  });
+
+  it("服务端未配置 TOTP（404）转为可操作提示", async () => {
+    stubFetch(() =>
+      Promise.resolve(jsonResponse({ code: 40401, message: "Not Found" }, 404)),
+    );
+    const error = await setupTotp("tok").catch((cause) => cause);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).message).toContain("服务端未启用双重验证");
+  });
+});
+
+describe("activateTotp", () => {
+  it("POST mfa/totp/activate 提交密钥与验证码，返回一次性恢复码", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    stubFetch((url, init) => {
+      captured = { url, init };
+      return Promise.resolve(
+        jsonResponse({
+          code: 0,
+          message: "TOTP 已启用，请妥善保存恢复码并重新登录",
+          data: {
+            totp_activated: true,
+            recovery_codes: ["aaaa1111-bbbb2222-cccc3333-dddd4444"],
+            immediate_convergence: true,
+            relogin_required: true,
+          },
+        }),
+      );
+    });
+
+    const result = await activateTotp("JBSWY3DPEHPK3PXP", "123456", "tok");
+    expect(captured?.url).toContain("/api/v1/users/mfa/totp/activate");
+    expect(JSON.parse(String(captured?.init.body))).toEqual({
+      secret: "JBSWY3DPEHPK3PXP",
+      code: "123456",
+    });
+    expect(result).toEqual({
+      recoveryCodes: ["aaaa1111-bbbb2222-cccc3333-dddd4444"],
+      immediateConvergence: true,
+    });
+  });
+
+  it("缺少恢复码的激活响应被拒绝", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        jsonResponse({
+          code: 0,
+          data: { totp_activated: true, relogin_required: true },
+        }),
+      ),
+    );
+    await expect(
+      activateTotp("JBSWY3DPEHPK3PXP", "123456", "tok"),
+    ).rejects.toThrow(/缺少恢复码/);
+  });
+});
+
+describe("deactivateTotp", () => {
+  it("POST mfa/totp/deactivate 透传 Step-up proof，返回停用确认", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    stubFetch((url, init) => {
+      captured = { url, init };
+      return Promise.resolve(
+        jsonResponse({
+          code: 0,
+          message: "双重验证已关闭，请重新登录",
+          data: {
+            totp_activated: false,
+            immediate_convergence: true,
+            relogin_required: true,
+          },
+        }),
+      );
+    });
+
+    const result = await deactivateTotp("tok", undefined, "proof-x");
+    expect(captured?.url).toContain("/api/v1/users/mfa/totp/deactivate");
+    expect(JSON.parse(String(captured?.init.body))).toEqual({});
+    expect(new Headers(captured?.init.headers).get("x-step-up-proof")).toBe(
+      "proof-x",
+    );
+    expect(result).toEqual({
+      reloginRequired: true,
+      immediateConvergence: true,
+    });
+  });
+
+  it("缺少停用确认的成功响应被拒绝", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        jsonResponse({
+          code: 0,
+          data: { totp_activated: true, relogin_required: true },
+        }),
+      ),
+    );
+    await expect(deactivateTotp("tok")).rejects.toThrow(/缺少确认/);
   });
 });
 

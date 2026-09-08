@@ -19,6 +19,7 @@ mod me;
 mod refresh;
 mod register;
 mod request_change_email;
+mod request_mfa_email_code;
 mod request_password_reset;
 mod request_registration_email;
 mod reset_password;
@@ -26,6 +27,7 @@ mod revoke_session;
 mod security_events;
 mod step_up;
 mod totp_activate;
+mod totp_deactivate;
 mod totp_setup;
 
 use crate::addon::account::Account;
@@ -60,13 +62,15 @@ const ACTIONS: &[Register] = action_registry![
     disable_self,    // 发布开关：credential_mutations_enabled
     request_change_email,
     request_password_reset,
+    request_mfa_email_code,
     reset_password, // 发布开关：credential_mutations_enabled
     logout,
     step_up, // 条件：组合根配置了 StepUpManager
     revoke_session,
     security_events,
-    totp_setup,    // 条件：security.totp 配置段
-    totp_activate, // 条件：security.totp 配置段
+    totp_setup,      // 条件：security.totp 配置段
+    totp_activate,   // 条件：security.totp 配置段
+    totp_deactivate, // 条件：security.totp 配置段
     me,
     // scaffold:action-registration
 ];

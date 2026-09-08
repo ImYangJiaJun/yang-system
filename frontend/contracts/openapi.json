@@ -1742,7 +1742,7 @@
                           "type": "string"
                         },
                         "UserView": {
-                          "description": "可安全返回给客户端的用户视图，不包含密码摘要。",
+                          "description": "可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。",
                           "properties": {
                             "created_at": {
                               "format": "int64",
@@ -1768,6 +1768,10 @@
                             "status": {
                               "$ref": "#/definitions/UserStatus"
                             },
+                            "totp_activated": {
+                              "description": "TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。",
+                              "type": "boolean"
+                            },
                             "updated_at": {
                               "format": "int64",
                               "type": "integer"
@@ -1780,6 +1784,7 @@
                             "created_at",
                             "id",
                             "status",
+                            "totp_activated",
                             "updated_at",
                             "username"
                           ],
@@ -2937,7 +2942,7 @@
                           "type": "string"
                         }
                       },
-                      "description": "可安全返回给客户端的用户视图，不包含密码摘要。",
+                      "description": "可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。",
                       "properties": {
                         "created_at": {
                           "format": "int64",
@@ -2963,6 +2968,10 @@
                         "status": {
                           "$ref": "#/definitions/UserStatus"
                         },
+                        "totp_activated": {
+                          "description": "TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。",
+                          "type": "boolean"
+                        },
                         "updated_at": {
                           "format": "int64",
                           "type": "integer"
@@ -2975,6 +2984,7 @@
                         "created_at",
                         "id",
                         "status",
+                        "totp_activated",
                         "updated_at",
                         "username"
                       ],
@@ -3047,6 +3057,142 @@
         "x-permission-mode": "all",
         "x-permissions": [],
         "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/mfa/email-code": {
+      "post": {
+        "description": "认证器不可用时向注册邮箱发送一次性登录验证码（等时密码校验防枚举）",
+        "operationId": "account.user.request_mfa_email_code",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "password": {
+                    "description": "登录凭据。",
+                    "type": "string"
+                  },
+                  "username": {
+                    "description": "用户名、邮箱或其他登录标识。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "password",
+                  "username"
+                ],
+                "title": "RequestMfaEmailCodeInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "验证码请求被接受后的通用响应（不暴露身份是否真实存在）。",
+                      "properties": {
+                        "accepted": {
+                          "description": "请求已被接受（不保证邮件真实投递）。",
+                          "type": "boolean"
+                        },
+                        "expires_in": {
+                          "description": "验证码有效期（秒）。",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "resend_after": {
+                          "description": "重发冷却（秒）。",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "accepted",
+                        "expires_in",
+                        "resend_after"
+                      ],
+                      "title": "RegistrationEmailCodeAccepted",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "请求登录 MFA 邮箱验证码",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
         "x-yang-response-kind": "json"
       }
     },
@@ -3174,6 +3320,127 @@
           }
         ],
         "summary": "TOTP 激活",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/mfa/totp/deactivate": {
+      "post": {
+        "description": "关闭 TOTP 第二因子并作废全部恢复码，既有会话失效",
+        "operationId": "account.user.totp_deactivate",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "title": "TotpDeactivateInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "TOTP 停用",
         "tags": [],
         "x-permission-mode": "all",
         "x-permissions": [],
@@ -3478,7 +3745,7 @@
                           "type": "string"
                         }
                       },
-                      "description": "可安全返回给客户端的用户视图，不包含密码摘要。",
+                      "description": "可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。",
                       "properties": {
                         "created_at": {
                           "format": "int64",
@@ -3504,6 +3771,10 @@
                         "status": {
                           "$ref": "#/definitions/UserStatus"
                         },
+                        "totp_activated": {
+                          "description": "TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。",
+                          "type": "boolean"
+                        },
                         "updated_at": {
                           "format": "int64",
                           "type": "integer"
@@ -3516,6 +3787,7 @@
                         "created_at",
                         "id",
                         "status",
+                        "totp_activated",
                         "updated_at",
                         "username"
                       ],

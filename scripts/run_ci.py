@@ -159,6 +159,19 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "MFA email code and TOTP deactivate integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "mfa_email_code_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 
@@ -297,6 +310,7 @@ def self_test() -> None:
     assert integration_tests == {
         "registration_email_integration",
         "schema_apply_integration",
+        "mfa_email_code_integration",
     }
     authorization_cache = next(
         command
