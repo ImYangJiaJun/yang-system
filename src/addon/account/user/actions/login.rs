@@ -252,7 +252,10 @@ pub(super) async fn record_login_failure(
 }
 
 /// 从新签发的 access token 提取 session_id/jti 并写入 `user_session` 表。
-async fn record_login_session(
+///
+/// `pub(super)`：邮箱验证码免密登录（`login_by_email_code`）的成功路径
+/// 与密码登录共用同一会话落库/成功事件/新设备提醒逻辑。
+pub(super) async fn record_login_session(
     ctx: &ActionContext,
     account: &Account,
     access_token: &str,

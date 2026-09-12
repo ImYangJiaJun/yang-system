@@ -39,7 +39,9 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
   Redis 不可用结果；
 - `yang_system_registration_email_total{result}` 与
   `yang_system_registration_email_verify_total{result}`：注册邮件的投递/抑制/限流/失败
-  及验证码消费/拒绝结果；标签只使用冻结的有限枚举，绝不包含邮箱、IP 或验证码；
+  及验证码消费/拒绝结果；换绑（`change_email`）、MFA 备用（`mfa_email`）与免密登录
+  （`login_email`）验证码各有一对同名前缀的 `*_total` / `*_verify_total` 指标；
+  标签只使用冻结的有限枚举，绝不包含邮箱、IP 或验证码；
 - `yang_system_resource_pool_connections{resource,state}`：MySQL/Redis 连接池的
   `max/open/available/waiting` 快照；
 - `yang_system_readiness_*`：管理面探针结果、耗时和各依赖健康状态；

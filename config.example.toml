@@ -8,7 +8,7 @@ environment = "development"
 
 [authorization]
 # 同一 Redis DB 内必须唯一且发布后保持稳定；只允许小写字母、数字和连字符。
-# 同时作为三类邮箱验证码 Redis key 的默认部署命名空间。
+# 同时作为四类邮箱验证码 Redis key 的默认部署命名空间。
 deployment = "local"
 
 [http]
@@ -45,9 +45,9 @@ password = "replace-with-smtp-password"
 from_address = "no-reply@example.com"
 from_name = "YANG System"
 
-# 注册、换绑、登录 MFA 备用三类邮箱验证码使用相互独立的密钥域：绝不复用彼此，
+# 注册、换绑、登录 MFA 备用、免密登录四类邮箱验证码使用相互独立的密钥域：绝不复用彼此，
 # 也不复用 token/step-up/security.totp 的密钥，否则验证码可跨场景重放。
-# 删除 [email.change] / [email.mfa] 整段即关闭对应能力（端点返回「未启用」错误）。
+# 删除 [email.change] / [email.mfa] / [email.login] 整段即关闭对应能力（端点返回「未启用」错误）。
 [email.verification]
 secret = "replace-with-independent-email-verification-secret"
 
@@ -56,6 +56,9 @@ secret = "replace-with-independent-change-email-secret"
 
 [email.mfa]
 secret = "replace-with-independent-mfa-email-secret"
+
+[email.login]
+secret = "replace-with-independent-login-email-secret"
 
 [email.password_reset]
 # 密码重置邮件中链接指向的前端控制台入口（scheme + host[:port]，无路径与查询串）。

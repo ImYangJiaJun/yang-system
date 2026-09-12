@@ -1,14 +1,18 @@
-import { useState, type FormEvent } from "react";
-import { Eye, EyeOff, Lock, User } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { Eye, EyeOff, Lock, Mail, User } from "lucide-react";
 import { useNavigate, useSearchParams, Link } from "react-router";
 
 import { login } from "@/engine/session/lifecycle";
+import { loginByEmailCode } from "@/engine";
 import { SecondFactorRequiredError } from "@/engine/http/errors";
 import {
   useSessionController,
   useSessionSnapshot,
 } from "@/engine/session/use-session";
-import { requestMfaEmailCode } from "@/features/auth/api";
+import {
+  requestLoginEmailCode,
+  requestMfaEmailCode,
+} from "@/features/auth/api";
 import { MfaChallengeDialog } from "@/features/auth/components/MfaChallengeDialog";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
@@ -19,16 +23,30 @@ import logoLightUrl from "@/shared/assets/logo-light.png";
 /// 登录页（对齐旧 LoginPage.vue 语义）：品牌面板 + 凭据表单 + 错误/提示横幅。
 /// 两段式登录：账号启用 TOTP 时，密码校验通过（SecondFactorRequired）后
 /// 弹出双重验证对话框，输入动态码/恢复码带原凭据重新提交。
+/// 验证码登录模式：邮箱 + 一次性验证码免密登录（无第二因子分支）。
+type LoginMode = "password" | "email-code";
+
+/// 仅做「明显非法」的前端基础提示，安全语义全在后端。
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function LoginPage() {
   const controller = useSessionController();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const snapshot = useSessionSnapshot();
+  const [mode, setMode] = useState<LoginMode>("password");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  // 验证码登录模式：发码冷却与送达提示。
+  const [loginEmail, setLoginEmail] = useState("");
+  const [emailCode, setEmailCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [codeCooldown, setCodeCooldown] = useState(0);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [infoMessage, setInfoMessage] = useState("");
   // 第二因子阶段：密码已通过，等待动态码/恢复码。
   const [mfaRequired, setMfaRequired] = useState(false);
   const [mfaError, setMfaError] = useState("");
@@ -75,6 +93,10 @@ export default function LoginPage() {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (submitting) return;
+    if (mode === "email-code") {
+      await submitEmailCode();
+      return;
+    }
     if (!username.trim()) {
       setErrorMessage("请输入帐号");
       return;
@@ -84,6 +106,75 @@ export default function LoginPage() {
       return;
     }
     await attemptLogin();
+  };
+
+  const switchMode = (next: LoginMode) => {
+    if (next === mode) return;
+    setMode(next);
+    setErrorMessage("");
+    setInfoMessage("");
+  };
+
+  const emailLooksValid = EMAIL_PATTERN.test(loginEmail.trim());
+
+  /// 发送登录验证码：成功进入 resend_after 冷却，冷却结束才可重发。
+  const sendLoginEmailCode = async () => {
+    if (sendingCode || codeCooldown > 0) return;
+    setErrorMessage("");
+    setInfoMessage("");
+    const email = loginEmail.trim();
+    if (!email || !EMAIL_PATTERN.test(email)) {
+      setErrorMessage("请输入有效的邮箱地址");
+      return;
+    }
+    setSendingCode(true);
+    try {
+      const challenge = await requestLoginEmailCode(email);
+      setCodeSent(true);
+      setCodeCooldown(challenge.resendAfter);
+      setInfoMessage("验证码已发送，请查收邮箱后输入完成登录");
+    } catch (cause) {
+      setErrorMessage(
+        cause instanceof Error ? cause.message : "发送失败，请稍后重试",
+      );
+    } finally {
+      setSendingCode(false);
+    }
+  };
+
+  useEffect(() => {
+    if (codeCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setCodeCooldown((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [codeCooldown > 0]);
+
+  /// 验证码登录提交：与密码登录同路径 beginSession，无 MFA 分支。
+  const submitEmailCode = async () => {
+    setErrorMessage("");
+    setInfoMessage("");
+    const email = loginEmail.trim();
+    if (!email || !EMAIL_PATTERN.test(email)) {
+      setErrorMessage("请输入有效的邮箱地址");
+      return;
+    }
+    if (!emailCode.trim()) {
+      setErrorMessage("请输入邮箱验证码");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await loginByEmailCode(email, emailCode.trim());
+      controller.beginSession(result);
+      navigate("/", { replace: true });
+    } catch (cause) {
+      setErrorMessage(
+        cause instanceof Error ? cause.message : "登录失败，请稍后重试",
+      );
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -117,50 +208,137 @@ export default function LoginPage() {
             </p>
           </div>
 
-          <form className="space-y-4" onSubmit={submit} noValidate>
-            <div className="space-y-1.5">
-              <Label htmlFor="login-username">帐号</Label>
-              <div className="relative">
-                <User className="absolute top-2.5 left-3 size-4 text-muted-foreground" />
-                <Input
-                  id="login-username"
-                  name="username"
-                  autoComplete="username"
-                  autoFocus
-                  className="pl-9"
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
-                />
-              </div>
-            </div>
+          <div
+            role="group"
+            aria-label="登录方式"
+            className="mb-4 grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/40 p-1"
+          >
+            <button
+              type="button"
+              aria-pressed={mode === "password"}
+              className={
+                mode === "password"
+                  ? "rounded-md bg-card px-3 py-1.5 text-sm font-medium shadow-sm"
+                  : "rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground"
+              }
+              onClick={() => switchMode("password")}
+            >
+              密码登录
+            </button>
+            <button
+              type="button"
+              aria-pressed={mode === "email-code"}
+              className={
+                mode === "email-code"
+                  ? "rounded-md bg-card px-3 py-1.5 text-sm font-medium shadow-sm"
+                  : "rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground"
+              }
+              onClick={() => switchMode("email-code")}
+            >
+              验证码登录
+            </button>
+          </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="login-password">密码</Label>
-              <div className="relative">
-                <Lock className="absolute top-2.5 left-3 size-4 text-muted-foreground" />
-                <Input
-                  id="login-password"
-                  name="password"
-                  type={passwordVisible ? "text" : "password"}
-                  autoComplete="current-password"
-                  className="pr-9 pl-9"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                />
-                <button
-                  type="button"
-                  aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
-                  className="absolute top-2.5 right-3 text-muted-foreground hover:text-foreground"
-                  onClick={() => setPasswordVisible((prev) => !prev)}
-                >
-                  {passwordVisible ? (
-                    <EyeOff className="size-4" />
-                  ) : (
-                    <Eye className="size-4" />
-                  )}
-                </button>
-              </div>
-            </div>
+          <form className="space-y-4" onSubmit={submit} noValidate>
+            {mode === "password" ? (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="login-username">帐号</Label>
+                  <div className="relative">
+                    <User className="absolute top-2.5 left-3 size-4 text-muted-foreground" />
+                    <Input
+                      id="login-username"
+                      name="username"
+                      autoComplete="username"
+                      autoFocus
+                      className="pl-9"
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="login-password">密码</Label>
+                  <div className="relative">
+                    <Lock className="absolute top-2.5 left-3 size-4 text-muted-foreground" />
+                    <Input
+                      id="login-password"
+                      name="password"
+                      type={passwordVisible ? "text" : "password"}
+                      autoComplete="current-password"
+                      className="pr-9 pl-9"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                    />
+                    <button
+                      type="button"
+                      aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
+                      className="absolute top-2.5 right-3 text-muted-foreground hover:text-foreground"
+                      onClick={() => setPasswordVisible((prev) => !prev)}
+                    >
+                      {passwordVisible ? (
+                        <EyeOff className="size-4" />
+                      ) : (
+                        <Eye className="size-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="login-email">邮箱</Label>
+                  <div className="relative">
+                    <Mail className="absolute top-2.5 left-3 size-4 text-muted-foreground" />
+                    <Input
+                      id="login-email"
+                      name="email"
+                      type="email"
+                      autoComplete="email"
+                      autoFocus
+                      className="pl-9"
+                      value={loginEmail}
+                      onChange={(event) => setLoginEmail(event.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-end gap-2">
+                  <div className="flex-1 space-y-1.5">
+                    <Label htmlFor="login-email-code">验证码</Label>
+                    <Input
+                      id="login-email-code"
+                      inputMode="numeric"
+                      maxLength={6}
+                      autoComplete="one-time-code"
+                      value={emailCode}
+                      onChange={(event) => setEmailCode(event.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={
+                      sendingCode ||
+                      codeCooldown > 0 ||
+                      submitting ||
+                      !emailLooksValid
+                    }
+                    onClick={() => void sendLoginEmailCode()}
+                  >
+                    {codeCooldown > 0
+                      ? `${codeCooldown}s 后重发`
+                      : sendingCode
+                        ? "发送中…"
+                        : codeSent
+                          ? "重新发送"
+                          : "发送验证码"}
+                  </Button>
+                </div>
+              </>
+            )}
 
             {reasonMessage && !errorMessage && (
               <p
@@ -184,6 +362,14 @@ export default function LoginPage() {
                 className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
               >
                 {successMessage}
+              </p>
+            )}
+            {infoMessage && (
+              <p
+                aria-live="polite"
+                className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
+              >
+                {infoMessage}
               </p>
             )}
 

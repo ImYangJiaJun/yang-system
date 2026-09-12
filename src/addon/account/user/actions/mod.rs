@@ -15,11 +15,13 @@ mod get_avatar;
 mod list_sessions;
 mod list_users;
 mod login;
+mod login_by_email_code;
 mod logout;
 mod me;
 mod refresh;
 mod register;
 mod request_change_email;
+mod request_login_email_code;
 mod request_mfa_email_code;
 mod request_password_reset;
 mod request_registration_email;
@@ -76,6 +78,8 @@ const ACTIONS: &[Register] = action_registry![
     me,
     upload_avatar,
     get_avatar,
+    request_login_email_code,
+    login_by_email_code,
     // scaffold:action-registration
 ];
 

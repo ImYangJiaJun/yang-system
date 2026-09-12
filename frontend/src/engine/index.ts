@@ -33,6 +33,7 @@ export {
 } from "./session/use-session";
 export {
   login,
+  loginByEmailCode,
   logout,
   refreshSession,
   disableAccount,

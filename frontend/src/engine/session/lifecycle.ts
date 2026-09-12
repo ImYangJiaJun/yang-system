@@ -115,6 +115,20 @@ export async function login(
   }
 }
 
+/// 邮箱验证码免密登录：一次性验证码单次消费，响应与密码登录同构（无第二因子分支）。
+export async function loginByEmailCode(
+  email: string,
+  emailCode: string,
+  signal?: AbortSignal,
+): Promise<LoginResult> {
+  return requestAccessToken(
+    "/api/v1/users/login-by-email-code",
+    { email, email_code: emailCode },
+    "登录响应缺少有效 Token",
+    signal,
+  );
+}
+
 export async function logout(
   accessToken: string | undefined,
   signal?: AbortSignal,

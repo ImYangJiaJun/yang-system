@@ -415,3 +415,190 @@ describe("LoginPage", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe("LoginPage 验证码登录模式", () => {
+  /// 切换到验证码模式并 stub 发码/登录/目录请求。
+  function stubEmailCodeFlow(options?: {
+    sendResponse?: () => Response;
+    loginResponse?: () => Response;
+    onLoginBody?: (body: unknown) => void;
+  }) {
+    let sendCalls = 0;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/v1/users/login-email-code")) {
+          sendCalls += 1;
+          return (
+            options?.sendResponse?.() ??
+            jsonResponse(
+              {
+                code: 0,
+                message: "成功",
+                data: { accepted: true, expires_in: 600, resend_after: 60 },
+              },
+              202,
+            )
+          );
+        }
+        if (url.includes("/api/v1/users/login-by-email-code")) {
+          options?.onLoginBody?.(JSON.parse(String(init?.body)));
+          return (
+            options?.loginResponse?.() ??
+            jsonResponse({
+              code: 0,
+              message: "成功",
+              data: { access_token: "access-token" },
+            })
+          );
+        }
+        if (url.includes("/.well-known/yang/ui-catalog")) {
+          return jsonResponse(catalogFixture);
+        }
+        if (url.includes("/api/v1/demo/items/query")) {
+          return jsonResponse({
+            code: 0,
+            message: "成功",
+            data: { items: [], page: 1, page_size: 10, total: 0 },
+          });
+        }
+        throw new Error(`测试未覆盖的请求：${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, sendCalls: () => sendCalls };
+  }
+
+  it("发码 → 冷却倒计时 → 提交验证码完成登录并跳转", async () => {
+    stubRefreshFailure();
+    const { controller, router } = renderLogin();
+    await screen.findByRole("heading", { name: "用户登录" });
+    let loginBody: unknown;
+    const { sendCalls } = stubEmailCodeFlow({
+      onLoginBody: (body) => {
+        loginBody = body;
+      },
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "验证码登录" }));
+    await user.type(screen.getByLabelText("邮箱"), "alice@example.com");
+    await user.click(screen.getByRole("button", { name: "发送验证码" }));
+
+    // 发码成功：提示送达，按钮进入冷却倒计时且不可再点。
+    expect(await screen.findByText(/验证码已发送/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /后重发/ })).toBeDisabled();
+    expect(sendCalls()).toBe(1);
+
+    await user.type(screen.getByLabelText("验证码"), "123456");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    await waitFor(() => {
+      expect(controller.getSnapshot()).toMatchObject({
+        token: "access-token",
+        loggedIn: true,
+      });
+    });
+    expect(loginBody).toEqual({
+      email: "alice@example.com",
+      email_code: "123456",
+    });
+    await waitFor(() => {
+      expect(router.state.location.pathname).not.toBe("/login");
+    });
+  });
+
+  it("发码失败在错误横幅展示后端消息，可修正后重试", async () => {
+    stubRefreshFailure();
+    const { controller } = renderLogin();
+    await screen.findByRole("heading", { name: "用户登录" });
+    let attempts = 0;
+    stubEmailCodeFlow({
+      sendResponse: () => {
+        attempts += 1;
+        return attempts === 1
+          ? jsonResponse(
+              { code: 42901, message: "请求过于频繁，请 60 秒后重试" },
+              429,
+            )
+          : jsonResponse(
+              {
+                code: 0,
+                message: "成功",
+                data: { accepted: true, expires_in: 600, resend_after: 60 },
+              },
+              202,
+            );
+      },
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "验证码登录" }));
+    await user.type(screen.getByLabelText("邮箱"), "alice@example.com");
+    await user.click(screen.getByRole("button", { name: "发送验证码" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/请求过于频繁/);
+    expect(controller.getSnapshot().loggedIn).toBe(false);
+    // 失败不进入冷却，可立即重试。
+    const resend = screen.getByRole("button", { name: "发送验证码" });
+    expect(resend).toBeEnabled();
+    await user.click(resend);
+    expect(await screen.findByText(/验证码已发送/)).toBeInTheDocument();
+  });
+
+  it("邮箱为空或明显非法时发送按钮禁用", async () => {
+    stubRefreshFailure();
+    renderLogin();
+    await screen.findByRole("heading", { name: "用户登录" });
+    const { fetchMock } = stubEmailCodeFlow();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "验证码登录" }));
+    expect(screen.getByRole("button", { name: "发送验证码" })).toBeDisabled();
+
+    await user.type(screen.getByLabelText("邮箱"), "not-an-email");
+    expect(screen.getByRole("button", { name: "发送验证码" })).toBeDisabled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("验证码错误：错误横幅提示，会话保持匿名", async () => {
+    stubRefreshFailure();
+    const { controller } = renderLogin();
+    await screen.findByRole("heading", { name: "用户登录" });
+    stubEmailCodeFlow({
+      loginResponse: () =>
+        jsonResponse({ code: 40101, message: "验证码错误或已过期" }, 401),
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "验证码登录" }));
+    await user.type(screen.getByLabelText("邮箱"), "alice@example.com");
+    await user.click(screen.getByRole("button", { name: "发送验证码" }));
+    await screen.findByText(/验证码已发送/);
+    await user.type(screen.getByLabelText("验证码"), "000000");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "验证码错误或已过期",
+    );
+    expect(controller.getSnapshot().loggedIn).toBe(false);
+  });
+
+  it("密码模式的既有元素不受模式切换影响", async () => {
+    stubRefreshFailure();
+    renderLogin();
+    await screen.findByRole("heading", { name: "用户登录" });
+    stubEmailCodeFlow();
+
+    const user = userEvent.setup();
+    // 默认密码模式：帐号/密码输入框与登录按钮保持原样。
+    expect(screen.getByLabelText("帐号")).toBeInTheDocument();
+    expect(screen.getByLabelText("密码", { exact: true })).toBeInTheDocument();
+    // 切换到验证码模式再切回，元素恢复。
+    await user.click(screen.getByRole("button", { name: "验证码登录" }));
+    expect(screen.queryByLabelText("帐号")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "密码登录" }));
+    expect(screen.getByLabelText("帐号")).toBeInTheDocument();
+    expect(screen.getByLabelText("密码", { exact: true })).toBeInTheDocument();
+  });
+});

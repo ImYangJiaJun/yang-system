@@ -172,6 +172,32 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "Login email code integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "login_email_code_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
+        "Avatar integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "avatar_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 
@@ -311,6 +337,8 @@ def self_test() -> None:
         "registration_email_integration",
         "schema_apply_integration",
         "mfa_email_code_integration",
+        "login_email_code_integration",
+        "avatar_integration",
     }
     authorization_cache = next(
         command

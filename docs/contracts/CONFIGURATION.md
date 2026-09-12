@@ -158,7 +158,8 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
 
 ### SMTP
 
-- `email.smtp` 凭据用于注册验证码与密码重置两类事务性邮件投递。先在 relay 侧添加新凭据，再按
+- `email.smtp` 凭据承载全部事务性邮件投递（注册验证码、密码重置链接、新设备登录提醒、
+  MFA 备用验证码、免密登录验证码）。先在 relay 侧添加新凭据，再按
   通用步骤滚动重启，最后吊销旧凭据。
 - 轮换失误（旧凭据提前失效）不会导致启动失败，但会让邮件投递失败；通过
   `yang_system_registration_email_total{result}` 指标观察 `error` 结果突增
@@ -193,6 +194,24 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   次数用尽即销毁。
 - 该段可省略（`#[serde(default)]`）：省略时发码端点返回「未启用」错误，
   登录第二因子仅接受认证器动态码与恢复码；显式配置后需重启生效。
+- 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度），且全部
+  字段有内置默认值：`namespace` 缺省继承 `authorization.deployment`，其余取
+  「内置默认值」表中的验证码默认值；最小配置只需填写 `secret`。
+
+### 邮箱验证码免密登录（`email.login`）
+
+- `email.login` 是邮箱验证码免密登录的独立配置段（与注册/换绑/MFA 验证码完全
+  隔离）：独立 `namespace`（Redis key 前缀 `yang-system:<ns>:login-email`）、
+  独立 `secret`。**启动校验拒绝** `email.login.secret` 复用注册验证码、换绑
+  验证码、MFA 验证码、Token、Step-up 或 `security.totp.aead_key` 密钥——
+  否则验证码可跨场景重放（注册码登录、登录码换绑等）。
+- 用途：不输密码、凭邮箱一次性验证码直接登录（`POST /api/v1/users/login-email-code`
+  请求发码，`POST /api/v1/users/login-by-email-code` 消费码并签发 Token）。
+  发码仅对「邮箱已注册且账号启用」真实投递，其余只耗限额、返回统一 accepted；
+  验证码错误/邮箱未注册/账号停用统一返回「邮箱验证码无效或已过期」；限流与
+  密码登录共用 `AuthOperation::Login` 预算，验证码单次消费、错误尝试用尽即销毁。
+- 该段可省略（`#[serde(default)]`）：省略时发码端点返回「未启用」错误，
+  免密登录不可用，密码登录不受影响；显式配置后需重启生效。
 - 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度），且全部
   字段有内置默认值：`namespace` 缺省继承 `authorization.deployment`，其余取
   「内置默认值」表中的验证码默认值；最小配置只需填写 `secret`。

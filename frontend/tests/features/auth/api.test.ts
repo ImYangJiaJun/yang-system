@@ -3,16 +3,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   disableAccount,
   login,
+  loginByEmailCode,
   logout,
   refreshSession,
 } from "@/engine/session/lifecycle";
 import {
   register,
+  requestLoginEmailCode,
   requestMfaEmailCode,
   requestRegistrationEmail,
   resetPassword,
 } from "@/features/auth/api";
 import { ApiError, StepUpRequiredError } from "@/engine/http/errors";
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -404,5 +413,114 @@ describe("resetPassword", () => {
     await expect(
       resetPassword("a".repeat(64), "replacement-password"),
     ).rejects.toThrow("密码重置响应缺少重新登录确认");
+  });
+});
+
+describe("requestLoginEmailCode", () => {
+  it("POST /users/login-email-code 并投影时限", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        captured = {
+          url: typeof input === "string" ? input : input.toString(),
+          init: init ?? {},
+        };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              code: 0,
+              message: "成功",
+              data: { accepted: true, expires_in: 600, resend_after: 60 },
+            }),
+            { status: 202, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }),
+    );
+
+    await expect(requestLoginEmailCode("alice@example.com")).resolves.toEqual({
+      expiresIn: 600,
+      resendAfter: 60,
+    });
+    expect(captured?.url).toBe("/api/v1/users/login-email-code");
+    expect(captured?.init.method).toBe("POST");
+    expect(captured?.init.body).toBe(
+      JSON.stringify({ email: "alice@example.com" }),
+    );
+  });
+
+  it("限流错误透传后端消息", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          { code: 42901, message: "请求过于频繁，请 60 秒后重试" },
+          429,
+        ),
+      ),
+    );
+    await expect(requestLoginEmailCode("alice@example.com")).rejects.toThrow(
+      /请求过于频繁/,
+    );
+  });
+
+  it("accepted 响应缺少时限时拒绝", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ code: 0, data: { accepted: true } }, 202),
+      ),
+    );
+    await expect(requestLoginEmailCode("alice@example.com")).rejects.toThrow(
+      /缺少有效时限/,
+    );
+  });
+});
+
+describe("loginByEmailCode", () => {
+  it("POST /users/login-by-email-code 并只暴露 Access Token", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.method).toBe("POST");
+      expect(init.body).toBe(
+        JSON.stringify({ email: "alice@example.com", email_code: "123456" }),
+      );
+      expect(init.credentials).toBe("include");
+      return jsonResponse({
+        code: 0,
+        message: "成功",
+        data: { access_token: "access-token" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      loginByEmailCode("alice@example.com", "123456"),
+    ).resolves.toEqual({ accessToken: "access-token" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/v1/users/login-by-email-code",
+    );
+  });
+
+  it("验证码错误透传后端消息，不映射为第二因子", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ code: 40101, message: "验证码错误或已过期" }, 401),
+      ),
+    );
+    await expect(
+      loginByEmailCode("alice@example.com", "000000"),
+    ).rejects.toThrow("验证码错误或已过期");
+  });
+
+  it("响应缺少 access_token 时拒绝", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ code: 0, data: {} })),
+    );
+    await expect(
+      loginByEmailCode("alice@example.com", "123456"),
+    ).rejects.toThrow(/缺少有效 Token/);
   });
 });

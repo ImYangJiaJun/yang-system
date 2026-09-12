@@ -133,6 +133,46 @@ export async function requestMfaEmailCode(
   };
 }
 
+export type LoginEmailCodeChallenge = {
+  expiresIn: number;
+  resendAfter: number;
+};
+
+/// 登录邮箱验证码（免密登录第一环节）：向登录邮箱发送一次性验证码。
+/// 后端统一 accepted 响应防枚举，不暴露邮箱是否注册。
+export async function requestLoginEmailCode(
+  email: string,
+  signal?: AbortSignal,
+): Promise<LoginEmailCodeChallenge> {
+  const result = await requestPublicAction(
+    "/api/v1/users/login-email-code",
+    { email },
+    signal,
+  );
+  const { payload } = result;
+  const data = recordData(payload.data);
+  if (
+    data?.accepted !== true ||
+    typeof data.expires_in !== "number" ||
+    !Number.isSafeInteger(data.expires_in) ||
+    data.expires_in <= 0 ||
+    typeof data.resend_after !== "number" ||
+    !Number.isSafeInteger(data.resend_after) ||
+    data.resend_after <= 0
+  ) {
+    throw new ApiError("验证码响应缺少有效时限", {
+      status: result.status,
+      code: payload.code,
+      requestId: result.requestId,
+      details: payload,
+    });
+  }
+  return {
+    expiresIn: data.expires_in,
+    resendAfter: data.resend_after,
+  };
+}
+
 export async function register(
   username: string,
   password: string,

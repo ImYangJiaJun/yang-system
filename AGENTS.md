@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + React 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前骨架只保留 `account` 一个业务 Addon：账号与会话（邮箱验证码注册、用户名/邮箱登录、头像、Refresh Cookie、Step-up 重认证、密码重置、全设备退出、登录设备管理）、登录 MFA（TOTP 激活/停用与备用邮箱验证码）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
+`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + React 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前骨架只保留 `account` 一个业务 Addon：账号与会话（邮箱验证码注册、用户名/邮箱/邮箱验证码免密登录、头像、Refresh Cookie、Step-up 重认证、密码重置、全设备退出、登录设备管理）、登录 MFA（TOTP 激活/停用与备用邮箱验证码）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
 
 本仓库是**独立 Git/Cargo 项目**，但被签出在 `lib_yang` 仓库的 `project/yang-system/` 路径下（`lib_yang` 根 workspace 显式排除它）；`Cargo.toml` 通过相对路径直接依赖同工作树中的基础库：
 
@@ -101,7 +101,7 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
   python scripts/run_ci.py integration
   ```
 
-  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路，以及头像上传/读取/注销清理。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs` 与 `avatar_integration.rs` 五个入口。
+  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）与头像上传/读取/注销清理。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs` 与 `avatar_integration.rs` 六个入口。
 
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
 

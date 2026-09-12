@@ -1,7 +1,8 @@
 use crate::addon::account::email_delivery::{
-    NewDeviceEmailSender, NewDeviceEmailSenderHandle, PasswordResetEmailSender,
-    PasswordResetEmailSenderHandle, RegistrationEmailSender, RegistrationEmailSenderHandle,
-    SmtpEmailSender, VerificationCodeSender, VerificationCodeSenderHandle,
+    LoginEmailCodeSenderHandle, NewDeviceEmailSender, NewDeviceEmailSenderHandle,
+    PasswordResetEmailSender, PasswordResetEmailSenderHandle, RegistrationEmailSender,
+    RegistrationEmailSenderHandle, SmtpEmailSender, SmtpLoginEmailCodeSender,
+    VerificationCodeSender, VerificationCodeSenderHandle,
 };
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
@@ -93,6 +94,8 @@ async fn run_after_telemetry_initialized(
     let registration_sender: Arc<dyn RegistrationEmailSender> = email_sender.clone();
     let password_reset_sender: Arc<dyn PasswordResetEmailSender> = email_sender.clone();
     let verification_code_sender: Arc<dyn VerificationCodeSender> = email_sender.clone();
+    // 免密登录验证码与 MFA 验证码共用 SMTP 传输但文案独立，占用独立 extension 槽。
+    let login_email_code_sender = SmtpLoginEmailCodeSender::new(email_sender.as_ref().clone());
     let new_device_sender: Arc<dyn NewDeviceEmailSender> = email_sender;
     let mut tools_builder = ToolsBuilder::new()
         .mysql(mysql)
@@ -107,6 +110,7 @@ async fn run_after_telemetry_initialized(
         .extension(VerificationCodeSenderHandle::from_arc(
             verification_code_sender,
         ))
+        .extension(LoginEmailCodeSenderHandle::new(login_email_code_sender))
         .extension(NewDeviceEmailSenderHandle::from_arc(new_device_sender))
         .config(log_identity)
         .config(settings.email.verification.engine_config())
@@ -122,6 +126,13 @@ async fn run_after_telemetry_initialized(
     if let Some(mfa) = settings.email.mfa.as_ref() {
         tools_builder = tools_builder.config(crate::config::MfaEmailVerificationConfig(
             mfa.mfa_engine_config(),
+        ));
+    }
+    // 邮箱验证码免密登录使用独立 config 槽与 key 域；
+    // 未配置时 request_login_email_code / login_by_email_code 返回未启用错误。
+    if let Some(login) = settings.email.login.as_ref() {
+        tools_builder = tools_builder.config(crate::config::LoginEmailVerificationConfig(
+            login.login_engine_config(),
         ));
     }
     // TOTP 密钥域（AEAD）；未配置时 MFA Action 不注册。

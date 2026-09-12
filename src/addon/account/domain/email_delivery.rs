@@ -1,4 +1,4 @@
-//! 事务性邮件的投递边界：注册验证码、密码重置链接、新设备提醒与 MFA 登录验证码。
+//! 事务性邮件的投递边界：注册验证码、密码重置链接、新设备提醒、MFA 登录验证码与免密登录验证码。
 //!
 //! 注册验证码的投递契约（[`RegistrationEmailSender`] / [`RegistrationEmailSenderHandle`] /
 //! [`EmailDeliveryError`]）与通用验证码投递契约（[`VerificationCodeSender`] /
@@ -287,5 +287,69 @@ impl VerificationCodeSender for SmtpEmailSender {
             ),
         )
         .await
+    }
+}
+
+/// 免密登录邮箱验证码投递句柄的独立 extension 槽类型。
+///
+/// `Tools` 的 extension 按具体 Rust 类型索引，MFA 备用验证码已占用
+/// [`VerificationCodeSenderHandle`] 槽；免密登录验证码文案不同，必须用
+/// distinct newtype 区分两个槽，避免相互覆盖。
+#[derive(Clone)]
+pub struct LoginEmailCodeSenderHandle(VerificationCodeSenderHandle);
+
+impl LoginEmailCodeSenderHandle {
+    /// 用业务投递器创建句柄。
+    pub fn new<T>(sender: T) -> Self
+    where
+        T: VerificationCodeSender,
+    {
+        Self(VerificationCodeSenderHandle::new(sender))
+    }
+
+    /// 取内部通用验证码投递句柄（供框架验证码引擎 `request_via` 使用）。
+    pub fn engine(&self) -> &VerificationCodeSenderHandle {
+        &self.0
+    }
+}
+
+impl fmt::Debug for LoginEmailCodeSenderHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoginEmailCodeSenderHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+/// 免密登录验证码的生产 SMTP 适配器：复用同一 SMTP 传输，文案与 MFA 验证码独立。
+#[derive(Clone)]
+pub(crate) struct SmtpLoginEmailCodeSender {
+    inner: SmtpEmailSender,
+}
+
+impl SmtpLoginEmailCodeSender {
+    pub(crate) fn new(inner: SmtpEmailSender) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl VerificationCodeSender for SmtpLoginEmailCodeSender {
+    async fn send_verification_code(
+        &self,
+        recipient: &str,
+        code: &str,
+        expires_in_seconds: u64,
+    ) -> Result<(), EmailDeliveryError> {
+        let minutes = expires_in_seconds.div_ceil(60);
+        self.inner
+            .deliver(
+                recipient,
+                "YANG System 登录验证码",
+                format!(
+                    "你的登录验证码是：{code}\n\n你正在使用邮箱验证码登录账号。验证码将在 {minutes} 分钟后失效，且只能使用一次。若非本人操作，请立即修改密码并检查账号安全。"
+                ),
+            )
+            .await
     }
 }
