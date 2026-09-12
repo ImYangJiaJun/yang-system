@@ -85,5 +85,5 @@ COMMIT;
 | 查询权限目录 | `GET /api/v1/access/permissions` | `access.grants.read` | 否 |
 
 授权/撤销为幂等语义：重复授予或撤销不存在的权限返回 `changed: false`，
-不递增版本、不追加 Outbox。高权限写操作按 `docs/AUDIT.md` 契约记录
+不递增版本、不追加 Outbox。高权限写操作按 `docs/contracts/AUDIT.md` 契约记录
 append-only 审计，并挂载 Step-up 重认证中间件。

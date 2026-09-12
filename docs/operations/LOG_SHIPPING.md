@@ -1,6 +1,6 @@
 # 日志聚合与采集约定
 
-本文是 [`OBSERVABILITY.md`](OBSERVABILITY.md)「结构化日志」章节的运维侧配套：
+本文是 [`OBSERVABILITY.md`](../contracts/OBSERVABILITY.md)「结构化日志」章节的运维侧配套：
 约定容器/进程 stdout 的 JSON 日志如何被采集器（Fluent Bit / Vector）接入、
 字段如何保留与脱敏、保留期与轮转策略。应用侧字段契约以 OBSERVABILITY.md 为
 唯一事实源，本文不重新定义字段语义。

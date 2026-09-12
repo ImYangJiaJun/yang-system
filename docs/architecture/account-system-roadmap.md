@@ -50,9 +50,9 @@
 
 - **无「最终管理员」不变量**：账户管理权限经 `access` Addon 的 grants 授予特定身份，实现「有管理动作、无超级管理员」，不引入 Keycloak 式 admin 账号。
 - 双版本失效（`authz_version` / `credential_version`）+ Outbox 传播，writer 契约见 `docs/architecture/authorization-writers.md`。
-- 敏感操作 Step-up + append-only 审计（`docs/AUDIT.md`）。
+- 敏感操作 Step-up + append-only 审计（`docs/contracts/AUDIT.md`）。
 - 防枚举统一响应、验证码/令牌只存摘要、原子单次消费。
-- 声明式 Schema 驱动（禁 SQL 迁移文件，`docs/SCHEMA.md`）；一 Action 一文件（`python scripts/check_architecture.py` 门禁）。
+- 声明式 Schema 驱动（禁 SQL 迁移文件，`docs/contracts/SCHEMA.md`）；一 Action 一文件（`python scripts/check_architecture.py` 门禁）。
 - 资源经 `ToolsBuilder` 显式持有，禁止进程级单例。
 
 ## 二、第一性原理：账户系统要回答的问题
@@ -189,7 +189,7 @@
 **E-1 TOTP MFA**（阶段 A–C 之后最值得投入的一项，涉及 yang-base 扩展，注意跨仓库推送顺序：先 lib_yang 后 yang-system）：
 - 选型：现成 crate（`totp-lite`/`oath`），禁止自写 HOTP/TOTP。
 - 框架扩展：`LoginAction` 支持「部分认证 → 第二因子挑战」两阶段状态（最大工作量点）；`AuthOperation` 增加 TOTP 限流维度。
-- 密钥存储：`users.totp_secret` 用 **AEAD 加密**——这是独立密钥域，不是 token keyring（HMAC 签名钥）的复用；新增配置项 + 启动密钥隔离校验 + 同步 `docs/CONFIGURATION.md`。
+- 密钥存储：`users.totp_secret` 用 **AEAD 加密**——这是独立密钥域，不是 token keyring（HMAC 签名钥）的复用；新增配置项 + 启动密钥隔离校验 + 同步 `docs/contracts/CONFIGURATION.md`。
 - 流程：`POST /users/mfa/totp/setup`（生成 secret + otpauth:// URI，未激活）→ `POST /users/mfa/totp/activate`（验码激活 + 版本递增 + 审计 + 签发一次性恢复码，恢复码摘要入库单次消费）。
 - **验收条件（易漏）**：启用 TOTP 的账号执行 Step-up 时必须同时要求第二因子，否则高权限操作防护降级回单因子。
 
@@ -203,7 +203,7 @@
 - 契约变更后重跑 `python scripts/dump_openapi.py` 并提交 `frontend/contracts/openapi.json` 与生成类型两个产物。
 - 提交前 `python scripts/run_ci.py quick`；推送前 `python scripts/run_ci.py full`；真实依赖行为补 `run_ci.py integration` 对抗性测试（防枚举、单次消费、限流维度、时序无关响应）。
 - 涉及 yang-base 的改动（E-1、可能的 A-2 框架端口）遵守跨仓库推送顺序：先推 lib_yang 再推 yang-system。
-- 新增配置项（AEAD 密钥域等）必须同步 `config.example.toml` 与 `docs/CONFIGURATION.md`，且不得与既有 keyring 复用。
+- 新增配置项（AEAD 密钥域等）必须同步 `config.example.toml` 与 `docs/contracts/CONFIGURATION.md`，且不得与既有 keyring 复用。
 
 ## 七、开放决策点
 

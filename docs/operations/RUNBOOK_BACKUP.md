@@ -108,6 +108,6 @@ docker compose exec -T mysql sh -c \
 
 ## 相关文档
 
-- `docs/CONFIGURATION.md`：凭据注入与轮换流程；
-- `docs/OBSERVABILITY.md`：恢复后验证用 readiness 与指标契约；
-- `docs/AUDIT.md`：`audit_event` 作为追责事实源的语义。
+- `docs/contracts/CONFIGURATION.md`：凭据注入与轮换流程；
+- `docs/contracts/OBSERVABILITY.md`：恢复后验证用 readiness 与指标契约；
+- `docs/contracts/AUDIT.md`：`audit_event` 作为追责事实源的语义。

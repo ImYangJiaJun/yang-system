@@ -53,7 +53,7 @@ vue-pure-admin、Refine、react-admin、NocoBase）无一使用 Quasar。
   官方基线对齐）；明确放弃 Safari 14 及以下。
 - 不引入降级构建或 polyfill 层；构建目标在 Vite `build.target` 显式声明。
 - Playwright 覆盖 Chromium / Firefox / WebKit 三引擎最新稳定版，与声明契约对应。
-- 该变更写入 `docs/CONFIGURATION.md` 与 README 的客户端要求章节。
+- 该变更写入 `docs/contracts/CONFIGURATION.md` 与 README 的客户端要求章节。
 
 **受影响用户面与接受理由（二审补充，需求方已于 2026-08-27 确认）**：放弃 Safari ≤ 14 意味着
 仍在使用旧版 Safari 的存量设备（典型是被企业 IT 策略锁定、无法升级系统的

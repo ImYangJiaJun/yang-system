@@ -24,7 +24,7 @@ tests:
               slo: availability
             exp_annotations:
               summary: "yang-system availability error budget is burning quickly"
-              runbook: "docs/SLO.md"
+              runbook: "docs/contracts/SLO.md"
 
   # 快速 burn 反例：错误率 0.005 低于 0.0144 阈值，不应触发。
   # （该比率高于慢速 burn 的 0.001，但慢速 burn for=30m，10m 时尚未 firing。）
@@ -55,7 +55,7 @@ tests:
               slo: readiness
             exp_annotations:
               summary: "yang-system instance has not passed readiness for two minutes"
-              runbook: "docs/SLO.md"
+              runbook: "docs/contracts/SLO.md"
 
   # readiness 反例：中途一次 0 抖动后恢复，2m 窗口内已有就绪，不应触发。
   - interval: 1m
@@ -84,7 +84,7 @@ tests:
               slo: dependency_availability
             exp_annotations:
               summary: "yang-system registration email delivery failure ratio exceeds 10%"
-              runbook: "docs/SLO.md"
+              runbook: "docs/contracts/SLO.md"
 
   # 注册邮件反例一：全部投递成功，不应触发。
   - interval: 1m
@@ -129,7 +129,7 @@ tests:
               slo: graceful_shutdown
             exp_annotations:
               summary: "yang-system shutdown phase exhausted the process budget"
-              runbook: "docs/SLO.md"
+              runbook: "docs/contracts/SLO.md"
 
   # shutdown 反例：各阶段均正常完成，timeout 计数恒为 0，不应触发。
   - interval: 1m

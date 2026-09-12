@@ -147,5 +147,5 @@ M2–M4。初版 ADR 的"3 周"估算作废——其低估了会话/Step-up/失�
 
 - `AGENTS.md`：前端章节整体重写（技术栈、目录约定、命令、测试策略）；
 - `README.md`：本地环境与启动命令；
-- `docs/CONFIGURATION.md` 与 README：浏览器契约变更（ADR-1 §5）；
+- `docs/contracts/CONFIGURATION.md` 与 README：浏览器契约变更（ADR-1 §5）；
 - 本 ADR 组状态翻转为 Accepted。

@@ -3,7 +3,7 @@
 **生成：** 2026-09-02
 **范围：** 以 P7 演示 Addon `src/addon/demo/`（便签 notes）为实例，给出"新增一个
 业务 Addon"的完整步骤清单、权限与所有权设计、运维授权方式、前端零代码条件与
-门禁命令。阅读前请先读 `AGENTS.md` 与 `docs/AUTHZ_GRANTS.md`。
+门禁命令。阅读前请先读 `AGENTS.md` 与 `docs/contracts/AUTHZ_GRANTS.md`。
 
 ## 验证结论（P7）
 
@@ -105,7 +105,7 @@ src/addon/<addon>/
 新业务的权限字符串随 Catalog 冻结自动进入权限目录（可用
 `GET /api/v1/access/permissions` 核实）。首个授权由运维 SQL 完成，必须遵守与
 在线 writer 相同的一致性（同事务：事实行 + 版本递增 + Outbox），完整模板见
-`docs/AUTHZ_GRANTS.md` 的"初始授权（运维）"；只需把权限换成新业务权限，例如：
+`docs/contracts/AUTHZ_GRANTS.md` 的"初始授权（运维）"；只需把权限换成新业务权限，例如：
 
 ```sql
 INSERT INTO authz_grant (user_id, permission, granted_by, occurred_at)

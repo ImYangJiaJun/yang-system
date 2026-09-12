@@ -47,7 +47,7 @@ WORKDIR /app
 COPY --from=build /ws/project/yang-system/target/release/yang-system /usr/local/bin/yang-system
 # 基线配置：占位密钥会被启动校验拒绝（失败关闭），生产凭据必须经
 # YANG_SYSTEM_* 环境变量或 YANG_SYSTEM_SECRET_DIR secret 目录注入，
-# 合成优先级见 project/yang-system/docs/CONFIGURATION.md。
+# 合成优先级见 project/yang-system/docs/contracts/CONFIGURATION.md。
 COPY project/yang-system/config.example.toml /app/config.toml
 
 # 容器内默认覆盖：生产环境、监听全部网卡（loopback 在容器内无法被编排器探测）。

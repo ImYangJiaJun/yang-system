@@ -37,9 +37,8 @@ src/
 ├── lib.rs / main.rs         # main.rs 只是 bootstrap::run("config.toml") 的入口
 tests/                       # Rust 集成测试（真实 MySQL/Redis）与 benchmark
 examples/frontend_demo/      # 数据库无关的演示后端，供 Playwright 浏览器测试使用
-migrations/                  # 空目录：本项目不用 SQL 迁移文件，Schema 由代码声明驱动
 scripts/                     # run_ci.py / check_architecture.py / new_action.py / setup_local.ps1 / upgrade_local_config.py
-docs/                        # 安全与运行契约：SCHEMA/AUDIT/CONFIGURATION/OBSERVABILITY/SLO/RUNBOOK_BACKUP/LOG_SHIPPING 等
+docs/                        # 文档：contracts/（系统契约）、operations/（运维）、guides/（开发指南）、architecture/（决策/边界/路线/benchmarks）、assessments/（时点评估）
 frontend/                    # React 控制台（见下）
 ops/prometheus/              # Prometheus 告警规则与演练（CI 用 promtool 校验）
 frontend/deploy/             # 生产 Nginx 配置、前端镜像 Dockerfile 与部署契约校验
@@ -75,7 +74,7 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 - `fields!` 是 Schema、输入输出约束、OpenAPI 和查询策略的唯一字段事实来源；`params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；**禁止引入进程级数据库/Redis/Tools 单例**。
 - 当前没有租户域；裸 SQL 路径的边界登记见 `docs/architecture/raw-sql-boundaries.md`。
-- 数据库结构由 `src/infrastructure/schema.rs` 的声明统一驱动：启动时先只读计划和旧数据预检，全部安全后才保数据增量同步；冲突会输出表、对象和主键并拒绝启动。**不要新增 SQL 迁移文件**（`migrations/` 为空是有意的）。规则见 `docs/SCHEMA.md`。
+- 数据库结构由 `src/infrastructure/schema.rs` 的声明统一驱动：启动时先只读计划和旧数据预检，全部安全后才保数据增量同步；冲突会输出表、对象和主键并拒绝启动。**不要新增 SQL 迁移文件**（仓库刻意不设 `migrations/` 目录）。规则见 `docs/contracts/SCHEMA.md`。
 - 前端业务导航由后端 Catalog 投影驱动，通用 `ModulePage` 解释 TableView/JSON Schema 表单/操作语义；需要特殊交互的页面必须在 `frontend/src/features/registry.ts` 静态注册表中显式登记，未登记或加载失败时回退到通用 TableView。**不要根据后端返回的字符串构造动态 import**。
 
 ## 代码风格
@@ -103,13 +102,13 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 
 ## 安全注意事项
 
-- `config.toml` 被 Git 忽略且**禁止提交**；仓库只保留无真实凭据的 `config.example.toml`。配置按 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成，契约见 `docs/CONFIGURATION.md`。
+- `config.toml` 被 Git 忽略且**禁止提交**；仓库只保留无真实凭据的 `config.example.toml`。配置按 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成，契约见 `docs/contracts/CONFIGURATION.md`。
 - Token、Step-up、邮箱验证码使用各自独立的 keyring/密钥，禁止复用；`config.example.toml` 中的占位密钥会被启动校验拒绝。
 - 授权快照（`authz_version`）以 MySQL 为最终事实源，Redis 只做短 TTL 单调加速；授权 writer 必须在同一事务中更新业务事实、单调递增版本并追加 Outbox，Outbox 重放不能让版本回退。
 - `security.issue_refresh_credential_version` 是三阶段发布开关，新旧实例混跑时不能提前打开（见 README）。
 - 默认不信任任何 `Forwarded`/`X-Forwarded-For`；只为真实反向代理配置最小 `trusted_proxy_cidrs`。
 - `app.environment` 支持 `development|test|production`，缺省按 `production` 处理；示例配置仅面向本地开发。
-- 高权限操作按契约使用 Step-up 和 append-only 审计（`docs/AUDIT.md`）；Step-up proof 在生产通过 Redis 原子单次消费。
+- 高权限操作按契约使用 Step-up 和 append-only 审计（`docs/contracts/AUDIT.md`）；Step-up proof 在生产通过 Redis 原子单次消费。
 
 ## CI 与部署
 
@@ -118,7 +117,7 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 - 存活/就绪：`/health/live`、`/health/ready`；独立管理面默认 `http://127.0.0.1:9090`（`/metrics` 与带依赖检查的 `/health/ready`），生产编排应使用管理面 readiness。
 - 前端生产部署使用 `frontend/deploy/nginx.conf`（CI 校验语法与部署契约）。
 - 生产镜像：后端 `docker/app/Dockerfile`（构建上下文必须是 lib_yang 仓库根：`docker build -f project/yang-system/docker/app/Dockerfile -t yang-system:local .`，配套根目录 `.dockerignore`；工具链与 CI 同为 1.97.1，debian-slim 运行时 + 非 root 用户）；前端 `frontend/deploy/Dockerfile`（构建上下文为 `frontend/`：corepack 按 `packageManager` 固定 pnpm，运行时复用 CI 校验过的同一 Nginx 镜像与 `nginx.conf`）。注意前端 nginx 按契约只监听 loopback，镜像须与后端共享网络命名空间（同 Pod / `--network container:`）运行。
-- 备份/恢复与日志聚合运维约定分别见 `docs/RUNBOOK_BACKUP.md`（MySQL 为唯一事实源、Redis 不备份、`down -v` 毁卷警告）与 `docs/LOG_SHIPPING.md`。
+- 备份/恢复与日志聚合运维约定分别见 `docs/operations/RUNBOOK_BACKUP.md`（MySQL 为唯一事实源、Redis 不备份、`down -v` 毁卷警告）与 `docs/operations/LOG_SHIPPING.md`。
 - **跨仓库推送顺序**：先推 `lib_yang`、确认推送完成后再推 `yang-system`。CI 在任务开始时按 `LIB_YANG_REF=master` 签出依赖仓库，两边推送间隔过近会拿到旧 master，使旧 `yang-base` 清单与新 `Cargo.lock` 不匹配，`--locked` 直接报 "cannot update the lock file"（2026-08-24 实际踩过，重跑即恢复）。
 - **MSRV 1.80 守护**：`.cargo/config.toml` 已配置 `resolver.incompatible-rust-versions = "fallback"`，解析依赖时优先选择兼容 `rust-version = "1.80"` 的版本；新增或升级依赖后必须冷缓存验证 MSRV，不能只信 CI 绿——Swatinem 缓存命中会跳过依赖清单解析，掩盖不兼容（且缓存闲置 7 天会被 GitHub 清除）。验证命令（与 CI 同环境）：
 
@@ -138,12 +137,15 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 ## 重要参考文档
 
 - `README.md` — 能力清单、本地环境、启动顺序、安全模型的权威说明
-- `docs/SCHEMA.md` — 声明式 Schema 演进规则
-- `docs/CONFIGURATION.md` — 环境变量、secret provider、keyring 与服务凭据轮换、关闭预算
-- `docs/OBSERVABILITY.md` — 指标、readiness、日志与 tracing 契约
-- `docs/LOG_SHIPPING.md` — 日志采集接入、字段保留/脱敏与保留期约定
-- `docs/RUNBOOK_BACKUP.md` — MySQL 备份/恢复演练、RPO/RTO 与毁卷警告
-- `docs/AUDIT.md` — 高权限审计
-- `docs/REGISTRATION_EMAIL_VERIFICATION.md` — 注册邮箱验证码边界
-- `docs/architecture/` — 授权失效 ADR 与 writer 清单、裸 SQL 边界、会话 TTL
+- `docs/contracts/SCHEMA.md` — 声明式 Schema 演进规则
+- `docs/contracts/CONFIGURATION.md` — 环境变量、secret provider、keyring 与服务凭据轮换、关闭预算
+- `docs/contracts/OBSERVABILITY.md` — 指标、readiness、日志与 tracing 契约
+- `docs/contracts/AUDIT.md` — 高权限审计
+- `docs/contracts/AUTHZ_GRANTS.md` — 授权存储与权限目录契约
+- `docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md` — 注册邮箱验证码边界
+- `docs/contracts/SLO.md` — 生产 SLO 与告警契约
+- `docs/operations/RUNBOOK_BACKUP.md` — MySQL 备份/恢复演练、RPO/RTO 与毁卷警告
+- `docs/operations/LOG_SHIPPING.md` — 日志采集接入、字段保留/脱敏与保留期约定
+- `docs/guides/ADDON_ONBOARDING.md` — 新业务 Addon 接入手册
+- `docs/architecture/` — 授权失效 ADR 与 writer 清单、裸 SQL 边界、会话 TTL、基座完备化路线（foundation-baseline）、前端重构 ADR 组与评审、性能基准
 - `docs/architecture/account-system-roadmap.md` — 账户系统补全路线图（通用业务底座定位，分阶段方案与开放决策点）

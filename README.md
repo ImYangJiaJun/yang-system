@@ -203,7 +203,7 @@ cargo run --locked --bin yang-system
 
 应用在创建 HTTP 服务前，以当前 TableDefinition 对全部表执行只读计划和旧数据预检；
 全部安全后才增量同步结构。任何冲突都会输出表、对象和主键并拒绝启动，因此
-`/health/ready` 不可能早于 Schema 同步。规则见 [`docs/SCHEMA.md`](docs/SCHEMA.md)。
+`/health/ready` 不可能早于 Schema 同步。规则见 [`docs/contracts/SCHEMA.md`](docs/contracts/SCHEMA.md)。
 
 应用进程内部启动顺序为：
 
@@ -251,7 +251,7 @@ Redis、SMTP、邮箱验证码、Token 等运行参数按
 部署时应限制 `config.toml` 的读取权限，并通过部署系统生成或挂载该文件。
 
 注册邮箱验证码的接口、防枚举/重放边界、SMTP/secret provider 配置与真实集成门禁见
-[`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)。
+[`docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md`](docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md)。
 
 当前骨架没有平台管理域，注册流程只创建普通账号，任何账号都不会成为系统最终管理员
 （组合根注入的是不声明最终管理员的默认声明器）。后续引入管理域时应重新评估首次
@@ -261,8 +261,8 @@ Redis、SMTP、邮箱验证码、Token 等运行参数按
 处理。示例配置仅面向本地开发，部署配置必须显式复核该标识。
 
 完整环境变量、目录型 secret provider、Token/Step-up keyring 轮换和关闭预算见
-[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)；指标、readiness、日志与 tracing 契约见
-[`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)。
+[`docs/contracts/CONFIGURATION.md`](docs/contracts/CONFIGURATION.md)；指标、readiness、日志与 tracing 契约见
+[`docs/contracts/OBSERVABILITY.md`](docs/contracts/OBSERVABILITY.md)。
 
 ## 真实依赖集成测试
 
@@ -294,7 +294,7 @@ python scripts/run_ci.py integration
 [`docs/architecture/authorization-freshness-adr.md`](docs/architecture/authorization-freshness-adr.md)，
 裸 SQL 边界见
 [`docs/architecture/raw-sql-boundaries.md`](docs/architecture/raw-sql-boundaries.md)，
-高权限审计见 [`docs/AUDIT.md`](docs/AUDIT.md)，Schema 演进见
-[`docs/SCHEMA.md`](docs/SCHEMA.md)，注册邮件见
-[`docs/REGISTRATION_EMAIL_VERIFICATION.md`](docs/REGISTRATION_EMAIL_VERIFICATION.md)，SLO 见
-[`docs/SLO.md`](docs/SLO.md)。
+高权限审计见 [`docs/contracts/AUDIT.md`](docs/contracts/AUDIT.md)，Schema 演进见
+[`docs/contracts/SCHEMA.md`](docs/contracts/SCHEMA.md)，注册邮件见
+[`docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md`](docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md)，SLO 见
+[`docs/contracts/SLO.md`](docs/contracts/SLO.md)。
