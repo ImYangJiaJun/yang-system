@@ -13,6 +13,8 @@ import { MfaChallengeDialog } from "@/features/auth/components/MfaChallengeDialo
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import logoDarkUrl from "@/shared/assets/logo-dark.png";
+import logoLightUrl from "@/shared/assets/logo-light.png";
 
 /// 登录页（对齐旧 LoginPage.vue 语义）：品牌面板 + 凭据表单 + 错误/提示横幅。
 /// 两段式登录：账号启用 TOTP 时，密码校验通过（SecondFactorRequired）后
@@ -88,9 +90,17 @@ export default function LoginPage() {
     <main className="flex min-h-svh bg-background text-foreground">
       <section className="hidden flex-1 items-center justify-center bg-primary/5 md:flex">
         <div className="max-w-sm space-y-4 px-8 text-center">
-          <div className="mx-auto flex size-20 items-center justify-center rounded-2xl bg-primary text-3xl font-bold text-primary-foreground">
-            Y
-          </div>
+          <img
+            src={logoLightUrl}
+            alt="YANG System 标识"
+            className="mx-auto size-28 dark:hidden"
+          />
+          <img
+            src={logoDarkUrl}
+            alt=""
+            aria-hidden="true"
+            className="mx-auto hidden size-28 dark:block"
+          />
           <h1 className="text-3xl font-bold tracking-tight">YANG System</h1>
           <p className="text-foreground/70">
             统一管理个人账号、平台账号与企业组织。

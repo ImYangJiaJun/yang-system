@@ -25,7 +25,7 @@ src/
 │   ├── registry.ts          # 自定义视图静态注册表（唯一入口）
 │   └── custom-view-boundary.tsx
 ├── shell/       # 应用外壳：routes/auth-gate/session-bridge/AppLayout/通用页面编排
-├── shared/      # ui/（shadcn 源码组件）与 lib/（产品文案、工具函数）
+├── shared/      # ui/（shadcn 源码组件）、lib/（产品文案、工具函数）与 assets/（品牌标识等静态图片）
 ├── main.tsx     # 唯一 createRoot 入口（架构门禁锁定）
 └── index.css
 ```

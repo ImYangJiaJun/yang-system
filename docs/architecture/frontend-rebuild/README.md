@@ -189,3 +189,28 @@ ADR-1 至 ADR-5 状态翻转为 **Accepted**。
 - 结构规则落成约束性文件 `frontend/AGENTS.md`（分层职责、依赖方向、新文件
   归位判断、门禁对照表），根 AGENTS.md 指向其为权威记录；后续结构演进须
   同提交同步该文件与门禁。
+
+### 2026-09-12 品牌标识落地（logo 双主题资源 + favicon）
+
+系统 logo（`docs/logo_dark.png` / `docs/logo_light.png`，1254×1254 RGBA 透明底）
+首次进入前端与 README：
+
+- **资源归位**：新增 `shared/assets/`（品牌标识等静态图片，领域无关 UI 资源，
+  按归位判断顺序下沉 shared/）；`logo-dark.png` / `logo-light.png` 为 192px
+  Lanczos 压缩版，经 Vite 打包带内容哈希。`frontend/AGENTS.md` 与根 AGENTS.md
+  的 shared/ 描述已同提交同步。
+- **明暗双版本**：`logo_dark`（亮色霓虹）配深色背景、`logo_light`（暗色沉稳）
+  配浅色背景。`shell/AppLayout.tsx` 侧边栏品牌位按现有 `dark` state 切换
+  （替代原纯文字 "YANG System 控制台" 占位）；`features/auth/pages/LoginPage.tsx`
+  品牌面板用 `dark:` 可见性类双 img 兜底（登出后 documentElement 的 dark class
+  可能残留，登录页不感知主题 state），替代原 "Y" 占位块。
+- **favicon**：新建 `frontend/public/`（Vite 静态目录），固定单张 64px
+  `favicon.png`（浅色圆角实底 #F8FAFC，不跟随系统主题）；favicon 不进
+  JS bundle，不受首屏预算门禁约束。16px 标签尺寸下完整 logo 细节糊成一片，
+  favicon 取原图人头侧影局部裁切（120,320)-(740,940) 放大填满保证辨识度。
+- **README**：顶部加 `<picture>` 横幅，GitHub 按读者系统主题自动选 dark/light。
+
+同提交追加：`docs/logo.png`（288×288 剪纸风）压缩为 128px
+`shared/assets/avatar-default.png`，作为控制台默认头像——
+`shell/AppLayout.tsx` AccountSwitcher 的 "Y" 字母占位圆替换为该图
+（rounded-full 圆形裁切）。

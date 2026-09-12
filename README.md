@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo_dark.png" />
+  <img src="docs/logo_light.png" alt="YANG System 标识" width="160" />
+</picture>
+
 # yang-system
 
 `yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用和 React 管理控制台。当前

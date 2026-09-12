@@ -45,6 +45,9 @@ import {
 } from "@/engine/catalog/module-pages";
 import type { UiCatalog } from "@/engine/contracts/ui-catalog";
 import { cn } from "@/shared/lib/utils";
+import logoDarkUrl from "@/shared/assets/logo-dark.png";
+import logoLightUrl from "@/shared/assets/logo-light.png";
+import avatarDefaultUrl from "@/shared/assets/avatar-default.png";
 
 export type ShellContext = { catalog: UiCatalog };
 
@@ -92,9 +95,11 @@ function AccountSwitcher({ catalog }: { catalog: UiCatalog | undefined }) {
           className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
           aria-label="账号菜单"
         >
-          <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
-            Y
-          </span>
+          <img
+            src={avatarDefaultUrl}
+            alt="默认头像"
+            className="size-6 shrink-0 rounded-full object-cover"
+          />
           <span className="min-w-0 flex-1 truncate text-left">
             {active?.title ?? "未选择角色"}
           </span>
@@ -218,6 +223,11 @@ export default function AppLayout() {
     <div className="flex h-svh overflow-hidden bg-background text-foreground">
       <aside className="flex h-full w-60 shrink-0 flex-col border-r border-border">
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+          <img
+            src={dark ? logoDarkUrl : logoLightUrl}
+            alt="YANG System 标识"
+            className="size-10 shrink-0"
+          />
           <span className="text-sm font-semibold tracking-tight">
             YANG System 控制台
           </span>
