@@ -225,7 +225,7 @@
 4. 正式 `/module` 与 `/business` 覆盖多身份、租户切换、权限变化、全 interaction、失败重试和会话过期。
 5. **已满足（仓库链路，2026-07-31）：** 前端错误上报携带原后端 request id；后端 `frontend.error` 日志、Action trace 与低基数 metric 可关联；promtool 演练验证达到阈值 firing、低于阈值 silent。真实 Alertmanager 接收器送达仍属于目标环境验收。
 6. **已满足（自动门禁，2026-07-31）：** 登录、角色、正式模块和表单对话框通过 axe WCAG 2.2 AA 扫描；纯键盘完成登录、角色选择、模块操作，关键控件有可见焦点，对话框打开后聚焦且关闭后恢复触发点。屏幕阅读器、高对比度和语音控制仍按目标用户/采购规范做环境人工验收。
-7. **已满足（本地基线，2026-07-31）：** `.ecc/benchmarks/work-scale.json` 固化 1 万项目/5 万任务环境、SLO 和实测值；真实库测试覆盖第 500 页、relation options、100 节点上限、100 条原子批量和十路并发。
+7. **已满足（本地基线，2026-07-31）：** `docs/architecture/benchmarks/work-scale.json` 固化 1 万项目/5 万任务环境、SLO 和实测值；真实库测试覆盖第 500 页、relation options、100 节点上限、100 条原子批量和十路并发。
 8. **已满足（产品合同，2026-07-31）：** 当前发布范围明确为单语言 `zh-CN`，HTML、Quasar 与 locale-sensitive API 均固定同一 locale；第二语言/地区格式触发条件和完整重开验收已写入 `frontend/docs/LOCALE.md`。
 9. **已满足（本地终态，2026-07-31）：** `python scripts/run_ci.py full` 与隔离 MySQL/Redis 的 `integration` 均从头通过；远程 CI 每个 job 的终态仍须在 push 后取证，不能用本地结果代替。
 
@@ -552,7 +552,7 @@ pnpm --dir frontend exec playwright test e2e/accessibility.spec.ts --retries=0
   的小写展示排序与 Rust Action 输入 `Asc/Desc` wire 值不一致；`useTableQuery` 现统一在
   API 边界序列化。批量确认又暴露 Quasar ad-hoc dialog 无可访问名称，现改用具名、初始
   聚焦明确的通用确认组件；
-- `.ecc/benchmarks/work-scale.json` 记录机器、依赖、数据集、SLO、命令和实测值，避免
+- `docs/architecture/benchmarks/work-scale.json` 记录机器、依赖、数据集、SLO、命令和实测值，避免
   只在文档中留下不可重放的数字。
 
 对抗性验证：

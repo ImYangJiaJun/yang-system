@@ -21,7 +21,7 @@ JWT 签名耗时。
 | 2 | 1023.11 | 9.241 ms | 10.617 ms | 11.722 ms | 0 |
 | 3 | 1108.80 | 8.650 ms | 9.910 ms | 10.771 ms | 0 |
 
-原始记录见 [refresh-ttl.json](../../.ecc/benchmarks/refresh-ttl.json)，可执行测试见
+原始记录见 [refresh-ttl.json](benchmarks/refresh-ttl.json)，可执行测试见
 `tests/refresh_load_benchmark.rs`。该数据覆盖应用 Action 派发、真实数据库和 Redis，
 但不包含反向代理、跨主机网络、生产连接池竞争、复制、备份或邻近业务负载，不能外推为
 生产容量承诺。
