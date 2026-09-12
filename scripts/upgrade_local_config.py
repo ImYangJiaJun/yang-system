@@ -277,11 +277,10 @@ filter = "yang_system=debug"
         self.assertNotEqual(values["step_up.active_secret"], quote_toml_string(STEP_UP_PLACEHOLDER))
         self.assertNotIn("token.secret", values)
         self.assertEqual(values["http.bind"], '"127.0.0.1:8181"')
-        self.assertEqual(values["mysql.max_connections"], "7")
         self.assertEqual(values["mysql.url"], quote_toml_string(LOCAL_MYSQL_URL))
         self.assertEqual(values["redis.url"], quote_toml_string(LOCAL_REDIS_URL))
         self.assertIn("authorization.deployment", values)
-        self.assertIn("observability.readiness_budget_ms", values)
+        self.assertIn("observability.metrics_enabled", values)
         self.assertTrue(inspect_config(upgraded, self.template).current)
 
     def test_upgrade_backs_up_original_before_atomic_replace(self) -> None:

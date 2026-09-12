@@ -18,28 +18,46 @@ const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    #[serde(default)]
     pub app: AppSettings,
     pub authorization: AuthorizationSettings,
+    #[serde(default)]
     pub http: HttpSettings,
     pub mysql: MysqlSettings,
     pub redis: RedisSettings,
     pub token: TokenSettings,
     pub step_up: StepUpSettings,
     pub email: EmailSettings,
+    #[serde(default)]
     pub security: SecuritySettings,
     #[serde(default)]
     pub shutdown: ShutdownSettings,
     #[serde(default)]
     pub observability: ObservabilitySettings,
+    #[serde(default)]
     pub logging: LoggingSettings,
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
+    #[serde(default = "default_app_name")]
     pub name: String,
     #[serde(default)]
     pub environment: DeploymentEnvironment,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            name: default_app_name(),
+            environment: DeploymentEnvironment::default(),
+        }
+    }
+}
+
+fn default_app_name() -> String {
+    "yang-system".to_owned()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -61,48 +79,156 @@ impl DeploymentEnvironment {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizationSettings {
     pub deployment: String,
+    #[serde(default = "default_outbox_poll_interval_ms")]
     pub outbox_poll_interval_ms: u64,
+    #[serde(default = "default_outbox_batch_size")]
     pub outbox_batch_size: u32,
+    #[serde(default = "default_outbox_lease_seconds")]
     pub outbox_lease_seconds: u64,
+    #[serde(default = "default_outbox_max_retry_seconds")]
     pub outbox_max_retry_seconds: u64,
 }
 
-#[derive(Clone, Deserialize)]
+const fn default_outbox_poll_interval_ms() -> u64 {
+    250
+}
+
+const fn default_outbox_batch_size() -> u32 {
+    100
+}
+
+const fn default_outbox_lease_seconds() -> u64 {
+    10
+}
+
+const fn default_outbox_max_retry_seconds() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpSettings {
+    #[serde(default = "default_http_bind")]
     pub bind: String,
+    #[serde(default = "default_http_max_body_bytes")]
     pub max_body_bytes: usize,
+    #[serde(default = "default_http_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
+    #[serde(default = "default_http_max_concurrency")]
     pub max_concurrency: usize,
+}
+
+impl Default for HttpSettings {
+    fn default() -> Self {
+        Self {
+            bind: default_http_bind(),
+            max_body_bytes: default_http_max_body_bytes(),
+            request_timeout_seconds: default_http_request_timeout_seconds(),
+            max_concurrency: default_http_max_concurrency(),
+        }
+    }
+}
+
+fn default_http_bind() -> String {
+    "127.0.0.1:8080".to_owned()
+}
+
+const fn default_http_max_body_bytes() -> usize {
+    1_048_576
+}
+
+const fn default_http_request_timeout_seconds() -> u64 {
+    30
+}
+
+const fn default_http_max_concurrency() -> usize {
+    256
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MysqlSettings {
     pub url: String,
+    #[serde(default = "default_mysql_max_connections")]
     pub max_connections: u32,
+    #[serde(default = "default_mysql_min_connections")]
     pub min_connections: u32,
+    #[serde(default = "default_mysql_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
+    #[serde(default = "default_mysql_idle_timeout_seconds")]
     pub idle_timeout_seconds: u64,
+    #[serde(default = "default_pool_max_lifetime_seconds")]
     pub max_lifetime_seconds: Option<u64>,
+    #[serde(default = "default_test_before_acquire")]
     pub test_before_acquire: bool,
+}
+
+const fn default_mysql_max_connections() -> u32 {
+    20
+}
+
+const fn default_mysql_min_connections() -> u32 {
+    2
+}
+
+const fn default_mysql_connect_timeout_seconds() -> u64 {
+    10
+}
+
+const fn default_mysql_idle_timeout_seconds() -> u64 {
+    600
+}
+
+const fn default_pool_max_lifetime_seconds() -> Option<u64> {
+    Some(1800)
+}
+
+const fn default_test_before_acquire() -> bool {
+    true
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RedisSettings {
     pub url: String,
+    #[serde(default = "default_redis_max_connections")]
     pub max_connections: usize,
+    #[serde(default = "default_redis_min_connections")]
     pub min_connections: usize,
+    #[serde(default = "default_redis_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
+    #[serde(default = "default_redis_wait_timeout_seconds")]
     pub wait_timeout_seconds: u64,
+    #[serde(default = "default_redis_idle_timeout_seconds")]
     pub idle_timeout_seconds: u64,
+    #[serde(default = "default_pool_max_lifetime_seconds")]
     pub max_lifetime_seconds: Option<u64>,
+    #[serde(default = "default_test_before_acquire")]
     pub test_before_acquire: bool,
+}
+
+const fn default_redis_max_connections() -> usize {
+    20
+}
+
+const fn default_redis_min_connections() -> usize {
+    2
+}
+
+const fn default_redis_connect_timeout_seconds() -> u64 {
+    5
+}
+
+const fn default_redis_wait_timeout_seconds() -> u64 {
+    10
+}
+
+const fn default_redis_idle_timeout_seconds() -> u64 {
+    300
 }
 
 #[derive(Clone, Deserialize)]
@@ -112,10 +238,30 @@ pub struct TokenSettings {
     pub active_secret: String,
     #[serde(default)]
     pub retiring_keys: Vec<RetiringTokenKeySettings>,
+    #[serde(default = "default_token_issuer")]
     pub issuer: String,
+    #[serde(default = "default_token_audience")]
     pub audience: String,
+    #[serde(default = "default_access_ttl_seconds")]
     pub access_ttl_seconds: u64,
+    #[serde(default = "default_refresh_ttl_seconds")]
     pub refresh_ttl_seconds: u64,
+}
+
+fn default_token_issuer() -> String {
+    "yang-system".to_owned()
+}
+
+fn default_token_audience() -> String {
+    "yang-system-api".to_owned()
+}
+
+const fn default_access_ttl_seconds() -> u64 {
+    3600
+}
+
+const fn default_refresh_ttl_seconds() -> u64 {
+    2_592_000
 }
 
 #[derive(Clone, Deserialize)]
@@ -132,10 +278,30 @@ pub struct StepUpSettings {
     pub active_secret: String,
     #[serde(default)]
     pub retiring_keys: Vec<RetiringTokenKeySettings>,
+    #[serde(default = "default_step_up_issuer")]
     pub issuer: String,
+    #[serde(default = "default_step_up_audience")]
     pub audience: String,
+    #[serde(default = "default_challenge_ttl_seconds")]
     pub challenge_ttl_seconds: u64,
+    #[serde(default = "default_proof_ttl_seconds")]
     pub proof_ttl_seconds: u64,
+}
+
+fn default_step_up_issuer() -> String {
+    "yang-system-step-up".to_owned()
+}
+
+fn default_step_up_audience() -> String {
+    "yang-system-sensitive-actions".to_owned()
+}
+
+const fn default_challenge_ttl_seconds() -> u64 {
+    120
+}
+
+const fn default_proof_ttl_seconds() -> u64 {
+    300
 }
 
 #[derive(Clone, Deserialize)]
@@ -157,28 +323,74 @@ pub struct EmailSettings {
 #[serde(deny_unknown_fields)]
 pub struct SmtpSettings {
     pub relay: String,
+    #[serde(default = "default_smtp_port")]
     pub port: u16,
     pub username: String,
     pub password: String,
     pub from_address: String,
     pub from_name: String,
+    #[serde(default = "default_smtp_timeout_seconds")]
     pub timeout_seconds: u64,
+}
+
+const fn default_smtp_port() -> u16 {
+    587
+}
+
+const fn default_smtp_timeout_seconds() -> u64 {
+    10
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmailVerificationSettings {
-    /// Redis key namespace，隔离共享 Redis 上的部署环境。
+    /// Redis key namespace，隔离共享 Redis 上的部署环境；缺省继承 `authorization.deployment`。
+    #[serde(default)]
     pub namespace: String,
     /// 验证码摘要的独立服务端密钥，不得与 Token/Step-up 密钥复用。
     pub secret: String,
+    #[serde(default = "default_email_code_ttl_seconds")]
     pub ttl_seconds: u64,
+    #[serde(default = "default_email_code_resend_cooldown_seconds")]
     pub resend_cooldown_seconds: u64,
+    #[serde(default = "default_email_code_max_attempts")]
     pub max_attempts: u32,
+    #[serde(default = "default_email_code_send_window_seconds")]
     pub send_window_seconds: u64,
+    #[serde(default = "default_email_code_send_ip_attempts")]
     pub send_ip_attempts: u64,
+    #[serde(default = "default_email_code_send_email_attempts")]
     pub send_email_attempts: u64,
+    #[serde(default = "default_email_code_send_global_attempts")]
     pub send_global_attempts: u64,
+}
+
+const fn default_email_code_ttl_seconds() -> u64 {
+    600
+}
+
+const fn default_email_code_resend_cooldown_seconds() -> u64 {
+    60
+}
+
+const fn default_email_code_max_attempts() -> u32 {
+    5
+}
+
+const fn default_email_code_send_window_seconds() -> u64 {
+    3600
+}
+
+const fn default_email_code_send_ip_attempts() -> u64 {
+    20
+}
+
+const fn default_email_code_send_email_attempts() -> u64 {
+    5
+}
+
+const fn default_email_code_send_global_attempts() -> u64 {
+    1000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -291,9 +503,13 @@ impl std::fmt::Debug for StepUpSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecuritySettings {
+    #[serde(default = "default_argon2_max_concurrency")]
     pub argon2_max_concurrency: usize,
+    #[serde(default = "default_auth_rate_limit_window_seconds")]
     pub auth_rate_limit_window_seconds: u64,
+    #[serde(default = "default_auth_rate_limit_ip_attempts")]
     pub auth_rate_limit_ip_attempts: u64,
+    #[serde(default = "default_auth_rate_limit_username_attempts")]
     pub auth_rate_limit_username_attempts: u64,
     /// 密码重置凭证的短期有效期；旧配置缺省为 15 分钟。
     #[serde(default = "default_password_reset_ttl_seconds")]
@@ -307,6 +523,37 @@ pub struct SecuritySettings {
     /// TOTP 第二因子配置域（E-1）；`None` 时 MFA Action 不注册。
     #[serde(default)]
     pub totp: Option<TotpSettings>,
+}
+
+impl Default for SecuritySettings {
+    fn default() -> Self {
+        Self {
+            argon2_max_concurrency: default_argon2_max_concurrency(),
+            auth_rate_limit_window_seconds: default_auth_rate_limit_window_seconds(),
+            auth_rate_limit_ip_attempts: default_auth_rate_limit_ip_attempts(),
+            auth_rate_limit_username_attempts: default_auth_rate_limit_username_attempts(),
+            password_reset_ttl_seconds: default_password_reset_ttl_seconds(),
+            issue_refresh_credential_version: false,
+            trusted_proxy_cidrs: Vec::new(),
+            totp: None,
+        }
+    }
+}
+
+const fn default_argon2_max_concurrency() -> usize {
+    4
+}
+
+const fn default_auth_rate_limit_window_seconds() -> u64 {
+    60
+}
+
+const fn default_auth_rate_limit_ip_attempts() -> u64 {
+    30
+}
+
+const fn default_auth_rate_limit_username_attempts() -> u64 {
+    10
 }
 
 /// TOTP 第二因子配置（路线图 E-1b）：AEAD 密钥域与码位。
@@ -330,10 +577,23 @@ const fn default_totp_digits() -> u32 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingSettings {
+    #[serde(default = "default_logging_filter")]
     pub filter: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl Default for LoggingSettings {
+    fn default() -> Self {
+        Self {
+            filter: default_logging_filter(),
+        }
+    }
+}
+
+fn default_logging_filter() -> String {
+    "yang_system=info,tower_http=info".to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShutdownSettings {
     #[serde(default = "default_shutdown_total_timeout_seconds")]
@@ -354,16 +614,38 @@ const fn default_shutdown_total_timeout_seconds() -> u64 {
 
 impl Settings {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let settings: Self = crate::config::source::load(path, "读取配置文件失败")?;
+        let mut settings: Self = crate::config::source::load(path, "读取配置文件失败")?;
+        settings.normalize();
         settings.validate()?;
         Ok(settings)
     }
 
     #[cfg(test)]
     fn parse(raw: &str) -> anyhow::Result<Self> {
-        let settings: Self = crate::config::source::parse_file_only(raw)?;
+        let mut settings: Self = crate::config::source::parse_file_only(raw)?;
+        settings.normalize();
         settings.validate()?;
         Ok(settings)
+    }
+
+    /// 派生默认值：邮箱验证码 Redis 命名空间缺省继承 `authorization.deployment`。
+    fn normalize(&mut self) {
+        if self.email.verification.namespace.is_empty() {
+            self.email
+                .verification
+                .namespace
+                .clone_from(&self.authorization.deployment);
+        }
+        if let Some(change) = &mut self.email.change {
+            if change.namespace.is_empty() {
+                change.namespace = self.authorization.deployment.clone();
+            }
+        }
+        if let Some(mfa) = &mut self.email.mfa {
+            if mfa.namespace.is_empty() {
+                mfa.namespace = self.authorization.deployment.clone();
+            }
+        }
     }
 
     pub fn bind_addr(&self) -> anyhow::Result<SocketAddr> {
@@ -1050,6 +1332,264 @@ filter = "info"
 "#
     }
 
+    /// 最小配置：只填环境事实与密钥，其余全部由内置默认值与派生规则承接。
+    #[test]
+    fn minimal_config_uses_safe_defaults_and_derives_namespaces() {
+        let raw = r#"
+[app]
+environment = "development"
+[authorization]
+deployment = "test-local"
+[mysql]
+url = "mysql://config-user:config-password@config-mysql/config-database"
+[redis]
+url = "redis://config-redis/3"
+[token]
+active_key_id = "test-2026-07"
+active_secret = "0123456789abcdef0123456789abcdef"
+[step_up]
+active_key_id = "step-up-test-2026-07"
+active_secret = "step-up-0123456789abcdef0123456789abcdef"
+[email.smtp]
+relay = "smtp.example.test"
+username = "test-smtp-user"
+password = "test-smtp-password"
+from_address = "no-reply@example.test"
+from_name = "YANG Test"
+[email.verification]
+secret = "email-verification-0123456789abcdef0123456789abcdef"
+[email.change]
+secret = "change-email-0123456789abcdef0123456789abcdef"
+[email.mfa]
+secret = "mfa-email-0123456789abcdef0123456789abcdef"
+[email.password_reset]
+link_base_url = "http://localhost:5273"
+"#;
+        let settings =
+            Settings::parse(raw).unwrap_or_else(|error| panic!("最小配置应解析成功: {error:#}"));
+
+        assert_eq!(settings.app.name, "yang-system");
+        assert_eq!(settings.http.bind, "127.0.0.1:8080");
+        assert_eq!(settings.http.max_body_bytes, 1_048_576);
+        assert_eq!(settings.mysql.max_connections, 20);
+        assert_eq!(settings.mysql.max_lifetime_seconds, Some(1800));
+        assert_eq!(settings.redis.wait_timeout_seconds, 10);
+        assert_eq!(settings.token.issuer, "yang-system");
+        assert_eq!(settings.token.audience, "yang-system-api");
+        assert_eq!(settings.token.access_ttl_seconds, 3600);
+        assert_eq!(settings.step_up.issuer, "yang-system-step-up");
+        assert_eq!(settings.step_up.challenge_ttl_seconds, 120);
+        assert_eq!(settings.email.smtp.port, 587);
+        for (section, engine) in [
+            ("verification", settings.email.verification.engine_config()),
+            (
+                "change",
+                settings
+                    .email
+                    .change
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("email.change 段应存在"))
+                    .change_engine_config(),
+            ),
+            (
+                "mfa",
+                settings
+                    .email
+                    .mfa
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("email.mfa 段应存在"))
+                    .mfa_engine_config(),
+            ),
+        ] {
+            assert_eq!(engine.ttl_seconds, 600, "{section} ttl 应取默认值");
+            assert_eq!(
+                engine.send_global_attempts, 1000,
+                "{section} 全局额度应取默认值"
+            );
+        }
+        // 三类验证码命名空间缺省继承 authorization.deployment，且 key 域相互隔离。
+        assert_eq!(
+            settings.email.verification.engine_config().redis_key_prefix,
+            "yang-system:test-local:registration-email"
+        );
+        assert_eq!(
+            settings
+                .email
+                .change
+                .as_ref()
+                .unwrap_or_else(|| panic!("email.change 段应存在"))
+                .change_engine_config()
+                .redis_key_prefix,
+            "yang-system:test-local:change-email"
+        );
+        assert_eq!(settings.security.argon2_max_concurrency, 4);
+        assert_eq!(settings.security.auth_rate_limit_ip_attempts, 30);
+        assert!(!settings.security.issue_refresh_credential_version);
+        assert_eq!(settings.logging.filter, "yang_system=info,tower_http=info");
+        assert_eq!(settings.shutdown.total_timeout_seconds, 30);
+    }
+
+    /// config.show.toml 是全量配置参考：必须能反序列化为 Settings（字段名与结构同步），
+    /// 且其中所有显式写出的值必须与代码内置默认值一致（占位密钥除外）。
+    #[test]
+    fn show_config_stays_in_sync_with_settings_schema_and_defaults() {
+        let raw = include_str!("../../config.show.toml");
+        let shown: Settings = crate::config::source::parse_file_only(raw)
+            .unwrap_or_else(|error| panic!("config.show.toml 必须符合 Settings 结构: {error:#}"));
+
+        // 把 show 文件中的占位密钥替换为合法值后必须能通过完整启动校验，
+        // 证明参考文件里的默认值组合本身是可启动的。
+        let launchable = raw
+            .replace(
+                "replace-with-at-least-32-random-bytes",
+                "token-secret-0123456789abcdef0123456789abcdef",
+            )
+            .replace(
+                "replace-with-independent-step-up-secret",
+                "step-up-secret-0123456789abcdef0123456789abc",
+            )
+            .replace(
+                "replace-with-independent-email-verification-secret",
+                "verification-0123456789abcdef0123456789abcdef",
+            )
+            .replace(
+                "replace-with-independent-change-email-secret",
+                "change-email-0123456789abcdef0123456789abcde",
+            )
+            .replace(
+                "replace-with-independent-mfa-email-secret",
+                "mfa-email-0123456789abcdef0123456789abcdef0",
+            )
+            .replace(
+                "replace-with-an-independent-32-byte-totp-aead-key",
+                "totp-aead-0123456789abcdef0123456789abcdef0",
+            )
+            .replace("replace-with-smtp-username", "show-smtp-user")
+            .replace("replace-with-smtp-password", "show-smtp-password");
+        Settings::parse(&launchable)
+            .unwrap_or_else(|error| panic!("config.show.toml 替换占位值后应可启动: {error:#}"));
+
+        // 与最小配置（全部走默认值）逐项比对，证明注释中标注的默认值真实。
+        let minimal = Settings::parse(
+            &launchable
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with("max_body_bytes")
+                        && !trimmed.starts_with("request_timeout_seconds")
+                        && !trimmed.starts_with("max_concurrency")
+                        && !trimmed.starts_with("min_connections")
+                        && !trimmed.starts_with("connect_timeout_seconds")
+                        && !trimmed.starts_with("idle_timeout_seconds")
+                        && !trimmed.starts_with("max_lifetime_seconds")
+                        && !trimmed.starts_with("test_before_acquire")
+                        && !trimmed.starts_with("wait_timeout_seconds")
+                        && !trimmed.starts_with("outbox_")
+                        && !trimmed.starts_with("issuer")
+                        && !trimmed.starts_with("audience")
+                        && !trimmed.starts_with("access_ttl_seconds")
+                        && !trimmed.starts_with("refresh_ttl_seconds")
+                        && !trimmed.starts_with("challenge_ttl_seconds")
+                        && !trimmed.starts_with("proof_ttl_seconds")
+                        && !trimmed.starts_with("port")
+                        && !trimmed.starts_with("timeout_seconds")
+                        && !trimmed.starts_with("namespace")
+                        && !trimmed.starts_with("ttl_seconds")
+                        && !trimmed.starts_with("resend_cooldown_seconds")
+                        && !trimmed.starts_with("max_attempts")
+                        && !trimmed.starts_with("send_")
+                        && !trimmed.starts_with("argon2_max_concurrency")
+                        && !trimmed.starts_with("auth_rate_limit_")
+                        && !trimmed.starts_with("password_reset_ttl_seconds")
+                        && !trimmed.starts_with("trusted_proxy_cidrs")
+                        && !trimmed.starts_with("digits")
+                        && !trimmed.starts_with("total_timeout_seconds")
+                        && !trimmed.starts_with("metrics_bind")
+                        && !trimmed.starts_with("traces_")
+                        && !trimmed.starts_with("readiness_budget_ms")
+                        && !trimmed.starts_with("filter")
+                        && !trimmed.starts_with("name =")
+                        && !trimmed.starts_with("retiring_keys")
+                        && !trimmed.starts_with("max_connections")
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap_or_else(|error| panic!("剥离默认值后的 show 配置应可解析: {error:#}"));
+
+        assert_eq!(shown.app.name, minimal.app.name);
+        assert_eq!(shown.http, minimal.http);
+        assert_eq!(shown.authorization, minimal.authorization);
+        assert_eq!(shown.token.issuer, minimal.token.issuer);
+        assert_eq!(shown.token.audience, minimal.token.audience);
+        assert_eq!(
+            shown.token.access_ttl_seconds,
+            minimal.token.access_ttl_seconds
+        );
+        assert_eq!(
+            shown.token.refresh_ttl_seconds,
+            minimal.token.refresh_ttl_seconds
+        );
+        assert_eq!(shown.step_up.issuer, minimal.step_up.issuer);
+        assert_eq!(shown.step_up.audience, minimal.step_up.audience);
+        assert_eq!(
+            shown.step_up.challenge_ttl_seconds,
+            minimal.step_up.challenge_ttl_seconds
+        );
+        assert_eq!(
+            shown.step_up.proof_ttl_seconds,
+            minimal.step_up.proof_ttl_seconds
+        );
+        assert_eq!(shown.email.smtp.port, minimal.email.smtp.port);
+        assert_eq!(
+            shown.email.smtp.timeout_seconds,
+            minimal.email.smtp.timeout_seconds
+        );
+        assert_eq!(
+            shown.email.verification.namespace,
+            minimal.email.verification.namespace
+        );
+        assert_eq!(
+            shown.email.verification.ttl_seconds,
+            minimal.email.verification.ttl_seconds
+        );
+        assert_eq!(
+            shown.email.verification.send_global_attempts,
+            minimal.email.verification.send_global_attempts
+        );
+        // security/totp 含密钥字段，只比对非密钥的默认值字段。
+        assert_eq!(
+            shown.security.argon2_max_concurrency,
+            minimal.security.argon2_max_concurrency
+        );
+        assert_eq!(
+            shown.security.auth_rate_limit_window_seconds,
+            minimal.security.auth_rate_limit_window_seconds
+        );
+        assert_eq!(
+            shown.security.auth_rate_limit_ip_attempts,
+            minimal.security.auth_rate_limit_ip_attempts
+        );
+        assert_eq!(
+            shown.security.auth_rate_limit_username_attempts,
+            minimal.security.auth_rate_limit_username_attempts
+        );
+        assert_eq!(
+            shown.security.password_reset_ttl_seconds,
+            minimal.security.password_reset_ttl_seconds
+        );
+        assert_eq!(
+            shown.security.trusted_proxy_cidrs,
+            minimal.security.trusted_proxy_cidrs
+        );
+        assert_eq!(
+            shown.security.totp.as_ref().map(|totp| totp.digits),
+            minimal.security.totp.as_ref().map(|totp| totp.digits)
+        );
+        assert_eq!(shown.shutdown, minimal.shutdown);
+        assert_eq!(shown.logging.filter, minimal.logging.filter);
+    }
+
     #[test]
     fn parses_values_from_config_file_and_redacts_token_debug() {
         let settings = Settings::parse(valid_config())
@@ -1560,32 +2100,43 @@ filter = "info"
         );
         assert_eq!(
             value
-                .get("security")
-                .and_then(|security| security.get("trusted_proxy_cidrs"))
-                .and_then(toml::Value::as_array)
-                .map(Vec::len),
-            Some(0)
-        );
-        assert_eq!(
-            value
-                .get("shutdown")
-                .and_then(|shutdown| shutdown.get("total_timeout_seconds"))
-                .and_then(toml::Value::as_integer),
-            Some(30)
-        );
-        assert_eq!(
-            value
                 .get("observability")
                 .and_then(|observability| observability.get("metrics_enabled"))
                 .and_then(toml::Value::as_bool),
             Some(true)
         );
+        // 示例配置只保留必填项：调优键一律不出现，由代码内默认值承接。
+        let mysql = value
+            .get("mysql")
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("示例配置必须包含 [mysql] 段"));
+        assert_eq!(mysql.len(), 1, "[mysql] 段只应保留 url: {mysql:?}");
+        assert!(mysql.get("url").is_some());
+        for section in ["verification", "change", "mfa"] {
+            let email_code = value
+                .get("email")
+                .and_then(|email| email.get(section))
+                .and_then(toml::Value::as_table)
+                .unwrap_or_else(|| panic!("示例配置必须包含 [email.{section}] 段"));
+            assert_eq!(
+                email_code.len(),
+                1,
+                "[email.{section}] 段只应保留 secret: {email_code:?}"
+            );
+            assert!(email_code.get("secret").is_some());
+        }
+        assert!(value.get("shutdown").is_none());
+        assert!(value.get("logging").is_none());
+        assert!(value
+            .get("security")
+            .and_then(|security| security.get("trusted_proxy_cidrs"))
+            .is_none());
         assert_eq!(
             value
-                .get("observability")
-                .and_then(|observability| observability.get("traces_enabled"))
+                .get("security")
+                .and_then(|security| security.get("issue_refresh_credential_version"))
                 .and_then(toml::Value::as_bool),
-            Some(false)
+            Some(true)
         );
     }
 

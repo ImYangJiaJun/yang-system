@@ -30,16 +30,60 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `observability.traces_export_timeout_seconds` | `YANG_SYSTEM_OBSERVABILITY_TRACES_EXPORT_TIMEOUT_SECONDS` |
 | `observability.readiness_budget_ms` | `YANG_SYSTEM_OBSERVABILITY_READINESS_BUDGET_MS` |
 
-`config.example.toml` 中的所有字段均支持该映射。整数使用非负十进制，
+所有配置字段均支持该映射，包括未出现在 `config.example.toml` 中、由内置
+默认值承接的调优项（见下节）。整数使用非负十进制，
 `traces_sample_ratio` 使用有限浮点数，
 布尔值只接受小写 `true`/`false`，字符串列表使用逗号分隔。可选的
 `max_lifetime_seconds` 可用空字符串或 `none` 清除。不认识的
 `YANG_SYSTEM_*` 变量会让启动失败，避免拼写错误被静默忽略；
 `YANG_SYSTEM_TEST_*` 保留给测试门禁。
 
+## 内置默认值
+
+`config.example.toml` 只保留必须填写的环境事实与部署决策（URL、密钥、
+`app.environment`、`authorization.deployment`、`issue_refresh_credential_version`
+等）。下列调优项全部有内置默认值，需要偏离时按原字段名在 `config.toml`
+或环境变量中显式覆盖即可；省略对应配置段同样生效。逐项注释版的全量参考见
+仓库根目录 `config.show.toml`（由 `config::tests` 的同步测试保证与代码一致）。
+
+| 字段 | 默认值 |
+|---|---|
+| `app.name` | `yang-system` |
+| `http.bind` | `127.0.0.1:8080` |
+| `http.max_body_bytes` | `1048576`（1 MiB，允许至 16 MiB） |
+| `http.request_timeout_seconds` | `30` |
+| `http.max_concurrency` | `256` |
+| `mysql.max_connections` / `min_connections` | `20` / `2` |
+| `mysql.connect_timeout_seconds` / `idle_timeout_seconds` / `max_lifetime_seconds` | `10` / `600` / `1800` |
+| `mysql.test_before_acquire` | `true` |
+| `redis.max_connections` / `min_connections` | `20` / `2` |
+| `redis.connect_timeout_seconds` / `wait_timeout_seconds` / `idle_timeout_seconds` / `max_lifetime_seconds` | `5` / `10` / `300` / `1800` |
+| `redis.test_before_acquire` | `true` |
+| `authorization.outbox_poll_interval_ms` | `250`（传播 p99 ≤ 2s 契约上限，不允许调大） |
+| `authorization.outbox_batch_size` / `outbox_lease_seconds` / `outbox_max_retry_seconds` | `100` / `10` / `60` |
+| `token.issuer` / `token.audience` | `yang-system` / `yang-system-api` |
+| `token.access_ttl_seconds` / `refresh_ttl_seconds` | `3600` / `2592000`（30 天） |
+| `step_up.issuer` / `step_up.audience` | `yang-system-step-up` / `yang-system-sensitive-actions` |
+| `step_up.challenge_ttl_seconds` / `proof_ttl_seconds` | `120` / `300` |
+| `email.smtp.port` / `timeout_seconds` | `587`（强制 STARTTLS）/ `10` |
+| `email.{verification,change,mfa}.namespace` | 继承 `authorization.deployment` |
+| `email.{verification,change,mfa}.ttl_seconds` / `resend_cooldown_seconds` / `max_attempts` | `600` / `60` / `5` |
+| `email.{verification,change,mfa}.send_window_seconds` | `3600` |
+| `email.{verification,change,mfa}.send_ip_attempts` / `send_email_attempts` / `send_global_attempts` | `20` / `5` / `1000` |
+| `security.argon2_max_concurrency` | `4` |
+| `security.auth_rate_limit_window_seconds` / `ip_attempts` / `username_attempts` | `60` / `30` / `10` |
+| `security.password_reset_ttl_seconds` | `900` |
+| `security.trusted_proxy_cidrs` | `[]`（完全忽略 Forwarded/X-Forwarded-For） |
+| `security.totp.digits` | `6` |
+| `observability.metrics_bind` | `127.0.0.1:9090` |
+| `observability.traces_*` | 关闭；端点 `http://127.0.0.1:4317`，采样 `0.1`，导出超时 `5s` |
+| `observability.readiness_budget_ms` | `2000`（允许 50..=10000） |
+| `shutdown.total_timeout_seconds` | `30` |
+| `logging.filter` | `yang_system=info,tower_http=info` |
+
 `app.environment=production` 时必须启用 `observability.metrics_enabled`，以保证
 独立管理面 `/metrics` 与预算化 `/health/ready` 一定存在；开发与测试环境可以显式
-关闭。`observability.readiness_budget_ms` 默认 2000，允许 50..=10000。
+关闭。
 
 `token.retiring_keys` 是对象数组，环境变量使用显式的
 `YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON`，例如：
@@ -132,7 +176,9 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   Step-up 密钥——否则换绑验证码可被注册验证码的 key 域重放，或跨密钥域混淆。
 - 该段可省略（`#[serde(default)]`）：省略时 `change_email`/`request_change_email`
   Action 不注册，换绑能力不可用；显式配置后需重启生效。
-- 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度）。
+- 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度），且全部
+  字段有内置默认值：`namespace` 缺省继承 `authorization.deployment`，其余取
+  「内置默认值」表中的验证码默认值；最小配置只需填写 `secret`。
 
 ### 登录 MFA 备用邮箱验证码（`email.mfa`）
 
@@ -147,7 +193,9 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   次数用尽即销毁。
 - 该段可省略（`#[serde(default)]`）：省略时发码端点返回「未启用」错误，
   登录第二因子仅接受认证器动态码与恢复码；显式配置后需重启生效。
-- 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度）。
+- 字段语义与 `email.verification` 一致（TTL/冷却/尝试上限/发送额度），且全部
+  字段有内置默认值：`namespace` 缺省继承 `authorization.deployment`，其余取
+  「内置默认值」表中的验证码默认值；最小配置只需填写 `secret`。
 
 ### TOTP 第二因子（`security.totp`）
 

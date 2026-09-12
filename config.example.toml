@@ -1,119 +1,61 @@
 # 启动配置只合成一次，固定优先级为：本文件 < YANG_SYSTEM_* 环境变量 < secret 目录。
-# 环境变量和 secret 文件的完整契约见 docs/contracts/CONFIGURATION.md。
+# 本文件只保留必须填写的环境事实与部署决策；连接池、超时、限流、TTL 等调优项
+# 均有内置安全默认值（取本文件历史基线值），需要偏离时按名显式覆盖即可。
+# 环境变量、secret 文件与全部默认值的完整契约见 docs/contracts/CONFIGURATION.md。
 
 [app]
-name = "yang-system"
 environment = "development"
 
 [authorization]
 # 同一 Redis DB 内必须唯一且发布后保持稳定；只允许小写字母、数字和连字符。
+# 同时作为三类邮箱验证码 Redis key 的默认部署命名空间。
 deployment = "local"
-# 授权变更传播轮询不得高于 250ms，目标 p99 不超过 2s。
-outbox_poll_interval_ms = 250
-outbox_batch_size = 100
-outbox_lease_seconds = 10
-outbox_max_retry_seconds = 60
 
 [http]
 bind = "127.0.0.1:8080"
-max_body_bytes = 1048576
-request_timeout_seconds = 30
-max_concurrency = 256
 
 [mysql]
 # 复制为 config.toml 后，直接填写当前环境的连接信息。
 url = "mysql://root:password@127.0.0.1:3306/yang_system"
-max_connections = 20
-min_connections = 2
-connect_timeout_seconds = 10
-idle_timeout_seconds = 600
-max_lifetime_seconds = 1800
-test_before_acquire = true
 
 [redis]
 url = "redis://127.0.0.1:6379"
-max_connections = 20
-min_connections = 2
-connect_timeout_seconds = 5
-wait_timeout_seconds = 10
-idle_timeout_seconds = 300
-max_lifetime_seconds = 1800
-test_before_acquire = true
 
 [token]
-# active key 负责签发；retiring key 只验证存量 Token，至少保留一个 refresh TTL。
+# active key 负责签发；轮换时用 retiring_keys（[{ key_id, secret }] 或
+# YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON）保留旧 key 至少一个 refresh TTL。
 active_key_id = "local-2026-07"
 # 必须替换为至少 32 字节的随机密钥；该占位值会被启动校验拒绝。
 active_secret = "replace-with-at-least-32-random-bytes"
 retiring_keys = []
-issuer = "yang-system"
-audience = "yang-system-api"
-access_ttl_seconds = 3600
-refresh_ttl_seconds = 2592000
 
 [step_up]
 # Step-up 使用独立签名域；不得与 Access/Refresh Token 复用任何密钥。
 active_key_id = "local-step-up-2026-07"
-# 必须替换为独立的至少 32 字节随机密钥；该占位值会被启动校验拒绝。
+# 必须替换为独立的至少 32 字节随机密钥。
 active_secret = "replace-with-independent-step-up-secret"
-# retiring key 只验证存量 challenge/proof；至少保留一个 proof TTL。
 retiring_keys = []
-issuer = "yang-system-step-up"
-audience = "yang-system-sensitive-actions"
-challenge_ttl_seconds = 120
-proof_ttl_seconds = 300
 
 [email.smtp]
-# 仅接受强制 STARTTLS 的 SMTP relay 主机名；不要填写 scheme 或把凭据写入 URL。
+# 仅接受强制 STARTTLS 的 SMTP relay 主机名（默认端口 587）；
+# 不要填写 scheme 或把凭据写入 URL。
 relay = "smtp.example.com"
-port = 587
 username = "replace-with-smtp-username"
 password = "replace-with-smtp-password"
 from_address = "no-reply@example.com"
 from_name = "YANG System"
-timeout_seconds = 10
 
+# 注册、换绑、登录 MFA 备用三类邮箱验证码使用相互独立的密钥域：绝不复用彼此，
+# 也不复用 token/step-up/security.totp 的密钥，否则验证码可跨场景重放。
+# 删除 [email.change] / [email.mfa] 整段即关闭对应能力（端点返回「未启用」错误）。
 [email.verification]
-# 共享 Redis 时按部署隔离 key；只允许 ASCII 字母、数字、点、下划线与连字符。
-namespace = "local"
-# 必须使用独立随机密钥，不得与 Token 或 Step-up 复用；该占位值会被启动拒绝。
 secret = "replace-with-independent-email-verification-secret"
-ttl_seconds = 600
-resend_cooldown_seconds = 60
-max_attempts = 5
-send_window_seconds = 3600
-send_ip_attempts = 20
-send_email_attempts = 5
-# 全局容量闸门高于单 IP/邮箱额度，避免单个攻击者耗尽邮件服务。
-send_global_attempts = 1000
 
 [email.change]
-# 邮箱换绑验证码的独立命名空间与密钥：绝不复用 [email.verification] 的密钥，
-# 否则换绑验证码可被注册验证码的 key 域重放（同一 Redis 前缀冲突）。
-namespace = "local"
 secret = "replace-with-independent-change-email-secret"
-ttl_seconds = 600
-resend_cooldown_seconds = 60
-max_attempts = 5
-send_window_seconds = 3600
-send_ip_attempts = 20
-send_email_attempts = 5
-send_global_attempts = 1000
 
 [email.mfa]
-# 登录 MFA 备用邮箱验证码的独立命名空间与密钥：认证器不可用时，登录第二因子
-# 可改用注册邮箱接收的一次性验证码。绝不复用 [email.verification]/[email.change]
-# 或 security.totp 的密钥，否则验证码可跨场景重放。删除整段即关闭该能力
-#（请求端点返回「未启用」错误）。
-namespace = "local"
 secret = "replace-with-independent-mfa-email-secret"
-ttl_seconds = 600
-resend_cooldown_seconds = 60
-max_attempts = 5
-send_window_seconds = 3600
-send_ip_attempts = 20
-send_email_attempts = 5
-send_global_attempts = 1000
 
 [email.password_reset]
 # 密码重置邮件中链接指向的前端控制台入口（scheme + host[:port]，无路径与查询串）。
@@ -121,43 +63,19 @@ send_global_attempts = 1000
 link_base_url = "http://localhost:5273"
 
 [security]
-argon2_max_concurrency = 4
-auth_rate_limit_window_seconds = 60
-auth_rate_limit_ip_attempts = 30
-auth_rate_limit_username_attempts = 10
-# 密码重置凭证只返回一次，建议保持短 TTL；允许范围 60..=3600 秒。
-password_reset_ttl_seconds = 900
 # 三阶段发布已完成：本系统无旧实例，示例配置直接开启 Refresh 凭据版本签发，
 # 同时启用会递增该版本的 change_password / disable / reset_password Action。
 # 接入存量旧部署时必须先保持 false 兼容读取，确认无旧实例后再改为 true。
 issue_refresh_credential_version = true
 # 默认不信任任何 Forwarded/X-Forwarded-For；仅填写实际反向代理的最小 CIDR。
 # 示例：trusted_proxy_cidrs = ["127.0.0.1/32", "10.42.0.0/24"]
-trusted_proxy_cidrs = []
 
 # TOTP 第二因子（MFA）。aead_key 是加密 users.totp_secret 的独立密钥域：
-# 禁止与 token/step-up/邮箱验证码密钥复用（启动校验拒绝占位值与重复字节）。
-# 删除此段则 MFA Action 不注册。
+# 禁止与 token/step-up/邮箱验证码密钥复用。删除此段则 MFA Action 不注册。
 [security.totp]
 aead_key = "replace-with-an-independent-32-byte-totp-aead-key"
-digits = 6
-
-[shutdown]
-# 从收到退出信号起，HTTP 排空、后台任务退出和资源关闭共享这一总预算。
-total_timeout_seconds = 30
 
 [observability]
-# Prometheus 使用独立运维监听地址；生产环境应由网络策略限制采集端访问。
+# Prometheus 使用独立运维监听地址（默认 127.0.0.1:9090），生产环境必须保持开启；
+# 未部署 OpenTelemetry Collector 时 traces 保持关闭，启用方式见配置契约文档。
 metrics_enabled = true
-metrics_bind = "127.0.0.1:9090"
-# 未部署 OpenTelemetry Collector 时保持关闭；启用后使用 OTLP/gRPC 导出。
-traces_enabled = false
-traces_otlp_endpoint = "http://127.0.0.1:4317"
-traces_sample_ratio = 0.1
-traces_export_timeout_seconds = 5
-# 管理面 /health/ready 检查 MySQL/Redis 的唯一总预算。
-readiness_budget_ms = 2000
-
-[logging]
-# 输出一行一个 JSON object；filter 只控制级别，不改变生产日志结构。
-filter = "yang_system=info,tower_http=info"

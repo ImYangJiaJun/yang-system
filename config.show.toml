@@ -1,0 +1,360 @@
+# yang-system 全量配置参考（非最小示例；最小必填项见 config.example.toml）
+#
+# 本文件列出全部配置项及其默认值、取值范围与作用说明，仅供查阅。
+# 所有未填写的项均取注释中标注的内置默认值；显式写出与省略效果相同。
+# 合成优先级：config.toml < YANG_SYSTEM_* 环境变量 < secret 目录。
+# 环境变量按 YANG_SYSTEM_{SECTION}_{FIELD} 大写映射（如 mysql.url →
+# YANG_SYSTEM_MYSQL_URL）；完整契约见 docs/contracts/CONFIGURATION.md。
+# 注意：本文件含占位密钥，直接复制为 config.toml 会被启动校验拒绝。
+
+[app]
+# 应用名，用于日志与内部标识。不能为空。
+# 默认："yang-system"
+name = "yang-system"
+
+# 部署环境：development | test | production。
+# production 强制 observability.metrics_enabled=true，且密码重置链接必须 https。
+# 默认："production"（缺省按生产处理，属安全兜底；本地开发需显式写 development）
+environment = "development"
+
+[authorization]
+# 部署标识：同一 Redis DB 内必须唯一且发布后保持稳定，用于授权快照与
+# Outbox 的 Redis key 隔离；只允许小写字母、数字和连字符。
+# 同时作为三类邮箱验证码 Redis 命名空间（email.*.namespace）的缺省值。
+# 必填，无默认值。
+deployment = "local"
+
+# 授权变更传播（Outbox）Worker 的轮询间隔。
+# 契约上限 250ms：授权失效传播目标 p99 ≤ 2s，调大会直接违反该契约。
+# 默认：250，允许 10..=250
+outbox_poll_interval_ms = 250
+
+# Outbox Worker 每批处理的事件数。
+# 默认：100，允许 1..=1000
+outbox_batch_size = 100
+
+# Outbox 事件租约时长：Worker 崩溃后事件被其他实例接管的等待时间。
+# 默认：10，允许 1..=300
+outbox_lease_seconds = 10
+
+# Outbox 事件最大重试退避时长。
+# 默认：60，允许 1..=300
+outbox_max_retry_seconds = 60
+
+[http]
+# 业务 HTTP 监听地址。管理面（/metrics、/health/ready）走独立的
+# observability.metrics_bind，二者必须不同。
+# 默认："127.0.0.1:8080"
+bind = "127.0.0.1:8080"
+
+# 请求体大小上限（字节）。
+# 默认：1048576（1 MiB），允许 1..=16777216（16 MiB）
+max_body_bytes = 1048576
+
+# 单个请求处理超时。
+# 默认：30，允许 1..=300
+request_timeout_seconds = 30
+
+# 全局并发请求上限，超出后排队/拒绝，防止资源耗尽。
+# 默认：256，允许 1..=100000
+max_concurrency = 256
+
+[mysql]
+# MySQL 8.0 连接串。生产建议经 secret 文件 mysql_url 或
+# YANG_SYSTEM_MYSQL_URL 注入，不要把真实密码写进 config.toml。
+# 必填，无默认值。
+url = "mysql://root:password@127.0.0.1:3306/yang_system"
+
+# 连接池上限。
+# 默认：20
+max_connections = 20
+
+# 连接池保底下限（空闲时也保持的连接数）。
+# 默认：2
+min_connections = 2
+
+# 建立新连接的超时。
+# 默认：10
+connect_timeout_seconds = 10
+
+# 连接空闲多久后被回收。
+# 默认：600
+idle_timeout_seconds = 600
+
+# 单连接最大存活时长；凭据轮换时旧连接最长存活这么久，
+# 吊销旧凭据前需预留至少一个该周期。可写 none 表示不限制。
+# 默认：1800
+max_lifetime_seconds = 1800
+
+# 取连接前先探活，牺牲少量延迟换取坏连接兜底。
+# 默认：true
+test_before_acquire = true
+
+[redis]
+# Redis 7 连接串（可带 db 序号与 ACL 凭据）。Redis 只是加速层
+# （授权最终事实在 MySQL），但进程按 Redis 不可达失败关闭处理。
+# 必填，无默认值。
+url = "redis://127.0.0.1:6379"
+
+# 连接池上限。
+# 默认：20
+max_connections = 20
+
+# 连接池保底下限。
+# 默认：2
+min_connections = 2
+
+# 建立新连接的超时。
+# 默认：5
+connect_timeout_seconds = 5
+
+# 池耗尽时等待空闲连接的超时。
+# 默认：10
+wait_timeout_seconds = 10
+
+# 连接空闲回收时长。
+# 默认：300
+idle_timeout_seconds = 300
+
+# 单连接最大存活时长；语义同 mysql.max_lifetime_seconds。
+# 默认：1800
+max_lifetime_seconds = 1800
+
+# 取连接前先探活。
+# 默认：true
+test_before_acquire = true
+
+[token]
+# Access/Refresh Token 的签发 key 标识（JWT kid）；轮换时旧 key 移入
+# retiring_keys 继续验签。1..=64 字节 ASCII 字母、数字、点、下划线、连字符。
+# 必填，无默认值。
+active_key_id = "local-2026-07"
+
+# HS256 对称密钥，至少 32 字节随机值；占位值与重复字符会被启动校验拒绝。
+# 不得与 step_up、邮箱验证码、security.totp 任何密钥复用。
+# 必填，无默认值；建议经 secret 文件 token_active_secret 注入。
+active_secret = "replace-with-at-least-32-random-bytes"
+
+# 只验签不签发的退役 key 数组，keyring 最多 8 把；轮换后至少保留一个
+# refresh TTL 周期再移除。环境变量用 YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON。
+# 默认：[]
+retiring_keys = []
+
+# JWT iss 声明。变更会使存量 Token 全部失效，属刻意运维动作。
+# 默认："yang-system"
+issuer = "yang-system"
+
+# JWT aud 声明。
+# 默认："yang-system-api"
+audience = "yang-system-api"
+
+# Access Token 有效期。
+# 默认：3600，允许 1..=86400
+access_ttl_seconds = 3600
+
+# Refresh Token 有效期，必须长于 access_ttl_seconds。
+# 默认：2592000（30 天），允许至 7776000（90 天）
+refresh_ttl_seconds = 2592000
+
+[step_up]
+# Step-up 重认证（敏感操作二次确认）的独立签名域，与 Access/Refresh Token
+# 完全隔离。key_id 只允许字母、数字、下划线、连字符。
+# 必填，无默认值。
+active_key_id = "local-step-up-2026-07"
+
+# 独立的至少 32 字节随机密钥；启动校验拒绝与 token keyring 复用。
+# 必填，无默认值；建议经 secret 文件 step_up_active_secret 注入。
+active_secret = "replace-with-independent-step-up-secret"
+
+# Step-up 退役 key：只验证存量 challenge/proof，至少保留一个 proof TTL。
+# 默认：[]
+retiring_keys = []
+
+# Step-up JWT iss 声明。
+# 默认："yang-system-step-up"
+issuer = "yang-system-step-up"
+
+# Step-up JWT aud 声明。
+# 默认："yang-system-sensitive-actions"
+audience = "yang-system-sensitive-actions"
+
+# challenge（向用户展示重认证要求）的有效期。
+# 默认：120，允许 1..=300
+challenge_ttl_seconds = 120
+
+# proof（重认证通过后换取的操作凭证）的有效期。
+# 默认：300，允许 1..=600
+proof_ttl_seconds = 300
+
+[email.smtp]
+# SMTP relay 主机名：只允许裸主机名（无 scheme、端口、路径），
+# 传输强制 STARTTLS。凭据必须同时配置或同时留空。
+# 必填，无默认值。
+relay = "smtp.example.com"
+
+# relay 端口。
+# 默认：587
+port = 587
+
+# SMTP 认证用户名；示例占位值会被启动校验拒绝。
+# 必填（可整体留空字符串表示无认证 relay）。
+username = "replace-with-smtp-username"
+
+# SMTP 认证密码；建议经 secret 文件 email_smtp_password 注入。
+password = "replace-with-smtp-password"
+
+# 发件人地址，必须是合法邮箱格式。
+# 必填，无默认值。
+from_address = "no-reply@example.com"
+
+# 发件人显示名，1..=100 字符。
+# 必填，无默认值。
+from_name = "YANG System"
+
+# SMTP 连接与投递超时。
+# 默认：10，允许 1..=30
+timeout_seconds = 10
+
+# ── 三类邮箱验证码共用同一组字段，语义一致，但 namespace/secret 必须各自独立 ──
+# 字段一览（默认值对三段相同）：
+#   namespace              Redis key 隔离命名空间；默认继承 authorization.deployment
+#   secret                 验证码摘要的独立服务端密钥（≥32 字节）；必填，
+#                          禁止跨段、跨密钥域复用（启动校验强制）
+#   ttl_seconds            验证码有效期；默认 600，允许 60..=1800
+#   resend_cooldown_seconds 重发冷却；默认 60，允许 1..=ttl_seconds
+#   max_attempts           单码校验尝试上限，用尽即销毁；默认 5，允许 1..=10
+#   send_window_seconds    发送限流窗口；默认 3600，允许 60..=3600
+#   send_ip_attempts       窗口内单 IP 发码额度；默认 20，允许 1..=1000000
+#   send_email_attempts    窗口内单邮箱发码额度；默认 5，允许 1..=1000000
+#   send_global_attempts   窗口内全局发码额度（不得小于单 IP/单邮箱额度）；
+#                          默认 1000，允许 1..=1000000
+
+[email.verification]
+# 注册邮箱验证码（必填段）。Redis key 前缀 yang-system:<ns>:registration-email。
+namespace = "local"
+secret = "replace-with-independent-email-verification-secret"
+ttl_seconds = 600
+resend_cooldown_seconds = 60
+max_attempts = 5
+send_window_seconds = 3600
+send_ip_attempts = 20
+send_email_attempts = 5
+send_global_attempts = 1000
+
+[email.change]
+# 邮箱换绑验证码（可选段，删除整段则换绑 Action 不注册）。
+# Redis key 前缀 yang-system:<ns>:change-email。
+namespace = "local"
+secret = "replace-with-independent-change-email-secret"
+ttl_seconds = 600
+resend_cooldown_seconds = 60
+max_attempts = 5
+send_window_seconds = 3600
+send_ip_attempts = 20
+send_email_attempts = 5
+send_global_attempts = 1000
+
+[email.mfa]
+# 登录 MFA 备用邮箱验证码（可选段，删除整段则发码端点返回「未启用」）。
+# 这是弱于 TOTP 的降级通道。Redis key 前缀 yang-system:<ns>:mfa-email。
+namespace = "local"
+secret = "replace-with-independent-mfa-email-secret"
+ttl_seconds = 600
+resend_cooldown_seconds = 60
+max_attempts = 5
+send_window_seconds = 3600
+send_ip_attempts = 20
+send_email_attempts = 5
+send_global_attempts = 1000
+
+[email.password_reset]
+# 密码重置邮件链接指向的前端控制台入口：scheme + host[:port]，
+# 不允许路径、查询串、用户信息。生产强制 https；只从配置注入，
+# 绝不从请求 Host 头推导（Host 头可伪造，伪造链接会把重置凭证导向攻击者）。
+# 必填，无默认值。
+link_base_url = "http://localhost:5273"
+
+[security]
+# Argon2 密码哈希的并行度（哈希成本参数之一，影响登录/注册延迟与抗离线爆破强度）。
+# 默认：4，必须 > 0
+argon2_max_concurrency = 4
+
+# 认证接口限流窗口。
+# 默认：60，允许 1..=86400
+auth_rate_limit_window_seconds = 60
+
+# 窗口内单 IP 认证尝试额度。
+# 默认：30，允许 1..=86400
+auth_rate_limit_ip_attempts = 30
+
+# 窗口内单用户名认证尝试额度。
+# 默认：10，允许 1..=86400
+auth_rate_limit_username_attempts = 10
+
+# 密码重置凭证有效期（只返回一次，保持短 TTL）。
+# 默认：900，允许 60..=3600
+password_reset_ttl_seconds = 900
+
+# 三阶段发布开关：开启后签发带凭据版本的 Refresh Token，并启用
+# change_password / disable / reset_password 的版本递增写。
+# 接入存量旧部署时必须先保持 false 兼容读取，确认无旧实例后再改 true。
+# 默认：false
+issue_refresh_credential_version = true
+
+# 信任哪些反向代理网段提供的 Forwarded/X-Forwarded-For；空列表表示完全忽略。
+# 只填实际反代的最小 CIDR，全网段（0.0.0.0/0 等）会被启动校验拒绝。
+# 默认：[]
+trusted_proxy_cidrs = []
+
+# TOTP 第二因子（可选段，删除整段则 MFA Action 不注册）。
+[security.totp]
+# 加密 users.totp_secret 的独立 AEAD 密钥域（≥32 字节）；
+# 禁止与 token/step-up/邮箱验证码密钥复用。轮换会使存量 TOTP 密文无法解密
+# （用户下次登录需重新 setup），属预期行为。
+# 段内必填，无默认值。
+aead_key = "replace-with-an-independent-32-byte-totp-aead-key"
+
+# TOTP 动态码位数。
+# 默认：6，允许 6..=8
+digits = 6
+
+[shutdown]
+# 进程关闭唯一总预算：收到退出信号后，HTTP 排空、Outbox Worker 退出、
+# MySQL/Redis 与可观测运行时关闭共享这一截止时间。
+# 默认：30，允许 1..=300
+total_timeout_seconds = 30
+
+[observability]
+# 是否启用独立管理面（/metrics 与带依赖检查的 /health/ready）。
+# production 环境必须为 true。
+# 默认：false
+metrics_enabled = true
+
+# 管理面监听地址，必须与 http.bind 不同；生产应由网络策略限制采集端访问。
+# 默认："127.0.0.1:9090"
+metrics_bind = "127.0.0.1:9090"
+
+# 是否启用 OpenTelemetry tracing（OTLP/gRPC 导出）。
+# 默认：false
+traces_enabled = false
+
+# OTLP collector 端点，必须带 scheme。
+# 默认："http://127.0.0.1:4317"
+traces_otlp_endpoint = "http://127.0.0.1:4317"
+
+# trace 采样率。
+# 默认：0.1，允许 0.0..=1.0
+traces_sample_ratio = 0.1
+
+# trace 导出超时。
+# 默认：5，允许 1..=60
+traces_export_timeout_seconds = 5
+
+# 管理面 /health/ready 检查 MySQL/Redis 的唯一总预算（毫秒）。
+# 默认：2000，允许 50..=10000
+readiness_budget_ms = 2000
+
+[logging]
+# tracing 过滤器：只控制级别，不改变生产 JSON 日志结构（一行一个 object）。
+# 默认："yang_system=info,tower_http=info"
+filter = "yang_system=info,tower_http=info"

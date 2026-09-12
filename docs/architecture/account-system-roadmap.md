@@ -9,7 +9,7 @@
 
 | 阶段 | 状态 | 说明 |
 |---|---|---|
-| A-0 三阶段发布开关 | ✅ 已完成 | 示例配置 `issue_refresh_credential_version = true`（`config.example.toml:105`、`src/config/mod.rs:878`） |
+| A-0 三阶段发布开关 | ✅ 已完成 | 示例配置 `issue_refresh_credential_version = true`（`config.example.toml:69`、`src/config/mod.rs:519`） |
 | A-1 自助密码找回 | ✅ 已完成 | `request_password_reset.rs` + `repository.rs::insert_issued`（2026-09-05 提交 40e5904） |
 | A-2 登录等时校验 | ✅ 已完成 | `PasswordEngine::verify_or_dummy` + `login.rs` 接入（2026-09-06 提交 bc808b2） |
 | A-3 前端账号中心 | ✅ 已完成 | `frontend/src/features/account/` + `/account` 路由 + 侧边栏入口（提交 c803071 之后） |

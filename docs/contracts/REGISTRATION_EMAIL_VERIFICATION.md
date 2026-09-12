@@ -31,8 +31,9 @@
 
 ## 配置与 secret provider
 
-完整字段见 `config.example.toml`。生产至少需要配置 SMTP relay、发件人、独立验证码
-密钥以及部署隔离的 Redis namespace。所有字段均可用 `YANG_SYSTEM_EMAIL_*` 环境变量
+完整字段与内置默认值见 `docs/contracts/CONFIGURATION.md`；`config.example.toml`
+只保留必填项。生产至少需要配置 SMTP relay、发件人、独立验证码
+密钥以及部署隔离的 Redis namespace（缺省继承 `authorization.deployment`）。所有字段均可用 `YANG_SYSTEM_EMAIL_*` 环境变量
 覆盖；更推荐通过 `YANG_SYSTEM_SECRET_DIR` 挂载：
 
 - `email_smtp_password`
