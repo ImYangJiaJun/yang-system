@@ -12,10 +12,12 @@ use yang_base::BaseError;
 yang_base::params! {
     #[deny_unknown_fields]
     pub(super) SecurityEventsInput {
+        #[param(source = query)]
         page: Int::new()
             .title("页码")
             .require(false)
             .default(1_i64),
+        #[param(source = query)]
         page_size: Int::new()
             .title("每页条数")
             .require(false)
@@ -84,6 +86,12 @@ mod tests {
             .map(|param| param.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["page", "page_size"]);
+        // GET 无请求体：分页参数必须声明为 query 来源，否则 `?page=N`
+        // 会被静默忽略（回归守护）。
+        assert!(params
+            .as_slice()
+            .iter()
+            .all(|param| param.source == yang_base::definition::ParamSource::Query));
         let injected = serde_json::from_value::<SecurityEventsInput>(serde_json::json!({
             "user_id": 99
         }));

@@ -1688,37 +1688,36 @@
       "get": {
         "description": "管理端分页列出用户（邮箱字段遵循 system 角色可见性）",
         "operationId": "account.user.list_users",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "additionalProperties": false,
-                "properties": {
-                  "page": {
-                    "default": null,
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "page_size": {
-                    "default": null,
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [],
-                "type": "object"
-              }
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
-          "required": false
-        },
+          {
+            "description": "",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1744,6 +1743,13 @@
                         "UserView": {
                           "description": "可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。",
                           "properties": {
+                            "avatar_version": {
+                              "description": "头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
                             "created_at": {
                               "format": "int64",
                               "type": "integer"
@@ -1872,6 +1878,243 @@
         "x-permissions": [
           "account.users.read"
         ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/avatar": {
+      "get": {
+        "description": "读取指定用户头像（JSON 内嵌 data URL，无头像时字段为 null）",
+        "operationId": "account.user.get_avatar",
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "description": "目标用户 ID。",
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "头像读取结果：两个字段始终序列化，无头像时都为 null。",
+                      "properties": {
+                        "data_url": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "etag": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "title": "GetAvatarOutput",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "读取头像",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      },
+      "post": {
+        "description": "上传当前用户头像（PNG/JPEG/WebP/GIF，解码后 ≤ 40 KiB，宽高 ≤ 1024）",
+        "operationId": "account.user.upload_avatar",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "content_base64": {
+                    "description": "头像图片字节的 base64 编码（解码后 ≤ 40 KiB）。",
+                    "type": "string"
+                  },
+                  "mime": {
+                    "description": "图片 MIME 类型：image/png、image/jpeg、image/webp、image/gif。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content_base64",
+                  "mime"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "上传成功后的头像版本（内容 etag，前端据此失效缓存）。",
+                      "properties": {
+                        "avatar_version": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "avatar_version"
+                      ],
+                      "title": "UploadAvatarOutput",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "上传头像",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -2780,6 +3023,264 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/users/login-by-email-code": {
+      "post": {
+        "description": "校验邮箱一次性验证码并签发 Token（免密登录，验证码单次消费）",
+        "operationId": "account.user.login_by_email_code",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "email": {
+                    "description": "登录邮箱。",
+                    "type": "string"
+                  },
+                  "email_code": {
+                    "description": "邮箱一次性验证码（6 位数字）。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "email_code"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "邮箱验证码登录",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/users/login-email-code": {
+      "post": {
+        "description": "向登录邮箱发送一次性免密登录验证码（统一 accepted 响应防枚举）",
+        "operationId": "account.user.request_login_email_code",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "email": {
+                    "description": "登录邮箱。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "验证码请求被接受后的通用响应（不暴露身份是否真实存在）。",
+                      "properties": {
+                        "accepted": {
+                          "description": "请求已被接受（不保证邮件真实投递）。",
+                          "type": "boolean"
+                        },
+                        "expires_in": {
+                          "description": "验证码有效期（秒）。",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "resend_after": {
+                          "description": "重发冷却（秒）。",
+                          "format": "uint64",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "accepted",
+                        "expires_in",
+                        "resend_after"
+                      ],
+                      "title": "RegistrationEmailCodeAccepted",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "请求登录邮箱验证码",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/users/logout": {
       "post": {
         "description": "递增持久会话版本并撤销当前账号此前签发的全部 Access 与 Refresh Token",
@@ -2944,6 +3445,13 @@
                       },
                       "description": "可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。",
                       "properties": {
+                        "avatar_version": {
+                          "description": "头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "created_at": {
                           "format": "int64",
                           "type": "integer"
@@ -3747,6 +4255,13 @@
                       },
                       "description": "可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。",
                       "properties": {
+                        "avatar_version": {
+                          "description": "头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "created_at": {
                           "format": "int64",
                           "type": "integer"
@@ -4239,37 +4754,36 @@
       "get": {
         "description": "查询当前用户的登录安全事件（分页、仅本人）",
         "operationId": "account.user.security_events",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "additionalProperties": false,
-                "properties": {
-                  "page": {
-                    "default": null,
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "page_size": {
-                    "default": null,
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [],
-                "type": "object"
-              }
+        "parameters": [
+          {
+            "description": "",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
-          "required": false
-        },
+          {
+            "description": "",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
