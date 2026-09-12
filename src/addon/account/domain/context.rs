@@ -4,6 +4,7 @@
 //! 获取能力——资源访问器、事务收尾、版本原语、授权快照与会话收敛都是
 //! 它的方法或关联函数，不再有多层自由函数和 re-export 墙。
 
+use super::avatar::AvatarRepository;
 use super::claims;
 use super::login_event::LoginEventRepository;
 use super::repository::UserRepository;
@@ -42,6 +43,7 @@ pub(crate) struct Account {
     users: Arc<UserRepository>,
     sessions: Arc<SessionRepository>,
     login_events: Arc<LoginEventRepository>,
+    avatars: Arc<AvatarRepository>,
     passwords: Arc<PasswordEngine>,
     rate_limiter: Arc<AuthRateLimiter>,
     grant_resolver: Arc<dyn GrantResolver>,
@@ -54,10 +56,12 @@ pub(crate) struct Account {
 
 impl Account {
     /// 由安全配置派生密码引擎与限流器，装配处只提供有信息量的部分。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         users: UserRepository,
         sessions: SessionRepository,
         login_events: LoginEventRepository,
+        avatars: AvatarRepository,
         security: &SecuritySettings,
         grant_resolver: Arc<dyn GrantResolver>,
         system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
@@ -67,6 +71,7 @@ impl Account {
             users: Arc::new(users),
             sessions: Arc::new(sessions),
             login_events: Arc::new(login_events),
+            avatars: Arc::new(avatars),
             passwords: Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?),
             rate_limiter: Arc::new(AuthRateLimiter::new(security.rate_limit_config())),
             grant_resolver,
@@ -90,6 +95,10 @@ impl Account {
 
     pub(crate) fn login_events(&self) -> &LoginEventRepository {
         &self.login_events
+    }
+
+    pub(crate) fn avatars(&self) -> &AvatarRepository {
+        &self.avatars
     }
 
     pub(crate) fn passwords(&self) -> &PasswordEngine {
@@ -158,7 +167,9 @@ impl Account {
             .ok_or_else(|| BaseError::UserNotFound(id.to_string()))?;
         let status = UserStatus::from_storage(&user.require::<String>(STATUS)?)?;
         Self::ensure_active(status)?;
-        UserView::try_from(&user)
+        // 头像 etag 只作缓存失效版本号投影；无头像时为 None（契约字段始终存在）。
+        let avatar_version = self.avatars.etag_for(ctx, id).await?;
+        Ok(UserView::try_from(&user)?.with_avatar_version(avatar_version))
     }
 
     /// 校验账号第二因子（E-1c/E-1d 验收）：TOTP 码优先，失败后依次尝试一次性

@@ -1,9 +1,12 @@
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+
 import { ApiError } from "@/engine/http/errors";
 import { apiBase, parseJson } from "@/engine/http/http";
 import { stepUpRequiredError } from "@/engine/session/step-up-response";
+import { useSessionCredentials, useSessionSnapshot } from "@/engine";
 
 /**
- * account 账号中心业务流程请求：当前用户资料、修改密码、修改用户名、停用账号。
+ * account 账号中心业务流程请求：当前用户资料、头像、修改密码、修改用户名、停用账号。
  *
  * 会话生命周期（login/refresh/logout/disable）属引擎会话协议，见 engine/session/lifecycle.ts；
  * 本文件只负责账号中心页面的受保护写操作。修改密码/用户名/停用均要求 Step-up
@@ -18,6 +21,7 @@ export type CurrentUser = {
   emailVerifiedAt: number | null;
   status: "active" | "disabled";
   totpActivated: boolean;
+  avatarVersion: string | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -120,9 +124,94 @@ export async function fetchCurrentUser(
         : null,
     status: data.status === "disabled" ? "disabled" : "active",
     totpActivated: data.totp_activated === true,
+    avatarVersion:
+      typeof data.avatar_version === "string" && data.avatar_version
+        ? data.avatar_version
+        : null,
     createdAt: data.created_at as number,
     updatedAt: data.updated_at as number,
   };
+}
+
+/// 当前用户资料的 TanStack Query 入口：认证会话就绪后拉取，token 变化自动重拉。
+/// 头像上传等写操作后由调用方 invalidate 该查询驱动各消费方刷新。
+export function useMe(): UseQueryResult<CurrentUser> {
+  const session = useSessionCredentials();
+  const snapshot = useSessionSnapshot();
+  return useQuery({
+    enabled: snapshot.loggedIn,
+    queryKey: ["me", session.token ?? "anonymous"],
+    queryFn: ({ signal }) => fetchCurrentUser(session.token, signal),
+    staleTime: 30_000,
+  });
+}
+
+export type AvatarContent = {
+  etag: string | null;
+  dataUrl: string | null;
+};
+
+/// 读取指定用户头像：无头像时 etag/data_url 均为 null；data_url 可直接作为 <img src>。
+export async function fetchAvatar(
+  userId: number,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<AvatarContent> {
+  const response = await fetch(
+    `${apiBase}/api/v1/users/avatar?user_id=${userId}`,
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+      credentials: "include",
+      signal,
+    },
+  );
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+  if (!response.ok || payload?.code !== 0) {
+    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+      status: response.status,
+      code: payload?.code,
+      requestId,
+      details: payload,
+    });
+  }
+  const data = recordData(payload.data);
+  return {
+    etag: typeof data?.etag === "string" && data.etag ? data.etag : null,
+    dataUrl:
+      typeof data?.data_url === "string" && data.data_url
+        ? data.data_url
+        : null,
+  };
+}
+
+/// 上传当前用户头像：body 为 base64 内容与 MIME，成功返回新的内容版本（etag）。
+export async function uploadAvatar(
+  contentBase64: string,
+  mime: string,
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ avatarVersion: string }> {
+  const result = await postAuthenticated(
+    "/api/v1/users/avatar",
+    { content_base64: contentBase64, mime },
+    accessToken,
+    signal,
+  );
+  const data = recordData(result.payload.data);
+  if (typeof data?.avatar_version !== "string" || !data.avatar_version) {
+    throw new ApiError("头像上传响应缺少有效版本", {
+      status: result.status,
+      code: result.payload.code,
+      requestId: result.requestId,
+      details: result.payload,
+    });
+  }
+  return { avatarVersion: data.avatar_version };
 }
 
 export async function changePassword(

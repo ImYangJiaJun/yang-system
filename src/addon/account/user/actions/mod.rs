@@ -11,6 +11,7 @@ mod change_password;
 mod change_username;
 mod delete_account;
 mod disable_self;
+mod get_avatar;
 mod list_sessions;
 mod list_users;
 mod login;
@@ -29,6 +30,7 @@ mod step_up;
 mod totp_activate;
 mod totp_deactivate;
 mod totp_setup;
+mod upload_avatar;
 
 use crate::addon::account::Account;
 use std::sync::Arc;
@@ -72,6 +74,8 @@ const ACTIONS: &[Register] = action_registry![
     totp_activate,   // 条件：security.totp 配置段
     totp_deactivate, // 条件：security.totp 配置段
     me,
+    upload_avatar,
+    get_avatar,
     // scaffold:action-registration
 ];
 

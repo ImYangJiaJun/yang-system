@@ -47,8 +47,19 @@ pub(crate) struct UserView {
     status: UserStatus,
     /// TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。
     totp_activated: bool,
+    /// 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由
+    /// `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。
+    avatar_version: Option<String>,
     created_at: i64,
     updated_at: i64,
+}
+
+impl UserView {
+    /// 注入头像版本号（始终序列化该字段，保持契约稳定）。
+    pub(crate) fn with_avatar_version(mut self, version: Option<String>) -> Self {
+        self.avatar_version = version;
+        self
+    }
 }
 
 impl TryFrom<&Record> for UserView {
@@ -62,6 +73,7 @@ impl TryFrom<&Record> for UserView {
             email_verified_at: user.optional(EMAIL_VERIFIED_AT)?,
             status: UserStatus::from_storage(&user.require::<String>(STATUS)?)?,
             totp_activated: user.optional::<i64>(TOTP_ACTIVATED_AT)?.is_some(),
+            avatar_version: None,
             created_at: user.require(CREATED_AT)?,
             updated_at: user.require(UPDATED_AT)?,
         })

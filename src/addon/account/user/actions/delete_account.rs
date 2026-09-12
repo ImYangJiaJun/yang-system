@@ -53,6 +53,11 @@ pub(super) async fn handle(
         }
         // FK 前置清理：作废该用户全部未消费重置凭证（匿名化后不允许再重置）。
         Account::invalidate_resets_in_tx(&mut transaction, user_id).await?;
+        // 隐私清理：同事务删除头像行（匿名化后不得保留可识别图片）。
+        account
+            .avatars()
+            .delete_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
         // 匿名化：username 改写保唯一、email 置 NULL 释放、status=deleted、双版本递增。
         Account::anonymize_locked_in_tx(&mut transaction, &locked, &deleted_username).await?;
         let event = audit::succeeded_event(

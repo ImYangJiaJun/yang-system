@@ -7,6 +7,7 @@
 //! 最终管理员声明端口（system_owner）与邮件投递（email_delivery）。
 
 pub(crate) mod authz_version;
+pub(crate) mod avatar;
 pub(crate) mod claims;
 pub(crate) mod context;
 pub mod email_delivery;

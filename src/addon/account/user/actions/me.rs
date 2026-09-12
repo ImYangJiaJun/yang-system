@@ -69,7 +69,30 @@ mod tests {
 
         assert_eq!(value.get(USERNAME), Some(&serde_json::json!("alice")));
         assert_eq!(value.get("totp_activated"), Some(&serde_json::json!(false)));
+        // 契约字段始终序列化：Record 不含头像信息时投影为 null。
+        assert_eq!(value.get("avatar_version"), Some(&serde_json::Value::Null));
         assert!(value.get(PASSWORD_HASH).is_none());
+    }
+
+    #[test]
+    fn user_view_carries_injected_avatar_version() {
+        let record = Record::new()
+            .set(USER_ID, 7)
+            .set(USERNAME, "alice")
+            .set(STATUS, "active")
+            .set(CREATED_AT, 10)
+            .set(UPDATED_AT, 11);
+
+        let view = UserView::try_from(&record)
+            .unwrap_or_else(|error| panic!("完整记录应转换为用户视图: {error}"))
+            .with_avatar_version(Some("0123456789abcdef0123456789abcdef".to_string()));
+        let value = serde_json::to_value(view)
+            .unwrap_or_else(|error| panic!("用户视图应可序列化: {error}"));
+
+        assert_eq!(
+            value.get("avatar_version"),
+            Some(&serde_json::json!("0123456789abcdef0123456789abcdef"))
+        );
     }
 
     #[test]

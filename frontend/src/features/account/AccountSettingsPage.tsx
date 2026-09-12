@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 import { useNavigate } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
 
 import type { CurrentUser, SessionInfo, TotpSetupResult } from "./api";
 import {
@@ -13,8 +21,11 @@ import {
   requestChangeEmail,
   revokeSession,
   setupTotp,
+  uploadAvatar,
 } from "./api";
+import { prepareAvatarFile } from "./lib/prepare-avatar";
 import { TotpSetupDialog } from "./TotpSetupDialog";
+import { UserAvatar } from "./UserAvatar";
 import {
   useSessionController,
   useSessionSnapshot,
@@ -60,6 +71,10 @@ export default function AccountSettingsPage() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sessionsError, setSessionsError] = useState("");
 
+  // 头像：隐藏文件输入 + 上传进行态（复用 busy="avatar"）
+  const queryClient = useQueryClient();
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+
   // TOTP 双重验证：setup（弹窗展示二维码/密钥待验码）→ activated（一次性回显恢复码）
   const [totpSetup, setTotpSetup] = useState<TotpSetupResult | null>(null);
   const [totpError, setTotpError] = useState("");
@@ -82,6 +97,29 @@ export default function AccountSettingsPage() {
   useEffect(() => {
     void loadProfile();
   }, [loadProfile]);
+
+  /// 更换头像：客户端压缩（≤256px / ≤40KiB WebP）→ 上传 → 失效 me 查询并刷新资料。
+  /// avatar_version 变化会让各处 UserAvatar 按新 key 自动重取。
+  const onAvatarFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // 清空 value 允许重复选择同一文件再次触发 change。
+    event.target.value = "";
+    if (!file || busy) return;
+    setMessage("");
+    setErrorMessage("");
+    setBusy("avatar");
+    try {
+      const prepared = await prepareAvatarFile(file);
+      await uploadAvatar(prepared.contentBase64, prepared.mime, token);
+      await queryClient.invalidateQueries({ queryKey: ["me"] });
+      await loadProfile();
+      setMessage("头像已更新");
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const loadSessions = useCallback(async () => {
     setSessionsError("");
@@ -383,6 +421,41 @@ export default function AccountSettingsPage() {
         >
           {message}
         </p>
+      )}
+
+      {profile && (
+        <section className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-medium">头像</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            支持 PNG/JPEG/WebP/GIF，上传前会自动压缩到 40KiB 以内
+          </p>
+          <div className="mt-3 flex items-center gap-4">
+            <UserAvatar
+              userId={profile.id}
+              avatarVersion={profile.avatarVersion}
+              size={64}
+              alt="当前头像"
+            />
+            <div className="space-y-2">
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                className="hidden"
+                aria-label="选择头像图片"
+                onChange={(event) => void onAvatarFile(event)}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy !== null}
+                onClick={() => avatarInputRef.current?.click()}
+              >
+                {busy === "avatar" ? "上传中…" : "更换头像"}
+              </Button>
+            </div>
+          </div>
+        </section>
       )}
 
       {profile && (

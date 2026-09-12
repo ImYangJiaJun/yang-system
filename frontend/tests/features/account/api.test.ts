@@ -7,9 +7,11 @@ import {
   changePassword,
   changeUsername,
   deactivateTotp,
+  fetchAvatar,
   fetchCurrentUser,
   requestChangeEmail,
   setupTotp,
+  uploadAvatar,
 } from "@/features/account/api";
 
 /// account 账号中心 API 契约：路径、鉴权头、Step-up 428 重放、响应校验。
@@ -57,6 +59,7 @@ describe("fetchCurrentUser", () => {
               email_verified_at: 1000,
               status: "active",
               totp_activated: true,
+              avatar_version: "v-etag-1",
               created_at: 500,
               updated_at: 600,
             },
@@ -75,9 +78,35 @@ describe("fetchCurrentUser", () => {
       emailVerifiedAt: 1000,
       status: "active",
       totpActivated: true,
+      avatarVersion: "v-etag-1",
       createdAt: 500,
       updatedAt: 600,
     });
+  });
+
+  it("无头像账号投影 avatarVersion=null（字段缺省或显式 null）", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/users/me")) {
+        return Promise.resolve(
+          jsonResponse({
+            code: 0,
+            data: {
+              id: 7,
+              username: "alice",
+              status: "active",
+              totp_activated: false,
+              avatar_version: null,
+              created_at: 500,
+              updated_at: 600,
+            },
+          }),
+        );
+      }
+      return Promise.reject(new Error(`未覆盖请求: ${url}`));
+    });
+
+    const user = await fetchCurrentUser("tok-1");
+    expect(user.avatarVersion).toBeNull();
   });
 
   it("未启用 TOTP 时投影 totpActivated=false", async () => {
@@ -402,5 +431,92 @@ describe("changeEmail", () => {
       reloginRequired: true,
       immediateConvergence: true,
     });
+  });
+});
+
+describe("fetchAvatar", () => {
+  it("GET /users/avatar?user_id= 携带 Bearer token 并投影 data_url/etag", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    stubFetch((url, init) => {
+      captured = { url, init };
+      return Promise.resolve(
+        jsonResponse({
+          code: 0,
+          data: { etag: "v-1", data_url: "data:image/webp;base64,QUJD" },
+        }),
+      );
+    });
+
+    const avatar = await fetchAvatar(42, "tok-1");
+    expect(captured?.url).toBe("/api/v1/users/avatar?user_id=42");
+    expect(captured?.init.method).toBe("GET");
+    expect(new Headers(captured?.init.headers).get("authorization")).toBe(
+      "Bearer tok-1",
+    );
+    expect(avatar).toEqual({
+      etag: "v-1",
+      dataUrl: "data:image/webp;base64,QUJD",
+    });
+  });
+
+  it("无头像时两个字段均为 null", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        jsonResponse({ code: 0, data: { etag: null, data_url: null } }),
+      ),
+    );
+    await expect(fetchAvatar(42, "tok-1")).resolves.toEqual({
+      etag: null,
+      dataUrl: null,
+    });
+  });
+
+  it("401 映射为 ApiError", async () => {
+    stubFetch(() =>
+      Promise.resolve(jsonResponse({ code: 40101, message: "未认证" }, 401)),
+    );
+    await expect(fetchAvatar(42, "tok-1")).rejects.toThrow("未认证");
+  });
+});
+
+describe("uploadAvatar", () => {
+  it("POST /users/avatar 上送 base64 与 mime，返回新版本", async () => {
+    let captured: { url: string; init: RequestInit } | undefined;
+    stubFetch((url, init) => {
+      captured = { url, init };
+      return Promise.resolve(
+        jsonResponse({ code: 0, data: { avatar_version: "v-2" } }),
+      );
+    });
+
+    const result = await uploadAvatar("QUJD", "image/webp", "tok-1");
+    expect(captured?.url).toBe("/api/v1/users/avatar");
+    expect(captured?.init.method).toBe("POST");
+    expect(JSON.parse(String(captured?.init.body))).toEqual({
+      content_base64: "QUJD",
+      mime: "image/webp",
+    });
+    expect(new Headers(captured?.init.headers).get("authorization")).toBe(
+      "Bearer tok-1",
+    );
+    expect(result).toEqual({ avatarVersion: "v-2" });
+  });
+
+  it("响应缺少 avatar_version 时拒绝", async () => {
+    stubFetch(() => Promise.resolve(jsonResponse({ code: 0, data: {} })));
+    await expect(uploadAvatar("QUJD", "image/webp", "tok-1")).rejects.toThrow(
+      /缺少有效版本/,
+    );
+  });
+
+  it("后端校验失败透传错误消息", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        jsonResponse({ code: 700005, message: "头像解码后超出 40KiB" }, 400),
+      ),
+    );
+    await expect(uploadAvatar("QUJD", "image/webp", "tok-1")).rejects.toThrow(
+      "头像解码后超出 40KiB",
+    );
   });
 });

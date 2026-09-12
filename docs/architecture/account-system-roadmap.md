@@ -18,6 +18,7 @@
 | B-1 邮箱换绑 | ✅ 已完成 | `[email.change]` 独立验证码段 + `change_email.rs`/`request_change_email.rs` + 前端区块 |
 | B-2 邮箱登录 | ✅ 已完成 | `find_credentials_by_email` + login 归一化按 `@` 分派，限流键沿用归一化标识 |
 | B-3 密码策略 | ✅ 已完成 | 内置弱密码字典 + 禁止与用户名相同（`policy.rs::WEAK_PASSWORDS`） |
+| F-1 用户头像 | ✅ 已完成 | `user_avatar` 运行支撑表（base64 TEXT，≤40KiB，magic bytes 与宽高 ≤1024 校验）+ `upload_avatar`/`get_avatar` Action + `UserView.avatar_version` + 注销事务内清理；存储层收在 `AvatarRepository` 后，未来可平滑切换对象存储 |
 | C-1 会话持久化 | ✅ 已完成 | `user_session` 表 + claims `session_id`（登录生成/refresh 继承）+ 60s 节流 + 设备列表/逐台撤销 |
 | C-2 登录历史 | ✅ 已完成 | `login_event` 表 + 成功/失败粗粒度记录 + `GET /users/security-events` |
 | C-3 新设备登录提醒 | ✅ 已完成 | `NewDeviceEmailSender` SMTP 实现，best-effort 不阻塞登录 |

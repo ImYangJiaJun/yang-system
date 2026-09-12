@@ -24,6 +24,8 @@ import {
   type Density,
 } from "@/shell/density";
 import { useIdentity } from "@/features/auth/use-identity";
+import { useMe } from "@/features/account/api";
+import { UserAvatar } from "@/features/account/UserAvatar";
 import {
   buildNavigationPages,
   groupNavigationPages,
@@ -47,7 +49,6 @@ import type { UiCatalog } from "@/engine/contracts/ui-catalog";
 import { cn } from "@/shared/lib/utils";
 import logoDarkUrl from "@/shared/assets/logo-dark.png";
 import logoLightUrl from "@/shared/assets/logo-light.png";
-import avatarDefaultUrl from "@/shared/assets/avatar-default.png";
 
 export type ShellContext = { catalog: UiCatalog };
 
@@ -75,6 +76,7 @@ function ModuleIcon({ token }: { token: string }) {
 /// 身份切换器（旧 AccountSwitcher.vue 语义）：当前身份 + 切换列表。
 function AccountSwitcher({ catalog }: { catalog: UiCatalog | undefined }) {
   const { identity, select } = useIdentity();
+  const me = useMe();
   const navigate = useNavigate();
   const modulePages = buildAccountModulePages(catalog);
   const identities = visibleAccountIdentities(modulePages, catalog);
@@ -95,10 +97,11 @@ function AccountSwitcher({ catalog }: { catalog: UiCatalog | undefined }) {
           className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
           aria-label="账号菜单"
         >
-          <img
-            src={avatarDefaultUrl}
-            alt="默认头像"
-            className="size-6 shrink-0 rounded-full object-cover"
+          <UserAvatar
+            userId={me.data?.id}
+            avatarVersion={me.data?.avatarVersion ?? null}
+            size={24}
+            alt="当前用户头像"
           />
           <span className="min-w-0 flex-1 truncate text-left">
             {active?.title ?? "未选择角色"}

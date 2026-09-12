@@ -7,6 +7,7 @@
 mod actions;
 pub(super) mod table;
 
+use super::domain::avatar::AvatarRepository;
 use super::domain::context::Account;
 use super::domain::login_event::LoginEventRepository;
 use super::domain::repository::UserRepository;
@@ -39,6 +40,7 @@ pub(super) fn build_module(
         UserRepository::new(table.table_definition()?),
         session_repository,
         login_event_repository,
+        AvatarRepository::new(crate::schema::user_avatar()?),
         &security,
         grant_resolver,
         system_owner_claimer,

@@ -44,13 +44,14 @@ pub async fn sync_with_database(
     result
 }
 
-fn infrastructure_definitions() -> Result<[TableDefinition; 5], BaseError> {
+fn infrastructure_definitions() -> Result<[TableDefinition; 6], BaseError> {
     Ok([
         authorization_outbox()?,
         audit_event()?,
         password_reset_token()?,
         user_session()?,
         login_event()?,
+        user_avatar()?,
     ])
 }
 
@@ -256,6 +257,29 @@ pub(crate) fn login_event() -> Result<TableDefinition, BaseError> {
         .build()
 }
 
+/// 用户头像（一人一行的数据库存储，不引入对象存储）。
+///
+/// 主键即用户 ID；图片字节以 base64 文本落 `content_base64`（TEXT 上限 65535
+/// 字节，应用层限制解码前 ≤ 40 KiB），`etag` 是内容 sha256 十六进制前 32 字符，
+/// 供前端按 `avatar_version` 做缓存失效。该表不进 UI Catalog，与 user_session
+/// 同列运行支撑。
+pub(crate) fn user_avatar() -> Result<TableDefinition, BaseError> {
+    Table::new("user_avatar")
+        .fields([
+            Field::bigint("user_id").required().primary_key(),
+            Field::string("mime", 32).required(),
+            Field::text("content_base64").required(),
+            Field::string("etag", 32).required(),
+            Field::bigint("updated_at").required(),
+        ])
+        .check_named(
+            "chk_user_avatar_mime",
+            "`mime` IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif')",
+        )
+        .foreign_key_named("fk_user_avatar_user", ["user_id"], "users", ["id"])
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +296,7 @@ mod tests {
                 "password_reset_token",
                 "user_session",
                 "login_event",
+                "user_avatar",
             ]
         );
     }
