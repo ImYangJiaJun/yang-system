@@ -2,7 +2,9 @@
 //!
 //! 覆盖完整链路（发码 → 用码登录 → me）、防枚举统一响应、验证码单次消费、
 //! 错误尝试上限销毁、与注册验证码 key 域隔离、停用账号抑制投递与拒绝登录、
-//! 以及与密码登录共享 AuthOperation::Login 限流预算。
+//! 与密码登录共享 AuthOperation::Login 限流预算，以及两段式 MFA（多因子任选
+//! 登录阶段 1）：已激活 TOTP 的账号第一段只验不消费、第二因子三选一中
+//! 备用邮箱通道严格禁用（同类不构成双因子）。
 //! 需要 `YANG_SYSTEM_TEST_DATABASE_URL`（库名以 `_test` 结尾）与
 //! `YANG_SYSTEM_TEST_REDIS_URL`（强制 DB 15）。
 
@@ -14,6 +16,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use yang_base::action::auth::TotpLiteVerifier;
 use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
@@ -22,18 +25,21 @@ use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::addon::account::email_delivery::{
     EmailDeliveryError, LoginEmailCodeSenderHandle, RegistrationEmailSender,
-    RegistrationEmailSenderHandle, VerificationCodeSender,
+    RegistrationEmailSenderHandle, VerificationCodeSender, VerificationCodeSenderHandle,
 };
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::{
-    EmailVerificationSettings, LoginEmailVerificationConfig, SecuritySettings,
+    EmailVerificationSettings, LoginEmailVerificationConfig, MfaEmailVerificationConfig,
+    SecuritySettings, TotpSettings,
 };
 use yang_system::schema::sync_with_database;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 /// 统一无效验证码错误（防枚举）：任何消费失败都映射为这一个形状。
 const INVALID_CODE_MESSAGE: &str = "邮箱验证码无效或已过期";
+/// 测试 TOTP AEAD 密钥域（32+ 字节，与验证码密钥域互不相同）。
+const TOTP_AEAD_KEY: &str = "integration-totp-aead-key-0123456789abcdef";
 
 /// 同时捕获注册验证码与免密登录验证码的测试投递器（两类缓冲互相隔离）。
 #[derive(Clone, Default)]
@@ -119,7 +125,10 @@ fn security_settings_with_login_budget(login_budget: u64) -> Arc<SecuritySetting
         password_reset_ttl_seconds: 900,
         issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
-        totp: None,
+        totp: Some(TotpSettings {
+            aead_key: TOTP_AEAD_KEY.to_string(),
+            digits: 6,
+        }),
     })
 }
 
@@ -297,10 +306,19 @@ async fn build_login_app(
             .extension(step_up_manager())
             .extension(RegistrationEmailSenderHandle::new(sender.clone()))
             .extension(LoginEmailCodeSenderHandle::new(sender.clone()))
+            .extension(VerificationCodeSenderHandle::new(sender.clone()))
             .config(
                 email_settings(namespace.clone(), "integration-registration-secret-32bytes")
                     .engine_config(),
             )
+            .config(MfaEmailVerificationConfig(
+                email_settings(namespace.clone(), "integration-mfa-email-secret-32bytes")
+                    .mfa_engine_config(),
+            ))
+            .config(TotpSettings {
+                aead_key: TOTP_AEAD_KEY.to_string(),
+                digits: 6,
+            })
             .config(LoginEmailVerificationConfig(
                 email_settings(namespace, "integration-login-email-secret-32bytes")
                     .login_engine_config(),
@@ -375,6 +393,101 @@ async fn login_by_email_code(
         peer_port,
     )
     .await
+}
+
+/// 用邮箱验证码登录（两段式第二段携带 `mfa_code`）。
+async fn login_by_email_code_2fa(
+    app: &BuiltApp,
+    email: &str,
+    code: &str,
+    mfa_code: &str,
+    peer_port: u16,
+) -> Result<ApiResponse, BaseError> {
+    dispatch(
+        app,
+        "login_by_email_code",
+        json!({ "email": email, "email_code": code, "mfa_code": mfa_code }),
+        &[],
+        peer_port,
+    )
+    .await
+}
+
+/// 密码登录；`mfa_code` 为 Some 时携带第二因子码。
+async fn login_with_password(
+    app: &BuiltApp,
+    username: &str,
+    mfa_code: Option<&str>,
+    peer_port: u16,
+) -> Result<ApiResponse, BaseError> {
+    let body = match mfa_code {
+        Some(code) => json!({
+            "username": username,
+            "password": PASSWORD,
+            "extra": { "mfa_code": code },
+        }),
+        None => json!({ "username": username, "password": PASSWORD }),
+    };
+    dispatch(app, "login", body, &[], peer_port).await
+}
+
+fn now_seconds() -> anyhow::Result<u64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+/// 为账号完成 TOTP 激活，返回（密钥，恢复码组）。
+async fn activate_totp(
+    app: &BuiltApp,
+    username: &str,
+    peer_port: u16,
+) -> anyhow::Result<(String, Vec<String>)> {
+    let login_response = login_with_password(app, username, None, peer_port).await?;
+    let token = access_token(&login_response)?;
+    let authorization = format!("Bearer {token}");
+    let setup = dispatch(
+        app,
+        "totp_setup",
+        json!({}),
+        &[("authorization", authorization.as_str())],
+        peer_port,
+    )
+    .await?;
+    let secret = setup
+        .data
+        .as_ref()
+        .and_then(|data| data["secret"].as_str())
+        .map(str::to_string)
+        .context("TOTP setup 响应缺少密钥")?;
+    let code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
+    let activated = dispatch(
+        app,
+        "totp_activate",
+        json!({ "secret": secret, "code": code }),
+        &[("authorization", authorization.as_str())],
+        peer_port,
+    )
+    .await?;
+    let data = activated.data.context("TOTP 激活响应缺少 data")?;
+    ensure!(data["totp_activated"] == true, "TOTP 激活必须成功");
+    let recovery_codes = data["recovery_codes"]
+        .as_array()
+        .context("TOTP 激活响应缺少恢复码")?
+        .iter()
+        .filter_map(|code| code.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    ensure!(!recovery_codes.is_empty(), "恢复码组不得为空");
+    Ok((secret, recovery_codes))
+}
+
+/// 统计账号的登录事件行数（成功与失败合计）。
+async fn login_event_count(database: &Database, username: &str) -> anyhow::Result<i64> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM login_event WHERE user_id = (SELECT user_id FROM users WHERE username = ?)",
+    )
+    .bind(username)
+    .fetch_one(database.pool())
+    .await?;
+    Ok(count)
 }
 
 /// 断言结果为统一无效验证码错误（防枚举形状）。
@@ -823,6 +936,229 @@ async fn login_email_code_shares_login_rate_limit_budget() -> anyhow::Result<()>
         {
             Err(BaseError::RateLimitExceeded { .. }) => {}
             other => anyhow::bail!("发码端点必须共享 Login 限流预算，实际: {other:?}"),
+        }
+        Ok(())
+    }
+    .await;
+
+    let database_cleanup = reset_database(&control).await;
+    let redis_cleanup = reset_redis(&redis).await;
+    finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn totp_account_email_code_login_requires_second_factor() -> anyhow::Result<()> {
+    let control = connect_database().await?;
+    let redis = connect_redis().await?;
+    reset_database(&control).await?;
+    reset_redis(&redis).await?;
+
+    let outcome = async {
+        let sender = CapturingEmailSender::default();
+        let app = build_login_app(&control, &redis, &sender, security_settings()).await?;
+
+        register_user(
+            &app,
+            &sender,
+            "mfa_code_user",
+            "mfa.code@example.com",
+            44_901,
+        )
+        .await?;
+        let (secret, _recovery) = activate_totp(&app, "mfa_code_user", 44_901).await?;
+        // 激活会按秒粒度撤销既有 Token；跨过撤销水位线再登录，避免同秒新 Token 被误撤。
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        request_login_code(&app, "mfa.code@example.com", 44_901).await?;
+        let email_code = sender
+            .take_login_code("mfa.code@example.com")?
+            .context("必须收到登录验证码")?;
+        // 激活流程内的密码登录已落过事件，以此为基线观察第一段是否新增。
+        let baseline_events = login_event_count(&control, "mfa_code_user").await?;
+
+        // 第一段：验证码有效但缺第二因子 → SecondFactorRequired，不签发凭据。
+        match login_by_email_code(&app, "mfa.code@example.com", &email_code, 44_901).await {
+            Err(BaseError::SecondFactorRequired) => {}
+            other => anyhow::bail!("缺第二因子必须返回 SecondFactorRequired，实际: {other:?}"),
+        }
+        // 协议步骤不是失败事件：第一段不得落 login_event（对齐密码登录）。
+        ensure!(
+            login_event_count(&control, "mfa_code_user").await? == baseline_events,
+            "第一段 SecondFactorRequired 不得记录登录事件"
+        );
+
+        // 第一段只验不消费：TTL 内同一验证码可完成第二段（TOTP 动态码）。
+        let totp_code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
+        let logged_in = login_by_email_code_2fa(
+            &app,
+            "mfa.code@example.com",
+            &email_code,
+            &totp_code,
+            44_901,
+        )
+        .await?;
+        let token = access_token(&logged_in)?;
+        ensure!(
+            login_event_count(&control, "mfa_code_user").await? > baseline_events,
+            "第二段成功必须记录登录事件"
+        );
+
+        // 签发的 token 可用；且邮箱验证码已被原子消费，重放必拒。
+        let authorization = format!("Bearer {token}");
+        let me = dispatch(
+            &app,
+            "me",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            44_901,
+        )
+        .await?;
+        ensure!(me.code == 0, "me 必须成功");
+        let fresh_totp = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
+        assert_invalid_code(
+            login_by_email_code_2fa(
+                &app,
+                "mfa.code@example.com",
+                &email_code,
+                &fresh_totp,
+                44_901,
+            )
+            .await,
+        )?;
+        Ok(())
+    }
+    .await;
+
+    let database_cleanup = reset_database(&control).await;
+    let redis_cleanup = reset_redis(&redis).await;
+    finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn backup_email_code_rejected_when_first_factor_is_email_code() -> anyhow::Result<()> {
+    let control = connect_database().await?;
+    let redis = connect_redis().await?;
+    reset_database(&control).await?;
+    reset_redis(&redis).await?;
+
+    let outcome = async {
+        let sender = CapturingEmailSender::default();
+        let app = build_login_app(&control, &redis, &sender, security_settings()).await?;
+
+        register_user(&app, &sender, "backup_user", "backup@example.com", 45_001).await?;
+        activate_totp(&app, "backup_user", 45_001).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        // 取一枚登录验证码（第一因子）与一枚 MFA 备用邮箱验证码（[email.mfa] 域）。
+        request_login_code(&app, "backup@example.com", 45_001).await?;
+        let email_code = sender
+            .take_login_code("backup@example.com")?
+            .context("必须收到登录验证码")?;
+        let mfa_request = dispatch(
+            &app,
+            "request_mfa_email_code",
+            json!({ "username": "backup_user", "password": PASSWORD }),
+            &[],
+            45_001,
+        )
+        .await?;
+        ensure!(mfa_request.code == 0, "MFA 备用邮箱验证码请求必须成功");
+        // 备用邮箱验证码与登录验证码共用投递器的同一捕获缓冲（按邮箱键隔离先后取用）。
+        let backup_code = sender
+            .take_login_code("backup@example.com")?
+            .context("必须收到 MFA 备用邮箱验证码")?;
+
+        // 第一段只验不消费 → SecondFactorRequired。
+        match login_by_email_code(&app, "backup@example.com", &email_code, 45_001).await {
+            Err(BaseError::SecondFactorRequired) => {}
+            other => anyhow::bail!("缺第二因子必须返回 SecondFactorRequired，实际: {other:?}"),
+        }
+        // 第二段以备用邮箱验证码作第二因子：同类因子不构成双因子，必须拒绝。
+        match login_by_email_code_2fa(
+            &app,
+            "backup@example.com",
+            &email_code,
+            &backup_code,
+            45_001,
+        )
+        .await
+        {
+            Err(BaseError::ParamInvalid(field, _)) if field == "mfa_code" => {}
+            other => anyhow::bail!("备用邮箱验证码作第二因子必须拒绝，实际: {other:?}"),
+        }
+        // 备用通道未被触碰：该备用邮箱验证码未被消费，仍可在密码登录路径使用
+        //（密码登录的备用邮箱通道保留，allow_backup_email = true）。
+        match login_with_password(&app, "backup_user", None, 45_001).await {
+            Err(BaseError::SecondFactorRequired) => {}
+            other => {
+                anyhow::bail!("密码登录缺第二因子必须返回 SecondFactorRequired，实际: {other:?}")
+            }
+        }
+        let password_login =
+            login_with_password(&app, "backup_user", Some(&backup_code), 45_001).await?;
+        access_token(&password_login)?;
+        Ok(())
+    }
+    .await;
+
+    let database_cleanup = reset_database(&control).await;
+    let redis_cleanup = reset_redis(&redis).await;
+    finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn recovery_code_works_as_second_factor_on_email_code_login() -> anyhow::Result<()> {
+    let control = connect_database().await?;
+    let redis = connect_redis().await?;
+    reset_database(&control).await?;
+    reset_redis(&redis).await?;
+
+    let outcome = async {
+        let sender = CapturingEmailSender::default();
+        let app = build_login_app(&control, &redis, &sender, security_settings()).await?;
+
+        register_user(
+            &app,
+            &sender,
+            "recovery_user",
+            "recovery@example.com",
+            45_101,
+        )
+        .await?;
+        let (_secret, recovery_codes) = activate_totp(&app, "recovery_user", 45_101).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        let recovery_code = recovery_codes
+            .first()
+            .context("激活必须签发恢复码")?
+            .clone();
+
+        request_login_code(&app, "recovery@example.com", 45_101).await?;
+        let email_code = sender
+            .take_login_code("recovery@example.com")?
+            .context("必须收到登录验证码")?;
+
+        // 第一段 → SecondFactorRequired；第二段用恢复码完成登录。
+        match login_by_email_code(&app, "recovery@example.com", &email_code, 45_101).await {
+            Err(BaseError::SecondFactorRequired) => {}
+            other => anyhow::bail!("缺第二因子必须返回 SecondFactorRequired，实际: {other:?}"),
+        }
+        let logged_in = login_by_email_code_2fa(
+            &app,
+            "recovery@example.com",
+            &email_code,
+            &recovery_code,
+            45_101,
+        )
+        .await?;
+        access_token(&logged_in)?;
+
+        // 恢复码单次消费：同一恢复码在密码登录路径重放必拒。
+        match login_with_password(&app, "recovery_user", Some(&recovery_code), 45_101).await {
+            Err(BaseError::ParamInvalid(field, _)) if field == "mfa_code" => {}
+            other => anyhow::bail!("已消费的恢复码重放必须拒绝，实际: {other:?}"),
         }
         Ok(())
     }
