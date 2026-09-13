@@ -48,7 +48,7 @@ export async function loginWithMockedCredentials(page: Page) {
   await page.goto("/login");
   await page.getByLabel("帐号").fill("alice");
   await page.getByLabel("密码", { exact: true }).fill("correct-password");
-  await page.getByRole("button", { name: "登录" }).click();
+  await page.getByRole("button", { name: "登录", exact: true }).click();
   // 演示 Catalog 无 Module 与 identity，登录后直达应用中心。
   await expect(
     page.getByRole("heading", { name: "应用中心", level: 1 }),

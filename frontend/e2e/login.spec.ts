@@ -24,7 +24,7 @@ test("登录失败时停留在登录页且不保存凭据", async ({ page }) => 
   await page.goto("/login");
   await page.getByLabel("帐号").fill("alice");
   await page.getByLabel("密码", { exact: true }).fill("wrong-password");
-  await page.getByRole("button", { name: "登录" }).click();
+  await page.getByRole("button", { name: "登录", exact: true }).click();
 
   await expect(page).toHaveURL(/\/login/);
   await expect(page.getByText("账号或密码错误")).toBeVisible();
@@ -49,7 +49,7 @@ test("登录成功进入应用中心且 Token 不落 Web Storage", async ({ page
   await page.goto("/login");
   await page.getByLabel("帐号").fill("alice");
   await page.getByLabel("密码", { exact: true }).fill("correct-password");
-  await page.getByRole("button", { name: "登录" }).click();
+  await page.getByRole("button", { name: "登录", exact: true }).click();
 
   // 演示 Catalog 无 identity：登录后直达应用中心。
   await expect(page).toHaveURL(/\/$/);
