@@ -154,4 +154,4 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
 - `docs/guides/ADDON_ONBOARDING.md` — 新业务 Addon 接入手册
 - `docs/architecture/` — 授权失效 ADR 与 writer 清单、裸 SQL 边界、会话 TTL、基座完备化路线（foundation-baseline）、前端重构 ADR 组与评审、性能基准
 - `docs/architecture/account-system-roadmap.md` — 账户系统补全路线图（通用业务底座定位，分阶段方案与开放决策点）
-- `docs/architecture/multi-factor-login.md` — 多因子任选登录（Google 式）设计方案（因子分类模型、分阶段方案，未实施）
+- `docs/architecture/multi-factor-login.md` — 多因子任选登录（Google 式）设计方案（因子分类模型、分阶段方案；阶段 1 两段式 MFA 已实施）

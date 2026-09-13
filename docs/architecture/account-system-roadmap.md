@@ -27,7 +27,7 @@
 | E-1 TOTP MFA | ✅ 已完成 | `[security.totp]` AEAD 密钥域 + users 三列 + setup/activate/deactivate Action + 登录两段式（密码通过后返回 `SecondFactorRequired` 进入验证码阶段，错码返参数错误；密码错误仍统一 `InvalidPassword` 防枚举）+ Step-up 第二因子强制 + 恢复码单次消费；deactivate 需登录 + Step-up（已激活账号须同时出示第二因子），停用即清空密钥/恢复码并全端失效；认证器不可用时登录第二因子可改用 `[email.mfa]` 备用邮箱验证码（等时密码重验防枚举、独立密钥域、单次消费，框架侧新增 `VerificationCodeSender`/`request_via` 投递端口）；前端交互面（登录两段式弹窗含邮箱验证码切换、Step-up 对话框 mfa_code、账号中心设置弹窗二维码/密钥/恢复码回显与关闭入口）已补齐 |
 | E-2 账号删除 | ✅ 已完成 | 匿名化（username 改写 + email 置 NULL + status=deleted + 双版本）+ FK 前置清理 |
 | E-3 OIDC 端口 | ✅ 已完成 | `domain/oidc.rs::ExternalIdentityProvider` 端口定义（不建表不接 Client） |
-| E-4 多因子任选登录 | 📋 方案已细化，未实施 | 详见 `docs/architecture/multi-factor-login.md`：因子分类模型（同类别内任选）；阶段 1 修邮箱验证码登录绕过 TOTP 的缺口（选型已决：框架验证码引擎加 `verify_only` + 备用邮箱通道作第二因子严格禁用）；阶段 2 框架登录挑战协议（lib_yang 扩展）；阶段 3 Passkey 评估 |
+| E-4 多因子任选登录 | 🚧 阶段 1 已完成 | 详见 `docs/architecture/multi-factor-login.md`：因子分类模型（同类别内任选）；阶段 1 已修复邮箱验证码登录绕过 TOTP 的缺口（方案 A：框架验证码引擎 `verify_only` 只验不消费 + 备用邮箱通道作第二因子严格禁用，lib_yang `cc9756d` + `c31f594`/`76ced5b`/`66ada17`）；阶段 2 框架登录挑战协议（lib_yang 扩展，未实施）；阶段 3 Passkey 评估 |
 
 > **外键现状修正**：路线图 3.2 第 10 条「无外键」已不成立——`src/infrastructure/schema.rs:187-198`
 > 声明了 `fk_password_reset_token_user` 与 `fk_password_reset_token_requested_by` 两条外键，

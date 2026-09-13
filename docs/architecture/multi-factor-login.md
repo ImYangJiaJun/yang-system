@@ -1,6 +1,6 @@
 # 多因子任选登录（Google 式）设计方案
 
-> - 文档性质：面向实施的设计方案，**当前未实施**；状态变更同步 `docs/architecture/account-system-roadmap.md` 进度表
+> - 文档性质：面向实施的设计方案；**阶段 1 已实施**（lib_yang `cc9756d` + yang-system `c31f594` / `76ced5b` / `66ada17`），阶段 2/3 未实施；状态变更同步 `docs/architecture/account-system-roadmap.md` 进度表
 > - 依据：2026-11 对 `src/addon/account/`、`frontend/src/features/auth/`、`crates/yang-base/src/action/auth/` 的源码核实
 > - 关联文档：`docs/architecture/account-system-roadmap.md`（总路线图）、`docs/contracts/AUDIT.md`、`docs/contracts/CONFIGURATION.md`
 > - 目标语义：对标 Google 账户登录——多种验证方式，**同一因子类别内任选**；未开双因子任选一种第一因子即可登录，开启双因子后需再任选一种第二因子
@@ -31,7 +31,7 @@
 
 ## 二、现状差距（源码核实）
 
-- **G-1（bug 级缺口）邮箱验证码登录绕过双因子**：`user/actions/login_by_email_code.rs` 的 `EmailCodeCredentialVerifier` 不检查 `totp_activated_at`，前端 `LoginPage.tsx` 验证码模式无 MFA 分支（文件内注释明示）。后果：**已激活 TOTP 的账号可用邮箱验证码直接登录，双因子形同虚设**。无论是否做完整改造，此缺口必须先修。
+- **G-1（已修复）邮箱验证码登录绕过双因子**：`user/actions/login_by_email_code.rs` 的 `EmailCodeCredentialVerifier` 不检查 `totp_activated_at`，前端 `LoginPage.tsx` 验证码模式无 MFA 分支。后果：**已激活 TOTP 的账号可用邮箱验证码直接登录，双因子形同虚设**。阶段 1 已按方案 A 修复（见下）。
 - **G-2 框架单步模型，无登录挑战协议**：`yang-base` `CredentialVerifier::verify`（`action/auth/login.rs:24`）是「验证→返回身份」单步模型；现有双因子是**无状态两段式**——第一段密码通过后返回 `SecondFactorRequired`（不签发任何凭据），第二段**重发完整密码** + `extra.mfa_code`。该形态在「任选组合」下不可扩展：每多一个可选第一因子/第二因子，客户端都要重放前面所有凭据，服务端也无法表达「已通过因子集合」。
 - **G-3 会话/claims 无认证方式记录**：`AppClaims`（`domain/claims.rs:14`）无 `amr` 类声明（有 `version: u8` 演进字段可用）；`user_session` 表（`infrastructure/schema.rs:210-227`）无认证级别列。
 - **G-4 前端结构**：`features/auth/pages/LoginPage.tsx` 单文件承载两种模式（`LoginMode` 联合类型 + 每模式独立 state/提交分支），加方式会继续膨胀；SessionController 无「部分认证」中间态。
@@ -48,7 +48,7 @@
 
 ## 四、分期方案
 
-### 阶段 1（必修）：邮箱验证码登录对齐 MFA 语义（框架引擎小幅扩展 + 应用侧编排）
+### 阶段 1（已完成，2026-11）：邮箱验证码登录对齐 MFA 语义（框架引擎小幅扩展 + 应用侧编排）
 
 **目标**：消灭 G-1 缺口；让「第一因子任选 {密码、邮箱验证码} + 第二因子任选三选一」在现有无状态两段式下完整可用。
 
@@ -63,7 +63,7 @@
 - 前端：`LoginPage.tsx` 验证码模式接入与密码模式相同的 `SecondFactorRequiredError` → `MfaChallengeDialog` 编排（第二段重发邮箱+验证码+mfa_code）。
 - 防枚举细化：第一段的 `SecondFactorRequired` 只有在验证码**验证通过**后才可能返回，不泄露 MFA 状态；验证码错误仍统一 `ParamInvalid(email_code, ...)`。
 
-**验收条件**：
+**验收条件**（已全部通过：框架 `email_verification_integration` 2 用例 + 应用侧 `tests/login_email_code_integration.rs` 10 用例 + 前端 274 单测，另 `mfa_email_code` / `registration_email` 集成回归）：
 
 1. 激活 TOTP 的账号走邮箱验证码登录，无第二因子必被拒；TOTP / 恢复码可完成，**备用邮箱验证码必被拒**（因子独立性）；密码登录的备用邮箱通道回归不受影响。
 2. 未激活 TOTP 的账号行为与现状完全一致（回归）。
