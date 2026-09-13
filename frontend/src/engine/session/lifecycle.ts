@@ -115,18 +115,39 @@ export async function login(
   }
 }
 
-/// 邮箱验证码免密登录：一次性验证码单次消费，响应与密码登录同构（无第二因子分支）。
+/// 邮箱验证码免密登录：一次性验证码单次消费，响应与密码登录同构。
+/// 两段式 MFA（多因子任选登录阶段 1）：账号启用 TOTP 时，第一段（无 mfaCode）
+/// 服务端只验不消费验证码并返回 SecondFactorRequiredError（错误码 700012）；
+/// 第二段携带 mfaCode 重发同一验证码，服务端先原子消费再验第二因子。
+/// 该路径的第二因子只接受认证器动态码或恢复码（备用邮箱通道服务端禁用）。
 export async function loginByEmailCode(
   email: string,
   emailCode: string,
+  mfaCode?: string,
   signal?: AbortSignal,
 ): Promise<LoginResult> {
-  return requestAccessToken(
-    "/api/v1/users/login-by-email-code",
-    { email, email_code: emailCode },
-    "登录响应缺少有效 Token",
-    signal,
-  );
+  const trimmedCode = mfaCode?.trim();
+  try {
+    return await requestAccessToken(
+      "/api/v1/users/login-by-email-code",
+      trimmedCode
+        ? { email, email_code: emailCode, mfa_code: trimmedCode }
+        : { email, email_code: emailCode },
+      "登录响应缺少有效 Token",
+      signal,
+    );
+  } catch (cause) {
+    if (
+      cause instanceof ApiError &&
+      cause.code === SECOND_FACTOR_REQUIRED_CODE
+    ) {
+      throw new SecondFactorRequiredError(cause.message, {
+        code: cause.code,
+        requestId: cause.requestId,
+      });
+    }
+    throw cause;
+  }
 }
 
 export async function logout(

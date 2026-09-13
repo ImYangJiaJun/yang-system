@@ -21,9 +21,10 @@ import logoDarkUrl from "@/shared/assets/logo-dark.png";
 import logoLightUrl from "@/shared/assets/logo-light.png";
 
 /// 登录页（对齐旧 LoginPage.vue 语义）：品牌面板 + 凭据表单 + 错误/提示横幅。
-/// 两段式登录：账号启用 TOTP 时，密码校验通过（SecondFactorRequired）后
+/// 两段式登录：账号启用 TOTP 时，第一因子校验通过（SecondFactorRequired）后
 /// 弹出双重验证对话框，输入动态码/恢复码带原凭据重新提交。
-/// 验证码登录模式：邮箱 + 一次性验证码免密登录（无第二因子分支）。
+/// 验证码登录模式：邮箱 + 一次性验证码免密登录；第二段重发同一验证码，
+/// 备用邮箱通道不可用（第一因子已是邮箱持有，同类不构成双因子）。
 type LoginMode = "password" | "email-code";
 
 /// 仅做「明显非法」的前端基础提示，安全语义全在后端。
@@ -47,8 +48,8 @@ export default function LoginPage() {
   const [codeCooldown, setCodeCooldown] = useState(0);
   const [sendingCode, setSendingCode] = useState(false);
   const [infoMessage, setInfoMessage] = useState("");
-  // 第二因子阶段：密码已通过，等待动态码/恢复码。
-  const [mfaRequired, setMfaRequired] = useState(false);
+  // 第二因子阶段：记录触发 MFA 的登录方式，第二段按原方式重发凭据。
+  const [mfaMode, setMfaMode] = useState<LoginMode | null>(null);
   const [mfaError, setMfaError] = useState("");
   // 会话结束原因优先读控制器快照（失效传播），兼容外部链接的 ?reason= 参数。
   const endReason = snapshot.sessionEndReason ?? searchParams.get("reason");
@@ -73,7 +74,7 @@ export default function LoginPage() {
     } catch (cause) {
       if (cause instanceof SecondFactorRequiredError) {
         // 密码已通过：进入第二因子阶段。
-        setMfaRequired(true);
+        setMfaMode("password");
       } else if (mfaCode !== undefined) {
         // 第二阶段失败：留在对话框内提示，输入框由对话框自动清空。
         setMfaError(
@@ -113,6 +114,9 @@ export default function LoginPage() {
     setMode(next);
     setErrorMessage("");
     setInfoMessage("");
+    // 切换登录方式即放弃未完成的第二因子阶段。
+    setMfaMode(null);
+    setMfaError("");
   };
 
   const emailLooksValid = EMAIL_PATTERN.test(loginEmail.trim());
@@ -150,10 +154,40 @@ export default function LoginPage() {
     return () => clearInterval(timer);
   }, [codeCooldown > 0]);
 
-  /// 验证码登录提交：与密码登录同路径 beginSession，无 MFA 分支。
-  const submitEmailCode = async () => {
+  /// 验证码登录提交：第一段（无码）或第二段（带 mfaCode 重发同一验证码）。
+  const attemptEmailCodeLogin = async (mfaCode?: string) => {
     setErrorMessage("");
     setInfoMessage("");
+    setMfaError("");
+    setSubmitting(true);
+    try {
+      const result = await loginByEmailCode(
+        loginEmail.trim(),
+        emailCode.trim(),
+        mfaCode,
+      );
+      controller.beginSession(result);
+      navigate("/", { replace: true });
+    } catch (cause) {
+      if (cause instanceof SecondFactorRequiredError) {
+        // 验证码已通过（服务端只验不消费）：进入第二因子阶段。
+        setMfaMode("email-code");
+      } else if (mfaCode !== undefined) {
+        // 第二阶段失败：留在对话框内提示，输入框由对话框自动清空。
+        setMfaError(
+          cause instanceof Error ? cause.message : "登录失败，请稍后重试",
+        );
+      } else {
+        setErrorMessage(
+          cause instanceof Error ? cause.message : "登录失败，请稍后重试",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitEmailCode = async () => {
     const email = loginEmail.trim();
     if (!email || !EMAIL_PATTERN.test(email)) {
       setErrorMessage("请输入有效的邮箱地址");
@@ -163,18 +197,7 @@ export default function LoginPage() {
       setErrorMessage("请输入邮箱验证码");
       return;
     }
-    setSubmitting(true);
-    try {
-      const result = await loginByEmailCode(email, emailCode.trim());
-      controller.beginSession(result);
-      navigate("/", { replace: true });
-    } catch (cause) {
-      setErrorMessage(
-        cause instanceof Error ? cause.message : "登录失败，请稍后重试",
-      );
-    } finally {
-      setSubmitting(false);
-    }
+    await attemptEmailCodeLogin();
   };
 
   return (
@@ -400,15 +423,23 @@ export default function LoginPage() {
       </aside>
 
       <MfaChallengeDialog
-        open={mfaRequired}
+        open={mfaMode !== null}
         submitting={submitting}
         errorMessage={mfaError}
-        onSubmit={(code) => void attemptLogin(code)}
+        onSubmit={(code) =>
+          void (mfaMode === "email-code"
+            ? attemptEmailCodeLogin(code)
+            : attemptLogin(code))
+        }
         onCancel={() => {
-          setMfaRequired(false);
+          setMfaMode(null);
           setMfaError("");
         }}
-        onSendEmailCode={() => requestMfaEmailCode(username.trim(), password)}
+        onSendEmailCode={
+          mfaMode === "email-code"
+            ? undefined
+            : () => requestMfaEmailCode(username.trim(), password)
+        }
       />
     </main>
   );

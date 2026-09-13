@@ -601,4 +601,64 @@ describe("LoginPage 验证码登录模式", () => {
     expect(screen.getByLabelText("帐号")).toBeInTheDocument();
     expect(screen.getByLabelText("密码", { exact: true })).toBeInTheDocument();
   });
+
+  it("启用 TOTP 的账号：验证码通过后弹出双重验证框（无备用邮箱入口），带码重发完成登录", async () => {
+    stubRefreshFailure();
+    const { controller } = renderLogin();
+    await screen.findByRole("heading", { name: "用户登录" });
+
+    let loginCalls = 0;
+    stubEmailCodeFlow({
+      onLoginBody: (body) => {
+        loginCalls += 1;
+        // 第一段只发邮箱+验证码；第二段重发同一验证码并携带 mfa_code。
+        if (loginCalls === 1) {
+          expect(body).toEqual({
+            email: "alice@example.com",
+            email_code: "123456",
+          });
+        } else {
+          expect(body).toEqual({
+            email: "alice@example.com",
+            email_code: "123456",
+            mfa_code: "654321",
+          });
+        }
+      },
+      loginResponse: () =>
+        loginCalls === 1
+          ? jsonResponse({ code: 700012, message: "需要输入双重验证码" }, 401)
+          : jsonResponse({
+              code: 0,
+              message: "成功",
+              data: { access_token: "access-token" },
+            }),
+    });
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "验证码登录" }));
+    await user.type(screen.getByLabelText("邮箱"), "alice@example.com");
+    await user.click(screen.getByRole("button", { name: "发送验证码" }));
+    await screen.findByText(/验证码已发送/);
+    await user.type(screen.getByLabelText("验证码"), "123456");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    // 第一段通过后弹出双重验证对话框；备用邮箱通道被服务端禁用，
+    // 对话框不提供邮箱验证码入口。
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).queryByRole("button", { name: /使用邮箱验证码/ }),
+    ).not.toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/恢复码/);
+
+    // 输入认证器动态码满 6 位自动提交，第二段完成登录。
+    await user.type(within(dialog).getByLabelText("双重验证码"), "654321");
+    await waitFor(() => {
+      expect(controller.getSnapshot()).toMatchObject({
+        token: "access-token",
+        loggedIn: true,
+      });
+    });
+    expect(loginCalls).toBe(2);
+  });
 });

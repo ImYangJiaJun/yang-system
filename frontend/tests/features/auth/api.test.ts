@@ -14,7 +14,11 @@ import {
   requestRegistrationEmail,
   resetPassword,
 } from "@/features/auth/api";
-import { ApiError, StepUpRequiredError } from "@/engine/http/errors";
+import {
+  ApiError,
+  SecondFactorRequiredError,
+  StepUpRequiredError,
+} from "@/engine/http/errors";
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -522,5 +526,39 @@ describe("loginByEmailCode", () => {
     await expect(
       loginByEmailCode("alice@example.com", "123456"),
     ).rejects.toThrow(/缺少有效 Token/);
+  });
+
+  it("第二段携带 mfa_code 重发同一验证码", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.body).toBe(
+        JSON.stringify({
+          email: "alice@example.com",
+          email_code: "123456",
+          mfa_code: "654321",
+        }),
+      );
+      return jsonResponse({
+        code: 0,
+        message: "成功",
+        data: { access_token: "access-token" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      loginByEmailCode("alice@example.com", "123456", "654321"),
+    ).resolves.toEqual({ accessToken: "access-token" });
+  });
+
+  it("700012 映射为 SecondFactorRequiredError（第一段只验不消费）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ code: 700012, message: "需要输入双重验证码" }, 401),
+      ),
+    );
+    const promise = loginByEmailCode("alice@example.com", "123456");
+    await expect(promise).rejects.toBeInstanceOf(SecondFactorRequiredError);
+    await expect(promise).rejects.toThrow("需要输入双重验证码");
   });
 });
