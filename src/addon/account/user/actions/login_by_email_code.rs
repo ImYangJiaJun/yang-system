@@ -2,8 +2,14 @@
 //!
 //! 复用框架 `LoginAction` 的签发路径：`LoginInput.username` 承载邮箱、
 //! `LoginInput.password` 承载验证码，由 [`EmailCodeCredentialVerifier`] 完成
-//! 限流、验证码消费、账号存在性与状态校验；签发后会话落库、登录事件与
+//! 限流、验证码校验、账号存在性与状态校验；签发后会话落库、登录事件与
 //! 新设备邮件提醒与密码登录完全同路径（复用 login.rs 的共享函数）。
+//!
+//! 两段式 MFA（多因子任选登录方案阶段 1，消灭 G-1 缺口）：账号已激活 TOTP 时，
+//! 第一段提交邮箱+验证码只验不消费（`verify_only`），返回 `SecondFactorRequired`；
+//! 第二段重发邮箱+同一验证码+`extra.mfa_code`，先原子消费验证码再验第二因子。
+//! 第一因子已是邮箱持有，第二因子严格禁用 `[email.mfa]` 备用邮箱通道
+//! （同类不构成双因子，方案 D-2），只接受 TOTP / 恢复码。
 
 use super::login::{record_login_failure, record_login_session};
 use crate::addon::account::Account;
@@ -35,6 +41,12 @@ yang_base::params! {
             .min_length(6)
             .max_length(6)
             .pattern(r"^[0-9]{6}$"),
+        /// 第二因子验证码（账号已激活 TOTP 时第二段提交：TOTP 动态码或一次性恢复码）。
+        mfa_code: Str::new()
+            .title("双重验证码")
+            .require(false)
+            .min_length(6)
+            .max_length(64),
     }
 }
 
@@ -74,17 +86,24 @@ impl CredentialVerifier for EmailCodeCredentialVerifier {
             })?;
         let verification =
             RegistrationEmailVerification::from_config(login_config.engine_config())?;
-        // 验证码先消费（Redis 原子单次消费，错误尝试达上限即销毁）；
-        // 失败计一次限流失败再返回统一无效验证码错误。
-        if let Err(error) = verification.consume(ctx, &email, &input.password).await {
+        let mfa_code = input
+            .extra
+            .get("mfa_code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+
+        // 两段式与验证码单次消费的调和（方案 A）：第一段（无 mfa_code）只验
+        // 不消费，验证码在 TTL 内留给第二段正式消费。peek 失败计一次限流失败，
+        // 返回统一无效验证码错误（防枚举边界与密码登录一致）。
+        if let Err(error) = verification.verify_only(ctx, &email, &input.password).await {
             self.account
                 .rate_limiter()
                 .record_failure(ctx, AuthOperation::Login, &email)
                 .await?;
             return Err(error);
         }
-        // 验证码已被消费：邮箱未注册或账号停用也返回同一个无效验证码错误，
-        // 不泄露账号存在性与状态变化。
+        // 验证码有效；账号不存在或停用仍返回统一无效验证码错误，不泄露账号状态
+        // （发码端点只对已注册且启用的账号真实投递，其余邮箱不存在有效验证码）。
         let user = self
             .account
             .users()
@@ -93,6 +112,53 @@ impl CredentialVerifier for EmailCodeCredentialVerifier {
             .ok_or_else(invalid_email_code)?;
         if !user.status.is_active() {
             return Err(invalid_email_code());
+        }
+        // 账号激活 TOTP 时登录为两段式（与密码登录同语义）：
+        // 缺 mfa_code 的第一段是协议步骤而非攻击信号，不计失败、不消费验证码。
+        let totp_state = self
+            .account
+            .users()
+            .find_totp_state_by_id(ctx, user.id)
+            .await?;
+        let totp_activated = totp_state
+            .as_ref()
+            .is_some_and(|state| state.totp_activated_at.is_some());
+        if totp_activated && mfa_code.is_none() {
+            return Err(BaseError::SecondFactorRequired);
+        }
+        // 签发凭据前必须原子消费验证码（verify_only 的契约要求）；此后验证码
+        // 失效，失败只可能来自第二因子。消费失败计一次限流失败。
+        if let Err(error) = verification.consume(ctx, &email, &input.password).await {
+            self.account
+                .rate_limiter()
+                .record_failure(ctx, AuthOperation::Login, &email)
+                .await?;
+            return Err(error);
+        }
+        if totp_activated {
+            if let (Some(state), Some(code)) = (totp_state, mfa_code) {
+                let secret = self
+                    .account
+                    .users()
+                    .decrypt_totp_secret(ctx, &state)
+                    .await?;
+                // 第一因子已是邮箱持有：备用邮箱通道禁用，只接受 TOTP / 恢复码。
+                let accepted = self
+                    .account
+                    .verify_second_factor(ctx, user.id, &state, &secret, &code, false)
+                    .await
+                    .is_ok();
+                if !accepted {
+                    self.account
+                        .rate_limiter()
+                        .record_failure(ctx, AuthOperation::Login, &email)
+                        .await?;
+                    return Err(BaseError::ParamInvalid(
+                        "mfa_code".to_string(),
+                        "双重验证码错误或已过期".to_string(),
+                    ));
+                }
+            }
         }
         let claims = self.account.claims_for(ctx, user.id).await?;
         Ok(VerifiedSubject::new(user.id.to_string()).with_token_pair_claims(claims))
@@ -121,7 +187,11 @@ pub(super) async fn handle(
         LoginInput {
             username: input.email.clone(),
             password: input.email_code,
-            extra: serde_json::Value::Null,
+            extra: input
+                .mfa_code
+                .as_ref()
+                .map(|code| serde_json::json!({ "mfa_code": code }))
+                .unwrap_or(serde_json::Value::Null),
         },
     )
     .await;
@@ -130,16 +200,19 @@ pub(super) async fn handle(
     let tokens = match login_result {
         Ok(tokens) => tokens,
         Err(error) => {
-            if let Err(record_error) = record_login_failure(
-                &record_ctx,
-                &account,
-                &input.email,
-                &session_ip,
-                &session_user_agent,
-            )
-            .await
-            {
-                tracing::warn!(error = %record_error, "邮箱验证码登录失败事件记录失败");
+            // 两段式登录的第一阶段通过（等待第二因子输入）不是失败事件，不记录。
+            if !matches!(error, BaseError::SecondFactorRequired) {
+                if let Err(record_error) = record_login_failure(
+                    &record_ctx,
+                    &account,
+                    &input.email,
+                    &session_ip,
+                    &session_user_agent,
+                )
+                .await
+                {
+                    tracing::warn!(error = %record_error, "邮箱验证码登录失败事件记录失败");
+                }
             }
             return Err(error);
         }
@@ -167,7 +240,7 @@ pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec 
         )
         .route(HttpMethod::Post, "/api/v1/users/login-by-email-code")
         .display_name("邮箱验证码登录")
-        .description("校验邮箱一次性验证码并签发 Token（免密登录，验证码单次消费）")
+        .description("校验邮箱一次性验证码并签发 Token（免密登录，两段式 MFA，验证码单次消费）")
         .public()
         .register()
 }
@@ -185,8 +258,9 @@ mod tests {
             .iter()
             .map(|param| param.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["email", "email_code"]);
-        assert!(params.as_slice().iter().all(|param| param.required));
+        assert_eq!(names, ["email", "email_code", "mfa_code"]);
+        assert!(params.as_slice().iter().take(2).all(|param| param.required));
+        assert!(!params.as_slice()[2].required);
     }
 
     #[test]
@@ -198,6 +272,14 @@ mod tests {
             }))
             .is_ok()
         );
+        // 两段式第二段：可选 mfa_code 入参。
+        let second_segment = serde_json::from_value::<LoginByEmailCodeInput>(serde_json::json!({
+            "email": "alice@example.com",
+            "email_code": "123456",
+            "mfa_code": "654321"
+        }))
+        .unwrap_or_else(|error| panic!("带 mfa_code 的第二段输入应合法: {error}"));
+        assert_eq!(second_segment.mfa_code.as_deref(), Some("654321"));
         assert!(
             serde_json::from_value::<LoginByEmailCodeInput>(serde_json::json!({
                 "email": "alice@example.com"

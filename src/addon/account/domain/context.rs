@@ -177,6 +177,10 @@ impl Account {
     /// 单次消费；`[email.mfa]` 未配置时跳过该段）。任何失败返回
     /// `InvalidPassword`，与密码错误同响应（防枚举）。
     ///
+    /// `allow_backup_email = false` 时禁用备用邮箱通道（只接受 TOTP / 恢复码）：
+    /// 用于第一因子已是邮箱验证码的登录——同类因子不构成双因子（多因子任选
+    /// 登录方案 D-2）。
+    ///
     /// 恢复码消费是独立事务：与登录/Step-up 的签发路径无共享写，单次
     /// 消费语义由事务内「摘要移除 + 回写」保证。
     pub(crate) async fn verify_second_factor(
@@ -186,6 +190,7 @@ impl Account {
         state: &crate::addon::account::domain::repository::TotpStateRecord,
         secret: &str,
         code: &str,
+        allow_backup_email: bool,
     ) -> Result<(), BaseError> {
         let verifier = yang_base::action::auth::TotpLiteVerifier::default();
         if yang_base::action::auth::TotpVerifier::verify(&verifier, secret, code)
@@ -212,17 +217,20 @@ impl Account {
         }
         // 恢复码未命中 → 尝试 MFA 备用邮箱验证码（认证器丢失的逃生通道；
         // 引擎 consume 内部原子单次消费，错误尝试达上限即销毁该码）。
-        if let Some(email) = state.email.as_deref() {
-            if let Ok(mfa_config) = ctx
-                .tools()
-                .config::<crate::config::MfaEmailVerificationConfig>()
-            {
-                let verification =
-                    yang_base::action::auth::RegistrationEmailVerification::from_config(
-                        mfa_config.engine_config(),
-                    )?;
-                if verification.consume(ctx, email, code).await.is_ok() {
-                    return Ok(());
+        // 第一因子为邮箱验证码的登录禁用该通道（同类不构成双因子）。
+        if allow_backup_email {
+            if let Some(email) = state.email.as_deref() {
+                if let Ok(mfa_config) = ctx
+                    .tools()
+                    .config::<crate::config::MfaEmailVerificationConfig>()
+                {
+                    let verification =
+                        yang_base::action::auth::RegistrationEmailVerification::from_config(
+                            mfa_config.engine_config(),
+                        )?;
+                    if verification.consume(ctx, email, code).await.is_ok() {
+                        return Ok(());
+                    }
                 }
             }
         }

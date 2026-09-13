@@ -3025,7 +3025,7 @@
     },
     "/api/v1/users/login-by-email-code": {
       "post": {
-        "description": "校验邮箱一次性验证码并签发 Token（免密登录，验证码单次消费）",
+        "description": "校验邮箱一次性验证码并签发 Token（免密登录，两段式 MFA，验证码单次消费）",
         "operationId": "account.user.login_by_email_code",
         "parameters": [],
         "requestBody": {
@@ -3041,6 +3041,14 @@
                   "email_code": {
                     "description": "邮箱一次性验证码（6 位数字）。",
                     "type": "string"
+                  },
+                  "mfa_code": {
+                    "default": null,
+                    "description": "第二因子验证码（账号已激活 TOTP 时第二段提交：TOTP 动态码或一次性恢复码）。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [

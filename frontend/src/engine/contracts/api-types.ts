@@ -379,7 +379,7 @@ export interface paths {
         put?: never;
         /**
          * 邮箱验证码登录
-         * @description 校验邮箱一次性验证码并签发 Token（免密登录，验证码单次消费）
+         * @description 校验邮箱一次性验证码并签发 Token（免密登录，两段式 MFA，验证码单次消费）
          */
         post: operations["account.user.login_by_email_code"];
         delete?: never;
@@ -2842,6 +2842,11 @@ export interface operations {
                     email: string;
                     /** @description 邮箱一次性验证码（6 位数字）。 */
                     email_code: string;
+                    /**
+                     * @description 第二因子验证码（账号已激活 TOTP 时第二段提交：TOTP 动态码或一次性恢复码）。
+                     * @default null
+                     */
+                    mfa_code?: string | null;
                 };
             };
         };
