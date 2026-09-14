@@ -49,22 +49,28 @@ pub(super) async fn handle(
         .ok_or_else(|| BaseError::UserNotFound(input.id.to_string()))?;
     Account::ensure_active(observed.status)?;
 
-    let issued = account
-        .issue_password_reset_by(&ctx, input.id, Some(operator_id))
-        .await?;
-
-    let event = audit::succeeded_event(
-        &ctx,
-        None,
-        Some(audit::entity("user", operator_id)?),
-        audit::entity("password_reset", issued.fingerprint())?,
-        None,
-        Some(audit::summary([
-            ("target_user_id", json!(input.id)),
-            ("reset_fingerprint", json!(issued.fingerprint())),
-        ])?),
-    )?;
-    audit::append_independent(ctx.tools().mysql()?.pool(), &event).await?;
+    // 凭证插入与成功审计同事务原子提交：崩溃时二者要么都落库、要么都不落库。
+    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let result = async {
+        let issued = account
+            .issue_password_reset_by_in_tx(&mut transaction, input.id, Some(operator_id))
+            .await?;
+        let event = audit::succeeded_event(
+            &ctx,
+            None,
+            Some(audit::entity("user", operator_id)?),
+            audit::entity("password_reset", issued.fingerprint())?,
+            None,
+            Some(audit::summary([
+                ("target_user_id", json!(input.id)),
+                ("reset_fingerprint", json!(issued.fingerprint())),
+            ])?),
+        )?;
+        audit::append_in_tx(&mut transaction, &event).await?;
+        Ok(issued)
+    }
+    .await;
+    let issued = Account::finish_transaction(transaction, result).await?;
 
     ApiResponse::success(
         IssuedResetToken {

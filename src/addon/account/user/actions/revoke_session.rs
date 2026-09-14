@@ -44,17 +44,36 @@ pub(super) async fn handle(
     }
 
     let now = current_unix_timestamp()?;
-    // 行标记撤销（幂等）。
-    let affected = account
-        .sessions()
-        .revoke(&ctx, &input.session_id, now)
-        .await?;
-    if affected != 1 {
-        return Err(BaseError::Unauthorized("会话不存在或已撤销".to_string()));
+    // 行标记撤销 + 成功审计同事务原子提交：崩溃时二者要么都落库、要么都不落库。
+    let mut transaction = ctx.tools().mysql()?.transaction().await?;
+    let result = async {
+        let affected = account
+            .sessions()
+            .revoke_in_tx(&ctx, &mut transaction, &input.session_id, now)
+            .await?;
+        if affected != 1 {
+            return Err(BaseError::Unauthorized("会话不存在或已撤销".to_string()));
+        }
+        let event = audit::succeeded_event(
+            &ctx,
+            None,
+            Some(audit::entity("user", user_id)?),
+            audit::entity("user_session", input.session_id.clone())?,
+            None,
+            Some(audit::summary([
+                ("session_id", json!(input.session_id)),
+                ("revoked", json!(true)),
+            ])?),
+        )?;
+        audit::append_in_tx(&mut transaction, &event).await?;
+        Ok(())
     }
-    // jti 黑名单：拉黑 access jti（立即失效当前 access token）与 refresh jti
-    // （阻止被踢设备继续轮换续期）。refresh 轮换校验的是 refresh token 自身的 jti，
-    // 二者独立生成，必须同时拉黑。不递增凭据版本，不影响该用户其他会话。
+    .await;
+    Account::finish_transaction(transaction, result).await?;
+
+    // jti 黑名单（事务提交后执行）：拉黑 access jti（立即失效当前 access token）
+    // 与 refresh jti（阻止被踢设备继续轮换续期）。refresh 轮换校验的是 refresh token
+    // 自身的 jti，二者独立生成，必须同时拉黑。不递增凭据版本，不影响其他会话。
     ctx.tools()
         .token()?
         .revoke_by_jti_with_ttl(&current_jti, REVOKE_JTI_BLACKLIST_TTL_SECONDS)
@@ -65,19 +84,6 @@ pub(super) async fn handle(
             .revoke_by_jti_with_ttl(&refresh_jti, REVOKE_JTI_BLACKLIST_TTL_SECONDS)
             .await?;
     }
-
-    let event = audit::succeeded_event(
-        &ctx,
-        None,
-        Some(audit::entity("user", user_id)?),
-        audit::entity("user_session", input.session_id.clone())?,
-        None,
-        Some(audit::summary([
-            ("session_id", json!(input.session_id)),
-            ("revoked", json!(true)),
-        ])?),
-    )?;
-    audit::append_independent(ctx.tools().mysql()?.pool(), &event).await?;
 
     ApiResponse::success(json!({ "session_revoked": true }), "该设备已退出登录")
 }

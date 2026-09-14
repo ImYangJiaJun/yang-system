@@ -3,7 +3,7 @@
 mod repository;
 
 pub(crate) use repository::{
-    consume_in_tx, find_target_user, insert_issued, insert_issued_by, invalid_reset_token,
+    consume_in_tx, find_target_user, insert_issued, insert_issued_by_in_tx, invalid_reset_token,
     invalidate_all_for_user_in_tx, lock_in_tx, IssuedPasswordReset, LockedPasswordReset,
     PasswordResetReference,
 };

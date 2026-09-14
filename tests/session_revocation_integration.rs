@@ -272,6 +272,15 @@ async fn current_session_id(app: &BuiltApp, token: &str, peer_port: u16) -> anyh
         .context("会话行缺少 session_id")
 }
 
+/// 统计指定 Action 的审计事件行数（验证成功审计与业务写同事务落库）。
+async fn audit_event_count(database: &Database, action: &str) -> anyhow::Result<i64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_event WHERE action = ?")
+        .bind(action)
+        .fetch_one(database.pool())
+        .await?;
+    Ok(count)
+}
+
 fn finish_with_cleanup(
     outcome: anyhow::Result<()>,
     database_cleanup: anyhow::Result<()>,
@@ -357,6 +366,13 @@ async fn revoking_a_session_rejects_its_refresh_token() -> anyhow::Result<()> {
         )
         .await?;
         ensure!(revoked.code == 0, "撤销会话必须成功: {}", revoked.message);
+
+        // 4a. 成功撤销必须写入一条审计事件（审计与业务行标记同事务原子提交）。
+        let audit_count = audit_event_count(&control, "account.user.revoke_session").await?;
+        ensure!(
+            audit_count == 1,
+            "撤销会话应写入一条成功审计事件，实际 {audit_count}"
+        );
 
         // 5. 被撤销设备的 refresh token 必须被拒绝（核心回归：此前只拉黑 access jti，
         //    refresh jti 未被拉黑，此处会错误地成功）。TokenRevoked 经 dispatch_context

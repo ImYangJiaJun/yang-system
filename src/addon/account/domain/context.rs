@@ -17,7 +17,7 @@ use crate::addon::account::domain::authz_version::{
 };
 use crate::addon::account::domain::grants::{AuthorizationGrants, GrantResolver};
 use crate::addon::account::domain::password_reset::{
-    consume_in_tx, find_target_user, insert_issued, insert_issued_by, invalid_reset_token,
+    consume_in_tx, find_target_user, insert_issued, insert_issued_by_in_tx, invalid_reset_token,
     invalidate_all_for_user_in_tx, lock_in_tx, IssuedPasswordReset, LockedPasswordReset,
     PasswordResetReference,
 };
@@ -369,16 +369,16 @@ impl Account {
         Ok(issued)
     }
 
-    /// 签发密码重置凭证并记录操作者（管理签发路线图 D-2）。
-    pub(crate) async fn issue_password_reset_by(
+    /// 在调用方事务内签发管理重置凭证（凭证插入与审计同事务，D-2）。
+    pub(crate) async fn issue_password_reset_by_in_tx(
         &self,
-        ctx: &ActionContext,
+        transaction: &mut Transaction,
         user_id: i64,
         requested_by_user: Option<i64>,
     ) -> Result<IssuedPasswordReset, BaseError> {
         let issued = IssuedPasswordReset::generate()?;
-        insert_issued_by(
-            ctx.tools().mysql()?.pool(),
+        insert_issued_by_in_tx(
+            transaction,
             user_id,
             &issued,
             self.password_reset_ttl_seconds,

@@ -233,10 +233,11 @@ impl SessionRepository {
         Ok(rows.len() as u64)
     }
 
-    /// 撤销单个会话（行标记；jti 黑名单由 Action 层完成）。
-    pub(crate) async fn revoke(
+    /// 在调用方事务内撤销单个会话（与成功审计同事务原子提交）。
+    pub(crate) async fn revoke_in_tx(
         &self,
         ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
         session_id: &str,
         now: i64,
     ) -> Result<u64, BaseError> {
@@ -247,7 +248,7 @@ impl SessionRepository {
                 serde_json::Value::String(session_id.to_string()),
             )?
             .where_null(REVOKED_AT)?
-            .update(Record::new().set(REVOKED_AT, now))
+            .update_in_tx(transaction, Record::new().set(REVOKED_AT, now))
             .await?;
         Ok(affected)
     }
