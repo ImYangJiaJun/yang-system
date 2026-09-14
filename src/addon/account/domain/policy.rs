@@ -57,10 +57,6 @@ pub(crate) const WEAK_PASSWORDS: &[&str] = &[
     "000000",
 ];
 
-pub(crate) fn validate_new_password(password: &str) -> Result<(), BaseError> {
-    validate_password_field("new_password", password, None)
-}
-
 /// 注册/改密/重置共享的密码校验；`username` 非空时追加「禁止与用户名相同」规则。
 pub(crate) fn validate_password_field(
     field: &str,
@@ -111,17 +107,21 @@ mod tests {
         assert!(normalize_username("ab").is_err());
     }
 
+    fn validate(password: &str) -> Result<(), BaseError> {
+        validate_password_field("new_password", password, None)
+    }
+
     #[test]
     fn password_policy_uses_character_count() {
-        assert!(validate_new_password("correct-horse-battery").is_ok());
-        assert!(validate_new_password("123456789").is_err());
-        assert!(validate_new_password(&"x".repeat(PASSWORD_MAX_LENGTH + 1)).is_err());
+        assert!(validate("correct-horse-battery").is_ok());
+        assert!(validate("123456789").is_err());
+        assert!(validate(&"x".repeat(PASSWORD_MAX_LENGTH + 1)).is_err());
     }
 
     #[test]
     fn change_password_reports_the_new_password_field() {
         assert!(matches!(
-            validate_new_password("too-short"),
+            validate("too-short"),
             Err(BaseError::ParamInvalid(field, _)) if field == "new_password"
         ));
     }
@@ -129,11 +129,11 @@ mod tests {
     #[test]
     fn weak_password_dictionary_is_rejected_case_insensitively() {
         assert!(matches!(
-            validate_new_password("Password123"),
+            validate("Password123"),
             Err(BaseError::ParamInvalid(field, message)) if field == "new_password" && message.contains("常见")
         ));
         assert!(matches!(
-            validate_new_password("123456"),
+            validate("123456"),
             Err(BaseError::ParamInvalid(field, _)) if field == "new_password"
         ));
     }

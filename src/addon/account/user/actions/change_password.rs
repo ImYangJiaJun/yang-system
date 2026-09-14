@@ -1,8 +1,9 @@
 //! 校验当前密码并使已有会话失效。
 
 use crate::addon::account::domain::policy::{
-    validate_new_password, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
+    validate_password_field, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
 };
+use crate::addon::account::user::table::USERNAME;
 use crate::addon::account::{Account, LockedUserCredential};
 use crate::audit;
 use serde_json::json;
@@ -43,7 +44,6 @@ pub(super) async fn handle(
             "改密能力必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
         ));
     }
-    validate_new_password(&input.new_password)?;
     account
         .rate_limiter()
         .check(&ctx, AuthOperation::ChangePassword, &user_id.to_string())
@@ -55,6 +55,14 @@ pub(super) async fn handle(
         .await?
         .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?;
     Account::ensure_active(observed.status)?;
+    // 密码不能与用户名相同：从用户视图取 username 后校验（与注册路径同规则）。
+    let username = account
+        .users()
+        .find_by_id(&ctx, user_id)
+        .await?
+        .ok_or_else(|| BaseError::UserNotFound(user_id.to_string()))?
+        .require::<String>(USERNAME)?;
+    validate_password_field("new_password", &input.new_password, Some(&username))?;
     if !account
         .passwords()
         .verify(&input.old_password, &observed.password_hash)
@@ -90,6 +98,12 @@ pub(super) async fn handle(
     }
     .await;
     Account::finish_transaction(transaction, result).await?;
+
+    // 改密是最关键的凭据变更：立即收敛 Redis 水位线，使旧 Access Token 即刻失效
+    // （收敛失败由授权 Outbox Worker 兜底，不阻塞改密响应）。
+    let _ = account
+        .converge_revocation(&ctx, user_id, "account.user.change_password", "user")
+        .await?;
 
     change_password_response(secure)
 }
