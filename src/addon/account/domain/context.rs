@@ -17,7 +17,7 @@ use crate::addon::account::domain::authz_version::{
 };
 use crate::addon::account::domain::grants::{AuthorizationGrants, GrantResolver};
 use crate::addon::account::domain::password_reset::{
-    consume_in_tx, find_target_user, insert_issued, insert_issued_by, invalid_reset_token,
+    consume_in_tx, find_target_user, insert_issued, insert_issued_by_in_tx, invalid_reset_token,
     invalidate_all_for_user_in_tx, lock_in_tx, IssuedPasswordReset, LockedPasswordReset,
     PasswordResetReference,
 };
@@ -27,6 +27,7 @@ use crate::audit;
 use crate::config::{SecuritySettings, TotpSettings};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use yang_base::action::auth::{AuthRateLimiter, BrowserSession, PasswordEngine, TokenPairClaims};
 use yang_base::action::{ActionContext, StepUpManager};
 use yang_base::token::TokenClaims;
@@ -183,6 +184,7 @@ impl Account {
     ///
     /// 恢复码消费是独立事务：与登录/Step-up 的签发路径无共享写，单次
     /// 消费语义由事务内「摘要移除 + 回写」保证。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn verify_second_factor(
         &self,
         ctx: &ActionContext,
@@ -191,12 +193,32 @@ impl Account {
         secret: &str,
         code: &str,
         allow_backup_email: bool,
+        purpose: &'static str,
     ) -> Result<(), BaseError> {
         let verifier = yang_base::action::auth::TotpLiteVerifier::default();
         if yang_base::action::auth::TotpVerifier::verify(&verifier, secret, code)
             .await
             .is_ok()
         {
+            // 防重放：按 (用户, 用途) 记录最近一次成功校验的 30 秒窗口步，同一窗口内
+            // 重复提交判为重放拒绝（TOTP 单次消费语义）。用途区分登录/Step-up/激活，
+            // 避免「登录后立即 Step-up」等不同用途复用同一码被误杀。
+            let cache = ctx.tools().cache()?;
+            let key = format!("yang-system:totp:used:{user_id}:{purpose}");
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| BaseError::ConfigError("系统时间早于 Unix epoch".to_string()))?
+                .as_secs() as i64;
+            let current_step = now / 30;
+            let last_used = cache
+                .get(&key)
+                .await?
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(0);
+            if current_step <= last_used {
+                return Err(BaseError::InvalidPassword);
+            }
+            cache.setex(&key, 120, current_step.to_string()).await?;
             return Ok(());
         }
         // TOTP 码失败 → 尝试一次性恢复码（单次消费）。
@@ -369,16 +391,16 @@ impl Account {
         Ok(issued)
     }
 
-    /// 签发密码重置凭证并记录操作者（管理签发路线图 D-2）。
-    pub(crate) async fn issue_password_reset_by(
+    /// 在调用方事务内签发管理重置凭证（凭证插入与审计同事务，D-2）。
+    pub(crate) async fn issue_password_reset_by_in_tx(
         &self,
-        ctx: &ActionContext,
+        transaction: &mut Transaction,
         user_id: i64,
         requested_by_user: Option<i64>,
     ) -> Result<IssuedPasswordReset, BaseError> {
         let issued = IssuedPasswordReset::generate()?;
-        insert_issued_by(
-            ctx.tools().mysql()?.pool(),
+        insert_issued_by_in_tx(
+            transaction,
             user_id,
             &issued,
             self.password_reset_ttl_seconds,

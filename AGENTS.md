@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + React 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前骨架只保留 `account` 一个业务 Addon：账号与会话（邮箱验证码注册、用户名/邮箱/邮箱验证码免密登录、头像、Refresh Cookie、Step-up 重认证、密码重置、全设备退出、登录设备管理）、登录 MFA（TOTP 激活/停用与备用邮箱验证码）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
+`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + React 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前以 `account` 为唯一业务 Addon（另有 `access` 授权端口与 `demo` 演示 Addon，均未计入业务域）：账号与会话（邮箱验证码注册、用户名/邮箱/邮箱验证码免密登录、头像、Refresh Cookie、Step-up 重认证、密码重置、全设备退出、登录设备管理）、登录 MFA（TOTP 激活/停用与备用邮箱验证码）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
 
 本仓库是**独立 Git/Cargo 项目**，但被签出在 `lib_yang` 仓库的 `project/yang-system/` 路径下（`lib_yang` 根 workspace 显式排除它）；`Cargo.toml` 通过相对路径直接依赖同工作树中的基础库：
 
@@ -27,11 +27,13 @@ yang-runtime = { path = "../../crates/yang-runtime", ... }
 
 ```text
 src/
-├── addon/                   # 业务 Addon；当前只有 account 一个
-│   └── account/             # mod.rs（装配+对外端口）；domain/ 是 addon 级共享机制；user/ 是 module 层
-│       ├── domain/          # context/repository/claims/authz_version/grants/session/password_reset/
-│       │                    # policy/status/system_owner/email_delivery/login_event/mfa/oidc
-│       └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
+├── addon/                   # account（唯一业务 Addon）+ access（授权端口）+ demo（前端演示）
+│   ├── account/             # mod.rs（装配+对外端口）；domain/ 是 addon 级共享机制；user/ 是 module 层
+│   │   ├── domain/          # context/repository/claims/authz_version/grants/session/password_reset/
+│   │   │                    # policy/status/system_owner/email_delivery/login_event/mfa/oidc
+│   │   └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
+│   ├── access/              # 授权端口（预留，无冷启动引导，权限管理未交付）
+│   └── demo/                # 前端演示（notes CRUD）
 ├── config/                  # 不可变运行配置（mod.rs）、配置源合成（source.rs）
 ├── infrastructure/          # 审计（audit/）、授权一致性（authorization/）、声明式 Schema（schema.rs）
 ├── app.rs                   # 所有业务 Addon 的唯一组合根

@@ -245,6 +245,22 @@ impl AuthorizationOutboxRepository {
         );
         Ok((pending as u64, oldest_age as u64))
     }
+
+    /// 删除已发布且超过保留期的 Outbox 行，防止无界增长。
+    pub(super) async fn delete_published_before(
+        &self,
+        retention_seconds: u64,
+    ) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM authorization_outbox \
+             WHERE state = 'published' AND published_at < UNIX_TIMESTAMP() - ?",
+        )
+        .bind(retention_seconds as i64)
+        .execute(&self.pool)
+        .await
+        .context("清理已发布 Outbox 行失败")?;
+        Ok(result.rows_affected())
+    }
 }
 
 fn retry_delay_seconds(attempts: u32, max_retry_seconds: u64) -> u64 {

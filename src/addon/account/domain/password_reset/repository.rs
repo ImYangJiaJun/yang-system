@@ -120,6 +120,28 @@ pub(crate) async fn insert_issued_by(
     Ok(())
 }
 
+/// 在调用方事务内签发一条管理重置凭证（与审计同事务原子提交）。
+///
+/// 与 [`insert_issued_by`] 相同的列值，但走事务连接，供管理签发 Action 把
+/// 凭证插入与成功审计事件绑定在同一事务（避免崩溃丢审计）。
+pub(crate) async fn insert_issued_by_in_tx(
+    transaction: &mut Transaction,
+    user_id: i64,
+    issued: &IssuedPasswordReset,
+    ttl_seconds: u64,
+    requested_by_user: Option<i64>,
+) -> Result<(), BaseError> {
+    let ttl = i64::try_from(ttl_seconds)
+        .map_err(|_| BaseError::ConfigError("密码重置凭证 TTL 超出 i64 范围".to_string()))?;
+    transaction
+        .table(table!("password_reset_token"))
+        .set_expr(field!("created_at"), SqlExpr::unix_timestamp())
+        .set_expr(field!("expires_at"), SqlExpr::unix_timestamp_add(ttl))
+        .insert(&insert_data(user_id, issued.reference(), requested_by_user))
+        .await?;
+    Ok(())
+}
+
 /// 组装签发 INSERT 的列值；时间两列由 `set_expr` 以数据库时钟写入。
 fn insert_data(
     user_id: i64,

@@ -5,7 +5,6 @@
 
 use crate::addon::account::domain::mfa::{generate_totp_secret, otpauth_uri};
 use crate::addon::account::Account;
-use crate::audit;
 use crate::config::TotpSettings;
 use serde_json::json;
 use std::sync::Arc;
@@ -51,18 +50,6 @@ pub(super) async fn handle(
     let secret = generate_totp_secret();
     // 展示用 URI 以登录用户身份（username）为标签。
     let uri = otpauth_uri("yang-system", &observed.username, &secret, totp.digits);
-
-    // 审计：TOTP 配置初始化（未激活，不含密钥）。
-    let event = audit::succeeded_event(
-        &ctx,
-        None,
-        Some(audit::entity("user", user_id)?),
-        audit::entity("user", user_id)?,
-        None,
-        Some(audit::summary([("totp_setup", json!(true))])?),
-    )?;
-    let pool = ctx.tools().mysql()?.pool().clone();
-    audit::append_independent(&pool, &event).await?;
 
     ApiResponse::success(
         json!({

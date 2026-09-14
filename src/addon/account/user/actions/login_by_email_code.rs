@@ -145,7 +145,7 @@ impl CredentialVerifier for EmailCodeCredentialVerifier {
                 // 第一因子已是邮箱持有：备用邮箱通道禁用，只接受 TOTP / 恢复码。
                 let accepted = self
                     .account
-                    .verify_second_factor(ctx, user.id, &state, &secret, &code, false)
+                    .verify_second_factor(ctx, user.id, &state, &secret, &code, false, "login")
                     .await
                     .is_ok();
                 if !accepted {
@@ -202,12 +202,19 @@ pub(super) async fn handle(
         Err(error) => {
             // 两段式登录的第一阶段通过（等待第二因子输入）不是失败事件，不记录。
             if !matches!(error, BaseError::SecondFactorRequired) {
+                // 按错误类型映射粗粒度失败原因（用户不存在由 record_login_failure 二次判定）。
+                let failure_reason = match &error {
+                    BaseError::RateLimitExceeded { .. } => "rate_limited",
+                    BaseError::Unauthorized(_) => "disabled",
+                    _ => "invalid_password",
+                };
                 if let Err(record_error) = record_login_failure(
                     &record_ctx,
                     &account,
                     &input.email,
                     &session_ip,
                     &session_user_agent,
+                    failure_reason,
                 )
                 .await
                 {
@@ -221,6 +228,7 @@ pub(super) async fn handle(
         &record_ctx,
         &account,
         &tokens.access_token,
+        &tokens.refresh_token,
         &session_ip,
         &session_user_agent,
     )

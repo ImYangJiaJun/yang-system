@@ -123,18 +123,27 @@ fn step_up_targets(
         yang_base::action!("account.user.admin_disable_user"),
         yang_base::action!("account.user.admin_enable_user"),
         yang_base::action!("account.user.admin_issue_password_reset"),
+        // 逐台撤销是安全操作（踢出某设备），且 jti 黑名单不依赖凭据版本签发，
+        // 无论凭据变更开关是否打开都必须重认证。
+        yang_base::action!("account.user.revoke_session"),
     ];
-    // TOTP 停用是安全降级操作，不受凭据写开关影响（激活同样不受其门控），
-    // 必须始终重认证；已激活账号的 Step-up 会同时要求出示第二因子。
+    // TOTP 停用是安全降级操作，不受凭据写开关影响；setup/activate 是认证器
+    // 生命周期变更（会话劫持者可借 setup→activate 把 TOTP 绑到自己并夺走恢复码，
+    // 进而锁定合法用户），三者都必须重认证；已激活账号的 Step-up 会同时要求
+    // 出示第二因子。
     if totp_enabled {
+        targets.push(yang_base::action!("account.user.totp_setup"));
+        targets.push(yang_base::action!("account.user.totp_activate"));
         targets.push(yang_base::action!("account.user.totp_deactivate"));
     }
     if credential_mutations_enabled {
         targets.insert(0, yang_base::action!("account.user.delete_account"));
-        targets.insert(1, yang_base::action!("account.user.revoke_session"));
-        targets.insert(2, yang_base::action!("account.user.change_email"));
-        targets.insert(3, yang_base::action!("account.user.change_username"));
-        targets.insert(4, yang_base::action!("account.user.disable_self"));
+        targets.insert(1, yang_base::action!("account.user.change_email"));
+        targets.insert(2, yang_base::action!("account.user.change_username"));
+        targets.insert(3, yang_base::action!("account.user.disable_self"));
+        // 改密是高价值凭据变更，须重认证；启用 TOTP 的账号还会被要求出示第二因子，
+        // 否则持有会话者可仅凭旧密码（单因子）改密并踢掉合法用户全部会话。
+        targets.insert(4, yang_base::action!("account.user.change_password"));
     }
     targets
 }
@@ -149,13 +158,16 @@ mod tests {
             step_up_targets(true, true),
             vec![
                 yang_base::action!("account.user.delete_account"),
-                yang_base::action!("account.user.revoke_session"),
                 yang_base::action!("account.user.change_email"),
                 yang_base::action!("account.user.change_username"),
                 yang_base::action!("account.user.disable_self"),
+                yang_base::action!("account.user.change_password"),
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.revoke_session"),
+                yang_base::action!("account.user.totp_setup"),
+                yang_base::action!("account.user.totp_activate"),
                 yang_base::action!("account.user.totp_deactivate"),
             ]
         );
@@ -165,6 +177,9 @@ mod tests {
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.revoke_session"),
+                yang_base::action!("account.user.totp_setup"),
+                yang_base::action!("account.user.totp_activate"),
                 yang_base::action!("account.user.totp_deactivate"),
             ]
         );
@@ -175,6 +190,7 @@ mod tests {
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.revoke_session"),
             ]
         );
     }

@@ -1,8 +1,9 @@
 //! 使用短期单次凭证重置密码；请求不依赖现有登录会话。
 
 use crate::addon::account::domain::policy::{
-    validate_new_password, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
+    validate_password_field, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH,
 };
+use crate::addon::account::user::table::USERNAME;
 use crate::addon::account::{Account, PasswordResetReference};
 use crate::audit;
 use serde_json::json;
@@ -39,7 +40,6 @@ pub(super) async fn handle(
             "密码重置能力必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
         ));
     }
-    validate_new_password(&input.new_password)?;
     let attempt_fingerprint = PasswordResetReference::attempt_fingerprint(&input.reset_token)?;
     account
         .rate_limiter()
@@ -57,6 +57,14 @@ pub(super) async fn handle(
         .find_reset_target(&ctx, &reference)
         .await?
         .ok_or_else(Account::invalid_reset_token)?;
+    // 密码不能与用户名相同：从用户视图取 username 后校验（与注册路径同规则）。
+    let username = account
+        .users()
+        .find_by_id(&ctx, target_user_id)
+        .await?
+        .ok_or_else(|| BaseError::UserNotFound(target_user_id.to_string()))?
+        .require::<String>(USERNAME)?;
+    validate_password_field("new_password", &input.new_password, Some(&username))?;
 
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
@@ -95,6 +103,11 @@ pub(super) async fn handle(
     }
     .await;
     Account::finish_transaction(transaction, result).await?;
+
+    // 重置密码同样是最关键的凭据变更：立即收敛 Redis 水位线，使旧 Token 即刻失效。
+    let _ = account
+        .converge_revocation(&ctx, target_user_id, "account.user.reset_password", "user")
+        .await?;
 
     Account::browser_session().relogin_response("密码已重置，请使用新密码登录", secure)
 }

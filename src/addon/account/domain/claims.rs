@@ -52,11 +52,17 @@ pub(super) fn claims_for_user(
         permissions: grants.permissions().map(str::to_string).collect(),
     })
     .map_err(|error| BaseError::Unknown(format!("构造用户 Token Claims 失败: {error}")))?;
-    let refresh = if issue_refresh_credential_version {
+    let mut refresh = if issue_refresh_credential_version {
         serde_json::json!({ "credential_version": credential_version })
     } else {
         serde_json::json!({ "authz_version": authz_version })
     };
+    // 把 session_id 一并写入 refresh claims，使 `claims_for_refresh` 能从旧 refresh
+    // 声明继承会话标识（否则轮换后新 access token 的 session_id 恒为 None，
+    // 逐台撤销/会话行更新因此失效）。老 Token 无该字段时按 None 降级。
+    if let Some(session_id) = session_id {
+        refresh["session_id"] = serde_json::json!(session_id);
+    }
     Ok(TokenPairClaims::new(access).with_refresh(refresh))
 }
 
@@ -256,6 +262,8 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("带会话标识的声明应可序列化: {error}"));
         assert_eq!(claims.access["session_id"], serde_json::json!("sess-1"));
+        // refresh claims 必须同样携带 session_id，供轮换时继承（否则逐台撤销失效）。
+        assert_eq!(claims.refresh["session_id"], serde_json::json!("sess-1"));
 
         // 老 Token 无 session_id（None）→ 序列化为 null，刷新时按无会话记录降级。
         let legacy = claims_for_user("alice", 7, 0, true, &AuthorizationGrants::user(), None)
@@ -338,7 +346,8 @@ mod tests {
             "test-api".to_string(),
             60,
             120,
-        );
+        )
+        .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"));
         let custom = claims_for_user("alice", 7, 3, true, &AuthorizationGrants::user(), None)
             .unwrap_or_else(|error| panic!("授权快照应可序列化: {error}"));
         let (access, refresh) = manager

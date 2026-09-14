@@ -46,30 +46,31 @@ impl CredentialVerifier for UserCredentialVerifier {
         input: &LoginInput,
     ) -> Result<VerifiedSubject, BaseError> {
         // 标识归一化后按是否含 @ 分派：邮箱走 email 唯一约束查询，其余按用户名。
-        // 两种标识统一归一化后落入同一查找函数族，限流键沿用归一化标识，
-        // 防止攻击者经邮箱维度绕过用户名维度的限流与枚举防护。
         let identifier = input.username.trim().to_ascii_lowercase();
-        let limit_key = if identifier.contains('@') {
+        let normalized = if identifier.contains('@') {
             normalize_email(&identifier)?
         } else {
             normalize_username(&identifier)?
         };
-        self.account
-            .rate_limiter()
-            .check(ctx, AuthOperation::Login, &limit_key)
-            .await?;
-        // 分派查询：邮箱或用户名命中同一凭据投影（限流键已用归一化标识）。
+        // 分派查询：邮箱或用户名命中同一凭据投影。
         let user = if identifier.contains('@') {
             self.account
                 .users()
-                .find_credentials_by_email(ctx, &limit_key)
+                .find_credentials_by_email(ctx, &normalized)
                 .await?
         } else {
             self.account
                 .users()
-                .find_credentials_by_username(ctx, &limit_key)
+                .find_credentials_by_username(ctx, &normalized)
                 .await?
         };
+        // 统一限流身份：同一账号无论用用户名还是邮箱登录都共享同一预算（以用户 ID
+        // 为键），防止攻击者经邮箱维度绕过用户名维度的限流；用户不存在时按归一化标识键控。
+        let limit_key = login_rate_limit_key(user.as_ref().map(|user| user.id), &normalized);
+        self.account
+            .rate_limiter()
+            .check(ctx, AuthOperation::Login, &limit_key)
+            .await?;
         // 等时校验：用户不存在时也必须执行一次完整的 Argon2 校验。
         // 若 miss 分支跳过哈希直接返回错误，「用户不存在」与「密码错误」的响应时间
         // 会相差一次 Argon2 运算（几十到几百毫秒），攻击者可据此枚举用户名是否存在。
@@ -114,7 +115,9 @@ impl CredentialVerifier for UserCredentialVerifier {
                     Some(code) => {
                         let accepted = self
                             .account
-                            .verify_second_factor(ctx, user.id, &state, &secret, &code, true)
+                            .verify_second_factor(
+                                ctx, user.id, &state, &secret, &code, true, "login",
+                            )
                             .await
                             .is_ok();
                         if !accepted {
@@ -139,6 +142,19 @@ impl CredentialVerifier for UserCredentialVerifier {
         let claims = self.account.claims_for(ctx, user.id).await?;
         Ok(VerifiedSubject::new(user.id.to_string()).with_token_pair_claims(claims))
     }
+}
+
+/// 构造登录限流键。
+///
+/// 账号存在时以 `id:{user_id}` 为键：`id:` 前缀把「用户 ID」与「归一化标识」
+/// 隔离到两个不相交命名空间——归一化后的用户名/邮箱不可能含冒号，因此纯数字
+/// 用户名（如 `"42"`）或攻击者编造的不存在账号标识，都无法与 user_id=42 的
+/// 账号桶互撞（否则任何人都可用数字串标识定向烧掉任意用户的限流预算，
+/// 实现定向锁定）。账号不存在时按归一化标识键控。
+fn login_rate_limit_key(user_id: Option<i64>, normalized: &str) -> String {
+    user_id
+        .map(|id| format!("id:{id}"))
+        .unwrap_or_else(|| normalized.to_string())
 }
 
 pub(super) async fn handle(
@@ -175,12 +191,19 @@ pub(super) async fn handle(
         Err(error) => {
             // 两段式登录的第一阶段通过（等待第二因子输入）不是失败事件，不记录。
             if !matches!(error, BaseError::SecondFactorRequired) {
+                // 按错误类型映射粗粒度失败原因（用户不存在由 record_login_failure 二次判定）。
+                let failure_reason = match &error {
+                    BaseError::RateLimitExceeded { .. } => "rate_limited",
+                    BaseError::Unauthorized(_) => "disabled",
+                    _ => "invalid_password",
+                };
                 if let Err(record_error) = record_login_failure(
                     &record_ctx,
                     &account,
                     &input.username,
                     &session_ip,
                     &session_user_agent,
+                    failure_reason,
                 )
                 .await
                 {
@@ -196,6 +219,7 @@ pub(super) async fn handle(
         &record_ctx,
         &account,
         &tokens.access_token,
+        &tokens.refresh_token,
         &session_ip,
         &session_user_agent,
     )
@@ -216,9 +240,9 @@ pub(super) async fn record_login_failure(
     identifier: &str,
     ip: &str,
     user_agent: &str,
+    failure_reason: &'static str,
 ) -> Result<(), BaseError> {
     let now = current_unix_timestamp()?;
-    // 用户不存在/停用/密码错误统一粗粒度归类；不泄露具体原因给事件面。
     let normalized = identifier.trim().to_ascii_lowercase();
     let user_id = if identifier.contains('@') {
         let email = normalize_email(&normalized)?;
@@ -235,6 +259,13 @@ pub(super) async fn record_login_failure(
             .await?
             .map(|user| user.id)
     };
+    // 用户不存在（user_id 为 None）时归为 user_not_found，否则沿用调用方按错误类型
+    // 给出的粗粒度原因（invalid_password/disabled/rate_limited）。
+    let failure_reason = if user_id.is_none() {
+        "user_not_found"
+    } else {
+        failure_reason
+    };
     account
         .login_events()
         .append(
@@ -245,13 +276,13 @@ pub(super) async fn record_login_failure(
                 ip: ip.to_string(),
                 user_agent: user_agent.to_string(),
                 result: "failed",
-                failure_reason: Some("invalid_password"),
+                failure_reason: Some(failure_reason),
             },
         )
         .await
 }
 
-/// 从新签发的 access token 提取 session_id/jti 并写入 `user_session` 表。
+/// 从新签发的 access/refresh token 提取 session_id 与两个 jti 并写入 `user_session`。
 ///
 /// `pub(super)`：邮箱验证码免密登录（`login_by_email_code`）的成功路径
 /// 与密码登录共用同一会话落库/成功事件/新设备提醒逻辑。
@@ -259,6 +290,7 @@ pub(super) async fn record_login_session(
     ctx: &ActionContext,
     account: &Account,
     access_token: &str,
+    refresh_token: &str,
     ip: &str,
     user_agent: &str,
 ) -> Result<(), BaseError> {
@@ -278,6 +310,14 @@ pub(super) async fn record_login_session(
         .sub
         .parse::<i64>()
         .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+    // refresh token 的 jti 独立于 access jti（框架各自生成）；逐台撤销必须同时拉黑
+    // 二者，否则被踢设备仍可凭 refresh cookie 轮换续期。这里从 refresh token 解出 jti。
+    let refresh_jti = ctx
+        .tools()
+        .token()?
+        .verify_token(refresh_token)
+        .ok()
+        .map(|refresh_claims| refresh_claims.jti);
     let now = current_unix_timestamp()?;
     account
         .sessions()
@@ -287,6 +327,7 @@ pub(super) async fn record_login_session(
                 session_id,
                 user_id,
                 jti: claims.jti,
+                refresh_jti,
                 ip: ip.to_string(),
                 user_agent: user_agent.to_string(),
                 now,
@@ -364,4 +405,30 @@ pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec 
         .description("校验账号密码并签发 Token")
         .public()
         .register()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::login_rate_limit_key;
+
+    #[test]
+    fn 限流键_账号存在时带id前缀与标识命名空间隔离() {
+        // 账号桶与标识桶必须不相交：纯数字用户名不得撞上同值用户 ID
+        assert_eq!(login_rate_limit_key(Some(42), "42"), "id:42");
+        assert_eq!(login_rate_limit_key(None, "42"), "42");
+        assert_ne!(
+            login_rate_limit_key(Some(42), "42"),
+            login_rate_limit_key(None, "42"),
+            "数字串标识不得与账号 ID 键互撞（定向锁定回归）"
+        );
+    }
+
+    #[test]
+    fn 限流键_账号不存在时按归一化标识() {
+        assert_eq!(login_rate_limit_key(None, "alice"), "alice");
+        assert_eq!(
+            login_rate_limit_key(None, "alice@example.com"),
+            "alice@example.com"
+        );
+    }
 }

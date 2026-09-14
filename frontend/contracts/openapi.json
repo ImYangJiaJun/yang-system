@@ -2889,6 +2889,270 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/users/export": {
+      "get": {
+        "description": "导出当前用户的个人数据（资料、会话、安全事件）",
+        "operationId": "account.user.export_data",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "title": "ExportDataInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "definitions": {
+                        "LoginEventView": {
+                          "description": "用户可见的安全事件视图。",
+                          "properties": {
+                            "failure_reason": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "ip": {
+                              "type": "string"
+                            },
+                            "occurred_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "result": {
+                              "type": "string"
+                            },
+                            "user_agent": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "ip",
+                            "occurred_at",
+                            "result",
+                            "user_agent"
+                          ],
+                          "type": "object"
+                        },
+                        "SessionView": {
+                          "description": "单条会话展示视图（供 GET /users/sessions 返回）。",
+                          "properties": {
+                            "created_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "current": {
+                              "type": "boolean"
+                            },
+                            "ip": {
+                              "type": "string"
+                            },
+                            "last_seen_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "revoked_at": {
+                              "format": "int64",
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "session_id": {
+                              "type": "string"
+                            },
+                            "user_agent": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "created_at",
+                            "current",
+                            "ip",
+                            "last_seen_at",
+                            "session_id",
+                            "user_agent"
+                          ],
+                          "type": "object"
+                        },
+                        "UserStatus": {
+                          "description": "用户账号状态：启用、停用或已删除（匿名化，路线图 E-2）。",
+                          "enum": [
+                            "active",
+                            "disabled",
+                            "deleted"
+                          ],
+                          "type": "string"
+                        },
+                        "UserView": {
+                          "description": "可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。",
+                          "properties": {
+                            "avatar_version": {
+                              "description": "头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "created_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "email": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "email_verified_at": {
+                              "format": "int64",
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "id": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "status": {
+                              "$ref": "#/definitions/UserStatus"
+                            },
+                            "totp_activated": {
+                              "description": "TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。",
+                              "type": "boolean"
+                            },
+                            "updated_at": {
+                              "format": "int64",
+                              "type": "integer"
+                            },
+                            "username": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "created_at",
+                            "id",
+                            "status",
+                            "totp_activated",
+                            "updated_at",
+                            "username"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "description": "个人数据导出载荷：资料 + 会话 + 登录安全事件（可机器读取的结构化 JSON）。",
+                      "properties": {
+                        "security_events": {
+                          "items": {
+                            "$ref": "#/definitions/LoginEventView"
+                          },
+                          "type": "array"
+                        },
+                        "sessions": {
+                          "items": {
+                            "$ref": "#/definitions/SessionView"
+                          },
+                          "type": "array"
+                        },
+                        "user": {
+                          "$ref": "#/definitions/UserView"
+                        }
+                      },
+                      "required": [
+                        "security_events",
+                        "sessions",
+                        "user"
+                      ],
+                      "title": "DataExport",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "导出个人数据",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/users/login": {
       "post": {
         "description": "校验账号密码并签发 Token",

@@ -4,6 +4,7 @@ import { ApiError } from "@/engine/http/errors";
 import { apiBase, parseJson } from "@/engine/http/http";
 import { stepUpRequiredError } from "@/engine/session/step-up-response";
 import { useSessionCredentials, useSessionSnapshot } from "@/engine";
+import { requestWithTokenRefresh } from "@/engine/session/auth-session";
 
 /**
  * account 账号中心业务流程请求：当前用户资料、头像、修改密码、修改用户名、停用账号。
@@ -82,15 +83,18 @@ export async function fetchCurrentUser(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<CurrentUser> {
-  const response = await fetch(`${apiBase}/api/v1/users/me`, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
-    credentials: "include",
-    signal,
-  });
+  // 走共享刷新客户端：access token 过期时透明续期，而非硬失败 401。
+  const response = await requestWithTokenRefresh(accessToken, (token) =>
+    fetch(`${apiBase}/api/v1/users/me`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      credentials: "include",
+      signal,
+    }),
+  );
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = (await parseJson(response)) as ApiEnvelope | undefined;
   if (!response.ok || payload?.code !== 0) {
@@ -377,6 +381,69 @@ export async function revokeSession(
       details: result.payload,
     });
   }
+}
+
+export type SecurityEvent = {
+  occurredAt: number;
+  ip: string;
+  userAgent: string;
+  result: "succeeded" | "failed";
+  failureReason: string | null;
+};
+
+/// 查询当前用户的登录安全事件（分页、仅本人、按时间倒序）。
+export async function fetchSecurityEvents(
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<SecurityEvent[]> {
+  const response = await requestWithTokenRefresh(accessToken, (token) =>
+    fetch(`${apiBase}/api/v1/users/security-events`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      credentials: "include",
+      signal,
+    }),
+  );
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+  if (!response.ok || payload?.code !== 0) {
+    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+      status: response.status,
+      code: payload?.code,
+      requestId,
+      details: payload,
+    });
+  }
+  const data = recordData(payload.data);
+  const events = Array.isArray(data?.events) ? data.events : [];
+  return events.map((raw) => {
+    const event = raw as Record<string, unknown>;
+    return {
+      occurredAt: event.occurred_at as number,
+      ip: String(event.ip),
+      userAgent: String(event.user_agent),
+      result: event.result === "succeeded" ? "succeeded" : "failed",
+      failureReason:
+        typeof event.failure_reason === "string"
+          ? (event.failure_reason as string)
+          : null,
+    };
+  });
+}
+
+/// 登录安全事件的 TanStack Query 入口：认证会话就绪后拉取。
+export function useSecurityEvents(): UseQueryResult<SecurityEvent[]> {
+  const session = useSessionCredentials();
+  const snapshot = useSessionSnapshot();
+  return useQuery({
+    enabled: snapshot.loggedIn,
+    queryKey: ["security-events", session.token ?? "anonymous"],
+    queryFn: ({ signal }) => fetchSecurityEvents(session.token, signal),
+    staleTime: 30_000,
+  });
 }
 
 export type TotpSetupResult = {

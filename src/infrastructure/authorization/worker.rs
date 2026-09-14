@@ -15,6 +15,9 @@ use yang_base::tools::Tools;
 
 static WORKER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+/// 已发布 Outbox 行的保留期（秒）：保留足够久以支持审计/对账，之后删除防无界增长。
+const OUTBOX_PUBLISHED_RETENTION_SECONDS: u64 = 7 * 24 * 3600;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AuthorizationOutboxBatchReport {
     pub claimed: u64,
@@ -112,7 +115,19 @@ impl AuthorizationOutboxProcessor {
             }
         }
         self.refresh_backlog_metrics().await?;
+        self.cleanup_published().await?;
         Ok(report)
+    }
+
+    async fn cleanup_published(&self) -> anyhow::Result<()> {
+        let deleted = self
+            .repository
+            .delete_published_before(OUTBOX_PUBLISHED_RETENTION_SECONDS)
+            .await?;
+        if deleted > 0 {
+            tracing::info!(deleted, "已清理过期已发布 Outbox 行");
+        }
+        Ok(())
     }
 
     async fn refresh_backlog_metrics(&self) -> anyhow::Result<()> {

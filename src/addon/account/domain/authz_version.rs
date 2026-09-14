@@ -197,6 +197,14 @@ pub(crate) async fn increment_locked_credential_versions(
     Ok((next_authz, next_credential))
 }
 
+/// 匿名化删除后写入 `password_hash` 的惰性有效 PHC。
+///
+/// `password_hash` 列非空，删除后不能置 NULL；写入一个与 argon2 默认参数一致的
+/// 惰性哈希，使登录等时校验路径对已删除账号仍能正常解析并返回「密码不匹配」，
+/// 不因「哈希格式无效」泄露账号存在性。该哈希不对应任何真实凭据。
+const DELETED_PASSWORD_HASH: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$KeT08Pv9+LVzDxDOmS18Tw$f1ITNKuxgUMXlkesQPqcEpIDZlQZ8FOm1wadvq9lxiU";
+
 /// 在账号匿名化删除事务中改写身份标识并递增两个安全版本（路线图 E-2b）。
 ///
 /// `deleted_username` 由调用方生成（如 `deleted_<id>`，保唯一约束）；
@@ -227,6 +235,12 @@ pub(crate) async fn anonymize_locked_user_and_increment_versions(
             "status": UserStatus::Deleted.as_str(),
             "authz_version": next_authz,
             "credential_version": next_credential,
+            // GDPR 删除权：清空可逆凭据材料。password_hash 置惰性有效 PHC，
+            // TOTP 密钥/激活时间/恢复码摘要一律置 NULL，不再保留。
+            "password_hash": DELETED_PASSWORD_HASH,
+            "totp_secret": serde_json::Value::Null,
+            "totp_activated_at": serde_json::Value::Null,
+            "totp_recovery_digest": serde_json::Value::Null,
         }))
         .await?;
     if affected != 1 {

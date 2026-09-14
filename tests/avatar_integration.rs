@@ -115,6 +115,7 @@ fn token_manager() -> TokenManager {
         300,
         3600,
     )
+    .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
 }
 
 fn step_up_manager() -> Arc<StepUpManager> {

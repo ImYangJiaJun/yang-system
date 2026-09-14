@@ -31,6 +31,14 @@ pub(super) async fn handle(
             "目标用户必须是正整数".to_string(),
         ));
     }
+    // 防锁定：操作者不能停用自身（否则最后一名持权管理员可把自己锁出系统，
+    // 且无上帝账号兜底，只能靠运维手工 SQL 恢复）。
+    if operator_id == input.id {
+        return Err(BaseError::ParamInvalid(
+            "id".to_string(),
+            "不能停用当前操作者的账号".to_string(),
+        ));
+    }
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
         let locked = account

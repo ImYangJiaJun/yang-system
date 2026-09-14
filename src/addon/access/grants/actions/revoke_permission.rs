@@ -83,6 +83,24 @@ pub(super) async fn handle(
     .await;
     let changed = Access::finish_transaction(transaction, result).await?;
 
+    // 权限撤销后立即收敛 Redis 水位线（best-effort），使携带旧权限快照的 access
+    // token 即刻失效，不等 Outbox Worker 异步发布（否则被撤销权限在传播窗口内仍生效）。
+    // 失败由 Outbox Worker 兜底。
+    if changed {
+        if let Err(error) = ctx
+            .tools()
+            .token()?
+            .revoke_by_subject(&input.user_id.to_string())
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                user_id = input.user_id,
+                "权限撤销 Redis 即时收敛失败，待 Outbox 兜底"
+            );
+        }
+    }
+
     ApiResponse::success(
         RevokePermissionResult {
             user_id: input.user_id,
