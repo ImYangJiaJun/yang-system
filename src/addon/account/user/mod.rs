@@ -141,6 +141,9 @@ fn step_up_targets(
         targets.insert(1, yang_base::action!("account.user.change_email"));
         targets.insert(2, yang_base::action!("account.user.change_username"));
         targets.insert(3, yang_base::action!("account.user.disable_self"));
+        // 改密是高价值凭据变更，须重认证；启用 TOTP 的账号还会被要求出示第二因子，
+        // 否则持有会话者可仅凭旧密码（单因子）改密并踢掉合法用户全部会话。
+        targets.insert(4, yang_base::action!("account.user.change_password"));
     }
     targets
 }
@@ -158,6 +161,7 @@ mod tests {
                 yang_base::action!("account.user.change_email"),
                 yang_base::action!("account.user.change_username"),
                 yang_base::action!("account.user.disable_self"),
+                yang_base::action!("account.user.change_password"),
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
