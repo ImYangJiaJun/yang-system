@@ -18,6 +18,7 @@ use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
+use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
@@ -42,8 +43,8 @@ fn redis_config() -> RedisConfig {
         .with_connect_timeout(10)
 }
 
-/// `issue_refresh_credential_version = false` 使 revoke_session 不进入 step_up_targets，
-/// 测试可直接调用撤销端点，聚焦「撤销后 refresh 必须失败」而非 Step-up 流程。
+/// revoke_session 现始终受 Step-up 保护（与凭据变更开关无关），测试须走
+/// challenge→proof 流程；开启凭据版本签发使 delete_account 等也进入 step_up_targets。
 fn security_settings() -> Arc<SecuritySettings> {
     Arc::new(SecuritySettings {
         argon2_max_concurrency: 4,
@@ -51,7 +52,7 @@ fn security_settings() -> Arc<SecuritySettings> {
         auth_rate_limit_ip_attempts: 10_000,
         auth_rate_limit_username_attempts: 1_000,
         password_reset_ttl_seconds: 900,
-        issue_refresh_credential_version: false,
+        issue_refresh_credential_version: true,
         trusted_proxy_cidrs: Vec::new(),
         totp: None,
     })
@@ -161,7 +162,7 @@ async fn dispatch(
     body: Value,
     headers: &[(&str, &str)],
     peer_port: u16,
-) -> anyhow::Result<ApiResponse> {
+) -> Result<ApiResponse, BaseError> {
     let mut request = Request::new(body);
     for (name, value) in headers {
         request = request.header(*name, *value);
@@ -169,9 +170,12 @@ async fn dispatch(
     let context = app.context(request).with_request_meta(
         RequestMeta::new().with_peer_addr(SocketAddr::from(([127, 0, 0, 1], peer_port))),
     );
-    app.dispatch_context(action_handle(app, module, action)?, context)
-        .await
-        .with_context(|| format!("{module}.{action} 调用失败"))
+    app.dispatch_context(
+        action_handle(app, module, action)
+            .map_err(|error| BaseError::ConfigError(error.to_string()))?,
+        context,
+    )
+    .await
 }
 
 fn access_token(response: &ApiResponse) -> anyhow::Result<String> {
@@ -354,14 +358,51 @@ async fn revoking_a_session_rejects_its_refresh_token() -> anyhow::Result<()> {
         // 3. 取会话 ID（列表应仍只显示一台设备，说明 session_id 在轮换后未丢失）。
         let session_id = current_session_id(&runtime, &token, 42_001).await?;
 
-        // 4. 撤销该会话。
+        // 4. 撤销该会话（revoke_session 始终受 Step-up 保护，先触发 challenge 再重认证）。
+        let username = format!("revoke_{suffix}");
         let authorization = format!("Bearer {token}");
-        let revoked = dispatch(
+        let challenge = match dispatch(
             &runtime,
             "account.user",
             "revoke_session",
             json!({ "session_id": session_id }),
             &[("authorization", authorization.as_str())],
+            42_001,
+        )
+        .await
+        {
+            Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
+            other => {
+                anyhow::bail!("撤销会话缺少 proof 必须返回 Step-up challenge，实际: {other:?}")
+            }
+        };
+        let completed = dispatch(
+            &runtime,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": challenge,
+                "credentials": { "username": username, "password": PASSWORD },
+            }),
+            &[],
+            42_001,
+        )
+        .await?;
+        let proof = completed
+            .data
+            .as_ref()
+            .and_then(|data| data["proof"].as_str())
+            .map(str::to_string)
+            .context("Step-up 完成响应缺少 proof")?;
+        let revoked = dispatch(
+            &runtime,
+            "account.user",
+            "revoke_session",
+            json!({ "session_id": session_id }),
+            &[
+                ("authorization", authorization.as_str()),
+                ("x-step-up-proof", proof.as_str()),
+            ],
             42_001,
         )
         .await?;

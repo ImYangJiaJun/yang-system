@@ -123,6 +123,9 @@ fn step_up_targets(
         yang_base::action!("account.user.admin_disable_user"),
         yang_base::action!("account.user.admin_enable_user"),
         yang_base::action!("account.user.admin_issue_password_reset"),
+        // 逐台撤销是安全操作（踢出某设备），且 jti 黑名单不依赖凭据版本签发，
+        // 无论凭据变更开关是否打开都必须重认证。
+        yang_base::action!("account.user.revoke_session"),
     ];
     // TOTP 停用是安全降级操作，不受凭据写开关影响；setup/activate 是认证器
     // 生命周期变更（会话劫持者可借 setup→activate 把 TOTP 绑到自己并夺走恢复码，
@@ -135,10 +138,9 @@ fn step_up_targets(
     }
     if credential_mutations_enabled {
         targets.insert(0, yang_base::action!("account.user.delete_account"));
-        targets.insert(1, yang_base::action!("account.user.revoke_session"));
-        targets.insert(2, yang_base::action!("account.user.change_email"));
-        targets.insert(3, yang_base::action!("account.user.change_username"));
-        targets.insert(4, yang_base::action!("account.user.disable_self"));
+        targets.insert(1, yang_base::action!("account.user.change_email"));
+        targets.insert(2, yang_base::action!("account.user.change_username"));
+        targets.insert(3, yang_base::action!("account.user.disable_self"));
     }
     targets
 }
@@ -153,13 +155,13 @@ mod tests {
             step_up_targets(true, true),
             vec![
                 yang_base::action!("account.user.delete_account"),
-                yang_base::action!("account.user.revoke_session"),
                 yang_base::action!("account.user.change_email"),
                 yang_base::action!("account.user.change_username"),
                 yang_base::action!("account.user.disable_self"),
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.revoke_session"),
                 yang_base::action!("account.user.totp_setup"),
                 yang_base::action!("account.user.totp_activate"),
                 yang_base::action!("account.user.totp_deactivate"),
@@ -171,6 +173,7 @@ mod tests {
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.revoke_session"),
                 yang_base::action!("account.user.totp_setup"),
                 yang_base::action!("account.user.totp_activate"),
                 yang_base::action!("account.user.totp_deactivate"),
@@ -183,6 +186,7 @@ mod tests {
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.revoke_session"),
             ]
         );
     }
