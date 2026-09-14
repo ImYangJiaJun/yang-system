@@ -202,12 +202,19 @@ pub(super) async fn handle(
         Err(error) => {
             // 两段式登录的第一阶段通过（等待第二因子输入）不是失败事件，不记录。
             if !matches!(error, BaseError::SecondFactorRequired) {
+                // 按错误类型映射粗粒度失败原因（用户不存在由 record_login_failure 二次判定）。
+                let failure_reason = match &error {
+                    BaseError::RateLimitExceeded { .. } => "rate_limited",
+                    BaseError::Unauthorized(_) => "disabled",
+                    _ => "invalid_password",
+                };
                 if let Err(record_error) = record_login_failure(
                     &record_ctx,
                     &account,
                     &input.email,
                     &session_ip,
                     &session_user_agent,
+                    failure_reason,
                 )
                 .await
                 {

@@ -86,8 +86,15 @@ pub(super) async fn handle(
             .get_header("user-agent")
             .unwrap_or_default()
             .to_string();
-        if let Err(error) =
-            record_login_failure(&ctx, &account, &input.username, &ip, &user_agent).await
+        if let Err(error) = record_login_failure(
+            &ctx,
+            &account,
+            &input.username,
+            &ip,
+            &user_agent,
+            "invalid_password",
+        )
+        .await
         {
             tracing::warn!(error = %error, "MFA 邮箱验证码请求的失败事件记录失败");
         }

@@ -175,12 +175,19 @@ pub(super) async fn handle(
         Err(error) => {
             // 两段式登录的第一阶段通过（等待第二因子输入）不是失败事件，不记录。
             if !matches!(error, BaseError::SecondFactorRequired) {
+                // 按错误类型映射粗粒度失败原因（用户不存在由 record_login_failure 二次判定）。
+                let failure_reason = match &error {
+                    BaseError::RateLimitExceeded { .. } => "rate_limited",
+                    BaseError::Unauthorized(_) => "disabled",
+                    _ => "invalid_password",
+                };
                 if let Err(record_error) = record_login_failure(
                     &record_ctx,
                     &account,
                     &input.username,
                     &session_ip,
                     &session_user_agent,
+                    failure_reason,
                 )
                 .await
                 {
@@ -217,9 +224,9 @@ pub(super) async fn record_login_failure(
     identifier: &str,
     ip: &str,
     user_agent: &str,
+    failure_reason: &'static str,
 ) -> Result<(), BaseError> {
     let now = current_unix_timestamp()?;
-    // 用户不存在/停用/密码错误统一粗粒度归类；不泄露具体原因给事件面。
     let normalized = identifier.trim().to_ascii_lowercase();
     let user_id = if identifier.contains('@') {
         let email = normalize_email(&normalized)?;
@@ -236,6 +243,13 @@ pub(super) async fn record_login_failure(
             .await?
             .map(|user| user.id)
     };
+    // 用户不存在（user_id 为 None）时归为 user_not_found，否则沿用调用方按错误类型
+    // 给出的粗粒度原因（invalid_password/disabled/rate_limited）。
+    let failure_reason = if user_id.is_none() {
+        "user_not_found"
+    } else {
+        failure_reason
+    };
     account
         .login_events()
         .append(
@@ -246,7 +260,7 @@ pub(super) async fn record_login_failure(
                 ip: ip.to_string(),
                 user_agent: user_agent.to_string(),
                 result: "failed",
-                failure_reason: Some("invalid_password"),
+                failure_reason: Some(failure_reason),
             },
         )
         .await
