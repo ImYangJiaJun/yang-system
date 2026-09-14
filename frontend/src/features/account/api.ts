@@ -4,6 +4,7 @@ import { ApiError } from "@/engine/http/errors";
 import { apiBase, parseJson } from "@/engine/http/http";
 import { stepUpRequiredError } from "@/engine/session/step-up-response";
 import { useSessionCredentials, useSessionSnapshot } from "@/engine";
+import { requestWithTokenRefresh } from "@/engine/session/auth-session";
 
 /**
  * account 账号中心业务流程请求：当前用户资料、头像、修改密码、修改用户名、停用账号。
@@ -82,15 +83,18 @@ export async function fetchCurrentUser(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<CurrentUser> {
-  const response = await fetch(`${apiBase}/api/v1/users/me`, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
-    credentials: "include",
-    signal,
-  });
+  // 走共享刷新客户端：access token 过期时透明续期，而非硬失败 401。
+  const response = await requestWithTokenRefresh(accessToken, (token) =>
+    fetch(`${apiBase}/api/v1/users/me`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      credentials: "include",
+      signal,
+    }),
+  );
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = (await parseJson(response)) as ApiEnvelope | undefined;
   if (!response.ok || payload?.code !== 0) {
@@ -392,15 +396,17 @@ export async function fetchSecurityEvents(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<SecurityEvent[]> {
-  const response = await fetch(`${apiBase}/api/v1/users/security-events`, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
-    credentials: "include",
-    signal,
-  });
+  const response = await requestWithTokenRefresh(accessToken, (token) =>
+    fetch(`${apiBase}/api/v1/users/security-events`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      credentials: "include",
+      signal,
+    }),
+  );
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = (await parseJson(response)) as ApiEnvelope | undefined;
   if (!response.ok || payload?.code !== 0) {
