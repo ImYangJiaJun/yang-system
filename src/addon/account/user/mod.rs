@@ -124,9 +124,13 @@ fn step_up_targets(
         yang_base::action!("account.user.admin_enable_user"),
         yang_base::action!("account.user.admin_issue_password_reset"),
     ];
-    // TOTP 停用是安全降级操作，不受凭据写开关影响（激活同样不受其门控），
-    // 必须始终重认证；已激活账号的 Step-up 会同时要求出示第二因子。
+    // TOTP 停用是安全降级操作，不受凭据写开关影响；setup/activate 是认证器
+    // 生命周期变更（会话劫持者可借 setup→activate 把 TOTP 绑到自己并夺走恢复码，
+    // 进而锁定合法用户），三者都必须重认证；已激活账号的 Step-up 会同时要求
+    // 出示第二因子。
     if totp_enabled {
+        targets.push(yang_base::action!("account.user.totp_setup"));
+        targets.push(yang_base::action!("account.user.totp_activate"));
         targets.push(yang_base::action!("account.user.totp_deactivate"));
     }
     if credential_mutations_enabled {
@@ -156,6 +160,8 @@ mod tests {
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.totp_setup"),
+                yang_base::action!("account.user.totp_activate"),
                 yang_base::action!("account.user.totp_deactivate"),
             ]
         );
@@ -165,6 +171,8 @@ mod tests {
                 yang_base::action!("account.user.admin_disable_user"),
                 yang_base::action!("account.user.admin_enable_user"),
                 yang_base::action!("account.user.admin_issue_password_reset"),
+                yang_base::action!("account.user.totp_setup"),
+                yang_base::action!("account.user.totp_activate"),
                 yang_base::action!("account.user.totp_deactivate"),
             ]
         );
