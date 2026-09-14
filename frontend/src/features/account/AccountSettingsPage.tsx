@@ -22,6 +22,7 @@ import {
   revokeSession,
   setupTotp,
   uploadAvatar,
+  useSecurityEvents,
 } from "./api";
 import { prepareAvatarFile } from "./lib/prepare-avatar";
 import { TotpSetupDialog } from "./TotpSetupDialog";
@@ -45,6 +46,7 @@ export default function AccountSettingsPage() {
   const session = useSessionSnapshot();
   const token = session.token || undefined;
   const navigate = useNavigate();
+  const securityEvents = useSecurityEvents();
 
   const [profile, setProfile] = useState<CurrentUser | null>(null);
   const [profileError, setProfileError] = useState("");
@@ -710,6 +712,41 @@ export default function AccountSettingsPage() {
           ))}
           {sessions.length === 0 && !sessionsError && (
             <li className="text-sm text-muted-foreground">暂无活跃会话</li>
+          )}
+        </ul>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <h2 className="text-base font-medium">安全事件</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          近期登录成功与失败记录
+        </p>
+        {securityEvents.isError && (
+          <p role="alert" className="mt-2 text-sm text-destructive">
+            安全事件加载失败
+          </p>
+        )}
+        <ul className="mt-3 space-y-2">
+          {securityEvents.data?.map((event, index) => (
+            <li
+              key={`${event.occurredAt}-${index}`}
+              className="rounded-md border border-border px-3 py-2 text-sm"
+            >
+              <p className="font-medium">
+                {event.result === "succeeded" ? "登录成功" : "登录失败"}
+                {event.failureReason && (
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {event.failureReason}
+                  </span>
+                )}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {event.ip} · {new Date(event.occurredAt * 1000).toLocaleString()}
+              </p>
+            </li>
+          ))}
+          {securityEvents.data?.length === 0 && !securityEvents.isError && (
+            <li className="text-sm text-muted-foreground">暂无安全事件</li>
           )}
         </ul>
       </section>

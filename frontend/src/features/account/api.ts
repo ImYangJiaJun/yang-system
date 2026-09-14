@@ -379,6 +379,67 @@ export async function revokeSession(
   }
 }
 
+export type SecurityEvent = {
+  occurredAt: number;
+  ip: string;
+  userAgent: string;
+  result: "succeeded" | "failed";
+  failureReason: string | null;
+};
+
+/// 查询当前用户的登录安全事件（分页、仅本人、按时间倒序）。
+export async function fetchSecurityEvents(
+  accessToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<SecurityEvent[]> {
+  const response = await fetch(`${apiBase}/api/v1/users/security-events`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    credentials: "include",
+    signal,
+  });
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+  if (!response.ok || payload?.code !== 0) {
+    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+      status: response.status,
+      code: payload?.code,
+      requestId,
+      details: payload,
+    });
+  }
+  const data = recordData(payload.data);
+  const events = Array.isArray(data?.events) ? data.events : [];
+  return events.map((raw) => {
+    const event = raw as Record<string, unknown>;
+    return {
+      occurredAt: event.occurred_at as number,
+      ip: String(event.ip),
+      userAgent: String(event.user_agent),
+      result: event.result === "succeeded" ? "succeeded" : "failed",
+      failureReason:
+        typeof event.failure_reason === "string"
+          ? (event.failure_reason as string)
+          : null,
+    };
+  });
+}
+
+/// 登录安全事件的 TanStack Query 入口：认证会话就绪后拉取。
+export function useSecurityEvents(): UseQueryResult<SecurityEvent[]> {
+  const session = useSessionCredentials();
+  const snapshot = useSessionSnapshot();
+  return useQuery({
+    enabled: snapshot.loggedIn,
+    queryKey: ["security-events", session.token ?? "anonymous"],
+    queryFn: ({ signal }) => fetchSecurityEvents(session.token, signal),
+    staleTime: 30_000,
+  });
+}
+
 export type TotpSetupResult = {
   secret: string;
   otpauthUri: string;
