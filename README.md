@@ -7,14 +7,16 @@
 
 `yang-system` 是 `yang-base` 唯一原生 Interface 的参考应用和 React 管理控制台。当前
 应用以同一份 Addon/Module 定义构建强类型 Action、Schema、Catalog、Registry、
-OpenAPI 与前端页面。骨架只保留 `account` 一个业务 Addon，覆盖账号与会话、
-授权失效传播、高权限审计和生产可观测性；没有平台管理、企业租户和业务对象域。
+OpenAPI 与前端页面。骨架以 `account` 为唯一业务 Addon，覆盖账号与会话、
+授权失效传播、高权限审计和生产可观测性；另有 `access`（授权端口，预留未接线）与 `demo`（前端演示）两个非业务 Addon。没有平台管理、企业租户和业务对象域。
 
 ## 当前能力
 
 | Addon / Module | 控制台入口 | 当前能力 |
 |---|---|---|
 | `account.user` | 个人账户 / 用户中心 / 账号设置 | 邮箱验证码注册、登录（用户名/邮箱/邮箱验证码免密）、头像设置与展示、Refresh Cookie、全设备退出、当前用户、Step-up、账号中心（资料/改密/改用户名/换邮箱/停用/登录设备/安全事件）、自助密码找回；启用凭据版本切换后还提供改密、自助停用、密码重置、匿名化删除；管理动作（grants 化）：停用/启用用户、签发重置凭证、用户列表 |
+| `access.grants` | —（预留端口，未接线） | 授权/权限管理端口：grant_permission / revoke_permission / list_permissions / list_user_grants；无冷启动引导，权限管理尚未交付 |
+| `demo.notes` | —（前端演示） | 笔记 CRUD（create / update / delete / list），供前端演示与无数据库 E2E 后端使用 |
 
 安全边界不是只依赖前端隐藏按钮：Access Token 的授权快照通过
 `authz_version` 与 MySQL/Redis 当前事实比较，授权 writer 在同一事务中更新业务事实、
@@ -152,9 +154,11 @@ pnpm dev
 
 ```text
 src/
-├── addon/                   # 业务 Addon；当前只有 account 一个
-│   └── account/             # 注册/会话/邮件投递、授权快照与密码重置；user/ 是 module 层
-│       └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
+├── addon/                   # account（唯一业务 Addon）+ access（授权端口）+ demo（前端演示）
+│   ├── account/             # 注册/会话/邮件投递、授权快照与密码重置；user/ 是 module 层
+│   │   └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
+│   ├── access/              # 授权端口（预留，无冷启动引导，权限管理未交付）
+│   └── demo/                # 前端演示（notes CRUD）
 ├── config/                  # 不可变设置、环境变量与 secret 白名单
 ├── infrastructure/          # 审计、授权一致性与声明式数据库 Schema
 ├── app.rs                   # 业务 Addon 的唯一组合根
