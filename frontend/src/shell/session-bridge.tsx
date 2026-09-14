@@ -5,6 +5,7 @@ import {
   SESSION_EXPIRED_EVENT,
   SESSION_RELOGIN_REQUIRED_EVENT,
 } from "@/engine/session/auth-session";
+import { subscribeSessionEnd } from "@/engine/session/session-coordination";
 import { useSessionController } from "@/engine/session/use-session";
 
 /**
@@ -36,6 +37,19 @@ export default function SessionBridge() {
         onReloginRequired,
       );
     };
+  }, [controller, navigate]);
+
+  // 跨标签页会话结束广播（登出/停用/改密后其它标签即时收敛）：
+  // subscribeSessionEnd 此前仅被定义与单测引用、未挂载到组件树，导致
+  // 跨标签收敛退化为被动依赖 authz_version 刷新失败。
+  useEffect(() => {
+    const unsubscribe = subscribeSessionEnd((reason) => {
+      controller.clearSession(
+        reason === "credentials-changed" ? "credentials-changed" : "session-expired",
+      );
+      navigate("/login", { replace: true });
+    });
+    return unsubscribe;
   }, [controller, navigate]);
 
   return <Outlet />;
