@@ -15,6 +15,7 @@ use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
+use yang_db::{field, table, CompareOp, QueryBuilder};
 
 const USER_CREDENTIAL_FIELDS: &[&str] = &[USER_ID, PASSWORD_HASH, STATUS];
 const USER_AUTHORIZATION_FIELDS: &[&str] = &[USERNAME, STATUS, AUTHZ_VERSION, CREDENTIAL_VERSION];
@@ -416,6 +417,21 @@ impl UserRepository {
         id: i64,
         code: &str,
     ) -> Result<bool, BaseError> {
+        // FOR UPDATE 锁定用户行：并发消费同一恢复码时，后到事务阻塞至先到事务提交，
+        // 随后读到已移除该摘要的版本并返回 false，修复无锁 SELECT + 无条件回写的
+        // TOCTOU 双消费（此前两并发请求可同时读到同一摘要集并各自成功）。
+        let pool = ctx.tools().mysql()?.pool().clone();
+        let locked = transaction
+            .select_for_update::<(i64,)>(
+                QueryBuilder::from_pool(&pool, table!("users"))
+                    .field(field!("id"))
+                    .where_and(field!("id"), CompareOp::Eq, id),
+            )
+            .await
+            .map_err(BaseError::from)?;
+        if locked.is_empty() {
+            return Ok(false);
+        }
         let rows = self
             .trusted_query(ctx)?
             .select_fields(USER_TOTP_FIELDS)?
