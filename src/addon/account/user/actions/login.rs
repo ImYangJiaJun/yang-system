@@ -66,10 +66,7 @@ impl CredentialVerifier for UserCredentialVerifier {
         };
         // 统一限流身份：同一账号无论用用户名还是邮箱登录都共享同一预算（以用户 ID
         // 为键），防止攻击者经邮箱维度绕过用户名维度的限流；用户不存在时按归一化标识键控。
-        let limit_key = user
-            .as_ref()
-            .map(|user| user.id.to_string())
-            .unwrap_or(normalized);
+        let limit_key = login_rate_limit_key(user.as_ref().map(|user| user.id), &normalized);
         self.account
             .rate_limiter()
             .check(ctx, AuthOperation::Login, &limit_key)
@@ -145,6 +142,19 @@ impl CredentialVerifier for UserCredentialVerifier {
         let claims = self.account.claims_for(ctx, user.id).await?;
         Ok(VerifiedSubject::new(user.id.to_string()).with_token_pair_claims(claims))
     }
+}
+
+/// 构造登录限流键。
+///
+/// 账号存在时以 `id:{user_id}` 为键：`id:` 前缀把「用户 ID」与「归一化标识」
+/// 隔离到两个不相交命名空间——归一化后的用户名/邮箱不可能含冒号，因此纯数字
+/// 用户名（如 `"42"`）或攻击者编造的不存在账号标识，都无法与 user_id=42 的
+/// 账号桶互撞（否则任何人都可用数字串标识定向烧掉任意用户的限流预算，
+/// 实现定向锁定）。账号不存在时按归一化标识键控。
+fn login_rate_limit_key(user_id: Option<i64>, normalized: &str) -> String {
+    user_id
+        .map(|id| format!("id:{id}"))
+        .unwrap_or_else(|| normalized.to_string())
 }
 
 pub(super) async fn handle(
@@ -395,4 +405,30 @@ pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec 
         .description("校验账号密码并签发 Token")
         .public()
         .register()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::login_rate_limit_key;
+
+    #[test]
+    fn 限流键_账号存在时带id前缀与标识命名空间隔离() {
+        // 账号桶与标识桶必须不相交：纯数字用户名不得撞上同值用户 ID
+        assert_eq!(login_rate_limit_key(Some(42), "42"), "id:42");
+        assert_eq!(login_rate_limit_key(None, "42"), "42");
+        assert_ne!(
+            login_rate_limit_key(Some(42), "42"),
+            login_rate_limit_key(None, "42"),
+            "数字串标识不得与账号 ID 键互撞（定向锁定回归）"
+        );
+    }
+
+    #[test]
+    fn 限流键_账号不存在时按归一化标识() {
+        assert_eq!(login_rate_limit_key(None, "alice"), "alice");
+        assert_eq!(
+            login_rate_limit_key(None, "alice@example.com"),
+            "alice@example.com"
+        );
+    }
 }
