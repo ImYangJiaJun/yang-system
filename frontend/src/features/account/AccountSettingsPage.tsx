@@ -741,7 +741,8 @@ export default function AccountSettingsPage() {
                 )}
               </p>
               <p className="text-xs text-muted-foreground">
-                {event.ip} · {new Date(event.occurredAt * 1000).toLocaleString()}
+                {event.ip} ·{" "}
+                {new Date(event.occurredAt * 1000).toLocaleString()}
               </p>
             </li>
           ))}

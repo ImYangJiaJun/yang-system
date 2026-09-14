@@ -45,7 +45,9 @@ export default function SessionBridge() {
   useEffect(() => {
     const unsubscribe = subscribeSessionEnd((reason) => {
       controller.clearSession(
-        reason === "credentials-changed" ? "credentials-changed" : "session-expired",
+        reason === "credentials-changed"
+          ? "credentials-changed"
+          : "session-expired",
       );
       navigate("/login", { replace: true });
     });
