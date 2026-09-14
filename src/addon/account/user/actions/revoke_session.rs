@@ -32,9 +32,9 @@ pub(super) async fn handle(
         .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
         .id;
     // 目标会话必须属于当前用户（横向越权防护）。
-    let Some((owner_id, current_jti)) = account
+    let Some((owner_id, current_jti, refresh_jti)) = account
         .sessions()
-        .current_jti(&ctx, &input.session_id)
+        .revocation_jtis(&ctx, &input.session_id)
         .await?
     else {
         return Err(BaseError::Unauthorized("会话不存在或已撤销".to_string()));
@@ -52,12 +52,19 @@ pub(super) async fn handle(
     if affected != 1 {
         return Err(BaseError::Unauthorized("会话不存在或已撤销".to_string()));
     }
-    // jti 黑名单：使被踢设备的旧 refresh 立即失效（不递增凭据版本，
-    // 不影响该用户其他会话）。
+    // jti 黑名单：拉黑 access jti（立即失效当前 access token）与 refresh jti
+    // （阻止被踢设备继续轮换续期）。refresh 轮换校验的是 refresh token 自身的 jti，
+    // 二者独立生成，必须同时拉黑。不递增凭据版本，不影响该用户其他会话。
     ctx.tools()
         .token()?
         .revoke_by_jti_with_ttl(&current_jti, REVOKE_JTI_BLACKLIST_TTL_SECONDS)
         .await?;
+    if let Some(refresh_jti) = refresh_jti {
+        ctx.tools()
+            .token()?
+            .revoke_by_jti_with_ttl(&refresh_jti, REVOKE_JTI_BLACKLIST_TTL_SECONDS)
+            .await?;
+    }
 
     let event = audit::succeeded_event(
         &ctx,

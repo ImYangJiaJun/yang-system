@@ -69,17 +69,25 @@ pub(super) async fn handle(
     .await?;
     // refresh 热路径：节流更新会话行（last_seen_at 60s 窗口内不重复写，
     // jti 随轮换更新）；失败只记日志，不阻塞 refresh。
-    if let Err(error) = touch_session_on_refresh(&touch_ctx, &account, &tokens.access_token).await {
+    if let Err(error) = touch_session_on_refresh(
+        &touch_ctx,
+        &account,
+        &tokens.access_token,
+        &tokens.refresh_token,
+    )
+    .await
+    {
         tracing::warn!(error = %error, "refresh 会话行更新失败");
     }
     Account::browser_session().token_response(tokens.access_token, tokens.refresh_token, secure)
 }
 
-/// 从新 access token 提取 session_id/jti 并节流更新 `user_session` 行。
+/// 从新 access/refresh token 提取 session_id 与两个 jti 并节流更新 `user_session` 行。
 async fn touch_session_on_refresh(
     ctx: &ActionContext,
     account: &Account,
     access_token: &str,
+    refresh_token: &str,
 ) -> Result<(), BaseError> {
     let claims = ctx.tools().token()?.verify_token(access_token)?;
     if claims.token_type != TokenType::Access {
@@ -92,10 +100,12 @@ async fn touch_session_on_refresh(
     else {
         return Ok(()); // 老 Token 无 session_id：按无会话记录降级
     };
+    // 记录轮换后的 refresh jti，供后续逐台撤销拉黑（否则撤销只命中 access jti）。
+    let refresh_jti = ctx.tools().token()?.verify_token(refresh_token)?.jti;
     let now = current_unix_timestamp()?;
     account
         .sessions()
-        .touch_on_refresh(ctx, session_id, &claims.jti, now)
+        .touch_on_refresh(ctx, session_id, &claims.jti, &refresh_jti, now)
         .await
 }
 

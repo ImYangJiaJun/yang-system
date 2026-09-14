@@ -17,6 +17,7 @@ pub(crate) const SESSION_LAST_SEEN_THROTTLE_SECONDS: i64 = 60;
 pub(crate) const SESSION_ID: &str = "session_id";
 pub(crate) const USER_ID: &str = "user_id";
 pub(crate) const CURRENT_JTI: &str = "current_jti";
+pub(crate) const REFRESH_JTI: &str = "refresh_jti";
 pub(crate) const CREATED_AT: &str = "created_at";
 pub(crate) const LAST_SEEN_AT: &str = "last_seen_at";
 pub(crate) const IP: &str = "ip";
@@ -40,6 +41,7 @@ pub(crate) struct NewSession {
     pub(crate) session_id: String,
     pub(crate) user_id: i64,
     pub(crate) jti: String,
+    pub(crate) refresh_jti: Option<String>,
     pub(crate) ip: String,
     pub(crate) user_agent: String,
     pub(crate) now: i64,
@@ -65,7 +67,7 @@ impl SessionRepository {
         ctx: &ActionContext,
         new_session: NewSession,
     ) -> Result<(), BaseError> {
-        let record = Record::new()
+        let mut record = Record::new()
             .set(SESSION_ID, new_session.session_id.as_str())
             .set(USER_ID, new_session.user_id)
             .set(CURRENT_JTI, new_session.jti.as_str())
@@ -73,6 +75,9 @@ impl SessionRepository {
             .set(LAST_SEEN_AT, new_session.now)
             .set(IP, new_session.ip.as_str())
             .set(USER_AGENT, new_session.user_agent.as_str());
+        if let Some(refresh_jti) = new_session.refresh_jti.as_deref() {
+            record = record.set(REFRESH_JTI, refresh_jti);
+        }
         // 会话已存在（同 session_id 重新登录/重放）时只更新 jti 与 last_seen。
         let existing = self
             .query(ctx)?
@@ -87,27 +92,31 @@ impl SessionRepository {
         if existing.is_empty() {
             self.query(ctx)?.insert(record).await?;
         } else {
+            let mut update = Record::new()
+                .set(CURRENT_JTI, new_session.jti)
+                .set(LAST_SEEN_AT, new_session.now);
+            if let Some(refresh_jti) = new_session.refresh_jti {
+                update = update.set(REFRESH_JTI, refresh_jti);
+            }
             self.query(ctx)?
                 .where_eq(
                     SESSION_ID,
                     serde_json::Value::String(new_session.session_id.clone()),
                 )?
-                .update(
-                    Record::new()
-                        .set(CURRENT_JTI, new_session.jti)
-                        .set(LAST_SEEN_AT, new_session.now),
-                )
+                .update(update)
                 .await?;
         }
         Ok(())
     }
 
-    /// refresh 轮换时更新 jti；`last_seen_at` 仅在节流窗口外更新（写放大控制）。
+    /// refresh 轮换时更新 jti（access 与 refresh）；`last_seen_at` 仅在节流窗口外
+    /// 更新（写放大控制）。
     pub(crate) async fn touch_on_refresh(
         &self,
         ctx: &ActionContext,
         session_id: &str,
         jti: &str,
+        refresh_jti: &str,
         now: i64,
     ) -> Result<(), BaseError> {
         let rows = self
@@ -128,7 +137,9 @@ impl SessionRepository {
             return Ok(());
         };
         let last_seen: i64 = record.require(LAST_SEEN_AT)?;
-        let mut update = Record::new().set(CURRENT_JTI, jti);
+        let mut update = Record::new()
+            .set(CURRENT_JTI, jti)
+            .set(REFRESH_JTI, refresh_jti);
         if now.saturating_sub(last_seen) >= SESSION_LAST_SEEN_THROTTLE_SECONDS {
             update = update.set(LAST_SEEN_AT, now);
         }
@@ -177,15 +188,16 @@ impl SessionRepository {
             .collect()
     }
 
-    /// 读取单个未撤销会话的 current_jti（撤销前用于 jti 黑名单）。
-    pub(crate) async fn current_jti(
+    /// 读取单个未撤销会话的（owner_id, access jti, refresh jti），供撤销时拉黑
+    /// access 与 refresh 两个 jti。`refresh_jti` 为 None 表示老会话（尚未轮换）。
+    pub(crate) async fn revocation_jtis(
         &self,
         ctx: &ActionContext,
         session_id: &str,
-    ) -> Result<Option<(i64, String)>, BaseError> {
+    ) -> Result<Option<(i64, String, Option<String>)>, BaseError> {
         let rows = self
             .query(ctx)?
-            .select_fields(&[USER_ID, CURRENT_JTI])?
+            .select_fields(&[USER_ID, CURRENT_JTI, REFRESH_JTI])?
             .where_eq(
                 SESSION_ID,
                 serde_json::Value::String(session_id.to_string()),
@@ -195,7 +207,13 @@ impl SessionRepository {
             .all()
             .await?;
         rows.first()
-            .map(|record| Ok((record.require(USER_ID)?, record.require(CURRENT_JTI)?)))
+            .map(|record| {
+                Ok((
+                    record.require(USER_ID)?,
+                    record.require(CURRENT_JTI)?,
+                    record.optional(REFRESH_JTI)?,
+                ))
+            })
             .transpose()
     }
 

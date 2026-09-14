@@ -221,6 +221,7 @@ pub(super) async fn handle(
         &record_ctx,
         &account,
         &tokens.access_token,
+        &tokens.refresh_token,
         &session_ip,
         &session_user_agent,
     )

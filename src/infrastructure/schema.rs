@@ -213,6 +213,7 @@ pub(crate) fn user_session() -> Result<TableDefinition, BaseError> {
             Field::string("session_id", 64).required().primary_key(),
             Field::bigint("user_id").required(),
             Field::string("current_jti", 64).required(),
+            Field::string("refresh_jti", 64),
             Field::bigint("created_at").required(),
             Field::bigint("last_seen_at").required(),
             Field::string("ip", 64).required(),

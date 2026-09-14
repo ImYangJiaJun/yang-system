@@ -196,6 +196,7 @@ pub(super) async fn handle(
         &record_ctx,
         &account,
         &tokens.access_token,
+        &tokens.refresh_token,
         &session_ip,
         &session_user_agent,
     )
@@ -251,7 +252,7 @@ pub(super) async fn record_login_failure(
         .await
 }
 
-/// 从新签发的 access token 提取 session_id/jti 并写入 `user_session` 表。
+/// 从新签发的 access/refresh token 提取 session_id 与两个 jti 并写入 `user_session`。
 ///
 /// `pub(super)`：邮箱验证码免密登录（`login_by_email_code`）的成功路径
 /// 与密码登录共用同一会话落库/成功事件/新设备提醒逻辑。
@@ -259,6 +260,7 @@ pub(super) async fn record_login_session(
     ctx: &ActionContext,
     account: &Account,
     access_token: &str,
+    refresh_token: &str,
     ip: &str,
     user_agent: &str,
 ) -> Result<(), BaseError> {
@@ -278,6 +280,14 @@ pub(super) async fn record_login_session(
         .sub
         .parse::<i64>()
         .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
+    // refresh token 的 jti 独立于 access jti（框架各自生成）；逐台撤销必须同时拉黑
+    // 二者，否则被踢设备仍可凭 refresh cookie 轮换续期。这里从 refresh token 解出 jti。
+    let refresh_jti = ctx
+        .tools()
+        .token()?
+        .verify_token(refresh_token)
+        .ok()
+        .map(|refresh_claims| refresh_claims.jti);
     let now = current_unix_timestamp()?;
     account
         .sessions()
@@ -287,6 +297,7 @@ pub(super) async fn record_login_session(
                 session_id,
                 user_id,
                 jti: claims.jti,
+                refresh_jti,
                 ip: ip.to_string(),
                 user_agent: user_agent.to_string(),
                 now,
