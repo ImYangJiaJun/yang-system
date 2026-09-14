@@ -61,15 +61,6 @@ pub(super) async fn handle(
             "用户名已存在".to_string(),
         ));
     }
-    // 预检邮箱唯一性：若邮箱已被占用，直接拒绝而不消费验证码，避免用户损失
-    // 一次性码（此前 email 唯一性只靠 insert 时的 DB 约束兜底，验证码在约束
-    // 冲突前已被原子消费）。
-    if account.users().email_exists(&ctx, &email).await? {
-        return Err(BaseError::ParamInvalid(
-            "email".to_string(),
-            "邮箱已被注册".to_string(),
-        ));
-    }
     RegistrationEmailVerification::from_context(&ctx)?
         .consume(&ctx, &email, &input.email_code)
         .await?;
