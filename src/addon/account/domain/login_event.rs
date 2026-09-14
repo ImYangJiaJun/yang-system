@@ -69,6 +69,26 @@ impl LoginEventRepository {
         Ok(())
     }
 
+    /// 在调用方事务内删除某用户的全部登录事件行（匿名化删除的隐私清理）。
+    ///
+    /// 登录事件含 ip/user_agent 个人数据；删除账号后必须移除，而非保留 PII。
+    pub(crate) async fn delete_all_for_user_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        user_id: i64,
+    ) -> Result<u64, BaseError> {
+        let affected = self
+            .query(ctx)?
+            .where_eq(
+                LOGIN_EVENT_USER_ID,
+                serde_json::Value::Number(user_id.into()),
+            )?
+            .delete_in_tx(transaction)
+            .await?;
+        Ok(affected)
+    }
+
     /// 按用户查询安全事件，按时间倒序分页。
     pub(crate) async fn list_for_user(
         &self,

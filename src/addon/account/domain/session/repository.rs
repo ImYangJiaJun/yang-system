@@ -233,6 +233,23 @@ impl SessionRepository {
         Ok(rows.len() as u64)
     }
 
+    /// 在调用方事务内删除某用户的全部会话行（匿名化删除的隐私清理）。
+    ///
+    /// 会话行含 ip/user_agent 个人数据；删除账号后必须移除，而非仅标记撤销。
+    pub(crate) async fn delete_all_for_user_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        user_id: i64,
+    ) -> Result<u64, BaseError> {
+        let affected = self
+            .query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(user_id.into()))?
+            .delete_in_tx(transaction)
+            .await?;
+        Ok(affected)
+    }
+
     /// 在调用方事务内撤销单个会话（与成功审计同事务原子提交）。
     pub(crate) async fn revoke_in_tx(
         &self,
