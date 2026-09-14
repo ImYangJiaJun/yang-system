@@ -8,6 +8,10 @@ pub(crate) const USERNAME_PATTERN: &str = "^[A-Za-z0-9_-]+$";
 pub(crate) const PASSWORD_MIN_LENGTH: usize = 10;
 pub(crate) const PASSWORD_MAX_LENGTH: usize = 128;
 
+/// 匿名化删除改写用户名的保留前缀：注册端拒绝该前缀，保证 `deleted_<id>` 在删除时
+/// 可用（否则可被预占导致删除事务的唯一约束冲突回滚）。
+pub(crate) const DELETED_USERNAME_PREFIX: &str = "deleted_";
+
 pub(crate) fn normalize_username(username: &str) -> Result<String, BaseError> {
     let normalized = username.trim().to_ascii_lowercase();
     let length = normalized.len();
@@ -24,6 +28,12 @@ pub(crate) fn normalize_username(username: &str) -> Result<String, BaseError> {
         return Err(BaseError::ParamInvalid(
             "username".to_string(),
             "只允许 ASCII 字母、数字、下划线和连字符".to_string(),
+        ));
+    }
+    if normalized.starts_with(DELETED_USERNAME_PREFIX) {
+        return Err(BaseError::ParamInvalid(
+            "username".to_string(),
+            "该用户名前缀为系统保留".to_string(),
         ));
     }
     Ok(normalized)
