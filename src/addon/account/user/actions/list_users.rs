@@ -2,10 +2,8 @@
 
 use crate::addon::account::user::table::UserView;
 use crate::addon::account::Account;
-use crate::audit;
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::definition::{HttpMethod, Int, ModuleSpec};
@@ -53,21 +51,6 @@ pub(super) async fn handle(
         .iter()
         .map(UserView::try_from)
         .collect::<Result<Vec<_>, BaseError>>()?;
-
-    let actor_id = ctx.actor()?.user_id();
-    let event = audit::succeeded_event(
-        &ctx,
-        None,
-        Some(audit::entity("user", actor_id)?),
-        audit::entity("user_list", format!("page-{page}"))?,
-        None,
-        Some(audit::summary([
-            ("page", json!(page)),
-            ("page_size", json!(page_size)),
-            ("count", json!(users.len())),
-        ])?),
-    )?;
-    audit::append_independent(ctx.tools().mysql()?.pool(), &event).await?;
 
     Ok(UsersPage { users })
 }
