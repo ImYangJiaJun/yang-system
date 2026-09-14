@@ -118,7 +118,9 @@ impl CredentialVerifier for UserCredentialVerifier {
                     Some(code) => {
                         let accepted = self
                             .account
-                            .verify_second_factor(ctx, user.id, &state, &secret, &code, true)
+                            .verify_second_factor(
+                                ctx, user.id, &state, &secret, &code, true, "login",
+                            )
                             .await
                             .is_ok();
                         if !accepted {

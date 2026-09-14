@@ -145,7 +145,7 @@ impl CredentialVerifier for EmailCodeCredentialVerifier {
                 // 第一因子已是邮箱持有：备用邮箱通道禁用，只接受 TOTP / 恢复码。
                 let accepted = self
                     .account
-                    .verify_second_factor(ctx, user.id, &state, &secret, &code, false)
+                    .verify_second_factor(ctx, user.id, &state, &secret, &code, false, "login")
                     .await
                     .is_ok();
                 if !accepted {

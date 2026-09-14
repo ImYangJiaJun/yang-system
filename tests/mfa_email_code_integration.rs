@@ -703,3 +703,55 @@ async fn totp_deactivate_requires_step_up_and_restores_single_factor() -> anyhow
         (Ok(()), Ok(()), Ok(())) => Ok(()),
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn totp_code_cannot_be_replayed_within_same_window() -> anyhow::Result<()> {
+    let control = connect_database().await?;
+    let redis = connect_redis().await?;
+    reset_database(&control).await?;
+    reset_redis(&redis).await?;
+
+    let outcome = async {
+        let sender = CapturingEmailSender::default();
+        let app = build_mfa_app(&control, &redis, &sender).await?;
+        register_user(
+            &app,
+            &sender,
+            "totp_replay_user",
+            "totp.replay@example.com",
+            44_201,
+        )
+        .await?;
+        let (secret, _recovery_codes) = activate_totp(&app, "totp_replay_user", 44_201).await?;
+        // 激活会按秒粒度撤销既有 Token；跨过撤销水位线再登录。
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        let code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
+        // 首次登录成功。
+        let first = login(&app, "totp_replay_user", Some(&code), 44_201).await?;
+        ensure!(first.code == 0, "首次 TOTP 登录必须成功: {}", first.message);
+
+        // 同一码在同一 30 秒窗口内重放：必须被拒绝（防重放）。
+        let replay = login(&app, "totp_replay_user", Some(&code), 44_201).await;
+        let replayed_ok = match replay {
+            Ok(response) => response.code == 0,
+            Err(_) => false,
+        };
+        ensure!(
+            !replayed_ok,
+            "同一 TOTP 码在同一窗口内重放必须被拒绝，实际成功"
+        );
+        Ok(())
+    }
+    .await;
+
+    let database_cleanup = reset_database(&control).await;
+    let redis_cleanup = reset_redis(&redis).await;
+    match (outcome, database_cleanup, redis_cleanup) {
+        (Err(error), _, _) => Err(error),
+        (Ok(()), Err(error), _) => Err(error.context("TOTP 重放测试数据库清理失败")),
+        (Ok(()), Ok(()), Err(error)) => Err(error.context("TOTP 重放测试 Redis 清理失败")),
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
+    }
+}

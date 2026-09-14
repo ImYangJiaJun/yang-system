@@ -110,7 +110,7 @@ impl CredentialVerifier for UserStepUpCredentialVerifier {
                 let accepted = match &mfa_code {
                     Some(code) => self
                         .account
-                        .verify_second_factor(ctx, user.id, &state, &secret, code, true)
+                        .verify_second_factor(ctx, user.id, &state, &secret, code, true, "step-up")
                         .await
                         .is_ok(),
                     None => false,
