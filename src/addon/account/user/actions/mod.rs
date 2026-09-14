@@ -11,6 +11,7 @@ mod change_password;
 mod change_username;
 mod delete_account;
 mod disable_self;
+mod export_data;
 mod get_avatar;
 mod list_sessions;
 mod list_users;
@@ -64,6 +65,7 @@ const ACTIONS: &[Register] = action_registry![
     change_email,    // 发布开关：credential_mutations_enabled
     delete_account,  // 发布开关：credential_mutations_enabled
     disable_self,    // 发布开关：credential_mutations_enabled
+    export_data,
     request_change_email,
     request_password_reset,
     request_mfa_email_code,
