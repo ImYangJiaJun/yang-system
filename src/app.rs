@@ -152,14 +152,17 @@ mod tests {
         Arc::new(
             ToolsBuilder::new()
                 .mysql(mysql)
-                .token(TokenManager::new_symmetric(
-                    "01234567890123456789012345678901",
-                    Algorithm::HS256,
-                    "test".to_string(),
-                    "test-api".to_string(),
-                    60,
-                    120,
-                ))
+                .token(
+                    TokenManager::new_symmetric(
+                        "01234567890123456789012345678901",
+                        Algorithm::HS256,
+                        "test".to_string(),
+                        "test-api".to_string(),
+                        60,
+                        120,
+                    )
+                    .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}")),
+                )
                 .extension(Arc::new(
                     StepUpManager::new(
                         "independent-step-up-test-secret-0123456789abcdef",

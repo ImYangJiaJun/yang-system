@@ -346,7 +346,8 @@ mod tests {
             "test-api".to_string(),
             60,
             120,
-        );
+        )
+        .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"));
         let custom = claims_for_user("alice", 7, 3, true, &AuthorizationGrants::user(), None)
             .unwrap_or_else(|error| panic!("授权快照应可序列化: {error}"));
         let (access, refresh) = manager

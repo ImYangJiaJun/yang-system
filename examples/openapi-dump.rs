@@ -26,14 +26,17 @@ async fn main() -> anyhow::Result<()> {
     let tools = Arc::new(
         ToolsBuilder::new()
             .mysql(mysql)
-            .token(TokenManager::new_symmetric(
-                "openapi-dump-local-placeholder-0000",
-                Algorithm::HS256,
-                "openapi-dump".to_string(),
-                "openapi-dump".to_string(),
-                60,
-                120,
-            ))
+            .token(
+                TokenManager::new_symmetric(
+                    "openapi-dump-local-placeholder-0000",
+                    Algorithm::HS256,
+                    "openapi-dump".to_string(),
+                    "openapi-dump".to_string(),
+                    60,
+                    120,
+                )
+                .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}")),
+            )
             .build()
             .context("构建 Tools 失败")?,
     );
