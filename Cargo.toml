@@ -22,8 +22,8 @@ tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "rt-
 toml = "0.8"
 uuid = { version = "=1.12.1", features = ["v4"] }
 tracing = "0.1.41"
-yang-base = { version = "0.2.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics"] }
-yang-db = { version = "0.1.4", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
+yang-base = { version = "0.2.2", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics"] }
+yang-db = { version = "0.1.6", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
 yang-runtime = { version = "0.1.0", path = "../../crates/yang-runtime" }
 aes-gcm = "0.10.3"
 base64 = "0.22"
