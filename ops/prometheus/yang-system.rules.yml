@@ -136,7 +136,7 @@ groups:
           runbook: "docs/contracts/SLO.md"
 
       - alert: YangSystemShutdownPhaseTimedOut
-        expr: increase(yang_runtime_shutdown_phase_total{result="timeout"}[15m]) > 0
+        expr: increase(yang_system_shutdown_phase_total{result="timeout"}[15m]) > 0
         labels:
           severity: warning
           slo: graceful_shutdown

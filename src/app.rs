@@ -18,6 +18,9 @@ pub(crate) const YANG_SYSTEM_METRIC_NAMES: RuntimeMetricNames = RuntimeMetricNam
     "yang_system_readiness_ready",
     "yang_system_readiness_resource_healthy",
     "yang_system_resource_pool_connections",
+    "yang_system_shutdown_started_total",
+    "yang_system_shutdown_phase_total",
+    "yang_system_shutdown_phase_duration_seconds",
 );
 
 pub struct Application {

@@ -40,7 +40,8 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         &log_identity,
     )?;
     let shutdown_budget =
-        ShutdownBudget::new(Duration::from_secs(settings.shutdown.total_timeout_seconds));
+        ShutdownBudget::new(Duration::from_secs(settings.shutdown.total_timeout_seconds))
+            .with_metric_names(YANG_SYSTEM_METRIC_NAMES);
     tracing::info!(
         service = %log_identity.service,
         version = %log_identity.version,

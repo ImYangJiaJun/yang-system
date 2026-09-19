@@ -114,7 +114,7 @@ tests:
   # shutdown 超时：15m 窗口内出现 result="timeout" 计数，应立即触发（无 for）。
   - interval: 1m
     input_series:
-      - series: 'yang_runtime_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="timeout"}'
+      - series: 'yang_system_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="timeout"}'
         values: '0+0x9 1+0x5'
     alert_rule_test:
       - eval_time: 15m
@@ -134,9 +134,9 @@ tests:
   # shutdown 反例：各阶段均正常完成，timeout 计数恒为 0，不应触发。
   - interval: 1m
     input_series:
-      - series: 'yang_runtime_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="timeout"}'
+      - series: 'yang_system_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="timeout"}'
         values: '0+0x14'
-      - series: 'yang_runtime_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="success"}'
+      - series: 'yang_system_shutdown_phase_total{job="yang-system", instance="127.0.0.1:9090", phase="http_drain", result="success"}'
         values: '0+1x14'
     alert_rule_test:
       - eval_time: 15m
