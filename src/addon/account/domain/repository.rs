@@ -425,7 +425,7 @@ impl UserRepository {
             .select_for_update::<(i64,)>(
                 QueryBuilder::from_pool(&pool, table!("users"))
                     .field(field!("id"))
-                    .where_and(field!("id"), CompareOp::Eq, id),
+                    .where_and(field!("id"), CompareOp::Eq, id)?,
             )
             .await
             .map_err(BaseError::from)?;

@@ -186,7 +186,7 @@ pub(crate) async fn find_target_user(
             field!("token_digest"),
             CompareOp::Eq,
             reference.digest.as_str(),
-        )
+        )?
         .value::<i64>(field!("user_user"))
         .await
         .map_err(BaseError::from)
@@ -211,7 +211,7 @@ pub(crate) async fn lock_in_tx(
                     field!("token_digest"),
                     CompareOp::Eq,
                     reference.digest.as_str(),
-                ),
+                )?,
         )
         .await?
         .into_iter()
@@ -241,7 +241,7 @@ pub(crate) async fn consume_in_tx(
     let consumed = transaction
         .table(table!("password_reset_token"))
         .set_expr(field!("consumed_at"), SqlExpr::unix_timestamp())
-        .where_and(field!("id"), CompareOp::Eq, locked.id)
+        .where_and(field!("id"), CompareOp::Eq, locked.id)?
         .where_null(field!("consumed_at"))
         .where_null(field!("invalidated_at"))
         .where_expr(
@@ -257,8 +257,8 @@ pub(crate) async fn consume_in_tx(
     transaction
         .table(table!("password_reset_token"))
         .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
-        .where_and(field!("user_user"), CompareOp::Eq, locked.user_id)
-        .where_and(field!("id"), CompareOp::Ne, locked.id)
+        .where_and(field!("user_user"), CompareOp::Eq, locked.user_id)?
+        .where_and(field!("id"), CompareOp::Ne, locked.id)?
         .where_null(field!("consumed_at"))
         .where_null(field!("invalidated_at"))
         .update(&serde_json::json!({}))
@@ -277,7 +277,7 @@ pub(crate) async fn invalidate_all_for_user_in_tx(
     transaction
         .table(table!("password_reset_token"))
         .set_expr(field!("invalidated_at"), SqlExpr::unix_timestamp())
-        .where_and(field!("user_user"), CompareOp::Eq, user_id)
+        .where_and(field!("user_user"), CompareOp::Eq, user_id)?
         .where_null(field!("consumed_at"))
         .where_null(field!("invalidated_at"))
         .update(&serde_json::json!({}))

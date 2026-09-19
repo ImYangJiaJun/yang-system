@@ -53,7 +53,7 @@ impl AuthorizationVersionSource for AccountAuthorizationPort {
         let row: Option<(String, i64)> = QueryBuilder::from_pool(pool, table!("users"))
             .field(field!("status"))
             .field(field!("authz_version"))
-            .where_and(field!("id"), CompareOp::Eq, user_id)
+            .where_and(field!("id"), CompareOp::Eq, user_id)?
             .find()
             .await
             .map_err(BaseError::from)?;
@@ -85,7 +85,7 @@ impl AuthorizationVersionWriter for AccountAuthorizationPort {
                 QueryBuilder::from_pool(pool, table!("users"))
                     .field(field!("status"))
                     .field(field!("authz_version"))
-                    .where_and(field!("id"), CompareOp::Eq, user_id),
+                    .where_and(field!("id"), CompareOp::Eq, user_id)?,
             )
             .await
             .map_err(BaseError::from)?
@@ -115,12 +115,12 @@ impl AuthorizationVersionWriter for AccountAuthorizationPort {
         let next_authz = next_authz_version(locked.authz_version())?;
         let affected = transaction
             .table(table!("users"))
-            .where_and(field!("id"), CompareOp::Eq, locked.user_id())
+            .where_and(field!("id"), CompareOp::Eq, locked.user_id())?
             .where_and(
                 field!("authz_version"),
                 CompareOp::Eq,
                 locked.authz_version(),
-            )
+            )?
             .update(&serde_json::json!({
                 "authz_version": next_authz,
             }))
@@ -148,7 +148,7 @@ pub(crate) async fn lock_user_credential(
                 .field(field!("password_hash"))
                 .field(field!("authz_version"))
                 .field(field!("credential_version"))
-                .where_and(field!("id"), CompareOp::Eq, user_id),
+                .where_and(field!("id"), CompareOp::Eq, user_id)?,
         )
         .await
         .map_err(BaseError::from)?
@@ -176,13 +176,13 @@ pub(crate) async fn increment_locked_credential_versions(
     let next_credential = next_credential_version(locked.credential_version)?;
     let affected = transaction
         .table(table!("users"))
-        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
-        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)?
         .where_and(
             field!("credential_version"),
             CompareOp::Eq,
             locked.credential_version,
-        )
+        )?
         .update(&serde_json::json!({
             "authz_version": next_authz,
             "credential_version": next_credential,
@@ -220,14 +220,14 @@ pub(crate) async fn anonymize_locked_user_and_increment_versions(
     let next_credential = next_credential_version(locked.credential_version)?;
     let affected = transaction
         .table(table!("users"))
-        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
-        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())
-        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
+        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())?
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)?
         .where_and(
             field!("credential_version"),
             CompareOp::Eq,
             locked.credential_version,
-        )
+        )?
         .update(&serde_json::json!({
             "username": deleted_username,
             "email": serde_json::Value::Null,
@@ -265,14 +265,14 @@ pub(crate) async fn activate_locked_user_and_increment_versions(
     let next_credential = next_credential_version(locked.credential_version)?;
     let affected = transaction
         .table(table!("users"))
-        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
-        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())
-        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
+        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())?
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)?
         .where_and(
             field!("credential_version"),
             CompareOp::Eq,
             locked.credential_version,
-        )
+        )?
         .update(&serde_json::json!({
             "status": UserStatus::Active.as_str(),
             "authz_version": next_authz,
@@ -297,14 +297,14 @@ pub(crate) async fn disable_locked_user_and_increment_versions(
     let next_credential = next_credential_version(locked.credential_version)?;
     let affected = transaction
         .table(table!("users"))
-        .where_and(field!("id"), CompareOp::Eq, locked.user_id)
-        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())
-        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)
+        .where_and(field!("id"), CompareOp::Eq, locked.user_id)?
+        .where_and(field!("status"), CompareOp::Eq, locked.status.as_str())?
+        .where_and(field!("authz_version"), CompareOp::Eq, locked.authz_version)?
         .where_and(
             field!("credential_version"),
             CompareOp::Eq,
             locked.credential_version,
-        )
+        )?
         .update(&serde_json::json!({
             "status": UserStatus::Disabled.as_str(),
             "authz_version": next_authz,
