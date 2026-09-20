@@ -341,7 +341,16 @@ impl StepUpResourceResolver for RequestFingerprintResolver {
         let scope = match self.scope {
             ResourceScope::Global => "global".to_string(),
         };
-        let canonical = canonical_json(&context.request.body)?;
+        // 指纹必须绑定**整个请求目标**，而不只是 body。管理动作的目标 ID 来自路径参数
+        // （`/api/v1/users/{id}/disable`、`/{id}/enable`、`/{id}/password-reset-tokens`），
+        // body 恒为空——只哈希 body 会让同一 Action 的所有目标算出同一个指纹，为某个目标
+        // 签发的 proof 可被重放去操作另一个目标，资源绑定形同虚设。路径参数与查询参数
+        // 一并纳入（`canonical_json` 会按键排序，HashMap 的迭代顺序不影响结果）。
+        let canonical = canonical_json(&serde_json::json!({
+            "body": &context.request.body,
+            "path": &context.request.path_params,
+            "query": &context.request.query,
+        }))?;
         let digest = Sha256::digest(canonical.as_bytes());
         Ok(format!("{}:{scope}:sha256:{digest:x}", self.namespace))
     }
@@ -425,6 +434,60 @@ mod tests {
         assert_eq!(left, reordered);
         assert_ne!(left, changed);
         assert!(!left.contains("active"));
+    }
+
+    fn context_with(request: Request) -> ActionContext {
+        ActionContext::new(
+            request,
+            Arc::new(
+                ToolsBuilder::new()
+                    .build()
+                    .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
+            ),
+        )
+    }
+
+    /// 资源指纹必须绑定路径参数与查询参数，而不只是 body。
+    ///
+    /// 回归：管理动作的目标 ID 在路径上（`/api/v1/users/{id}/disable` 等）而 body 为空，
+    /// 只哈希 body 会让同一 Action 的所有目标共用同一指纹，为某个目标签发的 proof 可被
+    /// 重放去操作另一个目标。
+    #[tokio::test]
+    async fn fingerprint_binds_path_and_query_targets_not_only_the_body() {
+        let resolver = RequestFingerprintResolver::global("admin-user");
+        let target = |id: &str, query_key: &str, query_value: &str| {
+            let mut request = Request::new(serde_json::json!({}));
+            request.path_params.insert("id".to_string(), id.to_string());
+            request
+                .query
+                .insert(query_key.to_string(), query_value.to_string());
+            context_with(request)
+        };
+        let user_7 = resolver
+            .resolve(&target("7", "page", "1"))
+            .await
+            .unwrap_or_else(|error| panic!("资源指纹应生成: {error}"));
+        let user_8 = resolver
+            .resolve(&target("8", "page", "1"))
+            .await
+            .unwrap_or_else(|error| panic!("资源指纹应生成: {error}"));
+        let other_page = resolver
+            .resolve(&target("7", "page", "2"))
+            .await
+            .unwrap_or_else(|error| panic!("资源指纹应生成: {error}"));
+        let repeated = resolver
+            .resolve(&target("7", "page", "1"))
+            .await
+            .unwrap_or_else(|error| panic!("资源指纹应生成: {error}"));
+        let secret = resolver
+            .resolve(&target("secret-target", "page", "1"))
+            .await
+            .unwrap_or_else(|error| panic!("资源指纹应生成: {error}"));
+
+        assert_eq!(user_7, repeated, "同一目标必须得到稳定指纹");
+        assert_ne!(user_7, user_8, "不同路径参数必须得到不同指纹");
+        assert_ne!(user_7, other_page, "不同查询参数必须得到不同指纹");
+        assert!(!secret.contains("secret"), "指纹不得泄露原始目标值");
     }
 
     #[test]
