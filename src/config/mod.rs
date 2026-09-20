@@ -1186,25 +1186,31 @@ fn validate_rate_limit(name: &str, value: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 判断（已 trim + 小写化的）密钥是否为示例/占位值。
+///
+/// 采用前缀式判定而非手工清单：`config.example.toml` / `config.show.toml` 里
+/// 的占位值统一以 `replace-with-` / `replace_with_` 开头，前缀规则能在新增占位
+/// 值时自动生效，不再需要同步维护一份易漏的精确匹配名单（历史缺陷：清单只覆盖
+/// 了 6 个值中的 2 个，`step_up` / `email.change` / `email.mfa` / `email.login`
+/// 的占位密钥以及 TOTP AEAD 占位密钥都能通过启动校验）。
+fn is_placeholder_secret(normalized: &str) -> bool {
+    const KNOWN: [&str; 3] = ["changeme", "replace-me", "example-secret"];
+    KNOWN.contains(&normalized)
+        || normalized.starts_with("replace-with")
+        || normalized.starts_with("replace_with")
+        || normalized.contains("placeholder")
+}
+
 fn validate_token_secret(secret: &str) -> anyhow::Result<()> {
     if secret.len() < 32 {
         bail!("token key secret 至少需要 32 字节");
     }
     let normalized = secret.trim().to_ascii_lowercase();
-    let known_placeholder = matches!(
-        normalized.as_str(),
-        "changeme"
-            | "replace-me"
-            | "replace_with_a_random_secret"
-            | "replace-with-at-least-32-random-bytes"
-            | "replace-with-independent-email-verification-secret"
-            | "example-secret"
-    );
     let repeated_byte = secret
         .as_bytes()
         .first()
         .is_some_and(|first| secret.as_bytes().iter().all(|byte| byte == first));
-    if known_placeholder || repeated_byte {
+    if is_placeholder_secret(&normalized) || repeated_byte {
         bail!("token key secret 不能使用示例值、占位值或重复字符");
     }
     Ok(())
@@ -1246,10 +1252,7 @@ fn validate_totp_settings(totp: &TotpSettings) -> anyhow::Result<()> {
         bail!("security.totp.aead_key 至少需要 32 字节");
     }
     let normalized = totp.aead_key.trim().to_ascii_lowercase();
-    if matches!(
-        normalized.as_str(),
-        "changeme" | "replace-me" | "replace_with_a_random_secret" | "example-secret"
-    ) {
+    if is_placeholder_secret(&normalized) {
         bail!("security.totp.aead_key 不能使用示例值或占位值");
     }
     let repeated_byte = totp
@@ -2350,6 +2353,64 @@ link_base_url = "http://localhost:5273"
             Err(error) => error,
         };
         assert!(error.to_string().contains("占位值"));
+    }
+
+    /// 示例配置里出现的**每一个**占位值都必须被密钥校验拒绝。
+    ///
+    /// AGENTS.md 承诺「config.example.toml 中的占位密钥会被启动校验拒绝」。本测试
+    /// 直接从随仓库发布的示例/展示配置里抽取占位值逐一验证，因此新增占位值而校验
+    /// 规则没跟上时会立刻失败（历史缺陷：`step_up` / `email.change` / `email.mfa` /
+    /// `email.login` 的占位密钥与 TOTP AEAD 占位密钥都能通过启动校验）。
+    #[test]
+    fn every_shipped_placeholder_secret_is_rejected() {
+        let mut checked = 0usize;
+        for raw in [
+            include_str!("../../config.example.toml"),
+            include_str!("../../config.show.toml"),
+        ] {
+            for line in raw.lines() {
+                let Some((_, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let value = value.trim().trim_matches('"');
+                let normalized = value.trim().to_ascii_lowercase();
+                if !(normalized.starts_with("replace-with")
+                    || normalized.starts_with("replace_with"))
+                {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    is_placeholder_secret(&normalized),
+                    "示例配置中的占位值必须被判为占位: {value:?}"
+                );
+                // 长度达标的占位值必须真的被密钥校验拒绝；短于 32 字节的由长度规则拦下。
+                if value.len() >= 32 {
+                    assert!(
+                        validate_token_secret(value).is_err(),
+                        "占位密钥必须被 validate_token_secret 拒绝: {value:?}"
+                    );
+                }
+            }
+        }
+        assert!(checked >= 8, "示例配置中的占位值数量异常: {checked}");
+    }
+
+    /// 两个随仓库发布的配置必须**原样**无法启动。
+    #[test]
+    fn shipped_configs_cannot_boot_verbatim() {
+        for (name, raw) in [
+            (
+                "config.example.toml",
+                include_str!("../../config.example.toml"),
+            ),
+            ("config.show.toml", include_str!("../../config.show.toml")),
+        ] {
+            assert!(
+                Settings::parse(raw).is_err(),
+                "{name} 原样必须被启动校验拒绝（占位密钥不得放行）"
+            );
+        }
     }
 
     #[test]
