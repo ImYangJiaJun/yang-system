@@ -39,6 +39,30 @@ const REFRESH_COOKIE_NAME: &str = "yang_refresh";
 /// 刷新会话 Cookie 的 Path 作用域。
 const REFRESH_COOKIE_PATH: &str = "/api/v1/users";
 
+/// TOTP 单次消费记录的保留时长（秒）。
+///
+/// TOTP 校验允许 ±1 步（30 秒）容差，取 4 个步长足以覆盖整个可接受窗口。
+const TOTP_REPLAY_TTL_SECONDS: i64 = 120;
+
+/// TOTP 单次消费的原子「比较并写入」脚本。
+///
+/// 此前是 `GET` 读上次步号、比较后再 `SETEX` 写回，属 check-then-act：并发提交同一
+/// 窗口的同一个码时，两个请求都能读到旧步号并各自判定通过，同一个 TOTP 码因此可被
+/// 双重消费。Lua 在 Redis 侧串行执行，比较与写入不可分割（与
+/// `authorization/version_cache.rs` 的单调发布脚本同构）。
+///
+/// 返回 1 表示本次消费成功（步号严格前进）；0 表示该窗口已被消费（重放）。
+const CONSUME_TOTP_STEP_SCRIPT: &str = r#"
+local current = redis.call('GET', KEYS[1])
+local incoming = tonumber(ARGV[1])
+local last = tonumber(current) or 0
+if incoming > last then
+    redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+    return 1
+end
+return 0
+"#;
+
 /// 账号模块上下文：聚合共享资源，并以方法承载跨用例机制。
 pub(crate) struct Account {
     users: Arc<UserRepository>,
@@ -200,9 +224,12 @@ impl Account {
             .await
             .is_ok()
         {
-            // 防重放：按 (用户, 用途) 记录最近一次成功校验的 30 秒窗口步，同一窗口内
-            // 重复提交判为重放拒绝（TOTP 单次消费语义）。用途区分登录/Step-up/激活，
-            // 避免「登录后立即 Step-up」等不同用途复用同一码被误杀。
+            // 防重放：按 (用户, 用途) 记录最近一次成功校验的 30 秒窗口步，步号不前进
+            // 即判为重放（TOTP 单次消费语义）。用途区分登录/Step-up/激活，避免
+            // 「登录后立即 Step-up」等不同用途复用同一码被误杀。
+            //
+            // 比较与写入必须在 Redis 侧原子完成：此前的 GET-then-SETEX 是 check-then-act，
+            // 并发提交同一窗口的同一个码时两个请求会同时通过。
             let cache = ctx.tools().cache()?;
             let key = format!("yang-system:totp:used:{user_id}:{purpose}");
             let now = SystemTime::now()
@@ -210,15 +237,20 @@ impl Account {
                 .map_err(|_| BaseError::ConfigError("系统时间早于 Unix epoch".to_string()))?
                 .as_secs() as i64;
             let current_step = now / 30;
-            let last_used = cache
-                .get(&key)
-                .await?
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(0);
-            if current_step <= last_used {
+            let script = cache.script(CONSUME_TOTP_STEP_SCRIPT);
+            let consumed: i64 = cache
+                .eval_script(
+                    &script,
+                    std::slice::from_ref(&key),
+                    &[
+                        current_step.to_string(),
+                        TOTP_REPLAY_TTL_SECONDS.to_string(),
+                    ],
+                )
+                .await?;
+            if consumed != 1 {
                 return Err(BaseError::InvalidPassword);
             }
-            cache.setex(&key, 120, current_step.to_string()).await?;
             return Ok(());
         }
         // TOTP 码失败 → 尝试一次性恢复码（单次消费）。
@@ -596,4 +628,78 @@ fn invalid_audit_event(error: anyhow::Error) -> BaseError {
 /// 生成跨 Refresh 轮换稳定的会话标识（UUID v4，`user_session` 表主键）。
 fn new_session_id() -> Result<String, BaseError> {
     Ok(uuid::Uuid::new_v4().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yang_db::{RedisClient, RedisConfig};
+
+    async fn consume_totp_step(
+        cache: &RedisClient,
+        key: &str,
+        step: i64,
+    ) -> Result<i64, yang_db::DbError> {
+        let script = cache.script(CONSUME_TOTP_STEP_SCRIPT);
+        cache
+            .eval_script(
+                &script,
+                &[key.to_string()],
+                &[step.to_string(), TOTP_REPLAY_TTL_SECONDS.to_string()],
+            )
+            .await
+    }
+
+    /// TOTP 单次消费必须在真实 Redis 上原子、单调地拒绝重放。
+    ///
+    /// 覆盖两类此前会漏过的场景：(1) 同一步号重复消费；(2) **并发**提交同一步号
+    /// （旧的 GET-then-SETEX 是 check-then-act，两个并发请求会同时通过）。
+    ///
+    /// `#[ignore]`：需要 `YANG_SYSTEM_TEST_REDIS_URL`（独立 DB 15），由
+    /// `python scripts/run_ci.py integration` 执行。
+    #[tokio::test]
+    #[ignore = "需要 YANG_SYSTEM_TEST_REDIS_URL 指向独立 Redis DB 15"]
+    async fn totp_step_consumption_is_atomic_and_monotonic() -> anyhow::Result<()> {
+        let redis_url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")
+            .map_err(|_| anyhow::anyhow!("缺少 YANG_SYSTEM_TEST_REDIS_URL"))?;
+        anyhow::ensure!(
+            redis_url.trim_end_matches('/').ends_with("/15"),
+            "TOTP 消费集成测试 Redis URL 必须使用独立 DB 15"
+        );
+        let cache = RedisClient::connect_with_config(&redis_url, RedisConfig::default()).await?;
+        let key = format!("yang-system:totp:used:it:{}", uuid::Uuid::new_v4());
+        let step = 1_000_000_i64;
+
+        anyhow::ensure!(
+            consume_totp_step(&cache, &key, step).await? == 1,
+            "首次消费必须成功"
+        );
+        anyhow::ensure!(
+            consume_totp_step(&cache, &key, step).await? == 0,
+            "同一步号重放必须被拒绝"
+        );
+        anyhow::ensure!(
+            consume_totp_step(&cache, &key, step - 1).await? == 0,
+            "更早的步号不得放行"
+        );
+        anyhow::ensure!(
+            consume_totp_step(&cache, &key, step + 1).await? == 1,
+            "下一步号必须放行"
+        );
+
+        let concurrent_key = format!("yang-system:totp:used:it:{}", uuid::Uuid::new_v4());
+        let (left, right) = tokio::join!(
+            consume_totp_step(&cache, &concurrent_key, step),
+            consume_totp_step(&cache, &concurrent_key, step)
+        );
+        let successes = [left?, right?].iter().filter(|value| **value == 1).count();
+        anyhow::ensure!(
+            successes == 1,
+            "并发消费同一窗口必须恰好一个成功，实际 {successes}"
+        );
+
+        cache.del(&[key, concurrent_key]).await?;
+        cache.close().await;
+        Ok(())
+    }
 }
