@@ -15,6 +15,14 @@ pub use yang_runtime::observability::ObservabilitySettings;
 const MAX_ACCESS_TTL_SECONDS: u64 = 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 
+/// 「踢出单台设备」时 jti 黑名单必须保留的最长时间（秒）。
+///
+/// 取 refresh token 有效期的**校验上限**而非当前配置值：任何合法签发的 refresh token
+/// 都不会比它更长寿，因此黑名单条目不可能先于它要吊销的令牌过期。若改用当前配置值，
+/// 一旦两者不同步（历史缺陷：黑名单硬编码 7 天，而默认 refresh TTL 是 30 天、上限 90 天），
+/// 被踢设备会在黑名单到期后凭原 refresh cookie 重新轮换，逐台撤销静默失效。
+pub(crate) const REVOCATION_BLACKLIST_TTL_SECONDS: u64 = MAX_REFRESH_TTL_SECONDS;
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -2394,6 +2402,36 @@ link_base_url = "http://localhost:5273"
             }
         }
         assert!(checked >= 8, "示例配置中的占位值数量异常: {checked}");
+    }
+
+    /// 逐台撤销的 jti 黑名单必须覆盖任何合法 refresh token 的完整寿命。
+    ///
+    /// 回归：黑名单曾硬编码 7 天，而 refresh token 有效期默认 30 天、上限 90 天，
+    /// 被踢设备在第 7 天后可凭原 refresh cookie 重新轮换出新令牌对（撤销静默失效）。
+    #[test]
+    fn revocation_blacklist_outlives_every_valid_refresh_token() {
+        let raw = valid_config().replace(
+            "refresh_ttl_seconds = 120",
+            &format!("refresh_ttl_seconds = {MAX_REFRESH_TTL_SECONDS}"),
+        );
+        let settings = match Settings::parse(&raw) {
+            Ok(settings) => settings,
+            Err(error) => panic!("取 refresh TTL 上限的配置必须可解析: {error:#}"),
+        };
+        assert!(
+            REVOCATION_BLACKLIST_TTL_SECONDS >= settings.token.refresh_ttl_seconds,
+            "黑名单 TTL({REVOCATION_BLACKLIST_TTL_SECONDS}) 必须覆盖 refresh TTL({})",
+            settings.token.refresh_ttl_seconds
+        );
+        // 上限之上必须被拒绝，否则「黑名单覆盖任何合法令牌」的论证不成立。
+        let over = valid_config().replace(
+            "refresh_ttl_seconds = 120",
+            &format!("refresh_ttl_seconds = {}", MAX_REFRESH_TTL_SECONDS + 1),
+        );
+        assert!(
+            Settings::parse(&over).is_err(),
+            "超过上限的 refresh TTL 必须被拒绝"
+        );
     }
 
     /// 两个随仓库发布的配置必须**原样**无法启动。

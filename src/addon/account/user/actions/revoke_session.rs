@@ -18,9 +18,12 @@ yang_base::params! {
     }
 }
 
-/// jti 黑名单保留时长（秒）：保守覆盖 refresh token 完整有效期，
-/// 被踢设备的旧 refresh 在窗口内轮换会被 `verify_token_checked` 拒绝。
-const REVOKE_JTI_BLACKLIST_TTL_SECONDS: u64 = 7 * 24 * 3600;
+/// jti 黑名单保留时长（秒）：覆盖 refresh token 有效期上限（见
+/// [`crate::config::REVOCATION_BLACKLIST_TTL_SECONDS`]）。
+///
+/// 曾被硬编码为 7 天，而 refresh token 的有效期默认 30 天、上限 90 天——黑名单先于
+/// 令牌过期后，被踢设备可凭原 refresh cookie 重新轮换出新令牌对，逐台撤销静默失效。
+const REVOKE_JTI_BLACKLIST_TTL_SECONDS: u64 = crate::config::REVOCATION_BLACKLIST_TTL_SECONDS;
 
 pub(super) async fn handle(
     ctx: ActionContext,
