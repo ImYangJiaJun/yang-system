@@ -36,9 +36,9 @@ pub(super) async fn handle(
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, input.id)
             .await?;
-        if locked.status().is_active() {
+        if !is_enable_target(locked.status()) {
             return Err(BaseError::PermissionDenied(
-                "目标账号已是启用状态".to_string(),
+                "只有已停用的账号可以被启用".to_string(),
             ));
         }
         Account::activate_locked_in_tx(&mut transaction, &locked).await?;
@@ -65,6 +65,16 @@ pub(super) async fn handle(
         json!({ "user_id": input.id, "enabled": true }),
         "账号已启用",
     )
+}
+
+/// 启用动作只接受「已停用」目标。
+///
+/// 此前只拒绝 `is_active()`，于是 `status = deleted` 的匿名化账号也能通过守卫，被
+/// [`Account::activate_locked_in_tx`] 翻转回 active：注销是不可逆事实（username 已改写为
+/// `deleted_{id}` 墓碑名，邮箱、密码摘要、TOTP 材料均已清空/惰性化），复活会重建一个占用
+/// 墓碑名的空壳账号，并使「注销」语义失效；审计事件也会谎称来态是 Disabled。
+fn is_enable_target(status: UserStatus) -> bool {
+    matches!(status, UserStatus::Disabled)
 }
 
 /// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
@@ -96,5 +106,20 @@ mod tests {
             .unwrap_or_else(|| panic!("应声明 id 参数"));
         assert_eq!(user_id.source, yang_base::definition::ParamSource::Path);
         assert!(user_id.required);
+    }
+
+    /// 注销不可逆：`deleted` 账号不得被启用动作复活（回归：守卫曾只拒绝 `is_active`，
+    /// 匿名化账号可被翻回 active）。
+    #[test]
+    fn only_disabled_accounts_are_valid_enable_targets() {
+        assert!(is_enable_target(UserStatus::Disabled));
+        assert!(
+            !is_enable_target(UserStatus::Deleted),
+            "已注销（匿名化）账号不得被启用"
+        );
+        assert!(
+            !is_enable_target(UserStatus::Active),
+            "已启用账号不得重复启用"
+        );
     }
 }
