@@ -8,6 +8,7 @@ import { SessionControllerContext } from "@/engine/session/use-session";
 import { createIdentityStore, storeIdentity } from "@/features/auth/identity";
 import { IdentityStoreContext } from "@/features/auth/use-identity";
 import { appRoutes } from "@/shell/routes";
+import { createSessionResetHandler } from "@/shell/session-reset";
 
 /**
  * 测试渲染 helper：与 App.tsx 相同的 provider 组合
@@ -45,15 +46,24 @@ export function renderTestApp(options: {
   identity?: string;
   controller?: ReturnType<typeof createSessionController>;
 }) {
-  const controller = options.controller ?? createSessionController();
-  if (options.authenticated ?? true) {
-    controller.beginSession({ accessToken: "test-access" });
-  }
-  if (options.identity) storeIdentity(options.identity);
   const identityStore = createIdentityStore();
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  // 与 App.tsx 使用同一个级联重置实现（shell/session-reset.ts），避免测试 helper
+  // 自己复制一份导致「测的是 helper 而不是生产接线」。
+  const controller =
+    options.controller ??
+    createSessionController({
+      onSessionReset: createSessionResetHandler({
+        clearIdentity: () => identityStore.clear(),
+        queryClient,
+      }),
+    });
+  if (options.authenticated ?? true) {
+    controller.beginSession({ accessToken: "test-access" });
+  }
+  if (options.identity) storeIdentity(options.identity);
   const router = createMemoryRouter(appRoutes, {
     initialEntries: [options.path ?? "/"],
   });

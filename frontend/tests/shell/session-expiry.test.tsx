@@ -76,4 +76,42 @@ describe("会话失效传播", () => {
       sessionEndReason: "session-expired",
     });
   });
+
+  /**
+   * 会话边界必须清空查询缓存（审计 R2-H6）。
+   *
+   * 表数据查询键 `["table-data", view_id, state]` 不含会话维度：同一标签页登出 A 后
+   * 登录 B，B 打开与 A 相同的视图会命中 A 的缓存并先渲染 A 的行；B 取数失败
+   * （403 等）时 React Query 保留上一次成功的 data，这些行会一直留在屏幕上。
+   */
+  it("清空会话时级联清空查询缓存（下一会话不得读到上一会话的数据）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/.well-known/yang/ui-catalog")) {
+          return jsonResponse(catalogFixture);
+        }
+        if (url.includes("/api/v1/demo/items/query")) {
+          return jsonResponse({ code: 40301, message: "无权限" }, 403);
+        }
+        throw new Error(`测试未覆盖的请求：${url}`);
+      }),
+    );
+    const { controller, queryClient } =
+      renderAppAuthenticated("/m/demo.items.main");
+
+    await waitFor(
+      () => {
+        expect(queryClient.getQueryCache().getAll().length).toBeGreaterThan(0);
+      },
+      { timeout: 5000 },
+    );
+
+    controller.clearSession();
+
+    await waitFor(() => {
+      expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    });
+  });
 });

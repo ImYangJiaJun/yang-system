@@ -5,6 +5,7 @@ import { createBrowserRouter, RouterProvider } from "react-router";
 import { createSessionController } from "@/engine/session/session-controller";
 import { SessionControllerContext } from "@/engine/session/use-session";
 import { applyDensity, loadDensity } from "@/shell/density";
+import { createSessionResetHandler } from "@/shell/session-reset";
 import { createIdentityStore } from "@/features/auth/identity";
 import { IdentityStoreContext } from "@/features/auth/use-identity";
 import {
@@ -38,8 +39,13 @@ export default function App() {
   const router = useMemo(() => createBrowserRouter(appRoutes), []);
 
   useEffect(() => {
-    identityResetRef.current = () => identityStore.clear();
-  }, [identityStore]);
+    // 会话边界（beginSession / clearSession）时级联清空查询缓存与身份 store；
+    // 轮换（acceptRefreshedTokenPair）不触发，详见 shell/session-reset.ts。
+    identityResetRef.current = createSessionResetHandler({
+      clearIdentity: () => identityStore.clear(),
+      queryClient,
+    });
+  }, [identityStore, queryClient]);
   useEffect(() => {
     applyDensity(loadDensity());
   }, []);
