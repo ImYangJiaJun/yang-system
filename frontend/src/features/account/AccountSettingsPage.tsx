@@ -251,13 +251,17 @@ export default function AccountSettingsPage() {
     }
   };
 
+  // 依赖布尔变量而非内联表达式：`emailCooldown > 0` 让 exhaustive-deps 无法静态判定，
+  // 且会把 emailCooldown 本身也算成缺失依赖。行为等价——React 按 Object.is 比较依赖，
+  // 内联表达式与提取后的变量在同一渲染中取值相同。
+  const emailCooldownActive = emailCooldown > 0;
   useEffect(() => {
-    if (emailCooldown <= 0) return;
+    if (!emailCooldownActive) return;
     const timer = setInterval(() => {
       setEmailCooldown((prev) => Math.max(0, prev - 1));
     }, 1000);
     return () => clearInterval(timer);
-  }, [emailCooldown > 0]);
+  }, [emailCooldownActive]);
 
   const submitEmail = async (event: FormEvent) => {
     event.preventDefault();

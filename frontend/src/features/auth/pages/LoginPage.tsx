@@ -146,13 +146,16 @@ export default function LoginPage() {
     }
   };
 
+  // 依赖提取成布尔变量（见 AccountSettingsPage 同处说明）：内联 `codeCooldown > 0`
+  // 无法被 exhaustive-deps 静态判定，且会误报 codeCooldown 缺失。
+  const codeCooldownActive = codeCooldown > 0;
   useEffect(() => {
-    if (codeCooldown <= 0) return;
+    if (!codeCooldownActive) return;
     const timer = setInterval(() => {
       setCodeCooldown((prev) => Math.max(0, prev - 1));
     }, 1000);
     return () => clearInterval(timer);
-  }, [codeCooldown > 0]);
+  }, [codeCooldownActive]);
 
   /// 验证码登录提交：第一段（无码）或第二段（带 mfaCode 重发同一验证码）。
   const attemptEmailCodeLogin = async (mfaCode?: string) => {

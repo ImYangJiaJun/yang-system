@@ -62,14 +62,16 @@ export function MfaChallengeDialog({
   useEffect(() => {
     if (errorMessage) setCode("");
   }, [errorMessage]);
-  // 重发冷却倒计时。
+  // 重发冷却倒计时。依赖提取成布尔变量（见 AccountSettingsPage 同处说明）：
+  // 内联 `emailCooldown > 0` 无法被 exhaustive-deps 静态判定。
+  const emailCooldownActive = emailCooldown > 0;
   useEffect(() => {
-    if (emailCooldown <= 0) return;
+    if (!emailCooldownActive) return;
     const timer = setInterval(() => {
       setEmailCooldown((prev) => Math.max(0, prev - 1));
     }, 1000);
     return () => clearInterval(timer);
-  }, [emailCooldown > 0]);
+  }, [emailCooldownActive]);
 
   const valid =
     TOTP_CODE_PATTERN.test(code) || RECOVERY_CODE_PATTERN.test(code);
