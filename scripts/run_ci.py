@@ -198,6 +198,45 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "Account deletion and anonymization integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "account_deletion_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
+        "Session revocation integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "session_revocation_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
+        "Refresh rotation load benchmark",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "refresh_load_benchmark",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 
@@ -333,13 +372,22 @@ def self_test() -> None:
         for command in INTEGRATION
         if command.argv[:3] == ("cargo", "test", "--test")
     }
-    assert integration_tests == {
-        "registration_email_integration",
-        "schema_apply_integration",
-        "mfa_email_code_integration",
-        "login_email_code_integration",
-        "avatar_integration",
+    # 反向校验：tests/ 下每个依赖容器（YANG_SYSTEM_TEST_*）的集成测试入口都必须登记在
+    # INTEGRATION。写死清单只能证明「登记项没写错」，无法发现**漏登记**——历史缺
+    # account_deletion_integration / session_revocation_integration /
+    # refresh_load_benchmark 三个入口，它们因此从未被任何门禁执行。
+    discovered_integration_tests = {
+        os.path.splitext(name)[0]
+        for name in os.listdir("tests")
+        if name.endswith(".rs")
+        and "YANG_SYSTEM_TEST_"
+        in open(os.path.join("tests", name), encoding="utf-8").read()
     }
+    assert integration_tests == discovered_integration_tests, (
+        "INTEGRATION 与 tests/ 下依赖容器的集成测试不一致: "
+        f"漏登记={sorted(discovered_integration_tests - integration_tests)} "
+        f"登记了不存在的入口={sorted(integration_tests - discovered_integration_tests)}"
+    )
     authorization_cache = next(
         command
         for command in INTEGRATION
