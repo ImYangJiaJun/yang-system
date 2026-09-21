@@ -18,6 +18,8 @@ use yang_base::definition::{
 use yang_base::BaseError;
 
 use super::domain::context::FeishuContext;
+use crate::addon::feishu::datasource::with_authentication;
+use crate::authorization::AuthorizationVersionValidator;
 use crate::config::FeishuSettings;
 
 /// 本 module 的名字。
@@ -29,11 +31,15 @@ const TABLE: &str = "feishu_option";
 pub(crate) fn build_module(
     context: Arc<FeishuContext>,
     settings: Option<&FeishuSettings>,
+    authorization_validator: AuthorizationVersionValidator,
 ) -> Result<ModuleSpec, BaseError> {
     let spec = ModuleSpec::new(module_name()?)
         .table(table::table_spec()?)
         .presentation(presentation())
         .view(view()?);
+    // 与 datastore 模块同一套认证中间件：本 module 的受保护 Action（list_options）
+    // 要靠它才有身份；而 public 的机器入口在完全不带 Authorization 头时放行匿名。
+    let spec = with_authentication(spec, authorization_validator);
     actions::register_all(spec, context, settings)
 }
 

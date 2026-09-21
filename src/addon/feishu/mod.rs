@@ -14,6 +14,7 @@ use sqlx::MySqlPool;
 use yang_base::definition::{AddonName, AddonSpec};
 use yang_base::BaseError;
 
+use crate::authorization::AuthorizationVersionValidator;
 use crate::config::FeishuSettings;
 
 use self::domain::context::FeishuContext;
@@ -26,6 +27,7 @@ use self::domain::repository::Repository;
 pub(crate) fn build_addon(
     pool: Arc<MySqlPool>,
     settings: Option<Arc<FeishuSettings>>,
+    authorization_validator: AuthorizationVersionValidator,
 ) -> Result<AddonSpec, BaseError> {
     let context = Arc::new(FeishuContext::new(
         Repository::new(
@@ -42,6 +44,13 @@ pub(crate) fn build_addon(
     Ok(AddonSpec::new(
         AddonName::new("feishu").map_err(|error| BaseError::ConfigError(error.to_string()))?,
     )
-    .module(datasource::build_module(Arc::clone(&context))?)
-    .module(option::build_module(context, settings.as_deref())?))
+    .module(datasource::build_module(
+        Arc::clone(&context),
+        authorization_validator.clone(),
+    )?)
+    .module(option::build_module(
+        context,
+        settings.as_deref(),
+        authorization_validator,
+    )?))
 }

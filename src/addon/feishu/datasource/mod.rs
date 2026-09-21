@@ -7,6 +7,9 @@ pub(crate) mod table;
 
 use std::sync::Arc;
 
+use crate::addon::account::user_from_claims;
+use crate::authorization::AuthorizationVersionValidator;
+use yang_base::action::TokenAuthMiddleware;
 use yang_base::definition::{
     ActionConfirmation, ActionInteraction, ActionName, ActionPlacement, ActionPresentationSpec,
     ActionRef, FieldName, FieldRef, ModuleName, ModulePresentationSpec, ModuleSpec, SortDirection,
@@ -22,12 +25,35 @@ const MODULE: &str = "feishu.datasource";
 const TABLE: &str = "feishu_datasource";
 
 /// 装配 `feishu.datasource` Module。
-pub(crate) fn build_module(context: Arc<FeishuContext>) -> Result<ModuleSpec, BaseError> {
+pub(crate) fn build_module(
+    context: Arc<FeishuContext>,
+    authorization_validator: AuthorizationVersionValidator,
+) -> Result<ModuleSpec, BaseError> {
     let spec = ModuleSpec::new(module_name()?)
         .table(table::table_spec()?)
         .presentation(presentation())
         .view(view()?);
+    let spec = with_authentication(spec, authorization_validator);
     Ok(actions::register_all(spec, context))
+}
+
+/// 挂上认证中间件。
+///
+/// **这一步不可省。** `TokenAuthMiddleware` 才是把 JWT 解成 `ctx.user`（含角色与权限）
+/// 的地方；没有它，受保护 Action 在 `authorize()` 阶段拿不到身份，一律返回 401。
+/// 症状具有迷惑性：接口返回 401 而不是 403，看着像「没登录」，实际是「没人建立身份」。
+///
+/// `authenticate_public_actions()` 让本 module 的 public Action（飞书机器入口）在
+/// **完全不带 `Authorization` 头**时放行匿名；带了无效 Token 仍 fail-closed，不降级。
+pub(crate) fn with_authentication(
+    module: ModuleSpec,
+    authorization_validator: AuthorizationVersionValidator,
+) -> ModuleSpec {
+    module.middleware(
+        TokenAuthMiddleware::new(user_from_claims)
+            .with_claims_validator(authorization_validator)
+            .authenticate_public_actions(),
+    )
 }
 
 /// 前端展示投影（控制台导航）。
