@@ -41,10 +41,19 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .searchable(true),
             // JSON 文本：{"en_us":"…","ja_jp":"…"}
             i18n => Text::new().title("多语言文案"),
+            // `filterable` 是 keyset 翻页的**硬依赖**，不是可选的筛选便利：游标条件
+            // `sort_order > ? OR (sort_order = ? AND option_id > ?)` 要经
+            // `validate_filter_field`，而 DSL 的 `filterable` 是 fail-closed——
+            // 只开 `.sortable(true)` 会让第二页起每次都被 FieldPermissionDenied 打回。
+            //
+            // 副作用（已知并接受）：DSL 没有「只给内部条件用」的窄写法，`.filterable(true)`
+            // 会把筛选权限一并置为 `Everyone`，于是持 `feishu.option.read` 的控制台用户
+            // 也多出一个按「排序」筛选的入口。收益（翻页可用）远大于这点面宽。
             sort_order => Int::new()
                 .title("排序")
                 .require(true)
                 .default(0)
+                .filterable(true)
                 .sortable(true),
             is_default => Switch::new().title("默认选项").require(true).default(false),
             // 禁用而非删除，避免历史审批单引用的选项彻底失联
@@ -134,6 +143,12 @@ mod tests {
             .unwrap_or_else(|| panic!("sort_order 字段必须存在"));
         assert_eq!(sort_order.default_value(), Some(&serde_json::json!(0)));
         assert!(sort_order.is_sortable(), "游标排序依赖该位");
+        // keyset 翻页的游标条件要经 validate_filter_field，而 DSL 的 filterable 是
+        // fail-closed：只开 sortable 会让第二页起被 FieldPermissionDenied 打回。
+        assert!(
+            sort_order.is_filterable(),
+            "游标翻页依赖该位——少了它 `page_token` 从第二页起必然失败"
+        );
 
         let is_default = definition
             .field("is_default")

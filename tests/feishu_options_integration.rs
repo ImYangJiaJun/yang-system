@@ -8,9 +8,10 @@
 //!
 //! # 不覆盖什么
 //!
-//! HTTP 层的端到端（真打 `POST /api/v1/feishu/approval/options/{source_key}`）需要
-//! 完整应用装配（Redis + StepUp 扩展 + JWT keyring），本文件没有搭那套 harness。
-//! 那个层次的验证靠 Task 11 的飞书后台联调与前端 e2e。
+//! HTTP 层的端到端（真打 `POST /api/v1/feishu/approval/options/{source_key}`）——那个层次
+//! 由 `tests/feishu_approval_options_integration.rs` 覆盖：它装配完整应用、经 Registry
+//! 派发取选项与写入 Action，断言响应体的字面形状、分页推进、关键词检索与加密路径。
+//! **本文件只管 Schema。**
 //!
 //! # 运行方式
 //!

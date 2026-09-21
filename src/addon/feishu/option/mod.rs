@@ -38,7 +38,12 @@ pub(crate) fn build_module(
         .presentation(presentation())
         .view(view()?);
     // 与 datastore 模块同一套认证中间件：本 module 的受保护 Action（list_options）
-    // 要靠它才有身份；而 public 的机器入口在完全不带 Authorization 头时放行匿名。
+    // 要靠它才有身份。public 的机器入口**不经过**它——`Next::run` 对默认
+    // `ProtectedActions` scope 的判据是 `!policy.is_public`，它们本来就被跳过，
+    // 因此匿名调用照样放行。别为了让它们「放行匿名」而加
+    // `authenticate_public_actions()`：那会把 scope 抬到 `AllActions`，让本中间件抢走
+    // 管理 Token 中间件要用的 `Authorization` 头，把两条写入入口打成不可用
+    // （见 `datasource::with_authentication` 的说明）。
     let spec = with_authentication(spec, authorization_validator);
     actions::register_all(spec, context, settings)
 }

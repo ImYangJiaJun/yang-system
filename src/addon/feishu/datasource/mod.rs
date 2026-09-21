@@ -43,16 +43,20 @@ pub(crate) fn build_module(
 /// 的地方；没有它，受保护 Action 在 `authorize()` 阶段拿不到身份，一律返回 401。
 /// 症状具有迷惑性：接口返回 401 而不是 403，看着像「没登录」，实际是「没人建立身份」。
 ///
-/// `authenticate_public_actions()` 让本 module 的 public Action（飞书机器入口）在
-/// **完全不带 `Authorization` 头**时放行匿名；带了无效 Token 仍 fail-closed，不降级。
+/// # 不要加 `authenticate_public_actions()`
+///
+/// 它会把这个中间件的 scope 从 `ProtectedActions` 抬到 `AllActions`，从而**也覆盖 public
+/// 的机器入口**；而它抢的是与管理 Token 中间件**同一个** `Authorization` 头，且排在前面
+/// ——静态管理 Token 会被当成 Access JWT 去验签并直接短路，写入入口因此永远拿不到请求。
+///
+/// 它想解决的问题并不存在：`Next::run` 对 `ProtectedActions` 的判据是
+/// `!policy.is_public`，public Action 本来就被跳过，匿名请求自然放行。
 pub(crate) fn with_authentication(
     module: ModuleSpec,
     authorization_validator: AuthorizationVersionValidator,
 ) -> ModuleSpec {
     module.middleware(
-        TokenAuthMiddleware::new(user_from_claims)
-            .with_claims_validator(authorization_validator)
-            .authenticate_public_actions(),
+        TokenAuthMiddleware::new(user_from_claims).with_claims_validator(authorization_validator),
     )
 }
 

@@ -103,7 +103,7 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
   python scripts/run_ci.py integration
   ```
 
-  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）与头像上传/读取/注销清理。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs` 与 `avatar_integration.rs` 六个入口。
+  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理，以及飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护）。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs` 与 `feishu_approval_options_integration.rs` 八个入口。
 
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
 

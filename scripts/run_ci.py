@@ -250,6 +250,19 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "飞书取选项端点集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "feishu_approval_options_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 

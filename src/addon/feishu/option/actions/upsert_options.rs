@@ -169,6 +169,40 @@ pub(super) async fn handle(
         return Ok(ApiResponse::fail(40401, "数据源不存在"));
     }
 
+    // 预检：一个数据源不得覆盖另一个数据源已有的选项 id。
+    //
+    // 不能只靠 UPDATE 的 WHERE 兜住——被写入的记录里带着**本次请求的** `source_key`，
+    // 若只用 `option_id` 定位，别的数据源推一个同 id 就会把那行的归属直接改写：
+    // 原数据源的取选项接口随即少一条（`options` 与 `texts` 同时变），两边都收不到
+    // 任何异常信号。这里放在事务之前，用一次 `where_in` 查完整批——既是可归因的
+    // 业务失败（不烧可用性预算），也不随批次大小放大查询数（批上限与 IN 上限同为 500）。
+    let ids: Vec<serde_json::Value> = input
+        .options
+        .iter()
+        .map(|item| serde_json::json!(item.id))
+        .collect();
+    let foreign = context
+        .options()
+        .query()
+        .select_fields(&["option_id", "source_key"])?
+        .where_in("option_id", ids)?
+        // **归属比较必须交给数据库做。** 表的排序规则是 `utf8mb4_unicode_ci`（大小写不
+        // 敏感 + PAD SPACE），紧随其后的 UPDATE 用的 `where_eq("source_key", …)` 正是它，
+        // 上面的「数据源是否存在」检查也是它。若这里改在 Rust 侧逐字节比较，调用方拿自己
+        // 数据源的另一种拼写（`DEMO` 对 `demo`）就会被误判成「另一个数据源」，收到一条
+        // 指向它自己的 40901——三道判据必须用同一套语义。
+        .where_ne("source_key", serde_json::json!(input.source_key))?
+        .all()
+        .await?;
+    if let Some(record) = foreign.first() {
+        let option_id: String = record.require("option_id")?;
+        let owner: String = record.require("source_key")?;
+        return Ok(ApiResponse::fail(
+            40901,
+            format!("选项 id {option_id} 已属于数据源 {owner}，不能用另一个数据源改写其归属"),
+        ));
+    }
+
     let mut transaction = ctx.begin_transaction().await?;
     let options = context.options();
     let mut inserted = 0u64;
@@ -179,9 +213,13 @@ pub(super) async fn handle(
             let record = input.to_record(&input.source_key, item)?;
             // 先试更新：0 行受影响说明该 option_id 还不存在，再插入。这样不需要先读一次，
             // 也不会有「读到不存在然后被别人插进来」的窗口。
+            //
+            // **必须同时限定 `source_key`**：记录里带着本次请求的 source_key，只按
+            // option_id 定位就会改写归属。上面的预检保证了此处 0 行只可能是「确实不存在」。
             let affected = options
                 .query()
                 .where_eq("option_id", serde_json::json!(item.id))?
+                .where_eq("source_key", serde_json::json!(input.source_key))?
                 .update_in_tx(&mut transaction, record.clone())
                 .await?;
             if affected == 0 {

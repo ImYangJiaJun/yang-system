@@ -31,7 +31,18 @@ use crate::addon::feishu::domain::token::verify_token;
 ///
 /// 框架 `TableQuery` 的硬上限是 100（`MAX_QUERY_PAGE_SIZE`），飞书要求 page size
 /// 不小于 10——100 同时满足两者。
+///
+/// **这个值恰好等于框架硬上限，所以任何「多取一行」的写法都会越界。** 判定 hasMore
+/// 只能用 `PaginatedResult::total`（见 `resolve` 与 `next_page_token` 的说明）。
 const PAGE_SIZE: usize = 100;
+
+/// 编译期守护：`PAGE_SIZE` 超过框架硬上限会让 `TableQuery::page` **拒绝**（不是 clamp），
+/// 端点随即对每一个合法请求恒返回 `code=50001`。
+///
+/// 这不是假想的风险——常量恰好等于上限时，任何「多取一行」的写法都必然越界，而这个
+/// 缺陷曾经上线过（110 条单测全绿、端点全挂）。把这类越界从「飞书联调时才发现」提前到
+/// 「构建期就炸」。
+const _: () = assert!(PAGE_SIZE <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE);
 
 /// 内部处理预算；飞书的回调超时是 3 秒。
 const PROCESSING_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_500);
@@ -213,23 +224,24 @@ async fn resolve(
         ])?;
     }
 
-    // 多取一行用于判定 hasMore
-    let page = query.page(1, PAGE_SIZE + 1)?.paginate_records().await?;
+    // 一页取满 PAGE_SIZE 条。**不能用「多取一行」判定 hasMore**：`TableQuery::page`
+    // 对页大小是**拒绝**而非 clamp，`page(1, PAGE_SIZE + 1)` 会直接返回
+    // `ParamInvalid`，把整个端点打成恒失败的 `code=50001`（`page_size` 硬上限恰好
+    // 就是 100，多取一行必然越界）。
+    //
+    // `paginate_records` 本来就会执行一次 COUNT(*)（`read.rs` 的 `paginate`），
+    // 所以改为借它的 `total` 判定下一页：既不额外取行，也不额外查询。
+    let page = query.page(1, PAGE_SIZE)?.paginate_records().await?;
+    let total = page.total;
 
     let mut rows = Vec::with_capacity(page.data.len());
     for record in page.data {
         rows.push(read_row(&record)?);
     }
-    let has_more = rows.len() > PAGE_SIZE;
-    rows.truncate(PAGE_SIZE);
 
-    // 游标必须用该行真实的 sort_order，否则下一页的 keyset 条件会错位
-    let next_page_token = if has_more {
-        rows.last()
-            .map(|last| encode_cursor(last.sort_order, &last.option_id))
-    } else {
-        None
-    };
+    // `next_page_token` 是 hasMore 的**唯一来源**，见函数文档。
+    let next_page_token = next_page_token(&rows, total);
+    let has_more = next_page_token.is_some();
 
     let result = build_result_body(&rows, &default_locale, has_more, next_page_token);
 
@@ -250,6 +262,39 @@ async fn resolve(
     Ok(FeishuEnvelope::encrypted(
         crate::addon::feishu::domain::crypto::encrypt_json(&value, &key)?,
     ))
+}
+
+/// 由本页结果推导下一页游标。**它的 `Option` 同时就是 `hasMore`**。
+///
+/// # 为什么 hasMore 必须从这里反推
+///
+/// 飞书文档对这两个字段的关系是硬约束：**`hasMore` 为 true 时「会同时返回新的
+/// `nextPageToken`」，否则不返回 `nextPageToken`**。而 `total`（COUNT）与 `rows`
+/// （SELECT）是 `paginate` 里**两条独立的 autocommit 语句**（查询绑在连接池上、不在
+/// 事务里），并发写会让两者看到不同快照：`delete_options` 单批就能停用 500 条，而本
+/// 端点恰好按 `enabled = true` 过滤——「COUNT 时还有、SELECT 时已被停用」完全可达。
+///
+/// 若把 `has_more` 直接写成 `total > rows.len()`，那种情形下会得到「空 `options` +
+/// `hasMore: true` + 没有 `nextPageToken`」——一个文档明令禁止的组合，而游标本来就
+/// 只能由本页最后一行编码，空页根本给不出。把 `has_more` 定义成「游标存在」，这个
+/// 组合在结构上就不可能再出现。
+///
+/// # 契约
+///
+/// | 本页行数 | `total` | 结果 | 说明 |
+/// |---|---|---|---|
+/// | 100 | 105 | `Some` | 取满且 COUNT 说还有剩余 |
+/// | 100 | 100 | `None` | 恰好取满，确实没有下一页 |
+/// | 50 | 50 | `None` | 不足一页，已到末尾 |
+/// | 0 | 0 | `None` | 空结果 |
+/// | 0 | 105 | `None` | COUNT/SELECT 不一致（并发停用清空了本页）——以 SELECT 为准 |
+fn next_page_token(rows: &[OptionRow], total: usize) -> Option<String> {
+    if total <= rows.len() {
+        return None;
+    }
+    // 游标必须用该行真实的 `sort_order`，否则下一页的 keyset 条件会错位
+    rows.last()
+        .map(|last| encode_cursor(last.sort_order, &last.option_id))
 }
 
 /// 把一行记录读成响应所需的形状。
@@ -394,6 +439,57 @@ mod tests {
         let row = read_row(&record).unwrap_or_else(|error| panic!("应可读取: {error}"));
         assert_eq!(row.i18n.get("en_us").map(String::as_str), Some("Alpha"));
         assert!(row.is_default);
+    }
+
+    /// 造 `count` 行选项，`sort_order` 从 `start` 起递增。
+    fn rows(count: usize, start: i64) -> Vec<OptionRow> {
+        (0..count)
+            .map(|index| OptionRow {
+                option_id: format!("opt_{:03}", start + index as i64),
+                label: format!("选项{index}"),
+                i18n: std::collections::BTreeMap::new(),
+                sort_order: start + index as i64,
+                is_default: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn next_page_token_contract_is_the_whole_has_more_decision() {
+        // 取满整页且 COUNT 说还有剩余 -> 给出游标（hasMore 为真）
+        assert!(next_page_token(&rows(100, 0), 105).is_some(), "应给出游标");
+        // 恰好取满、COUNT 说没有了 -> 不给游标（等价于 hasMore=false）
+        assert!(
+            next_page_token(&rows(100, 0), 100).is_none(),
+            "不得给出游标"
+        );
+        // 不足一页 -> 已到末尾
+        assert!(next_page_token(&rows(50, 0), 50).is_none(), "不得给出游标");
+        // 空结果
+        assert!(next_page_token(&[], 0).is_none(), "不得给出游标");
+    }
+
+    #[test]
+    fn next_page_token_is_absent_when_a_concurrent_disable_emptied_the_page() {
+        // COUNT 与 SELECT 是 `paginate` 里两条独立的 autocommit 语句，并发停用可以让
+        // 「COUNT 时还有」的行在 SELECT 前消失。此时若仍按 `total > rows.len()` 判定，
+        // 响应会出现 `hasMore: true` 配**空 options**、且完全没有 `nextPageToken`——
+        // 而文档明文要求 hasMore 为 true 时必须同时返回 nextPageToken，且游标只能由本页
+        // 最后一行编码，空页根本给不出。以 SELECT 为准即不可能出现该组合。
+        assert!(
+            next_page_token(&[], 105).is_none(),
+            "空页给不出游标，就不能声称还有下一页"
+        );
+    }
+
+    #[test]
+    fn next_page_token_encodes_the_last_row_of_the_page() {
+        // 游标必须落在**已交付**的最后一行上，否则下一页的 keyset 条件会错位
+        let token = next_page_token(&rows(100, 0), 105).unwrap_or_else(|| panic!("应给出游标"));
+        assert_eq!(
+            decode_cursor(&token).unwrap_or_else(|error| panic!("游标应可解码: {error}")),
+            Some((99, "opt_099".to_string()))
+        );
     }
 
     #[test]
