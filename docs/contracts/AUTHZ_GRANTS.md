@@ -87,3 +87,28 @@ COMMIT;
 授权/撤销为幂等语义：重复授予或撤销不存在的权限返回 `changed: false`，
 不递增版本、不追加 Outbox。高权限写操作按 `docs/contracts/AUDIT.md` 契约记录
 append-only 审计，并挂载 Step-up 重认证中间件。
+
+
+## 飞书集成的初始授权（运维）
+
+`feishu.datasource.read` / `feishu.datasource.write` / `feishu.option.read` 三个权限随
+Catalog 冻结自动进入权限目录（可用 `GET /api/v1/access/permissions` 核实），但**首个授权
+没有自助路径**（决策 D2），必须由运维 SQL 完成。
+
+与其它业务权限一样，三条事实必须在**同一事务**内落地：写 `authz_grant` 事实行、
+递增 `users.authz_version`、追加 `authorization_outbox`。模板见上文「初始授权（运维）」，
+把权限换成：
+
+```sql
+INSERT INTO authz_grant (user_id, permission, granted_by, occurred_at)
+VALUES (1, 'feishu.datasource.read',  0, UNIX_TIMESTAMP())
+     , (1, 'feishu.datasource.write', 0, UNIX_TIMESTAMP())
+     , (1, 'feishu.option.read',      0, UNIX_TIMESTAMP());
+```
+
+之后的日常授权/撤销走 `POST /api/v1/access/grants[/revoke]`（Step-up 保护）。
+
+**注意**：`approval_options` / `upsert_options` / `delete_options` 三条机器入口是
+`public` Action，**不经过权限体系**——它们的凭证分别是「按数据源存储的 Token 摘要」与
+`[feishu].management_api_token`，因此不需要（也不应该）在这里授权。给它们授权不会
+产生任何效果，反而会掩盖「凭证到底由谁校验」这个问题。

@@ -237,6 +237,19 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "飞书选项 Schema 集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "feishu_options_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 
