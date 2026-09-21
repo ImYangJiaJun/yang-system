@@ -1,0 +1,129 @@
+/**
+ * 创建 / 轮换之后的 Token 连通性预检回执。
+ *
+ * 这是控制台唯一能「具体」的指引时刻：此刻它知道真实的 `source_key`，也知道用户
+ * 手里正握着明文 Token——而服务端永远回不出明文（`token_hash` 只存 SHA-256 摘要），
+ * 所以**事后无法再校验任何一次**。预检因此必须排在创建/轮换成功之后（数据源行得先存在，
+ * `approval_options` 才能按 `source_key` 查库并比对哈希）。
+ *
+ * 预检失败**不阻塞**创建结果：数据源已经建好了，这一屏只回答「链路通没通」，
+ * 并且必须说清「建好了、但 Token 没验证过」，而不是让人以为创建失败了。
+ */
+
+import { Check, Copy } from "lucide-react";
+import { useState } from "react";
+
+import { Button } from "@/shared/ui/button";
+
+import type { TokenPrecheckResult } from "../types";
+
+export type TokenPrecheckMode = "create" | "rotate";
+
+export type TokenPrecheckNoticeProps = {
+  /// 真实的数据源标识：回执里要粘回飞书审批后台的那一段就是它。
+  sourceKey: string;
+  /// null 表示还没有结果（不渲染任何东西）。
+  result: TokenPrecheckResult | null;
+  mode?: TokenPrecheckMode;
+  pending?: boolean;
+  /// 预检失败时的「就地重填 Token」入口：不必删掉数据源重建。
+  onRotate?: () => void;
+};
+
+const NEUTRAL_BAR =
+  "rounded-md border border-border bg-muted/50 px-3 py-2 text-sm";
+const ERROR_BAR =
+  "rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive";
+
+export function TokenPrecheckNotice({
+  sourceKey,
+  result,
+  mode = "create",
+  pending = false,
+  onRotate,
+}: TokenPrecheckNoticeProps) {
+  const [copied, setCopied] = useState(false);
+
+  async function copySourceKey() {
+    try {
+      await navigator.clipboard.writeText(sourceKey);
+      setCopied(true);
+    } catch {
+      // 剪贴板不可用（无权限 / 非安全上下文）时不做任何事，文本本身已经可选中。
+    }
+  }
+
+  if (pending) {
+    return (
+      <p className={NEUTRAL_BAR} aria-live="polite">
+        正在用刚填的 Token 试拉一次选项…
+      </p>
+    );
+  }
+
+  if (!result) return null;
+
+  if (result.status === "failed") {
+    return (
+      <div className="space-y-3">
+        <p className={ERROR_BAR} role="alert">
+          {mode === "create" ? "数据源已创建" : "Token 已更新"}
+          ，但没有通过验证：{result.message}
+          {result.code === null ? "" : `（错误码 ${result.code}）`}
+        </p>
+        <p className={NEUTRAL_BAR} aria-live="polite">
+          {result.hint}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          预检失败不影响上面这次操作的结果——数据源本身已经就位，只是这条链路还没验通。
+        </p>
+        {onRotate ? (
+          <Button variant="outline" size="sm" onClick={onRotate}>
+            重新填写 Token
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className={NEUTRAL_BAR} aria-live="polite">
+        {mode === "create" ? "数据源已创建" : "Token 已更新"}
+        ，链路是通的：
+        {result.encrypted
+          ? "服务端返回了加密内容（该数据源开了「加密返回」），内容读不了，但这次取数已经成功。"
+          : `服务端这次拉到了 ${result.optionCount ?? 0} 个选项。`}
+      </p>
+      <div className="space-y-2 rounded-md border border-border p-3">
+        <p className="text-sm">把这一段粘回飞书审批后台的外部选项配置里：</p>
+        <div className="flex items-center gap-2">
+          <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-sm">
+            {sourceKey}
+          </code>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void copySourceKey()}
+          >
+            {copied ? (
+              <>
+                <Check aria-hidden="true" />
+                已复制
+              </>
+            ) : (
+              <>
+                <Copy aria-hidden="true" />
+                复制
+              </>
+            )}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          接口地址与 Token
+          由飞书那边填写；在这里点「校验数据」是飞书后台自己的动作。
+        </p>
+      </div>
+    </div>
+  );
+}

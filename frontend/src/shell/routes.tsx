@@ -73,6 +73,24 @@ export const appRoutes = [
           { path: "m/:moduleId", element: <ModulePage /> },
           { path: "m/:moduleId/v/:viewId", element: <ModulePage /> },
           { path: "business", element: <BusinessPage /> },
+          {
+            // 飞书数据源控制台：路由级 lazy，页面文件在 features/feishu/views/。
+            // 列表页与详情页分属两个 chunk，详情页只在进入时加载。
+            path: "feishu/datasources",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/feishu/views/DatasourceListPage")
+              ).default,
+            }),
+          },
+          {
+            path: "feishu/datasources/:sourceKey",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/feishu/views/DatasourceDetailPage")
+              ).default,
+            }),
+          },
           ...devOnlyRoutes,
         ],
       },

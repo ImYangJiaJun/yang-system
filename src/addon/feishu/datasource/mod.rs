@@ -1,6 +1,22 @@
 //! `feishu.datasource` Module：数据源注册表。
 //!
-//! 本文件是模块的"定义卡"：表、Action 注册表、展示投影与通用 TableView 按分区顺序装配。
+//! 本文件是模块的"定义卡"：表与 Action 注册表。
+//!
+//! # 为什么刻意不声明 `presentation()` 与 `view()`
+//!
+//! 控制台的入口是**自建页面**（`frontend/src/features/feishu/`），不是引擎投影的
+//! 通用 TableView。所以本模块不向 Catalog 投影任何界面。这两个必须**成对省略**：
+//!
+//! - 只省 `view()`：框架会给 `views` 为空的模块**自动合成**一个含全表列的
+//!   `feishu.datasource.default` 视图（`builder/compile.rs` 的 `module.views.is_empty()`
+//!   分支），只因它 `data_action` 为 `None` 才暂时没被投影出来——将来给模块加一个
+//!   可用作数据源的 primary action，整张表就会静默复现。
+//! - 只省 `presentation()`：模块离开 `catalog.modules`，但 view 仍在
+//!   `catalog.table_views`，前端 `navigation.ts` 的 `unassignedViews` 会把表格
+//!   挂到「工作台」分组下重新出现。
+//!
+//! 代价：原先在 `view()` 上声明的删除二次确认文案不再随 Catalog 下发，改由前端持有
+//! 同一份文案。见 `docs/architecture/feishu-datasource-console.md` §4.2 与 §5.3-1。
 
 pub(crate) mod actions;
 pub(crate) mod table;
@@ -10,29 +26,20 @@ use std::sync::Arc;
 use crate::addon::account::user_from_claims;
 use crate::authorization::AuthorizationVersionValidator;
 use yang_base::action::TokenAuthMiddleware;
-use yang_base::definition::{
-    ActionConfirmation, ActionInteraction, ActionName, ActionPlacement, ActionPresentationSpec,
-    ActionRef, FieldName, FieldRef, ModuleName, ModulePresentationSpec, ModuleSpec, SortDirection,
-    TableName, TableSortSpec, ViewName, ViewSpec,
-};
+use yang_base::definition::{ModuleName, ModuleSpec};
 use yang_base::BaseError;
 
 use super::domain::context::FeishuContext;
 
 /// 本 module 的名字。
 const MODULE: &str = "feishu.datasource";
-/// 本 module 的表名。
-const TABLE: &str = "feishu_datasource";
 
 /// 装配 `feishu.datasource` Module。
 pub(crate) fn build_module(
     context: Arc<FeishuContext>,
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<ModuleSpec, BaseError> {
-    let spec = ModuleSpec::new(module_name()?)
-        .table(table::table_spec()?)
-        .presentation(presentation())
-        .view(view()?);
+    let spec = ModuleSpec::new(module_name()?).table(table::table_spec()?);
     let spec = with_authentication(spec, authorization_validator);
     Ok(actions::register_all(spec, context))
 }
@@ -60,59 +67,6 @@ pub(crate) fn with_authentication(
     )
 }
 
-/// 前端展示投影（控制台导航）。
-fn presentation() -> ModulePresentationSpec {
-    ModulePresentationSpec::new(crate::addon::user_identity(), "飞书数据源", "table")
-        .description("飞书审批外部选项的数据源注册表")
-        .order(40)
-        .primary_action(yang_base::action!("feishu.datasource.list_datasources"))
-}
-
-/// 通用 TableView：数据 Action + 列 + 操作全部声明式投影，前端零代码。
-fn view() -> Result<ViewSpec, BaseError> {
-    let field = |name: &str| -> Result<FieldRef, BaseError> {
-        Ok(FieldRef::new(
-            TableName::new(TABLE).map_err(config_error)?,
-            FieldName::new(name).map_err(config_error)?,
-        ))
-    };
-    let action = |name: &str| -> Result<ActionRef, BaseError> {
-        Ok(ActionRef::new(
-            module_name()?,
-            ActionName::new(name).map_err(config_error)?,
-        ))
-    };
-
-    Ok(ViewSpec::new(ViewName::new("main").map_err(config_error)?)
-        .title("数据源")
-        .data_action(action("list_datasources")?)
-        .field(field("source_key")?)
-        .field(field("title")?)
-        .field(field("status")?)
-        .field(field("encrypt_enabled")?)
-        .field(field("default_locale")?)
-        .action(action("list_datasources")?)
-        .present_action(
-            action("create_datasource")?,
-            ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
-        )
-        .present_action(
-            action("update_datasource")?,
-            ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Form)
-                .record_parameter("source_key"),
-        )
-        .present_action(
-            action("delete_datasource")?,
-            ActionPresentationSpec::new(ActionPlacement::Row, ActionInteraction::Invoke)
-                .record_parameter("source_key")
-                .confirmation(ActionConfirmation::new(
-                    "删除数据源",
-                    "删除后其下全部选项会被同时停用，且不可恢复。确认删除？",
-                )),
-        )
-        .default_sort(TableSortSpec::new(field("source_key")?, SortDirection::Asc)))
-}
-
 fn module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new(MODULE).map_err(config_error)
 }
@@ -126,36 +80,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn module_name_and_table_are_declared() {
+    fn module_name_is_the_stable_qualified_identifier() {
         let name = module_name().unwrap_or_else(|error| panic!("模块名应有效: {error}"));
         assert_eq!(name.as_str(), MODULE);
-        assert_eq!(TABLE, "feishu_datasource");
     }
 
     #[test]
-    fn view_projects_every_declared_column_and_action() {
-        let spec = view().unwrap_or_else(|error| panic!("View 应可构造: {error}"));
-        assert_eq!(
-            spec.fields.len(),
-            5,
-            "应投影 source_key/title/status/encrypt_enabled/default_locale"
-        );
-        for presented in [
-            "create_datasource",
-            "update_datasource",
-            "delete_datasource",
-        ] {
-            assert!(
-                spec.actions
-                    .iter()
-                    .any(|action| action.action().as_str() == presented),
-                "View 应展示 {presented}"
-            );
-        }
-        let data_action = spec
-            .data_action
-            .as_ref()
-            .unwrap_or_else(|| panic!("TableView 必须声明数据 Action"));
-        assert_eq!(data_action.action().as_str(), "list_datasources");
+    fn table_spec_is_still_declared_after_dropping_the_view_projection() {
+        // 去掉 presentation/view 只影响**界面投影**，表本身必须仍然进 Catalog，
+        // 否则 schema 同步与数据面都会缺表。
+        let spec = table::table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let definition = spec
+            .table_definition()
+            .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));
+        assert_eq!(definition.name(), "feishu_datasource");
     }
 }

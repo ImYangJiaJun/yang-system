@@ -27,7 +27,8 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .title("名称")
                 .require(true)
                 .max_length(100)
-                .searchable(true),
+                .searchable(true)
+                .sortable(true),
             // 只存 SHA-256 摘要，永不存明文。secret(true) 会把读写权限置为 Nobody，
             // 因此必须紧接着显式授回受信角色，否则连 writer 都读写不了
             token_hash => Str::new()
@@ -48,11 +49,12 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .require(true)
                 .varchar(16)
                 .options([("active", "启用"), ("disabled", "停用")])
+                .filterable(true)
                 .default("active"),
             // JSON 文本：DSL 没有 Json builder，且该列从不被 SQL 查询进内部
             linkage_mapping => Text::new().title("联动映射"),
             created_at => Timestamp::new().created_at().title("创建时间"),
-            updated_at => Timestamp::new().updated_at().title("更新时间"),
+            updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
         }))
 }
 
@@ -154,6 +156,37 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} 字段必须存在"));
             assert!(field.is_required(), "{name} 应由框架自动写入");
         }
+    }
+
+    #[test]
+    fn title_is_sortable_so_the_ledger_can_order_by_name() {
+        // 台账视图在上百条量级下必须能按名称排序。DSL 的 sortable 是 fail-closed：
+        // 未显式打开时 TableQuery 会直接拒绝排序请求，所以这是一条能力断言而非优化。
+        let definition = definition();
+        let title = definition
+            .field("title")
+            .unwrap_or_else(|| panic!("title 字段必须存在"));
+        assert!(title.is_sortable(), "按名称排序必须可用");
+        assert!(title.is_searchable(), "名称必须可被关键词检索");
+    }
+
+    #[test]
+    fn status_is_filterable_so_the_ledger_can_filter_by_state() {
+        // 台账工具栏的「全部 / 启用 / 已停用」依赖这一位；同样 fail-closed。
+        let definition = definition();
+        let status = definition
+            .field("status")
+            .unwrap_or_else(|| panic!("status 字段必须存在"));
+        assert!(status.is_filterable(), "按状态筛选必须可用");
+    }
+
+    #[test]
+    fn updated_at_is_sortable_for_recency_ordering() {
+        let definition = definition();
+        let updated_at = definition
+            .field("updated_at")
+            .unwrap_or_else(|| panic!("updated_at 字段必须存在"));
+        assert!(updated_at.is_sortable(), "按更新时间排序必须可用");
     }
 
     #[test]

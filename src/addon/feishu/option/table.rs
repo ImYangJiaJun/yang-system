@@ -65,7 +65,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             // JSON 文本：预留联动筛选键值
             extra => Text::new().title("扩展字段"),
             created_at => Timestamp::new().created_at().title("创建时间"),
-            updated_at => Timestamp::new().updated_at().title("更新时间"),
+            updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
         }))
 }
 
@@ -154,6 +154,18 @@ mod tests {
             .field("is_default")
             .unwrap_or_else(|| panic!("is_default 字段必须存在"));
         assert_eq!(is_default.default_value(), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn updated_at_is_sortable_so_the_detail_page_can_order_by_last_push() {
+        // 详情页默认按「最近推送」倒序：只有持管理 Token 的多维表格自动化会写选项行，
+        // 所以 updated_at 就是那行选项最后一次被推送的时间，是控制台对
+        // 「推送还活着吗」唯一诚实的信号。排序位同样是 fail-closed。
+        let definition = definition();
+        let updated_at = definition
+            .field("updated_at")
+            .unwrap_or_else(|| panic!("updated_at 字段必须存在"));
+        assert!(updated_at.is_sortable(), "按最近推送排序必须可用");
     }
 
     #[test]

@@ -40,6 +40,9 @@ pub(super) async fn handle(
         "sort_order",
         "is_default",
         "enabled",
+        // 只有持管理 Token 的多维表格自动化会写选项行，所以 updated_at 就是
+        // 「这行选项最后一次被推送的时间」——控制台对「推送还活着吗」唯一诚实的信号。
+        "updated_at",
     ])?;
 
     // 本服务自己的扩展过滤：前端不发 source_key 时不生效
@@ -86,6 +89,8 @@ pub(super) async fn handle(
                 "sort_order": record.require::<i64>("sort_order")?,
                 "is_default": record.optional::<bool>("is_default")?.unwrap_or(false),
                 "enabled": record.optional::<bool>("enabled")?.unwrap_or(true),
+                // unix 秒；前端负责格式化（与 AccountSettingsPage 对 createdAt 的用法一致）
+                "updated_at": record.require::<i64>("updated_at")?,
             }))
         })
         .collect::<Result<Vec<_>, BaseError>>()?;

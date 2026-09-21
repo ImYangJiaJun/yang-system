@@ -5,6 +5,7 @@ use std::sync::Arc;
 use yang_base::action::builtin::OrderByItem;
 use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec};
+use yang_base::table::SortOrder;
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -23,6 +24,11 @@ pub(super) struct DatasourceItem {
     default_locale: String,
     /// 状态。
     status: String,
+    /// 该行最后一次被写入的时间（unix 秒）。
+    ///
+    /// 注意它**不是**「选项的最后推送时间」——那个在 `list_options` 的
+    /// `updated_at` 上。这里回答的是「这条数据源记录最后一次被改动是什么时候」。
+    updated_at: i64,
 }
 
 /// 注册数据源列表端点。
@@ -58,6 +64,7 @@ pub(super) async fn handle(
             "encrypt_enabled",
             "default_locale",
             "status",
+            "updated_at",
         ])?
         .search(input.search.as_deref())?;
 
@@ -69,8 +76,16 @@ pub(super) async fn handle(
     } else {
         None
     };
+    // 客户端没给排序时必须兜底：分页要有确定性全序，否则翻页会漏行或重复。
+    // 与 list_options 同一处理——前端控制台恒发 source_key 升序，这里兜的是
+    // 其它调用方（curl、未来的代码路径），不让它们静默拿到坏分页。
+    let mut ordered = false;
     for OrderByItem { field, direction } in input.order_by {
         query = query.order_by(&field, direction)?;
+        ordered = true;
+    }
+    if !ordered {
+        query = query.order_by("source_key", SortOrder::Asc)?;
     }
     query = query.page(input.page as usize, input.page_size as usize)?;
     let rows = query.all().await?;
@@ -84,6 +99,7 @@ pub(super) async fn handle(
                 encrypt_enabled: record.optional("encrypt_enabled")?.unwrap_or(false),
                 default_locale: record.optional("default_locale")?.unwrap_or_default(),
                 status: record.require("status")?,
+                updated_at: record.require("updated_at")?,
             })
         })
         .collect::<Result<Vec<_>, BaseError>>()?;

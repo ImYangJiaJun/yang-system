@@ -4,6 +4,7 @@ import {
   Check,
   ChevronsUpDown,
   CircleUser,
+  Database,
   LogOut,
   Moon,
   Puzzle,
@@ -222,6 +223,15 @@ export default function AppLayout() {
   );
   const groups = groupNavigationPages(pages, catalog);
 
+  // 飞书数据源入口的权限门控（设计 §5.2）：目录本身已按身份投影，这里直接问
+  // 「当前身份拿不拿得到 list_datasources 这个 Action」。三个权限位相互独立，
+  // 存在连读权限都没有的身份——那种身份不该看见入口（否则点进去是整页 403）。
+  const canReadFeishuDatasources = Boolean(
+    catalog?.actions.some(
+      (action) => action.operation_id === "feishu.datasource.list_datasources",
+    ),
+  );
+
   return (
     <div className="flex h-svh overflow-hidden bg-background text-foreground">
       <aside className="flex h-full w-60 shrink-0 flex-col border-r border-border">
@@ -261,6 +271,30 @@ export default function AppLayout() {
               </li>
             </ul>
           </div>
+          {canReadFeishuDatasources && (
+            <div>
+              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                飞书集成
+              </p>
+              <ul className="space-y-0.5">
+                <li>
+                  <NavLink
+                    to="/feishu/datasources"
+                    className={({ isActive }) =>
+                      cn(
+                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                        isActive &&
+                          "bg-accent font-medium text-accent-foreground",
+                      )
+                    }
+                  >
+                    <Database className="size-4 shrink-0" />
+                    飞书数据源
+                  </NavLink>
+                </li>
+              </ul>
+            </div>
+          )}
           {groups.map((group) => (
             <div key={group.identity}>
               <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">

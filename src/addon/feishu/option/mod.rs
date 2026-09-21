@@ -4,17 +4,24 @@
 //! - 控制台**只读**查询（`list_options`，受保护 Action）
 //! - 飞书审批取选项（`approval_options`，public + 按数据源 Token 自校验）
 //! - 多维表格写入（`upsert_options` / `delete_options`，public + 管理 Token 中间件）
+//!
+//! # 控制台对选项只读，是架构决策不是缺失
+//!
+//! 选项的增改由多维表格写入 API 承担。两个并存的可写入口会让审计语义与数据来源
+//! 分叉——「这条选项是谁写的」将无法回答。所以本 module 不挂任何选项写操作。
+//!
+//! # 为什么刻意不声明 `presentation()` 与 `view()`
+//!
+//! 与 `feishu.datasource` 同一取舍：控制台的选项视图是自建页面的一部分
+//! （详情页），不是引擎投影的通用 TableView。两者必须成对省略，理由与半吊子改法的
+//! 两个后果见 `datasource/mod.rs` 的文件头说明。
 
 pub(crate) mod actions;
 pub(crate) mod table;
 
 use std::sync::Arc;
 
-use yang_base::definition::{
-    ActionInteraction, ActionName, ActionPlacement, ActionPresentationSpec, ActionRef, FieldName,
-    FieldRef, ModuleName, ModulePresentationSpec, ModuleSpec, SortDirection, TableName,
-    TableSortSpec, ViewName, ViewSpec,
-};
+use yang_base::definition::{ModuleName, ModuleSpec};
 use yang_base::BaseError;
 
 use super::domain::context::FeishuContext;
@@ -24,8 +31,6 @@ use crate::config::FeishuSettings;
 
 /// 本 module 的名字。
 const MODULE: &str = "feishu.option";
-/// 本 module 的表名。
-const TABLE: &str = "feishu_option";
 
 /// 装配 `feishu.option` Module。
 pub(crate) fn build_module(
@@ -33,10 +38,7 @@ pub(crate) fn build_module(
     settings: Option<&FeishuSettings>,
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<ModuleSpec, BaseError> {
-    let spec = ModuleSpec::new(module_name()?)
-        .table(table::table_spec()?)
-        .presentation(presentation())
-        .view(view()?);
+    let spec = ModuleSpec::new(module_name()?).table(table::table_spec()?);
     // 与 datastore 模块同一套认证中间件：本 module 的受保护 Action（list_options）
     // 要靠它才有身份。public 的机器入口**不经过**它——`Next::run` 对默认
     // `ProtectedActions` scope 的判据是 `!policy.is_public`，它们本来就被跳过，
@@ -46,48 +48,6 @@ pub(crate) fn build_module(
     // （见 `datasource::with_authentication` 的说明）。
     let spec = with_authentication(spec, authorization_validator);
     actions::register_all(spec, context, settings)
-}
-
-/// 前端展示投影（控制台导航）。
-fn presentation() -> ModulePresentationSpec {
-    ModulePresentationSpec::new(crate::addon::user_identity(), "飞书选项", "list")
-        .description("飞书审批外部选项的数据")
-        .order(41)
-        .primary_action(yang_base::action!("feishu.option.list_options"))
-}
-
-/// 通用 TableView。
-///
-/// 只挂**查询**操作：选项的增改由多维表格写入 API 承担，控制台保持只读——
-/// 两个并存的可写入口会让审计语义与数据来源分叉。
-fn view() -> Result<ViewSpec, BaseError> {
-    let field = |name: &str| -> Result<FieldRef, BaseError> {
-        Ok(FieldRef::new(
-            TableName::new(TABLE).map_err(config_error)?,
-            FieldName::new(name).map_err(config_error)?,
-        ))
-    };
-    let action = |name: &str| -> Result<ActionRef, BaseError> {
-        Ok(ActionRef::new(
-            module_name()?,
-            ActionName::new(name).map_err(config_error)?,
-        ))
-    };
-
-    Ok(ViewSpec::new(ViewName::new("main").map_err(config_error)?)
-        .title("选项")
-        .data_action(action("list_options")?)
-        .field(field("option_id")?)
-        .field(field("source_key")?)
-        .field(field("label")?)
-        .field(field("sort_order")?)
-        .field(field("enabled")?)
-        .action(action("list_options")?)
-        .present_action(
-            action("list_options")?,
-            ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Invoke),
-        )
-        .default_sort(TableSortSpec::new(field("sort_order")?, SortDirection::Asc)))
 }
 
 fn module_name() -> Result<ModuleName, BaseError> {
@@ -103,17 +63,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn module_name_and_table_are_declared() {
+    fn module_name_is_the_stable_qualified_identifier() {
         let name = module_name().unwrap_or_else(|error| panic!("模块名应有效: {error}"));
         assert_eq!(name.as_str(), MODULE);
-        assert_eq!(TABLE, "feishu_option");
     }
 
     #[test]
-    fn view_is_read_only_and_projects_the_core_columns() {
-        let spec = view().unwrap_or_else(|error| panic!("View 应可构造: {error}"));
-        assert_eq!(spec.fields.len(), 5);
-        assert_eq!(spec.actions.len(), 1, "控制台对选项只读：不应挂任何写操作");
-        assert_eq!(spec.actions[0].action().as_str(), "list_options");
+    fn table_spec_is_still_declared_after_dropping_the_view_projection() {
+        let spec = table::table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let definition = spec
+            .table_definition()
+            .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));
+        assert_eq!(definition.name(), "feishu_option");
     }
 }
