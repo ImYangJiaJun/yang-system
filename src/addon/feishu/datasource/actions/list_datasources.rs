@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use yang_base::action::builtin::OrderByItem;
 use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec};
-use yang_base::table::SortOrder;
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -44,11 +44,12 @@ pub(super) async fn handle(
     input: ListInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
-    let (page, page_size) = input.normalized();
+    input.validate()?;
+
     // 必须显式列出可读字段：ensure_readable_projection 是框架 crate 私有的，
     // 自定义列表 Action 不会自动拿到「默认可读投影」。token_hash 是 secret 字段，
     // 即便列进来也会被兜住，但显式排除让它更清楚。
-    let query = context
+    let mut query = context
         .datasources()
         .query()
         .select_fields(&[
@@ -58,13 +59,23 @@ pub(super) async fn handle(
             "default_locale",
             "status",
         ])?
-        .search(input.search.as_deref())?
-        .order_by("source_key", SortOrder::Asc)?
-        .page(page, page_size)?;
+        .search(input.search.as_deref())?;
 
-    let result = query.paginate_records().await?;
-    let items = result
-        .data
+    if let Some(tree) = input.where_clause {
+        query = query.where_tree(tree)?;
+    }
+    let total = if input.count_total {
+        Some(query.clone().count().await?)
+    } else {
+        None
+    };
+    for OrderByItem { field, direction } in input.order_by {
+        query = query.order_by(&field, direction)?;
+    }
+    query = query.page(input.page as usize, input.page_size as usize)?;
+    let rows = query.all().await?;
+
+    let items = rows
         .iter()
         .map(|record| {
             Ok(DatasourceItem {
@@ -80,9 +91,9 @@ pub(super) async fn handle(
     Ok(ApiResponse::success_value(
         serde_json::json!({
             "items": items,
-            "page": page,
-            "page_size": page_size,
-            "total": result.total,
+            "page": input.page,
+            "page_size": input.page_size,
+            "total": total,
         }),
         "查询成功",
     ))
