@@ -106,18 +106,27 @@ async fn connect_test_redis() -> anyhow::Result<RedisClient> {
 }
 
 async fn reset_database(database: &Database) -> anyhow::Result<()> {
-    for table in [
-        "password_reset_token",
-        "audit_event",
-        "authorization_outbox",
-        "users",
-    ] {
-        sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
-            .execute(database.pool())
-            .await
-            .with_context(|| format!("清理 Refresh 基准表失败: {table}"))?;
+    // 测试库专用：循环 DROP 直到库为空（与 avatar_integration 等集成测试同策略），
+    // 不维护表名清单，避免声明式 Schema 新增外键子表后清理再次过时。
+    for _ in 0..64 {
+        let tables: Vec<String> = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()",
+        )
+        .fetch_all(database.pool())
+        .await?
+        .into_iter()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .collect();
+        if tables.is_empty() {
+            return Ok(());
+        }
+        for table in &tables {
+            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
+                .execute(database.pool())
+                .await;
+        }
     }
-    Ok(())
+    anyhow::bail!("Refresh 基准测试库清理未在 64 轮内收敛（存在环状外键？）")
 }
 
 async fn reset_redis(redis: &RedisClient) -> anyhow::Result<()> {
