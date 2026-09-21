@@ -107,13 +107,11 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
         .await
         .unwrap_or_else(|error| panic!("预清理失败: {error:#}"));
 
-    // sync_with_database 按值吃掉 Database，因此各留一个池克隆给块内与清理使用
-    let cleanup_pool = database.pool().clone();
     let outcome = async {
-        let pool = database.pool().clone();
+        // sync_with_database 内部会关掉连接池（tools.close()），且 pool.clone() 共享同一
+        // 底层池——所以同步之后必须重新建连，不能复用同步前的句柄。
         sync_feishu_schema(database).await?;
-        let handle = Database::from_pool(pool, yang_db::DatabaseConfig::default())
-            .context("重建测试库句柄失败")?;
+        let handle = connect_test_database().await?;
 
         // 两张表必须存在
         for table in [DATASOURCE_TABLE, OPTION_TABLE] {
@@ -141,7 +139,7 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
         );
 
         // 摘要列必须存在且能容纳 64 位 hex
-        let token_hash_len: Option<u64> = sqlx::query_scalar(
+        let token_hash_len: Option<i64> = sqlx::query_scalar(
             "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'token_hash'",
         )
@@ -154,10 +152,11 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
             "feishu_datasource.token_hash 必须存在且不少于 64 字符"
         );
 
-        // 再次同步必须是无操作：schema_sync 幂等，第二次不应有任何变更
+        // 再次同步必须是无操作：schema_sync 幂等，第二次不应有任何变更。
+        // 这里同样会关池，因此断言要在它之前做完。
+        drop(handle);
         let second = yang_system::schema::sync_with_database(
-            Database::from_pool(handle.pool().clone(), yang_db::DatabaseConfig::default())
-                .context("重建句柄失败")?,
+            connect_test_database().await?,
             yang_db::DatabaseConfig::default(),
             Arc::new(yang_system::config::SecuritySettings::default()),
         )
@@ -177,9 +176,9 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
     }
     .await;
 
-    let cleanup = match Database::from_pool(cleanup_pool, yang_db::DatabaseConfig::default()) {
+    let cleanup = match connect_test_database().await {
         Ok(handle) => drop_feishu_tables(&handle).await,
-        Err(error) => Err(error).context("清理用句柄构造失败"),
+        Err(error) => Err(error).context("清理用连接失败"),
     };
     if let Err(error) = outcome {
         panic!("飞书 Schema 集成测试失败: {error:#}");
@@ -201,24 +200,21 @@ async fn option_id_uniqueness_is_enforced_by_the_database() {
         .await
         .unwrap_or_else(|error| panic!("预清理失败: {error:#}"));
 
-    let cleanup_pool = database.pool().clone();
     let outcome = async {
-        let pool = database.pool().clone();
         sync_feishu_schema(database).await?;
-        let handle = Database::from_pool(pool, yang_db::DatabaseConfig::default())
-            .context("重建测试库句柄失败")?;
+        let handle = connect_test_database().await?;
 
         sqlx::query(
-            "INSERT INTO `feishu_option` (`option_id`, `source_key`, `label`, `sort_order`, `is_default`, `enabled`) \
-             VALUES ('dup_id', 'demo', '第一次', 0, 0, 1)",
+            "INSERT INTO `feishu_option` (`option_id`, `source_key`, `label`, `sort_order`, `is_default`, `enabled`, `created_at`, `updated_at`) \
+             VALUES ('dup_id', 'demo', '第一次', 0, 0, 1, NOW(), NOW())",
         )
         .execute(handle.pool())
         .await
         .context("首次插入应成功")?;
 
         let second = sqlx::query(
-            "INSERT INTO `feishu_option` (`option_id`, `source_key`, `label`, `sort_order`, `is_default`, `enabled`) \
-             VALUES ('dup_id', 'other', '第二次', 1, 0, 1)",
+            "INSERT INTO `feishu_option` (`option_id`, `source_key`, `label`, `sort_order`, `is_default`, `enabled`, `created_at`, `updated_at`) \
+             VALUES ('dup_id', 'other', '第二次', 1, 0, 1, NOW(), NOW())",
         )
         .execute(handle.pool())
         .await;
@@ -231,9 +227,9 @@ async fn option_id_uniqueness_is_enforced_by_the_database() {
     }
     .await;
 
-    let cleanup = match Database::from_pool(cleanup_pool, yang_db::DatabaseConfig::default()) {
+    let cleanup = match connect_test_database().await {
         Ok(handle) => drop_feishu_tables(&handle).await,
-        Err(error) => Err(error).context("清理用句柄构造失败"),
+        Err(error) => Err(error).context("清理用连接失败"),
     };
     if let Err(error) = outcome {
         panic!("唯一性集成测试失败: {error:#}");
