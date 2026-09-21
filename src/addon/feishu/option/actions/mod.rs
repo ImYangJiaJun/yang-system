@@ -5,6 +5,7 @@
 
 pub(super) mod approval_options;
 pub(super) mod delete_options;
+pub(super) mod list_options;
 pub(super) mod upsert_options;
 
 use std::sync::Arc;
@@ -18,18 +19,23 @@ use crate::config::FeishuSettings;
 
 /// 注册本 module 的全部 Action。
 ///
-/// **`[feishu]` 段未启用时不注册任何飞书路由。** 两条写入入口的凭证来自该段，
-/// 取选项端点虽然按数据源各自存凭证，但加密密钥同样来自该段——而「注册但拒绝所有
-/// 请求」会让端点出现在 Catalog 里，给人它可用的错觉。这与配置文档的措辞一致：
-/// 「关闭时不注册任何飞书路由」。
+/// 按「谁在用」分两组：
 ///
-/// 中间件用 `target_action()` 精确限定到单个 Action：取选项端点是 public 且按数据源
-/// 自校验，不能被管理 Token 中间件误伤。
+/// - **控制台查询**（`list_options`）始终注册：它声明 `feishu.option.read` 权限、走框架
+///   JWT 鉴权，与 `[feishu]` 段无关——运维在接通飞书之前就该能查看选项数据。
+/// - **机器入口**（取选项端点 + 两条写入）只在 `[feishu]` 段启用且管理 Token 非空时注册。
+///   取选项端点虽然按数据源各自存凭证，但加密密钥同样来自该段；而「注册但拒绝所有请求」
+///   会让端点出现在 Catalog 里，给人它可用的错觉。这与配置文档的措辞一致。
+///
+/// 中间件用 `target_action()` 精确限定到单个写入 Action：取选项端点是 public 且按
+/// 数据源自校验，不能被管理 Token 中间件误伤。
 pub(super) fn register_all(
     module: ModuleSpec,
     context: Arc<FeishuContext>,
     settings: Option<&FeishuSettings>,
 ) -> Result<ModuleSpec, BaseError> {
+    let module = list_options::register(module, Arc::clone(&context));
+
     let Some(settings) = settings.filter(|value| value.is_usable()) else {
         return Ok(module);
     };
