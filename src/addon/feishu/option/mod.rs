@@ -12,13 +12,17 @@ use yang_base::definition::{ModuleName, ModuleSpec};
 use yang_base::BaseError;
 
 use super::domain::context::FeishuContext;
+use crate::config::FeishuSettings;
 
 /// 装配 `feishu.option` Module。
-pub(crate) fn build_module(context: Arc<FeishuContext>) -> Result<ModuleSpec, BaseError> {
+pub(crate) fn build_module(
+    context: Arc<FeishuContext>,
+    settings: Option<&FeishuSettings>,
+) -> Result<ModuleSpec, BaseError> {
     let spec = ModuleSpec::new(
         ModuleName::new("feishu.option")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,
     )
     .table(table::table_spec()?);
-    Ok(actions::register_all(spec, context))
+    actions::register_all(spec, context, settings)
 }

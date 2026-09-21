@@ -36,12 +36,12 @@ pub(crate) fn build_addon(
             option::table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
-        settings,
+        settings.clone(),
     ));
 
     Ok(AddonSpec::new(
         AddonName::new("feishu").map_err(|error| BaseError::ConfigError(error.to_string()))?,
     )
     .module(datasource::build_module(Arc::clone(&context))?)
-    .module(option::build_module(context)?))
+    .module(option::build_module(context, settings.as_deref())?))
 }

@@ -1,12 +1,4 @@
 //! 飞书 addon 的模块上下文：聚合两张表的 Repository 与集成配置，并提供事务收尾。
-//!
-//! # 临时豁免
-//!
-//! `#![allow(dead_code)]` 是**临时**的：本模块的访问器要被尚未落地的写入 API 与
-//! 前端查询 Action 消费。它们提交时连同 `protocol` / `crypto` / `i18n` / `token` /
-//! `pagination` / `repository` 的豁免一并删除。
-
-#![allow(dead_code)]
 
 use std::sync::Arc;
 

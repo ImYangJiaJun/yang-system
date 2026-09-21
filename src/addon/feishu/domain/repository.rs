@@ -7,11 +7,6 @@
 //! 本模块刻意只提供**构造与查询入口**，不包装具体读写动作——那些动作由各自的
 //! Action 组合，避免这里长成一个什么都做的上帝对象。
 
-//! # 临时豁免
-//!
-//! `#![allow(dead_code)]` 是**临时**的：本模块要被尚未落地的端点与写入 API 消费。
-//! 它们提交时**必须删除这一行**。
-#![allow(dead_code)]
 use std::sync::Arc;
 
 use sqlx::MySqlPool;
@@ -23,8 +18,8 @@ pub(crate) const SYSTEM_ROLE: &str = "system";
 /// 一张表在服务端的读写入口。
 #[derive(Clone)]
 pub(crate) struct Repository {
-    definition: TableDefinition,
     pool: Arc<MySqlPool>,
+    definition: TableDefinition,
 }
 
 impl Repository {
@@ -38,10 +33,5 @@ impl Repository {
         self.definition
             .bind(Arc::clone(&self.pool))
             .query([SYSTEM_ROLE])
-    }
-
-    /// 表定义，供上层读取字段名与能力位。
-    pub(crate) fn definition(&self) -> &TableDefinition {
-        &self.definition
     }
 }
