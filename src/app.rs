@@ -1,4 +1,4 @@
-use crate::addon::{access, account, demo};
+use crate::addon::{access, account, demo, feishu};
 use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
@@ -107,7 +107,18 @@ fn build_application(
     let system_owner_claimer = account::no_system_owner_claimer();
     let demo =
         demo::build_addon(authorization_validator.clone()).context("构建 demo Addon 失败")?;
-    let builder = AppBuilder::new()
+    // 飞书 Addon 需要 MySQL（两张表的 Repository 绑定连接池）。缺 MySQL 时不装配——
+    // 与上面 `RedisNotInitialized => None` 同一个惯例：运行态缺失不是错误，
+    // 只有真实故障才向上冒泡。
+    let feishu = match tools.mysql() {
+        Ok(database) => Some(
+            feishu::build_addon(Arc::new(database.pool().clone()))
+                .context("构建 feishu Addon 失败")?,
+        ),
+        Err(yang_base::BaseError::DatabaseNotInitialized) => None,
+        Err(error) => return Err(error).context("检查飞书 Addon 运行态失败"),
+    };
+    let mut builder = AppBuilder::new()
         .addon(
             account::build_addon(
                 Arc::clone(&security),
@@ -125,6 +136,10 @@ fn build_application(
                 .middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))),
         )
         .addon(demo.middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))));
+    if let Some(feishu) = feishu {
+        builder = builder
+            .addon(feishu.middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))));
+    }
     let runtime = builder
         .build(tools)
         .context("构建应用定义与 Registry 失败")?;
