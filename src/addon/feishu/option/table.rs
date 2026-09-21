@@ -17,9 +17,10 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     Ok(TableSpec::new(yang_base::table!("feishu_option"))
         .title("飞书选项")
         .fields(yang_base::fields! {
-            id => Key::new(),
+            id => Key::new().title("ID"),
             // 飞书契约的选项 id：唯一索引保证全局唯一
             option_id => Str::new()
+                .title("选项 ID")
                 .require(true)
                 .unique(true)
                 .max_length(128)
@@ -27,22 +28,35 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .filterable(true)
                 .sortable(true),
             source_key => Str::new()
+                .title("数据源标识")
                 .require(true)
                 .max_length(64)
                 .indexed(true)
                 .filterable(true)
                 .sortable(true),
-            label => Str::new().require(true).max_length(255).searchable(true),
+            label => Str::new()
+                .title("显示文案")
+                .require(true)
+                .max_length(255)
+                .searchable(true),
             // JSON 文本：{"en_us":"…","ja_jp":"…"}
-            i18n => Text::new(),
-            sort_order => Int::new().require(true).default(0).sortable(true),
-            is_default => Switch::new().require(true).default(false),
+            i18n => Text::new().title("多语言文案"),
+            sort_order => Int::new()
+                .title("排序")
+                .require(true)
+                .default(0)
+                .sortable(true),
+            is_default => Switch::new().title("默认选项").require(true).default(false),
             // 禁用而非删除，避免历史审批单引用的选项彻底失联
-            enabled => Switch::new().require(true).default(true).filterable(true),
+            enabled => Switch::new()
+                .title("启用")
+                .require(true)
+                .default(true)
+                .filterable(true),
             // JSON 文本：预留联动筛选键值
-            extra => Text::new(),
-            created_at => Timestamp::new().created_at(),
-            updated_at => Timestamp::new().updated_at(),
+            extra => Text::new().title("扩展字段"),
+            created_at => Timestamp::new().created_at().title("创建时间"),
+            updated_at => Timestamp::new().updated_at().title("更新时间"),
         }))
 }
 
@@ -139,6 +153,26 @@ mod tests {
             assert!(
                 !field.is_required(),
                 "{name} 可空：没有额外语言或联动键时不必写"
+            );
+        }
+    }
+
+    #[test]
+    fn every_field_has_an_explicit_chinese_label() {
+        // 防线：字段没设 .title() 时展示名会退化成字段名（英文），
+        // 前端表格就会满屏 source_key / encrypt_enabled。
+        let definition = definition();
+        for field in definition.fields() {
+            assert!(
+                !field.label().is_empty(),
+                "字段 {} 必须有展示名",
+                field.name()
+            );
+            assert_ne!(
+                field.label(),
+                field.name(),
+                "字段 {} 的展示名退化成了字段名（忘了 .title(..)）",
+                field.name()
             );
         }
     }

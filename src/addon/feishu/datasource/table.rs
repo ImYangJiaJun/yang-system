@@ -13,35 +13,46 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     Ok(TableSpec::new(yang_base::table!("feishu_datasource"))
         .title("飞书数据源")
         .fields(yang_base::fields! {
-            id => Key::new(),
+            id => Key::new().title("ID"),
             // 路由键：进外部选项接口的 URL。唯一索引保证不会出现两个同 key 的数据源
             source_key => Str::new()
+                .title("数据源标识")
                 .require(true)
                 .unique(true)
                 .max_length(64)
                 .searchable(true)
                 .filterable(true)
                 .sortable(true),
-            title => Str::new().require(true).max_length(100).searchable(true),
+            title => Str::new()
+                .title("名称")
+                .require(true)
+                .max_length(100)
+                .searchable(true),
             // 只存 SHA-256 摘要，永不存明文。secret(true) 会把读写权限置为 Nobody，
             // 因此必须紧接着显式授回受信角色，否则连 writer 都读写不了
             token_hash => Str::new()
+                .title("Token 摘要")
                 .require(true)
                 .max_length(64)
                 .secret(true)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
-            encrypt_enabled => Switch::new().require(true).default(false),
-            default_locale => Str::new().require(true).max_length(16).default("zh_cn"),
+            encrypt_enabled => Switch::new().title("加密返回").require(true).default(false),
+            default_locale => Str::new()
+                .title("默认语言")
+                .require(true)
+                .max_length(16)
+                .default("zh_cn"),
             status => Radio::<String>::new()
+                .title("状态")
                 .require(true)
                 .varchar(16)
                 .options([("active", "启用"), ("disabled", "停用")])
                 .default("active"),
             // JSON 文本：DSL 没有 Json builder，且该列从不被 SQL 查询进内部
-            linkage_mapping => Text::new(),
-            created_at => Timestamp::new().created_at(),
-            updated_at => Timestamp::new().updated_at(),
+            linkage_mapping => Text::new().title("联动映射"),
+            created_at => Timestamp::new().created_at().title("创建时间"),
+            updated_at => Timestamp::new().updated_at().title("更新时间"),
         }))
 }
 
@@ -142,6 +153,26 @@ mod tests {
                 .field(name)
                 .unwrap_or_else(|| panic!("{name} 字段必须存在"));
             assert!(field.is_required(), "{name} 应由框架自动写入");
+        }
+    }
+
+    #[test]
+    fn every_field_has_an_explicit_chinese_label() {
+        // 防线：字段没设 .title() 时展示名会退化成字段名（英文），
+        // 前端表格就会满屏 source_key / encrypt_enabled。
+        let definition = definition();
+        for field in definition.fields() {
+            assert!(
+                !field.label().is_empty(),
+                "字段 {} 必须有展示名",
+                field.name()
+            );
+            assert_ne!(
+                field.label(),
+                field.name(),
+                "字段 {} 的展示名退化成了字段名（忘了 .title(..)）",
+                field.name()
+            );
         }
     }
 }

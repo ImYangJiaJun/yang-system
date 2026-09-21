@@ -2156,29 +2156,421 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
-                "description": "前端控制台列表接口的通用分页输入。\n\n与飞书那条入口的游标分页不同：控制台是人在用，`page/page_size` 语义更直观， 也是框架 `SelectAction` 的标准契约（`TableView` 直接消费 `items/page/page_size/total`）。",
-                "properties": {
-                  "page": {
-                    "default": null,
-                    "description": "页码，从 1 开始。",
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
+                "definitions": {
+                  "OrderByItem": {
+                    "additionalProperties": false,
+                    "description": "排序条目（JSON 形态：`{\"field\": \"id\", \"direction\": \"desc\"}`）。",
+                    "properties": {
+                      "direction": {
+                        "allOf": [
+                          {
+                            "$ref": "#/definitions/SortOrder"
+                          }
+                        ],
+                        "default": "Asc",
+                        "description": "方向，缺省为 Asc"
+                      },
+                      "field": {
+                        "description": "字段名",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "field"
+                    ],
+                    "type": "object"
+                  },
+                  "SortOrder": {
+                    "description": "排序方向。",
+                    "oneOf": [
+                      {
+                        "description": "升序排序。",
+                        "enum": [
+                          "Asc"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "description": "降序排序。",
+                        "enum": [
+                          "Desc"
+                        ],
+                        "type": "string"
+                      }
                     ]
                   },
-                  "page_size": {
-                    "default": null,
-                    "description": "每页条数；上限由框架的 `MAX_QUERY_PAGE_SIZE`（100）决定。",
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
+                  "WhereCondition": {
+                    "description": "WHERE 条件枚举\n\n定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。\n\n# 变体\n\n- `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)\n\n# 示例\n\n```rust use yang_base::table::WhereCondition; use serde_json::json;\n\n// 等于条件 let eq_condition = WhereCondition::Eq { field: \"status\".to_string(), value: json!(\"active\"), };\n\n// 包含条件 let in_condition = WhereCondition::In { field: \"role\".to_string(), values: vec![json!(\"admin\"), json!(\"user\")], };\n\n// 模糊匹配 let like_condition = WhereCondition::Like { field: \"name\".to_string(), pattern: \"%alice%\".to_string(), };\n\n// 大于条件 let gt_condition = WhereCondition::Gt { field: \"age\".to_string(), value: json!(18), };\n\n// 空值判断 let is_null_condition = WhereCondition::IsNull { field: \"deleted_at\".to_string(), }; ```",
+                    "oneOf": [
+                      {
+                        "description": "等于条件 (field = value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "eq"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "包含于列表条件 (field IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "模糊匹配条件 (field LIKE pattern)\n\n# 字段\n\n- `field`：字段名 - `pattern`：匹配模式，支持 % 和 _ 通配符",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "pattern": {
+                            "description": "匹配模式",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "like"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "pattern",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于条件 (field > value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于等于条件 (field >= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于条件 (field < value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于等于条件 (field <= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "空值判断 (field IS NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "非空值判断 (field IS NOT NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_not_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不等于条件 (field <> value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "ne"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "区间条件 (field BETWEEN lo AND hi)\n\n# 字段\n\n- `field`：字段名 - `lo`：区间下界 - `hi`：区间上界",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "hi": {
+                            "description": "区间上界"
+                          },
+                          "lo": {
+                            "description": "区间下界"
+                          },
+                          "type": {
+                            "enum": [
+                              "between"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "hi",
+                          "lo",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不在列表条件 (field NOT IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "not_in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑与组（嵌套子条件全部成立），SQL 渲染为 `(c1 AND c2 AND ...)`\n\n空组等价于恒真（`1=1`），与顶层「无条件」语义一致。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "and"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑或组（嵌套子条件任一成立），SQL 渲染为 `(c1 OR c2 OR ...)`\n\n空组等价于恒假（`1=0`），避免拼出非法的空括号。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "or"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      }
                     ]
+                  }
+                },
+                "description": "列表查询输入；与通用 TableView 发送的标准 select 输入完全同构。\n\n不能 derive `Debug`：`OrderByItem`（框架内置分页输入类型）没有实现它—— 这是 `ADDON_ONBOARDING.md` 记录的既有摩擦点 ④，去掉 derive 即可。",
+                "properties": {
+                  "count_total": {
+                    "default": false,
+                    "description": "是否额外执行 COUNT 查询。",
+                    "type": "boolean"
+                  },
+                  "order_by": {
+                    "description": "排序规则列表。",
+                    "items": {
+                      "$ref": "#/definitions/OrderByItem"
+                    },
+                    "type": "array"
+                  },
+                  "page": {
+                    "default": 1,
+                    "description": "页码（1 起步），缺省 1。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "page_size": {
+                    "default": 10,
+                    "description": "每页条数，缺省 10，必须 1..=100。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
                   },
                   "search": {
                     "default": null,
-                    "description": "关键词；命中表上声明了 `searchable` 的文本字段。",
+                    "description": "在表定义声明的 `searchable` 字段中执行关键词搜索。",
                     "type": [
                       "string",
                       "null"
@@ -2186,11 +2578,23 @@
                   },
                   "source_key": {
                     "default": null,
-                    "description": "按数据源过滤；`None` 表示不过滤（控制台可看全部）。",
+                    "description": "按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。",
                     "type": [
                       "string",
                       "null"
                     ]
+                  },
+                  "where": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/WhereCondition"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "where 布尔过滤树（JSON key 为 `\"where\"`），缺省无条件。"
                   }
                 },
                 "title": "ListInput",
@@ -2316,29 +2720,421 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
-                "description": "前端控制台列表接口的通用分页输入。\n\n与飞书那条入口的游标分页不同：控制台是人在用，`page/page_size` 语义更直观， 也是框架 `SelectAction` 的标准契约（`TableView` 直接消费 `items/page/page_size/total`）。",
-                "properties": {
-                  "page": {
-                    "default": null,
-                    "description": "页码，从 1 开始。",
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
+                "definitions": {
+                  "OrderByItem": {
+                    "additionalProperties": false,
+                    "description": "排序条目（JSON 形态：`{\"field\": \"id\", \"direction\": \"desc\"}`）。",
+                    "properties": {
+                      "direction": {
+                        "allOf": [
+                          {
+                            "$ref": "#/definitions/SortOrder"
+                          }
+                        ],
+                        "default": "Asc",
+                        "description": "方向，缺省为 Asc"
+                      },
+                      "field": {
+                        "description": "字段名",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "field"
+                    ],
+                    "type": "object"
+                  },
+                  "SortOrder": {
+                    "description": "排序方向。",
+                    "oneOf": [
+                      {
+                        "description": "升序排序。",
+                        "enum": [
+                          "Asc"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "description": "降序排序。",
+                        "enum": [
+                          "Desc"
+                        ],
+                        "type": "string"
+                      }
                     ]
                   },
-                  "page_size": {
-                    "default": null,
-                    "description": "每页条数；上限由框架的 `MAX_QUERY_PAGE_SIZE`（100）决定。",
-                    "format": "int64",
-                    "type": [
-                      "integer",
-                      "null"
+                  "WhereCondition": {
+                    "description": "WHERE 条件枚举\n\n定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。\n\n# 变体\n\n- `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)\n\n# 示例\n\n```rust use yang_base::table::WhereCondition; use serde_json::json;\n\n// 等于条件 let eq_condition = WhereCondition::Eq { field: \"status\".to_string(), value: json!(\"active\"), };\n\n// 包含条件 let in_condition = WhereCondition::In { field: \"role\".to_string(), values: vec![json!(\"admin\"), json!(\"user\")], };\n\n// 模糊匹配 let like_condition = WhereCondition::Like { field: \"name\".to_string(), pattern: \"%alice%\".to_string(), };\n\n// 大于条件 let gt_condition = WhereCondition::Gt { field: \"age\".to_string(), value: json!(18), };\n\n// 空值判断 let is_null_condition = WhereCondition::IsNull { field: \"deleted_at\".to_string(), }; ```",
+                    "oneOf": [
+                      {
+                        "description": "等于条件 (field = value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "eq"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "包含于列表条件 (field IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "模糊匹配条件 (field LIKE pattern)\n\n# 字段\n\n- `field`：字段名 - `pattern`：匹配模式，支持 % 和 _ 通配符",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "pattern": {
+                            "description": "匹配模式",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "like"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "pattern",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于条件 (field > value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于等于条件 (field >= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于条件 (field < value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于等于条件 (field <= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "空值判断 (field IS NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "非空值判断 (field IS NOT NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_not_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不等于条件 (field <> value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "ne"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "区间条件 (field BETWEEN lo AND hi)\n\n# 字段\n\n- `field`：字段名 - `lo`：区间下界 - `hi`：区间上界",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "hi": {
+                            "description": "区间上界"
+                          },
+                          "lo": {
+                            "description": "区间下界"
+                          },
+                          "type": {
+                            "enum": [
+                              "between"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "hi",
+                          "lo",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不在列表条件 (field NOT IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "not_in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑与组（嵌套子条件全部成立），SQL 渲染为 `(c1 AND c2 AND ...)`\n\n空组等价于恒真（`1=1`），与顶层「无条件」语义一致。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "and"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑或组（嵌套子条件任一成立），SQL 渲染为 `(c1 OR c2 OR ...)`\n\n空组等价于恒假（`1=0`），避免拼出非法的空括号。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "or"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      }
                     ]
+                  }
+                },
+                "description": "列表查询输入；与通用 TableView 发送的标准 select 输入完全同构。\n\n不能 derive `Debug`：`OrderByItem`（框架内置分页输入类型）没有实现它—— 这是 `ADDON_ONBOARDING.md` 记录的既有摩擦点 ④，去掉 derive 即可。",
+                "properties": {
+                  "count_total": {
+                    "default": false,
+                    "description": "是否额外执行 COUNT 查询。",
+                    "type": "boolean"
+                  },
+                  "order_by": {
+                    "description": "排序规则列表。",
+                    "items": {
+                      "$ref": "#/definitions/OrderByItem"
+                    },
+                    "type": "array"
+                  },
+                  "page": {
+                    "default": 1,
+                    "description": "页码（1 起步），缺省 1。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "page_size": {
+                    "default": 10,
+                    "description": "每页条数，缺省 10，必须 1..=100。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
                   },
                   "search": {
                     "default": null,
-                    "description": "关键词；命中表上声明了 `searchable` 的文本字段。",
+                    "description": "在表定义声明的 `searchable` 字段中执行关键词搜索。",
                     "type": [
                       "string",
                       "null"
@@ -2346,11 +3142,23 @@
                   },
                   "source_key": {
                     "default": null,
-                    "description": "按数据源过滤；`None` 表示不过滤（控制台可看全部）。",
+                    "description": "按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。",
                     "type": [
                       "string",
                       "null"
                     ]
+                  },
+                  "where": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/WhereCondition"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "where 布尔过滤树（JSON key 为 `\"where\"`），缺省无条件。"
                   }
                 },
                 "title": "ListInput",
