@@ -44,6 +44,13 @@ pub struct Settings {
     pub observability: ObservabilitySettings,
     #[serde(default)]
     pub logging: LoggingSettings,
+    /// 飞书外部数据源集成；`None` 表示未启用。
+    ///
+    /// 整段可选（照 `email.change` / `security.totp` 的既有形态）：省略时行为与未集成
+    /// 完全一致，因此 `config.example.toml` 无需新增键，不会影响
+    /// `example_config_has_no_schema_mode` 的精确长度断言。
+    #[serde(default)]
+    pub feishu: Option<FeishuSettings>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -553,6 +560,34 @@ impl Default for SecuritySettings {
     }
 }
 
+/// 飞书外部数据源集成配置。
+///
+/// 整段可选：省略时相关路由不注册，服务行为与未集成飞书时完全一致。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeishuSettings {
+    /// 是否启用飞书集成；关闭时不注册任何飞书路由。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 多维表格工作流调用写入 API 时使用的静态 Token。
+    ///
+    /// 与 [外部选项接口的数据源 Token] 是两条独立的凭证：这条保护**入站写入**，
+    /// 那条保护**出站取数**（按数据源分别存储其 SHA-256 摘要，见 `feishu_datasource` 表）。
+    pub management_api_token: String,
+    /// 外部选项接口的 AES 密钥原文；配置后按 `sha256(原文)` 派生 256 位密钥。
+    ///
+    /// 省略表示明文返回（对应飞书侧「不填写 Key」）。
+    #[serde(default)]
+    pub encryption_key: Option<String>,
+}
+
+impl FeishuSettings {
+    /// 是否具备注册对外路由的最小条件。
+    pub fn is_usable(&self) -> bool {
+        self.enabled && !self.management_api_token.trim().is_empty()
+    }
+}
+
 const fn default_argon2_max_concurrency() -> usize {
     4
 }
@@ -734,6 +769,33 @@ impl Settings {
                 if let Some(section) = section {
                     if section.secret == totp.aead_key {
                         bail!("{name} 不得复用 security.totp.aead_key");
+                    }
+                }
+            }
+        }
+        // 飞书集成：**只校验真正会生效的段**（enabled 且 Token 非空）。
+        // 段存在但惰性时（enabled=false，或 Token 留待运维后填）不应让进程起不来——
+        // 它不注册任何路由，没有可被误用的行为面。
+        if let Some(feishu) = self.feishu.as_ref().filter(|value| value.is_usable()) {
+            validate_token_secret(&feishu.management_api_token)
+                .context("feishu.management_api_token 无效")?;
+            validate_verification_secret(
+                "feishu.management_api_token",
+                &feishu.management_api_token,
+                &self.token,
+                &self.step_up,
+            )?;
+            if let Some(encryption_key) = feishu.encryption_key.as_deref() {
+                validate_token_secret(encryption_key).context("feishu.encryption_key 无效")?;
+                validate_verification_secret(
+                    "feishu.encryption_key",
+                    encryption_key,
+                    &self.token,
+                    &self.step_up,
+                )?;
+                if let Some(totp) = &self.security.totp {
+                    if encryption_key == totp.aead_key {
+                        bail!("feishu.encryption_key 不得复用 security.totp.aead_key");
                     }
                 }
             }
@@ -2512,5 +2574,85 @@ link_base_url = "http://localhost:5273"
                 "不安全的授权传播配置必须在启动前被拒绝"
             );
         }
+    }
+
+    /// 省略 `[feishu]` 段时必须能正常解析，且视为未启用。
+    #[test]
+    fn feishu_section_is_optional_and_absent_by_default() {
+        let settings = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("基准配置应解析成功: {error:#}"));
+        assert!(
+            settings.feishu.is_none(),
+            "[feishu] 缺席时应为 None，而不是启用一个空配置"
+        );
+    }
+
+    /// 占位密钥必须被拒绝，防止示例值被原样部署。
+    #[test]
+    fn feishu_rejects_placeholder_secrets() {
+        let raw = valid_config().to_string()
+            + "\n[feishu]\nenabled = true\nmanagement_api_token = \"replace-with-feishu-management-token\"\n";
+        assert!(
+            Settings::parse(&raw).is_err(),
+            "占位 management_api_token 必须被拒绝"
+        );
+    }
+
+    /// 密钥域隔离：飞书的密钥不得复用 Token / Step-up 的密钥。
+    #[test]
+    fn feishu_secrets_must_not_reuse_other_key_domains() {
+        // 复用 Token 的活动密钥
+        let reused_token = valid_config().to_string()
+            + "\n[feishu]\nenabled = true\nmanagement_api_token = \"0123456789abcdef0123456789abcdef\"\n";
+        let error = match Settings::parse(&reused_token) {
+            Ok(_) => panic!("management_api_token 复用 Token 密钥必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("feishu"),
+            "报错应指明飞书段，实际: {error:#}"
+        );
+
+        // 复用 Step-up 的活动密钥
+        let reused_step_up = valid_config().to_string()
+            + "\n[feishu]\nenabled = true\nmanagement_api_token = \"a-real-management-token-value-1234\"\nencryption_key = \"step-up-0123456789abcdef0123456789abcdef\"\n";
+        let error = match Settings::parse(&reused_step_up) {
+            Ok(_) => panic!("encryption_key 复用 Step-up 密钥必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("feishu"),
+            "报错应指明飞书段，实际: {error:#}"
+        );
+    }
+
+    /// `is_usable` 是路由注册的开关：关闭或 Token 为空时不得注册对外端点。
+    #[test]
+    fn feishu_is_usable_requires_enabled_and_non_blank_token() {
+        let parse_feishu =
+            |extra: &str| match Settings::parse(&(valid_config().to_string() + extra)) {
+                Ok(settings) => match settings.feishu {
+                    Some(feishu) => feishu,
+                    None => panic!("[feishu] 段应被解析出来"),
+                },
+                Err(error) => panic!("配置应解析成功: {error:#}"),
+            };
+
+        let disabled = parse_feishu(
+            "\n[feishu]\nenabled = false\nmanagement_api_token = \"a-real-management-token-value-1234\"\n",
+        );
+        assert!(!disabled.is_usable(), "enabled=false 时不可用");
+
+        let blank = parse_feishu("\n[feishu]\nenabled = true\nmanagement_api_token = \"   \"\n");
+        assert!(!blank.is_usable(), "Token 为空白时不可用");
+
+        let enabled = parse_feishu(
+            "\n[feishu]\nenabled = true\nmanagement_api_token = \"a-real-management-token-value-1234\"\n",
+        );
+        assert!(enabled.is_usable(), "enabled 且 Token 非空时可用");
+        assert!(
+            enabled.encryption_key.is_none(),
+            "未配置 Key 时应为 None（表示明文返回）"
+        );
     }
 }

@@ -371,3 +371,20 @@ readiness_budget_ms = 2000
 # tracing 过滤器：只控制级别，不改变生产 JSON 日志结构（一行一个 object）。
 # 默认："yang_system=info,tower_http=info"
 filter = "yang_system=info,tower_http=info"
+
+# 飞书外部数据源集成（整段可选；省略表示未集成，行为与不启用完全一致）。
+[feishu]
+# 是否启用飞书集成。关闭时不注册任何飞书路由。
+# 默认：false
+enabled = false
+# 多维表格自动化工作流调用写入 API 时使用的静态 Token。
+# 必填（启用时）：至少 32 字节，不得复用 token / step_up / security.totp 的密钥；
+# 占位值必须以 replace-with 开头才会被占位密钥校验识别。
+# 可用 secret 文件 feishu_management_api_token 覆盖，或环境变量
+# YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN。
+management_api_token = "replace-with-feishu-management-token"
+# 外部选项接口的 AES 密钥原文；按 sha256(原文) 派生 256 位密钥。
+# 省略表示明文返回（对应飞书审批后台上「不填写 Key」）。
+# 可用 secret 文件 feishu_encryption_key 覆盖，或环境变量
+# YANG_SYSTEM_FEISHU_ENCRYPTION_KEY。
+# encryption_key = "replace-with-feishu-encryption-key"

@@ -398,6 +398,20 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         Integer
     ),
     environment_binding!("YANG_SYSTEM_LOGGING_FILTER", "logging", "filter", Text),
+    // 飞书集成（section 用顶层段名；点号路径是 SecretBinding 的写法）
+    environment_binding!("YANG_SYSTEM_FEISHU_ENABLED", "feishu", "enabled", Boolean),
+    environment_binding!(
+        "YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN",
+        "feishu",
+        "management_api_token",
+        Text
+    ),
+    environment_binding!(
+        "YANG_SYSTEM_FEISHU_ENCRYPTION_KEY",
+        "feishu",
+        "encryption_key",
+        Text
+    ),
 ];
 
 /// secret provider 只允许覆盖明确标记为敏感的字段。
@@ -412,6 +426,8 @@ pub(crate) enum SecretKey {
     StepUpRetiringKeys,
     EmailSmtpPassword,
     EmailVerificationSecret,
+    FeishuManagementApiToken,
+    FeishuEncryptionKey,
 }
 
 #[cfg(test)]
@@ -426,6 +442,8 @@ impl SecretKey {
             Self::StepUpRetiringKeys => "step_up_retiring_keys_json",
             Self::EmailSmtpPassword => "email_smtp_password",
             Self::EmailVerificationSecret => "email_verification_secret",
+            Self::FeishuManagementApiToken => "feishu_management_api_token",
+            Self::FeishuEncryptionKey => "feishu_encryption_key",
         }
     }
 }
@@ -440,6 +458,8 @@ const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::StepUpRetiringKeys,
     SecretKey::EmailSmtpPassword,
     SecretKey::EmailVerificationSecret,
+    SecretKey::FeishuManagementApiToken,
+    SecretKey::FeishuEncryptionKey,
 ];
 
 const SECRET_BINDINGS: &[SecretBinding] = &[
@@ -451,6 +471,13 @@ const SECRET_BINDINGS: &[SecretBinding] = &[
     SecretBinding::json("step_up_retiring_keys_json", "step_up", "retiring_keys"),
     SecretBinding::text("email_smtp_password", "email.smtp", "password"),
     SecretBinding::text("email_verification_secret", "email.verification", "secret"),
+    // 飞书集成：section 是点号路径，"feishu" 表示顶层 [feishu] 段
+    SecretBinding::text(
+        "feishu_management_api_token",
+        "feishu",
+        "management_api_token",
+    ),
+    SecretBinding::text("feishu_encryption_key", "feishu", "encryption_key"),
 ];
 
 const CONFIG_SOURCES: ConfigSources = ConfigSources::new(

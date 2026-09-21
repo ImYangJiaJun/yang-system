@@ -103,6 +103,12 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `redis_url` | `redis.url` |
 | `token_active_secret` | `token.active_secret` |
 | `token_retiring_keys_json` | `token.retiring_keys`（JSON 对象数组） |
+| `step_up_active_secret` | `step_up.active_secret` |
+| `step_up_retiring_keys_json` | `step_up.retiring_keys`（JSON 对象数组） |
+| `email_smtp_password` | `email.smtp.password` |
+| `email_verification_secret` | `email.verification.secret` |
+| `feishu_management_api_token` | `feishu.management_api_token` |
+| `feishu_encryption_key` | `feishu.encryption_key` |
 
 每个文件上限 64 KiB；允许一个结尾换行，拒绝空值、内嵌换行、NUL 和非
 UTF-8 内容。目录一旦显式配置却不可访问，进程会失败关闭；单个文件缺失则
@@ -229,6 +235,33 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   全部失效（凭据版本递增），需重新登录。
 - 密钥轮换：滚动更新 `aead_key` 会让已存 TOTP 密文无法解密（用户在下次登录时
   被要求重新 setup）——属预期行为；如需无缝轮换需先实现多 keyring 版本化。
+
+### 飞书外部数据源集成（`feishu`）
+
+整段可选：省略时相关路由不注册，服务行为与未集成飞书时完全一致。
+
+- `feishu.enabled`（布尔，默认 `false`）：是否启用飞书集成。
+- `feishu.management_api_token`（文本，启用时必填）：飞书多维表格自动化工作流调用
+  **写入 API** 时使用的静态 Token。至少 32 字节；不得复用 `token` / `step_up` /
+  `security.totp` 的密钥，也不得使用占位值或重复字节。
+- `feishu.encryption_key`（文本，可选）：外部选项接口的 AES 密钥原文，按
+  `sha256(原文)` 派生 256 位密钥。**省略表示明文返回**，对应飞书审批后台
+  「不填写 Key」的配置；填写后响应体的 `data.result` 变为 base64 密文。同样受
+  密钥域隔离约束。
+
+对应环境变量：`YANG_SYSTEM_FEISHU_ENABLED`、`YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN`、
+`YANG_SYSTEM_FEISHU_ENCRYPTION_KEY`。
+
+**校验只在段真正生效时执行**（`enabled = true` 且 Token 非空白）。段存在但惰性时
+（`enabled = false`，或 Token 留待运维后填）不做校验，也不注册任何路由——惰性段没有
+可被误用的行为面，不应让进程起不来。
+
+**注意**：外部选项接口另有**按数据源**的 Token，与本段的 `management_api_token` 是
+两条独立凭证。前者保护**出站取数**（飞书来调我们），以 SHA-256 摘要存于
+`feishu_datasource.token_hash`，永不存明文；后者保护**入站写入**（多维表格来调我们）。
+
+环境变量是**白名单**：任何以 `YANG_SYSTEM_` 开头但未登记的名称会让进程启动失败，
+因此上列三个变量之外的拼写错误会被立即拒绝，而不是静默忽略。
 
 ## 关闭总预算
 
