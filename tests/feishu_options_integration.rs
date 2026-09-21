@@ -156,11 +156,8 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
 
         // 再次同步必须是无操作：schema_sync 幂等，第二次不应有任何变更
         let second = yang_system::schema::sync_with_database(
-            Database::from_pool(
-                handle.pool().clone(),
-                yang_db::DatabaseConfig::default(),
-            )
-            .context("重建句柄失败")?,
+            Database::from_pool(handle.pool().clone(), yang_db::DatabaseConfig::default())
+                .context("重建句柄失败")?,
             yang_db::DatabaseConfig::default(),
             Arc::new(yang_system::config::SecuritySettings::default()),
         )
@@ -169,9 +166,7 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
         let feishu_changes: Vec<_> = second
             .changes
             .iter()
-            .filter(|change| {
-                change.table == DATASOURCE_TABLE || change.table == OPTION_TABLE
-            })
+            .filter(|change| change.table == DATASOURCE_TABLE || change.table == OPTION_TABLE)
             .collect();
         ensure!(
             feishu_changes.is_empty(),
