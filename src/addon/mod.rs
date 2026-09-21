@@ -6,6 +6,7 @@
 pub(crate) mod access;
 pub mod account;
 pub(crate) mod demo;
+pub(crate) mod feishu;
 
 use yang_base::definition::AccountIdentitySpec;
 
