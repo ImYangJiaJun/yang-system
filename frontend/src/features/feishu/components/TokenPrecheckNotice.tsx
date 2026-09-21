@@ -15,7 +15,7 @@ import { useState } from "react";
 
 import { Button } from "@/shared/ui/button";
 
-import type { TokenPrecheckResult } from "../types";
+import { APPROVAL_OPTION_CODES, type TokenPrecheckResult } from "../types";
 
 export type TokenPrecheckMode = "create" | "rotate";
 
@@ -64,20 +64,32 @@ export function TokenPrecheckNotice({
   if (!result) return null;
 
   if (result.status === "failed") {
+    // 只有「数据源查不到」这一种失败能推翻「数据源已经就位」——服务端的判定顺序是
+    // 先按 source_key 查数据源（40401），再比对 Token（40101/40102），最后看状态（40301）。
+    // 其余失败码都说明那一行是存在的，可以照旧说上面那次操作已经生效。
+    const sourceMissing = result.code === APPROVAL_OPTION_CODES.sourceNotFound;
+
     return (
       <div className="space-y-3">
         <p className={ERROR_BAR} role="alert">
           {mode === "create" ? "数据源已创建" : "Token 已更新"}
-          ，但没有通过验证：{result.message}
+          ，但这次预检没走通：{result.message}
           {result.code === null ? "" : `（错误码 ${result.code}）`}
         </p>
         <p className={NEUTRAL_BAR} aria-live="polite">
-          {result.hint}
+          {result.verdict}
         </p>
+        <p className="text-sm text-muted-foreground">{result.hint}</p>
         <p className="text-xs text-muted-foreground">
-          预检失败不影响上面这次操作的结果——数据源本身已经就位，只是这条链路还没验通。
+          {sourceMissing
+            ? "服务端说它查不到这个数据源——上面那次操作到底有没有落库，这一屏确认不了，请回列表页核对它是否还在。"
+            : "预检失败不影响上面这次操作的结果——数据源本身已经就位，只是这条链路还没验通。"}
         </p>
-        {onRotate ? (
+        {
+          // 「重新填写 Token」只在 Token 可能是原因时才给：40401 里服务端根本没查到那一行，
+          // 拿新 Token 去更新它只会再收到一次「数据源不存在」——那就是把用户送进死路。
+        }
+        {onRotate && !sourceMissing ? (
           <Button variant="outline" size="sm" onClick={onRotate}>
             重新填写 Token
           </Button>
@@ -93,7 +105,11 @@ export function TokenPrecheckNotice({
         ，链路是通的：
         {result.encrypted
           ? "服务端返回了加密内容（该数据源开了「加密返回」），内容读不了，但这次取数已经成功。"
-          : `服务端这次拉到了 ${result.optionCount ?? 0} 个选项。`}
+          : result.hasMore
+            ? // 这一页拉满了（单页上限 100），服务端还说有下一页：
+              // 那就只能说「还有更多」，不能说个精确的条数——那个数只属于这一页。
+              `服务端这次拉到了 ${result.optionCount} 个选项，而且它说还有更多——这个接口一次只返回一页，所以这里给不出总数。`
+            : `服务端这次拉到了 ${result.optionCount} 个选项。`}
       </p>
       <div className="space-y-2 rounded-md border border-border p-3">
         <p className="text-sm">把这一段粘回飞书审批后台的外部选项配置里：</p>

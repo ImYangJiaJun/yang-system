@@ -163,6 +163,36 @@ describe("飞书数据源详情页 · 两个异常分支", () => {
     expect(screen.queryByRole("table")).toBeNull();
   });
 
+  it("空结果集不替服务端背书：「没有选项」与「数据源不存在」分不出来", async () => {
+    // 服务端的 list_options 对不存在的 source_key 也只回一个空结果集，而本页没有
+    // 取单条数据源的 Action——两种原因在这一页长得一模一样，所以：
+    // 既不能说「这个数据源本身是好的」，也不能反过来断言它不存在。
+    stubFeishuApi({ optionList: () => listPage([]) });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: "还没有选项推过来" });
+    expect(screen.queryByText(/这个数据源本身是好的/)).toBeNull();
+    expect(
+      screen.getByText(/也可能是这个数据源已经不在了/),
+    ).toBeInTheDocument();
+    // 也给出分辩的动作：回列表页看它还在不在
+    expect(screen.getByText(/回列表页看一眼就知道/)).toBeInTheDocument();
+  });
+
+  it("选项查询报错时原样回显后端原文（例如「数据源不存在」），不给 0 选项空态", async () => {
+    stubFeishuApi({
+      optionList: () =>
+        jsonResponse({ code: 400001, message: "数据源不存在" }, 400),
+    });
+    renderDetail();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("数据源不存在");
+    expect(
+      screen.queryByRole("heading", { name: "还没有选项推过来" }),
+    ).toBeNull();
+  });
+
   it("缺 option.read：给 403 说明与重试，既不是白屏也不是空列表", async () => {
     const calls = stubFeishuApi({
       optionRead: false,
@@ -179,6 +209,24 @@ describe("飞书数据源详情页 · 两个异常分支", () => {
     ).toBeNull();
     expect(screen.queryByRole("table")).toBeNull();
     // 没有权限就不发那次注定 403 的请求
+    expect(bodiesOf(calls, OPTIONS_PATH)).toHaveLength(0);
+  });
+
+  it("连 datasource.read 也没有时，不说「当前身份可以看数据源本身」", async () => {
+    // 三个权限位彼此独立：两粒都没有的身份照样能点到这个 URL，
+    // 那就不能替它说一句它不成立的话。
+    const calls = stubFeishuApi({
+      datasourceRead: false,
+      optionRead: false,
+      optionList: () => listPage(TWO_OPTIONS),
+    });
+    renderDetail();
+
+    expect(await screen.findByText("你没有查看选项的权限")).toBeInTheDocument();
+    expect(screen.queryByText(/现在身份可以看数据源本身/)).toBeNull();
+    expect(screen.getByText(/看不到数据源本身/)).toBeInTheDocument();
+    expect(screen.getByText(/不代表它真的没有选项/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     expect(bodiesOf(calls, OPTIONS_PATH)).toHaveLength(0);
   });
 

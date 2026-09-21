@@ -12,6 +12,14 @@
  *   后端对它零校验，而它会被原样当作回给飞书的 `locale` 键——写成 `zh-CN` 会让该
  *   数据源在飞书侧所有语言下都取不到文案，所以绝不能是自由文本；
  * - 重命名时 **留空 Token = 不轮换**：省略该字段实现，传空串会被后端拒绝。
+ *
+ * 「加密返回 / 默认语言」**编辑态也要能改**：`update_datasource` 收这两个字段，
+ * 默认语言选错会让该数据源在所有语言下都取不到文案——控制台必须留一条修复路径。
+ * 两条规矩管着它们：
+ * - 初值只能来自真实记录。**取不到现值就不渲染对应控件**（见 `encryptEditable` /
+ *   `localeEditable`），拿一个猜的值当现状再写回去，等于把用户没说过的设置改掉；
+ * - 现值认不出（`default_locale` 后端零校验，可能是 `zh-CN`）就**留空**并说明原因，
+ *   改动只能由用户显式选一项产生——静默归一到 `zh_cn` 是未经确认地改写用户数据。
  */
 
 import { useEffect, useId, useState } from "react";
@@ -37,7 +45,11 @@ import {
 } from "@/shared/ui/select";
 
 import type { DefaultLocale } from "../types";
-import { DEFAULT_LOCALE, DEFAULT_LOCALE_OPTIONS } from "../types";
+import {
+  DEFAULT_LOCALE,
+  DEFAULT_LOCALE_OPTIONS,
+  asDefaultLocale,
+} from "../types";
 
 export type DatasourceFormMode = "create" | "rename";
 
@@ -56,6 +68,10 @@ export type DatasourceFormSubmission =
       sourceKey: string;
       title: string;
       token?: string;
+      /// 编辑态的两项：**只有对话框渲染了对应控件时才带上**（没渲染就是不知道现值，
+      /// 省略 = 保持原值，绝不拿一个猜的值写回去）。
+      encryptEnabled?: boolean;
+      defaultLocale?: DefaultLocale;
     };
 
 export type DatasourceFormDialogProps = {
@@ -64,12 +80,32 @@ export type DatasourceFormDialogProps = {
   /// 编辑态初值（基本类型，便于安全地作为 effect 依赖）。
   initialSourceKey?: string;
   initialTitle?: string;
+  /// 编辑态「加密返回」的现值。**取不到就别给**：给了才渲染这个控件
+  /// （能改的前提是界面知道现状），不给就不渲染。
+  initialEncryptEnabled?: boolean;
+  /// 编辑态「默认语言」的现值，**原样**给。后端对它零校验，所以它可能是取值域以外的值
+  /// （例如 `zh-CN`）——认得出来就作为三选一的选中项，认不出就留空让用户显式改，
+  /// 界面对它既不猜也不替换。完全取不到（回执入口没找到那一行）时不给，控件不渲染。
+  initialDefaultLocale?: string;
   pending?: boolean;
   /// 服务端拒绝类错误：**直接回显后端原文**（例如「数据源不存在」）。
   serverError?: string | null;
   onSubmit: (submission: DatasourceFormSubmission) => void;
   onCancel: () => void;
 };
+
+/// 「默认语言」在打开时该选中哪一项。
+///
+/// 新建恒从 `zh_cn` 起；编辑则只认**认得出来**的值——认不出就留空（Radix 会显示
+/// 占位符），让用户显式选一项来修好。静默替换成 `zh_cn` 是另一回事：那是未经确认地
+/// 改写用户数据，而那个值恰恰就是「控件在所有语言下都取不到文案」的元凶。
+function localeSelection(
+  mode: DatasourceFormMode,
+  raw: string | undefined,
+): DefaultLocale | null {
+  if (mode === "create") return DEFAULT_LOCALE;
+  return raw === undefined ? null : asDefaultLocale(raw);
+}
 
 const SOURCE_KEY_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -113,6 +149,8 @@ export function DatasourceFormDialog({
   mode,
   initialSourceKey = "",
   initialTitle = "",
+  initialEncryptEnabled,
+  initialDefaultLocale,
   pending = false,
   serverError = null,
   onSubmit,
@@ -122,9 +160,12 @@ export function DatasourceFormDialog({
   const [sourceKey, setSourceKey] = useState(initialSourceKey);
   const [title, setTitle] = useState(initialTitle);
   const [token, setToken] = useState("");
-  const [encryptEnabled, setEncryptEnabled] = useState(false);
-  const [defaultLocale, setDefaultLocale] =
-    useState<DefaultLocale>(DEFAULT_LOCALE);
+  const [encryptEnabled, setEncryptEnabled] = useState(
+    initialEncryptEnabled ?? false,
+  );
+  const [defaultLocale, setDefaultLocale] = useState<DefaultLocale | null>(() =>
+    localeSelection(mode, initialDefaultLocale),
+  );
   const [submitted, setSubmitted] = useState(false);
 
   // 打开时按初值重置。依赖全是基本类型——传对象字面量会让 effect 每次渲染都跑。
@@ -133,10 +174,17 @@ export function DatasourceFormDialog({
     setSourceKey(initialSourceKey);
     setTitle(initialTitle);
     setToken("");
-    setEncryptEnabled(false);
-    setDefaultLocale(DEFAULT_LOCALE);
+    setEncryptEnabled(initialEncryptEnabled ?? false);
+    setDefaultLocale(localeSelection(mode, initialDefaultLocale));
     setSubmitted(false);
-  }, [open, mode, initialSourceKey, initialTitle]);
+  }, [
+    open,
+    mode,
+    initialSourceKey,
+    initialTitle,
+    initialEncryptEnabled,
+    initialDefaultLocale,
+  ]);
 
   const errors = validate(mode, { sourceKey, title, token });
   const hasErrors = Object.keys(errors).length > 0;
@@ -144,6 +192,17 @@ export function DatasourceFormDialog({
   const showTitleError =
     (submitted || title !== "") && errors.title !== undefined;
   const showTokenError = submitted && errors.token !== undefined;
+  // 两项各自开关：知道现状才渲染（见 props 上的说明），互不牵连——
+  // 默认语言是取值域外的值，不该连带把「加密返回」也锁住。
+  const encryptEditable =
+    mode === "create" || initialEncryptEnabled !== undefined;
+  const localeEditable =
+    mode === "create" || initialDefaultLocale !== undefined;
+  // 库里存着一个取值域以外的默认语言：这不会让控件报错，只会让它在所有语言下都取不到文案。
+  const offDomainLocale =
+    mode === "rename" &&
+    initialDefaultLocale !== undefined &&
+    asDefaultLocale(initialDefaultLocale) === null;
 
   function handleSubmit() {
     setSubmitted(true);
@@ -156,7 +215,8 @@ export function DatasourceFormDialog({
         title: trimmedTitle,
         token: token.trim(),
         encryptEnabled,
-        defaultLocale,
+        // 新建时恒有选中项（`localeSelection` 从 zh_cn 起）
+        defaultLocale: defaultLocale ?? DEFAULT_LOCALE,
       });
       return;
     }
@@ -167,6 +227,9 @@ export function DatasourceFormDialog({
       title: trimmedTitle,
       // 留空 = 不轮换：整个键都不出现，而不是传空串
       ...(rotated === "" ? {} : { token: rotated }),
+      // 没渲染（或没选）就不发：省略 = 保持原值，正好对上「不知道现状就别动它」
+      ...(encryptEditable ? { encryptEnabled } : {}),
+      ...(defaultLocale === null ? {} : { defaultLocale }),
     });
   }
 
@@ -185,7 +248,9 @@ export function DatasourceFormDialog({
           <DialogDescription>
             {mode === "create"
               ? "先在飞书审批后台配置好外部选项控件并记下自定义 Token，再在这里登记。"
-              : "只有名称与 Token 可以改；数据源标识是主键，创建后不可修改。"}
+              : encryptEditable && localeEditable
+                ? "数据源标识是主键，创建后不可修改；名称、Token、加密返回与默认语言都可以改。"
+                : "数据源标识是主键，创建后不可修改；这里可以改名称与 Token。"}
           </DialogDescription>
         </DialogHeader>
 
@@ -277,48 +342,61 @@ export function DatasourceFormDialog({
             ) : null}
           </div>
 
-          {mode === "create" ? (
-            <>
-              <div className="flex items-start gap-2">
-                <Checkbox
-                  id={`${fieldId}-encrypt`}
-                  checked={encryptEnabled}
-                  onCheckedChange={(checked) =>
-                    setEncryptEnabled(checked === true)
-                  }
-                />
-                <div className="space-y-1">
-                  <Label htmlFor={`${fieldId}-encrypt`}>加密返回</Label>
-                  <p className="text-xs text-muted-foreground">
-                    {ENCRYPT_HELP}
-                  </p>
-                </div>
+          {encryptEditable ? (
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id={`${fieldId}-encrypt`}
+                checked={encryptEnabled}
+                onCheckedChange={(checked) =>
+                  setEncryptEnabled(checked === true)
+                }
+              />
+              <div className="space-y-1">
+                <Label htmlFor={`${fieldId}-encrypt`}>加密返回</Label>
+                <p className="text-xs text-muted-foreground">{ENCRYPT_HELP}</p>
               </div>
+            </div>
+          ) : null}
 
-              <div className="space-y-1.5">
-                <Label htmlFor={`${fieldId}-locale`}>默认语言</Label>
-                <Select
-                  value={defaultLocale}
-                  onValueChange={(value) =>
-                    setDefaultLocale(value as DefaultLocale)
-                  }
-                >
-                  <SelectTrigger id={`${fieldId}-locale`} className="w-40">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {DEFAULT_LOCALE_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  飞书侧控件按这个语言取文案，只有三选一。
+          {localeEditable ? (
+            <div className="space-y-1.5">
+              <Label htmlFor={`${fieldId}-locale`}>默认语言</Label>
+              <Select
+                // 选中项可能是「无」（现值认不出时）：空串会让 Radix 显示占位符，
+                // 而省略 value 会把它变成非受控——两者都不改动的语义要分清。
+                value={defaultLocale ?? ""}
+                onValueChange={(value) =>
+                  setDefaultLocale(value as DefaultLocale)
+                }
+              >
+                <SelectTrigger id={`${fieldId}-locale`} className="w-40">
+                  <SelectValue placeholder="未选择（不修改）" />
+                </SelectTrigger>
+                <SelectContent>
+                  {DEFAULT_LOCALE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                飞书侧控件按这个语言取文案，只有三选一。
+              </p>
+              {offDomainLocale ? (
+                <p className="text-xs text-destructive">
+                  这个数据源当前存的默认语言是「{initialDefaultLocale}」，
+                  不在取值域内——飞书侧控件在所有语言下都会取不到文案。选一项保存即可修好。
                 </p>
-              </div>
-            </>
+              ) : null}
+            </div>
+          ) : null}
+
+          {mode === "rename" && !encryptEditable && !localeEditable ? (
+            <p className="text-xs text-muted-foreground">
+              读不到这个数据源当前的「加密返回 / 默认语言」，这两项这次不显示——
+              从列表页那一行的「重命名」入口进来就能改。
+            </p>
           ) : null}
         </div>
 

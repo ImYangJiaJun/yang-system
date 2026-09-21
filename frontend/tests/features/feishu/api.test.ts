@@ -443,7 +443,55 @@ describe("precheckApprovalOptions", () => {
     const result = await precheckApprovalOptions("dept_sales", "t-1", deps);
     expect(calls[0]?.url).toBe("/api/v1/feishu/approval/options/dept_sales");
     expect(calls[0]?.body).toEqual({ token: "t-1" });
-    expect(result).toEqual({ status: "ok", optionCount: 2, encrypted: false });
+    expect(result).toEqual({
+      status: "ok",
+      optionCount: 2,
+      hasMore: false,
+      encrypted: false,
+    });
+  });
+
+  it("nextPageToken 非空 = 还有下一页：本页条数不是总数", async () => {
+    // 单页上限 100。100 条 + 有下一页时，界面的「100」只是这一页。
+    stubFetch({
+      code: 0,
+      msg: "success!",
+      data: {
+        result: {
+          options: Array.from({ length: 100 }, (_, index) => ({
+            id: `opt_${index}`,
+          })),
+          hasMore: true,
+          nextPageToken: "cursor-1",
+        },
+      },
+    });
+    const result = await precheckApprovalOptions("dept_sales", "t-1", deps);
+    expect(result).toEqual({
+      status: "ok",
+      optionCount: 100,
+      hasMore: true,
+      encrypted: false,
+    });
+  });
+
+  it("nextPageToken 为 null（没有下一页）时不去猜成「还有更多」", async () => {
+    stubFetch({
+      code: 0,
+      msg: "success!",
+      data: {
+        result: {
+          options: [{ id: "a" }],
+          hasMore: false,
+          nextPageToken: null,
+        },
+      },
+    });
+    const result = await precheckApprovalOptions("dept_sales", "t-1", deps);
+    if (result.status !== "ok" || result.encrypted) {
+      throw new Error("应为明文成功回执");
+    }
+    expect(result.hasMore).toBe(false);
   });
 
   it("开了「加密返回」时拿到的是密文：连通但读不出条数", async () => {
@@ -464,6 +512,9 @@ describe("precheckApprovalOptions", () => {
     expect(result.code).toBe(40102);
     expect(result.message).toBe("token 校验失败");
     expect(result.hint).toContain("重填一次 Token");
+    expect(result.verdict).toBe(
+      "Token 没对：服务端存的摘要与这次传进来的不一致。",
+    );
   });
 
   it("数据源已停用（40301）也照实回显码与含义", async () => {
@@ -473,6 +524,29 @@ describe("precheckApprovalOptions", () => {
     expect(result.code).toBe(40301);
     expect(result.message).toBe("数据源已停用");
     expect(result.hint).toContain("停用");
+    expect(result.verdict).toContain("Token 已经通过了比对");
+  });
+
+  it("失败结论按码区分：Token 是对的几种失败不说成凭据没过", async () => {
+    // 服务端的判定顺序是「查数据源 → 比对 Token → 看状态」：
+    // 40401 / 40301 / 50002 都没有「Token 没通过」这一层含义。
+    const cases: Array<[number, string, RegExp]> = [
+      [40401, "数据源不存在", /Token 对不对还无从谈起/],
+      [40301, "数据源已停用", /Token 已经通过了比对/],
+      [50002, "服务端未配置加密密钥", /Token 已经通过了比对/],
+      [40102, "token 校验失败", /Token 没对/],
+    ];
+
+    for (const [code, msg, expected] of cases) {
+      stubFetch({ code, msg, data: null });
+      const result = await precheckApprovalOptions("dept_sales", "t-1", deps);
+      if (result.status !== "failed") throw new Error("应为失败回执");
+      expect(result.code).toBe(code);
+      expect(result.verdict).toMatch(expected);
+      expect(result.verdict).not.toMatch(/没有通过验证/);
+      // 每个码都有自己的结论，不是同一句话
+      expect(result.verdict).not.toBe("");
+    }
   });
 
   it("目录里没有这条 Action 也能预检（它是 public 端点，用兜底契约）", async () => {

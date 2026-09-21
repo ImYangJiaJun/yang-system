@@ -8,6 +8,8 @@
  *
  * 删除的正文**逐字**用后端原文（原 `datasource/mod.rs` 的 `ActionConfirmation`，
  * 摘掉 view 投影后由前端持有同一份文案），不得改写、不得拼接。
+ * 指认被删对象靠的是正文**之外**的那行 `source_key`——三段文案都只说后果、不说对象，
+ * 而删除不可逆，看不见删的是哪一条就等于闭着眼睛按下去。
  */
 
 import { Button } from "@/shared/ui/button";
@@ -66,7 +68,8 @@ function confirmCopy(kind: ConfirmKind): ConfirmCopy {
 export type ConfirmDialogProps = {
   open: boolean;
   kind: ConfirmKind;
-  /// 被操作的数据源标识；删除时**不展示**（正文必须逐字），停用/启用时用来指认对象。
+  /// 被操作的数据源的标识：三个动作都要展示，用来指认对象。
+  /// 它渲染在正文**之外**，所以正文仍然逐字是后端原文。
   sourceKey?: string;
   pending?: boolean;
   onConfirm: () => void;
@@ -95,7 +98,7 @@ export function ConfirmDialog({
           <DialogTitle>{copy.title}</DialogTitle>
           <DialogDescription>
             <span className="block">{copy.message}</span>
-            {kind !== "delete" && sourceKey ? (
+            {sourceKey ? (
               <span className="mt-2 block font-mono text-xs">{sourceKey}</span>
             ) : null}
           </DialogDescription>

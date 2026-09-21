@@ -45,7 +45,7 @@ import type {
   OrderByClause,
   TokenPrecheckResult,
 } from "./types";
-import { approvalCodeHint } from "./types";
+import { approvalCodeHint, approvalCodeVerdict } from "./types";
 
 /// 后端 8 个 Action 里控制台要用的 6 个（另两个是给飞书/自动化调用的机器入口）。
 export const DATASOURCE_OPERATION_IDS = {
@@ -463,10 +463,16 @@ export async function precheckApprovalOptions(
     if (typeof data?.result === "string") {
       return { status: "ok", optionCount: null, encrypted: true };
     }
-    const options = asRecord(data?.result)?.options;
+    const body = asRecord(data?.result);
+    const options = body?.options;
     return {
       status: "ok",
       optionCount: Array.isArray(options) ? options.length : 0,
+      // 本页条数**不是**选项总数：`approval_options` 单页上限 100（后端 `PAGE_SIZE`），
+      // 超过 100 条时这里只会看到 100。区分「还有更多」只能用 `nextPageToken`
+      // ——它非空当且仅当还有下一页（后端由 COUNT 与 SELECT 的差值推导，
+      // 没有下一页时整个键都不输出）。所以只认它，不猜。
+      hasMore: asString(body?.nextPageToken) !== "",
       encrypted: false,
     };
   } catch (error) {
@@ -482,7 +488,15 @@ export async function precheckApprovalOptions(
         : error instanceof Error
           ? error.message
           : "预检请求失败";
-    return { status: "failed", code, message, hint: approvalCodeHint(code) };
+    return {
+      status: "failed",
+      code,
+      message,
+      // 结论与指引都按码给：40401 / 40301 / 50002 这几种里 Token 其实是对的，
+      // 用一句泛化的「Token 没通过验证」盖住会把排查方向带偏。
+      verdict: approvalCodeVerdict(code),
+      hint: approvalCodeHint(code),
+    };
   }
 }
 

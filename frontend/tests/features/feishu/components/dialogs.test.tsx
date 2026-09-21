@@ -49,6 +49,21 @@ describe("ConfirmDialog", () => {
     );
   });
 
+  it("删除：正文之外必须显示 source_key——用户得看见自己删的是哪一条", () => {
+    render(
+      <ConfirmDialog
+        open
+        kind="delete"
+        sourceKey="expense_category"
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    // 后端原文一字不动，标识另起一行给
+    expect(screen.getByText(DELETE_MESSAGE)).toBeInTheDocument();
+    expect(screen.getByText("expense_category")).toBeInTheDocument();
+  });
+
   it("两种语气说得出区别：删除不可逆、停用可逆", () => {
     const { unmount } = render(
       <ConfirmDialog
@@ -283,5 +298,114 @@ describe("DatasourceFormDialog · 重命名", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "提交中…" })).toBeDisabled();
+  });
+});
+
+describe("DatasourceFormDialog · 编辑态也能改「加密返回 / 默认语言」", () => {
+  /// 默认语言选错会让该数据源在飞书侧所有语言下都取不到文案，控制台必须留一条修复路径。
+  const editProps = {
+    open: true,
+    mode: "rename" as const,
+    initialSourceKey: "dept_sales",
+    initialTitle: "部门",
+    initialEncryptEnabled: true,
+    initialDefaultLocale: "zh_cn",
+  };
+
+  it("给了现值就渲染这两项：勾选框反映现值，默认语言是当前值", () => {
+    render(
+      <DatasourceFormDialog
+        {...editProps}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("checkbox", { name: /加密返回/ })).toBeChecked();
+    expect(
+      screen.getByRole("combobox", { name: "默认语言" }),
+    ).toHaveTextContent("简体中文");
+  });
+
+  it("改默认语言并把「加密返回」关掉，提交物带上这两项", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
+    render(
+      <DatasourceFormDialog
+        {...editProps}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "默认语言" }));
+    await user.click(await screen.findByRole("option", { name: "English" }));
+    await user.click(screen.getByRole("checkbox", { name: /加密返回/ }));
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      mode: "rename",
+      sourceKey: "dept_sales",
+      title: "部门",
+      encryptEnabled: false,
+      defaultLocale: "en_us",
+    });
+  });
+
+  it("现值在取值域外（zh-CN）：留空并说明，改动只能由用户显式选一项产生", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
+    render(
+      <DatasourceFormDialog
+        {...editProps}
+        initialDefaultLocale="zh-CN"
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    // 不把它偷偷当成 zh_cn，也不拿它当选中项
+    const locale = screen.getByRole("combobox", { name: "默认语言" });
+    expect(locale).toHaveTextContent("未选择（不修改）");
+    expect(screen.getByText(/「zh-CN」/)).toBeInTheDocument();
+    expect(screen.getByText(/不在取值域内/)).toBeInTheDocument();
+    // 「加密返回」与它互不牵连：那一项知道现值，照样能改
+    expect(screen.getByRole("checkbox", { name: /加密返回/ })).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    const submission = onSubmit.mock.calls[0]?.[0];
+    expect(submission).toEqual({
+      mode: "rename",
+      sourceKey: "dept_sales",
+      title: "部门",
+      encryptEnabled: true,
+    });
+  });
+
+  it("拿不到现值就不渲染这两项，提交物里也不带（省略 = 保持原值）", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
+    render(
+      <DatasourceFormDialog
+        open
+        mode="rename"
+        initialSourceKey="dept_sales"
+        initialTitle="部门"
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("checkbox", { name: /加密返回/ })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "默认语言" })).toBeNull();
+    // 说清为什么这次改不了，以及去哪改
+    expect(screen.getByText(/读不到这个数据源当前的/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    const submission = onSubmit.mock.calls[0]?.[0];
+    expect(submission).toEqual({
+      mode: "rename",
+      sourceKey: "dept_sales",
+      title: "部门",
+    });
   });
 });

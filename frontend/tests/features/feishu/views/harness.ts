@@ -8,6 +8,25 @@
 
 import { vi } from "vitest";
 
+/*
+ * 预热本域两个**懒加载**页面模块（路由表里是 `lazy: () => import(...)`）。
+ *
+ * 用例里第一次渲染该路由时，Vite 才去转换并求值这一整棵依赖图（页面 + 表单对话框的
+ * react-hook-form、台账的 @tanstack/react-table、若干 Radix 组件）。这笔**每个测试文件
+ * 一次**的冷启动开销落在该文件**第一个用例**的 `findBy*` 预算（RTL 默认 1000ms）里：
+ * 实测插桩（渲染后到「页面挂上 / 空态落定」的时刻）
+ *   预热前：catalog=596ms mount=610ms empty=638ms；另一跑 mount=875ms empty=1659ms
+ *   预热后：catalog=199..267ms mount=208..281ms empty=231..312ms
+ * 全量跑多 worker 抢 CPU 时这笔开销会涨到 1s 以上——断言就在页面还停在骨架行的时刻
+ * 超时（失败现场 DOM 里工具栏与 `data-slot="skeleton"` 都在，`isPending` 仍为真）。
+ *
+ * 在夹具**加载期**（任何用例开始之前）先 import 一次，这笔开销就移出了用例的计时窗口。
+ * 运行时路由照旧走自己的 `lazy: () => import(...)`（命中模块缓存），
+ * 懒加载 + Suspense 那条路径仍然被覆盖；这里只是不让它替用例的断言计费。
+ */
+await import("@/features/feishu/views/DatasourceListPage");
+await import("@/features/feishu/views/DatasourceDetailPage");
+
 export type RecordedCall = {
   url: string;
   method: string;
