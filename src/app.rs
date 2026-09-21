@@ -112,8 +112,14 @@ fn build_application(
     // 只有真实故障才向上冒泡。
     let feishu = match tools.mysql() {
         Ok(database) => Some(
-            feishu::build_addon(Arc::new(database.pool().clone()))
-                .context("构建 feishu Addon 失败")?,
+            feishu::build_addon(
+                Arc::new(database.pool().clone()),
+                tools
+                    .config::<Arc<crate::config::FeishuSettings>>()
+                    .ok()
+                    .cloned(),
+            )
+            .context("构建 feishu Addon 失败")?,
         ),
         Err(yang_base::BaseError::DatabaseNotInitialized) => None,
         Err(error) => return Err(error).context("检查飞书 Addon 运行态失败"),

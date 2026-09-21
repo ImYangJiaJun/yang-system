@@ -4,12 +4,6 @@
 //! 因此**同一个键必须在所有语言里都出现**。文档明示 `i18nResources` 必须返回且非空
 //! （「返回空会导致显示是空的」），所以任何结果集都至少带一条默认语言。
 //!
-//! # 临时豁免
-//!
-//! `#![allow(dead_code)]` 是**临时**的：本模块要被 `option/actions/approval_options.rs`
-//! 消费，而该端点尚未落地。端点提交时**必须删除这一行**。
-
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 

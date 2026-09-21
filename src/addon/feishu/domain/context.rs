@@ -1,12 +1,19 @@
-//! 飞书 addon 的模块上下文：聚合两张表的 Repository，并提供事务收尾。
-
+//! 飞书 addon 的模块上下文：聚合两张表的 Repository 与集成配置，并提供事务收尾。
+//!
 //! # 临时豁免
 //!
-//! `#![allow(dead_code)]` 是**临时**的：本模块要被尚未落地的端点与写入 API 消费。
-//! 它们提交时**必须删除这一行**。
+//! `#![allow(dead_code)]` 是**临时**的：本模块的访问器要被尚未落地的写入 API 与
+//! 前端查询 Action 消费。它们提交时连同 `protocol` / `crypto` / `i18n` / `token` /
+//! `pagination` / `repository` 的豁免一并删除。
+
 #![allow(dead_code)]
+
+use std::sync::Arc;
+
 use yang_base::BaseError;
 use yang_db::Transaction;
+
+use crate::config::FeishuSettings;
 
 use super::repository::Repository;
 
@@ -18,12 +25,21 @@ use super::repository::Repository;
 pub(crate) struct FeishuContext {
     datasource: Repository,
     option: Repository,
+    settings: Option<Arc<FeishuSettings>>,
 }
 
 impl FeishuContext {
     /// 构造上下文。
-    pub(crate) fn new(datasource: Repository, option: Repository) -> Self {
-        Self { datasource, option }
+    pub(crate) fn new(
+        datasource: Repository,
+        option: Repository,
+        settings: Option<Arc<FeishuSettings>>,
+    ) -> Self {
+        Self {
+            datasource,
+            option,
+            settings,
+        }
     }
 
     /// 数据源表。
@@ -34,6 +50,18 @@ impl FeishuContext {
     /// 选项表。
     pub(crate) fn options(&self) -> &Repository {
         &self.option
+    }
+
+    /// 集成配置；`None` 表示 `[feishu]` 段缺席。
+    pub(crate) fn settings(&self) -> Option<&FeishuSettings> {
+        self.settings.as_deref()
+    }
+
+    /// 外部选项接口的 AES 密钥；未配置 Key 时返回 `None`（表示明文返回）。
+    pub(crate) fn encryption_key(&self) -> Option<[u8; 32]> {
+        self.settings()
+            .and_then(|settings| settings.encryption_key.as_deref())
+            .map(super::crypto::derive_key)
     }
 
     /// 事务收尾：成功提交、失败回滚。

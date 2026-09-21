@@ -140,6 +140,12 @@ async fn run_after_telemetry_initialized(
     if let Some(totp) = settings.security.totp.as_ref() {
         tools_builder = tools_builder.config(totp.clone());
     }
+    // 飞书集成配置；未配置时飞书 Addon 仍装配（表要参与 Schema 同步），
+    // 但对外路由不注册。用 `Arc` 包一层是为了让这个槽位与其它同类型配置区分开
+    // （`ToolsBuilder::config` 按具体 Rust 类型索引）。
+    if let Some(feishu) = settings.feishu.as_ref() {
+        tools_builder = tools_builder.config(Arc::new(feishu.clone()));
+    }
     let tools = Arc::new(tools_builder.build().context("构建应用 Tools 失败")?);
 
     run_then_cleanup(

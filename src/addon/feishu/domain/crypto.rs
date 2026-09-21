@@ -10,12 +10,6 @@
 //! CBC 本身不提供完整性保护，这是飞书规范的缺口——自行追加 HMAC 会导致飞书无法解密，
 //! 故不加。
 //!
-//! # 临时豁免
-//!
-//! `#![allow(dead_code)]` 是**临时**的：本模块要被 `option/actions/approval_options.rs`
-//! 消费，而该端点尚未落地。端点提交时**必须删除这一行**。
-
-#![allow(dead_code)]
 
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockEncryptMut, KeyIvInit};

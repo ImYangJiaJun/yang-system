@@ -4,12 +4,6 @@
 //! **只以 SHA-256 摘要入库**，永不存明文；比较走常数时间，避免通过响应时间侧信道
 //! 逐字节猜测。
 //!
-//! # 临时豁免
-//!
-//! `#![allow(dead_code)]` 是**临时**的：本模块要被 `option/actions/approval_options.rs`
-//! 与 `domain/middleware.rs` 消费，它们尚未落地。落地时**必须删除这一行**。
-
-#![allow(dead_code)]
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;

@@ -3,18 +3,10 @@
 //! 键名逐字对齐飞书官方文档，**不经过任何框架包络**：顶层是 `{code, msg, data}`，
 //! `data.result` 在未配置 Key 时是对象、配置 Key 后是 base64 字符串。
 //!
-//! # 临时豁免
-//!
-//! `#![allow(dead_code)]` 是**临时**的：本文件的类型要被
-//! `option/actions/approval_options.rs`（外部选项端点）消费，而该端点尚未落地。
-//! 端点提交时**必须删除这一行**——它不是长期豁免，只是为了让中间提交也能过
-//! `clippy -D warnings`。 `dead_code` 在端点落地后会自然消失。
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use yang_base::definition::{ParamInput, Params};
 use yang_base::BaseError;
 
@@ -28,18 +20,26 @@ use yang_base::BaseError;
 /// `params!` 宏表达不了 `linkage_params` 这个 Map（它只支持标量类 builder），
 /// 而手写 `decode` 反而要处理 trait 默认实现上 `where Self: DeserializeOwned`
 /// 子句的坑。默认实现正好就是我们要的语义。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub(crate) struct FeishuOptionsRequest {
     /// 内部 ID。飞书文档推荐改用 `employee_id`；两者都空表示期望返回全部数据。
+    ///
+    /// v1 不消费：不做按人过滤。保留字段是为了让契约完整、且让「未知字段容忍」
+    /// 策略有据可依。按人过滤需要业务侧定义「谁能看到哪些选项」的规则，属新增需求。
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) user_id: Option<String>,
     /// 用户的 user_id；发起审批时是发起人。
+    ///
+    /// v1 不消费，同 [`FeishuOptionsRequest::user_id`]。
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) employee_id: Option<String>,
     /// 用于校验请求来源是否合法的自定义取值（文档中唯一标为必填的请求参数）。
     pub(crate) token: String,
-    /// 联动选项参数。v1 收到即忽略，仅在数据模型上预留。
+    /// 联动选项参数。v1 收到即忽略，仅在数据模型上预留（`feishu_datasource.linkage_mapping`）。
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) linkage_params: Option<BTreeMap<String, String>>,
     /// 分页标记；不传或为空表示从第一页开始。
     #[serde(default)]
@@ -48,7 +48,11 @@ pub(crate) struct FeishuOptionsRequest {
     #[serde(default)]
     pub(crate) query: Option<String>,
     /// 语言环境：`zh_cn` / `en_us` / `ja_jp`。
+    ///
+    /// v1 不消费：文案语言由数据源自身的 `default_locale` 与已录入的翻译集合决定，
+    /// 不按请求语言协商。保留字段是为了让契约完整。
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) locale: Option<String>,
 }
 
@@ -77,6 +81,10 @@ pub(crate) struct FeishuResultBody {
 
 impl FeishuResultBody {
     /// 空结果集；`i18nResources` 的「至少一种语言」由构造方保证。
+    ///
+    /// 生产路径不构造空结果（`build_result_body` 总会带上默认语言），仅供单元测试
+    /// 断言序列化形状。
+    #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self {
             options: Vec::new(),
@@ -177,12 +185,6 @@ impl FeishuEnvelope {
     /// 序列化为响应体文本，供 `ResponseBody::raw` 使用。
     pub(crate) fn to_json(&self) -> Result<String, BaseError> {
         serde_json::to_string(self)
-            .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))
-    }
-
-    /// 序列化为 [`Value`]，供需要结构化访问的调用方使用。
-    pub(crate) fn to_value(&self) -> Result<Value, BaseError> {
-        serde_json::to_value(self)
             .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))
     }
 }

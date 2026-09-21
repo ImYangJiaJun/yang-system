@@ -14,6 +14,8 @@ use sqlx::MySqlPool;
 use yang_base::definition::{AddonName, AddonSpec};
 use yang_base::BaseError;
 
+use crate::config::FeishuSettings;
+
 use self::domain::context::FeishuContext;
 use self::domain::repository::Repository;
 
@@ -21,7 +23,10 @@ use self::domain::repository::Repository;
 ///
 /// `pool` 由组合根从 `Tools` 取得——`Registry::dispatch` 只向 Action 注入所在 module
 /// 的主表，所以两张表的 Repository 必须在这里一次性绑好、经 [`FeishuContext`] 共享。
-pub(crate) fn build_addon(pool: Arc<MySqlPool>) -> Result<AddonSpec, BaseError> {
+pub(crate) fn build_addon(
+    pool: Arc<MySqlPool>,
+    settings: Option<Arc<FeishuSettings>>,
+) -> Result<AddonSpec, BaseError> {
     let context = Arc::new(FeishuContext::new(
         Repository::new(
             datasource::table::table_spec()?.table_definition()?,
@@ -31,6 +36,7 @@ pub(crate) fn build_addon(pool: Arc<MySqlPool>) -> Result<AddonSpec, BaseError> 
             option::table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
+        settings,
     ));
 
     Ok(AddonSpec::new(
