@@ -6,7 +6,7 @@ rust-version = "1.80"
 default-run = "yang-system"
 
 [dependencies]
-yang-base = { version = "0.3.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics"] }
+yang-base = { version = "0.3.0", path = "../../crates/yang-base", default-features = false, features = ["mysql", "token", "validator", "openapi", "admin-metadata", "transport-axum", "metrics", "http"] }
 yang-db = { version = "0.2.0", path = "../../crates/yang-db", default-features = false, features = ["mysql", "redis"] }
 yang-runtime = { version = "0.1.0", path = "../../crates/yang-runtime" }
 

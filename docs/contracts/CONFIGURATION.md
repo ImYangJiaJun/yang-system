@@ -248,20 +248,46 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   `sha256(原文)` 派生 256 位密钥。**省略表示明文返回**，对应飞书审批后台
   「不填写 Key」的配置；填写后响应体的 `data.result` 变为 base64 密文。同样受
   密钥域隔离约束。
+- `feishu.app_id`（文本，可选）：自建应用的 App ID。与 `app_secret` 成对出现，
+  用于**出站**调用飞书开放平台换取 `tenant_access_token`。省略表示不出站。
+- `feishu.app_secret`（文本，可选）：自建应用的 App Secret。**建议只走 secret 目录
+  `feishu_app_secret`**（见下）。与 `management_api_token` 是两条无关凭证，且它是
+  **租户级**凭证——拿到它能读该应用可见的全部协作多维表格，不要写进配置文件或 Git。
+- `feishu.pull_interval_seconds`（整数，默认 `900`）：出站拉取轮询间隔，有效范围
+  `10..=86400`。契约是「最大可见延迟 = 一个轮询间隔」。
 
 对应环境变量：`YANG_SYSTEM_FEISHU_ENABLED`、`YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN`、
 `YANG_SYSTEM_FEISHU_ENCRYPTION_KEY`。
 
-**校验只在段真正生效时执行**（`enabled = true` 且 Token 非空白）。段存在但惰性时
-（`enabled = false`，或 Token 留待运维后填）不做校验，也不注册任何路由——惰性段没有
-可被误用的行为面，不应让进程起不来。
+`app_id` / `app_secret` / `pull_interval_seconds` **不登记环境变量**。这是刻意的：
+环境变量是白名单，未登记的名称会让进程启动失败——`YANG_SYSTEM_FEISHU_APP_SECRET`
+因此会被直接拒绝，secret 只能从 secret 目录进来。
+
+**出站可用性与入站可用性是两个独立判据**：
+
+| 谓词 | 含义 | 需要哪些配置 |
+|---|---|---|
+| `is_usable()` | 注册**入站**路由（飞书来取选项 / 多维表格来推选项） | `enabled` + `management_api_token` 非空白 |
+| `can_pull()` | 允许**出站**拉取飞书开放平台 | `enabled` + `app_id`/`app_secret` 均**非空白且非占位** + 间隔在范围内 |
+
+两者刻意分开：并成一个会改变入站路由的注册条件，让一次「还没配 `app_id`」的滚动发布
+把已经在跑的入站端点一起摘掉。`can_pull()` 会把 `CHANGE_ME_*` / `replace-with*` /
+`placeholder` 这类占位值判为**未配置**，避免 worker 拿占位凭证按间隔反复出网。
+
+**校验只在段真正生效时执行**（`enabled = true`）。段存在但惰性时（`enabled = false`，
+或凭证留待运维后填）不做校验，也不注册任何路由——惰性段没有可被误用的行为面，
+不应让进程起不来。注意：`enabled = true` 时 `pull_interval_seconds` 越界会**拒绝启动**，
+即使出站凭证还没配。
+
+**出站凭证不套用本系统自己的密钥强度规则**（≥32 字节、非重复字符）：那是约束我们自己
+签发的密钥的，飞书 `app_secret` 是第三方凭证，套上去会把合法配置判非法。它只受
+「非占位」与密钥域隔离（不得复用 `token` / `step_up` / `security.totp` 的密钥）约束。
 
 **注意**：外部选项接口另有**按数据源**的 Token，与本段的 `management_api_token` 是
-两条独立凭证。前者保护**出站取数**（飞书来调我们），以 SHA-256 摘要存于
+两条独立凭证。前者校验**飞书来取选项**的请求来源，以 SHA-256 摘要存于
 `feishu_datasource.token_hash`，永不存明文；后者保护**入站写入**（多维表格来调我们）。
+二者都是**入站**方向；`app_id`/`app_secret` 才是**出站**方向（我们主动调飞书）。
 
-环境变量是**白名单**：任何以 `YANG_SYSTEM_` 开头但未登记的名称会让进程启动失败，
-因此上列三个变量之外的拼写错误会被立即拒绝，而不是静默忽略。
 
 ## 关闭总预算
 

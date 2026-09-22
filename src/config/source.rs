@@ -428,6 +428,7 @@ pub(crate) enum SecretKey {
     EmailVerificationSecret,
     FeishuManagementApiToken,
     FeishuEncryptionKey,
+    FeishuAppSecret,
 }
 
 #[cfg(test)]
@@ -444,6 +445,7 @@ impl SecretKey {
             Self::EmailVerificationSecret => "email_verification_secret",
             Self::FeishuManagementApiToken => "feishu_management_api_token",
             Self::FeishuEncryptionKey => "feishu_encryption_key",
+            Self::FeishuAppSecret => "feishu_app_secret",
         }
     }
 }
@@ -460,6 +462,7 @@ const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::EmailVerificationSecret,
     SecretKey::FeishuManagementApiToken,
     SecretKey::FeishuEncryptionKey,
+    SecretKey::FeishuAppSecret,
 ];
 
 const SECRET_BINDINGS: &[SecretBinding] = &[
@@ -478,6 +481,11 @@ const SECRET_BINDINGS: &[SecretBinding] = &[
         "management_api_token",
     ),
     SecretBinding::text("feishu_encryption_key", "feishu", "encryption_key"),
+    // 出站凭证：**只走 secret 目录，不登记环境变量**。它与 management_api_token 是
+    // 两条无关凭证，且是租户级的（能读该应用可见的全部协作多维表格）。
+    // 注意 ENVIRONMENT_BINDINGS 是白名单：不登记意味着 `YANG_SYSTEM_FEISHU_APP_SECRET`
+    // 会让进程启动失败，这正是我们要的——secret 不该从环境变量进来。
+    SecretBinding::text("feishu_app_secret", "feishu", "app_secret"),
 ];
 
 const CONFIG_SOURCES: ConfigSources = ConfigSources::new(
@@ -605,6 +613,90 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    /// 只用于验证飞书 secret 绑定的最小配置形状。
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestFeishuConfig {
+        feishu: Option<TestFeishu>,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestFeishu {
+        #[serde(default)]
+        app_id: Option<String>,
+        #[serde(default)]
+        app_secret: Option<String>,
+        #[serde(default)]
+        management_api_token: String,
+    }
+
+    /// `feishu_app_secret` 必须真的能被 secret 目录覆盖。
+    ///
+    /// 这条测的是**行为**而不是常量表：`SecretBinding` 的字段是私有的，比不出
+    /// 「登记齐没有」；而漏登记 `SECRET_BINDINGS` 正是本仓库最容易犯、且**完全静默**
+    /// 的错——`SecretKey` / `file_name` / `SECRET_KEYS` 都是 `#[cfg(test)]`，编译器
+    /// 不会因为漏了一处而报错，症状只在生产出现：「secret 文件挂了但读不到」。
+    #[test]
+    fn feishu_app_secret_is_applied_from_the_secret_provider() {
+        let provider = StaticSecretProvider(BTreeMap::from([
+            (SecretKey::FeishuAppSecret, "provider-app-secret".to_owned()),
+            (
+                SecretKey::FeishuManagementApiToken,
+                "provider-management-token".to_owned(),
+            ),
+        ]));
+
+        let config: TestFeishuConfig = parse_with_sources(
+            "[feishu]\napp_id = \"cli_from_file\"\n",
+            &BTreeMap::new(),
+            Some(&provider),
+        )
+        .unwrap_or_else(|error| panic!("secret 注入应成功合成: {error:#}"));
+
+        let feishu = config.feishu.unwrap_or_else(|| panic!("[feishu] 段应存在"));
+        assert_eq!(
+            feishu.app_secret.as_deref(),
+            Some("provider-app-secret"),
+            "feishu_app_secret 未生效：SECRET_BINDINGS 漏登记了它"
+        );
+        assert_eq!(
+            feishu.management_api_token, "provider-management-token",
+            "既有的 management_api_token 绑定不得被破坏"
+        );
+        assert_eq!(
+            feishu.app_id.as_deref(),
+            Some("cli_from_file"),
+            "app_id 不走 secret 目录，仍应来自配置文件"
+        );
+    }
+
+    /// 只有 secret 文件、配置里没有 `[feishu]` 段时，不得让整份配置解析失败。
+    ///
+    /// secret provider 是「先建表后插入」（`apply_secrets`），所以目录里存在任一
+    /// feishu secret 文件就会造出**半张** `[feishu]` 表。`management_api_token`
+    /// 若没有 `#[serde(default)]`，这里会以 `missing field` 失败，且与 `enabled` 无关
+    /// ——部署时把 app_secret 挂进 secret 目录就会直接起不来。
+    #[test]
+    fn a_lone_feishu_secret_does_not_break_a_config_without_the_section() {
+        let provider = StaticSecretProvider(BTreeMap::from([(
+            SecretKey::FeishuAppSecret,
+            "provider-app-secret".to_owned(),
+        )]));
+
+        let config: TestFeishuConfig = parse_with_sources("", &BTreeMap::new(), Some(&provider))
+            .unwrap_or_else(|error| {
+                panic!("半张 [feishu] 表也必须能解析（management_api_token 需有默认值）: {error:#}")
+            });
+
+        let feishu = config
+            .feishu
+            .unwrap_or_else(|| panic!("secret 注入应造出 [feishu] 段"));
+        assert_eq!(feishu.app_secret.as_deref(), Some("provider-app-secret"));
+        assert!(
+            feishu.management_api_token.is_empty(),
+            "缺席的 management_api_token 应落到默认空串，而不是解析失败"
+        );
+    }
 
     #[derive(Debug, Deserialize, PartialEq, Eq)]
     struct TestConfig {

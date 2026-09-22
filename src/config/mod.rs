@@ -572,20 +572,101 @@ pub struct FeishuSettings {
     /// 多维表格工作流调用写入 API 时使用的静态 Token。
     ///
     /// 与 [外部选项接口的数据源 Token] 是两条独立的凭证：这条保护**入站写入**，
-    /// 那条保护**出站取数**（按数据源分别存储其 SHA-256 摘要，见 `feishu_datasource` 表）。
+    /// 那条保护**入站取数**（飞书审批来我们这里取选项，按数据源分别存储其
+    /// SHA-256 摘要，见 `feishu_datasource` 表）。本段的 `app_id`/`app_secret`
+    /// 是第三条、方向相反的凭证：它让**我们主动出站**调飞书开放平台。
+    ///
+    /// `#[serde(default)]` 是必需的：secret 目录型 provider 是「先建表后插入」
+    /// （`yang-runtime` 的 `apply_secrets`），只要目录里存在任一 feishu secret 文件，
+    /// 它就会在文档里造出半张 `[feishu]` 表；此时若本字段无默认值，配置解析会在
+    /// **反序列化阶段**以 `missing field` 失败，且与 `enabled` 无关。段真正是否
+    /// 生效仍由 [`FeishuSettings::is_usable`] 判定。
+    #[serde(default)]
     pub management_api_token: String,
     /// 外部选项接口的 AES 密钥原文；配置后按 `sha256(原文)` 派生 256 位密钥。
     ///
     /// 省略表示明文返回（对应飞书侧「不填写 Key」）。
     #[serde(default)]
     pub encryption_key: Option<String>,
+    /// 自建应用的 App ID；出站调用飞书开放平台换取 tenant_access_token 时使用。
+    ///
+    /// 在开发者后台的 **基础信息 > 凭证与基础信息** 页面获取。省略表示不出站。
+    #[serde(default)]
+    pub app_id: Option<String>,
+    /// 自建应用的 App Secret；与 [`FeishuSettings::app_id`] 成对使用。
+    ///
+    /// **建议走 secret 目录**（`feishu_app_secret`）而不是配置文件或环境变量——
+    /// 它与 `management_api_token` 是两条无关的凭证，泄露面也完全不同：这条是
+    /// **租户级**凭证，拿到它能读该应用可见的全部协作多维表格。
+    #[serde(default)]
+    pub app_secret: Option<String>,
+    /// 出站拉取轮询间隔（秒）。
+    ///
+    /// 契约是「最大可见延迟 = 一个轮询间隔」，因此本值就是新鲜度承诺。默认 900 秒。
+    #[serde(default = "default_feishu_pull_interval_seconds")]
+    pub pull_interval_seconds: u64,
+}
+
+/// 出站拉取间隔下限：低于 1 分钟会让飞书侧频控（bitable 列出记录 20 次/秒，
+/// 但单表并发受限）变成常态。
+const FEISHU_MIN_PULL_INTERVAL_SECONDS: u64 = 10;
+/// 上限取 24 小时：再长就等于关掉了同步，应当显式停用数据源而不是把间隔调到天上。
+const FEISHU_MAX_PULL_INTERVAL_SECONDS: u64 = 86_400;
+
+const fn default_feishu_pull_interval_seconds() -> u64 {
+    900
 }
 
 impl FeishuSettings {
     /// 是否具备注册对外路由的最小条件。
+    ///
+    /// **只表示「入站可用」**（飞书来调我们）。出站可用性见 [`Self::can_pull`]——
+    /// 两者刻意分开：把出站凭证并进这里会改变入站路由的注册条件，让一次
+    /// 「还没配 app_id」的滚动发布把已经在跑的入站端点一起摘掉。
     pub fn is_usable(&self) -> bool {
         self.enabled && !self.management_api_token.trim().is_empty()
     }
+
+    /// 是否具备出站拉取飞书开放平台的条件。
+    ///
+    /// 与 [`Self::is_usable`] 相互独立：出站只需要 `app_id`/`app_secret`，
+    /// 不需要 `management_api_token`（那是入站写入的凭证）。
+    ///
+    /// 占位值一律视为未配置。这条判据是**启动期**的闸门：`deploy/config.cloud.toml`
+    /// 里预置的就是 `CHANGE_ME_FEISHU_APP_ID` / `CHANGE_ME_FEISHU_APP_SECRET`，
+    /// 它们既不是空串、长度也够，只有显式识别才能挡住「worker 拿占位凭证按间隔
+    /// 反复出网、每轮都失败并告警」这种启动期就该拦下的状态。
+    pub fn can_pull(&self) -> bool {
+        self.enabled
+            && (FEISHU_MIN_PULL_INTERVAL_SECONDS..=FEISHU_MAX_PULL_INTERVAL_SECONDS)
+                .contains(&self.pull_interval_seconds)
+            && self.app_id.as_deref().is_some_and(credential_is_configured)
+            && self
+                .app_secret
+                .as_deref()
+                .is_some_and(credential_is_configured)
+    }
+}
+
+/// 判断一条**第三方**凭证是否真的配置了（非空、非占位）。
+///
+/// 刻意**不复用** [`validate_token_secret`]：那条规则是给我们自己签发的密钥用的
+/// （≥32 字节、非重复字符），套到飞书 app_secret 上会把合法的第三方凭证判非法，
+/// 在 `[feishu]` 段上重新制造一次启动失败。
+fn credential_is_configured(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    // `CHANGE_ME_*` 必须**单独**判：`is_placeholder_secret` 只认 changeme / replace-with*
+    // / placeholder 三类，而部署模板用的正是 `CHANGE_ME_FEISHU_APP_ID` 这种带下划线的
+    // 拼法（`deploy/config.cloud.example.toml` 明说它「不会被识别为占位」，
+    // 部署脚本因此只能用 grep 在部署期兜）。这里补上这一族，让启动期就拦住。
+    if normalized.starts_with("change_me") || normalized.starts_with("change-me") {
+        return false;
+    }
+    !is_placeholder_secret(&normalized)
 }
 
 const fn default_argon2_max_concurrency() -> usize {
@@ -796,6 +877,36 @@ impl Settings {
                 if let Some(totp) = &self.security.totp {
                     if encryption_key == totp.aead_key {
                         bail!("feishu.encryption_key 不得复用 security.totp.aead_key");
+                    }
+                }
+            }
+        }
+        // 飞书**出站**拉取：判据是 can_pull() 而不是 is_usable()——出站只需要
+        // app_id/app_secret，与入站写入凭证无关。段启用但出站凭证还是占位值时
+        // 不做校验：那正是「还没配就部署」的常态，worker 不会起来（can_pull 为假），
+        // 不该让进程起不来。
+        if let Some(feishu) = self.feishu.as_ref().filter(|value| value.enabled) {
+            if !(FEISHU_MIN_PULL_INTERVAL_SECONDS..=FEISHU_MAX_PULL_INTERVAL_SECONDS)
+                .contains(&feishu.pull_interval_seconds)
+            {
+                bail!(
+                    "feishu.pull_interval_seconds 必须在 {FEISHU_MIN_PULL_INTERVAL_SECONDS}..={FEISHU_MAX_PULL_INTERVAL_SECONDS} 范围内"
+                );
+            }
+            if feishu.can_pull() {
+                let app_secret = feishu.app_secret.as_deref().unwrap_or_default();
+                // **刻意不用 validate_token_secret**：那条规则（≥32 字节、非重复字符）
+                // 是约束我们自己签发的密钥的，套到飞书 app_secret 上会把合法的第三方
+                // 凭证判非法。出站凭证的「是否已配置」由 can_pull() 的占位值识别负责。
+                validate_verification_secret(
+                    "feishu.app_secret",
+                    app_secret,
+                    &self.token,
+                    &self.step_up,
+                )?;
+                if let Some(totp) = &self.security.totp {
+                    if app_secret == totp.aead_key {
+                        bail!("feishu.app_secret 不得复用 security.totp.aead_key");
                     }
                 }
             }
@@ -2654,5 +2765,186 @@ link_base_url = "http://localhost:5273"
             enabled.encryption_key.is_none(),
             "未配置 Key 时应为 None（表示明文返回）"
         );
+    }
+
+    /// 出站凭证必须能被解析。
+    ///
+    /// 这条是**部署能否起机**的守卫：`FeishuSettings` 开了 `deny_unknown_fields`，
+    /// 而 `deploy/config.cloud.toml` 的 `[feishu]` 段里已经写了 `app_id` /
+    /// `app_secret`（且 `enabled = true`）。在该结构体加上这两个字段之前，那份配置
+    /// 会在**反序列化阶段**直接失败——比 validate 更早，且报的是 unknown field。
+    #[test]
+    fn feishu_section_accepts_outbound_credentials() {
+        let settings = Settings::parse(
+            &(valid_config().to_string()
+                + "\n[feishu]\nenabled = true\n\
+                   management_api_token = \"a-real-management-token-value-1234\"\n\
+                   app_id = \"cli_a1b2c3d4e5f6g7h8\"\n\
+                   app_secret = \"dskLLdkasdjlasdKK0123456789abcdef\"\n\
+                   pull_interval_seconds = 600\n"),
+        )
+        .unwrap_or_else(|error| panic!("含出站凭证的 [feishu] 段必须可解析: {error:#}"));
+
+        let feishu = settings
+            .feishu
+            .unwrap_or_else(|| panic!("[feishu] 段应被解析出来"));
+        assert_eq!(feishu.app_id.as_deref(), Some("cli_a1b2c3d4e5f6g7h8"));
+        assert_eq!(
+            feishu.app_secret.as_deref(),
+            Some("dskLLdkasdjlasdKK0123456789abcdef")
+        );
+        assert_eq!(feishu.pull_interval_seconds, 600);
+    }
+
+    /// `pull_interval_seconds` 省略时取默认值（900 秒）。
+    #[test]
+    fn feishu_pull_interval_defaults_to_fifteen_minutes() {
+        let settings = Settings::parse(
+            &(valid_config().to_string()
+                + "\n[feishu]\nenabled = true\nmanagement_api_token = \"a-real-management-token-value-1234\"\n"),
+        )
+        .unwrap_or_else(|error| panic!("配置应解析成功: {error:#}"));
+        let feishu = settings
+            .feishu
+            .unwrap_or_else(|| panic!("[feishu] 段应被解析出来"));
+        assert_eq!(feishu.pull_interval_seconds, 900);
+    }
+
+    /// 出站可用性与入站可用性**必须相互独立**。
+    ///
+    /// 把出站凭证并进 `is_usable()` 会改变入站路由的注册条件——一次「还没配 app_id」
+    /// 的滚动发布会把已经在跑的入站端点一起摘掉。
+    #[test]
+    fn feishu_can_pull_is_independent_of_is_usable() {
+        let parse_feishu =
+            |extra: &str| match Settings::parse(&(valid_config().to_string() + extra)) {
+                Ok(settings) => match settings.feishu {
+                    Some(feishu) => feishu,
+                    None => panic!("[feishu] 段应被解析出来"),
+                },
+                Err(error) => panic!("配置应解析成功: {error:#}"),
+            };
+
+        // 只有入站凭证：入站可用、出站不可用
+        let inbound_only = parse_feishu(
+            "\n[feishu]\nenabled = true\nmanagement_api_token = \"a-real-management-token-value-1234\"\n",
+        );
+        assert!(inbound_only.is_usable(), "入站凭证齐备");
+        assert!(
+            !inbound_only.can_pull(),
+            "没有 app_id/app_secret 就不能出站"
+        );
+
+        // 只有出站凭证：出站可用、入站不可用（management_api_token 有 serde default）
+        let outbound_only = parse_feishu(
+            "\n[feishu]\nenabled = true\n\
+             app_id = \"cli_a1b2c3d4e5f6g7h8\"\n\
+             app_secret = \"dskLLdkasdjlasdKK0123456789abcdef\"\n",
+        );
+        assert!(
+            !outbound_only.is_usable(),
+            "没有管理 Token 就不能注册入站路由"
+        );
+        assert!(outbound_only.can_pull(), "出站凭证齐备");
+
+        // 段关闭时两者都不可用
+        let disabled = parse_feishu(
+            "\n[feishu]\nenabled = false\n\
+             management_api_token = \"a-real-management-token-value-1234\"\n\
+             app_id = \"cli_a1b2c3d4e5f6g7h8\"\n\
+             app_secret = \"dskLLdkasdjlasdKK0123456789abcdef\"\n",
+        );
+        assert!(!disabled.is_usable() && !disabled.can_pull());
+    }
+
+    /// 占位与空白凭证一律视为**未配置**：worker 不得拿占位凭证反复出网。
+    ///
+    /// `CHANGE_ME_*` 必须被单独识别——`is_placeholder_secret` 只认 changeme /
+    /// replace-with* / placeholder 三类，而部署模板用的正是带下划线的
+    /// `CHANGE_ME_FEISHU_APP_ID`。
+    #[test]
+    fn feishu_can_pull_rejects_placeholder_and_blank_credentials() {
+        let parse_feishu =
+            |extra: &str| match Settings::parse(&(valid_config().to_string() + extra)) {
+                Ok(settings) => match settings.feishu {
+                    Some(feishu) => feishu,
+                    None => panic!("[feishu] 段应被解析出来"),
+                },
+                Err(error) => panic!("配置应解析成功: {error:#}"),
+            };
+
+        for (app_id, app_secret) in [
+            ("CHANGE_ME_FEISHU_APP_ID", "CHANGE_ME_FEISHU_APP_SECRET"),
+            ("change_me_app", "change_me_secret"),
+            ("replace-with-app-id", "replace-with-app-secret"),
+            ("cli_real_looking", "   "),
+            ("   ", "dskLLdkasdjlasdKK0123456789abcdef"),
+        ] {
+            let feishu = parse_feishu(&format!(
+                "\n[feishu]\nenabled = true\napp_id = \"{app_id}\"\napp_secret = \"{app_secret}\"\n"
+            ));
+            assert!(
+                !feishu.can_pull(),
+                "占位/空白凭证不得开启出站: app_id={app_id:?} app_secret={app_secret:?}"
+            );
+        }
+    }
+
+    /// 轮询间隔越界必须被拒绝（段启用时）。
+    #[test]
+    fn feishu_rejects_out_of_range_pull_interval() {
+        for interval in [0u64, 1, 9, 86_401, u64::MAX] {
+            let raw = valid_config().to_string()
+                + &format!(
+                    "\n[feishu]\nenabled = true\n\
+                     management_api_token = \"a-real-management-token-value-1234\"\n\
+                     pull_interval_seconds = {interval}\n"
+                );
+            let error = match Settings::parse(&raw) {
+                Ok(_) => panic!("pull_interval_seconds={interval} 必须被拒绝"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("pull_interval_seconds"),
+                "报错必须定位到该字段: {error:#}"
+            );
+        }
+    }
+
+    /// 出站凭证同样受密钥域隔离约束。
+    #[test]
+    fn feishu_app_secret_must_not_reuse_other_key_domains() {
+        let raw = valid_config().to_string()
+            + "\n[feishu]\nenabled = true\n\
+             app_id = \"cli_a1b2c3d4e5f6g7h8\"\n\
+             app_secret = \"0123456789abcdef0123456789abcdef\"\n";
+        let error = match Settings::parse(&raw) {
+            Ok(_) => panic!("app_secret 复用 Token 密钥必须被拒绝"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("feishu.app_secret"),
+            "报错应指明 feishu.app_secret，实际: {error:#}"
+        );
+    }
+
+    /// 出站凭证**不得**套用我们自己签发密钥的强度规则。
+    ///
+    /// `validate_token_secret` 要求 ≥32 字节且非重复字符；飞书 app_secret 是**第三方**
+    /// 凭证，套上去会把合法配置判非法，在 `[feishu]` 段上重新制造一次启动失败。
+    #[test]
+    fn feishu_app_secret_is_not_subject_to_our_key_strength_rules() {
+        // 16 字节的短 secret：不经 validate_token_secret 就应通过
+        let settings = Settings::parse(
+            &(valid_config().to_string()
+                + "\n[feishu]\nenabled = true\n\
+                   app_id = \"cli_a1b2c3d4e5f6g7h8\"\n\
+                   app_secret = \"short-but-real\"\n"),
+        )
+        .unwrap_or_else(|error| panic!("短的第三方凭证不该被密钥强度规则拒绝: {error:#}"));
+        let feishu = settings
+            .feishu
+            .unwrap_or_else(|| panic!("[feishu] 段应被解析出来"));
+        assert!(feishu.can_pull(), "非占位的短 secret 应视为已配置");
     }
 }

@@ -503,10 +503,22 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
         )
         .await
         {
-            Err(BaseError::HttpRequestFailed(message)) => {
-                ensure!(message == "邮件服务暂不可用", "错误必须脱敏")
+            Err(error) => {
+                let message = match &error {
+                    BaseError::UpstreamUnavailable(message) => message.clone(),
+                    other => anyhow::bail!("SMTP 失败必须映射为上游不可用: {other:?}"),
+                };
+                ensure!(message == "邮件服务暂不可用", "错误必须脱敏");
+                // 名字里一直写着「可重试」，但此前只断言了变体与文案，没断言可重试性本身。
+                // 这条才是真契约：分类必须是 Transient，HTTP 边界才会映射成 503，
+                // 客户端才会重试；退化成 Server（500）会让上游一抖动就丢掉这批注册。
+                ensure!(
+                    error.is_retryable(),
+                    "SMTP 失败必须可重试（Transient → 503），实际分类: {:?}",
+                    error.category()
+                );
             }
-            other => anyhow::bail!("SMTP 失败必须映射为可重试上游失败: {other:?}"),
+            Ok(_) => anyhow::bail!("SMTP 投递失败时请求不该成功"),
         }
         ensure!(
             redis.keys("*:code:*").await?.len() == before_failed_send,

@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use yang_base::database::DatabaseInitializer;
+use yang_base::http::HttpClient;
 use yang_base::tools::{Tools, ToolsBuilder};
 use yang_base::transport::axum::{serve_with_shutdown, AxumTransportConfig};
 use yang_db::{Database, RedisClient};
@@ -102,6 +103,13 @@ async fn run_after_telemetry_initialized(
         .mysql(mysql)
         .cache(cache)
         .token(token_manager)
+        // 出站 HTTP 客户端：飞书开放平台拉取（tenant_access_token / 多维表格记录）用。
+        // 只打开 `http` feature 并不会有一个可用客户端——必须在启动期显式注册，
+        // 否则 `Tools::http()` 恒返回 `HttpClientNotInitialized(300006)`。
+        //
+        // 这里是**客户端级默认超时**（30 秒），只作兜底：单次取 token 与单页拉取
+        // 各自的超时由请求级 `RequestBuilder::timeout` 决定，量级差很大。
+        .http(HttpClient::new(30)?)
         .extension(authorization_cache)
         .extension(step_up_manager)
         .extension(RegistrationEmailSenderHandle::from_arc(registration_sender))

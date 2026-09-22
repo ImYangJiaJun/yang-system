@@ -143,6 +143,11 @@ fn feishu_settings(encryption_key: Option<&str>) -> Arc<FeishuSettings> {
         enabled: true,
         management_api_token: MANAGEMENT_TOKEN.to_string(),
         encryption_key: encryption_key.map(str::to_string),
+        // 本测试只覆盖**入站**端点（飞书来取选项 / 多维表格来推选项），
+        // 因此出站凭证保持未配置：`can_pull()` 为假，出站路径整条不参与。
+        app_id: None,
+        app_secret: None,
+        pull_interval_seconds: 900,
     })
 }
 

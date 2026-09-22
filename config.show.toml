@@ -388,3 +388,13 @@ management_api_token = "replace-with-feishu-management-token"
 # 可用 secret 文件 feishu_encryption_key 覆盖，或环境变量
 # YANG_SYSTEM_FEISHU_ENCRYPTION_KEY。
 # encryption_key = "replace-with-feishu-encryption-key"
+# 自建应用的 App ID。出站调用飞书开放平台换取 tenant_access_token 时使用。
+# 省略表示不出站（与 enabled / management_api_token 相互独立：出站不需要入站凭证）。
+# app_id = "cli_xxxxxxxxxxxxxxxx"
+# 自建应用的 App Secret。与 app_id 成对；只走 secret 目录 feishu_app_secret，
+# **不提供**环境变量入口（未登记的 YANG_SYSTEM_* 会让进程启动失败，这是刻意的）。
+# 它是租户级凭证：拿到它能读该应用可见的全部协作多维表格，别写进配置文件与 Git。
+# app_secret = "replace-with-feishu-app-secret"
+# 出站拉取轮询间隔（秒）。契约是「最大可见延迟 = 一个轮询间隔」。
+# 有效范围 10..=86400；默认：900
+pull_interval_seconds = 900
