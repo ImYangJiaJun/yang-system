@@ -1,6 +1,6 @@
 //! `feishu_datasource` 表声明——Schema 的唯一事实来源。
 
-use yang_base::definition::{Key, Radio, Str, Switch, TableSpec, Text, Timestamp};
+use yang_base::definition::{Int, Key, Radio, Str, Switch, TableSpec, Text, Timestamp};
 use yang_base::BaseError;
 
 use super::super::domain::repository::SYSTEM_ROLE;
@@ -51,6 +51,39 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .options([("active", "启用"), ("disabled", "停用")])
                 .filterable(true)
                 .default("active"),
+            // 取数方式。默认 push：存量数据源靠多维表格工作流推送，语义不变。
+            // `filterable` 必开——轮询要按 `ingest_mode = "pull"` 选出待拉取的数据源，
+            // 而 DSL 的 filterable 是 fail-closed，漏了会在运行期被
+            // FieldPermissionDenied 打回（不是启动期报错，更难查）。
+            ingest_mode => Radio::<String>::new()
+                .title("取数方式")
+                .require(true)
+                .varchar(16)
+                .options([("push", "手工推送"), ("pull", "定时拉取")])
+                .default("push")
+                .filterable(true),
+            // --- 多维表格坐标：三个路径段 + 精确字段名 ---
+            bitable_base_token => Str::new()
+                .title("Base Token")
+                .max_length(128)
+                .filterable(true),
+            bitable_table_id => Str::new()
+                .title("数据表 ID")
+                .max_length(128)
+                .filterable(true),
+            bitable_view_id => Str::new().title("视图 ID").max_length(128),
+            // **存字段名，不存 field_id。** 官方《列出记录》的 `field_names` 明确要
+            // 「字段名称」（`1254024 InvalidFieldNames` 的排查建议就是调「列出字段」
+            // 取名字），传 field_id 会稳定失败。名字必须与表格里**完全一致**（界面上的
+            // 显示名可能忽略空格/换行差异），拉取前会经「列出字段」核对并做同名唯一性
+            // 检查——重名列按名字匹配会取到不确定的那一列。
+            bitable_field_name => Str::new().title("取数列字段名").max_length(255),
+            // --- 同步状态（控制台台账与告警用） ---
+            last_pull_at => Timestamp::new().title("最近拉取时间"),
+            last_success_at => Timestamp::new().title("最近同步成功时间").sortable(true),
+            consecutive_failures => Int::new().title("连续失败次数").default(0),
+            last_error => Text::new().title("最近错误"),
+            snapshot_digest => Str::new().title("快照摘要").max_length(64),
             // JSON 文本：DSL 没有 Json builder，且该列从不被 SQL 查询进内部
             linkage_mapping => Text::new().title("联动映射"),
             created_at => Timestamp::new().created_at().title("创建时间"),
@@ -187,6 +220,61 @@ mod tests {
             .field("updated_at")
             .unwrap_or_else(|| panic!("updated_at 字段必须存在"));
         assert!(updated_at.is_sortable(), "按更新时间排序必须可用");
+    }
+
+    #[test]
+    fn ingest_mode_defaults_to_push_and_is_filterable() {
+        // 默认 push 让存量数据源的语义不变；filterable 是轮询选源（where_eq
+        // ingest_mode = "pull"）的硬依赖——DSL 的 filterable 是 fail-closed，
+        // 漏了会在运行期被 FieldPermissionDenied 打回，而不是启动期报错。
+        let definition = definition();
+        let mode = definition
+            .field("ingest_mode")
+            .unwrap_or_else(|| panic!("ingest_mode 字段必须存在"));
+        assert!(mode.is_required(), "取数方式必须有值");
+        assert_eq!(mode.default_value(), Some(&serde_json::json!("push")));
+        assert!(mode.is_filterable(), "轮询按取数方式选源，必须可筛");
+    }
+
+    #[test]
+    fn coordinates_store_the_field_name_not_the_field_id() {
+        // 官方《列出记录》的 field_names 要的是**字段名称**（传 field_id 稳定吃
+        // 1254024），所以坐标列存名字。这条断言把那个结论钉在 schema 上，
+        // 避免将来有人「按 tasklist 原文」加回 bitable_field_id 并改用它取数。
+        let definition = definition();
+        assert!(
+            definition.field("bitable_field_name").is_some(),
+            "取数列必须按字段名登记"
+        );
+        assert!(
+            definition.field("bitable_field_id").is_none(),
+            "不要登记 bitable_field_id：接口不吃 field_id，留着只会诱导误用"
+        );
+    }
+
+    #[test]
+    fn sync_state_columns_are_nullable_or_defaulted() {
+        // schema_sync 门禁：已有数据的表上加「必填且无默认值」的列会让启动直接失败。
+        let definition = definition();
+        for name in [
+            "bitable_base_token",
+            "bitable_table_id",
+            "bitable_view_id",
+            "bitable_field_name",
+            "last_pull_at",
+            "last_success_at",
+            "last_error",
+            "snapshot_digest",
+        ] {
+            let field = definition
+                .field(name)
+                .unwrap_or_else(|| panic!("{name} 字段必须存在"));
+            assert!(!field.is_required(), "{name} 必须可空，否则存量行无法加列");
+        }
+        let failures = definition
+            .field("consecutive_failures")
+            .unwrap_or_else(|| panic!("consecutive_failures 字段必须存在"));
+        assert_eq!(failures.default_value(), Some(&serde_json::json!(0)));
     }
 
     #[test]

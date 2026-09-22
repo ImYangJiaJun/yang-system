@@ -62,6 +62,25 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .require(true)
                 .default(true)
                 .filterable(true),
+            // 级联父键：存**父数据源**的 option_id（裸值，不带 @i18n@ 前缀）。
+            //
+            // 三位都不可省：`Str` 而非 `Text`（后者不能建索引）；`filterable` 必开
+            // （DSL 的 filterable 是 fail-closed，读端按父键过滤会吃
+            // FieldPermissionDenied）；**不能 `unique`**（一对多）；**不能 `require`**
+            // （存量行与无父选项都没有它）。
+            parent_key => Str::new()
+                .title("父级选项")
+                .max_length(192)
+                .indexed(true)
+                .filterable(true),
+            // 生效期。汇率类选项按月累积，文案要带「（2026-09 起）」让人分辨，
+            // 而 `created_at` 是框架自动写的、不可覆盖 —— 首轮播种需要人工指定，
+            // 所以必须落在独立列上。
+            effective_from => Timestamp::new().title("生效期"),
+            // 「这行选项最后一次被推送/拉取写入」的时间。`updated_at` 做不到这件事：
+            // 它只在 UPDATE 时变，而补集停用之外的写入也可能不改它，控制台需要一个
+            // 诚实的同步存活信号。
+            last_push_at => Timestamp::new().title("最近推送时间"),
             // JSON 文本：预留联动筛选键值
             extra => Text::new().title("扩展字段"),
             created_at => Timestamp::new().created_at().title("创建时间"),
@@ -180,6 +199,40 @@ mod tests {
             assert!(
                 !field.is_required(),
                 "{name} 可空：没有额外语言或联动键时不必写"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_key_is_filterable_and_optional_but_not_searchable() {
+        // 两条会真正咬人的约束（fail-closed，漏了只在运行期暴露）：
+        // - `filterable` 必开：读端按父键过滤，`FieldPermissionDenied` 是运行期才报的
+        // - `require` 必关：存量行与无父选项都没有父键
+        //
+        // 「不能 unique」无法在这里断言：DSL 没有唯一性内省接口。它是**结构性**保证
+        // ——`fields!` 里没写 `.unique(true)`，就不会生成唯一索引；改动时靠 review。
+        let definition = definition();
+        let parent_key = definition
+            .field("parent_key")
+            .unwrap_or_else(|| panic!("parent_key 字段必须存在"));
+        assert!(parent_key.is_filterable(), "按父键过滤必须可用");
+        assert!(!parent_key.is_required(), "存量行没有父键，不能必填");
+        assert!(
+            !parent_key.is_searchable(),
+            "父键是裸 option_id，进关键词检索面没有意义"
+        );
+    }
+
+    #[test]
+    fn cascade_and_sync_columns_exist() {
+        let definition = definition();
+        for name in ["effective_from", "last_push_at"] {
+            let field = definition
+                .field(name)
+                .unwrap_or_else(|| panic!("{name} 字段必须存在"));
+            assert!(
+                !field.is_required(),
+                "{name} 可空：生效期由拉取侧写，最近推送时间在从未推送时为空"
             );
         }
     }

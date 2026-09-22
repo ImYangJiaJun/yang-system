@@ -29,17 +29,7 @@ pub(crate) fn build_addon(
     settings: Option<Arc<FeishuSettings>>,
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<AddonSpec, BaseError> {
-    let context = Arc::new(FeishuContext::new(
-        Repository::new(
-            datasource::table::table_spec()?.table_definition()?,
-            Arc::clone(&pool),
-        ),
-        Repository::new(
-            option::table::table_spec()?.table_definition()?,
-            Arc::clone(&pool),
-        ),
-        settings.clone(),
-    ));
+    let context = build_context(Arc::clone(&pool), settings.clone())?;
 
     Ok(AddonSpec::new(
         AddonName::new("feishu").map_err(|error| BaseError::ConfigError(error.to_string()))?,
@@ -53,4 +43,29 @@ pub(crate) fn build_addon(
         settings.as_deref(),
         authorization_validator,
     )?))
+}
+
+/// 构建飞书 addon 的共享上下文（两张表的 Repository + 集成配置）。
+///
+/// 出站拉取 worker 需要与 Action **完全同一份表定义与配置**，所以两个入口共用这一个
+/// 构造函数。`build_addon` 里原先内联的构造已改走这里——两处各写一遍表定义的后果是
+/// 加列时漏改一处，而漏改的那一处通常只在运行期才暴露。
+///
+/// pool 用 `Arc<MySqlPool>` 而不是 `Database`：`Repository` 只做表查询，
+/// 事务由调用方按需从 `Database` 取（worker 走 `tools.mysql()?.transaction()`）。
+pub(crate) fn build_context(
+    pool: Arc<MySqlPool>,
+    settings: Option<Arc<FeishuSettings>>,
+) -> Result<Arc<FeishuContext>, BaseError> {
+    Ok(Arc::new(FeishuContext::new(
+        Repository::new(
+            datasource::table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            option::table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        settings,
+    )))
 }

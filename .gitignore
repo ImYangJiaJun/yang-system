@@ -5,3 +5,16 @@
 /config.local.toml
 .codex/
 __pycache__/
+
+# 部署产物：deploy/ 目录本身要入库（前端部署合同门禁会读 deploy-blue-green.sh），
+# 但下面这些是**生产凭据**或临时文件，绝不能提交。
+# 模板是 deploy/config.cloud.example.toml（已入库），首次部署时服务器上从它复制并填值。
+deploy/config.cloud.toml
+deploy/.mysql-root-password
+deploy/*.tar
+deploy/*.tar.gz
+
+# 飞书官方文档的本地镜像（scripts/fetch_feishu_docs.py 抓取，3574 篇 / 约 38MB）。
+# 它是**可再生的参考资料**，不是源码：随时能按脚本重抓，入库只会把仓库撑大一个量级。
+# 开发时按 docs/reference/feishu/README.md 使用即可。
+docs/reference/feishu/

@@ -7,6 +7,7 @@ use crate::addon::account::email_delivery::{
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
+use crate::feishu_pull::FeishuPullWorker;
 use anyhow::Context;
 use std::future::Future;
 use std::path::Path;
@@ -24,6 +25,7 @@ const TRIGGER_SIGNAL: &str = "signal";
 const TRIGGER_OPERATION_EXIT: &str = "operation_exit";
 const PHASE_HTTP_DRAIN: &str = "http_drain";
 const PHASE_AUTHORIZATION_OUTBOX_WORKER: &str = "authorization_outbox_worker";
+const PHASE_FEISHU_PULL_WORKER: &str = "feishu_pull_worker";
 const PHASE_TOOLS_CLOSE: &str = "tools_close";
 const PHASE_OBSERVABILITY: &str = "observability";
 
@@ -233,6 +235,23 @@ async fn run_after_tools_created(
     let outbox_worker = AuthorizationOutboxWorker::start(&tools, settings.authorization.clone())
         .await
         .context("启动授权 Outbox Worker 失败")?;
+    // 飞书出站拉取 Worker：**只在 can_pull() 为真时起**。凭证还是占位值时起来，
+    // 只会拿占位凭证按间隔反复出网、每轮都失败并告警——这正是 can_pull() 要挡的状态。
+    // 段未配置、或已配置但凭证是占位值时，这里安静地不起，行为与未集成飞书一致。
+    let feishu_pull_worker = match settings.feishu.as_ref().filter(|feishu| feishu.can_pull()) {
+        Some(feishu) => {
+            let feishu_context = crate::addon::feishu::build_context(
+                Arc::new(tools.mysql()?.pool().clone()),
+                Some(Arc::new(feishu.clone())),
+            )
+            .context("构建飞书出站上下文的上下文失败")?;
+            Some(
+                FeishuPullWorker::start(Arc::clone(&tools), feishu, feishu_context)
+                    .context("启动飞书出站拉取 Worker 失败")?,
+            )
+        }
+        None => None,
+    };
     let runtime = Arc::new(application.runtime);
     let signal_budget = shutdown_budget.clone();
     let signal_readiness = readiness_gate.clone();
@@ -268,10 +287,21 @@ async fn run_after_tools_created(
     };
     readiness_gate.mark_not_ready();
     shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;
-    let shutdown_result = shutdown_budget
+    // 两个后台任务都要在 Tools 关闭前停：Tools 关掉后 worker 每轮会拿到
+    // `Tools 已关闭` 并空转刷错误日志。分两个阶段跑，各自的耗时在关闭预算里可分辨。
+    let outbox_shutdown = shutdown_budget
         .run_phase(PHASE_AUTHORIZATION_OUTBOX_WORKER, outbox_worker.shutdown())
         .await
         .map_err(anyhow::Error::from);
+    let feishu_shutdown = match feishu_pull_worker {
+        Some(worker) => shutdown_budget
+            .run_phase(PHASE_FEISHU_PULL_WORKER, worker.shutdown())
+            .await
+            .map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    // `and` 保留第一个错误：两个都失败时先看到的是更早那个阶段的问题。
+    let shutdown_result = outbox_shutdown.and(feishu_shutdown);
     match (serve_result, shutdown_result) {
         (Err(serve_error), Err(worker_error)) => {
             tracing::error!(

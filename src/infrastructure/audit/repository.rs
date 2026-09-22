@@ -6,7 +6,7 @@
 use super::{AuditActor, AuditEntity, AuditEvent, AuditEventContext, AuditResult, AuditSummary};
 use serde_json::{json, Value};
 use sqlx::MySqlPool;
-use yang_base::action::ActionContext;
+use yang_base::action::{ActionContext, RequestId};
 use yang_base::BaseError;
 use yang_db::{table, QueryBuilder, Transaction};
 
@@ -61,6 +61,37 @@ pub(crate) fn succeeded_system_event(
         before_summary,
         after_summary,
     )
+}
+
+/// 为**没有 `ActionContext`** 的系统写入创建成功事件（后台 worker 专用）。
+///
+/// 为什么不复用 [`succeeded_system_event`]：那个函数要从 ctx 取 `dispatch_target()`，
+/// 而它的唯一 setter 是 `yang-base` 的 `pub(crate)`——worker 无论怎么造 ctx 都拿不到
+/// `Some`，必然硬失败在 `ConfigError`。这里把 module.action 与 actor 作为**显式参数**
+/// 传入，`request_id` 自行生成（它只用于日志关联，不参与任何鉴权）。
+///
+/// 与 ctx 版一样，`Succeeded` 事件必须带摘要——[`AuditEvent::new`] 会拒绝无摘要的成功事件。
+pub(crate) fn succeeded_system_event_without_ctx(
+    actor_id: &'static str,
+    action: &'static str,
+    subject: Option<AuditEntity>,
+    target: AuditEntity,
+    after_summary: AuditSummary,
+) -> Result<AuditEvent, BaseError> {
+    let actor = AuditActor::system(actor_id).map_err(invalid_event)?;
+    let context =
+        AuditEventContext::new(actor, None, RequestId::generate()).map_err(invalid_event)?;
+    AuditEvent::new(
+        context,
+        action,
+        subject,
+        target,
+        AuditResult::Succeeded,
+        // 后台任务没有「变更前」的可信快照，只给 after。
+        None,
+        Some(after_summary),
+    )
+    .map_err(invalid_event)
 }
 
 fn succeeded_event_with_actor(
