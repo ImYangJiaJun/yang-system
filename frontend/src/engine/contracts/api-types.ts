@@ -184,6 +184,74 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/feishu/datasources": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * 更新数据源
+     * @description 更新飞书数据源的名称、Token、加密开关或状态
+     */
+    put: operations["feishu.datasource.update_datasource"];
+    /**
+     * 新建数据源
+     * @description 创建一个飞书外部选项数据源
+     */
+    post: operations["feishu.datasource.create_datasource"];
+    /**
+     * 删除数据源
+     * @description 删除飞书数据源并停用其下全部选项
+     */
+    delete: operations["feishu.datasource.delete_datasource"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/query": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 数据源列表
+     * @description 分页查询飞书数据源
+     */
+    post: operations["feishu.datasource.list_datasources"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/options/query": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 选项列表
+     * @description 分页查询飞书选项
+     */
+    post: operations["feishu.option.list_options"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/users": {
     parameters: {
       query?: never;
@@ -951,6 +1019,286 @@ export interface components {
       | {
           /** @description 子条件列表 */
           conditions: components["schemas"]["WhereCondition"][];
+          /** @enum {string} */
+          type: "or";
+        };
+    /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+    OrderByItem__2: {
+      /**
+       * @description 方向，缺省为 Asc
+       * @default Asc
+       */
+      direction: components["schemas"]["SortOrder"];
+      /** @description 字段名 */
+      field: string;
+    };
+    /**
+     * @description WHERE 条件枚举
+     *
+     *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+     *
+     *     # 变体
+     *
+     *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+     *
+     *     # 示例
+     *
+     *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+     *
+     *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+     *
+     *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+     *
+     *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+     *
+     *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+     *
+     *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+     */
+    WhereCondition__2:
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "eq";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "in";
+          /** @description 值列表 */
+          values: unknown[];
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @description 匹配模式 */
+          pattern: string;
+          /** @enum {string} */
+          type: "like";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "gt";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "gte";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "lt";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "lte";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "is_null";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "is_not_null";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "ne";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @description 区间上界 */
+          hi: unknown;
+          /** @description 区间下界 */
+          lo: unknown;
+          /** @enum {string} */
+          type: "between";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "not_in";
+          /** @description 值列表 */
+          values: unknown[];
+        }
+      | {
+          /** @description 子条件列表 */
+          conditions: components["schemas"]["WhereCondition__2"][];
+          /** @enum {string} */
+          type: "and";
+        }
+      | {
+          /** @description 子条件列表 */
+          conditions: components["schemas"]["WhereCondition__2"][];
+          /** @enum {string} */
+          type: "or";
+        };
+    /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+    OrderByItem__3: {
+      /**
+       * @description 方向，缺省为 Asc
+       * @default Asc
+       */
+      direction: components["schemas"]["SortOrder"];
+      /** @description 字段名 */
+      field: string;
+    };
+    /**
+     * @description WHERE 条件枚举
+     *
+     *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+     *
+     *     # 变体
+     *
+     *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+     *
+     *     # 示例
+     *
+     *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+     *
+     *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+     *
+     *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+     *
+     *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+     *
+     *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+     *
+     *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+     */
+    WhereCondition__3:
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "eq";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "in";
+          /** @description 值列表 */
+          values: unknown[];
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @description 匹配模式 */
+          pattern: string;
+          /** @enum {string} */
+          type: "like";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "gt";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "gte";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "lt";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "lte";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "is_null";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "is_not_null";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "ne";
+          /** @description 比较值 */
+          value: unknown;
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @description 区间上界 */
+          hi: unknown;
+          /** @description 区间下界 */
+          lo: unknown;
+          /** @enum {string} */
+          type: "between";
+        }
+      | {
+          /** @description 字段名 */
+          field: string;
+          /** @enum {string} */
+          type: "not_in";
+          /** @description 值列表 */
+          values: unknown[];
+        }
+      | {
+          /** @description 子条件列表 */
+          conditions: components["schemas"]["WhereCondition__3"][];
+          /** @enum {string} */
+          type: "and";
+        }
+      | {
+          /** @description 子条件列表 */
+          conditions: components["schemas"]["WhereCondition__3"][];
           /** @enum {string} */
           type: "or";
         };
@@ -1836,6 +2184,709 @@ export interface operations {
           id: number;
           /** @default null */
           title?: string | null;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.update_datasource": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * @description 多维表格 app_token。
+           * @default null
+           */
+          bitable_base_token?: string | null;
+          /**
+           * @description 取数列的**精确字段名**（接口要名字不要 field_id）。
+           * @default null
+           */
+          bitable_field_name?: string | null;
+          /**
+           * @description 数据表 ID。
+           * @default null
+           */
+          bitable_table_id?: string | null;
+          /**
+           * @description 视图 ID。
+           * @default null
+           */
+          bitable_view_id?: string | null;
+          /**
+           * @description 默认语言。
+           * @default null
+           */
+          default_locale?: string | null;
+          /**
+           * @description 是否加密返回。
+           * @default null
+           */
+          encrypt_enabled?: boolean | null;
+          /**
+           * @description 取数方式：`push` / `pull`；省略即保持原值。
+           * @default null
+           */
+          ingest_mode?: string | null;
+          /**
+           * @description 级联映射（JSON 文本）。
+           * @default null
+           */
+          linkage_mapping?: string | null;
+          /** @description 目标数据源。 */
+          source_key: string;
+          /**
+           * @description 状态：`active` / `disabled`。
+           * @default null
+           */
+          status?: string | null;
+          /**
+           * @description 新名称。
+           * @default null
+           */
+          title?: string | null;
+          /**
+           * @description 新 Token；省略表示不轮换。
+           * @default null
+           */
+          token?: string | null;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.create_datasource": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * @description 多维表格 app_token（URL 里 `feishu.cn/base/<这段>`）；`pull` 时必填。
+           * @default null
+           */
+          bitable_base_token?: string | null;
+          /**
+           * @description 取数列的**精确字段名**（接口要名字不要 field_id）；`pull` 时必填。
+           * @default null
+           */
+          bitable_field_name?: string | null;
+          /**
+           * @description 数据表 ID；`pull` 时必填。
+           * @default null
+           */
+          bitable_table_id?: string | null;
+          /**
+           * @description 视图 ID；省略表示取全表。
+           * @default null
+           */
+          bitable_view_id?: string | null;
+          /**
+           * @description 默认语言。
+           * @default null
+           */
+          default_locale?: string | null;
+          /**
+           * @description 是否加密返回；需要服务端配置 `feishu.encryption_key`。
+           * @default null
+           */
+          encrypt_enabled?: boolean | null;
+          /**
+           * @description 取数方式：`push`（多维表格工作流推送，默认）/ `pull`（服务端定时拉取）。
+           * @default null
+           */
+          ingest_mode?: string | null;
+          /**
+           * @description 级联映射（JSON 文本）。声明本数据源是某个父数据源的子集时给出。
+           * @default null
+           */
+          linkage_mapping?: string | null;
+          /** @description 数据源标识；进外部选项接口的 URL，必须唯一且稳定。 */
+          source_key: string;
+          /** @description 展示名。 */
+          title: string;
+          /** @description 与飞书审批后台填写的 Token 一致；**只以摘要入库**。 */
+          token: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.delete_datasource": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /** @description 目标数据源。 */
+          source_key: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.list_datasources": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * @description 是否额外执行 COUNT 查询。
+           * @default false
+           */
+          count_total?: boolean;
+          /** @description 排序规则列表。 */
+          order_by?: components["schemas"]["OrderByItem__2"][];
+          /**
+           * Format: uint32
+           * @description 页码（1 起步），缺省 1。
+           * @default 1
+           */
+          page?: number;
+          /**
+           * Format: uint32
+           * @description 每页条数，缺省 10，必须 1..=100。
+           * @default 10
+           */
+          page_size?: number;
+          /**
+           * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
+           * @default null
+           */
+          search?: string | null;
+          /**
+           * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
+           * @default null
+           */
+          source_key?: string | null;
+          /**
+           * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
+           * @default null
+           */
+          where?: components["schemas"]["WhereCondition__2"] | null;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.option.list_options": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * @description 是否额外执行 COUNT 查询。
+           * @default false
+           */
+          count_total?: boolean;
+          /** @description 排序规则列表。 */
+          order_by?: components["schemas"]["OrderByItem__3"][];
+          /**
+           * Format: uint32
+           * @description 页码（1 起步），缺省 1。
+           * @default 1
+           */
+          page?: number;
+          /**
+           * Format: uint32
+           * @description 每页条数，缺省 10，必须 1..=100。
+           * @default 10
+           */
+          page_size?: number;
+          /**
+           * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
+           * @default null
+           */
+          search?: string | null;
+          /**
+           * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
+           * @default null
+           */
+          source_key?: string | null;
+          /**
+           * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
+           * @default null
+           */
+          where?: components["schemas"]["WhereCondition__3"] | null;
         };
       };
     };

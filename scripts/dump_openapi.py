@@ -22,8 +22,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = ROOT / "frontend" / "contracts" / "openapi.json"
-OUTPUT = ROOT / "frontend" / "src" / "engine" / "contracts" / "api-types.ts"
+FRONTEND = ROOT / "frontend"
+SPEC = FRONTEND / "contracts" / "openapi.json"
+OUTPUT = FRONTEND / "src" / "engine" / "contracts" / "api-types.ts"
 
 
 def run(argv: tuple[str, ...], cwd: Path = ROOT) -> None:
@@ -99,17 +100,22 @@ def main() -> int:
         json.dump(rebased, temp, ensure_ascii=False)
         temp_path = temp.name
     try:
+        # **必须在 `frontend/` 下调用 pnpm，不能用 `--dir frontend`。**
+        # Corepack 是按**当前工作目录**的 package.json 里 `packageManager` 来选 pnpm
+        # 版本的，而 `--dir` 只是 pnpm 自己的参数、对版本选择毫无影响。在仓库根调用
+        # 会退回机器上任意一个全局 pnpm（实测 12.4.1），于是撞上
+        # `ERR_PNPM_BAD_PM_VERSION`——脚本在本机与 CI 上是否可用，取决于「碰巧装的是
+        # 哪个版本」，是一处会随机发作的缺陷。
         run(
             (
                 "pnpm",
-                "--dir",
-                "frontend",
                 "exec",
                 "openapi-typescript",
                 temp_path,
                 "-o",
                 str(OUTPUT),
-            )
+            ),
+            cwd=FRONTEND,
         )
     finally:
         os.unlink(temp_path)
