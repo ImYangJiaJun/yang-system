@@ -461,7 +461,7 @@ async fn find_doomed(
     source_key: &str,
     derived: &[DerivedOption],
 ) -> Result<Vec<String>, BaseError> {
-    /// 单轮补集停用的规模上限：超过就跳过本轮停用，只告警。
+    /// 单轮补集停用的规模上限：**读满就跳过本轮**。
     const MAX_COMPLEMENT: usize = 20_000;
 
     let live: HashSet<&str> = derived
@@ -479,19 +479,25 @@ async fn find_doomed(
         .all()
         .await?;
 
+    // **守卫必须判「读是否被截断」，而不是「补集凑够没有」。**
+    // 这个查询本身被 `page` 截到上限；若判 `doomed.len() >= MAX`，只有当截出来的
+    // 两万行**全部**该停用才触发——几乎不可能发生，于是补集停用会在**残缺视图**上
+    // 运行：排在两万行之后的失效选项永远不会被停用。那是静默的漏停。
+    if rows.len() >= MAX_COMPLEMENT {
+        tracing::warn!(
+            source_key,
+            limit = MAX_COMPLEMENT,
+            "已启用选项达到单轮读取上限，无法确定视图完整，本轮跳过补集停用"
+        );
+        return Ok(Vec::new());
+    }
+
     let mut doomed = Vec::new();
     for row in &rows {
         let option_id: String = row.require("option_id")?;
         if !live.contains(option_id.as_str()) {
             doomed.push(option_id);
         }
-    }
-    if doomed.len() >= MAX_COMPLEMENT {
-        tracing::warn!(
-            source_key,
-            "补集规模达到上限 {MAX_COMPLEMENT}，本轮跳过补集停用以避免误停"
-        );
-        return Ok(Vec::new());
     }
     Ok(doomed)
 }
