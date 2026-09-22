@@ -452,44 +452,67 @@ fn to_write_item(source_key: &str, option: &DerivedOption) -> OptionWriteItem {
     }
 }
 
+/// 补集扫描的每页大小。**必须 ≤ 框架硬上限**：`TableQuery::page` 对超限是
+/// **拒绝**而不是 clamp，越界会让整轮拉取在补集那一步必败。
+const SCAN_PAGE_SIZE: usize = 100;
+
+/// 编译期守护，同 `approval_options.rs` 里那条：`MAX_TABLE_QUERY_PAGE_SIZE` 一旦
+/// 被调低，这里构建期就炸，而不是等到拉取时才发现整轮必败。
+///
+/// **这不是假想的风险**——本仓库已经因为同一类越界挂过一次端点（110 条单测全绿、
+/// 端点全挂），而这次是拉取侧：`find_doomed` 曾经写 `.page(1, 20_000)`，
+/// 每一轮拉取都在补集那一步失败，单元测试到不了（那条路径要数据库）。
+const _: () = assert!(SCAN_PAGE_SIZE <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE);
+
 /// 找出「本地有、本轮派生结果里没有」的选项 id（补集）。
 ///
-/// 规模保护：一次取回该数据源的全部 `option_id`。**超过 [`MAX_BATCH`] × 上限时
-/// 放弃停用并告警**——宁可不收敛，也不要在一次可能被截断的读取上做批量停用。
+/// 规模保护分两步：**先 `count` 判是否超限，再分页扫**。顺序不能反——
+/// 先扫再判的话，大表会把上限那么多行读进来才发现该跳过。
 async fn find_doomed(
     deps: &PullDeps<'_>,
     source_key: &str,
     derived: &[DerivedOption],
 ) -> Result<Vec<String>, BaseError> {
-    /// 单轮补集停用的规模上限：**读满就跳过本轮**。
+    /// 单轮补集停用的规模上限：超过就**跳过本轮停用**，只告警。
     const MAX_COMPLEMENT: usize = 20_000;
 
     let live: HashSet<&str> = derived
         .iter()
         .map(|option| option.option_id.as_str())
         .collect();
-    let rows = deps
-        .context
-        .options()
-        .query()
-        .select_fields(&["option_id"])?
-        .where_eq("source_key", serde_json::json!(source_key))?
-        .where_eq("enabled", serde_json::json!(true))?
-        .page(1, MAX_COMPLEMENT)?
-        .all()
-        .await?;
 
-    // **守卫必须判「读是否被截断」，而不是「补集凑够没有」。**
-    // 这个查询本身被 `page` 截到上限；若判 `doomed.len() >= MAX`，只有当截出来的
-    // 两万行**全部**该停用才触发——几乎不可能发生，于是补集停用会在**残缺视图**上
-    // 运行：排在两万行之后的失效选项永远不会被停用。那是静默的漏停。
-    if rows.len() >= MAX_COMPLEMENT {
+    let enabled_query = || -> Result<yang_base::table::TableQuery, BaseError> {
+        deps.context
+            .options()
+            .query()
+            .select_fields(&["option_id"])?
+            .where_eq("source_key", serde_json::json!(source_key))?
+            .where_eq("enabled", serde_json::json!(true))
+    };
+
+    // 第一步：先问总数。超限就没有必要把行读进来。
+    let enabled = enabled_query()?.count().await? as usize;
+    if enabled >= MAX_COMPLEMENT {
         tracing::warn!(
             source_key,
+            enabled,
             limit = MAX_COMPLEMENT,
-            "已启用选项达到单轮读取上限，无法确定视图完整，本轮跳过补集停用"
+            "已启用选项达到单轮上限，本轮跳过补集停用（未确保视图完整时不做批量停用）"
         );
         return Ok(Vec::new());
+    }
+
+    // 第二步：分页扫完。`count` 已保证行数在上限内，所以页数有界（≤ 200）。
+    let mut rows = Vec::with_capacity(enabled);
+    let mut page = 1usize;
+    loop {
+        let batch = enabled_query()?.page(page, SCAN_PAGE_SIZE)?.all().await?;
+        let fetched = batch.len();
+        rows.extend(batch);
+        if fetched < SCAN_PAGE_SIZE {
+            break;
+        }
+        page += 1;
     }
 
     let mut doomed = Vec::new();

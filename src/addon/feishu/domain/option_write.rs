@@ -52,8 +52,8 @@ pub(crate) const MAX_BATCH: usize = 500;
 
 /// 跨源夺取预检：返回第一个「id 属于**别的**数据源」的 `(option_id, owner)`。
 ///
-/// 放在事务之前，用一次 `where_in` 查完整批：既是可归因的业务失败（不烧可用性预算），
-/// 也不随批次大小放大查询数。
+/// 放在事务之前：既是可归因的业务失败（不烧可用性预算），也不会让一次脏数据把
+/// 整批写入带坏。批次**按 500 分片**（`where_in` 的元素上限），命中即提前返回。
 ///
 /// **归属比较交给数据库做。** 表的排序规则是 `utf8mb4_unicode_ci`（大小写不敏感 +
 /// PAD SPACE），紧随其后的 UPDATE 用的 `where_eq("source_key", …)` 正是它；若在
@@ -68,21 +68,28 @@ pub(crate) async fn find_foreign_option_owner(
         // `where_in` 拒绝空列表；空批没有可夺取的东西。
         return Ok(None);
     }
-    let ids: Vec<serde_json::Value> = option_ids.iter().map(|id| serde_json::json!(id)).collect();
-    let foreign = options
-        .query()
-        .select_fields(&["option_id", "source_key"])?
-        .where_in("option_id", ids)?
-        .where_ne("source_key", serde_json::json!(source_key))?
-        .all()
-        .await?;
-    match foreign.first() {
-        Some(record) => Ok(Some((
-            record.require::<String>("option_id")?,
-            record.require::<String>("source_key")?,
-        ))),
-        None => Ok(None),
+    // **必须分片**：`where_in` 有 500 元素上限，而派生结果可以远多于 500
+    // （拉取侧一条记录出一个选项）。整个列表一次性塞进去，大源每一轮都会在
+    // 进事务前被 `ParamInvalid` 打回——而单元测试到不了这条路径（要数据库）。
+    // 同类越界在 `find_doomed` 上已经真实发生过一次（`.page(1, 20_000)` 越了
+    // `TableQuery::page` 的 100 上限），所以这里不是假想。
+    for chunk in option_ids.chunks(MAX_BATCH) {
+        let ids: Vec<serde_json::Value> = chunk.iter().map(|id| serde_json::json!(id)).collect();
+        let foreign = options
+            .query()
+            .select_fields(&["option_id", "source_key"])?
+            .where_in("option_id", ids)?
+            .where_ne("source_key", serde_json::json!(source_key))?
+            .all()
+            .await?;
+        if let Some(record) = foreign.first() {
+            return Ok(Some((
+                record.require::<String>("option_id")?,
+                record.require::<String>("source_key")?,
+            )));
+        }
     }
+    Ok(None)
 }
 
 /// 在调用方事务内写入整批选项。
