@@ -82,7 +82,17 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2 text-center sm:text-left", className)}
+      // 伪元素盖住容器 `p-6` 的上内边距那一条：`top-0` 的吸附位置是内容的
+      // 上边界而不是容器的，那 24px 里内容会从标题**上方**穿过去。
+      //
+      // **吸顶**：`DialogContent` 现在可滚动（`max-h` + `overflow-y-auto`），
+      // 标题不固定的话，内容一长用户就看不到自己在编辑哪一条。
+      // 负外边距抵消容器的 `p-6`，让底色通栏；`top-0` 贴住滚动口顶端，
+      // 而 `-mt-6` 让静止时它已经在那个位置——进出吸附不跳。
+      className={cn(
+        "bg-background sticky top-0 z-10 -mx-6 -mt-6 flex flex-col gap-2 px-6 pt-6 pb-4 text-center before:absolute before:inset-x-0 before:-top-6 before:h-6 before:bg-background before:content-[''] sm:text-left",
+        className,
+      )}
       {...props}
     />
   );
@@ -92,8 +102,12 @@ function DialogFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-footer"
+      // 伪元素盖住容器下内边距那一条，理由同 `DialogHeader`。
+      //
+      // **吸底**：主人在这里——一长屏内容里让「保存」
+      // 滚出视野，用户会以为对话框没法提交。
       className={cn(
-        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
+        "bg-background sticky bottom-0 z-10 -mx-6 -mb-6 flex flex-col-reverse gap-2 border-t px-6 pt-4 pb-6 after:absolute after:inset-x-0 after:-bottom-6 after:h-6 after:bg-background after:content-[''] sm:flex-row sm:justify-end",
         className,
       )}
       {...props}
