@@ -325,3 +325,51 @@ T1 → T2（加列）→ T4-4..T4-10（派生、摘要、补集停用、worker�
   管控（v12.4.1）与项目锁定的 10.33.1 不一致，`dump_openapi.py` 第三步跑不起来。
   用正确的 pnpm 重跑 `python scripts/dump_openapi.py` 即可。
 - **T8 飞书侧人工配置**、**T9 验收**。
+
+---
+
+# 实测记录：出站链路首次真实跑通（2026-09-22）
+
+用本地 `config.toml` 里的真实 `app_id` / `app_secret` 调出站探针
+（`POST /api/v1/feishu/datasources/pull-probe`），对台账 Base
+`ZoCWb82JQaCCiAspCqbcUvlsnwg` / `tblauuOafa4acvT3` 跑了三次。**这是整条出站链路
+第一次真实出站**——此前它只在单测与假件上验证过。
+
+## 定论：单选字段回的是**裸字符串**，不是数组
+
+| 探测列 | field_id | field_type | `sample_raw_kinds` |
+|---|---|---|---|
+| 币种/Currency（单选） | `fld6DuK6tM` | `SingleSelect` | **全是 `string`** |
+| 汇率/Exchange Rate | `fldazesSdE` | `SingleSelect` | **全是 `string`** |
+| 费用类型/Fee Type* | `fldEblAr7X` | `SingleSelect` | **全是 `string`** |
+
+三个字段一致。**官方《多维表格记录数据结构》是对的**（`3 | 单选 | string`）；
+本仓库早先用 lark-cli 抓到的 `"费用大类/Main Exp Cat*": ["股东借款"]` **是那个 CLI 的
+归一化**，不是原始响应——这一条从此不必再猜。
+
+`cell_label` 里「两种都接受」的兼容分支保留（成本为零，且对归一化形态免疫），
+但主路径确实是 `String`。
+
+## 顺带确认的三件事
+
+1. **`field_id → 精确字段名` 的解析可用**。三次都成功解析出中文名，证明「列出字段」
+   这条路走得通，`resolve_field_name` 的实现正确。这也复证了「`field_names` 要的是
+   字段名而不是 field_id」。
+2. **文档权限已配**。整条链路 `换取 tenant_access_token → 读台账 Base` 全通，
+   没有出现 `1254302`——即 U8 的「必须给该文档添加文档应用」已经做了。
+3. **`fields` 里的值带尾随换行**。样本是 `"CNY 人民币\n"` 而不是 `"CNY 人民币"`。
+   所以 `derive_options` 里的 `label.trim()` 是**承重的**——少了它，派生出选项文案
+   会带一个换行。这条实测把那次 trim 从「顺手」变成「必需」。
+
+## 数据画像（与设计文档的记录吻合）
+
+`fld6DuK6tM` 一页 200 行里只有 **7 行有值**（`empty: 193`），首屏 `total` 228——
+印证了「228 行里只有 43 行有实际数据，其余是空占位行」。7 个币种与
+`.tmp-fs/_inuse.json` 记录的一致。
+
+## 仍未验证
+
+- **V4 `linkage_params` 真实报文**：探针方向是「我们 → 飞书」，而 V4 要的是
+  「飞书 → 我们」时的报文，只能等 T8（飞书侧配好外部选项）之后由真实请求产生。
+- **补集停用 / 派生的真实行为**：探针只读一页、不写库。要验这些得配一个 `pull`
+  数据源让 worker 真跑一轮（T6）。
