@@ -52,6 +52,15 @@ impl AuthorizationVersionCache {
         Ok(Self { redis, deployment })
     }
 
+    /// 本部署的缓存命名空间。
+    ///
+    /// 暴露出来是给**其它 Redis 缓存**复用同一个部署标识——它们必须落在同一命名空间
+    /// 下，否则「同一个部署」这个概念在缓存层会分裂成两份互不相干的键空间。
+    /// 值本身已在构造期通过 [`validate_deployment_name`] 校验。
+    pub(crate) fn deployment(&self) -> &str {
+        &self.deployment
+    }
+
     pub async fn publish(
         &self,
         user_id: i64,

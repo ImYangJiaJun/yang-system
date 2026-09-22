@@ -160,6 +160,11 @@ impl OutboundTransport for HttpClientTransport {
         }
         if let Some(body) = request.json_body.as_ref() {
             builder = builder.json(body)?;
+            // 官方把置换凭证接口的 `Content-Type` 标为**固定值**
+            // `application/json; charset=utf-8`，而框架的 `.json()` 只写
+            // `application/json`。这里补上 charset，让请求逐字对齐文档——
+            // 这类「网关按字节比头」的差异一旦出问题极难排查。
+            builder = builder.content_type("application/json; charset=utf-8");
         }
         if let Some(timeout_secs) = request.timeout_secs {
             builder = builder.timeout(timeout_secs);

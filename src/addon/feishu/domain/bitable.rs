@@ -221,6 +221,54 @@ pub(crate) struct FieldItem {
     pub(crate) field_id: String,
     #[serde(default)]
     pub(crate) field_name: String,
+    /// 字段类型码。官方《列出字段》的可选值：1 文本 / 2 数字 / 3 单选 / 4 多选 /
+    /// 5 日期 / 7 复选框 / 11 人员 / 13 电话号码 / 15 超链接 / 17 附件 / 18 关联 /
+    /// 20 公式 / 21 双向关联 / 22 地理位置 / 23 群组 / 1001~1005 自动字段。
+    ///
+    /// **这一位是消除「单选取值形态」歧义的唯一可靠依据**：只看单元格的 JSON
+    /// 无法区分「多选但只选了一项」（`["A"]`）与「单选」（官方是 `"A"`）。
+    #[serde(default, rename = "type")]
+    pub(crate) field_type: Option<i32>,
+    /// 字段 UI 类型（`SingleSelect` / `MultiSelect` / `Text` …）。
+    #[serde(default)]
+    pub(crate) ui_type: Option<String>,
+}
+
+/// 官方《多维表格记录数据结构》里值形态为**单值**的字段类型。
+///
+/// 取数列必须落在这些类型上。多值类型（多选 `4`、人员 `11`、附件 `17`、关联
+/// `18`/`21`、群组 `23`）与无文本类型（复选框 `7`、地理位置 `22`）一律拒绝——
+/// 详见 [`check_coordinate_field`]。
+pub(crate) fn is_single_value_field_type(field_type: i32) -> bool {
+    // 1 文本（含条码）/ 2 数字（含进度、货币、评分）/ 3 单选 / 5 日期 /
+    // 13 电话号码 / 15 超链接 / 20 公式 / 1005 自动编号：这些在记录接口里
+    // 都是**单个** string 或 number。
+    matches!(field_type, 1 | 2 | 3 | 5 | 13 | 15 | 20 | 1005)
+}
+
+/// 校验取数列的字段类型是否可用，返回可读的类型名。
+///
+/// 这一步把「取数列选错类型」从**运行期的静默产出空标签**变成**明确的配置错误**：
+/// 只从单元格值看不出类型（`["A"]` 既可能是多选选了一项，也可能是单选被归一化成
+/// 了数组），而字段元数据是权威的。
+pub(crate) fn check_coordinate_field(field: &FieldItem) -> anyhow::Result<String> {
+    let label = field
+        .ui_type
+        .clone()
+        .unwrap_or_else(|| format!("type={:?}", field.field_type));
+    let Some(field_type) = field.field_type else {
+        // 老响应或缺字段时不拦：宁可放行也不要因为拿不到元数据就拒绝一个本来可用的配置。
+        return Ok(label);
+    };
+    ensure!(
+        is_single_value_field_type(field_type),
+        "字段「{}」的类型是 {}（type={field_type}），不是单值字段：\
+         取数列必须指向文本、数字、单选、日期、电话、超链接或公式列。\
+         多选/人员/附件/关联/群组/复选框/地理位置的单元格不是一个可用的选项值",
+        field.field_name,
+        label
+    );
+    Ok(label)
 }
 
 /// 把 `field_id` 映射成**精确字段名**。
@@ -536,6 +584,34 @@ pub(crate) struct BitableCoordinates {
     pub(crate) view_id: Option<String>,
 }
 
+/// 只取**第一页**记录，不做收敛断言。
+///
+/// 给诊断路径用：它要回答的是「凭证能不能注入、列名能不能解析、值长什么样」，
+/// 而不是「快照完不完整」——因此**故意不套** [`PaginationState`] 的收敛判据，
+/// 也不按 `MAX_PAGES` 翻页。走了收敛判据反而会在一张多页表上直接失败，
+/// 把「探测成功」误报成「拉取失败」。
+pub(crate) async fn first_records_page(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    field_names: &[String],
+    page_size: u32,
+) -> Result<ListRecordsData, OutboundFailure> {
+    let url = records_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
+        OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: error.to_string(),
+        }
+    })?;
+    let query = list_records_query(field_names, coordinates.view_id.as_deref(), None, page_size)
+        .map_err(|error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: error.to_string(),
+        })?;
+    fetch_page(transport, sleeper, tokens, &url, query).await
+}
+
 /// 拉取全量记录。
 ///
 /// 成功即返回**已收敛**的快照；任何一页失败或未收敛都会返回 `Err`，
@@ -765,16 +841,20 @@ mod tests {
 
     // ---- 字段名解析 ----
 
+    /// 造一个字段项。默认 `type: 3`（单选）——名字解析类的用例不关心类型。
+    fn field(field_id: &str, field_name: &str) -> FieldItem {
+        FieldItem {
+            field_id: field_id.to_string(),
+            field_name: field_name.to_string(),
+            field_type: Some(3),
+            ui_type: Some("SingleSelect".to_string()),
+        }
+    }
+
     fn fields() -> Vec<FieldItem> {
         vec![
-            FieldItem {
-                field_id: "fldA".to_string(),
-                field_name: "费用大类/Main Exp Cat*".to_string(),
-            },
-            FieldItem {
-                field_id: "fldB".to_string(),
-                field_name: "费用类型/Fee Type*".to_string(),
-            },
+            field("fldA", "费用大类/Main Exp Cat*"),
+            field("fldB", "费用类型/Fee Type*"),
         ]
     }
 
@@ -798,16 +878,7 @@ mod tests {
     #[test]
     fn duplicate_field_names_are_rejected() {
         // 官方按名字匹配；重名列会取到不确定的那一列（实测同表确有两列同名不同 id）
-        let duplicated = vec![
-            FieldItem {
-                field_id: "fldA".to_string(),
-                field_name: "同名".to_string(),
-            },
-            FieldItem {
-                field_id: "fldB".to_string(),
-                field_name: "同名".to_string(),
-            },
-        ];
+        let duplicated = vec![field("fldA", "同名"), field("fldB", "同名")];
         let error = resolve_field_name(&duplicated, "fldA")
             .err()
             .unwrap_or_else(|| panic!("重名必须报错"));
@@ -816,11 +887,78 @@ mod tests {
 
     #[test]
     fn blank_field_name_is_rejected() {
-        let blank = vec![FieldItem {
-            field_id: "fldA".to_string(),
-            field_name: "   ".to_string(),
-        }];
+        let blank = vec![field("fldA", "   ")];
         assert!(resolve_field_name(&blank, "fldA").is_err());
+    }
+
+    // ---- 取数列类型校验 ----
+
+    fn field_of_type(field_type: i32, ui_type: Option<&str>) -> FieldItem {
+        FieldItem {
+            field_id: "fldX".to_string(),
+            field_name: "取数列".to_string(),
+            field_type: Some(field_type),
+            ui_type: ui_type.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn single_value_field_types_are_accepted() {
+        // 官方《列出字段》的类型码：1 文本 / 2 数字 / 3 单选 / 5 日期 /
+        // 13 电话 / 15 超链接 / 20 公式 / 1005 自动编号
+        for field_type in [1, 2, 3, 5, 13, 15, 20, 1005] {
+            assert!(
+                is_single_value_field_type(field_type),
+                "type={field_type} 是单值字段，应被接受"
+            );
+            assert!(
+                check_coordinate_field(&field_of_type(field_type, None)).is_ok(),
+                "type={field_type} 的校验应通过"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_value_and_textless_field_types_are_rejected() {
+        // 4 多选 / 7 复选框 / 11 人员 / 17 附件 / 18 关联 / 21 双向关联 /
+        // 22 地理位置 / 23 群组 —— 单元格不是一个可用的选项值
+        for field_type in [4, 7, 11, 17, 18, 21, 22, 23] {
+            assert!(!is_single_value_field_type(field_type));
+            let error = check_coordinate_field(&field_of_type(field_type, Some("MultiSelect")))
+                .err()
+                .unwrap_or_else(|| panic!("type={field_type} 必须被拒绝"));
+            let text = error.to_string();
+            assert!(
+                text.contains("不是单值字段"),
+                "报错要说清原因，实际: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_field_type_does_not_block_the_configuration() {
+        // 拿不到元数据时宁可放行：让真实拉取去暴露问题，比在这里猜更准
+        let unknown = FieldItem {
+            field_id: "fldX".to_string(),
+            field_name: "取数列".to_string(),
+            field_type: None,
+            ui_type: None,
+        };
+        assert!(check_coordinate_field(&unknown).is_ok());
+    }
+
+    #[test]
+    fn field_type_check_reports_a_readable_name() {
+        let single = field_of_type(3, Some("SingleSelect"));
+        assert_eq!(
+            check_coordinate_field(&single).unwrap_or_default(),
+            "SingleSelect"
+        );
+        // 没有 ui_type 时退回类型码，不返回空串
+        let bare = field_of_type(1, None);
+        assert!(check_coordinate_field(&bare)
+            .unwrap_or_default()
+            .contains("1"));
     }
 
     // ---- 单元格取值 ----
