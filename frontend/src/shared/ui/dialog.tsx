@@ -58,7 +58,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg duration-200 sm:max-w-lg",
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 flex max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg duration-200 sm:max-w-lg",
           className,
         )}
         {...props}
@@ -82,15 +82,20 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      // 伪元素盖住容器 `p-6` 的上内边距那一条：`top-0` 的吸附位置是内容的
-      // 上边界而不是容器的，那 24px 里内容会从标题**上方**穿过去。
+      // **吸顶**：`DialogContent` 可滚动（`max-h` + `overflow-y-auto`），标题不固定
+      // 的话，内容一长用户就看不到自己在编辑哪一条。
       //
-      // **吸顶**：`DialogContent` 现在可滚动（`max-h` + `overflow-y-auto`），
-      // 标题不固定的话，内容一长用户就看不到自己在编辑哪一条。
-      // 负外边距抵消容器的 `p-6`，让底色通栏；`top-0` 贴住滚动口顶端，
-      // 而 `-mt-6` 让静止时它已经在那个位置——进出吸附不跳。
+      // 三条都不是可选的，去掉任一条都会坏：
       className={cn(
-        "bg-background sticky top-0 z-10 -mx-6 -mt-6 flex flex-col gap-2 px-6 pt-6 pb-4 text-center before:absolute before:inset-x-0 before:-top-6 before:h-6 before:bg-background before:content-[''] sm:text-left",
+        // 1. `position: sticky` 的**包含块必须是整个滚动容器**。所以 `DialogContent`
+        //    用 `flex flex-col` 而不是 `grid`——网格里包含块就是它自己那一格，
+        //    标题没有任何可移动的余地，表现成「完全没吸附、随内容一起滚」。
+        // 2. **不要加负的纵向外边距**（`-mt-6` / `-mb-6`）。负外边距上移的是边框盒，
+        //    而后续项是按外边距盒排的——结果是下一项整体上移、被标题的不透明底色
+        //    盖掉一截（实测「数据源标识」标签被切掉上半：`headerBottom` 171 压在
+        //    `labelTop` 163 上）。
+        // 3. `before:` 那条盖住容器 `p-6` 的上内边距：内容会从那里从标题**上方**穿过。
+        "bg-background sticky top-0 z-10 -mx-6 flex flex-col gap-2 px-6 pt-6 pb-4 text-center before:absolute before:inset-x-0 before:-top-6 before:h-6 before:bg-background before:content-[''] sm:text-left",
         className,
       )}
       {...props}
@@ -107,7 +112,8 @@ function DialogFooter({ className, ...props }: React.ComponentProps<"div">) {
       // **吸底**：主人在这里——一长屏内容里让「保存」
       // 滚出视野，用户会以为对话框没法提交。
       className={cn(
-        "bg-background sticky bottom-0 z-10 -mx-6 -mb-6 flex flex-col-reverse gap-2 border-t px-6 pt-4 pb-6 after:absolute after:inset-x-0 after:-bottom-6 after:h-6 after:bg-background after:content-[''] sm:flex-row sm:justify-end",
+        // 与 `DialogHeader` 对称，三条约束同源。
+        "bg-background sticky bottom-0 z-10 -mx-6 flex flex-col-reverse gap-2 border-t px-6 pt-4 pb-6 after:absolute after:inset-x-0 after:-bottom-6 after:h-6 after:bg-background after:content-[''] sm:flex-row sm:justify-end",
         className,
       )}
       {...props}
