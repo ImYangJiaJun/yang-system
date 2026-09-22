@@ -18,3 +18,6 @@ deploy/*.tar.gz
 # 它是**可再生的参考资料**，不是源码：随时能按脚本重抓，入库只会把仓库撑大一个量级。
 # 开发时按 docs/reference/feishu/README.md 使用即可。
 docs/reference/feishu/
+
+# Playwright MCP 的会话产物（截图 / 快照 / 控制台日志），不是源码。
+.playwright-mcp/
