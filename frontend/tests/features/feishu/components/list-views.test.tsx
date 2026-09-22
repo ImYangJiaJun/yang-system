@@ -18,6 +18,17 @@ function item(overrides: Partial<DatasourceItem> = {}): DatasourceItem {
     defaultLocale: "zh_cn",
     status: "active",
     updatedAt: 1758000000,
+    ingestMode: "push",
+    bitableBaseToken: null,
+    bitableTableId: null,
+    bitableViewId: null,
+    bitableFieldName: null,
+    linkageMapping: null,
+    lastPullAt: null,
+    lastSuccessAt: null,
+    consecutiveFailures: 0,
+    lastError: null,
+    snapshotDigest: null,
     ...overrides,
   };
 }

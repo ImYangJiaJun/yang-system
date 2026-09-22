@@ -40,8 +40,13 @@ pub(super) async fn handle(
         "sort_order",
         "is_default",
         "enabled",
-        // 只有持管理 Token 的多维表格自动化会写选项行，所以 updated_at 就是
-        // 「这行选项最后一次被推送的时间」——控制台对「推送还活着吗」唯一诚实的信号。
+        // 级联父键（裸 option_id）；无父时为空串。控制台要能看出某条选项
+        // 「挂在谁名下」——否则级联配错时只能看到一个孤零零的子项。
+        "parent_key",
+        // **存活信号用 `last_push_at` 而不是 `updated_at`。**
+        // `updated_at` 只在 UPDATE 时变，补集停用之外的写入也可能不改它，
+        // 用它回答「这个源还活着吗」会给出错误的肯定；拉取侧则恒写 `last_push_at`。
+        "last_push_at",
         "updated_at",
     ])?;
 
@@ -89,7 +94,10 @@ pub(super) async fn handle(
                 "sort_order": record.require::<i64>("sort_order")?,
                 "is_default": record.optional::<bool>("is_default")?.unwrap_or(false),
                 "enabled": record.optional::<bool>("enabled")?.unwrap_or(true),
-                // unix 秒；前端负责格式化（与 AccountSettingsPage 对 createdAt 的用法一致）
+                "parent_key": record.optional::<String>("parent_key")?,
+                // unix 秒；前端负责格式化（与 AccountSettingsPage 对 createdAt 的用法一致）。
+                // `last_push_at` 可空：从未被推送/拉取过的行没有这个值。
+                "last_push_at": record.optional::<i64>("last_push_at")?,
                 "updated_at": record.require::<i64>("updated_at")?,
             }))
         })

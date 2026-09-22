@@ -35,6 +35,7 @@ import type {
 import { withStableOrder } from "./list-query";
 import type {
   DatasourceItem,
+  IngestMode,
   DatasourceListQuery,
   DatasourceStatus,
   DatasourceStatusFilter,
@@ -257,7 +258,31 @@ function parseDatasourceItem(
     defaultLocale: asString(raw.default_locale),
     status: raw.status === "disabled" ? "disabled" : "active",
     updatedAt: asNumber(raw.updated_at, 0),
+    ingestMode: asString(raw.ingest_mode),
+    bitableBaseToken: asNullableString(raw.bitable_base_token),
+    bitableTableId: asNullableString(raw.bitable_table_id),
+    bitableViewId: asNullableString(raw.bitable_view_id),
+    bitableFieldName: asNullableString(raw.bitable_field_name),
+    linkageMapping: asNullableString(raw.linkage_mapping),
+    lastPullAt: asNullableNumber(raw.last_pull_at),
+    lastSuccessAt: asNullableNumber(raw.last_success_at),
+    consecutiveFailures: asNumber(raw.consecutive_failures, 0),
+    lastError: asNullableString(raw.last_error),
+    snapshotDigest: asNullableString(raw.snapshot_digest),
   };
+}
+
+/// 可空时间戳：后端把「没有值」编码成 `null`（列本身可空），**不是 0**。
+///
+/// 与 `asNumber(x, 0)` 的区别很重要：0 是一个合法的时间戳语义（1970 年），
+/// 用它表示「从未同步过」会让界面显示成 1970 而不是「—」。
+function asNullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/// 可空字符串：空串与缺失一律折成 `null`，避免界面出现「有值但不可见」的空白格。
+function asNullableString(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 function parseOptionItem(raw: Record<string, unknown>): OptionItem | null {
@@ -271,7 +296,9 @@ function parseOptionItem(raw: Record<string, unknown>): OptionItem | null {
     sortOrder: asNumber(raw.sort_order, 0),
     isDefault: raw.is_default === true,
     enabled: raw.enabled !== false,
+    parentKey: asNullableString(raw.parent_key),
     updatedAt: asNumber(raw.updated_at, 0),
+    lastPushAt: asNullableNumber(raw.last_push_at),
   };
 }
 
@@ -305,12 +332,47 @@ export async function listOptions(
   return parsePage(result.data, parseOptionItem);
 }
 
+/// 坐标与取数方式。两者一起提交：单独给坐标而不说 `ingest_mode` 没有意义，
+/// 而 `ingest_mode = "pull"` 又必须有坐标（后端会拒）。
+export type DatasourceCoordinatesInput = {
+  ingestMode: IngestMode;
+  bitableBaseToken: string;
+  bitableTableId: string;
+  bitableViewId: string;
+  bitableFieldName: string;
+  linkageMapping: string;
+};
+
+/// 把坐标折成 wire 形状：**空串一律不发**。
+///
+/// 建源时后端对「传了空串」与「没传」同样处理（都落 NULL），但少发几个键能让
+/// 请求体更接近「用户实际填了什么」，排查时更好读。
+function coordinateBody(
+  coordinates: DatasourceCoordinatesInput | undefined,
+): Record<string, unknown> {
+  if (coordinates === undefined) return {};
+  const body: Record<string, unknown> = { ingest_mode: coordinates.ingestMode };
+  const pairs: Array<[string, string]> = [
+    ["bitable_base_token", coordinates.bitableBaseToken],
+    ["bitable_table_id", coordinates.bitableTableId],
+    ["bitable_view_id", coordinates.bitableViewId],
+    ["bitable_field_name", coordinates.bitableFieldName],
+    ["linkage_mapping", coordinates.linkageMapping],
+  ];
+  for (const [key, value] of pairs) {
+    if (value.trim() !== "") body[key] = value.trim();
+  }
+  return body;
+}
+
 export type CreateDatasourceInput = {
   sourceKey: string;
   title: string;
   token: string;
   encryptEnabled: boolean;
   defaultLocale: DefaultLocale;
+  /// 省略表示按后端默认（`push`）。
+  coordinates?: DatasourceCoordinatesInput;
 };
 
 /// 新建。成功只回 `{source_key}`，不回整条记录——所以调用方必须回读列表。
@@ -328,6 +390,7 @@ export async function createDatasource(
       token: input.token,
       encrypt_enabled: input.encryptEnabled,
       default_locale: input.defaultLocale,
+      ...coordinateBody(input.coordinates),
     },
     signal,
   );
@@ -346,6 +409,9 @@ export type UpdateDatasourceInput = {
   encryptEnabled?: boolean;
   defaultLocale?: DefaultLocale;
   status?: DatasourceStatus;
+  /// 坐标。**与其它字段不同：这里传空串是有意义的——表示清空该坐标。**
+  /// 所以不做 `coordinateBody` 那套「空串不发」的折叠，逐字段原样发出。
+  coordinates?: DatasourceCoordinatesInput;
 };
 
 /// 更新。`source_key` 之外**全部可选，省略即保持原值**——所以这里逐字段判 undefined，
@@ -368,6 +434,16 @@ export async function updateDatasource(
     body.default_locale = input.defaultLocale;
   }
   if (input.status !== undefined) body.status = input.status;
+  // 坐标：传空串表示清空（后端语义如此），所以这里**不能**按「空即省略」处理——
+  // 那会让「想清掉一个填错的 base_token」变得做不到。
+  if (input.coordinates !== undefined) {
+    body.ingest_mode = input.coordinates.ingestMode;
+    body.bitable_base_token = input.coordinates.bitableBaseToken.trim();
+    body.bitable_table_id = input.coordinates.bitableTableId.trim();
+    body.bitable_view_id = input.coordinates.bitableViewId.trim();
+    body.bitable_field_name = input.coordinates.bitableFieldName.trim();
+    body.linkage_mapping = input.coordinates.linkageMapping.trim();
+  }
 
   const result = await invokeFeishuAction(
     deps,

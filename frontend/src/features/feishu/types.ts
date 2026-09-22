@@ -53,6 +53,46 @@ export function statusLabel(status: DatasourceStatus): string {
   return status === "active" ? "启用" : "已停用";
 }
 
+/// 取数方式：后端 `datasource/table.rs` 的 Radio 取值域。
+///
+/// - `push`：多维表格自动化工作流持管理 Token 推选项过来（存量数据源都是这种）；
+/// - `pull`：服务端按 `feishu.pull_interval_seconds` 自己去多维表格拉。
+///
+/// 两种方式的**失败面完全不同**：`push` 出问题看不出任何服务端状态（没有那次请求），
+/// `pull` 才有 `lastSuccessAt` / `consecutiveFailures` 可看。表单里切换它是有后果的。
+export type IngestMode = "push" | "pull";
+
+export const INGEST_MODE_OPTIONS: ReadonlyArray<{
+  value: IngestMode;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "push",
+    label: "手工推送",
+    hint: "由多维表格自动化工作流推送选项，服务端不主动出网。",
+  },
+  {
+    value: "pull",
+    label: "定时拉取",
+    hint: "服务端按配置的间隔主动拉取，需要先配好应用凭证与坐标。",
+  },
+];
+
+/// 取数方式 → 展示名。认不出的值原样回显（与 `localeLabel` 同一取舍：不猜、不替换）。
+export function ingestModeLabel(value: string): string {
+  return (
+    INGEST_MODE_OPTIONS.find((option) => option.value === value)?.label ?? value
+  );
+}
+
+/// 任意字符串 → `IngestMode`；认不出回 `null`。
+export function asIngestMode(value: string): IngestMode | null {
+  return INGEST_MODE_OPTIONS.some((option) => option.value === value)
+    ? (value as IngestMode)
+    : null;
+}
+
 /// 日期时间格式必须显式带产品 locale（`scripts/verify-locale-contract.mjs` 的合同）。
 const DATE_TIME_FORMATTER = new Intl.DateTimeFormat(PRODUCT_LOCALE, {
   year: "numeric",
@@ -80,7 +120,52 @@ export type DatasourceItem = {
   status: DatasourceStatus;
   /// 该行最后一次被写入的时间（unix 秒）。
   updatedAt: number;
+
+  /* ------------------------------ 取数配置 ------------------------------ */
+
+  /// 取数方式。`push` 数据源下面这些坐标都是 null。
+  ingestMode: string;
+  bitableBaseToken: string | null;
+  bitableTableId: string | null;
+  bitableViewId: string | null;
+  /// 取数列的**精确字段名**（不是 field_id——接口要的是名字）。
+  bitableFieldName: string | null;
+  /// 级联映射的 JSON 原文；无级联时为 null。展示前必须解析。
+  linkageMapping: string | null;
+
+  /* ------------------------------ 同步状态 ------------------------------ */
+
+  /// 最近一次尝试拉取的时间（unix 秒）；失败也会更新它。
+  lastPullAt: number | null;
+  /// 最近一次**成功**同步的时间（unix 秒）。
+  ///
+  /// 这是判断「这个源还活着吗」唯一诚实的信号：`updatedAt` 只在整行被写时变，
+  /// 而「拉了一轮但内容没变」根本不会写库。
+  lastSuccessAt: number | null;
+  /// 连续失败次数。**只在整轮成功时清零**，所以它单调递增即代表「一直没成功」。
+  consecutiveFailures: number;
+  /// 最近一次失败的错误原文（可能较长）。
+  lastError: string | null;
+  /// 内容摘要；用于「内容没变就跳过写库」。
+  snapshotDigest: string | null;
 };
+
+/// 一个数据源的坐标是否配齐。
+///
+/// 表单与详情页都用它判断「这个 pull 源能不能拉起来」——**不据此禁用保存**：
+/// 允许先建一个坐标不全的源再补齐，比强制一次填完更好用，而坐标缺失的源会被
+/// 服务端每轮跳过并告警，是响亮的失败。
+export function hasCompleteCoordinates(item: {
+  bitableBaseToken: string | null;
+  bitableTableId: string | null;
+  bitableFieldName: string | null;
+}): boolean {
+  return [
+    item.bitableBaseToken,
+    item.bitableTableId,
+    item.bitableFieldName,
+  ].every((value) => typeof value === "string" && value.trim() !== "");
+}
 
 /// 选项行；与 `list_options` 的 `items[]` 一一对应。控制台对它是**只读**的。
 export type OptionItem = {
@@ -92,9 +177,18 @@ export type OptionItem = {
   sortOrder: number;
   isDefault: boolean;
   enabled: boolean;
-  /// unix 秒；只有持管理 Token 的多维表格自动化会写选项行，
-  /// 所以它就是「这行选项最后一次被推送的时间」。
+  /// 级联父键（裸 `option_id`）；无父时为空串。
+  ///
+  /// 界面拿它显示「这条选项挂在哪个父项下」。级联配错时，一个孤零零的子项
+  /// 会在这里暴露出来——比只看到「选项少了几条」好排查得多。
+  parentKey: string | null;
+  /// unix 秒；这行选项最后一次被**写入**的时间。
+  ///
+  /// **不要拿它当「推送还活着吗」的信号**：两条写入路径（多维表格推送、服务端拉取）
+  /// 都会改它。存活信号是 `lastPushAt`。
   updatedAt: number;
+  /// unix 秒；只有写入路径会写它，从未被写入过的行为 null。
+  lastPushAt: number | null;
 };
 
 /// 分页响应：`total` 只在请求带 `count_total: true` 时非 null。
@@ -237,3 +331,68 @@ export type TokenPrecheckResult =
       /// 接下来怎么办。
       hint: string;
     };
+
+/// 同步健康度：把 `DatasourceItem` 的同步状态折成一句可展示的判断。
+///
+/// 抽成纯函数是为了可测——这里的每一分支都对应一种**运维要采取不同动作**的情形，
+/// 把它们埋在 JSX 里就只能靠肉眼看。
+export type SyncHealth = {
+  tone: "positive" | "warning" | "info" | "neutral";
+  title: string;
+  detail: string;
+};
+
+export function syncHealth(item: DatasourceItem): SyncHealth {
+  // 停用优先于一切：一个停用的源不参与拉取，它的失败计数停在哪里都不代表现状。
+  if (item.status === "disabled") {
+    return {
+      tone: "neutral",
+      title: "已停用",
+      detail:
+        "数据源处于停用状态，不参与拉取。下面的时间是它停用前的最后一次记录。",
+    };
+  }
+
+  if (asIngestMode(item.ingestMode) !== "pull") {
+    return {
+      tone: "info",
+      title: "由多维表格推送",
+      detail:
+        "这个数据源靠多维表格自动化工作流推送选项，服务端不主动出网，因此没有同步状态可看。推送是否还活着，只能去那张多维表格的自动化日志里确认。",
+    };
+  }
+
+  if (!hasCompleteCoordinates(item)) {
+    return {
+      tone: "warning",
+      title: "坐标不完整，不会被拉取",
+      detail:
+        "定时拉取需要 Base Token、数据表 ID 与取数列字段名三项齐备。缺任何一项，服务端每轮都会跳过这个数据源。",
+    };
+  }
+
+  if (item.consecutiveFailures > 0) {
+    return {
+      tone: "warning",
+      title: `连续失败 ${item.consecutiveFailures} 次`,
+      detail:
+        "这个计数只在整轮成功时清零，所以它一直涨就代表「一直没成功过」。最近一次的错误原文见下方。",
+    };
+  }
+
+  if (item.lastSuccessAt === null) {
+    return {
+      tone: "info",
+      title: "尚未同步过",
+      detail:
+        "坐标已配齐但还没跑过一轮。服务端启动后会立刻拉一次，之后按配置的间隔轮询。",
+    };
+  }
+
+  return {
+    tone: "positive",
+    title: "同步正常",
+    detail:
+      "最近一轮同步成功。拉取间隔由服务端的 feishu.pull_interval_seconds 决定。",
+  };
+}

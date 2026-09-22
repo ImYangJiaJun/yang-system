@@ -32,6 +32,7 @@ import { DatasourceCardGrid } from "../components/DatasourceCardGrid";
 import {
   DatasourceFormDialog,
   type DatasourceFormSubmission,
+  type DatasourceCoordinatesFormValue,
 } from "../components/DatasourceFormDialog";
 import { DatasourceLedger } from "../components/DatasourceLedger";
 import { ListPagination } from "../components/ListPagination";
@@ -41,6 +42,7 @@ import {
   type TokenPrecheckMode,
 } from "../components/TokenPrecheckNotice";
 import { useListQuery } from "../list-query";
+import { asIngestMode } from "../types";
 import type { DatasourceItem, TokenPrecheckResult } from "../types";
 
 /// 四步指引（设计 §5.5 的四步原文）：只写「去哪做、填什么」，不写接口路径与字段名。
@@ -78,6 +80,8 @@ type RenameTarget = {
   /// 这种取值域以外的值，而它正是「所有语言下控件都取不到文案」的元凶。归一化会变成
   /// 未经确认地改写用户数据；对话框那边会让它留空、由用户显式选一项修好。
   defaultLocale?: string;
+  /// 坐标现值。与上面两项同一取舍：**只有读得到真实记录时才给**，给了才渲染坐标区。
+  coordinates?: DatasourceCoordinatesFormValue;
 };
 
 type FormTarget = { mode: "create" } | ({ mode: "rename" } & RenameTarget);
@@ -89,6 +93,16 @@ function renameTargetOf(item: DatasourceItem): RenameTarget {
     title: item.title,
     encryptEnabled: item.encryptEnabled,
     defaultLocale: item.defaultLocale,
+    // 空值统一折成空串：对话框里空串表示「清空该坐标」，而 `null` 与「没这个键」
+    // 在受控输入里都会退化成非受控，必须给一个确定的字符串。
+    coordinates: {
+      ingestMode: asIngestMode(item.ingestMode) ?? "push",
+      bitableBaseToken: item.bitableBaseToken ?? "",
+      bitableTableId: item.bitableTableId ?? "",
+      bitableViewId: item.bitableViewId ?? "",
+      bitableFieldName: item.bitableFieldName ?? "",
+      linkageMapping: item.linkageMapping ?? "",
+    },
   };
 }
 
@@ -302,6 +316,7 @@ export default function DatasourceListPage() {
             token: submission.token,
             encryptEnabled: submission.encryptEnabled,
             defaultLocale: submission.defaultLocale,
+            coordinates: submission.coordinates,
           });
           setFormTarget(null);
           await refreshList();
@@ -339,6 +354,11 @@ export default function DatasourceListPage() {
           ...(submission.defaultLocale === undefined
             ? {}
             : { defaultLocale: submission.defaultLocale }),
+          // 坐标区没渲染就不带（同上）；渲染了就整组带上——**空串是要发的**，
+          // 它表示「清空这个坐标」，而你刻意清空一个填错的值是合法操作。
+          ...(submission.coordinates === undefined
+            ? {}
+            : { coordinates: submission.coordinates }),
         });
         setFormTarget(null);
         // 重命名可能让这一行不再命中当前搜索词：结果集可能收缩。
@@ -555,6 +575,7 @@ export default function DatasourceListPage() {
         initialTitle={renameTarget?.title ?? ""}
         initialEncryptEnabled={renameTarget?.encryptEnabled}
         initialDefaultLocale={renameTarget?.defaultLocale}
+        initialCoordinates={renameTarget?.coordinates}
         pending={createPending || updatePending}
         serverError={formError}
         onSubmit={submitForm}

@@ -250,6 +250,19 @@ describe("listDatasources", () => {
         defaultLocale: "zh_cn",
         status: "disabled",
         updatedAt: 1758000000,
+        // 取数配置与同步状态：fixture 里没有这些键（模拟一个只按 push 用的存量
+        // 数据源），所以全部落到「空」而不是被猜成某个值。
+        ingestMode: "",
+        bitableBaseToken: null,
+        bitableTableId: null,
+        bitableViewId: null,
+        bitableFieldName: null,
+        linkageMapping: null,
+        lastPullAt: null,
+        lastSuccessAt: null,
+        consecutiveFailures: 0,
+        lastError: null,
+        snapshotDigest: null,
       },
     ]);
   });

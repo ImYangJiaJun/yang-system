@@ -86,13 +86,13 @@ describe("飞书数据源详情页 · 只读选项表", () => {
     expect(screen.queryByText('{"en_us":"Travel"}')).toBeNull();
   });
 
-  it("点「最近推送」列头切换排序方向", async () => {
+  it("点「最近写入」列头切换排序方向", async () => {
     const user = userEvent.setup();
     const calls = stubFeishuApi({ optionList: () => listPage(TWO_OPTIONS) });
     renderDetail();
 
     await user.click(
-      await screen.findByRole("button", { name: "按最近推送排序" }),
+      await screen.findByRole("button", { name: "按最近写入排序" }),
     );
 
     await waitFor(() => {

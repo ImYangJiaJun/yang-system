@@ -7,16 +7,19 @@
  *    （两个可写入口会让审计语义与数据来源分叉）。所以页面顶部那条说明不是装饰，
  *    它得同时说清「选项从哪来」与两级「停用」的区别——后者最容易在排查时被混淆：
  *    数据源级停用是整个控件取不到选项，选项级停用只影响那一条，且后端是禁用而非删除。
- * 2. **「最近推送」列默认倒序**（`updated_at`）：只有持管理 Token 的多维表格自动化
- *    会写选项行，所以那一列就是「这条推送还活着吗」唯一诚实的信号。列头可切换方向；
- *    去重键 `option_id` 恒作收尾，否则同一批推送写出的同一个 unix 秒会让翻页重复或漏行。
+ * 2. **「最近写入」列默认倒序**（`updated_at`）。这一列的语义是「这行选项最后一次被
+ *    写是什么时候」，**不是**「推送还活着吗」——出站拉取同样会写这些行，两条路径都会
+ *    改 `updated_at`。判断某个数据源的同步是否还活着，看上面「同步」区里的
+ *    `lastSuccessAt` 与 `consecutiveFailures`。
+ *    去重键 `option_id` 恒作收尾，否则同一批写入落下的同一个 unix 秒会让翻页重复或漏行。
  * 3. **缺 `feishu.option.read` 是 403 态而不是空列表**：三个权限位彼此独立，存在
  *    「能看数据源、看不到选项」这种身份，也存在**两粒都没有**的身份——
  *    后者连「可以看数据源本身」都不成立，所以 403 文案按实际拿到的权限分两句说。
  *    那时选项区是空的，但**不代表真的没有选项**，绝不能渲染成「0 选项」。
- * 4. **反过来，选项为空也不能断言数据源是好的**：本页只从路由拿到 `sourceKey`，
- *    没有取单条数据源的 Action，服务端的选项查询对不存在的 `source_key` 也只回空结果集。
- *    「数据源不存在」与「还没有选项」在这里不可分辨，界面因此只说「这一页没有选项」。
+ * 4. **选项为空不能断言数据源是好的**：服务端的选项查询对不存在的 `source_key`
+ *    也只回空结果集。本页额外拉一次数据源列表并按 `sourceKey` 取精确匹配，因此
+ *    「取到了这条数据源」与「没取到」是可分辨的——后者会让同步区明说「查不到这条数据源」，
+ *    而不是与「还没有选项」混为一谈。
  */
 
 import { useMemo, useState } from "react";
@@ -44,14 +47,26 @@ import {
 
 import {
   DEFAULT_OPTION_ORDER_BY,
+  useDatasourceList,
   useFeishuActions,
   useOptionList,
 } from "../api";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { DEFAULT_PAGE_SIZE } from "../list-query";
-import type { OptionItem, OptionListQuery, OrderByClause } from "../types";
-import { formatUnixSeconds, localeLabel } from "../types";
+import type {
+  DatasourceItem,
+  OptionItem,
+  OptionListQuery,
+  OrderByClause,
+} from "../types";
+import {
+  formatUnixSeconds,
+  hasCompleteCoordinates,
+  ingestModeLabel,
+  localeLabel,
+  syncHealth,
+} from "../types";
 
 const SKELETON_ROWS = 5;
 
@@ -110,9 +125,9 @@ function SortableHeader({
       type="button"
       className="inline-flex items-center gap-1 rounded-sm font-medium focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:outline-none"
       onClick={() => onSort("updated_at")}
-      aria-label="按最近推送排序"
+      aria-label="按最近写入排序"
     >
-      最近推送
+      最近写入
       <Icon className="size-3.5 text-muted-foreground" aria-hidden="true" />
     </button>
   );
@@ -136,6 +151,24 @@ export default function DatasourceDetailPage() {
   const optionsQuery = useOptionList(query);
   const items = optionsQuery.data?.items ?? [];
   const total = optionsQuery.data?.total ?? null;
+
+  // 这条数据源本身。取数方式与同步状态都挂在它上面，而本页只从路由拿到 sourceKey
+  // ——没有「取单条数据源」的 Action，所以借列表端点并**在本地取精确匹配**：
+  // 服务端的 search 是模糊的（LIKE 命中 source_key 或 title），可能带回别的行。
+  const datasourceListQuery = useMemo(
+    () => ({
+      page: 1,
+      pageSize: 50,
+      search: sourceKey,
+      status: "all" as const,
+      orderBy: [{ field: "source_key", direction: "Asc" as const }],
+    }),
+    [sourceKey],
+  );
+  const datasourceQuery = useDatasourceList(datasourceListQuery);
+  const datasource: DatasourceItem | null =
+    datasourceQuery.data?.items.find((item) => item.sourceKey === sourceKey) ??
+    null;
 
   function toggleSort(field: string) {
     setOrderBy((previous) => {
@@ -179,6 +212,23 @@ export default function DatasourceDetailPage() {
         <span className="font-medium">选项级停用</span>
         （下面状态列里的「已停用」）只影响那一条，而且后端是把它禁用而不是删除，改回来就恢复。
       </p>
+
+      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+        <h2 className="text-base font-medium">同步</h2>
+        {sourceKey === "" ? (
+          <p className={NEUTRAL_BAR}>
+            地址里没有数据源标识，无法确定要看哪一个数据源。
+          </p>
+        ) : datasourceQuery.isPending ? (
+          <Skeleton className="h-24 w-full" />
+        ) : datasource === null ? (
+          <p aria-live="polite" className={NEUTRAL_BAR}>
+            查不到这条数据源——它可能已被删除，或者当前身份读不到它。
+          </p>
+        ) : (
+          <SyncPanel item={datasource} />
+        )}
+      </section>
 
       <section className="space-y-3 rounded-xl border border-border bg-card p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -380,5 +430,57 @@ function OptionTable({
         })}
       </TableBody>
     </Table>
+  );
+}
+
+/// 同步状态面板。
+///
+/// 判定逻辑在 `types.ts` 的 `syncHealth` 里（纯函数、可单测）——这里只负责呈现。
+/// 分工的理由：那几个分支各对应一种**运维要采取不同动作**的情形，埋在 JSX 里
+/// 就只能靠肉眼看，而它们恰恰是最容易在改动中被无声破坏的。
+function SyncPanel({ item }: { item: DatasourceItem }) {
+  const health = syncHealth(item);
+  const rows: Array<[string, string]> = [
+    ["取数方式", ingestModeLabel(item.ingestMode)],
+    ["Base Token", item.bitableBaseToken ?? "—"],
+    ["数据表 ID", item.bitableTableId ?? "—"],
+    ["视图 ID", item.bitableViewId ?? "—"],
+    ["取数列", item.bitableFieldName ?? "—"],
+    ["最近成功同步", formatUnixSeconds(item.lastSuccessAt ?? 0)],
+    ["最近尝试拉取", formatUnixSeconds(item.lastPullAt ?? 0)],
+  ];
+  if (item.bitableFieldName !== null && !hasCompleteCoordinates(item)) {
+    rows.push(["提示", "坐标不全，服务端每轮都会跳过这个数据源"]);
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge tone={health.tone}>{health.title}</StatusBadge>
+        <span className="text-xs text-muted-foreground">{health.detail}</span>
+      </div>
+
+      <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex min-w-0 justify-between gap-3">
+            <dt className="shrink-0 text-muted-foreground">{label}</dt>
+            <dd className="truncate font-mono text-xs" title={value}>
+              {value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      {item.lastError !== null ? (
+        <div className="space-y-1">
+          <h3 className="text-xs font-medium text-muted-foreground">
+            最近一次错误
+          </h3>
+          <pre className="max-h-40 overflow-auto rounded-md border border-border bg-muted/50 p-2 text-xs whitespace-pre-wrap">
+            {item.lastError}
+          </pre>
+        </div>
+      ) : null}
+    </div>
   );
 }

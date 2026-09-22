@@ -186,6 +186,16 @@ describe("DatasourceFormDialog · 新建", () => {
       token: "t-1",
       encryptEnabled: true,
       defaultLocale: "zh_cn",
+      // 没填坐标时提交的是一组空值 + 默认取数方式，而不是省略整个键：
+      // 新建必须把「取数方式」明确写下来，否则用户以为选了 push 而库里是别的值。
+      coordinates: {
+        ingestMode: "push",
+        bitableBaseToken: "",
+        bitableTableId: "",
+        bitableViewId: "",
+        bitableFieldName: "",
+        linkageMapping: "",
+      },
     });
   });
 
@@ -407,5 +417,142 @@ describe("DatasourceFormDialog · 编辑态也能改「加密返回 / 默认语�
       sourceKey: "dept_sales",
       title: "部门",
     });
+  });
+});
+
+describe("DatasourceFormDialog · 取数与坐标", () => {
+  it("选了定时拉取但坐标不全时拒绝提交，并说明缺什么", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
+    render(
+      <DatasourceFormDialog
+        open
+        mode="create"
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("数据源标识"), "fx_rate");
+    await user.type(screen.getByLabelText("名称"), "汇率");
+    await user.type(screen.getByLabelText("接口 Token"), "t-1");
+    // 切到定时拉取，但只填一个坐标
+    await user.click(screen.getByLabelText("取数方式"));
+    await user.click(await screen.findByRole("option", { name: "定时拉取" }));
+    await user.type(
+      screen.getByLabelText("Base Token"),
+      "ZoCWb82JQaCCiAspCqbcUvlsnwg",
+    );
+    await user.click(screen.getByRole("button", { name: "创建数据源" }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText(/三项齐备/)).toBeInTheDocument();
+  });
+
+  it("坐标齐备时提交出完整的 coordinates", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
+    render(
+      <DatasourceFormDialog
+        open
+        mode="create"
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("数据源标识"), "fx_rate");
+    await user.type(screen.getByLabelText("名称"), "汇率");
+    await user.type(screen.getByLabelText("接口 Token"), "t-1");
+    await user.click(screen.getByLabelText("取数方式"));
+    await user.click(await screen.findByRole("option", { name: "定时拉取" }));
+    await user.type(
+      screen.getByLabelText("Base Token"),
+      "ZoCWb82JQaCCiAspCqbcUvlsnwg",
+    );
+    await user.type(screen.getByLabelText("数据表 ID"), "tblauuOafa4acvT3");
+    await user.type(
+      screen.getByLabelText("取数列字段名"),
+      "费用大类/Main Exp Cat*",
+    );
+    await user.click(screen.getByRole("button", { name: "创建数据源" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        coordinates: expect.objectContaining({
+          ingestMode: "pull",
+          bitableBaseToken: "ZoCWb82JQaCCiAspCqbcUvlsnwg",
+          bitableTableId: "tblauuOafa4acvT3",
+          bitableFieldName: "费用大类/Main Exp Cat*",
+        }),
+      }),
+    );
+  });
+
+  it("联动映射不是 JSON 对象时拒绝提交", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
+    render(
+      <DatasourceFormDialog
+        open
+        mode="create"
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("数据源标识"), "fx_rate");
+    await user.type(screen.getByLabelText("名称"), "汇率");
+    await user.type(screen.getByLabelText("接口 Token"), "t-1");
+    // `user.type` 会把 `[` 当成按键描述符解析，JSON 里有方括号 —— 改用 paste。
+    const linkage = screen.getByLabelText("联动映射（可选）");
+    await user.click(linkage);
+    await user.paste("[1,2]");
+    await user.click(screen.getByRole("button", { name: "创建数据源" }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText(/必须是一个 JSON 对象/)).toBeInTheDocument();
+  });
+
+  it("编辑态不给初值时不渲染坐标区（不拿猜的坐标覆盖服务端）", () => {
+    render(
+      <DatasourceFormDialog
+        open
+        mode="rename"
+        initialSourceKey="dept_sales"
+        initialTitle="部门"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.queryByLabelText("取数方式")).not.toBeInTheDocument();
+  });
+
+  it("编辑态给了初值就渲染，且用现值填充", () => {
+    render(
+      <DatasourceFormDialog
+        open
+        mode="rename"
+        initialSourceKey="fx_rate"
+        initialTitle="汇率"
+        initialCoordinates={{
+          ingestMode: "pull",
+          bitableBaseToken: "ZoCWb82JQaCCiAspCqbcUvlsnwg",
+          bitableTableId: "tblauuOafa4acvT3",
+          bitableViewId: "",
+          bitableFieldName: "汇率/Exchange Rate",
+          linkageMapping: "",
+        }}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("取数方式")).toBeInTheDocument();
+    expect(screen.getByLabelText("Base Token")).toHaveValue(
+      "ZoCWb82JQaCCiAspCqbcUvlsnwg",
+    );
+    expect(screen.getByLabelText("取数列字段名")).toHaveValue(
+      "汇率/Exchange Rate",
+    );
   });
 });

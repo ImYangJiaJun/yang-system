@@ -36,6 +36,7 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import { Textarea } from "@/shared/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -44,11 +45,14 @@ import {
   SelectValue,
 } from "@/shared/ui/select";
 
-import type { DefaultLocale } from "../types";
+import type { DefaultLocale, IngestMode } from "../types";
 import {
   DEFAULT_LOCALE,
   DEFAULT_LOCALE_OPTIONS,
+  INGEST_MODE_OPTIONS,
   asDefaultLocale,
+  asIngestMode,
+  hasCompleteCoordinates,
 } from "../types";
 
 export type DatasourceFormMode = "create" | "rename";
@@ -62,6 +66,7 @@ export type DatasourceFormSubmission =
       token: string;
       encryptEnabled: boolean;
       defaultLocale: DefaultLocale;
+      coordinates: DatasourceCoordinatesFormValue;
     }
   | {
       mode: "rename";
@@ -72,7 +77,20 @@ export type DatasourceFormSubmission =
       /// 省略 = 保持原值，绝不拿一个猜的值写回去）。
       encryptEnabled?: boolean;
       defaultLocale?: DefaultLocale;
+      /// 同上：只有 `initialCoordinates` 给了才带上。
+      coordinates?: DatasourceCoordinatesFormValue;
     };
+
+/// 坐标表单值。全部是**字符串**——空串在这里是有意义的（表示清空该坐标），
+/// 与 `undefined`（整个坐标区没渲染）是两回事。
+export type DatasourceCoordinatesFormValue = {
+  ingestMode: IngestMode;
+  bitableBaseToken: string;
+  bitableTableId: string;
+  bitableViewId: string;
+  bitableFieldName: string;
+  linkageMapping: string;
+};
 
 export type DatasourceFormDialogProps = {
   open: boolean;
@@ -87,6 +105,9 @@ export type DatasourceFormDialogProps = {
   /// （例如 `zh-CN`）——认得出来就作为三选一的选中项，认不出就留空让用户显式改，
   /// 界面对它既不猜也不替换。完全取不到（回执入口没找到那一行）时不给，控件不渲染。
   initialDefaultLocale?: string;
+  /// 编辑态坐标的现值。**取不到就别给**——与「加密返回」同一取舍：给了才渲染这一区，
+  /// 不给就不渲染，避免拿一份猜的坐标覆盖服务端。
+  initialCoordinates?: DatasourceCoordinatesFormValue;
   pending?: boolean;
   /// 服务端拒绝类错误：**直接回显后端原文**（例如「数据源不存在」）。
   serverError?: string | null;
@@ -124,11 +145,13 @@ type FieldErrors = {
   sourceKey?: string;
   title?: string;
   token?: string;
+  coordinates?: string;
 };
 
 function validate(
   mode: DatasourceFormMode,
   values: { sourceKey: string; title: string; token: string },
+  coordinates: DatasourceCoordinatesFormValue | undefined,
 ): FieldErrors {
   const errors: FieldErrors = {};
   const title = values.title.trim();
@@ -141,7 +164,46 @@ function validate(
   if (mode === "create" && values.token.trim() === "") {
     errors.token = "接口 Token 不能为空";
   }
+  if (coordinates !== undefined) {
+    // 与后端同一判据（`validate_coordinates`）：**只在选了 pull 时**要求三件齐备。
+    // 对 push 源强制要求坐标会把存量用法堵死。
+    if (
+      coordinates.ingestMode === "pull" &&
+      !hasCompleteCoordinates({
+        bitableBaseToken: coordinates.bitableBaseToken,
+        bitableTableId: coordinates.bitableTableId,
+        bitableFieldName: coordinates.bitableFieldName,
+      })
+    ) {
+      errors.coordinates =
+        "定时拉取需要 Base Token、数据表 ID 与取数列字段名三项齐备，缺任何一个都拉不起来。";
+    }
+    const linkage = coordinates.linkageMapping.trim();
+    if (linkage !== "") {
+      // 与后端同判据：只校验形状是 JSON 对象。内容对不对由拉取时的解析决定，
+      // 那里解析不出来只会降级为「无级联」并告警，不会打挂整条链路。
+      errors.coordinates = linkageLooksLikeObject(linkage)
+        ? errors.coordinates
+        : '联动映射必须是一个 JSON 对象，形如 {"控件代码":{"parent_source_key":…}}。';
+    }
+  }
   return errors;
+}
+
+/// 形状判断：必须是 JSON 对象字面量。
+///
+/// 这里**刻意不 `JSON.parse`**：那段文本用户可能正打到一半，一按键就报「不是合法 JSON」
+/// 会很吵。只在提交时做一次形状检查，把明显的错（忘了大括号、写成了数组）挡下来。
+function linkageLooksLikeObject(text: string): boolean {
+  if (!text.startsWith("{") || !text.endsWith("}")) return false;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return (
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function DatasourceFormDialog({
@@ -151,12 +213,17 @@ export function DatasourceFormDialog({
   initialTitle = "",
   initialEncryptEnabled,
   initialDefaultLocale,
+  initialCoordinates,
   pending = false,
   serverError = null,
   onSubmit,
   onCancel,
 }: DatasourceFormDialogProps) {
   const fieldId = useId();
+  // 坐标区**只在拿到现值时渲染**（与「加密返回」同一取舍：能改的前提是界面知道现状）。
+  // 新建态恒渲染：没有现值可丢，让用户一次填完。
+  const coordinatesEditable =
+    mode === "create" || initialCoordinates !== undefined;
   const [sourceKey, setSourceKey] = useState(initialSourceKey);
   const [title, setTitle] = useState(initialTitle);
   const [token, setToken] = useState("");
@@ -167,6 +234,27 @@ export function DatasourceFormDialog({
     localeSelection(mode, initialDefaultLocale),
   );
   const [submitted, setSubmitted] = useState(false);
+  // 存量值收敛到取值域内。**这里可以放心回退到 push，而 `defaultLocale` 不行**：
+  // 取数方式是后端 Radio 列 + 校验过的，不可能出现取值域以外的值；而 `default_locale`
+  // 后端零校验（见 `types.ts` 的 `asDefaultLocale`），静默替换会改写用户数据。
+  const [ingestMode, setIngestMode] = useState<IngestMode>(
+    asIngestMode(initialCoordinates?.ingestMode ?? "") ?? "push",
+  );
+  const [bitableBaseToken, setBitableBaseToken] = useState(
+    initialCoordinates?.bitableBaseToken ?? "",
+  );
+  const [bitableTableId, setBitableTableId] = useState(
+    initialCoordinates?.bitableTableId ?? "",
+  );
+  const [bitableViewId, setBitableViewId] = useState(
+    initialCoordinates?.bitableViewId ?? "",
+  );
+  const [bitableFieldName, setBitableFieldName] = useState(
+    initialCoordinates?.bitableFieldName ?? "",
+  );
+  const [linkageMapping, setLinkageMapping] = useState(
+    initialCoordinates?.linkageMapping ?? "",
+  );
 
   // 打开时按初值重置。依赖全是基本类型——传对象字面量会让 effect 每次渲染都跑。
   useEffect(() => {
@@ -186,12 +274,24 @@ export function DatasourceFormDialog({
     initialDefaultLocale,
   ]);
 
-  const errors = validate(mode, { sourceKey, title, token });
+  const coordinateValues: DatasourceCoordinatesFormValue | undefined =
+    coordinatesEditable
+      ? {
+          ingestMode,
+          bitableBaseToken,
+          bitableTableId,
+          bitableViewId,
+          bitableFieldName,
+          linkageMapping,
+        }
+      : undefined;
+  const errors = validate(mode, { sourceKey, title, token }, coordinateValues);
   const hasErrors = Object.keys(errors).length > 0;
   const showSourceKeyError = submitted && errors.sourceKey !== undefined;
   const showTitleError =
     (submitted || title !== "") && errors.title !== undefined;
   const showTokenError = submitted && errors.token !== undefined;
+  const showCoordinatesError = submitted && errors.coordinates !== undefined;
   // 两项各自开关：知道现状才渲染（见 props 上的说明），互不牵连——
   // 默认语言是取值域外的值，不该连带把「加密返回」也锁住。
   const encryptEditable =
@@ -217,6 +317,17 @@ export function DatasourceFormDialog({
         encryptEnabled,
         // 新建时恒有选中项（`localeSelection` 从 zh_cn 起）
         defaultLocale: defaultLocale ?? DEFAULT_LOCALE,
+        // 新建时恒有坐标值（`coordinatesEditable` 在 create 态为真）
+        coordinates:
+          coordinateValues ??
+          ({
+            ingestMode: "push",
+            bitableBaseToken: "",
+            bitableTableId: "",
+            bitableViewId: "",
+            bitableFieldName: "",
+            linkageMapping: "",
+          } satisfies DatasourceCoordinatesFormValue),
       });
       return;
     }
@@ -230,6 +341,11 @@ export function DatasourceFormDialog({
       // 没渲染（或没选）就不发：省略 = 保持原值，正好对上「不知道现状就别动它」
       ...(encryptEditable ? { encryptEnabled } : {}),
       ...(defaultLocale === null ? {} : { defaultLocale }),
+      // 与上面两条同一取舍：只有渲染了坐标区才带上。**空串在这里是要发的**
+      // ——它表示「清空这个坐标」，而你刻意清空一个填错的值是合法操作。
+      ...(coordinateValues === undefined
+        ? {}
+        : { coordinates: coordinateValues }),
     });
   }
 
@@ -390,6 +506,136 @@ export function DatasourceFormDialog({
                 </p>
               ) : null}
             </div>
+          ) : null}
+
+          {coordinatesEditable ? (
+            <fieldset className="space-y-3 rounded-md border border-border p-3">
+              <legend className="px-1 text-sm font-medium">取数与坐标</legend>
+              {/* 两列：六个字段竖排会把对话框撑到比视口还高，而这一区只有
+                  「取数方式」与「联动映射」需要整行。 */}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label htmlFor={`${fieldId}-ingest-mode`}>取数方式</Label>
+                  <Select
+                    value={ingestMode}
+                    onValueChange={(value) =>
+                      setIngestMode(value as IngestMode)
+                    }
+                  >
+                    <SelectTrigger
+                      id={`${fieldId}-ingest-mode`}
+                      className="w-full"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {INGEST_MODE_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {INGEST_MODE_OPTIONS.find(
+                      (option) => option.value === ingestMode,
+                    )?.hint ?? "认不出的取数方式，保存前请改成上面两项之一。"}
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${fieldId}-base-token`}>Base Token</Label>
+                  <Input
+                    id={`${fieldId}-base-token`}
+                    value={bitableBaseToken}
+                    onChange={(event) =>
+                      setBitableBaseToken(event.target.value)
+                    }
+                    className="font-mono"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="feishu.cn/base/ 后面那一段"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${fieldId}-table-id`}>数据表 ID</Label>
+                  <Input
+                    id={`${fieldId}-table-id`}
+                    value={bitableTableId}
+                    onChange={(event) => setBitableTableId(event.target.value)}
+                    className="font-mono"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="tbl 开头"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${fieldId}-view-id`}>视图 ID</Label>
+                  <Input
+                    id={`${fieldId}-view-id`}
+                    value={bitableViewId}
+                    onChange={(event) => setBitableViewId(event.target.value)}
+                    className="font-mono"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="留空表示取全表"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${fieldId}-field-name`}>取数列字段名</Label>
+                  <Input
+                    id={`${fieldId}-field-name`}
+                    value={bitableFieldName}
+                    onChange={(event) =>
+                      setBitableFieldName(event.target.value)
+                    }
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="例如 费用大类/Main Exp Cat*"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    必须与多维表格里的字段名
+                    <span className="font-medium">完全一致</span>
+                    。填字段 ID 不行——接口按名字匹配，填错会得到「字段名不存在」
+                    （1254024）。
+                  </p>
+                </div>
+
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label htmlFor={`${fieldId}-linkage`}>联动映射（可选）</Label>
+                  <Textarea
+                    id={`${fieldId}-linkage`}
+                    value={linkageMapping}
+                    onChange={(event) => setLinkageMapping(event.target.value)}
+                    className="font-mono text-xs"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="留空 = 这个数据源没有级联"
+                    aria-invalid={showCoordinatesError}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    只有需要「选完父级再选子级」时才填，三个成员缺一不可：
+                    <span className="font-mono">
+                      {
+                        '{"<联动控件代码>":{"parent_source_key":"…","parent_field":"…","cascade_field":"…"}}'
+                      }
+                    </span>
+                  </p>
+                </div>
+
+                {showCoordinatesError ? (
+                  <p
+                    role="alert"
+                    className="text-xs text-destructive sm:col-span-2"
+                  >
+                    {errors.coordinates}
+                  </p>
+                ) : null}
+              </div>
+            </fieldset>
           ) : null}
 
           {mode === "rename" && !encryptEditable && !localeEditable ? (

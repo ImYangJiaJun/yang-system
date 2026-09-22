@@ -29,6 +29,25 @@ pub(super) struct DatasourceItem {
     /// 注意它**不是**「选项的最后推送时间」——那个在 `list_options` 的
     /// `updated_at` 上。这里回答的是「这条数据源记录最后一次被改动是什么时候」。
     updated_at: i64,
+    /// 取数方式：`push`（多维表格工作流推送）/ `pull`（服务端定时拉取）。
+    ingest_mode: String,
+    /// 多维表格坐标。`push` 数据源这三项为空。
+    bitable_base_token: Option<String>,
+    bitable_table_id: Option<String>,
+    bitable_view_id: Option<String>,
+    /// 取数列的**精确字段名**（接口要名字不要 field_id）。
+    bitable_field_name: Option<String>,
+    /// 级联映射（JSON 文本）；无级联时为 None。
+    linkage_mapping: Option<String>,
+    /// 同步状态。控制台靠这四个值判断「这个源还活着吗」。
+    ///
+    /// `last_success_at` 是唯一诚实的存活信号：`updated_at` 只在整行被写时变，
+    /// 而「拉了一轮但内容没变」不会写它。
+    last_pull_at: Option<i64>,
+    last_success_at: Option<i64>,
+    consecutive_failures: i64,
+    last_error: Option<String>,
+    snapshot_digest: Option<String>,
 }
 
 /// 注册数据源列表端点。
@@ -65,6 +84,17 @@ pub(super) async fn handle(
             "default_locale",
             "status",
             "updated_at",
+            "ingest_mode",
+            "bitable_base_token",
+            "bitable_table_id",
+            "bitable_view_id",
+            "bitable_field_name",
+            "linkage_mapping",
+            "last_pull_at",
+            "last_success_at",
+            "consecutive_failures",
+            "last_error",
+            "snapshot_digest",
         ])?
         .search(input.search.as_deref())?;
 
@@ -100,6 +130,17 @@ pub(super) async fn handle(
                 default_locale: record.optional("default_locale")?.unwrap_or_default(),
                 status: record.require("status")?,
                 updated_at: record.require("updated_at")?,
+                ingest_mode: record.optional("ingest_mode")?.unwrap_or_default(),
+                bitable_base_token: record.optional("bitable_base_token")?,
+                bitable_table_id: record.optional("bitable_table_id")?,
+                bitable_view_id: record.optional("bitable_view_id")?,
+                bitable_field_name: record.optional("bitable_field_name")?,
+                linkage_mapping: record.optional("linkage_mapping")?,
+                last_pull_at: record.optional("last_pull_at")?,
+                last_success_at: record.optional("last_success_at")?,
+                consecutive_failures: record.optional("consecutive_failures")?.unwrap_or(0),
+                last_error: record.optional("last_error")?,
+                snapshot_digest: record.optional("snapshot_digest")?,
             })
         })
         .collect::<Result<Vec<_>, BaseError>>()?;

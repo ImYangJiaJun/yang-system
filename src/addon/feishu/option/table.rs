@@ -77,9 +77,11 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             // 而 `created_at` 是框架自动写的、不可覆盖 —— 首轮播种需要人工指定，
             // 所以必须落在独立列上。
             effective_from => Timestamp::new().title("生效期"),
-            // 「这行选项最后一次被推送/拉取写入」的时间。`updated_at` 做不到这件事：
-            // 它只在 UPDATE 时变，而补集停用之外的写入也可能不改它，控制台需要一个
-            // 诚实的同步存活信号。
+            // 出站拉取路径写入的「这行选项最后一次被拉进来」的时间。
+            //
+            // 与 `updated_at` 的分工：`updated_at` 由框架在任何 UPDATE 时写，两条写入
+            // 路径都会改它；`last_push_at` 只由本服务显式写。入站 upsert 路径目前不写
+            // 它（那批走「合并且省略即保持」的语义），所以推送型数据源这列为空。
             last_push_at => Timestamp::new().title("最近推送时间"),
             // JSON 文本：预留联动筛选键值
             extra => Text::new().title("扩展字段"),
@@ -176,15 +178,15 @@ mod tests {
     }
 
     #[test]
-    fn updated_at_is_sortable_so_the_detail_page_can_order_by_last_push() {
-        // 详情页默认按「最近推送」倒序：只有持管理 Token 的多维表格自动化会写选项行，
-        // 所以 updated_at 就是那行选项最后一次被推送的时间，是控制台对
-        // 「推送还活着吗」唯一诚实的信号。排序位同样是 fail-closed。
+    fn updated_at_is_sortable_so_the_detail_page_can_order_by_last_write() {
+        // 详情页默认按「最近写入」倒序。注意这个语义**不是**「推送还活着吗」——
+        // 入站推送与出站拉取两条路径都会写这些行，两者都会改 updated_at。
+        // 同步存活看数据源行上的 last_success_at / consecutive_failures。
         let definition = definition();
         let updated_at = definition
             .field("updated_at")
             .unwrap_or_else(|| panic!("updated_at 字段必须存在"));
-        assert!(updated_at.is_sortable(), "按最近推送排序必须可用");
+        assert!(updated_at.is_sortable(), "按最近写入排序必须可用");
     }
 
     #[test]
