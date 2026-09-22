@@ -373,3 +373,62 @@ T1 → T2（加列）→ T4-4..T4-10（派生、摘要、补集停用、worker�
   「飞书 → 我们」时的报文，只能等 T8（飞书侧配好外部选项）之后由真实请求产生。
 - **补集停用 / 派生的真实行为**：探针只读一页、不写库。要验这些得配一个 `pull`
   数据源让 worker 真跑一轮（T6）。
+
+---
+
+# 实测记录（二）：拉取写路径端到端跑通（2026-09-23）
+
+在本地真实凭证下建了 `payment_currency`（`ingest_mode = pull`，坐标与字段名用探针
+实测解析出的精确值），让 worker 真跑。**这是出站写路径第一次真实执行。**
+
+## 第一轮：真实拉取 → 派生 → 落库
+
+| 判据 | 实测 |
+|---|---|
+| 数据源同步状态 | `last_success_at` 有值、`consecutive_failures` 归零、`last_error` 清空、`snapshot_digest` 写入 |
+| 落库行数 | 7，`sort_order` 0–6，`option_id = payment_currency:<hash12>`，`parent_key` 空，`enabled=true`，`last_push_at` 已写 |
+| **label 是否被 trim** | ✅ 末字符是汉字码点而不是 `\n`——探针发现的「飞书回传带尾随换行」被 `derive_options` 剥掉了 |
+| 读端闭环 | ✅ `code:0 success!`、7 项、`value=@i18n@<id>`、`i18nResources` 有 `zh_cn` 且键对得上 |
+| worker 审计 | ✅ `actor_type=system` / `actor_id=feishu-pull` / `action=feishu.pull_options` / after_summary `{option_count:7, outcome_code:"pulled", disabled_count:0}` |
+
+## 第二轮：摘要快路径
+
+内容未变 → 摘要相同且本地无已停用行 → **跳过写库**。判据是 7 行的 `last_push_at`
+**保持第一轮的时间戳不变**，而 `last_success_at` 照常前进：
+
+```
+round1  last_pull_at=1790092448  push_times=[1790092448]
+round2  last_pull_at=1790093354  push_times=[1790092448]   ← 未被重写
+```
+
+审计表里 `feishu.pull_options` **只有 1 条**——两轮跑了，只在真变化的那一轮追加，
+符合「审计只在真变化时追加」的契约。
+
+## 这一轮暴露的两个必败缺陷（已修，`8e82c6d`）
+
+第一轮其实是**失败**的，暴露出两处我自己写的框架上限越界：
+
+1. **`find_doomed` 写了 `.page(1, 20_000)`**。`TableQuery::page` 对超限是**拒绝**
+   而不是 clamp（上限 100），补集那一步每轮必败。
+2. **`find_foreign_option_owner` 把全部派生 id 一次性塞进 `where_in`**（上限 500），
+   派生结果可远多于 500，大源同样每轮必败。
+
+两条路径都要数据库，**单测到不了**。而同类缺陷本仓库已经犯过一次
+（`approval_options.rs:42` 注释里写着「曾经上线过，110 条单测全绿、端点全挂」）。
+已补编译期断言钉住上限。
+
+> 失败处理本身是对的：`consecutive_failures` 自增、`last_error` 落库、
+> `last_success_at` 保持 null、选项表一格没动。
+
+## 由此可关闭
+
+- **T6-1 的一半**：`payment_currency` 已建（真实坐标 + 精确字段名）。仍欠
+  `payment_fx_rate`（需先配 `linkage_mapping` 级联）。
+- **U8**（出站需给文档「添加文档应用」）：已配，读台账 Base 未出现 `1254302`。
+- 单选值形态（`string`）与 `field_names` 按名字——见上一节。
+
+## 仍未验证
+
+- **V4 `linkage_params` 真实报文**：需要飞书侧配好外部选项后由真实请求产生（T8）。
+- **补集停用的真实行为**：本轮没有补集（表原本是空的）。要验需要在台账里删掉一个
+  币种再看下一轮是否把它停用。
