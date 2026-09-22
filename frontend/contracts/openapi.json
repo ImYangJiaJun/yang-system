@@ -1828,6 +1828,38 @@
                 "additionalProperties": false,
                 "description": "新建数据源的输入契约。",
                 "properties": {
+                  "bitable_base_token": {
+                    "default": null,
+                    "description": "多维表格 app_token（URL 里 `feishu.cn/base/<这段>`）；`pull` 时必填。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_field_name": {
+                    "default": null,
+                    "description": "取数列的**精确字段名**（接口要名字不要 field_id）；`pull` 时必填。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_table_id": {
+                    "default": null,
+                    "description": "数据表 ID；`pull` 时必填。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_view_id": {
+                    "default": null,
+                    "description": "视图 ID；省略表示取全表。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "default_locale": {
                     "default": null,
                     "description": "默认语言。",
@@ -1841,6 +1873,22 @@
                     "description": "是否加密返回；需要服务端配置 `feishu.encryption_key`。",
                     "type": [
                       "boolean",
+                      "null"
+                    ]
+                  },
+                  "ingest_mode": {
+                    "default": null,
+                    "description": "取数方式：`push`（多维表格工作流推送，默认）/ `pull`（服务端定时拉取）。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "linkage_mapping": {
+                    "default": null,
+                    "description": "级联映射（JSON 文本）。声明本数据源是某个父数据源的子集时给出。",
+                    "type": [
+                      "string",
                       "null"
                     ]
                   },
@@ -1985,6 +2033,38 @@
                 "additionalProperties": false,
                 "description": "更新数据源的输入契约。",
                 "properties": {
+                  "bitable_base_token": {
+                    "default": null,
+                    "description": "多维表格 app_token。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_field_name": {
+                    "default": null,
+                    "description": "取数列的**精确字段名**（接口要名字不要 field_id）。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_table_id": {
+                    "default": null,
+                    "description": "数据表 ID。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_view_id": {
+                    "default": null,
+                    "description": "视图 ID。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "default_locale": {
                     "default": null,
                     "description": "默认语言。",
@@ -1998,6 +2078,22 @@
                     "description": "是否加密返回。",
                     "type": [
                       "boolean",
+                      "null"
+                    ]
+                  },
+                  "ingest_mode": {
+                    "default": null,
+                    "description": "取数方式：`push` / `pull`；省略即保持原值。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "linkage_mapping": {
+                    "default": null,
+                    "description": "级联映射（JSON 文本）。",
+                    "type": [
+                      "string",
                       "null"
                     ]
                   },
