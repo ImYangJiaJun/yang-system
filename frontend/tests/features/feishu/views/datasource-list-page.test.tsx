@@ -374,7 +374,10 @@ describe("飞书数据源列表页 · 创建后的预检回执", () => {
     // 创建那一刻它还在（挂载 + 创建后回读各一次），随后别处删掉了它。
     let listCalls = 0;
     stubFeishuApi({
-      datasourceList: () => {
+      // 只数**列表页自己**的读取。父级候选那一份带 page_size=100（与页面的分页无关），
+      // 它不影响这里要断言的「回读之后结果集里还有没有那条」。
+      datasourceList: (body) => {
+        if (body.page_size === 100) return listPage([]);
         listCalls += 1;
         return listPage(
           listCalls <= 2

@@ -16,7 +16,6 @@
 
 use std::collections::HashSet;
 
-use serde::Deserialize;
 use yang_base::table::Record;
 use yang_base::BaseError;
 use yang_db::Database;
@@ -26,6 +25,7 @@ use super::bitable::{
 };
 use super::context::FeishuContext;
 use super::derive::{derive_options, snapshot_digest, DerivedOption, RawValue};
+use super::linkage::{parse_linkage_mapping, Linkage};
 use super::option_write::{
     apply_option_rows, count_option_rows, disable_option_rows, find_foreign_option_owner,
     OptionWriteItem,
@@ -86,25 +86,6 @@ pub(crate) struct PullSource {
     pub(crate) snapshot_digest: Option<String>,
 }
 
-/// 子数据源声明的级联关系。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Linkage {
-    /// 父数据源的 `source_key`；父键列里存的是父的 `option_id`，没有它拼不出来。
-    pub(crate) parent_source_key: String,
-    /// **本表**里承载父文案的列名（父键由同行共现读出）。
-    pub(crate) parent_field: String,
-    /// **本表**里承载子文案的列名；应当与数据源的取数列一致。
-    pub(crate) cascade_field: String,
-}
-
-/// `linkage_mapping` 的一条（键是飞书表单里联动控件的字段代码）。
-#[derive(Debug, Deserialize)]
-struct LinkageEntry {
-    parent_source_key: String,
-    parent_field: String,
-    cascade_field: String,
-}
-
 /// 选出本轮要拉的数据源。
 ///
 /// 只取 `status == active` 且 `ingest_mode == pull` 的行；坐标与取数列名缺一不可
@@ -151,7 +132,14 @@ pub(crate) async fn load_pull_sources(
 
         // linkage_mapping 是 JSON 文本；解析失败**不当致命**，按无级联处理并告警——
         // 让整条链路因为一段坏 JSON 全停，比少拉一个级联更糟。
-        let linkage = parse_linkage(row.optional::<String>("linkage_mapping")?)?;
+        //
+        // 拉取侧只可能有**一条**级联（一个数据源服务一个控件），所以取第一条即可；
+        // 映射的**键**（控件代码）在拉取侧完全不参与，它只用于读端匹配联动参数。
+        let linkage = row
+            .optional::<String>("linkage_mapping")?
+            .map(|raw| parse_linkage_mapping(&raw))
+            .and_then(|mut entries| entries.pop())
+            .map(|(_, linkage)| linkage);
 
         sources.push(PullSource {
             source_key,
@@ -170,37 +158,6 @@ pub(crate) async fn load_pull_sources(
         });
     }
     Ok(sources)
-}
-
-/// 解析 `linkage_mapping`。取第一条能解析出全部三个成员的表项。
-fn parse_linkage(raw: Option<String>) -> Result<Option<Linkage>, BaseError> {
-    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let map: std::collections::BTreeMap<String, LinkageEntry> = match serde_json::from_str(&raw) {
-        Ok(map) => map,
-        Err(error) => {
-            tracing::warn!(error = %error, "linkage_mapping 不是合法 JSON，本轮按无级联处理");
-            return Ok(None);
-        }
-    };
-    let Some(entry) = map.into_values().next() else {
-        return Ok(None);
-    };
-    if entry.parent_source_key.trim().is_empty()
-        || entry.parent_field.trim().is_empty()
-        || entry.cascade_field.trim().is_empty()
-    {
-        // 三者缺一就拼不出父键：`parent_source_key` 缺了不知道父在哪，
-        // `parent_field` 缺了读不出共现，`cascade_field` 缺了不知道哪列是子值。
-        tracing::warn!("linkage_mapping 三个成员缺一，本轮按无级联处理");
-        return Ok(None);
-    }
-    Ok(Some(Linkage {
-        parent_source_key: entry.parent_source_key.trim().to_string(),
-        parent_field: entry.parent_field.trim().to_string(),
-        cascade_field: entry.cascade_field.trim().to_string(),
-    }))
 }
 
 /// 一轮拉取：读 → 派生 → 比对 → 落库。
@@ -697,59 +654,12 @@ mod tests {
         }
     }
 
+    /// 级联声明。形状只有两个成员——`cascade_field` 已随「形状收敛到
+    /// `domain/linkage.rs`」一并去掉（它零消费）。
     fn linkage() -> Linkage {
         Linkage {
             parent_source_key: "currency".to_string(),
             parent_field: "父".to_string(),
-            cascade_field: "子".to_string(),
-        }
-    }
-
-    #[test]
-    fn linkage_mapping_parses_the_declared_triple() {
-        let raw = r#"{"widget1":{"parent_source_key":"payment_currency",
-            "parent_field":"币种/Currency（单选）","cascade_field":"汇率/Exchange Rate"}}"#;
-        let parsed = parse_linkage(Some(raw.to_string()))
-            .unwrap_or_else(|error| panic!("应可解析: {error}"))
-            .unwrap_or_else(|| panic!("应解析出级联关系"));
-        assert_eq!(parsed.parent_source_key, "payment_currency");
-        assert_eq!(parsed.parent_field, "币种/Currency（单选）");
-        assert_eq!(parsed.cascade_field, "汇率/Exchange Rate");
-    }
-
-    #[test]
-    fn blank_or_missing_linkage_is_no_cascade() {
-        assert!(parse_linkage(None).unwrap_or_default().is_none());
-        assert!(parse_linkage(Some("   ".to_string()))
-            .unwrap_or_default()
-            .is_none());
-        assert!(parse_linkage(Some("{}".to_string()))
-            .unwrap_or_default()
-            .is_none());
-    }
-
-    #[test]
-    fn malformed_linkage_degrades_instead_of_failing_the_round() {
-        // 一段坏 JSON 不该让整条链路停摆
-        assert!(parse_linkage(Some("{not json".to_string()))
-            .unwrap_or_default()
-            .is_none());
-    }
-
-    #[test]
-    fn incomplete_linkage_is_treated_as_no_cascade() {
-        // 三个成员缺一就拼不出父键
-        for raw in [
-            r#"{"w":{"parent_source_key":"","parent_field":"父","cascade_field":"子"}}"#,
-            r#"{"w":{"parent_source_key":"c","parent_field":"","cascade_field":"子"}}"#,
-            r#"{"w":{"parent_source_key":"c","parent_field":"父","cascade_field":""}}"#,
-        ] {
-            assert!(
-                parse_linkage(Some(raw.to_string()))
-                    .unwrap_or_default()
-                    .is_none(),
-                "{raw} 应被视为非级联"
-            );
         }
     }
 

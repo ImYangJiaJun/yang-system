@@ -3,6 +3,7 @@ pub(crate) mod context;
 pub(crate) mod crypto;
 pub(crate) mod derive;
 pub(crate) mod i18n;
+pub(crate) mod linkage;
 pub(crate) mod list_input;
 pub(crate) mod middleware;
 pub(crate) mod option_write;

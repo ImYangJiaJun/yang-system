@@ -36,7 +36,6 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
-import { Textarea } from "@/shared/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -45,7 +44,7 @@ import {
   SelectValue,
 } from "@/shared/ui/select";
 
-import type { DefaultLocale, IngestMode } from "../types";
+import type { DefaultLocale, IngestMode, LinkageFormValue } from "../types";
 import {
   DEFAULT_LOCALE,
   DEFAULT_LOCALE_OPTIONS,
@@ -89,7 +88,9 @@ export type DatasourceCoordinatesFormValue = {
   bitableTableId: string;
   bitableViewId: string;
   bitableFieldName: string;
-  linkageMapping: string;
+  /// 级联声明在界面上是**结构化**的三个字段，不是一段手写 JSON。
+  /// 提交时才由 `buildLinkageMapping` 拼成后端要的文本。
+  cascade: LinkageFormValue | null;
 };
 
 export type DatasourceFormDialogProps = {
@@ -108,6 +109,9 @@ export type DatasourceFormDialogProps = {
   /// 编辑态坐标的现值。**取不到就别给**——与「加密返回」同一取舍：给了才渲染这一区，
   /// 不给就不渲染，避免拿一份猜的坐标覆盖服务端。
   initialCoordinates?: DatasourceCoordinatesFormValue;
+  /// 可选为父级的数据源（供下拉）。**排除自己**：一个数据源不可能是自己的父级。
+  /// 为空时父源退化成普通输入框——总比给一个空下拉让人无从下手要好。
+  parentCandidates?: ReadonlyArray<{ sourceKey: string; title: string }>;
   pending?: boolean;
   /// 服务端拒绝类错误：**直接回显后端原文**（例如「数据源不存在」）。
   serverError?: string | null;
@@ -178,32 +182,17 @@ function validate(
       errors.coordinates =
         "定时拉取需要 Base Token、数据表 ID 与取数列字段名三项齐备，缺任何一个都拉不起来。";
     }
-    const linkage = coordinates.linkageMapping.trim();
-    if (linkage !== "") {
-      // 与后端同判据：只校验形状是 JSON 对象。内容对不对由拉取时的解析决定，
-      // 那里解析不出来只会降级为「无级联」并告警，不会打挂整条链路。
-      errors.coordinates = linkageLooksLikeObject(linkage)
-        ? errors.coordinates
-        : '联动映射必须是一个 JSON 对象，形如 {"控件代码":{"parent_source_key":…}}。';
+    // 开了级联就必须说清父在哪、父值在哪一列。**不再校验 JSON 形状**——
+    // 用户已经不写 JSON 了，那层校验连同 `linkageLooksLikeObject` 一并去掉。
+    if (coordinates.cascade !== null && errors.coordinates === undefined) {
+      if (coordinates.cascade.parentSourceKey.trim() === "") {
+        errors.coordinates = "请选择父数据源。";
+      } else if (coordinates.cascade.parentField.trim() === "") {
+        errors.coordinates = "请填写本表里承载父值的列名。";
+      }
     }
   }
   return errors;
-}
-
-/// 形状判断：必须是 JSON 对象字面量。
-///
-/// 这里**刻意不 `JSON.parse`**：那段文本用户可能正打到一半，一按键就报「不是合法 JSON」
-/// 会很吵。只在提交时做一次形状检查，把明显的错（忘了大括号、写成了数组）挡下来。
-function linkageLooksLikeObject(text: string): boolean {
-  if (!text.startsWith("{") || !text.endsWith("}")) return false;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return (
-      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-    );
-  } catch {
-    return false;
-  }
 }
 
 export function DatasourceFormDialog({
@@ -214,6 +203,7 @@ export function DatasourceFormDialog({
   initialEncryptEnabled,
   initialDefaultLocale,
   initialCoordinates,
+  parentCandidates = [],
   pending = false,
   serverError = null,
   onSubmit,
@@ -252,8 +242,20 @@ export function DatasourceFormDialog({
   const [bitableFieldName, setBitableFieldName] = useState(
     initialCoordinates?.bitableFieldName ?? "",
   );
-  const [linkageMapping, setLinkageMapping] = useState(
-    initialCoordinates?.linkageMapping ?? "",
+  // 级联：**结构化**。原先是一个 textarea 里手写 JSON，四样东西里有一半是死的或
+  // 不可知的（`cascade_field` 零消费、控件代码我们从未观测过真实报文）。
+  // 现在只剩两个必填项，其余交给表单。
+  const [cascadeEnabled, setCascadeEnabled] = useState(
+    initialCoordinates?.cascade != null,
+  );
+  const [parentSourceKey, setParentSourceKey] = useState(
+    initialCoordinates?.cascade?.parentSourceKey ?? "",
+  );
+  const [parentField, setParentField] = useState(
+    initialCoordinates?.cascade?.parentField ?? "",
+  );
+  const [linkageWidgetCode, setLinkageWidgetCode] = useState(
+    initialCoordinates?.cascade?.widgetCode ?? "",
   );
 
   // 打开时按初值重置。依赖全是基本类型——传对象字面量会让 effect 每次渲染都跑。
@@ -282,7 +284,9 @@ export function DatasourceFormDialog({
           bitableTableId,
           bitableViewId,
           bitableFieldName,
-          linkageMapping,
+          cascade: cascadeEnabled
+            ? { parentSourceKey, parentField, widgetCode: linkageWidgetCode }
+            : null,
         }
       : undefined;
   const errors = validate(mode, { sourceKey, title, token }, coordinateValues);
@@ -326,7 +330,7 @@ export function DatasourceFormDialog({
             bitableTableId: "",
             bitableViewId: "",
             bitableFieldName: "",
-            linkageMapping: "",
+            cascade: null,
           } satisfies DatasourceCoordinatesFormValue),
       });
       return;
@@ -604,27 +608,114 @@ export function DatasourceFormDialog({
                   </p>
                 </div>
 
-                <div className="space-y-1.5 sm:col-span-2">
-                  <Label htmlFor={`${fieldId}-linkage`}>联动映射（可选）</Label>
-                  <Textarea
-                    id={`${fieldId}-linkage`}
-                    value={linkageMapping}
-                    onChange={(event) => setLinkageMapping(event.target.value)}
-                    className="font-mono text-xs"
-                    autoComplete="off"
-                    spellCheck={false}
-                    placeholder="留空 = 这个数据源没有级联"
-                    aria-invalid={showCoordinatesError}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    只有需要「选完父级再选子级」时才填，三个成员缺一不可：
-                    <span className="font-mono">
-                      {
-                        '{"<联动控件代码>":{"parent_source_key":"…","parent_field":"…","cascade_field":"…"}}'
+                <div className="space-y-3 sm:col-span-2">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id={`${fieldId}-cascade`}
+                      checked={cascadeEnabled}
+                      onCheckedChange={(next) =>
+                        setCascadeEnabled(next === true)
                       }
-                    </span>
+                    />
+                    <Label htmlFor={`${fieldId}-cascade`}>
+                      这是某个数据源的子级（联动）
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    只有需要「选完父级再选子级」时才勾选。勾上之后，这个数据源只会在
+                    父级被选中时出现。
                   </p>
                 </div>
+
+                {cascadeEnabled ? (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label htmlFor={`${fieldId}-parent-source`}>
+                        父数据源
+                      </Label>
+                      {parentCandidates.length > 0 ? (
+                        <Select
+                          value={parentSourceKey}
+                          onValueChange={setParentSourceKey}
+                        >
+                          <SelectTrigger
+                            id={`${fieldId}-parent-source`}
+                            className="w-full"
+                          >
+                            <SelectValue placeholder="选择一个数据源" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {parentCandidates.map((candidate) => (
+                              <SelectItem
+                                key={candidate.sourceKey}
+                                value={candidate.sourceKey}
+                              >
+                                {candidate.title}（{candidate.sourceKey}）
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <Input
+                          id={`${fieldId}-parent-source`}
+                          value={parentSourceKey}
+                          onChange={(event) =>
+                            setParentSourceKey(event.target.value)
+                          }
+                          className="font-mono"
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder="父数据源的数据源标识"
+                        />
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        父级的选项就取自这个数据源；父级没选时本数据源不会返回选项。
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label htmlFor={`${fieldId}-parent-field`}>
+                        父值所在列
+                      </Label>
+                      <Input
+                        id={`${fieldId}-parent-field`}
+                        value={parentField}
+                        onChange={(event) => setParentField(event.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="例如 币种/Currency（单选）"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        多维表格里承载父级取值的列。父子关系由**同一行**的两列共现读出，
+                        所以这两列必须在同一张表里。
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5 sm:col-span-2">
+                      <Label htmlFor={`${fieldId}-widget-code`}>
+                        联动控件字段代码（可留空）
+                      </Label>
+                      <Input
+                        id={`${fieldId}-widget-code`}
+                        value={linkageWidgetCode}
+                        onChange={(event) =>
+                          setLinkageWidgetCode(event.target.value)
+                        }
+                        className="font-mono"
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="留空 = 自动匹配（推荐）"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        飞书表单里那个联动控件的字段代码，形如
+                        widget17796881173030001。
+                        <span className="font-medium">留空即可</span>
+                        ——一个数据源只服务一个联动控件，所以出现的任何联动参数只可能是它。
+                        填错了不会报错，只会静默变成「无级联」。
+                      </p>
+                    </div>
+                  </>
+                ) : null}
 
                 {showCoordinatesError ? (
                   <p

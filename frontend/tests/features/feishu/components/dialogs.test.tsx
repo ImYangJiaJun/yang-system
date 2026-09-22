@@ -194,7 +194,7 @@ describe("DatasourceFormDialog · 新建", () => {
         bitableTableId: "",
         bitableViewId: "",
         bitableFieldName: "",
-        linkageMapping: "",
+        cascade: null,
       },
     });
   });
@@ -489,7 +489,28 @@ describe("DatasourceFormDialog · 取数与坐标", () => {
     );
   });
 
-  it("联动映射不是 JSON 对象时拒绝提交", async () => {
+  it("级联区默认收起，勾选后才出现字段", async () => {
+    const user = userEvent.setup();
+    render(
+      <DatasourceFormDialog
+        open
+        mode="create"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    // 默认不勾：不给用户一堆与他无关的字段
+    expect(screen.queryByLabelText("父数据源")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: /子级/ }));
+    expect(screen.getByLabelText("父数据源")).toBeInTheDocument();
+    expect(screen.getByLabelText("父值所在列")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("联动控件字段代码（可留空）"),
+    ).toBeInTheDocument();
+  });
+
+  it("勾了级联却没选父数据源时拒绝提交", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
     render(
@@ -504,14 +525,54 @@ describe("DatasourceFormDialog · 取数与坐标", () => {
     await user.type(screen.getByLabelText("数据源标识"), "fx_rate");
     await user.type(screen.getByLabelText("名称"), "汇率");
     await user.type(screen.getByLabelText("接口 Token"), "t-1");
-    // `user.type` 会把 `[` 当成按键描述符解析，JSON 里有方括号 —— 改用 paste。
-    const linkage = screen.getByLabelText("联动映射（可选）");
-    await user.click(linkage);
-    await user.paste("[1,2]");
+    await user.click(screen.getByRole("checkbox", { name: /子级/ }));
     await user.click(screen.getByRole("button", { name: "创建数据源" }));
 
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByText(/必须是一个 JSON 对象/)).toBeInTheDocument();
+    expect(screen.getByText(/请选择父数据源/)).toBeInTheDocument();
+  });
+
+  it("父数据源给候选时用下拉，选完即可提交", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<(submission: DatasourceFormSubmission) => void>();
+    render(
+      <DatasourceFormDialog
+        open
+        mode="create"
+        parentCandidates={[
+          { sourceKey: "payment_currency", title: "币种" },
+          { sourceKey: "other", title: "别的" },
+        ]}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("数据源标识"), "fx_rate");
+    await user.type(screen.getByLabelText("名称"), "汇率");
+    await user.type(screen.getByLabelText("接口 Token"), "t-1");
+    await user.click(screen.getByRole("checkbox", { name: /子级/ }));
+    // 下拉里显示的是「名称（标识）」，不再需要手输那个标识
+    await user.click(screen.getByLabelText("父数据源"));
+    await user.click(await screen.findByRole("option", { name: /币种/ }));
+    await user.type(
+      screen.getByLabelText("父值所在列"),
+      "币种/Currency（单选）",
+    );
+    await user.click(screen.getByRole("button", { name: "创建数据源" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        coordinates: expect.objectContaining({
+          cascade: {
+            parentSourceKey: "payment_currency",
+            parentField: "币种/Currency（单选）",
+            // 控件代码留空 = 通配
+            widgetCode: "",
+          },
+        }),
+      }),
+    );
   });
 
   it("编辑态不给初值时不渲染坐标区（不拿猜的坐标覆盖服务端）", () => {
@@ -541,7 +602,7 @@ describe("DatasourceFormDialog · 取数与坐标", () => {
           bitableTableId: "tblauuOafa4acvT3",
           bitableViewId: "",
           bitableFieldName: "汇率/Exchange Rate",
-          linkageMapping: "",
+          cascade: null,
         }}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}

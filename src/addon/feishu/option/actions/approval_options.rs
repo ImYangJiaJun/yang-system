@@ -14,10 +14,8 @@
 //! 3. **2.5 秒主动收口**。飞书对这次回调的超时是 3 秒；主动收口能返回一个可归因的
 //!    失败信封，而不是被掐断、留下既无响应也无法诊断的黑洞。
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use serde::Deserialize;
 use yang_base::action::{ActionContext, ResponseBody};
 use yang_base::definition::{HttpMethod, ModuleSpec};
 use yang_base::table::{SortOrder, WhereCondition};
@@ -27,6 +25,7 @@ use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::i18n::{
     build_result_body, normalize_linkage_value, OptionRow, DEFAULT_LOCALE,
 };
+use crate::addon::feishu::domain::linkage::{match_linkage, parse_linkage_mapping};
 use crate::addon::feishu::domain::pagination::{decode_cursor, encode_cursor};
 use crate::addon::feishu::domain::protocol::{FeishuEnvelope, FeishuOptionsRequest};
 use crate::addon::feishu::domain::token::verify_token;
@@ -86,16 +85,6 @@ enum ParentFilter {
     ByKey(String),
 }
 
-/// `linkage_mapping` 的一条。读端只需要 `parent_source_key`——父键列里存的就是
-/// **父的 `option_id`**，而 `linkage_params` 回传的正是父控件的 `value`
-/// （即 `@i18n@<父 option_id>`），剥掉前缀即可直接用作过滤值。
-#[derive(Debug, Deserialize)]
-struct ReadLinkageEntry {
-    parent_source_key: String,
-}
-
-/// 决定本次请求要不要按父级过滤。
-///
 /// **纯决策**：从请求与映射里算出「要按父数据源下的哪个值过滤」。
 ///
 /// 返回 `Ok(None)` 表示**回退全量**——这是默认，只在能确定唯一父级时才收窄。
@@ -123,31 +112,26 @@ fn linkage_filter_target(
     let Some(raw) = linkage_mapping.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
-    let mapping: BTreeMap<String, ReadLinkageEntry> = match serde_json::from_str(raw) {
-        Ok(mapping) => mapping,
-        Err(error) => {
-            tracing::warn!(error = %error, "linkage_mapping 不是合法 JSON，本次回退全量");
-            return Ok(None);
+    // 3) 挑唯一命中的那条声明。精确键优先于通配键，规则见 `domain/linkage.rs`。
+    let entries = parse_linkage_mapping(raw);
+    let (matched_key, linkage) = match match_linkage(&entries, params.keys().map(String::as_str)) {
+        Ok(Some(found)) => found,
+        // 命中 0 条 → 回退全量：请求里多带一个无关键不该让请求失败。
+        Ok(None) => return Ok(None),
+        // 命中 ≥2 条 → 无法判定父级，fail-closed。
+        Err(()) => {
+            return Err(FeishuEnvelope::fail(
+                codes::LINKAGE_AMBIGUOUS,
+                "联动参数命中了多个映射，无法判定父级",
+            ))
         }
     };
 
-    // 3) 命中 0 个映射键 → 回退全量；命中 ≥2 个才 fail-closed——能确定唯一父级时
-    //    不该因为请求里多带了一个无关键就报错。
-    let mut matched = params
-        .iter()
-        .filter_map(|(key, value)| mapping.get(key).map(|entry| (entry, value)));
-    let Some((entry, raw_value)) = matched.next() else {
-        return Ok(None);
-    };
-    if matched.next().is_some() {
-        return Err(FeishuEnvelope::fail(
-            codes::LINKAGE_AMBIGUOUS,
-            "联动参数命中了多个映射，无法判定父级",
-        ));
-    }
-
     // 4) 值为空或 trim 后为空 → 回退全量。用户尚未选父级是最常见的形态，
     //    此时返回空集会让控件看起来「坏了」。
+    let Some(raw_value) = params.get(matched_key) else {
+        return Ok(None);
+    };
     let parent_key = normalize_linkage_value(raw_value);
     if parent_key.is_empty() {
         tracing::warn!("联动参数为空，本次回退全量");
@@ -155,7 +139,7 @@ fn linkage_filter_target(
     }
 
     Ok(Some((
-        entry.parent_source_key.clone(),
+        linkage.parent_source_key.clone(),
         parent_key.to_string(),
     )))
 }
@@ -755,9 +739,11 @@ mod tests {
 
     #[test]
     fn multiple_matched_keys_fail_closed() {
-        // 命中 ≥2 个时无法判定父级——这是唯一在决策期就失败的形态
-        let mapping =
-            r#"{"widget1":{"parent_source_key":"a"},"widget2":{"parent_source_key":"b"}}"#;
+        // 命中 ≥2 个参数时无法判定父级——这是唯一在决策期就失败的形态。
+        // 映射本身必须**完整**（两个成员都在），否则会被解析器按「配错的条目」跳过，
+        // 于是「两个参数」根本不会被判成歧义。
+        let mapping = r#"{"widget1":{"parent_source_key":"a","parent_field":"p"},
+                          "widget2":{"parent_source_key":"b","parent_field":"p"}}"#;
         let error = linkage_filter_target(
             &request_with(Some(&[("widget1", "x"), ("widget2", "y")])),
             Some(mapping),
@@ -765,6 +751,53 @@ mod tests {
         .err()
         .unwrap_or_else(|| panic!("命中多个映射必须失败"));
         assert_eq!(error.code, codes::LINKAGE_AMBIGUOUS);
+    }
+
+    #[test]
+    fn a_wildcard_key_matches_any_linkage_param() {
+        // 通配的目的：不必知道飞书那个控件的字段代码。一个数据源服务一个控件，
+        // 所以声明了级联时出现的任何联动参数只可能是它。
+        let mapping = r#"{"*":{"parent_source_key":"payment_currency","parent_field":"币种"}}"#;
+        for key in ["widget17796881173030001", "随便什么键"] {
+            let target = linkage_filter_target(
+                &request_with(Some(&[(key, "@i18n@payment_currency:abc")])),
+                Some(mapping),
+            )
+            .unwrap_or_else(|_| panic!("通配不该产生业务失败"));
+            assert_eq!(
+                target,
+                Some((
+                    "payment_currency".to_string(),
+                    "payment_currency:abc".to_string()
+                )),
+                "键 {key} 应被通配命中"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wildcard_still_fails_closed_on_two_params() {
+        // 通配不放大歧义：两个联动参数时仍无法判定哪个携带父值
+        let mapping = r#"{"*":{"parent_source_key":"c","parent_field":"p"}}"#;
+        let error = linkage_filter_target(
+            &request_with(Some(&[("a", "x"), ("b", "y")])),
+            Some(mapping),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("两个参数必须 fail-closed"));
+        assert_eq!(error.code, codes::LINKAGE_AMBIGUOUS);
+    }
+
+    #[test]
+    fn an_exact_key_beats_the_wildcard() {
+        let mapping = r#"{"*":{"parent_source_key":"wild","parent_field":"w"},
+                          "widget1":{"parent_source_key":"exact","parent_field":"e"}}"#;
+        let target = linkage_filter_target(
+            &request_with(Some(&[("widget1", "exact:x")])),
+            Some(mapping),
+        )
+        .unwrap_or_else(|_| panic!("不该产生业务失败"));
+        assert_eq!(target, Some(("exact".to_string(), "exact:x".to_string())));
     }
 
     #[test]

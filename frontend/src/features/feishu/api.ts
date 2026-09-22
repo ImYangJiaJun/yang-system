@@ -35,18 +35,23 @@ import type {
 import { withStableOrder } from "./list-query";
 import type {
   DatasourceItem,
-  IngestMode,
   DatasourceListQuery,
   DatasourceStatus,
   DatasourceStatusFilter,
   DefaultLocale,
+  IngestMode,
+  LinkageFormValue,
   ListPage,
   OptionItem,
   OptionListQuery,
   OrderByClause,
   TokenPrecheckResult,
 } from "./types";
-import { approvalCodeHint, approvalCodeVerdict } from "./types";
+import {
+  approvalCodeHint,
+  approvalCodeVerdict,
+  buildLinkageMapping,
+} from "./types";
 
 /// 后端 8 个 Action 里控制台要用的 6 个（另两个是给飞书/自动化调用的机器入口）。
 export const DATASOURCE_OPERATION_IDS = {
@@ -340,7 +345,9 @@ export type DatasourceCoordinatesInput = {
   bitableTableId: string;
   bitableViewId: string;
   bitableFieldName: string;
-  linkageMapping: string;
+  /// 级联声明是**结构化**的；拼成后端要的 `linkage_mapping` JSON 文本这一步
+  /// 落在本模块（wire 边界），界面层不碰 JSON。
+  cascade: LinkageFormValue | null;
 };
 
 /// 把坐标折成 wire 形状：**空串一律不发**。
@@ -357,7 +364,7 @@ function coordinateBody(
     ["bitable_table_id", coordinates.bitableTableId],
     ["bitable_view_id", coordinates.bitableViewId],
     ["bitable_field_name", coordinates.bitableFieldName],
-    ["linkage_mapping", coordinates.linkageMapping],
+    ["linkage_mapping", buildLinkageMapping(coordinates.cascade)],
   ];
   for (const [key, value] of pairs) {
     if (value.trim() !== "") body[key] = value.trim();
@@ -442,7 +449,8 @@ export async function updateDatasource(
     body.bitable_table_id = input.coordinates.bitableTableId.trim();
     body.bitable_view_id = input.coordinates.bitableViewId.trim();
     body.bitable_field_name = input.coordinates.bitableFieldName.trim();
-    body.linkage_mapping = input.coordinates.linkageMapping.trim();
+    // 取消勾选级联 = 传空串清空（后端语义如此）
+    body.linkage_mapping = buildLinkageMapping(input.coordinates.cascade);
   }
 
   const result = await invokeFeishuAction(
@@ -579,14 +587,19 @@ export async function precheckApprovalOptions(
 /* --------------------------------- hooks --------------------------------- */
 
 /// 数据源列表：目录里没有读权限时不发请求（省一次注定 403 的往返）。
+/// 数据源列表查询。
+///
+/// `options.enabled` 用于**按需**查询：父级候选那一份只在编辑对话框打开时才要，
+/// 让它在列表页每次渲染都跑会白白多拉一页数据。
 export function useDatasourceList(
   query: DatasourceListQuery,
+  options: { enabled?: boolean } = {},
 ): UseQueryResult<ListPage<DatasourceItem>> {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
   return useQuery({
-    enabled: canReadDatasources(catalogData),
+    enabled: canReadDatasources(catalogData) && options.enabled !== false,
     queryKey: feishuQueryKeys.datasourceList(query),
     queryFn: ({ signal }) =>
       listDatasources(query, { catalog: catalogData, session }, signal),

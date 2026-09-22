@@ -396,3 +396,77 @@ export function syncHealth(item: DatasourceItem): SyncHealth {
       "最近一轮同步成功。拉取间隔由服务端的 feishu.pull_interval_seconds 决定。",
   };
 }
+
+/* ------------------------------ 级联（父级） ------------------------------ */
+
+/// 通配键：不指定联动控件代码时用它。与后端 `domain/linkage.rs` 的
+/// `WILDCARD_KEY` 必须一致。
+///
+/// 存在的理由：联动的键是**飞书表单里那个控件的字段代码**（形如
+/// `widget17796881173030001`）。要求用户去表单设计器里翻出它，是在索取一个
+/// **我们自己从未观测过真实报文**的值——填错了不会报错，只会静默退化成「无级联」。
+/// 而一个数据源只服务一个联动控件（契约 C3 的「不带联动要回退全量」正基于此），
+/// 所以任何联动参数只可能是它。
+export const LINKAGE_WILDCARD_KEY = "*";
+
+/// 级联在界面上的形状。**只有两个必填成员**——后端曾经还有第三个
+/// `cascade_field`，但它零消费（拉取用的是数据源自己的取数列），已去掉。
+export type LinkageFormValue = {
+  /// 父数据源的 `source_key`。
+  parentSourceKey: string;
+  /// **本表**里承载父文案的列名。
+  parentField: string;
+  /// 联动控件的字段代码；**空串表示通配**（见 [`LINKAGE_WILDCARD_KEY`]）。
+  widgetCode: string;
+};
+
+/// `linkage_mapping` 文本 → 界面值。解析不出、或条目不完整时返回 `null`
+/// （即「无级联」）——与后端「配错的条目只让那个数据源退化成无级联」同一取舍。
+///
+/// 只取**第一条**：拉取侧只可能有一条级联，多出来的条目本来就是无效配置。
+export function parseLinkageMapping(
+  raw: string | null,
+): LinkageFormValue | null {
+  if (raw === null || raw.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return null;
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length === 0) return null;
+  const [key, value] = entries[0];
+  if (typeof value !== "object" || value === null) return null;
+  const entry = value as Record<string, unknown>;
+  const parentSourceKey =
+    typeof entry.parent_source_key === "string"
+      ? entry.parent_source_key.trim()
+      : "";
+  const parentField =
+    typeof entry.parent_field === "string" ? entry.parent_field.trim() : "";
+  if (parentSourceKey === "" || parentField === "") return null;
+  return {
+    parentSourceKey,
+    parentField,
+    // 通配键回到界面上是**空串**：用户看到的是「留空」，而不是一个星号。
+    widgetCode: key === LINKAGE_WILDCARD_KEY ? "" : key,
+  };
+}
+
+/// 界面值 → `linkage_mapping` 文本。`null` 返回空串（表示不写这一项）。
+export function buildLinkageMapping(value: LinkageFormValue | null): string {
+  if (value === null) return "";
+  const parentSourceKey = value.parentSourceKey.trim();
+  const parentField = value.parentField.trim();
+  if (parentSourceKey === "" || parentField === "") return "";
+  const key =
+    value.widgetCode.trim() === ""
+      ? LINKAGE_WILDCARD_KEY
+      : value.widgetCode.trim();
+  return JSON.stringify({
+    [key]: { parent_source_key: parentSourceKey, parent_field: parentField },
+  });
+}

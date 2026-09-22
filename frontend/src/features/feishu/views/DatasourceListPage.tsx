@@ -19,7 +19,7 @@
  * 「当前页为空」不构成任何结论（结果集可能只是缩小了），那是页码越界，夹回有效页即可。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
@@ -42,7 +42,7 @@ import {
   type TokenPrecheckMode,
 } from "../components/TokenPrecheckNotice";
 import { useListQuery } from "../list-query";
-import { asIngestMode } from "../types";
+import { asIngestMode, parseLinkageMapping } from "../types";
 import type { DatasourceItem, TokenPrecheckResult } from "../types";
 
 /// 四步指引（设计 §5.5 的四步原文）：只写「去哪做、填什么」，不写接口路径与字段名。
@@ -101,7 +101,9 @@ function renameTargetOf(item: DatasourceItem): RenameTarget {
       bitableTableId: item.bitableTableId ?? "",
       bitableViewId: item.bitableViewId ?? "",
       bitableFieldName: item.bitableFieldName ?? "",
-      linkageMapping: item.linkageMapping ?? "",
+      // 库里存的是 JSON 文本，界面要的是结构化——**解析放在这里**（进入界面的边界），
+      // 解析不出即视为无级联，与后端「配错的条目只让那个数据源退化」同一取舍。
+      cascade: parseLinkageMapping(item.linkageMapping),
     },
   };
 }
@@ -133,6 +135,27 @@ export default function DatasourceListPage() {
   const listQuery = useDatasourceList(controller.query);
 
   const [formTarget, setFormTarget] = useState<FormTarget | null>(null);
+
+  // 父级候选：**独立于当前页**。用列表页自己的结果集会让「父源不在本页」选不到，
+  // 而父源恰恰通常不在（用户正在编辑子源那一页）。一次小查询换掉这个坑。
+  //
+  // 放在 `formTarget` 之后是**必需的**：`enabled` 要读它（对话框没开就不查），
+  // 而 hooks 必须在渲染期无条件按同一顺序调用——所以查询声明在这里，不能挪到
+  // 声明之前去。
+  const parentCandidateQuery = useDatasourceList(
+    useMemo(
+      () => ({
+        page: 1,
+        pageSize: 100,
+        search: "",
+        status: "all" as const,
+        orderBy: [{ field: "title", direction: "Asc" as const }],
+      }),
+      [],
+    ),
+    { enabled: formTarget !== null },
+  );
+
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(
     null,
   );
@@ -206,6 +229,12 @@ export default function DatasourceListPage() {
     !items.some((item) => item.sourceKey === precheck.sourceKey);
 
   const renameTarget = formTarget?.mode === "rename" ? formTarget : null;
+
+  // 父级候选**必须在这里算**：它要排除正在编辑的那一条，而那要等 `renameTarget`
+  // 先声明出来（放前面会撞上 TDZ）。
+  const parentCandidates = (parentCandidateQuery.data?.items ?? [])
+    .filter((item) => item.sourceKey !== renameTarget?.sourceKey)
+    .map((item) => ({ sourceKey: item.sourceKey, title: item.title }));
 
   /**
    * 回读列表。
@@ -576,6 +605,9 @@ export default function DatasourceListPage() {
         initialEncryptEnabled={renameTarget?.encryptEnabled}
         initialDefaultLocale={renameTarget?.defaultLocale}
         initialCoordinates={renameTarget?.coordinates}
+        // 父级候选来自独立查询（见上方 `parentCandidateQuery`），**排除自己**：
+        // 一个数据源不可能是自己的父级。
+        parentCandidates={parentCandidates}
         pending={createPending || updatePending}
         serverError={formError}
         onSubmit={submitForm}
