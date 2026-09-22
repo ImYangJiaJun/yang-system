@@ -14,15 +14,19 @@
 //! 3. **2.5 秒主动收口**。飞书对这次回调的超时是 3 秒；主动收口能返回一个可归因的
 //!    失败信封，而不是被掐断、留下既无响应也无法诊断的黑洞。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use serde::Deserialize;
 use yang_base::action::{ActionContext, ResponseBody};
 use yang_base::definition::{HttpMethod, ModuleSpec};
 use yang_base::table::{SortOrder, WhereCondition};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
-use crate::addon::feishu::domain::i18n::{build_result_body, OptionRow, DEFAULT_LOCALE};
+use crate::addon::feishu::domain::i18n::{
+    build_result_body, normalize_linkage_value, OptionRow, DEFAULT_LOCALE,
+};
 use crate::addon::feishu::domain::pagination::{decode_cursor, encode_cursor};
 use crate::addon::feishu::domain::protocol::{FeishuEnvelope, FeishuOptionsRequest};
 use crate::addon::feishu::domain::token::verify_token;
@@ -67,9 +71,145 @@ mod codes {
     pub(super) const INTERNAL: i32 = 50001;
     /// 服务处理超时。
     pub(super) const TIMEOUT: i32 = 50401;
+    /// 联动参数命中了多个映射，无法判定用哪一个父级。
+    pub(super) const LINKAGE_AMBIGUOUS: i32 = 40003;
+    /// 联动参数归一化后无法解析成已知的父选项。
+    pub(super) const LINKAGE_NOT_RESOLVED: i32 = 40004;
 }
 
-/// 校验数据源与 Token；失败时给出信封。
+/// 读端的级联过滤决策。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParentFilter {
+    /// 不做父级过滤，回退全量。
+    All,
+    /// 只返回该父键下的选项。
+    ByKey(String),
+}
+
+/// `linkage_mapping` 的一条。读端只需要 `parent_source_key`——父键列里存的就是
+/// **父的 `option_id`**，而 `linkage_params` 回传的正是父控件的 `value`
+/// （即 `@i18n@<父 option_id>`），剥掉前缀即可直接用作过滤值。
+#[derive(Debug, Deserialize)]
+struct ReadLinkageEntry {
+    parent_source_key: String,
+}
+
+/// 决定本次请求要不要按父级过滤。
+///
+/// **纯决策**：从请求与映射里算出「要按父数据源下的哪个值过滤」。
+///
+/// 返回 `Ok(None)` 表示**回退全量**——这是默认，只在能确定唯一父级时才收窄。
+/// 四条回退分支都是刻意选的：
+///
+/// 1. 不带 `linkage_params` → 回退全量。契约 C3 的硬要求，也是「一个控件配一个
+///    `source_key`」的原因。
+/// 2. 映射缺失或解析不出 → 回退全量。返回空集是最难归因的失败形态。
+/// 3. 命中 0 个映射键 → 回退全量；**命中 ≥2 个才 fail-closed**——能确定唯一父级
+///    时不该因为请求里多带了一个无关键就报错。
+/// 4. 值为空或 trim 后为空 → 回退全量。用户尚未选父级是最常见的形态，
+///    此时返回空集会让控件看起来「坏了」。
+///
+/// 与 [`resolve_parent_key`] 分开是为了可测：这四条分支最容易在改动中被无声破坏——
+/// 它们的失效形态是「选项集静默变大或变空」，不会报错。
+fn linkage_filter_target(
+    input: &FeishuOptionsRequest,
+    linkage_mapping: Option<&str>,
+) -> Result<Option<(String, String)>, FeishuEnvelope> {
+    // 1) 不带联动参数 → 回退全量。契约 C3 的硬要求，也是「一个控件配一个 source_key」的原因。
+    let Some(params) = input.linkage_params.as_ref().filter(|map| !map.is_empty()) else {
+        return Ok(None);
+    };
+    // 2) 映射缺失或解析不出 → 回退全量。返回空集是最难归因的失败形态。
+    let Some(raw) = linkage_mapping.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let mapping: BTreeMap<String, ReadLinkageEntry> = match serde_json::from_str(raw) {
+        Ok(mapping) => mapping,
+        Err(error) => {
+            tracing::warn!(error = %error, "linkage_mapping 不是合法 JSON，本次回退全量");
+            return Ok(None);
+        }
+    };
+
+    // 3) 命中 0 个映射键 → 回退全量；命中 ≥2 个才 fail-closed——能确定唯一父级时
+    //    不该因为请求里多带了一个无关键就报错。
+    let mut matched = params
+        .iter()
+        .filter_map(|(key, value)| mapping.get(key).map(|entry| (entry, value)));
+    let Some((entry, raw_value)) = matched.next() else {
+        return Ok(None);
+    };
+    if matched.next().is_some() {
+        return Err(FeishuEnvelope::fail(
+            codes::LINKAGE_AMBIGUOUS,
+            "联动参数命中了多个映射，无法判定父级",
+        ));
+    }
+
+    // 4) 值为空或 trim 后为空 → 回退全量。用户尚未选父级是最常见的形态，
+    //    此时返回空集会让控件看起来「坏了」。
+    let parent_key = normalize_linkage_value(raw_value);
+    if parent_key.is_empty() {
+        tracing::warn!("联动参数为空，本次回退全量");
+        return Ok(None);
+    }
+
+    Ok(Some((
+        entry.parent_source_key.clone(),
+        parent_key.to_string(),
+    )))
+}
+
+/// 决定本次请求要不要按父级过滤，并在需要时确认父值真实存在。
+///
+/// 四条回退分支见 [`linkage_filter_target`]；这里是第 5 条：**归一化后匹配不上要
+/// fail-closed 返回可归因业务码，绝不静默返回 0 行**——「这个父值没有子项」与
+/// 「父值根本不存在」是两件事，控制台要看得出区别。
+///
+/// 返回值的两层是刻意分开的：外层 `BaseError` 是**内部故障**（数据库不可用等），
+/// 内层 `FeishuEnvelope` 是**可归因的业务失败**。两者对飞书的意义完全不同——
+/// 前者值得重试，后者重试也没用。
+async fn resolve_parent_key(
+    input: &FeishuOptionsRequest,
+    linkage_mapping: Option<&str>,
+    context: &FeishuContext,
+) -> Result<Result<ParentFilter, FeishuEnvelope>, BaseError> {
+    let (parent_source_key, parent_key) = match linkage_filter_target(input, linkage_mapping) {
+        Ok(Some(target)) => target,
+        Ok(None) => return Ok(Ok(ParentFilter::All)),
+        Err(envelope) => return Ok(Err(envelope)),
+    };
+
+    // 查一次确认父值存在，而不是直接拿去过滤：直接过滤的结果是「命中 0 行」，而它与
+    // 「这个父值确实没有子项」无法区分——前者是数据/契约问题，后者是正常的空集，
+    // 控制台必须能分辨。
+    let exists = context
+        .options()
+        .query()
+        .select_fields(&["option_id"])?
+        .where_eq(
+            "source_key",
+            serde_json::Value::String(parent_source_key.clone()),
+        )?
+        .where_eq("option_id", serde_json::Value::String(parent_key.clone()))?
+        .optional()
+        .await?
+        .is_some();
+    if !exists {
+        // 按 (source_key, label) 再查一次的兜底**没有实现**：`feishu_option.label`
+        // 不是 `filterable` 列（DSL 的 filterable 是 fail-closed），按它过滤会在运行期
+        // 吃 FieldPermissionDenied。而这条路径在契约下本就不该被执行——飞书回传的是
+        // 我们给它的 `value`，剥掉 `@i18n@` 就是 option_id。真走到这里说明契约变了，
+        // 应当是可归因的失败而不是一次模糊匹配。
+        return Ok(Err(FeishuEnvelope::fail(
+            codes::LINKAGE_NOT_RESOLVED,
+            format!("联动值无法解析为数据源 {parent_source_key} 下的已知选项"),
+        )));
+    }
+    Ok(Ok(ParentFilter::ByKey(parent_key)))
+}
+
+/// 校验数据源与 Token；失败时给出信封。/// 校验数据源与 Token；失败时给出信封。
 ///
 /// 抽成纯函数以便不依赖数据库做单元测试——这是本端点唯一能在单测里覆盖的判定逻辑。
 fn verify_source(
@@ -158,6 +298,8 @@ async fn resolve(
             "encrypt_enabled",
             "default_locale",
             "status",
+            // 级联映射：读端要按它决定「这个请求的联动参数对应哪个父数据源」。
+            "linkage_mapping",
         ])?
         .where_eq("source_key", serde_json::Value::String(source_key.clone()))?
         .optional()
@@ -200,6 +342,17 @@ async fn resolve(
         .search(input.query.as_deref())?
         .order_by("sort_order", SortOrder::Asc)?
         .order_by("option_id", SortOrder::Asc)?;
+
+    // 级联过滤：**挂在顶层**（顶层条件之间是 AND，不影响 keyset 游标）。
+    // 必须在游标解码之后、构造查询之前，否则游标条件会与它争同一层。
+    let linkage_raw = datasource.optional::<String>("linkage_mapping")?;
+    match resolve_parent_key(input, linkage_raw.as_deref(), context).await? {
+        Ok(ParentFilter::All) => {}
+        Ok(ParentFilter::ByKey(parent_key)) => {
+            query = query.where_eq("parent_key", serde_json::Value::String(parent_key))?;
+        }
+        Err(envelope) => return Ok(envelope),
+    }
 
     if let Some((sort_order, option_id)) = cursor {
         // keyset 翻页：排序键严格大于游标。用 offset 会在数据变动时漏行或重复，
@@ -501,5 +654,142 @@ mod tests {
         record.insert("sort_order", serde_json::json!(0));
         record.insert("i18n", serde_json::json!("{not json"));
         assert!(read_row(&record).is_err(), "非法 JSON 文本必须报错");
+    }
+
+    // ---- 级联过滤的纯决策（四条回退分支 + 一条失败分支）----
+
+    /// 造一个请求；`linkage_params` 为 `None` 表示不带联动。
+    fn request_with(linkage: Option<&[(&str, &str)]>) -> FeishuOptionsRequest {
+        let mut body = serde_json::json!({"token": "t0ken"});
+        if let Some(pairs) = linkage {
+            let map: serde_json::Map<String, serde_json::Value> = pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), serde_json::json!(value)))
+                .collect();
+            body["linkage_params"] = serde_json::Value::Object(map);
+        }
+        let mut request = yang_base::action::Request::new(body);
+        <FeishuOptionsRequest as yang_base::definition::ParamInput>::decode(&mut request)
+            .unwrap_or_else(|error| panic!("测试请求应可解码: {error}"))
+    }
+
+    const MAPPING: &str = r#"{"widget1":{"parent_source_key":"payment_currency",
+        "parent_field":"币种","cascade_field":"汇率"}}"#;
+
+    #[test]
+    fn no_linkage_params_falls_back_to_all() {
+        // 契约 C3 的硬要求：不带联动必须返回全量
+        let target = linkage_filter_target(&request_with(None), Some(MAPPING))
+            .unwrap_or_else(|_| panic!("不该产生业务失败"));
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn empty_linkage_params_falls_back_to_all() {
+        let target = linkage_filter_target(&request_with(Some(&[])), Some(MAPPING))
+            .unwrap_or_else(|_| panic!("不该产生业务失败"));
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn missing_or_broken_mapping_falls_back_to_all() {
+        // 空集是最难归因的失败形态，宁可回退全量
+        for mapping in [None, Some(""), Some("   "), Some("{not json"), Some("{}")] {
+            let target = linkage_filter_target(&request_with(Some(&[("widget1", "x")])), mapping)
+                .unwrap_or_else(|_| panic!("mapping={mapping:?} 不该产生业务失败"));
+            assert_eq!(target, None, "mapping={mapping:?} 应回退全量");
+        }
+    }
+
+    #[test]
+    fn an_unmatched_widget_key_falls_back_to_all() {
+        // 请求里带的键不在映射里 → 回退全量，而不是报错
+        let target = linkage_filter_target(&request_with(Some(&[("other", "x")])), Some(MAPPING))
+            .unwrap_or_else(|_| panic!("不该产生业务失败"));
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn blank_value_falls_back_to_all() {
+        // 用户尚未选父级是最常见形态，返回空集会让控件看起来「坏了」
+        for value in ["", "   ", "@i18n@", "@i18n@  "] {
+            let target =
+                linkage_filter_target(&request_with(Some(&[("widget1", value)])), Some(MAPPING))
+                    .unwrap_or_else(|_| panic!("value={value:?} 不该产生业务失败"));
+            assert_eq!(target, None, "value={value:?} 应回退全量");
+        }
+    }
+
+    #[test]
+    fn a_single_matched_key_yields_the_parent_target() {
+        let target = linkage_filter_target(
+            &request_with(Some(&[("widget1", "@i18n@payment_currency:abc123")])),
+            Some(MAPPING),
+        )
+        .unwrap_or_else(|_| panic!("不该产生业务失败"));
+        assert_eq!(
+            target,
+            Some((
+                "payment_currency".to_string(),
+                "payment_currency:abc123".to_string()
+            )),
+            "剥掉 @i18n@ 后剩下的就是父的 option_id"
+        );
+    }
+
+    #[test]
+    fn a_bare_id_without_prefix_is_accepted_too() {
+        let target = linkage_filter_target(
+            &request_with(Some(&[("widget1", "payment_currency:abc123")])),
+            Some(MAPPING),
+        )
+        .unwrap_or_else(|_| panic!("不该产生业务失败"));
+        assert_eq!(
+            target,
+            Some((
+                "payment_currency".to_string(),
+                "payment_currency:abc123".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn multiple_matched_keys_fail_closed() {
+        // 命中 ≥2 个时无法判定父级——这是唯一在决策期就失败的形态
+        let mapping =
+            r#"{"widget1":{"parent_source_key":"a"},"widget2":{"parent_source_key":"b"}}"#;
+        let error = linkage_filter_target(
+            &request_with(Some(&[("widget1", "x"), ("widget2", "y")])),
+            Some(mapping),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("命中多个映射必须失败"));
+        assert_eq!(error.code, codes::LINKAGE_AMBIGUOUS);
+    }
+
+    #[test]
+    fn one_matched_plus_one_unmatched_key_is_not_ambiguous() {
+        // 多带一个无关键不该让请求失败：能确定唯一父级时应当照常工作
+        let target = linkage_filter_target(
+            &request_with(Some(&[("widget1", "payment_currency:x"), ("noise", "y")])),
+            Some(MAPPING),
+        )
+        .unwrap_or_else(|_| panic!("不该产生业务失败"));
+        assert_eq!(
+            target,
+            Some((
+                "payment_currency".to_string(),
+                "payment_currency:x".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn linkage_failure_codes_are_distinct_and_nonzero() {
+        // 两个码必须可分辨：一个是「无法判定」，一个是「父值不存在」。
+        // 混成一个会让控制台分不清「配置写错了」还是「飞书契约变了」。
+        assert_ne!(codes::LINKAGE_AMBIGUOUS, codes::LINKAGE_NOT_RESOLVED);
+        assert_ne!(codes::LINKAGE_AMBIGUOUS, 0);
+        assert_ne!(codes::LINKAGE_NOT_RESOLVED, 0);
     }
 }
