@@ -1304,9 +1304,15 @@ mod tests {
     }
 
     #[test]
-    fn invalidation_of_an_empty_set_is_a_noop() {
-        // 空集不做任何锁操作，避免无谓的事务开销。
-        assert_eq!(BTreeSet::<i64>::new().len(), 0);
+    fn affected_users_are_iterated_in_ascending_order() {
+        // 锁序不变量的可测部分：`invalidate_users_in_tx` 直接按集合迭代顺序
+        // 加锁，因此集合类型本身就是锁序保证。此测试锁住该类型选择——
+        // 若有人把它换成 HashSet，扇出将不再有序，并发下会形成死锁环。
+        let mut affected: BTreeSet<i64> = BTreeSet::new();
+        affected.insert(9);
+        affected.insert(3);
+        affected.insert(7);
+        assert_eq!(affected.iter().copied().collect::<Vec<_>>(), [3, 7, 9]);
     }
 }
 ```
@@ -1633,29 +1639,39 @@ git commit -m "refactor(account): SystemOwnerClaimer 端口透传 ActionContext 
 
 **依赖方向**：access 已单向依赖 account（`access/domain/resolver.rs:6` 等），account 目录内 grep 不到 `crate::addon::access`，因此把实现放在 access 不会形成编译期循环。
 
-- [ ] **Step 1: 写失败的测试**
+- [ ] **Step 1: 写失败的集成测试**
+
+claimer 的全部行为都是数据库行为（写哨兵、入组、递增版本），没有可单测的纯逻辑面。**不要写"断言 enum 变体等于它自己"这类同义反复的测试**——那只会制造虚假信心。TDD 在这里落在集成层：先把「哨兵只被夺到一次」的契约写成失败测试。
+
+在 `tests/system_owner_bootstrap_integration.rs`（与 Task 9 同一文件）写：
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// claimer 的幂等契约：哨兵已存在时第二次 claim 必须返回 AlreadyClaimed 而非报错。
+/// 这是 Task 9 降级语义的前提，因此先单独钉住。
+#[tokio::test]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_second_claim_returns_already_claimed_instead_of_failing() {
+    let app = harness::build_test_app().await;
+    harness::reset_business_tables(&app).await;
 
-    #[test]
-    fn claim_outcome_variants_carry_the_guided_user() {
-        let claimed = crate::addon::account::OwnerClaimOutcome::Claimed { admin_id: 7 };
-        match claimed {
-            crate::addon::account::OwnerClaimOutcome::Claimed { admin_id } => assert_eq!(admin_id, 7),
-        }
-    }
+    let first = harness::claim_owner(&app, "first").await
+        .unwrap_or_else(|e| panic!("首次 claim 应成功: {e}"));
+    assert!(matches!(first, OwnerClaimOutcome::Claimed { .. }), "首次必须夺到哨兵");
+    assert_eq!(harness::count_system_owner_rows(&app).await, 1);
+
+    let second = harness::claim_owner(&app, "second").await
+        .unwrap_or_else(|e| panic!("第二次 claim 不得报错: {e}"));
+    assert_eq!(second, OwnerClaimOutcome::AlreadyClaimed, "第二次必须降级");
+    assert_eq!(harness::count_system_owner_rows(&app).await, 1, "哨兵行不得增加");
 }
 ```
 
-（实现的核心路径是数据库行为，由 Task 9 的并发集成测试覆盖；本任务的单测只固定契约形状。）
+（`harness::claim_owner` 需在测试夹具里直接经注册事务调用 claimer，或经 `register_with_code` 间接驱动；取更贴近真实路径的那种。`reset_business_tables` 必须清空 `system_owner`、`user_group`、`permission_group`。）
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `cargo test --lib --locked groups::owner`
-Expected: 编译失败（`owner.rs` 尚无内容）
+Run: `cargo test --test system_owner_bootstrap_integration -- --ignored --test-threads=1 a_second_claim_returns_already_claimed`
+Expected: FAIL——当前注入的是 `NoSystemOwnerClaimer`，首个 claim 返回 `AlreadyClaimed` 而非 `Claimed`
 
 - [ ] **Step 3: 实现 claimer**
 
