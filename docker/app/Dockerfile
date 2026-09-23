@@ -50,10 +50,21 @@ COPY --from=build /ws/project/yang-system/target/release/yang-system /usr/local/
 # 合成优先级见 project/yang-system/docs/contracts/CONFIGURATION.md。
 COPY project/yang-system/config.example.toml /app/config.toml
 
-# 容器内默认覆盖：生产环境、监听全部网卡（loopback 在容器内无法被编排器探测）。
+# 容器内默认覆盖：监听全部网卡（loopback 在容器内无法被编排器探测）。
 # 管理面 9090 只应向采集端/探针暴露，不要对公网发布该端口。
-ENV YANG_SYSTEM_APP_ENVIRONMENT=production \
-    YANG_SYSTEM_HTTP_BIND=0.0.0.0:8080 \
+#
+# ⚠️ **刻意不设 YANG_SYSTEM_APP_ENVIRONMENT**，不要加回来。
+#    配置合成优先级是 config.toml < YANG_SYSTEM_* 环境变量 < secret 目录
+#    （见 docs/contracts/CONFIGURATION.md），镜像 ENV 属于第二层，会**永久压过**
+#    被挂载的 config.toml——于是 `[app].environment = "test"` 永远不生效，
+#    deploy/README.md 那段「TLS 落地前先用 http 联调」的路子走不通。
+#    2026-09-23 实际踩过：配置文件里明明写着 environment = "test"，后端仍按
+#    production 做启动校验，报 'email.password_reset.link_base_url 必须使用 https'
+#    并 crash-loop。
+#    fail-safe 不受影响：`[app].environment` 缺省即 Production
+#    （DeploymentEnvironment 的 #[default]，由测试
+#    deployment_environment_defaults_to_production 守护）。
+ENV YANG_SYSTEM_HTTP_BIND=0.0.0.0:8080 \
     YANG_SYSTEM_OBSERVABILITY_METRICS_ENABLED=true \
     YANG_SYSTEM_OBSERVABILITY_METRICS_BIND=0.0.0.0:9090
 
