@@ -21,6 +21,7 @@ import { useCallback, useMemo } from "react";
 
 import {
   ApiError,
+  hasOperation,
   invokeAction,
   useSessionCredentials,
   useUiCatalog,
@@ -117,16 +118,11 @@ export type FeishuInvokeDeps = {
  * 目录本身已按身份投影（服务端用 `policy.allows(context)` 过滤），
  * 所以不要解析 JWT，也不要用 `presentation.availability`——那是声明期静态提示，
  * 后端测试明写它不能替代服务端授权。
+ *
+ * 实现已下沉到 `engine/catalog/has-operation.ts`：它不是飞书域的私有判据，
+ * 权限组管理面同样要用。这里只是转出，签名与语义保持不变。
  */
-export function hasOperation(
-  catalog: UiCatalog | undefined,
-  operationId: string,
-): boolean {
-  return (
-    catalog?.actions.some((action) => action.operation_id === operationId) ??
-    false
-  );
-}
+export { hasOperation };
 
 /// 能否看列表（侧边栏那条 NavLink 的渲染条件）。
 export function canReadDatasources(catalog: UiCatalog | undefined): boolean {

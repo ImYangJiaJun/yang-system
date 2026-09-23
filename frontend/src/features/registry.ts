@@ -20,6 +20,12 @@ export type CustomViewComponent = LazyExoticComponent<
 // 字符串拼接 import 路径（React.lazy 的参数必须是静态字面量）。
 const registry: Readonly<Record<string, CustomViewComponent>> = Object.freeze({
   "demo.items.insight": lazy(() => import("./demo/views/DemoItemInsight")),
+  // 权限组管理面：通用 TableView 表达不了「组 + 权限条目 + 成员」这三块结构，
+  // 所以按设计 §11.1 登记成自定义视图。键取后端 Action 名（`access.groups.list_groups`），
+  // 与 `features/access/api.ts` 的 `GROUP_OPERATION_IDS.list` 同源。
+  "access.groups.list_groups": lazy(
+    () => import("./access/views/PermissionGroupsPage"),
+  ),
 });
 
 export function resolveCustomView(
