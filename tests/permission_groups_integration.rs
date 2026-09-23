@@ -806,6 +806,197 @@ mod harness {
             },
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Task 11 起：组条目夹具。
+    // -----------------------------------------------------------------------
+
+    /// 组成员上限的生产口径（`access/domain/groups/repository.rs` 的
+    /// `MAX_GROUP_MEMBERS`）。
+    ///
+    /// 集成测试是独立 crate，读不到应用侧的 `pub(crate)` 常量，因此在此镜像一份；
+    /// 生产常量另有单测钉死取值（`max_group_members_is_a_named_constant`），
+    /// 它变更时会失败并提示同步这里。
+    pub const MAX_GROUP_MEMBERS: usize = 200;
+
+    /// 读取用户当前的授权版本；它是 Access Token 新鲜度的唯一事实源。
+    pub async fn authz_version_of(app: &BuiltApp, user_id: i64) -> i64 {
+        sqlx::query_scalar("SELECT authz_version FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("读取用户 {user_id} 授权版本失败: {error}"))
+    }
+
+    /// 一个组当前的权限条目行数。
+    pub async fn item_rows_of_group(app: &BuiltApp, group_id: i64) -> u64 {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM permission_group_item WHERE group_id = ?")
+                .bind(group_id)
+                .fetch_one(pool_of(app))
+                .await
+                .unwrap_or_else(|error| panic!("统计组条目失败: {error}"));
+        u64::try_from(count).unwrap_or_else(|error| panic!("条目行数为负: {error}"))
+    }
+
+    /// 直写一条组条目行（用于构造目录里已不存在的孤儿条目）。
+    pub async fn insert_item_row(app: &BuiltApp, group_id: i64, permission: &str, granted_by: i64) {
+        sqlx::query(
+            "INSERT INTO permission_group_item (group_id, permission, granted_by, occurred_at) \
+             VALUES (?, ?, ?, UNIX_TIMESTAMP())",
+        )
+        .bind(group_id)
+        .bind(permission)
+        .bind(granted_by)
+        .execute(pool_of(app))
+        .await
+        .unwrap_or_else(|error| panic!("直写组条目 {permission} 失败: {error}"));
+    }
+
+    /// 用已注册账号登录换取 Access Token。
+    ///
+    /// 「组事实变更后旧 Token 失效」必须拿**变更前**签发的那个 Token 去验证，
+    /// 所以登录取令牌要能单独调用——`register_with_code` 只注册不登录。
+    pub async fn login_as(app: &BuiltApp, username: &str) -> String {
+        login(app, username, PEER_PORT)
+            .await
+            .unwrap_or_else(|error| panic!("登录 {username} 失败: {error}"))
+    }
+
+    /// 该 Access Token 是否已被授权版本水位线判定为过期。
+    ///
+    /// 探针用无权限要求的 `account.user.me`：它只经过认证中间件，因此「被拒」只
+    /// 可能来自凭据新鲜度校验，不会与权限判定（403）或参数校验（400）混淆；
+    /// 其它错误一律 panic，避免把预期外故障读成「过期」。
+    pub async fn member_token_is_stale(app: &BuiltApp, token: &str) -> bool {
+        let authorization = format!("Bearer {token}");
+        match dispatch(
+            app,
+            "account.user",
+            "me",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
+        {
+            Ok(_) => false,
+            Err(BaseError::AuthorizationStale) => true,
+            Err(other) => panic!("Token 新鲜度探针返回预期外错误: {other}"),
+        }
+    }
+
+    /// 驱动一个组条目写 Action（普通认证请求）。
+    ///
+    /// 条目加/移除**不在** `step_up_targets()` 登记内（Task 10 只登记建/改/删三个），
+    /// 因此这里不能走 `step_up_dispatch`——那会要求这些 Action 挂 Step-up 守卫。
+    async fn group_item_dispatch(
+        app: &BuiltApp,
+        operator: &Admin,
+        action: &str,
+        group_id: i64,
+        permission: &str,
+    ) -> Result<ApiResponse, BaseError> {
+        let authorization = format!("Bearer {}", operator.token);
+        dispatch(
+            app,
+            "access.groups",
+            action,
+            json!({ "group_id": group_id, "permission": permission }),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
+    }
+
+    /// 向组追加一条权限；失败即 panic（调用方断言的是成功路径）。
+    pub async fn add_group_item(app: &BuiltApp, operator: &Admin, group_id: i64, permission: &str) {
+        group_item_dispatch(app, operator, "add_group_item", group_id, permission)
+            .await
+            .unwrap_or_else(|error| panic!("向组 {group_id} 加权限 {permission} 失败: {error}"));
+    }
+
+    /// 向组追加一条权限并折算为 HTTP 状态码。
+    pub async fn add_group_item_status(
+        app: &BuiltApp,
+        operator: &Admin,
+        group_id: i64,
+        permission: &str,
+    ) -> u16 {
+        match group_item_dispatch(app, operator, "add_group_item", group_id, permission).await {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 从组移除一条权限并折算为 HTTP 状态码。
+    pub async fn remove_group_item_status(
+        app: &BuiltApp,
+        operator: &Admin,
+        group_id: i64,
+        permission: &str,
+    ) -> u16 {
+        match group_item_dispatch(app, operator, "remove_group_item", group_id, permission).await {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 直写成员行把组补到 `total` 名成员，返回落库后**读回**的成员数。
+    ///
+    /// 成员上限用例需要 200+ 名成员，走真实注册路径要跑 200 次 argon2 摘要，因此
+    /// 与既有夹具同例直接落库：占位账号按 `users` 表的列口径写入最小必需列。
+    pub async fn seed_members_directly(app: &BuiltApp, group_id: i64, total: usize) -> usize {
+        let existing = member_rows_of_group(app, group_id).await;
+        let granted_by = created_by_of_group(app, group_id).await;
+        for index in existing..u64::try_from(total).unwrap_or(u64::MAX) {
+            let username = format!("bulk_member_{group_id}_{index:04}");
+            let user_id = insert_placeholder_user(app, &username).await;
+            sqlx::query(
+                "INSERT INTO user_group (user_id, group_id, granted_by, occurred_at) \
+                 VALUES (?, ?, ?, UNIX_TIMESTAMP())",
+            )
+            .bind(user_id)
+            .bind(group_id)
+            .bind(granted_by)
+            .execute(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("直写组成员 {username} 失败: {error}"));
+        }
+        usize::try_from(member_rows_of_group(app, group_id).await)
+            .unwrap_or_else(|error| panic!("成员数超出 usize: {error}"))
+    }
+
+    /// 直写一个占位账号，返回其主键。
+    ///
+    /// 时间戳列由 ORM 在插入时填充、表声明里没有数据库默认值，因此必须显式给出
+    /// （否则严格模式报 1364）；邮箱留空——`users` 的 CHECK 要求 `email` 与
+    /// `email_verified_at` 同为空或同非空。
+    async fn insert_placeholder_user(app: &BuiltApp, username: &str) -> i64 {
+        sqlx::query(
+            "INSERT INTO users \
+             (username, password_hash, status, authz_version, credential_version, created_at, updated_at) \
+             VALUES (?, ?, 'active', 1, 0, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())",
+        )
+        .bind(username)
+        .bind("integration-fixture-placeholder-hash")
+        .execute(pool_of(app))
+        .await
+        .unwrap_or_else(|error| panic!("直写占位账号 {username} 失败: {error}"));
+        sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_one(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("回查占位账号 {username} 失败: {error}"))
+    }
+
+    async fn created_by_of_group(app: &BuiltApp, group_id: i64) -> i64 {
+        sqlx::query_scalar("SELECT created_by FROM permission_group WHERE id = ?")
+            .bind(group_id)
+            .fetch_one(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("读取权限组 {group_id} 创建人失败: {error}"))
+    }
 }
 
 /// spec §8.3 与 Review Focus 3：删除仍有成员的组必须被拒，且不产生 500。
@@ -879,4 +1070,151 @@ async fn delete_races_add_member_without_orphans_or_500() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 11 起的组条目用例：加/移除权限，含扇出失效与成员上限边界。
+// ---------------------------------------------------------------------------
+
+/// spec §6.3：组权限变更必须让全部成员的 Token 失效。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn adding_a_group_permission_invalidates_every_member() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "ops", "运维").await;
+    let member = harness::register_with_code(&app, "ops1", "ops1@example.com")
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    harness::add_member(&app, &admin, group_id, member).await;
+
+    // 变更**前**签发的 Token：它正是本次扇出失效要判死的对象。
+    let issued_before = harness::login_as(&app, "ops1").await;
+    let before = harness::authz_version_of(&app, member).await;
+    harness::add_group_item(&app, &admin, group_id, "access.grants.read").await;
+    let after = harness::authz_version_of(&app, member).await;
+
+    assert!(after > before, "组权限变更必须递增成员授权版本");
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        1,
+        "权限必须真的落进条目表"
+    );
+    assert!(
+        harness::member_token_is_stale(&app, &issued_before).await,
+        "旧 Token 必须被判定为过期"
+    );
+    // 反面对照：变更后重新签发的 Token 必须有效。没有这一条，「探针恒为 stale」
+    // 与「旧 Token 恰好过期」无法区分。
+    let issued_after = harness::login_as(&app, "ops1").await;
+    assert!(
+        !harness::member_token_is_stale(&app, &issued_after).await,
+        "变更后重新签发的 Token 必须仍然有效"
+    );
+}
+
+/// Review Focus 4：成员数上限的边界行为必须可预测。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn group_permission_change_respects_the_member_limit() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 极限测试用专用常量；若 MAX_GROUP_MEMBERS 变更，此测试与常量一并更新。
+    let group_id = harness::create_group(&app, &admin, "big", "大组").await;
+
+    let at_limit = harness::seed_members_directly(&app, group_id, harness::MAX_GROUP_MEMBERS).await;
+    assert_eq!(at_limit, harness::MAX_GROUP_MEMBERS);
+    harness::add_group_item(&app, &admin, group_id, "access.grants.read").await;
+
+    let over_limit =
+        harness::seed_members_directly(&app, group_id, harness::MAX_GROUP_MEMBERS + 1).await;
+    assert_eq!(over_limit, harness::MAX_GROUP_MEMBERS + 1);
+    let status = harness::add_group_item_status(&app, &admin, group_id, "account.users.read").await;
+    // 计划此处写 409（设计 §9.3 的 `Conflict`）：`yang_base::BaseError` 没有 `Conflict`
+    // 变体，且设计同节要求「不为个别用例扩展框架错误类型」，因此超限拒绝落成既有的
+    // `ParamInvalid`（400）——与 Task 6 的 `ensure_member_limit`、Task 10 的删组拒绝
+    // 同一取舍。被钉住的契约不变：必须被明确拒绝，且不得留下任何写结果。
+    assert_eq!(status, 400, "超过上限必须明确报错");
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        1,
+        "超限拒绝不得写入新条目（只应剩上限内的那一条）"
+    );
+}
+
+/// 移除组权限：同样扇出失效、同样幂等，且必须能清理目录之外的孤儿条目。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn removing_a_group_permission_invalidates_members_and_is_idempotent() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "ops", "运维").await;
+    let member = harness::register_with_code(&app, "ops2", "ops2@example.com")
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    harness::add_member(&app, &admin, group_id, member).await;
+    harness::add_group_item(&app, &admin, group_id, "access.grants.read").await;
+
+    let before = harness::authz_version_of(&app, member).await;
+    assert_eq!(
+        harness::remove_group_item_status(&app, &admin, group_id, "access.grants.read").await,
+        200,
+        "移除组内已有权限必须成功"
+    );
+    let after = harness::authz_version_of(&app, member).await;
+    assert!(after > before, "移除组权限必须递增成员授权版本");
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        0,
+        "条目行必须被删除"
+    );
+
+    // 幂等：重复移除仍然成功，但不再改变任何事实（版本不得再增）。
+    assert_eq!(
+        harness::remove_group_item_status(&app, &admin, group_id, "access.grants.read").await,
+        200,
+        "重复移除必须幂等成功"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, member).await,
+        after,
+        "幂等移除不得再递增授权版本"
+    );
+
+    // 反向宽容语义：已不在权限目录里的权限也必须能清理，否则孤儿条目永远清不掉
+    // （对齐 `revoke_permission.rs` 的不做 `ensure_declared`）。
+    harness::insert_item_row(&app, group_id, "removed.module.act", admin.user_id).await;
+    assert_eq!(harness::item_rows_of_group(&app, group_id).await, 1);
+    assert_eq!(
+        harness::remove_group_item_status(&app, &admin, group_id, "removed.module.act").await,
+        200,
+        "目录之外的孤儿条目必须能被清理"
+    );
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        0,
+        "孤儿条目必须被真的删除"
+    );
+}
+
+/// 加条目必须 fail-closed：目录里没有声明的权限一律拒绝，且不留下任何写结果。
+///
+/// 这是 Review Focus 1 在本任务可达的那一半——「目录未安装」态由
+/// `PermissionCatalogHandle` 的单测覆盖（集成路径的三种装配入口都会安装目录，
+/// 造不出未安装的应用）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn adding_an_undeclared_permission_is_rejected() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "ops", "运维").await;
+
+    let status =
+        harness::add_group_item_status(&app, &admin, group_id, "nonexistent.module.act").await;
+    assert_eq!(status, 400, "未声明的权限必须 fail-closed 拒绝");
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        0,
+        "拒绝不得留下条目行"
+    );
 }
