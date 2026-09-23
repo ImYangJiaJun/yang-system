@@ -4,11 +4,13 @@
 //! 这里只有模块清单和注册表数组，新增接口时加 `mod` 声明和数组一行即可。
 
 mod add_group_item;
+mod add_group_member;
 mod create_group;
 mod delete_group;
 mod get_group;
 mod list_groups;
 mod remove_group_item;
+mod remove_group_member;
 mod update_group;
 
 use crate::addon::access::domain::context::Access;
@@ -32,6 +34,8 @@ const ACTIONS: &[Register] = action_registry![
     delete_group,
     add_group_item,
     remove_group_item,
+    add_group_member,
+    remove_group_member,
     list_groups,
     get_group,
     // scaffold:action-registration

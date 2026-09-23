@@ -1,7 +1,10 @@
 //! 向权限组追加一条权限（幂等）。
 
 use crate::addon::access::domain::context::Access;
-use crate::addon::access::domain::groups::admin::{ensure_member_limit, invalidate_users_in_tx};
+use crate::addon::access::domain::groups::admin::{
+    assert_no_self_escalation, effective_permissions_of_in_tx, ensure_member_limit,
+    invalidate_users_in_tx,
+};
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::permission_catalog::{PERMISSION_MAX_LENGTH, PERMISSION_PATTERN};
 use crate::audit;
@@ -70,6 +73,18 @@ pub(super) async fn handle(
             .list_members_in_tx(&ctx, &mut transaction, group.id)
             .await?;
         ensure_member_limit(members.len() as u64)?;
+
+        // spec §8.1 路径二：给自己**已属于**的组加一条自己没有的权限，同样是自提权。
+        // 组权限只影响成员，因此只有调用者本身在该组内时这条不变量才可能被破坏。
+        // 权限已在上方经 `ensure_declared` 确认属于目录，因此新增项就是它本身。
+        if members.contains(&operator_id) {
+            let before =
+                effective_permissions_of_in_tx(&access, &ctx, &mut transaction, operator_id)
+                    .await?;
+            let mut after = before.clone();
+            after.insert(input.permission.clone());
+            assert_no_self_escalation(&before, &after)?;
+        }
 
         let changed = access
             .groups()

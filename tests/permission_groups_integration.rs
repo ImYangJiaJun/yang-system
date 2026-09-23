@@ -513,7 +513,7 @@ mod harness {
     use super::common::take_registration_code;
     use super::{
         build_application, connect_test_database, connect_test_redis, dispatch, login,
-        reset_database, reset_redis, PASSWORD,
+        reset_database, reset_redis, PASSWORD, SYSTEM_ADMIN_GROUP_KEY,
     };
     use anyhow::{ensure, Context};
     use serde_json::{json, Value};
@@ -614,6 +614,7 @@ mod harness {
     pub async fn create_group(app: &BuiltApp, admin: &Admin, group_key: &str, title: &str) -> i64 {
         let response = step_up_dispatch(
             app,
+            "access.groups",
             "create_group",
             json!({ "group_key": group_key, "title": title }),
             admin,
@@ -629,7 +630,15 @@ mod harness {
 
     /// 删组并折算为 HTTP 状态码（成功为 200，其余由用例断言）。
     pub async fn delete_group_status(app: &BuiltApp, admin: &Admin, group_id: i64) -> u16 {
-        match step_up_dispatch(app, "delete_group", json!({ "group_id": group_id }), admin).await {
+        match step_up_dispatch(
+            app,
+            "access.groups",
+            "delete_group",
+            json!({ "group_id": group_id }),
+            admin,
+        )
+        .await
+        {
             Ok(_) => 200,
             Err(error) => http_status(&error),
         }
@@ -666,51 +675,150 @@ mod harness {
         u64::try_from(count).unwrap_or_else(|error| panic!("成员行数为负: {error}"))
     }
 
-    /// 直写一条成员行（成员 Action 落地前的唯一加成员手段）。
-    pub async fn add_member(app: &BuiltApp, admin: &Admin, group_id: i64, user_id: i64) {
-        insert_member_row(app, admin, group_id, user_id)
+    /// 走真实成员 Action 把一个用户加入组（失败即 panic：调用方断言的是成功路径）。
+    pub async fn add_member(app: &BuiltApp, operator: &Admin, group_id: i64, user_id: i64) {
+        let response = member_dispatch(app, operator, "add_group_member", group_id, user_id)
             .await
-            .unwrap_or_else(|error| panic!("加成员必须成功: {error}"));
+            .unwrap_or_else(|error| panic!("把用户 {user_id} 加入组 {group_id} 失败: {error}"));
+        assert_eq!(response.code, 0, "加成员必须成功: {}", response.message);
     }
 
     /// 尝试加成员并折算为 HTTP 状态码。
     ///
-    /// 200 表示插入成功；404 表示组已被并发删除（插入只剩外键这一条失败路径）。
-    /// 组仍在却插入失败属于预期外故障，这里直接 panic——不能静默折算成某个状态码
-    /// 混过调用方的状态断言。
+    /// 200 表示插入成功（或幂等重复）；403 表示撞上 spec §8.1 的防自提权判定；
+    /// 404 表示组已被并发删除——应用层的前置读取与外键兜底都折算到这一支。
     pub async fn add_member_status(
         app: &BuiltApp,
-        admin: &Admin,
+        operator: &Admin,
         group_id: i64,
         user_id: i64,
     ) -> u16 {
-        match insert_member_row(app, admin, group_id, user_id).await {
-            Ok(()) => 200,
-            Err(error) => {
-                if group_exists_by_id(app, group_id).await {
-                    panic!("组仍在，加成员却失败: {error}");
-                }
-                404
-            }
+        match member_dispatch(app, operator, "add_group_member", group_id, user_id).await {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
         }
     }
 
-    async fn insert_member_row(
+    /// 尝试移出成员并折算为 HTTP 状态码（400 为最后管理员守卫的拒绝）。
+    pub async fn remove_member_status(
         app: &BuiltApp,
-        admin: &Admin,
+        operator: &Admin,
         group_id: i64,
         user_id: i64,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO user_group (user_id, group_id, granted_by, occurred_at) \
-             VALUES (?, ?, ?, UNIX_TIMESTAMP())",
+    ) -> u16 {
+        match member_dispatch(app, operator, "remove_group_member", group_id, user_id).await {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 用户当前是否属于该组。
+    pub async fn is_member(app: &BuiltApp, group_id: i64, user_id: i64) -> bool {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_group WHERE group_id = ? AND user_id = ?",
         )
-        .bind(user_id)
         .bind(group_id)
-        .bind(admin.user_id)
-        .execute(pool_of(app))
+        .bind(user_id)
+        .fetch_one(pool_of(app))
         .await
-        .map(|_| ())
+        .unwrap_or_else(|error| panic!("查询成员关系失败: {error}"));
+        count > 0
+    }
+
+    /// 内置全权组的 id（由引导流程幂等创建）。
+    pub async fn system_admin_group_id(app: &BuiltApp) -> i64 {
+        sqlx::query_scalar("SELECT id FROM permission_group WHERE group_key = ?")
+            .bind(SYSTEM_ADMIN_GROUP_KEY)
+            .fetch_one(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("读取内置全权组 ID 失败: {error}"))
+    }
+
+    /// 注册一个只被直授 `permission` 的账号并登录取令牌。
+    ///
+    /// 「只」是这些用例的全部意义：账号除这一个权限外什么都没有，因此它一旦让自身
+    /// 有效权限变大，就必定是自提权。
+    pub async fn grant_only(
+        app: &BuiltApp,
+        admin: &Admin,
+        username: &str,
+        permission: &str,
+    ) -> Admin {
+        let email = format!("{username}@example.com");
+        let user_id = register_with_code(app, username, &email)
+            .await
+            .unwrap_or_else(|error| panic!("注册 {username} 失败: {error}"));
+        step_up_dispatch(
+            app,
+            "access.grants",
+            "grant_permission",
+            json!({ "user_id": user_id, "permission": permission }),
+            admin,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("授予 {username} 权限 {permission} 失败: {error}"));
+        Admin {
+            username: username.to_string(),
+            user_id,
+            // 直授会递增授权版本，令牌必须在授权**之后**签发才带得上这个权限。
+            token: login_as(app, username).await,
+        }
+    }
+
+    /// 再引导一名系统管理员：注册后经真实成员 Action 加入内置全权组。
+    ///
+    /// 入组会递增该账号的授权版本，因此令牌在入组**之后**签发——否则它一出生就是
+    /// 过期的，用例会停在 401。
+    pub async fn add_second_admin(app: &BuiltApp, first: &Admin, username: &str) -> Admin {
+        let email = format!("{username}@example.com");
+        let user_id = register_with_code(app, username, &email)
+            .await
+            .unwrap_or_else(|error| panic!("注册 {username} 失败: {error}"));
+        let group_id = system_admin_group_id(app).await;
+        let status = add_member_status(app, first, group_id, user_id).await;
+        assert_eq!(status, 200, "把 {username} 加入全权组必须成功");
+        Admin {
+            username: username.to_string(),
+            user_id,
+            token: login_as(app, username).await,
+        }
+    }
+
+    /// 用同一账号重新签发令牌。
+    ///
+    /// 组成员变更会递增该成员的授权版本、让旧令牌立即失效；用例若要在入组之后继续
+    /// 以该成员身份调用接口，就必须先换发令牌——这正是「旧 Token 失效」的另一面，
+    /// 不是给测试开的后门。
+    pub async fn relogin(app: &BuiltApp, admin: &Admin) -> Admin {
+        let token = login_as(app, &admin.username).await;
+        Admin {
+            token,
+            ..admin.clone()
+        }
+    }
+
+    /// 驱动一个组成员写 Action（普通认证请求）。
+    ///
+    /// 与组条目同例：成员加/移出**不在** `step_up_targets()` 登记内（那三个是
+    /// 建/改/删组），因此不能走 `step_up_dispatch`——那会要求这些 Action 挂 Step-up
+    /// 守卫，而守卫清单本身由 `access.groups` 的单测钉死。
+    async fn member_dispatch(
+        app: &BuiltApp,
+        operator: &Admin,
+        action: &str,
+        group_id: i64,
+        user_id: i64,
+    ) -> Result<ApiResponse, BaseError> {
+        let authorization = format!("Bearer {}", operator.token);
+        dispatch(
+            app,
+            "access.groups",
+            action,
+            json!({ "group_id": group_id, "user_id": user_id }),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
     }
 
     fn pool_of(app: &BuiltApp) -> &sqlx::MySqlPool {
@@ -727,6 +835,7 @@ mod harness {
     /// 失败，因此这里把它折算成 `ConfigError`（500）而不是放行。
     async fn step_up_dispatch(
         app: &BuiltApp,
+        module: &str,
         action: &str,
         body: Value,
         admin: &Admin,
@@ -734,7 +843,7 @@ mod harness {
         let authorization = format!("Bearer {}", admin.token);
         match dispatch(
             app,
-            "access.groups",
+            module,
             action,
             body.clone(),
             &[("authorization", authorization.as_str())],
@@ -765,7 +874,7 @@ mod harness {
                     })?;
                 dispatch(
                     app,
-                    "access.groups",
+                    module,
                     action,
                     body,
                     &[
@@ -1216,5 +1325,107 @@ async fn adding_an_undeclared_permission_is_rejected() {
         harness::item_rows_of_group(&app, group_id).await,
         0,
         "拒绝不得留下条目行"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 12 起的组成员用例：加/移出成员、两条自提权路径与最后管理员守卫。
+// ---------------------------------------------------------------------------
+
+/// spec §8.1 路径一：给自己加一个权限超集的组必须被拒。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn user_cannot_add_themselves_to_a_group_granting_more_than_they_hold() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // operator 只被授予 access.groups.write，不含 access.grants.write。
+    let operator = harness::grant_only(&app, &admin, "operator", "access.groups.write").await;
+    let powerful = harness::create_group(&app, &admin, "powerful", "高权").await;
+    harness::add_group_item(&app, &admin, powerful, "access.grants.write").await;
+
+    let status = harness::add_member_status(&app, &operator, powerful, operator.user_id).await;
+    assert_eq!(status, 403, "自提权必须被拒绝");
+    assert!(!harness::is_member(&app, powerful, operator.user_id).await);
+}
+
+/// spec §8.1 路径二：给自己已属于的组加一条自己没有的权限，同样必须被拒。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn user_cannot_add_a_permission_to_their_own_group_beyond_their_holdings() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let operator = harness::grant_only(&app, &admin, "operator2", "access.groups.write").await;
+    let own = harness::create_group(&app, &admin, "own", "自属组").await;
+    harness::add_group_item(&app, &admin, own, "access.groups.write").await;
+    harness::add_member(&app, &admin, own, operator.user_id).await;
+    // 入组递增了 operator 的授权版本，入组前签发的令牌已失效；换发之后才轮到
+    // §8.1 的子集判定——否则用例会停在 401，根本测不到提权拒绝。
+    let operator = harness::relogin(&app, &operator).await;
+
+    let status = harness::add_group_item_status(&app, &operator, own, "access.grants.write").await;
+    assert_eq!(status, 403, "给自己所属组加超集权限同样是自提权");
+    assert_eq!(
+        harness::item_rows_of_group(&app, own).await,
+        1,
+        "被拒的自提权不得留下条目行"
+    );
+}
+
+/// Review Focus 2：管理员把自己移出全权组（非最后一名）必须成功。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn admin_can_remove_themselves_when_another_admin_remains() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    let second = harness::add_second_admin(&app, &first, "admin2").await;
+    let group_id = harness::system_admin_group_id(&app).await;
+
+    let version_before = harness::authz_version_of(&app, second.user_id).await;
+    let status = harness::remove_member_status(&app, &second, group_id, second.user_id).await;
+    assert_eq!(status, 200, "非最后一名管理员可以退出全权组");
+    assert!(!harness::is_member(&app, group_id, second.user_id).await);
+    // 事实层：退出必须立刻递增该账号的授权版本（spec §6.3 的扇出失效）。
+    assert!(
+        harness::authz_version_of(&app, second.user_id).await > version_before,
+        "移出组成员必须递增该成员的授权版本"
+    );
+
+    // 退出后该账号失去全部权限（旧 Token 失效）。
+    //
+    // 这一条为什么必须等：校验器的快速路径在 Redis 版本与 claims 相同就直接放行
+    // （`request_validator.rs`），而 Redis 里的版本由 Outbox worker 异步刷新——本夹具
+    // 不启动 worker，且本用例自己那次请求刚把旧版本回填进了缓存。因此要观测到
+    // `AuthorizationStale`，必须等这条被写成旧值的键自然过期。ADR
+    // （docs/architecture/authorization-freshness-adr.md）把「数据库提交后最坏 5 秒
+    // 陈旧窗口」列为明确接受的代价，这里等的是同一件事，不是给断言放水：若移出没有
+    // 递增版本，回查主库时会以「版本相同」放行，本断言照样失败。
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(
+        harness::member_token_is_stale(&app, &second.token).await,
+        "移出全权组后旧 Token 必须失效"
+    );
+}
+
+/// spec §8.2 在组成员接口上的落点：移出全权组成员后系统必须仍有至少一名 active 管理员。
+///
+/// 计划此处断言 409（设计 §9.3 的 `Conflict`）。`yang_base::BaseError` 没有该变体，
+/// 且设计同节要求「不为个别用例扩展框架错误类型」，因此拒绝落成既有的 `ParamInvalid`
+/// （400）——与本文件里「删组」「成员上限」两条守卫同一取舍。断言要钉住的事实不变：
+/// 必须被拒、绝不能是 5xx、拒绝后成员关系必须原封不动。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn the_last_system_admin_cannot_be_removed_from_the_admin_group() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::system_admin_group_id(&app).await;
+
+    let status = harness::remove_member_status(&app, &admin, group_id, admin.user_id).await;
+    assert_eq!(
+        status, 400,
+        "最后一名管理员必须被拒（ParamInvalid→400），绝不能是 500"
+    );
+    assert!(
+        harness::is_member(&app, group_id, admin.user_id).await,
+        "拒绝不得顺手删掉成员行"
     );
 }

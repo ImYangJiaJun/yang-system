@@ -8,7 +8,7 @@
 // 接入，与 `repository.rs` / `resolution.rs` 同例显式豁免 dead-code 门禁。
 #![allow(dead_code)]
 
-use super::repository::{MAX_GROUP_MEMBERS, SYSTEM_ADMIN_GROUP_KEY};
+use super::repository::{GroupRecord, MAX_GROUP_MEMBERS, SYSTEM_ADMIN_GROUP_KEY};
 use super::resolution::{catalog_permissions, resolve_group_permissions};
 use crate::addon::access::domain::context::Access;
 use std::collections::BTreeSet;
@@ -85,6 +85,32 @@ pub(crate) async fn effective_permissions_of_in_tx(
         ));
     }
     Ok(effective)
+}
+
+/// 模拟「本次入组之后」某用户的有效权限：把目标组对他的贡献并入当前有效权限。
+///
+/// **不写库**、只做集合运算。它存在的意义是让 [`assert_no_self_escalation`]
+/// 有第二个可比快照，而那个快照必须与 `effective_permissions_of_in_tx` 出自
+/// 同一条解析路径（spec §8.1），否则校验会与实际 Token 解析漂移成两套语义。
+pub(crate) async fn simulate_after_join(
+    access: &Access,
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    user_id: i64,
+    group: &GroupRecord,
+) -> Result<BTreeSet<String>, BaseError> {
+    let catalog = catalog_permissions(access.permission_catalog())?;
+    let mut after = effective_permissions_of_in_tx(access, ctx, transaction, user_id).await?;
+    let items = access
+        .groups()
+        .list_items_in_tx(ctx, transaction, group.id)
+        .await?;
+    after.extend(resolve_group_permissions(
+        &group.group_key,
+        &items,
+        &catalog,
+    ));
+    Ok(after)
 }
 
 /// spec §8.1 的不变量：任何组管理操作都不得使调用者自身有效权限增大。
