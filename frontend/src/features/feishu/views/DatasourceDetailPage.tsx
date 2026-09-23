@@ -22,7 +22,7 @@
  *    而不是与「还没有选项」混为一谈。
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Link, useParams } from "react-router";
 import {
   ArrowDown,
@@ -46,11 +46,16 @@ import {
 } from "@/shared/ui/table";
 
 import {
+  DATASOURCE_OPERATION_IDS,
   DEFAULT_OPTION_ORDER_BY,
+  canWriteDatasources,
+  hasOperation,
   useDatasourceList,
   useFeishuActions,
   useOptionList,
+  usePullSchedule,
 } from "../api";
+import { CopyField } from "../components/CopyField";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { DEFAULT_PAGE_SIZE } from "../list-query";
@@ -61,17 +66,63 @@ import type {
   OrderByClause,
 } from "../types";
 import {
+  approvalOptionsUrl,
+  describeNextPull,
   formatUnixSeconds,
   hasCompleteCoordinates,
   ingestModeLabel,
   localeLabel,
+  pullLanded,
   syncHealth,
 } from "../types";
 
 const SKELETON_ROWS = 5;
 
+/// 「立即拉取」的轮询节拍与总预算。
+///
+/// 触发是**异步受理**的（后端只回 202 语义的「已受理」），所以结果只能靠盯
+/// `lastPullAt` 变化来收口。1 秒一拍、15 秒封顶：一轮小表通常 2~3 秒内落定，
+/// 而大表可能要几十秒——超过预算就让用户自己回来看，不要一直转。
+const PULL_POLL_MS = 1_000;
+const PULL_WAIT_MS = 15_000;
+
+/// 「立即拉取」触发后的状态机。
+///
+/// 每条分支对应一句**不同**的话——尤其 `failed` 与 `timeout` 不能合并：前者是
+/// 「服务端明确拒了，照它说的改配置」，后者是「不知道，自己回来看」，用户的下一步动作不同。
+type PullTrigger =
+  | { kind: "idle" }
+  /// `baseline` 是触发前那一轮的 `lastPullAt`——落定判据是「它变了没有」。
+  | { kind: "pending"; baseline: number | null }
+  | { kind: "landed" }
+  | { kind: "timeout" }
+  /// 后端在发信号**之前**就拒了（模式不对 / 已停用 / 坐标不全），这里是它的原话。
+  | { kind: "failed"; message: string };
+
 const NEUTRAL_BAR =
   "rounded-md border border-border bg-muted/50 px-3 py-2 text-sm";
+
+const ERROR_BAR =
+  "rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive";
+
+function subscribeToSecond(onStoreChange: () => void): () => void {
+  const timer = window.setInterval(onStoreChange, 1_000);
+  return () => window.clearInterval(timer);
+}
+
+function nowSeconds(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+/// 每秒推进一次的「现在」（unix 秒）。
+///
+/// 存在的理由有两条：渲染期不能直接读时钟（`react-hooks/purity` 会拦），而
+/// 「下次自动拉取」要回答的是「还有多久」——拿查询的取回时刻当现在，文案会在
+/// 两次取回之间冻住，越看越不准。`useSyncExternalStore` 是 React 给
+/// 「订阅外部可变源」的正门，时钟正是这种源。
+function useNowSeconds(): number {
+  return useSyncExternalStore(subscribeToSecond, nowSeconds, nowSeconds);
+}
 
 /**
  * `i18n` 是 JSON 文本（可能是 `'{"zh_cn":"差旅费","en_us":"Travel"}'` 或 null），
@@ -165,10 +216,47 @@ export default function DatasourceDetailPage() {
     }),
     [sourceKey],
   );
-  const datasourceQuery = useDatasourceList(datasourceListQuery);
+  // 「立即拉取」的触发状态。轮询只在 pending 期间打开——常态下这个列表没有轮询的必要。
+  const [pull, setPull] = useState<PullTrigger>({ kind: "idle" });
+  const datasourceQuery = useDatasourceList(datasourceListQuery, {
+    refetchInterval: pull.kind === "pending" ? PULL_POLL_MS : false,
+  });
   const datasource: DatasourceItem | null =
     datasourceQuery.data?.items.find((item) => item.sourceKey === sourceKey) ??
     null;
+
+  // 落定：`lastPullAt` 变了就说明这一轮跑过了。**成功失败都算**（见 `pullLanded`）——
+  // 失败的一轮同样写了 `last_pull_at`，拿它当判据是为了不让按钮在失败时一直转。
+  useEffect(() => {
+    if (pull.kind !== "pending") return;
+    if (pullLanded(pull.baseline, datasource)) {
+      setPull({ kind: "landed" });
+    }
+  }, [pull, datasource]);
+
+  // 超时兜底：轮询不能无限转下去。
+  useEffect(() => {
+    if (pull.kind !== "pending") return;
+    const timer = window.setTimeout(
+      () => setPull({ kind: "timeout" }),
+      PULL_WAIT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [pull]);
+
+  async function handlePullNow() {
+    if (datasource === null) return;
+    setPull({ kind: "pending", baseline: datasource.lastPullAt });
+    try {
+      await actions.pullNow(datasource.sourceKey);
+    } catch (error) {
+      // 后端的预检在**发信号之前**就会拒掉拉不动的源，并把原因带回来。
+      setPull({
+        kind: "failed",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   function toggleSort(field: string) {
     setOrderBy((previous) => {
@@ -226,7 +314,11 @@ export default function DatasourceDetailPage() {
             查不到这条数据源——它可能已被删除，或者当前身份读不到它。
           </p>
         ) : (
-          <SyncPanel item={datasource} />
+          <SyncPanel
+            item={datasource}
+            pull={pull}
+            onPullNow={() => void handlePullNow()}
+          />
         )}
       </section>
 
@@ -435,11 +527,33 @@ function OptionTable({
 
 /// 同步状态面板。
 ///
-/// 判定逻辑在 `types.ts` 的 `syncHealth` 里（纯函数、可单测）——这里只负责呈现。
-/// 分工的理由：那几个分支各对应一种**运维要采取不同动作**的情形，埋在 JSX 里
-/// 就只能靠肉眼看，而它们恰恰是最容易在改动中被无声破坏的。
-function SyncPanel({ item }: { item: DatasourceItem }) {
+/// 判定逻辑在 `types.ts` 的 `syncHealth` / `describeNextPull` 里（纯函数、可单测）——
+/// 这里只负责呈现。分工的理由：那几个分支各对应一种**运维要采取不同动作**的情形，
+/// 埋在 JSX 里就只能靠肉眼看，而它们恰恰是最容易在改动中被无声破坏的。
+function SyncPanel({
+  item,
+  pull,
+  onPullNow,
+}: {
+  item: DatasourceItem;
+  pull: PullTrigger;
+  onPullNow: () => void;
+}) {
+  const catalog = useUiCatalog();
+  const schedule = usePullSchedule();
   const health = syncHealth(item);
+  // 排程是**全局**的，所以这个值在每条数据源的详情页都一样。
+  // `now` 是**秒**（`nextRunAt` 也是秒）——传毫秒不会报错，只会让比较恒真。
+  const now = useNowSeconds();
+  const nextPull = describeNextPull(schedule.data ?? null, now);
+
+  // 按钮只在**真的能触发**时才渲染：目录里有 `pull_now` 才说明服务端起了 worker。
+  // 没有它却渲染一个按钮，点下去只会得到「UI 目录里找不到 Action」——那是把
+  // 「这个部署没开导出站拉取」错报成一次功能故障。
+  const canTrigger =
+    hasOperation(catalog.data, DATASOURCE_OPERATION_IDS.pullNow) &&
+    canWriteDatasources(catalog.data);
+
   const rows: Array<[string, string]> = [
     ["取数方式", ingestModeLabel(item.ingestMode)],
     ["Base Token", item.bitableBaseToken ?? "—"],
@@ -448,6 +562,7 @@ function SyncPanel({ item }: { item: DatasourceItem }) {
     ["取数列", item.bitableFieldName ?? "—"],
     ["最近成功同步", formatUnixSeconds(item.lastSuccessAt ?? 0)],
     ["最近尝试拉取", formatUnixSeconds(item.lastPullAt ?? 0)],
+    ["下次自动拉取", nextPull.label],
   ];
   if (item.bitableFieldName !== null && !hasCompleteCoordinates(item)) {
     rows.push(["提示", "坐标不全，服务端每轮都会跳过这个数据源"]);
@@ -458,6 +573,18 @@ function SyncPanel({ item }: { item: DatasourceItem }) {
       <div className="flex flex-wrap items-center gap-2">
         <StatusBadge tone={health.tone}>{health.title}</StatusBadge>
         <span className="text-xs text-muted-foreground">{health.detail}</span>
+        {canTrigger ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto"
+            disabled={pull.kind === "pending"}
+            onClick={onPullNow}
+          >
+            <RefreshCw aria-hidden="true" />
+            {pull.kind === "pending" ? "正在拉取…" : "立即拉取"}
+          </Button>
+        ) : null}
       </div>
 
       <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
@@ -470,6 +597,32 @@ function SyncPanel({ item }: { item: DatasourceItem }) {
           </div>
         ))}
       </dl>
+
+      <p className="text-xs text-muted-foreground">{nextPull.detail}</p>
+
+      {pull.kind === "landed" ? (
+        <p aria-live="polite" className={NEUTRAL_BAR}>
+          这一轮已经跑过了，上面的时间已更新。成功与否看下面的「最近一次错误」。
+        </p>
+      ) : null}
+      {pull.kind === "timeout" ? (
+        <p aria-live="polite" className={NEUTRAL_BAR}>
+          15
+          秒内没等到状态变化——这一轮可能还在跑，也可能服务端跳过了这个数据源。
+          稍后刷新本页看「最近尝试拉取」。
+        </p>
+      ) : null}
+      {pull.kind === "failed" ? (
+        <p role="alert" className={ERROR_BAR}>
+          {pull.message}
+        </p>
+      ) : null}
+
+      <CopyField
+        value={approvalOptionsUrl(window.location.origin, item.sourceKey)}
+        label="取选项接口地址（粘到飞书审批后台的外部选项配置里）："
+        hint="按当前站点的地址拼出来的。若飞书要访问的是另一个域名（例如加了 TLS 边缘之后），以那个域名为准。"
+      />
 
       {item.lastError !== null ? (
         <div className="space-y-1">

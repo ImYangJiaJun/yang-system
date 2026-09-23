@@ -397,6 +397,102 @@ export function syncHealth(item: DatasourceItem): SyncHealth {
   };
 }
 
+/* ------------------------------ 自动拉取排程 ------------------------------ */
+
+/// 服务端报告的自动拉取排程（`pull_schedule` Action）。
+///
+/// **排程是全局的，不是每条数据源一份**——只有一个 worker、一个循环，下一轮的时间对
+/// 所有数据源都相同。所以它没有 `sourceKey`，任何一条源的详情页看到的都是同一个值。
+export type PullScheduleInfo = {
+  /// 配置的轮询间隔（秒）。
+  intervalSeconds: number;
+  /// 下次自动拉取的 unix 秒；`null` = 正在拉取，或服务端还没跑过第一轮。
+  nextRunAt: number | null;
+};
+
+export type NextPullView = {
+  /// 「下次自动拉取」那一栏的主文案。
+  label: string;
+  /// 补充说明（间隔、或为什么答不出来）。
+  detail: string;
+};
+
+/// 秒数 → 人话。不足一分钟按秒说，不四舍五入成「0 分钟」。
+function describeDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${Math.round(seconds / 60)} 分钟`;
+}
+
+/// 排程 → 「下次自动拉取」那一栏的文案。
+///
+/// `nowSeconds` 显式传入而不是读内部时钟：这个函数要回答「还有多久」，用内部时钟就没法测。
+/// 参数名带上单位是刻意的——`nextRunAt` 是**秒**，而 `Date.now()` 是**毫秒**，
+/// 传错单位不会报错，只会让比较恒真、界面永远显示「即将开始」。
+///
+/// 三种答不出来的形态刻意分开：**没有排程**（端点没注册）、**正在拉取**（下一轮还没排）、
+/// **已到点**（随时会开跑）。它们对用户是三个不同的处境，合并成一句「未知」等于没答。
+export function describeNextPull(
+  schedule: PullScheduleInfo | null,
+  nowSeconds: number,
+): NextPullView {
+  if (schedule === null) {
+    return {
+      label: "未知",
+      detail: "服务端没有报告排程——出站拉取可能未启用。",
+    };
+  }
+
+  const interval = describeDuration(schedule.intervalSeconds);
+
+  if (schedule.nextRunAt === null) {
+    return {
+      label: "正在拉取",
+      detail: `这一轮跑完才会排出下一次；配置的轮询间隔是 ${interval}。`,
+    };
+  }
+
+  if (schedule.nextRunAt <= nowSeconds) {
+    return {
+      label: "即将开始",
+      detail: `已经到点，服务端随时会开跑；配置的轮询间隔是 ${interval}。`,
+    };
+  }
+
+  return {
+    label: `${formatUnixSeconds(schedule.nextRunAt)}（约 ${describeDuration(
+      schedule.nextRunAt - nowSeconds,
+    )}后）`,
+    // 后端在一轮**跑完之后**才排下一次，所以「下次」不是「上次 + 间隔」。
+    detail: `真实周期是「间隔 + 单轮耗时」，这里给的是最早可能开跑的时刻（间隔 ${interval}）。`,
+  };
+}
+
+/// 取选项接口的完整地址。
+///
+/// 用**调用方给的 origin** 拼而不是硬编码主机名：`window.location.origin` 一填，
+/// 本地开发时会自动变成 `http://localhost:5273`，不必在两处维护同一个常量。
+export function approvalOptionsUrl(origin: string, sourceKey: string): string {
+  const base = origin.endsWith("/") ? origin.slice(0, -1) : origin;
+  return `${base}/api/v1/feishu/approval/options/${sourceKey}`;
+}
+
+/// 手动触发之后，「我点的那一轮跑完了吗」。
+///
+/// 判据是 `lastPullAt` 变化而**不是** `lastSuccessAt`：后端每轮**开跑就写** `last_pull_at`，
+/// 成功与失败都写。手动触发要回答的是「跑了没有」，不是「成功了吗」——后者由
+/// `consecutiveFailures` 与 `lastError` 呈现。拿 `lastSuccessAt` 当判据会让失败的一轮
+/// 永远等不到落定，按钮一直转。
+///
+/// 数据源取不到时返回 `false`：列表还在加载、或那一条刚被删掉，都不该被当成跑完了。
+export function pullLanded(
+  baseline: number | null,
+  item: DatasourceItem | null,
+): boolean {
+  return item !== null && item.lastPullAt !== baseline;
+}
+
 /* ------------------------------ 级联（父级） ------------------------------ */
 
 /// 通配键：不指定联动控件代码时用它。与后端 `domain/linkage.rs` 的

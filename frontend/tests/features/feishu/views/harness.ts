@@ -49,6 +49,11 @@ export type FeishuApiStubOptions = {
   updateDatasource?: Handler;
   deleteDatasource?: Handler;
   approvalOptions?: Handler;
+  /// 「立即拉取」的受理结果。后端在**发信号之前**就会拒掉拉不动的源，
+  /// 所以错误态也走这里（返回 `Response`）。
+  pullNow?: Handler;
+  /// 自动拉取排程。`next_run_at` 为 `null` 表示「正在拉取 / 还没跑过第一轮」。
+  pullSchedule?: Handler;
 };
 
 export function jsonResponse(payload: unknown, status = 200): Response {
@@ -128,6 +133,22 @@ function catalogFor(options: FeishuApiStubOptions) {
         "feishu.datasource.delete_datasource",
         "DELETE",
         "/api/v1/feishu/datasources",
+      ),
+      // 服务端只在 can_pull()（出站凭证齐备）时才注册这一个。目录里没有它，
+      // 就等于这个部署没开导出站拉取——页面据此不渲染按钮。
+      action(
+        "feishu.datasource.pull_now",
+        "POST",
+        "/api/v1/feishu/datasources/pull-now",
+      ),
+    );
+  }
+  if (options.datasourceRead ?? true) {
+    actions.push(
+      action(
+        "feishu.datasource.pull_schedule",
+        "POST",
+        "/api/v1/feishu/datasources/pull-schedule",
       ),
     );
   }
@@ -255,6 +276,15 @@ export function stubFeishuApi(
       }
       if (url.endsWith("/api/v1/feishu/datasources/query")) {
         return respond(options.datasourceList, payload, emptyPage());
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/pull-now")) {
+        return respond(options.pullNow, payload, { accepted: true });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/pull-schedule")) {
+        return respond(options.pullSchedule, payload, {
+          interval_seconds: 900,
+          next_run_at: null,
+        });
       }
       if (url.endsWith("/api/v1/feishu/options/query")) {
         return respond(options.optionList, payload, emptyPage());

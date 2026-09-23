@@ -10,12 +10,10 @@
  * 并且必须说清「建好了、但 Token 没验证过」，而不是让人以为创建失败了。
  */
 
-import { Check, Copy } from "lucide-react";
-import { useState } from "react";
-
 import { Button } from "@/shared/ui/button";
 
 import { APPROVAL_OPTION_CODES, type TokenPrecheckResult } from "../types";
+import { CopyField } from "./CopyField";
 
 export type TokenPrecheckMode = "create" | "rotate";
 
@@ -42,17 +40,6 @@ export function TokenPrecheckNotice({
   pending = false,
   onRotate,
 }: TokenPrecheckNoticeProps) {
-  const [copied, setCopied] = useState(false);
-
-  async function copySourceKey() {
-    try {
-      await navigator.clipboard.writeText(sourceKey);
-      setCopied(true);
-    } catch {
-      // 剪贴板不可用（无权限 / 非安全上下文）时不做任何事，文本本身已经可选中。
-    }
-  }
-
   if (pending) {
     return (
       <p className={NEUTRAL_BAR} aria-live="polite">
@@ -111,35 +98,11 @@ export function TokenPrecheckNotice({
               `服务端这次拉到了 ${result.optionCount} 个选项，而且它说还有更多——这个接口一次只返回一页，所以这里给不出总数。`
             : `服务端这次拉到了 ${result.optionCount} 个选项。`}
       </p>
-      <div className="space-y-2 rounded-md border border-border p-3">
-        <p className="text-sm">把这一段粘回飞书审批后台的外部选项配置里：</p>
-        <div className="flex items-center gap-2">
-          <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-sm">
-            {sourceKey}
-          </code>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void copySourceKey()}
-          >
-            {copied ? (
-              <>
-                <Check aria-hidden="true" />
-                已复制
-              </>
-            ) : (
-              <>
-                <Copy aria-hidden="true" />
-                复制
-              </>
-            )}
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          接口地址与 Token
-          由飞书那边填写；在这里点「校验数据」是飞书后台自己的动作。
-        </p>
-      </div>
+      <CopyField
+        value={sourceKey}
+        label="把这一段粘回飞书审批后台的外部选项配置里："
+        hint="接口地址与 Token 由飞书那边填写；在这里点「校验数据」是飞书后台自己的动作。"
+      />
     </div>
   );
 }

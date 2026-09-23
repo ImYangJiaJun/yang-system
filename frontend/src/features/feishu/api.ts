@@ -45,6 +45,7 @@ import type {
   OptionItem,
   OptionListQuery,
   OrderByClause,
+  PullScheduleInfo,
   TokenPrecheckResult,
 } from "./types";
 import {
@@ -53,12 +54,17 @@ import {
   buildLinkageMapping,
 } from "./types";
 
-/// 后端 8 个 Action 里控制台要用的 6 个（另两个是给飞书/自动化调用的机器入口）。
+/// 控制台要用的数据源 Action。
+///
+/// `pullNow` / `pullSchedule` 只在服务端 `can_pull()` 为真（出站凭证齐备）时才注册，
+/// 所以目录里查不到它们是**正常状态**，不是权限问题——页面要按「没有」处理。
 export const DATASOURCE_OPERATION_IDS = {
   list: "feishu.datasource.list_datasources",
   create: "feishu.datasource.create_datasource",
   update: "feishu.datasource.update_datasource",
   remove: "feishu.datasource.delete_datasource",
+  pullNow: "feishu.datasource.pull_now",
+  pullSchedule: "feishu.datasource.pull_schedule",
 } as const;
 
 export const OPTION_OPERATION_IDS = {
@@ -136,6 +142,8 @@ export const feishuQueryKeys = {
     ] as const,
   options: (sourceKey: string) =>
     [FEISHU_QUERY_ROOT, "options", sourceKey] as const,
+  /// 排程是**全局**的，所以 key 里没有 sourceKey。
+  pullSchedule: () => [FEISHU_QUERY_ROOT, "pull-schedule"] as const,
   optionList: (query: OptionListQuery) =>
     [
       ...feishuQueryKeys.options(query.sourceKey),
@@ -481,6 +489,50 @@ export async function deleteDatasource(
   };
 }
 
+/* ------------------------------- 手动触发拉取 ------------------------------ */
+
+/// 请求后台立刻跑一轮。**只回「已受理」**——真正的结果靠轮询数据源行收口。
+///
+/// 后端刻意不在这里同步拉：一条大表可能超过 HTTP 请求超时（`[http].request_timeout_seconds`，
+/// 默认 30 秒），届时客户端看到报错而服务端还在跑，两边对不上。
+export async function pullNow(
+  sourceKey: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<void> {
+  await invokeFeishuAction(
+    deps,
+    DATASOURCE_OPERATION_IDS.pullNow,
+    { source_key: sourceKey },
+    signal,
+  );
+}
+
+/// 查询自动拉取排程；目录里没有这个 Action（服务端未启用出站拉取）时返回 `null`。
+///
+/// 返回 `null` 而不是抛错：「没启用」是正常状态，页面按「未知」显示即可。
+/// 这与 `requireAction` 的取舍不同——那个是用来暴露「有权限却没有」这种异常配置的。
+export async function fetchPullSchedule(
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<PullScheduleInfo | null> {
+  if (!hasOperation(deps.catalog, DATASOURCE_OPERATION_IDS.pullSchedule)) {
+    return null;
+  }
+  const result = await invokeFeishuAction(
+    deps,
+    DATASOURCE_OPERATION_IDS.pullSchedule,
+    {},
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    intervalSeconds: asNumber(data?.interval_seconds, 0),
+    // 缺这个键与显式 `null` 都表示「答不出来」，两者不该被区分对待。
+    nextRunAt: typeof data?.next_run_at === "number" ? data.next_run_at : null,
+  };
+}
+
 /* ------------------------------- 连通性预检 ------------------------------- */
 
 /// 目录拿不到这条 Action 时的兜底契约（它是 public 端点，目录可能不投影它）。
@@ -591,9 +643,12 @@ export async function precheckApprovalOptions(
 ///
 /// `options.enabled` 用于**按需**查询：父级候选那一份只在编辑对话框打开时才要，
 /// 让它在列表页每次渲染都跑会白白多拉一页数据。
+///
+/// `options.refetchInterval` 给「立即拉取」用：触发之后要盯着 `lastPullAt` 何时变化。
+/// 默认 `false`（不轮询）——常态下这个列表没有轮询的必要。
 export function useDatasourceList(
   query: DatasourceListQuery,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; refetchInterval?: number | false } = {},
 ): UseQueryResult<ListPage<DatasourceItem>> {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
@@ -606,6 +661,24 @@ export function useDatasourceList(
     // 翻页/搜索时保留上一页结果，避免整页闪空
     placeholderData: keepPreviousData,
     staleTime: 15_000,
+    refetchInterval: options.refetchInterval ?? false,
+  });
+}
+
+/// 自动拉取排程（全局，不随数据源变）。
+///
+/// `staleTime` 取得比列表短：这个值每一轮都会变，而它正是用来回答「还要等多久」的，
+/// 缓存久了会给出一个已经过去的时刻。
+export function usePullSchedule(): UseQueryResult<PullScheduleInfo | null> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled: canReadDatasources(catalogData),
+    queryKey: feishuQueryKeys.pullSchedule(),
+    queryFn: ({ signal }) =>
+      fetchPullSchedule({ catalog: catalogData, session }, signal),
+    staleTime: 5_000,
   });
 }
 
@@ -645,6 +718,8 @@ export type FeishuActions = {
     sourceKey: string,
     token: string,
   ) => Promise<TokenPrecheckResult>;
+  /// 请求后台立刻拉一次。只回「已受理」，结果靠轮询数据源行。
+  pullNow: (sourceKey: string) => Promise<void>;
 };
 
 export function useFeishuActions(): FeishuActions {
@@ -674,6 +749,10 @@ export function useFeishuActions(): FeishuActions {
       precheckApprovalOptions(sourceKey, token, deps),
     [deps],
   );
+  const trigger = useCallback(
+    (sourceKey: string) => pullNow(sourceKey, deps),
+    [deps],
+  );
 
   return {
     canRead: canReadDatasources(catalogData),
@@ -683,5 +762,6 @@ export function useFeishuActions(): FeishuActions {
     updateDatasource: update,
     deleteDatasource: remove,
     precheckToken: precheck,
+    pullNow: trigger,
   };
 }
