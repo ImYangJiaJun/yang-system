@@ -39,9 +39,13 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .filterable(true)
                 .sortable(true),
             // 只存摘要，校验用；校验路径不需要解密。
+            // **唯一**（设计 §10.2 第 2 条，MUST）：两个绑定拿到同一个 Token 时，
+            // 该 Token 对两张表都验得过——出站按 `source_key` 查行再比对摘要，
+            // 所以串源不成立，但重复凭据本身要挡在建源/轮换/手填这三条路径上。
             token_hash => Str::new()
                 .title("Token 摘要")
                 .require(true)
+                .unique(true)
                 .max_length(64)
                 .secret(true)
                 .readable_by([SYSTEM_ROLE])
@@ -116,6 +120,26 @@ mod tests {
         assert!(source_key.is_required());
         assert!(source_key.is_filterable());
         assert!(source_key.is_sortable());
+    }
+
+    #[test]
+    fn token_hash_is_unique_so_two_bindings_cannot_share_a_credential() {
+        // 设计 §10.2 第 2 条把这条写成 MUST。它此前**没有**唯一索引，后果收窄为
+        // 「两个绑定拿到同一个 Token 时该 Token 对两张表都验得过」——出站按
+        // `source_key` 路径段查行再比对摘要，所以「按 Token 反查串源」在当前路径上
+        // 不成立；而 `update_datasource_table.rs` 也会封存**手填** Token，人不保证唯一。
+        // `table_definition()` 不暴露索引，故这里按 DSL 读原始声明。
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let token_hash = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "token_hash")
+            .unwrap_or_else(|| panic!("token_hash 必须存在"));
+        assert!(
+            token_hash.storage.unique,
+            "token_hash 必须建唯一索引：否则两个绑定可以拿到同一个 Token，\
+             而该 Token 对两张表都验得过"
+        );
     }
 
     #[test]

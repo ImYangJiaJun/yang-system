@@ -25,6 +25,12 @@ pub(super) struct FieldBindingItem {
     parent_field_id: Option<String>,
     /// 是否在用。取消勾选的列会留在这里但被**停用**（不删行）。
     enabled: bool,
+    /// 最近一次轮换凭据的时间（unix 秒）；**从未轮换或手填的 Token 为 `None`**。
+    ///
+    /// 投影它是控制台那一列的全部意义：写入在 `rotate_token.rs`，没有读路径就永远空着。
+    /// 手填凭据的绑定从来没有轮换过——那与「轮换过但时间读不出来」是两回事，故用
+    /// `Option`（JSON 里是 `null`）而不是 `0`。
+    token_rotated_at: Option<i64>,
 }
 
 /// 把绑定行按 `datasource_id` 分组。
@@ -46,6 +52,7 @@ pub(super) fn group_bindings(
                 source_key: row.require("source_key")?,
                 parent_field_id: row.optional("parent_field_id")?,
                 enabled: row.optional("enabled")?.unwrap_or(true),
+                token_rotated_at: row.optional("token_rotated_at")?,
             });
     }
     Ok(groups)
@@ -177,6 +184,7 @@ pub(super) async fn handle(
                 "source_key",
                 "parent_field_id",
                 "enabled",
+                "token_rotated_at",
             ])?
             .where_in("datasource_id", ids)?
             .all()
@@ -266,6 +274,41 @@ mod tests {
         assert!(!item.enabled);
         assert_eq!(item.field_id, "fldB");
         assert_eq!(item.source_key, "fx");
+    }
+
+    #[test]
+    fn the_rotation_time_is_projected_so_the_console_column_is_not_always_blank() {
+        // 写入在 `rotate_token.rs`（三列同事务），但此前**没有任何读路径投影它**，
+        // 所以控制台那列永远显示「—」。绑定项必须带上 `token_rotated_at`。
+        let mut row = binding_row(1, "fldA", "currency", None, true);
+        row.insert("token_rotated_at", serde_json::json!(1_700_000_000_i64));
+        let groups = group_bindings(&[row]).unwrap_or_else(|error| panic!("应可分组: {error}"));
+        let item = groups
+            .get(&1)
+            .and_then(|items| items.first())
+            .unwrap_or_else(|| panic!("应有分组"));
+        let value = serde_json::to_value(item)
+            .unwrap_or_else(|error| panic!("绑定项应可序列化: {error}"));
+        assert_eq!(
+            value.get("token_rotated_at"),
+            Some(&serde_json::json!(1_700_000_000_i64)),
+            "轮换时间必须出现在绑定投影里，键名是 token_rotated_at（snake_case）"
+        );
+    }
+
+    #[test]
+    fn a_binding_that_was_never_rotated_projects_null_not_a_missing_key() {
+        // 手填的 Token 从来没有轮换过。这里必须是 `null`（键在、值为空），
+        // 而不是缺键——前端契约是 `token_rotated_at: number | null`。
+        let rows = vec![binding_row(1, "fldA", "currency", None, true)];
+        let groups = group_bindings(&rows).unwrap_or_else(|error| panic!("应可分组: {error}"));
+        let item = groups
+            .get(&1)
+            .and_then(|items| items.first())
+            .unwrap_or_else(|| panic!("应有分组"));
+        let value = serde_json::to_value(item)
+            .unwrap_or_else(|error| panic!("绑定项应可序列化: {error}"));
+        assert_eq!(value.get("token_rotated_at"), Some(&serde_json::Value::Null));
     }
 
     #[test]
