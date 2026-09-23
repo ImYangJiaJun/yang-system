@@ -1,0 +1,2147 @@
+<!doctype html>
+<html lang="zh-Hans" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>飞书数据源 · 配置向导</title>
+<!--
+  ============================================================
+  关于 ROLES.audit（「审计 / 只读观察员」）—— 它不是一个真实岗位
+  ============================================================
+  本原型的产品叙事只有两类人：「运维 / 集成负责人」与「业务 / 审批管理员」。
+  audit 明确超出这两类的定义，存在的唯一目的，是演示三粒权限位
+  （feishu.datasource.read / feishu.datasource.write / feishu.option.read）
+  可以彼此独立——它只有 feishu.datasource.read，没有 feishu.option.read：
+  列表照常，点进详情选项区 403。这不是第三个角色，只是一个边界状态的载体。
+  因此它必须在产品内的身份切换菜单里可见可达（不只是原型控制条），
+  否则 detailHTML 里那段 !canReadOptions() 的 403 分支从任何产品路径都进不去。
+  ============================================================
+-->
+<style>
+/* ============================================================
+   1. 设计 token —— 逐字取自 frontend/src/index.css
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --density-cell-y: 0.625rem;
+
+  /* 新增：语义状态色（引擎 tone 词汇的前端投影） */
+  --tone-positive:  oklch(0.55 0.09 155);
+  --tone-warning:   oklch(0.62 0.11 75);
+  --tone-info:      oklch(0.55 0.08 245);
+
+  /* 派生：徽标底色的混合比例（浅色 12% / 暗色 20%）与两档阴影 */
+  --tone-surface: 12%;
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+.dark,
+:root[data-theme="dark"] {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --tone-positive:  oklch(0.72 0.11 155);
+  --tone-warning:   oklch(0.78 0.12 75);
+  --tone-info:      oklch(0.72 0.09 245);
+  --tone-surface: 20%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --tone-positive:  oklch(0.72 0.11 155);
+    --tone-warning:   oklch(0.78 0.12 75);
+    --tone-info:      oklch(0.72 0.09 245);
+    --tone-surface: 20%;
+  }
+}
+
+html[data-density="compact"] { --density-cell-y: 0.25rem; }
+html[data-density="loose"]   { --density-cell-y: 1rem; }
+
+/* ============================================================
+   2. 基础排版
+   ============================================================ */
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { line-height: 1.25; }
+p { margin: 0; }
+a { color: inherit; }
+button { font-family: inherit; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted-foreground); }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.i {
+  width: 16px; height: 16px; flex-shrink: 0;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.i-14 { width: 14px; height: 14px; }
+.i-20 { width: 20px; height: 20px; }
+
+/* ============================================================
+   3. 应用外壳（AppLayout）
+   ============================================================ */
+.app {
+  display: flex;
+  height: 100svh;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+}
+.aside {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--card);
+}
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.brand-logo {
+  width: 40px; height: 40px; flex-shrink: 0;
+  border-radius: 10px;
+  display: grid; place-items: center;
+  background: var(--primary); color: var(--primary-foreground);
+}
+.brand-title { font-size: 14px; font-weight: 600; }
+
+.identity { padding: 8px; border-bottom: 1px solid var(--border); }
+.identity-btn {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; border: 0; border-radius: 8px; padding: 6px 8px;
+  background: transparent; color: inherit; font-size: 14px; text-align: left;
+  cursor: pointer; transition: background-color .15s;
+}
+.identity-btn:hover { background: var(--accent); }
+.identity-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.identity-role { font-size: 12px; color: var(--muted-foreground); }
+
+.nav { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 16px; }
+.nav-group { display: flex; flex-direction: column; gap: 2px; }
+.nav-label { padding: 0 8px 4px; font-size: 12px; font-weight: 500; color: var(--muted-foreground); }
+.nav-item {
+  display: flex; align-items: center; gap: 8px;
+  border-radius: 8px; padding: 6px 8px;
+  font-size: 14px; text-decoration: none;
+  transition: background-color .15s, color .15s;
+}
+.nav-item:hover { background: var(--accent); color: var(--accent-foreground); }
+.nav-item[aria-current="page"] { background: var(--accent); color: var(--accent-foreground); font-weight: 500; }
+.aside-foot { padding: 12px; border-top: 1px solid var(--border); }
+.aside-foot .btn { width: 100%; justify-content: flex-start; }
+
+.col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar {
+  display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+}
+.main { flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+.page {
+  max-width: 1040px; margin: 0 auto;
+  padding: 24px 24px 136px;
+  display: flex; flex-direction: column; gap: 24px;
+}
+
+/* ============================================================
+   4. 按钮
+   ============================================================ */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  white-space: nowrap; border-radius: 8px; height: 36px; padding: 0 16px;
+  border: 1px solid transparent; background: transparent; color: inherit;
+  font-size: 14px; font-weight: 500; line-height: 1;
+  cursor: pointer; text-decoration: none;
+  transition: background-color .15s, color .15s, border-color .15s, box-shadow .15s;
+}
+.btn:disabled, .btn[aria-disabled="true"] { pointer-events: none; opacity: .5; }
+.btn:focus-visible {
+  outline: none; border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.btn-sm { height: 32px; padding: 0 12px; }
+.btn-icon { width: 36px; height: 36px; padding: 0; }
+.btn-default { background: var(--primary); color: var(--primary-foreground); box-shadow: var(--shadow-xs); }
+.btn-default:hover { background: color-mix(in oklab, var(--primary) 90%, transparent); }
+.btn-outline { border-color: var(--border); background: var(--background); box-shadow: var(--shadow-xs); }
+.btn-outline:hover { background: var(--accent); color: var(--accent-foreground); }
+.btn-secondary { background: var(--secondary); color: var(--secondary-foreground); box-shadow: var(--shadow-xs); }
+.btn-secondary:hover { background: color-mix(in oklab, var(--secondary) 80%, transparent); }
+.btn-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+.btn-destructive { background: var(--destructive); color: var(--background); box-shadow: var(--shadow-xs); }
+.btn-destructive:hover { background: color-mix(in oklab, var(--destructive) 90%, transparent); }
+.btn-link {
+  height: auto; padding: 0; border: 0;
+  color: var(--primary); text-decoration: underline; text-underline-offset: 4px;
+}
+.btn-link:hover { text-decoration: underline; }
+
+/* ============================================================
+   5. 徽标
+   ============================================================ */
+.badge {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border-radius: 8px; border: 1px solid var(--border); padding: 2px 8px;
+  font-size: 12px; font-weight: 500; line-height: 1.5;
+  white-space: nowrap; width: fit-content;
+  background: transparent; color: inherit;
+}
+.badge-positive {
+  border-color: color-mix(in oklab, var(--tone-positive) 30%, transparent);
+  background: color-mix(in oklab, var(--tone-positive) var(--tone-surface), transparent);
+  color: var(--tone-positive);
+}
+.badge-warning {
+  border-color: color-mix(in oklab, var(--tone-warning) 30%, transparent);
+  background: color-mix(in oklab, var(--tone-warning) var(--tone-surface), transparent);
+  color: var(--tone-warning);
+}
+.badge-info {
+  border-color: color-mix(in oklab, var(--tone-info) 30%, transparent);
+  background: color-mix(in oklab, var(--tone-info) var(--tone-surface), transparent);
+  color: var(--tone-info);
+}
+.badge-muted {
+  border-color: var(--border);
+  background: color-mix(in oklab, var(--muted) 60%, transparent);
+  color: var(--muted-foreground);
+}
+.badge-dashed { border-style: dashed; border-color: var(--muted-foreground); color: var(--muted-foreground); }
+.badge-btn { cursor: pointer; }
+.badge-btn:hover { border-color: currentColor; }
+
+/* ============================================================
+   6. 表单
+   ============================================================ */
+.field { display: grid; gap: 6px; }
+.label { font-size: 14px; font-weight: 500; line-height: 1; }
+.hint { font-size: 12px; color: var(--muted-foreground); line-height: 1.5; }
+.err-text { font-size: 14px; color: var(--destructive); }
+
+.input, .select, .textarea {
+  width: 100%; height: 36px; padding: 0 12px;
+  border: 1px solid var(--input); border-radius: 8px;
+  background: transparent; color: inherit;
+  font-family: inherit; font-size: 14px; line-height: 1.5;
+}
+.textarea { height: auto; min-height: 72px; padding: 8px 12px; resize: vertical; }
+.select { appearance: none; cursor: pointer; }
+.input:focus, .select:focus, .textarea:focus {
+  outline: none; border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.input[aria-invalid="true"] { border-color: var(--destructive); }
+.input::placeholder { color: var(--muted-foreground); }
+.select-wrap { position: relative; }
+.select-wrap .i {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  color: var(--muted-foreground); pointer-events: none;
+}
+.check { display: flex; align-items: flex-start; gap: 8px; font-size: 14px; }
+.check input {
+  width: 16px; height: 16px; margin: 3px 0 0; flex-shrink: 0;
+  accent-color: var(--primary);
+}
+.search { position: relative; flex: 1; min-width: 180px; max-width: 300px; }
+.search .i { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted-foreground); }
+.search .input { padding-left: 34px; }
+
+/* ============================================================
+   7. 分节卡片 / 提示条 / 列表行
+   ============================================================ */
+.section {
+  border: 1px solid var(--border); border-radius: 14px;
+  background: var(--card); padding: 20px;
+}
+.section > h2 { margin: 0; font-size: 16px; font-weight: 500; }
+.section-desc { margin-top: 4px; font-size: 14px; color: var(--muted-foreground); }
+.section-body { margin-top: 12px; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.stack-sm { display: flex; flex-direction: column; gap: 8px; }
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+.banner {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 12px; border-radius: 8px; font-size: 14px;
+}
+.banner .i { margin-top: 3px; }
+.banner-error {
+  border: 1px solid color-mix(in oklab, var(--destructive) 40%, transparent);
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+  color: var(--destructive);
+}
+.banner-note {
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+}
+.banner-warn .i { color: var(--tone-warning); }
+.banner-danger-zone {
+  border: 1px solid color-mix(in oklab, var(--destructive) 40%, transparent);
+  background: color-mix(in oklab, var(--destructive) 5%, transparent);
+  padding: 20px; border-radius: 14px;
+}
+.banner-danger-zone h2 { color: var(--destructive); }
+.banner-body { flex: 1; min-width: 0; }
+
+.rowline {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; font-size: 14px;
+}
+.rowline-key { color: var(--muted-foreground); }
+.rowline-sub { font-size: 12px; color: var(--muted-foreground); }
+
+.code {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: color-mix(in oklab, var(--muted) 60%, transparent);
+  padding: 8px 12px;
+}
+.code code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+/* ============================================================
+   8. 表格（紧凑目录 / 选项）
+   ============================================================ */
+.table-card { border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
+.grid { width: 100%; border-collapse: collapse; font-size: 14px; }
+.grid th, .grid td {
+  text-align: left; padding-inline: 12px;
+  padding-block: var(--density-cell-y); vertical-align: middle;
+}
+.grid thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--card);
+  font-size: 12px; font-weight: 500; color: var(--muted-foreground);
+  border-bottom: 1px solid var(--border);
+}
+.grid tbody tr { border-bottom: 1px solid var(--border); }
+.grid tbody tr:last-child { border-bottom: 0; }
+.grid tbody tr.clickable { cursor: pointer; transition: background-color .15s; }
+.grid tbody tr.clickable:hover { background: var(--accent); }
+.grid tbody tr.is-off td { color: var(--muted-foreground); }
+.grid .cell-right { text-align: right; }
+.table-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px; border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--muted-foreground); flex-wrap: wrap;
+}
+.row-action { opacity: 0; transition: opacity .15s; }
+tr:hover .row-action, tr:focus-within .row-action,
+.row-action:focus-visible, .row-action[aria-expanded="true"] { opacity: 1; }
+@media (hover: none) { .row-action { opacity: 1; } }
+
+/* ============================================================
+   9. 空态 / 骨架 / 错误
+   ============================================================ */
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 40px 24px; text-align: center;
+  border: 1px dashed var(--border); border-radius: 14px; background: var(--card);
+}
+.empty-icon {
+  width: 36px; height: 36px; border-radius: 10px; margin-bottom: 4px;
+  display: grid; place-items: center;
+  background: var(--muted); color: var(--muted-foreground);
+}
+.empty h3 { margin: 0; font-size: 16px; font-weight: 500; }
+.empty p { font-size: 14px; color: var(--muted-foreground); max-width: 40ch; }
+.empty-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
+
+.sk { background: var(--muted); border-radius: 6px; animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+.sk-line { height: 14px; }
+.sk-title { height: 20px; }
+.sk-box { height: 40px; border-radius: 8px; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+.skeleton-page { padding: 32px; display: flex; flex-direction: column; gap: 16px; }
+
+/* ============================================================
+   10. 对话框 / 菜单
+   ============================================================ */
+.overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgb(0 0 0 / 0.5);
+  animation: fade-in .2s ease-out;
+}
+.dialog {
+  position: fixed; top: 50%; left: 50%; z-index: 50;
+  transform: translate(-50%, -50%);
+  width: calc(100% - 32px); max-width: 512px;
+  max-height: calc(100svh - 48px); overflow-y: auto;
+  display: grid; gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--background); color: var(--foreground);
+  box-shadow: var(--shadow-lg);
+  animation: dlg-in .2s ease-out;
+}
+.dialog-title { margin: 0; font-size: 18px; font-weight: 600; }
+.dialog-desc { font-size: 14px; color: var(--muted-foreground); }
+.dialog-close {
+  position: absolute; top: 16px; right: 16px; opacity: .7;
+  width: 24px; height: 24px; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; display: grid; place-items: center; cursor: pointer;
+}
+.dialog-close:hover { opacity: 1; background: var(--accent); }
+.dialog-foot { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+@keyframes dlg-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(.95); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.menu {
+  position: fixed; z-index: 60; min-width: 160px;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--popover); color: var(--popover-foreground);
+  box-shadow: var(--shadow-lg);
+  animation: fade-in .12s ease-out;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 8px;
+  border: 0; border-radius: 6px; padding: 6px 8px;
+  background: transparent; color: inherit;
+  font-size: 14px; text-align: left; cursor: pointer;
+}
+.menu-item:hover { background: var(--accent); color: var(--accent-foreground); }
+.menu-item.danger { color: var(--destructive); }
+.menu-item[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.menu-sep { height: 1px; margin: 2px 0; background: var(--border); }
+.menu-note { padding: 6px 8px; font-size: 12px; color: var(--muted-foreground); }
+.menu-code {
+  max-width: 320px; padding: 6px 8px;
+  font-size: 12px; line-height: 1.6; color: var(--muted-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap; word-break: break-all;
+}
+
+/* ============================================================
+   11. 提示条（toast）
+   ============================================================ */
+.toasts {
+  position: fixed; top: 16px; right: 16px; z-index: 70;
+  display: flex; flex-direction: column; gap: 8px; max-width: min(360px, calc(100vw - 32px));
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 12px; border-radius: 8px; font-size: 14px;
+  border: 1px solid var(--border);
+  background: var(--popover); color: var(--popover-foreground);
+  box-shadow: var(--shadow-lg);
+  animation: fade-in .15s ease-out;
+}
+.toast .i { margin-top: 3px; color: var(--tone-positive); }
+
+/* ============================================================
+   12. 向导（步骤条 + 步骤体）
+   ============================================================ */
+.wizard { width: 100%; max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.steps { display: flex; align-items: center; gap: 6px; }
+.step { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.step-num {
+  width: 24px; height: 24px; flex-shrink: 0;
+  display: grid; place-items: center;
+  border: 1px solid var(--border); border-radius: 999px;
+  font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+.step-name { font-size: 14px; color: var(--muted-foreground); white-space: nowrap; }
+.step.is-current .step-num { border-color: var(--ring); color: var(--foreground); }
+.step.is-current .step-name { color: var(--foreground); font-weight: 500; }
+.step.is-done .step-num { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+.step.is-done .step-name { color: var(--foreground); }
+.step-line { flex: 1; min-width: 8px; height: 1px; background: var(--border); }
+.step-num-btn { background: transparent; padding: 0; cursor: pointer; border-radius: 999px; }
+
+.wizard-panel {
+  border: 1px solid var(--border); border-radius: 14px; background: var(--card);
+  padding: 20px; display: flex; flex-direction: column; gap: 16px;
+}
+.wizard-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding-top: 16px; border-top: 1px solid var(--border); flex-wrap: wrap;
+}
+.kv-list { display: flex; flex-direction: column; gap: 8px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 1px 6px; font-size: 12px;
+  background: color-mix(in oklab, var(--muted) 60%, transparent);
+}
+
+/* ============================================================
+   13. 原型控制条（不属于产品）
+   ============================================================ */
+.proto {
+  position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+  z-index: 100;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  max-width: calc(100vw - 24px);
+  padding: 8px 12px;
+  border: 1px dashed var(--muted-foreground); border-radius: 12px;
+  background: var(--muted); color: var(--foreground);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px;
+}
+.proto-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px dashed var(--muted-foreground); border-radius: 6px;
+  padding: 2px 6px; font-weight: 600; color: var(--muted-foreground);
+}
+.proto-group { display: flex; align-items: center; gap: 6px; }
+.proto-group > span { color: var(--muted-foreground); }
+.proto-btn {
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--background); color: var(--foreground);
+  font-size: 12px; cursor: pointer;
+}
+.proto-btn:hover { background: var(--accent); }
+.proto-btn[aria-pressed="true"] {
+  background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
+}
+/* 「已知实现约束」折叠区：默认收起，展开时向上弹一层，不挤动控制条 */
+.proto-notes { position: relative; }
+.proto-notes > summary {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border: 1px dashed var(--muted-foreground); border-radius: 6px;
+  background: var(--background); color: var(--foreground);
+  font-size: 12px; font-weight: 600; cursor: pointer; list-style: none;
+}
+.proto-notes > summary::-webkit-details-marker { display: none; }
+.proto-notes[open] > summary { border-style: solid; background: var(--accent); }
+.proto-notes-list {
+  position: absolute; bottom: calc(100% + 8px); left: 0;
+  width: min(620px, calc(100vw - 48px));
+  max-height: 46vh; overflow: auto;
+  margin: 0; padding: 12px 12px 12px 28px;
+  border: 1px dashed var(--muted-foreground); border-radius: 10px;
+  background: var(--muted); color: var(--foreground);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px; line-height: 1.7;
+}
+.proto-notes-list li + li { margin-top: 6px; }
+.proto-notes-list strong { font-weight: 600; }
+
+/* ============================================================
+   14. 页头 / 工具条 / 内嵌面板
+   ============================================================ */
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.page-title { margin: 0; font-size: 20px; font-weight: 600; }
+.page-sub { margin-top: 4px; font-size: 14px; color: var(--muted-foreground); }
+.page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button {
+  height: 34px; padding: 0 12px; border: 0; background: transparent;
+  color: inherit; font-size: 14px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button:hover { background: var(--accent); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-foreground); font-weight: 500; }
+.seg button:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--ring); }
+.subcard { border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+
+/* ============================================================
+   15. 响应式
+   ============================================================ */
+@media (max-width: 860px) {
+  .aside { width: 200px; }
+}
+@media (max-width: 720px) {
+  .col-optional { display: none; }
+  .page { padding: 16px 16px 152px; gap: 16px; }
+}
+@media (max-width: 640px) {
+  .app { flex-direction: column; height: auto; min-height: 100svh; overflow: visible; }
+  .aside {
+    width: 100%; flex-direction: row; align-items: center; gap: 8px;
+    border-right: 0; border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .brand { border-bottom: 0; padding: 10px 12px; }
+  .brand-logo { width: 32px; height: 32px; }
+  .nav { flex-direction: row; gap: 8px; padding: 8px 12px; overflow: visible; }
+  .nav-label { display: none; }
+  .nav-group { flex-direction: row; gap: 4px; }
+  .nav-item { white-space: nowrap; }
+  .identity { border-bottom: 0; padding: 8px; }
+  .aside-foot { display: none; }
+  .main { overflow: visible; }
+  .page { padding-bottom: 208px; }
+  .table-scroll { overflow-x: auto; }
+  .grid { min-width: 520px; }
+  .grid thead th { position: static; }
+  .step-name { display: none; }
+  .proto { left: 12px; right: 12px; transform: none; justify-content: flex-start; }
+  .proto-notes-list {
+    position: fixed; left: 12px; right: 12px; width: auto;
+    bottom: 128px; max-height: 40vh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="aside" id="aside"></aside>
+  <div class="col">
+    <header class="topbar" id="topbar"></header>
+    <main class="main" id="main"></main>
+  </div>
+</div>
+
+<div class="proto" id="proto" role="group" aria-label="原型控制">
+  <span class="proto-tag">原型控制</span>
+  <div class="proto-group">
+    <span>数据</span>
+    <button class="proto-btn" type="button" data-proto="scenario" data-value="empty" aria-pressed="true">空态</button>
+    <button class="proto-btn" type="button" data-proto="scenario" data-value="data" aria-pressed="false">有数据</button>
+    <button class="proto-btn" type="button" data-proto="scenario" data-value="loading" aria-pressed="false">加载中</button>
+    <button class="proto-btn" type="button" data-proto="scenario" data-value="error" aria-pressed="false">错误</button>
+    <button class="proto-btn" type="button" data-proto="scenario" data-value="nooptions" aria-pressed="false"
+      title="有数据源，但那个数据源一个选项都没有（刚建好、自动化还没推）">空选项</button>
+  </div>
+  <div class="proto-group">
+    <span>身份</span>
+    <button class="proto-btn" type="button" data-proto="role" data-value="ops" aria-pressed="true">运维身份</button>
+    <button class="proto-btn" type="button" data-proto="role" data-value="business" aria-pressed="false">业务身份</button>
+    <button class="proto-btn" type="button" data-proto="role" data-value="audit" aria-pressed="false"
+      title="有 feishu.datasource.read、没有 feishu.option.read：列表正常，点进详情选项区 403">审计身份</button>
+  </div>
+  <div class="proto-group">
+    <span>主题</span>
+    <button class="proto-btn" type="button" data-proto="theme" data-value="light" aria-pressed="true">浅色</button>
+    <button class="proto-btn" type="button" data-proto="theme" data-value="dark" aria-pressed="false">深色</button>
+  </div>
+  <div class="proto-group">
+    <span>密度</span>
+    <button class="proto-btn" type="button" data-proto="density" data-value="default" aria-pressed="true">默认</button>
+    <button class="proto-btn" type="button" data-proto="density" data-value="compact" aria-pressed="false">紧凑</button>
+    <button class="proto-btn" type="button" data-proto="density" data-value="loose" aria-pressed="false">宽松</button>
+  </div>
+  <details class="proto-notes">
+    <summary>已知实现约束</summary>
+    <ul class="proto-notes-list">
+      <li>列表顶部的「全部 / 启用 / 停用」分段控件，服务端现在会拒绝：<span class="mono">feishu_datasource.status</span>
+        没有声明 <span class="mono">.filterable(true)</span>，框架对筛选是 fail-closed，会直接回「字段不允许筛选」。
+        要让它真的能用，后端需给该字段补 <span class="mono">.filterable(true)</span>（设计文档三处后端改动之外的第四处）。</li>
+      <li>列表必须由前端<strong>显式传 <span class="mono">order_by</span></strong>：
+        <span class="mono">list_datasources</span> 没有默认排序兜底（<span class="mono">list_options</span> 有回退），
+        不发排序条件就是无序分页，翻页会重复 / 漏行。</li>
+      <li>没有任何 Action 能按 <span class="mono">source_key</span> 取<strong>单个</strong>数据源，
+        所以详情页头部要么再发一次带 <span class="mono">where</span> 的列表请求，要么靠导航态传递；
+        这个原型走的是导航态，刷新或分享链接会丢。</li>
+      <li>「校验数据」按钮<strong>控制台做不到</strong>：唯一能校验的是 <span class="mono">approval_options</span>，
+        它要拿数据源 Token 自校验，而服务端只存 SHA-256 摘要，永远回不出明文 Token。
+        向导第 3 步因此把它标成「待后端补」。</li>
+      <li>卡片 / 行上<strong>不能</strong>显示选项数量与最后同步时间（后端都不返回）。
+        要显示得给 <span class="mono">list_datasources</span> 加字段，或给 option 表补 <span class="mono">updated_at</span> select。</li>
+      <li>列头<strong>没有排序箭头</strong>是故意的：<span class="mono">title</span> 只声明了
+        <span class="mono">.searchable(true)</span>（能搜、不能筛、不能排），
+        <span class="mono">feishu_datasource</span> 里只有 <span class="mono">source_key</span> 是
+        <span class="mono">.sortable(true)</span> 的。</li>
+      <li>两边筛选能力<strong>不对称</strong>：详情页的选项列表可以按 <span class="mono">enabled</span> 筛
+        （option 表声明了 filterable），列表页的状态筛选不可以。所以这里没有给选项列表画筛选器。</li>
+      <li>角色判断走 <span class="mono">catalog.actions</span> 里有没有对应
+        <span class="mono">operation_id</span>（目录本身已按身份投影），不需要前端解析 JWT。</li>
+      <li>示例数据里的标识带连字符（原契约给的样例就是这么写的），但真实约束只允许
+        <span class="mono">[a-z0-9_]</span>——按真实规则，列表里那几条样例其实建不出来。
+        原型为了四个方案横向可比没有改样例，但新建的数据源一律用下划线形式，
+        别照着样例去推 URL 里的标识。</li>
+    </ul>
+  </details>
+</div>
+
+<div id="menuLayer"></div>
+<div id="dialogLayer"></div>
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+<script>
+(function () {
+  "use strict";
+
+  /* ==========================================================
+     图标（lucide 风格，白名单，24×24 viewBox）
+     ========================================================== */
+  var PATHS = {
+    "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    "minus": '<path d="M5 12h14"/>',
+    "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    "check": '<path d="M20 6 9 17l-5-5"/>',
+    "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+    "chevron-right": '<path d="m9 18 6-6-6-6"/>',
+    "chevron-left": '<path d="m15 18-6-6 6-6"/>',
+    "chevrons-up-down": '<path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/>',
+    "arrow-left": '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+    "arrow-right": '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+    "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+    "more-horizontal": '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+    "refresh-cw": '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+    "copy": '<rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    "moon": '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+    "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m16.24 16.24 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+    "circle-user": '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/>',
+    "log-out": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+    "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    "building-2": '<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>',
+    "shield-check": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+    "table-2": '<path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>',
+    "list": '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>',
+    "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
+    "lock": '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    "key-round": '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>',
+    "power": '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',
+    "trash-2": '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+    "square-pen": '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>',
+    "triangle-alert": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    "info": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    "circle-check": '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+    "circle-alert": '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
+    "sliders-horizontal": '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>'
+  };
+
+  function ic(name, cls) {
+    var c = "i" + (cls ? " " + cls : "");
+    return '<svg class="' + c + '" viewBox="0 0 24 24" aria-hidden="true">' + PATHS[name] + "</svg>";
+  }
+
+  /* ==========================================================
+     数据（CONTRACT §6）
+     ========================================================== */
+  var DATASOURCES = [
+    {
+      key: "expense_category", title: "报销事由分类", status: "active", encrypt: true, locale: "zh_cn",
+      options: [
+        { id: "exp_trv", label: "差旅费", sort: 1, isDefault: true, enabled: true, i18n: '{"zh_cn":"差旅费","en_us":"Travel"}' },
+        { id: "exp_ofc", label: "办公用品", sort: 2, isDefault: false, enabled: true, i18n: null },
+        { id: "exp_ent", label: "业务招待", sort: 3, isDefault: false, enabled: true, i18n: null },
+        { id: "exp_trn", label: "培训费", sort: 4, isDefault: false, enabled: true, i18n: null },
+        { id: "exp_com", label: "通讯费", sort: 5, isDefault: false, enabled: false, i18n: null },
+        { id: "exp_uti", label: "房租水电", sort: 6, isDefault: false, enabled: true, i18n: null },
+        { id: "exp_cst", label: "咨询服务费", sort: 7, isDefault: false, enabled: true, i18n: null },
+        { id: "exp_oth", label: "其他", sort: 8, isDefault: false, enabled: true, i18n: null }
+      ]
+    },
+    {
+      key: "leave_type", title: "请假类型", status: "active", encrypt: false, locale: "zh_cn",
+      options: [
+        { id: "lea_ann", label: "年假", sort: 1, isDefault: true, enabled: true, i18n: null },
+        { id: "lea_sic", label: "病假", sort: 2, isDefault: false, enabled: true, i18n: null },
+        { id: "lea_per", label: "事假", sort: 3, isDefault: false, enabled: true, i18n: '{"zh_cn":"事假","en_us":"Personal leave"}' },
+        { id: "lea_mar", label: "婚假", sort: 4, isDefault: false, enabled: true, i18n: null },
+        { id: "lea_mat", label: "产假", sort: 5, isDefault: false, enabled: false, i18n: null }
+      ]
+    },
+    {
+      key: "purchase_dept", title: "采购归口部门", status: "active", encrypt: true, locale: "zh_cn",
+      options: [
+        { id: "pur_it", label: "信息技术部", sort: 1, isDefault: false, enabled: true, i18n: null },
+        { id: "pur_adm", label: "行政管理部", sort: 2, isDefault: true, enabled: true, i18n: null },
+        { id: "pur_fin", label: "财务部", sort: 3, isDefault: false, enabled: true, i18n: null },
+        { id: "pur_hse", label: "后勤保障部", sort: 4, isDefault: false, enabled: false, i18n: null }
+      ]
+    },
+    {
+      key: "vendor_list", title: "供应商名录", status: "disabled", encrypt: false, locale: "zh_cn",
+      options: [
+        { id: "ven_001", label: "中远物流有限公司", sort: 1, isDefault: false, enabled: false, i18n: null },
+        { id: "ven_002", label: "恒信办公设备有限公司", sort: 2, isDefault: false, enabled: false, i18n: null },
+        { id: "ven_003", label: "蓝汛信息技术有限公司", sort: 3, isDefault: false, enabled: false, i18n: null }
+      ]
+    },
+    {
+      key: "it_asset_class", title: "IT 资产分类", status: "active", encrypt: false, locale: "en_us",
+      options: [
+        { id: "ast_lap", label: "笔记本电脑", sort: 1, isDefault: true, enabled: true, i18n: '{"zh_cn":"笔记本电脑","en_us":"Laptop"}' },
+        { id: "ast_mon", label: "显示器", sort: 2, isDefault: false, enabled: true, i18n: '{"zh_cn":"显示器","en_us":"Monitor"}' },
+        { id: "ast_srv", label: "服务器", sort: 3, isDefault: false, enabled: true, i18n: '{"zh_cn":"服务器","en_us":"Server"}' },
+        { id: "ast_prn", label: "打印外设", sort: 4, isDefault: false, enabled: false, i18n: null }
+      ]
+    },
+    {
+      key: "travel_city", title: "差旅城市", status: "active", encrypt: false, locale: "zh_cn",
+      options: [
+        { id: "cit_bjs", label: "北京", sort: 1, isDefault: true, enabled: true, i18n: null },
+        { id: "cit_shs", label: "上海", sort: 2, isDefault: false, enabled: true, i18n: null },
+        { id: "cit_szs", label: "深圳", sort: 3, isDefault: false, enabled: true, i18n: null },
+        { id: "cit_hzs", label: "杭州", sort: 4, isDefault: false, enabled: true, i18n: null },
+        { id: "cit_cds", label: "成都", sort: 5, isDefault: false, enabled: true, i18n: null },
+        { id: "cit_whs", label: "武汉", sort: 6, isDefault: false, enabled: false, i18n: null }
+      ]
+    },
+    {
+      key: "contract_type", title: "合同类型", status: "disabled", encrypt: false, locale: "zh_cn",
+      options: [
+        { id: "con_prc", label: "采购合同", sort: 1, isDefault: false, enabled: false, i18n: null },
+        { id: "con_srv", label: "服务合同", sort: 2, isDefault: false, enabled: false, i18n: null },
+        { id: "con_lea", label: "租赁合同", sort: 3, isDefault: false, enabled: false, i18n: null }
+      ]
+    },
+    {
+      key: "cost_center", title: "成本中心", status: "active", encrypt: true, locale: "zh_cn",
+      options: [
+        { id: "cos_rd", label: "研发中心", sort: 1, isDefault: false, enabled: true, i18n: null },
+        { id: "cos_mkt", label: "市场中心", sort: 2, isDefault: false, enabled: true, i18n: null },
+        { id: "cos_ops", label: "运营中心", sort: 3, isDefault: true, enabled: true, i18n: null }
+      ]
+    }
+  ];
+
+  /* 权限是三粒独立位：feishu.datasource.read / feishu.datasource.write / feishu.option.read。
+     下面三种身份就是为了把「有 read、没有 option.read」这个组合演示出来。
+     audit 超出产品叙事里「运维 / 业务」两类的定义（见文件头部注释），
+     它只是一个边界状态的载体，不是第三种岗位；但必须在身份菜单里可见可达。 */
+  var ROLES = {
+    ops: {
+      name: "张运维", role: "运维 / 集成负责人",
+      canWrite: true, canReadOptions: true,
+      perms: "feishu.datasource.read · feishu.datasource.write · feishu.option.read"
+    },
+    business: {
+      name: "李业务", role: "业务 / 审批管理员",
+      canWrite: false, canReadOptions: true,
+      perms: "feishu.datasource.read · feishu.option.read"
+    },
+    audit: {
+      name: "王审计", role: "审计 / 只读观察员",
+      canWrite: false, canReadOptions: false,
+      perms: "feishu.datasource.read"
+    }
+  };
+
+  var NAV_GROUPS = [
+    {
+      label: "集成",
+      items: [
+        { icon: "database", text: "飞书数据源", current: true },
+        { icon: "table-2", text: "多维表格同步" },
+        { icon: "list", text: "审批模板" }
+      ]
+    },
+    {
+      label: "管理",
+      items: [
+        { icon: "users", text: "成员" },
+        { icon: "building-2", text: "组织架构" },
+        { icon: "shield-check", text: "权限与角色" }
+      ]
+    }
+  ];
+
+  /* ==========================================================
+     状态
+     ========================================================== */
+  var state = {
+    scenario: "data",
+    role: "ops",
+    theme: "light",
+    density: "default",
+    view: "list",
+    wizard: false,
+    step: 1,
+    current: "expense_category",
+    query: "",
+    filter: "all",
+    page: 1,
+    dialog: null,
+    dialogError: null,
+    menu: null,
+    form: { key: "", title: "", token: "", encrypt: false, locale: "zh_cn" },
+    renameValue: "",
+    busy: false
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var ESC = function (s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  };
+  function ds(key) {
+    for (var i = 0; i < DATASOURCES.length; i++) {
+      if (DATASOURCES[i].key === key) return DATASOURCES[i];
+    }
+    return null;
+  }
+
+  /* 刚建好、多维表格的自动化还没推过选项的数据源。默认列表里不预置它，
+     要么走向导第 2 步真的建一个，要么点原型控制条的「0 选项」把它造出来。 */
+  function ensureEmptyOptionsDs() {
+    if (!ds("budget_subject")) {
+      DATASOURCES.push({
+        key: "budget_subject", title: "预算科目", status: "active",
+        encrypt: false, locale: "zh_cn", options: []
+      });
+    }
+    return "budget_subject";
+  }
+  function canWrite() { return ROLES[state.role].canWrite; }
+  function canReadOptions() { return ROLES[state.role].canReadOptions; }
+
+  function statusBadge(status) {
+    if (status === "active") return '<span class="badge badge-positive">启用</span>';
+    return '<span class="badge badge-warning" title="整个数据源停用：飞书审批里用它的控件取不到任何选项">' +
+      "已停用</span>";
+  }
+  function encryptBadge(on) {
+    if (on) {
+      return '<span class="badge badge-info" title="返回给飞书的选项内容加密传输">' +
+        ic("lock", "i-14") + "加密返回</span>";
+    }
+    return '<span class="muted">—</span>';
+  }
+  /* 选项级（feishu_option.enabled）与数据源级（feishu_datasource.status）是两个层级，
+     用词必须分开：数据源是「启用 / 已停用」，选项是「已上线 / 已下线」。 */
+  function optionBadge(enabled) {
+    return enabled ? '<span class="badge badge-positive">已上线</span>'
+                   : '<span class="badge badge-warning">已下线</span>';
+  }
+  function localeBadge(locale) {
+    return '<span class="mono">' + ESC(locale) + "</span>";
+  }
+
+  /* ---------- 提示 ---------- */
+  function toast(text) {
+    var host = $("toasts");
+    var el = document.createElement("div");
+    el.className = "toast";
+    el.setAttribute("role", "status");
+    el.innerHTML = ic("circle-check", "i-14") + "<span>" + ESC(text) + "</span>";
+    host.appendChild(el);
+    window.setTimeout(function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, 3200);
+  }
+
+  function copyText(text) {
+    var done = function () { toast("已复制到剪贴板"); };
+    var fail = function () { toast("浏览器拒绝了复制，请手动选中"); };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, fail);
+        return;
+      }
+    } catch (e) { /* 落到下面的兜底 */ }
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "readonly");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      done();
+    } catch (e2) { fail(); }
+  }
+  /* ==========================================================
+     外壳渲染
+     ========================================================== */
+  function renderAside() {
+    var me = ROLES[state.role];
+    var nav = NAV_GROUPS.map(function (g) {
+      var items = g.items.map(function (it) {
+        return '<a class="nav-item" href="#" data-act="noop"' +
+          (it.current ? ' aria-current="page"' : "") + ">" +
+          ic(it.icon) + "<span>" + ESC(it.text) + "</span></a>";
+      }).join("");
+      return '<div class="nav-group"><div class="nav-label">' + ESC(g.label) + "</div>" + items + "</div>";
+    }).join("");
+
+    $("aside").innerHTML =
+      '<div class="brand">' +
+        '<div class="brand-logo">' + ic("database", "i-20") + "</div>" +
+        '<div class="brand-title">阳系统控制台</div>' +
+      "</div>" +
+      '<div class="identity">' +
+        '<button class="identity-btn" type="button" data-act="identity-menu" aria-haspopup="menu" ' +
+          'aria-expanded="' + (state.menu && state.menu.kind === "identity" ? "true" : "false") + '">' +
+          ic("circle-user") +
+          '<span class="identity-name">' + ESC(me.name) +
+            '<span class="identity-role"> · ' + ESC(me.role) + "</span></span>" +
+          ic("chevrons-up-down", "i-14") +
+        "</button>" +
+      "</div>" +
+      '<nav class="nav">' + nav + "</nav>" +
+      '<div class="aside-foot">' +
+        '<button class="btn btn-ghost btn-sm" type="button" data-act="logout">' +
+          ic("log-out") + "退出登录</button>" +
+      "</div>";
+  }
+
+  function renderTopbar() {
+    var dark = state.theme === "dark";
+    var densityText = { "default": "默认", "compact": "紧凑", "loose": "宽松" }[state.density];
+    $("topbar").innerHTML =
+      '<button class="btn btn-outline btn-sm" type="button" data-act="density-menu" aria-haspopup="menu" ' +
+        'aria-expanded="' + (state.menu && state.menu.kind === "density" ? "true" : "false") + '">' +
+        ic("sliders-horizontal") + "密度 · " + densityText + ic("chevron-down", "i-14") +
+      "</button>" +
+      '<button class="btn btn-ghost btn-icon" type="button" data-act="toggle-theme" ' +
+        'aria-label="' + (dark ? "切换到浅色主题" : "切换到深色主题") + '">' +
+        ic(dark ? "sun" : "moon") +
+      "</button>";
+  }
+
+  function pageHead(sub) {
+    return '<div class="page-head">' +
+      '<div><h1 class="page-title">飞书数据源</h1>' +
+      '<p class="page-sub">' + ESC(sub) + "</p></div>" +
+      pageActions() +
+    "</div>";
+  }
+
+  function pageActions() {
+    if (state.wizard || state.scenario === "loading") return "";
+    var out = '<button class="btn btn-secondary" type="button" data-act="open-wizard">' +
+      ic("list") + "配置向导</button>";
+    if (canWrite()) {
+      out += '<button class="btn btn-default" type="button" data-act="open-add">' +
+        ic("plus") + "添加数据源</button>";
+    }
+    return '<div class="page-actions">' + out + "</div>";
+  }
+
+  /* ==========================================================
+     列表行 / 表格
+     ========================================================== */
+  function filtered() {
+    var q = state.query.trim().toLowerCase();
+    return DATASOURCES.filter(function (d) {
+      if (state.filter === "active" && d.status !== "active") return false;
+      if (state.filter === "disabled" && d.status !== "disabled") return false;
+      if (q && d.title.toLowerCase().indexOf(q) < 0 && d.key.toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+  }
+
+  /* 列表分页：照方案 B 的 PAGE_SIZE 做法。表体只渲染当前页，页码与两个翻页按钮
+     都接在 state.page 上——之前这里是硬编码「第 1 / 1 页」+ 两个 aria-disabled 的死按钮。
+     与 B 一样，改筛选 / 改搜索词都要把页码归 1，否则会停在一个不存在的页上。 */
+  var PAGE_SIZE = 5;
+  function pageCount(list) { return Math.max(1, Math.ceil(list.length / PAGE_SIZE)); }
+  function pagedRows(list) {
+    var pages = pageCount(list);
+    if (state.page > pages) state.page = pages;
+    if (state.page < 1) state.page = 1;
+    var start = (state.page - 1) * PAGE_SIZE;
+    return list.slice(start, start + PAGE_SIZE);
+  }
+
+  function rowsHTML(list) {
+    if (!list.length) {
+      return '<tr><td colspan="6">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 0">' +
+          '<span class="muted">没有匹配的数据源。</span>' +
+          '<button class="btn btn-outline btn-sm" type="button" data-act="clear-filter">清除筛选条件</button>' +
+        "</div></td></tr>";
+    }
+    return list.map(function (d) {
+      var actions = canWrite()
+        ? '<button class="btn btn-ghost btn-sm btn-icon row-action" type="button" data-act="row-menu" ' +
+            'data-key="' + ESC(d.key) + '" aria-label="' + ESC(d.title) + ' 的更多操作" aria-haspopup="menu">' +
+            ic("more-horizontal") + "</button>"
+        : "";
+      return '<tr class="clickable' + (d.status === "disabled" ? " is-off" : "") + '" data-act="open-detail" ' +
+        'data-key="' + ESC(d.key) + '" tabindex="0">' +
+        "<td>" + ESC(d.title) + "</td>" +
+        '<td class="mono">' + ESC(d.key) + "</td>" +
+        "<td>" + statusBadge(d.status) + "</td>" +
+        '<td class="col-optional">' + encryptBadge(d.encrypt) + "</td>" +
+        '<td class="col-optional">' + localeBadge(d.locale) + "</td>" +
+        '<td class="cell-right">' + actions + "</td>" +
+      "</tr>";
+    }).join("");
+  }
+
+  function tableFootHTML(list) {
+    var pages = pageCount(list);
+    return "<span>共 <span class=\"num\">" + list.length + "</span> 个数据源</span>" +
+      '<span style="display:flex;align-items:center;gap:8px">' +
+        '<span class="num">第 ' + state.page + " / " + pages + ' 页</span>' +
+        '<button class="btn btn-outline btn-sm btn-icon" type="button" data-act="page-prev" ' +
+          'aria-label="上一页"' + (state.page <= 1 ? " disabled" : "") + ">" +
+          ic("chevron-left") + "</button>" +
+        '<button class="btn btn-outline btn-sm btn-icon" type="button" data-act="page-next" ' +
+          'aria-label="下一页"' + (state.page >= pages ? " disabled" : "") + ">" +
+          ic("chevron-right") + "</button>" +
+      "</span>";
+  }
+
+  function toolbarHTML() {
+    var opts = [["all", "全部"], ["active", "启用"], ["disabled", "停用"]];
+    return '<div class="toolbar">' +
+      '<div class="search">' + ic("search") +
+        '<input class="input" id="ds-search" type="search" placeholder="搜索名称或标识" ' +
+          'aria-label="搜索名称或标识" value="' + ESC(state.query) + '" data-role="search">' +
+      "</div>" +
+      '<div class="seg" role="group" aria-label="按状态筛选">' +
+        opts.map(function (o) {
+          return '<button type="button" data-act="filter" data-value="' + o[0] + '" ' +
+            'aria-pressed="' + (state.filter === o[0] ? "true" : "false") + '">' + o[1] + "</button>";
+        }).join("") +
+      "</div>" +
+    "</div>";
+  }
+
+  /* ==========================================================
+     空态 / 骨架 / 错误
+     ========================================================== */
+  function emptyStateHTML() {
+    var acts = canWrite()
+      ? '<button class="btn btn-default" type="button" data-act="open-add">' + ic("plus") + "添加数据源</button>"
+      : "";
+    return '<div class="empty">' +
+      '<div class="empty-icon">' + ic("database") + "</div>" +
+      "<h3>还没有数据源</h3>" +
+      "<p>先在飞书审批后台配好控件并拿到 Token，再回来建第一个。</p>" +
+      '<div class="empty-actions">' + acts +
+        '<button class="btn btn-outline" type="button" data-act="open-wizard">' +
+          "怎么拿到 Token？</button>" +
+      "</div>" +
+    "</div>";
+  }
+
+  function skeletonHTML() {
+    return '<div class="skeleton-page" aria-busy="true" aria-live="polite">' +
+      '<span class="sr-only">正在加载数据源</span>' +
+      '<div class="sk sk-title" style="width:180px"></div>' +
+      '<div class="sk sk-line" style="width:384px"></div>' +
+      '<div class="stack-sm">' +
+        '<div class="sk sk-box"></div><div class="sk sk-box"></div>' +
+        '<div class="sk sk-box"></div><div class="sk sk-box"></div>' +
+      "</div>" +
+    "</div>";
+  }
+
+  function errorHTML() {
+    return '<div class="stack-sm">' +
+      '<div class="banner banner-error" role="alert">' + ic("circle-alert") +
+        '<div class="banner-body">' +
+          "<div>数据源不存在</div>" +
+          '<div style="font-size:12px">读数据源的原文：请求的数据源可能已被其他管理员删除。</div>' +
+        "</div>" +
+      "</div>" +
+      '<div class="banner banner-error" role="alert">' + ic("circle-alert") +
+        '<div class="banner-body">' +
+          "<div>status 只能是 active 或 disabled</div>" +
+          '<div style="font-size:12px">改状态（停用 / 启用）被后端拒绝时的原文。</div>' +
+        "</div>" +
+      "</div>" +
+      '<div><button class="btn btn-outline btn-sm" type="button" data-act="retry">' +
+        ic("refresh-cw") + "重试</button></div>" +
+    "</div>";
+  }
+
+  /* ==========================================================
+     向导
+     ========================================================== */
+  var STEP_NAMES = ["飞书审批", "建数据源", "填回后台", "配推送"];
+
+  function stepperHTML() {
+    var out = "";
+    for (var i = 1; i <= 4; i++) {
+      if (i > 1) out += '<div class="step-line"></div>';
+      var cls = "step" + (state.step === i ? " is-current" : state.step > i ? " is-done" : "");
+      var num = state.step > i ? ic("check", "i-14") : String(i);
+      out += '<div class="' + cls + '">' +
+        '<button class="step-num step-num-btn" type="button" data-act="goto-step" data-step="' + i + '" ' +
+          'aria-label="第 ' + i + " 步：" + STEP_NAMES[i - 1] + '"' +
+          (state.step === i ? ' aria-current="step"' : "") + ">" + num + "</button>" +
+        '<span class="step-name">' + STEP_NAMES[i - 1] + "</span>" +
+      "</div>";
+    }
+    return '<div class="steps">' + out + "</div>";
+  }
+
+  function stepFooter(prevLabel, nextLabel, nextAct) {
+    return '<div class="wizard-foot">' +
+      '<span class="muted num">第 ' + state.step + " 步，共 4 步</span>" +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        (state.step > 1
+          ? '<button class="btn btn-outline" type="button" data-act="step-prev">' +
+            ic("chevron-left") + (prevLabel || "上一步") + "</button>"
+          : "") +
+        (nextAct
+          ? '<button class="btn btn-default" type="button" data-act="' + nextAct + '">' + nextLabel +
+            ic("chevron-right") + "</button>"
+          : "") +
+      "</div>" +
+    "</div>";
+  }
+
+  function wizardHTML() {
+    var body;
+    if (state.step === 1) {
+      body =
+        "<h2>在飞书审批后台配置控件</h2>" +
+        '<p class="section-desc">打开你要用的那个审批定义，找到单选或多选控件，把取值方式改成「使用外部选项」，' +
+          "然后自定义一个 Token。</p>" +
+        '<div class="banner banner-note banner-warn">' + ic("triangle-alert") +
+          '<div class="banner-body">这个 Token 只在飞书那边显示一次。服务端只保存它的摘要，之后无法回显——' +
+          "请先复制到安全的地方。</div></div>" +
+        '<div class="stack-sm"><div class="label">要填的东西</div>' +
+          '<div class="rowline"><span class="rowline-key">控件类型</span><span>单选 / 多选</span></div>' +
+          '<div class="rowline"><span class="rowline-key">取值方式</span>' +
+            '<span>使用外部选项　<span class="muted">不是「自定义选项」</span></span></div>' +
+          '<div class="rowline"><span class="rowline-key">自定义 Token</span>' +
+            "<span>随便起一个，记住它</span></div>" +
+        "</div>" +
+        stepFooter("", "我配好了，下一步", "step-next");
+    } else if (state.step === 2) {
+      body = wizardFormHTML();
+    } else if (state.step === 3) {
+      body =
+        "<h2>把接口地址与 Token 填回审批后台</h2>" +
+        '<p class="section-desc">回到刚才那个控件，把它的外部选项地址和 Token 填上，保存后回审批单里试选一次。</p>' +
+        '<div class="stack-sm">' +
+          '<div class="rowline"><span class="rowline-key">接口地址</span>' +
+            '<span>与上面的数据源标识对应，按飞书审批后台的填写要求填</span></div>' +
+          '<div class="rowline"><span class="rowline-key">接口 Token</span>' +
+            "<span>第 1 步在飞书那边复制的那个</span></div>" +
+        "</div>" +
+        '<div class="row-between">' +
+          '<button class="btn btn-outline" type="button" aria-disabled="true" ' +
+            'title="后端还没有提供校验接口">' + ic("circle-check") + "校验数据</button>" +
+          '<span class="badge badge-warning">待后端补</span>' +
+        "</div>" +
+        '<div class="banner banner-note">' + ic("info") +
+          '<div class="banner-body">这个按钮要做的是拿数据源标识去读一次选项，确认真的能拉到。' +
+          "当前后端没有校验接口，先按上面的清单人工核对。</div></div>" +
+        stepFooter("", "下一步", "step-next");
+    } else {
+      body =
+        "<h2>在多维表格配自动化推送选项</h2>" +
+        '<p class="section-desc">在选项所在的那张表里加一个自动化：记录变动时走 HTTP 节点调写入接口，' +
+          "选项就跟着表格自动更新。</p>" +
+        '<div class="code"><code>Authorization: Bearer &lt;管理 Token&gt;</code>' +
+          '<button class="btn btn-outline btn-sm" type="button" data-act="copy-auth">' +
+          ic("copy") + "复制</button></div>" +
+        '<p class="hint">把尖括号部分换成多维表格自动化里配的管理 Token。</p>' +
+        stepFooter("上一步", "完成，回数据源列表", "finish-wizard");
+    }
+
+    return '<div class="wizard">' + stepperHTML() +
+      '<div class="wizard-panel">' + body + "</div>" +
+      '<div class="row-between" style="justify-content:center">' +
+        '<span class="muted">已经有数据源了？</span>' +
+        '<button class="btn btn-link" type="button" data-act="skip-wizard">跳过向导</button>' +
+      "</div>" +
+    "</div>";
+  }
+
+  function fieldErr(name) {
+    if (!state.formErrors || !state.formErrors[name]) return "";
+    return '<p class="err-text" id="' + name + '-error">' + ESC(state.formErrors[name]) + "</p>";
+  }
+
+  function wizardFormHTML() {
+    if (!canWrite()) {
+      return "<h2>建一个数据源</h2>" +
+        '<p class="section-desc">数据源标识会进接口地址；把上一步在飞书那边复制的 Token 粘进来。</p>' +
+        '<div class="banner banner-note">' + ic("info") +
+          '<div class="banner-body">建数据源需要「飞书数据源」写权限。你当前是业务身份，这一步交给运维 / ' +
+          "集成负责人来做。</div></div>" +
+        stepFooter("上一步", "下一步", "step-next");
+    }
+    return "<h2>建一个数据源</h2>" +
+      '<p class="section-desc">数据源标识会进接口地址；把上一步在飞书那边复制的 Token 粘进来。</p>' +
+      formFieldsHTML("wz") +
+      formBanner() +
+      '<div class="wizard-foot">' +
+        '<span class="muted num">第 ' + state.step + " 步，共 4 步</span>" +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button class="btn btn-outline" type="button" data-act="step-prev">' +
+            ic("chevron-left") + "上一步</button>" +
+          '<button class="btn btn-default" type="button" data-act="wizard-create"' +
+            (state.busy ? ' aria-disabled="true"' : "") + ">" +
+            (state.busy ? "提交中…" : "添加数据源") + "</button>" +
+        "</div>" +
+      "</div>";
+  }
+
+  /* ==========================================================
+     紧凑目录 / 详情
+     ========================================================== */
+  function directoryHTML() {
+    var list = filtered();
+    var hasAny = DATASOURCES.length > 0;
+    var body;
+    if (!hasAny) {
+      body = emptyStateHTML();
+    } else {
+      var rows = pagedRows(list);
+      body = '<div class="table-card">' +
+        '<div class="table-scroll"><table class="grid">' +
+          "<thead><tr>" +
+            "<th>名称</th><th>标识</th><th>状态</th>" +
+            '<th class="col-optional">加密返回</th><th class="col-optional">语言</th>' +
+            '<th class="cell-right"><span class="sr-only">操作</span></th>' +
+          "</tr></thead>" +
+          '<tbody id="rowsHost">' + rowsHTML(rows) + "</tbody>" +
+        "</table></div>" +
+        '<div class="table-foot" id="tableFoot">' + tableFootHTML(list) + "</div>" +
+      "</div>";
+    }
+    return pageHead("审批控件的外部选项从这里接进来：建一个数据源，把飞书那边配好的 Token 接上。") +
+      (hasAny ? toolbarHTML() : "") + body;
+  }
+
+  function detailHTML() {
+    var d = ds(state.current);
+    if (!d) return pageHead("数据源详情") + errorHTML();
+    var opts = d.options;
+    var actions = canWrite()
+      ? '<button class="btn btn-outline" type="button" data-act="row-menu" data-key="' + ESC(d.key) + '" ' +
+          'aria-haspopup="menu" aria-expanded="' + (state.menu && state.menu.key === d.key ? "true" : "false") + '">' +
+          ic("more-horizontal") + "更多" + ic("chevron-down", "i-14") + "</button>"
+      : "";
+
+    var head =
+      '<div><button class="btn btn-ghost btn-sm" type="button" data-act="back-list">' +
+        ic("arrow-left") + "返回数据源列表</button></div>" +
+      '<div class="page-head">' +
+        '<div><h1 class="page-title">' + ESC(d.title) + "</h1>" +
+          '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px">' +
+            '<span class="mono muted">' + ESC(d.key) + "</span>" +
+            statusBadge(d.status) + encryptBadge(d.encrypt) +
+            '<span class="muted">默认语言</span>' + localeBadge(d.locale) +
+          "</div>" +
+        "</div>" +
+        (actions ? '<div class="page-actions">' + actions + "</div>" : "") +
+      "</div>";
+
+    /* 有 datasource.read、没有 option.read：页面照常，只有选项区 403。
+       不能白屏，也不能退回一个空列表——那会让人以为是「没有选项」。 */
+    if (!canReadOptions()) {
+      return head +
+        '<section class="section">' +
+          "<h2>选项</h2>" +
+          '<div class="banner banner-error" role="alert" style="margin-top:12px">' + ic("circle-alert") +
+            '<div class="banner-body">' +
+              "<div>你没有查看选项的权限</div>" +
+              '<div style="font-size:12px">当前身份只有「' + ESC(ROLES[state.role].perms) +
+                "」。数据源本身可以看，选项列表读不了。</div>" +
+            "</div>" +
+          "</div>" +
+          '<div style="margin-top:12px">' +
+            '<button class="btn btn-outline btn-sm" type="button" data-act="retry">' +
+              ic("refresh-cw") + "重试</button>" +
+          "</div>" +
+        "</section>";
+    }
+
+    var optionsBody;
+    if (!opts.length) {
+      /* 刚建好、自动化还没推过选项。这是最真实的首次体验，必须说清「下一步去哪做」 */
+      optionsBody =
+        '<div class="empty">' +
+          '<div class="empty-icon">' + ic("list") + "</div>" +
+          "<h3>还没有选项推过来</h3>" +
+          "<p>这个数据源刚建好，多维表格那边的自动化还没有推送过任何选项——" +
+            "也就是说飞书审批里这个控件现在一个值都选不到。</p>" +
+          '<div class="empty-actions">' +
+            '<button class="btn btn-outline" type="button" data-act="open-wizard" data-step="4">' +
+              "去配多维表格的推送</button>" +
+          "</div>" +
+        "</div>";
+    } else {
+      var rows = opts.map(function (o) {
+        var i18nCell = o.i18n
+          ? '<button class="badge badge-info badge-btn" type="button" data-act="i18n" ' +
+              'title="查看多语言内容">i18n</button>'
+          : '<span class="muted">—</span>';
+        return '<tr' + (o.enabled ? "" : ' class="is-off"') + ">" +
+          "<td>" + ESC(o.label) + "</td>" +
+          '<td class="mono">' + ESC(o.id) + "</td>" +
+          '<td class="num">' + o.sort + "</td>" +
+          "<td>" + (o.isDefault ? '<span class="badge badge-muted">默认</span>' : '<span class="muted">—</span>') + "</td>" +
+          "<td>" + optionBadge(o.enabled) + "</td>" +
+          '<td class="col-optional">' + i18nCell + "</td>" +
+        "</tr>";
+      }).join("");
+      optionsBody = '<div class="subcard"><div class="table-scroll"><table class="grid">' +
+        "<thead><tr><th>名称</th><th>标识</th><th>排序</th><th>默认</th><th>状态</th>" +
+          '<th class="col-optional">多语言</th></tr></thead>' +
+        "<tbody>" + rows + "</tbody>" +
+      "</table></div></div>";
+    }
+
+    var disabledNote = d.status === "active" ? "" :
+      '<div class="banner banner-note banner-warn" role="status">' + ic("triangle-alert") +
+        '<div class="banner-body">这个数据源已停用：飞书审批现在拉不到它的任何选项（40301 数据源已停用）。' +
+        "下面这些选项行仍会照常列出——选项列表不按数据源状态过滤，所以「已停用」的数据源" +
+        "配着一排「已上线」的选项是正常的。</div></div>";
+
+    return head +
+      '<section class="section">' +
+        '<div class="row-between">' +
+          "<div><h2>选项</h2>" +
+            '<p class="section-desc num">共 ' + opts.length + " 项 · 只读，由多维表格自动推送</p></div>" +
+          '<span class="badge badge-muted">' + ic("lock", "i-14") + "只读</span>" +
+        "</div>" +
+        '<div class="section-body stack">' +
+          '<div class="banner banner-note">' + ic("info") +
+            '<div class="banner-body">两个层级的「停用」不是一回事：数据源停用 = 整个控件在飞书审批里' +
+            "取不到任何选项；选项下线 = 只影响那一条，审批里选不到它，其余选项照常。" +
+            "（选项是「下线」而不是删除，是为了不让历史审批单引用的选项彻底失联。）</div></div>" +
+          disabledNote +
+          '<div class="banner banner-note">' + ic("info") +
+            '<div class="banner-body">控制台不提供增删改：选项由多维表格的自动化推送写入，' +
+            "这里只用来核对飞书审批里到底能选到什么。</div></div>" +
+          optionsBody +
+        "</div>" +
+      "</section>";
+  }
+
+  /* ==========================================================
+     主渲染
+     ========================================================== */
+  function mainHTML() {
+    var sub = "审批控件的外部选项从这里接进来：建一个数据源，把飞书那边配好的 Token 接上。";
+    if (state.scenario === "loading") return pageHead(sub) + skeletonHTML();
+    if (state.scenario === "error") return pageHead(sub) + errorHTML();
+    if (state.wizard) {
+      return pageHead("按四步把飞书审批的选项接进来；四步走完，这一页就变成数据源台账。") + wizardHTML();
+    }
+    if (state.scenario === "empty") return pageHead(sub) + emptyStateHTML();
+    if (state.view === "detail") return detailHTML();
+    return directoryHTML();
+  }
+
+  function render() {
+    closeMenu();
+    applyTheme();
+    applyDensity();
+    renderAside();
+    renderTopbar();
+    $("main").innerHTML = '<div class="page">' + mainHTML() + "</div>";
+    syncProto();
+    if (state.focusSearch) {
+      var el = $("ds-search");
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      state.focusSearch = false;
+    }
+  }
+
+  function renderRows() {
+    var list = filtered();
+    var rows = pagedRows(list);
+    var host = $("rowsHost");
+    if (host) host.innerHTML = rowsHTML(rows);
+    var foot = $("tableFoot");
+    if (foot) foot.innerHTML = tableFootHTML(list);
+  }
+
+  function syncProto() {
+    var btns = document.querySelectorAll("[data-proto]");
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      var v = b.getAttribute("data-value");
+      b.setAttribute("aria-pressed", String(state[b.getAttribute("data-proto")] === v));
+    }
+  }
+
+  function applyTheme() {
+    var dark = state.theme === "dark";
+    var root = document.documentElement;
+    root.classList.toggle("dark", dark);
+    root.setAttribute("data-theme", dark ? "dark" : "light");
+  }
+  function applyDensity() {
+    document.documentElement.setAttribute("data-density", state.density);
+  }
+  /* ==========================================================
+     表单字段（向导与对话框共用）
+     ========================================================== */
+  function ariaErr(name) {
+    return state.formErrors && state.formErrors[name]
+      ? ' aria-invalid="true" aria-describedby="' + name + '-error"' : "";
+  }
+
+  function formFieldsHTML(prefix) {
+    var f = state.form;
+    return '<div class="stack">' +
+      '<div class="field">' +
+        '<label class="label" for="' + prefix + '-key">数据源标识（小写字母开头，最长 64 字节）</label>' +
+        '<input class="input mono" id="' + prefix + '-key" name="' + prefix + '-key" type="text" ' +
+          'autocomplete="off" data-autofocus pattern="[a-z][a-z0-9_]{0,63}" ' +
+          'value="' + ESC(f.key) + '" data-form="key"' + ariaErr("key") + ">" +
+        '<p class="hint">小写字母开头，只能包含小写字母、数字与下划线，最长 64 字节；' +
+          "会进接口地址，创建后不可修改。</p>" +
+        fieldErr("key") +
+        '<p class="err-text live-err" role="alert"></p>' +
+      "</div>" +
+      '<div class="field">' +
+        '<label class="label" for="' + prefix + '-title">显示名称（1–100 字符）</label>' +
+        '<input class="input" id="' + prefix + '-title" name="' + prefix + '-title" type="text" ' +
+          'autocomplete="off" value="' + ESC(f.title) + '" data-form="title"' + ariaErr("title") + ">" +
+        '<p class="hint">审批人和管理员看到的就是这个名称。</p>' + fieldErr("title") +
+      "</div>" +
+      '<div class="field">' +
+        '<label class="label" for="' + prefix + '-token">接口 Token</label>' +
+        '<input class="input" id="' + prefix + '-token" name="' + prefix + '-token" type="password" ' +
+          'autocomplete="new-password" value="' + ESC(f.token) + '" data-form="token"' + ariaErr("token") + ">" +
+        '<p class="hint">服务端只保存摘要，提交后无法回显，请确认已经留底。</p>' + fieldErr("token") +
+      "</div>" +
+      '<div class="field">' +
+        '<label class="label" for="' + prefix + '-locale">默认语言</label>' +
+        '<div class="select-wrap"><select class="select" id="' + prefix + '-locale" name="' + prefix +
+          '-locale" data-form="locale">' +
+          '<option value="zh_cn"' + (f.locale === "zh_cn" ? " selected" : "") + ">简体中文（zh_cn）</option>" +
+          '<option value="en_us"' + (f.locale === "en_us" ? " selected" : "") + ">English（en_us）</option>" +
+          '<option value="ja_jp"' + (f.locale === "ja_jp" ? " selected" : "") + ">日本語（ja_jp）</option>" +
+        "</select>" + ic("chevron-down") + "</div>" +
+        '<p class="hint">选项没有多语言值时用它兜底，会原样回给飞书。</p>' +
+      "</div>" +
+      '<div class="field">' +
+        '<label class="check" for="' + prefix + '-encrypt">' +
+          '<input type="checkbox" id="' + prefix + '-encrypt" name="' + prefix + '-encrypt" ' +
+            'data-form="encrypt"' + (f.encrypt ? " checked" : "") + ">" +
+          "<span>加密返回</span>" +
+        "</label>" +
+        '<p class="hint">返回给飞书的选项内容加密传输；需服务端已配置加密密钥。</p>' +
+        '<p class="hint" style="color:var(--tone-warning)">服务端没配加密密钥时开启它，' +
+          "飞书那边会直接拿到「50002 服务端未配置加密密钥」。</p>" +
+      "</div>" +
+    "</div>";
+  }
+
+  function formBanner() {
+    if (!state.formErrors || !state.formErrors.form) return "";
+    return '<div class="banner banner-error" role="alert">' + ic("circle-alert") +
+      '<div class="banner-body">' + ESC(state.formErrors.form) + "</div></div>";
+  }
+
+  /* ==========================================================
+     对话框
+     ========================================================== */
+  var dialogTrigger = null;
+
+  function openDialog(type, key, trigger) {
+    state.dialog = { type: type, key: key };
+    state.formErrors = {};
+    state.busy = false;
+    state.renameValue = key ? ds(key).title : "";
+    dialogTrigger = trigger || null;
+    renderDialog();
+  }
+
+  function closeDialog() {
+    if (!state.dialog) return;
+    state.dialog = null;
+    state.formErrors = {};
+    state.busy = false;
+    renderDialog();
+    if (dialogTrigger && dialogTrigger.isConnected) dialogTrigger.focus();
+    dialogTrigger = null;
+  }
+
+  function footHTML(confirmLabel, destructive, busyLabel) {
+    return '<div class="dialog-foot">' +
+      '<button class="btn btn-outline" type="button" data-act="dialog-close">取消</button>' +
+      '<button class="btn ' + (destructive ? "btn-destructive" : "btn-default") + '" type="button" ' +
+        'data-act="dialog-confirm"' + (state.busy ? ' aria-disabled="true"' : "") + ">" +
+        (state.busy ? busyLabel : confirmLabel) + "</button>" +
+    "</div>";
+  }
+
+  function dialogShell(titleId, title, desc, inner) {
+    return '<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="' + titleId + '">' +
+      '<button class="dialog-close" type="button" data-act="dialog-close" aria-label="关闭">' + ic("x") + "</button>" +
+      "<div><h2 class=\"dialog-title\" id=\"" + titleId + "\">" + ESC(title) + "</h2>" +
+        '<p class="dialog-desc">' + desc + "</p></div>" +
+      inner +
+    "</div>";
+  }
+
+  function renderDialog() {
+    var host = $("dialogLayer");
+    if (!state.dialog) { host.innerHTML = ""; return; }
+    var type = state.dialog.type;
+    var d = state.dialog.key ? ds(state.dialog.key) : null;
+    var html;
+
+    if (type === "add") {
+      html = dialogShell("dlg-add-title", "添加数据源",
+        "只填这次要接的那个控件：标识进接口地址，Token 来自飞书审批后台。",
+        formFieldsHTML("add") + formBanner() + footHTML("添加数据源", false, "提交中…"));
+    } else if (type === "rename") {
+      html = dialogShell("dlg-rename-title", "重命名",
+        "只改显示名称，数据源标识 <span class=\"mono\">" + ESC(d.key) + "</span> 不变。",
+        '<div class="field">' +
+          '<label class="label" for="rename-title">显示名称（1–100 字符）</label>' +
+          '<input class="input" id="rename-title" name="rename-title" type="text" data-autofocus ' +
+            'value="' + ESC(state.renameValue) + '" data-form="rename"' + ariaErr("title") + ">" +
+          fieldErr("title") +
+        "</div>" + footHTML("重命名", false, "提交中…"));
+    } else if (type === "status") {
+      var off = d.status === "active";
+      html = dialogShell("dlg-status-title", off ? "停用数据源" : "启用数据源",
+        off
+          ? "停用后，飞书审批中正在使用该数据源的控件会立即取不到选项（40301 数据源已停用）。" +
+            "它下面的选项不会被删除，重新启用即可恢复。确认停用「" + ESC(d.title) + "」？"
+          : "启用后，飞书审批里的控件可以重新拉到这个数据源的选项。确认启用「" + ESC(d.title) + "」？",
+        footHTML(off ? "停用" : "启用", false, "提交中…"));
+    } else {
+      html = dialogShell("dlg-delete-title", "删除数据源",
+        "删除后其下全部选项会被同时停用，且不可恢复。确认删除？",
+        '<div class="rowline"><span class="rowline-key">将删除</span>' +
+          "<span>" + ESC(d.title) + '　<span class="mono muted">' + ESC(d.key) + "</span></span></div>" +
+        '<p class="hint">与「停用」的区别：停用是整个数据源暂时取不到选项，随时可以再启用；' +
+          "删除不可恢复，还会连带停用它下面的全部选项。</p>" +
+        footHTML("删除", true, "提交中…"));
+    }
+
+    host.innerHTML = '<div class="overlay" data-act="dialog-close"></div>' + html;
+    var focusTarget = host.querySelector("[data-autofocus]") || host.querySelector(".dialog .input");
+    if (focusTarget) {
+      focusTarget.focus();
+      if (focusTarget.select && focusTarget.type === "text" && focusTarget.id === "rename-title") focusTarget.select();
+    }
+  }
+
+  /* ==========================================================
+     菜单 / 浮层
+     ========================================================== */
+  var menuAnchor = null;
+
+  function menuItemHTML(it) {
+    return '<button class="menu-item' + (it.danger ? " danger" : "") + '" type="button" role="menuitem" ' +
+      'data-act="' + it.act + '"' + (it.key ? ' data-key="' + ESC(it.key) + '"' : "") +
+      (it.value ? ' data-value="' + ESC(it.value) + '"' : "") +
+      (it.disabled ? ' data-disabled="1" aria-disabled="true"' : "") +
+      (it.title ? ' title="' + ESC(it.title) + '"' : "") + ">" +
+      (it.icon ? ic(it.icon, "i-14") : "") + "<span>" + ESC(it.text) + "</span>" +
+      (it.checked ? ic("check", "i-14") : "") + "</button>";
+  }
+
+  function menuHTML() {
+    var m = state.menu;
+    if (m.kind === "identity") {
+      return '<div class="menu-note">当前身份</div>' +
+        menuItemHTML({ act: "set-role", value: "ops", icon: "circle-user", text: "张运维 · 运维 / 集成负责人", checked: state.role === "ops" }) +
+        menuItemHTML({ act: "set-role", value: "business", icon: "circle-user", text: "李业务 · 业务 / 审批管理员", checked: state.role === "business" }) +
+        menuItemHTML({ act: "set-role", value: "audit", icon: "circle-user", text: "王审计 · 审计 / 只读观察员", checked: state.role === "audit" }) +
+        '<div class="menu-sep"></div>' +
+        '<div class="menu-note">这个身份的权限：' + ESC(ROLES[state.role].perms) + "</div>";
+    }
+    if (m.kind === "density") {
+      return menuItemHTML({ act: "set-density", value: "default", icon: "sliders-horizontal", text: "默认", checked: state.density === "default" }) +
+        menuItemHTML({ act: "set-density", value: "compact", icon: "sliders-horizontal", text: "紧凑", checked: state.density === "compact" }) +
+        menuItemHTML({ act: "set-density", value: "loose", icon: "sliders-horizontal", text: "宽松", checked: state.density === "loose" });
+    }
+    if (m.kind === "i18n") {
+      return '<div class="menu-note">多语言内容</div><div class="menu-code">' + ESC(m.text) + "</div>";
+    }
+    var d = ds(m.key);
+    var on = d.status === "active";
+    return menuItemHTML({ act: "menu-rename", key: d.key, icon: "square-pen", text: "重命名" }) +
+      menuItemHTML({
+        act: "menu-status", key: d.key, icon: "power", text: "停用",
+        disabled: !on, title: on ? "" : "该数据源已经是停用状态"
+      }) +
+      menuItemHTML({
+        act: "menu-status", key: d.key, icon: "power", text: "启用",
+        disabled: on, title: on ? "该数据源正在启用中" : ""
+      }) +
+      '<div class="menu-sep"></div>' +
+      menuItemHTML({ act: "menu-delete", key: d.key, icon: "trash-2", text: "删除", danger: true });
+  }
+
+  function openMenu(anchor, menu, align) {
+    closeMenu();
+    state.menu = menu;
+    menuAnchor = anchor;
+    var host = $("menuLayer");
+    var el = document.createElement("div");
+    el.className = "menu";
+    if (menu.kind === "i18n") {
+      el.setAttribute("role", "dialog");
+      el.setAttribute("aria-label", "多语言内容");
+    } else {
+      el.setAttribute("role", "menu");
+      el.setAttribute("aria-label", "操作菜单");
+    }
+    el.innerHTML = menuHTML();
+    host.appendChild(el);
+    var r = anchor.getBoundingClientRect();
+    var m = el.getBoundingClientRect();
+    var left = (align === "start") ? r.left : r.right - m.width;
+    var top = r.bottom + 6;
+    if (left < 8) left = 8;
+    if (left + m.width > window.innerWidth - 8) left = window.innerWidth - m.width - 8;
+    if (top + m.height > window.innerHeight - 8) top = Math.max(8, r.top - m.height - 6);
+    el.style.left = left + "px";
+    el.style.top = top + "px";
+    if (menu.kind !== "i18n") anchor.setAttribute("aria-expanded", "true");
+  }
+
+  function closeMenu() {
+    if (!state.menu) return;
+    if (menuAnchor && menuAnchor.isConnected && state.menu.kind !== "i18n") {
+      menuAnchor.setAttribute("aria-expanded", "false");
+    }
+    state.menu = null;
+    menuAnchor = null;
+    $("menuLayer").innerHTML = "";
+  }
+
+  /* ==========================================================
+     业务动作
+     ========================================================== */
+  /* 数据源标识的真实约束：小写字母开头、只含 [a-z0-9_]、≤ 64 字节。
+     合法性只与 ASCII 字符集有关，所以长度即字节数。 */
+  function keyError(value) {
+    var v = String(value).trim();
+    if (!v) return "数据源标识不能为空";
+    if (!/^[a-z]/.test(v)) return "数据源标识必须以小写字母开头";
+    if (!/^[a-z0-9_]+$/.test(v)) return "数据源标识只能包含小写字母、数字与下划线";
+    if (v.length > 64) return "数据源标识最长 64 字节";
+    return "";
+  }
+
+  function validateForm() {
+    var errs = {};
+    var key = state.form.key.trim();
+    var title = state.form.title.trim();
+    var kerr = keyError(key);
+    if (kerr) errs.key = kerr;
+    else if (ds(key)) errs.key = "已经有同名标识的数据源，换一个。";
+    if (title.length < 1 || title.length > 100) errs.title = "名称必须在 1..=100 字符";
+    if (!state.form.token.trim()) errs.token = "Token 不能为空；不轮换请省略该字段";
+    return errs;
+  }
+
+  function afterWrite(msg) {
+    state.busy = false;
+    state.formErrors = {};
+    state.form = { key: "", title: "", token: "", encrypt: false, locale: "zh_cn" };
+    toast(msg);
+  }
+
+  function submitCreate(fromDialog) {
+    var errs = validateForm();
+    if (Object.keys(errs).length) {
+      state.formErrors = errs;
+      if (fromDialog) renderDialog(); else render();
+      return;
+    }
+    state.busy = true;
+    if (fromDialog) renderDialog(); else render();
+    window.setTimeout(function () {
+      var key = state.form.key.trim();
+      DATASOURCES.push({
+        key: key, title: state.form.title.trim(), status: "active",
+        encrypt: state.form.encrypt, locale: state.form.locale, options: []
+      });
+      afterWrite("已添加数据源");
+      if (fromDialog) {
+        state.dialog = null;
+        dialogTrigger = null;
+        renderDialog();
+        state.scenario = "data";
+        render();
+      } else {
+        state.scenario = "data";
+        state.step = 3;
+        render();
+      }
+    }, 600);
+  }
+
+  function submitRename() {
+    var title = state.renameValue.trim();
+    if (title.length < 1 || title.length > 100) {
+      state.formErrors = { title: "名称必须在 1..=100 字符" };
+      renderDialog();
+      return;
+    }
+    state.busy = true;
+    renderDialog();
+    window.setTimeout(function () {
+      ds(state.dialog.key).title = title;
+      state.dialog = null;
+      state.busy = false;
+      renderDialog();
+      toast("已重命名");
+      render();
+    }, 600);
+  }
+
+  function submitStatus() {
+    var key = state.dialog.key;
+    var target = ds(key);
+    var next = target.status === "active" ? "disabled" : "active";
+    state.busy = true;
+    renderDialog();
+    window.setTimeout(function () {
+      target.status = next;
+      state.dialog = null;
+      state.busy = false;
+      renderDialog();
+      toast(next === "disabled" ? "已停用" : "已启用");
+      render();
+    }, 600);
+  }
+
+  function submitDelete() {
+    var key = state.dialog.key;
+    state.busy = true;
+    renderDialog();
+    window.setTimeout(function () {
+      for (var i = 0; i < DATASOURCES.length; i++) {
+        if (DATASOURCES[i].key === key) { DATASOURCES.splice(i, 1); break; }
+      }
+      state.dialog = null;
+      state.busy = false;
+      renderDialog();
+      if (state.view === "detail" && state.current === key) state.view = "list";
+      toast("已删除");
+      render();
+    }, 600);
+  }
+
+  function confirmDialog() {
+    if (state.busy) return;
+    var type = state.dialog.type;
+    if (type === "add") submitCreate(true);
+    else if (type === "rename") submitRename();
+    else if (type === "status") submitStatus();
+    else submitDelete();
+  }
+
+  /* ==========================================================
+     事件
+     ========================================================== */
+  function handleProto(kind, value) {
+    state[kind] = value;
+    if (kind === "scenario") {
+      closeDialog();
+      state.view = "list";
+      state.step = 1;
+      state.page = 1;
+      state.wizard = (value === "empty");
+      if (value === "error") state.wizard = false;
+      if (value === "loading") state.wizard = false;
+      if (value === "empty") { state.query = ""; state.filter = "all"; }
+      if (value === "nooptions") {
+        /* 有数据源，但那个数据源一个选项都没有 */
+        state.wizard = false;
+        state.view = "detail";
+        state.current = ensureEmptyOptionsDs();
+      }
+    }
+    render();
+  }
+
+  function handleAction(act, el, e) {
+    var key = el && el.getAttribute("data-key");
+    switch (act) {
+      case "noop":
+        e.preventDefault();
+        break;
+      case "logout":
+        toast("这是原型，不接真实登录");
+        break;
+      case "identity-menu":
+        if (state.menu && state.menu.kind === "identity") closeMenu();
+        else openMenu(el, { kind: "identity" });
+        break;
+      case "density-menu":
+        if (state.menu && state.menu.kind === "density") closeMenu();
+        else openMenu(el, { kind: "density" }, "start");
+        break;
+      case "set-role":
+        state.role = el.getAttribute("data-value");
+        closeMenu();
+        render();
+        break;
+      case "set-density":
+        state.density = el.getAttribute("data-value");
+        closeMenu();
+        render();
+        break;
+      case "toggle-theme":
+        state.theme = state.theme === "dark" ? "light" : "dark";
+        render();
+        break;
+      case "i18n":
+        if (state.menu && state.menu.kind === "i18n") closeMenu();
+        else {
+          var row = el.closest("tr");
+          var optId = row ? row.children[1].textContent : "";
+          var found = null;
+          var dcur = ds(state.current);
+          if (dcur) {
+            for (var i = 0; i < dcur.options.length; i++) {
+              if (dcur.options[i].id === optId) found = dcur.options[i];
+            }
+          }
+          openMenu(el, { kind: "i18n", text: found ? found.i18n : "" });
+        }
+        break;
+      case "open-wizard":
+        state.wizard = true;
+        state.step = Number(el.getAttribute("data-step") || 1);
+        state.form = { key: "", title: "", token: "", encrypt: false, locale: "zh_cn" };
+        state.formErrors = {};
+        render();
+        break;
+      case "skip-wizard":
+        state.wizard = false;
+        state.view = "list";
+        render();
+        break;
+      case "step-next":
+        if (state.step < 4) { state.step++; render(); }
+        break;
+      case "step-prev":
+        if (state.step > 1) { state.step--; render(); }
+        break;
+      case "goto-step":
+        state.step = Number(el.getAttribute("data-step"));
+        render();
+        break;
+      case "wizard-create":
+        submitCreate(false);
+        break;
+      case "finish-wizard":
+        state.wizard = false;
+        state.view = "list";
+        render();
+        toast("向导已收起");
+        break;
+      case "open-add":
+        openDialog("add", null, el);
+        break;
+      case "open-detail":
+        state.wizard = false;
+        state.scenario = "data";
+        state.view = "detail";
+        state.current = key;
+        render();
+        break;
+      case "back-list":
+        state.view = "list";
+        render();
+        break;
+      case "row-menu":
+        e.stopPropagation();
+        if (state.menu && state.menu.kind === "row" && state.menu.key === key) closeMenu();
+        else openMenu(el, { kind: "row", key: key });
+        break;
+      case "menu-rename":
+        closeMenu();
+        openDialog("rename", key, el);
+        break;
+      case "menu-status":
+        closeMenu();
+        openDialog("status", key, el);
+        break;
+      case "menu-delete":
+        closeMenu();
+        openDialog("delete", key, el);
+        break;
+      case "dialog-close":
+        closeDialog();
+        break;
+      case "dialog-confirm":
+        confirmDialog();
+        break;
+      case "filter":
+        state.filter = el.getAttribute("data-value");
+        state.page = 1;
+        render();
+        break;
+      case "clear-filter":
+        state.query = "";
+        state.filter = "all";
+        state.page = 1;
+        state.focusSearch = true;
+        render();
+        break;
+      case "page-prev":
+        if (state.page > 1) { state.page--; renderRows(); }
+        break;
+      case "page-next":
+        if (state.page < pageCount(filtered())) { state.page++; renderRows(); }
+        break;
+      case "retry":
+        state.scenario = "data";
+        state.page = 1;
+        render();
+        break;
+      case "copy-auth":
+        copyText("Authorization: Bearer <管理 Token>");
+        break;
+      default:
+        break;
+    }
+  }
+
+  document.addEventListener("click", function (e) {
+    if (!(e.target instanceof Element)) return;
+
+    var protoBtn = e.target.closest("[data-proto]");
+    if (protoBtn) {
+      handleProto(protoBtn.getAttribute("data-proto"), protoBtn.getAttribute("data-value"));
+      return;
+    }
+
+    var el = e.target.closest("[data-act]");
+    if (!el) { closeMenu(); return; }
+    if (el.getAttribute("data-disabled") === "1") { closeMenu(); return; }
+    handleAction(el.getAttribute("data-act"), el, e);
+  });
+
+  function onField(e) {
+    var t = e.target;
+    if (!(t instanceof Element) || !t.getAttribute) return;
+    if (t.getAttribute("data-role") === "search") {
+      state.query = t.value;
+      state.page = 1;
+      renderRows();
+      return;
+    }
+    var f = t.getAttribute("data-form");
+    if (!f) return;
+    if (f === "rename") { state.renameValue = t.value; return; }
+    if (f === "encrypt") state.form.encrypt = t.checked;
+    else state.form[f] = t.value;
+    /* 数据源标识会进接口 URL：边打边把非法值标红，不等提交 */
+    if (f === "key") {
+      var bad = keyError(t.value);
+      if (bad) t.setAttribute("aria-invalid", "true");
+      else if (!(state.formErrors && state.formErrors.key)) t.removeAttribute("aria-invalid");
+      var live = t.parentNode ? t.parentNode.querySelector(".live-err") : null;
+      if (live) live.textContent = bad || "";
+    }
+  }
+  document.addEventListener("input", onField);
+  document.addEventListener("change", onField);
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      if (state.menu) { closeMenu(); return; }
+      if (state.dialog) { closeDialog(); }
+      return;
+    }
+    if (e.key === "Enter" && state.dialog && e.target instanceof Element &&
+        e.target.getAttribute && e.target.getAttribute("data-form")) {
+      e.preventDefault();
+      confirmDialog();
+      return;
+    }
+    if ((e.key === "Enter" || e.key === " ") && e.target instanceof Element &&
+        e.target.getAttribute && e.target.getAttribute("data-act") === "open-detail") {
+      e.preventDefault();
+      e.target.click();
+    }
+  });
+
+  $("main").addEventListener("scroll", closeMenu);
+  window.addEventListener("resize", closeMenu);
+
+  /* ==========================================================
+     启动
+     ========================================================== */
+  state.scenario = "empty";
+  state.wizard = true;
+  state.step = 1;
+  state.formErrors = {};
+  render();
+})();
+</script>
+</body>
+</html>

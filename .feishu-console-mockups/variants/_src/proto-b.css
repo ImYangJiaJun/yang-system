@@ -1,0 +1,98 @@
+/* 方案 B · 紧凑目录
+   行高由 --density-cell-y 驱动，这是这个方案的卖点。 */
+
+.ledger-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.search-box {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  flex: 0 1 260px;
+}
+.search-box:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.search-input {
+  border: 0;
+  outline: none;
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--foreground);
+}
+.search-input::-webkit-search-cancel-button { display: none; }
+
+.ledger-bar .seg { margin-left: 4px; }
+.ledger-bar .seg > button { padding: 5px 12px; }
+.ledger-guide { margin-left: auto; font-size: 12px; }
+
+.ledger-wrap {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  overflow: hidden;
+}
+.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
+
+.ledger thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  background: var(--card);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.ledger thead th:first-child { padding-left: 16px; }
+.ledger thead th:last-child { padding-right: 16px; }
+
+.ledger td {
+  padding: var(--density-cell-y) 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.ledger td:first-child { padding-left: 16px; }
+.ledger td:last-child { padding-right: 16px; }
+.ledger tbody tr:last-child td { border-bottom: 0; }
+
+.ledger-row { cursor: pointer; transition: background-color .1s; }
+.ledger-row:hover, .ledger-row:focus-visible { background: var(--accent); }
+.ledger-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--ring); }
+.ledger-name { font-weight: 500; }
+.ledger-act { width: 1%; text-align: right; }
+
+/* ⋯ 只在悬停/聚焦/已展开时出现，业务态整列不渲染 */
+.ledger-row .menu-wrap { opacity: 0; transition: opacity .1s; }
+.ledger-row:hover .menu-wrap,
+.ledger-row:focus-within .menu-wrap,
+.ledger-row .menu-wrap.is-open { opacity: 1; }
+
+.ledger-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 4px 0;
+  font-size: 12px;
+}

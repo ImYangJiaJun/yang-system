@@ -1,0 +1,174 @@
+/* 方案 D · 向导优先 */
+
+/* 步骤条是真序列，所以用编号是恰当的，不是装饰 */
+
+.wtrail {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin: 4px 0 20px;
+  flex-wrap: wrap;
+}
+
+.wstep { display: flex; }
+.wstep-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.wstep-btn:hover { background: var(--accent); }
+.wstep[data-state="current"] .wstep-btn { color: var(--foreground); font-weight: 500; }
+.wstep[data-state="done"] .wstep-btn { color: var(--foreground); }
+
+.wstep-num {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: var(--muted-foreground);
+}
+.wstep[data-state="current"] .wstep-num { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+.wstep[data-state="done"] .wstep-num { background: var(--tone-positive); color: var(--background); border-color: transparent; }
+.wstep-num svg { width: 13px; height: 13px; }
+
+.wstep-line {
+  flex: 1 1 16px;
+  min-width: 16px;
+  height: 1px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.wcard {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--card-foreground);
+}
+
+.wbody { padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+.wtitle { font-size: 16px; font-weight: 500; }
+.wtext { font-size: 14px; color: var(--muted-foreground); max-width: 62ch; }
+
+.wbanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklab, var(--tone-warning) 40%, transparent);
+  background: color-mix(in oklab, var(--tone-warning) 10%, transparent);
+  color: var(--tone-warning);
+  border-radius: 8px;
+  font-size: 14px;
+  max-width: 68ch;
+}
+.muted-banner {
+  border-color: var(--border);
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+  color: var(--muted-foreground);
+}
+
+.wspec {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--muted) 35%, transparent);
+  font-size: 14px;
+  max-width: 560px;
+}
+.wspec dt { color: var(--muted-foreground); }
+.wspec dd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.wcode {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+}
+.wcopy { height: 26px; padding: 0 8px; }
+
+.wcheck { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.wcheck li { display: flex; align-items: flex-start; gap: 8px; }
+.wcheck svg { margin-top: 3px; color: var(--tone-positive); }
+
+.wform { display: grid; gap: 14px; max-width: 460px; }
+.wform .field-error { margin-top: -4px; }
+
+.wactions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+
+.wfoot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  font-size: 14px;
+}
+
+/* 向导配完之后退化成台账，复用 B 的台账样式（同构，不共享代码） */
+
+.ledger-wrap {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  overflow: hidden;
+}
+.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
+.ledger thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  background: var(--card);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.ledger thead th:first-child { padding-left: 16px; }
+.ledger td {
+  padding: var(--density-cell-y) 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.ledger td:first-child { padding-left: 16px; }
+.ledger tbody tr:last-child td { border-bottom: 0; }
+.ledger-row { cursor: pointer; }
+.ledger-row:hover, .ledger-row:focus-visible { background: var(--accent); }
+.ledger-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--ring); }
+.ledger-name { font-weight: 500; }
+.ledger-act { width: 1%; text-align: right; }
+.ledger-row .menu-wrap { opacity: 0; transition: opacity .1s; }
+.ledger-row:hover .menu-wrap,
+.ledger-row:focus-within .menu-wrap,
+.ledger-row .menu-wrap.is-open { opacity: 1; }
+
+@media (max-width: 700px) {
+  .wtrail { gap: 2px; }
+  .wstep-label { display: none; }
+  .wstep[data-state="current"] .wstep-label { display: inline; }
+  .wbody { padding: 16px; }
+  .wspec { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .wspec dt { margin-top: 8px; }
+}

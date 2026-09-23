@@ -1,0 +1,1683 @@
+<title>飞书数据源卡片画廊</title>
+<style>
+/* ============ 1. 色彩 token（逐字抄自 frontend/src/index.css） ============ */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --density-cell-y: 0.625rem;
+  /* 新增：语义状态色（引擎 tone 词汇的前端投影） */
+  --tone-positive: oklch(0.55 0.09 155);
+  --tone-warning: oklch(0.62 0.11 75);
+  --tone-info: oklch(0.55 0.08 245);
+  --tone-tint: 12%;
+  /* 原型控制条的实测高度：控制条 flex-wrap 后行数随宽度变，
+     固定值会在窄屏下被压住，所以由 JS 量出来写进这里。 */
+  --proto-h: 112px;
+}
+.dark, :root[data-theme="dark"] {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --tone-positive: oklch(0.72 0.11 155);
+  --tone-warning: oklch(0.78 0.12 75);
+  --tone-info: oklch(0.72 0.09 245);
+  --tone-tint: 20%;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --tone-positive: oklch(0.72 0.11 155);
+    --tone-warning: oklch(0.78 0.12 75);
+    --tone-info: oklch(0.72 0.09 245);
+    --tone-tint: 20%;
+  }
+}
+html[data-density="compact"] { --density-cell-y: 0.25rem; }
+html[data-density="loose"]   { --density-cell-y: 1rem; }
+
+/* ============ 2. 基础 ============ */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+[hidden] { display: none !important; }
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, p, ol, ul, figure { margin: 0; padding: 0; }
+ol, ul { list-style: none; }
+h1, h2, h3 { line-height: 1.25; font-weight: 500; }
+a { color: inherit; text-decoration: none; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+.tnum { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted-foreground); }
+.xs { font-size: 12px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.i {
+  width: 16px; height: 16px; flex-shrink: 0; fill: none; stroke: currentColor;
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+.i.sm { width: 14px; height: 14px; }
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* ============ 3. 应用外壳 ============ */
+.shell {
+  display: flex;
+  height: 100svh;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+}
+.side {
+  width: 240px;
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--sidebar);
+  color: var(--sidebar-foreground);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--sidebar-border);
+}
+.brand-logo {
+  width: 40px; height: 40px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 10px;
+  background: var(--sidebar-accent);
+}
+.brand-logo .i { width: 20px; height: 20px; }
+.brand-name { font-size: 14px; font-weight: 600; }
+.brand-sub { font-size: 12px; color: var(--muted-foreground); }
+.identity { padding: 8px; border-bottom: 1px solid var(--sidebar-border); position: relative; }
+.identity-btn {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer;
+  border-radius: 8px; padding: 6px 8px; text-align: left;
+}
+.identity-btn:hover { background: var(--accent); color: var(--accent-foreground); }
+.identity-btn .i.chev { margin-left: auto; color: var(--muted-foreground); }
+.identity-text { display: flex; flex-direction: column; min-width: 0; text-align: left; }
+.identity-name { font-size: 14px; font-weight: 500; }
+.identity-role { font-size: 12px; color: var(--muted-foreground); }
+.nav { flex: 1; overflow-y: auto; padding: 12px 12px 100px; display: flex; flex-direction: column; gap: 16px; }
+.navlabel { padding: 0 8px 4px; font-size: 12px; font-weight: 500; color: var(--muted-foreground); }
+.navitem {
+  display: flex; align-items: center; gap: 8px;
+  border-radius: 8px; padding: 6px 8px; font-size: 14px;
+  transition: background-color .15s, color .15s;
+}
+.navitem:hover { background: var(--accent); color: var(--accent-foreground); }
+.navitem.active { background: var(--accent); font-weight: 500; color: var(--accent-foreground); }
+.sidefoot { padding: 12px; border-top: 1px solid var(--sidebar-border); }
+.col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar {
+  display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+}
+.main { flex: 1; min-width: 0; overflow-y: auto; padding: 24px 24px var(--proto-h); }
+.wrap { margin: 0 auto; width: 100%; max-width: 1200px; display: flex; flex-direction: column; gap: 24px; }
+
+/* ============ 4. 按钮 ============ */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  white-space: nowrap; border-radius: 8px; font-size: 14px; font-weight: 500;
+  height: 36px; padding: 0 16px; border: 1px solid transparent;
+  background: transparent; color: inherit; font-family: inherit; cursor: pointer;
+  transition: background-color .15s, color .15s, border-color .15s, opacity .15s;
+}
+.btn:disabled { pointer-events: none; opacity: .5; }
+.btn-default { background: var(--primary); color: var(--primary-foreground); box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); }
+.btn-default:hover { background: color-mix(in oklab, var(--primary) 90%, transparent); }
+.btn-outline { border-color: var(--border); background: var(--background); box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); }
+.btn-outline:hover { background: var(--accent); color: var(--accent-foreground); }
+.btn-secondary { background: var(--secondary); color: var(--secondary-foreground); box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); }
+.btn-ghost { color: inherit; }
+.btn-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+.btn-destructive { background: var(--destructive); color: oklch(1 0 0); box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); }
+.btn-destructive:hover { background: color-mix(in oklab, var(--destructive) 90%, transparent); }
+.btn-sm { height: 32px; padding: 0 12px; }
+.btn-icon { width: 36px; height: 36px; padding: 0; }
+
+/* ============ 5. 徽标 ============ */
+.badge {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border-radius: 8px; border: 1px solid; padding: 2px 8px;
+  font-size: 12px; font-weight: 500; white-space: nowrap; width: fit-content;
+}
+.badge-sm { border-radius: 6px; padding: 0 6px; }
+.badge-neutral { color: var(--muted-foreground); border-color: var(--border); background: color-mix(in oklab, var(--muted) 60%, transparent); }
+.badge-positive { color: var(--tone-positive); border-color: color-mix(in oklab, var(--tone-positive) 32%, transparent); background: color-mix(in oklab, var(--tone-positive) var(--tone-tint), transparent); }
+.badge-warning { color: var(--tone-warning); border-color: color-mix(in oklab, var(--tone-warning) 32%, transparent); background: color-mix(in oklab, var(--tone-warning) var(--tone-tint), transparent); }
+.badge-info { color: var(--tone-info); border-color: color-mix(in oklab, var(--tone-info) 32%, transparent); background: color-mix(in oklab, var(--tone-info) var(--tone-tint), transparent); }
+.badge-destructive { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 32%, transparent); background: color-mix(in oklab, var(--destructive) var(--tone-tint), transparent); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.dot.hollow { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+
+/* ============ 6. 分节 / 提示条 ============ */
+.section { border: 1px solid var(--border); border-radius: 14px; background: var(--card); padding: 20px; }
+.section > h2 { font-size: 16px; font-weight: 500; }
+.section-sub { margin-top: 4px; font-size: 14px; color: var(--muted-foreground); }
+.alert-error {
+  display: flex; align-items: flex-start; gap: 8px;
+  border: 1px solid color-mix(in oklab, var(--destructive) 40%, transparent);
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+  padding: 8px 12px; border-radius: 8px; color: var(--destructive); font-size: 14px;
+}
+.alert-error .btn { color: var(--destructive); }
+.alert-neutral {
+  display: flex; align-items: flex-start; gap: 8px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+  padding: 8px 12px; border-radius: 8px; font-size: 14px;
+}
+.alert-danger-zone {
+  border: 1px solid color-mix(in oklab, var(--destructive) 40%, transparent);
+  background: color-mix(in oklab, var(--destructive) 5%, transparent);
+  padding: 20px; border-radius: 14px;
+}
+.alert-danger-zone h2 { font-size: 16px; font-weight: 500; color: var(--destructive); }
+.rowlist { display: flex; flex-direction: column; gap: 8px; }
+
+/* ============ 7. 页头 + 指引 ============ */
+.pagehead { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.pagehead h1 { font-size: 20px; font-weight: 600; }
+.pagehead p { margin-top: 4px; font-size: 14px; color: var(--muted-foreground); }
+.guide { border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
+.guide-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%;
+  border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer;
+  padding: 14px 20px; text-align: left; border-radius: 14px;
+}
+.guide-title { font-size: 14px; font-weight: 500; }
+.guide-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted-foreground); }
+.guide-body { padding: 0 20px 20px; display: flex; flex-direction: column; gap: 12px; }
+.guide[data-open="false"] .guide-body { display: none; }
+.guide[data-open="false"] .guide-toggle .i { transform: rotate(-90deg); }
+.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.step { display: flex; gap: 10px; align-items: flex-start; }
+.step-num {
+  flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); background: color-mix(in oklab, var(--muted) 60%, transparent);
+  font-size: 12px; font-weight: 500; color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.step h3 { font-size: 14px; font-weight: 500; }
+.step p { margin-top: 2px; font-size: 12px; color: var(--muted-foreground); }
+.step-detail { border-top: 1px solid var(--border); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.deflist { display: grid; gap: 6px; font-size: 14px; }
+.deflist > div { display: flex; gap: 8px; }
+.deflist dt { width: 96px; flex-shrink: 0; color: var(--muted-foreground); }
+.deflist dd { margin: 0; }
+
+/* ============ 8. 卡片栅格 ============ */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.card {
+  position: relative; display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--border); border-radius: 14px; background: var(--card);
+  padding: 16px; cursor: pointer; text-align: left; font: inherit; color: inherit;
+  transition: border-color .15s, background-color .15s;
+}
+.card:hover { border-color: color-mix(in oklab, var(--ring) 60%, transparent); background: color-mix(in oklab, var(--accent) 55%, var(--card)); }
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.card-title { font-size: 16px; font-weight: 500; }
+.card-key { font-size: 12px; color: var(--muted-foreground); word-break: break-all; }
+.card-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.card-hint { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted-foreground); }
+.card-hint .i.sm { width: 12px; height: 12px; }
+.card-actions { position: relative; flex-shrink: 0; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 8px; border: 1px solid transparent;
+  background: transparent; color: var(--muted-foreground); cursor: pointer;
+}
+.icon-btn:hover { background: var(--accent); color: var(--accent-foreground); }
+
+/* ============ 9. 下拉菜单 ============ */
+.menu {
+  position: absolute; top: 32px; right: 0; z-index: 40; min-width: 148px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--popover);
+  color: var(--popover-foreground); padding: 4px;
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.menu-left { right: auto; left: 0; }
+.menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: 0; background: transparent; color: inherit; font: inherit; font-size: 14px;
+  border-radius: 6px; padding: 6px 8px; cursor: pointer; text-align: left;
+}
+.menu-item:hover { background: var(--accent); color: var(--accent-foreground); }
+.menu-item.danger { color: var(--destructive); }
+.menu-item.danger:hover { background: color-mix(in oklab, var(--destructive) 12%, transparent); color: var(--destructive); }
+
+/* ============ 10. 空状态 / 骨架 ============ */
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  border: 1px solid var(--border); border-radius: 14px; background: var(--card);
+  padding: 48px 24px; text-align: center;
+}
+.empty-icon {
+  width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); background: color-mix(in oklab, var(--muted) 60%, transparent);
+  color: var(--muted-foreground);
+}
+.empty-icon .i { width: 22px; height: 22px; }
+.empty h2 { font-size: 16px; font-weight: 500; }
+.empty p { font-size: 14px; color: var(--muted-foreground); max-width: 46ch; text-wrap: balance; }
+.empty-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 4px; }
+@keyframes pulse { 50% { opacity: .5; } }
+.sk { background: var(--muted); border-radius: 6px; animation: pulse 2s cubic-bezier(.4, 0, .6, 1) infinite; }
+.sk-card { border: 1px solid var(--border); border-radius: 14px; background: var(--card); padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.loading-block { padding: 32px; display: flex; flex-direction: column; gap: 12px; }
+.w-64 { width: 256px; } .w-96 { width: 384px; } .w-full { width: 100%; }
+
+/* ============ 11. 详情 ============ */
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted-foreground); border: 0; background: transparent; font-family: inherit; cursor: pointer; padding: 0; border-radius: 6px; }
+.backlink:hover { color: var(--foreground); }
+.detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.detail-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.detail-title h1 { font-size: 20px; font-weight: 600; }
+.detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.detail-ops { display: flex; flex-wrap: wrap; gap: 8px; }
+.table-wrap { overflow-x: auto; overflow-y: auto; max-height: 440px; border: 1px solid var(--border); border-radius: 10px; margin-top: 12px; }
+table.opt { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.opt th {
+  position: sticky; top: 0; z-index: 1; background: var(--card);
+  text-align: left; font-size: 12px; font-weight: 500; color: var(--muted-foreground);
+  padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+table.opt td { padding-left: 12px; padding-right: 12px; padding-block: var(--density-cell-y); border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.opt tr:last-child td { border-bottom: 0; }
+table.opt tr.off td { color: var(--muted-foreground); }
+table.opt tr.off td:first-child { text-decoration: none; }
+.col-num { text-align: right; white-space: nowrap; }
+table.opt th.col-num { text-align: right; }
+.i18n-row td { background: color-mix(in oklab, var(--muted) 45%, transparent); font-size: 12px; }
+.i18n-json { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; word-break: break-all; }
+.i18n-btn { cursor: pointer; font-family: inherit; }
+.i18n-btn:hover { background: color-mix(in oklab, var(--tone-info) calc(var(--tone-tint) + 8%), transparent); }
+
+/* ============ 12. 对话框 ============ */
+.overlay { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / .5); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.overlay[hidden] { display: none; }
+.dialog {
+  position: relative; width: min(512px, 100%); background: var(--background);
+  border: 1px solid var(--border); border-radius: 10px; padding: 24px;
+  display: grid; gap: 16px;
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
+  animation: pop .2s ease-out;
+}
+@keyframes pop { from { opacity: 0; transform: scale(.95); } to { opacity: 1; transform: scale(1); } }
+.dialog h2 { font-size: 18px; font-weight: 600; }
+.dialog .desc { font-size: 14px; color: var(--muted-foreground); }
+.dialog-close { position: absolute; top: 16px; right: 16px; width: 16px; height: 16px; border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 4px; padding: 0; }
+.dialog-close:hover { opacity: 1; }
+.dialog-close .i { width: 16px; height: 16px; }
+.dialog-foot { display: flex; gap: 8px; justify-content: flex-end; }
+.field { display: grid; gap: 6px; }
+.field > label { font-size: 14px; font-weight: 500; line-height: 1; }
+.input, .select {
+  height: 36px; width: 100%; border: 1px solid var(--input); border-radius: 8px;
+  padding: 0 12px; font-size: 14px; background: transparent; color: inherit; font-family: inherit;
+}
+.input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+.input:focus, .select:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+.input[aria-invalid="true"] { border-color: var(--destructive); }
+.field-error { font-size: 14px; color: var(--destructive); }
+.field-hint { font-size: 12px; color: var(--muted-foreground); }
+.field-hint.bad { color: var(--destructive); }
+.checkrow { display: flex; align-items: flex-start; gap: 8px; font-size: 14px; }
+.checkrow input { margin: 2px 0 0; width: 16px; height: 16px; accent-color: var(--primary); }
+
+/* ============ 13. 原型控制条 ============ */
+.pcbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+  padding: 8px 16px calc(8px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in oklab, var(--muted) 72%, var(--background));
+  border-top: 1px dashed color-mix(in oklab, var(--foreground) 38%, transparent);
+  font-size: 12px;
+}
+.pc-tag {
+  font-weight: 600; letter-spacing: 0;
+  border: 1px dashed color-mix(in oklab, var(--foreground) 45%, transparent);
+  border-radius: 8px; padding: 2px 8px;
+}
+.pc-note { color: var(--muted-foreground); }
+.pc-group { display: flex; align-items: center; gap: 6px; }
+.pc-label { color: var(--muted-foreground); }
+.pc-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--background); }
+.pc-seg button {
+  appearance: none; border: 0; border-left: 1px solid var(--border); background: transparent;
+  color: inherit; font: inherit; font-size: 12px; padding: 4px 10px; cursor: pointer;
+}
+.pc-seg button:first-child { border-left: 0; }
+.pc-seg button:hover { background: var(--accent); color: var(--accent-foreground); }
+.pc-seg button[aria-pressed="true"] { background: var(--primary); color: var(--primary-foreground); font-weight: 500; }
+
+/* 已知实现约束（E7）：折叠区住在控制条里，展开时控制条自身向上长高，不会横向溢出 */
+.pc-cons { margin-left: auto; }
+.pc-cons[open] { width: 100%; margin-left: 0; }
+.pc-cons > summary {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none;
+  border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px;
+  background: var(--background); font-size: 12px;
+}
+.pc-cons > summary::-webkit-details-marker { display: none; }
+.pc-cons > summary:hover { background: var(--accent); color: var(--accent-foreground); }
+.pc-cons > summary .i { width: 12px; height: 12px; }
+.pc-cons[open] > summary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+.pc-cons[open] > summary .i.chev { transform: rotate(180deg); }
+.pc-cons-panel {
+  margin-top: 8px; width: 100%; max-height: 42vh; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--background);
+  color: var(--foreground); padding: 16px;
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
+}
+.pc-cons-panel h2 { font-size: 16px; font-weight: 500; }
+.pc-cons-panel > p { margin-top: 4px; font-size: 12px; color: var(--muted-foreground); }
+.pc-cons-list { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.pc-cons-list li { display: flex; gap: 8px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.pc-cons-num {
+  flex-shrink: 0; width: 18px; height: 18px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); background: color-mix(in oklab, var(--muted) 60%, transparent);
+  font-size: 12px; color: var(--muted-foreground); font-variant-numeric: tabular-nums;
+}
+.pc-cons-list .k { font-weight: 500; }
+
+/* ============ 14. 响应式 ============ */
+@media (max-width: 860px) {
+  /* 窄屏兜底：侧边栏不整条藏掉，而是折成顶部横向导航条（照 B/D 的做法）。
+     产品内唯一的身份切换器（.identity）就在侧边栏里，display:none 等于切不了身份。 */
+  .shell { flex-direction: column; height: auto; min-height: 100svh; overflow: visible; }
+  .side {
+    width: 100%; flex: 0 0 auto; flex-direction: row; align-items: center; gap: 4px;
+    border-right: 0; border-bottom: 1px solid var(--sidebar-border);
+    overflow-x: auto; overflow-y: hidden;
+  }
+  .brand { padding: 8px 12px; border-bottom: 0; flex-shrink: 0; }
+  .brand-sub { display: none; }
+  .identity { padding: 4px 8px; border-bottom: 0; flex-shrink: 0; }
+  .identity-role { display: none; }
+  .nav {
+    flex: 1 1 auto; min-width: 0; flex-direction: row; align-items: center;
+    gap: 4px; padding: 8px 12px; overflow-x: auto; overflow-y: hidden;
+  }
+  .nav > div { display: flex; flex-direction: row; gap: 4px; }
+  .navlabel { display: none; }
+  .navitem { white-space: nowrap; flex-shrink: 0; }
+  .sidefoot { display: none; }
+  .col { min-width: 0; }
+  .main { padding: 16px 16px var(--proto-h); overflow-y: visible; }
+  .wrap { gap: 16px; }
+  .pagehead { flex-direction: column; align-items: stretch; }
+  .pagehead .btn { width: 100%; }
+  .empty { padding: 32px 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-chevrons-up-down" viewBox="0 0 24 24"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></symbol>
+  <symbol id="i-more-horizontal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+  <symbol id="i-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></symbol>
+  <symbol id="i-circle-user" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/></symbol>
+  <symbol id="i-log-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="i-building-2" viewBox="0 0 24 24"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></symbol>
+  <symbol id="i-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-puzzle" viewBox="0 0 24 24"><path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-1.705.707 2.402 2.402 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.402 2.402 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.23 8.77c.24-.24.581-.353.917-.303.515.077.877.528 1.073 1.01a2.5 2.5 0 1 0 3.259-3.259c-.482-.196-.933-.558-1.01-1.073-.05-.336.062-.676.303-.917l1.525-1.525A2.402 2.402 0 0 1 12 1.998c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z"/></symbol>
+  <symbol id="i-table-2" viewBox="0 0 24 24"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M3 6h.01"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M8 6h13"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
+  <symbol id="i-trash-2" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></symbol>
+  <symbol id="i-square-pen" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></symbol>
+  <symbol id="i-triangle-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></symbol>
+  <symbol id="i-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-circle-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></symbol>
+  <symbol id="i-circle-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-sliders-horizontal" viewBox="0 0 24 24"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+</svg>
+
+<div class="shell">
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-logo" aria-hidden="true"><svg class="i" aria-hidden="true"><use href="#i-database"/></svg></div>
+      <div>
+        <div class="brand-name">Yang 系统</div>
+        <div class="brand-sub">集成控制台</div>
+      </div>
+    </div>
+
+    <div class="identity">
+      <button class="identity-btn" id="identityBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="identityMenu">
+        <svg class="i" aria-hidden="true"><use href="#i-circle-user"/></svg>
+        <span class="identity-text">
+          <span class="identity-name" id="identityName">运维管理员</span>
+          <span class="identity-role" id="identityRole">可创建与修改数据源</span>
+        </span>
+        <svg class="i sm chev" aria-hidden="true"><use href="#i-chevrons-up-down"/></svg>
+      </button>
+      <div class="menu menu-left" id="identityMenu" role="menu" aria-labelledby="identityBtn" hidden>
+        <button class="menu-item" type="button" role="menuitem" data-role="ops">
+          <svg class="i" aria-hidden="true"><use href="#i-shield-check"/></svg>运维身份（可写）
+        </button>
+        <button class="menu-item" type="button" role="menuitem" data-role="biz">
+          <svg class="i" aria-hidden="true"><use href="#i-users"/></svg>业务身份（只读）
+        </button>
+        <button class="menu-item" type="button" role="menuitem" data-role="limited">
+          <svg class="i" aria-hidden="true"><use href="#i-lock"/></svg>审计身份（无选项权限）
+        </button>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="主导航">
+      <div>
+        <div class="navlabel">数据接入</div>
+        <a class="navitem active" href="#feishu/datasources" aria-current="page">
+          <svg class="i" aria-hidden="true"><use href="#i-database"/></svg>飞书数据源
+        </a>
+        <a class="navitem" href="#feishu/approval-defs">
+          <svg class="i" aria-hidden="true"><use href="#i-puzzle"/></svg>审批定义
+        </a>
+        <a class="navitem" href="#feishu/bitables">
+          <svg class="i" aria-hidden="true"><use href="#i-table-2"/></svg>多维表格
+        </a>
+      </div>
+      <div>
+        <div class="navlabel">组织与权限</div>
+        <a class="navitem" href="#org/members">
+          <svg class="i" aria-hidden="true"><use href="#i-users"/></svg>成员与权限
+        </a>
+        <a class="navitem" href="#org/departments">
+          <svg class="i" aria-hidden="true"><use href="#i-building-2"/></svg>组织架构
+        </a>
+      </div>
+      <div>
+        <div class="navlabel">平台</div>
+        <a class="navitem" href="#platform/audit">
+          <svg class="i" aria-hidden="true"><use href="#i-shield-check"/></svg>安全与审计
+        </a>
+        <a class="navitem" href="#platform/settings">
+          <svg class="i" aria-hidden="true"><use href="#i-sliders-horizontal"/></svg>集成设置
+        </a>
+      </div>
+    </nav>
+
+    <div class="sidefoot">
+      <button class="btn btn-ghost" type="button" style="width:100%;justify-content:flex-start">
+        <svg class="i" aria-hidden="true"><use href="#i-log-out"/></svg>退出登录
+      </button>
+    </div>
+  </aside>
+
+  <div class="col">
+    <header class="topbar">
+      <button class="btn btn-outline btn-sm" type="button" id="densityBtn">
+        <svg class="i" aria-hidden="true"><use href="#i-sliders-horizontal"/></svg><span id="densityLabel">密度：标准</span>
+      </button>
+      <button class="btn btn-outline btn-icon" type="button" id="themeBtn" aria-label="切换明暗主题">
+        <svg class="i" id="themeIcon" aria-hidden="true"><use href="#i-moon"/></svg>
+      </button>
+    </header>
+    <main class="main" id="main">
+      <div class="wrap" id="page"></div>
+    </main>
+  </div>
+</div>
+
+<!-- 新增数据源 -->
+<div class="overlay" id="dlgCreate" role="dialog" aria-modal="true" aria-labelledby="dlgCreateTitle" hidden>
+  <div class="dialog">
+    <button class="dialog-close" type="button" data-close="dlgCreate" aria-label="关闭">
+      <svg class="i" aria-hidden="true"><use href="#i-x"/></svg>
+    </button>
+    <div>
+      <h2 id="dlgCreateTitle">添加数据源</h2>
+      <p class="desc" style="margin-top:4px">数据源标识会进接口 URL；Token 请填飞书审批后台里为外部选项自定义的那一个。</p>
+    </div>
+    <form id="createForm" novalidate style="display:grid;gap:16px">
+      <div class="field">
+        <label for="fSourceKey">数据源标识</label>
+        <input class="input mono" id="fSourceKey" name="source_key" autocomplete="off" spellcheck="false"
+          maxlength="64" pattern="^[a-z][a-z0-9_]{0,63}$" aria-describedby="hintSourceKey" placeholder="expense_category">
+        <div class="field-hint" id="hintSourceKey">小写字母开头，只能包含小写字母、数字与下划线，最长 64 字节。它会进接口 URL。</div>
+        <div class="field-error" id="errSourceKey" hidden></div>
+      </div>
+      <div class="field">
+        <label for="fTitle">显示名称（1–100 字符）</label>
+        <input class="input" id="fTitle" name="title" autocomplete="off" placeholder="报销事由分类">
+        <div class="field-error" id="errTitle" hidden></div>
+      </div>
+      <div class="field">
+        <label for="fLocale">默认语言</label>
+        <select class="select" id="fLocale" name="default_locale">
+          <option value="zh_cn" selected>简体中文</option>
+          <option value="en_us">English</option>
+          <option value="ja_jp">日本語</option>
+        </select>
+        <div class="field-hint">这个值会原样回给飞书当作选项文案的语言标记，所以只能是上面三个之一；建好之后列表里的「默认语言」就显示成 <span class="mono">zh_cn</span> 这种形式。</div>
+      </div>
+      <div class="field">
+        <label for="fToken">接口 Token</label>
+        <input class="input mono" id="fToken" name="token" type="password" autocomplete="new-password" spellcheck="false">
+        <div class="field-hint">服务端只保存 SHA-256 摘要，保存后无法回显。跟下面那个开关无关。</div>
+        <div class="field-error" id="errToken" hidden></div>
+      </div>
+      <div class="field">
+        <div class="checkrow">
+          <input type="checkbox" id="fEncrypt" name="encrypt_enabled" checked>
+          <label for="fEncrypt">加密返回</label>
+        </div>
+        <div class="field-hint">返回给飞书的选项内容加密传输；需服务端已配置加密密钥。</div>
+        <div class="field-hint" id="hintEncrypt">开启但它没配密钥时，飞书那边会直接拿到 <span class="mono">50002 服务端未配置加密密钥</span>，控件同样显示不出选项。</div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn btn-outline" type="button" data-close="dlgCreate">取消</button>
+        <button class="btn btn-default" type="submit" id="createSubmit">添加数据源</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 重命名 -->
+<div class="overlay" id="dlgRename" role="dialog" aria-modal="true" aria-labelledby="dlgRenameTitle" hidden>
+  <div class="dialog">
+    <button class="dialog-close" type="button" data-close="dlgRename" aria-label="关闭">
+      <svg class="i" aria-hidden="true"><use href="#i-x"/></svg>
+    </button>
+    <div>
+      <h2 id="dlgRenameTitle">重命名数据源</h2>
+      <p class="desc" style="margin-top:4px">只改显示名称，数据源标识不变。</p>
+    </div>
+    <form id="renameForm" novalidate style="display:grid;gap:16px">
+      <div class="field">
+        <label for="fRenameTitle">显示名称（1–100 字符）</label>
+        <input class="input" id="fRenameTitle" name="title" autocomplete="off">
+        <div class="field-error" id="errRenameTitle" hidden></div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn btn-outline" type="button" data-close="dlgRename">取消</button>
+        <button class="btn btn-default" type="submit" id="renameSubmit">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 停用确认 -->
+<div class="overlay" id="dlgDisable" role="dialog" aria-modal="true" aria-labelledby="dlgDisableTitle" hidden>
+  <div class="dialog">
+    <button class="dialog-close" type="button" data-close="dlgDisable" aria-label="关闭">
+      <svg class="i" aria-hidden="true"><use href="#i-x"/></svg>
+    </button>
+    <div>
+      <h2 id="dlgDisableTitle">停用数据源</h2>
+      <p class="desc" style="margin-top:4px">停用后，飞书审批中正在使用该数据源的控件会立即取不到选项。</p>
+    </div>
+    <div class="alert-neutral" style="padding:12px">
+      <svg class="i" aria-hidden="true"><use href="#i-power"/></svg>
+      <div class="xs">
+        <div style="font-weight:500" id="offTarget">报销事由分类</div>
+        <div class="muted mono" id="offTargetKey">expense_category</div>
+        <div class="muted" style="margin-top:4px">审批控件拉选项时会直接拿到 <span class="mono">40301 数据源已停用</span>，控件里就是空的。</div>
+        <div class="muted" style="margin-top:4px">数据源本身不会被删除，它下面的选项也照旧保留，随时可以再「启用」恢复；这跟「删除」不是一回事。</div>
+      </div>
+    </div>
+    <div class="dialog-foot">
+      <button class="btn btn-outline" type="button" data-close="dlgDisable">取消</button>
+      <button class="btn btn-default" type="button" id="disableConfirm">停用</button>
+    </div>
+  </div>
+</div>
+
+<!-- 删除确认 -->
+<div class="overlay" id="dlgDelete" role="dialog" aria-modal="true" aria-labelledby="dlgDeleteTitle" hidden>
+  <div class="dialog">
+    <button class="dialog-close" type="button" data-close="dlgDelete" aria-label="关闭">
+      <svg class="i" aria-hidden="true"><use href="#i-x"/></svg>
+    </button>
+    <div>
+      <h2 id="dlgDeleteTitle">删除数据源</h2>
+      <p class="desc" style="margin-top:4px">删除后其下全部选项会被同时停用，且不可恢复。确认删除？</p>
+    </div>
+    <div class="alert-danger-zone" style="padding:12px">
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <svg class="i" aria-hidden="true" style="color:var(--destructive)"><use href="#i-triangle-alert"/></svg>
+        <div class="xs">
+          <div style="font-weight:500" id="delTarget">报销事由分类</div>
+          <div class="muted mono" id="delTargetKey">expense_category</div>
+          <div class="muted" style="margin-top:4px">不可恢复：这个标识要重新建一个才行，它下面选项的引用关系也一起没了。只想让审批暂时取不到选项，用「停用」。</div>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-foot">
+      <button class="btn btn-outline" type="button" data-close="dlgDelete">取消</button>
+      <button class="btn btn-destructive" type="button" id="deleteConfirm">删除</button>
+    </div>
+  </div>
+</div>
+
+<div class="pcbar" id="pcbar" aria-label="原型控制">
+  <span class="pc-tag">原型控制</span>
+  <span class="pc-note">调试条 · 不属于产品界面</span>
+  <div class="pc-group" id="pcStateGroup">
+    <span class="pc-label">数据状态</span>
+    <div class="pc-seg" id="pcState"></div>
+  </div>
+  <div class="pc-group">
+    <span class="pc-label">身份</span>
+    <div class="pc-seg" id="pcRole"></div>
+  </div>
+  <div class="pc-group">
+    <span class="pc-label">主题</span>
+    <div class="pc-seg" id="pcTheme"></div>
+  </div>
+  <div class="pc-group" id="pcHintGroup">
+    <span class="pc-label">操作</span>
+    <div class="pc-seg" id="pcHint"></div>
+  </div>
+  <div class="pc-group" id="pcEdgeGroup">
+    <span class="pc-label">边界态</span>
+    <div class="pc-seg" id="pcEdge"></div>
+  </div>
+  <details class="pc-cons" id="pcCons">
+    <summary>
+      <svg class="i" aria-hidden="true"><use href="#i-info"/></svg>已知实现约束
+      <svg class="i chev" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+    </summary>
+    <div class="pc-cons-panel">
+      <h2>已知实现约束</h2>
+      <p>这个方案在当前后端能力下踩到的边界。原型按真实能力画，没有假装。</p>
+      <ol class="pc-cons-list">
+        <li><span class="pc-cons-num">1</span><span><span class="k">列表没有筛选器，是刻意的。</span>给 <span class="mono">status</span> 做筛选需要后端先声明 <span class="mono">.filterable(true)</span>——未声明的字段服务端直接回「字段不允许筛选」。同理 <span class="mono">title</span> 只声明了 <span class="mono">searchable(true)</span>（能搜，不能筛也不能排），整个 <span class="mono">feishu_datasource</span> 里只有 <span class="mono">source_key</span> 是 <span class="mono">sortable(true)</span>，所以卡片上不出现任何排序入口。详情页的选项列表是反例：<span class="mono">enabled</span> 已声明 filterable，那边真能筛。</span></li>
+        <li><span class="pc-cons-num">2</span><span><span class="k">列表分页必须由前端显式传 <span class="mono">order_by</span>。</span><span class="mono">list_datasources</span> 只遍历传入的 <span class="mono">order_by</span>，没有默认排序兜底；不发就是无序分页，翻页会重复或漏行。（<span class="mono">list_options</span> 有回退到 <span class="mono">sort_order</span> + <span class="mono">option_id</span>，是反例。）</span></li>
+        <li><span class="pc-cons-num">3</span><span><span class="k">没有「按数据源标识取单个数据源」的 Action。</span>详情页头部要么再发一次带 <span class="mono">where</span> 的 <span class="mono">list_datasources</span>，要么靠导航态传递——这个原型用的是内存导航态，刷新或把链接分享给别人会丢。</span></li>
+        <li><span class="pc-cons-num">4</span><span><span class="k">卡片上没有选项数量，也没有最后同步时间。</span><span class="mono">list_datasources</span> 只回 <span class="mono">source_key / title / encrypt_enabled / default_locale / status</span>。要显示得给后端加字段（或给 option 表补一个可读的 <span class="mono">updated_at</span> 投影），或者逐源再调一次 <span class="mono">list_options</span>。</span></li>
+        <li><span class="pc-cons-num">5</span><span><span class="k">「校验数据」按钮控制台做不到。</span>唯一能校验的是 <span class="mono">approval_options</span> 端点，它要拿数据源 Token 自校验，而服务端只存 SHA-256 摘要、永远回不出明文。所以指引第 3 步只写「把值填回飞书后台」，不画这个按钮。</span></li>
+        <li><span class="pc-cons-num">6</span><span><span class="k">角色判断走 <span class="mono">catalog.actions</span> 里有没有对应的 operation_id</span>（目录本身已按身份投影），不需要前端解析 JWT。三个权限位是独立的：只有 <span class="mono">feishu.datasource.read</span> 而没有 <span class="mono">feishu.option.read</span> 时，卡片列表正常、点进详情选项区 403——见控制条「边界态」。</span></li>
+        <li><span class="pc-cons-num">7</span><span><span class="k">选项区永远只读。</span>没有任何新增、编辑、删除选项的 Action。这是架构决策（选项归多维表格管），不是还没做。</span></li>
+      </ol>
+    </div>
+  </details>
+</div>
+<script>
+(function () {
+  'use strict';
+
+  var page = document.getElementById('page');
+  var mainEl = document.getElementById('main');
+
+  /* ---------- 内容数据（CONTRACT §6） ---------- */
+  var SOURCES = [
+    { key: 'expense_category', title: '报销事由分类', status: 'active',   encrypt: true,  locale: 'zh_cn' },
+    { key: 'leave_type',       title: '请假类型',     status: 'active',   encrypt: false, locale: 'zh_cn' },
+    { key: 'purchase_dept',    title: '采购归口部门', status: 'active',   encrypt: true,  locale: 'zh_cn' },
+    { key: 'vendor_list',      title: '供应商名录',   status: 'disabled', encrypt: false, locale: 'zh_cn' },
+    { key: 'it_asset_class',   title: 'IT 资产分类',  status: 'active',   encrypt: false, locale: 'en_us' },
+    { key: 'travel_city',      title: '差旅城市',     status: 'active',   encrypt: false, locale: 'zh_cn' },
+    { key: 'contract_type',    title: '合同类型',     status: 'disabled', encrypt: false, locale: 'zh_cn' },
+    { key: 'cost_center',      title: '成本中心',     status: 'active',   encrypt: true,  locale: 'zh_cn' }
+  ];
+
+  function mk(key, rows) {
+    return rows.map(function (r, i) {
+      return {
+        id: key + '-' + (i + 1),
+        label: r[0],
+        i18n: r[1],
+        sort: (i + 1) * 10,
+        isDefault: r[2] === 1,
+        enabled: r[3] !== 0
+      };
+    });
+  }
+
+  var OPTIONS = {
+    'expense_category': mk('expense_category', [
+      ['差旅费', { 'zh_cn': '差旅费', 'en_us': 'Travel', 'ja_jp': '旅費' }, 1, 1],
+      ['办公用品', { 'zh_cn': '办公用品', 'en_us': 'Office supplies' }, 0, 1],
+      ['业务招待', { 'zh_cn': '业务招待', 'en_us': 'Client entertainment' }, 0, 1],
+      ['培训费', null, 0, 1],
+      ['通讯费', null, 0, 0],
+      ['房租水电', null, 0, 1],
+      ['咨询服务费', null, 0, 1],
+      ['其他', { 'zh_cn': '其他', 'en_us': 'Other' }, 0, 1]
+    ]),
+    'leave_type': mk('leave_type', [
+      ['年假', { 'zh_cn': '年假', 'en_us': 'Annual leave', 'ja_jp': '年次有給休暇' }, 1, 1],
+      ['事假', { 'zh_cn': '事假', 'en_us': 'Personal leave' }, 0, 1],
+      ['病假', { 'zh_cn': '病假', 'en_us': 'Sick leave' }, 0, 1],
+      ['调休', null, 0, 1],
+      ['婚假', null, 0, 1],
+      ['产假', null, 0, 1]
+    ]),
+    'purchase_dept': mk('purchase_dept', [
+      ['行政部', null, 0, 1],
+      ['信息技术部', { 'zh_cn': '信息技术部', 'en_us': 'Information Technology' }, 1, 1],
+      ['市场部', null, 0, 1],
+      ['生产制造部', null, 0, 1],
+      ['财务部', null, 0, 1]
+    ]),
+    'vendor_list': mk('vendor_list', [
+      ['深圳市恒通物流有限公司', null, 0, 1],
+      ['上海远卓信息技术有限公司', null, 1, 1],
+      ['北京同仁堂药材供应站', null, 0, 1],
+      ['广州华越办公用品有限公司', null, 0, 0]
+    ]),
+    'it_asset_class': mk('it_asset_class', [
+      ['笔记本电脑', { 'zh_cn': '笔记本电脑', 'en_us': 'Laptop', 'ja_jp': 'ノートパソコン' }, 0, 1],
+      ['显示器', { 'zh_cn': '显示器', 'en_us': 'Monitor' }, 0, 1],
+      ['服务器', { 'zh_cn': '服务器', 'en_us': 'Server' }, 1, 1],
+      ['网络设备', null, 0, 1]
+    ]),
+    'travel_city': [],
+    'contract_type': mk('contract_type', [
+      ['采购合同', null, 1, 1],
+      ['服务合同', null, 0, 0],
+      ['保密协议', null, 0, 1]
+    ]),
+    'cost_center': mk('cost_center', [
+      ['研发中心', null, 1, 1],
+      ['销售中心', null, 0, 1],
+      ['交付中心', null, 0, 1]
+    ])
+  };
+
+  /* ---------- 身份与三个独立权限位 ----------
+     feishu.datasource.read / feishu.datasource.write / feishu.option.read 是分开授的。
+     运维、业务这两个身份盖住了第三种组合：有 read、没有 option.read。 */
+  var ROLES = {
+    ops: {
+      name: '运维管理员', desc: '可创建与修改数据源',
+      canWrite: true, canOptionRead: true
+    },
+    biz: {
+      name: '业务审批管理员', desc: '只读：数据源与选项都能看',
+      canWrite: false, canOptionRead: true
+    },
+    limited: {
+      name: '审计观察员', desc: '只读数据源，没有选项查看权限',
+      canWrite: false, canOptionRead: false
+    }
+  };
+
+  function role() { return ROLES[state.role] || ROLES.ops; }
+  function isOps() { return !!role().canWrite; }
+  function canOptionRead() { return !!role().canOptionRead; }
+
+  /* ---------- 状态 ---------- */
+  var state = {
+    mode: 'data',
+    role: 'ops',
+    theme: window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+    density: 'default',
+    view: 'list',
+    current: null,
+    /* 对话框的目标数据源：必须在「打开对话框」时落定，
+       不能等到提交时再读 state.current——列表页的 ⋯ 菜单进来时它是 null 或上一个详情页的 key。 */
+    renaming: null,
+    deleting: null,
+    guideOpen: false,
+    guideStep1: false,
+    guideStep4: false,
+    openMenu: null,
+    identityOpen: false,
+    openI18n: {},
+    notice: null,
+    busy: false
+  };
+  var lastFocus = null;
+  var noticeTimer = null;
+
+  /* ---------- 小工具 ---------- */
+  function esc(v) {
+    return String(v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function ico(name, cls) {
+    return '<svg class="i ' + (cls || '') + '" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
+  }
+  function src(key) {
+    for (var i = 0; i < SOURCES.length; i++) { if (SOURCES[i].key === key) { return SOURCES[i]; } }
+    return null;
+  }
+  /* 数据源标识的真实规则（create_datasource.rs）：小写字母开头、只含 [a-z0-9_]、≤ 64 字节。
+     连字符是**非法**的——它会进接口 URL，所以这里跟后端对齐，不放宽。 */
+  function validKey(v) {
+    return !!v && v.length <= 64 && /^[a-z][a-z0-9_]*$/.test(v);
+  }
+  function statusBadge(s, small) {
+    var cls = 'badge ' + (s.status === 'active' ? 'badge-positive' : 'badge-warning') + (small ? ' badge-sm' : '');
+    return '<span class="' + cls + '"><span class="dot' + (s.status === 'active' ? '' : ' hollow') + '"></span>' +
+      (s.status === 'active' ? '启用' : '已停用') + '</span>';
+  }
+  function notice(text) {
+    state.notice = { text: text };
+    if (noticeTimer) { clearTimeout(noticeTimer); }
+    noticeTimer = setTimeout(function () { state.notice = null; render(); }, 3200);
+  }
+
+  /* ---------- 指引 ---------- */
+  function guide() {
+    var open = state.guideOpen;
+    return '' +
+      '<section class="guide" data-open="' + (open ? 'true' : 'false') + '">' +
+        '<button class="guide-head" type="button" id="guideHead" aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="guideBody">' +
+          '<span class="guide-title">从飞书审批后台到多维表格，四步接起来</span>' +
+          '<span class="guide-toggle">' + (open ? '收起' : '展开') + ico('chevron-down', 'sm') +
+            '<span class="sr">四步指引</span></span>' +
+        '</button>' +
+        '<div class="guide-body" id="guideBody">' +
+          '<ol class="steps">' +
+            '<li class="step"><span class="step-num">1</span><div>' +
+              '<h3>在飞书审批后台配置控件</h3>' +
+              '<p>单选或多选控件把取值方式改成「使用外部选项」，自定义一个 Token 并记住它。</p>' +
+            '</div></li>' +
+            '<li class="step"><span class="step-num">2</span><div>' +
+              '<h3>在这里建一个数据源</h3>' +
+              '<p>数据源标识会进接口 URL；把上一步的 Token 粘贴进来。</p>' +
+            '</div></li>' +
+            '<li class="step"><span class="step-num">3</span><div>' +
+              '<h3>把接口地址与 Token 填回审批后台</h3>' +
+              '<p>回到那个控件的外部选项配置，把这两项填进去。</p>' +
+            '</div></li>' +
+            '<li class="step"><span class="step-num">4</span><div>' +
+              '<h3>在多维表格配自动化推送选项</h3>' +
+              '<p>HTTP 节点带 <span class="mono">Authorization: Bearer &lt;管理 Token&gt;</span>，选项随表格变动自动更新。</p>' +
+            '</div></li>' +
+          '</ol>' +
+          '<div class="step-detail" id="guideStep1"' + (state.guideStep1 ? '' : ' hidden') + '>' +
+            '<dl class="deflist">' +
+              '<div><dt>控件类型</dt><dd>单选 / 多选</dd></div>' +
+              '<div><dt>取值方式</dt><dd>使用外部选项</dd></div>' +
+              '<div><dt>自定义 Token</dt><dd>自己起一个，先复制到安全的地方</dd></div>' +
+            '</dl>' +
+            '<div class="alert-neutral">' + ico('triangle-alert') +
+              '<span>这个 Token 只在飞书那边显示一次。服务端只保存它的摘要，之后无法回显——请先复制到安全的地方。</span></div>' +
+          '</div>' +
+          '<div class="step-detail" id="guideStep4"' + (state.guideStep4 ? '' : ' hidden') + '>' +
+            '<dl class="deflist">' +
+              '<div><dt>在哪做</dt><dd>多维表格里新加一个自动化</dd></div>' +
+              '<div><dt>触发</dt><dd>表格数据变更</dd></div>' +
+              '<div><dt>动作</dt><dd>HTTP 请求，打到这个数据源的接口地址</dd></div>' +
+              '<div><dt>鉴权</dt><dd><span class="mono">Authorization: Bearer &lt;管理 Token&gt;</span></dd></div>' +
+            '</dl>' +
+            '<div class="alert-neutral">' + ico('info') +
+              '<span>推送的选项数量、内容与排序都以表格为准；控制台这边只读。数据源建好之后如果一直是空的，多半是这一步还没跑过。</span></div>' +
+          '</div>' +
+        '</div>' +
+      '</section>';
+  }
+
+  /* ---------- 卡片 ---------- */
+  function card(s) {
+    var menuOpen = state.openMenu === s.key;
+    return '' +
+      '<div class="card" role="button" tabindex="0" data-action="open" data-key="' + esc(s.key) + '" ' +
+        'aria-label="' + esc(s.title) + '，' + (s.status === 'active' ? '启用' : '已停用') + '，查看选项">' +
+        '<div class="card-head">' +
+          '<div>' +
+            '<div class="card-title">' + esc(s.title) + '</div>' +
+            '<div class="card-key mono">' + esc(s.key) + '</div>' +
+          '</div>' +
+          (isOps() ? '<div class="card-actions">' +
+            '<button class="icon-btn" type="button" data-action="menu" data-key="' + esc(s.key) + '" ' +
+              'aria-haspopup="menu" aria-expanded="' + (menuOpen ? 'true' : 'false') + '" aria-label="更多操作">' +
+              ico('more-horizontal') + '</button>' +
+            (menuOpen ? menu(s) : '') +
+          '</div>' : '') +
+        '</div>' +
+        '<div class="card-meta">' + statusBadge(s) +
+          (s.encrypt ? '<span class="badge badge-info">' + ico('lock', 'sm') + '加密返回</span>' : '') +
+        '</div>' +
+        '<div class="card-foot">' +
+          '<span class="xs muted">默认语言 ' + esc(s.locale) + '</span>' +
+          (isOps() ? '' : '<span class="card-hint">查看选项' + ico('chevron-right', 'sm') + '</span>') +
+        '</div>' +
+      '</div>';
+  }
+
+  function menu(s) {
+    var off = s.status !== 'active';
+    return '' +
+      '<div class="menu" role="menu" aria-label="' + esc(s.title) + ' 操作">' +
+        '<button class="menu-item" type="button" role="menuitem" data-action="rename" data-key="' + esc(s.key) + '">' +
+          ico('square-pen') + '重命名</button>' +
+        '<button class="menu-item" type="button" role="menuitem" data-action="disable" data-key="' + esc(s.key) + '"' +
+          (off ? ' disabled aria-disabled="true" title="这个数据源已经是停用状态"' : '') + '>' +
+          ico('power') + '停用</button>' +
+        '<button class="menu-item danger" type="button" role="menuitem" data-action="delete" data-key="' + esc(s.key) + '">' +
+          ico('trash-2') + '删除</button>' +
+      '</div>';
+  }
+
+  function skeletonGrid() {
+    var one = '<div class="sk-card">' +
+      '<div class="sk" style="height:16px;width:66%"></div>' +
+      '<div class="sk" style="height:12px;width:45%"></div>' +
+      '<div class="sk" style="height:20px;width:56%"></div>' +
+      '<div class="sk" style="height:12px;width:38%"></div>' +
+      '</div>';
+    var out = '';
+    for (var i = 0; i < 6; i++) { out += one; }
+    return '<div class="grid" role="status" aria-live="polite"><span class="sr">正在加载数据源</span>' + out + '</div>';
+  }
+
+  function emptyState() {
+    return '' +
+      '<div class="empty">' +
+        '<div class="empty-icon" aria-hidden="true">' + ico('database') + '</div>' +
+        '<h2>还没有数据源</h2>' +
+        '<p>先在飞书审批后台配好控件并拿到 Token，再回来建第一个。</p>' +
+        '<div class="empty-actions">' +
+          (isOps()
+            ? '<button class="btn btn-default" type="button" data-action="create">' + ico('plus') + '添加数据源</button>'
+            : '') +
+          '<button class="btn btn-outline" type="button" data-action="how-token">' + ico('circle-help') + '怎么拿到 Token？</button>' +
+        '</div>' +
+        (isOps() ? '' : '<div class="xs muted">当前是业务身份，创建数据源请联系运维管理员。</div>') +
+      '</div>';
+  }
+
+  function errorState() {
+    return '' +
+      '<div class="alert-error" role="alert">' + ico('circle-alert') +
+        '<div style="flex:1">' +
+          '<div>数据源不存在</div>' +
+          '<div class="xs" style="opacity:.85">列表没有拉到数据。刷新后再试一次；如果一直这样，把这一屏截图发给集成负责人。</div>' +
+        '</div>' +
+        '<button class="btn btn-outline btn-sm" type="button" data-action="retry">' + ico('refresh-cw') + '重试</button>' +
+      '</div>';
+  }
+
+  /* ---------- 列表页 ---------- */
+  function listPage() {
+    var body;
+    if (state.mode === 'loading') {
+      body = skeletonGrid();
+    } else if (state.mode === 'error') {
+      body = errorState();
+    } else if (state.mode === 'empty') {
+      body = emptyState();
+    } else {
+      body = '<div class="grid">' + SOURCES.map(card).join('') + '</div>';
+    }
+    return '' +
+      '<div class="pagehead">' +
+        '<div>' +
+          '<h1>飞书数据源</h1>' +
+          '<p>把飞书审批控件的外部选项接在这里；选项由多维表格自动推送，控制台只读。</p>' +
+        '</div>' +
+        (isOps() ? '<button class="btn btn-default" type="button" data-action="create">' + ico('plus') + '添加数据源</button>' : '') +
+      '</div>' +
+      guide() +
+      body;
+  }
+
+  /* ---------- 详情页 ---------- */
+  function optionsBlock(s) {
+    if (!canOptionRead()) {
+      return '' +
+        '<div class="alert-error" role="alert" style="margin-top:12px">' + ico('circle-alert') +
+          '<div style="flex:1">' +
+            '<div>你没有查看选项的权限</div>' +
+            '<div class="xs" style="opacity:.85">当前身份只拿到了 <span class="mono">feishu.datasource.read</span>，没有 <span class="mono">feishu.option.read</span>，所以选项列表这一格是空的——不是它真的没有选项。数据源本身照样能看、能点进来。</div>' +
+          '</div>' +
+          '<button class="btn btn-outline btn-sm" type="button" data-action="retry">' + ico('refresh-cw') + '重试</button>' +
+        '</div>';
+    }
+    if (state.mode === 'loading') {
+      var row = '<tr><td colspan="5"><div class="sk" style="height:20px;width:100%"></div></td></tr>';
+      return '<div class="table-wrap"><table class="opt"><tbody>' + row + row + row + '</tbody></table></div>' +
+        '<div class="sr" role="status" aria-live="polite">正在加载选项</div>';
+    }
+    if (state.mode === 'error') {
+      return '' +
+        '<div class="alert-error" role="alert" style="margin-top:12px">' + ico('circle-alert') +
+          '<div style="flex:1">' +
+            '<div>数据源不存在</div>' +
+            '<div class="xs" style="opacity:.85">选项没有拉到。返回列表刷新后重试。</div>' +
+          '</div>' +
+          '<button class="btn btn-outline btn-sm" type="button" data-action="retry">' + ico('refresh-cw') + '重试</button>' +
+        '</div>';
+    }
+    var list = OPTIONS[s.key] || [];
+    if (!list.length) {
+      return '' +
+        '<div class="empty" style="margin-top:12px">' +
+          '<div class="empty-icon" aria-hidden="true">' + ico('table-2') + '</div>' +
+          '<h2>还没有选项推过来</h2>' +
+          '<p>这个数据源本身是好的，但多维表格那边的自动化还没往这里推过任何一条选项。选项只能从那边来，控制台不能手工添加。</p>' +
+          '<p>如果你觉得应该已经有了：先确认那条自动化的目标地址就是 <span class="mono">' + esc(s.key) + '</span>，再确认它至少成功跑过一次。</p>' +
+          '<div class="empty-actions">' +
+            '<button class="btn btn-outline" type="button" data-action="guide-step4">' + ico('circle-help') + '看第 4 步怎么配</button>' +
+          '</div>' +
+        '</div>';
+    }
+    var rows = list.map(function (o) {
+      var open = !!state.openI18n[o.id];
+      var html = '' +
+        '<tr class="' + (o.enabled ? '' : 'off') + '">' +
+          '<td>' + esc(o.label) + '</td>' +
+          '<td class="col-num tnum">' + o.sort + '</td>' +
+          '<td>' + (o.isDefault ? '<span class="badge badge-neutral badge-sm">默认</span>' : '<span class="muted">—</span>') + '</td>' +
+          '<td>' + (o.enabled
+            ? '<span class="badge badge-positive badge-sm"><span class="dot"></span>启用</span>'
+            : '<span class="badge badge-warning badge-sm"><span class="dot hollow"></span>已下线</span>') + '</td>' +
+          '<td>' + (o.i18n
+            ? '<button class="badge badge-info i18n-btn" type="button" data-action="i18n" data-id="' + esc(o.id) + '" ' +
+                'aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="' + esc(o.id) + '-i18n">' +
+                ico('list', 'sm') + 'i18n</button>'
+            : '<span class="muted">—</span>') + '</td>' +
+        '</tr>';
+      if (open && o.i18n) {
+        html += '<tr class="i18n-row" id="' + esc(o.id) + '-i18n"><td colspan="5">' +
+          '<div class="i18n-json">' + esc(JSON.stringify(o.i18n)) + '</div></td></tr>';
+      }
+      return html;
+    }).join('');
+    return '' +
+      '<div class="table-wrap">' +
+        '<table class="opt">' +
+          '<caption class="sr">选项列表，只读</caption>' +
+          '<thead><tr>' +
+            '<th scope="col">选项名称</th>' +
+            '<th scope="col" class="col-num">排序</th>' +
+            '<th scope="col">默认</th>' +
+            '<th scope="col">状态</th>' +
+            '<th scope="col">多语言</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+      '</div>';
+  }
+
+  function detailPage() {
+    var s = src(state.current);
+    if (!s) { return listPage(); }
+    var count = (OPTIONS[s.key] || []).length;
+    var countText = (state.mode === 'data' && canOptionRead()) ? '共 ' + count + ' 条选项' : '';
+    return '' +
+      '<div>' +
+        '<button class="backlink" type="button" data-action="back">' + ico('arrow-left') + '返回数据源</button>' +
+        '<div class="detail-head" style="margin-top:12px">' +
+          '<div>' +
+            '<div class="detail-title"><h1>' + esc(s.title) + '</h1>' + statusBadge(s) + '</div>' +
+            '<div class="detail-meta">' +
+              '<span class="xs muted mono">' + esc(s.key) + '</span>' +
+              (s.encrypt ? '<span class="badge badge-info badge-sm">' + ico('lock', 'sm') + '加密返回</span>' : '') +
+              '<span class="xs muted">默认语言 ' + esc(s.locale) + '</span>' +
+            '</div>' +
+          '</div>' +
+          (isOps() ? '<div class="detail-ops">' +
+            '<button class="btn btn-outline btn-sm" type="button" data-action="rename" data-key="' + esc(s.key) + '">' +
+              ico('square-pen') + '重命名</button>' +
+            (s.status === 'active'
+              ? '<button class="btn btn-outline btn-sm" type="button" data-action="disable" data-key="' + esc(s.key) + '">' +
+                  ico('power') + '停用</button>'
+              : '<button class="btn btn-outline btn-sm" type="button" data-action="enable" data-key="' + esc(s.key) + '">' +
+                  ico('power') + '启用</button>') +
+            '<button class="btn btn-destructive btn-sm" type="button" data-action="delete" data-key="' + esc(s.key) + '">' +
+              ico('trash-2') + '删除</button>' +
+          '</div>' : '') +
+        '</div>' +
+      '</div>' +
+      (state.mode === 'data'
+        ? '<div class="alert-neutral">' + ico(s.status === 'disabled' ? 'triangle-alert' : 'info') +
+            '<span>' + (s.status === 'disabled'
+              ? '这个数据源现在就是「已停用」——飞书审批里用它的控件立刻拿不到选项（接口回 40301 数据源已停用），控件里是空的。它下面的选项并没有被删掉，点「启用」就恢复。'
+              : '两个层级要分清楚：数据源级的「已停用」会让飞书审批里整个控件取不到任何选项；下面选项行里的「已下线」只是选项级的，只影响那一条，而且是禁用而非删除，历史审批单引用过的选项不会彻底失联。') +
+            '</span></div>'
+        : '') +
+      '<section class="section">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">' +
+          '<h2>选项</h2>' +
+          '<span class="xs muted tnum">' + countText + '</span>' +
+        '</div>' +
+        (canOptionRead()
+          ? '<div class="alert-neutral" style="margin-top:12px">' + ico('info') +
+              '<span>选项由多维表格自动推送，控制台只读。</span></div>'
+          : '') +
+        optionsBlock(s) +
+      '</section>';
+  }
+
+  /* ---------- 渲染 ---------- */
+  function render() {
+    var head = '';
+    if (state.notice) {
+      head = '<div class="alert-neutral" aria-live="polite">' + ico('circle-check') +
+        '<span>' + esc(state.notice.text) + '</span></div>';
+    }
+    page.innerHTML = head + (state.view === 'detail' ? detailPage() : listPage());
+    syncChrome();
+  }
+
+  function syncChrome() {
+    var isDark = state.theme === 'dark';
+    document.documentElement.classList.toggle('dark', isDark);
+    document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+    document.getElementById('themeIcon').innerHTML = '<use href="#i-' + (isDark ? 'sun' : 'moon') + '"/>';
+    document.getElementById('themeBtn').setAttribute('aria-label', isDark ? '切换到浅色主题' : '切换到深色主题');
+
+    var dLabel = { 'default': '密度：标准', 'compact': '密度：紧凑', 'loose': '密度：宽松' };
+    document.getElementById('densityLabel').textContent = dLabel[state.density];
+    if (state.density === 'default') {
+      delete document.documentElement.dataset.density;
+    } else {
+      document.documentElement.dataset.density = state.density;
+    }
+
+    var ops = isOps();
+    document.getElementById('identityName').textContent = role().name;
+    document.getElementById('identityRole').textContent = role().desc;
+    document.getElementById('identityBtn').setAttribute('aria-expanded', state.identityOpen ? 'true' : 'false');
+    document.getElementById('identityMenu').hidden = !state.identityOpen;
+
+    syncSeg('pcState', [['empty', '空态'], ['data', '有数据'], ['loading', '加载中'], ['error', '错误']], state.mode);
+    syncSeg('pcRole', [['ops', '运维'], ['biz', '业务'], ['limited', '审计']], state.role);
+    syncSeg('pcTheme', [['light', '明'], ['dark', '暗']], state.theme);
+    syncSeg('pcHint', (ops
+      ? [['create', '新增对话框'], ['disableconf', '停用确认'], ['deleteconf', '删除确认'], ['detail', '进入详情'], ['back', '返回列表']]
+      : [['detail', '进入详情'], ['back', '返回列表']]), null);
+    syncSeg('pcEdge', [['nooptions', '0 个选项'], ['nooptionread', '选项 403']], null);
+  }
+
+  function syncSeg(id, items, active) {
+    var box = document.getElementById(id);
+    if (box.getAttribute('data-sig') !== JSON.stringify(items)) {
+      box.setAttribute('data-sig', JSON.stringify(items));
+      box.innerHTML = items.map(function (it) {
+        return '<button type="button" data-val="' + it[0] + '">' + it[1] + '</button>';
+      }).join('');
+    }
+    Array.prototype.forEach.call(box.children, function (b) {
+      var on = active !== null && b.getAttribute('data-val') === active;
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  /* ---------- 对话框 ---------- */
+  function openDialog(id, focusId) {
+    lastFocus = document.activeElement;
+    var ov = document.getElementById(id);
+    ov.hidden = false;
+    var target = focusId ? document.getElementById(focusId) : ov.querySelector('.btn-default, .btn-destructive');
+    if (target) { target.focus(); }
+  }
+  function closeDialog(id) {
+    var ov = document.getElementById(id);
+    if (!ov || ov.hidden) { return; }
+    ov.hidden = true;
+    clearFormErrors(ov);
+    if (lastFocus && lastFocus.isConnected) { lastFocus.focus(); }
+  }
+  function openDialogEl() {
+    var list = document.querySelectorAll('.overlay');
+    for (var i = 0; i < list.length; i++) { if (!list[i].hidden) { return list[i]; } }
+    return null;
+  }
+  function askDisable(key) {
+    var s = src(key);
+    if (!s) { return; }
+    document.getElementById('offTarget').textContent = s.title;
+    document.getElementById('offTargetKey').textContent = s.key;
+    openDialog('dlgDisable', 'disableConfirm');
+  }
+  function clearFormErrors(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('.field-error'), function (e) { e.hidden = true; e.textContent = ''; });
+    Array.prototype.forEach.call(root.querySelectorAll('[aria-invalid]'), function (e) { e.removeAttribute('aria-invalid'); });
+  }
+  function setErr(inputId, errId, msg) {
+    var inp = document.getElementById(inputId);
+    var box = document.getElementById(errId);
+    inp.setAttribute('aria-invalid', 'true');
+    box.textContent = msg;
+    box.hidden = false;
+  }
+
+  /* ---------- 交互 ---------- */
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.identity') && state.identityOpen) { state.identityOpen = false; syncChrome(); }
+    if (!e.target.closest('.card-actions') && state.openMenu) { state.openMenu = null; render(); }
+  });
+
+  document.getElementById('identityBtn').addEventListener('click', function () {
+    state.identityOpen = !state.identityOpen;
+    syncChrome();
+  });
+  document.getElementById('identityMenu').addEventListener('click', function (e) {
+    var item = e.target.closest('[data-role]');
+    if (!item) { return; }
+    setRole(item.getAttribute('data-role'));
+    state.identityOpen = false;
+    if (state.view === 'detail') { state.view = 'list'; }
+    render();
+  });
+
+  document.getElementById('themeBtn').addEventListener('click', function () {
+    state.theme = state.theme === 'dark' ? 'light' : 'dark';
+    syncChrome();
+  });
+  document.getElementById('densityBtn').addEventListener('click', function () {
+    state.density = state.density === 'default' ? 'compact' : (state.density === 'compact' ? 'loose' : 'default');
+    syncChrome();
+  });
+
+  function setRole(role) {
+    state.role = role;
+    state.openMenu = null;
+  }
+
+  page.addEventListener('click', function (e) {
+    var el = e.target.closest('[data-action]');
+    if (!el) { return; }
+    var action = el.getAttribute('data-action');
+    var key = el.getAttribute('data-key');
+
+    if (action === 'menu') {
+      state.openMenu = state.openMenu === key ? null : key;
+      render();
+      var items = page.querySelector('.menu-item');
+      if (state.openMenu && items) { items.focus(); }
+      return;
+    }
+    if (action === 'i18n') {
+      var id = el.getAttribute('data-id');
+      state.openI18n[id] = !state.openI18n[id];
+      render();
+      var btn = page.querySelector('[data-id="' + id + '"]');
+      if (btn) { btn.focus(); }
+      return;
+    }
+    if (state.openMenu) {
+      var fromMenu = !!e.target.closest('.menu');
+      state.openMenu = null;
+      render();
+      if (!fromMenu) { return; }
+    }
+
+    switch (action) {
+      case 'open':
+        state.view = 'detail';
+        state.current = key;
+        state.openI18n = {};
+        mainEl.scrollTop = 0;
+        render();
+        break;
+      case 'back':
+        state.view = 'list';
+        mainEl.scrollTop = 0;
+        render();
+        break;
+      case 'retry':
+        if (!canOptionRead()) {
+          notice('重试仍然是 403：feishu.option.read 得由管理员授予');
+          return;
+        }
+        state.mode = 'data';
+        render();
+        break;
+      case 'guide-step4':
+        state.guideOpen = true;
+        state.guideStep4 = true;
+        state.view = 'list';
+        render();
+        var step4 = document.getElementById('guideStep4');
+        if (step4) { step4.scrollIntoView({ block: 'nearest' }); }
+        break;
+      case 'how-token':
+        state.guideOpen = true;
+        state.guideStep1 = true;
+        render();
+        document.getElementById('guideStep1').scrollIntoView({ block: 'nearest' });
+        break;
+      case 'create':
+        if (!isOps()) { return; }
+        openDialog('dlgCreate', 'fSourceKey');
+        break;
+      case 'rename':
+        if (!isOps()) { return; }
+        state.renaming = key;
+        document.getElementById('fRenameTitle').value = (src(key) || {}).title || '';
+        openDialog('dlgRename', 'fRenameTitle');
+        break;
+      case 'delete':
+        if (!isOps()) { return; }
+        state.deleting = key;
+        var s = src(key);
+        document.getElementById('delTarget').textContent = s ? s.title : '';
+        document.getElementById('delTargetKey').textContent = s ? s.key : '';
+        openDialog('dlgDelete', 'deleteConfirm');
+        break;
+      case 'disable':
+        if (!isOps()) { return; }
+        askDisable(key);
+        break;
+      case 'enable':
+        if (!isOps()) { return; }
+        var on = src(key);
+        if (!on) { return; }
+        on.status = 'active';
+        notice('已启用');
+        render();
+        break;
+    }
+  });
+
+  page.addEventListener('keydown', function (e) {
+    var el = e.target.closest('[data-action="open"]');
+    if (!el) { return; }
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      el.click();
+    }
+  });
+
+  page.addEventListener('click', function (e) {
+    if (e.target.closest('#guideHead')) {
+      state.guideOpen = !state.guideOpen;
+      render();
+      var h = document.getElementById('guideHead');
+      if (h) { h.focus(); }
+    }
+  });
+
+  document.addEventListener('click', function (e) {
+    var closeBtn = e.target.closest('[data-close]');
+    if (closeBtn) { closeDialog(closeBtn.getAttribute('data-close')); }
+    var ov = e.target.closest('.overlay');
+    if (ov && e.target === ov) { closeDialog(ov.id); }
+  });
+
+  document.getElementById('disableConfirm').addEventListener('click', function () {
+    var s = src(document.getElementById('offTargetKey').textContent);
+    if (s) { s.status = 'disabled'; }
+    closeDialog('dlgDisable');
+    state.openMenu = null;
+    notice('已停用');
+    render();
+  });
+
+  document.getElementById('deleteConfirm').addEventListener('click', function () {
+    /* 只认打开弹窗时落定的目标，不读 state.current：那是「当前详情页」，
+       跟从卡片 ⋯ 菜单点进来的删除目标常常不是一个数据源。 */
+    var s = src(state.deleting);
+    if (s) {
+      SOURCES.splice(SOURCES.indexOf(s), 1);
+      delete OPTIONS[s.key];
+    }
+    state.deleting = null;
+    closeDialog('dlgDelete');
+    state.view = 'list';
+    state.openMenu = null;
+    notice('已删除');
+    render();
+  });
+
+  document.getElementById('renameForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    clearFormErrors(this);
+    var input = document.getElementById('fRenameTitle');
+    var v = input.value.trim();
+    /* 目标来自「打开对话框时落定的那个 key」，不是 state.current。 */
+    var s = src(state.renaming);
+    if (!s) { return; }
+    if (!v) { setErr('fRenameTitle', 'errRenameTitle', '没有要更新的字段'); return; }
+    if (v.length > 100) { setErr('fRenameTitle', 'errRenameTitle', '名称必须在 1..=100 字符'); return; }
+    var btn = document.getElementById('renameSubmit');
+    btn.disabled = true;
+    btn.textContent = '提交中…';
+    setTimeout(function () {
+      var t = src(state.renaming);
+      if (t) { t.title = v; }
+      btn.disabled = false;
+      btn.textContent = '保存';
+      closeDialog('dlgRename');
+      notice('已保存');
+      render();
+    }, 500);
+  });
+
+  /* 边输边判：非法字符当场标出来，不等到提交才说 */
+  var keyInput = document.getElementById('fSourceKey');
+  var keyHint = document.getElementById('hintSourceKey');
+  keyInput.addEventListener('input', function () {
+    var bad = keyInput.value.trim().length > 0 && !validKey(keyInput.value.trim());
+    if (bad) { keyInput.setAttribute('aria-invalid', 'true'); } else { keyInput.removeAttribute('aria-invalid'); }
+    keyHint.classList.toggle('bad', bad);
+  });
+
+  document.getElementById('createForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    clearFormErrors(this);
+    var kEl = document.getElementById('fSourceKey');
+    var tEl = document.getElementById('fTitle');
+    var tokEl = document.getElementById('fToken');
+    var k = kEl.value.trim();
+    var t = tEl.value.trim();
+    var tok = tokEl.value;
+    var bad = false;
+    if (!k) { setErr('fSourceKey', 'errSourceKey', '数据源标识不能为空'); bad = true; }
+    else if (!validKey(k)) { setErr('fSourceKey', 'errSourceKey', '数据源标识必须是 1..=64 字节、小写字母开头的 [a-z0-9_]'); bad = true; }
+    else if (src(k)) { setErr('fSourceKey', 'errSourceKey', '这个数据源标识已经存在'); bad = true; }
+    if (!t) { setErr('fTitle', 'errTitle', '显示名称不能为空'); bad = true; }
+    else if (t.length > 100) { setErr('fTitle', 'errTitle', '名称必须在 1..=100 字符'); bad = true; }
+    if (!tok) { setErr('fToken', 'errToken', '接口 Token 不能为空'); bad = true; }
+    if (bad) { return; }
+
+    var btn = document.getElementById('createSubmit');
+    btn.disabled = true;
+    btn.textContent = '提交中…';
+    setTimeout(function () {
+      SOURCES.unshift({
+        key: k,
+        title: t,
+        status: 'active',
+        encrypt: document.getElementById('fEncrypt').checked,
+        locale: document.getElementById('fLocale').value
+      });
+      OPTIONS[k] = [];
+      btn.disabled = false;
+      btn.textContent = '添加数据源';
+      closeDialog('dlgCreate');
+      this.reset();
+      state.mode = 'data';
+      state.guideOpen = false;
+      notice('已添加数据源');
+      render();
+    }.bind(this), 600);
+  });
+
+  document.getElementById('pcbar').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-val]');
+    if (!b) { return; }
+    var group = b.parentElement.id;
+    var v = b.getAttribute('data-val');
+    if (group === 'pcState') {
+      state.mode = v;
+      state.guideOpen = v === 'empty';
+      state.view = 'list';
+      state.openMenu = null;
+      render();
+    } else if (group === 'pcRole') {
+      setRole(v);
+      // 切到「审计」时故意留在当前详情页——那是选项区 403 当场出现的地方
+      if (v !== 'limited' && state.view === 'detail') { state.view = 'list'; }
+      render();
+    } else if (group === 'pcEdge') {
+      state.mode = 'data';
+      state.openMenu = null;
+      state.guideOpen = false;
+      state.view = 'detail';
+      if (v === 'nooptions') {
+        state.current = 'travel_city';
+      }
+      if (v === 'nooptionread') {
+        setRole('limited');
+        state.current = 'expense_category';
+      }
+      mainEl.scrollTop = 0;
+      render();
+    } else if (group === 'pcTheme') {
+      state.theme = v;
+      syncChrome();
+    } else if (group === 'pcHint') {
+      if (v === 'create') { openDialog('dlgCreate', 'fSourceKey'); }
+      if (v === 'disableconf') {
+        if (state.mode !== 'data') { state.mode = 'data'; }
+        if (!state.current || !src(state.current)) { state.current = 'expense_category'; }
+        render();
+        askDisable(state.current);
+      }
+      if (v === 'deleteconf') {
+        if (state.mode !== 'data') { state.mode = 'data'; }
+        if (!state.current || !src(state.current)) { state.current = SOURCES[0].key; }
+        var s = src(state.current);
+        state.deleting = s.key;
+        document.getElementById('delTarget').textContent = s.title;
+        document.getElementById('delTargetKey').textContent = s.key;
+        syncChrome();
+        openDialog('dlgDelete', 'deleteConfirm');
+      }
+      if (v === 'detail') {
+        if (state.mode !== 'data') { state.mode = 'data'; }
+        if (!state.current || !src(state.current)) { state.current = 'expense_category'; }
+        state.view = 'detail';
+        render();
+      }
+      if (v === 'back') { state.view = 'list'; render(); }
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    var ov = openDialogEl();
+    if (e.key === 'Escape') {
+      if (ov) { closeDialog(ov.id); return; }
+      if (state.identityOpen) { state.identityOpen = false; syncChrome(); return; }
+      if (state.openMenu) { state.openMenu = null; render(); }
+      return;
+    }
+    if (e.key === 'Tab' && ov) {
+      var f = ov.querySelectorAll('button, input, select, [tabindex]:not([tabindex="-1"])');
+      if (!f.length) { return; }
+      var first = f[0];
+      var last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+
+  /* ---------- 原型控制条高度 ----------
+     控制条是 flex-wrap 的：窄屏会折成 5–6 行。写死 112px 的预留会被它压住正文，
+     所以量出真实高度写进 --proto-h，.main 的 padding-bottom 用这个变量。 */
+  var pcbarEl = document.getElementById('pcbar');
+  function measureProto() {
+    document.documentElement.style.setProperty('--proto-h', pcbarEl.offsetHeight + 'px');
+  }
+  window.addEventListener('resize', measureProto);
+  window.addEventListener('load', measureProto);
+  /* 「已知实现约束」展开/收起会改控制条自身高度，得重算一次 */
+  document.getElementById('pcCons').addEventListener('toggle', measureProto);
+
+  /* ---------- 启动 ---------- */
+  syncChrome();
+  render();
+  measureProto();
+})();
+</script>

@@ -1,0 +1,1344 @@
+<title>飞书数据源主从分栏</title>
+<style>
+/* ===== token 逐字取自 CONTRACT §1 ===== */
+:root{
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --density-cell-y: 0.625rem;
+  --tone-positive: oklch(0.55 0.09 155);
+  --tone-warning: oklch(0.62 0.11 75);
+  --tone-info: oklch(0.55 0.08 245);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --proto-h: 56px;
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / .05);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / .1), 0 4px 6px -4px rgb(0 0 0 / .1);
+}
+.dark, :root[data-theme="dark"]{
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --tone-positive: oklch(0.72 0.11 155);
+  --tone-warning: oklch(0.78 0.12 75);
+  --tone-info: oklch(0.72 0.09 245);
+}
+@media (prefers-color-scheme: dark){
+  :root:not(.dark):not([data-theme="light"]){
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --tone-positive: oklch(0.72 0.11 155);
+    --tone-warning: oklch(0.78 0.12 75);
+    --tone-info: oklch(0.72 0.09 245);
+  }
+}
+html[data-density="compact"]{ --density-cell-y: 0.25rem; }
+html[data-density="loose"]{ --density-cell-y: 1rem; }
+
+/* ===== 基础 ===== */
+*,*::before,*::after{ box-sizing: border-box; }
+body{
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  padding-bottom: var(--proto-h);
+}
+h1,h2,h3,p,ol,ul{ margin: 0; padding: 0; }
+h1,h2,h3{ line-height: 1.25; }
+ol,ul{ list-style: none; }
+button{ font: inherit; color: inherit; background: none; border: 0; cursor: pointer; text-align: left; }
+input,select{ font: inherit; color: inherit; }
+svg.i{ width:16px; height:16px; flex-shrink:0; fill:none; stroke:currentColor; stroke-width:2;
+  stroke-linecap:round; stroke-linejoin:round; }
+svg.i14{ width:14px; height:14px; }
+svg.i18{ width:18px; height:18px; }
+svg.i22{ width:22px; height:22px; }
+.mono{ font-family: var(--font-mono); font-size: 12px; color: var(--muted-foreground); }
+.num{ font-variant-numeric: tabular-nums; }
+.hint{ font-size: 12px; color: var(--muted-foreground); }
+.sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden;
+  clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+.mt12{ margin-top: 12px; }
+.mt16{ margin-top: 16px; }
+.mt20{ margin-top: 20px; }
+.stack{ display:flex; flex-direction:column; gap:12px; }
+*:focus-visible{ outline: 2px solid var(--ring); outline-offset: 2px; }
+
+/* ===== 外壳（CONTRACT §4.1） ===== */
+.app{ display:flex; height:calc(100vh - var(--proto-h)); height:calc(100svh - var(--proto-h));
+  overflow:hidden; background:var(--background); color:var(--foreground); }
+.sidebar{ width:240px; flex-shrink:0; display:flex; flex-direction:column;
+  border-right:1px solid var(--border); background:var(--background); }
+.brand{ display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--border); }
+.brand-logo{ width:40px; height:40px; flex-shrink:0; border-radius:10px; background:var(--primary);
+  color:var(--primary-foreground); display:grid; place-items:center; }
+.brand-name{ font-size:14px; font-weight:600; }
+.brand-sub{ font-size:12px; color:var(--muted-foreground); }
+.identity{ position:relative; padding:8px; border-bottom:1px solid var(--border); }
+.identity-btn{ display:flex; align-items:center; gap:8px; width:100%; border-radius:8px;
+  padding:6px 8px; transition:background .15s; }
+.identity-btn:hover{ background:var(--accent); }
+.identity-btn > svg:last-child{ margin-left:auto; color:var(--muted-foreground); }
+.identity-name{ display:block; font-size:14px; font-weight:500; }
+.identity-role{ display:block; font-size:12px; color:var(--muted-foreground); }
+.nav{ flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:16px; }
+.nav-label{ padding:0 8px 4px; font-size:12px; font-weight:500; color:var(--muted-foreground); }
+.nav-item{ display:flex; align-items:center; gap:8px; width:100%; border-radius:8px; padding:6px 8px;
+  font-size:14px; transition:background .15s,color .15s; }
+.nav-item:hover{ background:var(--accent); color:var(--accent-foreground); }
+.nav-item.active{ background:var(--accent); color:var(--accent-foreground); font-weight:500; }
+.sidebar-foot{ padding:12px; border-top:1px solid var(--border); }
+.main-col{ flex:1; min-width:0; display:flex; flex-direction:column; }
+.page-head{ display:flex; align-items:center; justify-content:flex-end; gap:8px;
+  padding:8px 16px; border-bottom:1px solid var(--border); flex-shrink:0; }
+.narrow-brand{ display:none; align-items:center; gap:8px; margin-right:auto; }
+.narrow-brand .brand-logo{ width:32px; height:32px; border-radius:8px; }
+.content{ flex:1; min-width:0; display:flex; flex-direction:column; padding:24px; overflow:hidden; }
+.content-inner{ flex:1; min-height:0; width:100%; max-width:1200px; margin:0 auto; display:flex; flex-direction:column; }
+.page-title{ display:flex; flex-direction:column; gap:4px; margin-bottom:24px; }
+.page-title h1{ font-size:20px; font-weight:600; }
+.page-title p{ font-size:14px; color:var(--muted-foreground); }
+
+/* ===== 主从分栏 ===== */
+.split{ flex:1; min-height:0; display:flex; gap:16px; }
+.master{ width:280px; flex-shrink:0; display:flex; flex-direction:column;
+  border:1px solid var(--border); border-radius:14px; background:var(--card); overflow:hidden; }
+.master-head{ padding:12px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:8px; }
+.master-title{ display:flex; align-items:baseline; justify-content:space-between; gap:8px;
+  font-size:14px; font-weight:500; }
+.master-list{ flex:1; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:2px; }
+.master-foot{ padding:12px; border-top:1px solid var(--border); }
+.master-item{ position:relative; display:flex; flex-direction:column; gap:2px; width:100%;
+  border-radius:8px; padding:8px 10px 8px 12px; transition:background .15s; }
+.master-item:hover{ background:var(--accent); }
+.master-item.active{ background:var(--accent); }
+.master-item.active::before{ content:""; position:absolute; left:0; top:6px; bottom:6px; width:2px;
+  border-radius:2px; background:var(--primary); }
+.master-item-title{ display:flex; align-items:center; gap:6px; font-size:14px; }
+.master-item.active .master-item-title{ font-weight:500; }
+.master-item-key{ font-family:var(--font-mono); font-size:12px; color:var(--muted-foreground);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ring{ width:8px; height:8px; flex-shrink:0; border-radius:50%;
+  border:1.5px solid var(--tone-warning); }
+.dot{ width:6px; height:6px; flex-shrink:0; border-radius:50%; background:currentColor; }
+.dot-ring{ background:transparent; border:1.5px solid currentColor; }
+.detail{ flex:1; min-width:0; display:flex; flex-direction:column;
+  border:1px solid var(--border); border-radius:14px; background:var(--card); overflow:hidden; }
+.detail-body{ flex:1; overflow-y:auto; padding:20px; }
+.detail-head{ display:flex; flex-direction:column; gap:10px; padding-bottom:16px;
+  border-bottom:1px solid var(--border); }
+.detail-title-row{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.detail-title{ font-size:20px; font-weight:600; }
+.detail-meta{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px; }
+.section-head{ display:flex; align-items:center; justify-content:space-between; gap:12px;
+  flex-wrap:wrap; margin:20px 0 4px; }
+.section-title{ display:flex; align-items:baseline; gap:8px; font-size:16px; font-weight:500; }
+.readonly-note{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted-foreground); }
+
+/* ===== 按钮（CONTRACT §4.4） ===== */
+.btn{ display:inline-flex; align-items:center; justify-content:center; gap:8px; white-space:nowrap;
+  border-radius:8px; border:1px solid transparent; font-size:14px; font-weight:500;
+  height:36px; padding:0 16px; transition:background .15s,color .15s,border-color .15s,box-shadow .15s; }
+.btn:disabled{ pointer-events:none; opacity:.5; }
+.btn-sm{ height:32px; padding:0 12px; }
+.btn-icon{ width:36px; padding:0; }
+.btn-block{ width:100%; }
+.btn-default{ background:var(--primary); color:var(--primary-foreground); box-shadow:var(--shadow-xs); }
+.btn-default:hover{ background:color-mix(in oklab, var(--primary) 90%, transparent); }
+.btn-outline{ border-color:var(--border); background:var(--background); box-shadow:var(--shadow-xs); }
+.btn-outline:hover{ background:var(--accent); color:var(--accent-foreground); }
+.btn-ghost:hover{ background:var(--accent); color:var(--accent-foreground); }
+.btn-destructive{ background:var(--destructive); color:white; box-shadow:var(--shadow-xs); }
+.btn-destructive:hover{ background:color-mix(in oklab, var(--destructive) 90%, transparent); }
+
+/* ===== 徽标（CONTRACT §4.5 + §1 tone） ===== */
+.badge{ display:inline-flex; align-items:center; justify-content:center; gap:4px; width:fit-content;
+  border-radius:8px; border:1px solid; padding:2px 8px; font-size:12px; font-weight:500;
+  white-space:nowrap; line-height:1.4; }
+.badge-sm{ border-radius:6px; padding:1px 6px; }
+.badge svg{ width:12px; height:12px; }
+.badge-neutral{ border-color:var(--border); color:var(--muted-foreground);
+  background:color-mix(in oklab, var(--muted) 50%, transparent); }
+.badge-positive{ border-color:color-mix(in oklab, var(--tone-positive) 35%, transparent);
+  color:var(--tone-positive); background:color-mix(in oklab, var(--tone-positive) 12%, transparent); }
+.badge-warning{ border-color:color-mix(in oklab, var(--tone-warning) 35%, transparent);
+  color:var(--tone-warning); background:color-mix(in oklab, var(--tone-warning) 12%, transparent); }
+.badge-info{ border-color:color-mix(in oklab, var(--tone-info) 35%, transparent);
+  color:var(--tone-info); background:color-mix(in oklab, var(--tone-info) 12%, transparent); }
+.dark .badge-positive, :root[data-theme="dark"] .badge-positive{ background:color-mix(in oklab, var(--tone-positive) 20%, transparent); }
+.dark .badge-warning, :root[data-theme="dark"] .badge-warning{ background:color-mix(in oklab, var(--tone-warning) 20%, transparent); }
+.dark .badge-info, :root[data-theme="dark"] .badge-info{ background:color-mix(in oklab, var(--tone-info) 20%, transparent); }
+@media (prefers-color-scheme: dark){
+  :root:not(.dark):not([data-theme="light"]) .badge-positive{ background:color-mix(in oklab, var(--tone-positive) 20%, transparent); }
+  :root:not(.dark):not([data-theme="light"]) .badge-warning{ background:color-mix(in oklab, var(--tone-warning) 20%, transparent); }
+  :root:not(.dark):not([data-theme="light"]) .badge-info{ background:color-mix(in oklab, var(--tone-info) 20%, transparent); }
+}
+
+/* ===== 表单（CONTRACT §4.6） ===== */
+.field{ display:grid; gap:6px; }
+.label{ font-size:14px; font-weight:500; line-height:1; }
+.input{ width:100%; height:36px; border:1px solid var(--input); border-radius:8px; padding:0 12px;
+  font-size:14px; background:transparent; transition:border-color .15s,box-shadow .15s; }
+.input:focus{ outline:none; border-color:var(--ring);
+  box-shadow:0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+.input[aria-invalid="true"]{ border-color:var(--destructive); }
+.input-mono{ font-family:var(--font-mono); font-size:13px; }
+select.input{ appearance:none; padding-right:30px; }
+/* 下拉三角：用 SVG 图标绘制（此前是两段渐变色块拼的），与 B/D 两个文件同构 */
+.select-wrap{ position:relative; }
+.select-wrap .i{ position:absolute; right:8px; top:50%; transform:translateY(-50%);
+  pointer-events:none; color:var(--muted-foreground); }
+.search{ position:relative; display:flex; align-items:center; }
+.search > svg{ position:absolute; left:10px; color:var(--muted-foreground); pointer-events:none; }
+.search .input{ padding-left:32px; font-size:13px; }
+.search .input::-webkit-search-cancel-button{ -webkit-appearance:none; }
+.field-err{ display:flex; align-items:flex-start; gap:6px; font-size:14px; color:var(--destructive); }
+.field-err[hidden]{ display:none; }
+.check{ display:flex; align-items:flex-start; gap:8px; }
+.check input{ width:16px; height:16px; margin:2px 0 0; accent-color:var(--primary); flex-shrink:0; }
+.check-text{ font-size:14px; font-weight:500; }
+.check-hint{ display:block; font-size:12px; font-weight:400; color:var(--muted-foreground); }
+
+/* ===== 提示条（CONTRACT §4.8） ===== */
+.alert-error{ display:flex; align-items:center; gap:8px; font-size:14px;
+  border:1px solid color-mix(in oklab, var(--destructive) 40%, transparent);
+  background:color-mix(in oklab, var(--destructive) 10%, transparent);
+  padding:8px 12px; border-radius:8px; color:var(--destructive); }
+.alert-error .btn{ margin-left:auto; color:var(--foreground); flex-shrink:0; }
+.alert-note{ display:flex; align-items:flex-start; gap:8px; font-size:14px;
+  border:1px solid var(--border); background:color-mix(in oklab, var(--muted) 50%, transparent);
+  padding:8px 12px; border-radius:8px; }
+.alert-note > svg{ margin-top:3px; color:var(--muted-foreground); }
+/* 需注意：复用 --tone-warning（CONTRACT §1 语义色），不新增变量 */
+.alert-warn{ display:flex; align-items:flex-start; gap:8px; font-size:14px;
+  border:1px solid color-mix(in oklab, var(--tone-warning) 40%, transparent);
+  background:color-mix(in oklab, var(--tone-warning) 10%, transparent);
+  padding:8px 12px; border-radius:8px; color:var(--tone-warning); }
+.alert-warn > svg{ margin-top:3px; flex-shrink:0; }
+.danger-zone{ border:1px solid color-mix(in oklab, var(--destructive) 40%, transparent);
+  background:color-mix(in oklab, var(--destructive) 5%, transparent);
+  padding:20px; border-radius:14px; }
+.alert-error h2, .danger-zone h2{ font-size:16px; font-weight:500; color:var(--destructive); }
+
+/* ===== 列表行（CONTRACT §4.9） ===== */
+.list-row{ display:flex; align-items:center; justify-content:space-between; gap:12px;
+  border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:14px; }
+.list-row-sub{ font-size:12px; color:var(--muted-foreground); }
+
+/* ===== 选项表 ===== */
+.table-card{ border:1px solid var(--border); border-radius:14px; overflow:hidden; }
+.table-wrap{ overflow-x:auto; }
+table.opt{ width:100%; min-width:620px; border-collapse:collapse; font-size:14px; }
+table.opt thead th{ text-align:left; font-size:12px; font-weight:500; color:var(--muted-foreground);
+  padding:8px 12px; border-bottom:1px solid var(--border); white-space:nowrap;
+  background:color-mix(in oklab, var(--muted) 40%, transparent); }
+table.opt tbody td{ padding-block:var(--density-cell-y); padding-inline:12px;
+  border-bottom:1px solid var(--border); vertical-align:top; }
+table.opt tbody tr:last-child td{ border-bottom:0; }
+table.opt tbody tr:hover{ background:var(--accent); }
+table.opt tr.off .opt-label{ color:var(--muted-foreground); }
+.col-num{ text-align:right; width:72px; }
+.cell-labels{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.opt-label{ font-size:14px; }
+.table-foot{ display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:8px 12px; border-top:1px solid var(--border); font-size:12px; color:var(--muted-foreground); }
+.i18n > summary{ list-style:none; display:inline-flex; cursor:pointer; }
+.i18n > summary::-webkit-details-marker{ display:none; }
+.i18n-pop{ margin-top:6px; padding:6px 8px; border:1px solid var(--border); border-radius:8px;
+  background:color-mix(in oklab, var(--muted) 50%, transparent); font-family:var(--font-mono);
+  font-size:12px; line-height:1.6; max-width:340px; word-break:break-all; color:var(--foreground); }
+
+/* ===== 空状态（CONTRACT §4.10） ===== */
+.empty{ display:flex; flex-direction:column; align-items:center; text-align:center; gap:8px; padding:32px 16px; }
+.empty-icon{ width:40px; height:40px; border-radius:10px; border:1px solid var(--border);
+  display:grid; place-items:center; color:var(--muted-foreground); margin-bottom:4px; }
+.empty-title{ font-size:14px; font-weight:500; }
+.empty-desc{ font-size:14px; color:var(--muted-foreground); max-width:340px; }
+.empty-actions{ display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:8px; }
+
+/* ===== 骨架 ===== */
+.sk{ background:var(--muted); border-radius:6px; animation:pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+@keyframes pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.5; } }
+
+/* ===== 指引 ===== */
+.guide{ display:flex; flex-direction:column; gap:16px; }
+.guide-head{ display:flex; flex-direction:column; gap:4px; }
+.guide-title{ font-size:20px; font-weight:600; }
+.guide-sub{ font-size:14px; color:var(--muted-foreground); }
+.steps{ display:flex; flex-direction:column; gap:12px; }
+.step{ display:flex; gap:12px; border:1px solid var(--border); border-radius:14px; padding:16px; }
+.step-num{ width:24px; height:24px; flex-shrink:0; border-radius:50%; border:1px solid var(--border);
+  background:color-mix(in oklab, var(--muted) 50%, transparent); display:grid; place-items:center;
+  font-size:12px; font-weight:500; font-variant-numeric:tabular-nums; }
+.step-body{ display:flex; flex-direction:column; gap:8px; min-width:0; }
+.step-title{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:16px; font-weight:500; }
+.step-text{ font-size:14px; color:var(--muted-foreground); }
+code{ font-family:var(--font-mono); font-size:12px; padding:2px 6px; border-radius:6px;
+  background:color-mix(in oklab, var(--muted) 60%, transparent); color:var(--foreground); }
+
+/* ===== 对话框（CONTRACT §4.7） ===== */
+.overlay{ position:fixed; inset:0; z-index:50; background:rgb(0 0 0 / .5);
+  display:grid; place-items:center; padding:16px; }
+.dlg{ position:relative; width:100%; max-width:512px; background:var(--background);
+  border:1px solid var(--border); border-radius:10px; padding:24px; display:grid; gap:16px;
+  box-shadow:var(--shadow-lg); max-height:calc(100svh - 32px); overflow-y:auto;
+  animation:dlg-in .2s ease-out; }
+@keyframes dlg-in{ from{ opacity:0; transform:scale(.95); } to{ opacity:1; transform:scale(1); } }
+.dlg-x{ position:absolute; top:16px; right:16px; width:16px; height:16px; padding:0; opacity:.7; }
+.dlg-x:hover{ opacity:1; }
+.dlg-head{ display:flex; flex-direction:column; gap:4px; padding-right:24px; }
+.dlg-title{ font-size:18px; font-weight:600; }
+.dlg-desc{ font-size:14px; color:var(--muted-foreground); }
+.dlg-actions{ display:flex; gap:8px; justify-content:flex-end; }
+
+/* ===== 下拉菜单 ===== */
+.menu-wrap{ position:relative; flex-shrink:0; }
+.menu{ position:absolute; top:calc(100% + 4px); right:0; z-index:30; min-width:168px; padding:4px;
+  display:flex; flex-direction:column; gap:2px; border:1px solid var(--border); border-radius:10px;
+  background:var(--popover); color:var(--popover-foreground); box-shadow:var(--shadow-lg);
+  animation:menu-in .12s ease-out; }
+@keyframes menu-in{ from{ opacity:0; transform:translateY(-4px); } to{ opacity:1; transform:none; } }
+.menu[hidden]{ display:none; }
+.menu-item{ display:flex; align-items:center; gap:8px; width:100%; border-radius:6px; padding:6px 8px; font-size:14px; }
+.menu-item:hover{ background:var(--accent); color:var(--accent-foreground); }
+.menu-item .check{ margin-left:auto; visibility:hidden; }
+.menu-item[aria-checked="true"] .check{ visibility:visible; }
+.menu-item.danger{ color:var(--destructive); }
+.menu-item.danger:hover{ background:color-mix(in oklab, var(--destructive) 10%, transparent); color:var(--destructive); }
+.menu-item[disabled]{ opacity:.5; pointer-events:none; }
+.menu-item > span{ flex:1; min-width:0; }
+.menu-sep{ height:1px; background:var(--border); margin:4px -4px; }
+
+/* ===== 轻提示 ===== */
+.toast-wrap{ position:fixed; right:16px; bottom:calc(var(--proto-h) + 16px); z-index:70;
+  display:flex; flex-direction:column; align-items:flex-end; gap:8px; pointer-events:none; }
+.toast{ display:flex; align-items:center; gap:8px; border:1px solid var(--border); border-radius:10px;
+  padding:8px 12px; background:var(--popover); color:var(--popover-foreground); font-size:14px;
+  box-shadow:var(--shadow-lg); animation:dlg-in .2s ease-out; }
+.toast svg{ color:var(--tone-positive); }
+.toast.is-warn svg{ color:var(--tone-warning); }
+
+/* ===== 原型控制条 ===== */
+.proto{ position:fixed; left:0; right:0; bottom:0; z-index:80; display:flex; align-items:center;
+  gap:12px; flex-wrap:wrap; padding:8px 12px; border-top:2px dashed var(--border);
+  background:color-mix(in oklab, var(--muted) 60%, var(--background)); font-size:12px; }
+.proto-tag{ font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--muted-foreground);
+  border:1px dashed var(--border); border-radius:6px; padding:2px 8px; }
+.proto-group{ display:flex; align-items:center; gap:6px; }
+.proto-label{ color:var(--muted-foreground); }
+.proto-note{ margin-left:auto; color:var(--muted-foreground); }
+.seg{ display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden;
+  background:var(--background); }
+.seg button{ padding:4px 10px; font-size:12px; border-right:1px solid var(--border); }
+.seg button:last-child{ border-right:0; }
+.seg button:hover{ background:var(--accent); }
+.seg button[aria-pressed="true"]{ background:var(--primary); color:var(--primary-foreground); }
+.proto-more{ flex-basis:100%; border-top:1px dashed var(--border); }
+.proto-more > summary{ display:flex; align-items:center; gap:6px; padding:4px 0; cursor:pointer;
+  list-style:none; color:var(--muted-foreground); }
+.proto-more > summary::-webkit-details-marker{ display:none; }
+.proto-caret{ transition:transform .15s; }
+.proto-more[open] .proto-caret{ transform:rotate(90deg); }
+.proto-more-body{ max-height:38svh; overflow-y:auto; margin-bottom:2px; padding:10px 12px;
+  border:1px dashed var(--border); border-radius:8px; background:var(--background);
+  display:flex; flex-direction:column; gap:8px; }
+.proto-more-body h3{ font-size:12px; font-weight:500; color:var(--muted-foreground); }
+.proto-more-body ol{ display:flex; flex-direction:column; gap:6px; }
+.proto-more-body li{ display:flex; gap:8px; line-height:1.5; color:var(--muted-foreground); }
+.proto-more-num{ flex-shrink:0; width:18px; height:18px; margin-top:1px; border:1px solid var(--border);
+  border-radius:6px; display:grid; place-items:center; font-family:var(--font-mono);
+  font-size:11px; color:var(--muted-foreground); }
+.proto-more-body strong{ color:var(--foreground); font-weight:500; }
+
+/* ===== 响应式：<900px 塌成单栏 ===== */
+.back-btn{ display:none; }
+@media (max-width:899px){
+  .app{ height:auto; min-height:calc(100svh - var(--proto-h)); overflow:visible; }
+  .sidebar{ display:none; }
+  .narrow-brand{ display:flex; }
+  .content{ padding:16px; overflow:visible; }
+  .split{ display:block; }
+  .master{ width:100%; }
+  .master-list{ overflow-y:visible; }
+  .detail{ display:none; }
+  .split.show .master{ display:none; }
+  .split.show .detail{ display:flex; }
+  .back-btn{ display:inline-flex; }
+  .proto-note{ display:none; }
+}
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{ animation:none !important; transition:none !important; }
+}
+</style>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-logo"><svg class="i i22" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg></span>
+      <span><span class="brand-name">杨系统</span><span class="brand-sub">管理控制台</span></span>
+    </div>
+    <div class="identity">
+      <button class="identity-btn" id="identityBtn" aria-haspopup="menu" aria-expanded="false">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/></svg>
+        <span><span class="identity-name" id="identityName">集成运维</span><span class="identity-role" id="identityRole">可建、可改、可删数据源</span></span>
+        <svg class="i i14" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg>
+      </button>
+      <div class="menu" id="identityMenu" role="menu" aria-labelledby="identityBtn" hidden>
+        <button class="menu-item" role="menuitemradio" aria-checked="true" data-role="ops" id="identityOps">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span><span class="identity-name">集成运维</span><span class="identity-role">可建、可改、可删数据源</span></span>
+          <svg class="i i14 check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        </button>
+        <button class="menu-item" role="menuitemradio" aria-checked="false" data-role="biz" id="identityBiz">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span><span class="identity-name">审批管理员</span><span class="identity-role">只能查看数据源与选项</span></span>
+          <svg class="i i14 check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        </button>
+        <button class="menu-item" role="menuitemradio" aria-checked="false" data-role="audit" id="identityAudit">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span><span class="identity-name">集成审计</span><span class="identity-role">只能看数据源清单，看不到选项</span></span>
+          <svg class="i i14 check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        </button>
+      </div>
+    </div>
+    <nav class="nav">
+      <div>
+        <div class="nav-label">集成</div>
+        <button class="nav-item active" aria-current="page" id="navDs">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>
+          飞书数据源
+        </button>
+        <button class="nav-item" id="navApp">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-1.705.707 2.402 2.402 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.402 2.402 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.23 8.77c.24-.24.581-.353.917-.303.515.077.877.528 1.073 1.01a2.5 2.5 0 1 0 3.259-3.259c-.482-.196-.933-.558-1.01-1.073-.05-.336.062-.676.303-.917l1.525-1.525A2.402 2.402 0 0 1 12 1.998c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z"/></svg>
+          集成应用
+        </button>
+      </div>
+      <div>
+        <div class="nav-label">系统</div>
+        <button class="nav-item" id="navUsers">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          成员与角色
+        </button>
+        <button class="nav-item" id="navOrg">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg>
+          组织架构
+        </button>
+        <button class="nav-item" id="navAudit">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+          审计日志
+        </button>
+      </div>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="btn btn-ghost btn-block" id="logoutBtn">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+        退出登录
+      </button>
+    </div>
+  </aside>
+  <div class="main-col">
+    <header class="page-head">
+      <div class="narrow-brand">
+        <span class="brand-logo"><svg class="i i14" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg></span>
+        <span><span class="brand-name">杨系统</span><span class="brand-sub" id="narrowRole">集成运维</span></span>
+      </div>
+      <div class="menu-wrap">
+        <button class="btn btn-outline btn-sm" id="densityBtn" aria-haspopup="menu" aria-expanded="false">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
+          密度
+        </button>
+        <div class="menu" id="densityMenu" role="menu" aria-labelledby="densityBtn" hidden>
+          <button class="menu-item" role="menuitemradio" aria-checked="true" data-density="standard" id="denStandard"><span>标准</span><svg class="i i14 check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-density="compact" id="denCompact"><span>紧凑</span><svg class="i i14 check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button>
+          <button class="menu-item" role="menuitemradio" aria-checked="false" data-density="loose" id="denLoose"><span>宽松</span><svg class="i i14 check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button>
+        </div>
+      </div>
+      <button class="btn btn-outline btn-icon" id="themeBtn" aria-label="切换明暗主题">
+        <svg class="i" id="themeIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+      </button>
+    </header>
+    <main class="content">
+      <div class="content-inner">
+        <div class="page-title">
+          <h1>飞书数据源</h1>
+          <p>管理飞书审批「使用外部选项」的取值来源，确认审批侧拉到的选项就是多维表格推送的那一份。</p>
+        </div>
+        <div class="split" id="split">
+          <aside class="master">
+            <div class="master-head">
+              <div class="master-title"><span>数据源</span><span class="mono num" id="dsCount">—</span></div>
+              <div class="search">
+                <svg class="i i14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input class="input" id="dsSearch" type="search" aria-label="搜索数据源" autocomplete="off">
+              </div>
+            </div>
+            <div class="master-list" id="dsList"></div>
+            <div class="master-foot" id="masterFoot"></div>
+          </aside>
+          <section class="detail" id="detail" aria-label="数据源详情"></section>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+<div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+<div id="dialogRoot"></div>
+<div class="proto" id="protoBar">
+  <span class="proto-tag">原型控制</span>
+  <div class="proto-group">
+    <span class="proto-label">数据</span>
+    <div class="seg" role="group" aria-label="数据状态">
+      <button id="stEmpty" data-state="empty" aria-pressed="false">空态</button>
+      <button id="stData" data-state="data" aria-pressed="true">有数据</button>
+      <button id="stLoading" data-state="loading" aria-pressed="false">加载中</button>
+      <button id="stError" data-state="error" aria-pressed="false">错误</button>
+    </div>
+  </div>
+  <div class="proto-group">
+    <span class="proto-label">详情</span>
+    <div class="seg" role="group" aria-label="详情状态">
+      <button id="detAuto" aria-pressed="true">有选项</button>
+      <button id="detZero" aria-pressed="false">0 选项</button>
+    </div>
+  </div>
+  <div class="proto-group">
+    <span class="proto-label">身份</span>
+    <div class="seg" role="group" aria-label="身份">
+      <button id="roleOps" data-role="ops" aria-pressed="true">运维</button>
+      <button id="roleBiz" data-role="biz" aria-pressed="false">业务</button>
+      <button id="roleAudit" data-role="audit" aria-pressed="false">审计（无选项权限）</button>
+    </div>
+  </div>
+  <div class="proto-group">
+    <span class="proto-label">主题</span>
+    <div class="seg" role="group" aria-label="主题">
+      <button id="thLight" data-theme="light" aria-pressed="true">明亮</button>
+      <button id="thDark" data-theme="dark" aria-pressed="false">暗色</button>
+    </div>
+  </div>
+  <span class="proto-note">这一条是原型控制，不属于产品界面</span>
+  <details class="proto-more" id="constraints">
+    <summary><svg class="i i14 proto-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>已知实现约束（7 条）· 点开看这个方案做不到的地方</summary>
+    <div class="proto-more-body">
+      <h3>主从分栏 · 设计文档之外还要动的后端改动，以及本方案不敢画的东西</h3>
+      <ol>
+        <li><span class="proto-more-num">1</span><span><strong>左栏按状态筛选，后端目前做不到。</strong>本方案左栏只有搜索；若要补「全部 / 启用 / 停用」，需给 <code>status</code> 加 <code>.filterable(true)</code>——框架对筛选是 fail-closed，字段没声明就直接回「字段不允许筛选」。注意不对称：详情页选项按 <code>enabled</code> 筛是真的（<code>option/table.rs</code> 已声明），两边画一样的筛选器会误导。</span></li>
+        <li><span class="proto-more-num">2</span><span><strong>左栏列表必须由前端显式传 <code>order_by</code>。</strong><code>list_datasources</code> 没有默认排序兜底（只遍历传入的 order_by），不发就是无序分页，翻页会重复或漏行。</span></li>
+        <li><span class="proto-more-num">3</span><span><strong>没有任何 Action 能按 <code>source_key</code> 取单个数据源。</strong>右栏头部要么再发一次带 <code>where</code> 的 <code>list_datasources</code>，要么靠导航态（本原型的 <code>state.selected</code>）传递——刷新或把链接发给别人就会丢选中态。</span></li>
+        <li><span class="proto-more-num">4</span><span><strong>「校验数据」按钮控制台做不到。</strong>唯一能自校验的是 <code>approval_options</code>，它要拿数据源 Token 去校验，而服务端永远回不出明文 Token（只存 SHA-256 摘要）。所以指引第 3 步只能是把值复制回审批后台，由飞书那边触发。</span></li>
+        <li><span class="proto-more-num">5</span><span><strong>左栏条目不能显示选项数量与最后同步时间</strong>（<code>list_datasources</code> 不返回，也没有任何 Action 返回同步时间）。右栏的「共 N 项」是合法的——它来自 <code>list_options</code> 的真实返回，不是猜的。</span></li>
+        <li><span class="proto-more-num">6</span><span><strong>身份判断只看 <code>catalog.actions</code> 里有没有对应 operation_id</strong>：目录本身已按身份投影，前端不需要解析 JWT。三个权限位相互独立，因此存在「有 <code>feishu.datasource.read</code>、没有 <code>feishu.option.read</code>」的组合——原型控制条里的「审计」就是它，表现为清单正常、详情 403。</span></li>
+        <li><span class="proto-more-num">7</span><span><strong>两处列表都不画排序箭头。</strong><code>title</code> 只声明了 <code>.searchable(true)</code>（能搜、不能筛、不能排），<code>feishu_datasource</code> 里只有 <code>source_key</code> 是 <code>.sortable(true)</code> 的；画了箭头就得靠前端自己排。</span></li>
+      </ol>
+    </div>
+  </details>
+</div>
+<script>
+'use strict';
+/* 方案 C · 主从分栏
+   论点：看数据源不是终点，看它下面有哪些选项才是——详情是高频动作，
+   就把它和列表放进同一屏，省掉一次导航。 */
+
+var ICONS = {
+  plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
+  x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  'arrow-left':'<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  'arrow-right':'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+  'refresh-cw':'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  moon:'<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+  'more-horizontal':'<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+  'square-pen':'<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z"/>',
+  power:'<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',
+  'trash-2':'<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+  database:'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+  list:'<path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M3 6h.01"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M8 6h13"/>',
+  'table-2':'<path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>',
+  info:'<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  lock:'<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  'circle-alert':'<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+  'circle-check':'<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+  'chevron-down':'<path d="m6 9 6 6 6-6"/>',
+  'triangle-alert':'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>'
+};
+function icon(name, cls){
+  return '<svg class="i' + (cls ? ' ' + cls : '') + '" viewBox="0 0 24 24" aria-hidden="true">' +
+    (ICONS[name] || ICONS.info) + '</svg>';
+}
+function esc(v){
+  return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ===== 样例数据（CONTRACT §6.1 / §6.2） ===== */
+/* default_locale 的取值域是后端词表里的三项（见 domain/i18n.rs），
+   不是 BCP-47 的连字符形式；它会原样回给飞书，写错不会有任何报错。 */
+var SOURCES = [
+  { key:'expense_category', title:'报销事由分类', status:'active',   encrypt:true,  locale:'zh_cn' },
+  { key:'leave_type',       title:'请假类型',     status:'active',   encrypt:false, locale:'zh_cn' },
+  { key:'purchase_dept',    title:'采购归口部门', status:'active',   encrypt:true,  locale:'zh_cn' },
+  { key:'vendor_list',      title:'供应商名录',   status:'disabled', encrypt:false, locale:'zh_cn' },
+  { key:'it_asset_class',   title:'IT 资产分类',  status:'active',   encrypt:false, locale:'en_us' },
+  { key:'travel_city',      title:'差旅城市',     status:'active',   encrypt:false, locale:'zh_cn' },
+  { key:'contract_type',    title:'合同类型',     status:'disabled', encrypt:false, locale:'zh_cn' },
+  { key:'cost_center',      title:'成本中心',     status:'active',   encrypt:false, locale:'zh_cn' }
+];
+/* [名称, 排序, 默认, 启用, i18n] —— i18n 为 null 表示后端该字段为空 */
+var OPTIONS = {
+  'expense_category':[
+    ['差旅费',10,true,true,{'zh_cn':'差旅费','en_us':'Travel'}],
+    ['办公用品',20,false,true,null],
+    ['业务招待',30,false,true,{'zh_cn':'业务招待','en_us':'Client Entertainment'}],
+    ['培训费',40,false,true,{'zh_cn':'培训费','en_us':'Training'}],
+    ['通讯费',50,false,false,null],
+    ['房租水电',60,false,true,null],
+    ['咨询服务费',70,false,true,{'zh_cn':'咨询服务费','en_us':'Consulting'}],
+    ['其他',999,false,true,{'zh_cn':'其他','en_us':'Other'}]
+  ],
+  'leave_type':[
+    ['年假',10,true,true,{'zh_cn':'年假','en_us':'Annual Leave'}],
+    ['事假',20,false,true,null],['病假',30,false,true,{'zh_cn':'病假','en_us':'Sick Leave'}],
+    ['调休',40,false,true,null],['婚假',50,false,true,null],['产假',60,false,true,null]
+  ],
+  'purchase_dept':[
+    ['行政部',10,true,true,null],['信息技术部',20,false,true,{'zh_cn':'信息技术部','en_us':'IT'}],
+    ['市场部',30,false,true,null],['人力资源部',40,false,true,null],['财务部',50,false,true,null]
+  ],
+  'vendor_list':[
+    ['中远物流有限公司',10,true,false,null],['恒信办公设备',20,false,false,null],
+    ['云启技术服务',30,false,false,{'zh_cn':'云启技术服务','en_us':'Yunqi Tech'}]
+  ],
+  'it_asset_class':[
+    ['Laptop',10,true,true,null],['Monitor',20,false,true,null],
+    ['Mobile Device',30,false,true,null],['Network Gear',40,false,false,null]
+  ],
+  'travel_city':[
+    ['北京',10,true,true,{'zh_cn':'北京','en_us':'Beijing'}],
+    ['上海',20,false,true,{'zh_cn':'上海','en_us':'Shanghai'}],
+    ['广州',30,false,true,null],['深圳',40,false,true,null],
+    ['杭州',50,false,true,null],['成都',60,false,true,null]
+  ],
+  'contract_type':[
+    ['采购合同',10,true,true,null],['服务合同',20,false,true,null],['租赁合同',30,false,true,null]
+  ],
+  /* 刚建好、多维表格的自动化还没推过任何选项——E6-a 的「0 选项」真实样本 */
+  'cost_center':[]
+};
+function optionsOf(key){
+  var rows = OPTIONS[key] || [];
+  return rows.map(function(r, i){
+    return {
+      option_id: 'opt_' + key.replace(/-/g,'_') + '_' + String(i + 1).padStart(3,'0'),
+      label: r[0], sort_order: r[1], is_default: r[2], enabled: r[3], i18n: r[4]
+    };
+  });
+}
+/* ===== 状态 ===== */
+/* 三个权限位相互独立：datasource.read / datasource.write / option.read。
+   于是有三种身份，其中第三种是「两角色模型」盖掉的组合（ERRATA E6-b）。 */
+var ROLES = {
+  ops:   { name:'集成运维',   role:'可建、可改、可删数据源',      write:true,  optionRead:true  },
+  biz:   { name:'审批管理员', role:'只能查看数据源与选项',        write:false, optionRead:true  },
+  audit: { name:'集成审计',   role:'只能看数据源清单，看不到选项', write:false, optionRead:false }
+};
+var state = {
+  data: 'data',            /* data | empty | loading | error */
+  role: 'ops',             /* ops | biz | audit */
+  theme: 'light',          /* light | dark */
+  density: 'standard',
+  selected: 'expense_category',
+  query: '',
+  narrowDetail: false,
+  forceZero: false         /* 原型控制：强制右栏显示「0 选项」空态 */
+};
+function byKey(k){
+  for (var i = 0; i < SOURCES.length; i++) if (SOURCES[i].key === k) return SOURCES[i];
+  return null;
+}
+function isDarkTheme(){ return state.theme === 'dark'; }
+function canWrite(){ return ROLES[state.role].write; }
+function canReadOptions(){ return ROLES[state.role].optionRead; }
+
+function statusBadge(s){
+  return s.status === 'active'
+    ? '<span class="badge badge-positive"><span class="dot"></span>启用</span>'
+    : '<span class="badge badge-warning"><span class="dot dot-ring"></span>已停用</span>';
+}
+function backBtn(){
+  return '<button class="btn btn-ghost btn-sm back-btn" id="backBtn">' +
+    icon('arrow-left','i14') + '返回列表</button>';
+}
+
+/* ===== 左栏 ===== */
+function masterItemHTML(s){
+  var on = state.selected === s.key;
+  return '<button class="master-item' + (on ? ' active' : '') +
+    '" data-key="' + esc(s.key) + '"' + (on ? ' aria-current="true"' : '') + '>' +
+    '<span class="master-item-title">' + esc(s.title) +
+      (s.status === 'disabled' ? '<span class="ring" title="已停用"></span>' : '') +
+    '</span>' +
+    '<span class="master-item-key">' + esc(s.key) + '</span></button>';
+}
+function skelList(){
+  var out = '';
+  for (var i = 0; i < 6; i++) {
+    out += '<div class="master-item"><div class="sk" style="height:14px;width:' +
+      (52 + (i % 3) * 16) + '%"></div><div class="sk" style="height:12px;width:' +
+      (72 - (i % 2) * 20) + '%;margin-top:6px"></div></div>';
+  }
+  return out;
+}
+function emptyMasterHTML(){
+  return '<div class="empty">' +
+    '<span class="empty-icon">' + icon('database','i22') + '</span>' +
+    '<div class="empty-title">还没有数据源</div>' +
+    '<p class="empty-desc">先在飞书审批后台配好控件并拿到 Token，再回来建第一个。</p>' +
+    '<div class="empty-actions">' +
+      (canWrite() ? '<button class="btn btn-default btn-sm" id="addBtnEmpty">' + icon('plus','i14') + '添加数据源</button>' : '') +
+      '<button class="btn btn-outline btn-sm" id="guideBtn">' + icon('arrow-right','i14') + '查看四步指引</button>' +
+    '</div></div>';
+}
+function noMatchHTML(){
+  return '<div class="empty">' +
+    '<span class="empty-icon">' + icon('search','i22') + '</span>' +
+    '<div class="empty-title">没有匹配的数据源</div>' +
+    '<p class="empty-desc">名称和标识里都不含「' + esc(state.query.trim()) + '」。</p>' +
+    '<div class="empty-actions"><button class="btn btn-outline btn-sm" id="clearSearch">' +
+      icon('x','i14') + '清除搜索</button></div></div>';
+}
+function renderMaster(){
+  var list = document.getElementById('dsList');
+  var foot = document.getElementById('masterFoot');
+  var count = document.getElementById('dsCount');
+  if (state.data === 'loading') {
+    count.textContent = '—';
+    list.innerHTML = skelList();
+    foot.innerHTML = '';
+    return;
+  }
+  if (state.data === 'empty') {
+    count.textContent = '0';
+    list.innerHTML = emptyMasterHTML();
+    foot.innerHTML = '';
+    return;
+  }
+  var q = state.query.trim().toLowerCase();
+  var items = SOURCES.filter(function(s){
+    return !q || s.title.toLowerCase().indexOf(q) >= 0 || s.key.indexOf(q) >= 0;
+  });
+  count.textContent = String(items.length);
+  list.innerHTML = items.length ? items.map(masterItemHTML).join('') : noMatchHTML();
+  foot.innerHTML = canWrite()
+    ? '<button class="btn btn-outline btn-sm btn-block" id="addBtn">' + icon('plus') + '添加数据源</button>'
+    : '';
+}
+
+/* ===== 右栏 ===== */
+function noSelectionHTML(){
+  return '<div class="empty" style="margin:auto">' +
+    '<span class="empty-icon">' + icon('list','i22') + '</span>' +
+    '<div class="empty-title">从左边选一个数据源</div>' +
+    '<p class="empty-desc">这里会列出它的选项，用来确认飞书审批侧拉到的就是这一份。</p></div>';
+}
+function skelDetail(){
+  var r = '';
+  for (var i = 0; i < 5; i++) {
+    r += '<div class="sk" style="height:16px;width:' + (44 + (i % 3) * 14) + '%"></div>';
+  }
+  return '<div class="detail-body"><div class="stack">' + backBtn() +
+    '<div class="sk" style="height:24px;width:38%"></div>' +
+    '<div class="sk" style="height:16px;width:56%"></div>' +
+    '<div class="sk" style="height:1px;width:100%;margin-top:12px"></div>' +
+    '<div class="sk" style="height:20px;width:24%;margin-top:8px"></div>' +
+    r + '</div></div>';
+}
+function detailErrorHTML(){
+  return '<div class="detail-body"><div class="stack">' + backBtn() +
+    '<div class="alert-error" role="alert">' + icon('circle-alert') +
+      '<span>数据源不存在</span>' +
+      '<button class="btn btn-outline btn-sm" id="retryBtn">' + icon('refresh-cw','i14') + '重试</button>' +
+    '</div>' +
+    '<p class="hint">它可能已经被删除，或者当前链接指向的数据源标识已经变更。' +
+    '回到左边重新选一个，或点「重试」再请求一次。</p>' +
+    '</div></div>';
+}
+function optionTableHTML(src, opts){
+  var rows = opts.map(function(o){
+    var i18nCell = o.i18n
+      ? '<details class="i18n"><summary class="badge badge-info badge-sm" title="展开查看多语言内容">i18n</summary>' +
+        '<div class="i18n-pop">' + esc(JSON.stringify(o.i18n)) + '</div></details>'
+      : '<span class="mono">—</span>';
+    return '<tr' + (o.enabled ? '' : ' class="off"') + '>' +
+      '<td><span class="cell-labels"><span class="opt-label">' + esc(o.label) + '</span>' +
+        (o.is_default ? '<span class="badge badge-neutral badge-sm">默认</span>' : '') +
+      '</span></td>' +
+      '<td class="col-num num">' + o.sort_order + '</td>' +
+      '<td>' + i18nCell + '</td>' +
+      '<td>' + (o.enabled
+        ? '<span class="badge badge-positive"><span class="dot"></span>启用</span>'
+        : '<span class="badge badge-warning"><span class="dot dot-ring"></span>已下线</span>') + '</td>' +
+      '</tr>';
+  }).join('');
+  return '<div class="table-card mt16"><div class="table-wrap"><table class="opt">' +
+      '<caption class="sr-only">' + esc(src.title) + ' 的选项列表，只读</caption>' +
+      '<thead><tr><th scope="col">名称</th><th scope="col" class="col-num">排序</th>' +
+      '<th scope="col">多语言</th><th scope="col">状态</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></div>' +
+      '<div class="table-foot"><span>共 ' + opts.length + ' 项</span><span>按排序值升序</span></div>' +
+    '</div>';
+}
+/* E6-a：有数据源、但一个选项都没有——链路通没通最需要回答的一屏 */
+function emptyOptionsHTML(src){
+  return '<div class="empty" style="padding:40px 16px 32px">' +
+    '<span class="empty-icon">' + icon('table-2','i22') + '</span>' +
+    '<div class="empty-title">还没有选项推过来</div>' +
+    '<p class="empty-desc">' + esc(src.title) + ' 已经建好了，但多维表格的自动化一次都没往这里推过。' +
+      '审批侧现在是拿得到接口、拿不到内容——链路建起来了，还没通上数据。</p>' +
+    '<div class="empty-actions">' +
+      '<button class="btn btn-outline btn-sm" id="guideStepBtn">' +
+        icon('arrow-right','i14') + '下一步：配多维表格的自动化推送</button>' +
+      (canWrite() ? '<button class="btn btn-ghost btn-sm" id="addBtnFromEmpty">' +
+        icon('plus','i14') + '再建一个数据源</button>' : '') +
+    '</div>' +
+    '<p class="hint" style="max-width:420px">选项只能由多维表格的自动化写入，控制台不提供新增——' +
+      '这是架构决策，不是没做。</p>' +
+  '</div>';
+}
+/* E6-b：有 datasource.read、没有 option.read —— 清单正常，详情这一块 403 */
+function forbiddenOptionsHTML(){
+  return '<div class="section-head"><div class="section-title">选项</div></div>' +
+    '<div class="mt12"><div class="alert-error" role="alert">' + icon('circle-alert') +
+      '<span>你没有查看选项的权限</span>' +
+      '<button class="btn btn-outline btn-sm" id="optRetry">' + icon('refresh-cw','i14') + '重试</button>' +
+    '</div></div>' +
+    '<p class="hint mt12">当前身份缺少 <code>feishu.option.read</code>。上面的数据源信息来自 ' +
+    '<code>feishu.datasource.read</code>，所以左栏与标题都正常——这不是「没有选项」，是这一块取不到。</p>';
+}
+function detailHTML(src){
+  var off = src.status === 'disabled';
+  var opts = optionsOf(src.key);
+  var menu = canWrite() ? (
+    '<div class="menu-wrap">' +
+      '<button class="btn btn-outline btn-sm" id="moreBtn" aria-haspopup="menu" aria-expanded="false">' +
+        icon('more-horizontal') + '更多</button>' +
+      '<div class="menu" id="moreMenu" role="menu" aria-labelledby="moreBtn" hidden>' +
+        '<button class="menu-item" role="menuitem" id="miRename">' + icon('square-pen','i14') + '<span>重命名</span></button>' +
+        '<button class="menu-item" role="menuitem" id="miToggle">' + icon('power','i14') +
+          '<span>' + (off ? '启用' : '停用') + '</span></button>' +
+        '<div class="menu-sep"></div>' +
+        '<button class="menu-item danger" role="menuitem" id="miDelete">' + icon('trash-2','i14') + '<span>删除</span></button>' +
+      '</div></div>') : '';
+
+  var offNote = off ? (
+    '<div class="alert-note" aria-live="polite">' + icon('info','i14') +
+      '<span><strong>该数据源已停用。</strong>数据源级停用是整个控件取不到选项：飞书审批拉取时会直接拿到 ' +
+      '<code>40301 数据源已停用</code>。' + (canWrite()
+        ? '要恢复请用右上角「更多」里的启用。'
+        : '要恢复请联系集成运维。') + '</span></div>') : '';
+
+  var optionsBlock;
+  if (!canReadOptions()) {
+    optionsBlock = forbiddenOptionsHTML();
+  } else if (!opts.length || state.forceZero) {
+    optionsBlock = '<div class="section-head">' +
+        '<div class="section-title">选项 <span class="mono num">共 0 项</span></div>' +
+        '<span class="readonly-note">' + icon('info','i14') + '只读 · 由多维表格维护</span></div>' +
+      emptyOptionsHTML(src);
+  } else {
+    optionsBlock = '<div class="section-head">' +
+        '<div class="section-title">选项 <span class="mono num">共 ' + opts.length + ' 项</span></div>' +
+        '<span class="readonly-note">' + icon('info','i14') + '只读 · 由多维表格维护</span></div>' +
+      '<p class="hint">选项由多维表格的自动化推送写入，审批侧读到的就是这一份；控制台不提供增删改。' +
+        '下面选项行的「已下线」是<strong>选项级</strong>状态，只影响那一条（后端是禁用而非删除，' +
+        '避免历史审批单引用的选项失联）；<strong>数据源级</strong>的停用在上面那枚徽标里，两者不是一回事。</p>' +
+      optionTableHTML(src, opts);
+  }
+
+  return '<div class="detail-body">' + backBtn() +
+    '<div class="detail-head"><div class="detail-title-row">' +
+      '<div><h2 class="detail-title">' + esc(src.title) + '</h2>' +
+        '<div class="detail-meta"><span class="mono">' + esc(src.key) + '</span>' +
+          statusBadge(src) +
+          (src.encrypt
+            ? '<span class="badge badge-info">' + icon('lock') + '加密返回</span>'
+            : '<span class="badge badge-neutral">明文返回</span>') +
+          '<span class="badge badge-neutral">默认语言 ' + esc(src.locale) + '</span>' +
+        '</div>' +
+      '</div>' + menu +
+    '</div>' + offNote + '</div>' +
+    optionsBlock + '</div>';
+}
+/* ===== 空态右栏：完整四步指引（CONTRACT §6.3） ===== */
+var GUIDE_STEPS = [
+  ['在飞书审批后台配置控件',
+   '打开你要用的那个审批定义，找到单选或多选控件，把取值方式改成「使用外部选项」，再自定义一个 Token。'],
+  ['在这里建一个数据源',
+   '数据源标识会进接口地址，起一个自己认得的；把上一步的 Token 粘进「接口 Token」。'],
+  ['把接口地址与 Token 填回审批后台',
+   '保存数据源后回到审批定义，把接口地址与 Token 填进「使用外部选项」的配置里。'],
+  ['在多维表格配自动化推送选项',
+   'HTTP 节点带上 Authorization: Bearer &lt;管理 Token&gt; 调写入接口，选项随表格变动自动更新。']
+];
+function guideHTML(){
+  var steps = GUIDE_STEPS;
+  var body = steps.map(function(s, i){
+    var extra = '';
+    if (i === 0) {
+      extra = '<div class="alert-note" aria-live="polite">' + icon('info','i14') +
+        '<span>这个 Token 只在飞书那边显示一次。服务端只保存它的摘要，之后无法回显——请先复制到安全的地方。</span></div>';
+    } else if (i === 2) {
+      extra = '<p class="hint">审批后台上的「校验数据」由飞书触发；控制台侧的同类按钮当前后端还没有对应接口，这一步先按清单逐项核对。</p>';
+    }
+    return '<li class="step"><span class="step-num">' + (i + 1) + '</span>' +
+      '<div class="step-body"><div class="step-title">' + s[0] +
+        (i === 2 ? '<span class="badge badge-neutral badge-sm">控制台侧待后端补</span>' : '') +
+      '</div><p class="step-text">' + s[1] + '</p>' + extra + '</div></li>';
+  }).join('');
+  return '<div class="detail-body">' + backBtn() +
+    '<div class="guide"><div class="guide-head">' +
+      '<h2 class="guide-title">四步把飞书审批的选项接过来</h2>' +
+      '<p class="guide-sub">现在还没有数据源。先在飞书审批后台配好控件并拿到 Token，再回来建第一个。</p>' +
+    '</div><ol class="steps">' + body + '</ol>' +
+    (canWrite() ? '<div><button class="btn btn-default" id="addBtnGuide">' +
+      icon('plus') + '添加数据源</button></div>' : '') +
+    '</div></div>';
+}
+function renderDetail(){
+  var d = document.getElementById('detail');
+  if (state.data === 'empty') { d.innerHTML = guideHTML(); return; }
+  if (state.data === 'loading') { d.innerHTML = skelDetail(); return; }
+  if (state.data === 'error') { d.innerHTML = detailErrorHTML(); return; }
+  var src = state.selected ? byKey(state.selected) : null;
+  d.innerHTML = src ? detailHTML(src) : noSelectionHTML();
+}
+
+/* 空态右栏：从「0 选项」直接跳到第 4 步 */
+function guideDialogHTML(){
+  var rows = GUIDE_STEPS.map(function(s, i){
+    return '<div class="list-row"><span><span class="identity-name">第 ' + (i + 1) + ' 步 · ' + s[0] + '</span>' +
+      '<span class="list-row-sub">' + s[1] + '</span></span>' +
+      (i === 3 ? '<span class="badge badge-info">下一步</span>' : '') + '</div>';
+  }).join('');
+  return '<div class="overlay" id="overlay"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">' +
+    '<button class="dlg-x" id="dlgX" aria-label="关闭">' + icon('x') + '</button>' +
+    '<div class="dlg-head"><h3 class="dlg-title" id="dlgTitle">四步把飞书审批的选项接过来</h3>' +
+      '<p class="dlg-desc">这个数据源一个选项都还没有，缺的是第 4 步：多维表格的自动化还没往这里推送过。</p></div>' +
+    '<div class="stack">' + rows + '</div>' +
+    '<div class="dlg-actions"><button class="btn btn-outline" id="dlgCancel">知道了</button></div></div></div>';
+}
+
+/* ===== 对话框 ===== */
+var dialog = null, lastFocus = null;
+function openDialog(kind, key){
+  lastFocus = document.activeElement;
+  dialog = { kind: kind, key: key || null, error: '' };
+  renderDialog();
+}
+function closeDialog(){
+  dialog = null;
+  document.getElementById('dialogRoot').innerHTML = '';
+  if (lastFocus && lastFocus.focus) lastFocus.focus();
+}
+/* E3：数据源标识必须小写字母开头、只含 [a-z0-9_]、≤64 字节 */
+function keyBytes(v){
+  var n = 0;
+  for (var i = 0; i < v.length; i++) {
+    var c = v.charCodeAt(i);
+    n += c < 0x80 ? 1 : (c < 0x800 ? 2 : 3);
+  }
+  return n;
+}
+function keyValid(v){ return /^[a-z][a-z0-9_]*$/.test(v) && keyBytes(v) <= 64; }
+function bindFKey(){
+  var f = document.getElementById('fKey');
+  if (!f) return;
+  var err = document.getElementById('fKeyErr');
+  function check(){
+    var bad = f.value.trim().length > 0 && !keyValid(f.value.trim());
+    f.setAttribute('aria-invalid', bad ? 'true' : 'false');
+    if (err) err.hidden = !bad;
+  }
+  f.addEventListener('input', check);
+  f.addEventListener('blur', check);
+}
+/* 删除用后端原文（CONTRACT §6.4）；停用另写一段，因为后果完全不同（ERRATA E6-c） */
+function toggleDialogHTML(tx){
+  var willDisable = tx.status === 'active';
+  var body = '<div class="list-row"><span><span class="identity-name">' + esc(tx.title) + '</span>' +
+    '<span class="list-row-sub mono">' + esc(tx.key) + '</span></span>' + statusBadge(tx) + '</div>';
+  if (willDisable) {
+    body += '<div class="alert-warn" role="alert">' + icon('triangle-alert','i14') +
+      '<span>停用后，飞书审批中正在使用该数据源的控件会立即取不到选项——飞书侧拿到的是 ' +
+      '<code>40301 数据源已停用</code>。数据源下的选项本身不会被删除。</span></div>';
+  } else {
+    body += '<div class="alert-note" aria-live="polite">' + icon('info','i14') +
+      '<span>启用后审批侧能重新拉到这个数据源的选项；如果多维表格的自动化停了，拉到的还是空列表。</span></div>';
+  }
+  return '<div class="overlay" id="overlay"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">' +
+    '<button class="dlg-x" id="dlgX" aria-label="关闭">' + icon('x') + '</button>' +
+    '<div class="dlg-head"><h3 class="dlg-title" id="dlgTitle">' + (willDisable ? '停用数据源' : '启用数据源') + '</h3>' +
+      '<p class="dlg-desc">' + (willDisable ? '停用是可逆的，随时可以再启用。'
+        : '这个数据源现在被审批侧拒绝取值。') + '</p></div>' +
+    body +
+    '<div class="dlg-actions"><button class="btn btn-outline" id="dlgCancel">取消</button>' +
+      '<button class="btn btn-default" id="dlgSubmit">' + (willDisable ? '停用' : '启用') + '</button></div></div></div>';
+}
+function renderDialog(){
+  var root = document.getElementById('dialogRoot');
+  if (!dialog) { root.innerHTML = ''; return; }
+  var html = '';
+  if (dialog.kind === 'delete') {
+    var dx = byKey(dialog.key);
+    if (!dx) { closeDialog(); return; }
+    html = '<div class="overlay" id="overlay"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">' +
+      '<button class="dlg-x" id="dlgX" aria-label="关闭">' + icon('x') + '</button>' +
+      '<div class="dlg-head"><h3 class="dlg-title" id="dlgTitle">删除数据源</h3></div>' +
+      '<div class="list-row"><span><span class="identity-name">' + esc(dx.title) + '</span>' +
+        '<span class="list-row-sub mono">' + esc(dx.key) + '</span></span>' +
+        '<span class="badge badge-neutral">' + esc(dx.locale) + '</span></div>' +
+      '<div class="alert-error" role="alert">' + icon('triangle-alert','i14') +
+        '<span>删除后其下全部选项会被同时停用，且不可恢复。确认删除？</span></div>' +
+      '<div class="dlg-actions"><button class="btn btn-outline" id="dlgCancel">取消</button>' +
+        '<button class="btn btn-destructive" id="dlgSubmit">删除</button></div></div></div>';
+  } else if (dialog.kind === 'toggle') {
+    var tx = byKey(dialog.key);
+    if (!tx) { closeDialog(); return; }
+    html = toggleDialogHTML(tx);
+  } else if (dialog.kind === 'guide') {
+    html = guideDialogHTML();
+  } else {
+    var ren = dialog.kind === 'rename';
+    var src = ren ? byKey(dialog.key) : null;
+    if (ren && !src) { closeDialog(); return; }
+    html = '<div class="overlay" id="overlay"><div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">' +
+      '<button class="dlg-x" id="dlgX" aria-label="关闭">' + icon('x') + '</button>' +
+      '<div class="dlg-head"><h3 class="dlg-title" id="dlgTitle">' + (ren ? '重命名数据源' : '添加数据源') + '</h3>' +
+        '<p class="dlg-desc">' + (ren ? '只改显示名称，数据源标识与接口 Token 不变。'
+          : '数据源标识会进接口地址，创建之后不能再改。') + '</p></div>' +
+      '<div class="stack">' +
+        (ren ? '' :
+          '<div class="field"><label class="label" for="fKey">数据源标识</label>' +
+          '<input class="input input-mono" id="fKey" type="text" autocomplete="off" spellcheck="false" ' +
+            'pattern="[a-z][a-z0-9_]*" aria-describedby="fKeyHint fKeyErr">' +
+          '<p class="hint" id="fKeyHint">小写字母开头，只能包含小写字母、数字与下划线，最长 64 字节。例如 expense_category。</p>' +
+          '<p class="field-err" id="fKeyErr" hidden>' + icon('circle-alert','i14') +
+            '<span>这个标识还不合规：小写字母开头，只能包含小写字母、数字与下划线，最长 64 字节。</span></p></div>') +
+        '<div class="field"><label class="label" for="fTitle">显示名称（1–100 字符）</label>' +
+        '<input class="input" id="fTitle" type="text" autocomplete="off" value="' + (ren ? esc(src.title) : '') + '"></div>' +
+        (ren ? '' :
+          '<div class="field"><label class="label" for="fToken">接口 Token</label>' +
+          '<input class="input input-mono" id="fToken" type="password" autocomplete="new-password">' +
+          '<p class="hint">飞书审批后台「使用外部选项」里自定义的那串 Token。服务端只存 SHA-256 摘要，保存后无法回显。</p></div>' +
+          '<div class="field"><label class="label" for="fLocale">默认语言</label>' +
+          '<div class="select-wrap"><select class="input" id="fLocale">' +
+            '<option value="zh_cn">简体中文（zh_cn）</option>' +
+            '<option value="en_us">English（en_us）</option>' +
+            '<option value="ja_jp">日本語（ja_jp）</option></select>' +
+            icon('chevron-down') + '</div>' +
+          '<p class="hint">后端词表里就这三项。它会被原样回给飞书，写错不会报错，只会让飞书拿到认不出的语言。</p></div>' +
+          '<label class="check" for="fEnc"><input type="checkbox" id="fEnc">' +
+          '<span class="check-text">加密返回<span class="check-hint">返回给飞书的选项内容加密传输；需服务端已配置加密密钥。</span></span></label>' +
+          '<div class="alert-note">' + icon('triangle-alert','i14') +
+          '<span>服务端没配加密密钥时开启它，飞书侧拿到的会是 <code>50002 服务端未配置加密密钥</code>，而不是选项。' +
+          '接口 Token 无论如何都只存 SHA-256 摘要，跟这个开关无关。</span></div>') +
+        (dialog.error ? '<p class="field-err" role="alert">' + icon('circle-alert','i14') +
+          esc(dialog.error) + '</p>' : '') +
+      '</div>' +
+      '<div class="dlg-actions"><button class="btn btn-outline" id="dlgCancel">取消</button>' +
+        '<button class="btn btn-default" id="dlgSubmit">' + (ren ? '保存' : '添加数据源') + '</button>' +
+      '</div></div></div>';
+  }
+  root.innerHTML = html;
+  bindFKey();
+  var first = document.getElementById('fKey') || document.getElementById('fTitle') ||
+    document.getElementById('dlgCancel');
+  if (first) first.focus();
+}
+function submitDialog(){
+  if (!dialog) return;
+  if (dialog.kind === 'guide') { closeDialog(); return; }
+  if (dialog.kind === 'toggle') {
+    var t = byKey(dialog.key);
+    if (!t) { closeDialog(); return; }
+    t.status = t.status === 'active' ? 'disabled' : 'active';
+    var nowActive = t.status === 'active';
+    closeDialog(); render();
+    toast(nowActive ? '已启用' : '已停用');
+    return;
+  }
+  if (dialog.kind === 'delete') {
+    var gone = byKey(dialog.key);
+    /* 对话框打开期间该数据源可能已被移除（列表刷新 / 别处删除）。
+       此时 gone 为 null，下面取 gone.key 会抛 TypeError 把弹窗卡死。 */
+    if (!gone) {
+      closeDialog(); render();
+      toast('这个数据源已经不在了，无需再删除', 'warn');
+      return;
+    }
+    var at = SOURCES.indexOf(gone);
+    if (at >= 0) SOURCES.splice(at, 1);
+    delete OPTIONS[gone.key];
+    if (state.selected === gone.key) {
+      state.selected = SOURCES.length ? SOURCES[0].key : null;
+      state.narrowDetail = false;
+    }
+    if (!SOURCES.length) state.data = 'empty';
+    closeDialog(); render(); toast('已删除');
+    return;
+  }
+  var title = document.getElementById('fTitle').value.trim();
+  if (!title || title.length > 100) { dialog.error = '名称必须在 1..=100 字符'; renderDialog(); return; }
+  if (dialog.kind === 'rename') {
+    var s = byKey(dialog.key);
+    if (s.title === title) { dialog.error = '没有要更新的字段'; renderDialog(); return; }
+    s.title = title;
+    closeDialog(); render(); toast('已重命名');
+    return;
+  }
+  var key = document.getElementById('fKey').value.trim();
+  if (!key) { dialog.error = '请填写数据源标识'; renderDialog(); return; }
+  if (!keyValid(key)) {
+    dialog.error = '数据源标识不合规：小写字母开头，只能包含小写字母、数字与下划线，最长 64 字节。';
+    renderDialog(); return;
+  }
+  if (byKey(key)) { dialog.error = '这个数据源标识已经被占用了。'; renderDialog(); return; }
+  if (!document.getElementById('fToken').value) {
+    dialog.error = 'Token 不能为空；不轮换请省略该字段'; renderDialog(); return;
+  }
+  SOURCES.push({ key: key, title: title, status: 'active',
+    encrypt: document.getElementById('fEnc').checked,
+    locale: document.getElementById('fLocale').value });
+  OPTIONS[key] = [];
+  state.selected = key;
+  state.forceZero = false;
+  state.data = 'data';   /* 从空态里建出来的第一个数据源，建完就进它的详情 */
+  closeDialog(); render(); toast('已添加数据源');
+}
+
+/* ===== 轻提示 ===== */
+var toastTimer = null;
+function toast(msg, tone){
+  var w = document.getElementById('toastWrap');
+  var warn = tone === 'warn';
+  w.innerHTML = '<div class="toast' + (warn ? ' is-warn' : '') + '" role="status">' +
+    icon(warn ? 'triangle-alert' : 'circle-check', 'i14') + esc(msg) + '</div>';
+  if (toastTimer) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(function(){ w.innerHTML = ''; }, 2400);
+}
+
+/* ===== 渲染 ===== */
+function applyTheme(){
+  var r = document.documentElement;
+  if (state.theme === 'dark') { r.classList.add('dark'); r.setAttribute('data-theme','dark'); }
+  else { r.classList.remove('dark'); r.setAttribute('data-theme','light'); }
+  document.getElementById('themeIcon').innerHTML = isDarkTheme() ? ICONS.sun : ICONS.moon;
+  document.getElementById('themeBtn').setAttribute('aria-label',
+    isDarkTheme() ? '切换到明亮主题' : '切换到暗色主题');
+}
+function applyRole(){
+  var r = ROLES[state.role];
+  document.getElementById('identityName').textContent = r.name;
+  document.getElementById('identityRole').textContent = r.role;
+  document.getElementById('narrowRole').textContent = r.name;
+  document.getElementById('identityOps').setAttribute('aria-checked', String(state.role === 'ops'));
+  document.getElementById('identityBiz').setAttribute('aria-checked', String(state.role === 'biz'));
+  document.getElementById('identityAudit').setAttribute('aria-checked', String(state.role === 'audit'));
+}
+function syncProto(){
+  var order = ['empty','data','loading','error'];
+  for (var i = 0; i < order.length; i++) {
+    var id = 'st' + order[i].charAt(0).toUpperCase() + order[i].slice(1);
+    document.getElementById(id).setAttribute('aria-pressed', String(state.data === order[i]));
+  }
+  document.getElementById('roleOps').setAttribute('aria-pressed', String(state.role === 'ops'));
+  document.getElementById('roleBiz').setAttribute('aria-pressed', String(state.role === 'biz'));
+  document.getElementById('roleAudit').setAttribute('aria-pressed', String(state.role === 'audit'));
+  document.getElementById('detAuto').setAttribute('aria-pressed', String(!state.forceZero));
+  document.getElementById('detZero').setAttribute('aria-pressed', String(state.forceZero));
+  document.getElementById('thLight').setAttribute('aria-pressed', String(!isDarkTheme()));
+  document.getElementById('thDark').setAttribute('aria-pressed', String(isDarkTheme()));
+  var d = document.getElementById('densityBtn');
+  d.setAttribute('aria-expanded', String(!document.getElementById('densityMenu').hidden));
+  var ids = ['denStandard','denCompact','denLoose'];
+  for (var j = 0; j < ids.length; j++) {
+    var name = ['standard','compact','loose'][j];
+    document.getElementById(ids[j]).setAttribute('aria-checked', String(state.density === name));
+  }
+}
+function render(){
+  applyTheme(); applyRole(); syncProto();
+  document.getElementById('split').classList.toggle('show', state.narrowDetail);
+  renderMaster(); renderDetail();
+}
+
+/* ===== 菜单 ===== */
+function closeMenus(){
+  var ms = document.querySelectorAll('.menu');
+  for (var i = 0; i < ms.length; i++) ms[i].hidden = true;
+  var bs = ['identityBtn','densityBtn','moreBtn'];
+  for (var j = 0; j < bs.length; j++) {
+    var b = document.getElementById(bs[j]);
+    if (b) b.setAttribute('aria-expanded','false');
+  }
+}
+function toggleMenu(btnId, menuId){
+  var m = document.getElementById(menuId), b = document.getElementById(btnId);
+  var wasOpen = !m.hidden;
+  closeMenus();
+  if (!wasOpen) { m.hidden = false; b.setAttribute('aria-expanded','true'); }
+}
+function setData(v){
+  state.data = v;
+  if (v === 'empty') { state.narrowDetail = false; }
+  if (v === 'data' && !state.selected && SOURCES.length) state.selected = SOURCES[0].key;
+  render();
+}
+function setRole(v){ state.role = v; closeMenus(); render(); }
+function setForceZero(v){ state.forceZero = v; render(); }
+function setTheme(v){ state.theme = v; render(); }
+function setDensity(v){
+  state.density = v;
+  if (v === 'standard') document.documentElement.removeAttribute('data-density');
+  else document.documentElement.setAttribute('data-density', v);
+  closeMenus(); render();
+}
+function selectSource(k){
+  state.selected = k;
+  state.forceZero = false;   /* 换一个数据源就回到它真实的数据 */
+  if (window.matchMedia('(max-width: 899px)').matches) state.narrowDetail = true;
+  render();
+}
+
+/* ===== 事件 ===== */
+document.addEventListener('click', function(e){
+  var el = e.target;
+  var item = el.closest ? el.closest('.master-item') : null;
+  if (item) { selectSource(item.getAttribute('data-key')); return; }
+  if (el.id === 'overlay') { closeDialog(); return; }
+  var b = el.closest ? el.closest('button') : null;
+  if (!b) { closeMenus(); return; }
+  switch (b.id) {
+    case 'addBtn': case 'addBtnEmpty': case 'addBtnGuide': case 'addBtnFromEmpty':
+      openDialog('add'); return;
+    case 'guideBtn': state.narrowDetail = true; render(); return;
+    case 'guideStepBtn': openDialog('guide'); return;
+    case 'optRetry': render(); return;
+    case 'clearSearch': state.query = ''; document.getElementById('dsSearch').value = ''; renderMaster(); return;
+    case 'backBtn': state.narrowDetail = false; render(); return;
+    case 'retryBtn': state.data = 'data'; render(); return;
+    case 'moreBtn': toggleMenu('moreBtn','moreMenu'); return;
+    case 'miRename': closeMenus(); openDialog('rename', state.selected); return;
+    case 'miToggle': closeMenus(); openDialog('toggle', state.selected); return;
+    case 'miDelete': closeMenus(); openDialog('delete', state.selected); return;
+    case 'dlgX': case 'dlgCancel': closeDialog(); return;
+    case 'dlgSubmit': submitDialog(); return;
+    case 'identityBtn': toggleMenu('identityBtn','identityMenu'); return;
+    case 'identityOps': setRole('ops'); return;
+    case 'identityBiz': setRole('biz'); return;
+    case 'identityAudit': setRole('audit'); return;
+    case 'densityBtn': toggleMenu('densityBtn','densityMenu'); return;
+    case 'denStandard': setDensity('standard'); return;
+    case 'denCompact': setDensity('compact'); return;
+    case 'denLoose': setDensity('loose'); return;
+    case 'themeBtn': setTheme(isDarkTheme() ? 'light' : 'dark'); return;
+    case 'stEmpty': setData('empty'); return;
+    case 'stData': setData('data'); return;
+    case 'stLoading': setData('loading'); return;
+    case 'stError': setData('error'); return;
+    case 'roleOps': setRole('ops'); return;
+    case 'roleBiz': setRole('biz'); return;
+    case 'roleAudit': setRole('audit'); return;
+    case 'detAuto': setForceZero(false); return;
+    case 'detZero': setForceZero(true); return;
+    case 'thLight': setTheme('light'); return;
+    case 'thDark': setTheme('dark'); return;
+    default: closeMenus(); return;
+  }
+});
+document.addEventListener('keydown', function(e){
+  if (e.key !== 'Escape') return;
+  var opened = document.querySelectorAll('details.i18n[open]');
+  if (opened.length) { for (var i = 0; i < opened.length; i++) opened[i].open = false; return; }
+  if (dialog) { closeDialog(); return; }
+  closeMenus();
+});
+document.getElementById('dsSearch').addEventListener('input', function(){
+  state.query = this.value;
+  renderMaster();
+});
+function measureProto(){
+  var h = document.getElementById('protoBar').offsetHeight;
+  document.documentElement.style.setProperty('--proto-h', h + 'px');
+}
+window.addEventListener('resize', measureProto);
+window.addEventListener('load', measureProto);
+/* 约束区展开会改变控制条高度，重心算一次，内容才不会被遮住 */
+document.getElementById('constraints').addEventListener('toggle', measureProto);
+measureProto();
+render();
+</script>

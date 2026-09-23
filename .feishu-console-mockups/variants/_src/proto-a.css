@@ -1,0 +1,84 @@
+/* 方案 A · 卡片画廊 */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.tile {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--card-foreground);
+  transition: border-color .12s, background-color .12s;
+}
+.tile:hover { background: color-mix(in oklab, var(--accent) 60%, var(--card)); }
+.tile:focus-within { border-color: var(--ring); }
+
+/* 整卡可点：铺满的透明按钮压在内容下面，菜单按钮浮在上面 */
+.tile-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.tile-body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  pointer-events: none;
+}
+.tile-body .menu-wrap { pointer-events: auto; }
+
+.tile-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
+.tile-title { font-size: 14px; font-weight: 500; line-height: 1.4; }
+
+.tile-key {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.tile-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.tile-sep { opacity: .6; }
+
+.tile-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition: opacity .12s;
+}
+.tile:hover .tile-hint { opacity: 1; }
+
+/* 卡片里的 ⋯ 比详情页的小一号 */
+.menu-btn-sm { width: 28px; height: 28px; }
+.menu-btn-sm svg { width: 16px; height: 16px; }
