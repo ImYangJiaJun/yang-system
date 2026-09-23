@@ -5,6 +5,7 @@
 
 pub(super) mod create_datasource;
 pub(super) mod delete_datasource;
+pub(super) mod list_bitable_tables;
 pub(super) mod list_datasources;
 pub(super) mod pull_now;
 pub(super) mod pull_probe;
@@ -28,6 +29,7 @@ use crate::addon::feishu::domain::context::FeishuContext;
 /// 注册出来都是让人以为可用。理由与 `option` module 的机器入口一致。
 pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> ModuleSpec {
     let module = list_datasources::register(module, Arc::clone(&context));
+    let module = list_bitable_tables::register(module, Arc::clone(&context));
     let module = create_datasource::register(module, Arc::clone(&context));
     let module = update_datasource::register(module, Arc::clone(&context));
     let module = delete_datasource::register(module, Arc::clone(&context));

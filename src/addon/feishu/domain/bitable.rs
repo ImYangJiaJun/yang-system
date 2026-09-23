@@ -98,6 +98,17 @@ pub(crate) fn fields_url(app_token: &str, table_id: &str) -> anyhow::Result<Stri
     ))
 }
 
+/// 组装列出数据表 URL。
+///
+/// 官方《列出数据表》：`GET /open-apis/bitable/v1/apps/:app_token/tables`。
+/// `app_token` 进路径段，必须先过 [`validate_path_segment`]。
+pub(crate) fn tables_url(app_token: &str) -> anyhow::Result<String> {
+    validate_path_segment("bitable_base_token", app_token)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/{app_token}/tables"
+    ))
+}
+
 /// 组装列出记录的查询参数。
 ///
 /// `field_names` 是**一个 JSON 数组字符串**，不是重复参数：写成
@@ -195,6 +206,31 @@ pub(crate) struct ListRecordsData {
     pub(crate) total: Option<i64>,
     #[serde(default)]
     pub(crate) items: Vec<RecordItem>,
+}
+
+/// 列出数据表的 `data`。
+///
+/// 与 [`ListFieldsData`] 同样的理由带分页字段：一张 Base 的表数可以超过默认
+/// `page_size`，少了分页就会把「还有第 2 页」静默吞掉。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BitableTablesData {
+    #[serde(default)]
+    pub(crate) has_more: bool,
+    #[serde(default)]
+    pub(crate) page_token: Option<String>,
+    #[serde(default)]
+    pub(crate) total: Option<i64>,
+    #[serde(default)]
+    pub(crate) items: Vec<BitableTableItem>,
+}
+
+/// 一张数据表的标识信息。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BitableTableItem {
+    #[serde(default)]
+    pub(crate) table_id: String,
+    #[serde(default)]
+    pub(crate) name: String,
 }
 
 /// 列出字段的 `data`。
@@ -676,6 +712,54 @@ pub(crate) async fn list_all_records(
     })
 }
 
+/// 拉取某张 Base 下的全部数据表。
+///
+/// 供配置向导第一步用：运维只填 `app_token`，表列表由这里取回让他在界面上选。
+pub(crate) async fn list_all_tables(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    app_token: &str,
+) -> Result<Vec<BitableTableItem>, OutboundFailure> {
+    let url = tables_url(app_token).map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })?;
+
+    let mut state = PaginationState::new(MAX_PAGES);
+    let mut cursor: Option<String> = None;
+    let mut items: Vec<BitableTableItem> = Vec::new();
+
+    loop {
+        let query = list_fields_query(cursor.as_deref());
+        let page: BitableTablesData = fetch_page(transport, sleeper, tokens, &url, query).await?;
+
+        let next = state
+            .accept(
+                page.has_more,
+                page.page_token.clone(),
+                page.total,
+                page.items.len(),
+            )
+            .map_err(|error| OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: error.to_string(),
+            })?;
+
+        items.extend(page.items);
+        match next {
+            Some(cursor_value) => cursor = Some(cursor_value),
+            None => break,
+        }
+    }
+
+    state.assert_converged().map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })?;
+    Ok(items)
+}
+
 /// 拉取全量字段定义（用于 `field_id → 字段名` 映射）。
 pub(crate) async fn list_all_fields(
     transport: &dyn OutboundTransport,
@@ -728,6 +812,43 @@ pub(crate) async fn list_all_fields(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ---- 列出数据表 ----
+
+    #[test]
+    fn tables_url_is_the_official_path() {
+        // 官方《列出数据表》：GET /open-apis/bitable/v1/apps/:app_token/tables
+        // 注意 `/open-apis` 这一段：既有的 records_url/fields_url 都带着它，
+        // 漏掉会打到一个不存在的路径上。
+        let url = tables_url("ZoCWb82JQaCCiAspCqbcUvlsnwg")
+            .unwrap_or_else(|error| panic!("应可组装: {error}"));
+        assert_eq!(
+            url,
+            format!(
+                "{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/ZoCWb82JQaCCiAspCqbcUvlsnwg/tables"
+            )
+        );
+    }
+
+    #[test]
+    fn tables_url_rejects_path_traversal() {
+        // app_token 来自用户输入；直接采信会让 `../` 把请求打到别的路径上
+        assert!(tables_url("../evil").is_err());
+        assert!(tables_url("").is_err());
+    }
+
+    #[test]
+    fn tables_data_tolerates_a_missing_page_token() {
+        // has_more 为 false 时官方不返回 page_token；写成 String 会反序列化失败
+        let data: BitableTablesData = serde_json::from_str(
+            r#"{"has_more":false,"total":1,"items":[{"table_id":"tblA","name":"公司往来付款"}]}"#,
+        )
+        .unwrap_or_else(|error| panic!("应可解析: {error}"));
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.items[0].table_id, "tblA");
+        assert_eq!(data.items[0].name, "公司往来付款");
+        assert!(data.page_token.is_none());
+    }
 
     // ---- 路径段与 URL ----
 

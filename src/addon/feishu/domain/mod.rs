@@ -8,6 +8,7 @@ pub(crate) mod list_input;
 pub(crate) mod middleware;
 pub(crate) mod option_write;
 pub(crate) mod outbound;
+pub(crate) mod outbound_setup;
 pub(crate) mod pagination;
 pub(crate) mod protocol;
 pub(crate) mod pull;
