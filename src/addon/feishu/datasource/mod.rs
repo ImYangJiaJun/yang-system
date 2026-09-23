@@ -128,7 +128,10 @@ mod tests {
         // 绑定表要进 schema 就必须有一个声明它的 Module——`ModuleSpec::table()`
         // 只收一张表，所以它只能是独立的一个。漏了这一步，表永远不会被创建。
         let spec = build_field_module().unwrap_or_else(|error| panic!("模块应可装配: {error}"));
-        let table = spec.table.as_ref().expect("必须声明绑定表");
+        let table = spec
+            .table
+            .as_ref()
+            .unwrap_or_else(|| panic!("必须声明绑定表"));
         let definition = table
             .table_definition()
             .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));

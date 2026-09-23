@@ -98,6 +98,17 @@ pub(crate) fn fields_url(app_token: &str, table_id: &str) -> anyhow::Result<Stri
     ))
 }
 
+/// 组装列出视图 URL。
+///
+/// 官方《列出视图》：`GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/views`。
+pub(crate) fn views_url(app_token: &str, table_id: &str) -> anyhow::Result<String> {
+    validate_path_segment("bitable_base_token", app_token)?;
+    validate_path_segment("bitable_table_id", table_id)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/views"
+    ))
+}
+
 /// 组装列出数据表 URL。
 ///
 /// 官方《列出数据表》：`GET /open-apis/bitable/v1/apps/:app_token/tables`。
@@ -149,7 +160,9 @@ pub(crate) fn list_records_query(
     Ok(query)
 }
 
-/// 组装列出字段的查询参数。
+/// 组装「每页 100 条」的列表查询参数。
+///
+/// 服务于所有 `page_size` 上限为 100 的列表端点：列出字段、列出数据表、列出视图。
 pub(crate) fn list_fields_query(page_token: Option<&str>) -> Vec<(String, String)> {
     let mut query = vec![("page_size".to_string(), PAGE_SIZE_FIELDS.to_string())];
     if let Some(page_token) = page_token {
@@ -231,6 +244,31 @@ pub(crate) struct BitableTableItem {
     pub(crate) table_id: String,
     #[serde(default)]
     pub(crate) name: String,
+}
+
+/// 列出视图的 `data`。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BitableViewsData {
+    #[serde(default)]
+    pub(crate) has_more: bool,
+    #[serde(default)]
+    pub(crate) page_token: Option<String>,
+    #[serde(default)]
+    pub(crate) total: Option<i64>,
+    #[serde(default)]
+    pub(crate) items: Vec<BitableViewItem>,
+}
+
+/// 一个视图的标识信息。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BitableViewItem {
+    #[serde(default)]
+    pub(crate) view_id: String,
+    #[serde(default)]
+    pub(crate) view_name: String,
+    /// `grid` 表格 / `kanban` 看板 / `gallery` 画册 / `gantt` 甘特 / `form` 表单。
+    #[serde(default)]
+    pub(crate) view_type: String,
 }
 
 /// 列出字段的 `data`。
@@ -712,6 +750,56 @@ pub(crate) async fn list_all_records(
     })
 }
 
+/// 拉取某张数据表下的全部视图。
+///
+/// 供配置向导第二步用。**注意视图的职责**：它决定**拉取哪些行**，不决定能勾哪些字段
+/// （实测「列出字段」的 `view_id` 参数不生效）。UI 必须把这件事讲对。
+pub(crate) async fn list_all_views(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    app_token: &str,
+    table_id: &str,
+) -> Result<Vec<BitableViewItem>, OutboundFailure> {
+    let url = views_url(app_token, table_id).map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })?;
+
+    let mut state = PaginationState::new(MAX_PAGES);
+    let mut cursor: Option<String> = None;
+    let mut items: Vec<BitableViewItem> = Vec::new();
+
+    loop {
+        let query = list_fields_query(cursor.as_deref());
+        let page: BitableViewsData = fetch_page(transport, sleeper, tokens, &url, query).await?;
+
+        let next = state
+            .accept(
+                page.has_more,
+                page.page_token.clone(),
+                page.total,
+                page.items.len(),
+            )
+            .map_err(|error| OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: error.to_string(),
+            })?;
+
+        items.extend(page.items);
+        match next {
+            Some(cursor_value) => cursor = Some(cursor_value),
+            None => break,
+        }
+    }
+
+    state.assert_converged().map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })?;
+    Ok(items)
+}
+
 /// 拉取某张 Base 下的全部数据表。
 ///
 /// 供配置向导第一步用：运维只填 `app_token`，表列表由这里取回让他在界面上选。
@@ -847,6 +935,48 @@ mod tests {
         assert_eq!(data.items.len(), 1);
         assert_eq!(data.items[0].table_id, "tblA");
         assert_eq!(data.items[0].name, "公司往来付款");
+        assert!(data.page_token.is_none());
+    }
+
+    // ---- 列出视图 ----
+
+    #[test]
+    fn views_url_matches_the_official_path() {
+        // 官方《列出视图》：GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/views
+        let url = views_url("ZoCWb82JQaCCiAspCqbcUvlsnwg", "tblauuOafa4acvT3")
+            .unwrap_or_else(|error| panic!("应可组装: {error}"));
+        assert_eq!(
+            url,
+            format!(
+                "{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/ZoCWb82JQaCCiAspCqbcUvlsnwg/tables/tblauuOafa4acvT3/views"
+            )
+        );
+    }
+
+    #[test]
+    fn views_url_rejects_path_traversal_in_either_segment() {
+        assert!(views_url("../evil", "tblA").is_err());
+        assert!(views_url("appA", "../evil").is_err());
+    }
+
+    #[test]
+    fn fields_url_does_not_send_view_id() {
+        // 【实测 2026-09-23】目标台账上带与不带 `view_id` 各调一次「列出字段」，
+        // 两次返回**完全相同的 30 个字段与顺序**。视图只管「拉哪些行」，不管「有哪些列」。
+        // 这条把「不要发它」钉住，免得有人照着官方参数字段表加回去。
+        let url = fields_url("appA", "tblA").unwrap_or_else(|error| panic!("应可组装: {error}"));
+        assert!(!url.contains("view_id"), "实际: {url}");
+    }
+
+    #[test]
+    fn views_data_tolerates_a_missing_page_token() {
+        let data: BitableViewsData = serde_json::from_str(
+            r#"{"has_more":false,"total":1,"items":[{"view_id":"vewAEKSbvO","view_name":"表格 1","view_type":"grid"}]}"#,
+        )
+        .unwrap_or_else(|error| panic!("应可解析: {error}"));
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.items[0].view_id, "vewAEKSbvO");
+        assert_eq!(data.items[0].view_type, "grid");
         assert!(data.page_token.is_none());
     }
 

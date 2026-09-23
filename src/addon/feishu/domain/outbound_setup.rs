@@ -13,6 +13,7 @@ use yang_base::BaseError;
 
 use crate::config::FeishuSettings;
 
+use super::context::FeishuContext;
 use super::outbound::{
     HttpClientTransport, OutboundFailure, OutboundTransport, Sleeper, TokioSleeper,
 };
@@ -74,6 +75,28 @@ pub(crate) fn build(ctx: &ActionContext, settings: &FeishuSettings) -> Result<Ou
         sleeper,
         tokens,
     })
+}
+
+/// 取出可用于出站的配置；不可用时给出 `(码, 文案)`。
+///
+/// # 为什么返回码与文案而不是 `BaseError`
+///
+/// 凭证没配是**运维需要看到原因**的状态，不是内部故障：落成 `BaseError` 会变成
+/// 5xx 语义。返回 `(码, 文案)` 而不是 `ApiResponse` 本身，是因为 `ApiResponse`
+/// 体型大，放进 `Err` 会触发 `clippy::result_large_err`。
+pub(crate) fn require_settings(
+    context: &FeishuContext,
+) -> Result<&FeishuSettings, (i32, &'static str)> {
+    let Some(settings) = context.settings() else {
+        return Err((40901, "未配置 [feishu] 段，无法出站调用"));
+    };
+    if !settings.can_pull() {
+        return Err((
+            40902,
+            "出站凭证未配置或仍是占位值（需要非占位的 feishu.app_id / feishu.app_secret）",
+        ));
+    }
+    Ok(settings)
 }
 
 /// 出站失败 → 框架错误。

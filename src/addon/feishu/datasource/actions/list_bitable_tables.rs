@@ -78,15 +78,10 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
 
-    let settings = context
-        .settings()
-        .ok_or_else(|| BaseError::ConfigError("未配置 [feishu] 段，无法出站调用".to_string()))?;
-    if !settings.can_pull() {
-        return Ok(ApiResponse::fail(
-            40902,
-            "出站凭证未配置或仍是占位值（需要非占位的 feishu.app_id / feishu.app_secret）",
-        ));
-    }
+    let settings = match outbound_setup::require_settings(&context) {
+        Ok(settings) => settings,
+        Err((code, message)) => return Ok(ApiResponse::fail(code, message)),
+    };
 
     let outbound = outbound_setup::build(&ctx, settings)?;
     let tables = list_all_tables(
