@@ -112,7 +112,10 @@ mod tests {
 
     #[test]
     fn source_key_is_unique_and_filterable() {
-        // 它进 URL 路径，全局唯一；出站按它路由，必须可筛
+        // 它进 URL 路径，全局唯一；出站按它路由，必须可筛。
+        // **唯一性走 DSL 层读**：`table_definition()` 不暴露索引，
+        // 只断言 required/filterable/sortable 的话，测试名声称的那一位其实没验
+        // （`token_hash` 的唯一索引曾经就是这样漏掉的）。
         let definition = definition();
         let source_key = definition
             .field("source_key")
@@ -120,6 +123,17 @@ mod tests {
         assert!(source_key.is_required());
         assert!(source_key.is_filterable());
         assert!(source_key.is_sortable());
+
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let declared = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "source_key")
+            .unwrap_or_else(|| panic!("source_key 必须在 DSL 声明里"));
+        assert!(
+            declared.storage.unique,
+            "source_key 必须建唯一索引：出站按它路由，重复会让请求分派歧义"
+        );
     }
 
     #[test]

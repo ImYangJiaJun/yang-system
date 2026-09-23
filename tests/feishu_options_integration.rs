@@ -28,8 +28,12 @@ use anyhow::{ensure, Context};
 use std::sync::Arc;
 use yang_db::Database;
 
-/// 本测试使用的两张表；清理时白名单化，避免拼错表名误删。
+/// 本测试使用的三张表；清理时白名单化，避免拼错表名误删。
+///
+/// `feishu_datasource_field`（字段绑定）是表级改造新增的：`source_key` 与凭据
+/// 都从表级行移到了这一层（设计 §5），所以断言也跟着搬过来。
 const DATASOURCE_TABLE: &str = "feishu_datasource";
+const FIELD_TABLE: &str = "feishu_datasource_field";
 const OPTION_TABLE: &str = "feishu_option";
 
 async fn connect_test_database() -> anyhow::Result<Database> {
@@ -52,9 +56,11 @@ async fn connect_test_database() -> anyhow::Result<Database> {
 
 /// 清理两张飞书表；表名白名单化。
 async fn drop_feishu_tables(database: &Database) -> anyhow::Result<()> {
-    for table in [OPTION_TABLE, DATASOURCE_TABLE] {
+    // 顺序无关：绑定表用的是普通 `Int` + 索引，没有外键约束（设计 §5）。
+    for table in [OPTION_TABLE, FIELD_TABLE, DATASOURCE_TABLE] {
         let statement = match table {
             DATASOURCE_TABLE => "DROP TABLE IF EXISTS `feishu_datasource`",
+            FIELD_TABLE => "DROP TABLE IF EXISTS `feishu_datasource_field`",
             OPTION_TABLE => "DROP TABLE IF EXISTS `feishu_option`",
             other => anyhow::bail!("拒绝清理未声明的测试表: {other}"),
         };
@@ -115,7 +121,7 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
         let handle = connect_test_database().await?;
 
         // 两张表必须存在
-        for table in [DATASOURCE_TABLE, OPTION_TABLE] {
+        for table in [DATASOURCE_TABLE, FIELD_TABLE, OPTION_TABLE] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM information_schema.TABLES \
                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
@@ -133,24 +139,49 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
             has_unique_index_on(&handle, OPTION_TABLE, "option_id").await?,
             "feishu_option.option_id 必须有唯一索引"
         );
-        // 数据源标识是路由键，重复会让请求分派歧义
+        // 数据源标识是路由键，重复会让请求分派歧义。
+        // **它现在住在绑定表上**：一条表级行可以有多条绑定，每条一个 source_key
+        // （设计 §5）。`Route` 层按它定位到具体那一条绑定。
         ensure!(
-            has_unique_index_on(&handle, DATASOURCE_TABLE, "source_key").await?,
-            "feishu_datasource.source_key 必须有唯一索引"
+            has_unique_index_on(&handle, FIELD_TABLE, "source_key").await?,
+            "feishu_datasource_field.source_key 必须有唯一索引"
         );
+        // 凭据摘要同样必须唯一：系统生成的 Token 若两行共用，该 Token 对两张表都验得过
+        // （设计 §10.2 的 MUST）。它在表级行上没有对应列——这是表级改造的核心搬移。
+        ensure!(
+            has_unique_index_on(&handle, FIELD_TABLE, "token_hash").await?,
+            "feishu_datasource_field.token_hash 必须有唯一索引"
+        );
+        // 表级行上不该再有 `source_key` / `token_hash`——一条表级行只能有一个
+        // source_key，放在那里语义上自相矛盾（Ruling 14）。
+        for gone in ["source_key", "token_hash"] {
+            let present: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS \
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+            )
+            .bind(DATASOURCE_TABLE)
+            .bind(gone)
+            .fetch_one(handle.pool())
+            .await
+            .context("查询表级行列是否存在失败")?;
+            ensure!(
+                present == 0,
+                "feishu_datasource.{gone} 应当已搬到绑定表上，不该留在表级行"
+            );
+        }
 
-        // 摘要列必须存在且能容纳 64 位 hex
+        // 摘要列必须存在且能容纳 64 位 hex——同样在绑定表上
         let token_hash_len: Option<i64> = sqlx::query_scalar(
             "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'token_hash'",
         )
-        .bind(DATASOURCE_TABLE)
+        .bind(FIELD_TABLE)
         .fetch_optional(handle.pool())
         .await
         .context("查询 token_hash 列失败")?;
         ensure!(
             token_hash_len.is_some_and(|len| len >= 64),
-            "feishu_datasource.token_hash 必须存在且不少于 64 字符"
+            "feishu_datasource_field.token_hash 必须存在且不少于 64 字符"
         );
 
         // 再次同步必须是无操作：schema_sync 幂等，第二次不应有任何变更。
@@ -166,7 +197,11 @@ async fn feishu_tables_are_created_with_required_unique_indexes() {
         let feishu_changes: Vec<_> = second
             .changes
             .iter()
-            .filter(|change| change.table == DATASOURCE_TABLE || change.table == OPTION_TABLE)
+            .filter(|change| {
+                change.table == DATASOURCE_TABLE
+                    || change.table == FIELD_TABLE
+                    || change.table == OPTION_TABLE
+            })
             .collect();
         ensure!(
             feishu_changes.is_empty(),
