@@ -206,7 +206,7 @@ describe("飞书数据源列表页 · 权限门控", () => {
       datasourceList: () =>
         listPage([
           datasourceWire(),
-          datasourceWire({ source_key: "expense_category", title: "费用类型" }),
+          datasourceWire({ id: 2, title: "费用类型" }),
         ]),
     });
     renderList();
@@ -222,7 +222,7 @@ describe("飞书数据源列表页 · 权限门控", () => {
       datasourceList: () =>
         listPage([
           datasourceWire(),
-          datasourceWire({ source_key: "expense_category", title: "费用类型" }),
+          datasourceWire({ id: 2, title: "费用类型" }),
         ]),
     });
     renderList();

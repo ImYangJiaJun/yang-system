@@ -15,6 +15,8 @@ function binding(
     sourceKey: "currency",
     parentFieldId: null,
     enabled: true,
+    encryptEnabled: false,
+    defaultLocale: "zh_cn",
     ...overrides,
   };
 }

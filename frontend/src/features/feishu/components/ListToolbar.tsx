@@ -22,7 +22,12 @@ const VIEW_OPTIONS: ReadonlyArray<{
   { value: "cards", label: "卡片" },
 ];
 
-const STATUS_OPTIONS: ReadonlyArray<{
+/// 状态筛选的可选值。
+///
+/// **导出**是为了让「界面上的取值域 ↔ 后端表声明」这条契约能被对账
+/// （`api.test.ts` 的「轴二：枚举取值域」）。`all` 是纯界面值（不过滤），
+/// 不属于后端取值域，对账时要剔掉。
+export const STATUS_OPTIONS: ReadonlyArray<{
   value: DatasourceStatusFilter;
   label: string;
 }> = [
@@ -109,7 +114,15 @@ export function ListToolbar({
         <Input
           value={search}
           onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="搜索名称或标识"
+          // **只搜名称。** 关键词最终进 `list_datasources` 打在**表级行**上的 `.search()`，
+          // 而那一行唯一声明了 `searchable` 的列是 `title`——`source_key` 在表级行上
+          // 根本不存在（它属于字段绑定）。文案写「或标识」就是承诺一件后端做不到的事：
+          // 粘一个真实存在的标识进来恒得 0 行，页面随后渲染「没有匹配的数据源」——
+          // 对一条确实存在的数据源说了一句假话，而且全程不报错。
+          //
+          // 要真支持按标识搜，得在服务端跨表查（绑定表 LIKE 出 datasource_id 再收窄），
+          // 那是另一个改动；在那之前，文案不能先答应。
+          placeholder="搜索名称"
           aria-label="搜索数据源"
           className="h-8 w-56 pl-7"
           autoComplete="off"

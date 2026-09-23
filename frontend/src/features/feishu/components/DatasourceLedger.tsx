@@ -23,11 +23,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 import type { DatasourceItem, OrderByClause } from "../types";
 import { identityLabel } from "../types";
 import { DatasourceActionsMenu } from "./DatasourceActionsMenu";
-import {
-  DatasourceStatusBadge,
-  EncryptBadge,
-  LocaleBadge,
-} from "./StatusBadge";
+import { DatasourceStatusBadge } from "./StatusBadge";
 
 const SKELETON_ROWS = 6;
 
@@ -119,8 +115,10 @@ export function DatasourceLedger({
               点一下会把整个列表请求打成 400。 */}
           <TableHead style={DENSITY_STYLE}>标识（首个字段）</TableHead>
           <TableHead style={DENSITY_STYLE}>状态</TableHead>
-          <TableHead style={DENSITY_STYLE}>加密返回</TableHead>
-          <TableHead style={DENSITY_STYLE}>默认语言</TableHead>
+          {/* 「加密返回」与「默认语言」两列**删掉了**：它们属于绑定层——一条数据源
+              有 N 个字段，可以各自加密、各自语言，所以表级行上根本没有单一值可显示。
+              这两列读的键在表级投影里不存在，于是对每一条数据源都恒画「—」与一个
+              空语言徽标。逐字段的取值在详情页的字段绑定表里。 */}
           <TableHead style={DENSITY_STYLE} className="w-10 text-right">
             <span className="sr-only">操作</span>
           </TableHead>
@@ -130,14 +128,15 @@ export function DatasourceLedger({
         {pending
           ? Array.from({ length: SKELETON_ROWS }, (_, index) => (
               <TableRow key={index}>
-                <TableCell style={DENSITY_STYLE} colSpan={6}>
+                <TableCell style={DENSITY_STYLE} colSpan={4}>
                   <Skeleton className="h-4 w-full" />
                 </TableCell>
               </TableRow>
             ))
           : items.map((item) => (
               <TableRow
-                key={item.id ?? item.sourceKey}
+                // 同 `DatasourceCardGrid`：`id` 是唯一的行身份，解析器保证非空。
+                key={item.id ?? "—"}
                 data-slot="datasource-ledger-row"
                 className="group cursor-pointer"
                 onClick={() => onOpen(item)}
@@ -159,16 +158,6 @@ export function DatasourceLedger({
                 </TableCell>
                 <TableCell style={DENSITY_STYLE}>
                   <DatasourceStatusBadge status={item.status} />
-                </TableCell>
-                <TableCell style={DENSITY_STYLE}>
-                  {item.encryptEnabled ? (
-                    <EncryptBadge enabled />
-                  ) : (
-                    <span className="text-xs text-muted-foreground">—</span>
-                  )}
-                </TableCell>
-                <TableCell style={DENSITY_STYLE}>
-                  <LocaleBadge locale={item.defaultLocale} />
                 </TableCell>
                 <TableCell style={DENSITY_STYLE} className="text-right">
                   {canWrite ? (

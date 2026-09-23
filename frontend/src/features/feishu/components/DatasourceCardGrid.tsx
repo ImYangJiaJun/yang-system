@@ -55,7 +55,9 @@ export function DatasourceCardGrid({
     <div className={GRID_CLASS}>
       {items.map((item) => (
         <article
-          key={item.id ?? item.sourceKey}
+          // `id` 是表级化之后唯一的行身份。解析器会把缺 `id` 的行丢掉，
+          // 所以这里的兜底只为满足类型，不会真的撞上。
+          key={item.id ?? "—"}
           data-slot="datasource-card"
           className="flex cursor-pointer flex-col gap-2 rounded-xl border border-border bg-card p-4 transition-colors hover:bg-accent/40"
           onClick={() => onOpen(item)}
@@ -84,8 +86,8 @@ export function DatasourceCardGrid({
           </p>
           <DatasourceBadgeRow
             status={item.status}
-            encryptEnabled={item.encryptEnabled}
-            defaultLocale={item.defaultLocale}
+            // 加密返回 / 默认语言属于**绑定层**，不在这里显示（见 `DatasourceBadgeRow`
+            // 的说明）：卡片拿到的表级行上没有这两个键。
           />
         </article>
       ))}

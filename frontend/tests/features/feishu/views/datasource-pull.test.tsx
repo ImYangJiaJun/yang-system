@@ -33,7 +33,7 @@ afterEach(() => {
 
 function renderDetail() {
   return renderTestApp({
-    path: `/feishu/datasources/${SOURCE_KEY}`,
+    path: `/feishu/datasources/${DATASOURCE_ID}`,
     authenticated: true,
   });
 }
@@ -43,18 +43,31 @@ function renderDetail() {
 const DATASOURCE_ID = 7;
 
 /// 一条坐标齐备、能自动拉取的数据源。
+///
+/// **刻意不带** `source_key` / `bitable_field_name`：这两个键在表级行上早已不存在
+/// （绑定标识与取数列都在 `fields[]` 里）。fixture 比真实投影「宽」正是这类 bug
+/// 长期全绿的原因——详情页曾经就是拿表级 `source_key` 去查一张没有这一列的表。
 function pullSource(overrides: Record<string, unknown> = {}) {
   return datasourceWire({
     id: DATASOURCE_ID,
-    source_key: SOURCE_KEY,
     title: "费用分类",
     ingest_mode: "pull",
     bitable_base_token: "ZoCWb82JQaCCiAspCqbcUvlsnwg",
     bitable_table_id: "tblauuOafa4acvT3",
-    bitable_field_name: "费用大类/Main Exp Cat*",
+    bitable_view_id: null,
     last_pull_at: 1758000000,
     last_success_at: 1758000000,
     consecutive_failures: 0,
+    fields: [
+      {
+        field_id: "fldEblAr7X",
+        field_name: "费用类型/Fee Type*",
+        source_key: SOURCE_KEY,
+        parent_field_id: null,
+        enabled: true,
+        token_rotated_at: null,
+      },
+    ],
     ...overrides,
   });
 }
@@ -162,7 +175,7 @@ describe("详情页 · 立即拉取", () => {
 });
 
 describe("详情页 · 取选项接口地址", () => {
-  it("给出完整地址，复制的是同一份内容", async () => {
+  it("凭据清单里每字段一个地址，复制的是显示的那一份原值", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
@@ -174,10 +187,12 @@ describe("详情页 · 取选项接口地址", () => {
     });
     renderDetail();
 
+    // 一条数据源有 N 个字段 = N 个地址，所以地址在**凭据清单**里一行一个：
+    // 页面顶部那块「取选项接口地址」在表级化之后没有单一值可填，已经删掉。
     const shown = await screen.findByText(
       /\/api\/v1\/feishu\/approval\/options\/expense_category$/,
     );
-    await user.click(screen.getByRole("button", { name: "复制" }));
+    await user.click(screen.getByRole("button", { name: "复制 URL" }));
 
     // 复制的是**显示的那一份原值**——截断只影响呈现，不影响剪贴板。
     expect(writeText).toHaveBeenCalledWith(shown.textContent);

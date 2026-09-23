@@ -28,23 +28,17 @@ function item(overrides: Partial<DatasourceItem> = {}): DatasourceItem {
   return {
     id: 7,
     fields: [],
-    sourceKey: "fx_rate",
     title: "汇率",
-    encryptEnabled: false,
-    defaultLocale: "zh_cn",
     status: "active",
     updatedAt: 1758000000,
     ingestMode: "pull",
     bitableBaseToken: "ZoCWb82JQaCCiAspCqbcUvlsnwg",
     bitableTableId: "tblauuOafa4acvT3",
     bitableViewId: null,
-    bitableFieldName: "币种/Currency（单选）",
-    linkageMapping: null,
     lastPullAt: 1758000000,
     lastSuccessAt: 1758000000,
     consecutiveFailures: 0,
     lastError: null,
-    snapshotDigest: "abc",
     ...overrides,
   };
 }

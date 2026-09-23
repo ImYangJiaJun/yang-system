@@ -256,19 +256,32 @@ export function listPage(
   };
 }
 
-/// 后端线格式的数据源行。
+/// 后端线格式的数据源行。**键集必须与 `list_datasources` 的投影逐字一致。**
+///
+/// 事实源是 `src/addon/feishu/datasource/actions/list_datasources.rs` 的
+/// `select_fields([...])`。改那边就要改这里——fixture 一旦比真实投影「宽」，
+/// 坏掉的消费方就会一直是绿的：`source_key` 曾经写在这里（表级行上早已没有这一列），
+/// 于是详情页拿它去 `order_by` 一张没有该列的表，整页恒说「查不到这条数据源」，
+/// 而所有用例全绿。守住这一点的断言在 `wire-fixture.test.ts`。
 export function datasourceWire(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
     // 表级主键：表级化之后它就是这一行的身份（`update` / `delete` / 体检都按它定位）。
     id: 1,
-    source_key: "dept_sales",
     title: "部门",
-    encrypt_enabled: false,
-    default_locale: "zh_cn",
     status: "active",
+    ingest_mode: "push",
+    bitable_base_token: null,
+    bitable_table_id: null,
+    bitable_view_id: null,
+    last_pull_at: null,
+    last_success_at: null,
+    consecutive_failures: 0,
+    last_error: null,
     updated_at: 1758000000,
+    // 字段绑定：一条数据源有 N 条，`source_key` 属于这一层。
+    fields: [],
     ...overrides,
   };
 }

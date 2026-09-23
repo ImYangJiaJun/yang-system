@@ -162,6 +162,12 @@ export const feishuQueryKeys = {
         search: query.search.trim(),
         status: query.status,
         orderBy: withStableOrder(query.orderBy),
+        // 详情页靠它按主键取单条。**它必须进 key**：详情页除 `id` 外所有入参都固定
+        // （page=1 / pageSize=1 / search="" / status="all"），漏了它两条数据源就共用
+        // 同一个缓存条目——15s 的 `staleTime` 内从 #7 跳到 #8 不会发请求，页面直接
+        // 渲染上一条的标题、字段绑定、凭据清单（URL/回显/轮换的目标字段）与拉取目标。
+        // 请求体是对的，坏在缓存不认这个入参。
+        id: query.id ?? null,
       },
     ] as const,
   options: (sourceKey: string) =>
@@ -234,6 +240,29 @@ function statusWhere(
     : { type: "eq", field: "status", value: status };
 }
 
+/// 表级主键等值条件。详情页用它取「就是这一条」——`id` 已声明 `filterable`。
+///
+/// **不能改用 `search`**：服务端的检索只覆盖 `searchable` 的列，而表级行上只有
+/// `title` 可搜（`source_key` 已经不在表级行上了，它属于字段绑定）。拿一个
+/// `source_key` 去 search 会命中零行，而「零行」会被页面读成「这条数据源不存在」。
+function idWhere(id: number | undefined): Record<string, unknown> | undefined {
+  return id === undefined ? undefined : { type: "eq", field: "id", value: id };
+}
+
+/// 把若干条件折成一棵树：无 → `undefined`（不带 `where`），一条 → 它本身，
+/// 多条 → `and` 组。DSL 的 where 树只有 `and`/`or` 组节点，**没有隐式合取**，
+/// 所以「id 且 状态」必须显式包一层。
+function allWhere(
+  clauses: Array<Record<string, unknown> | undefined>,
+): Record<string, unknown> | undefined {
+  const kept = clauses.filter(
+    (clause): clause is Record<string, unknown> => clause !== undefined,
+  );
+  if (kept.length === 0) return undefined;
+  if (kept.length === 1) return kept[0];
+  return { type: "and", conditions: kept };
+}
+
 /// 列表查询 → 请求体。缺省键一律用 `undefined` 省略，不传空串/空数组。
 export function buildDatasourceListBody(
   query: DatasourceListQuery,
@@ -243,7 +272,7 @@ export function buildDatasourceListBody(
     page: query.page,
     page_size: query.pageSize,
     search: search === "" ? undefined : search,
-    where: statusWhere(query.status),
+    where: allWhere([idWhere(query.id), statusWhere(query.status)]),
     // 恒非空：排序键是分页确定性的前提，调用方给了空数组也要兜住。
     order_by: withStableOrder(query.orderBy),
     count_total: true,
@@ -263,6 +292,82 @@ function buildOptionListBody(query: OptionListQuery): Record<string, unknown> {
 }
 
 /* ------------------------------- 响应解析 -------------------------------- */
+
+/// `list_datasources` 的**前端一半契约**：后端键 ↔ 它落到的前端字段。
+///
+/// 对账方是 `frontend/contracts/feishu-projections.json`（后端 `list_datasources.rs`
+/// 的 `the_committed_contract_*` 读同一份文件），两个方向都堵死：
+///   · 键少了 → 后端发了没人读（死投影）；
+///   · 键多了 → 前端读一个后端不发的键 ⇒ 恒得 `null`，而界面会把它当成
+///     「服务端说没有」，画出一句可查证的假话（`linkage_mapping` 就是这么活了很久的）。
+///
+/// `satisfies` 让编译器再保一层：值必须是真实的字段名，改错字段名编译不过。
+export const DATASOURCE_ITEM_KEYS = {
+  id: "id",
+  title: "title",
+  status: "status",
+  updated_at: "updatedAt",
+  ingest_mode: "ingestMode",
+  bitable_base_token: "bitableBaseToken",
+  bitable_table_id: "bitableTableId",
+  bitable_view_id: "bitableViewId",
+  last_pull_at: "lastPullAt",
+  last_success_at: "lastSuccessAt",
+  consecutive_failures: "consecutiveFailures",
+  last_error: "lastError",
+  fields: "fields",
+} as const satisfies Record<string, keyof DatasourceItem>;
+
+/// 选项行那一半（`list_options` 的 `items[]`）。
+export const OPTION_ITEM_KEYS = {
+  option_id: "optionId",
+  source_key: "sourceKey",
+  label: "label",
+  i18n: "i18n",
+  sort_order: "sortOrder",
+  is_default: "isDefault",
+  enabled: "enabled",
+  parent_key: "parentKey",
+  last_push_at: "lastPushAt",
+  updated_at: "updatedAt",
+} as const satisfies Record<string, keyof OptionItem>;
+
+/// 体检报告那一半（`health_check`）。
+export const HEALTH_REPORT_KEYS = {
+  ok: "ok",
+  missing_fields: "missingFields",
+  view_missing: "viewMissing",
+  table_missing: "tableMissing",
+  unchecked: "unchecked",
+} as const satisfies Record<string, keyof HealthReport>;
+
+/// 体检报告里嵌套的那一项（`missing_fields[]`）——**另一个形状**，单独对账。
+export const HEALTH_MISSING_FIELD_KEYS = {
+  field_id: "fieldId",
+  source_key: "sourceKey",
+} as const satisfies Record<
+  string,
+  keyof HealthReport["missingFields"][number]
+>;
+
+/// 自动拉取排程那一半（`pull_schedule`）。
+export const PULL_SCHEDULE_KEYS = {
+  interval_seconds: "intervalSeconds",
+  next_run_at: "nextRunAt",
+} as const satisfies Record<string, keyof PullScheduleInfo>;
+
+/// 字段绑定那一半。`datasource_id` **不在这里**：它属于契约的 `query_only`
+/// （后端用它把绑定分组到各条数据源上，分组之后就不 emit 了）。
+export const FIELD_BINDING_KEYS = {
+  field_id: "fieldId",
+  field_name: "fieldName",
+  source_key: "sourceKey",
+  parent_field_id: "parentFieldId",
+  enabled: "enabled",
+  encrypt_enabled: "encryptEnabled",
+  default_locale: "defaultLocale",
+  token_rotated_at: "tokenRotatedAt",
+} as const satisfies Record<string, keyof DatasourceFieldBinding>;
 
 function parsePage<T>(
   data: unknown,
@@ -300,6 +405,13 @@ function parseFieldBinding(
     parentFieldId: asNullableString(raw.parent_field_id),
     // `enabled` 缺失时按启用处理：那是存量行（列默认 true）的语义
     enabled: raw.enabled !== false,
+    // 加密返回与默认语言是**绑定级**的：一条数据源有 N 个字段，可以各自加密、
+    // 各自语言。表级行上曾经也有这两个名字，那是字段级时代的残影——读它只会
+    // 恒得 `false` 与 `""`，于是列表上那两列对每一条源都在说同一句假话。
+    // 兜底值刻意**等于列默认值**（`false` / `zh_cn`）：万一投影漏了这一列，
+    // 画面上的值仍与库里的实际值一致，不会凭空多出一句「未加密 / 空语言徽标」。
+    encryptEnabled: raw.encrypt_enabled === true,
+    defaultLocale: asString(raw.default_locale, "zh_cn"),
     tokenRotatedAt: rotatedAtOf(raw),
   };
 }
@@ -326,12 +438,15 @@ function rotatedAtOf(raw: Record<string, unknown>): number | null | undefined {
 function parseDatasourceItem(
   raw: Record<string, unknown>,
 ): DatasourceItem | null {
-  // 表级化之后**表级行上没有 `source_key`**（它在字段绑定上），所以身份改用 `id`。
-  // 但仍然接受只有 `source_key` 的旧形状：那条路径还有消费者（够不着的行会被静默
-  // 丢掉，而「丢掉」会把一条真实存在的数据源显示成不存在）。
-  const sourceKey = asString(raw.source_key);
+  // 表级化之后**表级行上没有 `source_key`**（它在字段绑定上），身份就是主键 `id`。
+  //
+  // 这里曾经还接受「只有 `source_key` 的旧形状」，理由是「那条路径还有消费者」。
+  // 那些消费者（详情页按 source_key 找数据源、`identityLabel` 的兜底）都已经改成
+  // 按 `id`/按绑定定位了，而服务端**从表级化起就不再发这个键**。于是这段容忍
+  // 只剩下一个作用：在类型里保留一条已被否决的身份，让下一个消费方还能拿到它。
+  // 缺 `id` 的行现在直接丢掉——不编，也不猜。
   const id = typeof raw.id === "number" ? raw.id : null;
-  if (id === null && sourceKey === "") return null;
+  if (id === null) return null;
   const rawFields = raw.fields;
   const fields = Array.isArray(rawFields)
     ? rawFields
@@ -343,23 +458,25 @@ function parseDatasourceItem(
   return {
     id,
     fields,
-    sourceKey,
     title: asString(raw.title),
-    encryptEnabled: raw.encrypt_enabled === true,
-    defaultLocale: asString(raw.default_locale),
+    // `encrypt_enabled` / `default_locale` 曾经在这里解析——两者都是**绑定级**属性，
+    // 表级投影里从来没有它们（见 `FieldBindingItem`）。现在归 `parseFieldBinding`。
     status: raw.status === "disabled" ? "disabled" : "active",
     updatedAt: asNumber(raw.updated_at, 0),
     ingestMode: asString(raw.ingest_mode),
     bitableBaseToken: asNullableString(raw.bitable_base_token),
     bitableTableId: asNullableString(raw.bitable_table_id),
     bitableViewId: asNullableString(raw.bitable_view_id),
-    bitableFieldName: asNullableString(raw.bitable_field_name),
-    linkageMapping: asNullableString(raw.linkage_mapping),
+    // `bitable_field_name` 与 `linkage_mapping` 曾经在这里解析——两者都已不在表级行上
+    // （取数列归绑定层；级联映射被逐字段的 `parent_field_id` 取代）。
+    // 后者还活了很久：注释都写对了「都已不在表级行上」，代码却还在读它、恒得 null。
+    // 现在由 `DATASOURCE_ITEM_KEYS` 与契约文件对账，那种「注释对、代码不对」不会再悄悄存在。
     lastPullAt: asNullableNumber(raw.last_pull_at),
     lastSuccessAt: asNullableNumber(raw.last_success_at),
     consecutiveFailures: asNumber(raw.consecutive_failures, 0),
     lastError: asNullableString(raw.last_error),
-    snapshotDigest: asNullableString(raw.snapshot_digest),
+    // `snapshot_digest` 不再解析：表级那一列是**保留列**（谁都不写），摘要归属在字段绑定。
+    // 它曾经被解析进 `snapshotDigest` 并文档成「内容摘要」——而那永远是 null。
   };
 }
 
@@ -1030,12 +1147,16 @@ export function usePullSchedule(): UseQueryResult<PullScheduleInfo | null> {
 /// 某个数据源下的选项（只读）。缺 `feishu.option.read` 时不发请求，页面渲染 403 说明。
 export function useOptionList(
   query: OptionListQuery,
+  options: { enabled?: boolean } = {},
 ): UseQueryResult<ListPage<OptionItem>> {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
   return useQuery({
-    enabled: canReadOptions(catalogData),
+    // 详情页的 `source_key` 现在由它自己解析出的绑定给出，所以会先空一拍。
+    // `enabled` 让它别拿着空串去打接口——`source_key` 是必填入参，
+    // 空串那一发必然是错，而错误的响应看起来和「没有选项」一模一样。
+    enabled: canReadOptions(catalogData) && options.enabled !== false,
     queryKey: feishuQueryKeys.optionList(query),
     queryFn: ({ signal }) =>
       listOptions(query, { catalog: catalogData, session }, signal),

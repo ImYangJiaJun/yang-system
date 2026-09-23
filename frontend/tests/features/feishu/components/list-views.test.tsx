@@ -6,7 +6,10 @@ import { DatasourceCardGrid } from "@/features/feishu/components/DatasourceCardG
 import { DatasourceLedger } from "@/features/feishu/components/DatasourceLedger";
 import { ListPagination } from "@/features/feishu/components/ListPagination";
 import { ListToolbar } from "@/features/feishu/components/ListToolbar";
-import type { DatasourceItem } from "@/features/feishu/types";
+import type {
+  DatasourceFieldBinding,
+  DatasourceItem,
+} from "@/features/feishu/types";
 
 /// 列表的两种渲染 + 工具栏 + 分页：权限门控、可排序列、空/加载分支。
 
@@ -14,35 +17,49 @@ function item(overrides: Partial<DatasourceItem> = {}): DatasourceItem {
   return {
     id: 7,
     fields: [],
-    sourceKey: "dept_sales",
     title: "部门",
-    encryptEnabled: false,
-    defaultLocale: "zh_cn",
     status: "active",
     updatedAt: 1758000000,
     ingestMode: "push",
     bitableBaseToken: null,
     bitableTableId: null,
     bitableViewId: null,
-    bitableFieldName: null,
-    linkageMapping: null,
     lastPullAt: null,
     lastSuccessAt: null,
     consecutiveFailures: 0,
     lastError: null,
-    snapshotDigest: null,
+    ...overrides,
+  };
+}
+
+/// 一条字段绑定。表级化之后**行上的标识来自首个绑定**（`identityLabel`），
+/// 所以卡片/台账上那个等宽标识要靠它才立得住——不给绑定，行上就只剩 `#id`。
+function binding(
+  sourceKey: string,
+  overrides: Partial<DatasourceFieldBinding> = {},
+): DatasourceFieldBinding {
+  return {
+    fieldId: `fld_${sourceKey}`,
+    fieldName: null,
+    sourceKey,
+    parentFieldId: null,
+    enabled: true,
+    encryptEnabled: false,
+    defaultLocale: "zh_cn",
+    tokenRotatedAt: null,
     ...overrides,
   };
 }
 
 const TWO_ITEMS = [
-  item({ sourceKey: "dept_sales", title: "部门" }),
+  // 区分两条行靠主键、标题与各自的首个绑定——`source_key` 不是**表级行**的身份
+  // （一条行有 N 个，全在 `fields` 里）。
+  item({ id: 7, title: "部门", fields: [binding("dept_sales")] }),
   item({
-    sourceKey: "expense_category",
+    id: 8,
     title: "费用类型",
     status: "disabled",
-    encryptEnabled: true,
-    defaultLocale: "en_us",
+    fields: [binding("expense_category", { enabled: false })],
   }),
 ];
 
@@ -70,9 +87,10 @@ describe("DatasourceCardGrid", () => {
     expect(screen.getByText("费用类型")).toBeInTheDocument();
     expect(screen.getByText("expense_category")).toBeInTheDocument();
     expect(screen.getByText("已停用")).toBeInTheDocument();
-    expect(screen.getByText("English")).toBeInTheDocument();
-    // 只有开了「加密返回」的那条才有这个标记
-    expect(screen.getAllByText("加密返回")).toHaveLength(1);
+    // 「加密返回」与「默认语言」**不在这里**：它们是绑定级属性，卡片拿到的表级行上
+    // 没有这两个键。逐字段的取值在详情页的 `FieldBindingsTable`。
+    expect(screen.queryByText("加密返回")).toBeNull();
+    expect(screen.queryByText("English")).toBeNull();
   });
 
   it("无写权限时「⋯」操作菜单不渲染（不是禁用）", () => {
@@ -136,7 +154,8 @@ describe("DatasourceLedger", () => {
     );
     expect(screen.getAllByRole("row")).toHaveLength(3); // 表头 + 两行
     expect(screen.getByText("已停用")).toBeInTheDocument();
-    expect(screen.getByText("简体中文")).toBeInTheDocument();
+    // 「默认语言」列已删（绑定级属性，表级行上没有单一值可显示）。
+    expect(screen.queryByText("简体中文")).toBeNull();
   });
 
   it("只有名称一列可排序：「标识」在表级行上没有单一值，排序会打到不存在的列", () => {
@@ -237,6 +256,28 @@ describe("DatasourceLedger", () => {
 });
 
 describe("ListToolbar", () => {
+  it("搜索框只承诺名称——后端只对表级行的 title 做检索，标识在字段绑定上", () => {
+    // 回归：文案曾经是「搜索名称或标识」。而关键词最终进 `list_datasources` 打在
+    // **表级行**上的 `.search()`，那一行唯一 `searchable` 的列是 `title`（`source_key`
+    // 属于字段绑定，表级行上没有这一列）。于是粘一个真实存在的标识恒得 0 行，
+    // 页面随即渲染「没有匹配的数据源」——对一条确实存在的数据源说了一句假话。
+    // 支持按标识搜要在服务端跨表查；在那之前，文案不能先答应。
+    render(
+      <ListToolbar
+        view="ledger"
+        search=""
+        status="all"
+        onViewChange={vi.fn()}
+        onSearchChange={vi.fn()}
+        onStatusChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("搜索数据源")).toHaveAttribute(
+      "placeholder",
+      "搜索名称",
+    );
+  });
+
   it("视图切换、搜索、状态筛选各自回调", async () => {
     const user = userEvent.setup();
     const onViewChange = vi.fn();

@@ -96,7 +96,12 @@ type ConfirmTarget = {
 };
 
 /// 预检状态。`result` 为 null 表示还在检——这一屏必须显示真实标识。
+///
+/// `datasourceId` 与 `sourceKey` **两个都要**：前者是「哪一条数据源」（详情页的身份，
+/// 路由 `/feishu/datasources/:id`），后者是「哪一条绑定」（预检与轮换都按字段做，
+/// 而 `precheckOutdated` 也要用它判断那条绑定还在不在）。
 type PrecheckState = {
+  datasourceId: number;
   sourceKey: string;
   title: string;
   mode: TokenPrecheckMode;
@@ -238,16 +243,19 @@ export default function DatasourceListPage() {
   }
 
   function openDetail(item: DatasourceItem) {
-    // 详情页仍按**字段标识**路由（选项是按 `source_key` 索引的，一条表级行有 N 个），
-    // 所以取第一条绑定当入口。一条绑定都没有时没有可去的地址——说清楚而不是静默无响应。
-    const sourceKey = item.fields[0]?.sourceKey ?? item.sourceKey;
-    if (sourceKey === "") {
+    // 详情页按**表级主键**路由：一条数据源的身份是 `id`，而 `source_key` 属于
+    // 某一条字段绑定（一条表级行有 N 个）。曾经这里传的是首条绑定的 `source_key`，
+    // 于是详情页只能看那一个字段，且它自己的查询还得反过来按 `source_key` 找数据源。
+    //
+    // 没有绑定不再挡路：详情页本来就要显示「这条源还没勾字段」，那比一个点不动的
+    // 行更该被看见。
+    if (item.id === null) {
       setActionNotice(
-        "这条数据源还没有字段绑定，详情页没有可打开的选项——先用配置向导勾几列。",
+        "这条数据源没有主键，打不开详情页——多半是列表响应缺了 `id`，刷新一次界面目录与列表再试。",
       );
       return;
     }
-    void navigate(`/feishu/datasources/${sourceKey}`);
+    void navigate(`/feishu/datasources/${item.id}`);
   }
 
   /**
@@ -257,16 +265,17 @@ export default function DatasourceListPage() {
    * 服务端只存 SHA-256 摘要，事后无法再校验。失败也不阻塞上面那次操作的结果。
    */
   async function runPrecheck(
+    datasourceId: number,
     sourceKey: string,
     title: string,
     token: string,
     mode: TokenPrecheckMode,
   ) {
-    setPrecheck({ sourceKey, title, mode, result: null });
+    setPrecheck({ datasourceId, sourceKey, title, mode, result: null });
     setPrecheckPending(true);
     try {
       const result = await actions.precheckToken(sourceKey, token);
-      setPrecheck({ sourceKey, title, mode, result });
+      setPrecheck({ datasourceId, sourceKey, title, mode, result });
     } finally {
       setPrecheckPending(false);
     }
@@ -283,6 +292,7 @@ export default function DatasourceListPage() {
       const first = created.credentials[0];
       if (first !== undefined) {
         await runPrecheck(
+          created.datasourceId,
           first.sourceKey,
           submission.title,
           first.token,
@@ -375,7 +385,11 @@ export default function DatasourceListPage() {
           onRotate={() => {
             // 轮换是**逐字段**的，且必须二次确认：所以这里把人送到详情页的
             // 凭据清单，而不是在这一屏直接换掉（那会作废已配好的控件）。
-            void navigate(`/feishu/datasources/${precheck.sourceKey}`);
+            //
+            // 跳转用的是**表级主键**：详情页按 `:id` 路由，而 `source_key` 是一条
+            // 绑定的标识（纯字母数字下划线，永远解析不成数字 id）——把它拼进 URL
+            // 只会让详情页判定「地址里没有有效的主键」，一个请求都不发。
+            void navigate(`/feishu/datasources/${precheck.datasourceId}`);
           }}
         />
       ) : null}

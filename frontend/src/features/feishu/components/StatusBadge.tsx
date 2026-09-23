@@ -109,23 +109,22 @@ export function LocaleBadge({ locale }: { locale: string }) {
   );
 }
 
-/// 列表项上的分组徽标行：状态 + 加密返回 + 默认语言。
+/// 列表项上的分组徽标行。
+///
+/// **只有状态**。它曾经还带「加密返回」与「默认语言」两粒——那两个属性属于
+/// **绑定层**（一条数据源有 N 个字段，可以各自加密、各自语言），而这里拿到的是
+/// **表级行**：那两个键在表级行上早就不存在了，于是徽标恒为「没有」+ 空语言徽标，
+/// 而对每一条数据源都在说同一句假话。它们的正确位置是详情页的字段绑定表。
 export function DatasourceBadgeRow({
   status,
-  encryptEnabled,
-  defaultLocale,
   style,
 }: {
   status: DatasourceStatus;
-  encryptEnabled: boolean;
-  defaultLocale: string;
   style?: CSSProperties;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5" style={style}>
       <DatasourceStatusBadge status={status} />
-      <EncryptBadge enabled={encryptEnabled} />
-      <LocaleBadge locale={defaultLocale} />
     </div>
   );
 }

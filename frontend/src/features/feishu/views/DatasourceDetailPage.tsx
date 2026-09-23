@@ -1,25 +1,33 @@
 /**
- * 某个数据源下的选项（只读）。路由 `/feishu/datasources/:sourceKey`，lazy → default 导出。
+ * 一个数据源的详情页。路由 `/feishu/datasources/:id`，路由级 lazy → 必须 default 导出。
  *
- * 三条设计约束落在这里：
+ * 设计约束落在这里：
  *
- * 1. **只读**：选项只能由飞书多维表格的自动化推送，控制台不提供任何增删改入口
- *    （两个可写入口会让审计语义与数据来源分叉）。所以页面顶部那条说明不是装饰，
- *    它得同时说清「选项从哪来」与两级「停用」的区别——后者最容易在排查时被混淆：
- *    数据源级停用是整个控件取不到选项，选项级停用只影响那一条，且后端是禁用而非删除。
- * 2. **「最近写入」列默认倒序**（`updated_at`）。这一列的语义是「这行选项最后一次被
+ * 1. **身份是表级主键 `id`**。一条数据源 = 一张表 = 一条表级行 + N 条字段绑定；
+ *    `source_key` 属于**绑定**（它要进飞书控件的 URL），不是一条数据源的身份。
+ *    本页曾经按 `:sourceKey` 路由，于是它天生只能看一个字段，而且它**自己的查询**
+ *    还得拿 `source_key` 去 `order_by` 并 `search` 一张没有这一列的**表级**表——
+ *    两处都失败，「查到了哪条数据源」恒为 null，三块面板一起说「查不到这条数据源」。
+ *    这类「表级化删掉的概念还有消费方在引用」的 bug 前后出现过四次，本页是第四次。
+ *    所以 `DatasourceItem` 上干脆不再有 `sourceKey` 字段，由编译器替我们看着。
+ * 2. **只读**：选项只能由多维表格自动化推送或服务端出站拉取写入，控制台不提供任何
+ *    增删改入口（两个可写入口会让审计语义与数据来源分叉）。所以页面顶部那条说明
+ *    不是装饰，它得同时说清「选项从哪来」与两级「停用」的区别：数据源级停用是整个
+ *    控件取不到选项，选项级停用只影响那一条，且后端是禁用而非删除。
+ * 3. **「失败」不等于「空」**。请求被拒（400/403）与服务端确认没有这一行（200 + 空
+ *    结果集）是两件事，下一步动作完全不同（重试/看错误码 vs 回列表确认）。本页把
+ *    它们分成四态（`types.ts` 的 `datasourceGap`），失败态必须把 `status` / `code` /
+ *    `request_id` 原样显示出来——否则排障只能靠猜，而猜错的代价是一个来回：
+ *    上一版把三块都渲染成「查不到这条数据源」，而那条源就在库里、9 条绑定、
+ *    服务端一分钟前刚拉成功。
+ * 4. **选项为空不能断言数据源是好的**：服务端的选项查询对不存在的 `source_key`
+ *    也只回空结果集。所以三个区块统一按同一个 `gap` 渲染，而不是各自判
+ *    `datasource === null`——那样连**加载中**都会被说成「查不到这条数据源」。
+ * 5. **「最近写入」列默认倒序**（`updated_at`）。这一列的语义是「这行选项最后一次被
  *    写是什么时候」，**不是**「推送还活着吗」——出站拉取同样会写这些行，两条路径都会
- *    改 `updated_at`。判断某个数据源的同步是否还活着，看上面「同步」区里的
+ *    改 `updated_at`。判断某个数据源的同步是否还活着，看「同步」区里的
  *    `lastSuccessAt` 与 `consecutiveFailures`。
  *    去重键 `option_id` 恒作收尾，否则同一批写入落下的同一个 unix 秒会让翻页重复或漏行。
- * 3. **缺 `feishu.option.read` 是 403 态而不是空列表**：三个权限位彼此独立，存在
- *    「能看数据源、看不到选项」这种身份，也存在**两粒都没有**的身份——
- *    后者连「可以看数据源本身」都不成立，所以 403 文案按实际拿到的权限分两句说。
- *    那时选项区是空的，但**不代表真的没有选项**，绝不能渲染成「0 选项」。
- * 4. **选项为空不能断言数据源是好的**：服务端的选项查询对不存在的 `source_key`
- *    也只回空结果集。本页额外拉一次数据源列表并按 `sourceKey` 取精确匹配，因此
- *    「取到了这条数据源」与「没取到」是可分辨的——后者会让同步区明说「查不到这条数据源」，
- *    而不是与「还没有选项」混为一谈。
  */
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
@@ -59,26 +67,27 @@ import {
   useOptionList,
   usePullSchedule,
 } from "../api";
-import { CopyField } from "../components/CopyField";
 import { CredentialChecklist } from "../components/CredentialChecklist";
+import { FieldBindingsTable } from "../components/FieldBindingsTable";
 import { DatasourceHealthPanel } from "../components/DatasourceHealthPanel";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { DEFAULT_PAGE_SIZE } from "../list-query";
 import type {
+  DatasourceGap,
   DatasourceItem,
   OptionItem,
   OptionListQuery,
   OrderByClause,
 } from "../types";
 import {
-  approvalOptionsUrl,
   credentialItems,
+  datasourceGap,
   describeNextPull,
   formatUnixSeconds,
-  hasCompleteCoordinates,
   ingestModeLabel,
   localeLabel,
+  orderBindingsForDisplay,
   pullLanded,
   syncHealth,
 } from "../types";
@@ -191,8 +200,99 @@ function SortableHeader({
   );
 }
 
+/// 路由参数 → 表级主键。非数字（旧地址、手输、被截断的链接）返回 `null`，
+/// 由页面把「地址不对」和「这条不存在」分开说。
+function parseDatasourceId(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/// 「这条数据源没渲染出来」的那一块。五种原因分开说（判定在 `types.ts` 的
+/// `datasourceGap`，纯函数可测），这里只负责呈现。
+///
+/// **它存在的唯一理由**：曾经「请求失败」和「没有这一行」渲染成同一句话，于是
+/// 详情页三块全说「查不到这条数据源」，而那条数据源就在库里、9 条绑定、服务端
+/// 一分钟前刚拉成功。排障只能靠猜——猜错一次就是一个来回。所以失败必须带
+/// `status` / `code` / `request_id`，让下一步动作不必靠推理。
+///
+/// **按钮只在真的能重试时给**：加载中给按钮是废话，而「这一行不存在」重试多少次
+/// 也还是不存在——那两个分支的下一步动作是回列表，不是再点一次。
+function DatasourceGapNote({
+  gap,
+  onRetry,
+}: {
+  gap: DatasourceGap;
+  onRetry: () => void;
+}) {
+  if (gap.kind === "loading") {
+    return <Skeleton className="h-24 w-full" />;
+  }
+
+  if (gap.kind === "forbidden") {
+    // 与选项区的 403 说明同一口径：**这条数据源存不存在，这一页确认不了**，
+    // 所以只说「你看不到」，不说「它不存在」。
+    return (
+      <div role="alert" className={ERROR_BAR + " space-y-2"}>
+        <p className="font-medium">当前身份没有查看数据源的权限</p>
+        <p>
+          缺 <code className="font-mono">feishu.datasource.read</code>
+          ——这一栏是空的，
+          <span className="font-medium">不代表它真的不存在</span>
+          。如果刚刚才开通权限，刷新一次界面目录即可。
+        </p>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          <RefreshCw aria-hidden="true" />
+          重新加载权限目录
+        </Button>
+      </div>
+    );
+  }
+
+  if (gap.kind === "failed") {
+    const facts = [
+      gap.status === null ? null : `HTTP ${gap.status}`,
+      gap.code === null ? null : `code ${gap.code}`,
+      gap.requestId === null ? null : `request_id ${gap.requestId}`,
+    ].filter((part): part is string => part !== null);
+    return (
+      <div role="alert" className={ERROR_BAR + " space-y-2"}>
+        <p className="font-medium">
+          读取这条数据源失败——是请求被拒，不是「没有数据」
+        </p>
+        {facts.length > 0 ? (
+          <p className="font-mono text-xs break-all">{facts.join("  ")}</p>
+        ) : null}
+        <p>{gap.message}</p>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          <RefreshCw aria-hidden="true" />
+          重试读取
+        </Button>
+      </div>
+    );
+  }
+
+  // 剩下的两态（地址不合法 / 服务端确认没有这一行）都没有可重试的东西：
+  // 下一步是回列表页，不是再点一次。所以这里**只给话，不给按钮**。
+  return (
+    <p aria-live="polite" className={NEUTRAL_BAR}>
+      {gap.kind === "missing-id"
+        ? "地址里没有有效的数据源主键（列表页里的数字 id）——请从数据源列表点进来。"
+        : "查询成功但没有这一行——这条数据源可能已被删除，回列表页确认一下。"}
+    </p>
+  );
+}
+
 export default function DatasourceDetailPage() {
-  const { sourceKey = "" } = useParams<{ sourceKey: string }>();
+  // 详情页按**表级主键**路由：一条数据源的身份是 `id`。
+  //
+  // 它曾经按 `:sourceKey` 路由 —— 那是**一条字段绑定**的标识，一条表级行有 N 个。
+  // 于是那一版页面只能看一个字段，而且还得反过来用 `source_key` 去查一张根本没有
+  // 这一列的表（`order_by: source_key` → 400，`search: sourceKey` → 检索只覆盖
+  // `title`，命中零行）。两处都失败，`datasource` 恒为 null，整页三块全说
+  // 「查不到这条数据源」——而它就在库里。
+  const { id: rawId } = useParams<{ id: string }>();
+  const datasourceId = parseDatasourceId(rawId);
   const actions = useFeishuActions();
   // 403 态的「重试」重拉的是**界面目录**：权限刚开通时目录还是上一份缓存。
   const catalog = useUiCatalog();
@@ -202,41 +302,78 @@ export default function DatasourceDetailPage() {
     DEFAULT_OPTION_ORDER_BY,
   );
 
-  const query = useMemo<OptionListQuery>(
-    () => ({ sourceKey, page, pageSize, orderBy }),
-    [sourceKey, page, pageSize, orderBy],
-  );
-  const optionsQuery = useOptionList(query);
-  const items = optionsQuery.data?.items ?? [];
-  const total = optionsQuery.data?.total ?? null;
-
-  // 这条数据源本身。取数方式与同步状态都挂在它上面，而本页只从路由拿到 sourceKey
-  // ——没有「取单条数据源」的 Action，所以借列表端点并**在本地取精确匹配**：
-  // 服务端的 search 是模糊的（LIKE 命中 source_key 或 title），可能带回别的行。
+  // 这条数据源本身。没有「取单条数据源」的 Action，所以借列表端点 + **一个 `id`
+  // 等值条件**（`id` 已声明 `filterable`）。不再用 `search`：检索只覆盖 `searchable`
+  // 的列，而表级行上只有 `title` 可搜。
   const datasourceListQuery = useMemo(
     () => ({
       page: 1,
-      pageSize: 50,
-      search: sourceKey,
+      pageSize: 1,
+      search: "",
       status: "all" as const,
-      orderBy: [{ field: "source_key", direction: "Asc" as const }],
+      orderBy: [{ field: "id", direction: "Asc" as const }],
+      ...(datasourceId === null ? {} : { id: datasourceId }),
     }),
-    [sourceKey],
+    [datasourceId],
   );
   // 「立即拉取」的触发状态。轮询只在 pending 期间打开——常态下这个列表没有轮询的必要。
   const [pull, setPull] = useState<PullTrigger>({ kind: "idle" });
   const datasourceQuery = useDatasourceList(datasourceListQuery, {
+    // 地址里没有合法主键时**不要发**这一发：发出去的就是「随便给我一条」。
+    enabled: datasourceId !== null,
     refetchInterval: pull.kind === "pending" ? PULL_POLL_MS : false,
   });
-  // 表级化之后表级行上没有 `source_key`（它在每条字段绑定上），所以按两处定位：
-  // 表级行的 `source_key`（旧形状）**或**任一绑定的 `source_key`（新形状）。
-  // 后者正是路由参数在表级世界里的含义——一个字段的取数标识。
   const datasource: DatasourceItem | null =
-    datasourceQuery.data?.items.find(
-      (item) =>
-        item.sourceKey === sourceKey ||
-        item.fields.some((binding) => binding.sourceKey === sourceKey),
-    ) ?? null;
+    datasourceQuery.data?.items[0] ?? null;
+
+  // 取不到就是取不到——**不许把「查询失败」和「没有这一行」折进同一个 null**。
+  // 这两件事的下一步动作完全不同（重试/看错误码 vs 回列表），而折平之后页面
+  // 只能替用户断言一个原因，那个断言是错的。
+  const gap = datasourceGap({
+    id: datasourceId,
+    canRead: actions.canRead,
+    isPending: datasourceQuery.isPending,
+    isError: datasourceQuery.isError,
+    error: datasourceQuery.error,
+    present: datasource !== null,
+  });
+
+  // 选项是按 `source_key` 索引的，而 `source_key` 属于**一条绑定**：一条数据源有 N 个。
+  // 默认看第一条**启用中**的绑定，点上面那张字段表可以把下面的选项切到别的字段。
+  //
+  // 选择态存 `sourceKey`（不是下标）：回读之后绑定可能被停用/删掉，按下标会切到
+  // 另一条绑定上，而按标识比对的最坏结果是「回到默认那一条」，不会指错字段。
+  const [selectedSourceKey, setSelectedSourceKey] = useState<string | null>(
+    null,
+  );
+  const bindings = datasource?.fields ?? [];
+  // 默认按**展示序**取第一条启用中的绑定，而不是数组里的第一条：上面的字段表就是
+  // 按展示序画的，取别的话高亮行会停在表中间某一行的位置，看着像「它替你选了一个
+  // 八竿子打不着的字段」。
+  const orderedBindings = orderBindingsForDisplay(bindings).map(
+    (entry) => entry.binding,
+  );
+  const defaultSourceKey =
+    orderedBindings.find((binding) => binding.enabled)?.sourceKey ??
+    orderedBindings[0]?.sourceKey ??
+    "";
+  // 选中的那条已经不在集合里时（刚被停用/删掉）回落到默认，而不是让下面显示一个
+  // 已经不存在的字段的选项——那种「空」会被读成「这个字段没有选项」。
+  const optionSourceKey =
+    selectedSourceKey !== null &&
+    bindings.some((binding) => binding.sourceKey === selectedSourceKey)
+      ? selectedSourceKey
+      : defaultSourceKey;
+
+  const query = useMemo<OptionListQuery>(
+    () => ({ sourceKey: optionSourceKey, page, pageSize, orderBy }),
+    [optionSourceKey, page, pageSize, orderBy],
+  );
+  const optionsQuery = useOptionList(query, {
+    enabled: optionSourceKey !== "",
+  });
+  const items = optionsQuery.data?.items ?? [];
+  const total = optionsQuery.data?.total ?? null;
 
   // 落定：`lastPullAt` 变了就说明这一轮跑过了。**成功失败都算**（见 `pullLanded`）——
   // 失败的一轮同样写了 `last_pull_at`，拿它当判据是为了不让按钮在失败时一直转。
@@ -256,6 +393,16 @@ export default function DatasourceDetailPage() {
     );
     return () => window.clearTimeout(timer);
   }, [pull]);
+
+  /// 重试的动作按缺口种类分：**权限不足要重拉界面目录**（权限刚开通时目录还是
+  /// 上一份缓存，而那一发查询因 `enabled: false` 根本没发过），其余都是重取这条数据源。
+  function retryDatasource() {
+    if (gap?.kind === "forbidden") {
+      void catalog.refetch();
+      return;
+    }
+    void datasourceQuery.refetch();
+  }
 
   async function handlePullNow() {
     // 拉取的单位是**表**，所以定位用的是表级主键 `id`——不是路由里那个
@@ -298,11 +445,13 @@ export default function DatasourceDetailPage() {
           返回数据源列表
         </Link>
         <div className="space-y-1">
-          <h1 className="font-mono text-xl font-semibold">
-            {sourceKey === "" ? "数据源" : sourceKey}
+          <h1 className="text-xl font-semibold">
+            {datasource?.title ??
+              (datasourceId === null ? "数据源" : `数据源 #${datasourceId}`)}
           </h1>
           <p className="text-sm text-muted-foreground">
-            这个数据源下已推送的选项（只读）
+            一条数据源对应一张表（`id` = {datasourceId ?? "—"}
+            ），选项按字段分别索引。
           </p>
         </div>
       </div>
@@ -316,66 +465,82 @@ export default function DatasourceDetailPage() {
         （下面状态列里的「已停用」）只影响那一条，而且后端是把它禁用而不是删除，改回来就恢复。
       </p>
 
-      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-        <h2 className="text-base font-medium">同步</h2>
-        {sourceKey === "" ? (
-          <p className={NEUTRAL_BAR}>
-            地址里没有数据源标识，无法确定要看哪一个数据源。
-          </p>
-        ) : datasourceQuery.isPending ? (
-          <Skeleton className="h-24 w-full" />
-        ) : datasource === null ? (
-          <p aria-live="polite" className={NEUTRAL_BAR}>
-            查不到这条数据源——它可能已被删除，或者当前身份读不到它。
-          </p>
-        ) : (
-          <SyncPanel
-            item={datasource}
-            pull={pull}
-            onPullNow={() => void handlePullNow()}
-          />
-        )}
-      </section>
+      {/* 这条数据源取不到时，**只在一处**说明原因。三个区块共用同一个依赖
+          （那一条表级行），在三个标题下重复同一句话、还各带一个「重试」，
+          是把一个事实说三遍——而它们说的还可能都是错的（见 `DatasourceGapNote`）。 */}
+      {gap !== null ? (
+        <DatasourceGapNote gap={gap} onRetry={retryDatasource} />
+      ) : null}
 
-      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-        <h2 className="text-base font-medium">体检</h2>
-        {datasource === null ? (
-          <p aria-live="polite" className={NEUTRAL_BAR}>
-            查不到这条数据源，体检无从谈起。
-          </p>
-        ) : (
-          <HealthSection datasource={datasource} />
-        )}
-      </section>
+      {gap === null && datasource !== null ? (
+        <>
+          <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+            <h2 className="text-base font-medium">同步</h2>
+            <SyncPanel
+              item={datasource}
+              pull={pull}
+              onPullNow={() => void handlePullNow()}
+            />
+          </section>
 
-      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-        <h2 className="text-base font-medium">
-          凭据清单（每字段一组 URL + Token）
-        </h2>
-        {datasource === null ? (
-          <p aria-live="polite" className={NEUTRAL_BAR}>
-            查不到这条数据源，取不到它的字段绑定。
-          </p>
-        ) : (
-          <CredentialSection datasource={datasource} />
-        )}
-      </section>
+          <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+            <h2 className="text-base font-medium">体检</h2>
+            <HealthSection datasource={datasource} />
+          </section>
+
+          <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+            <h2 className="text-base font-medium">
+              凭据清单（每字段一组 URL + Token）
+            </h2>
+            <CredentialSection datasource={datasource} />
+          </section>
+        </>
+      ) : null}
 
       <section className="space-y-3 rounded-xl border border-border bg-card p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-base font-medium">选项</h2>
-          {total !== null && optionsQuery.isSuccess ? (
+          {total !== null &&
+          optionsQuery.isSuccess &&
+          !optionsQuery.isPlaceholderData ? (
             <span className="text-xs text-muted-foreground tabular-nums">
               共 {total} 条
             </span>
           ) : null}
         </div>
 
-        {sourceKey === "" ? (
-          <p aria-live="polite" className={NEUTRAL_BAR}>
-            地址里没有数据源标识，无法确定要看哪一个数据源。请从列表页点进来。
-          </p>
-        ) : !actions.canReadOptions ? (
+        {gap === null && datasource !== null && bindings.length > 0 ? (
+          <div className="space-y-3">
+            <FieldBindingsTable
+              bindings={bindings}
+              selectedSourceKey={optionSourceKey}
+              onSelect={(sourceKey) => {
+                setSelectedSourceKey(sourceKey);
+                // 切字段是一次**结果集变更**，必须回到第 1 页（仓库既有规则见
+                // `list-query.ts` 顶部）。不回去的后果不是「看到第 2 页」：新字段的
+                // 第 2 页可能不存在，服务端回空 items 而 `count_total` 仍给真值，
+                // 于是「共 N 条」与空态同时出现，而空态分支**不渲染分页控件**——
+                // 人被卡在那一页，点别的字段也还是同一页码，只能整页重载。
+                setPage(1);
+              }}
+            />
+            <p className="text-xs text-muted-foreground">
+              下面这张表是
+              <span className="font-medium">
+                「
+                {bindings.find(
+                  (binding) => binding.sourceKey === optionSourceKey,
+                )?.fieldName ?? optionSourceKey}
+                」
+              </span>
+              的选项。点上面任意一行可以切到那个字段——级联的父列紧挨在它的子列上方。
+            </p>
+          </div>
+        ) : null}
+
+        {/* 权限不足**最先判**：那时数据源那一发请求根本没发，
+            `gap` 会是 `forbidden`/`loading`，而这两态都答不出「有没有选项」。 */}
+        {!actions.canReadOptions ? (
           <div className="space-y-3">
             <div
               role="alert"
@@ -403,6 +568,14 @@ export default function DatasourceDetailPage() {
               重试
             </Button>
           </div>
+        ) : gap !== null ? (
+          <p aria-live="polite" className={NEUTRAL_BAR}>
+            这条数据源还没取到，所以不知道选项该按哪个字段取——先看上面那条说明。
+          </p>
+        ) : optionSourceKey === "" ? (
+          <p aria-live="polite" className={NEUTRAL_BAR}>
+            这条数据源还没有字段绑定，所以没有可看的选项。用配置向导给它勾几列。
+          </p>
         ) : optionsQuery.isError ? (
           <div
             role="alert"
@@ -422,7 +595,12 @@ export default function DatasourceDetailPage() {
               重试
             </Button>
           </div>
-        ) : optionsQuery.isPending ? (
+        ) : optionsQuery.isPending || optionsQuery.isPlaceholderData ? (
+          // `isPlaceholderData` **必须**并进来：`keepPreviousData` 让切字段那一帧先拿
+          // **上一个字段**的 items/total 顶上，而那一刻 `isPending` / `isError` 都是
+          // false、`isSuccess` 还是 true。不排除它，画出来的就是「新字段的名字 + 旧字段
+          // 的行」，旧字段恰好为空时还会对新字段说「还没有选项推过来」——一句当场可证伪
+          // 的假话。列表页早已这么判（`DatasourceListPage` 的 `settled`），沿用同一条纪律。
           <Table>
             <TableBody>
               {Array.from({ length: SKELETON_ROWS }, (_, index) => (
@@ -435,7 +613,7 @@ export default function DatasourceDetailPage() {
             </TableBody>
           </Table>
         ) : items.length === 0 ? (
-          <OptionEmptyState sourceKey={sourceKey} />
+          <OptionEmptyState sourceKey={optionSourceKey} />
         ) : (
           <>
             <OptionTable items={items} orderBy={orderBy} onSort={toggleSort} />
@@ -697,15 +875,24 @@ function SyncPanel({
     ["取数方式", ingestModeLabel(item.ingestMode)],
     ["Base Token", item.bitableBaseToken ?? "—"],
     ["数据表 ID", item.bitableTableId ?? "—"],
-    ["视图 ID", item.bitableViewId ?? "—"],
-    ["取数列", item.bitableFieldName ?? "—"],
+    // 视图可空 = **整表拉取**，不是「缺一个坐标」。写「—」会被读成后者。
+    [
+      "视图 ID",
+      item.bitableViewId ?? (item.ingestMode === "pull" ? "整表" : "—"),
+    ],
+    // 「取数列」这一行删掉了：一条表级行有 N 条绑定，每条各自取自己那一列，
+    // 单一取数列在表级模型里**不存在**（它曾经恒显示「—」）。改报绑定数，
+    // 那才是这张表真实的形状；每个字段各自的标识与凭据在下面的「凭据清单」里。
+    [
+      "取数字段",
+      `${item.fields.filter((binding) => binding.enabled).length} 个启用中（共 ${item.fields.length} 条绑定）`,
+    ],
     ["最近成功同步", formatUnixSeconds(item.lastSuccessAt ?? 0)],
     ["最近尝试拉取", formatUnixSeconds(item.lastPullAt ?? 0)],
     ["下次自动拉取", nextPull.label],
   ];
-  if (item.bitableFieldName !== null && !hasCompleteCoordinates(item)) {
-    rows.push(["提示", "坐标不全，服务端每轮都会跳过这个数据源"]);
-  }
+  // 「坐标不全」不再在这里补一行：顶部的 `syncHealth` 徽章已经会说这件事，
+  // 而它的判据（Base Token + 数据表 ID）现在与表级模型一致。
 
   return (
     <div className="space-y-3">
@@ -757,11 +944,12 @@ function SyncPanel({
         </p>
       ) : null}
 
-      <CopyField
-        value={approvalOptionsUrl(window.location.origin, item.sourceKey)}
-        label="取选项接口地址（粘到飞书审批后台的外部选项配置里）："
-        hint="按当前站点的地址拼出来的。若飞书要访问的是另一个域名（例如加了 TLS 边缘之后），以那个域名为准。"
-      />
+      {/*
+        这里曾经有一块「取选项接口地址」：一条数据源一个地址。表级化之后**一条数据源
+        有 N 个地址**（每个字段一个 `source_key`），所以那一块已经没有单一值可填——
+        它读的还是表级行上那个已被删除的 `source_key`。地址改到「凭据清单」里
+        一行一个，那里才是它的归属。
+      */}
 
       {item.lastError !== null ? (
         <div className="space-y-1">

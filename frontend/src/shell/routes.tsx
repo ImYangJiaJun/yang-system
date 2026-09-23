@@ -84,7 +84,11 @@ export const appRoutes = [
             }),
           },
           {
-            path: "feishu/datasources/:sourceKey",
+            // 详情页按**表级主键**路由。它曾经按 `:sourceKey`（一条字段绑定的标识）
+            // 路由，那是字段级时代的身份：一条表级行有 N 个 source_key，页面因此
+            // 天生只能看一个字段，且查询端还拿它去 order_by/搜一张没有这一列的表。
+            // 「一条数据源」的身份是 `id`；`source_key` 只在选项与凭据两处局部使用。
+            path: "feishu/datasources/:id",
             lazy: async () => ({
               Component: (
                 await import("@/features/feishu/views/DatasourceDetailPage")
