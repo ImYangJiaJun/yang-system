@@ -44,11 +44,18 @@ pub async fn sync_with_database(
     result
 }
 
-fn infrastructure_definitions() -> Result<[TableDefinition; 6], BaseError> {
+fn infrastructure_definitions() -> Result<[TableDefinition; 9], BaseError> {
     Ok([
         authorization_outbox()?,
         audit_event()?,
+        // 权限组的三张运行支撑表：组-权限条目、用户-组关系、引导哨兵。
+        crate::addon::access::domain::groups::tables::group_items_table_spec()?
+            .table_definition()?,
         password_reset_token()?,
+        crate::addon::access::domain::groups::tables::user_group_table_spec()?
+            .table_definition()?,
+        crate::addon::access::domain::groups::tables::system_owner_table_spec()?
+            .table_definition()?,
         user_session()?,
         login_event()?,
         user_avatar()?,
@@ -294,7 +301,10 @@ mod tests {
             [
                 "authorization_outbox",
                 "audit_event",
+                "permission_group_item",
                 "password_reset_token",
+                "user_group",
+                "system_owner",
                 "user_session",
                 "login_event",
                 "user_avatar",
