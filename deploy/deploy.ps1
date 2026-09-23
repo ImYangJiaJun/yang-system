@@ -11,6 +11,12 @@
 # 【同事上手：只需改下面 param 里的 3 个 SSH 默认值】
 #   把 $SshUser / $SshHost / $SshKey 改成你自己的，然后直接运行即可。
 #
+#   ⚠️ 但**先看这一条**：本脚本的 -EdgeBindAddr 默认是 0.0.0.0，含义是
+#      「把应用边缘发布到**所有网卡**」，也就是**明文 http 直接暴露到公网**。
+#      本仓库当前的部署目标（测试环境）就是这么用的；如果你的环境不需要公网直连，
+#      请显式传 `-EdgeBindAddr 127.0.0.1`，否则你会在不知情的情况下开放一个
+#      明文入口——登录凭据与密码重置令牌都会在公网上明文传输。
+#
 # 用法：
 #   .\deploy.ps1                  # 完整：build + save + 上传 + 远程 smoke + cutover
 #   .\deploy.ps1 -Mode upload     # 只 build + 上传，不触发远程
@@ -49,13 +55,18 @@ param(
     [string]$TarFile = 'yang-system-images.tar.gz',
     [string]$DeployScript = 'deploy-blue-green.sh',
 
-    # 应用边缘（宿主 8154）的发布绑定地址。
-    #   127.0.0.1（默认）= 只对宿主机可见，公网访问交给宿主机上的受信 TLS 边缘。
-    #   0.0.0.0          = 直接用「公网 IP:8154」访问。⚠️ 那是**明文 http 直连公网**，
-    #                      凭据 / 会话 Cookie / 密码重置令牌都会以明文传输，仅适合临时联调。
-    # 注意：管理面 9154 **不受本参数影响**，始终只绑 loopback（见 deploy-blue-green.sh）；
-    #       否则把这里改成 0.0.0.0 会顺手把 /metrics 一起挂到公网上。
-    [string]$EdgeBindAddr = '127.0.0.1',
+    # 应用边缘（宿主端口）的发布绑定地址。
+    #   **本文件默认 0.0.0.0** —— 这台部署目标（测试环境）就是要用「公网 IP:18654」直接访问，
+    #   所以默认值取公网。改成 127.0.0.1 会让线上容器只绑 loopback、公网立刻不可达。
+    #   ⚠️ 0.0.0.0 是**明文 http 直连公网**：凭据 / 会话 Cookie / 密码重置令牌都会以明文传输。
+    #   ⚠️ **同事注意**：「拿本脚本部署 = 默认把应用暴露到公网」。若你的环境不需要公网直连，
+    #      务必显式传 `-EdgeBindAddr 127.0.0.1`，并把边缘交给宿主机上的受信 TLS 代理。
+    #   注意 deploy-blue-green.sh 里 BIND_ADDR 的默认值**仍是 127.0.0.1**（被 CI 部署合同
+    #   门禁 frontend/scripts/verify-deployment-contract.mjs 锁定，不要改）——本参数的作用
+    #   就是每次显式覆盖它，所以这里的默认值才是实际生效的那个。
+    #   管理面 9154 不受本参数影响，始终只绑 loopback（见 deploy-blue-green.sh 的
+    #   METRICS_BIND_ADDR），公网不可见。
+    [string]$EdgeBindAddr = '0.0.0.0',
 
     # 应用边缘的宿主端口（线上）。
     # 留空 = 用 deploy-blue-green.sh 里的默认值（当前 18654）——**刻意让默认值只有
@@ -103,6 +114,31 @@ function Exec([scriptblock]$block) {
     if ($LASTEXITCODE -ne 0) { throw "命令失败（退出码 $LASTEXITCODE）" }
 }
 
+# 构造远端 deploy-blue-green.sh 需要的环境变量前缀。
+#
+# ⚠️ **本脚本每个影响部署的参数都必须在这里转发**。漏转发的后果不是「报错」而是
+#    **静默不生效**：远端取自己的默认值，本地传的参数形同虚设。最坏的一种是
+#    `-BackendImage foo:v2` —— 脚本仍跑旧镜像，还会把 foo:v2 当「未使用」prune 掉，
+#    最后打印「部署完成 ✔」。（2026-09-23 审计发现：BACKEND_IMAGE / FRONTEND_IMAGE /
+#    BACKEND_TAR / APP_DIR 四个当时全都没转发，而 -RemoteDir 只用在 `cd` 上——
+#    远端脚本自己还会 `cd "$APP_DIR"` 一次，不转发就会落到默认目录。）
+#    对照表：-RemoteDir→APP_DIR、-BackendImage→BACKEND_IMAGE、-FrontendImage→
+#    FRONTEND_IMAGE、-TarFile→BACKEND_TAR、-EdgeBindAddr→BIND_ADDR、-LiveHostPort→LIVE_HOST_PORT。
+#    远端认的其余变量（NET / CONFIG_FILE / 各容器名 / GREEN_* / METRICS_*）本脚本没有
+#    对应参数，需要时请在服务器上直接调 deploy-blue-green.sh。
+function Get-RemoteEnv {
+    $pairs = [ordered]@{
+        'APP_DIR'        = $RemoteDir
+        'BACKEND_IMAGE'  = $BackendImage
+        'FRONTEND_IMAGE' = $FrontendImage
+        'BACKEND_TAR'    = $TarFile
+        'BIND_ADDR'      = $EdgeBindAddr
+    }
+    # 留空 = 不传，让 deploy-blue-green.sh 的默认值生效（默认值只有一处事实源）。
+    if ($LiveHostPort) { $pairs['LIVE_HOST_PORT'] = $LiveHostPort }
+    ($pairs.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
+}
+
 function Invoke-Remote([string]$remoteCommand) {
     # BIND_ADDR 只影响真正发布容器的子命令（smoke / cutover / deploy），其余子命令忽略它。
     # 用环境变量前缀传进去，**刻意不改动 deploy-blue-green.sh 里那个被 CI 部署合同门禁
@@ -111,9 +147,7 @@ function Invoke-Remote([string]$remoteCommand) {
     #    这里绝不能再拼一次 ./$DeployScript——那会变成
     #    `./deploy-blue-green.sh ./deploy-blue-green.sh deploy`，main() 按 $1 派发时
     #    收到 './deploy-blue-green.sh' 落入 *) 分支，所有 Mode 都会打 usage 后 exit 1。
-    $envPrefix = "BIND_ADDR=$EdgeBindAddr"
-    if ($LiveHostPort) { $envPrefix += " LIVE_HOST_PORT=$LiveHostPort" }
-    Exec { ssh -n @SshOpts -i $SshKey $sshTarget "cd $RemoteDir && chmod +x $DeployScript && $envPrefix $remoteCommand" }
+    Exec { ssh -n @SshOpts -i $SshKey $sshTarget "cd $RemoteDir && chmod +x $DeployScript && $(Get-RemoteEnv) $remoteCommand" }
 }
 
 # ---------- 仅远程操作，不打包 ----------
@@ -231,7 +265,10 @@ if (Test-Path $tarGz) {
 # ---------- 4. 触发远程 ----------
 if ($Mode -eq 'upload') {
     Write-Host "`n上传完成（未触发远程）。可手动执行：" -ForegroundColor Green
-    Write-Host "  服务器上：cd $RemoteDir && chmod +x $DeployScript && ./$DeployScript smoke"
+    # ⚠️ 这条提示必须带上与脚本自身**相同**的环境变量前缀。以前它是裸的
+    #    `./deploy-blue-green.sh smoke`，照抄就会落到 .sh 的默认绑定（loopback）上——
+    #    「脚本自己跑」与「照提示跑」得到不同的发布结果（2026-09-23 审计发现）。
+    Write-Host "  服务器上：cd $RemoteDir && chmod +x $DeployScript && $(Get-RemoteEnv) ./$DeployScript smoke"
     exit 0
 }
 Write-Host "`n==> [5/5] 远程执行 $Mode" -ForegroundColor Cyan

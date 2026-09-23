@@ -79,10 +79,11 @@ METRICS_GREEN_PORT="${METRICS_GREEN_PORT:-9155}"
 #    合同门禁会失败（门禁允许运维在调用时用环境变量显式覆盖，但不允许改默认值）。
 BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
 
-# 管理面（宿主 9154，容器内 9090）的绑定地址。**刻意与 BIND_ADDR 分开、且不可配置
-# 为公网**：管理面暴露 `/metrics` 与带依赖检查的 `/health/ready`，只应给采集端/探针，
-# 不该跟应用边缘一起对公网开放。这就是为什么上面把 BIND_ADDR 改成 0.0.0.0 时，
-# 9154 仍然留在 loopback 上。
+# 管理面（宿主 9154，容器内 9090）的绑定地址。**默认与 BIND_ADDR 分开**：管理面暴露
+# `/metrics` 与带依赖检查的 `/health/ready`，只应给采集端/探针，所以默认不随应用边缘
+# 一起对公网开放——把 BIND_ADDR 改成 0.0.0.0 时，9154 仍然留在 loopback 上。
+# ⚠️ 但它**是可以被覆盖的**（`METRICS_BIND_ADDR=0.0.0.0` 完全合法）。真那么做等于把
+#    /metrics 与 /health/ready 一并暴露出去，先确认那是你要的。
 METRICS_BIND_ADDR="${METRICS_BIND_ADDR:-127.0.0.1}"
 
 # ---------- 输出 ----------
@@ -95,24 +96,43 @@ die()  { err "$*"; exit 1; }
 
 # ---------- 工具 ----------
 need()    { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1，请先安装"; }
-exists()  { docker ps -a --format '{{.Names}}' | grep -qxF "$1"; }
-running() { docker ps    --format '{{.Names}}' | grep -qxF "$1"; }
+# ⚠️ 这两个判据**必须区分「容器真的不在」与「docker 根本没答上来」**。
+#    它们的返回值直接驱动「备份线上容器 / 跳过（首次部署？）」这类分支：
+#    若把 docker 不可达静默当成「不存在」，cutover 会跳过备份，紧接着 start_pair 的
+#    docker rm -f 会把线上那对容器**直接删掉**——回退源被销毁，而输出只说「首次部署」。
+#    （2026-09-23 审计发现；同一条规矩此前只修了 ensure_database 里的查询，漏了这里。）
+exists() {
+  local names
+  names=$(docker ps -a --format '{{.Names}}') \
+    || die "docker 不可达：docker ps 失败。请确认 Docker 在运行、当前用户有权限（docker 组）。"
+  printf '%s\n' "$names" | grep -qxF "$1"
+}
+running() {
+  local names
+  names=$(docker ps --format '{{.Names}}') \
+    || die "docker 不可达：docker ps 失败。请确认 Docker 在运行、当前用户有权限（docker 组）。"
+  printf '%s\n' "$names" | grep -qxF "$1"
+}
 
 cd "$APP_DIR" || die "找不到部署目录：$APP_DIR"
 
 # 精确清理：只删「yang-system 开头」且未被任何容器（含已停止的蓝容器）引用的旧镜像，
 # 不碰同机其它项目的镜像，也不做宿主机全局 prune。
 prune_unused_images() {
-  local repo_tag
-  for repo_tag in $(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^yang-system-(backend|frontend)' || true); do
-    if docker ps -a --filter "ancestor=${repo_tag}" --format '{{.ID}}' 2>/dev/null | grep -q .; then
+  # ⚠️ 这里以前吞掉两条 docker 的失败：`docker images … || true` 在守护进程不可达时
+  #    会让循环空转（**什么都没清理，而 cutover 随后照打「部署完成 ✔」**）；
+  #    `docker ps -a … 2>/dev/null` 失败则一律走进「未使用」分支，rmi 失败后再编一个
+  #    「可能仍被引用」的理由——真实原因是 docker 不可达。现在失败即中止，理由用原始报错。
+  local images repo_tag err
+  images=$(docker images --format '{{.Repository}}:{{.Tag}}') \
+    || die "docker 不可达：docker images 失败，镜像清理未执行。"
+  for repo_tag in $(printf '%s\n' "$images" | grep -E '^yang-system-(backend|frontend)' || true); do
+    if docker ps -a --filter "ancestor=${repo_tag}" --format '{{.ID}}' | grep -q .; then
       info "使用中，保留：${repo_tag}"
+    elif err=$(docker rmi "$repo_tag" 2>&1); then
+      ok "已删除未使用镜像：${repo_tag}"
     else
-      if docker rmi "$repo_tag" >/dev/null 2>&1; then
-        ok "已删除未使用镜像：${repo_tag}"
-      else
-        warn "删除失败（可能仍被引用）：${repo_tag}"
-      fi
+      warn "删除失败：${err:-未知原因}"
     fi
   done
 }
@@ -291,10 +311,29 @@ remove_pair() { docker rm -f "$2" "$1" >/dev/null 2>&1 || true; }
 
 # 健康检查：应用边缘（nginx 首页）+ 后端管理面 readiness。
 # 首页在未登录时会 307 跳登录，属正常，不能只认 200。
+# ⚠️ 探针 curl 的两条硬规矩：
+#  (1) **必须 --noproxy '*'**。本文件自己就写过「代理会让 curl 给出误导结果」，而 curl 对
+#      **127.0.0.1 同样会走 http_proxy**（实测 curl 8.21）。部署 shell 里只要 export 了
+#      http_proxy，所有健康检查都会失败——服务完全正常，脚本却报「健康检查未通过」，
+#      并把理由指向 MySQL/Redis 或端口。
+#  (2) **必须 --max-time**。否则一次挂起的连接就吃掉整个预算，打印的「最多 60 秒」并不成立。
+probe_code() {
+  curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 5 "$1" 2>/dev/null || echo 000
+}
+
+# 探针该打哪个主机：绑 0.0.0.0（或空）时用 127.0.0.1（一定可达）；绑具体地址时就用那个地址。
+# 写死 127.0.0.1 会在 `-EdgeBindAddr <宿主IP>` 时**假报「边缘无响应」**——容器其实好好的。
+probe_host() {
+  case "${1:-}" in
+    0.0.0.0|"") echo 127.0.0.1 ;;
+    *)          echo "$1" ;;
+  esac
+}
+
 wait_http() {
   local url="$1" tries="${2:-40}" code i
   for ((i=1; i<=tries; i++)); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)
+    code=$(probe_code "$url")
     [[ "$code" =~ ^(2|3)[0-9][0-9]$ ]] && return 0
     sleep 2
   done
@@ -305,7 +344,7 @@ wait_http() {
 wait_ready() {
   local port="$1" tries="${2:-40}" code i
   for ((i=1; i<=tries; i++)); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/health/ready" 2>/dev/null || echo 000)
+    code=$(probe_code "http://$(probe_host "$METRICS_BIND_ADDR"):${port}/health/ready")
     [[ "$code" == "200" ]] && return 0
     sleep 2
   done
@@ -320,7 +359,7 @@ health_check() {
     warn "$label 后端 readiness 未通过（检查 MySQL/Redis 与 config.cloud.toml）"
     return 1
   fi
-  if wait_http "http://127.0.0.1:${host_port}/" 15; then
+  if wait_http "http://$(probe_host "$BIND_ADDR"):${host_port}/" 15; then
     ok "$label 应用边缘 HTTP 响应正常"
   else
     warn "$label 应用边缘无响应"
@@ -330,12 +369,21 @@ health_check() {
 
 # ---------- 子命令 ----------
 cmd_status() {
+  need docker
   echo "容器："
-  docker ps -a --filter "name=yang-" --format '  {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+  # ⚠️ 这里以前把三条 docker 的失败全部吞掉（`2>/dev/null || true` / `|| echo 不存在`）。
+  #    docker 守护进程不可达时，整份报告会显示成「容器为空、镜像为空、网络不存在」——
+  #    一个完全错误的方向，而真实原因是 docker 根本连不上（2026-09-23 审计发现）。
+  #    故障时 status 往往是最先跑的命令，所以它最不该骗人。
+  docker ps -a --filter "name=yang-" --format '  {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
   echo "镜像："
-  docker images --format '  {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}' 2>/dev/null | grep -E 'yang-system-(backend|frontend)' || true
+  docker images --format '  {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}' | grep -E 'yang-system-(backend|frontend)' || echo "  (无 yang-system-* 镜像)"
   echo "网络："
-  docker network inspect "$NET" -f '  {{.Name}} ({{len .Containers}} 个容器)' 2>/dev/null || echo "  $NET 不存在"
+  if docker network inspect "$NET" >/dev/null 2>&1; then
+    docker network inspect "$NET" -f '  {{.Name}} ({{len .Containers}} 个容器)'
+  else
+    echo "  $NET 不存在"
+  fi
 }
 
 cmd_logs() {
@@ -415,15 +463,23 @@ prepare() {
   local old_backend old_frontend
   old_backend=$(docker inspect -f '{{.Image}}' "$LIVE_BACKEND" 2>/dev/null || true)
   old_frontend=$(docker inspect -f '{{.Image}}' "$LIVE_FRONTEND" 2>/dev/null || true)
+  # ⚠️ `docker tag … || true` 会吞掉失败却仍宣布「已备份」——备份不成立时回退会**悄悄
+  #    落到上上版**，而任何一条输出都不会揭示差异（2026-09-23 审计发现）。
   if [ -n "$old_backend" ]; then
-    docker tag "$old_backend" "$BACKEND_BACKUP" >/dev/null 2>&1 || true
-    ok "旧后端镜像已备份为 $BACKEND_BACKUP（$old_backend）"
+    if docker tag "$old_backend" "$BACKEND_BACKUP" >/dev/null 2>&1; then
+      ok "旧后端镜像已备份为 $BACKEND_BACKUP（$old_backend）"
+    else
+      warn "备份旧后端镜像**失败**（docker tag $old_backend → $BACKEND_BACKUP）——回退可能落到更早的版本！"
+    fi
   else
-    warn "未找到线上后端容器 $LIVE_BACKEND，跳过镜像备份（首次部署？）"
+    warn "未找到线上后端容器 $LIVE_BACKEND 的镜像，跳过镜像备份（首次部署？）"
   fi
   if [ -n "$old_frontend" ]; then
-    docker tag "$old_frontend" "$FRONTEND_BACKUP" >/dev/null 2>&1 || true
-    ok "旧前端镜像已备份为 $FRONTEND_BACKUP（$old_frontend）"
+    if docker tag "$old_frontend" "$FRONTEND_BACKUP" >/dev/null 2>&1; then
+      ok "旧前端镜像已备份为 $FRONTEND_BACKUP（$old_frontend）"
+    else
+      warn "备份旧前端镜像**失败**（docker tag $old_frontend → $FRONTEND_BACKUP）——回退可能落到更早的版本！"
+    fi
   fi
 }
 
@@ -439,7 +495,7 @@ cmd_smoke() {
   info "等待绿容器就绪（最多 60 秒）…"
   if health_check "$GREEN_HOST_PORT" "$METRICS_GREEN_PORT" "绿容器"; then
     echo "   查看日志：docker logs -f $GREEN_BACKEND"
-    echo "   外部验证（在宿主机上）：curl -I http://127.0.0.1:${GREEN_HOST_PORT}/"
+    echo "   外部验证（在宿主机上）：curl -I --noproxy '*' http://$(probe_host "$BIND_ADDR"):${GREEN_HOST_PORT}/"
     echo "   确认无误后切流量：$0 cutover"
   else
     warn "绿容器健康检查未通过！线上容器未受影响。"
@@ -455,7 +511,7 @@ cmd_cutover() {
   running "$GREEN_BACKEND" || die "绿容器 $GREEN_BACKEND 未运行（先执行 $0 smoke）"
   info "切流量前再次健康检查…"
   wait_ready "$METRICS_GREEN_PORT" 10 || die "绿容器 readiness 未通过，中止切流量（线上不受影响）"
-  wait_http "http://127.0.0.1:${GREEN_HOST_PORT}/" 10 || die "绿容器边缘未响应，中止切流量（线上不受影响）"
+  wait_http "http://$(probe_host "$BIND_ADDR"):${GREEN_HOST_PORT}/" 10 || die "绿容器边缘未响应，中止切流量（线上不受影响）"
 
   info "备份线上容器为蓝（停止但不删除，供回退）…"
   remove_pair "$BLUE_BACKEND" "$BLUE_FRONTEND"
@@ -473,16 +529,59 @@ cmd_cutover() {
 
   info "清理绿容器…"
   remove_pair "$GREEN_BACKEND" "$GREEN_FRONTEND"
-  ok "已清理临时绿容器"
+  # ⚠️ `docker rm -f | true` 后无条件说「已清理」是假的：rm 被拒（daemon 异常、容器卡在
+  #    removing）时绿容器其实还在占着 ${GREEN_HOST_PORT}/${METRICS_GREEN_PORT}。
+  if exists "$GREEN_BACKEND" || exists "$GREEN_FRONTEND"; then
+    warn "绿容器未完全清理（可能仍占着 ${GREEN_HOST_PORT}/${METRICS_GREEN_PORT}）：docker ps -a --filter name=yang-"
+  else
+    ok "已清理临时绿容器"
+  fi
 
-  rm -f "$BACKEND_TAR" 2>/dev/null || true
-  ok "已清理镜像包 $BACKEND_TAR"
+  # ⚠️ 只在文件确实存在时才宣称「已清理」。`rm -f` 对不存在的文件也返回 0，而
+  #    `-Mode cutover` 这条路径根本不经过 prepare（服务器上的包通常已被上一次删掉），
+  #    所以旧版那句「已清理镜像包 xxx」在**合法路径上必然为假**（2026-09-23 审计发现）。
+  if [ -e "$BACKEND_TAR" ]; then
+    rm -f "$BACKEND_TAR"
+    ok "已清理镜像包 $BACKEND_TAR"
+  else
+    info "镜像包 $BACKEND_TAR 本就不存在，无需清理"
+  fi
 
   prune_unused_images
 
   if health_check "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT" "线上"; then
     ok "部署完成 ✔"
-    echo "   对外入口：http://127.0.0.1:${LIVE_HOST_PORT}/（公网需经受信 TLS 边缘转发到该地址）"
+    # ⚠️ 这里以前**写死** `127.0.0.1`，与容器实际绑定无关：改绑 0.0.0.0 后上一行说
+    #    「边缘 0.0.0.0:18654」而这里说「对外入口 http://127.0.0.1:18654/」，自相矛盾，
+    #    人只会记住最后这句（2026-09-23 因此误判过一次）。
+    #    现在**只陈述本脚本能观测到的事实**，不替安全组下结论：
+    #      · 实际绑定       —— docker inspect，可观测
+    #      · loopback ⇒ 公网不可达 —— 由绑定可证
+    #      · 0.0.0.0  ⇒ **能否真从公网访问取决于云安全组与宿主防火墙，脚本探测不到**
+    #        （本文件的默认端口注释就记着反例：绑了所有网卡但安全组不放行的端口照样不可达）
+    local edge_bind edge_host
+    if ! edge_bind=$(docker inspect -f \
+        '{{with index .HostConfig.PortBindings "8081/tcp"}}{{(index . 0).HostIp}}:{{(index . 0).HostPort}}{{end}}' \
+        "$LIVE_BACKEND" 2>/dev/null) || [ -z "$edge_bind" ]; then
+      warn "读不到 $LIVE_BACKEND 的端口绑定（docker inspect 失败，或该端口未发布）——"
+      warn "  下面的暴露面结论不可信，请手工核对：docker ps --filter name=$LIVE_BACKEND"
+      edge_bind="（未知）"
+    fi
+    edge_host="${edge_bind%%:*}"
+    echo "   应用边缘绑定：${edge_bind}（容器内 8081）"
+    echo "   宿主机自测：curl --noproxy '*' -I http://127.0.0.1:${LIVE_HOST_PORT}/"
+    case "$edge_host" in
+      127.0.0.1)
+        warn "公网不可达：应用边缘只绑在 loopback（BIND_ADDR 的安全默认值）。"
+        warn "  若本意是公网直接访问，请重新发布：BIND_ADDR=0.0.0.0 LIVE_HOST_PORT=$LIVE_HOST_PORT $0 deploy"
+        warn "  （deploy.ps1 用 -EdgeBindAddr 0.0.0.0）" ;;
+      0.0.0.0)
+        info "应用边缘已绑到所有网卡。**能否从公网访问取决于云安全组与宿主防火墙，本脚本探测不到**"
+        info "  ——请从外网直连验证：curl.exe --noproxy \"*\" -I http://<公网IP>:${LIVE_HOST_PORT}/"
+        info "  且这是明文 http：凭据 / 会话 Cookie / 密码重置令牌都不加密；生产请改经受信 TLS 边缘。" ;;
+      *)
+        info "应用边缘绑在 ${edge_host}（既非 loopback 也非全网卡）。是否公网可达脚本探测不到，请从外网验证。" ;;
+    esac
     echo "   观察：docker logs -f $LIVE_BACKEND"
     echo "   回退：$0 rollback"
   else
@@ -534,6 +633,9 @@ cmd_rollback() {
     ok "回退成功"
   else
     warn "回退后健康检查未通过，查看：docker logs $LIVE_BACKEND"
+    # ⚠️ 必须非 0 退出：以前只 warn，脚本以 0 结束，`deploy.ps1 -Mode rollback` 会因为
+    #    ssh 退出码为 0 而报告「完成」——**回退失败被当成回退成功**（2026-09-23 审计发现）。
+    exit 1
   fi
 }
 
