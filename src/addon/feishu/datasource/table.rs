@@ -11,7 +11,13 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     Ok(TableSpec::new(yang_base::table!("feishu_datasource"))
         .title("飞书数据源")
         .fields(yang_base::fields! {
-            id => Key::new().title("ID"),
+            // `filterable` 必须显式打开（DSL 是 fail-closed）：本 addon 有一打以上的
+            // 路径按主键定位表级行——`pull.rs` 的表级状态回写、`pull_now` /
+            // `pull_probe` / `health_check` / `update_datasource_table` /
+            // `delete_datasource_table` 的数据源定位，以及出站读端取 `status`。
+            // 漏了它，这些路径会在运行期吃 `FieldPermissionDenied`（不是启动期报错）。
+            // 仓库惯例见 `account/user/table.rs:86`。
+            id => Key::new().title("ID").filterable(true),
             title => Str::new()
                 .title("名称")
                 .require(true)
@@ -105,6 +111,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} 字段必须存在"));
             assert!(field.is_required(), "{name} 应由框架自动写入");
         }
+    }
+
+    #[test]
+    fn id_is_filterable_so_every_row_lookup_by_primary_key_works() {
+        // DSL 的 filterable 是 fail-closed：未显式打开时 `where_eq("id", ..)` 会在
+        // 运行期被 `FieldPermissionDenied` 打回（不是启动期报错）。本 addon 里按主键
+        // 定位表级行的路径有一打以上——`pull.rs` 的表级状态回写、`pull_now` / `pull_probe`
+        // / `health_check` / `update_datasource_table` / `delete_datasource_table` 的
+        // 数据源定位，以及出站读端取 `status`——漏了这一位等于把整条控制面打成恒失败。
+        // 仓库惯例见 `account/user/table.rs:86`、`access/grants/table.rs:22`。
+        let definition = definition();
+        let id = definition
+            .field("id")
+            .unwrap_or_else(|| panic!("id 字段必须存在"));
+        assert!(
+            id.is_filterable(),
+            "按主键定位必须可用（fail-closed 能力位）"
+        );
     }
 
     #[test]

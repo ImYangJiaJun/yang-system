@@ -25,7 +25,6 @@ use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::i18n::{
     build_result_body, normalize_linkage_value, OptionRow, DEFAULT_LOCALE,
 };
-use crate::addon::feishu::domain::linkage::{match_linkage, parse_linkage_mapping};
 use crate::addon::feishu::domain::pagination::{decode_cursor, encode_cursor};
 use crate::addon::feishu::domain::protocol::{FeishuEnvelope, FeishuOptionsRequest};
 use crate::addon::feishu::domain::token::verify_token;
@@ -70,7 +69,7 @@ mod codes {
     pub(super) const INTERNAL: i32 = 50001;
     /// 服务处理超时。
     pub(super) const TIMEOUT: i32 = 50401;
-    /// 联动参数命中了多个映射，无法判定用哪一个父级。
+    /// 联动参数多于一个，无法判定用哪一个作为父值。
     pub(super) const LINKAGE_AMBIGUOUS: i32 = 40003;
     /// 联动参数归一化后无法解析成已知的父选项。
     pub(super) const LINKAGE_NOT_RESOLVED: i32 = 40004;
@@ -85,53 +84,58 @@ enum ParentFilter {
     ByKey(String),
 }
 
-/// **纯决策**：从请求与映射里算出「要按父数据源下的哪个值过滤」。
+/// **纯决策**：从请求与「本绑定父的 `source_key`」里算出「要按父数据源下的哪个值过滤」。
+///
+/// `parent_source_key` 为 `None` 表示**本条绑定没有可用父**（`parent_field_id` 为空，
+/// 或父绑定不在本表的启用绑定里），此时无论请求带几个联动参数都回退全量。
 ///
 /// 返回 `Ok(None)` 表示**回退全量**——这是默认，只在能确定唯一父级时才收窄。
 /// 四条回退分支都是刻意选的：
 ///
-/// 1. 不带 `linkage_params` → 回退全量。契约 C3 的硬要求，也是「一个控件配一个
-///    `source_key`」的原因。
-/// 2. 映射缺失或解析不出 → 回退全量。返回空集是最难归因的失败形态。
-/// 3. 命中 0 个映射键 → 回退全量；**命中 ≥2 个才 fail-closed**——能确定唯一父级
-///    时不该因为请求里多带了一个无关键就报错。
-/// 4. 值为空或 trim 后为空 → 回退全量。用户尚未选父级是最常见的形态，
-///    此时返回空集会让控件看起来「坏了」。
+/// 1. 无父 → 回退全量。级联的唯一来源是绑定行的 `parent_field_id`（设计 §8），
+///    没有父就没有可过滤的父键；带几个联动参数都不影响这条。
+/// 2. 有父但不带 `linkage_params` → 回退全量。契约 C3 的硬要求，也是「一个控件配
+///    一个 `source_key`」的原因。
+/// 3. 有父但 `linkage_params` 是空 map → 同第 2 条。
+/// 4. 有父、参数恰好一个、但值剥掉 `@i18n@` 并 trim 后为空 → 回退全量。
+///    用户尚未选父级是最常见的形态，此时返回空集会让控件看起来「坏了」。
 ///
-/// 与 [`resolve_parent_key`] 分开是为了可测：这四条分支最容易在改动中被无声破坏——
+/// **有父时唯一的那个联动参数就取它当父值**。表级配置下不再存飞书控件的字段代码，
+/// 因此无法做「精确键」匹配；但设计假定**一个控件 = 一个数据源 = 一个 `source_key`**
+/// （契约 C3 的「不带 linkage_params 要回退全量」正为此），所以声明了级联时出现的
+/// 任何联动参数**只可能是它**——有父即等同一个通配声明。参数 ≥2 个时无法判定哪个
+/// 携带父值，fail-closed 返回 [`codes::LINKAGE_AMBIGUOUS`]，与旧「命中多个映射键」
+/// 的语义一致。
+///
+/// 与 [`resolve_parent_key`] 分开是为了可测：这几条分支最容易在改动中被无声破坏——
 /// 它们的失效形态是「选项集静默变大或变空」，不会报错。
 fn linkage_filter_target(
     input: &FeishuOptionsRequest,
-    linkage_mapping: Option<&str>,
+    parent_source_key: Option<&str>,
 ) -> Result<Option<(String, String)>, FeishuEnvelope> {
-    // 1) 不带联动参数 → 回退全量。契约 C3 的硬要求，也是「一个控件配一个 source_key」的原因。
+    // 1) 无父 → 回退全量：级联由绑定行的 parent_field_id 决定，没有父就无可过滤。
+    let Some(parent_source_key) = parent_source_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    else {
+        return Ok(None);
+    };
+    // 2/3) 有父但不带（或空）联动参数 → 回退全量。契约 C3 的硬要求。
     let Some(params) = input.linkage_params.as_ref().filter(|map| !map.is_empty()) else {
         return Ok(None);
     };
-    // 2) 映射缺失或解析不出 → 回退全量。返回空集是最难归因的失败形态。
-    let Some(raw) = linkage_mapping.filter(|value| !value.trim().is_empty()) else {
+    // 有父即等同一个通配声明：≥2 个参数无法判定哪个携带父值，fail-closed。
+    if params.len() > 1 {
+        return Err(FeishuEnvelope::fail(
+            codes::LINKAGE_AMBIGUOUS,
+            "存在多个联动参数，无法判定哪一个是父值",
+        ));
+    }
+    let Some((_, raw_value)) = params.iter().next() else {
         return Ok(None);
     };
-    // 3) 挑唯一命中的那条声明。精确键优先于通配键，规则见 `domain/linkage.rs`。
-    let entries = parse_linkage_mapping(raw);
-    let (matched_key, linkage) = match match_linkage(&entries, params.keys().map(String::as_str)) {
-        Ok(Some(found)) => found,
-        // 命中 0 条 → 回退全量：请求里多带一个无关键不该让请求失败。
-        Ok(None) => return Ok(None),
-        // 命中 ≥2 条 → 无法判定父级，fail-closed。
-        Err(()) => {
-            return Err(FeishuEnvelope::fail(
-                codes::LINKAGE_AMBIGUOUS,
-                "联动参数命中了多个映射，无法判定父级",
-            ))
-        }
-    };
-
     // 4) 值为空或 trim 后为空 → 回退全量。用户尚未选父级是最常见的形态，
     //    此时返回空集会让控件看起来「坏了」。
-    let Some(raw_value) = params.get(matched_key) else {
-        return Ok(None);
-    };
     let parent_key = normalize_linkage_value(raw_value);
     if parent_key.is_empty() {
         tracing::warn!("联动参数为空，本次回退全量");
@@ -139,7 +143,7 @@ fn linkage_filter_target(
     }
 
     Ok(Some((
-        linkage.parent_source_key.clone(),
+        parent_source_key.to_string(),
         parent_key.to_string(),
     )))
 }
@@ -155,10 +159,10 @@ fn linkage_filter_target(
 /// 前者值得重试，后者重试也没用。
 async fn resolve_parent_key(
     input: &FeishuOptionsRequest,
-    linkage_mapping: Option<&str>,
+    parent_source_key: Option<&str>,
     context: &FeishuContext,
 ) -> Result<Result<ParentFilter, FeishuEnvelope>, BaseError> {
-    let (parent_source_key, parent_key) = match linkage_filter_target(input, linkage_mapping) {
+    let (parent_source_key, parent_key) = match linkage_filter_target(input, parent_source_key) {
         Ok(Some(target)) => target,
         Ok(None) => return Ok(Ok(ParentFilter::All)),
         Err(envelope) => return Ok(Err(envelope)),
@@ -193,7 +197,50 @@ async fn resolve_parent_key(
     Ok(Ok(ParentFilter::ByKey(parent_key)))
 }
 
-/// 校验数据源与 Token；失败时给出信封。/// 校验数据源与 Token；失败时给出信封。
+/// 由本绑定的 `parent_field_id` 推出**父绑定的 `source_key`**。
+///
+/// 父是**同一张表**（同 `datasource_id`）里 `field_id == parent_field_id` 的另一条
+/// **启用中**的绑定；取它自己的 `source_key`——飞书回传的父值是那个数据源下的
+/// `option_id`，没有它的 `source_key` 拼不出父键。
+///
+/// 父不存在、已停用或 `parent_field_id` 为空/空白 → 返回 `None`（按无父处理）。
+/// 这是刻意的：级联声明坏掉时的既有契约就是**回退全量**，而不是报错或返回空集
+/// （旧实现里「映射缺失或解析不出 → 回退全量」的对应分支）。
+async fn load_parent_source_key(
+    context: &FeishuContext,
+    datasource_id: i64,
+    parent_field_id: Option<&str>,
+) -> Result<Option<String>, BaseError> {
+    let Some(parent_field_id) = parent_field_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let parent = context
+        .datasource_fields()
+        .query()
+        .select_fields(&["source_key"])?
+        .where_eq("datasource_id", serde_json::json!(datasource_id))?
+        .where_eq(
+            "field_id",
+            serde_json::Value::String(parent_field_id.to_string()),
+        )?
+        // 父必须**启用中**：停用的父绑定不再出数，拿它的 source_key 去过滤只会得到空集。
+        .where_eq("enabled", serde_json::Value::Bool(true))?
+        .optional()
+        .await?;
+    match parent {
+        Some(row) => Ok(Some(row.require("source_key")?)),
+        None => {
+            tracing::warn!(
+                datasource_id,
+                parent_field_id,
+                "绑定的父列不在本表的启用绑定里，本次按无级联处理"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// 校验数据源与 Token；失败时给出信封。
 ///
 /// 抽成纯函数以便不依赖数据库做单元测试——这是本端点唯一能在单测里覆盖的判定逻辑。
 fn verify_source(
@@ -273,40 +320,65 @@ async fn resolve(
         })?
         .to_string();
 
-    let datasource = context
-        .datasources()
+    // 出站按 `source_key` 路由的是**一条字段绑定**，不是表级数据源行：凭据、加密开关、
+    // 默认语言、父指针都住在 `feishu_datasource_field` 上（设计 §5）。表级行只提供
+    // `status` —— 所以这里要查两张表，缺任何一级都不能出数。
+    let binding = context
+        .datasource_fields()
         .query()
         .select_fields(&[
             "source_key",
             "token_hash",
             "encrypt_enabled",
             "default_locale",
-            "status",
-            // 级联映射：读端要按它决定「这个请求的联动参数对应哪个父数据源」。
-            "linkage_mapping",
+            "parent_field_id",
+            "datasource_id",
+            "enabled",
         ])?
         .where_eq("source_key", serde_json::Value::String(source_key.clone()))?
         .optional()
         .await?;
 
-    let Some(datasource) = datasource else {
+    let Some(binding) = binding else {
         return Ok(FeishuEnvelope::fail(
             codes::SOURCE_NOT_FOUND,
             "数据源不存在",
         ));
     };
 
-    let stored_hash: String = datasource.require("token_hash")?;
-    let status: String = datasource.require("status")?;
-    if let Err(envelope) = verify_source(Some(&stored_hash), Some(&input.token), status == "active")
-    {
+    let stored_hash: String = binding.require("token_hash")?;
+    let datasource_id: i64 = binding.require("datasource_id")?;
+    let binding_enabled: bool = binding.optional("enabled")?.unwrap_or(true);
+
+    // 表级行的 `status` 与绑定的 `enabled` **都要** active 才算启用。表级行缺失
+    // （孤立绑定）按停用处理：绑定还在但宿主表没了，不该继续出数。
+    let status: Option<String> = context
+        .datasources()
+        .query()
+        .select_fields(&["status"])?
+        .where_eq("id", serde_json::Value::Number(datasource_id.into()))?
+        .optional()
+        .await?
+        .map(|row| row.require("status"))
+        .transpose()?;
+    let is_active = binding_enabled && status.as_deref() == Some("active");
+
+    // `verify_source` 内部的顺序仍是「先验 Token 再报停用」——这里只喂给它一个布尔，
+    // 不改变那条不变量（`token_is_checked_before_status` 钉着它）。
+    if let Err(envelope) = verify_source(Some(&stored_hash), Some(&input.token), is_active) {
         return Ok(envelope);
     }
 
-    let encrypt_enabled: bool = datasource.optional("encrypt_enabled")?.unwrap_or(false);
-    let default_locale: String = datasource
+    let encrypt_enabled: bool = binding.optional("encrypt_enabled")?.unwrap_or(false);
+    let default_locale: String = binding
         .optional("default_locale")?
         .unwrap_or_else(|| DEFAULT_LOCALE.to_string());
+
+    // 级联：父由绑定行的 `parent_field_id` 指向**同一张表**里的另一条启用绑定，
+    // 父的 `source_key` 是那条绑定自己的（设计 §8）。无父（或父已不可用）时为 None。
+    let parent_field_id: Option<String> = binding.optional("parent_field_id")?;
+    let parent_source_key =
+        load_parent_source_key(context, datasource_id, parent_field_id.as_deref()).await?;
 
     // 非法游标 fail-closed：静默从头返回会让翻页重复吐第一页
     let cursor = match input.page_token.as_deref() {
@@ -329,8 +401,7 @@ async fn resolve(
 
     // 级联过滤：**挂在顶层**（顶层条件之间是 AND，不影响 keyset 游标）。
     // 必须在游标解码之后、构造查询之前，否则游标条件会与它争同一层。
-    let linkage_raw = datasource.optional::<String>("linkage_mapping")?;
-    match resolve_parent_key(input, linkage_raw.as_deref(), context).await? {
+    match resolve_parent_key(input, parent_source_key.as_deref(), context).await? {
         Ok(ParentFilter::All) => {}
         Ok(ParentFilter::ByKey(parent_key)) => {
             query = query.where_eq("parent_key", serde_json::Value::String(parent_key))?;
@@ -657,38 +728,38 @@ mod tests {
             .unwrap_or_else(|error| panic!("测试请求应可解码: {error}"))
     }
 
-    const MAPPING: &str = r#"{"widget1":{"parent_source_key":"payment_currency",
-        "parent_field":"币种","cascade_field":"汇率"}}"#;
+    /// 父绑定的 `source_key`；`None` 表示本条绑定没有可用父列。
+    const PARENT: &str = "payment_currency";
+
+    #[test]
+    fn no_parent_falls_back_to_all_for_any_number_of_params() {
+        // 级联的唯一来源是绑定行的 `parent_field_id`（设计 §8）。没有父就没有可过滤的
+        // 父键，此时带几个联动参数都被忽略——回退全量，而不是报错。
+        // 这条同时吸收了旧实现里「映射缺失/解析不出」与「键不在映射里」两条回退分支：
+        // 表级配置下不再有 mapping 可解析，能坏掉的只有「父指针指不到东西」。
+        let without = request_with(None);
+        let with_one = request_with(Some(&[("widget1", "x")]));
+        let with_two = request_with(Some(&[("widget1", "x"), ("widget2", "y")]));
+        for parent in [None, Some(""), Some("   ")] {
+            for request in [&without, &with_one, &with_two] {
+                let target = linkage_filter_target(request, parent)
+                    .unwrap_or_else(|_| panic!("无父不该产生业务失败"));
+                assert_eq!(target, None, "parent={parent:?} 应回退全量");
+            }
+        }
+    }
 
     #[test]
     fn no_linkage_params_falls_back_to_all() {
-        // 契约 C3 的硬要求：不带联动必须返回全量
-        let target = linkage_filter_target(&request_with(None), Some(MAPPING))
+        // 契约 C3 的硬要求：有父但不带联动必须返回全量
+        let target = linkage_filter_target(&request_with(None), Some(PARENT))
             .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(target, None);
     }
 
     #[test]
     fn empty_linkage_params_falls_back_to_all() {
-        let target = linkage_filter_target(&request_with(Some(&[])), Some(MAPPING))
-            .unwrap_or_else(|_| panic!("不该产生业务失败"));
-        assert_eq!(target, None);
-    }
-
-    #[test]
-    fn missing_or_broken_mapping_falls_back_to_all() {
-        // 空集是最难归因的失败形态，宁可回退全量
-        for mapping in [None, Some(""), Some("   "), Some("{not json"), Some("{}")] {
-            let target = linkage_filter_target(&request_with(Some(&[("widget1", "x")])), mapping)
-                .unwrap_or_else(|_| panic!("mapping={mapping:?} 不该产生业务失败"));
-            assert_eq!(target, None, "mapping={mapping:?} 应回退全量");
-        }
-    }
-
-    #[test]
-    fn an_unmatched_widget_key_falls_back_to_all() {
-        // 请求里带的键不在映射里 → 回退全量，而不是报错
-        let target = linkage_filter_target(&request_with(Some(&[("other", "x")])), Some(MAPPING))
+        let target = linkage_filter_target(&request_with(Some(&[])), Some(PARENT))
             .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(target, None);
     }
@@ -698,17 +769,18 @@ mod tests {
         // 用户尚未选父级是最常见形态，返回空集会让控件看起来「坏了」
         for value in ["", "   ", "@i18n@", "@i18n@  "] {
             let target =
-                linkage_filter_target(&request_with(Some(&[("widget1", value)])), Some(MAPPING))
+                linkage_filter_target(&request_with(Some(&[("widget1", value)])), Some(PARENT))
                     .unwrap_or_else(|_| panic!("value={value:?} 不该产生业务失败"));
             assert_eq!(target, None, "value={value:?} 应回退全量");
         }
     }
 
     #[test]
-    fn a_single_matched_key_yields_the_parent_target() {
+    fn a_single_param_yields_the_parent_target() {
+        // 有父 + 恰好一个联动参数 → 用它当父值；父的 source_key 来自父绑定行
         let target = linkage_filter_target(
             &request_with(Some(&[("widget1", "@i18n@payment_currency:abc123")])),
-            Some(MAPPING),
+            Some(PARENT),
         )
         .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(
@@ -725,7 +797,7 @@ mod tests {
     fn a_bare_id_without_prefix_is_accepted_too() {
         let target = linkage_filter_target(
             &request_with(Some(&[("widget1", "payment_currency:abc123")])),
-            Some(MAPPING),
+            Some(PARENT),
         )
         .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(
@@ -738,50 +810,33 @@ mod tests {
     }
 
     #[test]
-    fn multiple_matched_keys_fail_closed() {
-        // 命中 ≥2 个参数时无法判定父级——这是唯一在决策期就失败的形态。
-        // 映射本身必须**完整**（两个成员都在），否则会被解析器按「配错的条目」跳过，
-        // 于是「两个参数」根本不会被判成歧义。
-        let mapping = r#"{"widget1":{"parent_source_key":"a","parent_field":"p"},
-                          "widget2":{"parent_source_key":"b","parent_field":"p"}}"#;
-        let error = linkage_filter_target(
-            &request_with(Some(&[("widget1", "x"), ("widget2", "y")])),
-            Some(mapping),
-        )
-        .err()
-        .unwrap_or_else(|| panic!("命中多个映射必须失败"));
-        assert_eq!(error.code, codes::LINKAGE_AMBIGUOUS);
-    }
-
-    #[test]
-    fn a_wildcard_key_matches_any_linkage_param() {
-        // 通配的目的：不必知道飞书那个控件的字段代码。一个数据源服务一个控件，
-        // 所以声明了级联时出现的任何联动参数只可能是它。
-        let mapping = r#"{"*":{"parent_source_key":"payment_currency","parent_field":"币种"}}"#;
-        for key in ["widget17796881173030001", "随便什么键"] {
+    fn any_param_key_carries_the_parent_value() {
+        // 表级配置下不存飞书控件的字段代码，无法做「精确键」匹配；但设计假定
+        // 「一个控件 = 一个数据源 = 一个 source_key」，所以有父即等同一个通配声明：
+        // 声明了级联时出现的任何联动参数只可能是它（旧实现的通配分支语义）。
+        for key in ["widget17796881173030001", "随便什么键", "*"] {
             let target = linkage_filter_target(
                 &request_with(Some(&[(key, "@i18n@payment_currency:abc")])),
-                Some(mapping),
+                Some(PARENT),
             )
-            .unwrap_or_else(|_| panic!("通配不该产生业务失败"));
+            .unwrap_or_else(|_| panic!("键 {key} 不该产生业务失败"));
             assert_eq!(
                 target,
                 Some((
                     "payment_currency".to_string(),
                     "payment_currency:abc".to_string()
                 )),
-                "键 {key} 应被通配命中"
+                "键 {key} 应被当作父值携带者"
             );
         }
     }
 
     #[test]
-    fn a_wildcard_still_fails_closed_on_two_params() {
-        // 通配不放大歧义：两个联动参数时仍无法判定哪个携带父值
-        let mapping = r#"{"*":{"parent_source_key":"c","parent_field":"p"}}"#;
+    fn two_params_fail_closed() {
+        // ≥2 个联动参数时无法判定哪个携带父值——这是唯一在决策期就失败的形态
         let error = linkage_filter_target(
-            &request_with(Some(&[("a", "x"), ("b", "y")])),
-            Some(mapping),
+            &request_with(Some(&[("widget1", "x"), ("widget2", "y")])),
+            Some(PARENT),
         )
         .err()
         .unwrap_or_else(|| panic!("两个参数必须 fail-closed"));
@@ -789,32 +844,17 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_key_beats_the_wildcard() {
-        let mapping = r#"{"*":{"parent_source_key":"wild","parent_field":"w"},
-                          "widget1":{"parent_source_key":"exact","parent_field":"e"}}"#;
-        let target = linkage_filter_target(
-            &request_with(Some(&[("widget1", "exact:x")])),
-            Some(mapping),
+    fn two_params_fail_closed_even_when_one_looks_unrelated() {
+        // 这条的期望**与旧实现相反**，是本次重新裁定的语义：旧实现按「键是否出现在
+        // linkage_mapping 里」筛，于是「一个命中 + 一个无关键」不算歧义；表级配置下
+        // 没有 mapping 可查，第二个参数同样可能是父值携带者，只能 fail-closed。
+        let error = linkage_filter_target(
+            &request_with(Some(&[("widget1", "x"), ("noise", "y")])),
+            Some(PARENT),
         )
-        .unwrap_or_else(|_| panic!("不该产生业务失败"));
-        assert_eq!(target, Some(("exact".to_string(), "exact:x".to_string())));
-    }
-
-    #[test]
-    fn one_matched_plus_one_unmatched_key_is_not_ambiguous() {
-        // 多带一个无关键不该让请求失败：能确定唯一父级时应当照常工作
-        let target = linkage_filter_target(
-            &request_with(Some(&[("widget1", "payment_currency:x"), ("noise", "y")])),
-            Some(MAPPING),
-        )
-        .unwrap_or_else(|_| panic!("不该产生业务失败"));
-        assert_eq!(
-            target,
-            Some((
-                "payment_currency".to_string(),
-                "payment_currency:x".to_string()
-            ))
-        );
+        .err()
+        .unwrap_or_else(|| panic!("两个参数必须 fail-closed"));
+        assert_eq!(error.code, codes::LINKAGE_AMBIGUOUS);
     }
 
     #[test]

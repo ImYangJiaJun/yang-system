@@ -157,15 +157,17 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
 
-    // 数据源必须存在：写入一个不存在数据源的选项，等于制造永远取不到的孤儿数据
-    let datasource = context
-        .datasources()
+    // 绑定必须存在：表级改造后 `source_key` 标识的是 `feishu_datasource_field` 上的
+    // 一条**字段绑定**，不再是表级行上的列（设计 §5）。写入一个不存在绑定的选项，
+    // 等于制造永远取不到的孤儿数据。
+    let binding = context
+        .datasource_fields()
         .query()
         .select_fields(&["source_key"])?
         .where_eq("source_key", serde_json::json!(input.source_key))?
         .optional()
         .await?;
-    if datasource.is_none() {
+    if binding.is_none() {
         return Ok(ApiResponse::fail(40401, "数据源不存在"));
     }
 

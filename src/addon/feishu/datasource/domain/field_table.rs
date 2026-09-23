@@ -14,7 +14,10 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     Ok(TableSpec::new(yang_base::table!("feishu_datasource_field"))
         .title("飞书数据源字段")
         .fields(yang_base::fields! {
-            id => Key::new().title("ID"),
+            // `filterable` 必须显式打开（DSL 是 fail-closed）：按绑定主键定位的路径有
+            // `rotate_token` / `reveal_token` 的绑定定位、`update_datasource_table` 的
+            // 绑定更新、`pull.rs` 的绑定状态回写。见 `datasource/table.rs` 的同名说明。
+            id => Key::new().title("ID").filterable(true),
             datasource_id => Int::new()
                 .title("所属数据源")
                 .require(true)
@@ -108,6 +111,22 @@ mod tests {
             .unwrap_or_else(|| panic!("field_id 必须存在"));
         assert!(field_id.is_required());
         assert!(field_id.is_filterable(), "按 field_id 查绑定要能筛");
+    }
+
+    #[test]
+    fn id_is_filterable_so_every_binding_lookup_by_primary_key_works() {
+        // 同 `datasource/table.rs` 的对应断言：DSL 的 filterable 是 fail-closed，
+        // 未显式打开时 `where_eq("id", ..)` 会在运行期吃 `FieldPermissionDenied`。
+        // 按绑定主键定位的路径有：`rotate_token` / `reveal_token` 的绑定定位、
+        // `update_datasource_table` 的绑定更新、`pull.rs` 的绑定状态回写。
+        let definition = definition();
+        let id = definition
+            .field("id")
+            .unwrap_or_else(|| panic!("id 字段必须存在"));
+        assert!(
+            id.is_filterable(),
+            "按绑定主键定位必须可用（fail-closed 能力位）"
+        );
     }
 
     #[test]

@@ -37,9 +37,9 @@ pub(crate) struct FeishuOptionsRequest {
     pub(crate) employee_id: Option<String>,
     /// 用于校验请求来源是否合法的自定义取值（文档中唯一标为必填的请求参数）。
     pub(crate) token: String,
-    /// 联动选项参数。v1 收到即忽略，仅在数据模型上预留（`feishu_datasource.linkage_mapping`）。
+    /// 联动选项参数。级联读端消费它：本条绑定有父列（`parent_field_id`）且这里恰好
+    /// 一个参数时，用它当父值过滤（见 `approval_options::linkage_filter_target`）。
     #[serde(default)]
-    #[allow(dead_code)]
     pub(crate) linkage_params: Option<BTreeMap<String, String>>,
     /// 分页标记；不传或为空表示从第一页开始。
     #[serde(default)]

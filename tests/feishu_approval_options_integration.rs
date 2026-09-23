@@ -47,12 +47,20 @@ use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::{FeishuSettings, SecuritySettings};
 use yang_system::schema::sync_with_database;
 
-/// 两张飞书表；清理时白名单化，避免拼错表名误删。
+/// 三张飞书表；清理时白名单化，避免拼错表名误删。
+///
+/// `feishu_datasource_field`（字段绑定）是表级改造新增的：`source_key` 与凭据都从
+/// 表级行搬到了这一层（设计 §5），出站按 `source_key` 路由的正是这一层。
 const DATASOURCE_TABLE: &str = "feishu_datasource";
+const FIELD_TABLE: &str = "feishu_datasource_field";
 const OPTION_TABLE: &str = "feishu_option";
 
 /// 数据源 Token 明文。服务端只存它的 SHA-256 摘要，明文只出现在这里。
 const DATASOURCE_TOKEN: &str = "integration-datasource-token";
+/// 第二个数据源的 Token。`token_hash` 有唯一索引，两条绑定不能共用一份凭据。
+const SECOND_DATASOURCE_TOKEN: &str = "integration-second-token";
+/// 级联用例里父数据源的 Token，同理必须与子数据源的不同。
+const PARENT_DATASOURCE_TOKEN: &str = "integration-parent-token";
 /// 错误 Token：用于验证来源校验确实拒绝。
 const WRONG_DATASOURCE_TOKEN: &str = "integration-wrong-token";
 /// 多维表格写入接口的管理 Token。
@@ -92,11 +100,13 @@ async fn connect_redis() -> anyhow::Result<RedisClient> {
         .map_err(Into::into)
 }
 
-/// 清理两张飞书表；表名白名单化。
+/// 清理三张飞书表；表名白名单化。
 async fn drop_feishu_tables(database: &Database) -> anyhow::Result<()> {
-    for table in [OPTION_TABLE, DATASOURCE_TABLE] {
+    // 顺序无关：绑定表用的是普通 `Int` + 索引，没有外键约束（设计 §5）。
+    for table in [OPTION_TABLE, FIELD_TABLE, DATASOURCE_TABLE] {
         let statement = match table {
             DATASOURCE_TABLE => "DROP TABLE IF EXISTS `feishu_datasource`",
+            FIELD_TABLE => "DROP TABLE IF EXISTS `feishu_datasource_field`",
             OPTION_TABLE => "DROP TABLE IF EXISTS `feishu_option`",
             other => anyhow::bail!("拒绝清理未声明的测试表: {other}"),
         };
@@ -284,7 +294,67 @@ async fn call_approval_options(
 
 // ---------------------------------------------------------------- 数据播种
 
-/// 写入一个数据源；`status` 为 `active` / `disabled`。
+/// 写入一条**表级**数据源行，返回它的 `id`。
+///
+/// 表级行只承载「表」这一层：`title` / `status` / 坐标。凭据与 `source_key` 都在
+/// 下面的绑定行上（设计 §5）。
+async fn seed_datasource_row(
+    database: &Database,
+    title: &str,
+    status: &str,
+) -> anyhow::Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO `feishu_datasource` (`title`, `status`, `ingest_mode`, `created_at`, `updated_at`) \
+         VALUES (?, ?, 'push', NOW(), NOW())",
+    )
+    .bind(title)
+    .bind(status)
+    .execute(database.pool())
+    .await
+    .with_context(|| format!("写入表级数据源 {title} 失败"))?;
+    Ok(result.last_insert_id() as i64)
+}
+
+/// 写入一条**字段绑定**行：`source_key` 与凭据都住在这里（设计 §5）。
+///
+/// `parent_field_id` 指向**同一张表**里的另一条绑定——级联由此表达，不再有
+/// `linkage_mapping` JSON 列（设计 §8）。
+#[allow(clippy::too_many_arguments)] // 绑定行本就这么多列，为测试收个结构体反而更绕
+async fn seed_binding(
+    database: &Database,
+    datasource_id: i64,
+    field_id: &str,
+    source_key: &str,
+    token: &str,
+    encrypt_enabled: bool,
+    default_locale: &str,
+    parent_field_id: Option<&str>,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO `feishu_datasource_field` \
+         (`datasource_id`, `field_id`, `source_key`, `token_hash`, `encrypt_enabled`, \
+          `default_locale`, `parent_field_id`, `enabled`, `created_at`, `updated_at`) \
+         VALUES (?, ?, ?, SHA2(?, 256), ?, ?, ?, ?, NOW(), NOW())",
+    )
+    .bind(datasource_id)
+    .bind(field_id)
+    .bind(source_key)
+    .bind(token)
+    .bind(encrypt_enabled)
+    .bind(default_locale)
+    .bind(parent_field_id)
+    .bind(enabled)
+    .execute(database.pool())
+    .await
+    .with_context(|| format!("写入字段绑定 {source_key} 失败"))?;
+    Ok(())
+}
+
+/// 播种一个**可出数**的数据源：一条表级行 + 它的一条启用绑定。
+///
+/// 绝大多数用例只需要「按 `source_key` 能取到选项」这一个前提，两条行的细节无关紧要，
+/// 故收成一个入口。`status` 为 `active` / `disabled`。
 async fn seed_datasource(
     database: &Database,
     source_key: &str,
@@ -293,21 +363,20 @@ async fn seed_datasource(
     default_locale: &str,
     encrypt_enabled: bool,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO `feishu_datasource` \
-         (`source_key`, `title`, `token_hash`, `encrypt_enabled`, `default_locale`, `status`, `created_at`, `updated_at`) \
-         VALUES (?, ?, SHA2(?, 256), ?, ?, ?, NOW(), NOW())",
+    let datasource_id =
+        seed_datasource_row(database, &format!("测试数据源 {source_key}"), status).await?;
+    seed_binding(
+        database,
+        datasource_id,
+        "fld_main",
+        source_key,
+        token,
+        encrypt_enabled,
+        default_locale,
+        None,
+        true,
     )
-    .bind(source_key)
-    .bind(format!("测试数据源 {source_key}"))
-    .bind(token)
-    .bind(encrypt_enabled)
-    .bind(default_locale)
-    .bind(status)
-    .execute(database.pool())
     .await
-    .with_context(|| format!("写入数据源 {source_key} 失败"))?;
-    Ok(())
 }
 
 /// 播种一条选项。
@@ -331,6 +400,34 @@ async fn seed_option(
     .bind(i18n)
     .bind(sort_order)
     .bind(enabled)
+    .execute(database.pool())
+    .await
+    .with_context(|| format!("写入选项 {option_id} 失败"))?;
+    Ok(())
+}
+
+/// 播种一条**带父键**的选项（级联用例用）。
+///
+/// `parent_key` 存的是**父数据源**里那条父选项的 `option_id`（裸值，不带 `@i18n@`），
+/// 与 `derive.rs` 的落库口径一致。
+async fn seed_option_with_parent(
+    database: &Database,
+    source_key: &str,
+    option_id: &str,
+    label: &str,
+    sort_order: i64,
+    parent_key: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO `feishu_option` \
+         (`option_id`, `source_key`, `label`, `parent_key`, `sort_order`, `is_default`, `enabled`, `created_at`, `updated_at`) \
+         VALUES (?, ?, ?, ?, ?, 0, 1, NOW(), NOW())",
+    )
+    .bind(option_id)
+    .bind(source_key)
+    .bind(label)
+    .bind(parent_key)
+    .bind(sort_order)
     .execute(database.pool())
     .await
     .with_context(|| format!("写入选项 {option_id} 失败"))?;
@@ -997,10 +1094,12 @@ async fn upsert_cannot_move_an_option_across_datasources() {
             false,
         )
         .await?;
+        // beta 必须用**另一个** Token：`token_hash` 有唯一索引，两条绑定共用一份
+        // 凭据会撞在写入那一步（H3/Ruling 40）。
         seed_datasource(
             &database,
             "beta",
-            DATASOURCE_TOKEN,
+            SECOND_DATASOURCE_TOKEN,
             "active",
             "zh_cn",
             false,
@@ -1557,6 +1656,263 @@ async fn approval_options_advances_the_cursor_without_losing_or_repeating_option
     };
     if let Err(error) = outcome {
         panic!("翻页集成测试失败: {error:#}");
+    }
+    if let Err(error) = cleanup {
+        panic!("清理失败: {error:#}");
+    }
+}
+
+/// 级联：读端按绑定行的 `parent_field_id` 找父、用父的 `source_key` 过滤子项。
+///
+/// 这条是出站回归修复的端到端证据。表级改造删掉了 `linkage_mapping` 列，级联改由
+/// 两条绑定的 `parent_field_id` 关联表达；此前读端仍在读那个不存在的列，端点对每个
+/// 合法请求恒失败（见文件头与本次修复的 ledger）。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn approval_options_filters_by_the_parent_binding() {
+    let outcome = async {
+        let (database, app) = prepare_app(None).await?;
+
+        // 级联的父与子必须是**同一张表**（同一个 `datasource_id`）里的两条绑定——
+        // `parent_field_id` 指的就是同表另一列（设计 §8）。两条绑定各有自己的
+        // `source_key`，所以选项仍分属两个「数据源」。
+        let table_id = seed_datasource_row(&database, "币种汇率表", "active").await?;
+        seed_binding(
+            &database,
+            table_id,
+            "fld_currency",
+            "currency",
+            PARENT_DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            None,
+            true,
+        )
+        .await?;
+        seed_binding(
+            &database,
+            table_id,
+            "fld_rate",
+            "rate",
+            DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            Some("fld_currency"),
+            true,
+        )
+        .await?;
+
+        // 父源下的选项：它们就是飞书回传给我们的父值（`@i18n@<option_id>`）。
+        seed_option(
+            &database,
+            "currency",
+            "currency:CNY",
+            "人民币",
+            0,
+            true,
+            None,
+        )
+        .await?;
+        seed_option(&database, "currency", "currency:USD", "美元", 1, true, None).await?;
+        // 子源下三个选项：两个挂父键，一个挂**不存在**的父键（不该被任何请求带回）。
+        seed_option_with_parent(
+            &database,
+            "rate",
+            "rate:cny",
+            "人民币汇率",
+            0,
+            "currency:CNY",
+        )
+        .await?;
+        seed_option_with_parent(&database, "rate", "rate:usd", "美元汇率", 1, "currency:USD")
+            .await?;
+        seed_option_with_parent(
+            &database,
+            "rate",
+            "rate:orphan",
+            "无主的汇率",
+            2,
+            "currency:GBP",
+        )
+        .await?;
+
+        // 带父值 → 只回该父下的子项
+        let filtered = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "widget17796881173030001": "@i18n@currency:CNY" },
+            }),
+        )
+        .await?;
+        let filtered_ids = option_ids(result_of(&filtered)?)?;
+        ensure!(
+            filtered_ids == vec!["rate:cny".to_string()],
+            "只应回父值 currency:CNY 下的子项，实际 {filtered_ids:?}"
+        );
+
+        // 不带联动参数 → 回退全量（契约 C3）
+        let all = call_approval_options(&app, "rate", json!({ "token": DATASOURCE_TOKEN })).await?;
+        let all_ids = option_ids(result_of(&all)?)?;
+        ensure!(
+            all_ids.len() == 3,
+            "不带联动参数必须回退全量，实际 {all_ids:?}"
+        );
+
+        // 父值在父源里不存在 → 可归因失败 40004，而不是静默空集
+        let unresolved = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "widget1": "@i18n@currency:NOPE" },
+            }),
+        )
+        .await?;
+        ensure!(
+            unresolved["code"] == json!(40004),
+            "父值不存在必须给出 40004（联动值无法解析），实际: {unresolved}"
+        );
+
+        // 父指针指向**别的表**里的字段 id → 不算父，按无级联处理（回退全量）
+        let other_id = seed_datasource_row(&database, "其它表", "active").await?;
+        seed_binding(
+            &database,
+            other_id,
+            "fld_other",
+            "other",
+            SECOND_DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            // 这个 field_id 属于「币种」那张表，不在「其它表」里
+            Some("fld_currency"),
+            true,
+        )
+        .await?;
+        let cross_table_parent = call_approval_options(
+            &app,
+            "other",
+            json!({
+                "token": SECOND_DATASOURCE_TOKEN,
+                "linkage_params": { "widget1": "@i18n@currency:CNY" },
+            }),
+        )
+        .await?;
+        ensure!(
+            cross_table_parent["code"] == json!(0),
+            "父不在同一张表时应按无级联处理（回退全量），实际: {cross_table_parent}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let cleanup = match connect_database().await {
+        Ok(database) => drop_feishu_tables(&database).await,
+        Err(error) => Err(error).context("清理用连接失败"),
+    };
+    if let Err(error) = outcome {
+        panic!("级联过滤集成测试失败: {error:#}");
+    }
+    if let Err(error) = cleanup {
+        panic!("清理失败: {error:#}");
+    }
+}
+
+/// 绑定本身被停用（`enabled = false`）必须被拒，哪怕表级源仍是 `active`。
+///
+/// 表级模型下「停用」有两个来源：表级行的 `status` 与绑定行的 `enabled`。旧用例只覆盖
+/// 前者；这条钉住后者——取消勾选一条字段就是停用它（设计 §5 的 `enabled`）。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn approval_options_rejects_a_disabled_binding() {
+    let outcome = async {
+        let (database, app) = prepare_app(None).await?;
+        let datasource_id = seed_datasource_row(&database, "停用绑定的源", "active").await?;
+        seed_binding(
+            &database,
+            datasource_id,
+            "fld_main",
+            "demo",
+            DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            None,
+            // 表级 active，但这条绑定被停用
+            false,
+        )
+        .await?;
+        seed_options(&database, "demo", 3).await?;
+
+        let envelope =
+            call_approval_options(&app, "demo", json!({ "token": DATASOURCE_TOKEN })).await?;
+        ensure!(
+            envelope["code"] == json!(40301),
+            "停用的绑定必须给出 40301（数据源已停用），实际: {envelope}"
+        );
+        ensure!(
+            !envelope.to_string().contains("opt_000"),
+            "停用绑定的选项不得被取出: {envelope}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let cleanup = match connect_database().await {
+        Ok(database) => drop_feishu_tables(&database).await,
+        Err(error) => Err(error).context("清理用连接失败"),
+    };
+    if let Err(error) = outcome {
+        panic!("停用绑定集成测试失败: {error:#}");
+    }
+    if let Err(error) = cleanup {
+        panic!("清理失败: {error:#}");
+    }
+}
+
+/// 绑定的宿主表级行不存在（孤立绑定）按**停用**处理：绑定还在但表没了，不该继续出数。
+///
+/// 这条钉住一个刻意选的 fail-closed：`status` 读不出来时不当作 `active`。绑定表没有
+/// 外键约束（设计 §5），所以这种行在库层面是可能出现的。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn approval_options_rejects_an_orphaned_binding() {
+    let outcome = async {
+        let (database, app) = prepare_app(None).await?;
+        // 直接指向一个不存在的表级 id
+        seed_binding(
+            &database,
+            9_999_999,
+            "fld_main",
+            "demo",
+            DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            None,
+            true,
+        )
+        .await?;
+        seed_options(&database, "demo", 3).await?;
+
+        let envelope =
+            call_approval_options(&app, "demo", json!({ "token": DATASOURCE_TOKEN })).await?;
+        ensure!(
+            envelope["code"] == json!(40301),
+            "宿主表级行缺失必须按停用处理（40301），实际: {envelope}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let cleanup = match connect_database().await {
+        Ok(database) => drop_feishu_tables(&database).await,
+        Err(error) => Err(error).context("清理用连接失败"),
+    };
+    if let Err(error) = outcome {
+        panic!("孤立绑定集成测试失败: {error:#}");
     }
     if let Err(error) = cleanup {
         panic!("清理失败: {error:#}");
