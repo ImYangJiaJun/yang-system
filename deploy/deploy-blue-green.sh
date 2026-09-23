@@ -70,9 +70,9 @@ GREEN_HOST_PORT="${GREEN_HOST_PORT:-8155}"
 METRICS_LIVE_PORT="${METRICS_LIVE_PORT:-9154}"
 METRICS_GREEN_PORT="${METRICS_GREEN_PORT:-9155}"
 
-# 应用边缘（宿主 8154）的发布绑定地址。**默认 127.0.0.1**：只对宿主机可见，
-# 公网访问交给宿主机上的受信 TLS 边缘。
-# 改成 0.0.0.0 会让 8154 **明文 http 直接对公网开放**——凭据、会话 Cookie、密码重置
+# 应用边缘（宿主端口见上面的 LIVE_HOST_PORT，当前 18654）的发布绑定地址。
+# **默认 127.0.0.1**：只对宿主机可见，公网访问交给宿主机上的受信 TLS 边缘。
+# 改成 0.0.0.0 会让该端口**明文 http 直接对公网开放**——凭据、会话 Cookie、密码重置
 # 令牌都会以明文传输。仅限测试环境，且应尽快换回 TLS 边缘。
 # ⚠️ 这个默认值被 frontend/scripts/verify-deployment-contract.mjs **机械校验**：
 #    该文件必须原样保留 `BIND_ADDR="${BIND_ADDR:-127.0.0.1}"` 字面量，否则 CI 部署

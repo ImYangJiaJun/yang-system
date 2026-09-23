@@ -28,7 +28,7 @@
                                      │  └─ config.cloud.toml（只读挂载）    │
                                      └────────────────────────────────────┘
                                                     │
-                                       127.0.0.1:8154（仅宿主机可达）
+                            18654（默认 loopback / 当前公网直连）
                                                     │
                                      ┌──────────────▼──────────────┐
                                      │ 受信 TLS 边缘（HTTPS / 443） │ ← 尚未配置
@@ -72,7 +72,7 @@
      **入站写入 API**——Token 是占位值时，那等于开放一个口令写在仓库里的写接口。
 
    **要在 TLS 落地前先用 http 联调飞书**：把 `[app].environment` 改成 `"test"` 同时把
-   `link_base_url` 换成 `http://<公网IP或域名>:8154`（飞书审批的「关联外部选项」官方
+   `link_base_url` 换成 `http://<公网IP或域名>:18654`（飞书审批的「关联外部选项」官方
    明确支持 HTTP 或 HTTPS，不受影响）。**这只是联调态**：`test` 下密码重置链接会以明文
    发出，且生产的 https 强制被关掉；拿到证书后必须改回 `production` + https。
 
@@ -158,50 +158,60 @@ cd <lib_yang>\project\yang-system\deploy
 
 | 端口 | 谁 | 绑定 | 说明 |
 |---|---|---|---|
-| 8154 | 线上应用边缘 | **`127.0.0.1`** | HTTPS 边缘转发到这里 |
-| 8155 | 绿容器边缘 | **`127.0.0.1`** | 仅冒烟期间存在 |
-| 9154 / 9155 | 管理面（`/metrics`、`/health/ready`） | **`127.0.0.1`** | 给采集端与探针 |
+| **18654** | 线上应用边缘 | 见下 | **前后端共用**：`/api`、`/.well-known`、`/health` 转后端，其余走 SPA |
+| 8155 | 绿容器边缘 | 见下 | 仅冒烟期间存在 |
+| 9154 / 9155 | 管理面（`/metrics`、`/health/ready`） | **`127.0.0.1`**（`METRICS_BIND_ADDR`） | 给采集端与探针，**不随边缘一起暴露** |
 | 8080 / 8081 / 9090 | — | 容器内 | 后端业务 / nginx / 后端管理面 |
 
-**绑定地址默认 `127.0.0.1`，不要改成 `0.0.0.0`。** 应用边缘的 nginx 从 2026-09-22 起监听
-所有网卡（原因见 `frontend/deploy/nginx.conf` 头部说明），所以「不暴露公网」这一条**由这里的
-loopback 绑定承担**。改错的后果是 8154 明文直接对公网开放。
+**端口必须落在云安全组放行的范围内。** 这台服务器的安全组只放行 `80/443` 与 **`18000-19000`**
+段，所以默认端口是 **18654**。早期用的 8154 在段外——从公网连不上（2026-09-23 实测：同机
+18501/18093/18110 可达，8154 超时）。`LIVE_HOST_PORT` 可覆盖，但换到段外会让公网直接不可达。
 
-这条约束是**机械校验**的：`frontend/scripts/verify-deployment-contract.mjs` 会读本目录的
-`deploy-blue-green.sh`，凡是发布 8081 的 `-p` 都必须绑 `127.0.0.1`，并校验 `BIND_ADDR`
-的默认值是 loopback。前端 `pnpm check` 会跑它。
+**绑定地址 `BIND_ADDR`**：`deploy-blue-green.sh` 的**默认值是 `127.0.0.1`**（只对宿主机可见，
+公网交给受信 TLS 边缘）。本测试环境用 `deploy.ps1 -EdgeBindAddr 0.0.0.0` **显式覆盖**成公网
+直连——见第五节。
+
+> ⚠️ **别用浏览器判断通不通。** Windows 系统代理会让 Chrome 对不可达端口返回**误导性的
+> `503`**，把「连不上」伪装成「服务器错误」。一律用 `curl.exe --noproxy "*"` 直连验证。
+
+机械校验的**边界**（重要）：`frontend/scripts/verify-deployment-contract.mjs` 会读本目录的
+`deploy-blue-green.sh`，要求发布 8081 的 `-p` 绑定只能是 `127.0.0.1` 或 `${BIND_ADDR}`，
+且 `BIND_ADDR` 的**源码默认值**必须是 loopback。它**不检查运行时环境变量**——所以它保证的是
+「默认不暴露」，**不是**「不会暴露」。前端 `pnpm check` 会跑它。
 
 ---
 
-## 五、还没做的事：TLS 边缘
+## 五、当前暴露形态与 TLS 边缘
 
-当前的终点是「宿主机 127.0.0.1:8154 上有一个能跑的 HTTP 服务」。**公网访问需要再加一层
-受信 TLS 边缘**（宿主 nginx / Caddy / 云负载均衡），并且必须：
+**本测试环境当前是公网明文直连**：`http://47.109.148.207:18654/`，由
+`deploy.ps1 -EdgeBindAddr 0.0.0.0` 发布（`deploy.ps1` 的该参数默认值即 `0.0.0.0`，
+所以不带参数也是公网直连；要收回请显式传 `-EdgeBindAddr 127.0.0.1`）。
 
-> ⚠️ **飞书联调会先撞上这一条。** 飞书审批的「关联外部选项」要求
-> **公网可访问、不能是内网地址**（官方原文：`docs/reference/feishu` 的
-> `approval/.../associate-external-options.md`，另有 **3 秒**请求超时）。
-> 而应用边缘由 `deploy-blue-green.sh` 按 `-p ${BIND_ADDR}:8154:8081` 发布，
-> `BIND_ADDR` 默认 `127.0.0.1` —— 飞书打不进来。
->
-> 三条出路，按暴露面从小到大：
-> 1. **宿主 nginx 只放行取选项路径**（最小暴露）：`location ^~ /api/v1/feishu/approval/options/`
->    → `proxy_pass http://127.0.0.1:8154`，其余 `return 404`。控制台仍走 SSH 隧道，
->    登录表单不会以明文暴露在公网。
-> 2. **宿主 nginx 全量反代到 `127.0.0.1:8154`**（推荐，就是本节的最终形态，先跑 http、
->    再加证书）。应用保持只绑 loopback，重新部署不会改变暴露面。
-> 3. `BIND_ADDR=0.0.0.0 ./deploy-blue-green.sh ...`：最快，但**整个控制台（含登录表单）
->    以明文 http 对公网开放**；且 `deploy.ps1` 不会转发这个变量，**每次重新部署都要在
->    服务器上手动带上**，否则容器回落成 loopback 绑定。
->
-> 另外记得放行云安全组的 8154（或 80）。
+> ⚠️ 这是**明文 http**：登录凭据、会话 Cookie、密码重置令牌都在公网上不加密传输。
+> 之所以这样，是因为飞书审批的「关联外部选项」要求**公网可访问、不能是内网地址**
+> （官方原文：`docs/reference/feishu` 的 `approval/.../associate-external-options.md`，
+> 另有 **3 秒**请求超时），而 TLS 边缘还没落地。
+> **上线真实用户前必须换成下面的形态之一。**
+
+演进路径，按暴露面从小到大：
+
+1. **宿主 nginx 只放行取选项路径**（最小暴露）：`location ^~ /api/v1/feishu/approval/options/`
+   → `proxy_pass http://127.0.0.1:18654`，其余 `return 404`。控制台仍走 SSH 隧道，
+   登录表单不会以明文暴露在公网。
+2. **宿主 nginx 全量反代到 `127.0.0.1:18654`**（推荐，本节的最终形态）：用
+   `-EdgeBindAddr 127.0.0.1` 重新发布，宿主边缘终结 TLS 后反代。重新部署不会改变暴露面。
+
+两种都要：
 
 - 只允许 TLS 1.2/1.3，HTTP 永久重定向到 HTTPS；
-- **覆盖**客户端传入的 `Forwarded` / `X-Forwarded-*`，再转发给 8154；
+- **覆盖**客户端传入的 `Forwarded` / `X-Forwarded-*`，再转发给 18654；
 - 保留应用返回的 CSP、HSTS 等安全响应头；
-- 对 `/api`、`/.well-known`、`/health` 不做 SPA fallback 或 HTML 缓存。
+- 对 `/api`、`/.well-known`、`/health` 不做 SPA fallback 或 HTML 缓存；
+- 云安全组放行边缘端口（80/443），并可把 18654 收回。
 
-加好边缘后，**回来把 `config.cloud.toml` 的 `[security].trusted_proxy_cidrs` 填上**。
+加好边缘后，**回来把 `config.cloud.toml` 的 `[security].trusted_proxy_cidrs` 填上**，
+并把 `[email.password_reset].link_base_url` 改回 `https://`、`[app].environment` 切回
+`production`（当前是 `test`，为的是在 TLS 落地前允许 http 的 reset 链接）。
 
 不填的后果是**客户端 IP 退化成 TCP 对端地址**（不是"HTTPS 被当成 HTTP"——后端
 **只读 `Forwarded` 与 `X-Forwarded-For` 推导客户端 IP，不读 `X-Forwarded-Proto`**；
@@ -233,7 +243,7 @@ docker logs --tail 200 yang-backend
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9154/health/ready
 
 # 应用边缘
-curl -I http://127.0.0.1:8154/
+curl --noproxy '*' -I http://127.0.0.1:18654/
 ```
 
 | 症状 | 多半是 |
@@ -244,7 +254,8 @@ curl -I http://127.0.0.1:8154/
 | 日志里有 `Unknown database` | 库不存在。跑 `./deploy-blue-green.sh infra-up`（内含建库步骤），或手动：`docker exec -e MYSQL_PWD="$(cat .mysql-root-password)" yang-mysql mysql -uroot -e "CREATE DATABASE IF NOT EXISTS yang_system CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"` |
 | 日志里有 `Access denied` | `[mysql].url` 的账号/密码与容器里实际的不一致（改了 config 但没重建 MySQL 容器；初始化只在数据卷为空时执行） |
 | readiness 一直不 200 | MySQL/Redis 没起、密码不匹配、或 `config.cloud.toml` 里的主机名不是 `yang-mysql` / `yang-redis` |
-| `curl 127.0.0.1:8154` 不通 | 容器的 `-p` 没绑到 loopback；`docker ps` 看端口映射 |
+| `curl --noproxy '*' http://127.0.0.1:18654/` 不通 | 端口没发布 / 绑错地址，或容器没起来。看 `docker ps` 的端口映射与 `docker logs yang-backend` |
+| **浏览器打不开、报 503** | ⚠️ **先怀疑系统代理**：Windows 代理会让 Chrome 对不可达端口返回**假 503**。用 `curl.exe --noproxy "*"` 直连复验；真不通再查云安全组是否放行了该端口（当前只放行 `80/443` 与 `18000-19000`） |
 | 前端 502 | 前端容器没起来，或它没加入后端容器的网络命名空间（`--network container:` 写错） |
 
 ---

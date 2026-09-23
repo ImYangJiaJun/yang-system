@@ -53,7 +53,8 @@ deployment = "yang-prod"
 
 [http]
 # 容器内监听全部网卡：loopback 在容器里无法被编排器/Docker 健康检查探测。
-# 对外暴露范围由 deploy-blue-green.sh 的 `-p 127.0.0.1:8154:8081` 约束，不在此处。
+# 对外暴露范围由 deploy-blue-green.sh 的 `-p ${BIND_ADDR}:${LIVE_HOST_PORT}:8081` 约束
+#（默认 127.0.0.1:18654；测试环境可用 `deploy.ps1 -EdgeBindAddr 0.0.0.0` 显式暴露到公网），不在此处。
 bind = "0.0.0.0:8080"
 
 [mysql]
@@ -132,7 +133,7 @@ issue_refresh_credential_version = true
 # 网络命名空间、upstream 写死 127.0.0.1:8080，于是后端看到的对端永远是 nginx，
 # `security.auth_rate_limit_ip_attempts`（默认 30 次/60 秒）会变成**全站共享的单一 IP 桶**。
 #
-# 取值取决于 8154 前面放什么 TLS 边缘：
+# 取值取决于应用边缘端口（`LIVE_HOST_PORT`，当前 18654）前面放什么 TLS 边缘：
 #   - 边缘在宿主机上（nginx / Caddy）→ 容器看到的源是 docker 网桥网关，
 #     通常需要同时信任 127.0.0.1/32 与网桥网段（默认 172.17.0.0/16）
 #   - 边缘是同一 docker 网络里的容器 → 填该网络子网

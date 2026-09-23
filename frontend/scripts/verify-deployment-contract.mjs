@@ -58,7 +58,7 @@ for (const [target, replacement] of mutations) {
 }
 
 stdout.write(
-  `deployment contract verification: ${Object.keys(deploymentHeaders).length} security headers, history fallback, strict asset 404, split cache policy, loopback-only edge publish, ${mutations.length} adversarial mutations rejected\n`,
+  `deployment contract verification: ${Object.keys(deploymentHeaders).length} security headers, history fallback, strict asset 404, split cache policy, loopback-default edge publish, ${mutations.length} adversarial mutations rejected\n`,
 );
 
 function verifyContract(source) {
@@ -94,7 +94,7 @@ function verifyContract(source) {
     ],
     [
       `listen ${EDGE_PORT} default_server;`,
-      `应用边缘必须监听 ${EDGE_PORT}；对外暴露范围由编排层的 -p 127.0.0.1:<host>:${EDGE_PORT} 约束`,
+      `应用边缘必须监听 ${EDGE_PORT}；对外暴露范围由编排层的 -p ${'${BIND_ADDR}'}:<host>:${EDGE_PORT} 约束（默认 127.0.0.1）`,
     ],
     [
       "~^(?:http|https)$ $http_x_forwarded_proto;",
@@ -114,12 +114,18 @@ function verifyContract(source) {
 }
 
 /**
- * 应用边缘改为监听所有网卡后，「不暴露公网」由编排层的 `-p 127.0.0.1:<host>:<edge>`
+ * 应用边缘改为监听所有网卡后，「不暴露公网」由编排层的 `-p <bind>:<host>:<edge>`
  * 承担。这条必须是机械可证的：部署脚本里凡是发布应用边缘端口的地方，绑定地址
- * 只能是 `127.0.0.1`。
+ * 只能是 `127.0.0.1` 或 `${BIND_ADDR}`（后者另需证明其**源码默认值**是 loopback）。
  *
- * 允许写 `-p 127.0.0.1:<host>:<edge>`；拒绝 `-p <host>:<edge>`（任意网卡）与
- * `-p 0.0.0.0:<host>:<edge>`。
+ * 允许：`-p 127.0.0.1:<host>:<edge>`、`-p ${BIND_ADDR}:<host>:<edge>`（默认 loopback）。
+ * 拒绝：`-p <host>:<edge>`（裸端口 = 任意网卡）、`-p 0.0.0.0:<host>:<edge>`（硬编码）。
+ *
+ * ⚠️ **本检查的边界，别误读**：它只证明**源码里的默认值**是 loopback，因此保证的是
+ *    「默认不暴露」。它**不检查运行时环境变量**——`BIND_ADDR=0.0.0.0 ./deploy-blue-green.sh`
+ *    是被允许的（运维显式覆盖），`deploy.ps1 -EdgeBindAddr 0.0.0.0` 同理。
+ *    所以它**不构成**对公网暴露面的保证；暴露面由调用方负责，`cmd_cutover` 收尾会按
+ *    容器**实际绑定**如实报告。
  */
 async function verifyEdgePublishIsLoopbackOnly() {
   let source;
