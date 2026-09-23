@@ -29,7 +29,11 @@
 | E-3 OIDC 端口 | ✅ 已完成 | `domain/oidc.rs::ExternalIdentityProvider` 端口定义（不建表不接 Client） |
 | E-4 多因子任选登录 | 🚧 阶段 1 已完成 | 详见 `docs/architecture/multi-factor-login.md`：因子分类模型（同类别内任选）；阶段 1 已修复邮箱验证码登录绕过 TOTP 的缺口（方案 A：框架验证码引擎 `verify_only` 只验不消费 + 备用邮箱通道作第二因子严格禁用，lib_yang `cc9756d` + `c31f594`/`76ced5b`/`66ada17`）；阶段 2 框架登录挑战协议（lib_yang 扩展，未实施）；阶段 3 Passkey 评估 |
 
-> **完成状态口径**：进度表「✅ 已完成」指相关 Action/契约已落地并通过门禁，不表示该能力在生产中已可交付使用——尤其「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）当前无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口，待「首次管理员授予」引导机制明确后再启用。
+> **完成状态口径**：进度表「✅ 已完成」指相关 Action/契约已落地并通过门禁，不表示该能力在生产中已可交付使用。
+>
+> **2026-09-24 更正**：「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）**曾**无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口。该状态已由「权限组与首账号引导」交付终结：**首个成功注册的账号在同一事务内被引导为系统管理员**（并发仲裁交给 `system_owner` 哨兵表的唯一约束，不做判空逻辑；运维 SQL 降为灾备路径），`access` 另交付**一层权限组**（`permission_group` / `permission_group_item` / `user_group`，有效权限 = 直授 ∪ 组权限），并补齐最后管理员守卫与防自提权不变量。设计见 `docs/architecture/2026-09-24-permission-groups-and-bootstrap-design.md`，契约见 `docs/contracts/AUTHZ_GRANTS.md`。
+>
+> **历史记录（原文，2026-09-05）**：进度表「✅ 已完成」指相关 Action/契约已落地并通过门禁，不表示该能力在生产中已可交付使用——尤其「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）当前无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口，待「首次管理员授予」引导机制明确后再启用。
 
 > **外键现状修正**：路线图 3.2 第 10 条「无外键」已不成立——`src/infrastructure/schema.rs:187-198`
 > 声明了 `fk_password_reset_token_user` 与 `fk_password_reset_token_requested_by` 两条外键，
@@ -53,7 +57,7 @@
 
 以下不是骨架简化，而是架构资产，新能力必须遵守同一套契约：
 
-- **无「最终管理员」不变量**：账户管理权限经 `access` Addon 的 grants 授予特定身份，实现「有管理动作、无超级管理员」，不引入 Keycloak 式 admin 账号。
+- **不做不可降权的超级账号**（2026-09-24 按 D2 修订改正）：账户管理权限经 `access` Addon 的直授与权限组授予特定身份，不引入 Keycloak 式 admin 账号。首个注册账号被引导为系统管理员，但它是**普通、可降权、可停用、可删除**的授权事实（内置全权组 `system_admin` 的成员行），且应用内不存在自提权路径。原表述「无『最终管理员』不变量：…实现『有管理动作、无超级管理员』」已随引导机制引入而废止。
 - 双版本失效（`authz_version` / `credential_version`）+ Outbox 传播，writer 契约见 `docs/architecture/authorization-writers.md`。
 - 敏感操作 Step-up + append-only 审计（`docs/contracts/AUDIT.md`）。
 - 防枚举统一响应、验证码/令牌只存摘要、原子单次消费。

@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + React 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前以 `account` 为唯一业务 Addon（另有 `access` 授权端口与 `demo` 演示 Addon，均未计入业务域）：账号与会话（邮箱验证码注册、用户名/邮箱/邮箱验证码免密登录、头像、Refresh Cookie、Step-up 重认证、密码重置、全设备退出、登录设备管理）、登录 MFA（TOTP 激活/停用与备用邮箱验证码）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性。没有平台管理、企业租户和业务对象域，也没有任何账号会成为系统最终管理员。
+`yang-system` 是基于 `yang-base` 框架的模块化单体参考应用：一个 Rust (axum) 后端服务 + React 管理控制台。同一份 Addon/Module 定义同时驱动强类型 Action、数据库 Schema、Catalog、Registry、OpenAPI 和前端页面。当前以 `account` 为唯一业务 Addon（另有 `access` 授权端口与 `demo` 演示 Addon，均未计入业务域）：账号与会话（邮箱验证码注册、用户名/邮箱/邮箱验证码免密登录、头像、Refresh Cookie、Step-up 重认证、密码重置、全设备退出、登录设备管理）、登录 MFA（TOTP 激活/停用与备用邮箱验证码）、授权失效传播（authz_version + Outbox）、高权限审计和生产可观测性；权限管理面（`access`：直授 + 一层权限组 + 首账号引导）已交付。没有企业租户和业务对象域。首个成功注册的账号由应用在同一事务内引导为系统管理员（内置 `system_admin` 全权组，可降权/可停用/可删除），其余账号的平台管理能力完全由授权事实决定，应用内不存在自提权路径。
 
 本仓库是**独立 Git/Cargo 项目**，但被签出在 `lib_yang` 仓库的 `project/yang-system/` 路径下（`lib_yang` 根 workspace 显式排除它）；`Cargo.toml` 通过相对路径直接依赖同工作树中的基础库：
 
@@ -32,7 +32,7 @@ src/
 │   │   ├── domain/          # context/repository/claims/authz_version/grants/session/password_reset/
 │   │   │                    # policy/status/system_owner/email_delivery/login_event/mfa/oidc
 │   │   └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
-│   ├── access/              # 授权端口（预留，无冷启动引导，权限管理未交付）
+│   ├── access/              # 权限管理面：权限目录 + 直授 + 权限组 + 首账号引导（grants/ 与 groups/ 两个 module）
 │   └── demo/                # 前端演示（notes CRUD）
 ├── config/                  # 不可变运行配置（mod.rs）、配置源合成（source.rs）
 ├── infrastructure/          # 审计（audit/）、授权一致性（authorization/）、声明式 Schema（schema.rs）
@@ -103,7 +103,7 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
   python scripts/run_ci.py integration
   ```
 
-  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理，以及飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护）。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs` 与 `feishu_approval_options_integration.rs` 八个入口。
+  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理、匿名化删除后的凭据与 PII 清理、逐台会话撤销后 refresh 被拒，飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护），以及权限组并入 Token claims（组名不进 `roles`）与首账号引导的哨兵并发仲裁。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs`、`feishu_approval_options_integration.rs`、`account_deletion_integration.rs`、`session_revocation_integration.rs`、`permission_groups_integration.rs` 与 `system_owner_bootstrap_integration.rs` 十二个入口。
 
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
 
