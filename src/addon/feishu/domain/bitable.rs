@@ -376,6 +376,82 @@ pub(crate) fn resolve_field_name(fields: &[FieldItem], field_id: &str) -> anyhow
     Ok(matched)
 }
 
+/// 把一组 `field_id` 批量映射成**当前**的精确字段名。
+///
+/// 返回 `(field_id, 当前字段名)`，**顺序与输入一致**——日志、快照摘要与
+/// `field_names` 都按这个顺序拼，顺序飘了对照价值就没了。
+///
+/// 与 [`resolve_field_name`] 的三点不同，都是表级拉取逼出来的：
+///
+/// 1. **批量**：一次快照要解析整张表勾选的所有列，逐列调用会重复扫全表元数据。
+/// 2. **点名缺失**：缺哪个就报哪个，而不是在第一个缺失处停下——运维一次就能看全
+///    要修的东西，不必「修一个跑一轮」。
+/// 3. **按 id 稳定**：字段改名后仍解析得出当前名字。这正是身份存 `field_id`
+///    而不是 `field_name` 的全部意义。
+pub(crate) fn resolve_field_names(
+    fields: &[FieldItem],
+    field_ids: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let name_of = |field_id: &str| -> Option<String> {
+        fields
+            .iter()
+            .find(|field| field.field_id == field_id)
+            .map(|field| field.field_name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    };
+
+    let missing: Vec<&str> = field_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|field_id| name_of(field_id).is_none())
+        .collect();
+    ensure!(
+        missing.is_empty(),
+        "多维表格里找不到这些字段（可能已被删除，或该字段名为空）：{}",
+        missing.join("、")
+    );
+
+    let resolved: Vec<(String, String)> = field_ids
+        .iter()
+        .filter_map(|field_id| name_of(field_id).map(|name| (field_id.clone(), name)))
+        .collect();
+
+    // 重名必须拦在拉取之前：`field_names` 是**按名字匹配**的，表里有两列同名时
+    // 接口会取到不确定的那一列。单列版已经有这条，批量版不能漏。
+    for (_, name) in &resolved {
+        let in_table = fields
+            .iter()
+            .filter(|field| field.field_name.trim() == name)
+            .count();
+        ensure!(
+            in_table == 1,
+            "字段名「{name}」在表内不唯一（{in_table} 列同名）：\
+             接口按名字匹配会取到不确定的列，请改用唯一列名"
+        );
+    }
+    Ok(resolved)
+}
+
+/// 拉一次字段元数据，把一组 `field_id` 解析成当前名字。
+///
+/// 表级拉取的第一步：一次快照要覆盖整张表勾选的所有列，所以名字在同一次
+/// 元数据里解析完，不做逐列往返。
+///
+/// 缺失一律归为 `Fatal`：这是**配置错误**（列被删了），退避重试不会自愈。
+pub(crate) async fn resolve_current_field_names(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    field_ids: &[String],
+) -> Result<Vec<(String, String)>, OutboundFailure> {
+    let fields = list_all_fields(transport, sleeper, tokens, coordinates).await?;
+    resolve_field_names(&fields, field_ids).map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 单元格取值
 // ---------------------------------------------------------------------------
@@ -936,6 +1012,94 @@ mod tests {
         assert_eq!(data.items[0].table_id, "tblA");
         assert_eq!(data.items[0].name, "公司往来付款");
         assert!(data.page_token.is_none());
+    }
+
+    // ---- 批量解析 field_id → 当前字段名 ----
+
+    fn remote(field_id: &str, field_name: &str) -> FieldItem {
+        FieldItem {
+            field_id: field_id.to_string(),
+            field_name: field_name.to_string(),
+            field_type: Some(3),
+            ui_type: Some("SingleSelect".to_string()),
+        }
+    }
+
+    #[test]
+    fn every_missing_field_id_is_named_not_just_the_first() {
+        // 勾选的列被删了 → 必须一次看全要修的东西。只报第一个会让人修一轮跑一轮。
+        let fields = vec![remote("fldA", "币种"), remote("fldB", "汇率")];
+        let wanted = vec![
+            "fldA".to_string(),
+            "fldGONE".to_string(),
+            "fldALSO_GONE".to_string(),
+        ];
+        let error = resolve_field_names(&fields, &wanted)
+            .err()
+            .unwrap_or_else(|| panic!("缺字段应报错"));
+        let message = error.to_string();
+        assert!(message.contains("fldGONE"), "实际: {message}");
+        assert!(
+            message.contains("fldALSO_GONE"),
+            "要一次报全，实际: {message}"
+        );
+    }
+
+    #[test]
+    fn resolution_returns_the_current_name_so_a_rename_does_not_break_the_link() {
+        // 存 field_id 的全部意义：字段改名后仍解析得出当前名字
+        let fields = vec![remote("fld6DuK6tM", "币种/Currency（单选）（已改名）")];
+        let resolved = resolve_field_names(&fields, &["fld6DuK6tM".to_string()])
+            .unwrap_or_else(|error| panic!("应可解析: {error}"));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "fld6DuK6tM");
+        assert_eq!(resolved[0].1, "币种/Currency（单选）（已改名）");
+    }
+
+    #[test]
+    fn the_order_matches_the_input_order() {
+        // 顺序稳定才有对照价值：日志、快照摘要、`field_names` 都按它拼
+        let fields = vec![
+            remote("fldB", "汇率"),
+            remote("fldA", "币种"),
+            remote("fldC", "费用类型"),
+        ];
+        let wanted = vec!["fldC".to_string(), "fldA".to_string(), "fldB".to_string()];
+        let resolved = resolve_field_names(&fields, &wanted)
+            .unwrap_or_else(|error| panic!("应可解析: {error}"));
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fldC", "fldA", "fldB"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_collides_with_another_column_is_rejected() {
+        // `field_names` 是**按名字匹配**的：表里有两列同名就取到不确定的那一列。
+        // 单列版 resolve_field_name 已经拦这条，批量版不能漏。
+        let fields = vec![remote("fldA", "费用类型"), remote("fldB", "费用类型")];
+        assert!(
+            resolve_field_names(&fields, &["fldA".to_string()]).is_err(),
+            "重名必须被拦在拉取之前"
+        );
+    }
+
+    #[test]
+    fn an_empty_request_yields_an_empty_result() {
+        // 没勾任何列是合法输入（调用方另有非空校验），这里不该报错
+        let resolved =
+            resolve_field_names(&[], &[]).unwrap_or_else(|error| panic!("空输入不该报错: {error}"));
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn a_blank_field_name_counts_as_missing() {
+        // 名字被清空的列没法喂给 `field_names`，等同于不存在
+        let fields = vec![remote("fldA", "   ")];
+        assert!(resolve_field_names(&fields, &["fldA".to_string()]).is_err());
     }
 
     // ---- 列出视图 ----
