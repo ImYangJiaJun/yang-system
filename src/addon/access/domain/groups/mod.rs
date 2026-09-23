@@ -11,6 +11,7 @@ pub(crate) mod repository;
 pub(crate) mod resolution;
 pub(crate) mod tables;
 
+pub(crate) use owner::AccessSystemOwnerClaimer;
 pub(crate) use repository::{
     GroupRecord, GroupRepository, MAX_GROUP_MEMBERS, SYSTEM_ADMIN_GROUP_KEY,
 };

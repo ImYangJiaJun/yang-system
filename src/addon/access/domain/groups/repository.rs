@@ -11,7 +11,7 @@
 
 use crate::addon::access::domain::groups::tables::{
     ITEM_GRANTED_BY, ITEM_GROUP_ID, ITEM_PERMISSION, MEMBER_GRANTED_BY, MEMBER_GROUP_ID,
-    MEMBER_USER_ID, SYSTEM_ROLE,
+    MEMBER_USER_ID, OWNER_SENTINEL_KEY, OWNER_USER_ID, SENTINEL_KEY_VALUE, SYSTEM_ROLE,
 };
 use crate::addon::access::groups::table::{
     GROUP_CREATED_BY, GROUP_DESCRIPTION, GROUP_ID, GROUP_KEY, GROUP_RECORD_FIELDS, GROUP_TITLE,
@@ -94,6 +94,10 @@ impl GroupRepository {
         Self::trusted(&self.members, ctx)
     }
 
+    fn trusted_owner(&self, ctx: &ActionContext) -> Result<TableQuery, BaseError> {
+        Self::trusted(&self.owners, ctx)
+    }
+
     /// 幂等地确保内置全权组存在，返回其 id。
     ///
     /// 并发下两个调用者可能同时插入：唯一键冲突按「别人已建好」处理，
@@ -128,6 +132,25 @@ impl GroupRepository {
                 .ok_or_else(|| BaseError::ConfigError("内置权限组插入冲突后回查不到".to_string())),
             Err(error) => Err(error),
         }
+    }
+
+    /// 竞争引导哨兵；重复插入由唯一约束与 CHECK 拒绝。
+    ///
+    /// 这是哨兵表的唯一写入口：并发仲裁完全交给数据库约束，
+    /// 调用方不得先「判空」再插入（那是 TOCTOU）。
+    pub(crate) async fn insert_owner_sentinel_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        user_id: i64,
+    ) -> Result<(), BaseError> {
+        let record = Record::new()
+            .set(OWNER_SENTINEL_KEY, SENTINEL_KEY_VALUE)
+            .set(OWNER_USER_ID, user_id);
+        self.trusted_owner(ctx)?
+            .insert_in_tx(transaction, record)
+            .await?;
+        Ok(())
     }
 
     /// 写入一条组事实并返回自增主键。

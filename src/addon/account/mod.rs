@@ -28,14 +28,6 @@ pub(crate) use domain::context::Account;
 pub(crate) use domain::password_reset::PasswordResetReference;
 pub(crate) use domain::system_owner::OwnerClaimOutcome;
 
-/// 返回不声明最终管理员的默认声明器。
-///
-/// 当前骨架只保留 account Addon，没有平台管理域来声明最终管理员；
-/// 注册流程照常完成，任何账号都不会成为系统最终管理员。
-pub(crate) fn no_system_owner_claimer() -> Arc<dyn SystemOwnerClaimer> {
-    Arc::new(domain::system_owner::NoSystemOwnerClaimer)
-}
-
 /// 装配授权失效公共端口（组合根调用一次）。
 ///
 /// 读/写两个端口由同一账号域实现承载：`users.authz_version` 的 SQL 仍只在

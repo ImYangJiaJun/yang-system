@@ -8,10 +8,11 @@ pub(crate) mod domain;
 mod grants;
 mod groups;
 
-use crate::addon::account::GrantResolver;
+use crate::addon::account::{GrantResolver, SystemOwnerClaimer};
 use crate::authorization::{AuthorizationPort, AuthorizationVersionValidator, StepUpServices};
 use domain::context::Access;
 use domain::group_resolver::GroupGrantResolver;
+use domain::groups::AccessSystemOwnerClaimer;
 use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
@@ -35,6 +36,11 @@ impl AccessAddon {
     /// 账号域在 Token 签发时合并权限组权限的解析器。
     pub(crate) fn group_grant_resolver(&self) -> Arc<dyn GrantResolver> {
         Arc::new(GroupGrantResolver::new(Arc::clone(&self.access)))
+    }
+
+    /// 首个注册账号的引导声明器。
+    pub(crate) fn system_owner_claimer(&self) -> Arc<dyn SystemOwnerClaimer> {
+        Arc::new(AccessSystemOwnerClaimer::new(Arc::clone(&self.access)))
     }
 
     /// 取出 Addon 定义交给 AppBuilder。
