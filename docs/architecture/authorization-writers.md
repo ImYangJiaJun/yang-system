@@ -10,6 +10,7 @@
 | `users` | `authz_version` | 仅账号安全版本原语可单调递增，并在同事务追加 Outbox |
 | `users` | `credential_version` | 仅凭据变更原语可与授权版本一起单调递增 |
 | `authz_grant` | 整行 | 仅 access 授权存储 writer 可插入/删除；每次事实变更必须同事务经账号安全版本原语递增目标用户 `authz_version` 并追加 Outbox |
+| `permission_group` / `permission_group_item` / `user_group` | 整行 | 仅 access 组事实 writer 可增删改；组成员或权限变化必须同事务经账号安全版本原语递增**受影响用户**的 `authz_version` 并追加 Outbox（扇出按 `user_id` 升序加锁） |
 
 当前骨架的外围授权域（access）已登记在下方清单；未来其它 Addon（平台/企业等）
 新增授权事实表与 writer 时，必须先在下方清单登记再写代码。
@@ -34,10 +35,12 @@
 | `account-user-facts` | `src/addon/account/domain/repository.rs` | 用户注册的固定初始状态与密码摘要写入；不暴露用户状态更新 API |
 | `account-security-version` | `src/addon/account/domain/authz_version.rs` | 用户状态锁、授权/凭据版本单调递增与 Outbox |
 | `access-grant-lifecycle` | `src/addon/access/domain/repository.rs` | `authz_grant` 直授权限事实的读取、插入与删除；版本递增复用 `account-security-version` |
+| `access-group-lifecycle` | `src/addon/access/domain/groups/repository.rs` | 权限组、组条目与用户-组关系的读取、插入与删除；版本递增复用 `account-security-version` |
 
 <!-- authorization-writer: account-user-facts src/addon/account/domain/repository.rs -->
 <!-- authorization-writer: account-security-version src/addon/account/domain/authz_version.rs -->
 <!-- authorization-writer: access-grant-lifecycle src/addon/access/domain/repository.rs -->
+<!-- authorization-writer: access-group-lifecycle src/addon/access/domain/groups/repository.rs -->
 
 ## 验证边界
 

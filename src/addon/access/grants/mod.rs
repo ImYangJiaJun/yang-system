@@ -8,6 +8,10 @@ mod actions;
 pub(super) mod table;
 
 use super::domain::context::Access;
+use super::domain::groups::tables::{
+    group_items_table_spec, system_owner_table_spec, user_group_table_spec,
+};
+use super::domain::groups::GroupRepository;
 use super::domain::permission_catalog::PermissionCatalogHandle;
 use super::domain::repository::GrantRepository;
 use crate::addon::account::user_from_claims;
@@ -34,6 +38,12 @@ pub(super) fn build_module(
     let table = table::grants_table_spec()?;
     let access = Arc::new(Access::new(
         GrantRepository::new(table.table_definition()?),
+        GroupRepository::new(
+            super::groups::table::groups_table_spec()?.table_definition()?,
+            group_items_table_spec()?.table_definition()?,
+            user_group_table_spec()?.table_definition()?,
+            system_owner_table_spec()?.table_definition()?,
+        ),
         permission_catalog,
         authorization,
     ));
