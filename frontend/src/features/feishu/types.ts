@@ -552,6 +552,97 @@ export function parseLinkageMapping(
   };
 }
 
+/* ------------------------------ 表级配置向导 ------------------------------ */
+
+/// `source_key` 的合法形状。与后端 `domain/source_key.rs::valid_source_key` 同一口径：
+/// 小写字母开头、只含 `[a-z0-9_]`、最长 64 字节。它进接口 URL 路径段，所以是**硬契约**
+/// （后端会拒，且它是全局唯一索引）。
+export const SOURCE_KEY_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+
+/// `field_id` → 默认 `source_key`。
+///
+/// **默认值必须直接可用**：运维不改这一栏也能过。所以派生只做两件确定性的事——
+/// 小写化、把 `[^a-z0-9_]` 换成下划线——再保证首字符是字母。
+/// 不做「拼上字段名」那种聪明事：字段名可以改名，而 `source_key` 创建后不可改。
+export function sourceKeyFromFieldId(fieldId: string): string {
+  return fieldId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/^(?![a-z])/, "f_")
+    .slice(0, 64);
+}
+
+export function isValidSourceKey(value: string): boolean {
+  return SOURCE_KEY_PATTERN.test(value);
+}
+
+/// 官方字段类型码 → 人话（`docs/reference/feishu/` 的响应体字段表）。
+///
+/// **认不出的码也照实带出来**（见 [`fieldTypeLabel`]）：字段列表是全量列出的，
+/// 判不判得出来由运维自己决定，把未知类型静默吞掉等于少给了一列。
+export const FIELD_TYPE_LABELS: Readonly<Record<number, string>> = {
+  1: "文本",
+  2: "数字",
+  3: "单选",
+  4: "多选",
+  5: "日期",
+  7: "复选框",
+  11: "人员",
+  13: "电话号码",
+  15: "超链接",
+  17: "附件",
+  18: "关联",
+  20: "公式",
+  21: "双向关联",
+  22: "地理位置",
+  23: "群组",
+  1001: "创建时间",
+  1002: "最后更新时间",
+  1003: "创建人",
+  1004: "修改人",
+  1005: "自动编号",
+};
+
+/// 字段类型码 → 展示文本。**数字码永远是文案的一部分**：官方枚举会加新值，
+/// 而带出原始码之后，认不出的类型也能被运维和官方文档对上号。
+export function fieldTypeLabel(type: number): string {
+  return `${type} ${FIELD_TYPE_LABELS[type] ?? "未收录"}`;
+}
+
+/// 多维表格数据表（`list_bitable_tables` 的一项）。
+export type BitableTable = {
+  tableId: string;
+  name: string;
+};
+
+/// 多维表格视图（`list_bitable_views` 的一项）。
+export type BitableView = {
+  viewId: string;
+  viewName: string;
+  viewType: string;
+};
+
+/// 多维表格字段（`list_bitable_fields` 的一项）。
+export type BitableField = {
+  fieldId: string;
+  fieldName: string;
+  /// 官方类型码。
+  type: number;
+};
+
+/// 向导里一条**勾选后**的字段绑定。
+export type TableWizardField = {
+  fieldId: string;
+  /// 勾选当时的字段名。**只是展示标签**——身份是 `fieldId`，改名不断链。
+  fieldName: string;
+  type: number;
+  sourceKey: string;
+  /// 同表内的父列 `field_id`；无父为 `null`（不是空串——空串会被后端当成「没给」，
+  /// 两者在 wire 上恰好同义，但显式的 `null` 让「这条没有父」是写出来的，而不是漏掉的）。
+  parentFieldId: string | null;
+};
+
 /// 界面值 → `linkage_mapping` 文本。`null` 返回空串（表示不写这一项）。
 export function buildLinkageMapping(value: LinkageFormValue | null): string {
   if (value === null) return "";

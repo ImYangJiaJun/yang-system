@@ -34,6 +34,9 @@ import type {
 
 import { withStableOrder } from "./list-query";
 import type {
+  BitableField,
+  BitableTable,
+  BitableView,
   DatasourceItem,
   DatasourceListQuery,
   DatasourceStatus,
@@ -46,6 +49,7 @@ import type {
   OptionListQuery,
   OrderByClause,
   PullScheduleInfo,
+  TableWizardField,
   TokenPrecheckResult,
 } from "./types";
 import {
@@ -70,6 +74,23 @@ export const DATASOURCE_OPERATION_IDS = {
 export const OPTION_OPERATION_IDS = {
   list: "feishu.option.list_options",
   approvalOptions: "feishu.option.approval_options",
+} as const;
+
+/// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。
+///
+/// 这些端点在服务端都在**表级**这一侧：元数据三个是出站查飞书（归 `datasource.write`
+/// 一侧，见 `list_bitable_tables.rs` 的注释），创建是一次写两张表的事务。
+export const TABLE_OPERATION_IDS = {
+  listTables: "feishu.datasource.list_bitable_tables",
+  listViews: "feishu.datasource.list_bitable_views",
+  listFields: "feishu.datasource.list_bitable_fields",
+  createTable: "feishu.datasource.create_datasource_table",
+  /// 体检：勾选的 `field_id` 与表实际字段比对（读 + 出站，不改任何状态）。
+  healthCheck: "feishu.datasource.health_check",
+  /// 回显 Token：**纯读**，但读的是凭据，所以是独立权限位。
+  reveal: "feishu.datasource.reveal_token",
+  /// 轮换 Token：写，事务内换 hash + cipher + 轮换时间。
+  rotate: "feishu.datasource.rotate_token",
 } as const;
 
 /// 详情页默认排序：按「最近推送」倒序，并以唯一键 `option_id` 收尾。
@@ -487,6 +508,207 @@ export async function deleteDatasource(
     deleted: asNumber(data?.deleted, 0),
     disabledOptions: asNumber(data?.disabled_options, 0),
   };
+}
+
+/* ---------------------------- 表级配置：元数据 ---------------------------- */
+
+function parseBitableTable(raw: Record<string, unknown>): BitableTable | null {
+  const tableId = asString(raw.table_id);
+  // 没有 table_id 的行不可用：它是下一步的坐标，猜不出来
+  return tableId === "" ? null : { tableId, name: asString(raw.name) };
+}
+
+function parseBitableView(raw: Record<string, unknown>): BitableView | null {
+  const viewId = asString(raw.view_id);
+  return viewId === ""
+    ? null
+    : {
+        viewId,
+        viewName: asString(raw.view_name),
+        viewType: asString(raw.view_type),
+      };
+}
+
+function parseBitableField(raw: Record<string, unknown>): BitableField | null {
+  const fieldId = asString(raw.field_id);
+  if (fieldId === "") return null;
+  return {
+    fieldId,
+    fieldName: asString(raw.field_name),
+    type: asNumber(raw.type, 0),
+  };
+}
+
+function listOf<T>(
+  data: unknown,
+  key: string,
+  parse: (raw: Record<string, unknown>) => T | null,
+): T[] {
+  const raw = asRecord(data)?.[key];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== undefined)
+    .map(parse)
+    .filter((item): item is T => item !== null);
+}
+
+/// 列出某个多维表格 App 下的数据表（向导第一步）。
+///
+/// 它**会出站调飞书**并消耗本应用频控配额，所以服务端把三粒元数据权限都归到
+/// `feishu.datasource.write` 一侧——目录里没有它时这里会走 `requireAction` 抛错。
+export async function listBitableTables(
+  appToken: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<BitableTable[]> {
+  const result = await invokeFeishuAction(
+    deps,
+    TABLE_OPERATION_IDS.listTables,
+    { app_token: appToken },
+    signal,
+  );
+  return listOf(result.data, "tables", parseBitableTable);
+}
+
+/// 列出数据表的视图（向导第二步）。**它决定拉取哪些行，不决定能勾哪些字段。**
+export async function listBitableViews(
+  appToken: string,
+  tableId: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<BitableView[]> {
+  const result = await invokeFeishuAction(
+    deps,
+    TABLE_OPERATION_IDS.listViews,
+    { app_token: appToken, table_id: tableId },
+    signal,
+  );
+  return listOf(result.data, "views", parseBitableView);
+}
+
+/// 列出数据表的字段（向导第三步）。
+///
+/// **一个 `view_id` 都不发**：实测「列出字段」的 `view_id` 参数不生效（带与不带返回
+/// 完全相同的字段集合与顺序）。加回去只会让人以为「换视图能换出一批字段」。
+export async function listBitableFields(
+  appToken: string,
+  tableId: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<BitableField[]> {
+  const result = await invokeFeishuAction(
+    deps,
+    TABLE_OPERATION_IDS.listFields,
+    { app_token: appToken, table_id: tableId },
+    signal,
+  );
+  return listOf(result.data, "fields", parseBitableField);
+}
+
+/* ---------------------------- 表级配置：创建 ----------------------------- */
+
+/// 一次「建表级数据源」的完整提交物。
+export type CreateTableSubmission = {
+  title: string;
+  appToken: string;
+  tableId: string;
+  /// 空串 = 取全表。**不发这个键**（发空串会被后端当成「有一个空坐标」）。
+  viewId: string;
+  fields: TableWizardField[];
+};
+
+/// 创建时系统生成的凭据。明文只在这一刻与回显端点上出现。
+export type CreatedCredential = {
+  fieldId: string;
+  sourceKey: string;
+  token: string;
+};
+
+export type CreatedTable = {
+  datasourceId: number;
+  credentials: CreatedCredential[];
+};
+
+/// 建表级数据源：表级行 + N 条字段绑定，服务端**同一事务**写入。
+export async function createDatasourceTable(
+  input: CreateTableSubmission,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<CreatedTable> {
+  const body: Record<string, unknown> = {
+    title: input.title,
+    ingest_mode: "pull",
+    bitable_base_token: input.appToken,
+    bitable_table_id: input.tableId,
+    fields: input.fields.map((field) => ({
+      field_id: field.fieldId,
+      source_key: field.sourceKey,
+      // 显式 `null`（后端 `#[serde(default)] Option<String>`，两者同义，但写出来更清楚）
+      parent_field_id: field.parentFieldId,
+    })),
+  };
+  if (input.viewId.trim() !== "") body.bitable_view_id = input.viewId.trim();
+
+  const result = await invokeFeishuAction(
+    deps,
+    TABLE_OPERATION_IDS.createTable,
+    body,
+    signal,
+  );
+  const data = asRecord(result.data);
+  const rawCredentials = data?.credentials;
+  const credentials: CreatedCredential[] = Array.isArray(rawCredentials)
+    ? rawCredentials
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map((item) => ({
+          fieldId: asString(item.field_id),
+          sourceKey: asString(item.source_key),
+          token: asString(item.token),
+        }))
+        .filter((item) => item.sourceKey !== "")
+    : [];
+  return { datasourceId: asNumber(data?.datasource_id, 0), credentials };
+}
+
+/// 向导要用的一组数据访问入口。
+///
+/// 抽成一个对象是为了**可注入**：组件不直接摸目录与会话，也就没有「渲染它必须先把
+/// 整棵应用壳搭起来」这个前提。真实实现见 [`useTableWizardClient`]。
+export type TableWizardClient = {
+  listTables: (appToken: string) => Promise<BitableTable[]>;
+  listViews: (appToken: string, tableId: string) => Promise<BitableView[]>;
+  listFields: (appToken: string, tableId: string) => Promise<BitableField[]>;
+  createTable: (input: CreateTableSubmission) => Promise<CreatedTable>;
+};
+
+/// 绑定当前会话与界面目录的向导数据访问。
+///
+/// **一律走目录声明的 Action**：`requireAction` 对未知 operation_id 抛错，所以
+/// 「服务端没部署这个端点」会表现为一句明确的错误，而不是一个打到空路径的请求。
+export function useTableWizardClient(): TableWizardClient {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  return useMemo(
+    () => ({
+      listTables: (appToken: string) => listBitableTables(appToken, deps),
+      listViews: (appToken: string, tableId: string) =>
+        listBitableViews(appToken, tableId, deps),
+      listFields: (appToken: string, tableId: string) =>
+        listBitableFields(appToken, tableId, deps),
+      createTable: (input: CreateTableSubmission) =>
+        createDatasourceTable(input, deps),
+    }),
+    [deps],
+  );
 }
 
 /* ------------------------------- 手动触发拉取 ------------------------------ */

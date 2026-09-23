@@ -4,8 +4,12 @@ import type { ActionDemoSchema, UiCatalog } from "@/engine";
 import {
   buildDatasourceListBody,
   createDatasource,
+  createDatasourceTable,
   deleteDatasource,
   feishuQueryKeys,
+  listBitableFields,
+  listBitableTables,
+  listBitableViews,
   listDatasources,
   listOptions,
   precheckApprovalOptions,
@@ -443,6 +447,177 @@ describe("deleteDatasource", () => {
     expect(calls[0]?.method).toBe("DELETE");
     expect(calls[0]?.body).toEqual({ source_key: "dept_sales" });
     expect(result).toEqual({ deleted: 1, disabledOptions: 3 });
+  });
+});
+
+/* ---------------------- 表级配置：元数据与创建端点 ---------------------- */
+
+/// 这四个端点的契约由后端 T3/T4/T5 落地；这里钉的是**前端发出去的形状**
+/// （路径、权限位对应的 operation_id、请求体的键名）。
+const TABLE_CONFIG_ACTIONS: ActionDemoSchema[] = [
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.list_bitable_tables",
+    path: "/api/v1/feishu/datasources/bitable-tables",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.list_bitable_views",
+    path: "/api/v1/feishu/datasources/bitable-views",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.list_bitable_fields",
+    path: "/api/v1/feishu/datasources/bitable-fields",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.create_datasource_table",
+    path: "/api/v1/feishu/datasources/table",
+  },
+];
+
+const tableDeps: FeishuInvokeDeps = {
+  catalog: catalogWith(TABLE_CONFIG_ACTIONS),
+  session: { token: "tok-1" },
+};
+
+describe("表级配置的元数据端点", () => {
+  it("listBitableTables：POST + app_token 走请求体，响应投影成驼峰", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: { tables: [{ table_id: "tblA", name: "目标台账" }] },
+    });
+    const tables = await listBitableTables("app1", tableDeps);
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/bitable-tables");
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.body).toEqual({ app_token: "app1" });
+    expect(tables).toEqual([{ tableId: "tblA", name: "目标台账" }]);
+  });
+
+  it("listBitableViews：两个坐标都发，且带出 view_type", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: {
+        views: [{ view_id: "vew1", view_name: "全部记录", view_type: "grid" }],
+      },
+    });
+    const views = await listBitableViews("app1", "tblA", tableDeps);
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/bitable-views");
+    expect(calls[0]?.body).toEqual({ app_token: "app1", table_id: "tblA" });
+    expect(views).toEqual([
+      { viewId: "vew1", viewName: "全部记录", viewType: "grid" },
+    ]);
+  });
+
+  it("listBitableFields：不发 view_id（实测那个参数对列出字段不生效）", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: {
+        fields: [{ field_id: "fldA", field_name: "币种", type: 3 }],
+      },
+    });
+    const fields = await listBitableFields("app1", "tblA", tableDeps);
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/bitable-fields");
+    expect(calls[0]?.body).toEqual({ app_token: "app1", table_id: "tblA" });
+    expect(calls[0]?.body).not.toHaveProperty("view_id");
+    expect(fields).toEqual([{ fieldId: "fldA", fieldName: "币种", type: 3 }]);
+  });
+
+  it("createDatasourceTable：勾选集合原样发出，父指针是 field_id", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: {
+        datasource_id: 7,
+        credentials: [
+          { field_id: "fldA", source_key: "payment_currency", token: "t-1" },
+        ],
+      },
+    });
+    const result = await createDatasourceTable(
+      {
+        title: "公司往来付款",
+        appToken: "app1",
+        tableId: "tblA",
+        viewId: "vew1",
+        fields: [
+          {
+            fieldId: "fldA",
+            fieldName: "币种/Currency",
+            type: 3,
+            sourceKey: "payment_currency",
+            parentFieldId: null,
+          },
+          {
+            fieldId: "fldB",
+            fieldName: "汇率/Exchange Rate",
+            type: 2,
+            sourceKey: "payment_fx_rate",
+            parentFieldId: "fldA",
+          },
+        ],
+      },
+      tableDeps,
+    );
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/table");
+    expect(calls[0]?.body).toEqual({
+      title: "公司往来付款",
+      ingest_mode: "pull",
+      bitable_base_token: "app1",
+      bitable_table_id: "tblA",
+      bitable_view_id: "vew1",
+      fields: [
+        {
+          field_id: "fldA",
+          source_key: "payment_currency",
+          parent_field_id: null,
+        },
+        {
+          field_id: "fldB",
+          source_key: "payment_fx_rate",
+          parent_field_id: "fldA",
+        },
+      ],
+    });
+    expect(result.datasourceId).toBe(7);
+    expect(result.credentials).toEqual([
+      { fieldId: "fldA", sourceKey: "payment_currency", token: "t-1" },
+    ]);
+  });
+
+  it("视图留空表示取全表：按键整个不发，而不是发空串", async () => {
+    const calls = stubFetch({ code: 0, data: { datasource_id: 7 } });
+    await createDatasourceTable(
+      {
+        title: "公司往来付款",
+        appToken: "app1",
+        tableId: "tblA",
+        viewId: "",
+        fields: [
+          {
+            fieldId: "fldA",
+            fieldName: "币种",
+            type: 3,
+            sourceKey: "currency",
+            parentFieldId: null,
+          },
+        ],
+      },
+      tableDeps,
+    );
+    expect(calls[0]?.body).not.toHaveProperty("bitable_view_id");
+  });
+
+  it("目录里没有这条 Action 时抛错，且一个请求都不发", async () => {
+    const calls = stubFetch({ code: 0, data: { tables: [] } });
+    await expect(listBitableTables("app1", deps)).rejects.toThrow(
+      /找不到 Action「feishu\.datasource\.list_bitable_tables」/,
+    );
+    expect(calls).toHaveLength(0);
   });
 });
 
