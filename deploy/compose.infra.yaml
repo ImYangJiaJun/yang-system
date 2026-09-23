@@ -1,0 +1,79 @@
+# =============================================================================
+# yang-system 基础设施（MySQL + Redis）— 服务器侧
+#
+# 只起依赖，**不起应用**：应用容器由 deploy-blue-green.sh 以 docker 原生命令管理
+# （蓝绿需要精确控制容器名、端口与网络命名空间，交给 compose 会互相打架）。
+#
+# 用法（在 /home/yjj/yang-system 下）：
+#   ./deploy-blue-green.sh infra-up
+# 凭据由该脚本从 config.cloud.toml 解析后注入，**不要直接调用 docker compose**。
+#
+# 注意：
+#   - 数据落在命名卷 yang_mysql_data / yang_redis_data 上，`down -v` 会**永久删除**。
+#   - 不映射任何宿主端口：只允许同处 yang-system-net 网络的容器访问。
+#     要从宿主机连库调试，用 `docker exec -it yang-mysql mysql -u...`。
+#   - Redis **不备份**（授权版本缓存、验证码、Step-up 单次消费都在里面，丢了只需重新登录）。
+#     见 docs/operations/RUNBOOK_BACKUP.md。
+# =============================================================================
+name: yang-system-infra
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: yang-mysql
+    environment:
+      # 这四个变量**不需要你维护 .env 文件**：deploy-blue-green.sh 会从
+      # config.cloud.toml 的 [mysql].url 解析出 USER/PASSWORD/DATABASE 并导出，
+      # root 密码由脚本首次运行时随机生成（存在 .mysql-root-password，chmod 600）。
+      #
+      # ⚠️ 因此**不要直接 `docker compose -f compose.infra.yaml up`**——那样这些变量
+      #    是空的，compose 会拒起。请走 `./deploy-blue-green.sh infra-up`。
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?由 deploy-blue-green.sh 注入，请勿直接调用 compose}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?由 deploy-blue-green.sh 从 config.cloud.toml 解析}
+      MYSQL_USER: ${MYSQL_USER:?由 deploy-blue-green.sh 从 config.cloud.toml 解析}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?由 deploy-blue-green.sh 从 config.cloud.toml 解析}
+      TZ: Asia/Shanghai
+    command:
+      # 与应用使用的排序规则/字符集一致（见 docker/mysql/init 与
+      # src/infrastructure/schema.rs 的声明式 Schema）。
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - yang_mysql_data:/var/lib/mysql
+      # 不挂 docker/mysql/init：那个脚本的作用是**额外**建 yang_system_test 测试库，
+      # 生产用不到；而 deploy.ps1 只上传 tar 与脚本，服务器上没有那个目录，
+      # 挂载不存在的宿主路径会让容器起不来。
+      # 主库由上面的 MYSQL_DATABASE 自动创建，足够生产使用。
+      # 本地跑集成测试用的 yang_system_test 仍由仓库根的 compose.yaml 提供。
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks: [yang-system-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: yang-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - yang_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    networks: [yang-system-net]
+
+volumes:
+  yang_mysql_data:
+  yang_redis_data:
+
+networks:
+  # 由 deploy-blue-green.sh 的 ensure_network 创建；应用容器也接入这个网络，
+  # 因此 config.cloud.toml 里可以直接用服务名 yang-mysql / yang-redis 作主机名。
+  yang-system-net:
+    external: true

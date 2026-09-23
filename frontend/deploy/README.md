@@ -3,7 +3,20 @@
 `nginx.conf` 是 YANG System SPA 的可审计完整 Nginx 配置，可直接安装为
 `/etc/nginx/nginx.conf`。`deployment-contract.mjs` 是生产构建 E2E 使用的
 同一响应合同。发布时必须把 `dist` 挂载到 `/usr/share/nginx/html`，
-Rust 服务监听 `127.0.0.1:8080`，Nginx 只监听 `127.0.0.1:8081`。
+Rust 服务监听 `127.0.0.1:8080`，Nginx 监听 `8081`（所有网卡）。
+
+> **2026-09-22 起监听地址由 `127.0.0.1:8081` 改为 `8081`。**
+>
+> 原设计只绑 loopback，理由是「应用边缘必须躲在受信 TLS 边缘之后」。但容器编排用
+> `docker -p` 发布端口时，DNAT 会把流量送到 netns 的 eth0，而 loopback 绑定收不到
+> ——「只听 loopback」与「用 `-p` 发布端口」在技术上互斥。
+>
+> 「不暴露公网」的责任因此**移到编排层**，规则是：
+> **发布端口必须写 `-p 127.0.0.1:<host_port>:8081`，绝不写 `-p <host_port>:8081`。**
+> 这条由 `scripts/verify-deployment-contract.mjs` 机械校验（它会读
+> `../../deploy/deploy-blue-green.sh` 并检查每一个发布 8081 的 `-p`）；监听 80/443 仍被禁止。
+>
+> 仍然必须与后端容器**共享网络命名空间**运行——nginx 的 upstream 写死 `127.0.0.1:8080`。
 
 公网入口必须由受信任的 TLS 终止层提供 HTTPS，并满足以下前置条件：
 

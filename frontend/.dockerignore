@@ -1,0 +1,35 @@
+# yang-system 前端镜像构建上下文（frontend/）的忽略规则。
+#
+# 为什么必须有这个文件：
+#   deploy/Dockerfile 的构建阶段是
+#       COPY package.json pnpm-lock.yaml ./   → pnpm install
+#       COPY . .                              → 覆盖式拷贝整个上下文
+#   没有 .dockerignore 时，`COPY . .` 会把**宿主机**的 node_modules 覆盖到容器里，
+#   把 Linux 侧刚装好的原生依赖（@next/swc / esbuild / rollup / lightningcss 等）
+#   换成 Windows 二进制，导致 pnpm build 失败或产出坏镜像。
+#   这与 ProfitScope 的 Dockerfile.prod 注释里记的是同一个坑。
+#
+# 注意：deploy/ 不能忽略——Dockerfile 运行时阶段要 COPY deploy/nginx.conf。
+
+# 依赖与构建产物（关键：node_modules）
+node_modules
+**/node_modules
+dist
+
+# 测试与测试产物（构建不需要）
+playwright-report
+test-results
+blob-report
+coverage
+
+# 版本控制与工具元数据
+.git
+.gitignore
+.prettierignore
+.prettierrc.json
+eslint.config.js
+
+# 文档与本地临时产物
+docs
+.tmp-fs
+AGENTS.md

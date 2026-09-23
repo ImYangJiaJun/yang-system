@@ -7,11 +7,20 @@ import {
   deploymentHeaders,
 } from "../deploy/deployment-contract.mjs";
 
+// 应用边缘的容器内端口。2026-09-22 起监听地址从 `127.0.0.1:8081` 改为 `8081`
+//（所有网卡）——因为「只听 loopback」与「用 `docker -p` 发布端口」技术上互斥：
+// DNAT 会把流量送到 netns 的 eth0，而 loopback 绑定收不到。
+// 「不暴露公网」的责任因此移到**编排层**，并由本脚本的下方检查保证它仍是
+// **机械可证**的，而不是退化成文档约定。
+const EDGE_PORT = "8081";
+
 const nginxPath = resolve("deploy/nginx.conf");
+const deployScriptPath = resolve("../deploy/deploy-blue-green.sh");
 const nginx = await readFile(nginxPath, "utf8");
 
 verifySecurityPolicy();
 verifyContract(nginx);
+await verifyEdgePublishIsLoopbackOnly();
 
 const mutations = [
   ["frame-ancestors 'none'; ", ""],
@@ -21,7 +30,7 @@ const mutations = [
   ],
   ["try_files $uri =404;", "try_files $uri /index.html;"],
   ["try_files $uri $uri/ /index.html;", "try_files $uri $uri/ =404;"],
-  ["listen 127.0.0.1:8081 default_server;", "listen 80 default_server;"],
+  [`listen ${EDGE_PORT} default_server;`, "listen 80 default_server;"],
   [
     "~^(?:http|https)$ $http_x_forwarded_proto;",
     "default $http_x_forwarded_proto;",
@@ -49,7 +58,7 @@ for (const [target, replacement] of mutations) {
 }
 
 stdout.write(
-  `deployment contract verification: ${Object.keys(deploymentHeaders).length} security headers, history fallback, strict asset 404, split cache policy, ${mutations.length} adversarial mutations rejected\n`,
+  `deployment contract verification: ${Object.keys(deploymentHeaders).length} security headers, history fallback, strict asset 404, split cache policy, loopback-only edge publish, ${mutations.length} adversarial mutations rejected\n`,
 );
 
 function verifyContract(source) {
@@ -84,8 +93,8 @@ function verifyContract(source) {
       "Nginx 缺少显式 SPA history fallback",
     ],
     [
-      "listen 127.0.0.1:8081 default_server;",
-      "应用边缘必须只绑定 loopback，并置于受信 TLS 边缘之后",
+      `listen ${EDGE_PORT} default_server;`,
+      `应用边缘必须监听 ${EDGE_PORT}；对外暴露范围由编排层的 -p 127.0.0.1:<host>:${EDGE_PORT} 约束`,
     ],
     [
       "~^(?:http|https)$ $http_x_forwarded_proto;",
@@ -101,6 +110,64 @@ function verifyContract(source) {
 
   if (/^\s*listen\s+(?:80|443)\b/m.test(source)) {
     throw new Error("应用边缘不得在此配置中直接暴露公网 80/443");
+  }
+}
+
+/**
+ * 应用边缘改为监听所有网卡后，「不暴露公网」由编排层的 `-p 127.0.0.1:<host>:<edge>`
+ * 承担。这条必须是机械可证的：部署脚本里凡是发布应用边缘端口的地方，绑定地址
+ * 只能是 `127.0.0.1`。
+ *
+ * 允许写 `-p 127.0.0.1:<host>:<edge>`；拒绝 `-p <host>:<edge>`（任意网卡）与
+ * `-p 0.0.0.0:<host>:<edge>`。
+ */
+async function verifyEdgePublishIsLoopbackOnly() {
+  let source;
+  try {
+    source = await readFile(deployScriptPath, "utf8");
+  } catch {
+    throw new Error(
+      `找不到部署脚本 ${deployScriptPath}：应用边缘已监听所有网卡，其对外暴露必须由该脚本约束在 loopback，无法在缺少该文件时证明`,
+    );
+  }
+
+  // 只看可执行行：脚本头部注释里就有 `-p 127.0.0.1:<host_port>:8081` 这样的示例，
+  // 不剥掉注释会让检查扫到示例文本（现在是恰好被 endsWith 滤掉，但那是巧合）。
+  const executable = source
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+
+  const specs = [...executable.matchAll(/-p\s+"?([^"\s]+)"?/g)].map((match) =>
+    match[1].replace(/^["']|["']$/g, ""),
+  );
+  const edgeSpecs = specs.filter((spec) => spec.endsWith(`:${EDGE_PORT}`));
+  if (edgeSpecs.length === 0) {
+    throw new Error(
+      `部署脚本里找不到对应用边缘端口 ${EDGE_PORT} 的 -p 发布；无法证明其对外暴露被约束在 loopback`,
+    );
+  }
+
+  const ALLOWED_BINDINGS = new Set(["127.0.0.1", "${BIND_ADDR}"]);
+  for (const spec of edgeSpecs) {
+    const bindAddress = spec.split(":")[0];
+    if (!ALLOWED_BINDINGS.has(bindAddress)) {
+      throw new Error(
+        `部署脚本必须以 127.0.0.1 绑定应用边缘端口，实际写了「-p ${spec}」——` +
+          "公网暴露必须由宿主机上的受信 TLS 边缘承担，不能由应用容器直接对外",
+      );
+    }
+  }
+
+  // 用了 ${BIND_ADDR} 变量就必须证明它的默认值是 loopback：否则有人把默认值改成
+  // 0.0.0.0 就能悄悄把应用边缘暴露到公网，而上面的检查仍会放行。
+  if (edgeSpecs.some((spec) => spec.split(":")[0] === "${BIND_ADDR}")) {
+    const expected = 'BIND_ADDR="${BIND_ADDR:-127.0.0.1}"';
+    if (!source.includes(expected)) {
+      throw new Error(
+        `部署脚本使用了 \${BIND_ADDR} 发布应用边缘，但找不到 loopback 默认值声明：${expected}`,
+      );
+    }
   }
 }
 

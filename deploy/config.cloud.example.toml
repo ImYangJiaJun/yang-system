@@ -1,0 +1,184 @@
+# =============================================================================
+# yang-system 服务器配置模板（生产）
+#
+# 用法：把本文件复制为 config.cloud.toml，填好后放到服务器 /home/yjj/yang-system/。
+#   cp config.cloud.example.toml config.cloud.toml
+# **config.cloud.toml 已被 .gitignore 忽略，因为它含生产凭据。**
+#
+# 由 deploy-blue-green.sh 以只读方式挂进后端容器：-v <APP_DIR>/config.cloud.toml:/app/config.toml:ro
+#
+# -----------------------------------------------------------------------------
+# 【需要你填的】——下面所有 `replace-with-*` 都要换掉。
+#
+# ⚠️ **占位值用的是 `replace-with-` 前缀，这是刻意的**：应用启动校验里的
+#    `is_placeholder_secret` 只认 `changeme` / `replace-me` / `example-secret`（精确）、
+#    `replace-with*` / `replace_with*`（前缀）、以及含 `placeholder` 的值。
+#    换成别的写法（例如 `CHANGE_ME_...`）**不会被识别为占位**，只要长度 ≥32 就会
+#    静默通过校验——服务会带着一个写在仓库里的"密钥"正常启动。
+#
+#   1. [mysql].url               —— 用户 / 密码 / 库名（**库不存在时部署脚本会自动建**）
+#   2. [redis].url               —— 不设密码就保持原样（redis://yang-redis:6379/0）
+#   3. [token].active_secret     —— ≥32 字节随机串
+#   4. [step_up].active_secret   —— 独立的 ≥32 字节随机串，**不得与 token 复用**
+#   5. [security.totp].aead_key  —— 独立的 32 字节密钥，**不得与上面任何一个复用**
+#   6. [email.*].secret 四段     —— 四类验证码各用独立密钥，**互不复用**
+#   7. [email.smtp] / [email.password_reset].link_base_url
+#   8. [feishu]                  —— **必须保持整段注释**（见文件末尾说明）
+#
+# 生成随机密钥（在服务器上跑）：
+#   openssl rand -base64 48    # 给各 secret / aead_key
+#   openssl rand -hex 24       # 给 MySQL 密码（见下方 [mysql] 的说明）
+#
+# **本文件是唯一的配置来源**：不需要再维护 .env 之类的第二份文件。
+# deploy-blue-green.sh 会从这里解析出 MySQL 的账号/密码/库名喂给 compose。
+#
+# 配置合成优先级：本文件 < YANG_SYSTEM_* 环境变量 < secret 目录。
+# 完整契约见 docs/contracts/CONFIGURATION.md。
+# =============================================================================
+
+[app]
+# 测试态可用 "test"：它会解掉下面 [email.password_reset].link_base_url 的 https 强制，
+# 让「TLS 边缘还没落地」不再挡住启动（飞书审批的「关联外部选项」官方支持 HTTP，
+# 所以先用 http 联调飞书是可行的）。
+#
+# ⚠️ `test` 只该是联调态的临时值：它同时关掉了生产的 https 强制校验，密码重置邮件里的
+#    链接会以明文 http 发出。**拿到域名与证书后必须改回 "production" 并换成 https 域名。**
+#    全仓只有两处读它：bootstrap 的日志标签，与 `src/config/mod.rs:1269` 那条 https 判据。
+environment = "production"
+
+[authorization]
+# 同一 Redis DB 内必须唯一且发布后保持稳定（改了会让所有已签发 Token 的授权版本校验失效）。
+# 只允许小写字母、数字和连字符。同时作为邮箱验证码 Redis key 的部署命名空间。
+deployment = "yang-prod"
+
+[http]
+# 容器内监听全部网卡：loopback 在容器里无法被编排器/Docker 健康检查探测。
+# 对外暴露范围由 deploy-blue-green.sh 的 `-p 127.0.0.1:8154:8081` 约束，不在此处。
+bind = "0.0.0.0:8080"
+
+[mysql]
+# 主机名 yang-mysql 来自 deploy/compose.infra.yaml 的 container_name（同处 yang-system-net 网络）。
+# 若用宿主机上已有的 MySQL，改成 host.docker.internal:<port>。
+#
+# ⚠️ **密码只用字母数字**（生成：openssl rand -hex 24）。
+#    deploy-blue-green.sh 会解析这个 URL 来给 MySQL 容器注入账号密码，
+#    密码里含 @ : / 会破坏解析（我们不做 URL 解码）。
+#
+# **库不存在时会被自动创建**：应用自己只建表不建库（全仓没有 CREATE DATABASE），
+# 所以 deploy-blue-green.sh 在启动前会检查这个库并 `CREATE DATABASE IF NOT EXISTS`
+# （字符集 utf8mb4 / 排序规则 utf8mb4_unicode_ci，与 Schema 声明一致），
+# 顺带把该库的权限授给这个用户。
+url = "mysql://yang:replace-with-mysql-password@yang-mysql:3306/yang_system"
+
+[redis]
+# Redis 是**必需依赖**：授权版本新鲜度缓存、邮箱验证码、Step-up 单次消费都走它；不备份。
+url = "redis://yang-redis:6379/0"
+
+[token]
+# active key 负责签发；轮换时用 retiring_keys（[{ key_id, secret }]）保留旧 key 至少一个 refresh TTL。
+active_key_id = "prod-2026-09"
+active_secret = "replace-with-token-active-secret-32-bytes-min"
+retiring_keys = []
+
+[step_up]
+# Step-up 使用独立签名域；**不得与 Access/Refresh Token 复用任何密钥**。
+active_key_id = "prod-step-up-2026-09"
+active_secret = "replace-with-step-up-active-secret-32-bytes-min"
+retiring_keys = []
+
+[email.smtp]
+# 仅接受强制 STARTTLS 的 SMTP relay 主机名（默认端口 587）；不要写 scheme、不要把凭据写进 URL。
+relay = "smtp.example.com"
+username = "replace-with-smtp-username"
+password = "replace-with-smtp-password"
+from_address = "no-reply@example.com"
+from_name = "YANG System"
+
+# 注册、换绑、登录 MFA 备用、免密登录四类邮箱验证码使用**相互独立**的密钥域：
+# 绝不复用彼此，也不复用 token/step-up/security.totp 的密钥，否则验证码可跨场景重放。
+# 删除 [email.change] / [email.mfa] / [email.login] 整段即关闭对应能力（端点返回「未启用」）。
+[email.verification]
+secret = "replace-with-email-verification-secret-32-min"
+
+[email.change]
+secret = "replace-with-change-email-secret-32-bytes-min"
+
+[email.mfa]
+secret = "replace-with-mfa-email-secret-32-bytes-min"
+
+[email.login]
+secret = "replace-with-login-email-secret-32-bytes-min"
+
+[email.password_reset]
+# 密码重置邮件里链接指向的前端入口（scheme + host[:port]，无路径与查询串）。
+# **生产环境（app.environment = "production"）必须是 https**——http 只允许在
+# development / test 下使用，否则启动校验直接失败。
+# 也不得从请求 Host 头推导（Host 头可被攻击者伪造）。
+# 在 TLS 边缘落地之前，这一项会挡住启动：先确认域名/证书就位再填。
+link_base_url = "https://replace-with-your-domain"
+
+[security]
+# 三阶段发布已完成：本系统无旧实例，直接开启 Refresh 凭据版本签发。
+# 接入存量旧部署时必须先保持 false 兼容读取，确认无旧实例后再改为 true。
+issue_refresh_credential_version = true
+
+# 默认不信任任何转发头。
+#
+# **后端只读 `Forwarded` 与 `X-Forwarded-For` 来推导客户端 IP，不读 `X-Forwarded-Proto`**
+# （全仓对 forwarded-proto 零命中）；登录 Cookie 的 Secure 由 Origin/Referer 的 scheme 决定，
+# 与转发头无关。
+#
+# 不填的后果：**客户端 IP 退化成 TCP 对端地址**。本部署拓扑下前端 nginx 与后端共享
+# 网络命名空间、upstream 写死 127.0.0.1:8080，于是后端看到的对端永远是 nginx，
+# `security.auth_rate_limit_ip_attempts`（默认 30 次/60 秒）会变成**全站共享的单一 IP 桶**。
+#
+# 取值取决于 8154 前面放什么 TLS 边缘：
+#   - 边缘在宿主机上（nginx / Caddy）→ 容器看到的源是 docker 网桥网关，
+#     通常需要同时信任 127.0.0.1/32 与网桥网段（默认 172.17.0.0/16）
+#   - 边缘是同一 docker 网络里的容器 → 填该网络子网
+# 确认网段：docker network inspect yang-system-net -f '{{.IPAM.Config}}'
+# trusted_proxy_cidrs = ["127.0.0.1/32", "172.17.0.0/16"]
+
+# TOTP 第二因子（MFA）。
+# aead_key 是加密 users.totp_secret 的**独立密钥域**：禁止与 token/step-up/邮箱验证码密钥复用。
+# 删除此段则 MFA Action 不注册。
+[security.totp]
+aead_key = "replace-with-independent-totp-aead-key-32-min"
+
+[observability]
+# Prometheus 使用独立运维监听地址（容器内 0.0.0.0:9090，由镜像 ENV 设定）。
+# 生产必须保持开启；该端口由部署脚本发布到宿主机 loopback（127.0.0.1:9154），不要对公网发布。
+metrics_enabled = true
+
+# =============================================================================
+# 飞书集成 —— **保持整段注释，直到「飞书外部选项」链路跑通**
+# =============================================================================
+#
+# 这段**故意整段注释掉**。取消注释即等于在生产启用飞书路由，具体后果：
+#
+#   1. `enabled = true` 且 `management_api_token` 非空时，`is_usable()` 为真，
+#      会注册**多维表格入站写入 API**（`/api/v1/feishu/inbound/options/upsert` 等）。
+#      若 token 还是模板里的占位串，等于生产上开放了一个口令已知的写接口。
+#
+#      ⚠️ **`is_usable()` 只判「非空」，不认占位符**（`src/config/mod.rs:626`）——
+#      这与出站侧的 `can_pull()` 不同，后者走 `credential_is_configured` 会拒
+#      `CHANGE_ME_*`。两条凭证的占位符待遇**不对称**：把 token 填成任何非空串
+#      （哪怕是 `CHANGE_ME_...`）都会让入站写接口上线。这个 Token 必须是真的强口令。
+#   2. **本段的合法键是**：`enabled` / `management_api_token` / `encryption_key` /
+#      `app_id` / `app_secret` / `pull_interval_seconds`。
+#      该结构体开了 `deny_unknown_fields`，**多写一个键就会在反序列化阶段直接启动失败**
+#      （报 unknown field），比 validate 阶段更早。上列之外的键不要写。
+#   3. `app_id` / `app_secret` 一旦**非占位**地配上，`can_pull()` 即为真，会出站调用
+#      飞书开放平台。它们是**租户级**凭证：能读该应用可见的全部协作多维表格。
+#      `app_secret` 只走 secret 目录（文件名 `feishu_app_secret`），不要写在本文件里。
+#
+# 等到要启用时，取消注释：
+#
+# [feishu]
+# enabled = true
+# management_api_token = "replace-with-feishu-management-token"
+# encryption_key = "replace-with-feishu-encryption-key"
+# # 出站拉取（可选）。app_secret 建议用 secret 目录而不是写在这里。
+# # app_id = "cli_xxxxxxxxxxxxxxxx"
+# # app_secret = "replace-with-feishu-app-secret"
+# # pull_interval_seconds = 900
