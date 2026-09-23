@@ -402,12 +402,12 @@ describe("体检与凭据端点", () => {
     {
       ...DATASOURCE_LIST_ACTION,
       operation_id: "feishu.datasource.reveal_token",
-      path: "/api/v1/feishu/datasources/fields/{source_key}/reveal",
+      path: "/api/v1/feishu/datasources/reveal-token",
     },
     {
       ...DATASOURCE_LIST_ACTION,
       operation_id: "feishu.datasource.rotate_token",
-      path: "/api/v1/feishu/datasources/fields/{source_key}/rotate",
+      path: "/api/v1/feishu/datasources/rotate-token",
     },
   ];
 
@@ -447,72 +447,24 @@ describe("体检与凭据端点", () => {
     expect(report.ok).toBe(false);
   });
 
-  it("reveal：source_key 进路径段，明文从请求体之外取回", async () => {
-    // handler 没把这个段声明成 path 参数（`approval_options` 就是这种形状），
-    // 所以由前端填进路径，值**不进 body**。
+  it("reveal：打到 reveal-token，source_key 走请求体（T12 落地的口径）", async () => {
     const calls = stubFetch({ code: 0, data: { token: "plaintext" } });
     const token = await revealFieldToken("payment_currency", credentialDeps);
 
-    expect(calls[0]?.url).toBe(
-      "/api/v1/feishu/datasources/fields/payment_currency/reveal",
-    );
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/reveal-token");
     expect(calls[0]?.method).toBe("POST");
-    // 引擎在没有 body 键时整个不发请求体：断言「一个键都没有」
-    expect(calls[0]?.body ?? {}).toEqual({});
+    // 路由里没有路径段：标识只能走 body
+    expect(calls[0]?.body).toEqual({ source_key: "payment_currency" });
     expect(token).toBe("plaintext");
   });
 
-  it("rotate：同样的路径口径，返回的是新值", async () => {
+  it("rotate：打到 rotate-token，返回的是新值（旧值当场失效）", async () => {
     const calls = stubFetch({ code: 0, data: { token: "rotated" } });
     const token = await rotateFieldToken("payment_currency", credentialDeps);
 
-    expect(calls[0]?.url).toBe(
-      "/api/v1/feishu/datasources/fields/payment_currency/rotate",
-    );
-    expect(token).toBe("rotated");
-  });
-
-  it("段声明成 path 参数时交给引擎填，值不会同时出现在请求体里", async () => {
-    const declared: ActionDemoSchema = {
-      ...DATASOURCE_LIST_ACTION,
-      operation_id: "feishu.datasource.reveal_token",
-      path: "/api/v1/feishu/datasources/fields/{source_key}/reveal",
-      params: [
-        {
-          name: "source_key",
-          title: "数据源标识",
-          description: "",
-          source: "path",
-          required: true,
-        },
-      ],
-    };
-    const calls = stubFetch({ code: 0, data: { token: "plaintext" } });
-    await revealFieldToken("payment_currency", {
-      catalog: catalogWith([declared]),
-      session: { token: "tok-1" },
-    });
-
-    expect(calls[0]?.url).toBe(
-      "/api/v1/feishu/datasources/fields/payment_currency/reveal",
-    );
-    expect(calls[0]?.body ?? {}).toEqual({});
-  });
-
-  it("路由不带这个段时按请求体传（T6/T11 之后的既有口径）", async () => {
-    const bodyRoute: ActionDemoSchema = {
-      ...DATASOURCE_LIST_ACTION,
-      operation_id: "feishu.datasource.rotate_token",
-      path: "/api/v1/feishu/datasources/field/rotate",
-    };
-    const calls = stubFetch({ code: 0, data: { token: "rotated" } });
-    await rotateFieldToken("payment_currency", {
-      catalog: catalogWith([bodyRoute]),
-      session: { token: "tok-1" },
-    });
-
-    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/field/rotate");
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/rotate-token");
     expect(calls[0]?.body).toEqual({ source_key: "payment_currency" });
+    expect(token).toBe("rotated");
   });
 
   it("回显响应缺 token 时拒绝，不返回一个空值让人去粘", async () => {

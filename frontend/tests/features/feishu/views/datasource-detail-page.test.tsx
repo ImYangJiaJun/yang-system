@@ -332,12 +332,13 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
       expect(writeText).toHaveBeenCalledWith("revealed-token");
     });
 
-    expect(calls.filter((call) => call.url.endsWith("/reveal"))).toHaveLength(
-      1,
-    );
-    expect(calls.filter((call) => call.url.endsWith("/rotate"))).toHaveLength(
-      0,
-    );
+    // 回显（读）打了，且 source_key 走请求体；轮换（写）一个都没打
+    const reveals = calls.filter((call) => call.url.endsWith("/reveal-token"));
+    expect(reveals).toHaveLength(1);
+    expect(reveals[0]?.body).toEqual({ source_key: SOURCE_KEY });
+    expect(
+      calls.filter((call) => call.url.endsWith("/rotate-token")),
+    ).toHaveLength(0);
     vi.unstubAllGlobals();
   });
 });

@@ -183,12 +183,12 @@ function catalogFor(options: FeishuApiStubOptions) {
       action(
         "feishu.datasource.reveal_token",
         "POST",
-        "/api/v1/feishu/datasources/fields/{source_key}/reveal",
+        "/api/v1/feishu/datasources/reveal-token",
       ),
       action(
         "feishu.datasource.rotate_token",
         "POST",
-        "/api/v1/feishu/datasources/fields/{source_key}/rotate",
+        "/api/v1/feishu/datasources/rotate-token",
       ),
     );
   }
@@ -345,13 +345,11 @@ export function stubFeishuApi(
           unchecked: [],
         });
       }
-      if (url.includes("/api/v1/feishu/datasources/fields/")) {
-        if (url.endsWith("/reveal")) {
-          return respond(options.reveal, payload, { token: "revealed-token" });
-        }
-        if (url.endsWith("/rotate")) {
-          return respond(options.rotate, payload, { token: "rotated-token" });
-        }
+      if (url.endsWith("/api/v1/feishu/datasources/reveal-token")) {
+        return respond(options.reveal, payload, { token: "revealed-token" });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/rotate-token")) {
+        return respond(options.rotate, payload, { token: "rotated-token" });
       }
       if (url.includes("/api/v1/feishu/approval/options/")) {
         return respond(options.approvalOptions, payload, {

@@ -792,41 +792,6 @@ export async function checkDatasourceHealth(
   return parseHealthReport(result.data);
 }
 
-/**
- * 路由里的一个标识段：**该进路径还是该进请求体，由服务端的声明决定**。
- *
- * 本仓库三种形状都真的出现过，所以这里不能押一个：
- * - handler 把段声明成 `path` 参数（T5 之前的 `field_names` 那类）→ 交给引擎替换；
- * - 路由模板里有 `{name}` 但 handler **没有**声明它（`approval_options` 的
- *   `{source_key}` 就是这种）→ 引擎会在最后一步抛「路径仍有未填写参数」，必须自己填，
- *   而且**不能**再把值塞进请求体（那些 handler 的入参是空集 + `deny_unknown_fields`）；
- * - 路由不带这个段（T6/T11 之后的既有口径：标识走请求体）→ 值进 body。
- *
- * 返回值是「可直接交给 `invokeAction` 的 action + values」。
- */
-function segmentRequest(
-  action: ActionDemoSchema,
-  name: string,
-  value: string,
-  extra: Record<string, unknown> = {},
-): { action: ActionDemoSchema; values: Record<string, unknown> } {
-  const declared = action.params.find((parameter) => parameter.name === name);
-  if (declared?.source === "path") {
-    return { action, values: { ...extra, [name]: value } };
-  }
-  const segment = `{${name}}`;
-  if (action.path.includes(segment)) {
-    return {
-      action: {
-        ...action,
-        path: action.path.replaceAll(segment, encodeURIComponent(value)),
-      },
-      values: extra,
-    };
-  }
-  return { action, values: { ...extra, [name]: value } };
-}
-
 /// 回显端点的响应契约：`{"token":"<明文>"}`。两个端点同形。
 function tokenFrom(data: unknown, operationId: string): string {
   const token = asString(asRecord(data)?.token);
@@ -837,21 +802,19 @@ function tokenFrom(data: unknown, operationId: string): string {
 }
 
 /// 回显某个字段的 Token。**纯读**：不改任何状态，可以反复调（设计 §10.2.1）。
+///
+/// `source_key` 走**请求体**（路由 `/api/v1/feishu/datasources/reveal-token` 里没有
+/// 路径段）——与 T6/T11 的既有口径一致：本模块凡按标识定位的端点都把它放 body。
 export async function revealFieldToken(
   sourceKey: string,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
 ): Promise<string> {
   const operationId = TABLE_OPERATION_IDS.reveal;
-  const request = segmentRequest(
-    requireAction(deps.catalog, operationId),
-    "source_key",
-    sourceKey,
-  );
-  const result = await invokeAction(
-    request.action,
-    request.values,
-    deps.session,
+  const result = await invokeFeishuAction(
+    deps,
+    operationId,
+    { source_key: sourceKey },
     signal,
   );
   return tokenFrom(result.data, operationId);
@@ -865,15 +828,10 @@ export async function rotateFieldToken(
   signal?: AbortSignal,
 ): Promise<string> {
   const operationId = TABLE_OPERATION_IDS.rotate;
-  const request = segmentRequest(
-    requireAction(deps.catalog, operationId),
-    "source_key",
-    sourceKey,
-  );
-  const result = await invokeAction(
-    request.action,
-    request.values,
-    deps.session,
+  const result = await invokeFeishuAction(
+    deps,
+    operationId,
+    { source_key: sourceKey },
     signal,
   );
   return tokenFrom(result.data, operationId);
