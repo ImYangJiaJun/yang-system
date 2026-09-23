@@ -22,7 +22,7 @@ use yang_base::BaseError;
 
 use crate::addon::feishu::domain::bitable::validate_path_segment;
 use crate::addon::feishu::domain::context::FeishuContext;
-use crate::addon::feishu::domain::crypto::{generate_token, seal};
+use crate::addon::feishu::domain::crypto::issue_token;
 use crate::addon::feishu::domain::field_binding::{validate_fields, FieldBindingInput};
 use crate::infrastructure::audit;
 
@@ -164,15 +164,16 @@ pub(super) async fn handle(
         let mut issued = Vec::with_capacity(input.fields.len());
         for field in &input.fields {
             let source_key = field.source_key.trim().to_string();
-            let plaintext = generate_token();
-            let (token_hash, token_cipher) = seal(&plaintext, &wrapping_key)?;
+            // 与轮换走**同一条**签发路径（`crypto::issue_token`）：两处各写一遍
+            // 迟早会漂移，而漂移的失效形态是「这一行的复制按钮永远失效」。
+            let credential = issue_token(&wrapping_key)?;
 
             let mut binding = Record::new();
             binding.insert("datasource_id", serde_json::json!(datasource_id));
             binding.insert("field_id", serde_json::json!(field.field_id.trim()));
             binding.insert("source_key", serde_json::json!(&source_key));
-            binding.insert("token_hash", serde_json::json!(token_hash));
-            binding.insert("token_cipher", serde_json::json!(token_cipher));
+            binding.insert("token_hash", serde_json::json!(&credential.hash));
+            binding.insert("token_cipher", serde_json::json!(&credential.cipher));
             if let Some(parent) = field
                 .parent_field_id
                 .as_deref()
@@ -190,7 +191,7 @@ pub(super) async fn handle(
             issued.push(serde_json::json!({
                 "field_id": field.field_id.trim(),
                 "source_key": source_key,
-                "token": plaintext,
+                "token": credential.plaintext,
             }));
         }
 

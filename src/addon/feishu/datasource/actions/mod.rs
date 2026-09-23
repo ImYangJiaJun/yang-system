@@ -15,6 +15,8 @@ pub(super) mod list_datasources;
 pub(super) mod pull_now;
 pub(super) mod pull_probe;
 pub(super) mod pull_schedule;
+pub(super) mod reveal_token;
+pub(super) mod rotate_token;
 pub(super) mod update_datasource;
 pub(super) mod update_datasource_table;
 
@@ -42,6 +44,8 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = health_check::register(module, Arc::clone(&context));
     let module = list_bitable_views::register(module, Arc::clone(&context));
     let module = list_bitable_fields::register(module, Arc::clone(&context));
+    let module = reveal_token::register(module, Arc::clone(&context));
+    let module = rotate_token::register(module, Arc::clone(&context));
     let module = create_datasource::register(module, Arc::clone(&context));
     let module = update_datasource::register(module, Arc::clone(&context));
     let module = delete_datasource::register(module, Arc::clone(&context));

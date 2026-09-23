@@ -28,9 +28,7 @@ const BASE64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
-// 消费者（凭据回显端点）在后续批次接入。仓库既有先例：
-// `domain/bitable.rs:29`、`domain/outbound.rs:30`。
-#[allow(dead_code)]
+/// 解密方向。消费者是凭据回显端点（经 [`unseal`] / [`unseal_verified`]）。
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
 /// 由配置原文派生 256 位密钥。
@@ -87,7 +85,6 @@ pub(crate) fn encrypt_json(value: &serde_json::Value, key: &[u8; 32]) -> Result<
 ///
 /// 与 [`encrypt_bytes`] 严格对称：IV 前置、PKCS#7。**只用于解本服务自己封存的凭据**，
 /// 不用于解任何外部输入（飞书来文是明文）。
-#[allow(dead_code)]
 fn decrypt_bytes(encoded: &str, key: &[u8; 32]) -> Result<Vec<u8>, BaseError> {
     let raw = BASE64
         .decode(encoded)
@@ -140,6 +137,32 @@ pub(crate) fn generate_token() -> String {
     out
 }
 
+/// 一份**新签发**的凭据。
+///
+/// 明文只在这一刻存在于内存里：响应里出现一次，之后只能靠 [`unseal_verified`] 取回。
+pub(crate) struct IssuedToken {
+    /// 明文。
+    pub(crate) plaintext: String,
+    /// 校验用摘要（落库）。
+    pub(crate) hash: String,
+    /// 可逆密文（落库）。
+    pub(crate) cipher: String,
+}
+
+/// 签发一份新凭据：密码学随机源生成 → 摘要 + 封存密文。
+///
+/// 两个调用点（建数据源时写绑定行、轮换）**必须走同一条路**：任何一处漏了封存，
+/// 那一行的「复制」按钮就会永远失效，而且失效形态是静默的——建的时候没人看得出来。
+pub(crate) fn issue_token(key: &[u8; 32]) -> Result<IssuedToken, BaseError> {
+    let plaintext = generate_token();
+    let (hash, cipher) = seal(&plaintext, key)?;
+    Ok(IssuedToken {
+        plaintext,
+        hash,
+        cipher,
+    })
+}
+
 /// 取出封存的凭据明文（低层，**不做完整性校验**）。
 ///
 /// 调用方几乎总是该用 [`unseal_verified`]：CBC 没有完整性保护，本函数对
@@ -148,7 +171,6 @@ pub(crate) fn generate_token() -> String {
 /// # 错误
 ///
 /// 密文非法、填充不合法、明文不是合法 UTF-8 时返回 [`BaseError`]。
-#[allow(dead_code)]
 pub(crate) fn unseal(cipher: &str, key: &[u8; 32]) -> Result<String, BaseError> {
     let bytes = decrypt_bytes(cipher, key)?;
     String::from_utf8(bytes)
@@ -164,7 +186,6 @@ pub(crate) fn unseal(cipher: &str, key: &[u8; 32]) -> Result<String, BaseError> 
 /// 的正解——它本来就在同一条记录上，且校验路径**不需要解密**。
 ///
 /// 于是三类事故都会变成确定性失败：篡改密文、拿错钥匙、把 A 行的密文贴到 B 行。
-#[allow(dead_code)]
 pub(crate) fn unseal_verified(
     cipher: &str,
     expected_hash: &str,
@@ -214,6 +235,7 @@ pub(crate) fn decrypt_cbc(
 
 #[cfg(test)]
 mod tests {
+    use super::super::token::verify_token;
     use super::*;
 
     // ---- 凭据封存（seal / unseal）----
@@ -294,6 +316,42 @@ mod tests {
             unseal_verified(&cipher_a, &hash_b, &key()).is_err(),
             "密文与摘要必须同源"
         );
+    }
+
+    #[test]
+    fn an_issued_credential_is_self_consistent_and_revealable() {
+        // 签发出来的三样必须自洽：明文能验过自己的摘要、且能从自己的密文里取回。
+        // 缺任何一样，「复制」按钮背后就是一个永远取不回原值的密文。
+        let issued = issue_token(&key()).unwrap_or_else(|error| panic!("应可签发: {error}"));
+        assert_eq!(issued.plaintext.len(), 64, "32 字节随机源的 hex");
+        assert!(verify_token(&issued.plaintext, &issued.hash));
+        assert_eq!(
+            unseal_verified(&issued.cipher, &issued.hash, &key())
+                .unwrap_or_else(|error| panic!("应可解封: {error}")),
+            issued.plaintext
+        );
+    }
+
+    #[test]
+    fn rotation_issues_a_new_credential_and_the_old_one_stops_verifying() {
+        // 轮换的硬要求：旧 Token **立即**失效（摘要换了），且密文也换了
+        // （只换摘要会让「复制」回显出来的还是旧 Token）。
+        let (old_hash, old_cipher) = sealed("old-token");
+        let issued = issue_token(&key()).unwrap_or_else(|error| panic!("应可签发: {error}"));
+        assert_ne!(issued.hash, old_hash);
+        assert_ne!(issued.cipher, old_cipher);
+        assert!(
+            !verify_token("old-token", &issued.hash),
+            "旧 Token 必须立即失效"
+        );
+    }
+
+    #[test]
+    fn unseal_rejects_a_ciphertext_with_a_trailing_garbage_char() {
+        // 密文被改过要显式失败，不能返回垃圾明文
+        let (_hash, mut cipher) = sealed("t");
+        cipher.push('A');
+        assert!(unseal(&cipher, &key()).is_err());
     }
 
     #[test]
