@@ -21,3 +21,18 @@ docs/reference/feishu/
 
 # Playwright MCP 的会话产物（截图 / 快照 / 控制台日志），不是源码。
 .playwright-mcp/
+
+# 飞书联调期的本地产物。**这些不是源码，而且多数含真实业务数据或活体凭证**：
+#   · .tmp-fs/        —— 多维表格全量导出（记录逐条落盘），含真实财务台账字段
+#   · *.manifest.json —— 每份导出各带一个 base_token，拿到即可读那张多维表格
+#   · .tmp-*          —— 探针脚本与响应抓取（可能含 token）
+#   · *.ndjson        —— 记录转储
+# 已在 yang-system 仓库里实测：这 1500+ 个文件既未被跟踪、也未被忽略，
+# 一次 `git add -A` 就会把它们连同 base_token 一起推到 origin。
+.tmp-fs/
+.tmp-*
+*.manifest.json
+*.ndjson
+
+# 业务侧提供的原始表格（境内银行网点信息管理等）。是**数据**不是源码。
+docs/*.xlsx
