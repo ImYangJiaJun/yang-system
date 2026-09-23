@@ -42,6 +42,9 @@ export type FeishuApiStubOptions = {
   datasourceRead?: boolean;
   datasourceWrite?: boolean;
   optionRead?: boolean;
+  /// 表级扩展（T11/T12）：体检 + 回显 + 轮换三粒权限位与它们的端点。
+  /// **默认关**——存量用例走的是字段级口径的目录，多开三粒会让它们发出没被覆盖的请求。
+  tableConfig?: boolean;
   /// 各端点的响应。返回 Response 时原样使用（用来构造错误态）。
   datasourceList?: Handler;
   optionList?: Handler;
@@ -54,6 +57,12 @@ export type FeishuApiStubOptions = {
   pullNow?: Handler;
   /// 自动拉取排程。`next_run_at` 为 `null` 表示「正在拉取 / 还没跑过第一轮」。
   pullSchedule?: Handler;
+  /// 体检（`/datasources/table/health`，按表级 id 定位）。
+  health?: Handler;
+  /// 回显 Token（纯读）。
+  reveal?: Handler;
+  /// 轮换 Token（写）。
+  rotate?: Handler;
 };
 
 export function jsonResponse(payload: unknown, status = 200): Response {
@@ -105,6 +114,9 @@ function catalogFor(options: FeishuApiStubOptions) {
     (options.datasourceRead ?? true) ? "1" : "0",
     (options.datasourceWrite ?? true) ? "1" : "0",
     (options.optionRead ?? true) ? "1" : "0",
+    // 表级扩展也必须进 revision：它增删的是**同一次会话里**的 Action 集合，
+    // revision 不变的话引擎会直接复用上一份目录（`CatalogCache.accept`）。
+    (options.tableConfig ?? false) ? "1" : "0",
   ].join("");
   const revision = `${flags}${"a".repeat(64)}`.slice(0, 64);
   const actions = [APPROVAL_OPTIONS_ACTION];
@@ -158,6 +170,25 @@ function catalogFor(options: FeishuApiStubOptions) {
         "feishu.option.list_options",
         "POST",
         "/api/v1/feishu/options/query",
+      ),
+    );
+  }
+  if (options.tableConfig ?? false) {
+    actions.push(
+      action(
+        "feishu.datasource.health_check",
+        "POST",
+        "/api/v1/feishu/datasources/table/health",
+      ),
+      action(
+        "feishu.datasource.reveal_token",
+        "POST",
+        "/api/v1/feishu/datasources/fields/{source_key}/reveal",
+      ),
+      action(
+        "feishu.datasource.rotate_token",
+        "POST",
+        "/api/v1/feishu/datasources/fields/{source_key}/rotate",
       ),
     );
   }
@@ -303,6 +334,23 @@ export function stubFeishuApi(
             deleted: 1,
             disabled_options: 0,
           });
+        }
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/table/health")) {
+        return respond(options.health, payload, {
+          ok: true,
+          missing_fields: [],
+          view_missing: false,
+          table_missing: false,
+          unchecked: [],
+        });
+      }
+      if (url.includes("/api/v1/feishu/datasources/fields/")) {
+        if (url.endsWith("/reveal")) {
+          return respond(options.reveal, payload, { token: "revealed-token" });
+        }
+        if (url.endsWith("/rotate")) {
+          return respond(options.rotate, payload, { token: "rotated-token" });
         }
       }
       if (url.includes("/api/v1/feishu/approval/options/")) {

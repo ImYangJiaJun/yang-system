@@ -24,6 +24,7 @@
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Link, useParams } from "react-router";
+import { useQuery } from "@tanstack/react-query";
 import {
   ArrowDown,
   ArrowLeft,
@@ -32,7 +33,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 
-import { useUiCatalog } from "@/engine";
+import { useSessionCredentials, useUiCatalog } from "@/engine";
 
 import { Button } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -48,14 +49,19 @@ import {
 import {
   DATASOURCE_OPERATION_IDS,
   DEFAULT_OPTION_ORDER_BY,
+  TABLE_OPERATION_IDS,
   canWriteDatasources,
+  checkDatasourceHealth,
   hasOperation,
+  useCredentialClient,
   useDatasourceList,
   useFeishuActions,
   useOptionList,
   usePullSchedule,
 } from "../api";
 import { CopyField } from "../components/CopyField";
+import { CredentialChecklist } from "../components/CredentialChecklist";
+import { DatasourceHealthPanel } from "../components/DatasourceHealthPanel";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { DEFAULT_PAGE_SIZE } from "../list-query";
@@ -67,6 +73,7 @@ import type {
 } from "../types";
 import {
   approvalOptionsUrl,
+  credentialItems,
   describeNextPull,
   formatUnixSeconds,
   hasCompleteCoordinates,
@@ -221,9 +228,15 @@ export default function DatasourceDetailPage() {
   const datasourceQuery = useDatasourceList(datasourceListQuery, {
     refetchInterval: pull.kind === "pending" ? PULL_POLL_MS : false,
   });
+  // 表级化之后表级行上没有 `source_key`（它在每条字段绑定上），所以按两处定位：
+  // 表级行的 `source_key`（旧形状）**或**任一绑定的 `source_key`（新形状）。
+  // 后者正是路由参数在表级世界里的含义——一个字段的取数标识。
   const datasource: DatasourceItem | null =
-    datasourceQuery.data?.items.find((item) => item.sourceKey === sourceKey) ??
-    null;
+    datasourceQuery.data?.items.find(
+      (item) =>
+        item.sourceKey === sourceKey ||
+        item.fields.some((binding) => binding.sourceKey === sourceKey),
+    ) ?? null;
 
   // 落定：`lastPullAt` 变了就说明这一轮跑过了。**成功失败都算**（见 `pullLanded`）——
   // 失败的一轮同样写了 `last_pull_at`，拿它当判据是为了不让按钮在失败时一直转。
@@ -323,6 +336,30 @@ export default function DatasourceDetailPage() {
       </section>
 
       <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+        <h2 className="text-base font-medium">体检</h2>
+        {datasource === null ? (
+          <p aria-live="polite" className={NEUTRAL_BAR}>
+            查不到这条数据源，体检无从谈起。
+          </p>
+        ) : (
+          <HealthSection datasource={datasource} />
+        )}
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+        <h2 className="text-base font-medium">
+          凭据清单（每字段一组 URL + Token）
+        </h2>
+        {datasource === null ? (
+          <p aria-live="polite" className={NEUTRAL_BAR}>
+            查不到这条数据源，取不到它的字段绑定。
+          </p>
+        ) : (
+          <CredentialSection datasource={datasource} />
+        )}
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-base font-medium">选项</h2>
           {total !== null && optionsQuery.isSuccess ? (
@@ -415,6 +452,102 @@ export default function DatasourceDetailPage() {
         )}
       </section>
     </main>
+  );
+}
+
+/// 体检：把该表启用中的字段拿去和表实际字段比对（T11）。
+///
+/// 目录里没有这粒权限位时**不渲染体检结论**——服务端没部署、或这个身份没有权限，
+/// 画一个「还不知道」的面板只会把「没有」错报成「坏了」。
+function HealthSection({ datasource }: { datasource: DatasourceItem }) {
+  const catalog = useUiCatalog();
+  const session = useSessionCredentials();
+  const catalogData = catalog.data;
+  const datasourceId = datasource.id;
+  const permitted = hasOperation(catalogData, TABLE_OPERATION_IDS.healthCheck);
+
+  const query = useQuery({
+    enabled: permitted && datasourceId !== null,
+    queryKey: ["feishu", "health", datasourceId ?? 0],
+    queryFn: ({ signal }) =>
+      checkDatasourceHealth(
+        datasourceId ?? 0,
+        { catalog: catalogData, session },
+        signal,
+      ),
+    // 体检会出站打飞书：页面内不自动重取，换结论靠「重新体检」。
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+
+  if (!permitted) {
+    return (
+      <p aria-live="polite" className={NEUTRAL_BAR}>
+        当前身份没有体检权限（或这个部署没有体检端点）。
+      </p>
+    );
+  }
+  if (datasourceId === null) {
+    return (
+      <p aria-live="polite" className={NEUTRAL_BAR}>
+        这条数据源没有可定位的主键（id）。体检按表定位，缺它做不了。
+      </p>
+    );
+  }
+
+  return (
+    <DatasourceHealthPanel
+      report={query.data ?? null}
+      pending={query.isPending}
+      error={query.error === null ? null : String(query.error)}
+      onRecheck={() => void query.refetch()}
+    />
+  );
+}
+
+/// 凭据清单：一行一个字段绑定（URL + Token + 轮换）。
+///
+/// 回显与轮换**是两粒独立的权限位**，所以这里按各自的开关拼一个 client：
+/// 只给回显的部署，轮换按钮会在确认框里说「没有轮换权限」，而不是发一个必然 403 的请求。
+function CredentialSection({ datasource }: { datasource: DatasourceItem }) {
+  const catalog = useUiCatalog();
+  const credentialClient = useCredentialClient();
+  const canReveal = hasOperation(catalog.data, TABLE_OPERATION_IDS.reveal);
+  const canRotate = hasOperation(catalog.data, TABLE_OPERATION_IDS.rotate);
+
+  const items = useMemo(() => credentialItems(datasource), [datasource]);
+  const disabledCount = datasource.fields.length - items.length;
+
+  const client = useMemo(() => {
+    if (!canReveal && !canRotate) return undefined;
+    return {
+      reveal: canReveal
+        ? credentialClient.reveal
+        : () => Promise.reject(new Error("当前身份没有回显凭据的权限")),
+      rotate: canRotate
+        ? credentialClient.rotate
+        : () => Promise.reject(new Error("当前身份没有轮换凭据的权限")),
+    };
+  }, [canReveal, canRotate, credentialClient]);
+
+  if (items.length === 0) {
+    return (
+      <p aria-live="polite" className={NEUTRAL_BAR}>
+        这条数据源还没有启用中的字段绑定——先用配置向导勾几列，凭据是逐字段生成的。
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <CredentialChecklist items={items} client={client} />
+      {disabledCount > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          还有 {disabledCount} 条已停用的绑定没列在这里：停用的字段出站时会被拒
+          （`SOURCE_DISABLED`），把它们配进控件只会得到一个永远取不到选项的下拉。
+        </p>
+      ) : null}
+    </div>
   );
 }
 

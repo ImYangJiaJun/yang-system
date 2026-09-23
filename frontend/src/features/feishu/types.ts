@@ -111,8 +111,14 @@ export function formatUnixSeconds(value: number): string {
 
 /// 数据源列表项；与 `list_datasources` 的 `items[]` 一一对应。
 export type DatasourceItem = {
-  /// 数据源标识，进外部选项接口的 URL 路径段。
+  /// 表级主键。体检与绑定都按它定位（`list_datasources` 的 `id`）。
+  id: number | null;
+  /// 数据源标识，进外部选项接口的 URL 路径段。**表级化之后它不再在表级行上**——
+  /// 一条表级行有 N 个 `source_key`，见 [`DatasourceItem.fields`]。
+  /// 这里恒为空串（保留字段是为了不把存量调用点一次全改掉）。
   sourceKey: string;
+  /// 勾选的字段绑定。**空数组表示一条都没配**，不是「没取到」。
+  fields: DatasourceFieldBinding[];
   title: string;
   /// 「加密返回」——加密的是**回给飞书的选项信封**，与 Token 存储无关。
   encryptEnabled: boolean;
@@ -642,6 +648,72 @@ export type TableWizardField = {
   /// 两者在 wire 上恰好同义，但显式的 `null` 让「这条没有父」是写出来的，而不是漏掉的）。
   parentFieldId: string | null;
 };
+
+/* ------------------------------ 凭据与体检 ------------------------------ */
+
+/// 一条字段绑定（`list_datasources` 的 `fields[]` 一项，设计 §5 的
+/// `feishu_datasource_field` 投影）。
+///
+/// 表级化之后，`source_key` / 凭据 / 父指针都挂在这一层——一条表级行有 N 条绑定。
+export type DatasourceFieldBinding = {
+  fieldId: string;
+  /// 服务端缓存的字段名。**可能是 null**（首次拉取前还没解析过），
+  /// 所以界面拿它当标签时必须允许缺省，不能编一个名字出来。
+  fieldName: string | null;
+  sourceKey: string;
+  parentFieldId: string | null;
+  enabled: boolean;
+};
+
+/// 体检报告（`health_check`，后端 `MissingField` / `HealthReport` 的投影）。
+export type HealthReport = {
+  /// 没有已知问题**且**每一项都真的查过。
+  ok: boolean;
+  /// 勾了但表里已被删除的字段。**改名不在里面**（改名能自愈）。
+  missingFields: Array<{ fieldId: string; sourceKey: string }>;
+  viewMissing: boolean;
+  tableMissing: boolean;
+  /// 本轮没能查成的项及其原因。非空时 `ok` 必为 false——
+  /// 「查不了」不是「没问题」，界面不能把它读成通过。
+  unchecked: string[];
+};
+
+/// 拷贝清单的一行：一个字段绑定 + 它的轮换时间。
+///
+/// **不带 Token 明文**：明文只在用户点「复制 Token」时经回显端点取一次、
+/// 或轮换之后由那次响应带回。清单是常驻的一页，凭据不该一直躺在里面。
+export type CredentialItem = {
+  fieldId: string;
+  fieldName: string | null;
+  sourceKey: string;
+  /// 最近一次轮换时间（unix 秒）。三态：`undefined` = **拿不到**（列表端点的绑定
+  /// 投影里没有这一列）、`null` = 明确知道从未轮换过、数字 = 那次的时间。
+  /// 把「拿不到」画成「从未轮换」是一句可查证的假话，所以两者分开。
+  tokenRotatedAt?: number | null;
+  enabled: boolean;
+};
+
+/// 表级行的字段绑定 → 拷贝清单行。
+///
+/// **只列启用中的绑定**：停用的绑定出站会吃 `SOURCE_DISABLED`，把它们摆进
+/// 「粘到控件里」的清单，会让人配出一个永远取不到选项的控件。
+///
+/// 抽成纯函数是为了可测——「哪几行会出现在清单上」正是最容易在改动中无声漂移的地方。
+export function credentialItems(item: {
+  fields: DatasourceFieldBinding[];
+}): CredentialItem[] {
+  return item.fields
+    .filter((binding) => binding.enabled)
+    .map((binding) => ({
+      fieldId: binding.fieldId,
+      fieldName: binding.fieldName,
+      sourceKey: binding.sourceKey,
+      // **拿不到**而不是「从未轮换」：列表端点的绑定投影里没有 `token_rotated_at`，
+      // 而「不知道」与「确实没换过」在界面上必须长得不一样。
+      tokenRotatedAt: undefined,
+      enabled: binding.enabled,
+    }));
+}
 
 /// 界面值 → `linkage_mapping` 文本。`null` 返回空串（表示不写这一项）。
 export function buildLinkageMapping(value: LinkageFormValue | null): string {

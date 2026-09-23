@@ -26,6 +26,8 @@ function schedule(
 
 function item(overrides: Partial<DatasourceItem> = {}): DatasourceItem {
   return {
+    id: 7,
+    fields: [],
     sourceKey: "fx_rate",
     title: "汇率",
     encryptEnabled: false,

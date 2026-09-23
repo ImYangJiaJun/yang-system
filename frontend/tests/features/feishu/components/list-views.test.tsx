@@ -12,6 +12,8 @@ import type { DatasourceItem } from "@/features/feishu/types";
 
 function item(overrides: Partial<DatasourceItem> = {}): DatasourceItem {
   return {
+    id: 7,
+    fields: [],
     sourceKey: "dept_sales",
     title: "部门",
     encryptEnabled: false,

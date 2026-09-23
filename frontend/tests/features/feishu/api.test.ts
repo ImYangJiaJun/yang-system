@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActionDemoSchema, UiCatalog } from "@/engine";
 import {
   buildDatasourceListBody,
+  checkDatasourceHealth,
   createDatasource,
   createDatasourceTable,
   deleteDatasource,
@@ -14,6 +15,8 @@ import {
   listOptions,
   precheckApprovalOptions,
   requireAction,
+  revealFieldToken,
+  rotateFieldToken,
   updateDatasource,
   type FeishuInvokeDeps,
 } from "@/features/feishu/api";
@@ -248,6 +251,10 @@ describe("listDatasources", () => {
     expect(page.total).toBe(1);
     expect(page.items).toEqual([
       {
+        // 旧形状（表级化之前）没有 id 也没有字段绑定：两项都落到「空」，
+        // 而不是被猜成一个值。
+        id: null,
+        fields: [],
         sourceKey: "expense_category",
         title: "费用类型",
         encryptEnabled: true,
@@ -292,6 +299,235 @@ describe("listDatasources", () => {
     await expect(listDatasources(query(), deps)).rejects.toThrow(
       "page/page_size 越界",
     );
+  });
+});
+
+describe("表级数据源行的投影", () => {
+  /// 表级化之后 `list_datasources` 的形状（`list_datasources.rs` 的 `DatasourceItem`）：
+  /// **表级行上没有 `source_key`**，它在 `fields[]` 的每条绑定上。
+  const TABLE_ROW = {
+    id: 7,
+    title: "公司往来付款",
+    status: "active",
+    updated_at: 1758000000,
+    ingest_mode: "pull",
+    bitable_base_token: "app1",
+    bitable_table_id: "tblA",
+    bitable_view_id: "vew1",
+    last_pull_at: null,
+    last_success_at: null,
+    consecutive_failures: 2,
+    last_error: "1254024 InvalidFieldNames",
+    fields: [
+      {
+        field_id: "fldA",
+        field_name: "币种/Currency",
+        source_key: "payment_currency",
+        parent_field_id: null,
+        enabled: true,
+      },
+      {
+        field_id: "fldB",
+        field_name: null,
+        source_key: "payment_fx_rate",
+        parent_field_id: "fldA",
+        enabled: false,
+      },
+    ],
+  };
+
+  it("id 与字段绑定被投影出来，且不因为表级行没有 source_key 就丢掉整行", async () => {
+    stubFetch({
+      code: 0,
+      data: { items: [TABLE_ROW], page: 1, page_size: 10, total: 1 },
+    });
+    const page = await listDatasources(query(), deps);
+
+    expect(page.items).toHaveLength(1);
+    const item = page.items[0];
+    expect(item?.id).toBe(7);
+    expect(item?.consecutiveFailures).toBe(2);
+    expect(item?.lastError).toBe("1254024 InvalidFieldNames");
+    // 表级行没有表级标识：空串，而不是编一个出来
+    expect(item?.sourceKey).toBe("");
+    expect(item?.fields).toEqual([
+      {
+        fieldId: "fldA",
+        fieldName: "币种/Currency",
+        sourceKey: "payment_currency",
+        parentFieldId: null,
+        enabled: true,
+      },
+      {
+        fieldId: "fldB",
+        // 还没解析过字段名（首次拉取前）：null，不是空串
+        fieldName: null,
+        sourceKey: "payment_fx_rate",
+        parentFieldId: "fldA",
+        enabled: false,
+      },
+    ]);
+  });
+
+  it("绑定行缺 source_key 或 field_id 时被丢掉（两者都定位不了）", async () => {
+    stubFetch({
+      code: 0,
+      data: {
+        items: [
+          {
+            ...TABLE_ROW,
+            fields: [
+              { field_id: "fldA", source_key: "" },
+              { field_id: "", source_key: "orphan" },
+            ],
+          },
+        ],
+        page: 1,
+        page_size: 10,
+        total: 1,
+      },
+    });
+    const page = await listDatasources(query(), deps);
+    expect(page.items[0]?.fields).toEqual([]);
+  });
+});
+
+describe("体检与凭据端点", () => {
+  const CREDENTIAL_ACTIONS: ActionDemoSchema[] = [
+    {
+      ...DATASOURCE_LIST_ACTION,
+      operation_id: "feishu.datasource.health_check",
+      path: "/api/v1/feishu/datasources/table/health",
+    },
+    {
+      ...DATASOURCE_LIST_ACTION,
+      operation_id: "feishu.datasource.reveal_token",
+      path: "/api/v1/feishu/datasources/fields/{source_key}/reveal",
+    },
+    {
+      ...DATASOURCE_LIST_ACTION,
+      operation_id: "feishu.datasource.rotate_token",
+      path: "/api/v1/feishu/datasources/fields/{source_key}/rotate",
+    },
+  ];
+
+  const credentialDeps: FeishuInvokeDeps = {
+    catalog: catalogWith(CREDENTIAL_ACTIONS),
+    session: { token: "tok-1" },
+  };
+
+  it("checkDatasourceHealth：按表级主键定位，路径里不放 id", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: {
+        ok: false,
+        missing_fields: [{ field_id: "fldGONE", source_key: "old_rate" }],
+        view_missing: false,
+        table_missing: false,
+        unchecked: [],
+      },
+    });
+    const report = await checkDatasourceHealth(7, credentialDeps);
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/table/health");
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.body).toEqual({ datasource_id: 7 });
+    expect(report).toEqual({
+      ok: false,
+      missingFields: [{ fieldId: "fldGONE", sourceKey: "old_rate" }],
+      viewMissing: false,
+      tableMissing: false,
+      unchecked: [],
+    });
+  });
+
+  it("体检报告缺 `ok` 键时按不通过处理（读不出结论 ≠ 通过）", async () => {
+    stubFetch({ code: 0, data: { missing_fields: [] } });
+    const report = await checkDatasourceHealth(7, credentialDeps);
+    expect(report.ok).toBe(false);
+  });
+
+  it("reveal：source_key 进路径段，明文从请求体之外取回", async () => {
+    // handler 没把这个段声明成 path 参数（`approval_options` 就是这种形状），
+    // 所以由前端填进路径，值**不进 body**。
+    const calls = stubFetch({ code: 0, data: { token: "plaintext" } });
+    const token = await revealFieldToken("payment_currency", credentialDeps);
+
+    expect(calls[0]?.url).toBe(
+      "/api/v1/feishu/datasources/fields/payment_currency/reveal",
+    );
+    expect(calls[0]?.method).toBe("POST");
+    // 引擎在没有 body 键时整个不发请求体：断言「一个键都没有」
+    expect(calls[0]?.body ?? {}).toEqual({});
+    expect(token).toBe("plaintext");
+  });
+
+  it("rotate：同样的路径口径，返回的是新值", async () => {
+    const calls = stubFetch({ code: 0, data: { token: "rotated" } });
+    const token = await rotateFieldToken("payment_currency", credentialDeps);
+
+    expect(calls[0]?.url).toBe(
+      "/api/v1/feishu/datasources/fields/payment_currency/rotate",
+    );
+    expect(token).toBe("rotated");
+  });
+
+  it("段声明成 path 参数时交给引擎填，值不会同时出现在请求体里", async () => {
+    const declared: ActionDemoSchema = {
+      ...DATASOURCE_LIST_ACTION,
+      operation_id: "feishu.datasource.reveal_token",
+      path: "/api/v1/feishu/datasources/fields/{source_key}/reveal",
+      params: [
+        {
+          name: "source_key",
+          title: "数据源标识",
+          description: "",
+          source: "path",
+          required: true,
+        },
+      ],
+    };
+    const calls = stubFetch({ code: 0, data: { token: "plaintext" } });
+    await revealFieldToken("payment_currency", {
+      catalog: catalogWith([declared]),
+      session: { token: "tok-1" },
+    });
+
+    expect(calls[0]?.url).toBe(
+      "/api/v1/feishu/datasources/fields/payment_currency/reveal",
+    );
+    expect(calls[0]?.body ?? {}).toEqual({});
+  });
+
+  it("路由不带这个段时按请求体传（T6/T11 之后的既有口径）", async () => {
+    const bodyRoute: ActionDemoSchema = {
+      ...DATASOURCE_LIST_ACTION,
+      operation_id: "feishu.datasource.rotate_token",
+      path: "/api/v1/feishu/datasources/field/rotate",
+    };
+    const calls = stubFetch({ code: 0, data: { token: "rotated" } });
+    await rotateFieldToken("payment_currency", {
+      catalog: catalogWith([bodyRoute]),
+      session: { token: "tok-1" },
+    });
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/field/rotate");
+    expect(calls[0]?.body).toEqual({ source_key: "payment_currency" });
+  });
+
+  it("回显响应缺 token 时拒绝，不返回一个空值让人去粘", async () => {
+    stubFetch({ code: 0, data: {} });
+    await expect(
+      revealFieldToken("payment_currency", credentialDeps),
+    ).rejects.toThrow(/没有 token/);
+  });
+
+  it("目录里没有回显端点时抛错（它是独立权限位）", async () => {
+    const calls = stubFetch({ code: 0, data: { token: "x" } });
+    await expect(revealFieldToken("payment_currency", deps)).rejects.toThrow(
+      /找不到 Action「feishu\.datasource\.reveal_token」/,
+    );
+    expect(calls).toHaveLength(0);
   });
 });
 

@@ -37,11 +37,13 @@ import type {
   BitableField,
   BitableTable,
   BitableView,
+  DatasourceFieldBinding,
   DatasourceItem,
   DatasourceListQuery,
   DatasourceStatus,
   DatasourceStatusFilter,
   DefaultLocale,
+  HealthReport,
   IngestMode,
   LinkageFormValue,
   ListPage,
@@ -280,12 +282,46 @@ function parsePage<T>(
   };
 }
 
+/// 字段绑定行（`list_datasources` 的 `fields[]`）。
+///
+/// 表级化之后 `source_key` / 凭据 / 父指针都在这一层：一条表级行有 N 条绑定。
+function parseFieldBinding(
+  raw: Record<string, unknown>,
+): DatasourceFieldBinding | null {
+  const sourceKey = asString(raw.source_key);
+  const fieldId = asString(raw.field_id);
+  // 没有 source_key 或 field_id 的绑定行无法定位（一个进 URL、一个是身份）
+  if (sourceKey === "" || fieldId === "") return null;
+  return {
+    fieldId,
+    fieldName: asNullableString(raw.field_name),
+    sourceKey,
+    parentFieldId: asNullableString(raw.parent_field_id),
+    // `enabled` 缺失时按启用处理：那是存量行（列默认 true）的语义
+    enabled: raw.enabled !== false,
+  };
+}
+
 function parseDatasourceItem(
   raw: Record<string, unknown>,
 ): DatasourceItem | null {
+  // 表级化之后**表级行上没有 `source_key`**（它在字段绑定上），所以身份改用 `id`。
+  // 但仍然接受只有 `source_key` 的旧形状：那条路径还有消费者（够不着的行会被静默
+  // 丢掉，而「丢掉」会把一条真实存在的数据源显示成不存在）。
   const sourceKey = asString(raw.source_key);
-  if (!sourceKey) return null;
+  const id = typeof raw.id === "number" ? raw.id : null;
+  if (id === null && sourceKey === "") return null;
+  const rawFields = raw.fields;
+  const fields = Array.isArray(rawFields)
+    ? rawFields
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map(parseFieldBinding)
+        .filter((item): item is DatasourceFieldBinding => item !== null)
+    : [];
   return {
+    id,
+    fields,
     sourceKey,
     title: asString(raw.title),
     encryptEnabled: raw.encrypt_enabled === true,
@@ -706,6 +742,168 @@ export function useTableWizardClient(): TableWizardClient {
         listBitableFields(appToken, tableId, deps),
       createTable: (input: CreateTableSubmission) =>
         createDatasourceTable(input, deps),
+    }),
+    [deps],
+  );
+}
+
+/* ------------------------------ 体检与凭据 ------------------------------- */
+
+function parseHealthReport(data: unknown): HealthReport {
+  const record = asRecord(data);
+  const rawMissing = record?.missing_fields;
+  const missingFields = Array.isArray(rawMissing)
+    ? rawMissing
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map((item) => ({
+          fieldId: asString(item.field_id),
+          sourceKey: asString(item.source_key),
+        }))
+        .filter((item) => item.fieldId !== "" || item.sourceKey !== "")
+    : [];
+  const rawUnchecked = record?.unchecked;
+  return {
+    // 缺 `ok` 键时按**不通过**处理：一份读不出结论的报告不能被读成通过
+    ok: record?.ok === true,
+    missingFields,
+    viewMissing: record?.view_missing === true,
+    tableMissing: record?.table_missing === true,
+    unchecked: Array.isArray(rawUnchecked)
+      ? rawUnchecked.filter((item): item is string => typeof item === "string")
+      : [],
+  };
+}
+
+/// 体检：把该表**启用中的** `field_id` 集合拿去和「列出字段」比对（T11）。
+///
+/// 按 `id`（表级主键）定位——体检的粒度就是一张表。
+export async function checkDatasourceHealth(
+  datasourceId: number,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<HealthReport> {
+  const result = await invokeFeishuAction(
+    deps,
+    TABLE_OPERATION_IDS.healthCheck,
+    { datasource_id: datasourceId },
+    signal,
+  );
+  return parseHealthReport(result.data);
+}
+
+/**
+ * 路由里的一个标识段：**该进路径还是该进请求体，由服务端的声明决定**。
+ *
+ * 本仓库三种形状都真的出现过，所以这里不能押一个：
+ * - handler 把段声明成 `path` 参数（T5 之前的 `field_names` 那类）→ 交给引擎替换；
+ * - 路由模板里有 `{name}` 但 handler **没有**声明它（`approval_options` 的
+ *   `{source_key}` 就是这种）→ 引擎会在最后一步抛「路径仍有未填写参数」，必须自己填，
+ *   而且**不能**再把值塞进请求体（那些 handler 的入参是空集 + `deny_unknown_fields`）；
+ * - 路由不带这个段（T6/T11 之后的既有口径：标识走请求体）→ 值进 body。
+ *
+ * 返回值是「可直接交给 `invokeAction` 的 action + values」。
+ */
+function segmentRequest(
+  action: ActionDemoSchema,
+  name: string,
+  value: string,
+  extra: Record<string, unknown> = {},
+): { action: ActionDemoSchema; values: Record<string, unknown> } {
+  const declared = action.params.find((parameter) => parameter.name === name);
+  if (declared?.source === "path") {
+    return { action, values: { ...extra, [name]: value } };
+  }
+  const segment = `{${name}}`;
+  if (action.path.includes(segment)) {
+    return {
+      action: {
+        ...action,
+        path: action.path.replaceAll(segment, encodeURIComponent(value)),
+      },
+      values: extra,
+    };
+  }
+  return { action, values: { ...extra, [name]: value } };
+}
+
+/// 回显端点的响应契约：`{"token":"<明文>"}`。两个端点同形。
+function tokenFrom(data: unknown, operationId: string): string {
+  const token = asString(asRecord(data)?.token);
+  if (token === "") {
+    throw new Error(`「${operationId}」的响应里没有 token`);
+  }
+  return token;
+}
+
+/// 回显某个字段的 Token。**纯读**：不改任何状态，可以反复调（设计 §10.2.1）。
+export async function revealFieldToken(
+  sourceKey: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<string> {
+  const operationId = TABLE_OPERATION_IDS.reveal;
+  const request = segmentRequest(
+    requireAction(deps.catalog, operationId),
+    "source_key",
+    sourceKey,
+  );
+  const result = await invokeAction(
+    request.action,
+    request.values,
+    deps.session,
+    signal,
+  );
+  return tokenFrom(result.data, operationId);
+}
+
+/// 轮换某个字段的 Token。**写**：服务端在事务内换掉摘要 + 密文 + 轮换时间，
+/// 旧值当场失效——所以调用方必须先让用户确认过。
+export async function rotateFieldToken(
+  sourceKey: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<string> {
+  const operationId = TABLE_OPERATION_IDS.rotate;
+  const request = segmentRequest(
+    requireAction(deps.catalog, operationId),
+    "source_key",
+    sourceKey,
+  );
+  const result = await invokeAction(
+    request.action,
+    request.values,
+    deps.session,
+    signal,
+  );
+  return tokenFrom(result.data, operationId);
+}
+
+/// 清单页要的一组凭据入口。`reveal` 是读、`rotate` 是写——**两个不同的操作**，
+/// 界面上也必须分开（决策 D10：复制只回显，轮换独立成按钮）。
+export type CredentialClient = {
+  reveal: (sourceKey: string) => Promise<string>;
+  rotate: (sourceKey: string) => Promise<string>;
+};
+
+/// 绑定当前会话与界面目录的凭据入口。
+///
+/// 两条都要求目录里**分别**有对应的 Action：回显是独立权限位（读的是凭据，
+/// 不是数据源配置），所以一个部署完全可能只给轮换不给回显，或反过来。
+export function useCredentialClient(): CredentialClient {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  return useMemo(
+    () => ({
+      reveal: (sourceKey: string) => revealFieldToken(sourceKey, deps),
+      rotate: (sourceKey: string) => rotateFieldToken(sourceKey, deps),
     }),
     [deps],
   );

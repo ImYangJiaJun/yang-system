@@ -7,6 +7,7 @@ import { renderTestApp } from "@test/helpers/render-app";
 
 import {
   bodiesOf,
+  datasourceWire,
   jsonResponse,
   listPage,
   optionWire,
@@ -240,5 +241,103 @@ describe("飞书数据源详情页 · 两个异常分支", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("数据源不存在");
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+});
+
+/// 表级扩展（T15）：体检面板与凭据清单，按**表级 id 与字段绑定**定位。
+describe("飞书数据源详情页 · 体检与凭据清单", () => {
+  /// 表级行：没有表级 `source_key`，凭据在 `fields[]` 的每条绑定上。
+  /// 路由参数仍是那个**字段的** source_key（列表页就是这么链过来的）。
+  const TABLE_ROW = datasourceWire({
+    id: 7,
+    source_key: undefined,
+    title: "公司往来付款",
+    ingest_mode: "pull",
+    bitable_base_token: "app1",
+    bitable_table_id: "tblA",
+    bitable_view_id: "vew1",
+    fields: [
+      {
+        field_id: "fldEblAr7X",
+        field_name: "费用类型/Fee Type*",
+        source_key: SOURCE_KEY,
+        parent_field_id: null,
+        enabled: true,
+      },
+      {
+        field_id: "fldGONE",
+        field_name: null,
+        source_key: "old_rate",
+        parent_field_id: null,
+        enabled: false,
+      },
+    ],
+  });
+
+  function renderTableDetail(
+    options: Parameters<typeof stubFeishuApi>[0] = {},
+  ) {
+    const calls = stubFeishuApi({
+      tableConfig: true,
+      datasourceList: () => listPage([TABLE_ROW]),
+      optionList: () => listPage(TWO_OPTIONS),
+      ...options,
+    });
+    renderDetail();
+    return calls;
+  }
+
+  it("凭据清单按字段绑定列出：字段名 + 该字段的 URL，且只列启用中的", async () => {
+    renderTableDetail();
+
+    expect(await screen.findByText("费用类型/Fee Type*")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `${window.location.origin}/api/v1/feishu/approval/options/${SOURCE_KEY}`,
+      ),
+    ).toBeInTheDocument();
+    // 停用的绑定不进清单（它出站会吃 SOURCE_DISABLED），但要说明它为什么不在
+    expect(screen.queryByText(/old_rate/)).toBeNull();
+    expect(screen.getByText(/1 条已停用的绑定没列在这里/)).toBeInTheDocument();
+  });
+
+  it("体检按表级 id 打 health 端点，并把缺失字段的 id 与 source_key 一起列出", async () => {
+    const calls = renderTableDetail({
+      health: () => ({
+        ok: false,
+        missing_fields: [{ field_id: "fldGONE", source_key: "old_rate" }],
+        view_missing: false,
+        table_missing: false,
+        unchecked: [],
+      }),
+    });
+
+    expect(await screen.findByText("fldGONE")).toBeInTheDocument();
+    expect(screen.getByText("old_rate")).toBeInTheDocument();
+    expect(bodiesOf(calls, "/api/v1/feishu/datasources/table/health")).toEqual([
+      { datasource_id: 7 },
+    ]);
+  });
+
+  it("复制 Token 走回显端点（读），绝不打轮换端点（写）", async () => {
+    // 决策 D10 的硬要求：误点复制不能有任何后果。
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const calls = renderTableDetail();
+
+    await screen.findByText("费用类型/Fee Type*");
+    await user.click(screen.getByRole("button", { name: "复制 Token" }));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("revealed-token");
+    });
+
+    expect(calls.filter((call) => call.url.endsWith("/reveal"))).toHaveLength(
+      1,
+    );
+    expect(calls.filter((call) => call.url.endsWith("/rotate"))).toHaveLength(
+      0,
+    );
+    vi.unstubAllGlobals();
   });
 });
