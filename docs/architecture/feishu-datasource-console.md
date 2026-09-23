@@ -400,8 +400,10 @@ frontend/src/features/feishu/
 | 删除 | `delete_datasource` | `{source_key}` | 列表项菜单 → **二次确认**（文案见下） |
 | 查看选项 | `list_options` | `{source_key, …标准分页六键}` | 详情页表格（只读） |
 
-**列表查询必须每次显式带排序。** 默认 `order_by = source_key ASC`；
-台账列头切换排序时换成对应字段。不发就是无序分页，翻页会重复/漏行（§4.10）。
+**列表查询必须每次显式带排序。** 默认 `order_by = title ASC, id ASC`（`id` 收尾是
+为了保证全序：`title` 会重名）；台账列头切换排序时换成对应字段。
+**不要用 `source_key`**——它不在表级行上，排序校验会直接 400。
+不发就是无序分页，翻页会重复/漏行（§4.10）。
 
 **搜索与筛选的结果集变化要回到第 1 页**，否则会停在一个不存在的页码上。
 
@@ -487,19 +489,29 @@ frontend/src/features/feishu/
 
 ### 5.6 两个视图各展示什么
 
-`list_datasources` 返回 5 个字段（`source_key` / `title` / `encrypt_enabled` /
-`default_locale` / `status`），两种视图用的是**同一份数据**。
+`list_datasources` 的表级行返回 `id` / `title` / `status` / `updated_at` /
+`ingest_mode` / 三个坐标 / 同步状态六个字段，外加一个 `fields[]`（字段绑定）。
+两种视图用的是**同一份数据**。
+
+> **表级行上没有 `source_key`、没有 `encrypt_enabled`、没有 `default_locale`。**
+> 一条数据源 = 一张表 = N 条绑定，所以这三项都属于**绑定层**（`fields[]` 里的每一条）：
+> `source_key` 进 URL、后两项在详情页的字段绑定表里逐字段显示。
+> 本节曾把 `encrypt_enabled` / `default_locale` 写成表级的「公共字段」，照那写就会把
+> 已删的东西正好加回表级行与卡片——**它们恒为默认值，画出来是一句假话**。
 
 **公共字段渲染规则：**
 
 - `status` → 前端映射「启用 / 已停用」，用 tone 语义色（后端不下发 `display`，§4.4-2）
-- `default_locale` → **显示为「简体中文 / English / 日本語」而不是 `zh_cn`**
-- `encrypt_enabled` → 为真时一个「加密返回」标记，**用 info 色而非 positive**（§4.7）
+- 绑定的 `default_locale` → **显示为「简体中文 / English / 日本語」而不是 `zh_cn`**
+- 绑定的 `encrypt_enabled` → 为真时一个「加密返回」标记，**用 info 色而非 positive**（§4.7）
 
 **卡片视图**（概貌用）：
 
-- 标题位 `title`；副标题位 `source_key`（等宽）
-- 徽标行：`status` + 「加密返回」+ 默认语言
+- 标题位 `title`；副标题位**首个绑定的 `source_key`**（等宽；一条表级行有 N 个）
+- 徽标行：**只有 `status`**。原设计这里是 `status` + 「加密返回」+ 默认语言，但那两个
+  属性属于**绑定层**（一条数据源有 N 个字段，可以各自加密、各自语言），表级行上没有
+  单一值可显示——照着画的结果是对每一条数据源都恒画「—」与一个空语言徽标。
+  逐字段的取值在详情页的字段绑定表（`FieldBindingsTable`），见 §4.7 末。
 - 栅格 `repeat(auto-fill, minmax(260px, 1fr))`；卡片整块可点进详情
 - 菜单「⋯」在右上角，**只在有写权限时渲染**
 
@@ -508,11 +520,12 @@ frontend/src/features/feishu/
 | 列 | 内容 | 可排序 |
 |---|---|---|
 | 名称 | `title` | 是（依赖 §5.3-3） |
-| 标识 | `source_key`，等宽 | 是（原生支持） |
+| 标识 | 首个绑定的 `source_key`，等宽 | **否**（表级行上没有单一 `source_key`，点一下会把请求打成 400） |
 | 状态 | tone 徽标 | 否（`status` 未声明 sortable） |
-| 加密返回 | 标记 | 否 |
-| 默认语言 | 中文名 | 否 |
 | （操作） | 「⋯」菜单，悬停/聚焦时出现 | — |
+
+> 「加密返回」与「默认语言」两列**已删**（原设计有）：它们是**绑定级**属性，
+> 表级行上恒为空，逐字段的取值改在详情页的字段绑定表里显示。
 
 - 工具栏：搜索框 + 「全部 / 启用 / 已停用」分段筛选（筛选依赖 §5.3-3）
 - 行高受 `--density-cell-y` 驱动（`html[data-density]`），页头「密度」菜单实时切换
