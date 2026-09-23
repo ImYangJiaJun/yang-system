@@ -17,7 +17,7 @@ use yang_base::BaseError;
 // 组合根与基础设施使用的账号端口。
 pub use domain::email_delivery;
 pub(crate) use domain::grants::{AuthorizationGrants, CompositeGrantResolver, GrantResolver};
-pub(crate) use domain::system_owner::SystemOwnerClaimer;
+pub(crate) use domain::system_owner::{SystemAuthorizationPort, SystemOwnerClaimer};
 
 // 外围授权域（access）使用的账号端口：授权快照类型与可信用户投影。
 pub(crate) use domain::claims::user_from_claims;
@@ -44,6 +44,7 @@ pub(crate) fn build_addon(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
+    system_authorization: Arc<dyn SystemAuthorizationPort>,
     authorization_validator: AuthorizationVersionValidator,
     step_up: Option<StepUpServices>,
 ) -> Result<AddonSpec, BaseError> {
@@ -52,6 +53,7 @@ pub(crate) fn build_addon(
             security,
             grant_resolver,
             system_owner_claimer,
+            system_authorization,
             authorization_validator,
             step_up,
         )?),

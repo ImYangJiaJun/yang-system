@@ -428,6 +428,25 @@ impl GroupRepository {
         Ok(members)
     }
 
+    /// 删除一个用户**在所有组**里的成员行，返回删除行数（账号删除时的孤儿清理）。
+    ///
+    /// 与 [`Self::delete_member_in_tx`] 的区别是它不指定组：账号删除后该用户的
+    /// 成员关系已无意义，必须一次清干净，否则留下指向已匿名化账号的悬空行
+    /// （spec §8.3）。
+    pub(crate) async fn delete_member_rows_of_user_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        user_id: i64,
+    ) -> Result<u64, BaseError> {
+        let affected = self
+            .trusted_members(ctx)?
+            .where_eq(MEMBER_USER_ID, serde_json::Value::Number(user_id.into()))?
+            .delete_in_tx(transaction)
+            .await?;
+        Ok(affected)
+    }
+
     /// 读取一个用户所属的全部组 id。
     pub(crate) async fn list_group_ids_of_user_in_tx(
         &self,

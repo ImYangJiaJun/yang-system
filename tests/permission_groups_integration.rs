@@ -116,9 +116,14 @@ async fn connect_test_redis() -> anyhow::Result<RedisClient> {
 }
 
 /// 清空测试库：组事实表必须先于 `users` / `permission_group` 删除（外键 RESTRICT）。
+///
+/// `authz_grant` 没有外键、DROP `users` 不会带走它，而本文件的用例会直授权限并
+/// 断言「某用户名下剩几行」——漏删它会让上一轮运行的行按 `user_id` 撞进下一个
+/// 用例（自增主键从 1 重新开始），断言与权限集合都会被污染。
 async fn reset_database(database: &Database) -> anyhow::Result<()> {
     for table in [
         "user_group",
+        "authz_grant",
         "permission_group_item",
         "permission_group",
         "system_owner",
@@ -168,9 +173,29 @@ async fn dispatch(
     headers: &[(&str, &str)],
     peer_port: u16,
 ) -> Result<ApiResponse, BaseError> {
+    dispatch_with_path(app, module, action, body, headers, peer_port, &[]).await
+}
+
+/// 同 [`dispatch`]，额外携带路径参数。
+///
+/// 路径参数必须走 `request.path_params`：`params!` 生成的 `decode` 只对
+/// `source = body` 的字段读请求体，把路径参数写进 JSON body 会被判为缺参
+/// （`ParamInvalid("input", "missing field ...")`）。
+async fn dispatch_with_path(
+    app: &BuiltApp,
+    module: &str,
+    action: &str,
+    body: Value,
+    headers: &[(&str, &str)],
+    peer_port: u16,
+    path_params: &[(&str, &str)],
+) -> Result<ApiResponse, BaseError> {
     let mut request = Request::new(body);
     for (name, value) in headers {
         request = request.header(*name, *value);
+    }
+    for (name, value) in path_params {
+        request = request.path_param(*name, *value);
     }
     let context = app.context(request).with_request_meta(
         RequestMeta::new().with_peer_addr(SocketAddr::from(([127, 0, 0, 1], peer_port))),
@@ -512,8 +537,8 @@ async fn system_admin_group_token_carries_the_whole_catalog() -> anyhow::Result<
 mod harness {
     use super::common::take_registration_code;
     use super::{
-        build_application, connect_test_database, connect_test_redis, dispatch, login,
-        reset_database, reset_redis, PASSWORD, SYSTEM_ADMIN_GROUP_KEY,
+        build_application, connect_test_database, connect_test_redis, dispatch, dispatch_with_path,
+        login, reset_database, reset_redis, PASSWORD, SYSTEM_ADMIN_GROUP_KEY,
     };
     use anyhow::{ensure, Context};
     use serde_json::{json, Value};
@@ -840,14 +865,27 @@ mod harness {
         body: Value,
         admin: &Admin,
     ) -> Result<ApiResponse, BaseError> {
+        step_up_dispatch_with_path(app, module, action, body, admin, &[]).await
+    }
+
+    /// 同 [`step_up_dispatch`]，额外携带路径参数（如 `/api/v1/users/{id}/disable`）。
+    async fn step_up_dispatch_with_path(
+        app: &BuiltApp,
+        module: &str,
+        action: &str,
+        body: Value,
+        admin: &Admin,
+        path_params: &[(&str, &str)],
+    ) -> Result<ApiResponse, BaseError> {
         let authorization = format!("Bearer {}", admin.token);
-        match dispatch(
+        match dispatch_with_path(
             app,
             module,
             action,
             body.clone(),
             &[("authorization", authorization.as_str())],
             PEER_PORT,
+            path_params,
         )
         .await
         {
@@ -872,7 +910,7 @@ mod harness {
                     .ok_or_else(|| {
                         BaseError::ConfigError("Step-up 完成响应缺少 proof".to_string())
                     })?;
-                dispatch(
+                dispatch_with_path(
                     app,
                     module,
                     action,
@@ -882,6 +920,7 @@ mod harness {
                         (STEP_UP_PROOF_HEADER, proof.as_str()),
                     ],
                     PEER_PORT,
+                    path_params,
                 )
                 .await
             }
@@ -1105,6 +1144,101 @@ mod harness {
             .fetch_one(pool_of(app))
             .await
             .unwrap_or_else(|error| panic!("读取权限组 {group_id} 创建人失败: {error}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 13 起：账号生命周期夹具（最后管理员守卫与账号删除的授权事实清理）。
+    // -----------------------------------------------------------------------
+
+    /// 尝试管理端停用目标账号并折算为 HTTP 状态码。
+    ///
+    /// `admin_disable_user` 要求 `account.users.manage` 且受 Step-up 保护，因此操作者
+    /// 身份由调用方给出——最后管理员用例刻意让一个**非系统管理员**来当操作者，
+    /// 否则该 Action 既有的「不能停用自己」前置会先把用例挡在守卫之前。
+    ///
+    /// 目标用户是**路径参数**（`/api/v1/users/{id}/disable`），必须经
+    /// `step_up_dispatch_with_path` 传入 `request.path_params`。
+    pub async fn admin_disable_status(
+        app: &BuiltApp,
+        operator: &Admin,
+        target_user_id: i64,
+    ) -> u16 {
+        let target = target_user_id.to_string();
+        match step_up_dispatch_with_path(
+            app,
+            "account.user",
+            "admin_disable_user",
+            json!({}),
+            operator,
+            &[("id", target.as_str())],
+        )
+        .await
+        {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 尝试自助停用当前账号并折算为 HTTP 状态码。
+    pub async fn disable_self_status(app: &BuiltApp, actor: &Admin) -> u16 {
+        match step_up_dispatch(app, "account.user", "disable_self", json!({}), actor).await {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 尝试匿名化删除当前账号并折算为 HTTP 状态码。
+    pub async fn delete_account_status(app: &BuiltApp, actor: &Admin) -> u16 {
+        match step_up_dispatch(
+            app,
+            "account.user",
+            "delete_account",
+            json!({ "confirmation": "delete my account" }),
+            actor,
+        )
+        .await
+        {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 走真实删除路径删掉自己的账号；失败即 panic（调用方断言的是成功路径）。
+    pub async fn delete_account(app: &BuiltApp, actor: &Admin) {
+        let status = delete_account_status(app, actor).await;
+        assert_eq!(status, 200, "删除账号必须成功");
+    }
+
+    /// 账号当前的 `users.status` 列取值。
+    pub async fn user_status(app: &BuiltApp, user_id: i64) -> String {
+        sqlx::query_scalar("SELECT status FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("读取用户 {user_id} 状态失败: {error}"))
+    }
+
+    /// 某个用户名下残留的 `authz_grant` 直授行数。
+    pub async fn grant_rows_of_user(app: &BuiltApp, user_id: i64) -> u64 {
+        count_rows_of_user(app, "authz_grant", user_id).await
+    }
+
+    /// 某个用户名下残留的 `user_group` 成员行数。
+    pub async fn member_rows_of_user(app: &BuiltApp, user_id: i64) -> u64 {
+        count_rows_of_user(app, "user_group", user_id).await
+    }
+
+    /// 按 `user_id` 统计一张授权事实表的行数。
+    async fn count_rows_of_user(app: &BuiltApp, table: &str, user_id: i64) -> u64 {
+        let count: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE user_id = ?"))
+                .bind(user_id)
+                .fetch_one(pool_of(app))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("统计 {table} 中用户 {user_id} 的行数失败: {error}")
+                });
+        u64::try_from(count).unwrap_or_else(|error| panic!("{table} 行数为负: {error}"))
     }
 }
 
@@ -1427,5 +1561,106 @@ async fn the_last_system_admin_cannot_be_removed_from_the_admin_group() {
     assert!(
         harness::is_member(&app, group_id, admin.user_id).await,
         "拒绝不得顺手删掉成员行"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 13 起的账号生命周期用例：最后管理员守卫与账号删除的孤儿授权清理。
+// ---------------------------------------------------------------------------
+
+/// spec §8.2：最后一名系统管理员不可被停用、不可自停用、不可被删除。
+///
+/// 计划此处断言 409（设计 §9.3 的 `Conflict`）。`yang_base::BaseError` 没有该变体，
+/// 且设计同节要求「不为个别用例扩展框架错误类型」，因此拒绝落成既有的 `ParamInvalid`
+/// （400）——与 `remove_group_member` 的最后管理员守卫同一取舍。断言要钉住的事实不变：
+/// 三条路径都必须被拒、绝不能是 5xx，且拒绝后账号状态与成员关系原封不动。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn the_last_system_admin_cannot_be_disabled_or_deleted() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 停用他人需要 `account.users.manage`；这个操作者**不是**系统管理员，
+    // 否则 `admin_disable_user` 既有的「不能停用自己」前置会先把用例挡在守卫之前，
+    // 断言就变成了在同义反复地复述那条前置。
+    let manager = harness::grant_only(&app, &admin, "manager", "account.users.manage").await;
+
+    let disable_status = harness::admin_disable_status(&app, &manager, admin.user_id).await;
+    assert_eq!(disable_status, 400, "最后一名系统管理员不可被停用");
+
+    let delete_status = harness::delete_account_status(&app, &admin).await;
+    assert_eq!(delete_status, 400, "最后一名系统管理员不可被删除");
+
+    let self_disable_status = harness::disable_self_status(&app, &admin).await;
+    assert_eq!(self_disable_status, 400, "最后一名系统管理员不可自停用");
+
+    // 拒绝不得留下任何写结果。
+    assert_eq!(
+        harness::user_status(&app, admin.user_id).await,
+        "active",
+        "被拒的停用不得改动账号状态"
+    );
+    assert!(
+        harness::is_member(
+            &app,
+            harness::system_admin_group_id(&app).await,
+            admin.user_id
+        )
+        .await,
+        "被拒的操作不得顺手删掉全权组成员行"
+    );
+}
+
+/// 有两名管理员时，移除其一必须成功（守卫不能过度收紧）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn one_of_two_admins_can_be_disabled() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    let second = harness::add_second_admin(&app, &first, "admin2").await;
+
+    let status = harness::admin_disable_status(&app, &first, second.user_id).await;
+    assert_eq!(status, 200, "还有另一名启用管理员时必须允许停用");
+    assert_eq!(
+        harness::user_status(&app, second.user_id).await,
+        "disabled",
+        "停用必须真的落库"
+    );
+}
+
+/// spec §8.3：账号删除后不得残留授权事实。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn deleting_an_account_leaves_no_orphan_authorization_rows() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let user = harness::grant_only(&app, &admin, "victim", "demo.notes.read").await;
+    let group_id = harness::create_group(&app, &admin, "temp", "临时").await;
+    harness::add_member(&app, &admin, group_id, user.user_id).await;
+
+    // 前置事实必须真的存在，否则「删除后为 0」可能只是从未建起来过。
+    assert_eq!(
+        harness::grant_rows_of_user(&app, user.user_id).await,
+        1,
+        "夹具必须真的写入一条直授权限"
+    );
+    assert_eq!(
+        harness::member_rows_of_user(&app, user.user_id).await,
+        1,
+        "夹具必须真的写入一条成员关系"
+    );
+
+    // 入组递增了 victim 的授权版本，删除前必须换发令牌，否则用例会停在 401。
+    let user = harness::relogin(&app, &user).await;
+    harness::delete_account(&app, &user).await;
+
+    assert_eq!(
+        harness::grant_rows_of_user(&app, user.user_id).await,
+        0,
+        "不得残留 authz_grant 行"
+    );
+    assert_eq!(
+        harness::member_rows_of_user(&app, user.user_id).await,
+        0,
+        "不得残留 user_group 行"
     );
 }

@@ -106,8 +106,9 @@ fn build_application(
     // 直授权限与权限组权限是两个独立事实源，各由一个解析器负责，账号域只做合并。
     let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> =
         vec![access.grant_resolver(), access.group_grant_resolver()];
-    // 引导声明器由 access 域实现：它是唯一持有组事实受信 writer 的域。
+    // 引导声明器与账号生命周期守卫都由 access 域实现：它是唯一持有组事实受信 writer 的域。
     let system_owner_claimer = access.system_owner_claimer();
+    let system_authorization = access.system_authorization_port();
     let demo =
         demo::build_addon(authorization_validator.clone()).context("构建 demo Addon 失败")?;
     // 飞书 Addon 需要 MySQL（两张表的 Repository 绑定连接池）。缺 MySQL 时不装配——
@@ -134,6 +135,7 @@ fn build_application(
                 Arc::clone(&security),
                 Arc::new(account::CompositeGrantResolver::new(grant_resolvers)),
                 system_owner_claimer,
+                system_authorization,
                 authorization_validator,
                 step_up,
             )

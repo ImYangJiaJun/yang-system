@@ -8,7 +8,7 @@ pub(crate) mod domain;
 mod grants;
 mod groups;
 
-use crate::addon::account::{GrantResolver, SystemOwnerClaimer};
+use crate::addon::account::{GrantResolver, SystemAuthorizationPort, SystemOwnerClaimer};
 use crate::authorization::{AuthorizationPort, AuthorizationVersionValidator, StepUpServices};
 use domain::context::Access;
 use domain::group_resolver::GroupGrantResolver;
@@ -40,6 +40,11 @@ impl AccessAddon {
 
     /// 首个注册账号的引导声明器。
     pub(crate) fn system_owner_claimer(&self) -> Arc<dyn SystemOwnerClaimer> {
+        Arc::new(AccessSystemOwnerClaimer::new(Arc::clone(&self.access)))
+    }
+
+    /// 账号生命周期所需的授权事实端口（最后管理员判定与授权事实清理）。
+    pub(crate) fn system_authorization_port(&self) -> Arc<dyn SystemAuthorizationPort> {
         Arc::new(AccessSystemOwnerClaimer::new(Arc::clone(&self.access)))
     }
 

@@ -47,6 +47,14 @@ pub(super) async fn handle(
         if !locked.status().is_active() {
             return Err(BaseError::PermissionDenied("目标账号已停用".to_string()));
         }
+        // spec §8.2：不能移除最后一名 active 系统管理员。
+        if !account
+            .system_authorization()
+            .remains_an_admin_after(&ctx, &mut transaction, input.id)
+            .await?
+        {
+            return Err(Account::last_system_admin_guard("停用"));
+        }
         Account::disable_locked_in_tx(&mut transaction, &locked).await?;
         let event = audit::succeeded_event(
             &ctx,
