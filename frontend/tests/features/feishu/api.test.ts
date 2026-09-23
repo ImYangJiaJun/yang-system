@@ -5,7 +5,14 @@ import {
   DATASOURCE_OPERATION_IDS,
   canWriteDatasources,
   buildDatasourceListBody,
+  DATASOURCE_ITEM_KEYS,
+  FIELD_BINDING_KEYS,
+  HEALTH_MISSING_FIELD_KEYS,
+  HEALTH_REPORT_KEYS,
+  OPTION_ITEM_KEYS,
+  PULL_SCHEDULE_KEYS,
   checkDatasourceHealth,
+  fetchPullSchedule,
   createDatasourceTable,
   deleteDatasourceTable,
   enabledBindingInputs,
@@ -25,6 +32,15 @@ import {
 } from "@/features/feishu/api";
 import { DEFAULT_OPTION_ORDER_BY } from "@/features/feishu/api";
 import type { DatasourceListQuery } from "@/features/feishu/types";
+
+import projections from "../../../contracts/feishu-projections.json";
+import {
+  DEFAULT_LOCALE_OPTIONS,
+  INGEST_MODE_OPTIONS,
+  hasCompleteCoordinates,
+  syncHealth,
+} from "@/features/feishu/types";
+import { STATUS_OPTIONS } from "@/features/feishu/components/ListToolbar";
 
 /// 飞书数据源 API 契约：query key 形状、请求体逐字对齐后端、缺 operation_id 时抛错。
 
@@ -156,7 +172,20 @@ describe("query key 工厂", () => {
         { field: "title", direction: "Asc" },
         { field: "id", direction: "Asc" },
       ],
+      // 不按主键取单条时也带上这一位（值为 null），键形状恒定。
+      id: null,
     });
+  });
+
+  it("详情页的单条取值进 key——否则两条数据源会共用同一个缓存条目", () => {
+    // 详情页除 `id` 外所有入参都固定（page=1 / pageSize=1 / search="" / status="all"），
+    // 所以键里漏掉 `id` 的后果不是「多打一次请求」，而是**渲染错的那一条**：
+    // staleTime 内从 #7 跳到 #8，页面直接复用 #7 的缓存——标题、字段绑定、
+    // 凭据清单的复制/轮换目标、体检目标、以及「立即拉取」用的 id 全是 #7。
+    const seven = feishuQueryKeys.datasourceList(query({ id: 7 }));
+    const eight = feishuQueryKeys.datasourceList(query({ id: 8 }));
+    expect(seven).not.toEqual(eight);
+    expect((seven[2] as { id: number | null }).id).toBe(7);
   });
 
   it("选项键带上数据源标识", () => {
@@ -278,10 +307,34 @@ describe("buildDatasourceListBody", () => {
       value: "disabled",
     });
   });
+
+  it("详情页按主键取单条：发 id 等值条件，且**不发** search", () => {
+    // 详情页借列表端点取「就是这一条」。它曾经用 `search: <source_key>`，那是把
+    // **一条绑定的标识**当数据源的身份用：检索只覆盖 `searchable` 的列，而表级行上
+    // 只有 `title` 可搜，所以那一发必然命中零行——零行又被页面读成「这条数据源不存在」。
+    const body = buildDatasourceListBody(query({ id: 7 }));
+    expect(body.where).toEqual({ type: "eq", field: "id", value: 7 });
+    expect(body.search).toBeUndefined();
+  });
+
+  it("主键与状态并存时折成 and 组——DSL 的 where 树没有隐式合取", () => {
+    const body = buildDatasourceListBody(query({ id: 7, status: "active" }));
+    expect(body.where).toEqual({
+      type: "and",
+      conditions: [
+        { type: "eq", field: "id", value: 7 },
+        { type: "eq", field: "status", value: "active" },
+      ],
+    });
+  });
 });
 
 describe("listDatasources", () => {
-  it("打到 /feishu/datasources/query，并把响应投影成前端形状", async () => {
+  it("缺 id 的行被丢掉，而不是降级成一条没有主键的数据源", async () => {
+    // 表级行的身份就是 `id`，而它在 `list_datasources` 的投影里必然出现，所以
+    // 「没有 id」只可能是形状认不出来。取舍与 `parseFieldBinding` 一致：**丢掉，不猜**。
+    // 曾经这里把它降级成 `id: null` 的行——那种行在界面上既不能打开、也不能更新、
+    // 也不能拉取，点哪儿都失效，还会占着一个「数据源」的位置。
     const calls = stubFetch({
       code: 0,
       message: "查询成功",
@@ -290,8 +343,6 @@ describe("listDatasources", () => {
           {
             source_key: "expense_category",
             title: "费用类型",
-            encrypt_enabled: true,
-            default_locale: "zh_cn",
             status: "disabled",
             updated_at: 1758000000,
           },
@@ -305,34 +356,7 @@ describe("listDatasources", () => {
     const page = await listDatasources(query(), deps);
     expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/query");
     expect(calls[0]?.method).toBe("POST");
-    expect(page.total).toBe(1);
-    expect(page.items).toEqual([
-      {
-        // 旧形状（表级化之前）没有 id 也没有字段绑定：两项都落到「空」，
-        // 而不是被猜成一个值。
-        id: null,
-        fields: [],
-        sourceKey: "expense_category",
-        title: "费用类型",
-        encryptEnabled: true,
-        defaultLocale: "zh_cn",
-        status: "disabled",
-        updatedAt: 1758000000,
-        // 取数配置与同步状态：fixture 里没有这些键（模拟一个只按 push 用的存量
-        // 数据源），所以全部落到「空」而不是被猜成某个值。
-        ingestMode: "",
-        bitableBaseToken: null,
-        bitableTableId: null,
-        bitableViewId: null,
-        bitableFieldName: null,
-        linkageMapping: null,
-        lastPullAt: null,
-        lastSuccessAt: null,
-        consecutiveFailures: 0,
-        lastError: null,
-        snapshotDigest: null,
-      },
-    ]);
+    expect(page.items).toEqual([]);
   });
 
   it("每次请求都带非空 order_by（不发就是无序分页）", async () => {
@@ -359,6 +383,355 @@ describe("listDatasources", () => {
   });
 });
 
+/// **投影契约（emit ↔ read）** —— 这一整类 bug 的结构防线。
+///
+/// 契约文件 `frontend/contracts/feishu-projections.json` 同时被这份测试与后端
+/// `list_datasources.rs` 的 `the_committed_contract_*` 读，所以「后端 emit 的键集」与
+/// 「前端 read 的键集」不可能各自漂移：
+///   · 前端读一个后端不发的键 ⇒ 恒得 `null`，界面把它当成「服务端说没有」；
+///   · 后端发一个前端不读的键 ⇒ 死投影（补读，或去 `backend_only` 记账）。
+///
+/// 为什么「扫已删字段」那类检查不够：这一类的病根是**字段没被删，只是搬到了另一层**
+/// （`encrypt_enabled` 在绑定表上依然是合法字段名，`linkage_mapping` 连注释都写对了、
+/// 代码却还在读）。只有把两张键集摆在一起比才看得见。
+/// 体检与排程平时不在 `DEPLOYED_ACTIONS` 里（控制台只在有权限 / 有 worker 时才用它们），
+/// 所以这两条探针测试各自带一份目录——不动共享夹具，避免改到既有断言的前提。
+const TABLE_DEPS: FeishuInvokeDeps = {
+  catalog: catalogWith([
+    ...DEPLOYED_ACTIONS,
+    {
+      ...DATASOURCE_LIST_ACTION,
+      operation_id: "feishu.datasource.health_check",
+      path: "/api/v1/feishu/datasources/table/health",
+    },
+    {
+      ...DATASOURCE_LIST_ACTION,
+      operation_id: "feishu.datasource.pull_schedule",
+      path: "/api/v1/feishu/datasources/pull-schedule",
+    },
+  ]),
+  session: { token: "tok-1" },
+};
+
+describe("投影契约（emit ↔ read）", () => {
+  type Spec = {
+    emitted: string[];
+    backend_only: Record<string, string>;
+    query_only?: Record<string, string>;
+  };
+  /// 另外两条轴也在同一个契约文件里（`client_fields` / `enums`）。
+  type ClientFields = { order_by?: string[]; where?: string[] };
+  type EnumDomain = { values?: string[]; enforced_by?: string };
+  type Contract = Record<string, Record<string, Spec>> & {
+    client_fields?: Record<string, ClientFields>;
+    enums?: Record<string, Record<string, EnumDomain>>;
+  };
+  const CONTRACT = projections as unknown as Contract;
+  /// 契约里每个「有形状的响应」都要在这里有一行：`[端点, 层, 键映射]`。
+  /// 加端点时**同时**在契约文件与这里补一行——三处（Rust struct / 契约 / 前端映射）
+  /// 少任何一处，下面那条集合断言就会红。
+  const LEVELS = [
+    ["list_datasources", "item", DATASOURCE_ITEM_KEYS],
+    ["list_datasources", "binding", FIELD_BINDING_KEYS],
+    ["list_options", "item", OPTION_ITEM_KEYS],
+    ["health_check", "report", HEALTH_REPORT_KEYS],
+    ["health_check", "missing_field", HEALTH_MISSING_FIELD_KEYS],
+    ["pull_schedule", "result", PULL_SCHEDULE_KEYS],
+  ] as const;
+
+  /// 探针值：**每一个都必须与「缺键时的兜底值」不同**，否则「解析器到底读没读这个键」
+  /// 根本测不出来——缺了它，这条测试会对着一个恒为默认值的字段满意地通过。
+  const BINDING_PROBE: Record<string, unknown> = {
+    field_id: "fldPROBE",
+    field_name: "探针字段",
+    source_key: "probe_key",
+    parent_field_id: "fldPARENT",
+    // 兜底是 true ⇒ 用 false 才测得出「读到了」
+    enabled: false,
+    // 兜底是 false ⇒ 用 true
+    encrypt_enabled: true,
+    // 兜底是 zh_cn ⇒ 换一个
+    default_locale: "ja_jp",
+    token_rotated_at: 1758000003,
+  };
+  const ITEM_PROBE: Record<string, unknown> = {
+    id: 4242,
+    title: "探针",
+    status: "disabled",
+    updated_at: 1758000000,
+    ingest_mode: "pull",
+    bitable_base_token: "probe_base",
+    bitable_table_id: "probe_table",
+    bitable_view_id: "probe_view",
+    last_pull_at: 1758000001,
+    last_success_at: 1758000002,
+    consecutive_failures: 7,
+    last_error: "探针错误",
+    fields: [BINDING_PROBE],
+  };
+
+  /// 由契约的 emitted 键集**生成**线格式载荷：契约里加了键而这里忘了改，会当场报缺。
+  function wireFrom(
+    keys: string[],
+    probe: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const key of keys) {
+      expect(Object.hasOwn(probe, key), `探针表缺 ${key}`).toBe(true);
+      out[key] = probe[key];
+    }
+    return out;
+  }
+
+  /// 由键映射**生成**期望的解析结果（键名逐条对应，不是手写一遍）。
+  function expectedFrom(
+    map: Record<string, string>,
+    probe: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [wire, field] of Object.entries(map)) out[field] = probe[wire];
+    return out;
+  }
+
+  it("read 键集 ⊆ emitted，且 emitted 里没被读的键都在 backend_only 里记着", () => {
+    for (const [endpoint, level, map] of LEVELS) {
+      const spec = CONTRACT[endpoint]?.[level];
+      if (spec === undefined) throw new Error(`契约里缺 ${endpoint}.${level}`);
+      const read = Object.keys(map);
+      for (const key of read) {
+        expect(
+          spec.emitted,
+          `${endpoint}.${level}：前端读了 ${key}，后端并不发`,
+        ).toContain(key);
+      }
+      const unread = spec.emitted.filter((key) => !read.includes(key)).sort();
+      // 差值必须是**记录下来的决定**，不是没人注意到的死投影。
+      expect(unread).toEqual(Object.keys(spec.backend_only).sort());
+    }
+  });
+
+  it("表级行：契约里每个键都被真的读到，且解析结果里没有契约之外的字段", async () => {
+    const wire = wireFrom(
+      CONTRACT.list_datasources.item?.emitted ?? [],
+      ITEM_PROBE,
+    );
+    stubFetch({
+      code: 0,
+      data: { items: [wire], page: 1, page_size: 1, total: 1 },
+    });
+
+    const page = await listDatasources(query(), deps);
+    // 一条 `toEqual` 同时盖住两个方向：某个键没被读 ⇒ 值停在兜底值上；
+    // 解析结果多出一个契约之外的字段 ⇒ 期望对象里没有它。
+    //
+    // `fields` 要单独给：它在**线格式**与**解析后**是两个形状（snake → camel），
+    // 而 `ITEM_PROBE.fields` 是喂给接口的那一份（线格式）。
+    expect(page.items[0]).toEqual({
+      ...expectedFrom(DATASOURCE_ITEM_KEYS, ITEM_PROBE),
+      fields: [expectedFrom(FIELD_BINDING_KEYS, BINDING_PROBE)],
+    });
+  });
+
+  /// 另外三个端点的探针（同上：值必须与兜底值不同）。
+  const OPTION_PROBE: Record<string, unknown> = {
+    option_id: "optPROBE",
+    source_key: "probe_key",
+    label: "探针选项",
+    i18n: '{"zh_cn":"探针"}',
+    sort_order: 99,
+    // 兜底 false / true / null 都换掉
+    is_default: true,
+    enabled: false,
+    parent_key: "optPARENT",
+    last_push_at: 1758000004,
+    updated_at: 1758000005,
+  };
+  const HEALTH_PROBE: Record<string, unknown> = {
+    // `ok` 的兜底是 false（读不出结论不能算通过）
+    ok: true,
+    // 占位：嵌套数组在下面单独填（它自己是一个「形状」，有自己的一行契约）。
+    missing_fields: [],
+    view_missing: true,
+    table_missing: true,
+    unchecked: ["这一轮没查成"],
+  };
+  const MISSING_PROBE: Record<string, unknown> = {
+    field_id: "fldPROBE",
+    source_key: "probe_key",
+  };
+  const SCHEDULE_PROBE: Record<string, unknown> = {
+    interval_seconds: 900,
+    next_run_at: 1758000009,
+  };
+
+  it("字段绑定：同上", async () => {
+    const wire = wireFrom(
+      CONTRACT.list_datasources.binding?.emitted ?? [],
+      BINDING_PROBE,
+    );
+    stubFetch({
+      code: 0,
+      data: {
+        items: [
+          {
+            ...wireFrom(
+              CONTRACT.list_datasources.item?.emitted ?? [],
+              ITEM_PROBE,
+            ),
+            fields: [wire],
+          },
+        ],
+        page: 1,
+        page_size: 1,
+        total: 1,
+      },
+    });
+
+    const page = await listDatasources(query(), deps);
+    expect(page.items[0]?.fields).toEqual([
+      expectedFrom(FIELD_BINDING_KEYS, BINDING_PROBE),
+    ]);
+  });
+
+  it("选项行：同上", async () => {
+    const wire = wireFrom(
+      CONTRACT.list_options?.item?.emitted ?? [],
+      OPTION_PROBE,
+    );
+    stubFetch({
+      code: 0,
+      data: { items: [wire], page: 1, page_size: 1, total: 1 },
+    });
+
+    const page = await listOptions(
+      { sourceKey: "probe_key", page: 1, pageSize: 1, orderBy: [] },
+      deps,
+    );
+    expect(page.items[0]).toEqual(expectedFrom(OPTION_ITEM_KEYS, OPTION_PROBE));
+  });
+
+  it("体检报告（含嵌套的缺失字段项）：同上", async () => {
+    const wire = {
+      ...wireFrom(CONTRACT.health_check?.report?.emitted ?? [], HEALTH_PROBE),
+      missing_fields: [
+        wireFrom(
+          CONTRACT.health_check?.missing_field?.emitted ?? [],
+          MISSING_PROBE,
+        ),
+      ],
+    };
+    stubFetch({ code: 0, data: wire });
+
+    const report = await checkDatasourceHealth(7, TABLE_DEPS);
+    expect(report).toEqual({
+      ...expectedFrom(HEALTH_REPORT_KEYS, HEALTH_PROBE),
+      missingFields: [expectedFrom(HEALTH_MISSING_FIELD_KEYS, MISSING_PROBE)],
+    });
+  });
+
+  /// **轴一：客户端字段名。** 前端发出的名字必须都在契约的 `client_fields` 里。
+  ///
+  /// 后端那一半（这些名字在那张表上确实可排/可筛）锚在真实表声明上，见
+  /// `projection_contract::assert_client_fields_are_usable`。两半合起来才是一条契约。
+  it("轴一：前端发出的排序/筛选字段名，契约里都记着", async () => {
+    const collector = (node: unknown): string[] => {
+      const record =
+        node !== null && typeof node === "object"
+          ? (node as Record<string, unknown>)
+          : undefined;
+      if (record === undefined) return [];
+      if (record.type === "and" || record.type === "or") {
+        return Array.isArray(record.conditions)
+          ? record.conditions.flatMap(collector)
+          : [];
+      }
+      return typeof record.field === "string" ? [record.field] : [];
+    };
+
+    const listContract = CONTRACT.client_fields?.list_datasources;
+    expect(listContract).toBeDefined();
+    // 状态筛选（列表页工具栏）+ 主键收窄（详情页）——两种 where 都要覆盖到
+    for (const body of [
+      buildDatasourceListBody(query({ status: "active" })),
+      buildDatasourceListBody(query({ id: 7 })),
+    ]) {
+      for (const field of collector(body.where)) {
+        expect(
+          listContract?.where,
+          `列表页在 where 里发了 ${field}，契约里没记`,
+        ).toContain(field);
+      }
+      for (const clause of body.order_by as Array<{ field: string }>) {
+        expect(
+          listContract?.order_by,
+          `列表页在 order_by 里发了 ${clause.field}，契约里没记`,
+        ).toContain(clause.field);
+      }
+    }
+
+    // 选项列表的排序键走另一条构造路径，用桩记录下来的真实请求体对账
+    const calls = stubFetch({
+      code: 0,
+      data: { items: [], page: 1, page_size: 1, total: 0 },
+    });
+    await listOptions(
+      { sourceKey: "k", page: 1, pageSize: 1, orderBy: [] },
+      deps,
+    );
+    const optionBody = calls.at(-1)?.body as {
+      order_by?: Array<{ field: string }>;
+    };
+    for (const clause of optionBody.order_by ?? []) {
+      expect(
+        CONTRACT.client_fields?.list_options?.order_by,
+        `选项列表在 order_by 里发了 ${clause.field}，契约里没记`,
+      ).toContain(clause.field);
+    }
+  });
+
+  /// **轴二：枚举取值域。** 界面上的可选值必须与契约一致。
+  ///
+  /// `status` / `ingest_mode` 在契约里标 `enforced_by: backend`（后端表声明里有
+  /// `.options(..)`，那边逐字对账）；`default_locale` 标 `enforced_by: frontend`——
+  /// **后端对它零校验**，界面是唯一的守卫，所以这边这条断言就是它全部的防线。
+  it("轴二：枚举取值域与契约一致（含只有界面在守的那个）", () => {
+    const ingest = CONTRACT.enums?.feishu_datasource?.ingest_mode;
+    expect(INGEST_MODE_OPTIONS.map((option) => option.value)).toEqual(
+      ingest?.values,
+    );
+
+    const status = CONTRACT.enums?.feishu_datasource?.status;
+    expect(
+      STATUS_OPTIONS.map((option) => option.value).filter(
+        (value) => value !== "all",
+      ),
+      "`all` 是纯界面值（不过滤），不属于后端取值域",
+    ).toEqual(status?.values);
+
+    const locale = CONTRACT.enums?.feishu_datasource_field?.default_locale;
+    expect(
+      locale?.enforced_by,
+      "`default_locale` 的取值域只有界面在守——这条契约的意义就在这里",
+    ).toBe("frontend");
+    expect(DEFAULT_LOCALE_OPTIONS.map((option) => option.value)).toEqual(
+      locale?.values,
+    );
+  });
+
+  it("自动拉取排程：同上", async () => {
+    stubFetch({
+      code: 0,
+      data: wireFrom(
+        CONTRACT.pull_schedule?.result?.emitted ?? [],
+        SCHEDULE_PROBE,
+      ),
+    });
+
+    const schedule = await fetchPullSchedule(TABLE_DEPS);
+    expect(schedule).toEqual(expectedFrom(PULL_SCHEDULE_KEYS, SCHEDULE_PROBE));
+  });
+});
+
 describe("表级数据源行的投影", () => {
   /// 表级化之后 `list_datasources` 的形状（`list_datasources.rs` 的 `DatasourceItem`）：
   /// **表级行上没有 `source_key`**，它在 `fields[]` 的每条绑定上。
@@ -382,6 +755,10 @@ describe("表级数据源行的投影", () => {
         source_key: "payment_currency",
         parent_field_id: null,
         enabled: true,
+        // 这三个键属于绑定层。取值刻意各不相同，好让下面那条断言真的在验映射，
+        // 而不是「全都落回默认值也算过」。
+        encrypt_enabled: true,
+        default_locale: "en_us",
       },
       {
         field_id: "fldB",
@@ -389,9 +766,32 @@ describe("表级数据源行的投影", () => {
         source_key: "payment_fx_rate",
         parent_field_id: "fldA",
         enabled: false,
+        encrypt_enabled: false,
+        default_locale: "zh_cn",
       },
     ],
   };
+
+  it("真实投影的行满足坐标判据——不会被误报成「坐标不完整」", async () => {
+    // **回归**：`hasCompleteCoordinates` 曾经还要求「取数列字段名」，而
+    // `list_datasources` 从表级化起就不发这个键（取数列属于字段绑定）。后果是
+    // **每一条**真实数据源在详情页都显示「坐标不完整，不会被拉取」——而它的
+    // `last_success_at` 就在几分钟前，服务端正在正常拉取。
+    //
+    // 这条刻意**不走手写对象**，而是真实解析器 + 服务端投影形状的 payload：
+    // 手写 fixture 可以比现实「宽」（`datasource-pull.test.tsx` 的 `pullSource()`
+    // 曾长期喂 `bitable_field_name`），解析器不行。这是那一类 bug 的通用防线。
+    stubFetch({
+      code: 0,
+      data: { items: [TABLE_ROW], page: 1, page_size: 10, total: 1 },
+    });
+    const page = await listDatasources(query(), deps);
+    const item = page.items[0];
+    expect(item).toBeDefined();
+    if (item === undefined) return;
+    expect(hasCompleteCoordinates(item)).toBe(true);
+    expect(syncHealth(item).title).not.toContain("坐标不完整");
+  });
 
   it("id 与字段绑定被投影出来，且不因为表级行没有 source_key 就丢掉整行", async () => {
     stubFetch({
@@ -405,8 +805,12 @@ describe("表级数据源行的投影", () => {
     expect(item?.id).toBe(7);
     expect(item?.consecutiveFailures).toBe(2);
     expect(item?.lastError).toBe("1254024 InvalidFieldNames");
-    // 表级行没有表级标识：空串，而不是编一个出来
-    expect(item?.sourceKey).toBe("");
+    // 表级行上没有表级标识：`DatasourceItem` 里**根本不存在** `sourceKey` 这个字段。
+    // 它曾经是一个恒为空串的字段（「为了不把存量调用点一次全改掉」），而详情页正是
+    // 拿它去查一张没有这一列的表。这条断言钉住的是「那扇门已经拆了」——
+    // 类型系统会拦住下次想用它的人，这里钉住类型本身没被改回去。
+    expect(item).toBeDefined();
+    expect(Object.hasOwn(item as object, "sourceKey")).toBe(false);
     expect(item?.fields).toEqual([
       {
         fieldId: "fldA",
@@ -414,6 +818,8 @@ describe("表级数据源行的投影", () => {
         sourceKey: "payment_currency",
         parentFieldId: null,
         enabled: true,
+        encryptEnabled: true,
+        defaultLocale: "en_us",
       },
       {
         fieldId: "fldB",
@@ -422,6 +828,8 @@ describe("表级数据源行的投影", () => {
         sourceKey: "payment_fx_rate",
         parentFieldId: "fldA",
         enabled: false,
+        encryptEnabled: false,
+        defaultLocale: "zh_cn",
       },
     ]);
   });
@@ -663,6 +1071,8 @@ describe("enabledBindingInputs", () => {
             sourceKey: "dept_sales",
             parentFieldId: null,
             enabled: true,
+            encryptEnabled: false,
+            defaultLocale: "zh_cn",
           },
           {
             fieldId: "fldB",
@@ -670,6 +1080,8 @@ describe("enabledBindingInputs", () => {
             sourceKey: "dept_old",
             parentFieldId: "fldA",
             enabled: false,
+            encryptEnabled: false,
+            defaultLocale: "zh_cn",
           },
         ],
       }),
