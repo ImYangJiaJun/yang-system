@@ -224,7 +224,7 @@ async fn run_after_tools_created(
     shutdown_budget: ShutdownBudget,
     telemetry: &mut TelemetryRuntime,
     feishu_pull_handle: FeishuPullHandle,
-    feishu_pull_requests: mpsc::UnboundedReceiver<Option<String>>,
+    feishu_pull_requests: mpsc::UnboundedReceiver<Option<i64>>,
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;

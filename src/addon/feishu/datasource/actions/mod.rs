@@ -2,10 +2,15 @@
 //!
 //! 架构门禁要求：`actions/` 下每个文件恰好一个 `pub(super) async fn handle` +
 //! 一个 `pub(super) fn register`，并在这里登记。
+//!
+//! # 这里**没有**字段级入口
+//!
+//! `create_datasource` / `update_datasource` / `delete_datasource` 已退役（T13）：
+//! 它们引用的列（`bitable_field_name` / `linkage_mapping` / 表级行上的 `source_key`）
+//! 在表级模型下已全部消失。留着它们会让同一批表有两个可写入口——审计语义与数据来源
+//! 就此分叉（`option/mod.rs` 对机器入口的既有立场）。配置单位是**表**，入口也只有一套。
 
-pub(super) mod create_datasource;
 pub(super) mod create_datasource_table;
-pub(super) mod delete_datasource;
 pub(super) mod delete_datasource_table;
 pub(super) mod health_check;
 pub(super) mod list_bitable_fields;
@@ -17,7 +22,6 @@ pub(super) mod pull_probe;
 pub(super) mod pull_schedule;
 pub(super) mod reveal_token;
 pub(super) mod rotate_token;
-pub(super) mod update_datasource;
 pub(super) mod update_datasource_table;
 
 use std::sync::Arc;
@@ -46,9 +50,6 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = list_bitable_fields::register(module, Arc::clone(&context));
     let module = reveal_token::register(module, Arc::clone(&context));
     let module = rotate_token::register(module, Arc::clone(&context));
-    let module = create_datasource::register(module, Arc::clone(&context));
-    let module = update_datasource::register(module, Arc::clone(&context));
-    let module = delete_datasource::register(module, Arc::clone(&context));
 
     if context
         .settings()

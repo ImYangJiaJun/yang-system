@@ -1,7 +1,13 @@
-//! 出站拉取的一轮编排：选源 → 拉取 → 派生 → 摘要比对 → 事务内落库与补集停用。
+//! 出站拉取的表级编排：选表 → 解析列名 → 一次取回 → 逐字段派生 → 事务内落库与补集停用。
+//!
+//! **拉取合并、落库拆开**（设计 §6.2）：同一张表 N 个字段共用**一份**快照，
+//! 落库却逐字段各一个事务。这既是「一轮只扫一次表」的收益来源，也让「一个字段写坏」
+//! 不会把整轮已提交的结果拖回去。
 //!
 //! 本模块**不依赖 `ActionContext`**（后台 worker 没有可用 ctx，理由见
 //! [`super::option_write`]），因此读走 `Repository`、事务走 `Database::transaction()`。
+//! 一轮的循环本身在 worker（`infrastructure/feishu_pull.rs`）里——那里才拿得到
+//! 告警发送器。
 //!
 //! # 一轮的成败判据
 //!
@@ -26,7 +32,7 @@ use super::bitable::{
 };
 use super::context::FeishuContext;
 use super::derive::{derive_options, snapshot_digest, DerivedOption, RawValue};
-use super::linkage::{parse_linkage_mapping, Linkage};
+use super::linkage::Linkage;
 use super::option_write::{
     apply_option_rows, count_option_rows, disable_option_rows, find_foreign_option_owner,
     OptionWriteItem, OptionWriteOutcome,
@@ -34,33 +40,6 @@ use super::option_write::{
 use super::outbound::{OutboundFailure, OutboundTransport, Sleeper};
 use super::tenant_token::TenantTokenProvider;
 use crate::infrastructure::audit;
-
-/// 单个数据源一轮拉取的结果。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SourcePullReport {
-    /// 拉到的记录行数。
-    pub(crate) fetched: usize,
-    /// 派生出的选项数。
-    pub(crate) derived: usize,
-    /// 本轮新增。
-    pub(crate) inserted: u64,
-    /// 本轮更新。
-    pub(crate) updated: u64,
-    /// 本轮被补集停用。
-    pub(crate) disabled: u64,
-    /// 内容摘要未变而跳过了写库。
-    pub(crate) skipped: bool,
-    /// 判为可疑空快照，已拒绝停用补集。
-    pub(crate) suspicious_empty: bool,
-}
-
-/// 一轮的汇总。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct RoundReport {
-    pub(crate) sources: usize,
-    pub(crate) failures: usize,
-    pub(crate) reports: Vec<(String, SourcePullReport)>,
-}
 
 /// 拉取所需的共享依赖。借用而不是持有：worker 每轮现取，避免把资源生命周期拉长。
 pub(crate) struct PullDeps<'a> {
@@ -71,20 +50,6 @@ pub(crate) struct PullDeps<'a> {
     pub(crate) tokens: &'a TenantTokenProvider,
     /// 单轮最多翻页数（透传给分页状态机）。
     pub(crate) max_pages: u32,
-}
-
-/// 一个待拉取的数据源。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PullSource {
-    pub(crate) source_key: String,
-    pub(crate) title: String,
-    pub(crate) coordinates: BitableCoordinates,
-    /// 取数列的**精确字段名**（接口要名字，不要 field_id）。
-    pub(crate) field_name: String,
-    /// 子数据源声明的父信息；`None` 表示无级联。
-    pub(crate) linkage: Option<Linkage>,
-    /// 上一轮落库的内容摘要。
-    pub(crate) snapshot_digest: Option<String>,
 }
 
 /// 一条**已解析过名字**的绑定：`field_id` 与它的当前 `field_name` 都在手边。
@@ -178,88 +143,14 @@ pub(crate) struct TablePullOutcome {
     pub(crate) disabled: u64,
 }
 
-/// 选出本轮要拉的数据源。
-///
-/// 只取 `status == active` 且 `ingest_mode == pull` 的行；坐标与取数列名缺一不可
-/// （缺了就不是一个可拉取的数据源，静默跳过会让「配了却不生效」无从排查，故在
-/// 调用方按条记 warning）。
-pub(crate) async fn load_pull_sources(
-    context: &FeishuContext,
-) -> Result<Vec<PullSource>, BaseError> {
-    let rows = context
-        .datasources()
-        .query()
-        .select_fields(&[
-            "source_key",
-            "title",
-            "status",
-            "ingest_mode",
-            "bitable_base_token",
-            "bitable_table_id",
-            "bitable_view_id",
-            "bitable_field_name",
-            "linkage_mapping",
-            "snapshot_digest",
-        ])?
-        .where_eq("ingest_mode", serde_json::json!("pull"))?
-        .where_eq("status", serde_json::json!("active"))?
-        .all()
-        .await?;
-
-    let mut sources = Vec::new();
-    for row in rows {
-        let source_key: String = row.require("source_key")?;
-        let Some(base_token) = row.optional::<String>("bitable_base_token")? else {
-            tracing::warn!(source_key = %source_key, "数据源缺少 bitable_base_token，本轮跳过");
-            continue;
-        };
-        let Some(table_id) = row.optional::<String>("bitable_table_id")? else {
-            tracing::warn!(source_key = %source_key, "数据源缺少 bitable_table_id，本轮跳过");
-            continue;
-        };
-        let Some(field_name) = row.optional::<String>("bitable_field_name")? else {
-            tracing::warn!(source_key = %source_key, "数据源缺少 bitable_field_name，本轮跳过");
-            continue;
-        };
-
-        // linkage_mapping 是 JSON 文本；解析失败**不当致命**，按无级联处理并告警——
-        // 让整条链路因为一段坏 JSON 全停，比少拉一个级联更糟。
-        //
-        // 拉取侧只可能有**一条**级联（一个数据源服务一个控件），所以取第一条即可；
-        // 映射的**键**（控件代码）在拉取侧完全不参与，它只用于读端匹配联动参数。
-        let linkage = row
-            .optional::<String>("linkage_mapping")?
-            .map(|raw| parse_linkage_mapping(&raw))
-            .and_then(|mut entries| entries.pop())
-            .map(|(_, linkage)| linkage);
-
-        sources.push(PullSource {
-            source_key,
-            title: row.optional::<String>("title")?.unwrap_or_default(),
-            coordinates: BitableCoordinates {
-                app_token: base_token.trim().to_string(),
-                table_id: table_id.trim().to_string(),
-                view_id: row
-                    .optional::<String>("bitable_view_id")?
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty()),
-            },
-            field_name: field_name.trim().to_string(),
-            linkage,
-            snapshot_digest: row.optional::<String>("snapshot_digest")?,
-        });
-    }
-    Ok(sources)
-}
-
 /// 选出本轮要拉的表级数据源，并把它们的启用绑定一次取回。
 ///
-/// 判据与 [`load_pull_sources`] 逐条一致（`ingest_mode == pull` + `status == active`
-/// + 坐标齐备），只是单位从字段上移到表：同表 N 个字段现在是**一行**。
+/// 判据是 `ingest_mode == pull` + `status == active` + 坐标齐备；配置单位是表，
+/// 所以同表 N 个字段现在是**一行**。判据与 [`check_pullable`]（控制台点「立即拉取」
+/// 时走的那道预检）必须逐条一致。
 ///
 /// 绑定**一次 `where_in` 取回再分组**，不是按表查 N 次。`where_in` 拒绝空列表，
 /// 所以候选表为空时要短路。
-#[allow(dead_code)] // 消费者是 T13 的 worker；T9 只落地表级入口，逐源路径仍在跑。
 pub(crate) async fn load_pull_tables(context: &FeishuContext) -> Result<Vec<PullTable>, BaseError> {
     let rows = context
         .datasources()
@@ -347,185 +238,79 @@ pub(crate) async fn load_pull_tables(context: &FeishuContext) -> Result<Vec<Pull
     Ok(tables)
 }
 
-/// 一轮拉取：读 → 派生 → 比对 → 落库。
-pub(crate) async fn pull_source(
-    deps: &PullDeps<'_>,
-    source: &PullSource,
-) -> Result<SourcePullReport, OutboundFailure> {
-    // 1) 拉取。父列与子列一起限定，避免把敏感列读进进程。
-    let mut fields = vec![source.field_name.clone()];
-    if let Some(linkage) = source.linkage.as_ref() {
-        fields.push(linkage.parent_field.clone());
-    }
-    let snapshot = list_all_records(
-        deps.transport,
-        deps.sleeper,
-        deps.tokens,
-        &source.coordinates,
-        &fields,
-        deps.max_pages.max(1),
-    )
-    .await?;
-
-    // 2) 抽取取值对，并派生。
-    let values = extract_values_owned(&snapshot, &source.field_name, source.linkage.as_ref());
-    let parent_source_key = source
-        .linkage
-        .as_ref()
-        .map(|linkage| linkage.parent_source_key.as_str());
-    // 派生要 `&[RawValue]`；这里把自有载体借出去，派生完即丢。
-    let raw: Vec<RawValue<'_>> = values.iter().map(OwnedRawValue::as_raw).collect();
-    let derived = derive_options(&source.source_key, parent_source_key, &raw);
-    let digest = snapshot_digest(&derived);
-
-    let mut report = SourcePullReport {
-        fetched: snapshot.items.len(),
-        derived: derived.len(),
-        ..SourcePullReport::default()
-    };
-
-    // 3) 空快照歧义守卫（见模块文档）。
-    //
-    // 只有在「本轮 0 行 **且** 库里还有已启用的行」时才可疑——正常的空数据源
-    // （本来就没选项）应当照常走完，否则它会永远停在「疑似异常」上。
-    let (existing_rows, active_rows) = count_existing(deps, &source.source_key)
-        .await
-        .map_err(internal_failure)?;
-    if snapshot.items.is_empty() && active_rows > 0 {
-        report.suspicious_empty = true;
-        tracing::warn!(
-            source_key = %source.source_key,
-            active_rows,
-            "飞书返回空快照但本地仍有已启用选项：疑似文档权限不足（官方明示高级权限下\
-             可能「调用成功但返回空」），本轮拒绝停用补集"
-        );
-        record_failure(deps, &source.source_key, "空快照可疑：拒绝停用补集")
-            .await
-            .map_err(internal_failure)?;
-        return Ok(report);
-    }
-
-    // 4) 内容未变且本地没有已停用行 → 跳过写库。
-    //
-    // 「没有已停用行」这个附加条件不可省：摘要是按**本轮应当是什么**算的，不含
-    // `enabled`；若某行被补集停用后内容恰好没变，只比摘要会永远跳过写、那行永远
-    // 复活不了。
-    let disabled_rows = existing_rows.saturating_sub(active_rows);
-    if source.snapshot_digest.as_deref() == Some(digest.as_str()) && disabled_rows == 0 {
-        report.skipped = true;
-        record_success(deps, &source.source_key, &digest, report).await?;
-        return Ok(report);
-    }
-
-    // 5) 事务内落库：跨源预检 → 整行替换 → 补集停用 → 审计 → 更新同步状态。
-    let options = deps.context.options();
-    let ids: Vec<String> = derived
-        .iter()
-        .map(|option| option.option_id.clone())
-        .collect();
-    if let Some((option_id, owner)) = find_foreign_option_owner(options, &source.source_key, &ids)
-        .await
-        .map_err(internal_failure)?
-    {
-        // 与入站写入同一道预检：不让一个数据源改写另一个数据源的选项归属。
-        return Err(internal_failure(BaseError::ConfigError(format!(
-            "选项 id {option_id} 已属于数据源 {owner}，拒绝改写其归属"
-        ))));
-    }
-
-    let doomed = find_doomed(deps, &source.source_key, &derived)
-        .await
-        .map_err(internal_failure)?;
-
-    let mut transaction = deps
-        .database
-        .transaction()
-        .await
-        .map_err(|error| internal_failure(BaseError::from(error)))?;
-
-    let outcome = async {
-        let items = derived
-            .iter()
-            .map(|option| to_write_item(&source.source_key, option))
-            .collect::<Vec<_>>();
-        let outcome =
-            apply_option_rows(options, &mut transaction, &source.source_key, &items).await?;
-        let disabled =
-            disable_option_rows(options, &mut transaction, &source.source_key, &doomed).await?;
-
-        let event = audit::succeeded_system_event_without_ctx(
-            "feishu-pull",
-            "feishu.pull_options",
-            Some(audit::entity("feishu_datasource", &source.source_key)?),
-            audit::entity("feishu_option", &source.source_key)?,
-            audit::summary([
-                ("outcome_code", serde_json::json!("pulled")),
-                ("option_count", serde_json::json!(derived.len() as i64)),
-                ("disabled_count", serde_json::json!(disabled as i64)),
-            ])?,
-        )?;
-        audit::append_in_tx(&mut transaction, &event).await?;
-
-        // 同步状态与内容在同事务提交：半提交会让「摘要已推进但行没写完」永久错位。
-        let mut update = Record::new();
-        update.insert("snapshot_digest", serde_json::json!(digest));
-        update.insert("last_pull_at", serde_json::json!(now_seconds()));
-        update.insert("last_success_at", serde_json::json!(now_seconds()));
-        update.insert("consecutive_failures", serde_json::json!(0));
-        update.insert("last_error", serde_json::Value::Null);
-        deps.context
-            .datasources()
-            .query()
-            .where_eq("source_key", serde_json::json!(source.source_key))?
-            .update_in_tx(&mut transaction, update)
-            .await?;
-
-        Ok::<_, BaseError>((outcome, disabled))
-    }
-    .await;
-
-    let (outcome, disabled) = match outcome {
-        Ok(value) => {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| internal_failure(BaseError::from(error)))?;
-            value
-        }
-        Err(error) => {
-            if let Err(rollback_error) = transaction.rollback().await {
-                tracing::error!(error = %rollback_error, "飞书拉取事务回滚失败");
-            }
-            return Err(internal_failure(error));
-        }
-    };
-    report.inserted = outcome.inserted;
-    report.updated = outcome.updated;
-    report.disabled = disabled;
-
-    tracing::info!(
-        source_key = %source.source_key,
-        fetched = report.fetched,
-        derived = report.derived,
-        inserted = report.inserted,
-        updated = report.updated,
-        disabled = report.disabled,
-        "飞书数据源同步完成"
-    );
-    Ok(report)
-}
-
 // ---------------------------------------------------------------------------
 // 表级拉取（设计 §6.2）
 // ---------------------------------------------------------------------------
 
+/// 一张表**现在为什么拉不动**。
+///
+/// 每个变体对应一个不同的修法，所以刻意不合并成一个笼统的「不可拉取」——
+/// 运维拿到这句话是要回去改配置的，笼统等于没答。
+///
+/// **没有「缺取数列字段名」这一项**：取数列已经上移到字段绑定层，表级行上只有一个
+/// 坐标三元组。绑定一条都没勾的表不是「配置不全」，它只是没有要与飞书同步的东西
+/// （`pull_table` 会直接返回）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotPullable {
+    /// 取数方式是 `push`：服务端不主动出网，等飞书多维表格自动化来推。
+    PushMode,
+    /// 已停用。
+    Disabled,
+    /// 缺 Base Token。
+    MissingBaseToken,
+    /// 缺数据表 ID。
+    MissingTableId,
+}
+
+impl NotPullable {
+    /// 给人看的一句话，必须点出**具体**缺什么。
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::PushMode => "取数方式是「手工推送」——服务端不主动出网，只有「定时拉取」才拉得动",
+            Self::Disabled => "数据源已停用",
+            Self::MissingBaseToken => "缺少 Base Token",
+            Self::MissingTableId => "缺少数据表 ID",
+        }
+    }
+}
+
+/// 判定一张表**现在**能不能被拉取（自动轮询不经过这里，它只跑候选集）。
+///
+/// 判据必须与 [`load_pull_tables`] 的 WHERE 子句逐条对应（`ingest_mode == pull` +
+/// `status == active`），再加上它随后 trim 判空的两个坐标。两边漂移的后果**不对称**：
+/// 这里宽了，用户点完按钮只能等到前端轮询超时；这里严了，一张其实拉得动的表被白拒。
+///
+/// 空串与 `NULL` 在库里是两种形态，但对「能不能拉」是同一件事——`load_pull_tables`
+/// 也是 trim 之后判空的。
+pub(crate) fn check_pullable(
+    ingest_mode: &str,
+    status: &str,
+    base_token: Option<&str>,
+    table_id: Option<&str>,
+) -> Result<(), NotPullable> {
+    if ingest_mode != "pull" {
+        return Err(NotPullable::PushMode);
+    }
+    if status != "active" {
+        return Err(NotPullable::Disabled);
+    }
+    for (value, missing) in [
+        (base_token, NotPullable::MissingBaseToken),
+        (table_id, NotPullable::MissingTableId),
+    ] {
+        if !value.is_some_and(|text| !text.trim().is_empty()) {
+            return Err(missing);
+        }
+    }
+    Ok(())
+}
+
 /// 一张表的一轮拉取：**一次取回、按字段分派**。
 ///
-/// # 与逐源路径的关系
+/// # 为什么这样切
 ///
-/// [`pull_source`] 是「逐条数据源」，同一张表 N 个字段就是 **N 次全表扫描**。
-/// 这里把「取回」合并成一次、把「落库」拆成每字段一个事务（§6.2 末句「拉取合并、
-/// 落库拆开」）。两条路径暂时并存，逐源那条在 T13 退役。
+/// 逐字段各扫一遍表是 **N 次全表扫描**；这里把「取回」合并成一次、把「落库」拆成
+/// 每字段一个事务（§6.2 末句「拉取合并、落库拆开」）。
 ///
 /// # 状态列的归属（设计 §6.3）
 ///
@@ -538,7 +323,6 @@ pub(crate) async fn pull_source(
 /// 两边都写会让连续失败次数翻倍。
 ///
 /// 一张表启用中的绑定为空时直接返回：它本来就没有要与飞书同步的东西。
-#[allow(dead_code)] // 消费者是 T13 的 worker 与「立即拉取」；T9 只落地入口本身。
 pub(crate) async fn pull_table(
     deps: &PullDeps<'_>,
     table: &PullTable,
@@ -814,7 +598,6 @@ async fn record_table_success(deps: &PullDeps<'_>, table_id: i64) -> Result<(), 
 /// ——两次读之间可能有另一轮插进来。
 ///
 /// 表级行已不存在（本轮进行中被删）时返回 `0` 且不写库：没有行可记账，也没有人可告警。
-#[allow(dead_code)] // 消费者是 T13 接进 worker 的表级轮询失败路径。
 pub(crate) async fn record_table_failure(
     deps: &PullDeps<'_>,
     table_id: i64,
@@ -861,132 +644,6 @@ pub(crate) async fn record_table_failure(
             Err(error)
         }
     }
-}
-
-/// 按需把一轮收窄到**一条**源。
-///
-/// `None` = 整轮（自动轮询走这条）；`Some(key)` = 只跑点名的那条（控制台的
-/// 「立即拉取」走这条）。两条路径**共用 `run_round` 之后的一切**，包括重读存活、
-/// 失败只记状态不冒泡——手动触发不是一条独立分支。
-///
-/// 点名一条不在候选集里的源返回**空轮**而不是报错：候选集已由 [`load_pull_sources`]
-/// 过滤过（`pull` + `active` + 坐标齐备），所以「点名了却没有」只可能意味着那条源
-/// 已停用 / 已删除 / 本就不是 pull 模式。空轮的判据留给调用方——`pull_now` 会在
-/// **发信号之前**先把这几种情形挡掉并给出可归因文案，否则前端会轮询到超时却什么都看不到。
-pub(crate) fn select_sources(sources: Vec<PullSource>, only: Option<&str>) -> Vec<PullSource> {
-    match only {
-        None => sources,
-        Some(key) => sources
-            .into_iter()
-            .filter(|source| source.source_key == key)
-            .collect(),
-    }
-}
-
-/// 一条数据源**现在为什么拉不动**。
-///
-/// 每个变体对应一个不同的修法，所以刻意不合并成一个笼统的「不可拉取」——
-/// 运维拿到这句话是要回去改配置的，笼统等于没答。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NotPullable {
-    /// 取数方式是 `push`：服务端不主动出网，等飞书多维表格自动化来推。
-    PushMode,
-    /// 已停用。
-    Disabled,
-    /// 缺 Base Token。
-    MissingBaseToken,
-    /// 缺数据表 ID。
-    MissingTableId,
-    /// 缺取数列字段名。
-    MissingFieldName,
-}
-
-impl NotPullable {
-    /// 给人看的一句话，必须点出**具体**缺什么。
-    pub(crate) fn reason(self) -> &'static str {
-        match self {
-            Self::PushMode => "取数方式是「手工推送」——服务端不主动出网，只有「定时拉取」才拉得动",
-            Self::Disabled => "数据源已停用",
-            Self::MissingBaseToken => "缺少 Base Token",
-            Self::MissingTableId => "缺少数据表 ID",
-            Self::MissingFieldName => "缺少取数列字段名",
-        }
-    }
-}
-
-/// 判定一条数据源**现在**能不能被拉取（自动轮询不经过这里，它只跑候选集）。
-///
-/// 判据必须与 [`load_pull_sources`] 的 WHERE 子句逐条对应（`ingest_mode == pull` +
-/// `status == active`），再加上它随后 trim 判空的那三项坐标。两边漂移的后果**不对称**：
-/// 这里宽了，用户点完按钮只能等到前端轮询超时；这里严了，一条其实拉得动的源被白拒。
-///
-/// 空串与 `NULL` 在库里是两种形态，但对「能不能拉」是同一件事——`load_pull_sources`
-/// 也是 trim 之后判空的。
-pub(crate) fn check_pullable(
-    ingest_mode: &str,
-    status: &str,
-    base_token: Option<&str>,
-    table_id: Option<&str>,
-    field_name: Option<&str>,
-) -> Result<(), NotPullable> {
-    if ingest_mode != "pull" {
-        return Err(NotPullable::PushMode);
-    }
-    if status != "active" {
-        return Err(NotPullable::Disabled);
-    }
-    for (value, missing) in [
-        (base_token, NotPullable::MissingBaseToken),
-        (table_id, NotPullable::MissingTableId),
-        (field_name, NotPullable::MissingFieldName),
-    ] {
-        if !value.is_some_and(|text| !text.trim().is_empty()) {
-            return Err(missing);
-        }
-    }
-    Ok(())
-}
-
-/// 一轮：遍历选中的拉取源，单个源失败不影响其它源。
-pub(crate) async fn run_round(
-    deps: &PullDeps<'_>,
-    only: Option<&str>,
-) -> Result<RoundReport, BaseError> {
-    let sources = select_sources(load_pull_sources(deps.context).await?, only);
-    let mut report = RoundReport {
-        sources: sources.len(),
-        ..RoundReport::default()
-    };
-
-    for source in &sources {
-        // 每个源开跑前**重读**它是否仍然存在且 active：管理员可能在本轮进行中把它
-        // 删掉或停用，此时必须丢弃本轮对它的全部写入。
-        if !source_is_still_active(deps, &source.source_key).await? {
-            tracing::info!(source_key = %source.source_key, "数据源已删除或停用，丢弃本轮结果");
-            continue;
-        }
-
-        match pull_source(deps, source).await {
-            Ok(source_report) => report
-                .reports
-                .push((source.source_key.clone(), source_report)),
-            Err(failure) => {
-                report.failures += 1;
-                tracing::warn!(
-                    source_key = %source.source_key,
-                    error = %failure,
-                    "飞书数据源同步失败"
-                );
-                // 失败只记状态、不冒泡：一个源坏掉不该拖停其它源。
-                if let Err(error) =
-                    record_failure(deps, &source.source_key, &failure.to_string()).await
-                {
-                    tracing::error!(error = %error, source_key = %source.source_key, "记录同步失败状态时出错");
-                }
-            }
-        }
-    }
-    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -1299,14 +956,20 @@ async fn count_existing(deps: &PullDeps<'_>, source_key: &str) -> Result<(u64, u
     Ok((total, active))
 }
 
-/// 数据源是否仍然存在且为 active。
-async fn source_is_still_active(deps: &PullDeps<'_>, source_key: &str) -> Result<bool, BaseError> {
+/// 一张表级数据源是否仍然存在且为 active。
+///
+/// 每张表开跑前**重读**：管理员可能在本轮进行中把它删掉或停用，此时必须丢弃本轮
+/// 对它的全部写入。
+pub(crate) async fn table_is_still_active(
+    deps: &PullDeps<'_>,
+    table_id: i64,
+) -> Result<bool, BaseError> {
     let row = deps
         .context
         .datasources()
         .query()
         .select_fields(&["status"])?
-        .where_eq("source_key", serde_json::json!(source_key))?
+        .where_eq("id", serde_json::json!(table_id))?
         .optional()
         .await?;
     match row {
@@ -1315,106 +978,11 @@ async fn source_is_still_active(deps: &PullDeps<'_>, source_key: &str) -> Result
     }
 }
 
-/// 记录一次成功（含「内容未变而跳过」的快路径）。独立事务提交。
-async fn record_success(
-    deps: &PullDeps<'_>,
-    source_key: &str,
-    digest: &str,
-    report: SourcePullReport,
-) -> Result<(), OutboundFailure> {
-    let mut transaction = deps
-        .database
-        .transaction()
-        .await
-        .map_err(|error| internal_failure(BaseError::from(error)))?;
-    let mut update = Record::new();
-    update.insert("snapshot_digest", serde_json::json!(digest));
-    update.insert("last_pull_at", serde_json::json!(now_seconds()));
-    update.insert("last_success_at", serde_json::json!(now_seconds()));
-    update.insert("consecutive_failures", serde_json::json!(0));
-    update.insert("last_error", serde_json::Value::Null);
-    let result = deps
-        .context
-        .datasources()
-        .query()
-        .where_eq("source_key", serde_json::json!(source_key))
-        .map_err(internal_failure)?
-        .update_in_tx(&mut transaction, update)
-        .await;
-    match result {
-        Ok(_) => {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| internal_failure(BaseError::from(error)))?;
-            tracing::debug!(source_key, derived = report.derived, "内容未变，跳过写库");
-            Ok(())
-        }
-        Err(error) => {
-            let _ = transaction.rollback().await;
-            Err(internal_failure(error))
-        }
-    }
-}
-
-/// 记录一次失败：`consecutive_failures` 自增、写 `last_error`。
-///
-/// **只在整轮成功时清零**，因此这里是自增而不是覆盖为 1——连续失败次数是控制台
-/// 与告警判断「这个源还活着吗」的唯一诚实信号。
-async fn record_failure(
-    deps: &PullDeps<'_>,
-    source_key: &str,
-    message: &str,
-) -> Result<(), BaseError> {
-    let current = deps
-        .context
-        .datasources()
-        .query()
-        .select_fields(&["consecutive_failures"])?
-        .where_eq("source_key", serde_json::json!(source_key))?
-        .optional()
-        .await?;
-    let Some(current) = current else {
-        return Ok(());
-    };
-    let failures: i64 = current.optional("consecutive_failures")?.unwrap_or(0);
-    // 错误文案可能很长（含飞书原始响应），截断后再落库。
-    let message: String = message.chars().take(1000).collect();
-
-    let mut transaction = deps.database.transaction().await?;
-    let mut update = Record::new();
-    update.insert("consecutive_failures", serde_json::json!(failures + 1));
-    update.insert("last_pull_at", serde_json::json!(now_seconds()));
-    update.insert("last_error", serde_json::json!(message));
-    let result = deps
-        .context
-        .datasources()
-        .query()
-        .where_eq("source_key", serde_json::json!(source_key))?
-        .update_in_tx(&mut transaction, update)
-        .await;
-    match result {
-        Ok(_) => transaction.commit().await.map_err(BaseError::from),
-        Err(error) => {
-            let _ = transaction.rollback().await;
-            Err(error)
-        }
-    }
-}
-
 fn now_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or_default()
-}
-
-/// 把「内部错误」包装成出站失败，让上层的统一日志格式不必分叉。
-fn internal_failure(error: BaseError) -> OutboundFailure {
-    OutboundFailure {
-        kind: super::outbound::FailureKind::Fatal { code: 0 },
-        message: error.to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -1536,63 +1104,26 @@ mod tests {
         assert_eq!(raw.parent_label, Some("USD"));
     }
 
-    /// 只为筛选测试构造的拉取源。
-    fn source(key: &str) -> PullSource {
-        PullSource {
-            source_key: key.to_string(),
-            title: key.to_string(),
-            coordinates: BitableCoordinates {
-                app_token: "bascn".to_string(),
-                table_id: "tbl".to_string(),
-                view_id: None,
-            },
-            field_name: "列".to_string(),
-            linkage: None,
-            snapshot_digest: None,
-        }
-    }
-
-    #[test]
-    fn without_a_target_every_source_runs() {
-        let all = select_sources(vec![source("a"), source("b")], None);
-        assert_eq!(all.len(), 2, "自动轮询必须覆盖全部拉取源");
-    }
-
-    #[test]
-    fn a_target_narrows_the_round_to_that_source() {
-        let only = select_sources(vec![source("a"), source("b")], Some("b"));
-        assert_eq!(only.len(), 1);
-        assert_eq!(only[0].source_key, "b");
-    }
-
-    #[test]
-    fn a_target_naming_nothing_yields_an_empty_round() {
-        // 点名了一条已停用 / 已删除 / 非 pull 的源时它根本不在候选集里。
-        // **空轮是正确结果**，不是错误：调用方据此知道「没有可跑的」。
-        assert!(select_sources(vec![source("a")], Some("nope")).is_empty());
-    }
-
     /// 预检必须**拒绝**，并给出原因。断言的是拒绝本身——通过就意味着这条用例的前提塌了。
     fn refusal(
         ingest_mode: &str,
         status: &str,
         base_token: Option<&str>,
         table_id: Option<&str>,
-        field_name: Option<&str>,
     ) -> NotPullable {
-        match check_pullable(ingest_mode, status, base_token, table_id, field_name) {
-            Ok(()) => panic!("这条数据源不该通过预检：{ingest_mode}/{status}"),
+        match check_pullable(ingest_mode, status, base_token, table_id) {
+            Ok(()) => panic!("这张表不该通过预检：{ingest_mode}/{status}"),
             Err(reason) => reason,
         }
     }
 
     #[test]
     fn a_push_source_cannot_be_pulled_on_demand() {
-        // 最要紧的一条：手工推送的源**根本不进** load_pull_sources 的候选集，
+        // 最要紧的一条：手工推送的源**根本不进** load_pull_tables 的候选集，
         // worker 会静默跳过。不在触发前挡掉，用户点完按钮只能看到轮询超时，
         // 而真实原因永远不会浮出来。
         assert_eq!(
-            refusal("push", "active", Some("b"), Some("t"), Some("f")),
+            refusal("push", "active", Some("b"), Some("t")),
             NotPullable::PushMode
         );
     }
@@ -1600,41 +1131,37 @@ mod tests {
     #[test]
     fn a_disabled_source_cannot_be_pulled_on_demand() {
         assert_eq!(
-            refusal("pull", "disabled", Some("b"), Some("t"), Some("f")),
+            refusal("pull", "disabled", Some("b"), Some("t")),
             NotPullable::Disabled
         );
     }
 
     #[test]
     fn each_missing_coordinate_is_named_individually() {
-        // 三项各自要有自己的变体：只说「坐标不全」等于让人回去逐个猜。
+        // 两项各自要有自己的变体：只说「坐标不全」等于让人回去逐个猜。
         assert_eq!(
-            refusal("pull", "active", None, Some("t"), Some("f")),
+            refusal("pull", "active", None, Some("t")),
             NotPullable::MissingBaseToken
         );
         assert_eq!(
-            refusal("pull", "active", Some("b"), None, Some("f")),
+            refusal("pull", "active", Some("b"), None),
             NotPullable::MissingTableId
-        );
-        assert_eq!(
-            refusal("pull", "active", Some("b"), Some("t"), None),
-            NotPullable::MissingFieldName
         );
     }
 
     #[test]
     fn blank_coordinates_count_as_missing() {
         // 空串与 NULL 在库里是两种形态，但对「能不能拉」是同一件事——
-        // `load_pull_sources` 也是 trim 之后判空的。
+        // `load_pull_tables` 也是 trim 之后判空的。
         assert_eq!(
-            refusal("pull", "active", Some("   "), Some("t"), Some("f")),
+            refusal("pull", "active", Some("   "), Some("t")),
             NotPullable::MissingBaseToken
         );
     }
 
     #[test]
-    fn a_fully_configured_pull_source_passes_the_check() {
-        assert!(check_pullable("pull", "active", Some("b"), Some("t"), Some("f")).is_ok());
+    fn a_fully_configured_pull_table_passes_the_check() {
+        assert!(check_pullable("pull", "active", Some("b"), Some("t")).is_ok());
     }
 
     #[test]
@@ -1646,7 +1173,6 @@ mod tests {
             NotPullable::Disabled,
             NotPullable::MissingBaseToken,
             NotPullable::MissingTableId,
-            NotPullable::MissingFieldName,
         ] {
             assert!(!reason.reason().trim().is_empty(), "{reason:?} 缺文案");
         }

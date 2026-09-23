@@ -8,9 +8,9 @@
 //! **不做跨实例单飞、不做快照 CAS 租约。** 部署形态是单实例，跨实例互斥的复杂度
 //! 换不来任何收益；真要上多实例，先要解决的是「谁拥有这一轮」而不是加锁。
 //!
-//! 单实例之外仍有两道廉价的自保（都在 `pull` 模块里）：
-//! - 每轮开跑前**重读数据源行**，已删除/停用则丢弃本轮；
-//! - 单个源失败只记状态、不中断整轮。
+//! 单实例之外仍有两道廉价的自保：
+//! - 每张表开跑前**重读数据源行**（`pull::table_is_still_active`），已删除/停用则丢弃本轮；
+//! - 单张表失败只记状态、不中断整轮。
 //!
 //! # 首次立即执行
 //!
@@ -19,12 +19,12 @@
 //!
 //! # 手动触发不是第二条路径
 //!
-//! 控制台的「立即拉取」只往 [`FeishuPullHandle`] 的通道里投一个信号（`Some(source_key)`
-//! = 只跑那一条），由本循环在同一个 `select!` 里接住，再走
+//! 控制台的「立即拉取」只往 [`FeishuPullHandle`] 的通道里投一个信号（`Some(datasource_id)`
+//! = 只跑那一张表），由本循环在同一个 `select!` 里接住，再走
 //! [`run_round_and_reschedule`]——与自动轮询**完全同一条路径**。
 //!
 //! 这也是它**不需要互斥锁**的原因：循环是单线程的，同一时刻只可能有一轮在跑。
-//! 若改成在 Action 里同步调 `pull_source`，就得自己造一把 per-source 锁，
+//! 若改成在 Action 里同步调 `pull_table`，就得自己造一把 per-table 锁，
 //! 还得让 worker 也认那把锁——那条路只为一个按钮引入了新的失效面。
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -40,7 +40,9 @@ use yang_base::BaseError;
 use crate::addon::feishu::domain::alert::{alert_pull_failure, FeishuAlertSenderHandle};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{HttpClientTransport, TokioSleeper};
-use crate::addon::feishu::domain::pull::{record_table_failure, run_round, PullDeps, PullTable};
+use crate::addon::feishu::domain::pull::{
+    load_pull_tables, pull_table, record_table_failure, table_is_still_active, PullDeps, PullTable,
+};
 use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
 };
@@ -105,7 +107,7 @@ impl PullSchedule {
 /// worker 持有另一半：触发信号的接收端。
 #[derive(Clone)]
 pub(crate) struct FeishuPullHandle {
-    trigger: mpsc::UnboundedSender<Option<String>>,
+    trigger: mpsc::UnboundedSender<Option<i64>>,
     schedule: Arc<PullSchedule>,
 }
 
@@ -113,7 +115,7 @@ impl FeishuPullHandle {
     /// 建一对：句柄给 Action，接收端给 worker。
     ///
     /// 无界通道：触发是**运维的低频动作**，没有一个值得让 HTTP 请求等它的背压。
-    pub(crate) fn new(interval_seconds: u64) -> (Self, mpsc::UnboundedReceiver<Option<String>>) {
+    pub(crate) fn new(interval_seconds: u64) -> (Self, mpsc::UnboundedReceiver<Option<i64>>) {
         let (trigger, requests) = mpsc::unbounded_channel();
         let handle = Self {
             trigger,
@@ -122,12 +124,12 @@ impl FeishuPullHandle {
         (handle, requests)
     }
 
-    /// 请求立刻跑一轮；`Some(key)` = 只跑那一条源。
+    /// 请求立刻跑一轮；`Some(datasource_id)` = 只跑那一张表。
     ///
     /// 接收端已消失（worker 没起或正在退出）时返回错误——静默丢弃会让控制台
     /// 一直轮询一个永远不会发生的结果。
-    pub(crate) fn request_pull(&self, source_key: Option<String>) -> Result<(), BaseError> {
-        self.trigger.send(source_key).map_err(|_| {
+    pub(crate) fn request_pull(&self, datasource_id: Option<i64>) -> Result<(), BaseError> {
+        self.trigger.send(datasource_id).map_err(|_| {
             BaseError::ConfigError("飞书出站拉取 Worker 未在运行，无法手动触发".to_string())
         })
     }
@@ -171,7 +173,7 @@ impl FeishuPullWorker {
         settings: &FeishuSettings,
         context: Arc<FeishuContext>,
         handle: FeishuPullHandle,
-        requests: mpsc::UnboundedReceiver<Option<String>>,
+        requests: mpsc::UnboundedReceiver<Option<i64>>,
     ) -> anyhow::Result<Self> {
         // 这三样在启动期取一次即可，它们都是可 Clone 的句柄，且不随 Tools 关闭而失效。
         let cache = Arc::new(RedisTenantTokenCache::new(
@@ -263,7 +265,7 @@ async fn run_loop(
     runner: RoundRunner,
     interval: Duration,
     schedule: Arc<PullSchedule>,
-    mut requests: mpsc::UnboundedReceiver<Option<String>>,
+    mut requests: mpsc::UnboundedReceiver<Option<i64>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     // 首次立即执行，不等一个完整间隔（兼作存量播种）。
@@ -281,7 +283,7 @@ async fn run_loop(
             request = requests.recv() => {
                 // 发送端全部 drop（进程在关闭）：不再有人能触发，收工。
                 let Some(only) = request else { break };
-                run_round_and_reschedule(&runner, only.as_deref(), &schedule).await;
+                run_round_and_reschedule(&runner, only, &schedule).await;
                 // 手动跑完要**重置**自动排程，否则紧接着又会跑一轮。
                 next_run = tokio::time::Instant::now() + interval;
             }
@@ -301,7 +303,7 @@ async fn run_loop(
 /// 才有的行为。
 async fn run_round_and_reschedule(
     runner: &RoundRunner,
-    only: Option<&str>,
+    only: Option<i64>,
     schedule: &PullSchedule,
 ) {
     schedule.mark_running();
@@ -314,7 +316,18 @@ async fn run_round_and_reschedule(
     schedule.schedule_next(now_unix());
 }
 
-async fn run_once(runner: &RoundRunner, only: Option<&str>) -> anyhow::Result<()> {
+/// 跑一轮：**表级**遍历，单张表失败不影响其它表。
+///
+/// # 为什么循环在这里而不在 `domain/pull.rs`
+///
+/// 失败路径要发告警，而告警发送器在 `Tools` 里、`PullDeps` 里没有它（Ruling 21 的
+/// 分界：**写库在 `pull`、编排在 worker**）。放回域模块就得把 `Tools` 塞进 `PullDeps`，
+/// 那会把「拉取需要什么」这件事从「凭证 + 传输 + 库」污染成「什么都可能要」。
+///
+/// # 每张表开跑前重读存活
+///
+/// 管理员可能在本轮进行中把某张表删掉或停用，此时必须丢弃本轮对它的全部写入。
+async fn run_once(runner: &RoundRunner, only: Option<i64>) -> anyhow::Result<()> {
     // 进程正在关闭时 `Tools` 已进入 Closing/Closed，这里会以可读错误返回而不是 panic。
     let database = runner.tools.mysql()?;
     let transport = HttpClientTransport::new(runner.tools.http()?.clone());
@@ -327,13 +340,49 @@ async fn run_once(runner: &RoundRunner, only: Option<&str>) -> anyhow::Result<()
         tokens: &runner.tokens,
         max_pages: MAX_PAGES_PER_ROUND,
     };
-    let report = run_round(&deps, only).await?;
-    if report.sources > 0 {
-        tracing::info!(
-            sources = report.sources,
-            failures = report.failures,
-            "飞书出站拉取一轮结束"
-        );
+
+    let tables = load_pull_tables(&runner.context).await?;
+    // 点名一张不在候选集里的表得到**空轮**而不是报错：候选集已过滤过
+    // （`pull` + `active` + 坐标齐备），所以「点名了却没有」只可能意味着那张表已停用 /
+    // 已删除 / 本就不是 pull 模式。`pull_now` 会在**发信号之前**先把这几种挡掉并给出
+    // 可归因文案，否则前端会轮询到超时却什么都看不到。
+    let selected: Vec<PullTable> = match only {
+        None => tables,
+        Some(id) => tables.into_iter().filter(|table| table.id == id).collect(),
+    };
+
+    let mut failures = 0usize;
+    for table in &selected {
+        if !table_is_still_active(&deps, table.id).await? {
+            tracing::info!(table_id = table.id, "表级数据源已删除或停用，丢弃本轮结果");
+            continue;
+        }
+        match pull_table(&deps, table).await {
+            Ok(outcome) => tracing::info!(
+                table_id = table.id,
+                fetched = outcome.fetched,
+                fields = outcome.fields,
+                skipped = outcome.skipped,
+                inserted = outcome.inserted,
+                updated = outcome.updated,
+                disabled = outcome.disabled,
+                "飞书表级数据源同步完成"
+            ),
+            Err(error) => {
+                failures += 1;
+                tracing::warn!(
+                    table_id = table.id,
+                    error = %error,
+                    "飞书表级数据源同步失败"
+                );
+                // 失败只记状态、不冒泡：一张表坏掉不该拖停其它表。
+                record_table_failure_and_alert(runner, &deps, table, &error).await;
+            }
+        }
+    }
+
+    if !selected.is_empty() {
+        tracing::info!(tables = selected.len(), failures, "飞书出站拉取一轮结束");
     }
     Ok(())
 }
@@ -350,13 +399,7 @@ async fn run_once(runner: &RoundRunner, only: Option<&str>) -> anyhow::Result<()
 /// 成功清零归 `pull::record_table_success`（它在 [`pull_table`] 里收尾）。两边都写
 /// 会让 `consecutive_failures` 翻倍，而阈值正是按它判的。
 ///
-/// # 消费者
-///
-/// T13 把表级轮询接进 [`run_once`] 时调用本函数；本任务只落地这条路径本身——
-/// worker 此刻实际跑的仍是逐源路径（`run_round`），它在 T13 一并退役。
-///
 /// [`pull_table`]: crate::addon::feishu::domain::pull::pull_table
-#[allow(dead_code)]
 async fn record_table_failure_and_alert(
     runner: &RoundRunner,
     deps: &PullDeps<'_>,

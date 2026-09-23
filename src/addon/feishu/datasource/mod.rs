@@ -106,6 +106,87 @@ fn config_error(error: impl std::fmt::Display) -> BaseError {
 mod tests {
     use super::*;
 
+    use crate::addon::feishu::domain::repository::Repository;
+    use yang_base::definition::HttpMethod;
+
+    /// 装配好的 `feishu.datasource` module。
+    ///
+    /// 用**惰性连接池**：这些用例只读 Action 契约，不碰数据库
+    /// （`connect_lazy` 不建立任何连接，但它要求一个 Tokio 上下文，故用例是
+    /// `#[tokio::test]`）。
+    ///
+    /// 这里刻意不经 `build_module`：那一步要挂认证中间件，而入参
+    /// `AuthorizationVersionValidator` 需要真实的授权缓存。本用例要的是**路由表**，
+    /// 与中间件无关。
+    fn registered_datasource_module() -> ModuleSpec {
+        let pool = Arc::new(
+            sqlx::MySqlPool::connect_lazy("mysql://user:pass@localhost:3306/yang")
+                .unwrap_or_else(|error| panic!("惰性连接池应可构造: {error}")),
+        );
+        let definition = |spec: yang_base::definition::TableSpec| {
+            spec.table_definition()
+                .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"))
+        };
+        let context = Arc::new(FeishuContext::new(
+            Repository::new(
+                definition(table::table_spec().unwrap_or_else(|e| panic!("{e}"))),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(domain::field_table::table_spec().unwrap_or_else(|e| panic!("{e}"))),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::option::table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                pool,
+            ),
+            // `settings: None` → `can_pull()` 为假，三个出站端点不会注册。本用例
+            // 断言的两条路由都在无条件注册的那一批里。
+            None,
+        ));
+        let spec = ModuleSpec::new(module_name().unwrap_or_else(|e| panic!("{e}")))
+            .table(table::table_spec().unwrap_or_else(|e| panic!("{e}")));
+        actions::register_all(spec, context)
+    }
+
+    fn registered_routes() -> Vec<(HttpMethod, String)> {
+        registered_datasource_module()
+            .actions()
+            .iter()
+            .map(|spec| (spec.route.method, spec.route.path.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_field_level_create_route_is_gone() {
+        // 两个可写入口并存会让审计语义与数据来源分叉（`option/mod.rs:54-57` 的既有
+        // 立场）；旧路由必须消失，而不是留在那里指向一个已删掉列的表。
+        let routes = registered_routes();
+        assert!(
+            !routes.contains(&(HttpMethod::Post, "/api/v1/feishu/datasources".to_string())),
+            "字段级创建路由应已退役，实际路由表: {routes:?}"
+        );
+        assert!(
+            !routes.contains(&(HttpMethod::Put, "/api/v1/feishu/datasources".to_string())),
+            "字段级更新路由应已退役，实际路由表: {routes:?}"
+        );
+        assert!(
+            !routes.contains(&(HttpMethod::Delete, "/api/v1/feishu/datasources".to_string())),
+            "字段级删除路由应已退役，实际路由表: {routes:?}"
+        );
+        // 表级入口必须还在——退役不是把一个能力删掉，而是把它收到唯一一个入口上
+        assert!(
+            routes.contains(&(
+                HttpMethod::Post,
+                "/api/v1/feishu/datasources/table".to_string()
+            )),
+            "表级创建路由必须保留，实际路由表: {routes:?}"
+        );
+    }
+
     #[test]
     fn module_name_is_the_stable_qualified_identifier() {
         let name = module_name().unwrap_or_else(|error| panic!("模块名应有效: {error}"));

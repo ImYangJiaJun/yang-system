@@ -43,10 +43,7 @@ use crate::addon::feishu::domain::bitable::{
     BitableCoordinates, CellValue,
 };
 use crate::addon::feishu::domain::context::FeishuContext;
-use crate::addon::feishu::domain::outbound::{HttpClientTransport, OutboundFailure, TokioSleeper};
-use crate::addon::feishu::domain::tenant_token::{
-    FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
-};
+use crate::addon::feishu::domain::outbound_setup;
 
 /// 单次探测最多取多少行。诊断足够，且刻意远小于 `PAGE_SIZE`(500)，避免大表首屏过重。
 const PROBE_PAGE_SIZE: u32 = 200;
@@ -54,19 +51,25 @@ const PROBE_PAGE_SIZE: u32 = 200;
 /// 回报的样本条数上限。再多只是把响应撑大，不影响判定。
 const SAMPLE_LIMIT: usize = 10;
 
-/// 探针输入。
+/// 探针输入。**两种模式，二选一**。
 ///
-/// 坐标为**请求体直传**而不是从数据源行读取：数据源表的坐标列（`bitable_base_token` /
-/// `bitable_table_id` / `bitable_field_id`）属 T2-2，尚未落地；而探针的价值恰恰在于
-/// **先于那些列**证明凭证链路可用。等坐标列落地后，这里可以再加一个 `source_key`
-/// 分支走库。
+/// - 给了 `datasource_id`：坐标取自那条表级数据源行，取数列默认取它**第一条启用中的
+///   绑定**（`field_id → 精确字段名` 的解析正是表级拉取每轮做的那一步）。这是配置
+///   落库之后的排查路径：拉取失败时想知道「到底是凭证、权限、还是这一列」。
+/// - 只给坐标：**请求体直传**，不走库。保留它是为了探针最初、也是最不可替代的用途——
+///   **先于任何数据源**证明凭证链路可用（那时候库里一行都还没有）。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PullProbeInput {
-    /// 多维表格 app_token（URL 里 `feishu.cn/base/<这里>` 那段）。
-    pub(super) base_token: String,
-    /// 数据表 table_id。
-    pub(super) table_id: String,
+    /// 表级数据源 `id`。给了它就不必再给坐标与取数列。
+    #[serde(default)]
+    pub(super) datasource_id: Option<i64>,
+    /// 多维表格 app_token（URL 里 `feishu.cn/base/<这里>` 那段）。直传模式下必填。
+    #[serde(default)]
+    pub(super) base_token: Option<String>,
+    /// 数据表 table_id。直传模式下必填。
+    #[serde(default)]
+    pub(super) table_id: Option<String>,
     /// 取数列的 field_id。给了它就顺带验证「field_id → 精确字段名」的解析路径。
     #[serde(default)]
     pub(super) field_id: Option<String>,
@@ -86,24 +89,65 @@ impl ParamInput for PullProbeInput {
 
 impl PullProbeInput {
     fn validate(&self) -> Result<(), BaseError> {
+        if self.datasource_id.is_some_and(|id| id <= 0) {
+            return Err(BaseError::ParamInvalid(
+                "datasource_id".to_string(),
+                "必须是正整数".to_string(),
+            ));
+        }
+        // 走库模式只需要 `datasource_id`：坐标与取数列都从那条源上读。
+        if self.datasource_id.is_some() {
+            return Ok(());
+        }
         for (name, value) in [
-            ("base_token", &self.base_token),
-            ("table_id", &self.table_id),
+            ("base_token", self.base_token.as_deref()),
+            ("table_id", self.table_id.as_deref()),
         ] {
-            if value.trim().is_empty() {
+            if !value.is_some_and(|text| !text.trim().is_empty()) {
                 return Err(BaseError::ParamInvalid(
                     name.to_string(),
-                    "不能为空".to_string(),
+                    "直传坐标时必须给（或改用 datasource_id 走库）".to_string(),
                 ));
             }
         }
         if self.field_id.is_none() && self.field_name.is_none() {
             return Err(BaseError::ParamInvalid(
                 "field_id/field_name".to_string(),
-                "至少要给一个取数列（field_id 或 field_name）".to_string(),
+                "直传坐标时至少要给一个取数列（field_id 或 field_name）".to_string(),
             ));
         }
         Ok(())
+    }
+}
+
+/// 探针要探测的坐标与取数列。两个来源（走库 / 直传）在这里汇成同一份。
+struct ProbeTarget {
+    coordinates: BitableCoordinates,
+    field_id: Option<String>,
+    field_name: Option<String>,
+}
+
+impl ProbeTarget {
+    fn from_input(input: &PullProbeInput) -> Self {
+        Self {
+            coordinates: BitableCoordinates {
+                app_token: input
+                    .base_token
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
+                table_id: input
+                    .table_id
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
+                view_id: input.view_id.as_deref().map(str::trim).map(str::to_string),
+            },
+            field_id: input.field_id.clone(),
+            field_name: input.field_name.clone(),
+        }
     }
 }
 
@@ -146,7 +190,10 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         })
         .route(HttpMethod::Post, "/api/v1/feishu/datasources/pull-probe")
         .display_name("出站拉取探针")
-        .description("用自建应用凭证真实调用飞书多维表格，回报字段类型与取值形态")
+        .description(
+            "用自建应用凭证真实调用飞书多维表格，回报字段类型与取值形态\
+             （给 datasource_id 走库，或直传坐标先于任何数据源验证凭证链路）",
+        )
         // 用 write 而不是 read：它会出站调飞书、消耗本应用的频控配额，
         // 属于运维动作，不该和纯读的控制台查询共用同一权限。
         .permissions(["feishu.datasource.write"])
@@ -160,56 +207,27 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
 
-    // 1) 凭证与出站设施。三样都来自框架资源，本函数不自己建连接池。
-    let settings = context
-        .settings()
-        .ok_or_else(|| BaseError::ConfigError("未配置 [feishu] 段，无法出站拉取".to_string()))?;
-    if !settings.can_pull() {
-        return Ok(ApiResponse::fail(
-            40902,
-            "出站凭证未配置或仍是占位值（需要非占位的 feishu.app_id / feishu.app_secret）",
-        ));
-    }
-    let app_id = settings.app_id.clone().unwrap_or_default();
-    let app_secret = settings.app_secret.clone().unwrap_or_default();
-    // 部署命名空间复用授权缓存那一份，而不是在 [feishu] 段再配一个：
-    // 同一个部署在缓存层必须是同一个键空间，两份配置迟早会漂移。
-    let deployment = ctx
-        .tools()
-        .extension::<crate::authorization::AuthorizationVersionCache>()?
-        .deployment()
-        .to_string();
-
-    let cache = Arc::new(RedisTenantTokenCache::new(
-        ctx.tools().cache()?.clone(),
-        &deployment,
-    ));
-    let transport = Arc::new(HttpClientTransport::new(ctx.tools().http()?.clone()));
-    let sleeper = Arc::new(TokioSleeper);
-    let tokens = TenantTokenProvider::new(
-        cache,
-        transport.clone(),
-        sleeper.clone(),
-        FeishuCredentials { app_id, app_secret },
-        &deployment,
-    )
-    .map_err(|error| BaseError::ConfigError(error.to_string()))?;
-
-    let coordinates = BitableCoordinates {
-        app_token: input.base_token.trim().to_string(),
-        table_id: input.table_id.trim().to_string(),
-        view_id: input
-            .view_id
-            .as_deref()
-            .map(|value| value.trim().to_string()),
+    // 1) 凭证与出站设施。四件套收敛在 `outbound_setup`（T3 抽出来的那份），
+    //    本函数不自己建连接池、也不自己拼凭证。
+    let settings = match outbound_setup::require_settings(&context) {
+        Ok(settings) => settings,
+        Err((code, message)) => return Ok(ApiResponse::fail(code, message)),
     };
+    let outbound = outbound_setup::build(&ctx, settings)?;
+
+    let target = resolve_target(&input, &context).await?;
 
     // 2) 解析取数列：field_id -> 精确字段名，并校验它是单值字段。
-    let fields = list_all_fields(transport.as_ref(), sleeper.as_ref(), &tokens, &coordinates)
-        .await
-        .map_err(outbound_error)?;
+    let fields = list_all_fields(
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        &target.coordinates,
+    )
+    .await
+    .map_err(outbound_setup::outbound_error)?;
 
-    let (field_name, field) = match input.field_id.as_deref() {
+    let (field_name, field) = match target.field_id.as_deref() {
         Some(field_id) => {
             let name = resolve_field_name(&fields, field_id).map_err(|error| {
                 BaseError::ParamInvalid("field_id".to_string(), error.to_string())
@@ -221,7 +239,7 @@ pub(super) async fn handle(
             (name, field)
         }
         None => {
-            let name = input.field_name.clone().unwrap_or_default();
+            let name = target.field_name.clone().unwrap_or_default();
             let field = fields
                 .iter()
                 .find(|candidate| candidate.field_name.trim() == name.trim())
@@ -241,15 +259,15 @@ pub(super) async fn handle(
 
     // 3) 真实拉取一页，凭证在这一步注入（Authorization: Bearer <tenant_access_token>）。
     let page = first_records_page(
-        transport.as_ref(),
-        sleeper.as_ref(),
-        &tokens,
-        &coordinates,
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        &target.coordinates,
         std::slice::from_ref(&field_name),
         PROBE_PAGE_SIZE,
     )
     .await
-    .map_err(outbound_error)?;
+    .map_err(outbound_setup::outbound_error)?;
 
     // 4) 逐行取值，同时统计形态——形态统计就是「单选是字符串还是数组」的答案。
     let mut sample_labels = Vec::new();
@@ -290,13 +308,66 @@ pub(super) async fn handle(
     )
 }
 
-/// 把出站失败转成可归因的业务错误。
+/// 决定这次探什么：走库（`datasource_id`）还是直传坐标。
 ///
-/// 用 `ApiResponse::fail` 的码值域而不是 HTTP 5xx：这一层的失败几乎都是**配置或权限**
-/// 问题（列名不对、没给应用加文档权限、凭证写错），返回可读文案比返回一个 500
-/// 更能让运维直接定位。
-fn outbound_error(failure: OutboundFailure) -> BaseError {
-    BaseError::ParamInvalid("feishu".to_string(), failure.to_string())
+/// 走库模式要读两处：那条表级行（坐标）与它的**第一条启用中的绑定**（取数列）。
+/// 「第一条」而不是按 `source_key` 挑，是因为探针要回答的是「这条源现在能不能拉」，
+/// 任一条绑定都足以把它答出来；而启用中的绑定为空时，这条源本来就没有可拉的列。
+async fn resolve_target(
+    input: &PullProbeInput,
+    context: &FeishuContext,
+) -> Result<ProbeTarget, BaseError> {
+    let Some(datasource_id) = input.datasource_id else {
+        return Ok(ProbeTarget::from_input(input));
+    };
+
+    let row = context
+        .datasources()
+        .query()
+        .select_fields(&["bitable_base_token", "bitable_table_id", "bitable_view_id"])?
+        .where_eq("id", serde_json::json!(datasource_id))?
+        .optional()
+        .await?;
+    let Some(row) = row else {
+        return Err(BaseError::RecordNotFound("数据源不存在".to_string()));
+    };
+
+    let binding = context
+        .datasource_fields()
+        .query()
+        .select_fields(&["field_id"])?
+        .where_eq("datasource_id", serde_json::json!(datasource_id))?
+        .where_eq("enabled", serde_json::json!(true))?
+        .optional()
+        .await?;
+
+    // 显式给的 field_id / field_name 优先：排查「就是这一列」时不该被第一条绑定盖掉。
+    let field_id = input.field_id.clone().or_else(|| {
+        binding
+            .as_ref()
+            .and_then(|row| row.optional("field_id").ok().flatten())
+    });
+
+    Ok(ProbeTarget {
+        coordinates: BitableCoordinates {
+            app_token: trimmed_column(&row, "bitable_base_token")?.unwrap_or_default(),
+            table_id: trimmed_column(&row, "bitable_table_id")?.unwrap_or_default(),
+            view_id: trimmed_column(&row, "bitable_view_id")?,
+        },
+        field_id,
+        field_name: input.field_name.clone(),
+    })
+}
+
+/// 读一列并 trim；空串与 `NULL` 一样按「没有」处理，避免拿一个空坐标去打飞书。
+fn trimmed_column(
+    row: &yang_base::table::Record,
+    column: &str,
+) -> Result<Option<String>, BaseError> {
+    Ok(row
+        .optional::<String>(column)?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
 }
 
 /// 单元格值的 JSON 形态名，用于回报「原始数据长什么样」。
@@ -317,8 +388,9 @@ mod tests {
 
     fn input(field_id: Option<&str>, field_name: Option<&str>) -> PullProbeInput {
         PullProbeInput {
-            base_token: "bascnCMII2ORej2RItqpZZUNMIe".to_string(),
-            table_id: "tblxI2tWaxP5dG7p".to_string(),
+            datasource_id: None,
+            base_token: Some("bascnCMII2ORej2RItqpZZUNMIe".to_string()),
+            table_id: Some("tblxI2tWaxP5dG7p".to_string()),
             field_id: field_id.map(str::to_string),
             field_name: field_name.map(str::to_string),
             view_id: None,
@@ -326,18 +398,18 @@ mod tests {
     }
 
     #[test]
-    fn requires_both_coordinates() {
+    fn requires_both_coordinates_in_direct_mode() {
         let mut payload = input(Some("fldA"), None);
-        payload.base_token = "  ".to_string();
+        payload.base_token = Some("  ".to_string());
         assert!(payload.validate().is_err(), "空 base_token 应被拒绝");
 
         let mut payload = input(Some("fldA"), None);
-        payload.table_id = String::new();
-        assert!(payload.validate().is_err(), "空 table_id 应被拒绝");
+        payload.table_id = None;
+        assert!(payload.validate().is_err(), "缺 table_id 应被拒绝");
     }
 
     #[test]
-    fn requires_at_least_one_field_selector() {
+    fn requires_at_least_one_field_selector_in_direct_mode() {
         assert!(
             input(None, None).validate().is_err(),
             "既不给 field_id 也不给 field_name 就无法取数"
@@ -346,6 +418,36 @@ mod tests {
         assert!(input(None, Some("名称")).validate().is_ok());
         // 两个都给是允许的：以 field_id 为准，顺带验证解析路径
         assert!(input(Some("fldA"), Some("名称")).validate().is_ok());
+    }
+
+    #[test]
+    fn a_datasource_id_is_enough_on_its_own() {
+        // 走库模式：坐标与取数列都从那条源上读，请求体里什么都不必再给
+        let payload = PullProbeInput {
+            datasource_id: Some(7),
+            base_token: None,
+            table_id: None,
+            field_id: None,
+            field_name: None,
+            view_id: None,
+        };
+        assert!(payload.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_a_non_positive_datasource_id() {
+        let mut payload = input(Some("fldA"), None);
+        payload.datasource_id = Some(0);
+        assert!(payload.validate().is_err(), "id 必须是正整数");
+    }
+
+    #[test]
+    fn the_direct_mode_still_trims_its_coordinates() {
+        // 直传坐标是旧路径，trim 行为不能因为多了一个模式而改变
+        let mut payload = input(Some("fldA"), None);
+        payload.base_token = Some("  base  ".to_string());
+        let target = ProbeTarget::from_input(&payload);
+        assert_eq!(target.coordinates.app_token, "base");
     }
 
     #[test]
