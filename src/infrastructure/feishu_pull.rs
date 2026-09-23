@@ -37,9 +37,10 @@ use tokio::task::JoinHandle;
 use yang_base::tools::Tools;
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::alert::{alert_pull_failure, FeishuAlertSenderHandle};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{HttpClientTransport, TokioSleeper};
-use crate::addon::feishu::domain::pull::{run_round, PullDeps};
+use crate::addon::feishu::domain::pull::{record_table_failure, run_round, PullDeps, PullTable};
 use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
 };
@@ -335,6 +336,68 @@ async fn run_once(runner: &RoundRunner, only: Option<&str>) -> anyhow::Result<()
         );
     }
     Ok(())
+}
+
+/// 一张表一轮失败后的收尾：连续失败自增 → 写 `last_error` → 达阈值发告警邮件。
+///
+/// # 三步的顺序不能换
+///
+/// **先落库、再告警。** 反过来会出现「邮件已经发出、计数还没落」的窗口：下一轮读到
+/// 的仍是旧计数，于是同一轮失败被重复告警。告警的判据读的正是刚落库的那个值。
+///
+/// # 这里只写失败那一组状态
+///
+/// 成功清零归 `pull::record_table_success`（它在 [`pull_table`] 里收尾）。两边都写
+/// 会让 `consecutive_failures` 翻倍，而阈值正是按它判的。
+///
+/// # 消费者
+///
+/// T13 把表级轮询接进 [`run_once`] 时调用本函数；本任务只落地这条路径本身——
+/// worker 此刻实际跑的仍是逐源路径（`run_round`），它在 T13 一并退役。
+///
+/// [`pull_table`]: crate::addon::feishu::domain::pull::pull_table
+#[allow(dead_code)]
+async fn record_table_failure_and_alert(
+    runner: &RoundRunner,
+    deps: &PullDeps<'_>,
+    table: &PullTable,
+    error: &BaseError,
+) {
+    let message = error.to_string();
+    let failures = match record_table_failure(deps, table.id, &message).await {
+        Ok(failures) => failures,
+        Err(record_error) => {
+            // 记不上账就不告警：阈值判据失去了可信的输入，硬发只会误导运维。
+            tracing::error!(
+                error = %record_error,
+                table_id = table.id,
+                "记录表级同步失败状态时出错"
+            );
+            return;
+        }
+    };
+
+    // 告警只是「失败之后的第二件事」：没有 feishu 段、或告警通道没注册（正在关停、
+    // 或装配遗漏）时，上面的失败状态已经落库，跳过发信即可。
+    let Some(settings) = runner.context.settings() else {
+        return;
+    };
+    let sender = match runner.tools.extension::<FeishuAlertSenderHandle>() {
+        Ok(sender) => sender,
+        Err(extension_error) => {
+            tracing::warn!(error = %extension_error, "飞书告警发送器不可用，本轮不发告警");
+            return;
+        }
+    };
+    alert_pull_failure(
+        sender,
+        &settings.alert_recipients,
+        settings.alert_failure_threshold,
+        &table.title,
+        &message,
+        failures,
+    )
+    .await;
 }
 
 #[cfg(test)]

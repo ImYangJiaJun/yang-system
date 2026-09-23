@@ -605,6 +605,19 @@ pub struct FeishuSettings {
     /// 契约是「最大可见延迟 = 一个轮询间隔」，因此本值就是新鲜度承诺。默认 900 秒。
     #[serde(default = "default_feishu_pull_interval_seconds")]
     pub pull_interval_seconds: u64,
+    /// 出站拉取连续失败达阈值时的告警收件人。
+    ///
+    /// **默认空 = 不告警**（设计 D5）：告警往哪儿发是部署方的决定，不是我们的。
+    /// 每一项都必须在启动期校验（见 `feishu::domain::alert::validate_recipients`）
+    /// ——配了一个空白项等于「以为配上了其实没配」，而那种错**没有任何症状**。
+    #[serde(default)]
+    pub alert_recipients: Vec<String>,
+    /// 连续失败多少轮之后开始告警。
+    ///
+    /// 每轮都会发，直到有一轮成功把计数清零（设计 §9.2 的收口条件是「恢复」，
+    /// 不是冷却）。下限见 [`FEISHU_MIN_ALERT_THRESHOLD`]。默认 3。
+    #[serde(default = "default_feishu_alert_threshold")]
+    pub alert_failure_threshold: i64,
 }
 
 /// 出站拉取间隔下限：低于 1 分钟会让飞书侧频控（bitable 列出记录 20 次/秒，
@@ -615,6 +628,18 @@ const FEISHU_MAX_PULL_INTERVAL_SECONDS: u64 = 86_400;
 
 pub(crate) const fn default_feishu_pull_interval_seconds() -> u64 {
     900
+}
+
+/// 告警阈值下限：**2 轮**。
+///
+/// 阈值 1 会把单次失败也发出去，而单次失败与飞书侧抖动无法区分——这正是阈值要挡的
+/// 邮件风暴。允许 1 等于把「阈值」这个机制关掉，那种部署应该走「不配收件人」。
+const FEISHU_MIN_ALERT_THRESHOLD: i64 = 2;
+/// 上限 1000：再大就等于永久静音，那也该走「不配收件人」，而不是把阈值调到天上。
+const FEISHU_MAX_ALERT_THRESHOLD: i64 = 1_000;
+
+pub(crate) const fn default_feishu_alert_threshold() -> i64 {
+    3
 }
 
 impl FeishuSettings {
@@ -893,6 +918,17 @@ impl Settings {
                     "feishu.pull_interval_seconds 必须在 {FEISHU_MIN_PULL_INTERVAL_SECONDS}..={FEISHU_MAX_PULL_INTERVAL_SECONDS} 范围内"
                 );
             }
+            if !(FEISHU_MIN_ALERT_THRESHOLD..=FEISHU_MAX_ALERT_THRESHOLD)
+                .contains(&feishu.alert_failure_threshold)
+            {
+                bail!(
+                    "feishu.alert_failure_threshold 必须在 {FEISHU_MIN_ALERT_THRESHOLD}..={FEISHU_MAX_ALERT_THRESHOLD} 范围内"
+                );
+            }
+            // 收件人逐个校验（空列表合法 = 不告警）。放在**启动期**而不是首次告警时：
+            // 一个空白项或拼错的地址在投递那一刻只会静默失败，运维却以为告警在跑。
+            crate::addon::feishu::domain::alert::validate_recipients(&feishu.alert_recipients)
+                .map_err(|error| anyhow::anyhow!("feishu.alert_recipients 无效：{error}"))?;
             if feishu.can_pull() {
                 let app_secret = feishu.app_secret.as_deref().unwrap_or_default();
                 // **刻意不用 validate_token_secret**：那条规则（≥32 字节、非重复字符）
@@ -2946,5 +2982,89 @@ link_base_url = "http://localhost:5273"
             .feishu
             .unwrap_or_else(|| panic!("[feishu] 段应被解析出来"));
         assert!(feishu.can_pull(), "非占位的短 secret 应视为已配置");
+    }
+
+    /// 告警默认值：**不配收件人 = 不告警**，阈值取 3。
+    ///
+    /// 「不配 = 不告警」是设计 D5 的选择，不是遗漏：告警要往哪儿发是部署方的决定，
+    /// 我们不该默认往任何地址发信。
+    #[test]
+    fn feishu_alert_settings_default_to_silent() {
+        let settings = Settings::parse(
+            &(valid_config().to_string()
+                + "\n[feishu]\nenabled = true\nmanagement_api_token = \"a-real-management-token-value-1234\"\n"),
+        )
+        .unwrap_or_else(|error| panic!("配置应解析成功: {error:#}"));
+        let feishu = settings
+            .feishu
+            .unwrap_or_else(|| panic!("[feishu] 段应被解析出来"));
+        assert!(
+            feishu.alert_recipients.is_empty(),
+            "默认不配收件人 = 不告警"
+        );
+        assert_eq!(feishu.alert_failure_threshold, 3);
+    }
+
+    /// 收件人逐项校验：空串与非法地址必须在**启动期**被拒。
+    #[test]
+    fn feishu_rejects_unusable_alert_recipients() {
+        for entry in ["\"  \"", "\"not-an-email\"", "\"ops@example\""] {
+            let raw = valid_config().to_string()
+                + &format!(
+                    "\n[feishu]\nenabled = true\n\
+                     management_api_token = \"a-real-management-token-value-1234\"\n\
+                     alert_recipients = [\"ops@example.com\", {entry}]\n"
+                );
+            let error = match Settings::parse(&raw) {
+                Ok(_) => panic!("收件人 {entry} 必须被拒绝"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("alert_recipients"),
+                "报错必须定位到该字段: {error:#}"
+            );
+        }
+    }
+
+    /// 收件人配全时按原样带出（顺序即投递顺序）。
+    #[test]
+    fn feishu_keeps_configured_alert_recipients() {
+        let settings = Settings::parse(
+            &(valid_config().to_string()
+                + "\n[feishu]\nenabled = true\n\
+                   management_api_token = \"a-real-management-token-value-1234\"\n\
+                   alert_recipients = [\"ops@example.com\", \"oncall@example.com.cn\"]\n\
+                   alert_failure_threshold = 5\n"),
+        )
+        .unwrap_or_else(|error| panic!("合法收件人应通过: {error:#}"));
+        let feishu = settings
+            .feishu
+            .unwrap_or_else(|| panic!("[feishu] 段应被解析出来"));
+        assert_eq!(
+            feishu.alert_recipients,
+            vec!["ops@example.com", "oncall@example.com.cn"]
+        );
+        assert_eq!(feishu.alert_failure_threshold, 5);
+    }
+
+    /// 阈值有下限：1 次失败不足以判定一张表坏了，允许等于把阈值机制关掉。
+    #[test]
+    fn feishu_rejects_out_of_range_alert_threshold() {
+        for threshold in [0i64, 1, -1, 1_001] {
+            let raw = valid_config().to_string()
+                + &format!(
+                    "\n[feishu]\nenabled = true\n\
+                     management_api_token = \"a-real-management-token-value-1234\"\n\
+                     alert_failure_threshold = {threshold}\n"
+                );
+            let error = match Settings::parse(&raw) {
+                Ok(_) => panic!("alert_failure_threshold={threshold} 必须被拒绝"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("alert_failure_threshold"),
+                "报错必须定位到该字段: {error:#}"
+            );
+        }
     }
 }

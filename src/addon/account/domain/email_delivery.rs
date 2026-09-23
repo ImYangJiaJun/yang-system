@@ -200,6 +200,22 @@ impl SmtpEmailSender {
     }
 }
 
+impl SmtpEmailSender {
+    /// 投递一封**纯文本**邮件（收件人 + 主题 + 正文）。
+    ///
+    /// 给本模块之外的发送器复用同一条 STARTTLS 传输用（如飞书拉取失败的告警）。
+    /// `deliver` 是模块私有的，而那个适配器在另一个 addon 里；这里**只**放出
+    /// 「发一封纯文本」这一件事——传输句柄、from 地址与超时都留在本模块。
+    pub(crate) async fn deliver_text(
+        &self,
+        recipient: &str,
+        subject: &str,
+        body: String,
+    ) -> Result<(), EmailDeliveryError> {
+        self.deliver(recipient, subject, body).await
+    }
+}
+
 #[async_trait]
 impl RegistrationEmailSender for SmtpEmailSender {
     async fn send_registration_code(

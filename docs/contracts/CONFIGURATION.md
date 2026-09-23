@@ -255,11 +255,20 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   **租户级**凭证——拿到它能读该应用可见的全部协作多维表格，不要写进配置文件或 Git。
 - `feishu.pull_interval_seconds`（整数，默认 `900`）：出站拉取轮询间隔，有效范围
   `10..=86400`。契约是「最大可见延迟 = 一个轮询间隔」。
+- `feishu.alert_recipients`（字符串数组，默认 `[]`）：出站拉取**连续失败**达阈值时的
+  告警收件人。**默认空 = 不告警**。每一项都必须是可投递的地址（空白项、缺 `@`、
+  域名缺 `.` 都会在启动期被拒）——一个空白项等于「以为配上了其实没配」，而那种错
+  在投递那一刻只会静默失败。
+- `feishu.alert_failure_threshold`（整数，默认 `3`）：连续失败多少轮之后开始告警，
+  有效范围 `2..=1000`。达阈值后**每轮都发**，直到有一轮成功把计数清零——收口条件
+  是「恢复」而不是冷却。下限 2：单次失败与飞书侧抖动无法区分，阈值 1 等于把抖动
+  变成邮件；要彻底静音请清空 `alert_recipients`，而不是把阈值调到天上。
 
 对应环境变量：`YANG_SYSTEM_FEISHU_ENABLED`、`YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN`、
 `YANG_SYSTEM_FEISHU_ENCRYPTION_KEY`。
 
-`app_id` / `app_secret` / `pull_interval_seconds` **不登记环境变量**。这是刻意的：
+`app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` /
+`alert_failure_threshold` **不登记环境变量**。这是刻意的：
 环境变量是白名单，未登记的名称会让进程启动失败——`YANG_SYSTEM_FEISHU_APP_SECRET`
 因此会被直接拒绝，secret 只能从 secret 目录进来。
 
@@ -276,8 +285,9 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
 
 **校验只在段真正生效时执行**（`enabled = true`）。段存在但惰性时（`enabled = false`，
 或凭证留待运维后填）不做校验，也不注册任何路由——惰性段没有可被误用的行为面，
-不应让进程起不来。注意：`enabled = true` 时 `pull_interval_seconds` 越界会**拒绝启动**，
-即使出站凭证还没配。
+不应让进程起不来。注意：`enabled = true` 时 `pull_interval_seconds` 越界、
+`alert_failure_threshold` 越界、`alert_recipients` 里有不可投递的地址，都会
+**拒绝启动**，即使出站凭证还没配——错在配置里，越早暴露越好。
 
 **出站凭证不套用本系统自己的密钥强度规则**（≥32 字节、非重复字符）：那是约束我们自己
 签发的密钥的，飞书 `app_secret` 是第三方凭证，套上去会把合法配置判非法。它只受

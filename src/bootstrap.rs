@@ -4,6 +4,7 @@ use crate::addon::account::email_delivery::{
     RegistrationEmailSenderHandle, SmtpEmailSender, SmtpLoginEmailCodeSender,
     VerificationCodeSender, VerificationCodeSenderHandle,
 };
+use crate::addon::feishu::domain::alert::{FeishuAlertSender, FeishuAlertSenderHandle};
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
@@ -101,6 +102,9 @@ async fn run_after_telemetry_initialized(
     let verification_code_sender: Arc<dyn VerificationCodeSender> = email_sender.clone();
     // 免密登录验证码与 MFA 验证码共用 SMTP 传输但文案独立，占用独立 extension 槽。
     let login_email_code_sender = SmtpLoginEmailCodeSender::new(email_sender.as_ref().clone());
+    // 飞书拉取失败的告警邮件复用同一条 SMTP 传输。**无条件注册**：收件人列表为空
+    // （默认）时它一次也不会被调用，行为与未集成飞书时一致。
+    let feishu_alert_sender: Arc<dyn FeishuAlertSender> = email_sender.clone();
     let new_device_sender: Arc<dyn NewDeviceEmailSender> = email_sender;
     // 飞书出站拉取的手动触发句柄 + 排程出口。**无条件注册**：句柄必须在 Tools 定型**之前**
     // 就位，否则「立即拉取」与「下次自动拉取」两个 Action 取不到它。
@@ -133,6 +137,8 @@ async fn run_after_telemetry_initialized(
         ))
         .extension(LoginEmailCodeSenderHandle::new(login_email_code_sender))
         .extension(NewDeviceEmailSenderHandle::from_arc(new_device_sender))
+        // 飞书拉取失败的告警出口：与上面几个投递器共用 SMTP 传输，占用独立槽位。
+        .extension(FeishuAlertSenderHandle::from_arc(feishu_alert_sender))
         // 运行期句柄，照 `AuthorizationVersionCache` 的先例走 extension 槽：
         // `FeishuContext` 描述的是「有哪些表与什么配置」，不该混进 worker 的运行时状态。
         .extension(feishu_pull_handle.clone())

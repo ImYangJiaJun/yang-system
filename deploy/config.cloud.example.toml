@@ -166,7 +166,8 @@ metrics_enabled = true
 #      `CHANGE_ME_*`。两条凭证的占位符待遇**不对称**：把 token 填成任何非空串
 #      （哪怕是 `CHANGE_ME_...`）都会让入站写接口上线。这个 Token 必须是真的强口令。
 #   2. **本段的合法键是**：`enabled` / `management_api_token` / `encryption_key` /
-#      `app_id` / `app_secret` / `pull_interval_seconds`。
+#      `app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` /
+#      `alert_failure_threshold`。
 #      该结构体开了 `deny_unknown_fields`，**多写一个键就会在反序列化阶段直接启动失败**
 #      （报 unknown field），比 validate 阶段更早。上列之外的键不要写。
 #   3. `app_id` / `app_secret` 一旦**非占位**地配上，`can_pull()` 即为真，会出站调用
@@ -183,3 +184,6 @@ metrics_enabled = true
 # # app_id = "cli_xxxxxxxxxxxxxxxx"
 # # app_secret = "replace-with-feishu-app-secret"
 # # pull_interval_seconds = 900
+# # 拉取连续失败告警（可选）。默认空收件人 = 不告警；达阈值后每轮都发，直到恢复。
+# # alert_recipients = ["ops@example.com"]
+# # alert_failure_threshold = 3

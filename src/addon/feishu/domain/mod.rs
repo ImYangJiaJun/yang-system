@@ -1,3 +1,4 @@
+pub(crate) mod alert;
 pub(crate) mod bitable;
 pub(crate) mod context;
 pub(crate) mod crypto;

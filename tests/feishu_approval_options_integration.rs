@@ -148,6 +148,9 @@ fn feishu_settings(encryption_key: Option<&str>) -> Arc<FeishuSettings> {
         app_id: None,
         app_secret: None,
         pull_interval_seconds: 900,
+        // 告警收件人留空 = 不告警（默认值）；本测试不出站，告警路径不参与。
+        alert_recipients: Vec::new(),
+        alert_failure_threshold: 3,
     })
 }
 

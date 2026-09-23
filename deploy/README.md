@@ -67,7 +67,8 @@
    - `[email.password_reset].link_base_url` 在 `environment = "production"` 下**必须是 https**
      （http 只允许 development / test）。TLS 边缘没落地之前，这一项会挡住启动。
    - `[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` /
-     `app_id` / `app_secret` / `pull_interval_seconds`。它有 `deny_unknown_fields`，
+     `app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` /
+     `alert_failure_threshold`。它有 `deny_unknown_fields`，
      多写一个键就在反序列化阶段直接起不来。`enabled = true` 且 Token 非空会注册飞书
      **入站写入 API**——Token 是占位值时，那等于开放一个口令写在仓库里的写接口。
 
@@ -248,7 +249,7 @@ curl --noproxy '*' -I http://127.0.0.1:18654/
 
 | 症状 | 多半是 |
 |---|---|
-| 容器起来几秒就退出，日志含 `unknown field` | `config.cloud.toml` 里有 schema 不存在的键。`[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` / `app_id` / `app_secret` / `pull_interval_seconds`（`deny_unknown_fields`，多一个就起不来） |
+| 容器起来几秒就退出，日志含 `unknown field` | `config.cloud.toml` 里有 schema 不存在的键。`[feishu]` 段的合法键**只有** `enabled` / `management_api_token` / `encryption_key` / `app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` / `alert_failure_threshold`（`deny_unknown_fields`，多一个就起不来） |
 | 容器起来几秒就退出，日志含「必须使用 https」 | `[email.password_reset].link_base_url` 用了 http，而 `environment = "production"` 下只接受 https |
 | 容器起来几秒就退出，日志含「占位」或密钥长度 | 有未填的 `replace-with-*`，或密钥不足 32 字节 |
 | 日志里有 `Unknown database` | 库不存在。跑 `./deploy-blue-green.sh infra-up`（内含建库步骤），或手动：`docker exec -e MYSQL_PWD="$(cat .mysql-root-password)" yang-mysql mysql -uroot -e "CREATE DATABASE IF NOT EXISTS yang_system CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"` |

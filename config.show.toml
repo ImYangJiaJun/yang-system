@@ -398,3 +398,10 @@ management_api_token = "replace-with-feishu-management-token"
 # 出站拉取轮询间隔（秒）。契约是「最大可见延迟 = 一个轮询间隔」。
 # 有效范围 10..=86400；默认：900
 pull_interval_seconds = 900
+# 出站拉取连续失败达阈值时的告警收件人。默认空 = **不告警**。
+# 每一项都在启动期校验：空白项或非法地址会拒绝启动——一个空白项等于「以为配上了
+# 其实没配」，而那种错没有任何症状。
+# alert_recipients = ["ops@example.com"]
+# 连续失败多少轮之后开始告警；达阈值后每轮都发，直到有一轮成功把计数清零。
+# 有效范围 2..=1000；默认：3
+alert_failure_threshold = 3

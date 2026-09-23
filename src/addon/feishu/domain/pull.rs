@@ -804,6 +804,65 @@ async fn record_table_success(deps: &PullDeps<'_>, table_id: i64) -> Result<(), 
     }
 }
 
+/// 记录一次整表失败：`consecutive_failures` 自增、写 `last_error`，返回自增后的次数。
+///
+/// 与 [`record_table_success`] 成对：成功清零、失败自增，两个都落在**表级**行上
+/// （设计 §6.3——失败是整轮的，决策 D4）。分工不重叠：本函数只写失败那一组，
+/// 成功那一组由 [`pull_table`] 的收尾写，两边都写会让连续失败次数翻倍。
+///
+/// 返回自增后的计数，因为**告警阈值判的正是它**（T10）：调用方拿到它就不必再查一次库
+/// ——两次读之间可能有另一轮插进来。
+///
+/// 表级行已不存在（本轮进行中被删）时返回 `0` 且不写库：没有行可记账，也没有人可告警。
+#[allow(dead_code)] // 消费者是 T13 接进 worker 的表级轮询失败路径。
+pub(crate) async fn record_table_failure(
+    deps: &PullDeps<'_>,
+    table_id: i64,
+    message: &str,
+) -> Result<i64, BaseError> {
+    let current = deps
+        .context
+        .datasources()
+        .query()
+        .select_fields(&["consecutive_failures"])?
+        .where_eq("id", serde_json::json!(table_id))?
+        .optional()
+        .await?;
+    let Some(current) = current else {
+        tracing::warn!(table_id, "表级数据源已不存在，本轮失败状态无处记账");
+        return Ok(0);
+    };
+    let failures: i64 = current.optional("consecutive_failures")?.unwrap_or(0);
+    // 错误文案可能很长（含飞书原始响应），截断后再落库。
+    let message: String = message.chars().take(1000).collect();
+
+    let mut transaction = deps.database.transaction().await?;
+    let mut update = Record::new();
+    update.insert("consecutive_failures", serde_json::json!(failures + 1));
+    // 失败也是一次**尝试**：`last_pull_at` 是「最近拉取时间」，试过就该推进它。
+    // 不推进的话，一张一直拉不动的表在控制台上会显示成「从来没拉过」，而
+    // 「刚试过、又失败了」才是运维要的那条信息。
+    update.insert("last_pull_at", serde_json::json!(now_seconds()));
+    update.insert("last_error", serde_json::json!(message));
+    let result = deps
+        .context
+        .datasources()
+        .query()
+        .where_eq("id", serde_json::json!(table_id))?
+        .update_in_tx(&mut transaction, update)
+        .await;
+    match result {
+        Ok(_) => {
+            transaction.commit().await.map_err(BaseError::from)?;
+            Ok(failures + 1)
+        }
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
+}
+
 /// 按需把一轮收窄到**一条**源。
 ///
 /// `None` = 整轮（自动轮询走这条）；`Some(key)` = 只跑点名的那条（控制台的
