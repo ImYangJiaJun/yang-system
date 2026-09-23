@@ -103,7 +103,9 @@ fn build_application(
         authorization_port,
     )
     .context("构建 access Addon 失败")?;
-    let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> = vec![access.grant_resolver()];
+    // 直授权限与权限组权限是两个独立事实源，各由一个解析器负责，账号域只做合并。
+    let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> =
+        vec![access.grant_resolver(), access.group_grant_resolver()];
     let system_owner_claimer = account::no_system_owner_claimer();
     let demo =
         demo::build_addon(authorization_validator.clone()).context("构建 demo Addon 失败")?;

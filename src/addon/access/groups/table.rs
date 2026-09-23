@@ -35,7 +35,9 @@ pub(crate) const GROUP_RECORD_FIELDS: &[&str] = &[
 /// 构建权限组事实表的唯一 Schema 定义。
 pub(crate) fn groups_table_spec() -> Result<TableSpec, BaseError> {
     let fields = yang_base::fields! {
-        id => Key::new().title("ID"),
+        // 主键必须可筛选：受信 writer 的按 id 读取（`find_by_id_in_tx`）依赖它，
+        // 与 account/user、access/grants 两张表同例。
+        id => Key::new().title("ID").filterable(true),
         group_key => Str::new()
                 .title("组标识")
                 .require(true)
