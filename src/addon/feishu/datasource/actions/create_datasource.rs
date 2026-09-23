@@ -10,6 +10,7 @@ use yang_base::table::Record;
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::source_key::valid_source_key;
 use crate::addon::feishu::domain::token::hash_token;
 use crate::infrastructure::audit;
 
@@ -53,20 +54,6 @@ impl ParamInput for CreateDatasourceInput {
     fn params() -> Params {
         Params::new()
     }
-}
-
-/// 数据源标识的合法形态。
-///
-/// 它进 URL 路径段，因此限定为小写字母开头的 `[a-z0-9_]`——避免百分号编码、
-/// 大小写歧义与路径穿越。
-fn valid_source_key(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    first.is_ascii_lowercase()
-        && value.len() <= 64
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 /// 校验坐标列。

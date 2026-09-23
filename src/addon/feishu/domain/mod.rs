@@ -13,5 +13,6 @@ pub(crate) mod pagination;
 pub(crate) mod protocol;
 pub(crate) mod pull;
 pub(crate) mod repository;
+pub(crate) mod source_key;
 pub(crate) mod tenant_token;
 pub(crate) mod token;
