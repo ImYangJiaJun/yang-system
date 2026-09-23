@@ -114,6 +114,22 @@ describe("配置向导 · 视图选择器", () => {
   });
 });
 
+describe("配置向导 · 改 source_key 的代价（spec §9.3）", () => {
+  it("第 4 步写明「换 source_key 就得回审批后台改地址」", async () => {
+    // 只写「创建后不可修改」是**说少了**：源标识进的是审批控件的外部选项地址，
+    // 换一个就等于那条链路断在控件那一侧——而这一步正是唯一能改它的地方。
+    const user = userEvent.setup();
+    const client = stubClient();
+    await driveToFields(user, client);
+    await user.click(await screen.findByLabelText("费用类型/Fee Type*"));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(await screen.findByLabelText("源标识")).toBeInTheDocument();
+    expect(screen.getByText(/回审批后台/)).toBeInTheDocument();
+    expect(screen.getByText(/外部选项地址/)).toBeInTheDocument();
+  });
+});
+
 describe("配置向导 · 字段勾选与父列", () => {
   it("字段列表全部列出、不按类型过滤，但带出类型码", async () => {
     const user = userEvent.setup();

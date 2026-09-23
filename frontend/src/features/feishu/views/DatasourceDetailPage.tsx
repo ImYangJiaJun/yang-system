@@ -258,10 +258,12 @@ export default function DatasourceDetailPage() {
   }, [pull]);
 
   async function handlePullNow() {
-    if (datasource === null) return;
+    // 拉取的单位是**表**，所以定位用的是表级主键 `id`——不是路由里那个
+    // `source_key`（那是某一条字段绑定的标识，一条表级行有 N 个）。
+    if (datasource === null || datasource.id === null) return;
     setPull({ kind: "pending", baseline: datasource.lastPullAt });
     try {
-      await actions.pullNow(datasource.sourceKey);
+      await actions.pullNow(datasource.id);
     } catch (error) {
       // 后端的预检在**发信号之前**就会拒掉拉不动的源，并把原因带回来。
       setPull({
@@ -683,7 +685,11 @@ function SyncPanel({
   // 按钮只在**真的能触发**时才渲染：目录里有 `pull_now` 才说明服务端起了 worker。
   // 没有它却渲染一个按钮，点下去只会得到「UI 目录里找不到 Action」——那是把
   // 「这个部署没开导出站拉取」错报成一次功能故障。
+  //
+  // `id !== null` 也要一起要求：拉取按表级主键定位，缺它这个按钮点下去
+  // 什么也发不出去（旧形状的行没有 `id`）。
   const canTrigger =
+    item.id !== null &&
     hasOperation(catalog.data, DATASOURCE_OPERATION_IDS.pullNow) &&
     canWriteDatasources(catalog.data);
 

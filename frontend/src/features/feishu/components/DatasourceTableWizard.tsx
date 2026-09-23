@@ -17,8 +17,9 @@
  *
  * # 表单状态为什么是 `useState`
  *
- * 与 `DatasourceFormDialog` 同一取舍：每个字段都有自己的帮助文字与实时校验，
- * 走通用 schema 表单或引 react-hook-form 都只会多一层需要同步的状态。
+ * 与已退役的字段级表单对话框同一取舍（它随退役的字段级可写入口一起删掉了）：
+ * 每个字段都有自己的帮助文字与实时校验，走通用 schema 表单或引 react-hook-form
+ * 都只会多一层需要同步的状态。
  */
 
 import { useId, useMemo, useState } from "react";
@@ -83,6 +84,15 @@ const SOURCE_KEY_HELP =
 const SOURCE_KEY_ERROR =
   "标识形状不对：必须是小写字母开头的 [a-z0-9_]（小写字母开头，只含小写字母、数字与下划线），最长 64 字节。";
 
+/// 改 `source_key` 的真实代价（设计 §9.3）。
+///
+/// 「创建后不可修改」是一句**程序事实**；这一句才是**代价**：源标识进的是审批控件
+/// 的外部选项地址，换掉它，那边已经配好的控件会立刻取不到选项——所以换标识**必须**
+/// 回审批后台把那个地址一并改掉。只讲前一句，运维会以为「反正我记住新的就行」。
+const SOURCE_KEY_WARNING =
+  "改这一栏之前想清楚：源标识进的是那个审批控件的外部选项地址。换一个就等于换了地址——" +
+  "必须回审批后台把控件里的外部选项地址一并改掉，否则它会立刻取不到任何选项。";
+
 const THEAD = "text-xs text-muted-foreground";
 
 type Step = 1 | 2 | 3 | 4;
@@ -98,7 +108,13 @@ export type DatasourceTableWizardProps = {
   /// 关掉向导（用户点了取消、或关掉对话框）。
   onCancel: () => void;
   /// 创建成功。调用方通常据此回读列表并关掉向导。
-  onSubmitted?: (created: CreatedTable) => void;
+  ///
+  /// 一并交回那次**提交物**：回执里要写的是用户刚填的名称，而它是向导的内部状态，
+  /// 调用方从响应里读不到（响应只回 `datasource_id` 与逐字段凭据）。
+  onSubmitted?: (
+    created: CreatedTable,
+    submission: CreateTableSubmission,
+  ) => void;
   open?: boolean;
 };
 
@@ -252,7 +268,7 @@ export function DatasourceTableWizard({
     };
     try {
       const created = await client.createTable(submission);
-      onSubmitted?.(created);
+      onSubmitted?.(created, submission);
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -481,6 +497,9 @@ export function DatasourceTableWizard({
               </TableBody>
             </Table>
             <p className="text-xs text-muted-foreground">{SOURCE_KEY_HELP}</p>
+            <p className="rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
+              {SOURCE_KEY_WARNING}
+            </p>
           </div>
         ) : null}
 

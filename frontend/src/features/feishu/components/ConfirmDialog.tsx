@@ -1,5 +1,5 @@
 /**
- * 停用 / 启用 / 删除的二次确认。
+ * 删除（以及历史上停用 / 启用）的二次确认。
  *
  * 为什么自建而不用引擎的 `ConfirmActionDialog`：那个组件的确认按钮**写死了
  * destructive**。而「停用」是可逆的——它会立刻让飞书审批里正在用这个数据源的控件
@@ -8,8 +8,9 @@
  *
  * 删除的正文**逐字**用后端原文（原 `datasource/mod.rs` 的 `ActionConfirmation`，
  * 摘掉 view 投影后由前端持有同一份文案），不得改写、不得拼接。
- * 指认被删对象靠的是正文**之外**的那行 `source_key`——三段文案都只说后果、不说对象，
- * 而删除不可逆，看不见删的是哪一条就等于闭着眼睛按下去。
+ * 指认被删对象靠的是正文**之外**的那行 `target`（叫什么由调用方定：表级世界里
+ * 那是「名称（#主键）」，字段级世界里曾经是 `source_key`）——三段文案都只说后果、
+ * 不说对象，而删除不可逆，看不见删的是哪一条就等于闭着眼睛按下去。
  */
 
 import { Button } from "@/shared/ui/button";
@@ -68,9 +69,9 @@ function confirmCopy(kind: ConfirmKind): ConfirmCopy {
 export type ConfirmDialogProps = {
   open: boolean;
   kind: ConfirmKind;
-  /// 被操作的数据源的标识：三个动作都要展示，用来指认对象。
+  /// 被操作对象的标识：三个动作都要展示，用来指认对象。
   /// 它渲染在正文**之外**，所以正文仍然逐字是后端原文。
-  sourceKey?: string;
+  target?: string;
   pending?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -79,7 +80,7 @@ export type ConfirmDialogProps = {
 export function ConfirmDialog({
   open,
   kind,
-  sourceKey,
+  target,
   pending = false,
   onConfirm,
   onCancel,
@@ -98,8 +99,8 @@ export function ConfirmDialog({
           <DialogTitle>{copy.title}</DialogTitle>
           <DialogDescription>
             <span className="block">{copy.message}</span>
-            {sourceKey ? (
-              <span className="mt-2 block font-mono text-xs">{sourceKey}</span>
+            {target ? (
+              <span className="mt-2 block font-mono text-xs">{target}</span>
             ) : null}
           </DialogDescription>
         </DialogHeader>

@@ -11,6 +11,7 @@
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import type { DatasourceItem } from "../types";
+import { identityLabel } from "../types";
 import { DatasourceActionsMenu } from "./DatasourceActionsMenu";
 import { DatasourceBadgeRow } from "./StatusBadge";
 
@@ -24,8 +25,7 @@ export type DatasourceCardGridProps = {
   canWrite: boolean;
   pending?: boolean;
   onOpen: (item: DatasourceItem) => void;
-  onRename: (item: DatasourceItem) => void;
-  onToggleStatus: (item: DatasourceItem) => void;
+  onEdit: (item: DatasourceItem) => void;
   onDelete: (item: DatasourceItem) => void;
 };
 
@@ -34,8 +34,7 @@ export function DatasourceCardGrid({
   canWrite,
   pending = false,
   onOpen,
-  onRename,
-  onToggleStatus,
+  onEdit,
   onDelete,
 }: DatasourceCardGridProps) {
   if (pending) {
@@ -56,7 +55,7 @@ export function DatasourceCardGrid({
     <div className={GRID_CLASS}>
       {items.map((item) => (
         <article
-          key={item.sourceKey}
+          key={item.id ?? item.sourceKey}
           data-slot="datasource-card"
           className="flex cursor-pointer flex-col gap-2 rounded-xl border border-border bg-card p-4 transition-colors hover:bg-accent/40"
           onClick={() => onOpen(item)}
@@ -75,14 +74,13 @@ export function DatasourceCardGrid({
             {canWrite ? (
               <DatasourceActionsMenu
                 item={item}
-                onRename={onRename}
-                onToggleStatus={onToggleStatus}
+                onEdit={onEdit}
                 onDelete={onDelete}
               />
             ) : null}
           </div>
           <p className="truncate font-mono text-xs text-muted-foreground">
-            {item.sourceKey}
+            {identityLabel(item)}
           </p>
           <DatasourceBadgeRow
             status={item.status}

@@ -49,8 +49,7 @@ const TWO_ITEMS = [
 function gridHandlers() {
   return {
     onOpen: vi.fn(),
-    onRename: vi.fn(),
-    onToggleStatus: vi.fn(),
+    onEdit: vi.fn(),
     onDelete: vi.fn(),
   };
 }
@@ -140,7 +139,7 @@ describe("DatasourceLedger", () => {
     expect(screen.getByText("简体中文")).toBeInTheDocument();
   });
 
-  it("只有名称与标识两列可排序（其余列后端没声明 sortable）", () => {
+  it("只有名称一列可排序：「标识」在表级行上没有单一值，排序会打到不存在的列", () => {
     render(
       <DatasourceLedger
         items={TWO_ITEMS}
@@ -151,7 +150,7 @@ describe("DatasourceLedger", () => {
     );
     const sortable = screen.getAllByRole("button", { name: /^按.+排序$/ });
     expect(sortable.map((button) => button.getAttribute("aria-label"))).toEqual(
-      ["按名称排序", "按标识排序"],
+      ["按名称排序"],
     );
   });
 

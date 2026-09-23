@@ -156,6 +156,18 @@ export type DatasourceItem = {
   snapshotDigest: string | null;
 };
 
+/// 列表上用来指认一条表级数据源的那一行等宽文字。
+///
+/// 表级化之后一条行有 N 个 `source_key`，行上自己不再有标识，所以取**首个绑定**的
+/// 标识——它就是粘进审批控件地址里的那一段。一条绑定都没有时退回落单行上的
+/// `sourceKey`（旧形状），仍为空则用主键 `#id`：总得有个能指认的东西。
+export function identityLabel(item: DatasourceItem): string {
+  const first = item.fields[0]?.sourceKey;
+  if (first !== undefined && first !== "") return first;
+  if (item.sourceKey !== "") return item.sourceKey;
+  return item.id === null ? "—" : `#${item.id}`;
+}
+
 /// 一个数据源的坐标是否配齐。
 ///
 /// 表单与详情页都用它判断「这个 pull 源能不能拉起来」——**不据此禁用保存**：
@@ -212,7 +224,10 @@ export type SortDirection = "Asc" | "Desc";
 export type OrderByClause = { field: string; direction: SortDirection };
 
 /// 台账视图的列头可排序字段。其余列后端没有声明 sortable，画排序箭头就是在要求后端改动。
-export type DatasourceSortField = "title" | "source_key";
+///
+/// 只剩 `title`：表级行上唯一的另一个可排序列是 `id`，而它由 `withStableOrder`
+/// 恒作收尾键（不该再出现在列头里）。`source_key` 已经不在表级行上。
+export type DatasourceSortField = "title";
 
 export type DatasourceStatusFilter = "all" | "active" | "disabled";
 
@@ -663,6 +678,11 @@ export type DatasourceFieldBinding = {
   sourceKey: string;
   parentFieldId: string | null;
   enabled: boolean;
+  /// 这条绑定的凭据最近一次轮换时间（unix 秒）。**三态**，与
+  /// [`CredentialItem.tokenRotatedAt`] 同一语义——投影没给这一列时是
+  /// `undefined`（拿不到），服务端明确回 `null` 才是「从未轮换过」。
+  /// 折平这两者会把「不知道」画成「从未轮换」，那是一句可查证的假话。
+  tokenRotatedAt?: number | null;
 };
 
 /// 体检报告（`health_check`，后端 `MissingField` / `HealthReport` 的投影）。
@@ -708,9 +728,10 @@ export function credentialItems(item: {
       fieldId: binding.fieldId,
       fieldName: binding.fieldName,
       sourceKey: binding.sourceKey,
-      // **拿不到**而不是「从未轮换」：列表端点的绑定投影里没有 `token_rotated_at`，
-      // 而「不知道」与「确实没换过」在界面上必须长得不一样。
-      tokenRotatedAt: undefined,
+      // 原样透传三态：数字 = 那次轮换的时间、`null` = 从未轮换、
+      // `undefined` = 这一列没拿到。**不能写死**——写死的后果是那一列
+      // 永远显示「—」，用户看不到刚换过的凭据是什么时候换的。
+      tokenRotatedAt: binding.tokenRotatedAt,
       enabled: binding.enabled,
     }));
 }

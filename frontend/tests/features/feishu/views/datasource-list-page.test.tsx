@@ -21,7 +21,14 @@ const LIST_PATH = "/api/v1/feishu/datasources/query";
 function makeRows(count: number): Array<Record<string, unknown>> {
   return Array.from({ length: count }, (_, index) => {
     const n = String(index + 1).padStart(2, "0");
-    return datasourceWire({ source_key: `ds_${n}`, title: `数据源 ${n}` });
+    return datasourceWire({
+      id: index + 1,
+      source_key: `ds_${n}`,
+      title: `数据源 ${n}`,
+      // 至少一条启用中的绑定：服务端的 `update_datasource_table` 要求
+      // `fields` 非空，一条绑定都没有的行在界面上也不该放行「编辑」。
+      fields: [{ field_id: `fld${n}`, source_key: `ds_${n}`, enabled: true }],
+    });
   });
 }
 
@@ -36,6 +43,14 @@ function orderedByTitle(orderBy: unknown): boolean {
   return (
     Array.isArray(orderBy) &&
     (orderBy[0] as { field?: string } | undefined)?.field === "title"
+  );
+}
+
+/// 首段是「名称降序」——点一次「按名称排序」之后就落到这里（默认是升序）。
+function orderedByTitleDesc(orderBy: unknown): boolean {
+  return (
+    orderedByTitle(orderBy) &&
+    (orderBy as Array<{ direction?: string }>)[0]?.direction === "Desc"
   );
 }
 
@@ -224,9 +239,11 @@ describe("飞书数据源列表页 · 权限门控", () => {
     const bodies = bodiesOf(calls, LIST_PATH);
     expect(bodies.length).toBeGreaterThan(0);
     for (const body of bodies) {
-      // 不发排序就是无序分页：翻页会重复或漏行
+      // 不发排序就是无序分页：翻页会重复或漏行。收尾键必须是表级行上真实
+      // 存在的 `id`——`source_key` 已经不在表级行上，发它会被 FieldNotFound 拒掉。
       expect(body?.order_by).toEqual([
-        { field: "source_key", direction: "Asc" },
+        { field: "title", direction: "Asc" },
+        { field: "id", direction: "Asc" },
       ]);
     }
   });
@@ -278,79 +295,216 @@ describe("飞书数据源列表页 · 双视图", () => {
   });
 });
 
-describe("飞书数据源列表页 · 创建后的预检回执", () => {
-  async function createFirstDatasource() {
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "添加数据源" }));
-    const dialog = await screen.findByRole("dialog");
-    await user.type(within(dialog).getByLabelText("数据源标识"), "dept_sales");
-    await user.type(within(dialog).getByLabelText("名称"), "部门");
-    await user.type(within(dialog).getByLabelText("接口 Token"), "t-1");
-    await user.click(
-      within(dialog).getByRole("button", { name: "创建数据源" }),
-    );
-    return user;
+describe("飞书数据源列表页 · 建源入口是表级向导", () => {
+  const APP_TOKEN = "ZoCWb82JQaCCiAspCqbcUvlsnwg";
+
+  /// 向导要用的三个元数据端点 + 创建端点。
+  ///
+  /// `created` 就是 H4 之前**根本不可能发生**的那一步：服务端只剩表级建源端点，
+  /// 而界面上那个入口当时指向一个已经被删掉的字段级 Action。
+  function wizardStub(overrides: Record<string, unknown> = {}) {
+    return {
+      bitableTables: () => ({ tables: [{ table_id: "tblA", name: "台账" }] }),
+      bitableViews: () => ({
+        views: [{ view_id: "vew1", view_name: "全部记录", view_type: "grid" }],
+      }),
+      bitableFields: () => ({
+        fields: [
+          { field_id: "fldA", field_name: "费用类型/Fee Type*", type: 3 },
+        ],
+      }),
+      createTable: () => ({
+        datasource_id: 7,
+        credentials: [
+          { field_id: "fldA", source_key: "dept_sales", token: "t-1" },
+        ],
+      }),
+      ...overrides,
+    };
   }
 
-  it("预检通过：回执带真实标识与「粘回飞书审批后台」+ 复制入口", async () => {
-    stubFeishuApi({
-      // 回执的有效性以「这一行还在列表里」为准，所以桩里也要有它。
-      datasourceList: () =>
-        listPage([datasourceWire({ source_key: "dept_sales", title: "部门" })]),
+  /// 走完四步向导：名称 + Base Token → 拉表 → 选表 → 选视图 → 勾字段 → 创建。
+  async function createViaWizard(
+    user: ReturnType<typeof userEvent.setup>,
+    title = "部门",
+  ) {
+    // 页头与工具栏各有一个「添加数据源」，两个开的是同一个向导。
+    const [add] = await screen.findAllByRole("button", {
+      name: "添加数据源",
+    });
+    await user.click(add!);
+    await user.type(await screen.findByLabelText("名称"), title);
+    await user.type(screen.getByLabelText(/Base Token/), APP_TOKEN);
+    await user.click(screen.getByRole("button", { name: "拉取数据表" }));
+
+    await user.click(await screen.findByRole("combobox", { name: "数据表" }));
+    await user.click(await screen.findByRole("option", { name: "台账" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    await user.click(await screen.findByRole("combobox", { name: "视图" }));
+    await user.click(await screen.findByRole("option", { name: /全部记录/ }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    await user.click(await screen.findByLabelText("费用类型/Fee Type*"));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(await screen.findByRole("button", { name: "创建数据源" }));
+  }
+
+  it("工具栏的「添加数据源」打开的是配置向导，不再是字段级对话框", async () => {
+    const user = userEvent.setup();
+    stubFeishuApi({ datasourceList: () => listPage([datasourceWire()]) });
+    renderList();
+
+    const [add] = await screen.findAllByRole("button", {
+      name: "添加数据源",
+    });
+    await user.click(add!);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("配置表级数据源")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/Base Token/)).toBeInTheDocument();
+    // 字段级对话框那三个字段一个都不该在
+    expect(within(dialog).queryByLabelText("数据源标识")).toBeNull();
+    expect(within(dialog).queryByLabelText("接口 Token")).toBeNull();
+  });
+
+  it("空态那一处的「添加数据源」同样打开向导", async () => {
+    // 一个数据源都没有时整屏归四步建档——那里的入口过去也指向字段级建源。
+    const user = userEvent.setup();
+    stubFeishuApi({ datasourceList: () => listPage([]) });
+    renderList();
+
+    expect(
+      await screen.findByRole("heading", { name: "还没有数据源" }),
+    ).toBeInTheDocument();
+    const buttons = screen.getAllByRole("button", { name: "添加数据源" });
+    await user.click(buttons[buttons.length - 1]!);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("配置表级数据源")).toBeInTheDocument();
+  });
+
+  it("向导提交后回读列表，并用服务端回的第一条凭据跑一次预检", async () => {
+    // 预检必须排在创建**之后**：数据源行得先存在，`approval_options` 才能按
+    // source_key 查库并比对哈希。而这是唯一能验证一次凭据的时刻。
+    const user = userEvent.setup();
+    const calls = stubFeishuApi({
+      ...wizardStub({
+        datasourceList: () =>
+          listPage([
+            datasourceWire({
+              id: 7,
+              source_key: "dept_sales",
+              title: "部门",
+              fields: [
+                { field_id: "fldA", source_key: "dept_sales", enabled: true },
+              ],
+            }),
+          ]),
+      }),
       approvalOptions: () => ({ result: { options: [{ id: "a" }] } }),
     });
     renderList();
-    await createFirstDatasource();
+    await createViaWizard(user);
 
     expect(
       await screen.findByText(/把这一段粘回飞书审批后台/),
     ).toBeInTheDocument();
     expect(screen.getByText(/拉到了 1 个选项/)).toBeInTheDocument();
-    // 回执里那一段可复制的标识（列表行里也有同一个标识，所以按元素定位）
     expect(
       screen.getByText("dept_sales", { selector: "code" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "复制" })).toBeInTheDocument();
-    // 创建成功后对话框关闭
+    // 创建成功后向导关闭
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // 建源打的是**表级**端点，请求体是向导那套坐标 + 勾选集合
+    const create = calls.find(
+      (call) =>
+        call.method === "POST" &&
+        call.url.endsWith("/api/v1/feishu/datasources/table"),
+    );
+    expect(create?.body).toMatchObject({
+      title: "部门",
+      ingest_mode: "pull",
+      bitable_base_token: APP_TOKEN,
+      bitable_table_id: "tblA",
+      bitable_view_id: "vew1",
+      fields: [{ field_id: "fldA", source_key: "flda", parent_field_id: null }],
+    });
   });
 
-  it("预检失败：说清数据源已创建、给出可归因码，并能就地重填 Token", async () => {
+  it("服务端拒绝创建时，后端原文回显在向导里且不出现预检回执", async () => {
+    const user = userEvent.setup();
+    stubFeishuApi(
+      wizardStub({
+        datasourceList: () => listPage([]),
+        createTable: () =>
+          jsonResponse({ code: 400001, message: "数据源标识已存在" }, 400),
+      }),
+    );
+    renderList();
+    await createViaWizard(user);
+
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent(
+        "数据源标识已存在",
+      ),
+    );
+    expect(screen.queryByText(/把这一段粘回飞书审批后台/)).toBeNull();
+  });
+
+  it("预检失败：说清数据源已创建、给出可归因码", async () => {
     const user = userEvent.setup();
     stubFeishuApi({
-      datasourceList: () =>
-        listPage([datasourceWire({ source_key: "dept_sales", title: "部门" })]),
+      ...wizardStub({
+        datasourceList: () =>
+          listPage([
+            datasourceWire({
+              id: 7,
+              source_key: "dept_sales",
+              title: "部门",
+              fields: [
+                { field_id: "fldA", source_key: "dept_sales", enabled: true },
+              ],
+            }),
+          ]),
+      }),
       approvalOptions: () =>
         jsonResponse({ code: 40102, msg: "token 校验失败", data: null }),
     });
     renderList();
-    await createFirstDatasource();
+    await createViaWizard(user);
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("数据源已创建");
     expect(alert).toHaveTextContent("token 校验失败");
     expect(alert).toHaveTextContent("40102");
     expect(screen.getByText(/重填一次 Token/)).toBeInTheDocument();
-    // 预检失败不阻塞创建结果：对话框已关，数据源已经就位
+    // 预检失败不阻塞创建结果：向导已关，数据源已经就位
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-
-    await user.click(screen.getByRole("button", { name: "重新填写 Token" }));
-    const renameDialog = await screen.findByRole("dialog");
-    expect(within(renameDialog).getByText("dept_sales")).toBeInTheDocument();
-    expect(
-      within(renameDialog).getByLabelText("轮换 Token（可留空）"),
-    ).toBeInTheDocument();
   });
 
-  it("删掉那个数据源后回执当场清掉：它的「重新填写 Token」会送进一个不存在的标识", async () => {
+  it("删掉那个数据源后回执当场清掉：它的「重新填写 Token」会送进一个不存在的绑定", async () => {
     const user = userEvent.setup();
+    const rows = [
+      datasourceWire({
+        id: 7,
+        source_key: "dept_sales",
+        title: "部门",
+        fields: [{ field_id: "fldA", source_key: "dept_sales", enabled: true }],
+      }),
+    ];
     stubFeishuApi({
-      datasourceList: () =>
-        listPage([datasourceWire({ source_key: "dept_sales", title: "部门" })]),
+      ...wizardStub({
+        datasourceList: () => listPage(rows),
+        deleteTable: () => {
+          rows.length = 0;
+          return { deleted_fields: 1, disabled_options: 0 };
+        },
+      }),
       approvalOptions: () => ({ result: { options: [{ id: "a" }] } }),
     });
     renderList();
-    await createFirstDatasource();
+    await createViaWizard(user);
 
     expect(
       await screen.findByText(/把这一段粘回飞书审批后台/),
@@ -359,36 +513,45 @@ describe("飞书数据源列表页 · 创建后的预检回执", () => {
     await user.click(screen.getByRole("button", { name: "部门 的操作" }));
     await user.click(await screen.findByRole("menuitem", { name: "删除" }));
     const confirm = await screen.findByRole("dialog");
-    // 删除不可逆：确认框里必须看得见删的是哪一条
-    expect(within(confirm).getByText("dept_sales")).toBeInTheDocument();
+    // 删除不可逆：确认框里必须看得见删的是哪一条（名称 + 主键）
+    expect(within(confirm).getByText(/部门/)).toBeInTheDocument();
     await user.click(within(confirm).getByRole("button", { name: "删除" }));
 
-    // 不能再挂着一句「数据源已创建」
     await waitFor(() =>
       expect(screen.queryByText(/把这一段粘回飞书审批后台/)).toBeNull(),
     );
   });
 
-  it("回执所指的数据源已不在结果集里（别处删的）：回执同样不再渲染", async () => {
+  it("回执所指的绑定已不在结果集里（别处删的）：回执同样不再渲染", async () => {
     const user = userEvent.setup();
     // 创建那一刻它还在（挂载 + 创建后回读各一次），随后别处删掉了它。
     let listCalls = 0;
     stubFeishuApi({
-      // 只数**列表页自己**的读取。父级候选那一份带 page_size=100（与页面的分页无关），
-      // 它不影响这里要断言的「回读之后结果集里还有没有那条」。
-      datasourceList: (body) => {
-        if (body.page_size === 100) return listPage([]);
-        listCalls += 1;
-        return listPage(
-          listCalls <= 2
-            ? [datasourceWire({ source_key: "dept_sales", title: "部门" })]
-            : [],
-        );
-      },
+      ...wizardStub({
+        datasourceList: () => {
+          listCalls += 1;
+          return listCalls <= 2
+            ? listPage([
+                datasourceWire({
+                  id: 7,
+                  source_key: "dept_sales",
+                  title: "部门",
+                  fields: [
+                    {
+                      field_id: "fldA",
+                      source_key: "dept_sales",
+                      enabled: true,
+                    },
+                  ],
+                }),
+              ])
+            : listPage([]);
+        },
+      }),
       approvalOptions: () => ({ result: { options: [{ id: "a" }] } }),
     });
     renderList();
-    await createFirstDatasource();
+    await createViaWizard(user);
 
     expect(
       await screen.findByText(/把这一段粘回飞书审批后台/),
@@ -401,175 +564,134 @@ describe("飞书数据源列表页 · 创建后的预检回执", () => {
       expect(screen.queryByText(/把这一段粘回飞书审批后台/)).toBeNull(),
     );
   });
-
-  it("服务端拒绝创建时，后端原文回显在对话框里且不出现预检回执", async () => {
-    stubFeishuApi({
-      datasourceList: () => listPage([]),
-      createDatasource: () =>
-        jsonResponse({ code: 400001, message: "数据源标识已存在" }, 400),
-    });
-    renderList();
-    await createFirstDatasource();
-
-    const dialog = await screen.findByRole("dialog");
-    await waitFor(() =>
-      expect(within(dialog).getByRole("alert")).toHaveTextContent(
-        "数据源标识已存在",
-      ),
-    );
-    expect(screen.queryByText(/把这一段粘回飞书审批后台/)).toBeNull();
-  });
 });
 
-describe("飞书数据源列表页 · 编辑入口能改服务端开关", () => {
-  it("默认语言选错后必须有一条修复路径：现值来自那一行，改动随 PUT 发出", async () => {
+/// 编辑走**表级入参**：字段级那个按 `source_key` 定位的更新入口已经退役。
+describe("飞书数据源列表页 · 编辑按表级主键提交", () => {
+  const TWO_BINDINGS = [
+    {
+      field_id: "fldA",
+      field_name: "费用类型",
+      source_key: "dept_sales",
+      parent_field_id: null,
+      enabled: true,
+    },
+    {
+      field_id: "fldB",
+      field_name: "已停用的列",
+      source_key: "dept_old",
+      parent_field_id: "fldA",
+      enabled: false,
+    },
+  ];
+
+  async function openEditor(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      await screen.findByRole("button", { name: "部门 的操作" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "编辑" }));
+    return screen.findByRole("dialog");
+  }
+
+  it("改名称：PUT 打到表级端点，带主键与**启用中**的绑定集合", async () => {
     const user = userEvent.setup();
     const calls = stubFeishuApi({
       datasourceList: () =>
         listPage([
-          datasourceWire({
-            source_key: "dept_sales",
-            title: "部门",
-            encrypt_enabled: true,
-            default_locale: "zh_cn",
-          }),
+          datasourceWire({ id: 7, title: "部门", fields: TWO_BINDINGS }),
         ]),
     });
     renderList();
 
-    await user.click(
-      await screen.findByRole("button", { name: "部门 的操作" }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "重命名" }));
-
-    const dialog = await screen.findByRole("dialog");
-    // 初值来自那一行，而不是控件的缺省值
-    expect(
-      within(dialog).getByRole("checkbox", { name: /加密返回/ }),
-    ).toBeChecked();
-    expect(
-      within(dialog).getByRole("combobox", { name: "默认语言" }),
-    ).toHaveTextContent("简体中文");
-
-    await user.click(
-      within(dialog).getByRole("combobox", { name: "默认语言" }),
-    );
-    await user.click(await screen.findByRole("option", { name: "日本語" }));
+    const dialog = await openEditor(user);
+    // 初值来自那一行
+    expect(within(dialog).getByLabelText("名称")).toHaveValue("部门");
+    await user.clear(within(dialog).getByLabelText("名称"));
+    await user.type(within(dialog).getByLabelText("名称"), "部门（新）");
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
       const put = calls.find((call) => call.method === "PUT");
-      expect(put?.body).toMatchObject({
-        source_key: "dept_sales",
-        title: "部门",
-        encrypt_enabled: true,
-        default_locale: "ja_jp",
+      expect(put?.url).toBe("/api/v1/feishu/datasources/table");
+      expect(put?.body).toEqual({
+        datasource_id: 7,
+        title: "部门（新）",
+        // 只送启用中的那一条：服务端对集合里出现的已有绑定会写 `enabled = true`，
+        // 把停用的那条塞回去等于悄悄把它重新启用。
+        fields: [
+          { field_id: "fldA", source_key: "dept_sales", parent_field_id: null },
+        ],
       });
     });
   });
 
-  it("行里的 default_locale 是取值域外的值（zh-CN）：留空让用户显式改，不静默替换", async () => {
-    // 后端对它零校验。把认不出的值静默换成 zh_cn 再写回去，等于把
-    // 「所有语言下控件都取不到文案」的元凶悄悄改掉——所以这一项留空，由用户显式选。
+  it("服务端拒绝时把原文留在对话框里", async () => {
     const user = userEvent.setup();
-    const calls = stubFeishuApi({
+    stubFeishuApi({
       datasourceList: () =>
         listPage([
-          datasourceWire({
-            source_key: "dept_sales",
-            title: "部门",
-            default_locale: "zh-CN",
-          }),
+          datasourceWire({ id: 7, title: "部门", fields: TWO_BINDINGS }),
         ]),
+      updateTable: () =>
+        jsonResponse({ code: 40401, message: "数据源不存在" }, 404),
     });
     renderList();
 
-    await user.click(
-      await screen.findByRole("button", { name: "部门 的操作" }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "重命名" }));
-
-    const dialog = await screen.findByRole("dialog");
-    // 修复入口要在，而且要说清当前值为什么不合法
-    expect(
-      within(dialog).getByRole("combobox", { name: "默认语言" }),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByText(/「zh-CN」/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/不在取值域内/)).toBeInTheDocument();
-
-    // 不动它直接保存：不发 default_locale（省略 = 保持原值）
+    const dialog = await openEditor(user);
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => {
-      const put = calls.find((call) => call.method === "PUT");
-      expect(put?.body).not.toHaveProperty("default_locale");
-    });
+
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("dialog")).getByRole("alert"),
+      ).toHaveTextContent("数据源不存在"),
+    );
   });
 
-  it("显式选一项：取值域外的值就被改成合法值（这就是修复入口）", async () => {
+  it("没有启用中的绑定时不放行保存，并说明为什么", async () => {
+    // 服务端的 `fields` 是必填且至少一条，此刻提交必然被拒——按钮不该放行。
     const user = userEvent.setup();
-    const calls = stubFeishuApi({
+    stubFeishuApi({
       datasourceList: () =>
         listPage([
           datasourceWire({
-            source_key: "dept_sales",
+            id: 7,
             title: "部门",
-            default_locale: "zh-CN",
+            fields: [{ ...TWO_BINDINGS[1] }],
           }),
         ]),
     });
     renderList();
 
-    await user.click(
-      await screen.findByRole("button", { name: "部门 的操作" }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "重命名" }));
-    const dialog = await screen.findByRole("dialog");
-
-    await user.click(
-      within(dialog).getByRole("combobox", { name: "默认语言" }),
-    );
-    await user.click(await screen.findByRole("option", { name: "简体中文" }));
-    await user.click(within(dialog).getByRole("button", { name: "保存" }));
-
-    await waitFor(() => {
-      const put = calls.find((call) => call.method === "PUT");
-      expect(put?.body).toMatchObject({ default_locale: "zh_cn" });
-    });
+    const dialog = await openEditor(user);
+    expect(within(dialog).getByText(/至少带一条绑定/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "保存" })).toBeDisabled();
   });
 });
-
-/// 结果集收缩之后，「当前页空了」与「真的没有匹配」是两件事。这一组用例盯的就是
-/// 页面有没有把前者说成后者，以及页码有没有归位。
 describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () => {
-  it("第 2 页唯一一行被停用后：不出现「没有匹配的数据源」，页码归位到有效页", async () => {
+  it("第 2 页唯一一行被删除后：不出现「没有匹配的数据源」，页码归位到有效页", async () => {
     const user = userEvent.setup();
     const rows = makeRows(11);
     const calls = stubFeishuApi({
       datasourceList: (body) => pageRows(rows, body),
-      updateDatasource: (body) => {
-        const row = rows.find(
-          (candidate) => candidate.source_key === body.source_key,
-        );
-        if (row) row.status = body.status;
-        return { affected: 1 };
+      // 删除按**表级主键**定位（字段级那个按 source_key 定位的入口已退役）。
+      deleteTable: (body) => {
+        const index = rows.findIndex((row) => row.id === body.datasource_id);
+        if (index >= 0) rows.splice(index, 1);
+        return { deleted_fields: 1, disabled_options: 0 };
       },
     });
     renderList();
 
-    // 只看「启用」：11 条 → 第 1 页 10 行、第 2 页 1 行
-    await screen.findByText("数据源 01");
-    await user.click(screen.getByRole("button", { name: "启用" }));
     expect(await screen.findByText("数据源 01")).toBeInTheDocument();
     expect(screen.getByText(/共 11 个 · 第 1 \/ 2 页/)).toBeInTheDocument();
-
     await user.click(screen.getByRole("button", { name: "下一页" }));
     expect(await screen.findByText("数据源 11")).toBeInTheDocument();
 
     const before = calls.length;
-    // 停用它：这一行离开「启用」这个结果集，第 2 页随之不复存在
+    // 删掉它：第 2 页随之不复存在
     await user.click(screen.getByRole("button", { name: "数据源 11 的操作" }));
-    await user.click(await screen.findByRole("menuitem", { name: "停用" }));
-    await user.click(await screen.findByRole("button", { name: "停用" }));
+    await user.click(await screen.findByRole("menuitem", { name: "删除" }));
+    await user.click(await screen.findByRole("button", { name: "删除" }));
 
     // 结果集缩到 10：页码必须归位；「这一页空了」不等于「没有匹配」
     expect(
@@ -591,12 +713,12 @@ describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () 
     const rows = makeRows(11);
     stubFeishuApi({
       datasourceList: (body) => pageRows(rows, body),
-      updateDatasource: (body) => {
+      updateTable: (body) => {
         const row = rows.find(
-          (candidate) => candidate.source_key === body.source_key,
+          (candidate) => candidate.id === body.datasource_id,
         );
         if (row && typeof body.title === "string") row.title = body.title;
-        return { affected: 1 };
+        return { inserted: 0, updated: 1, disabled: 0 };
       },
     });
     renderList();
@@ -609,7 +731,7 @@ describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () 
 
     // 把它改成不再命中搜索词的名字
     await user.click(screen.getByRole("button", { name: "数据源 11 的操作" }));
-    await user.click(await screen.findByRole("menuitem", { name: "重命名" }));
+    await user.click(await screen.findByRole("menuitem", { name: "编辑" }));
     const dialog = await screen.findByRole("dialog");
     const titleInput = within(dialog).getByLabelText("名称");
     await user.clear(titleInput);
@@ -694,15 +816,16 @@ describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () 
     expect(screen.getByLabelText("搜索数据源")).toBeInTheDocument();
   });
 
-  it("切回「全部」的那一帧拿的是 placeholderData：不判空、不闪四步建档", async () => {
+  it("切到新键那一帧拿的是 placeholderData：不判空、不闪四步建档", async () => {
+    // `keepPreviousData` 让切查询键的那一帧先拿**上一个键**的 items/total 顶上，
+    // 而 `isPending` / `isError` 都还是 false——此时拿它判空会得出与事实相反的结论。
     const user = userEvent.setup();
     const rows = makeRows(11);
     const calls = stubFeishuApi({
       datasourceList: (body) => {
-        // 「已停用」这一支：后端确实一条都没有
-        if (asWhereValue(body.where) !== null) return listPage([]);
-        // 「全部 + 名称排序 + 第 1 页」这一跳故意不返回：停在 placeholderData 那一帧上观察
-        if (body.page === 1 && orderedByTitle(body.order_by)) {
+        // 「全部 + 名称降序 + 第 1 页」这一跳故意不返回：停在 placeholderData
+        // 那一帧上观察（它是唯一一个从没被取过的键）。
+        if (body.page === 1 && orderedByTitleDesc(body.order_by)) {
           return new Promise<never>(() => {});
         }
         return pageRows(rows, body);
@@ -710,7 +833,7 @@ describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () 
     });
     renderList();
 
-    // 先在第 2 页点一次列头排序：「全部 + 名称排序 + 第 1 页」从此是个没取过的键
+    // 第 1 页 → 第 2 页 → 点一次列头（改成名称降序，仍在第 2 页）→ 上一页
     expect(await screen.findByText("数据源 01")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "下一页" }));
     expect(await screen.findByText("数据源 11")).toBeInTheDocument();
@@ -718,29 +841,17 @@ describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () 
     await waitFor(() =>
       expect(
         bodiesOf(calls, LIST_PATH).some(
-          (body) => body?.page === 2 && orderedByTitle(body?.order_by),
+          (body) => body?.page === 2 && orderedByTitleDesc(body?.order_by),
         ),
       ).toBe(true),
     );
 
-    // 切到「已停用」：这次是真的没有匹配，页面就该这么说
-    await user.click(screen.getByRole("button", { name: "已停用" }));
-    expect(
-      await screen.findByRole("heading", { name: "没有匹配的数据源" }),
-    ).toBeInTheDocument();
-
-    // 切回「全部」：新键的请求发出去了但还没有结果，此刻 items 仍是上一把的空数组
-    await user.click(screen.getByRole("button", { name: "全部" }));
+    const before = countCalls(calls, LIST_PATH);
+    await user.click(screen.getByRole("button", { name: "上一页" }));
     await waitFor(() =>
-      expect(
-        bodiesOf(calls, LIST_PATH).some(
-          (body) =>
-            asWhereValue(body?.where) === null &&
-            body?.page === 1 &&
-            orderedByTitle(body?.order_by),
-        ),
-      ).toBe(true),
+      expect(countCalls(calls, LIST_PATH)).toBeGreaterThan(before),
     );
+
     // placeholderData 不属于当前查询键，它证明不了任何空态
     expect(screen.queryByRole("heading", { name: "还没有数据源" })).toBeNull();
     expect(
@@ -748,6 +859,8 @@ describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () 
     ).toBeNull();
     // 工具栏不能被藏掉（旧实现会在这一帧把整屏换成四步建档）
     expect(screen.getByLabelText("搜索数据源")).toBeInTheDocument();
+    // 上一把的那一页照旧画着，不是闪空的骨架
+    expect(screen.getByText("数据源 11")).toBeInTheDocument();
   });
 
   it("新键在 placeholder 之后落定为 total=0：空态照样给四步建档，不会停在上一把的行上", async () => {
@@ -757,7 +870,7 @@ describe("飞书数据源列表页 · 结果集收缩后的页码与结论", () 
     const user = userEvent.setup();
     stubFeishuApi({
       datasourceList: (body) =>
-        orderedByTitle(body.order_by)
+        orderedByTitleDesc(body.order_by)
           ? listPage([]) // 新键：服务端确实一条都没有
           : listPage([datasourceWire()]), // 旧键：有一行，正好当 placeholder
     });

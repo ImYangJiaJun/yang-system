@@ -1684,141 +1684,10 @@
         "x-yang-response-kind": "json"
       }
     },
-    "/api/v1/feishu/datasources": {
-      "delete": {
-        "description": "删除飞书数据源并停用其下全部选项",
-        "operationId": "feishu.datasource.delete_datasource",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "additionalProperties": false,
-                "description": "删除数据源的输入契约。",
-                "properties": {
-                  "source_key": {
-                    "description": "目标数据源。",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "source_key"
-                ],
-                "title": "DeleteDatasourceInput",
-                "type": "object"
-              }
-            }
-          },
-          "required": false
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "code": {
-                      "const": 0,
-                      "type": "integer"
-                    },
-                    "data": {
-                      "$schema": "http://json-schema.org/draft-07/schema#",
-                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
-                      "properties": {
-                        "code": {
-                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
-                          "format": "int32",
-                          "type": "integer"
-                        },
-                        "data": {
-                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
-                        },
-                        "message": {
-                          "description": "响应消息\n\n描述操作结果的文本信息",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "code",
-                        "message"
-                      ],
-                      "title": "ApiResponse",
-                      "type": "object"
-                    },
-                    "message": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "code",
-                    "message",
-                    "data"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "成功"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "请求参数错误"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "未认证"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "权限不足"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "服务器内部错误"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "summary": "删除数据源",
-        "tags": [],
-        "x-permission-mode": "all",
-        "x-permissions": [
-          "feishu.datasource.write"
-        ],
-        "x-public": false,
-        "x-yang-response-kind": "json"
-      },
+    "/api/v1/feishu/datasources/bitable-fields": {
       "post": {
-        "description": "创建一个飞书外部选项数据源",
-        "operationId": "feishu.datasource.create_datasource",
+        "description": "列出一张数据表的全部字段（含类型码），供配置向导勾选",
+        "operationId": "feishu.datasource.list_bitable_fields",
         "parameters": [],
         "requestBody": {
           "content": {
@@ -1826,91 +1695,22 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
-                "description": "新建数据源的输入契约。",
+                "description": "输入契约。两个坐标都进 URL 路径段。",
                 "properties": {
-                  "bitable_base_token": {
-                    "default": null,
-                    "description": "多维表格 app_token（URL 里 `feishu.cn/base/<这段>`）；`pull` 时必填。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "bitable_field_name": {
-                    "default": null,
-                    "description": "取数列的**精确字段名**（接口要名字不要 field_id）；`pull` 时必填。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "bitable_table_id": {
-                    "default": null,
-                    "description": "数据表 ID；`pull` 时必填。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "bitable_view_id": {
-                    "default": null,
-                    "description": "视图 ID；省略表示取全表。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "default_locale": {
-                    "default": null,
-                    "description": "默认语言。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "encrypt_enabled": {
-                    "default": null,
-                    "description": "是否加密返回；需要服务端配置 `feishu.encryption_key`。",
-                    "type": [
-                      "boolean",
-                      "null"
-                    ]
-                  },
-                  "ingest_mode": {
-                    "default": null,
-                    "description": "取数方式：`push`（多维表格工作流推送，默认）/ `pull`（服务端定时拉取）。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "linkage_mapping": {
-                    "default": null,
-                    "description": "级联映射（JSON 文本）。声明本数据源是某个父数据源的子集时给出。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "source_key": {
-                    "description": "数据源标识；进外部选项接口的 URL，必须唯一且稳定。",
+                  "app_token": {
+                    "description": "多维表格 app_token。",
                     "type": "string"
                   },
-                  "title": {
-                    "description": "展示名。",
-                    "type": "string"
-                  },
-                  "token": {
-                    "description": "与飞书审批后台填写的 Token 一致；**只以摘要入库**。",
+                  "table_id": {
+                    "description": "数据表 ID。",
                     "type": "string"
                   }
                 },
                 "required": [
-                  "source_key",
-                  "title",
-                  "token"
+                  "app_token",
+                  "table_id"
                 ],
-                "title": "CreateDatasourceInput",
+                "title": "ListBitableFieldsInput",
                 "type": "object"
               }
             }
@@ -2012,7 +1812,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "新建数据源",
+        "summary": "列出多维表格字段",
         "tags": [],
         "x-permission-mode": "all",
         "x-permissions": [
@@ -2020,10 +1820,12 @@
         ],
         "x-public": false,
         "x-yang-response-kind": "json"
-      },
-      "put": {
-        "description": "更新飞书数据源的名称、Token、加密开关或状态",
-        "operationId": "feishu.datasource.update_datasource",
+      }
+    },
+    "/api/v1/feishu/datasources/bitable-tables": {
+      "post": {
+        "description": "用自建应用凭证列出某个多维表格 App 下的数据表，供配置向导选择",
+        "operationId": "feishu.datasource.list_bitable_tables",
         "parameters": [],
         "requestBody": {
           "content": {
@@ -2031,105 +1833,17 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
-                "description": "更新数据源的输入契约。",
+                "description": "列出数据表的输入契约。",
                 "properties": {
-                  "bitable_base_token": {
-                    "default": null,
-                    "description": "多维表格 app_token。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "bitable_field_name": {
-                    "default": null,
-                    "description": "取数列的**精确字段名**（接口要名字不要 field_id）。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "bitable_table_id": {
-                    "default": null,
-                    "description": "数据表 ID。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "bitable_view_id": {
-                    "default": null,
-                    "description": "视图 ID。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "default_locale": {
-                    "default": null,
-                    "description": "默认语言。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "encrypt_enabled": {
-                    "default": null,
-                    "description": "是否加密返回。",
-                    "type": [
-                      "boolean",
-                      "null"
-                    ]
-                  },
-                  "ingest_mode": {
-                    "default": null,
-                    "description": "取数方式：`push` / `pull`；省略即保持原值。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "linkage_mapping": {
-                    "default": null,
-                    "description": "级联映射（JSON 文本）。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "source_key": {
-                    "description": "目标数据源。",
+                  "app_token": {
+                    "description": "多维表格 app_token（`feishu.cn/base/<这一段>`）。",
                     "type": "string"
-                  },
-                  "status": {
-                    "default": null,
-                    "description": "状态：`active` / `disabled`。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "title": {
-                    "default": null,
-                    "description": "新名称。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "token": {
-                    "default": null,
-                    "description": "新 Token；省略表示不轮换。",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
                   }
                 },
                 "required": [
-                  "source_key"
+                  "app_token"
                 ],
-                "title": "UpdateDatasourceInput",
+                "title": "ListBitableTablesInput",
                 "type": "object"
               }
             }
@@ -2231,7 +1945,145 @@
             "bearerAuth": []
           }
         ],
-        "summary": "更新数据源",
+        "summary": "列出多维表格数据表",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/datasources/bitable-views": {
+      "post": {
+        "description": "列出一张数据表下的视图，供配置向导选择（视图决定拉取哪些行）",
+        "operationId": "feishu.datasource.list_bitable_views",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "输入契约。两个坐标都进 URL 路径段。",
+                "properties": {
+                  "app_token": {
+                    "description": "多维表格 app_token。",
+                    "type": "string"
+                  },
+                  "table_id": {
+                    "description": "数据表 ID。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "app_token",
+                  "table_id"
+                ],
+                "title": "ListBitableViewsInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "列出多维表格视图",
         "tags": [],
         "x-permission-mode": "all",
         "x-permissions": [
@@ -2800,6 +2652,947 @@
         "x-permission-mode": "all",
         "x-permissions": [
           "feishu.datasource.read"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/datasources/reveal-token": {
+      "post": {
+        "description": "取出该字段绑定上封存的 Token 明文（纯读，不改变任何状态；每次追加审计）",
+        "operationId": "feishu.datasource.reveal_token",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "回显输入。\n\n`source_key` 走 **body**：与 `update_datasource_table` / `delete_datasource_table` 一致（本模块的标识一律走 body，路由不带路径段）。",
+                "properties": {
+                  "source_key": {
+                    "description": "目标字段绑定的 `source_key`（进 URL 的数据源标识，全局唯一）。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source_key"
+                ],
+                "title": "RevealTokenInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "回显凭据",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.secret"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/datasources/rotate-token": {
+      "post": {
+        "description": "重新签发 Token（旧值立即失效，控件需回审批后台改）；每次追加审计",
+        "operationId": "feishu.datasource.rotate_token",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "轮换输入。\n\n`source_key` 走 **body**（与回显一致）。",
+                "properties": {
+                  "source_key": {
+                    "description": "目标字段绑定的 `source_key`。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source_key"
+                ],
+                "title": "RotateTokenInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "轮换凭据",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/datasources/table": {
+      "delete": {
+        "description": "删除数据源、它的全部字段绑定；其选项行只停用不删除",
+        "operationId": "feishu.datasource.delete_datasource_table",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "删除表级数据源的输入契约。\n\n`datasource_id` 走 **body**：与 `delete_datasource` / `update_datasource` 一致。",
+                "properties": {
+                  "datasource_id": {
+                    "description": "目标数据源的 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "datasource_id"
+                ],
+                "title": "DeleteTableInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "删除表级数据源",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      },
+      "post": {
+        "description": "一次写入表级行与 N 条字段绑定（含系统生成的凭据），同一事务",
+        "operationId": "feishu.datasource.create_datasource_table",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "FieldBindingInput": {
+                    "additionalProperties": false,
+                    "description": "一条字段绑定的输入。",
+                    "properties": {
+                      "field_id": {
+                        "description": "多维表格字段 ID。**身份就是它**，不是字段名——改名不能断链。",
+                        "type": "string"
+                      },
+                      "parent_field_id": {
+                        "default": null,
+                        "description": "同表内的父列 `field_id`；无父给 `null` 或省略。",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "source_key": {
+                        "description": "进 URL 路径段的数据源标识；全局唯一、创建后不可改。",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "field_id",
+                      "source_key"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "description": "创建表级数据源的输入契约。",
+                "properties": {
+                  "bitable_base_token": {
+                    "default": null,
+                    "description": "多维表格 app_token；`pull` 时必填。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_table_id": {
+                    "default": null,
+                    "description": "数据表 ID；`pull` 时必填。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_view_id": {
+                    "default": null,
+                    "description": "视图 ID；省略表示取全表。**它只决定拉取哪些行**，不影响能勾哪些字段。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "fields": {
+                    "description": "勾选的字段。至少一条。",
+                    "items": {
+                      "$ref": "#/definitions/FieldBindingInput"
+                    },
+                    "type": "array"
+                  },
+                  "ingest_mode": {
+                    "default": null,
+                    "description": "取数方式：`push`（默认）/ `pull`。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "description": "展示名。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "fields",
+                  "title"
+                ],
+                "title": "CreateTableInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "新建表级数据源",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      },
+      "put": {
+        "description": "整份替换字段绑定集合；已有绑定保留其 source_key 与凭据",
+        "operationId": "feishu.datasource.update_datasource_table",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "FieldBindingInput": {
+                    "additionalProperties": false,
+                    "description": "一条字段绑定的输入。",
+                    "properties": {
+                      "field_id": {
+                        "description": "多维表格字段 ID。**身份就是它**，不是字段名——改名不能断链。",
+                        "type": "string"
+                      },
+                      "parent_field_id": {
+                        "default": null,
+                        "description": "同表内的父列 `field_id`；无父给 `null` 或省略。",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "source_key": {
+                        "description": "进 URL 路径段的数据源标识；全局唯一、创建后不可改。",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "field_id",
+                      "source_key"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "description": "更新表级数据源的输入契约。\n\n`datasource_id` 走 **body** 而不是路径段：本模块所有既有 Action （`update_datasource` / `delete_datasource` / `pull_now`）都用 body 传标识， 且 `fields` 是复杂结构，与 `params!` 的路径参数无法共用一套声明。",
+                "properties": {
+                  "bitable_base_token": {
+                    "default": null,
+                    "description": "多维表格 app_token；省略即不改。**给空串表示清空该坐标。**",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_table_id": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "bitable_view_id": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "datasource_id": {
+                    "description": "目标数据源的 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "fields": {
+                    "description": "期望的字段绑定集合（整份替换）。",
+                    "items": {
+                      "$ref": "#/definitions/FieldBindingInput"
+                    },
+                    "type": "array"
+                  },
+                  "ingest_mode": {
+                    "default": null,
+                    "description": "取数方式；省略即不改。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "default": null,
+                    "description": "展示名；省略即不改。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "datasource_id",
+                  "fields"
+                ],
+                "title": "UpdateTableInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "更新表级数据源",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/datasources/table/health": {
+      "post": {
+        "description": "把勾选的字段与表实际字段比对，列出不可自愈的问题（改名不算问题）",
+        "operationId": "feishu.datasource.health_check",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "体检输入。\n\n`datasource_id` 走 **body**：与 `update_datasource_table` / `delete_datasource_table` 一致（`datasource_id` 是本模块标识实体的既有口径）。",
+                "properties": {
+                  "datasource_id": {
+                    "description": "目标数据源的 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "datasource_id"
+                ],
+                "title": "HealthCheckInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "数据源体检",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
         ],
         "x-public": false,
         "x-yang-response-kind": "json"

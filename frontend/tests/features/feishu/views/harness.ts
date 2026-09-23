@@ -48,9 +48,14 @@ export type FeishuApiStubOptions = {
   /// 各端点的响应。返回 Response 时原样使用（用来构造错误态）。
   datasourceList?: Handler;
   optionList?: Handler;
-  createDatasource?: Handler;
-  updateDatasource?: Handler;
-  deleteDatasource?: Handler;
+  /// 建表级数据源的元数据三个端点（T3/T4）与创建端点（T5）。
+  bitableTables?: Handler;
+  bitableViews?: Handler;
+  bitableFields?: Handler;
+  createTable?: Handler;
+  /// 表级更新（T6）与删除（T6）。
+  updateTable?: Handler;
+  deleteTable?: Handler;
   approvalOptions?: Handler;
   /// 「立即拉取」的受理结果。后端在**发信号之前**就会拒掉拉不动的源，
   /// 所以错误态也走这里（返回 `Response`）。
@@ -130,21 +135,40 @@ function catalogFor(options: FeishuApiStubOptions) {
     );
   }
   if (options.datasourceWrite ?? true) {
+    // **表级**的三个写端点 + 建源向导要用的三个元数据端点。
+    // 字段级的 `create_datasource` / `update_datasource` / `delete_datasource`
+    // 已在 T13 退役——目录里再也不会出现它们，所以替身里也一个都不留：
+    // 留着就等于把「界面上那个入口到底发得出去没有」这件事测反。
     actions.push(
       action(
-        "feishu.datasource.create_datasource",
+        "feishu.datasource.create_datasource_table",
         "POST",
-        "/api/v1/feishu/datasources",
+        "/api/v1/feishu/datasources/table",
       ),
       action(
-        "feishu.datasource.update_datasource",
+        "feishu.datasource.update_datasource_table",
         "PUT",
-        "/api/v1/feishu/datasources",
+        "/api/v1/feishu/datasources/table",
       ),
       action(
-        "feishu.datasource.delete_datasource",
+        "feishu.datasource.delete_datasource_table",
         "DELETE",
-        "/api/v1/feishu/datasources",
+        "/api/v1/feishu/datasources/table",
+      ),
+      action(
+        "feishu.datasource.list_bitable_tables",
+        "POST",
+        "/api/v1/feishu/datasources/bitable-tables",
+      ),
+      action(
+        "feishu.datasource.list_bitable_views",
+        "POST",
+        "/api/v1/feishu/datasources/bitable-views",
+      ),
+      action(
+        "feishu.datasource.list_bitable_fields",
+        "POST",
+        "/api/v1/feishu/datasources/bitable-fields",
       ),
       // 服务端只在 can_pull()（出站凭证齐备）时才注册这一个。目录里没有它，
       // 就等于这个部署没开导出站拉取——页面据此不渲染按钮。
@@ -237,6 +261,8 @@ export function datasourceWire(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
+    // 表级主键：表级化之后它就是这一行的身份（`update` / `delete` / 体检都按它定位）。
+    id: 1,
     source_key: "dept_sales",
     title: "部门",
     encrypt_enabled: false,
@@ -320,18 +346,33 @@ export function stubFeishuApi(
       if (url.endsWith("/api/v1/feishu/options/query")) {
         return respond(options.optionList, payload, emptyPage());
       }
-      if (url.endsWith("/api/v1/feishu/datasources")) {
+      if (url.endsWith("/api/v1/feishu/datasources/bitable-tables")) {
+        return respond(options.bitableTables, payload, { tables: [] });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/bitable-views")) {
+        return respond(options.bitableViews, payload, { views: [] });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/bitable-fields")) {
+        return respond(options.bitableFields, payload, { fields: [] });
+      }
+      // 建 / 改 / 删共用 `/datasources/table` 一条路径，按 method 分流。
+      if (url.endsWith("/api/v1/feishu/datasources/table")) {
         if (method === "POST") {
-          return respond(options.createDatasource, payload, {
-            source_key: payload.source_key,
+          return respond(options.createTable, payload, {
+            datasource_id: 7,
+            credentials: [],
           });
         }
         if (method === "PUT") {
-          return respond(options.updateDatasource, payload, { affected: 1 });
+          return respond(options.updateTable, payload, {
+            inserted: 0,
+            updated: payload.fields ? 1 : 0,
+            disabled: 0,
+          });
         }
         if (method === "DELETE") {
-          return respond(options.deleteDatasource, payload, {
-            deleted: 1,
+          return respond(options.deleteTable, payload, {
+            deleted_fields: 1,
             disabled_options: 0,
           });
         }

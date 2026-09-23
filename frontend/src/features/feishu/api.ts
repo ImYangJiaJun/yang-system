@@ -40,12 +40,8 @@ import type {
   DatasourceFieldBinding,
   DatasourceItem,
   DatasourceListQuery,
-  DatasourceStatus,
   DatasourceStatusFilter,
-  DefaultLocale,
   HealthReport,
-  IngestMode,
-  LinkageFormValue,
   ListPage,
   OptionItem,
   OptionListQuery,
@@ -54,21 +50,26 @@ import type {
   TableWizardField,
   TokenPrecheckResult,
 } from "./types";
-import {
-  approvalCodeHint,
-  approvalCodeVerdict,
-  buildLinkageMapping,
-} from "./types";
+import { approvalCodeHint, approvalCodeVerdict } from "./types";
 
 /// 控制台要用的数据源 Action。
+///
+/// **每一粒都必须是服务端真实注册过的 `operation_id`**（逐个对着
+/// `src/addon/feishu/datasource/actions/*.rs` 的 `action_name!(...)` 核过）。
+/// 写一个不存在的 id 的后果不是报错而是**静默**：`hasOperation` 恒为 false，
+/// 于是整个写侧（「添加数据源」与行内菜单）永远不渲染——界面上看不出任何异常。
+///
+/// 三个写操作（建 / 改 / 删）都是**表级**的：字段级的 `create_datasource` /
+/// `update_datasource` / `delete_datasource` 已在「退役字段级可写入口」那一次重构里删掉，
+/// 服务端目录里再也不会出现它们。
 ///
 /// `pullNow` / `pullSchedule` 只在服务端 `can_pull()` 为真（出站凭证齐备）时才注册，
 /// 所以目录里查不到它们是**正常状态**，不是权限问题——页面要按「没有」处理。
 export const DATASOURCE_OPERATION_IDS = {
   list: "feishu.datasource.list_datasources",
-  create: "feishu.datasource.create_datasource",
-  update: "feishu.datasource.update_datasource",
-  remove: "feishu.datasource.delete_datasource",
+  create: "feishu.datasource.create_datasource_table",
+  update: "feishu.datasource.update_datasource_table",
+  remove: "feishu.datasource.delete_datasource_table",
   pullNow: "feishu.datasource.pull_now",
   pullSchedule: "feishu.datasource.pull_schedule",
 } as const;
@@ -299,7 +300,27 @@ function parseFieldBinding(
     parentFieldId: asNullableString(raw.parent_field_id),
     // `enabled` 缺失时按启用处理：那是存量行（列默认 true）的语义
     enabled: raw.enabled !== false,
+    tokenRotatedAt: rotatedAtOf(raw),
   };
+}
+
+/// 绑定投影里的 `token_rotated_at`，**三态**读法。
+///
+/// - 键不在：`undefined` = 拿不到（服务端还没投影这一列）；
+/// - 键是 `null`：明确知道从未轮换过；
+/// - 数字：那次轮换的时间。
+///
+/// 不能折成「有值 / 没有值」两态：把「拿不到」画成「从未轮换」是一句可查证的
+/// 假话，而这张清单是运维判断「该控件配的凭据是不是刚换过」的唯一依据。
+function rotatedAtOf(raw: Record<string, unknown>): number | null | undefined {
+  if (!("token_rotated_at" in raw)) return undefined;
+  const value = raw.token_rotated_at;
+  if (value === null) return null;
+  // 键在、值却不是数字也不是 null：形状认不出来，按「拿不到」处理，
+  // 不要用一个解析失败的残值去冒充时间。
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function parseDatasourceItem(
@@ -402,121 +423,57 @@ export async function listOptions(
   return parsePage(result.data, parseOptionItem);
 }
 
-/// 坐标与取数方式。两者一起提交：单独给坐标而不说 `ingest_mode` 没有意义，
-/// 而 `ingest_mode = "pull"` 又必须有坐标（后端会拒）。
-export type DatasourceCoordinatesInput = {
-  ingestMode: IngestMode;
-  bitableBaseToken: string;
-  bitableTableId: string;
-  bitableViewId: string;
-  bitableFieldName: string;
-  /// 级联声明是**结构化**的；拼成后端要的 `linkage_mapping` JSON 文本这一步
-  /// 落在本模块（wire 边界），界面层不碰 JSON。
-  cascade: LinkageFormValue | null;
+/// 一条字段绑定在**写**方向的形状（后端 `FieldBindingInput`）。
+export type FieldBindingInput = {
+  fieldId: string;
+  sourceKey: string;
+  parentFieldId: string | null;
 };
 
-/// 把坐标折成 wire 形状：**空串一律不发**。
+/// 表级行的绑定投影 → 写的形状（**只送启用中的那几条**）。
 ///
-/// 建源时后端对「传了空串」与「没传」同样处理（都落 NULL），但少发几个键能让
-/// 请求体更接近「用户实际填了什么」，排查时更好读。
-function coordinateBody(
-  coordinates: DatasourceCoordinatesInput | undefined,
-): Record<string, unknown> {
-  if (coordinates === undefined) return {};
-  const body: Record<string, unknown> = { ingest_mode: coordinates.ingestMode };
-  const pairs: Array<[string, string]> = [
-    ["bitable_base_token", coordinates.bitableBaseToken],
-    ["bitable_table_id", coordinates.bitableTableId],
-    ["bitable_view_id", coordinates.bitableViewId],
-    ["bitable_field_name", coordinates.bitableFieldName],
-    ["linkage_mapping", buildLinkageMapping(coordinates.cascade)],
-  ];
-  for (const [key, value] of pairs) {
-    if (value.trim() !== "") body[key] = value.trim();
-  }
-  return body;
+/// 服务端对「出现在集合里」的已有绑定会顺手写上 `enabled = true`：把一条已经停用的
+/// 绑定塞回去，等于悄悄把它重新启用——那不是用户在「改名称」时想做的事。
+/// 而集合里没有的行只会被停用（幂等），所以省略它们是安全的。
+export function enabledBindingInputs(item: {
+  fields: DatasourceFieldBinding[];
+}): FieldBindingInput[] {
+  return item.fields
+    .filter((binding) => binding.enabled)
+    .map((binding) => ({
+      fieldId: binding.fieldId,
+      sourceKey: binding.sourceKey,
+      parentFieldId: binding.parentFieldId,
+    }));
 }
 
-export type CreateDatasourceInput = {
-  sourceKey: string;
-  title: string;
-  token: string;
-  encryptEnabled: boolean;
-  defaultLocale: DefaultLocale;
-  /// 省略表示按后端默认（`push`）。
-  coordinates?: DatasourceCoordinatesInput;
-};
-
-/// 新建。成功只回 `{source_key}`，不回整条记录——所以调用方必须回读列表。
-export async function createDatasource(
-  input: CreateDatasourceInput,
-  deps: FeishuInvokeDeps,
-  signal?: AbortSignal,
-): Promise<{ sourceKey: string }> {
-  const result = await invokeFeishuAction(
-    deps,
-    DATASOURCE_OPERATION_IDS.create,
-    {
-      source_key: input.sourceKey,
-      title: input.title,
-      token: input.token,
-      encrypt_enabled: input.encryptEnabled,
-      default_locale: input.defaultLocale,
-      ...coordinateBody(input.coordinates),
-    },
-    signal,
-  );
-  const sourceKey = asString(asRecord(result.data)?.source_key);
-  if (!sourceKey) {
-    throw new Error("创建数据源的响应里没有 source_key，无法确认结果");
-  }
-  return { sourceKey };
-}
-
-export type UpdateDatasourceInput = {
-  sourceKey: string;
+export type UpdateTableInput = {
+  datasourceId: number;
+  /// 省略即不改。**空串会被后端拒**（名称必须在 1..=100 字符）。
   title?: string;
-  /// 省略 = 不轮换 Token。传空串会被后端拒绝（`Token 不能为空`）。
-  token?: string;
-  encryptEnabled?: boolean;
-  defaultLocale?: DefaultLocale;
-  status?: DatasourceStatus;
-  /// 坐标。**与其它字段不同：这里传空串是有意义的——表示清空该坐标。**
-  /// 所以不做 `coordinateBody` 那套「空串不发」的折叠，逐字段原样发出。
-  coordinates?: DatasourceCoordinatesInput;
+  /// 期望的字段绑定集合（**整份替换**）。后端要求至少一条，且集合里没有的
+  /// 已有绑定会被停用——所以这里送的恒是「当前启用中的那一份」（见
+  /// [`enabledBindingInputs`]）。
+  fields: FieldBindingInput[];
 };
 
-/// 更新。`source_key` 之外**全部可选，省略即保持原值**——所以这里逐字段判 undefined，
-/// 绝不能把缺省字段写成空串或 null 发出去。
-export async function updateDatasource(
-  input: UpdateDatasourceInput,
+/// 更新一条表级数据源。回执三个计数回答「这次改动动了哪些绑定」。
+///
+/// 入参是**表级主键**：字段级那个按 `source_key` 定位的更新入口已经退役。
+export async function updateDatasourceTable(
+  input: UpdateTableInput,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
-): Promise<{ affected: number }> {
-  const body: Record<string, unknown> = { source_key: input.sourceKey };
+): Promise<{ inserted: number; updated: number; disabled: number }> {
+  const body: Record<string, unknown> = {
+    datasource_id: input.datasourceId,
+    fields: input.fields.map((field) => ({
+      field_id: field.fieldId,
+      source_key: field.sourceKey,
+      parent_field_id: field.parentFieldId,
+    })),
+  };
   if (input.title !== undefined) body.title = input.title;
-  // 留空 = 不改：空白 Token 一律按省略处理，避免踩到后端的「Token 不能为空」
-  if (input.token !== undefined && input.token.trim() !== "") {
-    body.token = input.token;
-  }
-  if (input.encryptEnabled !== undefined) {
-    body.encrypt_enabled = input.encryptEnabled;
-  }
-  if (input.defaultLocale !== undefined) {
-    body.default_locale = input.defaultLocale;
-  }
-  if (input.status !== undefined) body.status = input.status;
-  // 坐标：传空串表示清空（后端语义如此），所以这里**不能**按「空即省略」处理——
-  // 那会让「想清掉一个填错的 base_token」变得做不到。
-  if (input.coordinates !== undefined) {
-    body.ingest_mode = input.coordinates.ingestMode;
-    body.bitable_base_token = input.coordinates.bitableBaseToken.trim();
-    body.bitable_table_id = input.coordinates.bitableTableId.trim();
-    body.bitable_view_id = input.coordinates.bitableViewId.trim();
-    body.bitable_field_name = input.coordinates.bitableFieldName.trim();
-    // 取消勾选级联 = 传空串清空（后端语义如此）
-    body.linkage_mapping = buildLinkageMapping(input.coordinates.cascade);
-  }
 
   const result = await invokeFeishuAction(
     deps,
@@ -524,24 +481,30 @@ export async function updateDatasource(
     body,
     signal,
   );
-  return { affected: asNumber(asRecord(result.data)?.affected, 0) };
+  const data = asRecord(result.data);
+  return {
+    inserted: asNumber(data?.inserted, 0),
+    updated: asNumber(data?.updated, 0),
+    disabled: asNumber(data?.disabled, 0),
+  };
 }
 
-/// 删除。后端会在同一事务里连带停用其下全部选项，`disabled_options` 就是那个计数。
-export async function deleteDatasource(
-  sourceKey: string,
+/// 删除一条表级数据源：连带删掉它的全部字段绑定，其下选项只停用不删除
+/// （`disabled_options` 就是那个计数）。
+export async function deleteDatasourceTable(
+  datasourceId: number,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
-): Promise<{ deleted: number; disabledOptions: number }> {
+): Promise<{ deletedFields: number; disabledOptions: number }> {
   const result = await invokeFeishuAction(
     deps,
     DATASOURCE_OPERATION_IDS.remove,
-    { source_key: sourceKey },
+    { datasource_id: datasourceId },
     signal,
   );
   const data = asRecord(result.data);
   return {
-    deleted: asNumber(data?.deleted, 0),
+    deletedFields: asNumber(data?.deleted_fields, 0),
     disabledOptions: asNumber(data?.disabled_options, 0),
   };
 }
@@ -873,15 +836,19 @@ export function useCredentialClient(): CredentialClient {
 ///
 /// 后端刻意不在这里同步拉：一条大表可能超过 HTTP 请求超时（`[http].request_timeout_seconds`，
 /// 默认 30 秒），届时客户端看到报错而服务端还在跑，两边对不上。
+///
+/// 入参是**表级主键** `datasource_id`：拉取的单位是一张表（设计 §6.2），
+/// 按 `source_key` 点名一条字段没有意义。后端 `PullNowInput` 是
+/// `deny_unknown_fields` + 必填 `datasource_id`，所以这里多发一个键就会被拒。
 export async function pullNow(
-  sourceKey: string,
+  datasourceId: number,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
 ): Promise<void> {
   await invokeFeishuAction(
     deps,
     DATASOURCE_OPERATION_IDS.pullNow,
-    { source_key: sourceKey },
+    { datasource_id: datasourceId },
     signal,
   );
 }
@@ -1078,26 +1045,27 @@ export function useOptionList(
 }
 
 /// 页面用的一组「已绑定目录与会话」的写操作入口。
-/// 变更函数本身不缓存失效——`update` 只回 `{affected}`，页面提交后必须回读列表。
+/// 变更函数本身不缓存失效——`update` 只回三个计数，页面提交后必须回读列表。
+///
+/// **建源不在这一组里**：它是一次写两张表的事务，界面走的是配置向导
+/// （`useTableWizardClient`），不是一个「填完就提交」的对话框。
 export type FeishuActions = {
   canRead: boolean;
   canWrite: boolean;
   canReadOptions: boolean;
-  createDatasource: (
-    input: CreateDatasourceInput,
-  ) => Promise<{ sourceKey: string }>;
-  updateDatasource: (
-    input: UpdateDatasourceInput,
-  ) => Promise<{ affected: number }>;
-  deleteDatasource: (
-    sourceKey: string,
-  ) => Promise<{ deleted: number; disabledOptions: number }>;
+  updateDatasourceTable: (
+    input: UpdateTableInput,
+  ) => Promise<{ inserted: number; updated: number; disabled: number }>;
+  deleteDatasourceTable: (
+    datasourceId: number,
+  ) => Promise<{ deletedFields: number; disabledOptions: number }>;
   precheckToken: (
     sourceKey: string,
     token: string,
   ) => Promise<TokenPrecheckResult>;
   /// 请求后台立刻拉一次。只回「已受理」，结果靠轮询数据源行。
-  pullNow: (sourceKey: string) => Promise<void>;
+  /// 入参是**表级主键**（后端 `pull_now` 的单位就是一张表）。
+  pullNow: (datasourceId: number) => Promise<void>;
 };
 
 export function useFeishuActions(): FeishuActions {
@@ -1110,16 +1078,12 @@ export function useFeishuActions(): FeishuActions {
     [catalogData, session],
   );
 
-  const create = useCallback(
-    (input: CreateDatasourceInput) => createDatasource(input, deps),
-    [deps],
-  );
   const update = useCallback(
-    (input: UpdateDatasourceInput) => updateDatasource(input, deps),
+    (input: UpdateTableInput) => updateDatasourceTable(input, deps),
     [deps],
   );
   const remove = useCallback(
-    (sourceKey: string) => deleteDatasource(sourceKey, deps),
+    (datasourceId: number) => deleteDatasourceTable(datasourceId, deps),
     [deps],
   );
   const precheck = useCallback(
@@ -1128,7 +1092,7 @@ export function useFeishuActions(): FeishuActions {
     [deps],
   );
   const trigger = useCallback(
-    (sourceKey: string) => pullNow(sourceKey, deps),
+    (datasourceId: number) => pullNow(datasourceId, deps),
     [deps],
   );
 
@@ -1136,9 +1100,8 @@ export function useFeishuActions(): FeishuActions {
     canRead: canReadDatasources(catalogData),
     canWrite: canWriteDatasources(catalogData),
     canReadOptions: canReadOptions(catalogData),
-    createDatasource: create,
-    updateDatasource: update,
-    deleteDatasource: remove,
+    updateDatasourceTable: update,
+    deleteDatasourceTable: remove,
     precheckToken: precheck,
     pullNow: trigger,
   };

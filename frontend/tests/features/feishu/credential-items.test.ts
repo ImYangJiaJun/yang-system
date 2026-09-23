@@ -37,9 +37,25 @@ describe("credentialItems", () => {
   });
 
   it("轮换时间是「拿不到」（undefined），不是「从未轮换」（null）", () => {
-    // 列表端点的绑定投影里没有 token_rotated_at，所以这里只能是不知情。
+    // 绑定上没有这一列（服务端没投影，或还是旧形状）时只能是不知情。
     const items = credentialItems({ fields: [binding()] });
     expect(items[0]?.tokenRotatedAt).toBeUndefined();
+  });
+
+  it("绑定带回了轮换时间就原样带到清单行上（那一列才不再永远是「—」）", () => {
+    // `token_rotated_at` 是绑定投影上的一个键。写死 undefined 的后果是
+    // 界面上那一列**永远**显示「—」，用户看不到刚换过的凭据是什么时候换的。
+    const items = credentialItems({
+      fields: [binding({ tokenRotatedAt: 1758000000 })],
+    });
+    expect(items[0]?.tokenRotatedAt).toBe(1758000000);
+  });
+
+  it("服务端明确回 null（从未轮换）与「拿不到」是两回事，中途不许被折平", () => {
+    const items = credentialItems({
+      fields: [binding({ tokenRotatedAt: null })],
+    });
+    expect(items[0]?.tokenRotatedAt).toBeNull();
   });
 
   it("没有绑定就是空清单，不是报错", () => {

@@ -1,8 +1,8 @@
 /**
  * 台账视图（默认视图）：上百条量级下的查找、排序与横向对比。
  *
- * 只有「名称」与「标识」两列画排序箭头——后端只有它们声明了 `sortable`，
- * 给别的列画箭头等于在要求后端改动。行高受 `--density-cell-y` 驱动
+ * 只有「名称」一列画排序箭头：表级行上可排的另一个列是主键 `id`，而它恒作
+ * `withStableOrder` 的收尾键；「标识」在表级行上根本没有（它在字段绑定那一层）。行高受 `--density-cell-y` 驱动
  * （页头的「密度」菜单实时切换），所以这里**不写死 `py-3`**。
  *
  * 空结果集不在这里表达，理由同卡片视图。
@@ -21,6 +21,7 @@ import {
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import type { DatasourceItem, OrderByClause } from "../types";
+import { identityLabel } from "../types";
 import { DatasourceActionsMenu } from "./DatasourceActionsMenu";
 import {
   DatasourceStatusBadge,
@@ -72,8 +73,7 @@ export type DatasourceLedgerProps = {
   pending?: boolean;
   onOpen: (item: DatasourceItem) => void;
   onSort: (field: string) => void;
-  onRename: (item: DatasourceItem) => void;
-  onToggleStatus: (item: DatasourceItem) => void;
+  onEdit: (item: DatasourceItem) => void;
   onDelete: (item: DatasourceItem) => void;
 };
 
@@ -84,12 +84,10 @@ export function DatasourceLedger({
   pending = false,
   onOpen,
   onSort,
-  onRename,
-  onToggleStatus,
+  onEdit,
   onDelete,
 }: DatasourceLedgerProps) {
   const nameSorted = orderBy.find((clause) => clause.field === "title");
-  const keySorted = orderBy.find((clause) => clause.field === "source_key");
 
   // 空结果集不在这里表达（要么是四步指引，要么是「没有匹配的数据源」），
   // 更不该渲染一张只有表头的空表。
@@ -116,23 +114,10 @@ export function DatasourceLedger({
               onSort={onSort}
             />
           </TableHead>
-          <TableHead
-            style={DENSITY_STYLE}
-            aria-sort={
-              keySorted
-                ? keySorted.direction === "Asc"
-                  ? "ascending"
-                  : "descending"
-                : "none"
-            }
-          >
-            <SortableHeader
-              field="source_key"
-              label="标识"
-              orderBy={orderBy}
-              onSort={onSort}
-            />
-          </TableHead>
+          {/* 标识列**不放排序箭头**：表级行上没有单一的 `source_key`（它在字段绑定
+              那一层，一条行有 N 个），而后端对不存在的排序列是 FieldNotFound——
+              点一下会把整个列表请求打成 400。 */}
+          <TableHead style={DENSITY_STYLE}>标识（首个字段）</TableHead>
           <TableHead style={DENSITY_STYLE}>状态</TableHead>
           <TableHead style={DENSITY_STYLE}>加密返回</TableHead>
           <TableHead style={DENSITY_STYLE}>默认语言</TableHead>
@@ -152,7 +137,7 @@ export function DatasourceLedger({
             ))
           : items.map((item) => (
               <TableRow
-                key={item.sourceKey}
+                key={item.id ?? item.sourceKey}
                 data-slot="datasource-ledger-row"
                 className="group cursor-pointer"
                 onClick={() => onOpen(item)}
@@ -170,7 +155,7 @@ export function DatasourceLedger({
                   </button>
                 </TableCell>
                 <TableCell style={DENSITY_STYLE} className="font-mono text-xs">
-                  {item.sourceKey}
+                  {identityLabel(item)}
                 </TableCell>
                 <TableCell style={DENSITY_STYLE}>
                   <DatasourceStatusBadge status={item.status} />
@@ -191,8 +176,7 @@ export function DatasourceLedger({
                     <span className="inline-flex opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                       <DatasourceActionsMenu
                         item={item}
-                        onRename={onRename}
-                        onToggleStatus={onToggleStatus}
+                        onEdit={onEdit}
                         onDelete={onDelete}
                       />
                     </span>

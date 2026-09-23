@@ -7,8 +7,9 @@
  *
  * 三条硬规则（写错会静默出错数据）：
  * 1. **默认视图是 `ledger`**——预期量级是「可能上百」，台账在找那一条时更强；
- * 2. **默认排序是 `source_key Asc`**，且请求里恒非空：后端不发排序就没有确定性全序，
- *    翻页会重复或漏行；
+ * 2. **默认排序按名称升序 + 唯一键 `id` 收尾**，且请求里恒非空：后端不发排序就没有
+ *    确定性全序，翻页会重复或漏行；收尾键必须是**表级行上真的存在**的列
+ *    （`id`），发一个不存在的字段名会让整个请求被 `FieldNotFound` 拒掉；
  * 3. **搜索 / 筛选 / 每页条数变化必须回到第 1 页**，否则会停在一个不存在的页码上。
  */
 
@@ -30,10 +31,18 @@ export const DEFAULT_VIEW: DatasourceView = "ledger";
 export const PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
 export const DEFAULT_PAGE_SIZE = 10;
 
-/// 默认排序：`source_key` 是唯一键，天然给出确定性全序。
+/// 默认排序：按名称升序（与后端 `list_datasources` 的兜底一致），
+/// 再由 [`withStableOrder`] 补上唯一键 `id` 收尾。
 export const DEFAULT_ORDER_BY: OrderByClause[] = [
-  { field: "source_key", direction: "Asc" },
+  { field: "title", direction: "Asc" },
 ];
+
+/// 唯一键收尾用的列，也就是 `feishu_datasource` 表级行的真唯一键。
+///
+/// **不能是 `source_key`**：表级化之后它属于字段绑定那一层，表级行上没有这一列，
+/// 而 `validate_order_field` 对不存在的字段直接 `FieldNotFound`——列表页会整个打不开，
+/// 不是「排序不生效」那么轻。
+export const STABLE_ORDER_FIELD = "id";
 
 /// 搜索框去抖：搜索词每次按键都会改变结果集，不去抖会把每个字符都打成一次请求。
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -136,7 +145,7 @@ export function clearFilters(state: ListQueryState): ListQueryState {
  *
  * 后端只按传入的 `order_by` 排序，不加兜底——`title` 会重名，单键排序下
  * 相同值的行顺序由数据库决定，翻页就会重复或漏行。所以凡是以非唯一列排序，
- * 都在末尾追加唯一键 `source_key Asc`。
+ * 都在末尾追加唯一键 [`STABLE_ORDER_FIELD`]（`id`）升序。
  */
 export function withStableOrder(orderBy: OrderByClause[]): OrderByClause[] {
   const clauses =
@@ -147,8 +156,8 @@ export function withStableOrder(orderBy: OrderByClause[]): OrderByClause[] {
       deduped.push(clause);
     }
   }
-  if (!deduped.some((clause) => clause.field === "source_key")) {
-    deduped.push({ field: "source_key", direction: "Asc" });
+  if (!deduped.some((clause) => clause.field === STABLE_ORDER_FIELD)) {
+    deduped.push({ field: STABLE_ORDER_FIELD, direction: "Asc" });
   }
   return deduped;
 }

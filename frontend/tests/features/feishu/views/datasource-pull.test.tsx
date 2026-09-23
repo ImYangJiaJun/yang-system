@@ -38,9 +38,14 @@ function renderDetail() {
   });
 }
 
+/// 这条数据源的表级主键。后端 `pull_now` 只认它——`PullNowInput` 是
+/// `deny_unknown_fields` + 必填 `datasource_id`，发 `source_key` 100% 被拒。
+const DATASOURCE_ID = 7;
+
 /// 一条坐标齐备、能自动拉取的数据源。
 function pullSource(overrides: Record<string, unknown> = {}) {
   return datasourceWire({
+    id: DATASOURCE_ID,
     source_key: SOURCE_KEY,
     title: "费用分类",
     ingest_mode: "pull",
@@ -105,9 +110,13 @@ describe("详情页 · 立即拉取", () => {
       () => expect(screen.getByText(/这一轮已经跑过了/)).toBeInTheDocument(),
       { timeout: 5_000 },
     );
-    expect(bodiesOf(calls, PULL_NOW_PATH)[0]).toMatchObject({
-      source_key: SOURCE_KEY,
-    });
+    // 后端 `pull_now.rs` 的 `PullNowInput` 是 `#[serde(deny_unknown_fields)]`
+    // 加一个必填的 `datasource_id`：带 `source_key` 的请求**必然被拒**
+    // （多一个未知键）。所以这里钉的是「网线上到底是什么形状」，
+    // 而不是「发出去过一次请求」。
+    const body = bodiesOf(calls, PULL_NOW_PATH)[0];
+    expect(body).not.toHaveProperty("source_key");
+    expect(body).toEqual({ datasource_id: DATASOURCE_ID });
   });
 
   it("后端在触发前就拒绝时，把原因原样显示出来", async () => {

@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActionDemoSchema, UiCatalog } from "@/engine";
 import {
+  DATASOURCE_OPERATION_IDS,
+  canWriteDatasources,
   buildDatasourceListBody,
   checkDatasourceHealth,
-  createDatasource,
   createDatasourceTable,
-  deleteDatasource,
+  deleteDatasourceTable,
+  enabledBindingInputs,
   feishuQueryKeys,
   listBitableFields,
   listBitableTables,
@@ -17,7 +19,8 @@ import {
   requireAction,
   revealFieldToken,
   rotateFieldToken,
-  updateDatasource,
+  updateDatasourceTable,
+  pullNow,
   type FeishuInvokeDeps,
 } from "@/features/feishu/api";
 import { DEFAULT_OPTION_ORDER_BY } from "@/features/feishu/api";
@@ -39,22 +42,32 @@ const DATASOURCE_LIST_ACTION: ActionDemoSchema = {
   requires_auth: true,
 };
 
+/// 部署里真实存在的那一套（字段级 `create_datasource` / `update_datasource` /
+/// `delete_datasource` 已在 T13 退役，这里一个都不留——替身照着事实搭，
+/// 否则「界面上那个入口发得出去没有」这件事就被测反了）。
 const DEPLOYED_ACTIONS: ActionDemoSchema[] = [
   DATASOURCE_LIST_ACTION,
   {
     ...DATASOURCE_LIST_ACTION,
-    operation_id: "feishu.datasource.create_datasource",
-    path: "/api/v1/feishu/datasources",
+    operation_id: "feishu.datasource.create_datasource_table",
+    path: "/api/v1/feishu/datasources/table",
   },
   {
     ...DATASOURCE_LIST_ACTION,
-    operation_id: "feishu.datasource.update_datasource",
+    operation_id: "feishu.datasource.update_datasource_table",
+    path: "/api/v1/feishu/datasources/table",
     method: "PUT",
   },
   {
     ...DATASOURCE_LIST_ACTION,
-    operation_id: "feishu.datasource.delete_datasource",
+    operation_id: "feishu.datasource.delete_datasource_table",
+    path: "/api/v1/feishu/datasources/table",
     method: "DELETE",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.pull_now",
+    path: "/api/v1/feishu/datasources/pull-now",
   },
   {
     ...DATASOURCE_LIST_ACTION,
@@ -94,7 +107,7 @@ function query(
     pageSize: 10,
     search: "",
     status: "all",
-    orderBy: [{ field: "source_key", direction: "Asc" }],
+    orderBy: [{ field: "title", direction: "Asc" }],
     ...overrides,
   };
 }
@@ -138,7 +151,11 @@ describe("query key 工厂", () => {
       pageSize: 10,
       search: "",
       status: "all",
-      orderBy: [{ field: "source_key", direction: "Asc" }],
+      // 收尾键是表级行的真唯一键 `id`（`source_key` 已不在表级行上）
+      orderBy: [
+        { field: "title", direction: "Asc" },
+        { field: "id", direction: "Asc" },
+      ],
     });
   });
 
@@ -168,9 +185,46 @@ describe("query key 工厂", () => {
       search: "北京",
       orderBy: [
         { field: "title", direction: "Asc" },
-        { field: "source_key", direction: "Asc" },
+        { field: "id", direction: "Asc" },
       ],
     });
+  });
+});
+
+describe("写侧权限门控（canWriteDatasources）", () => {
+  it("目录里只有**已落地**的表级端点时它就是真的", () => {
+    // 这是 H2 的那条静默失效：常量表若还指向 T13 删掉的
+    // `feishu.datasource.create_datasource`，`hasOperation` 恒为 false，
+    // 于是「添加数据源」与列表项上的「⋯」菜单**永远不渲染**——
+    // 界面不会报错，什么都没有，看起来跟「权限不足」一模一样。
+    expect(canWriteDatasources(catalogWith(DEPLOYED_ACTIONS))).toBe(true);
+  });
+
+  it("把那个建源端点从目录里拿掉就不再有写权限（门控真的读目录）", () => {
+    expect(
+      canWriteDatasources(
+        catalogWith(
+          DEPLOYED_ACTIONS.filter(
+            (action) =>
+              action.operation_id !==
+              "feishu.datasource.create_datasource_table",
+          ),
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("三个写操作都按表级主键定位，不再是退役的字段级那三个", () => {
+    expect(DATASOURCE_OPERATION_IDS).toMatchObject({
+      create: "feishu.datasource.create_datasource_table",
+      update: "feishu.datasource.update_datasource_table",
+      remove: "feishu.datasource.delete_datasource_table",
+      pullNow: "feishu.datasource.pull_now",
+    });
+    for (const id of Object.values(DATASOURCE_OPERATION_IDS)) {
+      // 字段级那三个 id 正是服务端已经删掉的：任何一处留着它们都是死门控。
+      expect(id).not.toMatch(/(create|update|delete)_datasource$/);
+    }
   });
 });
 
@@ -189,9 +243,12 @@ describe("requireAction", () => {
 });
 
 describe("buildDatasourceListBody", () => {
-  it("order_by 恒非空：调用方给空数组也要兜住 source_key Asc", () => {
+  it("order_by 恒非空：调用方给空数组也要兜住默认排序 + 唯一键收尾", () => {
     expect(buildDatasourceListBody(query({ orderBy: [] }))).toMatchObject({
-      order_by: [{ field: "source_key", direction: "Asc" }],
+      order_by: [
+        { field: "title", direction: "Asc" },
+        { field: "id", direction: "Asc" },
+      ],
     });
   });
 
@@ -201,7 +258,7 @@ describe("buildDatasourceListBody", () => {
     );
     expect(body.order_by).toEqual([
       { field: "title", direction: "Desc" },
-      { field: "source_key", direction: "Asc" },
+      { field: "id", direction: "Asc" },
     ]);
   });
 
@@ -545,98 +602,110 @@ describe("listOptions", () => {
   });
 });
 
-describe("createDatasource", () => {
-  it("提交 source_key/title/token/encrypt_enabled/default_locale", async () => {
-    const calls = stubFetch({ code: 0, data: { source_key: "dept_sales" } });
-    const result = await createDatasource(
+describe("updateDatasourceTable", () => {
+  it("PUT 打到表级端点，带主键、名称与绑定集合（整份替换）", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: { inserted: 0, updated: 2, disabled: 0 },
+    });
+    const result = await updateDatasourceTable(
       {
-        sourceKey: "dept_sales",
-        title: "部门",
-        token: "t-1",
-        encryptEnabled: true,
-        defaultLocale: "en_us",
+        datasourceId: 7,
+        title: "新名称",
+        fields: [
+          { fieldId: "fldA", sourceKey: "dept_sales", parentFieldId: null },
+          { fieldId: "fldB", sourceKey: "dept_sub", parentFieldId: "fldA" },
+        ],
       },
       deps,
     );
-    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources");
-    expect(calls[0]?.body).toEqual({
-      source_key: "dept_sales",
-      title: "部门",
-      token: "t-1",
-      encrypt_enabled: true,
-      default_locale: "en_us",
-    });
-    expect(result).toEqual({ sourceKey: "dept_sales" });
-  });
 
-  it("响应缺 source_key 时拒绝，不返回一个空标识", async () => {
-    stubFetch({ code: 0, data: {} });
-    await expect(
-      createDatasource(
-        {
-          sourceKey: "dept_sales",
-          title: "部门",
-          token: "t-1",
-          encryptEnabled: false,
-          defaultLocale: "zh_cn",
-        },
-        deps,
-      ),
-    ).rejects.toThrow(/没有 source_key/);
-  });
-});
-
-describe("updateDatasource", () => {
-  it("只改名称时，未给的字段一个都不出现（省略 = 保持原值）", async () => {
-    const calls = stubFetch({ code: 0, data: { affected: 1 } });
-    await updateDatasource({ sourceKey: "dept_sales", title: "新名称" }, deps);
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/table");
     expect(calls[0]?.method).toBe("PUT");
     expect(calls[0]?.body).toEqual({
-      source_key: "dept_sales",
+      datasource_id: 7,
       title: "新名称",
+      fields: [
+        { field_id: "fldA", source_key: "dept_sales", parent_field_id: null },
+        { field_id: "fldB", source_key: "dept_sub", parent_field_id: "fldA" },
+      ],
     });
+    expect(result).toEqual({ inserted: 0, updated: 2, disabled: 0 });
   });
 
-  it("空白 Token 按「不轮换」处理，不会发出空串", async () => {
-    const calls = stubFetch({ code: 0, data: { affected: 1 } });
-    await updateDatasource(
-      { sourceKey: "dept_sales", title: "新名称", token: "   " },
-      deps,
-    );
-    expect(calls[0]?.body).not.toHaveProperty("token");
-  });
-
-  it("给了 Token 时原样发出（轮换）", async () => {
-    const calls = stubFetch({ code: 0, data: { affected: 1 } });
-    await updateDatasource({ sourceKey: "dept_sales", token: "t-2" }, deps);
-    expect(calls[0]?.body).toMatchObject({ token: "t-2" });
-  });
-
-  it("状态改成 disabled 时只发 status", async () => {
-    const calls = stubFetch({ code: 0, data: { affected: 1 } });
-    await updateDatasource(
-      { sourceKey: "dept_sales", status: "disabled" },
-      deps,
-    );
-    expect(calls[0]?.body).toEqual({
-      source_key: "dept_sales",
-      status: "disabled",
-    });
-  });
-});
-
-describe("deleteDatasource", () => {
-  it("DELETE 且只带 source_key，回执含被连带停用的选项数", async () => {
+  it("没给名称时整个键不出现（省略 = 不改）", async () => {
     const calls = stubFetch({
       code: 0,
-      data: { deleted: 1, disabled_options: 3 },
+      data: { inserted: 0, updated: 1, disabled: 0 },
     });
-    const result = await deleteDatasource("dept_sales", deps);
-    expect(calls[0]?.method).toBe("DELETE");
-    expect(calls[0]?.body).toEqual({ source_key: "dept_sales" });
-    expect(result).toEqual({ deleted: 1, disabledOptions: 3 });
+    await updateDatasourceTable(
+      {
+        datasourceId: 7,
+        fields: [
+          { fieldId: "fldA", sourceKey: "dept_sales", parentFieldId: null },
+        ],
+      },
+      deps,
+    );
+    expect(calls[0]?.body).not.toHaveProperty("title");
   });
 });
+
+describe("enabledBindingInputs", () => {
+  it("只送启用中的绑定：集合里出现的已有绑定会被服务端写上 enabled = true", () => {
+    // 把一条已停用的绑定塞回去，等于在「只是改个名字」的时候悄悄把它重新启用。
+    expect(
+      enabledBindingInputs({
+        fields: [
+          {
+            fieldId: "fldA",
+            fieldName: "费用类型",
+            sourceKey: "dept_sales",
+            parentFieldId: null,
+            enabled: true,
+          },
+          {
+            fieldId: "fldB",
+            fieldName: "已停用",
+            sourceKey: "dept_old",
+            parentFieldId: "fldA",
+            enabled: false,
+          },
+        ],
+      }),
+    ).toEqual([
+      { fieldId: "fldA", sourceKey: "dept_sales", parentFieldId: null },
+    ]);
+  });
+});
+
+describe("deleteDatasourceTable", () => {
+  it("DELETE 只带表级主键，回执含被连带停用的选项数", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: { deleted_fields: 2, disabled_options: 3 },
+    });
+    const result = await deleteDatasourceTable(7, deps);
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/table");
+    expect(calls[0]?.method).toBe("DELETE");
+    expect(calls[0]?.body).toEqual({ datasource_id: 7 });
+    expect(result).toEqual({ deletedFields: 2, disabledOptions: 3 });
+  });
+});
+
+describe("pullNow", () => {
+  it("发的是表级 `datasource_id`，一个多余的键都不带", async () => {
+    // 后端 `PullNowInput` 是 `deny_unknown_fields` + 必填 `datasource_id`：
+    // 多发一个键（例如退役前的 `source_key`）会被直接拒掉。
+    const calls = stubFetch({ code: 0, data: { accepted: true } });
+    await pullNow(7, deps);
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/pull-now");
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.body).toEqual({ datasource_id: 7 });
+  });
+});
+
+/* ---------------------- 表级配置：元数据与创建端点 ---------------------- */
 
 /* ---------------------- 表级配置：元数据与创建端点 ---------------------- */
 

@@ -25,7 +25,7 @@ function stateAtPage3() {
     ...initialQueryState("ledger"),
     page: 3,
     search: "北京",
-    orderBy: [{ field: "source_key", direction: "Asc" as const }],
+    orderBy: [{ field: "id", direction: "Asc" as const }],
   };
 }
 
@@ -39,11 +39,9 @@ describe("默认值", () => {
     expect(initialQueryState().view).toBe("ledger");
   });
 
-  it("默认排序是 source_key Asc", () => {
+  it("默认排序按名称升序（表级行上没有可排的 `source_key`）", () => {
     expect(initialQueryState().orderBy).toEqual(DEFAULT_ORDER_BY);
-    expect(DEFAULT_ORDER_BY).toEqual([
-      { field: "source_key", direction: "Asc" },
-    ]);
+    expect(DEFAULT_ORDER_BY).toEqual([{ field: "title", direction: "Asc" }]);
   });
 
   it("默认第 1 页、每页 10、无搜索、状态筛选为全部", () => {
@@ -104,35 +102,47 @@ describe("不改动结果集的操作", () => {
   });
 
   it("同一列再点一次反转方向", () => {
-    const ascending = nextStateOnSort(stateAtPage3(), "source_key");
-    expect(ascending.orderBy).toEqual([
-      { field: "source_key", direction: "Desc" },
-    ]);
-    const descending = nextStateOnSort(ascending, "source_key");
-    expect(descending.orderBy).toEqual([
-      { field: "source_key", direction: "Asc" },
-    ]);
+    // 夹具当前排的是 `id`，所以点「名称」是第一次选中它 → 升序。
+    const ascending = nextStateOnSort(stateAtPage3(), "title");
+    expect(ascending.orderBy).toEqual([{ field: "title", direction: "Asc" }]);
+    const descending = nextStateOnSort(ascending, "title");
+    expect(descending.orderBy).toEqual([{ field: "title", direction: "Desc" }]);
   });
 });
 
 describe("withStableOrder", () => {
-  it("空数组兜底为 source_key Asc", () => {
+  it("空数组兜底为默认排序，并补上唯一键收尾", () => {
     expect(withStableOrder([])).toEqual([
-      { field: "source_key", direction: "Asc" },
+      { field: "title", direction: "Asc" },
+      { field: "id", direction: "Asc" },
     ]);
   });
 
   it("非唯一列排序时补上唯一键收尾（否则翻页会重复/漏行）", () => {
     expect(withStableOrder([{ field: "title", direction: "Desc" }])).toEqual([
       { field: "title", direction: "Desc" },
-      { field: "source_key", direction: "Asc" },
+      { field: "id", direction: "Asc" },
     ]);
   });
 
-  it("已经有 source_key 时不重复追加", () => {
+  it("收尾键是表级行的真唯一键 `id`——发 `source_key` 会把整个列表请求搭进去", () => {
+    // `feishu_datasource` 的表级行上**没有** `source_key`（它属于字段绑定那一层）。
+    // 后端 `validate_order_field` 对不存在的字段直接 `FieldNotFound`，
+    // 所以这不是「排序不生效」，是**列表根本打不开**。
+    for (const clauses of withStableOrder([
+      { field: "title", direction: "Asc" },
+    ])) {
+      expect(clauses.field).not.toBe("source_key");
+    }
     expect(
-      withStableOrder([{ field: "source_key", direction: "Desc" }]),
-    ).toEqual([{ field: "source_key", direction: "Desc" }]);
+      withStableOrder([{ field: "title", direction: "Asc" }]).at(-1),
+    ).toEqual({ field: "id", direction: "Asc" });
+  });
+
+  it("已经有 id 时不重复追加", () => {
+    expect(withStableOrder([{ field: "id", direction: "Desc" }])).toEqual([
+      { field: "id", direction: "Desc" },
+    ]);
   });
 });
 

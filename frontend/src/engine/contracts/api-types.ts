@@ -184,7 +184,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/feishu/datasources": {
+  "/api/v1/feishu/datasources/bitable-fields": {
     parameters: {
       query?: never;
       header?: never;
@@ -192,21 +192,53 @@ export interface paths {
       cookie?: never;
     };
     get?: never;
+    put?: never;
     /**
-     * 更新数据源
-     * @description 更新飞书数据源的名称、Token、加密开关或状态
+     * 列出多维表格字段
+     * @description 列出一张数据表的全部字段（含类型码），供配置向导勾选
      */
-    put: operations["feishu.datasource.update_datasource"];
+    post: operations["feishu.datasource.list_bitable_fields"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/bitable-tables": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
     /**
-     * 新建数据源
-     * @description 创建一个飞书外部选项数据源
+     * 列出多维表格数据表
+     * @description 用自建应用凭证列出某个多维表格 App 下的数据表，供配置向导选择
      */
-    post: operations["feishu.datasource.create_datasource"];
+    post: operations["feishu.datasource.list_bitable_tables"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/bitable-views": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
     /**
-     * 删除数据源
-     * @description 删除飞书数据源并停用其下全部选项
+     * 列出多维表格视图
+     * @description 列出一张数据表下的视图，供配置向导选择（视图决定拉取哪些行）
      */
-    delete: operations["feishu.datasource.delete_datasource"];
+    post: operations["feishu.datasource.list_bitable_views"];
+    delete?: never;
     options?: never;
     head?: never;
     patch?: never;
@@ -226,6 +258,94 @@ export interface paths {
      * @description 分页查询飞书数据源
      */
     post: operations["feishu.datasource.list_datasources"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/reveal-token": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 回显凭据
+     * @description 取出该字段绑定上封存的 Token 明文（纯读，不改变任何状态；每次追加审计）
+     */
+    post: operations["feishu.datasource.reveal_token"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/rotate-token": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 轮换凭据
+     * @description 重新签发 Token（旧值立即失效，控件需回审批后台改）；每次追加审计
+     */
+    post: operations["feishu.datasource.rotate_token"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/table": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * 更新表级数据源
+     * @description 整份替换字段绑定集合；已有绑定保留其 source_key 与凭据
+     */
+    put: operations["feishu.datasource.update_datasource_table"];
+    /**
+     * 新建表级数据源
+     * @description 一次写入表级行与 N 条字段绑定（含系统生成的凭据），同一事务
+     */
+    post: operations["feishu.datasource.create_datasource_table"];
+    /**
+     * 删除表级数据源
+     * @description 删除数据源、它的全部字段绑定；其选项行只停用不删除
+     */
+    delete: operations["feishu.datasource.delete_datasource_table"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/table/health": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 数据源体检
+     * @description 把勾选的字段与表实际字段比对，列出不可自愈的问题（改名不算问题）
+     */
+    post: operations["feishu.datasource.health_check"];
     delete?: never;
     options?: never;
     head?: never;
@@ -1162,6 +1282,18 @@ export interface components {
           /** @enum {string} */
           type: "or";
         };
+    /** @description 一条字段绑定的输入。 */
+    FieldBindingInput: {
+      /** @description 多维表格字段 ID。**身份就是它**，不是字段名——改名不能断链。 */
+      field_id: string;
+      /**
+       * @description 同表内的父列 `field_id`；无父给 `null` 或省略。
+       * @default null
+       */
+      parent_field_id: string | null;
+      /** @description 进 URL 路径段的数据源标识；全局唯一、创建后不可改。 */
+      source_key: string;
+    };
     /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
     OrderByItem__3: {
       /**
@@ -2280,7 +2412,7 @@ export interface operations {
       };
     };
   };
-  "feishu.datasource.update_datasource": {
+  "feishu.datasource.list_bitable_fields": {
     parameters: {
       query?: never;
       header?: never;
@@ -2290,63 +2422,10 @@ export interface operations {
     requestBody?: {
       content: {
         "application/json": {
-          /**
-           * @description 多维表格 app_token。
-           * @default null
-           */
-          bitable_base_token?: string | null;
-          /**
-           * @description 取数列的**精确字段名**（接口要名字不要 field_id）。
-           * @default null
-           */
-          bitable_field_name?: string | null;
-          /**
-           * @description 数据表 ID。
-           * @default null
-           */
-          bitable_table_id?: string | null;
-          /**
-           * @description 视图 ID。
-           * @default null
-           */
-          bitable_view_id?: string | null;
-          /**
-           * @description 默认语言。
-           * @default null
-           */
-          default_locale?: string | null;
-          /**
-           * @description 是否加密返回。
-           * @default null
-           */
-          encrypt_enabled?: boolean | null;
-          /**
-           * @description 取数方式：`push` / `pull`；省略即保持原值。
-           * @default null
-           */
-          ingest_mode?: string | null;
-          /**
-           * @description 级联映射（JSON 文本）。
-           * @default null
-           */
-          linkage_mapping?: string | null;
-          /** @description 目标数据源。 */
-          source_key: string;
-          /**
-           * @description 状态：`active` / `disabled`。
-           * @default null
-           */
-          status?: string | null;
-          /**
-           * @description 新名称。
-           * @default null
-           */
-          title?: string | null;
-          /**
-           * @description 新 Token；省略表示不轮换。
-           * @default null
-           */
-          token?: string | null;
+          /** @description 多维表格 app_token。 */
+          app_token: string;
+          /** @description 数据表 ID。 */
+          table_id: string;
         };
       };
     };
@@ -2443,7 +2522,7 @@ export interface operations {
       };
     };
   };
-  "feishu.datasource.create_datasource": {
+  "feishu.datasource.list_bitable_tables": {
     parameters: {
       query?: never;
       header?: never;
@@ -2453,52 +2532,8 @@ export interface operations {
     requestBody?: {
       content: {
         "application/json": {
-          /**
-           * @description 多维表格 app_token（URL 里 `feishu.cn/base/<这段>`）；`pull` 时必填。
-           * @default null
-           */
-          bitable_base_token?: string | null;
-          /**
-           * @description 取数列的**精确字段名**（接口要名字不要 field_id）；`pull` 时必填。
-           * @default null
-           */
-          bitable_field_name?: string | null;
-          /**
-           * @description 数据表 ID；`pull` 时必填。
-           * @default null
-           */
-          bitable_table_id?: string | null;
-          /**
-           * @description 视图 ID；省略表示取全表。
-           * @default null
-           */
-          bitable_view_id?: string | null;
-          /**
-           * @description 默认语言。
-           * @default null
-           */
-          default_locale?: string | null;
-          /**
-           * @description 是否加密返回；需要服务端配置 `feishu.encryption_key`。
-           * @default null
-           */
-          encrypt_enabled?: boolean | null;
-          /**
-           * @description 取数方式：`push`（多维表格工作流推送，默认）/ `pull`（服务端定时拉取）。
-           * @default null
-           */
-          ingest_mode?: string | null;
-          /**
-           * @description 级联映射（JSON 文本）。声明本数据源是某个父数据源的子集时给出。
-           * @default null
-           */
-          linkage_mapping?: string | null;
-          /** @description 数据源标识；进外部选项接口的 URL，必须唯一且稳定。 */
-          source_key: string;
-          /** @description 展示名。 */
-          title: string;
-          /** @description 与飞书审批后台填写的 Token 一致；**只以摘要入库**。 */
-          token: string;
+          /** @description 多维表格 app_token（`feishu.cn/base/<这一段>`）。 */
+          app_token: string;
         };
       };
     };
@@ -2595,7 +2630,7 @@ export interface operations {
       };
     };
   };
-  "feishu.datasource.delete_datasource": {
+  "feishu.datasource.list_bitable_views": {
     parameters: {
       query?: never;
       header?: never;
@@ -2605,8 +2640,10 @@ export interface operations {
     requestBody?: {
       content: {
         "application/json": {
-          /** @description 目标数据源。 */
-          source_key: string;
+          /** @description 多维表格 app_token。 */
+          app_token: string;
+          /** @description 数据表 ID。 */
+          table_id: string;
         };
       };
     };
@@ -2747,6 +2784,706 @@ export interface operations {
            * @default null
            */
           where?: components["schemas"]["WhereCondition__2"] | null;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.reveal_token": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /** @description 目标字段绑定的 `source_key`（进 URL 的数据源标识，全局唯一）。 */
+          source_key: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.rotate_token": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /** @description 目标字段绑定的 `source_key`。 */
+          source_key: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.update_datasource_table": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * @description 多维表格 app_token；省略即不改。**给空串表示清空该坐标。**
+           * @default null
+           */
+          bitable_base_token?: string | null;
+          /** @default null */
+          bitable_table_id?: string | null;
+          /** @default null */
+          bitable_view_id?: string | null;
+          /**
+           * Format: int64
+           * @description 目标数据源的 `id`。
+           */
+          datasource_id: number;
+          /** @description 期望的字段绑定集合（整份替换）。 */
+          fields: components["schemas"]["FieldBindingInput"][];
+          /**
+           * @description 取数方式；省略即不改。
+           * @default null
+           */
+          ingest_mode?: string | null;
+          /**
+           * @description 展示名；省略即不改。
+           * @default null
+           */
+          title?: string | null;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.create_datasource_table": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * @description 多维表格 app_token；`pull` 时必填。
+           * @default null
+           */
+          bitable_base_token?: string | null;
+          /**
+           * @description 数据表 ID；`pull` 时必填。
+           * @default null
+           */
+          bitable_table_id?: string | null;
+          /**
+           * @description 视图 ID；省略表示取全表。**它只决定拉取哪些行**，不影响能勾哪些字段。
+           * @default null
+           */
+          bitable_view_id?: string | null;
+          /** @description 勾选的字段。至少一条。 */
+          fields: components["schemas"]["FieldBindingInput"][];
+          /**
+           * @description 取数方式：`push`（默认）/ `pull`。
+           * @default null
+           */
+          ingest_mode?: string | null;
+          /** @description 展示名。 */
+          title: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.delete_datasource_table": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * Format: int64
+           * @description 目标数据源的 `id`。
+           */
+          datasource_id: number;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.health_check": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": {
+          /**
+           * Format: int64
+           * @description 目标数据源的 `id`。
+           */
+          datasource_id: number;
         };
       };
     };
