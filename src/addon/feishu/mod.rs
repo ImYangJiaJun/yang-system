@@ -38,6 +38,9 @@ pub(crate) fn build_addon(
         Arc::clone(&context),
         authorization_validator.clone(),
     )?)
+    // 只声明绑定表、不带 Action：一张表 = 一个 module 是框架的硬形状，
+    // 而绑定表由 `feishu.datasource` 的 Action 经 `FeishuContext` 跨表访问。
+    .module(datasource::build_field_module()?)
     .module(option::build_module(
         context,
         settings.as_deref(),
@@ -45,7 +48,7 @@ pub(crate) fn build_addon(
     )?))
 }
 
-/// 构建飞书 addon 的共享上下文（两张表的 Repository + 集成配置）。
+/// 构建飞书 addon 的共享上下文（三张表的 Repository + 集成配置）。
 ///
 /// 出站拉取 worker 需要与 Action **完全同一份表定义与配置**，所以两个入口共用这一个
 /// 构造函数。`build_addon` 里原先内联的构造已改走这里——两处各写一遍表定义的后果是
@@ -60,6 +63,10 @@ pub(crate) fn build_context(
     Ok(Arc::new(FeishuContext::new(
         Repository::new(
             datasource::table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            datasource::domain::field_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         Repository::new(

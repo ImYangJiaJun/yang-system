@@ -19,6 +19,7 @@
 //! 同一份文案。见 `docs/architecture/feishu-datasource-console.md` §4.2 与 §5.3-1。
 
 pub(crate) mod actions;
+pub(crate) mod domain;
 pub(crate) mod table;
 
 use std::sync::Arc;
@@ -42,6 +43,32 @@ pub(crate) fn build_module(
     let spec = ModuleSpec::new(module_name()?).table(table::table_spec()?);
     let spec = with_authentication(spec, authorization_validator);
     Ok(actions::register_all(spec, context))
+}
+
+/// 本 module 的第二个 Module：只有字段绑定表，没有 Action。
+///
+/// # 为什么要单独一个 Module
+///
+/// `ModuleSpec::table()` 是**单个** `Option<TableSpec>`（「设置 Module 主表」），
+/// `AddonSpec` 又没有挂独立表的入口（只有 `module()`）。所以「一张表 = 一个 module」
+/// 是框架的硬形状——绑定表要进 schema，就只能是自己的 module。
+///
+/// # 它为什么住在 `datasource/` 里而不是自己的目录
+///
+/// 架构门禁只把**含 `actions/` 的目录**认定为 module。绑定表没有自己的 Action
+/// （它的读写都由本 module 的 Action 经 `FeishuContext` 跨表完成），所以独立目录
+/// 会被判成「游离的机制目录」。故构造器与主表并列放在这里。
+///
+/// # 成对省略 `view()` 与 `presentation()`
+///
+/// 与主表同一条纪律，理由见本文件开头的模块文档：只省一个会让表静默出现在前端。
+pub(crate) fn build_field_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(field_module_name()?).table(domain::field_table::table_spec()?))
+}
+
+/// 字段绑定表所在 Module 的名字。
+fn field_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.datasource_field").map_err(config_error)
 }
 
 /// 挂上认证中间件。
@@ -94,5 +121,26 @@ mod tests {
             .table_definition()
             .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));
         assert_eq!(definition.name(), "feishu_datasource");
+    }
+
+    #[test]
+    fn the_field_module_declares_the_binding_table() {
+        // 绑定表要进 schema 就必须有一个声明它的 Module——`ModuleSpec::table()`
+        // 只收一张表，所以它只能是独立的一个。漏了这一步，表永远不会被创建。
+        let spec = build_field_module().unwrap_or_else(|error| panic!("模块应可装配: {error}"));
+        let table = spec.table.as_ref().expect("必须声明绑定表");
+        let definition = table
+            .table_definition()
+            .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));
+        assert_eq!(definition.name(), "feishu_datasource_field");
+    }
+
+    #[test]
+    fn the_field_module_projects_nothing_to_the_frontend() {
+        // 成对省略：只省 `view()` 会被框架自动合成一个含全表列的视图，
+        // 只省 `presentation()` 会让 view 从「工作台」分组冒回来。
+        let spec = build_field_module().unwrap_or_else(|error| panic!("模块应可装配: {error}"));
+        assert!(spec.views.is_empty(), "不得声明视图");
+        assert!(spec.presentation.is_none(), "不得声明呈现");
     }
 }

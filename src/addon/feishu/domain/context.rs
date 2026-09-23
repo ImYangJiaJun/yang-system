@@ -1,4 +1,4 @@
-//! 飞书 addon 的模块上下文：聚合两张表的 Repository 与集成配置，并提供事务收尾。
+//! 飞书 addon 的模块上下文：聚合三张表的 Repository 与集成配置，并提供事务收尾。
 
 use std::sync::Arc;
 
@@ -11,11 +11,15 @@ use super::repository::Repository;
 
 /// addon 级共享上下文。
 ///
-/// 两张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
+/// 三张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
 /// module 的主表**，所以跨表访问（选项 module 读数据源表）必须经这个上下文。
 #[derive(Clone)]
 pub(crate) struct FeishuContext {
     datasource: Repository,
+    // 消费者（表级数据源的 Action）在后续批次接入。仓库既有先例：
+    // `domain/bitable.rs:29`、`domain/outbound.rs:30` 同样先落地能力、后接消费者。
+    #[allow(dead_code)]
+    datasource_field: Repository,
     option: Repository,
     settings: Option<Arc<FeishuSettings>>,
 }
@@ -24,19 +28,32 @@ impl FeishuContext {
     /// 构造上下文。
     pub(crate) fn new(
         datasource: Repository,
+        datasource_field: Repository,
         option: Repository,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
         Self {
             datasource,
+            datasource_field,
             option,
             settings,
         }
     }
 
-    /// 数据源表。
+    /// 数据源表（表级）。
     pub(crate) fn datasources(&self) -> &Repository {
         &self.datasource
+    }
+
+    /// 数据源字段绑定表。
+    ///
+    /// 一条绑定 = 一个多维表格字段 = 一个 `source_key` = 一个审批控件；
+    /// 级联的父指针也落在这一层。
+    ///
+    /// 消费者（表级数据源的 Action）在后续批次接入，故暂标 `dead_code`。
+    #[allow(dead_code)]
+    pub(crate) fn datasource_fields(&self) -> &Repository {
+        &self.datasource_field
     }
 
     /// 选项表。

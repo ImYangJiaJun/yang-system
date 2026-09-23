@@ -62,7 +62,10 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .options([("push", "手工推送"), ("pull", "定时拉取")])
                 .default("push")
                 .filterable(true),
-            // --- 多维表格坐标：三个路径段 + 精确字段名 ---
+            // --- 多维表格坐标：三个路径段 ---
+            //
+            // 取数列不再在这里：一条数据源现在是一张表，取数是它下面**每条字段绑定**
+            // 各自的事（`field_table.rs`）。这里只留表级坐标与表级同步状态。
             bitable_base_token => Str::new()
                 .title("Base Token")
                 .max_length(128)
@@ -72,20 +75,15 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(128)
                 .filterable(true),
             bitable_view_id => Str::new().title("视图 ID").max_length(128),
-            // **存字段名，不存 field_id。** 官方《列出记录》的 `field_names` 明确要
-            // 「字段名称」（`1254024 InvalidFieldNames` 的排查建议就是调「列出字段」
-            // 取名字），传 field_id 会稳定失败。名字必须与表格里**完全一致**（界面上的
-            // 显示名可能忽略空格/换行差异），拉取前会经「列出字段」核对并做同名唯一性
-            // 检查——重名列按名字匹配会取到不确定的那一列。
-            bitable_field_name => Str::new().title("取数列字段名").max_length(255),
             // --- 同步状态（控制台台账与告警用） ---
+            // 失败与时间戳是**表级**的：一轮拉取以表为单位，失败也是整表一起停。
             last_pull_at => Timestamp::new().title("最近拉取时间"),
             last_success_at => Timestamp::new().title("最近同步成功时间").sortable(true),
             consecutive_failures => Int::new().title("连续失败次数").default(0),
             last_error => Text::new().title("最近错误"),
-            snapshot_digest => Str::new().title("快照摘要").max_length(64),
-            // JSON 文本：DSL 没有 Json builder，且该列从不被 SQL 查询进内部
-            linkage_mapping => Text::new().title("联动映射"),
+            // **已废弃**：摘要归属已改为「每条字段绑定一份」，见 `field_table.rs` 的
+            // `snapshot_digest`。此列保留只为避免一次破坏性的列删除，不再被读写。
+            snapshot_digest => Str::new().title("快照摘要（已废弃）").max_length(64),
             created_at => Timestamp::new().created_at().title("创建时间"),
             updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
         }))
@@ -237,19 +235,16 @@ mod tests {
     }
 
     #[test]
-    fn coordinates_store_the_field_name_not_the_field_id() {
-        // 官方《列出记录》的 field_names 要的是**字段名称**（传 field_id 稳定吃
-        // 1254024），所以坐标列存名字。这条断言把那个结论钉在 schema 上，
-        // 避免将来有人「按 tasklist 原文」加回 bitable_field_id 并改用它取数。
+    fn the_field_level_coordinates_are_gone() {
+        // 表级模型下没有「取数列」这一列——取数是每条字段绑定各自的事。
+        // 这条把「不要在表级行上加回字段级列」钉住。
         let definition = definition();
-        assert!(
-            definition.field("bitable_field_name").is_some(),
-            "取数列必须按字段名登记"
-        );
-        assert!(
-            definition.field("bitable_field_id").is_none(),
-            "不要登记 bitable_field_id：接口不吃 field_id，留着只会诱导误用"
-        );
+        for gone in ["bitable_field_name", "linkage_mapping"] {
+            assert!(
+                definition.field(gone).is_none(),
+                "{gone} 属于字段绑定层（field_table.rs），不该出现在表级行上"
+            );
+        }
     }
 
     #[test]
@@ -260,7 +255,6 @@ mod tests {
             "bitable_base_token",
             "bitable_table_id",
             "bitable_view_id",
-            "bitable_field_name",
             "last_pull_at",
             "last_success_at",
             "last_error",
