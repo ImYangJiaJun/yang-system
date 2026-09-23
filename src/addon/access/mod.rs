@@ -6,6 +6,7 @@
 
 pub(crate) mod domain;
 mod grants;
+mod groups;
 
 use crate::addon::account::GrantResolver;
 use crate::authorization::{AuthorizationPort, AuthorizationVersionValidator, StepUpServices};
@@ -44,13 +45,22 @@ pub(crate) fn build_addon(
     authorization: AuthorizationPort,
 ) -> Result<AccessAddon, BaseError> {
     let (module, access) = grants::build_module(
+        authorization_validator.clone(),
+        step_up.clone(),
+        permission_catalog.clone(),
+        authorization.clone(),
+    )?;
+    let groups_module = groups::build_module(
         authorization_validator,
         step_up,
         permission_catalog,
         authorization,
+        Arc::clone(&access),
     )?;
     Ok(AccessAddon {
-        spec: AddonSpec::new(yang_base::addon!("access")).module(module),
+        spec: AddonSpec::new(yang_base::addon!("access"))
+            .module(module)
+            .module(groups_module),
         grant_resolver: Arc::new(AuthzGrantResolver::new(access)),
     })
 }
