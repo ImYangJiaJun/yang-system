@@ -403,6 +403,9 @@ async fn group_membership_flows_into_the_issued_access_token() -> anyhow::Result
     let outcome = async {
         let runtime = build_application(&control, &redis).await?;
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        // Task 9 的引导 claimer 会把**首个**注册账号变成系统管理员（令牌因此带全目录
+        // 权限），所以先消费掉那个名额——被测账号必须是零权限的普通用户。
+        register_and_login(&runtime, &control, suffix - 1, 42_300).await?;
         let (before_token, user_id) =
             register_and_login(&runtime, &control, suffix, 42_301).await?;
         let before = token_permissions(&before_token)?;
@@ -454,9 +457,18 @@ async fn system_admin_group_token_carries_the_whole_catalog() -> anyhow::Result<
         );
 
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        // 首个注册账号被引导 claimer 建进内置全权组；这里要单独验证「成员关系 →
+        // Token 全量」这条链，因此被测账号取第二个（夹具直写它的成员关系）。
+        register_and_login(&runtime, &control, suffix - 1, 42_301).await?;
         let (_, user_id) = register_and_login(&runtime, &control, suffix, 42_302).await?;
-        // 内置全权组的条目由目录计算，表里没有行也应签发整个目录。
-        let group_id = insert_group(&control, SYSTEM_ADMIN_GROUP_KEY, 0).await?;
+        // 内置全权组由引导幂等创建，这里只查它的 id（不再直写，否则撞唯一键）。
+        // 它的条目由目录计算，表里没有行也应签发整个目录。
+        let group_id: i64 =
+            sqlx::query_scalar("SELECT id FROM permission_group WHERE group_key = ?")
+                .bind(SYSTEM_ADMIN_GROUP_KEY)
+                .fetch_one(control.pool())
+                .await
+                .context("读取内置全权组 ID 失败")?;
         insert_membership(&control, user_id, group_id, user_id).await?;
 
         let token = login(&runtime, &format!("group_{suffix}"), 42_302).await?;
@@ -481,4 +493,390 @@ async fn system_admin_group_token_carries_the_whole_catalog() -> anyhow::Result<
     let database_cleanup = reset_database(&control).await;
     let redis_cleanup = reset_redis(&redis).await;
     finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
+}
+
+// ---------------------------------------------------------------------------
+// Task 10 起的组管理夹具与用例。
+// ---------------------------------------------------------------------------
+
+/// 组管理接口的测试夹具。
+///
+/// 把「注册账号 → 登录取令牌 → 受 Step-up 保护的组写操作 → 直接观测数据库事实」
+/// 收敛在这里，用例只描述语义；后续任务（成员、条目、生命周期）在同一套夹具上追加。
+///
+/// 两处取舍写在明处：
+/// 1. **成员写入直捣 `user_group`**：成员 Action 尚未落地，夹具只能按受信 writer
+///    的列口径直写（与 Task 5 的集成测试同例），成员 Action 落地后应换成真实 Action。
+/// 2. **HTTP 状态码由测试侧按同一套分类重算**：框架的映射是传输层私有实现，
+///    集成测试拿不到，只能覆盖本文件会遇到的类别（见 `http_status`）。
+mod harness {
+    use super::common::take_registration_code;
+    use super::{
+        build_application, connect_test_database, connect_test_redis, dispatch, login,
+        reset_database, reset_redis, PASSWORD,
+    };
+    use anyhow::{ensure, Context};
+    use serde_json::{json, Value};
+    use yang_base::action::{ApiResponse, STEP_UP_PROOF_HEADER};
+    use yang_base::definition::BuiltApp;
+    use yang_base::error::ErrorCategory;
+    use yang_base::BaseError;
+
+    /// 夹具固定的对端端口：注册与重认证限流按 IP 计数，阈值已放大到用例不会触发。
+    const PEER_PORT: u16 = 52_400;
+
+    /// 管理员身份：令牌，以及重认证所需的用户名与用户 ID。
+    #[derive(Clone)]
+    pub struct Admin {
+        pub username: String,
+        pub user_id: i64,
+        pub token: String,
+    }
+
+    /// 装配一个「业务表已清空」的测试应用。
+    ///
+    /// 与 Task 9 的夹具同构，差别是装配前 DROP 掉业务表：组管理用例要求每个用例都
+    /// 从零账号、零组事实开始，否则 `group_key` 唯一键会撞上一个用例的残留行。
+    pub async fn build_test_app() -> BuiltApp {
+        let control = connect_test_database()
+            .await
+            .unwrap_or_else(|error| panic!("连接测试库失败: {error}"));
+        let redis = connect_test_redis()
+            .await
+            .unwrap_or_else(|error| panic!("连接测试 Redis 失败: {error}"));
+        reset_database(&control)
+            .await
+            .unwrap_or_else(|error| panic!("清理测试库失败: {error}"));
+        reset_redis(&redis)
+            .await
+            .unwrap_or_else(|error| panic!("清理测试 Redis 失败: {error}"));
+        build_application(&control, &redis)
+            .await
+            .unwrap_or_else(|error| panic!("装配测试应用失败: {error}"))
+    }
+
+    /// 走真实注册路径创建账号（邮箱验证码 → 注册），返回新账号的用户 ID。
+    pub async fn register_with_code(
+        app: &BuiltApp,
+        username: &str,
+        email: &str,
+    ) -> anyhow::Result<i64> {
+        dispatch(
+            app,
+            "account.user",
+            "request_registration_email",
+            json!({ "email": email }),
+            &[],
+            PEER_PORT,
+        )
+        .await?;
+        let code = take_registration_code(email)?;
+        let registered = dispatch(
+            app,
+            "account.user",
+            "register",
+            json!({
+                "username": username,
+                "password": PASSWORD,
+                "email": email,
+                "email_code": code,
+            }),
+            &[],
+            PEER_PORT,
+        )
+        .await?;
+        ensure!(registered.code == 0, "注册必须成功: {}", registered.message);
+        let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_one(pool_of(app))
+            .await
+            .context("回查新注册账号 ID 失败")?;
+        Ok(user_id)
+    }
+
+    /// 让首账号经真实注册路径成为系统管理员，返回其管理员身份。
+    pub async fn bootstrap_admin(app: &BuiltApp) -> Admin {
+        let username = "admin";
+        let user_id = register_with_code(app, username, "admin@example.com")
+            .await
+            .unwrap_or_else(|error| panic!("引导管理员注册失败: {error}"));
+        let token = login(app, username, PEER_PORT)
+            .await
+            .unwrap_or_else(|error| panic!("引导管理员登录失败: {error}"));
+        Admin {
+            username: username.to_string(),
+            user_id,
+            token,
+        }
+    }
+
+    /// 建组（受 Step-up 保护），返回新组 ID。
+    pub async fn create_group(app: &BuiltApp, admin: &Admin, group_key: &str, title: &str) -> i64 {
+        let response = step_up_dispatch(
+            app,
+            "create_group",
+            json!({ "group_key": group_key, "title": title }),
+            admin,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("创建权限组 {group_key} 失败: {error}"));
+        response
+            .data
+            .as_ref()
+            .and_then(|data| data["id"].as_i64())
+            .unwrap_or_else(|| panic!("创建权限组响应缺少 id: {}", response.message))
+    }
+
+    /// 删组并折算为 HTTP 状态码（成功为 200，其余由用例断言）。
+    pub async fn delete_group_status(app: &BuiltApp, admin: &Admin, group_id: i64) -> u16 {
+        match step_up_dispatch(app, "delete_group", json!({ "group_id": group_id }), admin).await {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 组是否仍按 `group_key` 存在。
+    pub async fn group_exists(app: &BuiltApp, group_key: &str) -> bool {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM permission_group WHERE group_key = ?")
+                .bind(group_key)
+                .fetch_one(pool_of(app))
+                .await
+                .unwrap_or_else(|error| panic!("统计权限组失败: {error}"));
+        count > 0
+    }
+
+    /// 组是否仍按主键存在（竞态用例必须按 id 观测）。
+    pub async fn group_exists_by_id(app: &BuiltApp, group_id: i64) -> bool {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permission_group WHERE id = ?")
+            .bind(group_id)
+            .fetch_one(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("统计权限组失败: {error}"));
+        count > 0
+    }
+
+    /// 一个组当前的成员行数。
+    pub async fn member_rows_of_group(app: &BuiltApp, group_id: i64) -> u64 {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_group WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_one(pool_of(app))
+            .await
+            .unwrap_or_else(|error| panic!("统计组成员失败: {error}"));
+        u64::try_from(count).unwrap_or_else(|error| panic!("成员行数为负: {error}"))
+    }
+
+    /// 直写一条成员行（成员 Action 落地前的唯一加成员手段）。
+    pub async fn add_member(app: &BuiltApp, admin: &Admin, group_id: i64, user_id: i64) {
+        insert_member_row(app, admin, group_id, user_id)
+            .await
+            .unwrap_or_else(|error| panic!("加成员必须成功: {error}"));
+    }
+
+    /// 尝试加成员并折算为 HTTP 状态码。
+    ///
+    /// 200 表示插入成功；404 表示组已被并发删除（插入只剩外键这一条失败路径）。
+    /// 组仍在却插入失败属于预期外故障，这里直接 panic——不能静默折算成某个状态码
+    /// 混过调用方的状态断言。
+    pub async fn add_member_status(
+        app: &BuiltApp,
+        admin: &Admin,
+        group_id: i64,
+        user_id: i64,
+    ) -> u16 {
+        match insert_member_row(app, admin, group_id, user_id).await {
+            Ok(()) => 200,
+            Err(error) => {
+                if group_exists_by_id(app, group_id).await {
+                    panic!("组仍在，加成员却失败: {error}");
+                }
+                404
+            }
+        }
+    }
+
+    async fn insert_member_row(
+        app: &BuiltApp,
+        admin: &Admin,
+        group_id: i64,
+        user_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO user_group (user_id, group_id, granted_by, occurred_at) \
+             VALUES (?, ?, ?, UNIX_TIMESTAMP())",
+        )
+        .bind(user_id)
+        .bind(group_id)
+        .bind(admin.user_id)
+        .execute(pool_of(app))
+        .await
+        .map(|_| ())
+    }
+
+    fn pool_of(app: &BuiltApp) -> &sqlx::MySqlPool {
+        app.tools()
+            .mysql()
+            .unwrap_or_else(|error| panic!("测试应用必须配置 MySQL: {error}"))
+            .pool()
+    }
+
+    /// 驱动一个受 Step-up 保护的写 Action：先无 proof 触发 challenge，用密码重认证
+    /// 换一次性 proof，再带 proof 重试同一次调用。
+    ///
+    /// 第一次调用若直接成功，说明 Step-up 守卫根本没挂上——那是安全回归，必须让用例
+    /// 失败，因此这里把它折算成 `ConfigError`（500）而不是放行。
+    async fn step_up_dispatch(
+        app: &BuiltApp,
+        action: &str,
+        body: Value,
+        admin: &Admin,
+    ) -> Result<ApiResponse, BaseError> {
+        let authorization = format!("Bearer {}", admin.token);
+        match dispatch(
+            app,
+            "access.groups",
+            action,
+            body.clone(),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
+        {
+            Err(BaseError::StepUpRequired(challenge)) => {
+                let completed = dispatch(
+                    app,
+                    "account.user",
+                    "step_up_complete",
+                    json!({
+                        "challenge": challenge.challenge,
+                        "credentials": { "username": admin.username, "password": PASSWORD },
+                    }),
+                    &[],
+                    PEER_PORT,
+                )
+                .await?;
+                let proof = completed
+                    .data
+                    .as_ref()
+                    .and_then(|data| data["proof"].as_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        BaseError::ConfigError("Step-up 完成响应缺少 proof".to_string())
+                    })?;
+                dispatch(
+                    app,
+                    "access.groups",
+                    action,
+                    body,
+                    &[
+                        ("authorization", authorization.as_str()),
+                        (STEP_UP_PROOF_HEADER, proof.as_str()),
+                    ],
+                    PEER_PORT,
+                )
+                .await
+            }
+            Ok(response) => Err(BaseError::ConfigError(format!(
+                "{action} 未受 Step-up 保护：无 proof 也成功了（{}）",
+                response.message
+            ))),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// 把 Action 错误折算为 HTTP 状态码。
+    ///
+    /// 框架的映射函数是传输层私有实现，集成测试只能按同一套分类重算：先看有专属
+    /// 状态的变体，其余按 `ErrorCategory` 归并；未覆盖的类别一律 500，让预期外错误
+    /// 直接表现为断言失败而不是被静默吞掉。
+    fn http_status(error: &BaseError) -> u16 {
+        match error {
+            BaseError::StepUpRequired(_) => 428,
+            BaseError::PermissionDenied(_) | BaseError::FieldPermissionDenied(_, _, _) => 403,
+            BaseError::Unauthorized(_) => 401,
+            BaseError::RecordNotFound(_) | BaseError::UserNotFound(_) => 404,
+            BaseError::ParamInvalid(_, _) => 400,
+            other => match other.category() {
+                ErrorCategory::Client => 400,
+                ErrorCategory::Auth => 401,
+                ErrorCategory::NotFound => 404,
+                ErrorCategory::Conflict => 409,
+                ErrorCategory::Transient => 503,
+                _ => 500,
+            },
+        }
+    }
+}
+
+/// spec §8.3 与 Review Focus 3：删除仍有成员的组必须被拒，且不产生 500。
+///
+/// 计划此处断言 409（`BaseError::Conflict`）。框架没有 `Conflict` 变体，且设计 §9.3
+/// 同时要求「不为个别用例扩展框架错误类型」，因此拒绝只能落成既有的 `ParamInvalid`
+/// （400）——与 Task 6 的成员上限拒绝同一取舍。断言要钉住的事实不变：必须被拒、
+/// 绝不能是 5xx、组必须仍然存在。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn deleting_a_group_with_members_is_rejected() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "ops", "运维").await;
+    let user_id = harness::register_with_code(&app, "member1", "member1@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    harness::add_member(&app, &admin, group_id, user_id).await;
+
+    let status = harness::delete_group_status(&app, &admin, group_id).await;
+    assert_eq!(
+        status, 400,
+        "组内非空必须被拒（ParamInvalid→400），绝不能是 500"
+    );
+    assert!(harness::group_exists(&app, "ops").await, "拒绝后组必须仍在");
+    assert_eq!(
+        harness::member_rows_of_group(&app, group_id).await,
+        1,
+        "拒绝不得顺手清掉成员行"
+    );
+}
+
+/// Review Focus 3：删除与加成员并发时，结果必须收敛到「删成功」或「冲突」。
+///
+/// 允许的状态集把计划里的 409 换成 400：删组被拒的原因（组内非空）在框架里是
+/// `ParamInvalid`（见上一个用例的说明）。真正被钉住的契约不变——任何一侧都不得
+/// 出现 5xx，且组一旦消失就不得残留成员行。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn delete_races_add_member_without_orphans_or_500() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+
+    for round in 0..5 {
+        let group_id = harness::create_group(&app, &admin, &format!("race{round}"), "竞态").await;
+        let user_id = harness::register_with_code(
+            &app,
+            &format!("racer{round}"),
+            &format!("racer{round}@example.com"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let (delete_result, add_result) = tokio::join!(
+            harness::delete_group_status(&app, &admin, group_id),
+            harness::add_member_status(&app, &admin, group_id, user_id),
+        );
+
+        for status in [delete_result, add_result] {
+            assert!(
+                status == 200 || status == 400 || status == 404,
+                "只允许 200/400/404，实际 {status}"
+            );
+        }
+        // 无论谁赢，都不能留下悬空成员行：组不存在则成员行必须为 0。
+        if !harness::group_exists_by_id(&app, group_id).await {
+            assert_eq!(
+                harness::member_rows_of_group(&app, group_id).await,
+                0,
+                "组已删除时不得残留成员行（外键 RESTRICT 必须兜住）"
+            );
+        }
+    }
 }

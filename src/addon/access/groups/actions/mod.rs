@@ -3,6 +3,12 @@
 //! 每个 Action 的输入、路由、权限与业务用例都自包含在同名文件中；
 //! 这里只有模块清单和注册表数组，新增接口时加 `mod` 声明和数组一行即可。
 
+mod create_group;
+mod delete_group;
+mod get_group;
+mod list_groups;
+mod update_group;
+
 use crate::addon::access::domain::context::Access;
 use std::sync::Arc;
 use yang_base::definition::ModuleSpec;
@@ -19,6 +25,11 @@ macro_rules! action_registry {
 
 /// access.groups 的全部 Action，按可审查的顺序排列。
 const ACTIONS: &[Register] = action_registry![
+    create_group,
+    update_group,
+    delete_group,
+    list_groups,
+    get_group,
     // scaffold:action-registration
 ];
 

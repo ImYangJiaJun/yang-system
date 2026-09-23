@@ -18,7 +18,7 @@ use crate::addon::access::groups::table::{
 };
 use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::table::{Record, SortOrder, TableDefinition, TableQuery};
+use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
 use yang_db::Transaction;
 
@@ -240,6 +240,24 @@ impl GroupRepository {
         Ok(affected)
     }
 
+    /// 删除一个组的全部权限条目，返回删除行数。
+    ///
+    /// 条目表只有唯一键与 CHECK、没有到 `permission_group` 的外键，删组时数据库
+    /// 不会替我们清理，因此这里必须显式删——否则会留下悬空条目行。
+    pub(crate) async fn delete_items_of_group_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        group_id: i64,
+    ) -> Result<u64, BaseError> {
+        let affected = self
+            .trusted_items(ctx)?
+            .where_eq(ITEM_GROUP_ID, serde_json::Value::Number(group_id.into()))?
+            .delete_in_tx(transaction)
+            .await?;
+        Ok(affected)
+    }
+
     /// 改写组事实的展示字段，返回影响行数（0 表示组不存在）。
     pub(crate) async fn update_group_in_tx(
         &self,
@@ -385,6 +403,11 @@ impl GroupRepository {
     ///
     /// 升序是扇出失效的锁序契约：受影响用户必须按同一顺序加锁，否则两个
     /// 并发变更会互相死锁。
+    ///
+    /// 排序在内存里做而不是 `ORDER BY`：`user_group.user_id` 只声明了可筛选、
+    /// 未声明可排序，走查询层排序会被字段权限门禁拒绝（Task 10 的集成测试正是
+    /// 撞在这里）。这里需要的只是确定的加锁顺序，而成员集合本来就被
+    /// `MAX_GROUP_MEMBERS` 约束成有界规模。
     pub(crate) async fn list_members_in_tx(
         &self,
         ctx: &ActionContext,
@@ -395,12 +418,14 @@ impl GroupRepository {
             .trusted_members(ctx)?
             .select_fields(&[MEMBER_USER_ID])?
             .where_eq(MEMBER_GROUP_ID, serde_json::Value::Number(group_id.into()))?
-            .order_by(MEMBER_USER_ID, SortOrder::Asc)?
             .all_in_tx(transaction)
             .await?;
-        rows.iter()
+        let mut members: Vec<i64> = rows
+            .iter()
             .map(|record| record.require(MEMBER_USER_ID))
-            .collect()
+            .collect::<Result<Vec<i64>, BaseError>>()?;
+        members.sort_unstable();
+        Ok(members)
     }
 
     /// 读取一个用户所属的全部组 id。
