@@ -105,6 +105,9 @@ docker compose exec -T mysql sh -c \
   等同于删除本地全部业务数据与审计记录，不可恢复。执行前确认已备份或确实要清空环境；
   日常停止只使用 `docker compose down`（不带 `-v`）。
 - 删除卷后即使重新 `up`，`docker/mysql/init/` 也只会重建空库，历史数据不会回来。
+- 部署链路里的清库开关（`deploy.ps1 -ResetDb` / 服务器上的 `SYNC_* refresh`）同属销毁性操作：
+  它 `DROP DATABASE` 掉 `[mysql].url` 指向的库并清空 Redis（**不删卷**），同样不可恢复，
+  也没有备份可回——执行前确认这就是你要的，详见 `deploy/README.md`。
 
 ## 相关文档
 

@@ -1,3 +1,7 @@
 frontend/** text eol=lf
 # 视觉回归基线等二进制资源不得做文本行尾归一化
 frontend/**/*.png binary
+# deploy/ 下的 shell 脚本是**在服务器上**执行的 bash：行尾被改成 CRLF 会直接破坏
+# shebang、set -euo pipefail 与 heredoc（而 CI 与门禁都不检测这一点，见 deploy/README.md）。
+# 除了这一行，当前没有任何机制拦得住它。
+deploy/*.sh text eol=lf

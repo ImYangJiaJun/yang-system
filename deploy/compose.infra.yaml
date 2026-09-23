@@ -10,6 +10,9 @@
 #
 # 注意：
 #   - 数据落在命名卷 yang_mysql_data / yang_redis_data 上，`down -v` 会**永久删除**。
+#   - 想把库重置成空库（应用启动时会重建全部表），**不要**用 down -v：用
+#     `deploy.ps1 -ResetDb`（或服务器上的 `RESET_DB=1 RESET_DB_CONFIRM=yes ./deploy-blue-green.sh refresh`）
+#     ——它只 DROP [mysql].url 指向的那个库 + 清 Redis，容器、卷、root 密码都保留。
 #   - 不映射任何宿主端口：只允许同处 yang-system-net 网络的容器访问。
 #     要从宿主机连库调试，用 `docker exec -it yang-mysql mysql -u...`。
 #   - Redis **不备份**（授权版本缓存、验证码、Step-up 单次消费都在里面，丢了只需重新登录）。

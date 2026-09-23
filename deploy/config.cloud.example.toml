@@ -5,6 +5,14 @@
 #   cp config.cloud.example.toml config.cloud.toml
 # **config.cloud.toml 已被 .gitignore 忽略，因为它含生产凭据。**
 #
+# 填好的 config.cloud.toml 默认只留在服务器上（deploy.ps1 只上传本模板）。
+# 想反过来「本机留一份、用 deploy.ps1 -SyncConfig 推上去」，也可以——那条路径会先备份
+# 服务器上的原文件、打印键级差异预览，失败时自动回滚。注意三个键改下去会让存量状态失效：
+# [token].active_secret（作废全部 Token）、[security.totp].aead_key（已绑定 TOTP 的用户
+# 登录不了）、[feishu].encryption_key（库里已封存的密文解不开）。详见 deploy/README.md。
+#
+# 另外 deploy.ps1 -ResetDb 会 DROP 掉本文件 [mysql].url 指向的那个库（不可逆）。
+#
 # 由 deploy-blue-green.sh 以只读方式挂进后端容器：-v <APP_DIR>/config.cloud.toml:/app/config.toml:ro
 #
 # -----------------------------------------------------------------------------

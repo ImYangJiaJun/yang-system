@@ -6,10 +6,10 @@
 
 | 文件 | 在哪跑 | 作用 |
 |---|---|---|
-| `deploy.ps1` | **本机 Windows** | 构建两个镜像 → 导出压缩 → 上传 → 触发远程 |
-| `deploy-blue-green.sh` | **服务器** | 载入镜像、起绿容器冒烟、切流量、回退 |
+| `deploy.ps1` | **本机 Windows** | 构建两个镜像 → 导出压缩 → 上传 → 触发远程；另外两个开关 `-SyncConfig`（推配置）与 `-ResetDb`（清库） |
+| `deploy-blue-green.sh` | **服务器** | 载入镜像、起绿容器冒烟、切流量、回退；`refresh` 子命令负责换配置与清库 |
 | `config.cloud.example.toml` | 入库 | 配置模板（占位值，可提交） |
-| `config.cloud.toml` | **服务器** | 生产配置（**由模板复制而来，凭据只在服务器上填**） |
+| `config.cloud.toml` | **服务器** | 生产配置（**由模板复制而来，凭据默认只填在服务器上**；也可以用 `-SyncConfig` 从本机推一份覆盖它） |
 | `compose.infra.yaml` | **服务器** | MySQL + Redis（只起依赖，不起应用） |
 
 > **只有 `config.cloud.toml` 需要你维护。** MySQL 的账号/密码/库名由脚本从
@@ -59,9 +59,11 @@
    openssl rand -hex 24          # 生成 MySQL 密码（只能字母数字）
    ```
 
-   > ⚠️ **凭据只填在服务器上，本机不要留生产口令。**
-   > `deploy.ps1` 只上传模板，**绝不上传本机的 `config.cloud.toml`**；
-   > 那份文件也已被 `.gitignore` 忽略。
+   > ⚠️ **默认只上传模板**：`deploy.ps1` 不会碰服务器上已填好的 `config.cloud.toml`
+   > （凭据仍建议只留在服务器上）。想主动用本机那份覆盖它，用显式的 `-SyncConfig`
+   > ——它会先备份服务器上的原文件、打印键级差异预览，失败还会自动回滚，
+   > 见下面「三、日常部署」里的「刷新配置 / 重置数据库」。
+   > 本机那份 `config.cloud.toml` 已被 `.gitignore` 忽略。
 
    **两条会挡住启动的硬约束**：
    - `[email.password_reset].link_base_url` 在 `environment = "production"` 下**必须是 https**
@@ -117,9 +119,12 @@ cd <lib_yang>\project\yang-system\deploy
 .\deploy.ps1 -Mode logs      # 追踪线上后端日志（Ctrl+C 退出）
 .\deploy.ps1 -Mode logs -LogContainer yang-backend-green   # 追踪绿容器
 .\deploy.ps1 -SkipBuild      # 跳过构建，复用上次导出的镜像包，直接上传（重试用）
+.\deploy.ps1 -SyncConfig     # 推本机配置到服务器并热替换（不构建）
+.\deploy.ps1 -ResetDb        # 清空本系统的库 + Redis（不构建），由应用启动时重建 schema
 ```
 
-服务器上也可以直接操作：`./deploy-blue-green.sh {status|logs|smoke|cutover|deploy|rollback}`。
+服务器上也可以直接操作：
+`./deploy-blue-green.sh {status|logs|smoke|cutover|deploy|rollback|refresh}`。
 
 **建议**：生产变更先 `-Mode smoke`，确认绿容器健康再 `-Mode cutover`——两段之间线上完全不受影响。
 
@@ -133,6 +138,91 @@ cd <lib_yang>\project\yang-system\deploy
 > 它要求 `yang-system-images.tar.gz` 还在本地。注意**上传成功后脚本会删掉这个包**，
 > 所以那种情况下改用 `-Mode cutover` / `-Mode rollback` 重跑远程步骤。
 > 镜像包不存在时脚本会直接报错，**不会**退化成悄悄重新构建。
+
+### 刷新配置 / 重置数据库
+
+```powershell
+.\deploy.ps1 -SyncConfig                        # 本机 config.cloud.toml → 服务器，热替换并重启应用
+.\deploy.ps1 -ResetDb                           # 清空本系统的库 + Redis，由应用启动时重建 schema
+.\deploy.ps1 -SyncConfig -ResetDb               # 两件一起做：重置配置 + 重置数据库
+.\deploy.ps1 -Mode deploy -SyncConfig -ResetDb  # 先部署新镜像，**再**重置
+.\deploy.ps1 -ResetDb -Yes                      # 跳过交互确认（脚本化用）
+```
+
+两个开关都**不涉及镜像**：不给 `-Mode` 时不会构建（刷新配置/清库是运维动作，不该顺带重打
+8~9 分钟）。给了 `-Mode deploy` 时是「先部署、后重置」——**顺序不能反**：库要清在「新版本已经
+在跑」之后，否则旧容器一被 `--restart` 拉起来就会把**旧 schema** 同步进刚清空的库，破坏性
+schema 变更就白做了。与 `-Mode logs` / `-Mode upload` 组合会直接报错（前者是交互式阻塞命令，
+后者本就不触发远程）；`-ResetDb` 还**只认 `-Mode deploy`**——别的 Mode 跑完时线上仍是旧版本，
+重启起来的旧容器会把旧 schema 同步进刚清空的库（`smoke` 尤其容易踩：它只起绿容器，线上那对
+根本没换）。
+
+> **首次部署的例外**：服务器上还没有 `config.cloud.toml` 时，`-Mode deploy -SyncConfig` 会
+> **提前报错**（部署一上来就要用配置，而配置是在部署之后才安装的）。先单独推一次配置
+> （`.\deploy.ps1 -SyncConfig`），再正常部署。
+
+服务器上也可以直接调用（`refresh` 的动作由环境变量选）：
+
+```bash
+SYNC_CONFIG=1 ./deploy-blue-green.sh refresh
+RESET_DB=1 RESET_DB_CONFIRM=yes ./deploy-blue-green.sh refresh
+SYNC_CONFIG=1 RESET_DB=1 RESET_DB_CONFIRM=yes ./deploy-blue-green.sh refresh
+```
+
+两者都不可逆，所以默认会打印影响面并要求输入 `yes`；加 `-Yes` 可以跳过，但**无法交互时它会
+直接失败**，不会因为「没人回答」而放行。远端还有一道 `RESET_DB_CONFIRM=yes` 的硬闸门，
+它由 `deploy.ps1` 在确认通过后才转发。
+
+**`-SyncConfig` 做的事**：
+
+1. 本机先校验（占位值 / 缺 `[authorization]` 段 / URL 写法），不合格就不上传；
+2. 打印**键级差异预览**（只列键名，一个值都不打印），并把会「让存量状态失效」的键单独标出：
+
+   | 键 | 改了会怎样 |
+   |---|---|
+   | `[token].active_secret` | 所有已签发 Token 立即失效（所有人要重新登录） |
+   | `[security.totp].aead_key` | 它加密库里的 `users.totp_secret` —— 已绑定 TOTP 的用户登录不了 |
+   | `[feishu].encryption_key` | 它封存库里的飞书 token 密文 —— 那些密文解不开 |
+
+3. 上传为服务器的暂存文件 `config.cloud.toml.upload`，由远端校验后**就地安装**（原地截断写，
+   保住 inode：配置是单文件 bind mount，换 inode 的写法运行中的容器读不到新内容），
+   原文件备份为 `config.cloud.toml.bak.<时间戳>`；
+4. 重启应用容器（配置只在进程启动时读一次，光换文件不生效），健康检查不通过就
+   **自动把备份还原回去**并再次重启，然后以非 0 退出。
+
+`[http].bind` / `[observability].metrics_enabled` / `[observability].metrics_bind` 三项**推配置
+改不动**：`docker/app/Dockerfile` 里同名 ENV 的优先级更高（优先级为 配置文件 < 环境变量）。
+
+**`-ResetDb` 做的事**（`DROP DATABASE` + 重建空库 + 清 Redis）：
+
+- 清的库 = 服务器 `config.cloud.toml` 里 `[mysql].url` 指向的那个库。MySQL 容器、数据卷、
+  root 密码、同机其它库都**保留**；要连容器一起重置才用 `docker compose down -v`。
+  库名从 `[mysql].url` 解析出来，脚本会拒绝清系统库与含非法字符的库名，也**一律拒绝**在
+  `[mysql].url` / `[redis].url` 指向非本容器时动手——MySQL 的 SQL 全部走
+  `docker exec yang-mysql`、Redis 的清空走 `docker exec yang-redis`，都不按 URL 里的 host 建连接，
+  所以对外部实例执行只会「打错目标还报成功」。真要清外部库/缓存请由 DBA 处理。
+- 应用账号会按 `[mysql].url` **重新对齐**（`CREATE USER` / `ALTER USER` / `GRANT`）。
+  MySQL 的账号密码只在数据卷为空时初始化，改了配置里的账号/密码而不重建卷是不会生效的
+  （症状就是日志里的 `Access denied`）。
+- Redis 一起清（会话 / 授权版本缓存 / 验证码 / step-up 令牌）。只清库不清 Redis 会留下指向
+  已消失用户的缓存，让「重置」停在半截状态；Redis 本就不备份，代价只是重新登录。
+- 应用是「停 → 清 → 起」：schema 同步只在进程启动时跑一次，所以清完必须重启才会重建表。
+  脚本会额外校验「库里的表数 > 0」——readiness 探针只做 `SELECT 1`，空库照样返回 200，
+  证明不了 schema 已经重建。
+  中途失败（清库语句、Redis、起容器）时，脚本会**先把容器起回去**再退出，不会把站点留在
+  停着的状态；库若停在半途，修好原因后重跑一次同样的 refresh 即可重新对齐。
+  服务器上还没有线上容器时，结论会明确写成「已执行，但**未经验证**」而不是「完成 ✔」。
+- ⚠️ **清库之后没有任何账号能登录**：注册出来的新账号零权限，而授予权限只有手工 SQL
+  （见 `docs/contracts/AUTHZ_GRANTS.md` 的「初始授权运维手册」），系统也没有「首个注册账号
+  即管理员」的引导。
+- ⚠️ **不可恢复**：MySQL 没有备份机制，清掉就没了（见 `docs/operations/RUNBOOK_BACKUP.md`）。
+- ⚠️ 清库对**已签发 Token** 的影响：`users` 行被删掉后，请求期的授权版本校验会拒绝**绝大多数**
+  旧 Token（缓存未命中或版本不等时会回查 MySQL 的 `users.authz_version`，用户不存在即拒）。
+  但重建后的自增 id 从 1 重排：若旧 Token 的 `authz_version` 恰好等于新账号的版本（都取默认 1），
+  就存在被继承的可能。要彻底作废，改 `[token].active_secret` 后再 `-SyncConfig`（所有人重新登录）。
+
+> 这条路径也是应用**破坏性 schema 变更**（删列、改类型等）的唯一干净做法：schema 同步是
+> 只增不删的，改结构得先清库再让应用重建。清库 + `-Mode deploy` 一条命令即可。
 
 ### 排障：上传卡住不动
 
@@ -258,6 +348,12 @@ curl --noproxy '*' -I http://127.0.0.1:18654/
 | `curl --noproxy '*' http://127.0.0.1:18654/` 不通 | 端口没发布 / 绑错地址，或容器没起来。看 `docker ps` 的端口映射与 `docker logs yang-backend` |
 | **浏览器打不开、报 503** | ⚠️ **先怀疑系统代理**：Windows 代理会让 Chrome 对不可达端口返回**假 503**。用 `curl.exe --noproxy "*"` 直连复验；真不通再查云安全组是否放行了该端口（当前只放行 `80/443` 与 `18000-19000`） |
 | 前端 502 | 前端容器没起来，或它没加入后端容器的网络命名空间（`--network container:` 写错） |
+| `refresh` 之后 readiness 一直不 200 | 新推上去的配置有问题。看 `refresh` 的输出：没用 `-SyncConfig` 时它不会回滚，配置得自己修；用了的话它会把备份还原并重启（输出里会写「配置已回滚」） |
+| `refresh` 报告「库 X 里一张表都没有」 | 应用启动了但 schema 同步没生效——通常是配置里的库名/账号不对（`docker logs yang-backend` 里会有线索）。清库本身没失败，别把它当成功 |
+| 清库后表数正常，但**登不进去** | 这是预期行为：清库后没有任何账号，注册出来的账号零权限。按 `docs/contracts/AUTHZ_GRANTS.md` 手工插 `authz_grant` |
+| `refresh` 报「[mysql].url 的主机名不是本脚本管理的容器」 | 脚本只清 `docker exec yang-mysql` 里的库，不按 URL 的 host 连接。若这确实是本机容器，把主机名改成 `yang-mysql` 再跑；真是外部实例则请 DBA 处理 |
+| `refresh` 报「容器读不到刚写进 config.cloud.toml 的内容」 | 那份配置在容器创建之后被换过 inode（`sed -i` / `vim` / `mv`）。就地改写对它不生效，先 `./deploy-blue-green.sh deploy`（或 `cutover`）重建容器，再重试 `-SyncConfig` |
+| `refresh` 报「脚本以退出码 N 中止，而容器之前被停过」 | 清库/换配置中途失败了。脚本会**自动把容器起回去**（然后你可以从日志排查）；库可能停在半途，修好原因后重跑一次同样的 refresh 即可对齐 |
 
 ---
 
@@ -270,6 +366,11 @@ curl --noproxy '*' -I http://127.0.0.1:18654/
   下次会重新生成，但那时它已与实际 root 密码不符（MySQL 的 root 密码只在初始化时设定）。
 - **数据卷**：`yang_mysql_data` / `yang_redis_data`。`docker compose down -v` 会**永久删除**，
   MySQL 是唯一事实源，Redis 不备份（见 `docs/operations/RUNBOOK_BACKUP.md`）。
+  注意 `-ResetDb` **不删卷**：它只清 `[mysql].url` 指向的那个库，容器、卷、root 密码都留着。
+- **换配置 / 清库只走 `deploy.ps1 -SyncConfig` / `-ResetDb`（或服务器上的 `refresh`）**：
+  两件事都必须重启应用容器才生效，手工 `scp` + 改文件容易「传了却没生效」——
+  配置是单文件 bind mount，用 `mv` / `sed -i` 这类换 inode 的写法写下去，运行中的容器读到的
+  仍是旧内容，连 `docker restart` 都救不回来。
 - **应用容器由本脚本管理，不要用 compose 管理**：蓝绿需要精确控制容器名、端口与 netns，
   交给 compose 会互相打架。`compose.infra.yaml` 只管 MySQL/Redis。
 - **回退保留一个版本**：`cutover` 会把上一版容器停掉并改名为 `*-blue`，镜像备份为
