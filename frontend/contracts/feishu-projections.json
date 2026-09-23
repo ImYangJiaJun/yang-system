@@ -1,0 +1,164 @@
+{
+  "$comment": [
+    "飞书控制台各端点的**投影契约**：后端实际 emit 的键 ↔ 前端实际 read 的键。",
+    "",
+    "两端各自断言，谁漂移谁红：",
+    "  · Rust：src/addon/feishu/datasource/actions/list_datasources.rs 的 `the_committed_contract_*`",
+    "  · 前端：frontend/tests/features/feishu/api.test.ts 的 `投影契约（emit ↔ read）`",
+    "两份断言都读本文件，所以「emit 键集」与「read 键集」不可能各自漂移。",
+    "",
+    "为什么需要它：这一整类 bug（前后端四次）的病根是「字段没被删，只是**搬到了另一层**」。",
+    "那种漂移对「扫已删字段」类检查**全盲**——`encrypt_enabled` 在绑定表上依然是合法字段名，",
+    "`linkage_mapping` 更是注释都写对了、代码却还在读。只有把两张键集摆在一起比才看得见：",
+    "  · 前端读一个后端不发的键 ⇒ 恒得 null，界面当成「服务端说没有」，画出一句假话；",
+    "  · 后端发一个前端不读的键 ⇒ 死投影（补读，或在 backend_only 里记下为什么不必读）。",
+    "",
+    "键有三个去处，断言各不相同：",
+    "  · emitted      —— 真的发出去（前端必须读，或在 backend_only 里记账）；",
+    "  · query_only   —— 查询要用、但不发出去（例如分组键）；",
+    "  · backend_only —— 发了但前端不读，**必须写明理由**（这是记录下来的决定，不是垃圾桶）。",
+    "",
+    "只覆盖**结构体化**的响应：断言靠 serde 推导的键集，所以内联 json!({...}) 的响应（翻页信封、创建/更新回执）断言不到——那类要先把响应对成结构体才能纳入。",
+    "",
+    "另外两条轴也在这个文件里：",
+    "  · `client_fields` —— **前端发出**的字段名（order_by[].field / where.field）。它们必须能在",
+    "    那张表上用（列存在 + order_by 要 sortable、where 要 filterable）。后端侧断言在",
+    "    `projection_contract::assert_client_fields_are_usable`，前端侧在 api.test.ts。",
+    "  · `enums` —— 枚举取值域。`enforced_by: backend` 的那些与表声明的 `.options(..)` 逐字对账；",
+    "    `enforced_by: frontend` 的是**后端零校验**、只有界面在守的那一个。"
+  ],
+  "list_datasources": {
+    "item": {
+      "emitted": [
+        "id",
+        "title",
+        "status",
+        "updated_at",
+        "ingest_mode",
+        "bitable_base_token",
+        "bitable_table_id",
+        "bitable_view_id",
+        "last_pull_at",
+        "last_success_at",
+        "consecutive_failures",
+        "last_error",
+        "fields"
+      ],
+      "backend_only": {},
+      "query_only": {}
+    },
+    "binding": {
+      "emitted": [
+        "field_id",
+        "field_name",
+        "source_key",
+        "parent_field_id",
+        "enabled",
+        "encrypt_enabled",
+        "default_locale",
+        "token_rotated_at"
+      ],
+      "query_only": {
+        "datasource_id": "查询要用它把绑定分组到各条数据源上；分组之后它没有意义，所以不 emit。"
+      },
+      "backend_only": {}
+    }
+  },
+  "list_options": {
+    "item": {
+      "emitted": [
+        "option_id",
+        "source_key",
+        "label",
+        "i18n",
+        "sort_order",
+        "is_default",
+        "enabled",
+        "parent_key",
+        "last_push_at",
+        "updated_at"
+      ],
+      "backend_only": {},
+      "query_only": {}
+    }
+  },
+  "health_check": {
+    "report": {
+      "emitted": [
+        "ok",
+        "missing_fields",
+        "view_missing",
+        "table_missing",
+        "unchecked"
+      ],
+      "backend_only": {},
+      "query_only": {}
+    },
+    "missing_field": {
+      "emitted": [
+        "field_id",
+        "source_key"
+      ],
+      "backend_only": {},
+      "query_only": {}
+    }
+  },
+  "pull_schedule": {
+    "result": {
+      "emitted": [
+        "interval_seconds",
+        "next_run_at"
+      ],
+      "backend_only": {},
+      "query_only": {}
+    }
+  },
+  "client_fields": {
+    "list_datasources": {
+      "order_by": [
+        "title",
+        "id"
+      ],
+      "where": [
+        "status",
+        "id"
+      ]
+    },
+    "list_options": {
+      "order_by": [
+        "updated_at",
+        "option_id"
+      ],
+      "where": []
+    }
+  },
+  "enums": {
+    "feishu_datasource": {
+      "status": {
+        "values": [
+          "active",
+          "disabled"
+        ],
+        "enforced_by": "backend"
+      },
+      "ingest_mode": {
+        "values": [
+          "push",
+          "pull"
+        ],
+        "enforced_by": "backend"
+      }
+    },
+    "feishu_datasource_field": {
+      "default_locale": {
+        "values": [
+          "zh_cn",
+          "en_us",
+          "ja_jp"
+        ],
+        "enforced_by": "frontend",
+        "why": "后端对它零校验（声明成 Str + default），界面是唯一的守卫——写错会让该字段在所有语言下都取不到文案。"
+      }
+    }
+  }
+}

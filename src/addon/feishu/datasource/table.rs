@@ -17,7 +17,16 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             // `delete_datasource_table` 的数据源定位，以及出站读端取 `status`。
             // 漏了它，这些路径会在运行期吃 `FieldPermissionDenied`（不是启动期报错）。
             // 仓库惯例见 `account/user/table.rs:86`。
-            id => Key::new().title("ID").filterable(true),
+            //
+            // `sortable` **同样必须打开**，这条是**本表对仓库惯例的刻意偏离**：
+            // 别处的 `id` 都只有 `filterable`（排序主键对人没有意义），但本表是
+            // 「一表一源」的台账，列表要靠**唯一列**收尾才能有确定性全序——
+            // `title` 会重名，`id` 是这张表上唯一的唯一列。
+            // `list_datasources` 的兜底分支与前端 `withStableOrder` 都恒按 `id` 升序，
+            // 而 `validate_order_field` 对不可排序的字段**先于角色权限**直接拒绝
+            // （`table_query/validation.rs`），映射到 HTTP 就是 403——列表页不是
+            // 「排序不生效」，是整个请求恒失败。
+            id => Key::new().title("ID").filterable(true).sortable(true),
             title => Str::new()
                 .title("名称")
                 .require(true)
@@ -128,6 +137,25 @@ mod tests {
         assert!(
             id.is_filterable(),
             "按主键定位必须可用（fail-closed 能力位）"
+        );
+    }
+
+    #[test]
+    fn id_is_sortable_so_the_ledger_can_close_its_ordering_with_it() {
+        // 本表刻意偏离仓库惯例（别处的 `id` 只有 `filterable`）：台账要靠唯一列收尾
+        // 才有确定性全序，而 `title` 会重名、`id` 是唯一的唯一列。
+        // `validate_order_field` 对不可排序的字段先于角色权限直接拒绝，HTTP 边界上
+        // 是 **403**——`list_datasources` 的兜底与前端 `withStableOrder` 都恒按 `id`
+        // 升序，漏了这一位就是「列表页永远打不开」。
+        // 端到端复现见 `actions/list_datasources.rs` 的
+        // `the_order_clauses_the_console_always_sends_are_applicable`。
+        let definition = definition();
+        let id = definition
+            .field("id")
+            .unwrap_or_else(|| panic!("id 字段必须存在"));
+        assert!(
+            id.is_sortable(),
+            "按主键收尾排序必须可用（fail-closed 能力位）"
         );
     }
 

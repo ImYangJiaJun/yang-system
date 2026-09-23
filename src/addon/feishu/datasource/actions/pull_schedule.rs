@@ -86,3 +86,24 @@ pub(super) async fn handle(
         "查询成功",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! 只放一条：排程结果的键集与契约对账（工具在 `domain/projection_contract.rs`）。
+    use super::*;
+
+    use crate::addon::feishu::domain::projection_contract;
+
+    #[test]
+    fn the_committed_contract_matches_the_schedule_struct() {
+        let result = PullScheduleResult {
+            interval_seconds: 900,
+            next_run_at: Some(1),
+        };
+        projection_contract::assert_keys(
+            &result,
+            &["pull_schedule", "result", "emitted"],
+            "自动拉取排程",
+        );
+    }
+}

@@ -60,7 +60,12 @@ impl CreateTableInput {
     /// 顺序有讲究：先查便宜的形状，再查需要建索引的集合关系，最后才做要拼 URL 的
     /// 坐标校验——错误消息要指向**最先出问题**的那个输入。
     fn validate(&self) -> Result<(), BaseError> {
-        if self.title.trim().is_empty() || self.title.chars().count() > 100 {
+        // 控制字符一并挡掉：它能过 trim（`"a	b".trim()` 仍是原样），进库之后
+        // 在界面上渲染成一个方块，而名称是**人用来指认这条数据源的**唯一标签。
+        if self.title.trim().is_empty()
+            || self.title.chars().count() > 100
+            || self.title.chars().any(|c| c.is_control())
+        {
             return Err(BaseError::ParamInvalid(
                 "title".to_string(),
                 "名称必须在 1..=100 字符".to_string(),
@@ -199,7 +204,13 @@ pub(super) async fn handle(
             &ctx,
             None,
             None,
-            audit::entity("feishu_datasource", &input.title)?,
+            // **必须用刚拿到的主键**，不是名称：同表另外五条路径（update / delete /
+            // reveal / rotate / pull）传的都是表级主键，只有这一条曾经传名称原文。
+            // 传名称有两个后果：一是名称里夹控制字符（例如粘进来的制表符）时
+            // `audit::entity` 会拒收，整笔建源在同一事务末尾回滚、对外只报内部错误，
+            // 用户没有任何线索指向名称；二是创建事件按名称记账，与后续更新/删除
+            // 事件的主键口径对不上，「查这条数据源的变更史」会缺掉创建那一笔。
+            audit::entity("feishu_datasource", datasource_id)?,
             None,
             Some(audit::summary([(
                 "outcome_code",
@@ -359,6 +370,22 @@ mod tests {
     fn rejects_an_unknown_ingest_mode() {
         let mut input = two_level();
         input.ingest_mode = Some("telepathy".to_string());
+        assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_a_title_with_a_control_character() {
+        // 回归：控制字符能过 `trim`（`"a\tb".trim()` 仍是原样），所以旧的校验放它进库。
+        // 它踩的雷在**审计实体 id** 上——那一处会拒收控制字符，让整笔建源在同一事务
+        // 末尾回滚、对外只报内部错误，用户没有任何线索指向名称。
+        // 审计目标已经改成表级主键（不再受名称影响），但名称本身仍然不该收控制字符：
+        // 它在界面上渲染成一个方块，而名称是人用来指认这条数据源的唯一标签。
+        let mut input = two_level();
+        input.title = "公司往来付款\t".to_string();
+        assert!(input.validate().is_err());
+
+        let mut input = two_level();
+        input.title = "公司往来付款\u{7}".to_string();
         assert!(input.validate().is_err());
     }
 

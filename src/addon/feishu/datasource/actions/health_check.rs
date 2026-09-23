@@ -329,6 +329,41 @@ pub(super) async fn handle(
 mod tests {
     use super::*;
 
+    use crate::addon::feishu::domain::projection_contract;
+
+    /// 体检报告的键集与契约对账。
+    ///
+    /// 嵌套项单独对一次：`missing_fields[]` 是**另一个形状**（`field_id` / `source_key`），
+    /// 前端在那两个键上拼给运维看的标识，漏一个就画不出「哪一列被删了」。
+    #[test]
+    fn the_committed_contract_matches_the_report_structs() {
+        let report = HealthReport {
+            ok: true,
+            missing_fields: vec![MissingField {
+                field_id: "fldA".to_string(),
+                source_key: "k".to_string(),
+            }],
+            view_missing: false,
+            table_missing: false,
+            unchecked: vec!["x".to_string()],
+        };
+        projection_contract::assert_keys(
+            &report,
+            &["health_check", "report", "emitted"],
+            "体检报告",
+        );
+
+        let missing = MissingField {
+            field_id: "fldA".to_string(),
+            source_key: "k".to_string(),
+        };
+        projection_contract::assert_keys(
+            &missing,
+            &["health_check", "missing_field", "emitted"],
+            "体检的缺失字段项",
+        );
+    }
+
     fn remote_field(field_id: &str, field_name: &str) -> FieldItem {
         FieldItem {
             field_id: field_id.to_string(),

@@ -12,9 +12,12 @@ pub(crate) mod option_write;
 pub(crate) mod outbound;
 pub(crate) mod outbound_setup;
 pub(crate) mod pagination;
+#[cfg(test)]
+pub(crate) mod projection_contract;
 pub(crate) mod protocol;
 pub(crate) mod pull;
 pub(crate) mod repository;
+pub(crate) mod schema_anchor;
 pub(crate) mod source_key;
 pub(crate) mod tenant_token;
 pub(crate) mod token;

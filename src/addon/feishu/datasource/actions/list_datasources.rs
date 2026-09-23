@@ -12,6 +12,42 @@ use yang_base::BaseError;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::list_input::ListInput;
 
+/// 表级行的**投影列**。与 `frontend/contracts/feishu-projections.json` 是同一份契约。
+///
+/// 提成常量不是为了好看：`select_fields` 与契约断言**必须读同一个来源**，否则
+/// 「查询选的列」与「契约声明的键」会各自漂移——那正是这一整类 bug 的形态。
+/// `fields` 不在其中：它没有对应的列，由 `group_bindings` 组装（见 `DATASOURCE_ITEM_COMPOSED`）。
+pub(super) const DATASOURCE_ITEM_COLUMNS: &[&str] = &[
+    "id",
+    "title",
+    "status",
+    "updated_at",
+    "ingest_mode",
+    "bitable_base_token",
+    "bitable_table_id",
+    "bitable_view_id",
+    "last_pull_at",
+    "last_success_at",
+    "consecutive_failures",
+    "last_error",
+    // `snapshot_digest` **不再投影**：摘要归属在表级化时已搬到字段绑定，
+    // 表级那一列是「保留列」，谁都不写它（`pull.rs` 只把摘要写进绑定行）。
+    // 继续投影它 = 前端永远读到 null，却把它文档成「内容摘要」——一句假话。
+];
+
+/// 字段绑定的**投影列**。同上，与契约文件是同一份契约。
+pub(super) const BINDING_ITEM_COLUMNS: &[&str] = &[
+    "datasource_id",
+    "field_id",
+    "field_name",
+    "source_key",
+    "parent_field_id",
+    "enabled",
+    "encrypt_enabled",
+    "default_locale",
+    "token_rotated_at",
+];
+
 /// 一条字段绑定的对外视图。
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub(super) struct FieldBindingItem {
@@ -25,6 +61,13 @@ pub(super) struct FieldBindingItem {
     parent_field_id: Option<String>,
     /// 是否在用。取消勾选的列会留在这里但被**停用**（不删行）。
     enabled: bool,
+    /// 加密返回（回给飞书的信封是否加密）。**它是绑定级的**——一条数据源有 N 条绑定，
+    /// 每条可以各自决定。表级行上曾经也有这个名字的列，那是字段级时代的残留：
+    /// 表级行读它只会恒得 `false`，于是台账那一列对每一条源都画「未加密」。
+    encrypt_enabled: bool,
+    /// 回给飞书的 `locale`。同样属于绑定层，取值域 `zh_cn` / `en_us` / `ja_jp`，
+    /// **后端对它零校验**——界面是唯一的守卫。
+    default_locale: String,
     /// 最近一次轮换凭据的时间（unix 秒）；**从未轮换或手填的 Token 为 `None`**。
     ///
     /// 投影它是控制台那一列的全部意义：写入在 `rotate_token.rs`，没有读路径就永远空着。
@@ -52,6 +95,14 @@ pub(super) fn group_bindings(
                 source_key: row.require("source_key")?,
                 parent_field_id: row.optional("parent_field_id")?,
                 enabled: row.optional("enabled")?.unwrap_or(true),
+                // 两列在库上都是 `NOT NULL` + 有默认值，兜底值与列默认值一致：
+                // 缺键只可能意味着「投影少列了」，那种时候静默降级成默认值会
+                // 把一个缺陷画成「未加密 / 简体中文」——所以兜底值必须**等于**
+                // 列默认值，这样万一真漏了，画面与库里的实际值仍然一致。
+                encrypt_enabled: row.optional("encrypt_enabled")?.unwrap_or(false),
+                default_locale: row
+                    .optional("default_locale")?
+                    .unwrap_or_else(|| "zh_cn".to_string()),
                 token_rotated_at: row.optional("token_rotated_at")?,
             });
     }
@@ -90,8 +141,6 @@ pub(super) struct DatasourceItem {
     last_success_at: Option<i64>,
     consecutive_failures: i64,
     last_error: Option<String>,
-    /// **已废弃**：摘要归属已改为「每条字段绑定一份」，见 `field_table.rs`。
-    snapshot_digest: Option<String>,
     /// 勾选的字段绑定。**空数组表示一条都没配**，不是「没取到」。
     fields: Vec<FieldBindingItem>,
 }
@@ -123,21 +172,7 @@ pub(super) async fn handle(
     let mut query = context
         .datasources()
         .query()
-        .select_fields(&[
-            "id",
-            "title",
-            "status",
-            "updated_at",
-            "ingest_mode",
-            "bitable_base_token",
-            "bitable_table_id",
-            "bitable_view_id",
-            "last_pull_at",
-            "last_success_at",
-            "consecutive_failures",
-            "last_error",
-            "snapshot_digest",
-        ])?
+        .select_fields(DATASOURCE_ITEM_COLUMNS)?
         .search(input.search.as_deref())?;
 
     if let Some(tree) = input.where_clause {
@@ -177,15 +212,10 @@ pub(super) async fn handle(
         let binding_rows = context
             .datasource_fields()
             .query()
-            .select_fields(&[
-                "datasource_id",
-                "field_id",
-                "field_name",
-                "source_key",
-                "parent_field_id",
-                "enabled",
-                "token_rotated_at",
-            ])?
+            // 这两个键**属于绑定层**，而表级行上曾经各有一个同名的残影
+            // （读它恒为默认值，于是台账那两列对每一条源都在说假话）。
+            // 控制台要在一条数据源里逐字段展示它们，所以必须从这里投影出去。
+            .select_fields(BINDING_ITEM_COLUMNS)?
             .where_in("datasource_id", ids)?
             .all()
             .await?;
@@ -208,7 +238,6 @@ pub(super) async fn handle(
             last_success_at: record.optional("last_success_at")?,
             consecutive_failures: record.optional("consecutive_failures")?.unwrap_or(0),
             last_error: record.optional("last_error")?,
-            snapshot_digest: record.optional("snapshot_digest")?,
             // 没配绑定的数据源得到**空数组**，不是缺键——前端不必到处补 `?? []`
             fields: groups.remove(&id).unwrap_or_default(),
         });
@@ -228,6 +257,41 @@ pub(super) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::addon::feishu::domain::projection_contract;
+
+    /// 控制台与后端兜底都按 `id` 收尾排序，而 DSL 的 `sortable` 是 fail-closed。
+    ///
+    /// 这条不是「测一个布尔位」：`TableQuery::order_by` 对不可排序的字段直接返回
+    /// `FieldPermissionDenied`，HTTP 边界把它映射成 **403**（`transport/axum.rs`），
+    /// 于是 `/datasources/query` 每次请求都失败——列表页根本打不开，比「排序不生效」
+    /// 重得多。前端 `withStableOrder` 恒发 `[{title,Asc},{id,Asc}]`，后端兜底
+    /// （本文件 `!ordered` 分支）也是这两条，所以两条都必须真的可用。
+    #[tokio::test]
+    async fn the_order_clauses_the_console_always_sends_are_applicable() {
+        let pool = Arc::new(
+            sqlx::MySqlPool::connect_lazy("mysql://user:pass@localhost:3306/yang")
+                .unwrap_or_else(|error| panic!("惰性连接池应可构造: {error}")),
+        );
+        let definition = crate::addon::feishu::datasource::table::table_spec()
+            .unwrap_or_else(|error| panic!("表声明应有效: {error}"))
+            .table_definition()
+            .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));
+        // 与 `Repository::query()` 同一条绑定路径：受信角色 + 惰性连接池。
+        // `order_by` 只做校验，不碰数据库。
+        let mut query = definition.bind(pool).query(["system"]);
+        for field in ["title", "id"] {
+            query = query
+                .order_by(field, SortOrder::Asc)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "按 {field} 排序被拒：{error}——不可排序的字段得到 \
+                     FieldPermissionDenied，在 HTTP 边界上就是 403，\
+                     整个 /datasources/query 恒失败"
+                    )
+                });
+        }
+    }
 
     fn binding_row(
         datasource_id: i64,
@@ -312,6 +376,148 @@ mod tests {
             value.get("token_rotated_at"),
             Some(&serde_json::Value::Null)
         );
+    }
+
+    /// 表级行上**没有对应列**的合成键：`fields` 由 `group_bindings` 组装。
+    ///
+    /// 只在这里用到（生产路径直接组装它，不需要一份清单），所以放测试模块里，
+    /// 免得给非测试构建留一个 dead_code。
+    const DATASOURCE_ITEM_COMPOSED: &[&str] = &["fields"];
+
+    /// 表级行 / 字段绑定 / 查询列，三处与契约文件逐一对账。
+    ///
+    /// 挡的是这一整类 bug 的病根——「字段没被删，只是搬到了另一层」：那种漂移对
+    /// 「扫已删字段」类检查全盲（`encrypt_enabled` 在绑定表上依然是合法字段名）。
+    /// 断言工具在 `domain/projection_contract.rs`，与前端那份测试共用同一份契约文件。
+    #[test]
+    fn the_committed_contract_matches_the_structs_and_the_query() {
+        let contract = projection_contract::contract();
+
+        let item = DatasourceItem {
+            id: 1,
+            title: "t".to_string(),
+            status: "active".to_string(),
+            updated_at: 0,
+            ingest_mode: "pull".to_string(),
+            bitable_base_token: None,
+            bitable_table_id: None,
+            bitable_view_id: None,
+            last_pull_at: None,
+            last_success_at: None,
+            consecutive_failures: 0,
+            last_error: None,
+            fields: Vec::new(),
+        };
+        projection_contract::assert_keys(&item, &["list_datasources", "item", "emitted"], "表级行");
+
+        let binding = FieldBindingItem {
+            field_id: "fldA".to_string(),
+            field_name: None,
+            source_key: "k".to_string(),
+            parent_field_id: None,
+            enabled: true,
+            encrypt_enabled: false,
+            default_locale: "zh_cn".to_string(),
+            token_rotated_at: None,
+        };
+        projection_contract::assert_keys(
+            &binding,
+            &["list_datasources", "binding", "emitted"],
+            "字段绑定",
+        );
+
+        for level in ["item", "binding"] {
+            projection_contract::assert_buckets_are_disjoint(&contract, "list_datasources", level);
+        }
+
+        // 轴一：前端在这个端点上**发出**的排序/筛选字段名，必须能在这张表上用。
+        // 它们曾经漂移过一次（收尾键从 source_key 换成 id，而 id 当时没开 sortable），
+        // 后果是整个列表请求被排序校验打成 400。
+        let spec = crate::addon::feishu::datasource::table::table_spec()
+            .unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        projection_contract::assert_client_fields_are_usable(
+            &contract,
+            "list_datasources",
+            &spec,
+            "表级行",
+        );
+    }
+
+    /// 查询选的列必须恰好等于 `emitted ∪ query_only`——多一列少一列都说明
+    /// 「查询」与「契约」两处各自漂移了。
+    #[test]
+    fn the_query_columns_match_the_contract_buckets() {
+        let contract = projection_contract::contract();
+
+        let mut item_expected: Vec<String> = DATASOURCE_ITEM_COLUMNS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect();
+        item_expected.sort_unstable();
+        let mut item_declared =
+            projection_contract::string_array(&contract, &["list_datasources", "item", "emitted"]);
+        item_declared.retain(|key| !DATASOURCE_ITEM_COMPOSED.contains(&key.as_str()));
+        item_declared.extend(projection_contract::bucket_keys(
+            &contract,
+            &["list_datasources", "item", "query_only"],
+        ));
+        item_declared.sort_unstable();
+        assert_eq!(item_expected, item_declared, "表级行的查询列与契约不一致");
+
+        let mut binding_expected: Vec<String> = BINDING_ITEM_COLUMNS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect();
+        binding_expected.sort_unstable();
+        let mut binding_declared = projection_contract::string_array(
+            &contract,
+            &["list_datasources", "binding", "emitted"],
+        );
+        binding_declared.extend(projection_contract::bucket_keys(
+            &contract,
+            &["list_datasources", "binding", "query_only"],
+        ));
+        binding_declared.sort_unstable();
+        assert_eq!(
+            binding_expected, binding_declared,
+            "字段绑定的查询列与契约不一致（`datasource_id` 属于 query_only：它只用来分组）"
+        );
+    }
+
+    #[test]
+    fn the_per_field_settings_are_projected_from_the_binding_layer() {
+        // 这两个键**属于绑定层**：表级行上曾经有同名残影，表级行读它恒为默认值，
+        // 于是台账那两列对每一条源都在说假话。控制台要在一条数据源里逐字段展示它们，
+        // 所以它们必须从这里投影出去。
+        let mut row = binding_row(1, "fldA", "currency", None, true);
+        row.insert("encrypt_enabled", serde_json::json!(true));
+        row.insert("default_locale", serde_json::json!("en_us"));
+        let groups = group_bindings(&[row]).unwrap_or_else(|error| panic!("应可分组: {error}"));
+        let item = groups
+            .get(&1)
+            .and_then(|items| items.first())
+            .unwrap_or_else(|| panic!("应有分组"));
+        let value =
+            serde_json::to_value(item).unwrap_or_else(|error| panic!("绑定项应可序列化: {error}"));
+        assert_eq!(value.get("encrypt_enabled"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            value.get("default_locale"),
+            Some(&serde_json::json!("en_us"))
+        );
+    }
+
+    #[test]
+    fn a_binding_missing_those_keys_degrades_to_the_column_defaults() {
+        // 兜底值必须**等于列默认值**（`false` / `zh_cn`）：否则投影一旦漏列，
+        // 画面上的「未加密 / 简体中文」就与库里的实际值分叉，而那种分叉看不出来。
+        let rows = vec![binding_row(1, "fldA", "currency", None, true)];
+        let groups = group_bindings(&rows).unwrap_or_else(|error| panic!("应可分组: {error}"));
+        let item = groups
+            .get(&1)
+            .and_then(|items| items.first())
+            .unwrap_or_else(|| panic!("应有分组"));
+        assert!(!item.encrypt_enabled);
+        assert_eq!(item.default_locale, "zh_cn");
     }
 
     #[test]
