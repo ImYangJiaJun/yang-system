@@ -90,12 +90,12 @@ pub(super) async fn handle(
             }
             Err(error) => return Err(error),
         };
-        // 当前骨架注入的是不声明的默认实现，永不进入 Claimed 分支；
-        // 端口保留给未来平台管理 Addon 重新引入最终管理员声明。
-        if let OwnerClaimOutcome::Claimed { admin_id } = account
+        // 引导是「尽力而为的一次性事件」：AlreadyClaimed 是正常结果，
+        // 不得阻断注册；只有真实数据库故障才让整个事务回滚。
+        let outcome = account
             .claim_system_owner(&ctx, &mut transaction, id, &username)
-            .await?
-        {
+            .await?;
+        if let OwnerClaimOutcome::Claimed { admin_id } = outcome {
             let event = audit::succeeded_system_event(
                 &ctx,
                 "first-registration",

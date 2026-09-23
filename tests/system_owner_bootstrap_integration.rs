@@ -4,6 +4,8 @@
 //! 并使目标用户的授权版本失效；没有可单测的纯逻辑面。因此本文件的契约钉在
 //! 真实 MySQL/Redis 上：先把「哨兵只被夺到一次」写成失败测试，再让实现追平。
 
+use std::sync::Arc;
+
 mod common;
 
 /// 测试夹具：真库/真 Redis 上的应用装配与直接的数据库观测。
@@ -319,4 +321,63 @@ async fn a_second_claim_returns_already_claimed_instead_of_failing() {
         vec!["first".to_string()],
         "第二个账号不得成为系统管理员"
     );
+}
+
+/// Review Focus 与 spec §13：并发首注册恰好产生一个 owner。
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_first_registrations_produce_exactly_one_system_owner() {
+    let app = harness::build_test_app().await;
+    harness::reset_business_tables(&app).await;
+
+    let mutations = 6;
+    // 用 Barrier 让所有任务在同一时刻抵达 INSERT，制造真实的哨兵竞争。
+    // 只用 tokio —— 仓库的 dev-dependencies 里没有 futures crate，不要引入。
+    let barrier = Arc::new(tokio::sync::Barrier::new(mutations));
+    let mut handles = Vec::new();
+    for index in 0..mutations {
+        let app = app.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            let username = format!("racer{index}");
+            let email = format!("racer{index}@example.com");
+            barrier.wait().await;
+            harness::register_with_code(&app, &username, &email).await
+        }));
+    }
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(
+            handle
+                .await
+                .unwrap_or_else(|e| panic!("任务不应 panic: {e}")),
+        );
+    }
+
+    let succeeded = results.iter().filter(|result| result.is_ok()).count();
+    assert_eq!(succeeded, mutations, "哨兵竞争不得让任何一次注册失败");
+
+    let owners = harness::count_system_owner_rows(&app).await;
+    assert_eq!(owners, 1, "唯一约束必须把并发收敛到恰好一行哨兵");
+
+    let admins = harness::system_admin_usernames(&app).await;
+    assert_eq!(admins.len(), 1, "恰好一个账号成为系统管理员");
+}
+
+/// 哨兵已存在时，后续注册一律降级为普通用户且不报错。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn later_registrations_degrade_to_plain_users() {
+    let app = harness::build_test_app().await;
+    harness::reset_business_tables(&app).await;
+
+    harness::register_with_code(&app, "first", "first@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("首个注册应成功: {error}"));
+    harness::register_with_code(&app, "second", "second@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("第二个注册应成功并降级: {error}"));
+
+    let admins = harness::system_admin_usernames(&app).await;
+    assert_eq!(admins, vec!["first".to_string()]);
 }
