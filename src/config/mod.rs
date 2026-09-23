@@ -613,7 +613,7 @@ const FEISHU_MIN_PULL_INTERVAL_SECONDS: u64 = 10;
 /// 上限取 24 小时：再长就等于关掉了同步，应当显式停用数据源而不是把间隔调到天上。
 const FEISHU_MAX_PULL_INTERVAL_SECONDS: u64 = 86_400;
 
-const fn default_feishu_pull_interval_seconds() -> u64 {
+pub(crate) const fn default_feishu_pull_interval_seconds() -> u64 {
     900
 }
 

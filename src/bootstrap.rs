@@ -7,12 +7,13 @@ use crate::addon::account::email_delivery::{
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
-use crate::feishu_pull::FeishuPullWorker;
+use crate::feishu_pull::{FeishuPullHandle, FeishuPullWorker};
 use anyhow::Context;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use yang_base::database::DatabaseInitializer;
 use yang_base::http::HttpClient;
 use yang_base::tools::{Tools, ToolsBuilder};
@@ -101,6 +102,15 @@ async fn run_after_telemetry_initialized(
     // 免密登录验证码与 MFA 验证码共用 SMTP 传输但文案独立，占用独立 extension 槽。
     let login_email_code_sender = SmtpLoginEmailCodeSender::new(email_sender.as_ref().clone());
     let new_device_sender: Arc<dyn NewDeviceEmailSender> = email_sender;
+    // 飞书出站拉取的手动触发句柄 + 排程出口。**无条件注册**：句柄必须在 Tools 定型**之前**
+    // 就位，否则「立即拉取」与「下次自动拉取」两个 Action 取不到它。
+    // 段未配置时这里注册的是一个永远不会被读到的空壳（那两个 Action 也只在
+    // can_pull() 时才注册），行为与未集成飞书一致。
+    let (feishu_pull_handle, feishu_pull_requests) =
+        FeishuPullHandle::new(settings.feishu.as_ref().map_or_else(
+            crate::config::default_feishu_pull_interval_seconds,
+            |feishu| feishu.pull_interval_seconds,
+        ));
     let mut tools_builder = ToolsBuilder::new()
         .mysql(mysql)
         .cache(cache)
@@ -123,6 +133,9 @@ async fn run_after_telemetry_initialized(
         ))
         .extension(LoginEmailCodeSenderHandle::new(login_email_code_sender))
         .extension(NewDeviceEmailSenderHandle::from_arc(new_device_sender))
+        // 运行期句柄，照 `AuthorizationVersionCache` 的先例走 extension 槽：
+        // `FeishuContext` 描述的是「有哪些表与什么配置」，不该混进 worker 的运行时状态。
+        .extension(feishu_pull_handle.clone())
         .config(log_identity)
         .config(settings.email.verification.engine_config())
         .config(settings.email.password_reset.link_config());
@@ -165,6 +178,8 @@ async fn run_after_telemetry_initialized(
             Arc::clone(&tools),
             shutdown_budget.clone(),
             telemetry,
+            feishu_pull_handle,
+            feishu_pull_requests,
         ),
         tools.close(),
         &shutdown_budget,
@@ -202,6 +217,8 @@ async fn run_after_tools_created(
     tools: Arc<Tools>,
     shutdown_budget: ShutdownBudget,
     telemetry: &mut TelemetryRuntime,
+    feishu_pull_handle: FeishuPullHandle,
+    feishu_pull_requests: mpsc::UnboundedReceiver<Option<String>>,
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
@@ -246,8 +263,14 @@ async fn run_after_tools_created(
             )
             .context("构建飞书出站上下文的上下文失败")?;
             Some(
-                FeishuPullWorker::start(Arc::clone(&tools), feishu, feishu_context)
-                    .context("启动飞书出站拉取 Worker 失败")?,
+                FeishuPullWorker::start(
+                    Arc::clone(&tools),
+                    feishu,
+                    feishu_context,
+                    feishu_pull_handle,
+                    feishu_pull_requests,
+                )
+                .context("启动飞书出站拉取 Worker 失败")?,
             )
         }
         None => None,

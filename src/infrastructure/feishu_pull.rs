@@ -16,14 +16,26 @@
 //!
 //! 启动后**立刻跑第一轮**，不等一个完整间隔——它同时兼作存量播种。否则部署完成后
 //! 最长要等一个 interval 才有数据。
+//!
+//! # 手动触发不是第二条路径
+//!
+//! 控制台的「立即拉取」只往 [`FeishuPullHandle`] 的通道里投一个信号（`Some(source_key)`
+//! = 只跑那一条），由本循环在同一个 `select!` 里接住，再走
+//! [`run_round_and_reschedule`]——与自动轮询**完全同一条路径**。
+//!
+//! 这也是它**不需要互斥锁**的原因：循环是单线程的，同一时刻只可能有一轮在跑。
+//! 若改成在 Action 里同步调 `pull_source`，就得自己造一把 per-source 锁，
+//! 还得让 worker 也认那把锁——那条路只为一个按钮引入了新的失效面。
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use yang_base::tools::Tools;
+use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{HttpClientTransport, TokioSleeper};
@@ -36,6 +48,108 @@ use crate::config::FeishuSettings;
 /// 单轮最多翻页数。与 `bitable::MAX_PAGES` 同源；这里显式再声明一次，
 /// 是为了让「一轮最多打多少次飞书」这层意思在 worker 里也读得出来。
 const MAX_PAGES_PER_ROUND: u32 = 40;
+
+/// 自动拉取的排程出口：控制台靠它回答「下次什么时候跑」。
+///
+/// # 为什么排程挂在 worker 上而不是数据源行上
+///
+/// 排程是**全局**的——只有一个 worker、一个循环，下一轮的时间对每个数据源都相同。
+/// 把它写进数据源表会造出「每行各带一个其实永远相等的时间」这种假自由度。
+/// 所以控制台在**每一条**源的详情页看到的都是同一个值。
+pub(crate) struct PullSchedule {
+    interval_seconds: u64,
+    /// 下次自动拉取的 unix 秒。`0` 表示**没有已排定的时间**——正在跑，或还没跑过第一轮。
+    next_run_at: AtomicI64,
+}
+
+impl PullSchedule {
+    pub(crate) fn new(interval_seconds: u64) -> Self {
+        Self {
+            interval_seconds,
+            next_run_at: AtomicI64::new(0),
+        }
+    }
+
+    pub(crate) fn interval_seconds(&self) -> u64 {
+        self.interval_seconds
+    }
+
+    /// 下次自动拉取的 unix 秒；`None` = 答不出来（正在跑 / 还没跑过）。
+    pub(crate) fn next_run_at(&self) -> Option<i64> {
+        match self.next_run_at.load(Ordering::Relaxed) {
+            0 => None,
+            value => Some(value),
+        }
+    }
+
+    /// 一轮**开跑**：撤掉上一条排程，让控制台改说「正在拉取」。
+    fn mark_running(&self) {
+        self.next_run_at.store(0, Ordering::Relaxed);
+    }
+
+    /// 一轮**跑完**：把下一次排在一个完整间隔之后。
+    ///
+    /// 入参是 `now` 而不是内部取时钟——这条规则因此是可以直接单测的纯计算。
+    /// **手动触发也走这里**：否则手动跑完一个间隔内自动那轮又来了。
+    fn schedule_next(&self, now_unix: i64) {
+        let next = now_unix.saturating_add(self.interval_seconds as i64);
+        self.next_run_at.store(next, Ordering::Relaxed);
+    }
+}
+
+/// 手动触发与排程的共享句柄。
+///
+/// 注册进 `Tools` 供 Action 取用（照 `AuthorizationVersionCache` 的先例：运行期句柄
+/// 走 extension 槽，不进 `FeishuContext`——后者描述的是「有哪些表与什么配置」）。
+/// worker 持有另一半：触发信号的接收端。
+#[derive(Clone)]
+pub(crate) struct FeishuPullHandle {
+    trigger: mpsc::UnboundedSender<Option<String>>,
+    schedule: Arc<PullSchedule>,
+}
+
+impl FeishuPullHandle {
+    /// 建一对：句柄给 Action，接收端给 worker。
+    ///
+    /// 无界通道：触发是**运维的低频动作**，没有一个值得让 HTTP 请求等它的背压。
+    pub(crate) fn new(interval_seconds: u64) -> (Self, mpsc::UnboundedReceiver<Option<String>>) {
+        let (trigger, requests) = mpsc::unbounded_channel();
+        let handle = Self {
+            trigger,
+            schedule: Arc::new(PullSchedule::new(interval_seconds)),
+        };
+        (handle, requests)
+    }
+
+    /// 请求立刻跑一轮；`Some(key)` = 只跑那一条源。
+    ///
+    /// 接收端已消失（worker 没起或正在退出）时返回错误——静默丢弃会让控制台
+    /// 一直轮询一个永远不会发生的结果。
+    pub(crate) fn request_pull(&self, source_key: Option<String>) -> Result<(), BaseError> {
+        self.trigger.send(source_key).map_err(|_| {
+            BaseError::ConfigError("飞书出站拉取 Worker 未在运行，无法手动触发".to_string())
+        })
+    }
+
+    /// 排程的只读出口，供 `pull_schedule` Action 取用。
+    pub(crate) fn schedule(&self) -> &PullSchedule {
+        &self.schedule
+    }
+
+    /// worker 侧要的那一份所有权。
+    fn schedule_handle(&self) -> Arc<PullSchedule> {
+        Arc::clone(&self.schedule)
+    }
+}
+
+/// 当前 unix 秒。取不到（系统时钟早于纪元）时返回 0——`schedule_next` 会把它推成
+/// 一个非零值，不会与「未排程」的哨兵值撞上。
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// 飞书出站拉取 worker。
 ///
@@ -55,6 +169,8 @@ impl FeishuPullWorker {
         tools: Arc<Tools>,
         settings: &FeishuSettings,
         context: Arc<FeishuContext>,
+        handle: FeishuPullHandle,
+        requests: mpsc::UnboundedReceiver<Option<String>>,
     ) -> anyhow::Result<Self> {
         // 这三样在启动期取一次即可，它们都是可 Clone 的句柄，且不随 Tools 关闭而失效。
         let cache = Arc::new(RedisTenantTokenCache::new(
@@ -81,7 +197,16 @@ impl FeishuPullWorker {
         let interval = Duration::from_secs(settings.pull_interval_seconds);
         let (shutdown, receiver) = watch::channel(false);
         let task = tokio::spawn(run_loop(
-            tools, context, tokens, sleeper, interval, receiver,
+            RoundRunner {
+                tools,
+                context,
+                tokens,
+                sleeper,
+            },
+            interval,
+            handle.schedule_handle(),
+            requests,
+            receiver,
         ));
 
         tracing::info!(
@@ -121,12 +246,23 @@ fn deployment_namespace(tools: &Tools) -> anyhow::Result<String> {
         .to_string())
 }
 
-async fn run_loop(
+/// 跑一轮要用到的共享句柄。启动期取一次，之后每轮只是借用。
+///
+/// 收成一个结构体而不是一路传四个参数：`run_loop` 本来就已经贴着参数上限，
+/// 再加「手动触发」的通道与排程就直接越界了——而且这四样在语义上确实是一组
+/// （「怎么跑一轮」的全部依赖），拆开传只是把它们的位置关系抄了三遍。
+struct RoundRunner {
     tools: Arc<Tools>,
     context: Arc<FeishuContext>,
     tokens: Arc<TenantTokenProvider>,
     sleeper: Arc<TokioSleeper>,
+}
+
+async fn run_loop(
+    runner: RoundRunner,
     interval: Duration,
+    schedule: Arc<PullSchedule>,
+    mut requests: mpsc::UnboundedReceiver<Option<String>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     // 首次立即执行，不等一个完整间隔（兼作存量播种）。
@@ -138,12 +274,18 @@ async fn run_loop(
                     break;
                 }
             }
+            // 手动触发。`recv()` 是取消安全的，与 sleep 分支竞争不会丢信号。
+            // 一次只处理一条；积压的多条会依次跑完（触发是低频运维动作，
+            // 不值得为它加合并逻辑——真要连点，跑两次的结果也是幂等的）。
+            request = requests.recv() => {
+                // 发送端全部 drop（进程在关闭）：不再有人能触发，收工。
+                let Some(only) = request else { break };
+                run_round_and_reschedule(&runner, only.as_deref(), &schedule).await;
+                // 手动跑完要**重置**自动排程，否则紧接着又会跑一轮。
+                next_run = tokio::time::Instant::now() + interval;
+            }
             _ = tokio::time::sleep_until(next_run) => {
-                if let Err(error) = run_once(&tools, &context, &tokens, sleeper.as_ref()).await {
-                    // 整轮失败只记日志：worker 不能因一次失败就退出，
-                    // 否则一个瞬时故障会让同步永久停摆。
-                    tracing::error!(error = %error, "飞书出站拉取整轮失败");
-                }
+                run_round_and_reschedule(&runner, None, &schedule).await;
                 next_run = tokio::time::Instant::now() + interval;
             }
         }
@@ -151,25 +293,40 @@ async fn run_loop(
     tracing::info!("飞书出站拉取 Worker 已退出");
 }
 
-async fn run_once(
-    tools: &Arc<Tools>,
-    context: &Arc<FeishuContext>,
-    tokens: &TenantTokenProvider,
-    sleeper: &TokioSleeper,
-) -> anyhow::Result<()> {
+/// 跑一轮，然后重排下一次。
+///
+/// **手动触发与自动轮询共用这一个函数。** 两条路径在「跑完之后怎么排、失败了怎么办」
+/// 上必须一致，否则会出现「手动跑完一个间隔内自动那轮又来」这类只在手动路径上
+/// 才有的行为。
+async fn run_round_and_reschedule(
+    runner: &RoundRunner,
+    only: Option<&str>,
+    schedule: &PullSchedule,
+) {
+    schedule.mark_running();
+    if let Err(error) = run_once(runner, only).await {
+        // 整轮失败只记日志：worker 不能因一次失败就退出，
+        // 否则一个瞬时故障会让同步永久停摆。
+        tracing::error!(error = %error, "飞书出站拉取整轮失败");
+    }
+    // 失败也要排下一次——停摆比重复失败更糟。
+    schedule.schedule_next(now_unix());
+}
+
+async fn run_once(runner: &RoundRunner, only: Option<&str>) -> anyhow::Result<()> {
     // 进程正在关闭时 `Tools` 已进入 Closing/Closed，这里会以可读错误返回而不是 panic。
-    let database = tools.mysql()?;
-    let transport = HttpClientTransport::new(tools.http()?.clone());
+    let database = runner.tools.mysql()?;
+    let transport = HttpClientTransport::new(runner.tools.http()?.clone());
 
     let deps = PullDeps {
-        context,
+        context: &runner.context,
         database,
         transport: &transport,
-        sleeper,
-        tokens,
+        sleeper: runner.sleeper.as_ref(),
+        tokens: &runner.tokens,
         max_pages: MAX_PAGES_PER_ROUND,
     };
-    let report = run_round(&deps).await?;
+    let report = run_round(&deps, only).await?;
     if report.sources > 0 {
         tracing::info!(
             sources = report.sources,
@@ -178,4 +335,42 @@ async fn run_once(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_schedule_promises_no_time() {
+        // 还没跑过任何一轮时**不能编一个时间出来**——控制台宁可显示「正在拉取」，
+        // 也不能显示一个下一秒就被推翻的时刻。
+        assert_eq!(PullSchedule::new(900).next_run_at(), None);
+    }
+
+    #[test]
+    fn scheduling_pushes_the_next_run_one_interval_ahead() {
+        let schedule = PullSchedule::new(900);
+        schedule.schedule_next(1_700_000_000);
+        assert_eq!(schedule.next_run_at(), Some(1_700_000_900));
+    }
+
+    #[test]
+    fn a_running_round_reports_no_next_run() {
+        // 「正在跑」与「还没排过程」对「下次几点」这个问题的答案都是「不知道」，
+        // 所以两者共用 None。区别只在文案层，不需要两个状态位。
+        let schedule = PullSchedule::new(900);
+        schedule.schedule_next(1_700_000_000);
+        schedule.mark_running();
+        assert_eq!(
+            schedule.next_run_at(),
+            None,
+            "跑的时候不能还挂着上一轮排的时间"
+        );
+    }
+
+    #[test]
+    fn the_interval_is_reported_verbatim() {
+        assert_eq!(PullSchedule::new(1860).interval_seconds(), 1860);
+    }
 }

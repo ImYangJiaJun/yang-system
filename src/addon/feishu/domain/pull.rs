@@ -328,9 +328,96 @@ pub(crate) async fn pull_source(
     Ok(report)
 }
 
-/// 一轮：遍历全部拉取源，单个源失败不影响其它源。
-pub(crate) async fn run_round(deps: &PullDeps<'_>) -> Result<RoundReport, BaseError> {
-    let sources = load_pull_sources(deps.context).await?;
+/// 按需把一轮收窄到**一条**源。
+///
+/// `None` = 整轮（自动轮询走这条）；`Some(key)` = 只跑点名的那条（控制台的
+/// 「立即拉取」走这条）。两条路径**共用 `run_round` 之后的一切**，包括重读存活、
+/// 失败只记状态不冒泡——手动触发不是一条独立分支。
+///
+/// 点名一条不在候选集里的源返回**空轮**而不是报错：候选集已由 [`load_pull_sources`]
+/// 过滤过（`pull` + `active` + 坐标齐备），所以「点名了却没有」只可能意味着那条源
+/// 已停用 / 已删除 / 本就不是 pull 模式。空轮的判据留给调用方——`pull_now` 会在
+/// **发信号之前**先把这几种情形挡掉并给出可归因文案，否则前端会轮询到超时却什么都看不到。
+pub(crate) fn select_sources(sources: Vec<PullSource>, only: Option<&str>) -> Vec<PullSource> {
+    match only {
+        None => sources,
+        Some(key) => sources
+            .into_iter()
+            .filter(|source| source.source_key == key)
+            .collect(),
+    }
+}
+
+/// 一条数据源**现在为什么拉不动**。
+///
+/// 每个变体对应一个不同的修法，所以刻意不合并成一个笼统的「不可拉取」——
+/// 运维拿到这句话是要回去改配置的，笼统等于没答。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotPullable {
+    /// 取数方式是 `push`：服务端不主动出网，等飞书多维表格自动化来推。
+    PushMode,
+    /// 已停用。
+    Disabled,
+    /// 缺 Base Token。
+    MissingBaseToken,
+    /// 缺数据表 ID。
+    MissingTableId,
+    /// 缺取数列字段名。
+    MissingFieldName,
+}
+
+impl NotPullable {
+    /// 给人看的一句话，必须点出**具体**缺什么。
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::PushMode => "取数方式是「手工推送」——服务端不主动出网，只有「定时拉取」才拉得动",
+            Self::Disabled => "数据源已停用",
+            Self::MissingBaseToken => "缺少 Base Token",
+            Self::MissingTableId => "缺少数据表 ID",
+            Self::MissingFieldName => "缺少取数列字段名",
+        }
+    }
+}
+
+/// 判定一条数据源**现在**能不能被拉取（自动轮询不经过这里，它只跑候选集）。
+///
+/// 判据必须与 [`load_pull_sources`] 的 WHERE 子句逐条对应（`ingest_mode == pull` +
+/// `status == active`），再加上它随后 trim 判空的那三项坐标。两边漂移的后果**不对称**：
+/// 这里宽了，用户点完按钮只能等到前端轮询超时；这里严了，一条其实拉得动的源被白拒。
+///
+/// 空串与 `NULL` 在库里是两种形态，但对「能不能拉」是同一件事——`load_pull_sources`
+/// 也是 trim 之后判空的。
+pub(crate) fn check_pullable(
+    ingest_mode: &str,
+    status: &str,
+    base_token: Option<&str>,
+    table_id: Option<&str>,
+    field_name: Option<&str>,
+) -> Result<(), NotPullable> {
+    if ingest_mode != "pull" {
+        return Err(NotPullable::PushMode);
+    }
+    if status != "active" {
+        return Err(NotPullable::Disabled);
+    }
+    for (value, missing) in [
+        (base_token, NotPullable::MissingBaseToken),
+        (table_id, NotPullable::MissingTableId),
+        (field_name, NotPullable::MissingFieldName),
+    ] {
+        if !value.is_some_and(|text| !text.trim().is_empty()) {
+            return Err(missing);
+        }
+    }
+    Ok(())
+}
+
+/// 一轮：遍历选中的拉取源，单个源失败不影响其它源。
+pub(crate) async fn run_round(
+    deps: &PullDeps<'_>,
+    only: Option<&str>,
+) -> Result<RoundReport, BaseError> {
+    let sources = select_sources(load_pull_sources(deps.context).await?, only);
     let mut report = RoundReport {
         sources: sources.len(),
         ..RoundReport::default()
@@ -775,5 +862,121 @@ mod tests {
         let raw = owned.as_raw();
         assert_eq!(raw.label, "6.9");
         assert_eq!(raw.parent_label, Some("USD"));
+    }
+
+    /// 只为筛选测试构造的拉取源。
+    fn source(key: &str) -> PullSource {
+        PullSource {
+            source_key: key.to_string(),
+            title: key.to_string(),
+            coordinates: BitableCoordinates {
+                app_token: "bascn".to_string(),
+                table_id: "tbl".to_string(),
+                view_id: None,
+            },
+            field_name: "列".to_string(),
+            linkage: None,
+            snapshot_digest: None,
+        }
+    }
+
+    #[test]
+    fn without_a_target_every_source_runs() {
+        let all = select_sources(vec![source("a"), source("b")], None);
+        assert_eq!(all.len(), 2, "自动轮询必须覆盖全部拉取源");
+    }
+
+    #[test]
+    fn a_target_narrows_the_round_to_that_source() {
+        let only = select_sources(vec![source("a"), source("b")], Some("b"));
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].source_key, "b");
+    }
+
+    #[test]
+    fn a_target_naming_nothing_yields_an_empty_round() {
+        // 点名了一条已停用 / 已删除 / 非 pull 的源时它根本不在候选集里。
+        // **空轮是正确结果**，不是错误：调用方据此知道「没有可跑的」。
+        assert!(select_sources(vec![source("a")], Some("nope")).is_empty());
+    }
+
+    /// 预检必须**拒绝**，并给出原因。断言的是拒绝本身——通过就意味着这条用例的前提塌了。
+    fn refusal(
+        ingest_mode: &str,
+        status: &str,
+        base_token: Option<&str>,
+        table_id: Option<&str>,
+        field_name: Option<&str>,
+    ) -> NotPullable {
+        match check_pullable(ingest_mode, status, base_token, table_id, field_name) {
+            Ok(()) => panic!("这条数据源不该通过预检：{ingest_mode}/{status}"),
+            Err(reason) => reason,
+        }
+    }
+
+    #[test]
+    fn a_push_source_cannot_be_pulled_on_demand() {
+        // 最要紧的一条：手工推送的源**根本不进** load_pull_sources 的候选集，
+        // worker 会静默跳过。不在触发前挡掉，用户点完按钮只能看到轮询超时，
+        // 而真实原因永远不会浮出来。
+        assert_eq!(
+            refusal("push", "active", Some("b"), Some("t"), Some("f")),
+            NotPullable::PushMode
+        );
+    }
+
+    #[test]
+    fn a_disabled_source_cannot_be_pulled_on_demand() {
+        assert_eq!(
+            refusal("pull", "disabled", Some("b"), Some("t"), Some("f")),
+            NotPullable::Disabled
+        );
+    }
+
+    #[test]
+    fn each_missing_coordinate_is_named_individually() {
+        // 三项各自要有自己的变体：只说「坐标不全」等于让人回去逐个猜。
+        assert_eq!(
+            refusal("pull", "active", None, Some("t"), Some("f")),
+            NotPullable::MissingBaseToken
+        );
+        assert_eq!(
+            refusal("pull", "active", Some("b"), None, Some("f")),
+            NotPullable::MissingTableId
+        );
+        assert_eq!(
+            refusal("pull", "active", Some("b"), Some("t"), None),
+            NotPullable::MissingFieldName
+        );
+    }
+
+    #[test]
+    fn blank_coordinates_count_as_missing() {
+        // 空串与 NULL 在库里是两种形态，但对「能不能拉」是同一件事——
+        // `load_pull_sources` 也是 trim 之后判空的。
+        assert_eq!(
+            refusal("pull", "active", Some("   "), Some("t"), Some("f")),
+            NotPullable::MissingBaseToken
+        );
+    }
+
+    #[test]
+    fn a_fully_configured_pull_source_passes_the_check() {
+        assert!(check_pullable("pull", "active", Some("b"), Some("t"), Some("f")).is_ok());
+    }
+
+    #[test]
+    fn every_reason_says_what_to_fix() {
+        // 文案是这一层的**唯一**产出——运维拿着它回去改配置。
+        // 空文案等于把「不可拉取」原样丢回去。
+        for reason in [
+            NotPullable::PushMode,
+            NotPullable::Disabled,
+            NotPullable::MissingBaseToken,
+            NotPullable::MissingTableId,
+            NotPullable::MissingFieldName,
+        ] {
+            assert!(!reason.reason().trim().is_empty(), "{reason:?} 缺文案");
+        }
     }
 }

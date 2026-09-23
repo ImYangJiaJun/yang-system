@@ -6,7 +6,9 @@
 pub(super) mod create_datasource;
 pub(super) mod delete_datasource;
 pub(super) mod list_datasources;
+pub(super) mod pull_now;
 pub(super) mod pull_probe;
+pub(super) mod pull_schedule;
 pub(super) mod update_datasource;
 
 use std::sync::Arc;
@@ -20,9 +22,10 @@ use crate::addon::feishu::domain::context::FeishuContext;
 /// 数据源的增删改查都声明了 `feishu.datasource.*` 权限并走框架 JWT 鉴权，
 /// 因此与 `[feishu]` 段是否启用无关——控制台始终可用来准备数据源。
 ///
-/// **唯一的例外是出站拉取探针**：它要出站调飞书并消耗频控配额，因此只在
-/// `can_pull()`（凭证齐备且非占位）时才注册。理由与 `option` module 的机器入口
-/// 一致——注册出来却在每次调用时拒绝，会让人以为它可用。
+/// **例外是三个出站相关端点**：`pull_probe`（探针）、`pull_now`（立即拉取）、
+/// `pull_schedule`（排程）。它们都只在 `can_pull()`（凭证齐备且非占位）时才注册——
+/// 没有 worker 的时候，前两个只能返回「Worker 未在运行」，第三个只能答「不知道」，
+/// 注册出来都是让人以为可用。理由与 `option` module 的机器入口一致。
 pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> ModuleSpec {
     let module = list_datasources::register(module, Arc::clone(&context));
     let module = create_datasource::register(module, Arc::clone(&context));
@@ -33,7 +36,9 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
         .settings()
         .is_some_and(|settings| settings.can_pull())
     {
-        return pull_probe::register(module, context);
+        let module = pull_probe::register(module, Arc::clone(&context));
+        let module = pull_now::register(module, Arc::clone(&context));
+        return pull_schedule::register(module, context);
     }
     module
 }
