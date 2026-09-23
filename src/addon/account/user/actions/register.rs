@@ -93,7 +93,7 @@ pub(super) async fn handle(
         // 当前骨架注入的是不声明的默认实现，永不进入 Claimed 分支；
         // 端口保留给未来平台管理 Addon 重新引入最终管理员声明。
         if let OwnerClaimOutcome::Claimed { admin_id } = account
-            .claim_system_owner(&mut transaction, id, &username)
+            .claim_system_owner(&ctx, &mut transaction, id, &username)
             .await?
         {
             let event = audit::succeeded_system_event(

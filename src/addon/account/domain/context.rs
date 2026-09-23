@@ -154,7 +154,6 @@ impl Account {
         self.totp_settings.as_ref()
     }
 
-    /// 在注册事务中竞争唯一最终管理员哨兵（当前骨架为不声明的默认实现）。
     /// 从当前请求 access token 的 claims 提取会话标识（无 token/老格式返回 None）。
     pub(crate) fn session_id_from_request(&self, ctx: &ActionContext) -> Option<String> {
         let token = ctx.request.token()?;
@@ -166,14 +165,19 @@ impl Account {
             .map(str::to_string)
     }
 
+    /// 在注册事务中竞争唯一最终管理员哨兵（当前骨架为不声明的默认实现）。
+    ///
+    /// `ctx` 透传给声明器：实现方写授权事实必须经受信 writer，
+    /// 而 writer 需要 `ctx` 取得连接池（`trusted_query`）。
     pub(crate) async fn claim_system_owner(
         &self,
+        ctx: &ActionContext,
         transaction: &mut Transaction,
         user_id: i64,
         username: &str,
     ) -> Result<OwnerClaimOutcome, BaseError> {
         self.system_owner_claimer
-            .claim(transaction, user_id, username)
+            .claim(ctx, transaction, user_id, username)
             .await
     }
 
