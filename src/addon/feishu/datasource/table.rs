@@ -1,9 +1,7 @@
 //! `feishu_datasource` 表声明——Schema 的唯一事实来源。
 
-use yang_base::definition::{Int, Key, Radio, Str, Switch, TableSpec, Text, Timestamp};
+use yang_base::definition::{Int, Key, Radio, Str, TableSpec, Text, Timestamp};
 use yang_base::BaseError;
-
-use super::super::domain::repository::SYSTEM_ROLE;
 
 /// 声明数据源注册表。
 ///
@@ -14,36 +12,12 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
         .title("飞书数据源")
         .fields(yang_base::fields! {
             id => Key::new().title("ID"),
-            // 路由键：进外部选项接口的 URL。唯一索引保证不会出现两个同 key 的数据源
-            source_key => Str::new()
-                .title("数据源标识")
-                .require(true)
-                .unique(true)
-                .max_length(64)
-                .searchable(true)
-                .filterable(true)
-                .sortable(true),
             title => Str::new()
                 .title("名称")
                 .require(true)
                 .max_length(100)
                 .searchable(true)
                 .sortable(true),
-            // 只存 SHA-256 摘要，永不存明文。secret(true) 会把读写权限置为 Nobody，
-            // 因此必须紧接着显式授回受信角色，否则连 writer 都读写不了
-            token_hash => Str::new()
-                .title("Token 摘要")
-                .require(true)
-                .max_length(64)
-                .secret(true)
-                .readable_by([SYSTEM_ROLE])
-                .writable_by([SYSTEM_ROLE]),
-            encrypt_enabled => Switch::new().title("加密返回").require(true).default(false),
-            default_locale => Str::new()
-                .title("默认语言")
-                .require(true)
-                .max_length(16)
-                .default("zh_cn"),
             status => Radio::<String>::new()
                 .title("状态")
                 .require(true)
@@ -109,39 +83,6 @@ mod tests {
     }
 
     #[test]
-    fn source_key_is_required_searchable_filterable_and_sortable() {
-        let definition = definition();
-        let source_key = definition
-            .field("source_key")
-            .unwrap_or_else(|| panic!("source_key 字段必须存在"));
-        assert!(source_key.is_required(), "source_key 必填");
-        // DSL 侧 filterable / sortable 是 fail-closed，未显式打开就是 false
-        assert!(source_key.is_filterable(), "按 source_key 过滤必须可用");
-        assert!(source_key.is_sortable(), "按 source_key 排序必须可用");
-        assert!(source_key.is_searchable(), "source_key 应可被关键词检索");
-        assert!(!source_key.is_auto_increment(), "source_key 不是自增列");
-    }
-
-    #[test]
-    fn token_hash_is_secret_and_never_searchable() {
-        let definition = definition();
-        let token_hash = definition
-            .field("token_hash")
-            .unwrap_or_else(|| panic!("token_hash 字段必须存在"));
-        assert!(token_hash.is_secret(), "token_hash 必须是 secret 字段");
-        assert!(
-            !token_hash.is_searchable(),
-            "secret 字段不得进入关键词检索面"
-        );
-        assert!(
-            !token_hash.is_filterable(),
-            "secret 字段不得进入结构化筛选面"
-        );
-        assert!(!token_hash.is_sortable(), "secret 字段不得进入排序面");
-        assert!(token_hash.is_required(), "token_hash 必填");
-    }
-
-    #[test]
     fn status_is_required_with_active_default() {
         let definition = definition();
         let status = definition
@@ -152,29 +93,6 @@ mod tests {
             status.default_value(),
             Some(&serde_json::json!("active")),
             "status 应默认 active"
-        );
-    }
-
-    #[test]
-    fn encrypt_enabled_defaults_to_false() {
-        let definition = definition();
-        let flag = definition
-            .field("encrypt_enabled")
-            .unwrap_or_else(|| panic!("encrypt_enabled 字段必须存在"));
-        assert!(flag.is_required());
-        assert_eq!(flag.default_value(), Some(&serde_json::json!(false)));
-    }
-
-    #[test]
-    fn default_locale_defaults_to_zh_cn() {
-        let definition = definition();
-        let locale = definition
-            .field("default_locale")
-            .unwrap_or_else(|| panic!("default_locale 字段必须存在"));
-        assert_eq!(
-            locale.default_value(),
-            Some(&serde_json::json!("zh_cn")),
-            "缺少默认语言时也要有一种语言，否则控件显示为空"
         );
     }
 
@@ -232,6 +150,27 @@ mod tests {
         assert!(mode.is_required(), "取数方式必须有值");
         assert_eq!(mode.default_value(), Some(&serde_json::json!("push")));
         assert!(mode.is_filterable(), "轮询按取数方式选源，必须可筛");
+    }
+
+    #[test]
+    fn the_table_row_carries_no_credential_or_routing_columns() {
+        // 设计 §5：source_key 与凭据都属于**字段绑定**那一层。
+        // 表级行上留着它们，会让「一张表 = 一条数据源」这个语义立刻自相矛盾
+        // （一条表级行只能有一个 source_key）。
+        let definition = definition();
+        for gone in [
+            "source_key",
+            "token_hash",
+            "encrypt_enabled",
+            "default_locale",
+            "bitable_field_name",
+            "linkage_mapping",
+        ] {
+            assert!(
+                definition.field(gone).is_none(),
+                "{gone} 属于字段绑定层（datasource/domain/field_table.rs），不该在表级行上"
+            );
+        }
     }
 
     #[test]
