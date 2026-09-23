@@ -287,8 +287,8 @@ mod tests {
             .get(&1)
             .and_then(|items| items.first())
             .unwrap_or_else(|| panic!("应有分组"));
-        let value = serde_json::to_value(item)
-            .unwrap_or_else(|error| panic!("绑定项应可序列化: {error}"));
+        let value =
+            serde_json::to_value(item).unwrap_or_else(|error| panic!("绑定项应可序列化: {error}"));
         assert_eq!(
             value.get("token_rotated_at"),
             Some(&serde_json::json!(1_700_000_000_i64)),
@@ -306,9 +306,12 @@ mod tests {
             .get(&1)
             .and_then(|items| items.first())
             .unwrap_or_else(|| panic!("应有分组"));
-        let value = serde_json::to_value(item)
-            .unwrap_or_else(|error| panic!("绑定项应可序列化: {error}"));
-        assert_eq!(value.get("token_rotated_at"), Some(&serde_json::Value::Null));
+        let value =
+            serde_json::to_value(item).unwrap_or_else(|error| panic!("绑定项应可序列化: {error}"));
+        assert_eq!(
+            value.get("token_rotated_at"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]
