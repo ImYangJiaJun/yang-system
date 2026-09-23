@@ -11,7 +11,6 @@
 //! 在同一事务里封存（摘要 + 密文）。明文只在响应里出现一次——但它**可以再取回**，
 //! 见回显端点。
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -24,21 +23,8 @@ use yang_base::BaseError;
 use crate::addon::feishu::domain::bitable::validate_path_segment;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::crypto::{generate_token, seal};
-use crate::addon::feishu::domain::source_key::valid_source_key;
+use crate::addon::feishu::domain::field_binding::{validate_fields, FieldBindingInput};
 use crate::infrastructure::audit;
-
-/// 一条字段绑定的输入。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct FieldBindingInput {
-    /// 多维表格字段 ID。**身份就是它**，不是字段名——改名不能断链。
-    pub(super) field_id: String,
-    /// 进 URL 路径段的数据源标识；全局唯一、创建后不可改。
-    pub(super) source_key: String,
-    /// 同表内的父列 `field_id`；无父给 `null` 或省略。
-    #[serde(default)]
-    pub(super) parent_field_id: Option<String>,
-}
 
 /// 创建表级数据源的输入契约。
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -68,39 +54,6 @@ impl ParamInput for CreateTableInput {
     }
 }
 
-/// 父链是否成环。
-///
-/// 从每个节点沿父指针走，步数上限取节点数：无环时每步都走到一个**没走过的**节点，
-/// 因此最多走「边数 ≤ 节点数」步；超过就一定回到了走过的节点。
-///
-/// 刻意不用递归——深链会爆栈，而链深由用户输入决定。
-fn has_parent_cycle(fields: &[FieldBindingInput]) -> bool {
-    let parent: HashMap<&str, &str> = fields
-        .iter()
-        .filter_map(|field| {
-            field
-                .parent_field_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|parent| !parent.is_empty())
-                .map(|parent| (field.field_id.trim(), parent))
-        })
-        .collect();
-
-    for start in parent.keys().copied() {
-        let mut cursor = start;
-        let mut steps = 0usize;
-        while let Some(next) = parent.get(cursor).copied() {
-            cursor = next;
-            steps += 1;
-            if steps > parent.len() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 impl CreateTableInput {
     /// 进入事务前的入参校验。
     ///
@@ -121,73 +74,7 @@ impl CreateTableInput {
                 ));
             }
         }
-        if self.fields.is_empty() {
-            return Err(BaseError::ParamInvalid(
-                "fields".to_string(),
-                "至少要勾选一个字段".to_string(),
-            ));
-        }
-
-        let mut seen_ids: HashSet<&str> = HashSet::new();
-        let mut seen_keys: HashSet<&str> = HashSet::new();
-        for field in &self.fields {
-            let field_id = field.field_id.trim();
-            if field_id.is_empty() {
-                return Err(BaseError::ParamInvalid(
-                    "field_id".to_string(),
-                    "字段 ID 不能为空".to_string(),
-                ));
-            }
-            if !seen_ids.insert(field_id) {
-                return Err(BaseError::ParamInvalid(
-                    "field_id".to_string(),
-                    format!("字段 {field_id} 勾选了不止一次"),
-                ));
-            }
-            if !valid_source_key(field.source_key.trim()) {
-                return Err(BaseError::ParamInvalid(
-                    "source_key".to_string(),
-                    "数据源标识必须是 1..=64 字节、小写字母开头的 [a-z0-9_]".to_string(),
-                ));
-            }
-            if !seen_keys.insert(field.source_key.trim()) {
-                return Err(BaseError::ParamInvalid(
-                    "source_key".to_string(),
-                    format!("数据源标识 {} 重复", field.source_key.trim()),
-                ));
-            }
-        }
-
-        // 父指针：必须在**勾选集合内**（没勾就没有它的选项可挂，拉取时也读不到父列），
-        // 不能自指，且父链无环。
-        for field in &self.fields {
-            let Some(parent) = field
-                .parent_field_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|parent| !parent.is_empty())
-            else {
-                continue;
-            };
-            if parent == field.field_id.trim() {
-                return Err(BaseError::ParamInvalid(
-                    "parent_field_id".to_string(),
-                    "不能把自己设为父列".to_string(),
-                ));
-            }
-            if !seen_ids.contains(parent) {
-                return Err(BaseError::ParamInvalid(
-                    "parent_field_id".to_string(),
-                    format!("父列 {parent} 不在勾选集合内"),
-                ));
-            }
-        }
-        if has_parent_cycle(&self.fields) {
-            return Err(BaseError::ParamInvalid(
-                "parent_field_id".to_string(),
-                "父链成环".to_string(),
-            ));
-        }
+        validate_fields(&self.fields)?;
 
         for (name, value) in [
             ("bitable_base_token", self.bitable_base_token.as_deref()),

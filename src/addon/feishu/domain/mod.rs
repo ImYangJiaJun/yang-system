@@ -2,6 +2,7 @@ pub(crate) mod bitable;
 pub(crate) mod context;
 pub(crate) mod crypto;
 pub(crate) mod derive;
+pub(crate) mod field_binding;
 pub(crate) mod i18n;
 pub(crate) mod linkage;
 pub(crate) mod list_input;

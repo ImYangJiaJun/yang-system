@@ -6,6 +6,7 @@
 pub(super) mod create_datasource;
 pub(super) mod create_datasource_table;
 pub(super) mod delete_datasource;
+pub(super) mod delete_datasource_table;
 pub(super) mod list_bitable_fields;
 pub(super) mod list_bitable_tables;
 pub(super) mod list_bitable_views;
@@ -14,6 +15,7 @@ pub(super) mod pull_now;
 pub(super) mod pull_probe;
 pub(super) mod pull_schedule;
 pub(super) mod update_datasource;
+pub(super) mod update_datasource_table;
 
 use std::sync::Arc;
 
@@ -33,6 +35,8 @@ use crate::addon::feishu::domain::context::FeishuContext;
 pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> ModuleSpec {
     let module = list_datasources::register(module, Arc::clone(&context));
     let module = create_datasource_table::register(module, Arc::clone(&context));
+    let module = update_datasource_table::register(module, Arc::clone(&context));
+    let module = delete_datasource_table::register(module, Arc::clone(&context));
     let module = list_bitable_tables::register(module, Arc::clone(&context));
     let module = list_bitable_views::register(module, Arc::clone(&context));
     let module = list_bitable_fields::register(module, Arc::clone(&context));
