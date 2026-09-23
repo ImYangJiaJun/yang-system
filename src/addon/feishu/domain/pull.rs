@@ -14,21 +14,22 @@
 //! 补集停用，会把该数据源 100% 已启用的选项静默停掉。所以顺序是：
 //! 拿到的行数为 0 且库里仍有已启用行 → 判为**可疑空快照**，只记录、不停用。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use yang_base::table::Record;
 use yang_base::BaseError;
 use yang_db::Database;
 
 use super::bitable::{
-    cell_label, list_all_records, BitableCoordinates, CellValue, RecordsSnapshot,
+    cell_label, list_all_records, resolve_current_field_names, BitableCoordinates, CellValue,
+    RecordsSnapshot,
 };
 use super::context::FeishuContext;
 use super::derive::{derive_options, snapshot_digest, DerivedOption, RawValue};
 use super::linkage::{parse_linkage_mapping, Linkage};
 use super::option_write::{
     apply_option_rows, count_option_rows, disable_option_rows, find_foreign_option_owner,
-    OptionWriteItem,
+    OptionWriteItem, OptionWriteOutcome,
 };
 use super::outbound::{OutboundFailure, OutboundTransport, Sleeper};
 use super::tenant_token::TenantTokenProvider;
@@ -84,6 +85,97 @@ pub(crate) struct PullSource {
     pub(crate) linkage: Option<Linkage>,
     /// 上一轮落库的内容摘要。
     pub(crate) snapshot_digest: Option<String>,
+}
+
+/// 一条**已解析过名字**的绑定：`field_id` 与它的当前 `field_name` 都在手边。
+///
+/// 表级拉取把「解析名字」与「拼请求参数」分成两步：先按 `field_id` 解析出当前名字
+/// （决策 D2，改名不断链），再按名字拼 `field_names`。这个结构是两步之间的载体。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundField {
+    pub(crate) field_id: String,
+    /// 本轮解析出来的**当前**名字（不是绑定行上的缓存）。
+    pub(crate) field_name: String,
+    /// 同表内的父列 `field_id`；无父为 `None`。**已归一化**：空白串按无父处理。
+    pub(crate) parent_field_id: Option<String>,
+}
+
+/// `field_names` 要传的列名集合：**所有绑定列 + 所有父列**的并集，去重、保序。
+///
+/// 为什么父列也要限定：父键由**同行共现**读出（`derive.rs` 的 A7b）——不快照父列就
+/// 拼不出父键，整棵子树会静默变成无父。
+///
+/// 为什么必须去重：`field_names` 是**一个** JSON 数组查询参数，重复项会被官方拒
+/// （`bitable.rs:879` 的 `duplicate_field_names_are_rejected` 钉着这条）。三级链的
+/// 中间列（既自己取值、又是别人的父）是最容易漏的那一例。
+///
+/// 只在**绑定集合内**找父：不在集合里的 `parent_field_id` 查不到名字，这里略过——
+/// 「父列不在集合内」由 [`bind_fields`] 报错，不在这里静默降级。
+pub(crate) fn collect_field_names(fields: &[BoundField]) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut names: Vec<String> = Vec::new();
+    for field in fields {
+        let parent_name = field
+            .parent_field_id
+            .as_deref()
+            .and_then(|parent| resolved_name(fields, parent));
+        for name in std::iter::once(field.field_name.as_str()).chain(parent_name) {
+            if seen.insert(name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// 在解析结果里按 `field_id` 取当前名字。
+fn resolved_name<'a>(fields: &'a [BoundField], field_id: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|field| field.field_id == field_id)
+        .map(|field| field.field_name.as_str())
+}
+
+/// 一条字段绑定（表级拉取视角）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TableBinding {
+    /// 绑定行的主键。落库按它定位（`source_key` 虽也唯一，但主键更精确）。
+    pub(crate) id: i64,
+    /// 进 URL 路径段的数据源标识；出站的落库边界就是它。
+    pub(crate) source_key: String,
+    /// 多维表格字段 ID——**身份**。
+    pub(crate) field_id: String,
+    /// 上一轮解析出的名字（缓存）。本轮以重新解析的结果为准。
+    pub(crate) field_name: Option<String>,
+    /// 同表内的父列 `field_id`；无父为 `None`。
+    pub(crate) parent_field_id: Option<String>,
+    /// 上一轮落库的内容摘要。归属是**这一条绑定**（设计 §6.3）。
+    pub(crate) snapshot_digest: Option<String>,
+}
+
+/// 一张待拉取的表级数据源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullTable {
+    /// 表级行主键。同步状态与审计都按它定位。
+    pub(crate) id: i64,
+    pub(crate) title: String,
+    pub(crate) coordinates: BitableCoordinates,
+    /// **启用中**的绑定（`enabled = true`）。空数组合法：一张表可以一个字段都没勾。
+    pub(crate) bindings: Vec<TableBinding>,
+}
+
+/// 一张表一轮拉取的结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TablePullOutcome {
+    /// 拉到的记录行数。**一份快照服务整表**，所以这是表级数字。
+    pub(crate) fetched: usize,
+    /// 本轮处理的字段绑定条数。
+    pub(crate) fields: usize,
+    /// 内容未变而跳过写库的字段数。
+    pub(crate) skipped: usize,
+    pub(crate) inserted: u64,
+    pub(crate) updated: u64,
+    pub(crate) disabled: u64,
 }
 
 /// 选出本轮要拉的数据源。
@@ -158,6 +250,101 @@ pub(crate) async fn load_pull_sources(
         });
     }
     Ok(sources)
+}
+
+/// 选出本轮要拉的表级数据源，并把它们的启用绑定一次取回。
+///
+/// 判据与 [`load_pull_sources`] 逐条一致（`ingest_mode == pull` + `status == active`
+/// + 坐标齐备），只是单位从字段上移到表：同表 N 个字段现在是**一行**。
+///
+/// 绑定**一次 `where_in` 取回再分组**，不是按表查 N 次。`where_in` 拒绝空列表，
+/// 所以候选表为空时要短路。
+#[allow(dead_code)] // 消费者是 T13 的 worker；T9 只落地表级入口，逐源路径仍在跑。
+pub(crate) async fn load_pull_tables(context: &FeishuContext) -> Result<Vec<PullTable>, BaseError> {
+    let rows = context
+        .datasources()
+        .query()
+        .select_fields(&[
+            "id",
+            "title",
+            "bitable_base_token",
+            "bitable_table_id",
+            "bitable_view_id",
+        ])?
+        .where_eq("ingest_mode", serde_json::json!("pull"))?
+        .where_eq("status", serde_json::json!("active"))?
+        .all()
+        .await?;
+
+    let mut tables = Vec::new();
+    for row in rows {
+        let title: String = row.optional::<String>("title")?.unwrap_or_default();
+        // 缺坐标就不是一个可拉取的表，静默跳过会让「配了却不生效」无从排查，故记 warning。
+        let Some(base_token) = trimmed(row.optional::<String>("bitable_base_token")?) else {
+            tracing::warn!(title = %title, "表级数据源缺少 bitable_base_token，本轮跳过");
+            continue;
+        };
+        let Some(table_id) = trimmed(row.optional::<String>("bitable_table_id")?) else {
+            tracing::warn!(title = %title, "表级数据源缺少 bitable_table_id，本轮跳过");
+            continue;
+        };
+        tables.push(PullTable {
+            id: row.require("id")?,
+            title,
+            coordinates: BitableCoordinates {
+                app_token: base_token,
+                table_id,
+                view_id: trimmed(row.optional::<String>("bitable_view_id")?),
+            },
+            bindings: Vec::new(),
+        });
+    }
+
+    if tables.is_empty() {
+        return Ok(tables);
+    }
+
+    let ids: Vec<serde_json::Value> = tables
+        .iter()
+        .map(|table| serde_json::json!(table.id))
+        .collect();
+    let binding_rows = context
+        .datasource_fields()
+        .query()
+        .select_fields(&[
+            "id",
+            "datasource_id",
+            "source_key",
+            "field_id",
+            "field_name",
+            "parent_field_id",
+            "snapshot_digest",
+        ])?
+        .where_in("datasource_id", ids)?
+        // 只取启用中的：取消勾选 = 停用绑定（T6 的决定），停用的列不参与本轮拉取。
+        .where_eq("enabled", serde_json::json!(true))?
+        .all()
+        .await?;
+
+    let mut groups: HashMap<i64, Vec<TableBinding>> = HashMap::new();
+    for row in binding_rows {
+        groups
+            .entry(row.require("datasource_id")?)
+            .or_default()
+            .push(TableBinding {
+                id: row.require("id")?,
+                source_key: row.require("source_key")?,
+                field_id: row.require("field_id")?,
+                field_name: row.optional("field_name")?,
+                parent_field_id: row.optional("parent_field_id")?,
+                snapshot_digest: row.optional("snapshot_digest")?,
+            });
+    }
+    for table in &mut tables {
+        // 没配绑定的表得到**空数组**，不是缺键。
+        table.bindings = groups.remove(&table.id).unwrap_or_default();
+    }
+    Ok(tables)
 }
 
 /// 一轮拉取：读 → 派生 → 比对 → 落库。
@@ -328,6 +515,295 @@ pub(crate) async fn pull_source(
     Ok(report)
 }
 
+// ---------------------------------------------------------------------------
+// 表级拉取（设计 §6.2）
+// ---------------------------------------------------------------------------
+
+/// 一张表的一轮拉取：**一次取回、按字段分派**。
+///
+/// # 与逐源路径的关系
+///
+/// [`pull_source`] 是「逐条数据源」，同一张表 N 个字段就是 **N 次全表扫描**。
+/// 这里把「取回」合并成一次、把「落库」拆成每字段一个事务（§6.2 末句「拉取合并、
+/// 落库拆开」）。两条路径暂时并存，逐源那条在 T13 退役。
+///
+/// # 状态列的归属（设计 §6.3）
+///
+/// `snapshot_digest` 落在**字段绑定**行——一个字段内容没变就该跳过它的写库；
+/// `last_pull_at` / `last_success_at` / `consecutive_failures` / `last_error`
+/// 落在**表级**行——失败是整轮的（决策 D4）。
+///
+/// 本函数只写**成功**那一组状态。失败状态由调用方在失败路径上写：表级失败语义与
+/// 告警（自增 `consecutive_failures`、写 `last_error`、达阈值发邮件）是 T10 的内容，
+/// 两边都写会让连续失败次数翻倍。
+///
+/// 一张表启用中的绑定为空时直接返回：它本来就没有要与飞书同步的东西。
+#[allow(dead_code)] // 消费者是 T13 的 worker 与「立即拉取」；T9 只落地入口本身。
+pub(crate) async fn pull_table(
+    deps: &PullDeps<'_>,
+    table: &PullTable,
+) -> Result<TablePullOutcome, BaseError> {
+    let outcome = pull_table_inner(deps, table).await?;
+    record_table_success(deps, table.id).await?;
+    Ok(outcome)
+}
+
+/// 表级编排的本体。拆出来只是为了让 [`pull_table`] 的成功状态收尾一眼可见。
+async fn pull_table_inner(
+    deps: &PullDeps<'_>,
+    table: &PullTable,
+) -> Result<TablePullOutcome, BaseError> {
+    let mut outcome = TablePullOutcome::default();
+    if table.bindings.is_empty() {
+        return Ok(outcome);
+    }
+
+    // 1) 一次元数据往返，解析整表勾选列（含父列）的**当前**名字。
+    //    缺失即整体失败（全有或全无）：`resolve_field_names` 会点名每一个找不到的
+    //    `field_id`，运维一次就能看全要修的东西。
+    let resolved = resolve_current_field_names(
+        deps.transport,
+        deps.sleeper,
+        deps.tokens,
+        &table.coordinates,
+        &resolve_targets(&table.bindings),
+    )
+    .await
+    .map_err(internal_error)?;
+    let bound = bind_fields(&table.bindings, &resolved)?;
+
+    // 2) 一次取回一份快照，服务整表所有字段——这是表级拉取的全部意义。
+    let snapshot = list_all_records(
+        deps.transport,
+        deps.sleeper,
+        deps.tokens,
+        &table.coordinates,
+        &collect_field_names(&bound),
+        deps.max_pages.max(1),
+    )
+    .await
+    .map_err(internal_error)?;
+    outcome.fetched = snapshot.items.len();
+
+    // 3) 空快照歧义守卫。**同一份快照服务整表**，所以这判据也是表级的：只要还有任一
+    //    字段本地留着已启用选项，整张表本轮一个写都不做（理由见模块文档）。
+    if snapshot.items.is_empty() {
+        let mut suspicious = Vec::new();
+        for binding in &table.bindings {
+            let (_, active) = count_existing(deps, &binding.source_key).await?;
+            if active > 0 {
+                suspicious.push(binding.source_key.clone());
+            }
+        }
+        if !suspicious.is_empty() {
+            tracing::warn!(
+                table_id = table.id,
+                suspicious = %suspicious.join("、"),
+                "飞书返回空快照但本地仍有已启用选项：疑似文档权限不足（官方明示高级权限下\
+                 可能「调用成功但返回空」），本轮拒绝停用补集"
+            );
+            return Err(BaseError::ConfigError(format!(
+                "飞书返回空快照但本地仍有已启用选项（{}）：疑似文档权限不足（官方明示\
+                 高级权限下可能「调用成功但返回空」），本轮拒绝停用补集",
+                suspicious.join("、")
+            )));
+        }
+    }
+
+    // 4) 逐条绑定：抽取 → 派生 → 比对 → 落库（每条一个事务）。
+    for (binding, field) in table.bindings.iter().zip(bound.iter()) {
+        outcome.fields += 1;
+        let linkage = parent_linkage(field, &table.bindings, &bound)?;
+        let values = extract_values_owned(&snapshot, &field.field_name, linkage.as_ref());
+        // 派生要 `&[RawValue]`；这里把自有载体借出去，派生完即丢。
+        let raw: Vec<RawValue<'_>> = values.iter().map(OwnedRawValue::as_raw).collect();
+        let derived = derive_options(
+            &binding.source_key,
+            linkage
+                .as_ref()
+                .map(|linkage| linkage.parent_source_key.as_str()),
+            &raw,
+        );
+        let digest = snapshot_digest(&derived);
+        let renamed = name_cache_is_stale(binding, &field.field_name);
+
+        let (existing_rows, active_rows) = count_existing(deps, &binding.source_key).await?;
+        let disabled_rows = existing_rows.saturating_sub(active_rows);
+
+        // 内容未变**且**本地没有已停用行 → 没有选项要写。
+        //
+        // 「没有已停用行」这个附加条件不可省：摘要是按**本轮应当是什么**算的，不含
+        // `enabled`；只比摘要会让「被补集停用后内容恰好没变」的行永远复活不了。
+        let unchanged =
+            binding.snapshot_digest.as_deref() == Some(digest.as_str()) && disabled_rows == 0;
+        if unchanged {
+            outcome.skipped += 1;
+        }
+
+        // 跨源夺取预检与补集扫描都在进事务前做完：前者是可归因的业务失败，
+        // 后者只读。两者都按 `source_key` 界定。
+        let mut doomed = Vec::new();
+        if !unchanged {
+            let ids: Vec<String> = derived
+                .iter()
+                .map(|option| option.option_id.clone())
+                .collect();
+            // 与入站写入同一道预检：不让一个数据源改写另一个数据源的选项归属。
+            if let Some((option_id, owner)) =
+                find_foreign_option_owner(deps.context.options(), &binding.source_key, &ids).await?
+            {
+                return Err(BaseError::ConfigError(format!(
+                    "选项 id {option_id} 已属于数据源 {owner}，拒绝改写其归属"
+                )));
+            }
+            doomed = find_doomed(deps, &binding.source_key, &derived).await?;
+        }
+
+        // 内容与名字都没变时，这一行真的不用碰。
+        if unchanged && !renamed {
+            tracing::debug!(source_key = %binding.source_key, "内容未变，跳过写库");
+            continue;
+        }
+
+        let written = persist_binding(
+            deps,
+            table.id,
+            binding,
+            BindingWritePlan {
+                field_name: &field.field_name,
+                digest: &digest,
+                derived: &derived,
+                doomed: &doomed,
+                replace_options: !unchanged,
+            },
+        )
+        .await?;
+        outcome.inserted += written.options.inserted;
+        outcome.updated += written.options.updated;
+        outcome.disabled += written.disabled;
+
+        tracing::info!(
+            source_key = %binding.source_key,
+            fetched = outcome.fetched,
+            derived = derived.len(),
+            inserted = written.options.inserted,
+            updated = written.options.updated,
+            disabled = written.disabled,
+            "飞书数据源字段同步完成"
+        );
+    }
+    Ok(outcome)
+}
+
+/// 一条绑定本轮落库的计数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BindingWrite {
+    options: OptionWriteOutcome,
+    disabled: u64,
+}
+
+/// 一条绑定本轮要落库的东西。
+///
+/// 收成一个结构体而不是一路传参：这些值同进同出，而且它们的**关系**（摘要配这批派生
+/// 结果、补集配这个 `source_key`）比各自的类型更值得在签名里说清楚。
+struct BindingWritePlan<'a> {
+    /// 本轮解析出来的当前字段名，写回缓存。
+    field_name: &'a str,
+    /// 本轮派生结果的内容摘要，写回绑定行。
+    digest: &'a str,
+    /// 本轮派生出的选项（整行替换的输入）。
+    derived: &'a [DerivedOption],
+    /// 补集：本地有、本轮派生结果里没有的 `option_id`。
+    doomed: &'a [String],
+    /// 是否重写选项行。`false` = 内容没变、只是名字过期。
+    replace_options: bool,
+}
+
+/// 一条绑定的事务内落库：选项整行替换 + 补集停用 + 名字与摘要 + 审计。
+///
+/// 名字缓存与摘要**总是**写：名字每一轮都要跟上飞书侧（决策 D2，改名不断链），
+/// 摘要写在这里让下一轮能跳过。`replace_options = false` 时（内容没变、只是名字过期）
+/// 不动任何选项行，自然也不追加审计——「只在真变化时追加」的语义要保住。
+async fn persist_binding(
+    deps: &PullDeps<'_>,
+    table_id: i64,
+    binding: &TableBinding,
+    plan: BindingWritePlan<'_>,
+) -> Result<BindingWrite, BaseError> {
+    let options = deps.context.options();
+
+    let mut binding_update = Record::new();
+    binding_update.insert("field_name", serde_json::json!(plan.field_name));
+    // 摘要与选项行同事务提交：半提交会让「摘要已推进但行没写完」永久错位。
+    binding_update.insert("snapshot_digest", serde_json::json!(plan.digest));
+
+    let mut transaction = deps.database.transaction().await?;
+    let result = async {
+        let mut written = BindingWrite::default();
+        if plan.replace_options {
+            let items: Vec<OptionWriteItem> = plan
+                .derived
+                .iter()
+                .map(|option| to_write_item(&binding.source_key, option))
+                .collect();
+            written.options =
+                apply_option_rows(options, &mut transaction, &binding.source_key, &items).await?;
+            written.disabled =
+                disable_option_rows(options, &mut transaction, &binding.source_key, plan.doomed)
+                    .await?;
+
+            let event = audit::succeeded_system_event_without_ctx(
+                "feishu-pull",
+                "feishu.pull_options",
+                Some(audit::entity("feishu_datasource", table_id)?),
+                audit::entity("feishu_option", &binding.source_key)?,
+                audit::summary([
+                    ("outcome_code", serde_json::json!("pulled")),
+                    ("option_count", serde_json::json!(plan.derived.len() as i64)),
+                    ("disabled_count", serde_json::json!(written.disabled as i64)),
+                ])?,
+            )?;
+            audit::append_in_tx(&mut transaction, &event).await?;
+        }
+        deps.context
+            .datasource_fields()
+            .query()
+            .where_eq("id", serde_json::json!(binding.id))?
+            .update_in_tx(&mut transaction, binding_update)
+            .await?;
+        Ok::<_, BaseError>(written)
+    }
+    .await;
+    FeishuContext::finish_transaction(transaction, result).await
+}
+
+/// 记录一次整表成功：表级时间戳推进、连续失败清零。
+///
+/// 独立事务（不与某个绑定共用）：这两列描述的是**整轮**，而落库是逐字段的。
+/// 一个字段写到一半失败时整轮在调用方落成失败，这一组状态就不会被写。
+async fn record_table_success(deps: &PullDeps<'_>, table_id: i64) -> Result<(), BaseError> {
+    let mut transaction = deps.database.transaction().await?;
+    let mut update = Record::new();
+    update.insert("last_pull_at", serde_json::json!(now_seconds()));
+    update.insert("last_success_at", serde_json::json!(now_seconds()));
+    update.insert("consecutive_failures", serde_json::json!(0));
+    update.insert("last_error", serde_json::Value::Null);
+    let result = deps
+        .context
+        .datasources()
+        .query()
+        .where_eq("id", serde_json::json!(table_id))?
+        .update_in_tx(&mut transaction, update)
+        .await;
+    match result {
+        Ok(_) => transaction.commit().await.map_err(BaseError::from),
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
+}
+
 /// 按需把一轮收窄到**一条**源。
 ///
 /// `None` = 整轮（自动轮询走这条）；`Some(key)` = 只跑点名的那条（控制台的
@@ -457,6 +933,143 @@ pub(crate) async fn run_round(
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------
+
+/// trim 后非空才算有值——`NULL` 与空白串对「能不能拉」是同一件事。
+fn trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// 绑定声明的父列 `field_id`（空白串按无父处理）。
+///
+/// 界面清空父列时可能提交空串而不是 `null`（`validate_fields` 已按同一口径处理），
+/// 拿一个空 id 去解析会让整表因为一个不存在的字段停摆。
+fn declared_parent(binding: &TableBinding) -> Option<&str> {
+    binding
+        .parent_field_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|parent| !parent.is_empty())
+}
+
+/// 本轮要交给「列出字段」解析的 `field_id` 全集：绑定列 + 父列，去重保序。
+///
+/// 与 [`collect_field_names`] 是同一件事的两个阶段：这里给的是 **id**（解析的输入），
+/// 那里给的是**名字**（查询参数的输入）。父列也要解析——快照里靠名字取父列的值。
+fn resolve_targets(bindings: &[TableBinding]) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut ids = Vec::new();
+    for binding in bindings {
+        for id in std::iter::once(binding.field_id.as_str()).chain(declared_parent(binding)) {
+            if seen.insert(id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+/// 把「列出字段」的解析结果贴回绑定。
+///
+/// 返回的顺序与入参 `bindings` **逐一对应**——派生父键要靠这个对应关系取父的
+/// `source_key`。
+///
+/// # 父列不在集合里为什么是失败而不是降级
+///
+/// 集合来自「启用中的绑定」。父列不在里面只有两种可能：启用位与父指针漂移
+/// （`validate_fields` 不允许，但手工改库可以），或父列的绑定行被删了。两种情况都
+/// 读不到父列的文案——父列进不了 `field_names`、快照里也没有它。此时若静默按「无父」
+/// 派生，子选项的 `option_id` 会**整棵子树一起变**：飞书上已选中的值全部失联，
+/// 而且**不报错**（失效形态是「下拉静默变空」）。所以整体失败并点名，符合 D4。
+fn bind_fields(
+    bindings: &[TableBinding],
+    resolved: &[(String, String)],
+) -> Result<Vec<BoundField>, BaseError> {
+    let name_of = |field_id: &str| {
+        resolved
+            .iter()
+            .find(|(id, _)| id == field_id)
+            .map(|(_, name)| name.clone())
+    };
+
+    let mut bound = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let Some(field_name) = name_of(&binding.field_id) else {
+            return Err(BaseError::ConfigError(format!(
+                "多维表格里找不到字段绑定 {} 的 field_id {}",
+                binding.source_key, binding.field_id
+            )));
+        };
+        let parent_field_id = declared_parent(binding).map(str::to_string);
+        if let Some(parent) = parent_field_id.as_deref() {
+            if !bindings.iter().any(|other| other.field_id == parent) {
+                return Err(BaseError::ConfigError(format!(
+                    "字段绑定 {} 的父列 {parent} 不在本表的启用绑定里：读不到父列文案会让\
+                     整棵子树的选项 id 变化（飞书控件上已选中的值会失联），本轮整表停止",
+                    binding.source_key
+                )));
+            }
+        }
+        bound.push(BoundField {
+            field_id: binding.field_id.clone(),
+            field_name,
+            parent_field_id,
+        });
+    }
+    Ok(bound)
+}
+
+/// 一条绑定的父列声明：父的 `source_key` 与父的**当前**名字。
+///
+/// 名字取**解析后**的那一份，不能用绑定行上的缓存——缓存是上一轮的名字，父列改名后
+/// 按旧名字读快照会一片空白（`record.fields.get` 取不到键，全部子项静默变成无父）。
+fn parent_linkage(
+    field: &BoundField,
+    bindings: &[TableBinding],
+    bound: &[BoundField],
+) -> Result<Option<Linkage>, BaseError> {
+    let Some(parent_field_id) = field.parent_field_id.as_deref() else {
+        return Ok(None);
+    };
+    let (Some(parent_binding), Some(parent_field)) = (
+        bindings
+            .iter()
+            .find(|other| other.field_id == parent_field_id),
+        bound.iter().find(|other| other.field_id == parent_field_id),
+    ) else {
+        // `bind_fields` 已经挡过一次；这是同一条判据的第二道，防的是将来有人绕过它
+        // 单独调用本函数。
+        return Err(BaseError::ConfigError(format!(
+            "字段绑定 {} 的父列 {parent_field_id} 不在本表的启用绑定里",
+            field.field_id
+        )));
+    };
+    Ok(Some(Linkage {
+        parent_source_key: parent_binding.source_key.clone(),
+        parent_field: parent_field.field_name.clone(),
+    }))
+}
+
+/// 绑定行的 `field_name` 缓存是否落后于本轮解析出来的名字。
+///
+/// 缓存为空（首次拉取）也算落后：名字要写回去，否则控制台一直显示空。
+/// 两侧都 trim 过（`resolve_field_names` 与写回时同一个值），所以口径一致。
+fn name_cache_is_stale(binding: &TableBinding, resolved: &str) -> bool {
+    binding.field_name.as_deref() != Some(resolved)
+}
+
+/// 出站失败 → 内部错误。
+///
+/// 保留「要不要重试」这层语义：`Fatal` 是**配置错误**（列被删了、没给应用加文档
+/// 权限），退避重试不会自愈，落成 `ConfigError` 让人回去改配置；其余是上游暂时不可用。
+/// 文案原样保留——它是运维唯一的线索。
+fn internal_error(failure: OutboundFailure) -> BaseError {
+    match failure.kind {
+        super::outbound::FailureKind::Fatal { .. } => BaseError::ConfigError(failure.to_string()),
+        _ => BaseError::UpstreamUnavailable(failure.to_string()),
+    }
+}
 
 /// 抽取取值对。与 [`extract_values`] 的区别是**自有字符串**，避免把借用透传到
 /// 派生之外（派生只在本函数返回后调用一次，没有必要为零拷贝引入生命周期参数）。
@@ -978,5 +1591,227 @@ mod tests {
         ] {
             assert!(!reason.reason().trim().is_empty(), "{reason:?} 缺文案");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 表级拉取：纯函数部分（设计 §6.2）
+    // -----------------------------------------------------------------------
+
+    /// 一条已解析过名字的绑定：`field_id` 与它的当前 `field_name` 都在手边。
+    fn bound(field_id: &str, name: &str, parent: Option<&str>) -> BoundField {
+        BoundField {
+            field_id: field_id.to_string(),
+            field_name: name.to_string(),
+            parent_field_id: parent.map(str::to_string),
+        }
+    }
+
+    /// 一条落库视角的绑定。`source_key` 由 `field_id` 派生，只有需要断言它时才单写。
+    fn table_binding(field_id: &str, name: Option<&str>, parent: Option<&str>) -> TableBinding {
+        TableBinding {
+            id: 1,
+            source_key: format!("src_{field_id}"),
+            field_id: field_id.to_string(),
+            field_name: name.map(str::to_string),
+            parent_field_id: parent.map(str::to_string),
+            snapshot_digest: None,
+        }
+    }
+
+    #[test]
+    fn field_names_are_the_union_and_are_deduped() {
+        // field_names 是一个 JSON 数组查询参数，重复项会被官方拒
+        // （bitable.rs 的 duplicate_field_names_are_rejected 钉着这条）
+        let fields = vec![
+            bound("fldA", "币种/Currency（单选）", None),
+            bound("fldB", "汇率/Exchange Rate", Some("fldA")),
+        ];
+        let names = collect_field_names(&fields);
+        assert_eq!(names, vec!["币种/Currency（单选）", "汇率/Exchange Rate"]);
+    }
+
+    #[test]
+    fn a_column_that_is_both_a_value_and_a_parent_is_listed_once() {
+        // 中间的父列（如 费用类型）既自己取值、又是别人的父 → 只能出现一次
+        let fields = vec![
+            bound("fldP", "费用大类/Main Exp Cat*", None),
+            bound("fldM", "费用类型/Fee Type*", Some("fldP")),
+            bound("fldC", "银行流水摘要-编码", Some("fldM")),
+        ];
+        let names = collect_field_names(&fields);
+        assert_eq!(names.len(), 3, "三级链的中间列不得重复: {names:?}");
+    }
+
+    #[test]
+    fn a_cyclic_pair_does_not_duplicate_a_name() {
+        // 建源时已挡环（T5），但拼 field_names 的函数不能依赖上游一定挡住了
+        let fields = vec![
+            bound("fldA", "甲", Some("fldB")),
+            bound("fldB", "乙", Some("fldA")),
+        ];
+        assert_eq!(collect_field_names(&fields).len(), 2);
+    }
+
+    #[test]
+    fn parent_and_child_labels_are_trimmed_identically() {
+        // 实测该表有 "CNY 人民币\n" 这种尾随换行。父键与子键必须用同一份 trim 后的文案
+        // （derive.rs 的两处都 trim），否则子项指向一个不存在的父 option_id
+        // ——失效形态是「下拉静默变空」，不报错。
+        let parent_rows = [RawValue {
+            parent_label: None,
+            label: "CNY 人民币\n",
+        }];
+        let child_rows = [
+            RawValue {
+                parent_label: Some("CNY 人民币\n"),
+                label: "1.0000",
+            },
+            RawValue {
+                parent_label: Some("CNY 人民币"),
+                label: "1.0000",
+            },
+        ];
+        let parent = derive_options("currency", None, &parent_rows);
+        let child = derive_options("fx", Some("currency"), &child_rows);
+        assert_eq!(parent.len(), 1, "两种写法折叠成同一个父选项");
+        assert_eq!(child.len(), 1, "同父同文案只派生一个子选项");
+        assert_eq!(
+            child[0].parent_key, parent[0].option_id,
+            "子键必须命中父的 option_id"
+        );
+    }
+
+    #[test]
+    fn a_row_with_a_parent_but_no_child_value_yields_no_option() {
+        // 设计 Review Focus 第 4 条：父列有值、子列为空 与 父列为空 是两种情形，
+        // 但都不得挂到一个空父上。
+        let rows = [
+            RawValue {
+                parent_label: Some("推广测评服务费"),
+                label: "   ",
+            },
+            RawValue {
+                parent_label: Some("   "),
+                label: "pay for services-X",
+            },
+        ];
+        let derived = derive_options("summary", Some("fee_type"), &rows);
+        assert_eq!(derived.len(), 1, "空文案不产出选项（derive.rs 的 trim）");
+        assert_eq!(derived[0].parent_key, "", "父文案为空时落无父键，不挂空父");
+    }
+
+    #[test]
+    fn the_same_label_under_two_parents_yields_two_options() {
+        // 目标表实测有 6 例「一子多父」（如 pay for services-YL-AR 同时属于
+        // 推广测评服务费 与 预付储值款）。设计答案：各派生一个，互不覆盖。
+        let rows = [
+            RawValue {
+                parent_label: Some("推广测评服务费"),
+                label: "pay for services-YL-AR",
+            },
+            RawValue {
+                parent_label: Some("预付储值款"),
+                label: "pay for services-YL-AR",
+            },
+        ];
+        let derived = derive_options("summary", Some("fee_type"), &rows);
+        assert_eq!(derived.len(), 2, "同文案不同父必须派生两个选项");
+        assert_ne!(derived[0].parent_key, derived[1].parent_key);
+    }
+
+    #[test]
+    fn the_targets_cover_bound_columns_and_their_parents() {
+        // 父列也要解析：快照里靠**名字**取父列的值，拼不出父键的子树会整棵塌掉
+        let bindings = vec![
+            table_binding("fldA", Some("币种"), None),
+            table_binding("fldB", Some("汇率"), Some("fldA")),
+        ];
+        assert_eq!(resolve_targets(&bindings), vec!["fldA", "fldB"]);
+    }
+
+    #[test]
+    fn a_blank_parent_pointer_is_not_a_target() {
+        // 界面清空父列时可能提交空串而不是 null；当成「没有父」，
+        // 而不是拿一个空 id 去解析（那会让整表因为一个不存在的字段停摆）
+        let bindings = vec![table_binding("fldA", Some("币种"), Some("   "))];
+        assert_eq!(resolve_targets(&bindings), vec!["fldA"]);
+        let bound = bind_fields(&bindings, &[("fldA".to_string(), "币种".to_string())])
+            .unwrap_or_else(|error| panic!("应可绑定: {error}"));
+        assert!(bound[0].parent_field_id.is_none());
+    }
+
+    #[test]
+    fn a_binding_whose_parent_is_not_enabled_fails_the_whole_table() {
+        // 父列不在启用集合里 → 读不到父列文案，快照里也没有它 → 子树 option_id 整棵变，
+        // 飞书控件上已选中的值全部失联**且不报错**。所以整体失败并点名（D4 全有或全无）。
+        let bindings = vec![
+            table_binding("fldA", Some("币种"), None),
+            table_binding("fldB", Some("汇率"), Some("fldDisabled")),
+        ];
+        let resolved = vec![
+            ("fldA".to_string(), "币种".to_string()),
+            ("fldB".to_string(), "汇率".to_string()),
+        ];
+        let Err(error) = bind_fields(&bindings, &resolved) else {
+            panic!("父列不在启用集合里必须整体失败，不能静默降级成无父");
+        };
+        assert!(
+            error.to_string().contains("fldDisabled"),
+            "错误里要点名缺失的父列: {error}"
+        );
+    }
+
+    #[test]
+    fn the_parent_linkage_uses_the_resolved_name_not_the_cache() {
+        // 父列改名后，缓存里的旧名字在快照里读不到任何值 → 全部子项静默变成无父。
+        // 所以父键必须用**本轮解析出来的**名字。
+        let bindings = vec![
+            TableBinding {
+                id: 7,
+                source_key: "currency".to_string(),
+                field_id: "fldA".to_string(),
+                field_name: Some("旧名字".to_string()),
+                parent_field_id: None,
+                snapshot_digest: None,
+            },
+            table_binding("fldB", Some("汇率"), Some("fldA")),
+        ];
+        let resolved = vec![
+            ("fldA".to_string(), "币种（改名后）".to_string()),
+            ("fldB".to_string(), "汇率".to_string()),
+        ];
+        let bound =
+            bind_fields(&bindings, &resolved).unwrap_or_else(|error| panic!("应可绑定: {error}"));
+        let linkage = parent_linkage(&bound[1], &bindings, &bound)
+            .unwrap_or_else(|error| panic!("应可解析: {error}"))
+            .unwrap_or_else(|| panic!("fldB 声明了父列"));
+        assert_eq!(linkage.parent_source_key, "currency");
+        assert_eq!(linkage.parent_field, "币种（改名后）");
+    }
+
+    #[test]
+    fn a_binding_without_a_parent_has_no_linkage() {
+        let bindings = vec![table_binding("fldA", Some("币种"), None)];
+        let bound = bind_fields(&bindings, &[("fldA".to_string(), "币种".to_string())])
+            .unwrap_or_else(|error| panic!("应可绑定: {error}"));
+        let linkage = parent_linkage(&bound[0], &bindings, &bound)
+            .unwrap_or_else(|error| panic!("应可解析: {error}"));
+        assert!(linkage.is_none());
+    }
+
+    #[test]
+    fn an_empty_name_cache_is_stale() {
+        // 首次拉取时缓存是空的。那不是「改名」，但名字必须写回去，否则控制台一直显示空。
+        let fresh = table_binding("fldA", None, None);
+        assert!(name_cache_is_stale(&fresh, "币种"));
+        let same = table_binding("fldA", Some("币种"), None);
+        assert!(!name_cache_is_stale(&same, "币种"));
+    }
+
+    #[test]
+    fn a_trimmed_name_is_not_a_rename() {
+        // 解析结果与缓存都是 trim 过的，两侧口径必须一致——否则每轮都白开一个事务
+        let renamed = table_binding("fldA", Some("币种（改名后）"), None);
+        assert!(name_cache_is_stale(&renamed, "币种"));
     }
 }
