@@ -314,7 +314,15 @@ function Test-RemoteConfigPresent {
 }
 
 function Get-RemoteConfigLines {
-    $lines = & ssh -n @SshOpts -i $SshKey $sshTarget "cat $RemoteDir/config.cloud.toml"
+    # ⚠️ 必须临时把控制台输出编码设成 UTF-8：PowerShell 5.1 会用 [Console]::OutputEncoding
+    #    （中文 Windows 上是 GBK/936）去解码**本机进程**的 stdout。配置里有中文注释，
+    #    按 GBK 解 UTF-8 字节会让变长编码的尾字节吃掉后面的换行 → 行结构被打乱 → 差异预览漏报。
+    $prev = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        $lines = & ssh -n @SshOpts -i $SshKey $sshTarget "cat $RemoteDir/config.cloud.toml"
+    }
+    finally { [Console]::OutputEncoding = $prev }
     if ($LASTEXITCODE -ne 0) { throw "读取服务器上的 config.cloud.toml 失败（ssh 退出码 $LASTEXITCODE）。" }
     return @($lines)
 }
@@ -374,7 +382,8 @@ function Confirm-PostSteps {
         Write-Host "    覆盖配置    : $local"
         Write-Host "                  → 服务器 $RemoteDir/config.cloud.toml（原文件先备份）"
         if (Test-RemoteConfigPresent) {
-            Show-ConfigChangePreview (Get-RemoteConfigLines) (Get-Content -LiteralPath $local)
+            # 本机这份也必须按 UTF-8 读，理由见 Assert-LocalCloudConfigReady 里的说明。
+            Show-ConfigChangePreview (Get-RemoteConfigLines) (Get-Content -LiteralPath $local -Encoding UTF8)
         } else {
             Write-Host "    服务器上还没有 config.cloud.toml：本次会新建一份。" -ForegroundColor Yellow
         }
@@ -425,9 +434,14 @@ function Send-DeployArtifacts {
 function Assert-LocalCloudConfigReady {
     $local = Get-LocalCloudConfigPath
     if (-not (Test-Path $local)) { throw "-SyncConfig 需要本机配置，但找不到：$local" }
-    $lines = Get-Content -LiteralPath $local
+    # ⚠️ 必须显式 -Encoding UTF8。配置是无 BOM 的 UTF-8（模板就是），而 PowerShell 5.1 的
+    #    Get-Content 在无 BOM 时按 **ANSI/GBK** 解码：GBK 是变长编码，UTF-8 中文注释的尾字节
+    #    会**吃掉后面的换行**，于是 `url = "..."` 被粘进上一行注释、整行以 # 开头，下面的键匹配
+    #    就落空——2026-09-24 实测报「读不到 [mysql].url」而配置其实完全正确（服务器端的 awk 逐字节
+    #    读，不受影响，所以只有本机预检会误判）。
+    $lines = Get-Content -LiteralPath $local -Encoding UTF8
 
-    $hits = Select-String -Path $local -Pattern '=\s*"[^"]*(CHANGE_ME|replace-with)' |
+    $hits = Select-String -Path $local -Pattern '=\s*"[^"]*(CHANGE_ME|replace-with)' -Encoding UTF8 |
             Where-Object { $_.Line -notmatch '^\s*#' }
     if ($hits) {
         Write-Host "    本机配置里仍有未填写的占位值：" -ForegroundColor Red
