@@ -68,12 +68,13 @@ shared  ←  engine  ←  features  ←  shell
 
 ## 机器门禁（改动结构时必须同步）
 
-| 门禁                                          | 锁定的内容                                                                                                                                                                                      |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scripts/check_architecture.py`               | `main.tsx` 唯一 createRoot（全 src 扫描）；`engine/renderers/table/TableView.tsx` ≤400 行 + 三个 hook 行为边界；`shell/routes.tsx` workbench DEV 门控；`features/registry.ts` 静态字面量 import |
-| `frontend/scripts/verify-locale-contract.mjs` | `shared/lib/product-locale.ts` 唯一 locale 权威常量；src 与 tests 禁用隐式 locale API                                                                                                           |
-| `frontend/scripts/verify-bundle-budget.mjs`   | 首屏 JS gzip 预算（目标 350 kB / 硬上限 450 kB）；自定义视图走 lazy chunk，不得进首屏                                                                                                           |
-| `frontend/components.json`                    | shadcn 别名（ui → `@/shared/ui` 等）                                                                                                                                                            |
+| 门禁                                           | 锁定的内容                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scripts/check_architecture.py`                | `main.tsx` 唯一 createRoot（全 src 扫描）；`engine/renderers/table/TableView.tsx` ≤400 行 + 三个 hook 行为边界；`shell/routes.tsx` workbench DEV 门控；`features/registry.ts` 静态字面量 import                                                                              |
+| `frontend/scripts/verify-locale-contract.mjs`  | `shared/lib/product-locale.ts` 唯一 locale 权威常量；src 与 tests 禁用隐式 locale API                                                                                                                                                                                        |
+| `frontend/scripts/verify-bundle-budget.mjs`    | 首屏 JS gzip 预算（目标 350 kB / 硬上限 450 kB）；自定义视图走 lazy chunk，不得进首屏                                                                                                                                                                                        |
+| `frontend/scripts/verify-production-build.mjs` | 生产入口必须带 enforce 模式 CSP（含 `default-src`/`base-uri`/`object-src`/`script-src`/`connect-src`）；**`<meta>` 里不得出现 `frame-ancestors`/`report-uri`/`sandbox`**（这三条在 `<meta>` 中必然被浏览器忽略并报错，防嵌入必须靠响应头）；无 source map、无 Workbench 标记 |
+| `frontend/components.json`                     | shadcn 别名（ui → `@/shared/ui` 等）                                                                                                                                                                                                                                         |
 
 提交前门禁：`pnpm check`（format/lint/typecheck/Vitest/locale 契约/build/
 bundle 预算/部署契约）+ 仓库根 `python scripts/check_architecture.py`。

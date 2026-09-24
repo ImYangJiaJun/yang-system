@@ -7,13 +7,26 @@ import { defineConfig, loadEnv, type Plugin } from "vite";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/// 生产 CSP（与 deploy/deployment-contract.mjs 精确同源）。
+/// 生产 CSP 的 meta 版本。
+///
+/// 口径是「**响应头清单减去 `<meta>` 交付不了的指令**」，响应头那份的权威定义在
+/// `deploy/deployment-contract.mjs`（`contentSecurityPolicy`）。这里目前唯一的差项是
+/// `frame-ancestors`：
+///
+/// 规范规定 `frame-ancestors` 只认 HTTP 响应头，放进 `<meta>` 会被浏览器**直接忽略**
+/// 并在控制台打一条错误（`The Content Security Policy directive 'frame-ancestors' is
+/// ignored when delivered via a <meta> element.`）。写在这里既不生效，又是一条常驻噪音
+/// ——2026-09-24 在线上控制台实测到了它。防嵌入由 nginx 的响应头承担，那条有
+/// `frontend/e2e-production/production-build.spec.ts` 盯着。
+///
+/// 同名清单不再靠注释维系：`scripts/verify-production-build.mjs` 按
+/// `deploy/deployment-contract.mjs` 的 `metaIgnoredCspDirectives` **推导**出 meta 应有
+/// 的指令集合，缺一条、或者把必然失效的那几条加回来，构建门禁都会红。
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'none'",
   "object-src 'none'",
   "form-action 'self'",
-  "frame-ancestors 'none'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
