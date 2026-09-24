@@ -618,6 +618,18 @@ pub struct FeishuSettings {
     /// 不是冷却）。下限见 [`FEISHU_MIN_ALERT_THRESHOLD`]。默认 3。
     #[serde(default = "default_feishu_alert_threshold")]
     pub alert_failure_threshold: i64,
+    /// 是否把三个机器入口的**完整请求参数**写进日志（含 `token` 与认证头明文）。
+    ///
+    /// **默认关闭，且不应用于生产。** `docs/contracts/OBSERVABILITY.md` 的
+    /// 「结构化日志」章节禁止日志记录请求体与 Token，本开关是那条禁令的**唯一例外**：
+    /// 联调期必须抓到飞书回传的真实报文，而报文里有几处字段形状项目从未观测过
+    /// （见 `docs/architecture/feishu-option-ingest.md` 的 V4）。
+    ///
+    /// 开启期间 stdout 会含**数据源 Token 与多维表格管理 Token 的明文**，日志采集与
+    /// 保留策略须按 `docs/operations/LOG_SHIPPING.md` 另行评估。关闭时不注册中间件，
+    /// 因此没有运行期开销。
+    #[serde(default)]
+    pub log_inbound_requests: bool,
 }
 
 /// 出站拉取间隔下限：低于 1 分钟会让飞书侧频控（bitable 列出记录 20 次/秒，

@@ -22,6 +22,14 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 替代事务内审计。采集器接入、字段保留/脱敏与保留期约定见
 [`LOG_SHIPPING.md`](../operations/LOG_SHIPPING.md)。
 
+**唯一例外**：`feishu.log_inbound_requests = true` 时，`feishu.option` 的三个**机器
+入口**（`approval_options` / `upsert_options` / `delete_options`）会以
+`飞书机器入口请求参数` 事件记录完整请求参数，**含 `token` 与认证头明文**，请求体超过
+64 KiB 时截断并保留原始字节数。该开关**默认关闭**，存在理由是联调期必须抓到飞书
+回传的真实报文（`linkage_params` 的字段形状项目从未观测过）。开启期间 stdout 含凭据
+明文，**不得在生产开启**；一旦开启，采集与保留策略须按 `LOG_SHIPPING.md` 的例外条款
+重新评估。其余 Action 一律不受影响，控制台侧的 Action 永远不记录请求体。
+
 ## Prometheus 指标
 
 `observability.metrics_enabled=true` 时，进程在独立的

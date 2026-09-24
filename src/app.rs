@@ -169,33 +169,44 @@ mod tests {
     use yang_db::{Database, DatabaseConfig};
 
     fn test_tools() -> Arc<Tools> {
+        test_tools_with(None)
+    }
+
+    /// 与 [`test_tools`] 同形，另可注入 `[feishu]` 段——`build_application` 是从
+    /// `tools.config::<Arc<FeishuSettings>>()` 读它来决定装配哪些飞书路由的。
+    fn test_tools_with(feishu: Option<crate::config::FeishuSettings>) -> Arc<Tools> {
         let pool = MySqlPoolOptions::new()
             .connect_lazy("mysql://root:test@127.0.0.1:3306/test")
             .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
         let mysql = Database::from_pool(pool.clone(), DatabaseConfig::default())
             .unwrap_or_else(|error| panic!("测试 Database 应构建成功: {error}"));
-        Arc::new(
-            ToolsBuilder::new()
-                .mysql(mysql)
-                .token(
-                    TokenManager::new_symmetric(
-                        "01234567890123456789012345678901",
-                        Algorithm::HS256,
-                        "test".to_string(),
-                        "test-api".to_string(),
-                        60,
-                        120,
-                    )
-                    .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}")),
+        let builder = ToolsBuilder::new()
+            .mysql(mysql)
+            .token(
+                TokenManager::new_symmetric(
+                    "01234567890123456789012345678901",
+                    Algorithm::HS256,
+                    "test".to_string(),
+                    "test-api".to_string(),
+                    60,
+                    120,
                 )
-                .extension(Arc::new(
-                    StepUpManager::new(
-                        "independent-step-up-test-secret-0123456789abcdef",
-                        "test-step-up",
-                        "test-sensitive-actions",
-                    )
-                    .unwrap_or_else(|error| panic!("测试 Step-up manager 应有效: {error}")),
-                ))
+                .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}")),
+            )
+            .extension(Arc::new(
+                StepUpManager::new(
+                    "independent-step-up-test-secret-0123456789abcdef",
+                    "test-step-up",
+                    "test-sensitive-actions",
+                )
+                .unwrap_or_else(|error| panic!("测试 Step-up manager 应有效: {error}")),
+            ));
+        let builder = match feishu {
+            Some(settings) => builder.config(Arc::new(settings)),
+            None => builder,
+        };
+        Arc::new(
+            builder
                 .build()
                 .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
         )
@@ -212,6 +223,51 @@ mod tests {
             trusted_proxy_cidrs: Vec::new(),
             totp: None,
         })
+    }
+
+    /// 打开 `[feishu].log_inbound_requests` 后应用仍必须能构建。
+    ///
+    /// 这是**唯一**会走到 `MachineRequestLogMiddleware` 装配的测试。开关的取值分支与
+    /// ActionName 的**语法**由 `feishu.option` 的单测覆盖，但「这三个名字真的能解析成
+    /// 已注册 Action」只有 App 构建期的 `validate_references` 才校验
+    /// （`BuildError::InvalidReference`）。缺了这条，`LOGGED_ACTIONS` 里写错一个名字、
+    /// 或把注册循环挪错位置，都会一路绿到生产启动才炸——而那时的表现是**起不来**。
+    #[tokio::test]
+    async fn feishu_request_log_switch_still_builds_a_valid_app() {
+        let app = build_application(
+            test_tools_with(Some(crate::config::FeishuSettings {
+                enabled: true,
+                management_api_token: "0123456789abcdef0123456789abcdef".to_string(),
+                encryption_key: None,
+                app_id: None,
+                app_secret: None,
+                pull_interval_seconds: 900,
+                alert_recipients: Vec::new(),
+                alert_failure_threshold: 3,
+                log_inbound_requests: true,
+            })),
+            test_security(),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("开启请求参数日志后应用仍应能构建: {error:#}"));
+
+        let option_module = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "feishu.option")
+            .unwrap_or_else(|| panic!("应存在 feishu.option 模块"));
+        for action_name in ["approval_options", "upsert_options", "delete_options"] {
+            assert!(
+                option_module
+                    .actions()
+                    .iter()
+                    .any(|action| action.name.as_str() == action_name),
+                "feishu.option 应注册 {action_name}——请求日志中间件按名字挂载"
+            );
+        }
     }
 
     /// account + access 骨架冒烟：应用必须可构建并产出两个 Addon 的 Catalog 与授权事实表。

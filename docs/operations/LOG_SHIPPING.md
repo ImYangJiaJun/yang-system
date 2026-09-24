@@ -58,6 +58,11 @@ sinks:
   sidecar 抓包、access log 镜像等方式把这些内容补回来——Nginx 边缘的 access
   log 如开启，必须关闭对 `Cookie`/`Authorization` 的记录（Nginx 默认
   `combined` 格式不含这两个头，保持默认即可）。
+- **已知例外**：`feishu.log_inbound_requests = true` 时，`feishu.option` 的三个机器
+  入口会记录完整请求参数，**含 `token` 明文**（见 OBSERVABILITY.md 的例外条款）。
+  该窗口内这些事件的 `body` / `headers` 字段按**凭据**对待：不得进入面向宽泛人群的
+  检索索引，保留期不高于排障所需，开关关闭后应清理该窗口内已落地的数据。
+  `request_id` 仍是对应应用的关联键。
 - `actor_id`、`operation`、`request_id` 是排障与审计关联的必要字段，予以保留；
   如落地平台有合规要求，可对 `actor_id` 做带盐哈希，但必须在管道内统一完成，
   且与 `audit_event` 的关联能力要在切换前评估（高权限追责的事实源是

@@ -17,6 +17,7 @@ pub(crate) mod projection_contract;
 pub(crate) mod protocol;
 pub(crate) mod pull;
 pub(crate) mod repository;
+pub(crate) mod request_log;
 pub(crate) mod schema_anchor;
 pub(crate) mod source_key;
 pub(crate) mod tenant_token;

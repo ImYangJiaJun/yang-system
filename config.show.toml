@@ -377,6 +377,13 @@ filter = "yang_system=info,tower_http=info"
 # 是否启用飞书集成。关闭时不注册任何飞书路由。
 # 默认：false
 enabled = false
+# 是否把飞书三个**机器入口**（取选项 + 多维表格两条写入）的完整请求参数写进日志，
+# 含数据源 Token 与多维表格管理 Token 的**明文**。
+# **默认关闭，不要在生产开启**：它是 OBSERVABILITY.md「不得记录请求体与 Token」的
+# 唯一例外，只为联调期抓飞书回传的真实报文而存在（linkage_params 的字段形状项目
+# 从未观测过）。开启期间 stdout 含凭据明文，采集与保留须按 LOG_SHIPPING.md 评估。
+# 默认：false
+log_inbound_requests = false
 # 多维表格自动化工作流调用写入 API 时使用的静态 Token。
 # 必填（启用时）：至少 32 字节，不得复用 token / step_up / security.totp 的密钥；
 # 占位值必须以 replace-with 开头才会被占位密钥校验识别。

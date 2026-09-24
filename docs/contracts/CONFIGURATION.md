@@ -263,12 +263,20 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   有效范围 `2..=1000`。达阈值后**每轮都发**，直到有一轮成功把计数清零——收口条件
   是「恢复」而不是冷却。下限 2：单次失败与飞书侧抖动无法区分，阈值 1 等于把抖动
   变成邮件；要彻底静音请清空 `alert_recipients`，而不是把阈值调到天上。
+- `feishu.log_inbound_requests`（布尔，默认 `false`）：是否把飞书三个**机器入口**
+  （`approval_options` / `upsert_options` / `delete_options`）的**完整请求参数**写进
+  日志，含 `token` 与认证头明文；请求体超过 64 KiB 时截断并保留原始字节数。
+  **默认关闭，且不应用于生产**——它是 [`OBSERVABILITY.md`](OBSERVABILITY.md)「不得
+  记录请求体与 Token」的**唯一例外**，只为联调期抓飞书回传的真实报文而存在
+  （`linkage_params` 的字段形状项目从未观测过）。开启期间 stdout 含凭据明文，
+  采集与保留策略须按 [`LOG_SHIPPING.md`](../operations/LOG_SHIPPING.md) 的例外条款
+  重新评估。关闭时不注册中间件，没有运行期开销。
 
 对应环境变量：`YANG_SYSTEM_FEISHU_ENABLED`、`YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN`、
 `YANG_SYSTEM_FEISHU_ENCRYPTION_KEY`。
 
 `app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` /
-`alert_failure_threshold` **不登记环境变量**。这是刻意的：
+`alert_failure_threshold` / `log_inbound_requests` **不登记环境变量**。这是刻意的：
 环境变量是白名单，未登记的名称会让进程启动失败——`YANG_SYSTEM_FEISHU_APP_SECRET`
 因此会被直接拒绝，secret 只能从 secret 目录进来。
 
