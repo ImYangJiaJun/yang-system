@@ -21,11 +21,23 @@
  * 清单是常驻的一页，而凭据是 `secret` 级的东西。明文只在两条路径上出现：
  * 用户点「复制 Token」（回显一次）与轮换成功后（那一次响应就是新值）。
  * 两者都进本组件的本地状态，刷新页面即消失。
+ *
+ * # 复制失败时的退路（2026-09-24 修）
+ *
+ * 明文 HTTP 部署下 `navigator.clipboard` 不存在，两处复制都成了「点了没反应」。
+ * 而这一页有个别处没有的问题：**Token 是唯一一处「复制不成，就彻底拿不到」的值**
+ * ——它只进本地状态，页面上从不渲染；更糟的是「轮换」会成功并让已配好的飞书控件
+ * 立刻失效，而新 Token 又复制不出来，运维就被留在「集成已死、新值拿不到」的死角里。
+ *
+ * 所以失败时**只有那一次**把明文就地渲染成可选中文本（带 `select-all`，点一下全选）。
+ * 这不破坏上面那条约定：明文依旧只活在本组件状态里、刷新即失，只是从「只给剪贴板」
+ * 放宽为「剪贴板不行时也给屏幕」——刻意不改成常显，那才是把约定放开。
  */
 
 import { Check, Copy } from "lucide-react";
 import { useState } from "react";
 
+import { copyText } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -75,34 +87,46 @@ export function CredentialChecklist({
   const [error, setError] = useState<string | null>(null);
   const [rotating, setRotating] = useState<CredentialItem | null>(null);
   const [pending, setPending] = useState(false);
+  /// 剪贴板写不进去时的退路。`plaintext` 只在「刚回显出来的 Token 也复制不成」时才带上
+  /// ——那一次不给屏幕就没别的路可走了（见文件头）。
+  const [copyFailure, setCopyFailure] = useState<{
+    sourceKey: string;
+    plaintext?: string;
+  } | null>(null);
 
-  async function copy(sourceKey: string, value: string) {
-    try {
-      await navigator.clipboard.writeText(value);
+  /// 复制成功才点亮「已复制」；否则把退路交回给渲染层。绝不谎报成功
+  /// ——用户会去别处粘一个空的，比不响应更糟。
+  async function copy(sourceKey: string, value: string): Promise<boolean> {
+    if ((await copyText(value)) === "copied") {
       setCopiedKey(sourceKey);
-    } catch {
-      // 剪贴板不可用（无权限 / 非安全上下文）：什么都不做，也**不谎报已复制**
-      // ——用户会去别处粘一个空的，比不响应更糟。
+      return true;
     }
+    return false;
   }
 
   /// 复制 URL：值是在本地拼出来的，所以一个请求都不发。
   async function copyUrl(item: CredentialItem) {
     setError(null);
     setCopiedKey(null);
-    await copy(
+    setCopyFailure(null);
+    const done = await copy(
       `${item.sourceKey}#url`,
       approvalOptionsUrl(base, item.sourceKey),
     );
+    if (!done) setCopyFailure({ sourceKey: item.sourceKey });
   }
 
   /// 复制 Token：**只回显**（读），没有值就取一次。绝不触发轮换。
   async function copyToken(item: CredentialItem) {
     setError(null);
     setCopiedKey(null);
+    setCopyFailure(null);
     const existing = tokens[item.sourceKey];
     if (existing !== undefined) {
-      await copy(`${item.sourceKey}#token`, existing);
+      const done = await copy(`${item.sourceKey}#token`, existing);
+      if (!done) {
+        setCopyFailure({ sourceKey: item.sourceKey, plaintext: existing });
+      }
       return;
     }
     if (client === undefined) {
@@ -112,7 +136,11 @@ export function CredentialChecklist({
     try {
       const token = await client.reveal(item.sourceKey);
       setTokens((previous) => ({ ...previous, [item.sourceKey]: token }));
-      await copy(`${item.sourceKey}#token`, token);
+      const done = await copy(`${item.sourceKey}#token`, token);
+      // 回显已经成功了（Token 就在手里），死只死在剪贴板：那就把它摆出来。
+      if (!done) {
+        setCopyFailure({ sourceKey: item.sourceKey, plaintext: token });
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -122,6 +150,12 @@ export function CredentialChecklist({
     if (rotating === null || client === undefined) return;
     setPending(true);
     setError(null);
+    // 轮换会作废旧值，所以上次复制失败时摆出来的那段明文**当场就失效了**。
+    // 不清掉它，用户可能照着屏幕把那串已经作废的 Token 粘回审批后台。
+    setCopyFailure(null);
+    // 同理：那一行的「已复制」勾勾指的是**旧** Token（剪贴板里也还是旧的）。
+    // 留着它等于说「新的这串已经复制好了」，而它其实还没被碰过。
+    setCopiedKey(null);
     try {
       const token = await client.rotate(rotating.sourceKey);
       setTokens((previous) => ({ ...previous, [rotating.sourceKey]: token }));
@@ -159,6 +193,36 @@ export function CredentialChecklist({
         </p>
       )}
 
+      {copyFailure === null ? null : (
+        <div
+          role="alert"
+          className="space-y-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          <p>
+            {
+              // 只说「这次没写成」这个已知事实，再点出最常见的原因——
+              // 断言「就是明文 HTTP 干的」在 HTTPS 上（例如权限被拒）就是假话。
+            }
+            浏览器这次没允许写剪贴板，明文 HTTP 页面最常见的原因是这个。
+            {copyFailure.plaintext === undefined
+              ? // 这条提示挂在表格**上方**，所以指路必须往下指，并且点名是哪一行：
+                // 多行时「上面那一行」既不对也应不上号。
+                `字段 ${copyFailure.sourceKey} 的接口地址在下面同一行的「接口地址」列里，`
+              : `字段 ${copyFailure.sourceKey} 的这段 Token 只能手动复制，`}
+            点一下即可全选，再按 Ctrl/Cmd + C。
+          </p>
+          {
+            // 只有 Token 这条路会走到这里：它不像地址那样本来就显示在页面上，
+            // 不摆出来就真的没别的地方能拿到了。地址那条不给明文，避免无谓地重复一段长串。
+          }
+          {copyFailure.plaintext === undefined ? null : (
+            <code className="block rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-xs break-all text-foreground select-all">
+              {copyFailure.plaintext}
+            </code>
+          )}
+        </div>
+      )}
+
       <div className="overflow-x-auto">
         <Table>
           <TableHeader>
@@ -184,7 +248,9 @@ export function CredentialChecklist({
                   </TableCell>
                   <TableCell className="align-top">
                     <code
-                      className="block max-w-[28rem] truncate font-mono text-xs"
+                      // `select-all`：这一段被 CSS 截断显示，靠鼠标拖着选只能选到看得见的
+                      // 部分。复制失败时的提示说「点一下即可全选」，这里必须真的成立。
+                      className="block max-w-[28rem] truncate font-mono text-xs select-all"
                       title={url}
                     >
                       {url}

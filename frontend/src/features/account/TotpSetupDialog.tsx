@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { TotpSetupResult } from "./api";
+import { copyText } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -49,12 +50,15 @@ export function TotpSetupDialog({
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrFailed, setQrFailed] = useState(false);
   const [copied, setCopied] = useState(false);
+  // 剪贴板写不进去（明文 HTTP 部署）时不再只是「不亮已复制」——那是没反应。
+  const [copyFailed, setCopyFailed] = useState(false);
   const [code, setCode] = useState("");
 
   // 打开（setup 变更）时重置本地状态并生成二维码。
   useEffect(() => {
     setCode("");
     setCopied(false);
+    setCopyFailed(false);
     setQrDataUrl(null);
     setQrFailed(false);
     if (!setup) return;
@@ -78,13 +82,17 @@ export function TotpSetupDialog({
 
   const copySecret = async () => {
     if (!setup) return;
-    try {
-      await navigator.clipboard.writeText(setup.secret);
+    // 降级路径见 shared/lib/clipboard.ts：明文 HTTP 部署上 navigator.clipboard 不存在。
+    if ((await copyText(setup.secret)) === "copied") {
       setCopied(true);
-    } catch {
-      // 剪贴板不可用（非安全上下文等）：密钥文本本身可手动选中复制。
-      setCopied(false);
+      // 失败标记必须跟着这次结果走：不清掉的话，先失败再成功后界面上会同时挂着
+      // 「已复制」和那条失败提示，两句里必有一句是假的。
+      setCopyFailed(false);
+      return;
     }
+    // 悄悄不亮「已复制」等于没反应；密钥旁边的文字已带 `select-all`，把退路说出来。
+    setCopied(false);
+    setCopyFailed(true);
   };
 
   const digits = setup?.digits ?? 6;
@@ -149,6 +157,16 @@ export function TotpSetupDialog({
                   {copied ? "已复制" : "复制"}
                 </Button>
               </div>
+              {copyFailed ? (
+                <p role="alert" className="text-xs text-destructive">
+                  {
+                    // 只说「这次没写成」这个已知事实，再点出最常见的原因——
+                    // 断言「就是明文 HTTP 干的」在 HTTPS 上（例如权限被拒）就是假话。
+                  }
+                  浏览器这次没允许写剪贴板，明文 HTTP 页面最常见的原因是这个。
+                  上面的密钥点一下即可全选，再按 Ctrl/Cmd + C。
+                </p>
+              ) : null}
             </div>
 
             <div className="space-y-1.5">

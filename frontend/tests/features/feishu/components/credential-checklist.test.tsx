@@ -10,12 +10,19 @@
 
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CredentialChecklist } from "@/features/feishu/components/CredentialChecklist";
 import { DatasourceHealthPanel } from "@/features/feishu/components/DatasourceHealthPanel";
 import type { CredentialClient } from "@/features/feishu/api";
 import type { CredentialItem, HealthReport } from "@/features/feishu/types";
+import {
+  restoreClipboard,
+  stubExecCommand,
+  stubInsecureClipboard,
+} from "@test/helpers/clipboard";
+
+afterEach(restoreClipboard);
 
 const ORIGIN = "https://ops.example.com";
 const SOURCE_KEY = "fee_type";
@@ -247,6 +254,116 @@ describe("凭据拷贝清单", () => {
     );
     expect(screen.getAllByRole("button", { name: /复制/ })).toHaveLength(4);
     expect(screen.getAllByRole("button", { name: "轮换" })).toHaveLength(2);
+  });
+});
+
+/**
+ * 明文 HTTP 部署下的复制（2026-09-24 事故）。
+ *
+ * 现场是 `http://<公网IP>:18654`：`navigator.clipboard` 整块缺席，两个复制按钮
+ * 全部「点了没反应」。这一页比别处多一层风险——**Token 是唯一一处「复制不成，
+ * 就彻底拿不到」的值**：它只进本地状态、页面上从不渲染，而「轮换」却会成功并让
+ * 已配好的飞书控件立刻失效。所以修好之后必须满足：能复制就真复制，不能就摆出来。
+ */
+describe("凭据清单：明文 HTTP 部署下的复制", () => {
+  it("非安全上下文：降级路径仍把 Token 复制成功，不误报失败", async () => {
+    const user = userEvent.setup();
+    stubInsecureClipboard();
+    const execCommand = stubExecCommand(true);
+    const { client, reveal } = stubClient();
+    render(
+      <CredentialChecklist
+        items={[itemFixture]}
+        origin={ORIGIN}
+        client={client}
+      />,
+    );
+
+    await user.click(
+      screen.getAllByRole("button", { name: /复制/ })[1] as HTMLElement,
+    );
+
+    // 回显照旧只读一次，复制走降级路径，且不该出现任何错误提示
+    expect(reveal).toHaveBeenCalledWith(SOURCE_KEY);
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("两条路都不可用时把 Token 明文摆出来，而不是「点了没反应」", async () => {
+    const user = userEvent.setup();
+    stubInsecureClipboard();
+    stubExecCommand(false);
+    const { client } = stubClient();
+    render(
+      <CredentialChecklist
+        items={[itemFixture]}
+        origin={ORIGIN}
+        client={client}
+      />,
+    );
+
+    await user.click(
+      screen.getAllByRole("button", { name: /复制/ })[1] as HTMLElement,
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/只能手动复制/);
+    // 明文必须真的摆出来，且能一键全选——不给就等于把人送进死角
+    expect(alert).toHaveTextContent("plaintext-token");
+    expect(screen.getByText("plaintext-token")).toHaveClass("select-all");
+  });
+
+  it("复制 URL 失败时也给退路，但不重复那串本来就显示着的地址", async () => {
+    const user = userEvent.setup();
+    stubInsecureClipboard();
+    stubExecCommand(false);
+    const { client, reveal } = stubClient();
+    render(
+      <CredentialChecklist
+        items={[itemFixture]}
+        origin={ORIGIN}
+        client={client}
+      />,
+    );
+
+    await user.click(
+      screen.getAllByRole("button", { name: /复制/ })[0] as HTMLElement,
+    );
+
+    const alert = await screen.findByRole("alert");
+    // 提示挂在表格**上方**，所以指路必须往下指；并且要点明是哪一行——
+    // 多行时「上面那一行」既指错方向、也对不上号。
+    expect(alert).toHaveTextContent(/接口地址在下面同一行/);
+    expect(alert).toHaveTextContent(SOURCE_KEY);
+    // 地址本来就渲染在行里；再往提示里塞一遍只是噪音
+    expect(alert).not.toHaveTextContent(ORIGIN);
+    expect(reveal).not.toHaveBeenCalled();
+  });
+
+  it("轮换之后不再摆着上一次复制失败留下的旧明文——它那一刻就作废了", async () => {
+    const user = userEvent.setup();
+    stubInsecureClipboard();
+    stubExecCommand(false);
+    const { client } = stubClient();
+    render(
+      <CredentialChecklist
+        items={[itemFixture]}
+        origin={ORIGIN}
+        client={client}
+      />,
+    );
+
+    // 复制失败 → 旧明文被摆出来（这是它唯一出现的场合）
+    await user.click(
+      screen.getAllByRole("button", { name: /复制/ })[1] as HTMLElement,
+    );
+    expect(await screen.findByText("plaintext-token")).toBeInTheDocument();
+
+    // 轮换把旧值作废了：屏幕上要是还留着那串，用户就会照着它往审批后台粘
+    await user.click(screen.getByRole("button", { name: "轮换" }));
+    await user.click(await screen.findByRole("button", { name: "轮换 Token" }));
+
+    expect(screen.queryByText("plaintext-token")).toBeNull();
   });
 });
 

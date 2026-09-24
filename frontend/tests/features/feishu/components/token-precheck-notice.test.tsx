@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TokenPrecheckNotice } from "@/features/feishu/components/TokenPrecheckNotice";
 import {
@@ -8,6 +8,13 @@ import {
   approvalCodeHint,
   approvalCodeVerdict,
 } from "@/features/feishu/types";
+import {
+  restoreClipboard,
+  stubExecCommand,
+  stubInsecureClipboard,
+} from "@test/helpers/clipboard";
+
+afterEach(restoreClipboard);
 
 /// 创建后的连通性预检回执：通了要给可复制的一段，失败了要说清「数据源已创建」。
 
@@ -69,6 +76,59 @@ describe("TokenPrecheckNotice", () => {
     expect(screen.getByText("已复制")).toBeInTheDocument();
 
     vi.unstubAllGlobals();
+  });
+
+  // ---- 明文 HTTP 部署（2026-09-24 事故）----
+  // 现场是 http://<公网IP>:18654：Clipboard API 整块缺席，原来的空 catch 让这个按钮
+  // 变成「点了没反应」。这两条钉住修好之后的行为：要么真复制成功，要么把退路说出来。
+
+  it("非安全上下文：降级路径仍复制成功，不算失败", async () => {
+    const user = userEvent.setup();
+    stubInsecureClipboard();
+    const execCommand = stubExecCommand(true);
+
+    render(
+      <TokenPrecheckNotice
+        sourceKey="dept_sales"
+        result={{
+          status: "ok",
+          optionCount: 3,
+          hasMore: false,
+          encrypted: false,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /复制/ }));
+
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    expect(screen.getByText("已复制")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("降级也不可用时给出可手动复制的退路，绝不谎报已复制", async () => {
+    const user = userEvent.setup();
+    stubInsecureClipboard();
+    stubExecCommand(false);
+
+    render(
+      <TokenPrecheckNotice
+        sourceKey="dept_sales"
+        result={{
+          status: "ok",
+          optionCount: 3,
+          hasMore: false,
+          encrypted: false,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /复制/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/全选/);
+    expect(screen.queryByText("已复制")).toBeNull();
+    // 退路指向的那段文字必须真的能一键全选，否则「全选」就是一句空话
+    expect(screen.getByText("dept_sales")).toHaveClass("select-all");
   });
 
   it("加密返回时说明「内容读不了但取数成功」", () => {

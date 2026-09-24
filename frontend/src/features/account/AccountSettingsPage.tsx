@@ -32,6 +32,7 @@ import {
   useSessionSnapshot,
 } from "@/engine/session/use-session";
 import { StepUpRequiredError } from "@/engine/http/errors";
+import { copyText } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
@@ -84,6 +85,9 @@ export default function AccountSettingsPage() {
     null,
   );
   const [totpCodesCopied, setTotpCodesCopied] = useState(false);
+  /// 恢复码复制失败的提示。**就地**渲染在按钮旁：这些码只在这一次显示，
+  /// 而页面底部的通用错误区在三个区块之下，用户在那里等于是看不到反馈。
+  const [copyCodesFailed, setCopyCodesFailed] = useState(false);
 
   const loadProfile = useCallback(async () => {
     setProfileError("");
@@ -302,6 +306,7 @@ export default function AccountSettingsPage() {
       setTotpSetup(setup);
       setTotpRecoveryCodes(null);
       setTotpCodesCopied(false);
+      setCopyCodesFailed(false);
     } catch (cause) {
       setErrorMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -323,6 +328,7 @@ export default function AccountSettingsPage() {
       setTotpSetup(null);
       setTotpRecoveryCodes(result.recoveryCodes);
       setTotpCodesCopied(false);
+      setCopyCodesFailed(false);
     } catch (cause) {
       setTotpError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -332,12 +338,17 @@ export default function AccountSettingsPage() {
 
   const copyTotpRecoveryCodes = async () => {
     if (!totpRecoveryCodes) return;
-    try {
-      await navigator.clipboard.writeText(totpRecoveryCodes.join("\n"));
+    // 降级路径见 shared/lib/clipboard.ts：明文 HTTP 部署上 navigator.clipboard 不存在，
+    // 这里必须靠它退到 execCommand，否则恢复码会因为「复制不了」而直接丢失
+    // （它和 Token 一样只在这一次显示）。
+    if ((await copyText(totpRecoveryCodes.join("\n"))) === "copied") {
       setTotpCodesCopied(true);
-    } catch {
-      setErrorMessage("复制失败，请手动抄录恢复码");
+      setCopyCodesFailed(false);
+      return;
     }
+    // 两个标记必须互斥：留着上一次的「已复制」会让按钮和下面的提示互相打脸。
+    setTotpCodesCopied(false);
+    setCopyCodesFailed(true);
   };
 
   const finishTotpActivation = () => {
@@ -608,7 +619,11 @@ export default function AccountSettingsPage() {
               </p>
               <ul className="grid grid-cols-2 gap-2 rounded-md border border-border bg-muted/50 p-3 font-mono text-sm">
                 {totpRecoveryCodes.map((code) => (
-                  <li key={code}>{code}</li>
+                  // `select-all`：复制失败时的退路——点一下就是全选，
+                  // 恢复码只在这一次显示，抄丢就没有第二次。
+                  <li key={code} className="select-all">
+                    {code}
+                  </li>
                 ))}
               </ul>
               <div className="flex items-center gap-2">
@@ -623,6 +638,12 @@ export default function AccountSettingsPage() {
                   我已保存恢复码，重新登录
                 </Button>
               </div>
+              {copyCodesFailed ? (
+                <p role="alert" className="text-xs text-destructive">
+                  浏览器这次没允许写剪贴板，明文 HTTP 页面最常见的原因是这个。
+                  上面的每个恢复码点一下即可全选，请手动抄录。
+                </p>
+              ) : null}
             </div>
           ) : profile.totpActivated ? (
             <div className="mt-3 space-y-3">
