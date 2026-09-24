@@ -23,17 +23,19 @@ pub(crate) fn i18n_key(option_id: &str) -> String {
 /// 因此这个前缀是**我们与飞书之间的约定**，剥/拼两侧必须用同一个常量。
 pub(crate) const I18N_PREFIX: &str = "@i18n@";
 
-/// 把飞书回传的联动值归一成 `option_id`。
+/// 把飞书回传的联动值归一成可用的父值。
 ///
-/// 飞书在 `linkage_params` 里回传的是父控件选项的 `value`，而我们的 `value` 恒为
-/// `@i18n@<option_id>`（见 [`i18n_key`]）——所以「剥掉前缀」是最常见的情形。
+/// **真机回传的是文案，不是 `option_id`**（2026-09-24 云上抓包实测
+/// `{"手动填写内容":"成都"}`，见 `docs/architecture/feishu-datasource-table-config.md`
+/// §11.2）——这里既没有前缀也没有哈希，函数原样返回。`@i18n@<option_id>` 那条路径
+/// 是契约形态（父控件本身就是「关联外部选项」时才成立），保留但**不是主流**。
 ///
-/// 但**不能假定一定有前缀**：不同控件形态或将来契约变化都可能回传裸 id 或裸文案。
-/// 于是防御式处理：**有前缀才剥、没前缀原样用、两端一律 trim**。
+/// 因此**不能假定一定有前缀**：**有前缀才剥、没前缀原样用、两端一律 trim**。
 ///
-/// 归一化失败（比如误把文案当 id）的代价是拼出一个恒不命中的 `parent_key`，
-/// 而那是**静默的 0 行**——调用方必须对「归一化后仍匹配不上」做可归因的失败，
-/// 而不是让它表现为「这个币种没有汇率」。
+/// 归一化只负责去壳，**不负责判定「这个值能不能用」**：能用的形态有两种（`option_id`
+/// 或文案），解析成父键是 `approval_options::resolve_parent_key` 的事。调用方必须对
+/// 「归一化后仍匹配不上」做可归因的失败，而不是让它表现为「这个父值没有子项」——
+/// 后者是**静默的 0 行**。
 pub(crate) fn normalize_linkage_value(raw: &str) -> &str {
     let trimmed = raw.trim();
     let stripped = trimmed.strip_prefix(I18N_PREFIX).unwrap_or(trimmed);

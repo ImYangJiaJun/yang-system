@@ -385,13 +385,32 @@ POST /api/v1/feishu/approval/options/{source_key}
 逻辑不需要改」照做会把出站链路写死：`select_fields` 里带上一个已不存在的列，
 `1054 Unknown column` 让每一个合法请求恒失败。
 
-**通配键 `"*"` 的语义保留、实现搬家**：表级配置下不存飞书控件的字段代码，无法做
-「精确键」匹配；但「一个控件 = 一个数据源 = 一个 `source_key`」这个前提没变，所以
-**有父即等同一个通配声明**——有父且恰好一个联动参数时就用它当父值，≥2 个
-fail-closed（`LINKAGE_AMBIGUOUS`）。`linkage.rs` 里为旧 JSON 服务的
-`parse_linkage_mapping` / `match_linkage` 连同其单测一并删除（已确认无生产消费者，
-写端只用 `Linkage` 这个类型），该语义移到 `approval_options.rs::linkage_filter_target`
-的文档注释里。
+**选参数两条路：键匹配优先，通配回退**（2026-09-24 随真机报文修订）。
+
+原文写的是「表级配置下不存飞书控件的字段代码，无法做『精确键』匹配」——这句**下得太早**。
+`linkage_params` 的键对应审批定义里的 `linkageConfigs[].key`，是一段**由表单设计者自己
+填的自由文本**（§11.2 实测到的是 `手动填写内容`），所以我们完全可以**规定**它填什么：
+**填父控件的字段 id**，也就是子绑定行上 `parent_field_id` 的值。于是：
+
+- **键匹配优先**：某个参数的键等于 `parent_field_id`（trim + 大小写不敏感）时就是它，
+  **其余参数一律忽略**。一个控件挂多个联动参数不再致命——这正是通配语义做不到的事。
+- **通配回退**：没有键命中时保持原语义，**有父即等同一个通配声明**——有父且恰好一个
+  联动参数时就用它当父值，≥2 个 fail-closed（`LINKAGE_AMBIGUOUS`）。
+
+回退**必须保留**：存量表单的参数代码是随手填的，砍掉回退等于让它们全部断链；而键抄错
+一个字符时也只会退化成现状，不会失败。
+
+键匹配优先的理由不只是「更精确」：读端既能按 `option_id` 也能按 `label` 解析父值之后，
+通配语义下「某个**不是**父的参数，其值恰好等于父源里某条文案」会**静默返回错误的子集**；
+键匹配把那类误配从「猜一个」变成「明确不是我们的」。
+
+`linkage.rs` 里为旧 JSON 服务的 `parse_linkage_mapping` / `match_linkage` 连同其单测
+一并删除（已确认无生产消费者，写端只用 `Linkage` 这个类型），该语义移到
+`approval_options.rs::linkage_filter_target` 的文档注释里。
+
+**配套缺口**：控制台的凭据拷贝清单目前只给 **URL + Token** 两项可复制，键匹配要用的
+父字段 id 无处可取——运维得自己去多维表格里翻、极易抄错，而抄错的代价从「没影响」
+变成「级联静默失效」。清单页需要补这一项（`CredentialChecklist`）。
 
 ---
 
@@ -548,7 +567,7 @@ fail-closed（`LINKAGE_AMBIGUOUS`）。`linkage.rs` 里为旧 JSON 服务的
   升级为「封存所有凭据的钥匙」（保险柜钥匙）。它丢失 → 所有 `token_cipher` / `key_cipher`
   解不开 → **出示不了、响应也加密不了 → 所有控件一起失效**；若轮换时旧值未保留，
   则**不可恢复**（只能逐字段重新生成、再回审批后台逐个改控件）。
-  现状 `config/mod.rs:869-879` 只做了密钥校验并禁止与 `security.totp.aead_key` 复用，
+  现状 `config/mod.rs:881-892` 只做了密钥校验并禁止与 `security.totp.aead_key` 复用，
   **没有轮换机制**——再引入时要先补「用旧钥匙解、用新钥匙封」的再加密。
 
 ---
@@ -562,10 +581,52 @@ fail-closed（`LINKAGE_AMBIGUOUS`）。`linkage.rs` 里为旧 JSON 服务的
    **叠加一个事实**：Key 加密本次不做（决策 D11），所以这些敏感列的内容
    **以明文走公网**到飞书。这是现状、不是本次引入的，但勾选网格会让"哪些列暴露了"
    从「手打一个名字」变成「点一下复选框」——两条缺口叠在一起，风险面比单独任何一条都大。
-2. **级联读端的真实报文从未观测到**。`linkage_params` 的实际形状项目里一次都没抓到过
-   （tasklist 的 V4 仍未勾）。本设计把级联做成向导的头牌功能，押注在一个
-   **从未端到端验证过**的机制上。
-   **建议动工前先跑一次真实的飞书审批提交（两级控件），把报文抓下来。**
+2. ~~**级联读端的真实报文从未观测到**。~~ **已于 2026-09-24 观测到，本条的押注失败了。**
+   云服务器日志（`[feishu].log_inbound_requests` 开启后由
+   `domain/request_log.rs` 落的 `飞书机器入口请求参数`）抓到真实报文：
+
+   ```
+   POST /api/v1/feishu/approval/options/fldq7lcb6y      ← 路径参数 source_key
+                                                           （= 公司名称 fldQ7LcB6y，全小写）
+   body: { "employeeId": "eabadgcg", "employee_id": "eabadgcg",
+           "linkage_params": { "手动填写内容": "成都" },
+           "locale": "zh_cn", "openId": "", "open_id": "",
+           "tenantKey": "…", "tenant_key": "…",
+           "token": "…", "userId": "…", "user_id": "…" }
+   ```
+
+   三条实测结论（**推翻了 §8 的原始前提**）：
+
+   - **键是自由文本的「参数代码」**，对应审批定义里的 `linkageConfigs[].key`
+     （`docs/reference/feishu/approval/.../approval-definition-form-control-parameters.md:225-227`
+     的 `{linkageWidgetID, key, value}`），由表单设计者自己写。它不是控件 ID、
+     也不是飞书生成的任何东西——读端对键名不敏感（有父即等同通配），所以无害。
+   - **值是被联动控件的文案，不是 `@i18n@<option_id>`**。`linkageWidgetID` 指向的控件
+     决定值是什么；本例指向「地点」控件，于是值就是 `成都`。
+     **`normalize_linkage_value` 的「剥 `@i18n@` 前缀」路径在本例中根本没被走到。**
+   - 报文里同时带 camelCase 与 snake_case 两套键（`employeeId` 与 `employee_id`、
+     `openId`、`tenantKey`、`userId`），被 DTO 的「刻意不设 `deny_unknown_fields`」
+     自然容忍（`protocol.rs:16-18` 的设计在真机上兑现）。
+
+   **读端因此已改**：`resolve_parent_key` 现在一次查询同时认 `option_id` **和** `label`
+   （`option/table.rs` 给 `label` 补了 `filterable`，否则按它过滤会在运行期吃
+   `FieldPermissionDenied`），并且**只认启用中的父选项**——否则父文案改名后旧文案会
+   命中那条已停用的旧父行，再被子的 `enabled = true` 滤空，把可归因的 40004 退化成
+   「`code=0` + 空 options」这种没人能诊断的静默空集。
+   同一文案落到多条父选项时取**子树并集**（防御性支路：根级父源按 `option_id` 去重、
+   而根级 `option_id` 只是 `hash(label)`，所以这只在父源自身也有父、或 push 源自选 id
+   时才会出现）。
+   选参数则**键匹配优先、通配回退**：把父控件的字段 id 填进表单的参数代码，就能让
+   一个控件挂多个联动参数不再 fail-closed（详见 §8）。
+   端到端证据：`tests/feishu_approval_options_integration.rs::approval_options_resolves_the_parent_by_its_label`。
+
+   **尚未解决（本设计另一处押注也跟着失败了）**：`derive.rs:118` 让子行的 `parent_key`
+   走 `parent_option_id(...)`，而那个函数硬编码「父源自己没有父」。于是父级一旦是
+   **三级链的中间列**（自己也有 `parent_field_id`），它的真实 `option_id` 含祖父键哈希、
+   与子行存的 `parent_key` **恒不相等**，`where_in("parent_key", …)` 恒命中 0 行。
+   即设计 §4.7 列出的 `费用大类 → 费用类型 → 银行流水摘要-编码` 这条三级链
+   **端到端不成立**，且失败形态是静默空集。修它要动 `option_id` 派生口径
+   （会连带换掉整棵子树的 id），须单独裁定，不在本次读端修复内。
 3. **`records/list` → `records/search` 必须迁，但不是本次**。勾的列一多，GET 的
    URL 变长、响应变大，而 `1254030 TooLargeResponse` 被归为不可重试。
    迁移**不是换 URL**：`field_names` 要变成真 `string[]`、数字列从 string 变 number、

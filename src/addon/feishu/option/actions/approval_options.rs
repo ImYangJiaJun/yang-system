@@ -80,8 +80,24 @@ mod codes {
 enum ParentFilter {
     /// 不做父级过滤，回退全量。
     All,
-    /// 只返回该父键下的选项。
-    ByKey(String),
+    /// 只返回这些父键下的选项。
+    ///
+    /// **是复数**：飞书回传的是被联动控件的**文案**而不是 `option_id`（见
+    /// [`resolve_parent_key`]），而文案不是唯一键——同一文案在同一个父数据源下可能落到
+    /// 多条选项上。用户选的是文案、分辨不出是哪一条，所以取这些父的子树**并集**，
+    /// 而不是替他猜一个。
+    ///
+    /// 但**别把这条支路想得比实际常见**：出站拉取时 `derive_options` 按 `option_id`
+    /// 去重（`derive.rs:123`），而**根级**行的 `option_id` 只是 `hash(label)`，
+    /// 因此根级父源里同一文案最多一行。能出现多行的只有两种：
+    ///
+    /// 1. 父源**自己也有父**——此时它的 `option_id` 把祖父键也哈希了进去，同一文案挂在
+    ///    不同祖父下就是不同行（设计 §4.7 的「一子多父」）；
+    /// 2. **push 源**——`option_id` 由推送方自选（`upsert_options.rs:104-121`）。
+    ///
+    /// 换言之这条支路是**防御性**的：它防的正是「同一文案对应多个父」这种合法数据，
+    /// 而不是某个已知必现的场景。
+    ByKeys(Vec<String>),
 }
 
 /// **纯决策**：从请求与「本绑定父的 `source_key`」里算出「要按父数据源下的哪个值过滤」。
@@ -100,18 +116,30 @@ enum ParentFilter {
 /// 4. 有父、参数恰好一个、但值剥掉 `@i18n@` 并 trim 后为空 → 回退全量。
 ///    用户尚未选父级是最常见的形态，此时返回空集会让控件看起来「坏了」。
 ///
-/// **有父时唯一的那个联动参数就取它当父值**。表级配置下不再存飞书控件的字段代码，
-/// 因此无法做「精确键」匹配；但设计假定**一个控件 = 一个数据源 = 一个 `source_key`**
-/// （契约 C3 的「不带 linkage_params 要回退全量」正为此），所以声明了级联时出现的
-/// 任何联动参数**只可能是它**——有父即等同一个通配声明。参数 ≥2 个时无法判定哪个
-/// 携带父值，fail-closed 返回 [`codes::LINKAGE_AMBIGUOUS`]，与旧「命中多个映射键」
-/// 的语义一致。
+/// # 选参数的两条路：**键匹配优先，通配回退**
+///
+/// `linkage_params` 的键是审批定义里 `linkageConfigs[].key`——一段**自由文本的参数代码**，
+/// 由表单设计者在审批后台自己填（真机抓到的是 `{"手动填写内容": "成都"}`）。因此：
+///
+/// - **键匹配**：若某个参数的键等于**父控件的字段 id**（即本绑定的 `parent_field_id`，
+///   形如 `fldEblAr7X`），那就是它，**其余参数一律忽略**。一个控件挂多个联动参数不再致命。
+/// - **通配回退**：没有键匹配时保持原语义——有父即等同一个**通配声明**，声明了级联时
+///   出现的任何单一参数只可能是它。参数 ≥2 个时无法判定哪个携带父值，fail-closed
+///   返回 [`codes::LINKAGE_AMBIGUOUS`]，与旧「命中多个映射键」的语义一致。
+///
+/// 回退**必须保留**：存量表单的参数代码是随手填的自由文本，砍掉回退等于让它们全部断链；
+/// 而键匹配抄错一个字符时也只会退化成现状，不会失败。
+///
+/// 键匹配优先的理由不只是「更精确」。按文案解析（见 [`resolve_parent_key`]）之后，
+/// 通配语义下「某个**不是**父的参数，其值恰好等于父源里某条文案」会**静默返回错误的
+/// 子集**；键匹配把那类误配从「猜一个」变成「明确不是我们的」。
 ///
 /// 与 [`resolve_parent_key`] 分开是为了可测：这几条分支最容易在改动中被无声破坏——
 /// 它们的失效形态是「选项集静默变大或变空」，不会报错。
 fn linkage_filter_target(
     input: &FeishuOptionsRequest,
     parent_source_key: Option<&str>,
+    parent_field_id: Option<&str>,
 ) -> Result<Option<(String, String)>, FeishuEnvelope> {
     // 1) 无父 → 回退全量：级联由绑定行的 parent_field_id 决定，没有父就无可过滤。
     let Some(parent_source_key) = parent_source_key
@@ -124,21 +152,49 @@ fn linkage_filter_target(
     let Some(params) = input.linkage_params.as_ref().filter(|map| !map.is_empty()) else {
         return Ok(None);
     };
-    // 有父即等同一个通配声明：≥2 个参数无法判定哪个携带父值，fail-closed。
-    if params.len() > 1 {
-        return Err(FeishuEnvelope::fail(
-            codes::LINKAGE_AMBIGUOUS,
-            "存在多个联动参数，无法判定哪一个是父值",
-        ));
-    }
-    let Some((_, raw_value)) = params.iter().next() else {
-        return Ok(None);
+
+    // 键匹配优先。**大小写不敏感是刻意的**：父字段 id 形如 `fldEblAr7X`，而控制台给
+    // `source_key` 的默认值恰恰是它的**小写**形式（`sourceKeyFromFieldId`），两种写法
+    // 运维都可能抄下来。两个键只差大小写的情形不存在，放宽没有代价。
+    let matched = parent_field_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|parent_field_id| {
+            params
+                .iter()
+                .find(|(key, _)| key.trim().eq_ignore_ascii_case(parent_field_id))
+                .map(|(_, value)| value.as_str())
+        });
+
+    let raw_value = match matched {
+        Some(value) => value,
+        None => {
+            // 通配回退：见函数文档。≥2 个参数时无法判定哪个携带父值，fail-closed。
+            // 错误文案里点明「没有键等于父字段 id」——这是运维唯一能据此修好的线索。
+            if params.len() > 1 {
+                return Err(FeishuEnvelope::fail(
+                    codes::LINKAGE_AMBIGUOUS,
+                    "存在多个联动参数，且没有参数的键等于父控件字段 id，无法判定哪一个是父值",
+                ));
+            }
+            let Some((_, value)) = params.iter().next() else {
+                return Ok(None);
+            };
+            value.as_str()
+        }
     };
+
     // 4) 值为空或 trim 后为空 → 回退全量。用户尚未选父级是最常见的形态，
     //    此时返回空集会让控件看起来「坏了」。
     let parent_key = normalize_linkage_value(raw_value);
     if parent_key.is_empty() {
-        tracing::warn!("联动参数为空，本次回退全量");
+        // 带上两个字段：这条 WARN 原先是一句裸消息，现场既不知道是哪个数据源、
+        // 也分不清是「键匹配到但值为空」还是「走通配取到的值为空」。
+        tracing::warn!(
+            parent_source_key = %parent_source_key,
+            key_matched = matched.is_some(),
+            "联动参数为空，本次回退全量"
+        );
         return Ok(None);
     }
 
@@ -148,9 +204,9 @@ fn linkage_filter_target(
     )))
 }
 
-/// 决定本次请求要不要按父级过滤，并在需要时确认父值真实存在。
+/// 决定本次请求要不要按父级过滤，并把父值解析成一组真实的父 `option_id`。
 ///
-/// 四条回退分支见 [`linkage_filter_target`]；这里是第 5 条：**归一化后匹配不上要
+/// 四条回退分支见 [`linkage_filter_target`]；这里是第 5 条：**归一化后解析不出要
 /// fail-closed 返回可归因业务码，绝不静默返回 0 行**——「这个父值没有子项」与
 /// 「父值根本不存在」是两件事，控制台要看得出区别。
 ///
@@ -160,18 +216,35 @@ fn linkage_filter_target(
 async fn resolve_parent_key(
     input: &FeishuOptionsRequest,
     parent_source_key: Option<&str>,
+    parent_field_id: Option<&str>,
     context: &FeishuContext,
 ) -> Result<Result<ParentFilter, FeishuEnvelope>, BaseError> {
-    let (parent_source_key, parent_key) = match linkage_filter_target(input, parent_source_key) {
-        Ok(Some(target)) => target,
-        Ok(None) => return Ok(Ok(ParentFilter::All)),
-        Err(envelope) => return Ok(Err(envelope)),
-    };
+    let (parent_source_key, parent_key) =
+        match linkage_filter_target(input, parent_source_key, parent_field_id) {
+            Ok(Some(target)) => target,
+            Ok(None) => return Ok(Ok(ParentFilter::All)),
+            Err(envelope) => return Ok(Err(envelope)),
+        };
 
-    // 查一次确认父值存在，而不是直接拿去过滤：直接过滤的结果是「命中 0 行」，而它与
+    // 父值有两种真实形态，一次查询同时认。两者不会在同一行上同时命中，所以这里没有
+    // 优先级问题：
+    //
+    // 1. **`option_id`**（契约形态）：父控件本身就是「关联外部选项」时，飞书回传的是
+    //    我们给它的 `value`，剥掉 `@i18n@` 就是 option_id。
+    // 2. **`label`**（**真机形态**，2026-09-24 云上抓包实测）：飞书回传的是被联动控件
+    //    的**文案**——实测报文 `{"手动填写内容":"成都"}`，值既没有 `@i18n@` 前缀、
+    //    也不含任何哈希。此前这条兜底**刻意没有实现**（理由是 `label` 不是 filterable
+    //    列，按它过滤会吃 FieldPermissionDenied），于是归一化后的文案永远拼不出合法
+    //    父键，级联恒不生效。现在 `label` 已补上 `filterable`（见 `option/table.rs`）。
+    //
+    // 先查出来再决定，而不是直接拿去过滤：直接过滤的结果是「命中 0 行」，而它与
     // 「这个父值确实没有子项」无法区分——前者是数据/契约问题，后者是正常的空集，
     // 控制台必须能分辨。
-    let exists = context
+    //
+    // 结果集有界：匹配被 `source_key` 收窄到一个数据源之内，而一个数据源的选项量级
+    // 是几百条（目标台账最大的「费用类型」312 条）。下游 `where_in` 的 500 元素上限
+    // 因此不可能被触达；真被触达说明该数据源已经失控，届时 50001 也是可接受的信号。
+    let rows = context
         .options()
         .query()
         .select_fields(&["option_id"])?
@@ -179,22 +252,40 @@ async fn resolve_parent_key(
             "source_key",
             serde_json::Value::String(parent_source_key.clone()),
         )?
-        .where_eq("option_id", serde_json::Value::String(parent_key.clone()))?
-        .optional()
-        .await?
-        .is_some();
-    if !exists {
-        // 按 (source_key, label) 再查一次的兜底**没有实现**：`feishu_option.label`
-        // 不是 `filterable` 列（DSL 的 filterable 是 fail-closed），按它过滤会在运行期
-        // 吃 FieldPermissionDenied。而这条路径在契约下本就不该被执行——飞书回传的是
-        // 我们给它的 `value`，剥掉 `@i18n@` 就是 option_id。真走到这里说明契约变了，
-        // 应当是可归因的失败而不是一次模糊匹配。
+        // 父**必须启用中**，与 `load_parent_source_key` 对父绑定的要求同源同理：停用的
+        // 父不再出数，拿它去过滤只会得到空集。
+        //
+        // 这一位不是可有可无的谨慎，它守着本函数的契约：父文案改名后（`derive.rs:19`
+        // 的既定语义——改文案 = 新 `option_id`，旧行被补集**停用**但保留），旧文案仍能
+        // 逐字命中那条已停用的父行。若不筛 `enabled`，解析会「成功」，随后子查询自己的
+        // `enabled = true` 把整棵旧子树滤空——端点回 `code=0` + `options:[]`，
+        // **与本文件 :154-158 承诺的「父值不存在 vs 父值无子项要能分辨」直接冲突**，
+        // 而且现场只看到「下拉是空的」，两边都没有任何信号。
+        .where_eq("enabled", serde_json::Value::Bool(true))?
+        .where_or(vec![
+            WhereCondition::Eq {
+                field: "option_id".to_string(),
+                value: serde_json::Value::String(parent_key.clone()),
+            },
+            WhereCondition::Eq {
+                field: "label".to_string(),
+                value: serde_json::Value::String(parent_key.clone()),
+            },
+        ])?
+        .all()
+        .await?;
+
+    let mut parent_keys: Vec<String> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        parent_keys.push(row.require("option_id")?);
+    }
+    if parent_keys.is_empty() {
         return Ok(Err(FeishuEnvelope::fail(
             codes::LINKAGE_NOT_RESOLVED,
             format!("联动值无法解析为数据源 {parent_source_key} 下的已知选项"),
         )));
     }
-    Ok(Ok(ParentFilter::ByKey(parent_key)))
+    Ok(Ok(ParentFilter::ByKeys(parent_keys)))
 }
 
 /// 由本绑定的 `parent_field_id` 推出**父绑定的 `source_key`**。
@@ -401,10 +492,23 @@ async fn resolve(
 
     // 级联过滤：**挂在顶层**（顶层条件之间是 AND，不影响 keyset 游标）。
     // 必须在游标解码之后、构造查询之前，否则游标条件会与它争同一层。
-    match resolve_parent_key(input, parent_source_key.as_deref(), context).await? {
+    match resolve_parent_key(
+        input,
+        parent_source_key.as_deref(),
+        parent_field_id.as_deref(),
+        context,
+    )
+    .await?
+    {
         Ok(ParentFilter::All) => {}
-        Ok(ParentFilter::ByKey(parent_key)) => {
-            query = query.where_eq("parent_key", serde_json::Value::String(parent_key))?;
+        Ok(ParentFilter::ByKeys(parent_keys)) => {
+            // 取并集：父值解析出多条时（同一文案对应多个父选项）用户的意图是「这个文案
+            // 底下的全部」，而不是其中任意一条。
+            let values: Vec<serde_json::Value> = parent_keys
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect();
+            query = query.where_in("parent_key", values)?;
         }
         Err(envelope) => return Ok(envelope),
     }
@@ -731,6 +835,10 @@ mod tests {
     /// 父绑定的 `source_key`；`None` 表示本条绑定没有可用父列。
     const PARENT: &str = "payment_currency";
 
+    /// 父控件在台账里的**字段 id**，即子绑定行上 `parent_field_id` 的值。
+    /// 表单里把它填进 `linkageConfigs[].key`（参数代码）即可启用键匹配。
+    const PARENT_FIELD_ID: &str = "fldCurrency";
+
     #[test]
     fn no_parent_falls_back_to_all_for_any_number_of_params() {
         // 级联的唯一来源是绑定行的 `parent_field_id`（设计 §8）。没有父就没有可过滤的
@@ -742,7 +850,7 @@ mod tests {
         let with_two = request_with(Some(&[("widget1", "x"), ("widget2", "y")]));
         for parent in [None, Some(""), Some("   ")] {
             for request in [&without, &with_one, &with_two] {
-                let target = linkage_filter_target(request, parent)
+                let target = linkage_filter_target(request, parent, None)
                     .unwrap_or_else(|_| panic!("无父不该产生业务失败"));
                 assert_eq!(target, None, "parent={parent:?} 应回退全量");
             }
@@ -752,14 +860,14 @@ mod tests {
     #[test]
     fn no_linkage_params_falls_back_to_all() {
         // 契约 C3 的硬要求：有父但不带联动必须返回全量
-        let target = linkage_filter_target(&request_with(None), Some(PARENT))
+        let target = linkage_filter_target(&request_with(None), Some(PARENT), None)
             .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(target, None);
     }
 
     #[test]
     fn empty_linkage_params_falls_back_to_all() {
-        let target = linkage_filter_target(&request_with(Some(&[])), Some(PARENT))
+        let target = linkage_filter_target(&request_with(Some(&[])), Some(PARENT), None)
             .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(target, None);
     }
@@ -768,9 +876,12 @@ mod tests {
     fn blank_value_falls_back_to_all() {
         // 用户尚未选父级是最常见形态，返回空集会让控件看起来「坏了」
         for value in ["", "   ", "@i18n@", "@i18n@  "] {
-            let target =
-                linkage_filter_target(&request_with(Some(&[("widget1", value)])), Some(PARENT))
-                    .unwrap_or_else(|_| panic!("value={value:?} 不该产生业务失败"));
+            let target = linkage_filter_target(
+                &request_with(Some(&[("widget1", value)])),
+                Some(PARENT),
+                None,
+            )
+            .unwrap_or_else(|_| panic!("value={value:?} 不该产生业务失败"));
             assert_eq!(target, None, "value={value:?} 应回退全量");
         }
     }
@@ -781,6 +892,7 @@ mod tests {
         let target = linkage_filter_target(
             &request_with(Some(&[("widget1", "@i18n@payment_currency:abc123")])),
             Some(PARENT),
+            None,
         )
         .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(
@@ -798,6 +910,7 @@ mod tests {
         let target = linkage_filter_target(
             &request_with(Some(&[("widget1", "payment_currency:abc123")])),
             Some(PARENT),
+            None,
         )
         .unwrap_or_else(|_| panic!("不该产生业务失败"));
         assert_eq!(
@@ -810,14 +923,14 @@ mod tests {
     }
 
     #[test]
-    fn any_param_key_carries_the_parent_value() {
-        // 表级配置下不存飞书控件的字段代码，无法做「精确键」匹配；但设计假定
-        // 「一个控件 = 一个数据源 = 一个 source_key」，所以有父即等同一个通配声明：
-        // 声明了级联时出现的任何联动参数只可能是它（旧实现的通配分支语义）。
-        for key in ["widget17796881173030001", "随便什么键", "*"] {
+    fn any_param_key_carries_the_parent_value_when_no_key_matches() {
+        // **通配回退**这一路：键都不是父字段 id 时（存量表单的参数代码是随手填的自由
+        // 文本），有父即等同一个通配声明——出现的任何单一参数只可能是它。
+        for key in ["widget17796881173030001", "随便什么键", "*", "手动填写内容"] {
             let target = linkage_filter_target(
                 &request_with(Some(&[(key, "@i18n@payment_currency:abc")])),
                 Some(PARENT),
+                None,
             )
             .unwrap_or_else(|_| panic!("键 {key} 不该产生业务失败"));
             assert_eq!(
@@ -837,6 +950,7 @@ mod tests {
         let error = linkage_filter_target(
             &request_with(Some(&[("widget1", "x"), ("widget2", "y")])),
             Some(PARENT),
+            None,
         )
         .err()
         .unwrap_or_else(|| panic!("两个参数必须 fail-closed"));
@@ -845,16 +959,136 @@ mod tests {
 
     #[test]
     fn two_params_fail_closed_even_when_one_looks_unrelated() {
-        // 这条的期望**与旧实现相反**，是本次重新裁定的语义：旧实现按「键是否出现在
-        // linkage_mapping 里」筛，于是「一个命中 + 一个无关键」不算歧义；表级配置下
-        // 没有 mapping 可查，第二个参数同样可能是父值携带者，只能 fail-closed。
+        // 通配回退这一路里，第二个参数同样可能是父值携带者，只能 fail-closed。
+        // **键能命中时就不该走这里**——那条见 a_key_equal_to_the_parent_field_id_wins。
         let error = linkage_filter_target(
             &request_with(Some(&[("widget1", "x"), ("noise", "y")])),
             Some(PARENT),
+            None,
         )
         .err()
         .unwrap_or_else(|| panic!("两个参数必须 fail-closed"));
         assert_eq!(error.code, codes::LINKAGE_AMBIGUOUS);
+    }
+
+    // ---- 键匹配（参数代码 == 父控件字段 id）----
+
+    #[test]
+    fn a_key_equal_to_the_parent_field_id_wins_and_others_are_ignored() {
+        // 键匹配的全部意义：一个控件挂了多个联动参数时不再整条链 fail-closed，
+        // 而是明确挑走自己那一个、忽略其余。这是通配语义下做不到的事。
+        let target = linkage_filter_target(
+            &request_with(Some(&[
+                ("noise", "别的东西"),
+                (PARENT_FIELD_ID, "@i18n@payment_currency:abc"),
+            ])),
+            Some(PARENT),
+            Some(PARENT_FIELD_ID),
+        )
+        .unwrap_or_else(|error| panic!("键命中时不该 fail-closed，实际码 {}", error.code));
+        assert_eq!(
+            target,
+            Some((
+                "payment_currency".to_string(),
+                "payment_currency:abc".to_string()
+            )),
+            "应挑走键命中的那一个，而不是被另一个参数逼成歧义"
+        );
+    }
+
+    #[test]
+    fn key_matching_tolerates_case_and_padding() {
+        // 父字段 id 形如 `fldEblAr7X`，而控制台给 `source_key` 的默认值恰恰是它的
+        // **小写**形式（`sourceKeyFromFieldId`），两种写法运维都可能抄下来；
+        // 审批后台那一格也常被带上前后空格。两种偏差都必须容忍，否则「抄错」= 断链。
+        // 每条都**额外带一个噪声参数**：这样若键匹配失效，通配回退会因 ≥2 个参数
+        // fail-closed，用例才会转红。只带一个参数的话两种路径给出同样结果，
+        // 用例在变异下照样绿——那是假强度（变异实验实测到过）。
+        for key in ["fldcurrency", "  fldCurrency  ", "FLDCURRENCY"] {
+            let target = linkage_filter_target(
+                &request_with(Some(&[(key, "payment_currency:abc"), ("noise", "x")])),
+                Some(PARENT),
+                Some(PARENT_FIELD_ID),
+            )
+            .unwrap_or_else(|error| panic!("键 {key:?} 应可命中，实际码 {}", error.code));
+            assert_eq!(
+                target,
+                Some((
+                    "payment_currency".to_string(),
+                    "payment_currency:abc".to_string()
+                )),
+                "键 {key:?} 应命中父字段 id"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_key_falls_back_to_the_wildcard_for_a_single_param() {
+        // 回退**必须保留**：存量表单的参数代码是随手填的自由文本，
+        // 砍掉回退等于让它们全部断链。
+        let target = linkage_filter_target(
+            &request_with(Some(&[("手动填写内容", "payment_currency:abc")])),
+            Some(PARENT),
+            Some(PARENT_FIELD_ID),
+        )
+        .unwrap_or_else(|_| panic!("无键命中时单参数应走通配"));
+        assert_eq!(
+            target,
+            Some((
+                "payment_currency".to_string(),
+                "payment_currency:abc".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn an_unmatched_key_with_two_params_still_fails_closed() {
+        // 回退不是「什么都收」：通配语义下 ≥2 个参数仍然无法判定，必须 fail-closed
+        let error = linkage_filter_target(
+            &request_with(Some(&[("a", "x"), ("b", "y")])),
+            Some(PARENT),
+            Some(PARENT_FIELD_ID),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("无键命中且参数 ≥2 必须 fail-closed"));
+        assert_eq!(error.code, codes::LINKAGE_AMBIGUOUS);
+    }
+
+    #[test]
+    fn a_key_matched_but_blank_value_falls_back_to_all() {
+        // 键命中只决定「取哪一个值」，不改变「值为空则回退全量」——
+        // 用户尚未选父级时就是这个形态
+        for value in ["", "   ", "@i18n@", "@i18n@  "] {
+            let target = linkage_filter_target(
+                &request_with(Some(&[(PARENT_FIELD_ID, value)])),
+                Some(PARENT),
+                Some(PARENT_FIELD_ID),
+            )
+            .unwrap_or_else(|_| panic!("value={value:?} 不该产生业务失败"));
+            assert_eq!(target, None, "value={value:?} 应回退全量");
+        }
+    }
+
+    #[test]
+    fn a_blank_parent_field_id_degenerates_to_the_wildcard() {
+        // `parent_field_id` 缺失或空白时**不能拿空串去比键**——那会让「键恰好为空」
+        // 的参数被当成命中。三道输入都必须退化成通配。
+        for field_id in [None, Some(""), Some("   ")] {
+            let target = linkage_filter_target(
+                &request_with(Some(&[("随便什么键", "payment_currency:abc")])),
+                Some(PARENT),
+                field_id,
+            )
+            .unwrap_or_else(|_| panic!("field_id={field_id:?} 不该产生业务失败"));
+            assert_eq!(
+                target,
+                Some((
+                    "payment_currency".to_string(),
+                    "payment_currency:abc".to_string()
+                )),
+                "field_id={field_id:?} 应退化成通配"
+            );
+        }
     }
 
     #[test]

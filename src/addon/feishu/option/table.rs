@@ -34,11 +34,23 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .indexed(true)
                 .filterable(true)
                 .sortable(true),
+            // 级联读端要**按文案**解析父值：飞书回传的是被联动控件的文案，而不是我们
+            // 给它的 `@i18n@<option_id>`（2026-09-24 云上抓包实测
+            // `{"手动填写内容":"成都"}`，见 `docs/architecture/feishu-datasource-table-config.md`
+            // §11.2）。`where_eq("label", …)` 要过 `validate_filter_field`，而 DSL 的
+            // `filterable` 是 fail-closed——不开这一位，级联在运行期吃
+            // `FieldPermissionDenied`，表现为父值恒解析不出、只回 40004。
+            //
+            // 副作用同 `sort_order`（已知并接受）：DSL 没有「只给内部条件用」的窄写法，
+            // `.filterable(true)` 会把筛选权限一并置为 `Everyone`，于是持
+            // `feishu.option.read` 的控制台用户多出一个按「显示文案」筛选的入口。
+            // 收益（级联可用）远大于这点面宽。
             label => Str::new()
                 .title("显示文案")
                 .require(true)
                 .max_length(255)
-                .searchable(true),
+                .searchable(true)
+                .filterable(true),
             // JSON 文本：{"en_us":"…","ja_jp":"…"}
             i18n => Text::new().title("多语言文案"),
             // `filterable` 是 keyset 翻页的**硬依赖**，不是可选的筛选便利：游标条件
@@ -122,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn label_is_required_and_searchable() {
+    fn label_is_required_searchable_and_filterable() {
         let definition = definition();
         let label = definition
             .field("label")
@@ -130,6 +142,9 @@ mod tests {
         assert!(label.is_required(), "label 必填");
         // 一个可搜索文本字段都没有时 TableQuery::search 会 fail-closed 报错
         assert!(label.is_searchable(), "label 必须可搜索");
+        // 级联读端按文案兜底解析父值，靠的正是这一位：DSL 的 filterable 是 fail-closed，
+        // 少了它 `where_eq("label", …)` 会在运行期吃 FieldPermissionDenied。
+        assert!(label.is_filterable(), "级联按文案解析父值依赖 label 可筛选");
     }
 
     #[test]

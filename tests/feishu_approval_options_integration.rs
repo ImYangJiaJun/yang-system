@@ -161,6 +161,9 @@ fn feishu_settings(encryption_key: Option<&str>) -> Arc<FeishuSettings> {
         // 告警收件人留空 = 不告警（默认值）；本测试不出站，告警路径不参与。
         alert_recipients: Vec::new(),
         alert_failure_threshold: 3,
+        // 请求参数日志保持关闭：本文件的断言全部落在端点行为上，而开启后每个
+        // 请求都会多写一行含 Token 明文的日志（见 `feishu.log_inbound_requests`）。
+        log_inbound_requests: false,
     })
 }
 
@@ -1814,6 +1817,190 @@ async fn approval_options_filters_by_the_parent_binding() {
     };
     if let Err(error) = outcome {
         panic!("级联过滤集成测试失败: {error:#}");
+    }
+    if let Err(error) = cleanup {
+        panic!("清理失败: {error:#}");
+    }
+}
+
+/// 级联：**父值按文案解析**——飞书回传的是被联动控件的文案，不是 `@i18n@<option_id>`。
+///
+/// 这条是 2026-09-24 云上抓包（`docs/architecture/feishu-datasource-table-config.md` §11.2）
+/// 的回归证据。实测报文里 `linkage_params` 是 `{"手动填写内容":"成都"}`：值既没有
+/// `@i18n@` 前缀，也不含 `option_id` 的哈希尾巴。此前读端只认 `option_id`，于是归一化
+/// 后的文案永远拼不出合法父键——父值为空时回退全量、非空时 fail-closed 回 40004，
+/// **级联恒不生效**。
+///
+/// 同一条用例还钉住**同名文案的并集语义**与**停用父必须 40004**。前者是防御性支路：
+/// 出站拉取按 `option_id` 去重，而根级 `option_id` 只是 `hash(label)`，所以根级父源里
+/// 同一文案最多一行——本用例手播两行同名父，模拟的是「父源自身也有父」或 push 源自选
+/// id 时才会出现的形态，**不是出站拉取能产出的**。
+///
+/// 后者（停用父）是本用例真正要紧的一环：解析查询必须筛 `enabled`。父文案一旦改名，
+/// 旧文案仍能逐字命中那条被补集停用的旧父行；不筛启用态的话解析会「成功」，再被子的
+/// `enabled = true` 滤空，端点回 `code=0` + `options:[]`——把可归因的 40004 变成
+/// 一个谁都诊断不出的静默空集。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn approval_options_resolves_the_parent_by_its_label() {
+    let outcome = async {
+        let (database, app) = prepare_app(None).await?;
+
+        let table_id = seed_datasource_row(&database, "币种汇率表", "active").await?;
+        seed_binding(
+            &database,
+            table_id,
+            "fld_currency",
+            "currency",
+            PARENT_DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            None,
+            true,
+        )
+        .await?;
+        seed_binding(
+            &database,
+            table_id,
+            "fld_rate",
+            "rate",
+            DATASOURCE_TOKEN,
+            false,
+            "zh_cn",
+            Some("fld_currency"),
+            true,
+        )
+        .await?;
+
+        // 后两条父选项**文案相同**，模拟「办公地点」里那两个 `成都`。
+        seed_option(&database, "currency", "currency:CNY", "人民币", 0, true, None).await?;
+        seed_option(&database, "currency", "currency:CNY2", "人民币", 1, true, None).await?;
+        seed_option(&database, "currency", "currency:USD", "美元", 2, true, None).await?;
+
+        seed_option_with_parent(&database, "rate", "rate:cny", "人民币汇率一", 0, "currency:CNY")
+            .await?;
+        seed_option_with_parent(&database, "rate", "rate:cny2", "人民币汇率二", 1, "currency:CNY2")
+            .await?;
+        seed_option_with_parent(&database, "rate", "rate:usd", "美元汇率", 2, "currency:USD")
+            .await?;
+
+        // 真机形态：裸文案。两条同名父的子树都要回，且不得混进别的父的子树。
+        let by_label = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "手动填写内容": "人民币" },
+            }),
+        )
+        .await?;
+        let by_label_ids = option_ids(result_of(&by_label)?)?;
+        ensure!(
+            by_label_ids == vec!["rate:cny".to_string(), "rate:cny2".to_string()],
+            "同名文案应回其全部父的子树并集，实际 {by_label_ids:?}"
+        );
+
+        // 契约形态仍然认：剥掉 `@i18n@` 就是 option_id，只命中一条父。
+        let by_id = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "手动填写内容": "@i18n@currency:USD" },
+            }),
+        )
+        .await?;
+        let by_id_ids = option_ids(result_of(&by_id)?)?;
+        ensure!(
+            by_id_ids == vec!["rate:usd".to_string()],
+            "按 option_id 精确命中时只应回该父下的子项，实际 {by_id_ids:?}"
+        );
+
+        // **键匹配**：参数代码 == 父控件字段 id（子绑定的 `parent_field_id` = `fld_currency`）
+        // 时，多出来的联动参数被**忽略**，而不是把整条链逼成 40003。
+        // 通配语义下这件事做不到——它只能看「有几个参数」，看不出哪个是父。
+        let by_key = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "fld_currency": "人民币", "noise": "别的东西" },
+            }),
+        )
+        .await?;
+        let by_key_ids = option_ids(result_of(&by_key)?)?;
+        ensure!(
+            by_key_ids == vec!["rate:cny".to_string(), "rate:cny2".to_string()],
+            "键命中时应忽略其余参数并回该父的子树，实际 {by_key_ids:?}"
+        );
+
+        // 但没有键命中时，通配回退**兜不住** ≥2 个参数——仍须是可归因的 40003
+        let ambiguous = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "甲": "人民币", "乙": "美元" },
+            }),
+        )
+        .await?;
+        ensure!(
+            ambiguous["code"] == json!(40003),
+            "无键命中且参数 ≥2 必须回 40003，实际: {ambiguous}"
+        );
+
+        // 文案在父源里根本没有 → 仍是可归因的 40004，而不是静默空集
+        let unresolved = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "手动填写内容": "不存在的城市" },
+            }),
+        )
+        .await?;
+        ensure!(
+            unresolved["code"] == json!(40004),
+            "文案解析不出必须给出 40004，实际: {unresolved}"
+        );
+
+        // 父文案改名的既定后果：旧 `option_id` 整棵子树被补集**停用**（父行与子行一起，
+        // 见 derive.rs:19 与 pull 的补集逻辑）。此时旧文案仍能逐字命中那条旧父行——
+        // 解析查询若不筛 `enabled`，「解析成功」之后子查询自己的 `enabled = true` 会把
+        // 整棵旧子树滤空，端点回 code=0 + options:[]，把 40004 退化成一个没人能诊断的
+        // 静默空集。父与子**必须一起停用**才复现得出：只停父的话子行仍启用，症状是
+        // 「停用父之下照常出子」，不是空集。
+        for option_id in ["currency:USD", "rate:usd"] {
+            sqlx::query("UPDATE `feishu_option` SET `enabled` = 0 WHERE `option_id` = ?")
+                .bind(option_id)
+                .execute(database.pool())
+                .await
+                .with_context(|| format!("停用 {option_id} 失败"))?;
+        }
+        let renamed_parent = call_approval_options(
+            &app,
+            "rate",
+            json!({
+                "token": DATASOURCE_TOKEN,
+                "linkage_params": { "手动填写内容": "美元" },
+            }),
+        )
+        .await?;
+        ensure!(
+            renamed_parent["code"] == json!(40004),
+            "父与子树都被停用后必须回可归因的 40004，而不是 code=0 的静默空集，实际: {renamed_parent}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let cleanup = match connect_database().await {
+        Ok(database) => drop_feishu_tables(&database).await,
+        Err(error) => Err(error).context("清理用连接失败"),
+    };
+    if let Err(error) = outcome {
+        panic!("按文案解析父值集成测试失败: {error:#}");
     }
     if let Err(error) = cleanup {
         panic!("清理失败: {error:#}");
