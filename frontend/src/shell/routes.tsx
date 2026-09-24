@@ -9,6 +9,7 @@ import ResetPasswordPage from "@/features/auth/pages/ResetPasswordPage";
 import SelectIdentityPage from "@/features/auth/pages/SelectIdentityPage";
 
 import { RedirectIfAuthed, RequireAuth } from "./auth-gate";
+import { RouteFallback } from "./RouteFallback";
 import SessionBridge from "./session-bridge";
 
 // 开发工作台仅开发构建可见：生产构建不含该路由（ADR-5 能力 14 安全姿态）。
@@ -19,6 +20,7 @@ const devOnlyRoutes = import.meta.env.DEV
         lazy: async () => ({
           Component: (await import("@/shell/pages/WorkbenchPage")).default,
         }),
+        hydrateFallbackElement: <RouteFallback />,
       },
     ]
   : [];
@@ -82,6 +84,9 @@ export const appRoutes = [
                 await import("@/features/feishu/views/DatasourceListPage")
               ).default,
             }),
+            // 路由级 lazy 的页面在硬导航时必须给兜底：否则首次导航完成前是空白，
+            // 而且 react-router 会打一条 HydrateFallback 警告（见 RouteFallback.tsx）。
+            hydrateFallbackElement: <RouteFallback />,
           },
           {
             // 详情页按**表级主键**路由。它曾经按 `:sourceKey`（一条字段绑定的标识）
@@ -94,6 +99,7 @@ export const appRoutes = [
                 await import("@/features/feishu/views/DatasourceDetailPage")
               ).default,
             }),
+            hydrateFallbackElement: <RouteFallback />,
           },
           ...devOnlyRoutes,
         ],
