@@ -40,7 +40,7 @@ import {
   hasCompleteCoordinates,
   syncHealth,
 } from "@/features/feishu/types";
-import { STATUS_OPTIONS } from "@/features/feishu/components/ListToolbar";
+import { STATUS_OPTIONS } from "@/features/feishu/list-query";
 
 /// 飞书数据源 API 契约：query key 形状、请求体逐字对齐后端、缺 operation_id 时抛错。
 

@@ -47,6 +47,24 @@ export const STABLE_ORDER_FIELD = "id";
 /// 搜索框去抖：搜索词每次按键都会改变结果集，不去抖会把每个字符都打成一次请求。
 export const SEARCH_DEBOUNCE_MS = 300;
 
+/// 状态筛选的可选值。
+///
+/// 放在这里而不是 `components/ListToolbar.tsx` 里，是因为它**不只是一个界面常量**：
+/// 「界面上的取值域 ↔ 后端表声明」这条契约要能被对账（`api.test.ts` 的「轴二：枚举
+/// 取值域」），所以它必须从一个**非组件模块**导出——react-refresh 的
+/// `only-export-components` 不允许组件文件同时导出非组件（`--max-warnings 0` 下
+/// 直接失败），而把这个 export 删掉就等于让那条对账失去唯一的取值域来源。
+///
+/// `all` 是纯界面值（不过滤），不属于后端取值域，对账时要剔掉。
+export const STATUS_OPTIONS: ReadonlyArray<{
+  value: DatasourceStatusFilter;
+  label: string;
+}> = [
+  { value: "all", label: "全部" },
+  { value: "active", label: "启用" },
+  { value: "disabled", label: "已停用" },
+];
+
 /// 读持久化的视图选择。localStorage 在隐私模式/被禁时访问即抛，必须兜住。
 export function loadView(): DatasourceView {
   try {

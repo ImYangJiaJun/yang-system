@@ -94,7 +94,7 @@ function verifyContract(source) {
     ],
     [
       `listen ${EDGE_PORT} default_server;`,
-      `应用边缘必须监听 ${EDGE_PORT}；对外暴露范围由编排层的 -p ${'${BIND_ADDR}'}:<host>:${EDGE_PORT} 约束（默认 127.0.0.1）`,
+      `应用边缘必须监听 ${EDGE_PORT}；对外暴露范围由编排层的 -p ${"${BIND_ADDR}"}:<host>:${EDGE_PORT} 约束（默认 127.0.0.1）`,
     ],
     [
       "~^(?:http|https)$ $http_x_forwarded_proto;",

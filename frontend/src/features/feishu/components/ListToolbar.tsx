@@ -12,6 +12,7 @@ import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/utils";
 
+import { STATUS_OPTIONS } from "../list-query";
 import type { DatasourceStatusFilter, DatasourceView } from "../types";
 
 const VIEW_OPTIONS: ReadonlyArray<{
@@ -22,19 +23,9 @@ const VIEW_OPTIONS: ReadonlyArray<{
   { value: "cards", label: "卡片" },
 ];
 
-/// 状态筛选的可选值。
-///
-/// **导出**是为了让「界面上的取值域 ↔ 后端表声明」这条契约能被对账
-/// （`api.test.ts` 的「轴二：枚举取值域」）。`all` 是纯界面值（不过滤），
-/// 不属于后端取值域，对账时要剔掉。
-export const STATUS_OPTIONS: ReadonlyArray<{
-  value: DatasourceStatusFilter;
-  label: string;
-}> = [
-  { value: "all", label: "全部" },
-  { value: "active", label: "启用" },
-  { value: "disabled", label: "已停用" },
-];
+/// 状态筛选的可选值已搬到 `../list-query`：它要供 `api.test.ts` 对账「界面取值域 ↔
+/// 后端表声明」，而组件文件不能同时导出非组件（react-refresh 的
+/// `only-export-components`，`--max-warnings 0` 下直接失败）。
 
 function Segmented<T extends string>({
   label,

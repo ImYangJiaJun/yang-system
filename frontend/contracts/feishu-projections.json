@@ -95,67 +95,42 @@
       "query_only": {}
     },
     "missing_field": {
-      "emitted": [
-        "field_id",
-        "source_key"
-      ],
+      "emitted": ["field_id", "source_key"],
       "backend_only": {},
       "query_only": {}
     }
   },
   "pull_schedule": {
     "result": {
-      "emitted": [
-        "interval_seconds",
-        "next_run_at"
-      ],
+      "emitted": ["interval_seconds", "next_run_at"],
       "backend_only": {},
       "query_only": {}
     }
   },
   "client_fields": {
     "list_datasources": {
-      "order_by": [
-        "title",
-        "id"
-      ],
-      "where": [
-        "status",
-        "id"
-      ]
+      "order_by": ["title", "id"],
+      "where": ["status", "id"]
     },
     "list_options": {
-      "order_by": [
-        "updated_at",
-        "option_id"
-      ],
+      "order_by": ["updated_at", "option_id"],
       "where": []
     }
   },
   "enums": {
     "feishu_datasource": {
       "status": {
-        "values": [
-          "active",
-          "disabled"
-        ],
+        "values": ["active", "disabled"],
         "enforced_by": "backend"
       },
       "ingest_mode": {
-        "values": [
-          "push",
-          "pull"
-        ],
+        "values": ["push", "pull"],
         "enforced_by": "backend"
       }
     },
     "feishu_datasource_field": {
       "default_locale": {
-        "values": [
-          "zh_cn",
-          "en_us",
-          "ja_jp"
-        ],
+        "values": ["zh_cn", "en_us", "ja_jp"],
         "enforced_by": "frontend",
         "why": "后端对它零校验（声明成 Str + default），界面是唯一的守卫——写错会让该字段在所有语言下都取不到文案。"
       }
