@@ -319,6 +319,29 @@ docker network inspect yang-system-net -f '{{.IPAM.Config}}'
 docker network inspect bridge -f '{{.IPAM.Config}}'
 ```
 
+### 明文 HTTP 下浏览器会静默失去什么
+
+非安全上下文（`http://<公网IP>:<端口>`）在浏览器里是**一套独立的能力集**，而且失败方式
+很坑：一批 API **不是被拒绝，而是压根不存在**（`undefined`），调用点于是抛 `TypeError`
+而不是一个能读出原因的 `NotAllowedError`——写惯了 `try/catch` 的代码会把它当成一次普通失败
+吞掉，界面表现成「点了没反应」。
+
+2026-09-24 在 `http://47.109.148.207:18654` 上实测到的清单：
+
+| API / 响应头 | 该源上的形态 | 后果 | 代码侧现状 |
+| --- | --- | --- | --- |
+| `navigator.clipboard` | `undefined` | 所有「复制」按钮失效 | 降级到 `execCommand("copy")`，两条路都不通时给可手动复制的退路（`frontend/src/shared/lib/clipboard.ts`） |
+| `navigator.locks` | `undefined` | 跨标签页的续期互斥消失：两个标签页同时刷新会撞上 Token Rotation，其中一个被登出 | 降级到 `localStorage` 租约（`frontend/src/engine/session/refresh-lock.ts`） |
+| `crypto.randomUUID` / `crypto.subtle` | `undefined` | 客户端随机 UUID 与 WebCrypto 不可用 | `randomUUID` 已有兜底；`subtle` 未被使用 |
+| `Cross-Origin-Opener-Policy` | 被浏览器忽略 | 失去跨源隔离 | 无功能依赖（未用 `SharedArrayBuffer`） |
+| `Strict-Transport-Security` | 被浏览器忽略 | **HSTS 完全不生效**——它只对 HTTPS 响应生效 | 无（这是「明文下写什么都没用」的一项） |
+
+注意 `navigator.geolocation` 与 `Notification` **不在**这张表里：它们的对象在明文源上
+依然存在（不是安全上下文门控），区别在于「对象在不在」而不是「调用成不成」。
+
+**上面的降级是「让界面在明文 HTTP 上也能用」，不是「明文 HTTP 没问题」。** 登录凭据、
+会话 Cookie 与飞书审批 Token 依旧在公网上明文传输，第五节列的 TLS 形态仍是必须做的事。
+
 ---
 
 ## 六、排障
