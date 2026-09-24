@@ -1,4 +1,6 @@
-//! 把一个用户移出权限组（幂等），并守住 spec §8.2 的最后管理员守卫。
+//! 把一个用户移出权限组（幂等），守住 spec §8.1 的「只有全权组成员能修改全权组成员」
+//! 与 §8.2 的最后管理员守卫——前者**必须**先于后者判定，否则非管理员能借「还剩 >=2 名
+//! 启用管理员」反复移出管理员，直到只剩他指定的那一名。
 
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
@@ -50,6 +52,25 @@ pub(super) async fn handle(
             .await?
             .ok_or_else(|| BaseError::RecordNotFound("权限组".to_string()))?;
 
+        // spec §8.1 附加规则：只有全权组成员能修改全权组成员——移出路径与
+        // `add_group_member` 完全对称（同一个判定、同一句话）。
+        //
+        // **必须排在下面 §8.2 的最后管理员判定之前**：那条判定只在「移出后一个人都不剩」
+        // 时才拒绝，因此它对「组里还剩 >=2 名启用管理员」的移除一律放行。少了本守卫，
+        // 持有 `access.groups.write` 的非管理员就能把管理员逐个移出——每次都能通过最后
+        // 管理员判定，反复执行直到组内只剩他指定的那一名，把守卫本身变成摆设。
+        if group.group_key == SYSTEM_ADMIN_GROUP_KEY {
+            let members = access
+                .groups()
+                .list_members_in_tx(&ctx, &mut transaction, group.id)
+                .await?;
+            if !members.contains(&operator_id) {
+                return Err(BaseError::PermissionDenied(
+                    "只有系统管理员可以修改系统管理员组的成员".to_string(),
+                ));
+            }
+        }
+
         // spec §8.2：移出全权组成员之后，系统必须仍有至少一名 active 管理员。
         //
         // 判定必须建立在「目标本人是否已计入这份计数」上：移出一名**已停用**的
@@ -63,7 +84,7 @@ pub(super) async fn handle(
                 return Err(last_admin_guard());
             }
         }
-        // 这里**刻意不做** §8.1 的自提权校验：移出只会减少权限，永远不会让调用者的
+        // 这里**刻意不做** §8.1 的自提权（权限子集）校验：移出只会减少权限，永远不会让调用者的
         // 有效权限变大，而管理员必须能退出全权组（否则最后一个想走的管理员被锁死）。
 
         let changed = access

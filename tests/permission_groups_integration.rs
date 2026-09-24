@@ -724,6 +724,23 @@ mod harness {
         }
     }
 
+    /// 尝试加成员，返回（HTTP 状态码，拒绝时的错误消息）。
+    ///
+    /// 成员上限用例必须同时钉住「被拒」与「拒绝理由说得清」两件事：只断言状态码
+    /// 无法区分「撞上成员上限」与「参数校验顺手拦下」，而调用方要照消息办事。
+    /// 成功时消息是成功文案（用例只会在拒绝路径上读它）。
+    pub async fn add_member_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        group_id: i64,
+        user_id: i64,
+    ) -> (u16, String) {
+        match member_dispatch(app, operator, "add_group_member", group_id, user_id).await {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
+    }
+
     /// 尝试移出成员并折算为 HTTP 状态码（400 为最后管理员守卫的拒绝）。
     pub async fn remove_member_status(
         app: &BuiltApp,
@@ -1876,4 +1893,155 @@ async fn removing_an_already_disabled_admin_member_is_not_rejected() {
         1,
         "移出已停用成员后启用管理员数不变"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 组成员接口的两条守卫：全权组 admin-only 与成员上限（含并发幂等）。
+// ---------------------------------------------------------------------------
+
+/// spec §8.1 附加规则：**只有全权组成员能修改全权组成员**——移除路径同样适用。
+///
+/// 缺陷形态：`remove_group_member` 只有 §8.2 的最后管理员判定，没有 `add_group_member`
+/// 那条 admin-only 守卫。于是持 `access.groups.write` 的非管理员可以把管理员一个个
+/// 移出——只要组内始终还剩 >=2 名启用管理员，最后管理员判定就一直放行，攻击者可以
+/// 反复执行直到组内只剩他指定的那一名。这条守卫必须独立于最后管理员判定，且先于它。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_non_admin_cannot_remove_members_of_the_system_admin_group() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    let second = harness::add_second_admin(&app, &first, "admin2").await;
+    // 攻击者：只直授 `access.groups.write`，完全不在全权组内。
+    let outsider = harness::grant_only(&app, &first, "outsider", "access.groups.write").await;
+    let group_id = harness::system_admin_group_id(&app).await;
+
+    // 夹具必须真的从「两名启用管理员」出发：此时最后管理员判定会放行（去掉一个仍剩一个），
+    // 因此这一次移除能否被拦下，只取决于 admin-only 守卫在不在。
+    assert_eq!(
+        harness::active_member_count(&app, group_id).await,
+        2,
+        "夹具必须从两名启用管理员出发，否则最后管理员判定会先拦下，用例测不到 admin-only 守卫"
+    );
+
+    let status = harness::remove_member_status(&app, &outsider, group_id, second.user_id).await;
+    assert_eq!(
+        status, 403,
+        "非全权组成员不得修改全权组成员，必须 403 PermissionDenied"
+    );
+    assert!(
+        harness::is_member(&app, group_id, second.user_id).await,
+        "被拒的移除不得删掉成员行"
+    );
+}
+
+/// spec 的成员上限（200）：`add_group_member` 是唯一能增加成员的路径，必须自己守住上限。
+///
+/// 缺陷形态：全仓 `ensure_member_limit` 只出现在 `add_group_item` / `remove_group_item`，
+/// `add_group_member` 从不调用它，于是组可经 API 无界增长，`repository.rs` 里
+/// 「成员集合被 `MAX_GROUP_MEMBERS` 约束成有界规模」的注释与事实不符。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn adding_a_member_beyond_the_limit_is_rejected() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "capped", "受上限约束的组").await;
+
+    // 极限测试要 200 名成员，走真实注册路径要跑 200 次 argon2，因此与既有夹具同例直写。
+    let seeded = harness::seed_members_directly(&app, group_id, harness::MAX_GROUP_MEMBERS).await;
+    assert_eq!(
+        seeded,
+        harness::MAX_GROUP_MEMBERS,
+        "夹具必须先把组填到恰好上限"
+    );
+
+    let newcomer = harness::register_with_code(&app, "latecomer", "latecomer@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let (status, message) = harness::add_member_outcome(&app, &admin, group_id, newcomer).await;
+
+    assert_eq!(
+        status,
+        400,
+        "第 {} 名成员必须被明确拒绝（ParamInvalid→400），绝不能是 5xx：{message}",
+        harness::MAX_GROUP_MEMBERS + 1
+    );
+    assert!(
+        message.contains("上限"),
+        "拒绝必须说明撞上的是成员上限，而不是别的参数错误，实际 {message}"
+    );
+    assert!(
+        message.contains(&harness::MAX_GROUP_MEMBERS.to_string()),
+        "错误信息必须给出上限 {}，实际 {message}",
+        harness::MAX_GROUP_MEMBERS
+    );
+    assert_eq!(
+        harness::member_rows_of_group(&app, group_id).await,
+        u64::try_from(harness::MAX_GROUP_MEMBERS).unwrap_or(u64::MAX),
+        "被拒的写入不得落库（组内仍应恰好 {} 人）",
+        harness::MAX_GROUP_MEMBERS
+    );
+    assert!(
+        !harness::is_member(&app, group_id, newcomer).await,
+        "被拒的成员不得出现在组内"
+    );
+}
+
+/// spec §9.2 的幂等契约在并发下同样成立：两个并发加的同一 (user, group)，终态恰好一行。
+///
+/// 缺陷形态：`insert_member_in_tx` 是「先查后插」，并发时后到者撞唯一键（1062）被
+/// `DbError::ConstraintError` 捕获，而它同时覆盖外键（1452）——于是被折算成
+/// `RecordNotFound("权限组")`（404），把「已是成员」这个幂等成功谎报成「组已消失」。
+///
+/// 用真库两条独立连接 + Barrier 让两次插入真正撞在唯一键上（真库上后到者会先阻塞在
+/// 索引锁上，等先到者提交后拿到 1062），单连接串行调用压不出这个窗口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
+    // 单轮交错仍可能被调度偶然化：两个任务若恰好一前一后跑完，后到者会在「先查」里
+    // 读到已提交的成员行而直接幂等返回，压不到唯一键冲突那条路径。重复三轮。
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let admin = harness::bootstrap_admin(&app).await;
+        let group_id = harness::create_group(&app, &admin, "dup", "并发重复加成员").await;
+        let target = harness::register_with_code(&app, "dup_target", "dup_target@example.com")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let app = app.clone();
+            let admin = admin.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                // 用 outcome 而非 status：失败时要能读出真正的错误文案，
+                // 否则 5xx/404 只留下一串状态码，定位不到是哪条错误被折算出来的。
+                harness::add_member_outcome(&app, &admin, group_id, target).await
+            }));
+        }
+        let mut outcomes = Vec::new();
+        for handle in handles {
+            outcomes.push(
+                handle
+                    .await
+                    .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+            );
+        }
+        let statuses: Vec<u16> = outcomes.iter().map(|(status, _)| *status).collect();
+
+        // 幂等语义下两次都该是 200（一次 changed=true，一次 changed=false）。这里把它
+        // 断言成「两个都是 200」比「不得是 5xx/404」更强：它同时钉住了不得把重复加
+        // 当成错误，也钉住了不得泄漏 500。
+        assert_eq!(
+            statuses,
+            vec![200, 200],
+            "第 {round} 轮并发重复加同一成员必须两次都幂等成功，实际 {outcomes:?}"
+        );
+        assert_eq!(
+            harness::member_rows_of_group(&app, group_id).await,
+            1,
+            "第 {round} 轮并发重复加同一成员必须收敛到恰好一行成员"
+        );
+    }
 }
