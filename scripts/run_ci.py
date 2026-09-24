@@ -238,6 +238,19 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "首账号引导并发仲裁集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "system_owner_bootstrap_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Refresh rotation load benchmark",
         (
             "cargo",
