@@ -1,4 +1,5 @@
 import { refreshSession, type LoginResult } from "./lifecycle";
+import { withRefreshLock } from "./refresh-lock";
 import { ApiError } from "../http/errors";
 
 export const SESSION_EXPIRED_EVENT = "yang:session-expired";
@@ -11,7 +12,6 @@ const SESSION_KEYS = [
   "yang.account-identity",
 ] as const;
 const CREDENTIAL_KEYS = ["yang.token", "yang.refresh-token"] as const;
-const REFRESH_LOCK = "yang.session.refresh";
 
 let activeRefresh: Promise<LoginResult> | undefined;
 let currentAccessToken: string | undefined;
@@ -76,13 +76,6 @@ function terminalRefreshFailure(cause: unknown): boolean {
     cause.status === 401 ||
     cause.status === 403 ||
     cause.status === 422
-  );
-}
-
-async function withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
-  if (typeof navigator === "undefined" || !navigator.locks) return task();
-  return navigator.locks.request(REFRESH_LOCK, { mode: "exclusive" }, () =>
-    task(),
   );
 }
 
