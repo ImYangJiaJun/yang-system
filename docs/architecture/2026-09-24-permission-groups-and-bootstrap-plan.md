@@ -22,6 +22,8 @@
 - **授权事实 writer 边界**：新事实表的 writer 必须登记进 `docs/architecture/authorization-writers.md` 并加 `<!-- authorization-writer: <id> <path> -->` 标记（机器可读门禁）。每次事实变更必须在同一事务经 `AuthorizationPort` 递增 `authz_version` 并追加 Outbox。
 - **原始 SQL 只允许落在特定路径**：`**/repository.rs`，或 stem ∈ `{authz_version, grants, guard, lifecycle, service, tenant}`，且必须带 `raw-sql-boundary` 标记与文档条目（`scripts/check_architecture.py:573-590`）。→ **组 Repository 的文件名必须是 `repository.rs` 或落在同目录内被允许的 stem**；本计划用 `group_repository.rs` 会失败，改用 `access/domain/groups/repository.rs` 目录形式（其 stem 仍是 `repository`）。
 - **生产代码禁止 `unsafe`、`unwrap()`、`expect()`**（`Cargo.toml` 设 `unwrap_used`/`expect_used` 为 deny）。测试内可用 `unwrap_or_else(|e| panic!(...))`。
+- **`#[cfg(test)]` 代码同样受 `expect_used = "deny"` 约束**：**不得**用 `.expect(..)` 及其"取错误值"变体（clippy 把它们统一归到 `expect_used`），取错误值一律用 `match` 或 `unwrap_or_else(|e| panic!(..))`。**修订理由**：本计划早先版本在 Task 4、Task 6 共 3 处用了 `.expect(..)` 的错误值版本，`cargo clippy --all-targets -- -D warnings` 会直接拒掉。
+- **死代码门禁与任务边界的矛盾（每任务必须处理）**：计划按任务切分，而「消费者的落地晚于生产者的任务」是本计划的常态——例如 Task 1 声明的列名常量要到 Task 3+ 才被 writer 使用，Task 3 的解析函数要到 Task 5 才被 resolver 使用。因此**每个只落地生产者、消费者在后续任务的任务，都必须在文件顶部加文件级 `#![allow(dead_code)]`（或 `#![allow(unused_imports)]`）并附一句中文理由**，指明消费者落在哪个任务。**修订理由**：本计划原本要求「每步 clippy 必须 0 警告」，但按任务边界切分时该要求在中间步骤**不可满足**；把豁免写成显式且有理由的声明，才能既过门禁又不掩盖真实死代码（仓库既有惯例，见 `src/addon/access/groups/table.rs`、`src/addon/access/domain/groups/tables.rs` 与 `mod.rs`）。
 - **一 Action 一文件**，形态为「自包含 register」：恰好一个 `pub(super) async fn handle` + 一个 `pub(super) fn register(module, access)`；`actions/mod.rs` 只保留 `mod` 声明与 `ACTIONS` 数组。禁止在业务代码用 `#[derive(Action)]`。改完必须跑 `python scripts/check_architecture.py`。
 - **每个 Action 必须挂 Step-up 与 append-only 审计**（`docs/contracts/AUDIT.md`）。
 - **命名**：不得把新类型命名为 `PermissionGroup`——框架已有同名结构（`crates/yang-base/src/router/middleware.rs:83-101`，语义是「Action 要求的一组权限 + All/Any」）。统一使用 `Group` 词根。
@@ -94,6 +96,26 @@
 | `frontend/src/features/registry.ts` | 登记权限组自定义视图 |
 | `frontend/src/shell/routes.tsx` | 权限组路由 |
 | `frontend/contracts/openapi.json`、`frontend/src/engine/contracts/api-types.ts` | 契约重生成（生成物，禁止手改） |
+
+### 计划遗漏的文件归属与 Schema 能力位（修订补充）
+
+**修订理由**：下面的文件在实现时**确实被改动**，但本计划早先版本的 `Files` / 文件结构表漏列了它们，于是实现者只能"计划外改动"——这类静默偏离最危险，因为计划作为事实来源已经不准。此处逐一补上归属；执行时请把它们视作对应任务 `Files` 的一部分。
+
+| 文件 | 归属任务 | 为什么必须改 |
+|---|---|---|
+| `src/addon/access/grants/mod.rs` | Task 3 | `Access::new(...)` 的调用点要新增 `GroupRepository` 参数（Task 3 Step 5 正文已提到，但 `Files` 漏列） |
+| `src/addon/access/domain/groups/mod.rs` | Task 3 / Task 8 | Task 3 建模块出口与常量 re-export；Task 8 追加 `pub(crate) use owner::AccessSystemOwnerClaimer`（Task 8 的 `Files` 只写了 `access/mod.rs`、`app.rs`） |
+| `src/addon/access/domain/repository.rs` | Task 13 | 新增 `GrantRepository::delete_all_of_user_in_tx`（Task 13 的 `Interfaces` 已声明，但 `Files` 漏列） |
+| `src/addon/account/user/mod.rs` | Task 13 | `build_module` 透传新增的 `SystemAuthorizationPort`（计划全文未提及该文件） |
+| `src/addon/account/domain/system_owner.rs` | Task 7 / Task 13 | **同一个文件被两个任务改**：Task 7 改 `claim` 签名，Task 13 追加 `SystemAuthorizationPort`。两处 `Files` 均已列出，此处重申以免实现者以为只需改一次 |
+| `scripts/run_ci.py` | Task 5 / Task 9 | 登记两个新集成测试入口。**这是第二处假绿陷阱**：不登记则 `run_ci.py integration` 永远不跑新用例，门禁"通过"却什么都没验证 |
+| `scripts/check_architecture.py` | Task 2 / Task 3 | 运行支撑表数量断言与 writer allowlist / raw-sql-boundary 的登记面 |
+| `tests/account_deletion_integration.rs`、`tests/avatar_integration.rs`、`tests/session_revocation_integration.rs` | Task 2 / Task 13 | 既有集成入口的 `reset_business_tables` 必须把新增的四张表（`permission_group`、`permission_group_item`、`user_group`、`system_owner`）纳入清空集合，否则跨用例互相污染 |
+
+**Schema 能力位（`filterable` / `sortable`）必须与查询面一起声明**：`TableQuery` 的 `where_eq` / `order_by` 是 fail-closed 的——列上没有声明对应能力位时，**运行期**返回 `FieldPermissionDenied`，**编译期没有任何提示**。因此：
+
+- 凡被 `where_eq` 过滤的列必须写 `filterable(true)`。本计划里漏掉的是 `permission_group.id`（受信 writer 的按 id 读/改/删都走它），已在 Task 1 的代码块补上；`permission_group_item` / `user_group` / `system_owner` 的 `group_id`、`user_id`、`permission` 已在 Task 2 声明。
+- 凡被 `order_by` 排序的列必须写 `sortable(true)`。仓库当前对组表**不做** SQL 排序（`list_members_in_tx` 的升序在内存里排，理由见 `src/addon/access/domain/groups/repository.rs` 的注释），因此**当前不需要** `sortable(true)`；若将来改成 SQL 排序，必须同时给该列加 `sortable(true)`，否则运行期报错。
 
 ---
 
@@ -170,9 +192,16 @@ Expected: 编译失败，`cannot find function groups_table_spec` / `cannot find
 在 `src/addon/access/groups/table.rs` 的测试模块之上插入：
 
 ```rust
-use crate::addon::account::user::table::SYSTEM_ROLE;
 use yang_base::definition::{FieldName, FieldRef, Int, Key, Str, TableName, TableSpec, Timestamp};
 use yang_base::BaseError;
+
+/// 系统角色名：组事实表字段的读写只认它。
+///
+/// **模块内独立常量**，`access/grants/table.rs:10` 与 `access/domain/groups/tables.rs`
+/// 同样各自私有定义——仓库既有惯例。**不要**写成
+/// `use crate::addon::account::user::table::SYSTEM_ROLE;`：`account` 的 `mod user`
+/// 是私有的（`src/addon/account/mod.rs:8` 为 `mod user;`），那条路径编译不过。
+pub(crate) const SYSTEM_ROLE: &str = "system";
 
 /// 组标识格式：单段小写，用于代码与审计引用（展示名走 `title`）。
 pub(crate) const GROUP_KEY_PATTERN: &str = r"^[a-z][a-z0-9_]*$";
@@ -196,7 +225,10 @@ pub(crate) const GROUP_RECORD_FIELDS: &[&str] = &[
 /// 构建权限组事实表的唯一 Schema 定义。
 pub(crate) fn groups_table_spec() -> Result<TableSpec, BaseError> {
     let fields = yang_base::fields! {
-        id => Key::new().title("ID"),
+        // 主键必须可筛选：受信 writer 的按 id 读取/更新/删除走 `where_eq(GROUP_ID, ...)`，
+        // 未声明 `filterable(true)` 会在**运行期**返回 `FieldPermissionDenied`（fail-closed），
+        // 而不是编译期报错。与 account/user、access/grants 两张表同例。
+        id => Key::new().title("ID").filterable(true),
         group_key => Str::new()
                 .title("组标识")
                 .require(true)
@@ -342,7 +374,7 @@ git commit -m "feat(access): 新增 permission_group 表与 access.groups 模块
 - Test: `src/addon/access/domain/groups/tables.rs`（文件内）、`src/infrastructure/schema.rs`（断言测试）
 
 **Interfaces:**
-- Consumes: Task 1 的 `GROUP_KEY_PATTERN`、`GROUP_KEY_MAX_LENGTH`、`SYSTEM_ROLE`
+- Consumes: Task 1 的 `GROUP_KEY_PATTERN`、`GROUP_KEY_MAX_LENGTH`（`SYSTEM_ROLE` **不是**消费项：本文件按仓库惯例自带模块内同名常量）
 - Produces:
   - `pub(crate) fn group_items_table_spec() -> Result<TableSpec, BaseError>`（表名 `permission_group_item`）
   - `pub(crate) fn user_group_table_spec() -> Result<TableSpec, BaseError>`（表名 `user_group`）
@@ -375,6 +407,42 @@ mod tests {
         assert_eq!(fks, ["fk_user_group_user", "fk_user_group_group"]);
     }
 
+    /// 设计 §8.3 列出三条外键；必须逐条断言完整形状，而不是只看成员表那两条。
+    ///
+    /// 这条断言是补上来的：本计划早先版本的 `group_items_table_spec` 漏了
+    /// `permission_group_item.group_id → permission_group.id`，而原来的断言只覆盖
+    /// 成员表的两条 FK，于是删组缺少数据库层兜底、条目表可留下孤儿行却无人报警。
+    #[test]
+    fn every_group_fact_table_declares_its_foreign_keys_from_spec_section_8_3() {
+        let mut declared: Vec<String> = Vec::new();
+        for spec in [group_items_table_spec(), user_group_table_spec()] {
+            let spec = spec.unwrap_or_else(|e| panic!("{e}"));
+            for foreign_key in &spec.foreign_keys {
+                let columns: Vec<String> =
+                    foreign_key.fields.iter().map(ToString::to_string).collect();
+                let referenced: Vec<String> = foreign_key
+                    .referenced_fields
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                declared.push(format!(
+                    "{}: [{}] -> [{}]",
+                    foreign_key.name,
+                    columns.join(","),
+                    referenced.join(",")
+                ));
+            }
+        }
+        assert_eq!(
+            declared,
+            [
+                "fk_permission_group_item_group: [permission_group_item.group_id] -> [permission_group.id]",
+                "fk_user_group_user: [user_group.user_id] -> [users.id]",
+                "fk_user_group_group: [user_group.group_id] -> [permission_group.id]",
+            ]
+        );
+    }
+
     #[test]
     fn system_owner_table_pins_the_sentinel_key() {
         let spec = system_owner_table_spec().unwrap_or_else(|e| panic!("{e}"));
@@ -405,9 +473,15 @@ Expected: 编译失败，找不到三个 `*_table_spec`
 use crate::addon::access::domain::permission_catalog::{
     PERMISSION_MAX_LENGTH, PERMISSION_PATTERN,
 };
-use crate::addon::account::user::table::SYSTEM_ROLE;
 use yang_base::definition::{FieldName, FieldRef, Int, Key, Str, TableName, TableSpec, Timestamp};
 use yang_base::BaseError;
+
+/// 系统角色名：与 `access/grants/table.rs`、`access/groups/table.rs` 同名同值，
+/// 各表声明文件按仓库既有惯例各自私有定义。
+///
+/// **不要**从 `crate::addon::account::user::table` 跨模块 import：`account` 的
+/// `mod user` 是私有的，那条路径编译不过。
+pub(crate) const SYSTEM_ROLE: &str = "system";
 
 pub(crate) const ITEM_ID: &str = "id";
 pub(crate) const ITEM_GROUP_ID: &str = "group_id";
@@ -443,6 +517,7 @@ fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError>
 /// 组 → 权限条目。
 pub(crate) fn group_items_table_spec() -> Result<TableSpec, BaseError> {
     let name = table_name("permission_group_item")?;
+    let groups = table_name("permission_group")?;
     let fields = yang_base::fields! {
         id => Key::new().title("ID"),
         group_id => Int::new().title("权限组").require(true).filterable(true)
@@ -465,6 +540,17 @@ pub(crate) fn group_items_table_spec() -> Result<TableSpec, BaseError> {
         .check_named(
             "chk_permission_group_item_permission_format",
             "regexp_like(`permission`, '^[a-z][a-z0-9_]*(\\\\.[a-z][a-z0-9_]*)+$')",
+        )
+        // 外键规则固定 RESTRICT：删除仍有条目的组会被数据库拒绝（spec §8.3），
+        // 与删组的应用层前置检查构成纵深防御；条目表也因此不可能留下孤儿行。
+        //
+        // 修订理由：本计划早先版本的 `group_items_table_spec` 漏了这条外键，
+        // 于是「删除仍有条目的组」只能靠应用层前置检查兜底，缺少数据库层兜底，
+        // 与设计 §8.3 的三条 FK 清单不一致。
+        .foreign_key_named(
+            "fk_permission_group_item_group",
+            [field_ref(&name, ITEM_GROUP_ID)?],
+            [field_ref(&groups, "id")?],
         ))
 }
 
@@ -530,7 +616,7 @@ pub(crate) fn system_owner_table_spec() -> Result<TableSpec, BaseError> {
 - [ ] **Step 4: 运行确认三张表定义通过**
 
 Run: `cargo test --lib --locked groups::tables`
-Expected: PASS（3 tests）
+Expected: PASS（4 tests）
 
 - [ ] **Step 5: 写 `infrastructure_definitions` 的失败断言**
 
@@ -599,6 +685,7 @@ git commit -m "feat(access): 声明组的条目表/成员表与引导哨兵表�
 - Create: `src/addon/access/domain/groups/mod.rs`
 - Create: `src/addon/access/domain/groups/repository.rs`
 - Modify: `src/addon/access/domain/mod.rs`、`src/addon/access/domain/context.rs`
+- Modify: `src/addon/access/grants/mod.rs`（`Access::new` 调用点补 `GroupRepository` 参数——原 `Files` 漏列）
 - Modify: `docs/architecture/authorization-writers.md`
 - Test: `src/addon/access/domain/groups/repository.rs`（文件内）
 
@@ -980,7 +1067,12 @@ mod tests {
         // Review Focus 1：目录未安装时必须报错，绝不能退化成空集或全权集。
         use crate::addon::access::domain::permission_catalog::PermissionCatalogHandle;
         let handle = PermissionCatalogHandle::new();
-        let error = catalog_permissions(&handle).expect_err("未安装目录必须失败");
+        // 修订理由：`expect_used` 是 deny（`Cargo.toml:49`），测试里也不能用
+        // `.expect(..)` 的错误值版本；改用 match 取出错误值。
+        let error = match catalog_permissions(&handle) {
+            Ok(permissions) => panic!("未安装目录必须失败，实际返回 {permissions:?}"),
+            Err(error) => error,
+        };
         assert!(
             matches!(error, yang_base::BaseError::ConfigError(_)),
             "必须是 ConfigError（fail-closed），实际为 {error:?}"
@@ -1077,7 +1169,9 @@ git commit -m "feat(access): 有效权限解析纯函数（含全权组与孤儿
 
 **Files:**
 - Create: `src/addon/access/domain/group_resolver.rs`
+- Create: `tests/permission_groups_integration.rs`（Step 6 的端到端用例；原 `Files` 漏列）
 - Modify: `src/addon/access/domain/mod.rs`、`src/addon/access/mod.rs`、`src/app.rs:106`
+- Modify: `scripts/run_ci.py`（登记新集成入口，否则该用例永不执行；原 `Files` 漏列）
 - Test: `src/addon/access/domain/group_resolver.rs`（文件内，纯逻辑部分）
 
 **Interfaces:**
@@ -1121,8 +1215,10 @@ mod tests {
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `cargo test --lib --locked groups::group_resolver`
+Run: `cargo test --lib --locked access::domain::group_resolver`
 Expected: 编译失败
+
+> **修订理由**：本计划早先版本写的是 `cargo test --lib --locked groups::group_resolver`。该过滤串在本仓库**匹配 0 个用例却退出 0**（模块路径是 `access::domain::group_resolver` 而非 `groups::group_resolver`），是典型的假绿——门禁会"通过"而测试根本没跑。实际可复现的输出是 `running 0 tests … 0 passed; 0 filtered out`，改成 `access::domain::group_resolver` 后匹配到 2 个用例。
 
 - [ ] **Step 3: 实现**
 
@@ -1200,7 +1296,7 @@ impl GrantResolver for GroupGrantResolver {
 
 - [ ] **Step 4: 运行确认通过**
 
-Run: `cargo test --lib --locked groups::group_resolver`
+Run: `cargo test --lib --locked access::domain::group_resolver`
 Expected: PASS
 
 - [ ] **Step 5: 接入组合根**
@@ -1272,7 +1368,11 @@ mod tests {
     fn self_escalation_is_rejected_when_new_permission_appears() {
         let before = set(&["access.groups.write"]);
         let after = set(&["access.groups.write", "access.grants.write"]);
-        let error = assert_no_self_escalation(&before, &after).expect_err("提权必须被拒");
+        // 修订理由：同 Task 4——`expect_used` 是 deny，改用 match 取错误值。
+        let error = match assert_no_self_escalation(&before, &after) {
+            Ok(()) => panic!("提权必须被拒"),
+            Err(error) => error,
+        };
         assert!(
             matches!(error, yang_base::BaseError::PermissionDenied(_)),
             "应为 403，实际 {error:?}"
@@ -1298,22 +1398,26 @@ mod tests {
         assert!(ensure_member_limit(0).is_ok());
         assert!(ensure_member_limit(199).is_ok());
         assert!(ensure_member_limit(200).is_ok(), "等于上限必须允许");
-        let error = ensure_member_limit(201).expect_err("超过上限必须拒绝");
-        assert!(matches!(error, yang_base::BaseError::Conflict(_)));
+        let error = match ensure_member_limit(201) {
+            Ok(()) => panic!("超过上限必须拒绝"),
+            Err(error) => error,
+        };
+        // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码，但框架 `BaseError` 从无
+        // `Conflict` 变体（只有 `ErrorCategory::Conflict`），实现落在既有的
+        // `ParamInvalid` → 400（设计 §9.3；`ensure_member_limit` 的 message 仍给出上限）。
+        assert!(matches!(error, yang_base::BaseError::ParamInvalid(_, _)));
         assert!(error.to_string().contains("200"), "错误信息必须给出上限");
     }
 
-    #[test]
-    fn affected_users_are_iterated_in_ascending_order() {
-        // 锁序不变量的可测部分：`invalidate_users_in_tx` 直接按集合迭代顺序
-        // 加锁，因此集合类型本身就是锁序保证。此测试锁住该类型选择——
-        // 若有人把它换成 HashSet，扇出将不再有序，并发下会形成死锁环。
-        let mut affected: BTreeSet<i64> = BTreeSet::new();
-        affected.insert(9);
-        affected.insert(3);
-        affected.insert(7);
-        assert_eq!(affected.iter().copied().collect::<Vec<_>>(), [3, 7, 9]);
-    }
+    // 锁序没有可单测的纯逻辑面：`BTreeSet` 的迭代顺序是 std 类型自身的性质，
+    // 断言它等于 `[3, 7, 9]` 只是同义反复（本计划早先版本在此写过这种测试，
+    // 实际写代码时被实现者拒绝，已删除——留着只会制造虚假信心）。
+    //
+    // 真实的锁序验证必须落在集成层：两个并发事务按不同的取锁顺序才会成环，
+    // 这只有在真实 MySQL 上才能证伪。**归属 Task 12 之后的锁序用例**，由 R3
+    // 实现在 `tests/permission_groups_integration.rs`：
+    //   - `concurrent_item_and_member_add_on_the_same_group_do_not_deadlock`
+    //   - `concurrent_item_adds_by_two_member_operators_do_not_deadlock`
 }
 ```
 
@@ -1424,9 +1528,15 @@ pub(crate) fn assert_no_self_escalation(
 /// 组成员数上限检查；超过上限必须明确报错而不是静默做 O(N) 行锁事务。
 pub(crate) fn ensure_member_limit(member_count: u64) -> Result<(), BaseError> {
     if member_count > MAX_GROUP_MEMBERS as u64 {
-        return Err(BaseError::Conflict(format!(
-            "该组已有 {member_count} 名成员，超过上限 {MAX_GROUP_MEMBERS}；请先分批移出成员再修改组权限"
-        )));
+        // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码，但框架 `BaseError` 从无
+        // `Conflict` 变体（只有 `ErrorCategory::Conflict`），实现复用既有的
+        // `ParamInvalid` → 400（设计 §9.3 的同一取舍），消息里给出成员数与上限。
+        return Err(BaseError::ParamInvalid(
+            "member_count".to_string(),
+            format!(
+                "该组已有 {member_count} 名成员，超过上限 {MAX_GROUP_MEMBERS}；请先分批移出成员再修改组权限"
+            ),
+        ));
     }
     Ok(())
 }
@@ -1470,7 +1580,7 @@ pub(crate) async fn count_active_system_admins_in_tx(
 - [ ] **Step 4: 运行确认通过**
 
 Run: `cargo test --lib --locked groups::admin`
-Expected: PASS（5 tests）
+Expected: PASS（4 tests——锁序那条同义反复用例已删除，真实锁序验证见 Task 12 之后的集成用例）
 
 - [ ] **Step 5: 提交**
 
@@ -1626,7 +1736,9 @@ git commit -m "refactor(account): SystemOwnerClaimer 端口透传 ActionContext 
 
 **Files:**
 - Create: `src/addon/access/domain/groups/owner.rs`
+- Modify: `src/addon/access/domain/groups/mod.rs`（re-export `AccessSystemOwnerClaimer`——原 `Files` 漏列）
 - Modify: `src/addon/access/mod.rs`、`src/app.rs:107`
+- Modify: `src/addon/account/mod.rs`（删除已无调用方的 `no_system_owner_claimer()`——Step 5 正文已提到，原 `Files` 漏列）
 - Test: `src/addon/access/domain/groups/owner.rs`（文件内）
 
 **Interfaces:**
@@ -1803,6 +1915,7 @@ git commit -m "feat(access): 首个注册账号引导为系统管理员的 claim
 **Files:**
 - Modify: `src/addon/account/user/actions/register.rs:93-115`
 - Create: `tests/system_owner_bootstrap_integration.rs`
+- Modify: `scripts/run_ci.py`（登记本集成入口，否则并发引导对抗用例永不执行；原 `Files` 漏列）
 - Test: 同上
 
 **Interfaces:**
@@ -1984,7 +2097,9 @@ async fn deleting_a_group_with_members_is_rejected() {
     harness::add_member(&app, &admin, group_id, user_id).await;
 
     let status = harness::delete_group_status(&app, &admin, group_id).await;
-    assert_eq!(status, 409, "组内非空必须返回 409 而不是 500");
+    // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码。框架没有 `Conflict` 变体，
+    // 组内非空走既有的 `ParamInvalid` → 400（设计 §9.3）。
+    assert_eq!(status, 400, "组内非空必须返回 400 而不是 500");
     assert!(harness::group_exists(&app, "ops").await, "拒绝后组必须仍在");
 }
 
@@ -2011,9 +2126,11 @@ async fn delete_races_add_member_without_orphans_or_500() {
         );
 
         for status in [delete_result, add_result] {
+            // 修订理由：允许集里原先写的 HTTP 冲突码换成 400——删组被拒（组内非空）
+            // 与加成员撞上成员上限，在框架里都是 `ParamInvalid` → 400。
             assert!(
-                status == 200 || status == 404 || status == 409,
-                "只允许 200/404/409，实际 {status}"
+                status == 200 || status == 400 || status == 404,
+                "只允许 200/400/404，实际 {status}"
             );
         }
         // 无论谁赢，都不能留下悬空成员行：组不存在则成员行必须为 0。
@@ -2059,9 +2176,12 @@ Expected: 编译失败（`harness::create_group` 等尚不存在，接口未注�
         .count_members_in_tx(&ctx, &mut transaction, group.id)
         .await?;
     if member_count > 0 {
-        return Err(BaseError::Conflict(format!(
-            "该权限组仍有 {member_count} 名成员，请先移出成员"
-        )));
+        // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码，但框架 `BaseError` 从无该变体。
+        // 沿用既有的 `ParamInvalid` → 400（设计 §9.3）。
+        return Err(BaseError::ParamInvalid(
+            "group_id".to_string(),
+            format!("该权限组仍有 {member_count} 名成员，请先移出成员"),
+        ));
     }
     let affected_rows = access
         .groups()
@@ -2163,7 +2283,8 @@ async fn group_permission_change_respects_the_member_limit() {
         harness::seed_members_directly(&app, group_id, harness::MAX_GROUP_MEMBERS + 1).await;
     assert_eq!(over_limit, harness::MAX_GROUP_MEMBERS + 1);
     let status = harness::add_group_item_status(&app, &admin, group_id, "account.users.read").await;
-    assert_eq!(status, 409, "超过上限必须明确报错");
+    // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码。成员上限走 `ParamInvalid` → 400。
+    assert_eq!(status, 400, "超过上限必须明确报错");
 }
 ```
 
@@ -2374,7 +2495,10 @@ Expected: 编译失败
                 .await?;
             let admins = count_active_system_admins_in_tx(&access, &ctx, &mut transaction).await?;
             if members.contains(&input.user_id) && admins <= 1 {
-                return Err(BaseError::Conflict(
+                // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码，但框架 `BaseError` 从无该变体。
+                // 沿用既有的 `ParamInvalid` → 400（设计 §9.3）。
+                return Err(BaseError::ParamInvalid(
+                    "user_id".to_string(),
                     "不能移出最后一名系统管理员".to_string(),
                 ));
             }
@@ -2423,6 +2547,8 @@ git commit -m "feat(access): 组成员接口与防自提权不变量"
 - Modify: `src/addon/account/user/actions/delete_account.rs:44-90`
 - Modify: `src/addon/access/domain/groups/owner.rs`（实现 `SystemAuthorizationPort`）
 - Modify: `src/addon/access/domain/groups/repository.rs`（新增两个清理方法）
+- Modify: `src/addon/access/domain/repository.rs`（新增 `GrantRepository::delete_all_of_user_in_tx`——Interfaces 已声明，原 `Files` 漏列）
+- Modify: `src/addon/account/user/mod.rs`（`build_module` 透传新端口——计划全文原先未提及该文件）
 - Modify: `src/addon/access/mod.rs`、`src/app.rs`（装配新端口）
 - Test: `tests/permission_groups_integration.rs`（追加）
 
@@ -2484,13 +2610,15 @@ async fn the_last_system_admin_cannot_be_disabled_or_deleted() {
     let admin = harness::bootstrap_admin(&app).await;
 
     let disable_status = harness::admin_disable_status(&app, &admin, admin).await;
-    assert_eq!(disable_status, 409, "最后一名管理员不可被停用");
+    // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码。框架没有 `Conflict` 变体，
+    // 三处守卫都走 `Account::last_system_admin_guard` 的 `ParamInvalid` → 400。
+    assert_eq!(disable_status, 400, "最后一名管理员不可被停用");
 
     let delete_status = harness::delete_account_status(&app, &admin).await;
-    assert_eq!(delete_status, 409, "最后一名管理员不可被删除");
+    assert_eq!(delete_status, 400, "最后一名管理员不可被删除");
 
     let self_disable_status = harness::disable_self_status(&app, &admin).await;
-    assert_eq!(self_disable_status, 409, "最后一名管理员不可自停用");
+    assert_eq!(self_disable_status, 400, "最后一名管理员不可自停用");
 }
 
 /// 有两名管理员时，移除其一必须成功（守卫不能过度收紧）。
@@ -2590,9 +2718,10 @@ impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
             .remains_an_admin_after(&ctx, &mut transaction, input.id)
             .await?
         {
-            return Err(BaseError::Conflict(
-                "不能停用最后一名系统管理员".to_string(),
-            ));
+            // 修订理由：计划原先把这类拒绝定成 HTTP 冲突码，但框架 `BaseError` 从无该变体。
+            // 实现收敛到共享的 `Account::last_system_admin_guard(action)`，
+            // 返回 `ParamInvalid("user_id", ...)` → 400（设计 §9.3）。
+            return Err(Account::last_system_admin_guard("停用"));
         }
 ```
 

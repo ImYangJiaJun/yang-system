@@ -312,7 +312,7 @@ before = 调用者当前的有效权限集合
 |---|---|---|
 | `POST /api/v1/access/groups` | `access.groups.write` | 建组（`group_key` + `title` + `description`） |
 | `POST /api/v1/access/groups/update` | `access.groups.write` | 改 `title`/`description`（不改 `group_key`） |
-| `POST /api/v1/access/groups/delete` | `access.groups.write` | 删组；组内非空则拒绝（409） |
+| `POST /api/v1/access/groups/delete` | `access.groups.write` | 删组；组内非空则拒绝（400，错误语义见 §9.3） |
 | `GET /api/v1/access/groups` | `access.groups.read` | 列表：成员数、权限数、是否内置、孤儿条目数 |
 | `GET /api/v1/access/groups/{id}` | `access.groups.read` | 详情：`group_key`、`title`、条目、成员（含孤儿标记与 `effective_all` 布尔） |
 | `POST /api/v1/access/groups/items` | `access.groups.write` | 加权限（经 `ensure_declared` fail-closed） |
@@ -333,10 +333,18 @@ before = 调用者当前的有效权限集合
 | 组不存在 | `RecordNotFound` | 404 |
 | `group_key` 重复 | `ParamInvalid`（重复键经 `From<DbError>` 会映射为 `ParamInvalid(索引名)`） | 400 |
 | 组内权限未在目录声明 | `ParamInvalid("permission")`（经 `ensure_declared`） | 400 |
-| 删除仍有成员的组 | 应用层前置检查返回 `Conflict` | 409 |
-| 移除最后一名管理员 | `Conflict` | 409 |
+| 删除仍有成员的组 | 应用层前置检查返回 `ParamInvalid("group_id", ...)` | 400 |
+| 移除最后一名管理员 | `ParamInvalid("user_id", ...)` | 400 |
+| 组权限变更时成员数超上限（§6.3） | `ParamInvalid("member_count", ...)` | 400 |
 | 自提权尝试（子集校验失败） | `PermissionDenied` | 403 |
 | 目录未安装 | `ConfigError` | 500（fail-closed） |
+
+> **修订理由（对齐实现的事实订正）**：本表原先把「删除仍有成员的组」「移除最后一名管理员」定成
+> HTTP 冲突码，这是**文档错、代码对**：`yang_base::BaseError` **没有 `Conflict` 变体**
+> （框架只有 `ErrorCategory::Conflict` 这个错误分类），照写会直接编译不过。本着本节开头
+> 「不为个别用例扩展框架错误类型」的原则，实现统一落在既有的 `ParamInvalid` → 400；
+> 这三类都是「资源当前状态不允许该操作」的前置拒绝，与「用户名已存在」同一条路径，
+> 前端按错误码而非字段名分支即可（见本节末尾的既有实现细节）。
 
 **注意一处既有实现细节**：`From<DbError>` 会把可解析的唯一键冲突改写为 `ParamInvalid(索引名, "该值已存在")`，索引名取 MySQL `库.表.键` 的最后一段（`crates/yang-base/src/error/mod.rs:400-420`）。因此前端不能依赖固定字段名做分支，需按错误码而非字段名处理。
 
@@ -397,7 +405,7 @@ before = 调用者当前的有效权限集合
 | 引导 | **并发首注册恰好产生一个 owner**（多连接真实 MySQL 对抗测试）；`AlreadyClaimed` 降级不阻断注册；哨兵行已存在时不再产生第二个管理员 |
 | 防自提权 | 为自己添加超集权限组被拒（403）；非 `system_admin` 成员不能修改该组成员；`system_admin` 成员的移出受限 |
 | 最后管理员 | 最后一名 active 管理员不可被停用、不可被自我删除、不可被移出全权组；两管理员时可移除其一 |
-| 引用完整性 | 删除仍有成员的组被拒（409）；账号删除后无孤儿 `authz_grant` 与 `user_group` 行 |
+| 引用完整性 | 删除仍有成员的组被拒（400，见 §9.3）；账号删除后无孤儿 `authz_grant` 与 `user_group` 行 |
 | 错误语义 | 各场景 HTTP 码与 §9.3 一致；前端不依赖字段名分支 |
 | **非回归红线** | `tests/refresh_load_benchmark.rs` 不受影响（本设计不触碰校验热路径） |
 
