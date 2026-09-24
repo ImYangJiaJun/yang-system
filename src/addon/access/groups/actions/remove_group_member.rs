@@ -51,13 +51,15 @@ pub(super) async fn handle(
             .ok_or_else(|| BaseError::RecordNotFound("权限组".to_string()))?;
 
         // spec §8.2：移出全权组成员之后，系统必须仍有至少一名 active 管理员。
+        //
+        // 判定必须建立在「目标本人是否已计入这份计数」上：移出一名**已停用**的
+        // 管理员成员不减少启用管理员数，裸计数（`members.contains && admins <= 1`）
+        // 会把这种合法操作误拒成最后管理员守卫。
         if group.group_key == SYSTEM_ADMIN_GROUP_KEY {
-            let members = access
-                .groups()
-                .list_members_in_tx(&ctx, &mut transaction, group.id)
-                .await?;
-            let admins = count_active_system_admins_in_tx(&access, &ctx, &mut transaction).await?;
-            if members.contains(&input.user_id) && admins <= 1 {
+            let admins =
+                count_active_system_admins_in_tx(&access, &ctx, &mut transaction, input.user_id)
+                    .await?;
+            if !admins.keeps_at_least_one_admin() {
                 return Err(last_admin_guard());
             }
         }

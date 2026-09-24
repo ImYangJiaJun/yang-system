@@ -146,39 +146,105 @@ pub(crate) fn ensure_member_limit(member_count: u64) -> Result<(), BaseError> {
     Ok(())
 }
 
-/// 当前处于启用的系统管理员人数（内置全权组的 active 成员）。
+/// 事务内加锁统计出的系统管理员启用情况。
 ///
-/// 成员数从组事实读取；active 判定复用 `AuthorizationPort` 的版本快照
-/// （`users.status` 的事实源），避免在此另写一条用户状态查询路径。
+/// 只返回一个总数不足以支撑守卫：调用方真正要回答的是「去掉**目标本人**之后
+/// 是否还剩人」。目标若本来就不计入（不在组内，或自身已停用），那么任何针对他的
+/// 操作都不会减少启用管理员数，此时即便系统只剩一名启用管理员也必须放行——
+/// 这正是裸计数会误拒「移出一名已停用的管理员成员」这类合法操作的根因。
+/// spec §8.2 的守卫语义是「本次操作之后仍有至少一名启用管理员」，
+/// 而不是「当前至少有两名」。
+pub(crate) struct ActiveSystemAdminCount {
+    group_exists: bool,
+    total: u64,
+    target_included: bool,
+}
+
+impl ActiveSystemAdminCount {
+    /// 内置全权组是否存在于库中。
+    pub(crate) fn group_exists(&self) -> bool {
+        self.group_exists
+    }
+
+    /// 当前处于启用状态的管理员总数。
+    pub(crate) fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// 目标用户是否「在组内且自身启用」——即他是否已被计入 [`Self::total`]。
+    pub(crate) fn target_included(&self) -> bool {
+        self.target_included
+    }
+
+    /// 目标被停用 / 删除 / 移出全权组之后，系统是否仍有至少一名启用管理员。
+    ///
+    /// 目标未被计入时恒为真；被计入时需要 `total >= 2`（去掉他自己还剩一个）。
+    pub(crate) fn keeps_at_least_one_admin(&self) -> bool {
+        !self.target_included || self.total >= 2
+    }
+}
+
+/// 当前处于启用的系统管理员情况（内置全权组的成员）。
+///
+/// **必须名副其实**：成员行与 `users.status` 都在**调用方事务内**读取——成员按
+/// `user_id` 升序逐个 `lock_authorization_version`（`FOR UPDATE`）锁定后，再读锁
+/// 句柄的 `is_active()` 判启用状态。绝不能再经连接池在事务外读状态：那样两个并发
+/// 「停用/删除/移出管理员」会各自读到同一份未加锁的旧计数而双双放行，
+/// `system_admin` 组被清零，而 spec §8.2 声称该状态不可达。
+///
+/// **锁序**：升序与 [`invalidate_users_in_tx`] 一致，是两个并发变更不互相死锁的
+/// 唯一纪律（`list_members_in_tx` 保证按 `user_id` 升序返回，不要在此重排）。
+///
+/// 成员行指向的 user 已不存在（并发删号窗口）时按「不计入」降级而不是整单硬失败，
+/// 与解析侧 `group_resolver` 对悬空成员的口径一致。
 pub(crate) async fn count_active_system_admins_in_tx(
     access: &Access,
     ctx: &ActionContext,
     transaction: &mut Transaction,
-) -> Result<u64, BaseError> {
+    target_user_id: i64,
+) -> Result<ActiveSystemAdminCount, BaseError> {
     let Some(group) = access
         .groups()
         .find_by_key_in_tx(ctx, transaction, SYSTEM_ADMIN_GROUP_KEY)
         .await?
     else {
-        return Ok(0);
+        return Ok(ActiveSystemAdminCount {
+            group_exists: false,
+            total: 0,
+            target_included: false,
+        });
     };
     let members = access
         .groups()
         .list_members_in_tx(ctx, transaction, group.id)
         .await?;
-    let mut active = 0_u64;
+    let mut total = 0_u64;
+    let mut target_included = false;
     for user_id in members {
-        if let Some(snapshot) = access
+        let locked = match access
             .authorization()
-            .find_authorization_version(ctx.tools().mysql()?.pool(), user_id)
-            .await?
+            .lock_authorization_version(ctx.tools().mysql()?.pool(), transaction, user_id)
+            .await
         {
-            if snapshot.is_active() {
-                active += 1;
-            }
+            Ok(locked) => locked,
+            // 并发删号窗口：成员行还在、user 行已经没了。按「不计入」降级，
+            // 不因为一行悬空成员就让整单失败。
+            Err(BaseError::UserNotFound(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        if !locked.is_active() {
+            continue;
+        }
+        total += 1;
+        if user_id == target_user_id {
+            target_included = true;
         }
     }
-    Ok(active)
+    Ok(ActiveSystemAdminCount {
+        group_exists: true,
+        total,
+        target_included,
+    })
 }
 
 #[cfg(test)]
@@ -265,5 +331,50 @@ mod tests {
             error.to_string().contains("201"),
             "错误信息必须给出实际成员数，实际 {error}"
         );
+    }
+
+    /// 构造一份「组存在」的计数结果，供守卫语义单测使用。
+    fn count(total: u64, target_included: bool) -> ActiveSystemAdminCount {
+        ActiveSystemAdminCount {
+            group_exists: true,
+            total,
+            target_included,
+        }
+    }
+
+    #[test]
+    fn removing_the_target_still_leaves_an_admin_only_when_another_one_is_counted() {
+        // 目标已计入（在组内且自身启用）：必须还有第二个人才算「操作后仍有人」。
+        assert!(count(2, true).keeps_at_least_one_admin());
+        assert!(count(3, true).keeps_at_least_one_admin());
+        assert!(!count(1, true).keeps_at_least_one_admin());
+
+        // 目标未计入（不在组内，或自身已停用）：任何针对他的操作都不减少启用
+        // 管理员数，即便系统只剩一名启用管理员也必须放行——裸计数误拒的正是这一支。
+        assert!(
+            count(1, false).keeps_at_least_one_admin(),
+            "移出一名已停用的管理员成员不得被误拒"
+        );
+        assert!(count(0, false).keeps_at_least_one_admin());
+    }
+
+    #[test]
+    fn the_count_result_carries_both_the_total_and_the_target_state() {
+        // 守卫需要「总数」与「目标是否已计入」两个事实同时可读：少任何一个，
+        // 调用方都只能靠猜，而猜错的方向就是把合法操作误拒或把不安全操作放行。
+        let snapshot = count(3, true);
+        assert_eq!(snapshot.total(), 3);
+        assert!(snapshot.target_included());
+        assert!(snapshot.group_exists());
+
+        // 组不存在时三个事实都必须给出确定值，不能靠调用方自行推断。
+        let missing = ActiveSystemAdminCount {
+            group_exists: false,
+            total: 0,
+            target_included: false,
+        };
+        assert!(!missing.group_exists());
+        assert_eq!(missing.total(), 0);
+        assert!(!missing.target_included());
     }
 }

@@ -5,7 +5,6 @@
 //! 「用户表为空则本次注册者晋升」是典型 TOCTOU，在并发下会产出多个管理员。
 
 use super::admin::{count_active_system_admins_in_tx, invalidate_users_in_tx};
-use super::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::context::Access;
 use crate::addon::account::{OwnerClaimOutcome, SystemAuthorizationPort, SystemOwnerClaimer};
 use async_trait::async_trait;
@@ -79,27 +78,18 @@ impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
         transaction: &mut Transaction,
         target_user_id: i64,
     ) -> Result<bool, BaseError> {
-        let admins = count_active_system_admins_in_tx(&self.access, ctx, transaction).await?;
-        let Some(group) = self
-            .access
-            .groups()
-            .find_by_key_in_tx(ctx, transaction, SYSTEM_ADMIN_GROUP_KEY)
-            .await?
-        else {
+        // 计数与「目标是否计入」出自同一次加锁读取：调用方据此判断去掉目标之后
+        // 是否还剩人（spec §8.2 的守卫语义是「操作之后仍有至少一名启用管理员」，
+        // 不是「当前至少有两名」）。
+        let admins =
+            count_active_system_admins_in_tx(&self.access, ctx, transaction, target_user_id)
+                .await?;
+        if !admins.group_exists() {
             // 内置全权组不存在时系统本就没有管理员，任何账号操作都不会让这个
             // 不变量变得更糟；保守起见仍按「不能再少」处理。
             return Ok(false);
-        };
-        let members = self
-            .access
-            .groups()
-            .list_members_in_tx(ctx, transaction, group.id)
-            .await?;
-        if !members.contains(&target_user_id) {
-            // 目标本就不是管理员，任何操作都不影响该不变量。
-            return Ok(true);
         }
-        Ok(admins > 1)
+        Ok(admins.keeps_at_least_one_admin())
     }
 
     async fn purge_user_facts_in_tx(

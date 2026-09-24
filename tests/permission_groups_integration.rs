@@ -1209,6 +1209,97 @@ mod harness {
         assert_eq!(status, 200, "删除账号必须成功");
     }
 
+    /// 预先取得一次 Step-up 重认证的 proof。
+    ///
+    /// 并发用例必须把重认证**移出**临界窗口：`step_up_dispatch` 内部是「无 proof
+    /// 触发 challenge → 完成重认证 → 带 proof 重试」三跳，两个任务在这三跳上的
+    /// 抖动（含 argon2 校验耗时）会远超真正要观测的事务窗口，用例会退化成
+    /// 「串行两次调用」，根本压不到临界点。因此这里只负责取 proof，由用例自己在
+    /// 拿到两份 proof 之后用 Barrier 同时发起携带 proof 的那一次调用。
+    ///
+    /// proof 与 Action 绑定（challenge 由该 Action 的无 proof 调用签发），
+    /// 所以 `action` 必须与随后携带它的那次调用完全一致。
+    pub async fn step_up_proof_for(app: &BuiltApp, admin: &Admin, action: &str) -> String {
+        let authorization = format!("Bearer {}", admin.token);
+        let challenge = match dispatch(
+            app,
+            "account.user",
+            action,
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
+        {
+            Err(BaseError::StepUpRequired(challenge)) => challenge,
+            Ok(response) => panic!(
+                "{action} 未受 Step-up 保护：无 proof 也成功了（{}）",
+                response.message
+            ),
+            Err(other) => panic!("{action} 触发 Step-up 失败: {other}"),
+        };
+        let completed = dispatch(
+            app,
+            "account.user",
+            "step_up_complete",
+            json!({
+                "challenge": challenge.challenge,
+                "credentials": { "username": admin.username, "password": PASSWORD },
+            }),
+            &[],
+            PEER_PORT,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("Step-up 完成失败: {error}"));
+        completed
+            .data
+            .as_ref()
+            .and_then(|data| data["proof"].as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("Step-up 完成响应缺少 proof"))
+    }
+
+    /// 携带**已取得的** proof 自助停用，折算为 HTTP 状态码。
+    ///
+    /// 与 `disable_self_status` 的区别只在于 proof 由调用方先行取得，从而让
+    /// 真正的临界区（开启事务 → 读管理员计数 → 写停用）能被 Barrier 精确对齐。
+    pub async fn disable_self_with_proof(app: &BuiltApp, actor: &Admin, proof: &str) -> u16 {
+        let authorization = format!("Bearer {}", actor.token);
+        match dispatch(
+            app,
+            "account.user",
+            "disable_self",
+            json!({}),
+            &[
+                ("authorization", authorization.as_str()),
+                (STEP_UP_PROOF_HEADER, proof),
+            ],
+            PEER_PORT,
+        )
+        .await
+        {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 一个组里当前处于**启用**状态（`users.status = 'active'`）的成员数。
+    ///
+    /// spec §8.2 的不变量是「系统始终至少有一名启用管理员」，所以观测必须落在
+    /// 「成员行 ∩ 启用账号」上：只看成员行会把已停用的成员算进去，从而读不出
+    /// 「管理员被清零」这个真正的违规。
+    pub async fn active_member_count(app: &BuiltApp, group_id: i64) -> u64 {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_group ug JOIN users u ON u.id = ug.user_id \
+             WHERE ug.group_id = ? AND u.status = 'active'",
+        )
+        .bind(group_id)
+        .fetch_one(pool_of(app))
+        .await
+        .unwrap_or_else(|error| panic!("统计组 {group_id} 的启用成员失败: {error}"));
+        u64::try_from(count).unwrap_or_else(|error| panic!("启用成员数为负: {error}"))
+    }
+
     /// 账号当前的 `users.status` 列取值。
     pub async fn user_status(app: &BuiltApp, user_id: i64) -> String {
         sqlx::query_scalar("SELECT status FROM users WHERE id = ?")
@@ -1662,5 +1753,127 @@ async fn deleting_an_account_leaves_no_orphan_authorization_rows() {
         harness::member_rows_of_user(&app, user.user_id).await,
         0,
         "不得残留 user_group 行"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 最后管理员守卫的原子性（spec §8.2 的不可达态）。
+// ---------------------------------------------------------------------------
+
+/// spec §8.2：**无论并发如何交错**，系统都不得失去最后一名启用管理员。
+///
+/// 两个管理员各自自助停用，用真库两条独立连接 + Barrier 让两次「读管理员计数 →
+/// 写停用」真正撞在一起。若计数是在事务外经连接池无锁读出的（缺陷形态），两边都会
+/// 读到「还有两名」，双双放行，system_admin 组被清零；只有把成员行在**调用方事务内**
+/// 按 `user_id` 升序 `FOR UPDATE` 逐个锁定后再判启用状态，第二个进入者才会看到
+/// 第一个的提交从而被守卫拦下。
+///
+/// 断言只钉住不安全的那件事——最终必须仍有至少一名启用管理员；这正是缺陷会打破、
+/// 而修复必须守住的不变量。至于败者是被守卫拦下（400）还是被 MySQL 挑中回滚
+/// （500，两次事务互相持有对方随后还要锁的成员行时 InnoDB 会牺牲一个），在真库上
+/// 两种都会实测出现，且都不影响该不变量：被回滚的一方原子地什么都没写。因此这里
+/// **不**断言「绝不出现 5xx」——那会要求放弃行锁，退回到本项要消灭的缺陷形态。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_self_disables_never_leave_zero_active_admins() {
+    // 单轮的并发交错仍可能被调度偶然化：两个任务恰好一前一后抵达，缺陷里那次
+    // 事务外无锁读就可能读到对方的已提交结果而侥幸放行。所以重复三轮，每轮都由
+    // `build_test_app` 重建库、重新搭出「恰好两名启用管理员」——只要有一轮被清零，
+    // 就说明守卫并非原子。
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let first = harness::bootstrap_admin(&app).await;
+        let second = harness::add_second_admin(&app, &first, "admin2").await;
+        let group_id = harness::system_admin_group_id(&app).await;
+        assert_eq!(
+            harness::active_member_count(&app, group_id).await,
+            2,
+            "第 {round} 轮夹具必须从两名启用管理员出发，否则并发窗口压不出来"
+        );
+
+        // 重认证先行完成，临界区只留「事务内读计数 + 写停用」。
+        let first_proof = harness::step_up_proof_for(&app, &first, "disable_self").await;
+        let second_proof = harness::step_up_proof_for(&app, &second, "disable_self").await;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for (actor, proof) in [(first.clone(), first_proof), (second.clone(), second_proof)] {
+            let app = app.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::disable_self_with_proof(&app, &actor, &proof).await
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(
+                handle
+                    .await
+                    .unwrap_or_else(|e| panic!("任务不应 panic: {e}")),
+            );
+        }
+
+        let active = harness::active_member_count(&app, group_id).await;
+        assert!(
+            active >= 1,
+            "第 {round} 轮并发自助停用两名管理员后系统零管理员（响应 {statuses:?}）\
+             ——spec §8.2 的不可达态被触达"
+        );
+        // 反向钉住「不得双双放行」：清零必然意味着两次都成功，所以这一条与上面
+        // 那条等价，但它把「拒绝」这件事也钉进事实里，避免未来把守卫改成静默忽略。
+        assert!(
+            statuses.iter().filter(|status| **status == 200).count() <= 1,
+            "第 {round} 轮两个并发停用不得都成功，实际响应 {statuses:?}"
+        );
+    }
+}
+
+/// spec §8.2 的守卫语义是「本次操作之后仍有至少一名启用管理员」，
+/// 而不是「当前至少有两名」。
+///
+/// 移出一名**已停用**的管理员成员不会减少启用管理员数：即便组里此刻只剩一名
+/// 启用管理员，这次移出也完全合法。裸计数（`admins <= 1` 就拒）会把这种合法操作
+/// 误拒，因此这一条钉住的是「计数必须能表达目标自身是否已被计入」。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn removing_an_already_disabled_admin_member_is_not_rejected() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    let second = harness::add_second_admin(&app, &first, "admin2").await;
+    let group_id = harness::system_admin_group_id(&app).await;
+
+    // 两名启用管理员时停用其一：守卫必须放行（否则下面的夹具搭不起来）。
+    assert_eq!(
+        harness::admin_disable_status(&app, &first, second.user_id).await,
+        200,
+        "两名启用管理员时停用其一必须成功"
+    );
+    assert_eq!(
+        harness::user_status(&app, second.user_id).await,
+        "disabled",
+        "停用必须真的落库"
+    );
+    assert_eq!(
+        harness::active_member_count(&app, group_id).await,
+        1,
+        "夹具必须真的只剩一名启用管理员"
+    );
+
+    // 现在被移出的目标是一名**已停用**的管理员成员：这次移出不会让启用管理员
+    // 变少（1 → 1），因此必须放行。
+    let status = harness::remove_member_status(&app, &first, group_id, second.user_id).await;
+    assert_eq!(
+        status, 200,
+        "移出一名已停用的管理员成员不减少启用管理员数，必须放行（不得 400/500）"
+    );
+    assert!(
+        !harness::is_member(&app, group_id, second.user_id).await,
+        "放行必须真的删掉成员行"
+    );
+    assert_eq!(
+        harness::active_member_count(&app, group_id).await,
+        1,
+        "移出已停用成员后启用管理员数不变"
     );
 }
