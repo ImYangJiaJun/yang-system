@@ -43,6 +43,39 @@ pub(crate) async fn invalidate_users_in_tx(
     Ok(())
 }
 
+/// 在调用方事务内按 `user_id` **升序**锁定一批用户行（`FOR UPDATE`）。
+///
+/// **锁序契约**：这是「操作者行 + 组成员行」两类行锁的唯一入口。调用方必须
+/// 一次性把本次事务将触碰的**全部**用户行交给它，并在**读取任何有效权限/成员/条目
+/// 快照之前**调用——`add_group_item` 与 `add_group_member` 都遵守这条纪律。
+///
+/// 为什么是「整集升序」而不是「先锁操作者行、再锁成员行」：升序是
+/// [`invalidate_users_in_tx`] 的扇出与 [`count_active_system_admins_in_tx`] 共同遵守的
+/// 全局唯一锁序，只有所有事务都按同一顺序取行锁，环才无从闭合。而「操作者行优先」
+/// 会让操作者成为序列里的**第一个**元素：当操作者本身也是组成员时，同一组的两名
+/// 成员操作者会各自先锁自己、再去要对方的行（A 持 A 等 B，B 持 B 等 A），恰好构成
+/// 一个死锁环——而按升序整集加锁时两个事务的取锁序列完全相同，环不成立。
+/// 操作者行必在这批锁里，因此「同一账号的两个并发请求被这一行串行化」仍然成立：
+/// 后到者一定在先到者提交之后才读到后续快照。
+///
+/// 只借这批行锁做互斥，不在此处递增版本：`invalidate_users_in_tx` 会在同一事务内
+/// 依同一升序重新读取锁值并递增，版本语义（单调递增 + Outbox）仍只有一处实现。
+pub(crate) async fn lock_users_ascending_in_tx(
+    access: &Access,
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    user_ids: &BTreeSet<i64>,
+) -> Result<(), BaseError> {
+    for user_id in user_ids {
+        // `BTreeSet` 的迭代顺序即升序，不要改成 `HashSet`。
+        let _held = access
+            .authorization()
+            .lock_authorization_version(ctx.tools().mysql()?.pool(), transaction, *user_id)
+            .await?;
+    }
+    Ok(())
+}
+
 /// 某用户的当前有效权限（供提权校验使用，与 resolvers 共用解析函数）。
 pub(crate) async fn effective_permissions_of_in_tx(
     access: &Access,

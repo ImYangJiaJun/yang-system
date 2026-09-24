@@ -3,7 +3,7 @@
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
     assert_no_self_escalation, effective_permissions_of_in_tx, ensure_member_limit,
-    invalidate_users_in_tx, simulate_after_join,
+    invalidate_users_in_tx, lock_users_ascending_in_tx, simulate_after_join,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
@@ -82,9 +82,20 @@ async fn join_group_once(
 ) -> Result<bool, BaseError> {
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
-        // 并发串行化：把**目标用户**的授权行锁作为本事务的第一把锁。
+        // 并发串行化与锁序：在读取任何有效权限/组条目快照之前，按 `user_id` 升序
+        // 一次性锁定本事务会触碰的两类用户行——**操作者自己**与**目标用户**。
         //
-        // 这不是可有可无的加锁，它同时消掉两个真实故障（真库死锁报告已确认）：
+        // 操作者行是防自提权的串行化点：`add_group_item` 与 `add_group_member` 的判据
+        // 都是无锁 SELECT，同一账号并发发起两者时会各自读到对方未提交的快照、各自
+        // 通过 §8.1 子集校验，进而完成自提权。把操作者行纳入本事务的第一批锁后，
+        // 后到者一定在先到者提交之后才读到判据快照，两条路径不再能互相穿透。
+        //
+        // 这里把操作者行**显式**写进锁批，而不是依赖「目标恰好就是操作者」这个巧合：
+        // §8.1 的判据只在 `input.user_id == operator_id` 时才生效，那一刻两行确实是同一行；
+        // 但把它写出来，这条串行化保证才是结构性的，不会因为将来给「修改他人」补一条
+        // 判据而静默失效。锁批按 `user_id` 升序整集获取，多锁一行没有额外代价。
+        //
+        // 这批锁同时消掉两个真实故障（真库死锁报告已确认）：
         //
         // 1. `user_group` 到 `users` 的外键让 INSERT 先取父行的**共享锁**，而插入成功
         //    后 `invalidate_users_in_tx` 又要对同一行取**排他锁**。两个并发入组于是
@@ -98,16 +109,14 @@ async fn join_group_once(
         //    之后，后到者一定会在 `insert_member_in_tx` 的前置读取里看到先到者刚提交
         //    的成员行，直接返回幂等结果，根本走不到 INSERT。
         //
-        // 锁序纪律：这必须是事务里的**第一把**锁。它一旦靠后，本函数就会在持有
-        // 外键父行锁之后再去等它，重新制造上面第 1 条那个环。
-        let _locked = access
-            .authorization()
-            .lock_authorization_version(
-                ctx.tools().mysql()?.pool(),
-                &mut transaction,
-                input.user_id,
-            )
-            .await?;
+        // 锁序纪律：这必须是事务里的**第一把**锁，且必须按升序**整集**加锁
+        // （理由见 `lock_users_ascending_in_tx`）——写成「先锁操作者、再锁目标」会让
+        // 两个互相加对方的账号各持自己的行等对方的行，直接构成死锁环。它一旦靠后，
+        // 本函数还会在持有外键父行锁之后再去等它，重新制造上面第 1 条那个环。
+        let mut lock_set = BTreeSet::new();
+        lock_set.insert(operator_id);
+        lock_set.insert(input.user_id);
+        lock_users_ascending_in_tx(access, ctx, &mut transaction, &lock_set).await?;
 
         let group = access
             .groups()

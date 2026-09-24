@@ -807,6 +807,23 @@ mod harness {
         }
     }
 
+    /// 给已存在的账号补一条直授权限（受 Step-up 保护），不重新签发令牌。
+    ///
+    /// [`grant_only`] 只覆盖「恰好一条权限」的夹具；锁序用例需要操作者既持
+    /// `access.groups.write`（否则调用不了组条目 Action），又持一条它准备写进组的
+    /// 权限（否则会撞上 §8.1 的子集校验），因此需要这条补充授权的路径。
+    pub async fn grant_permission(app: &BuiltApp, admin: &Admin, user_id: i64, permission: &str) {
+        step_up_dispatch(
+            app,
+            "access.grants",
+            "grant_permission",
+            json!({ "user_id": user_id, "permission": permission }),
+            admin,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("授予账号 {user_id} 权限 {permission} 失败: {error}"));
+    }
+
     /// 再引导一名系统管理员：注册后经真实成员 Action 加入内置全权组。
     ///
     /// 入组会递增该账号的授权版本，因此令牌在入组**之后**签发——否则它一出生就是
@@ -1002,6 +1019,23 @@ mod harness {
                 .await
                 .unwrap_or_else(|error| panic!("统计组条目失败: {error}"));
         u64::try_from(count).unwrap_or_else(|error| panic!("条目行数为负: {error}"))
+    }
+
+    /// 该组当前是否持有某条权限（按 `permission_group_item` 的事实行判断）。
+    ///
+    /// 自提权用例必须同时观测「成员关系」与「组条目」两个事实：只有二者同时成立，
+    /// 调用者的有效权限才真的变大了——只看其中一个会把「权限已写入但人还没进组」
+    /// 这类无害中间态误报成提权。
+    pub async fn group_holds_item(app: &BuiltApp, group_id: i64, permission: &str) -> bool {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM permission_group_item WHERE group_id = ? AND permission = ?",
+        )
+        .bind(group_id)
+        .bind(permission)
+        .fetch_one(pool_of(app))
+        .await
+        .unwrap_or_else(|error| panic!("查询组 {group_id} 的条目 {permission} 失败: {error}"));
+        count > 0
     }
 
     /// 直写一条组条目行（用于构造目录里已不存在的孤儿条目）。
@@ -2042,6 +2076,227 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
             harness::member_rows_of_group(&app, group_id).await,
             1,
             "第 {round} 轮并发重复加同一成员必须收敛到恰好一行成员"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R3：条目路径与成员路径之间的自提权 TOCTOU（同一账号两个并发请求即可完成）。
+// ---------------------------------------------------------------------------
+
+/// spec §8.1 与决策 D2：应用内不存在自提权路径——**并发交错下同样不存在**。
+///
+/// 缺陷形态：两条路径的判据取自彼此尚未提交的快照，且都是无锁 SELECT：
+/// `add_group_item` 的判据是「调用者此刻在该组内」（`list_members_in_tx`），
+/// `add_group_member` 的判据是「该组此刻的条目」（`list_items_in_tx`）。
+/// 同一账号同时发起这两个请求时：
+///
+/// - 条目请求读到「我还不在此组」→ 整段 §8.1 子集校验被跳过，权限 X 写进组；
+/// - 成员请求读到「该组还没有 X」→ 子集校验通过，把自己写进组。
+///
+/// 两次提交后，调用者成了「持有一条自己原本没有的权限」的组成员——**不需要同伙**，
+/// 一个账号两个并发请求即可完成。串行执行时第二个请求必被 403 拒掉，因此这是纯粹的
+/// 原子性缺失，任何单连接串行用例都压不出来。
+///
+/// 夹具组里有 8 名成员：扇出失效是真的（要逐个锁行并递增授权版本），但刻意**不**做大。
+/// 原因是本用例压的是「读快照的时机」而不是「谁跑得慢」：InnoDB 可重复读下两个事务各自
+/// 的快照在各自第一条普通读时建立，因此只要两次判据读都早于对方的提交，缺陷就必然出现，
+/// 不需要靠人为拖长事务。成员数一旦做得很大，条目请求那批前置行锁本身会把它的快照推到
+/// 成员请求提交之后——用例反而会对「操作者行不在锁集内」这种破坏不再敏感（实测：150 名
+/// 成员时该破坏仍绿，8 名时变红）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_item_add_and_self_member_add_cannot_self_escalate() {
+    const SEEDED_MEMBERS: usize = 8;
+    const ESCALATED: &str = "access.grants.write";
+
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let admin = harness::bootstrap_admin(&app).await;
+        // operator 只被直授 access.groups.write：它一旦拿到 access.grants.write，
+        // 就只可能来自这次并发，不可能来自任何既有授权。
+        let operator = harness::grant_only(&app, &admin, "operator", "access.groups.write").await;
+        let group_id = harness::create_group(&app, &admin, "target", "并发自提权目标组").await;
+        let seeded = harness::seed_members_directly(&app, group_id, SEEDED_MEMBERS).await;
+        assert_eq!(seeded, SEEDED_MEMBERS, "第 {round} 轮夹具必须先把组填满");
+        assert!(
+            !harness::is_member(&app, group_id, operator.user_id).await,
+            "第 {round} 轮夹具必须从「operator 不在组内」出发，否则条目请求的判据会生效"
+        );
+        assert!(
+            !harness::group_holds_item(&app, group_id, ESCALATED).await,
+            "第 {round} 轮夹具必须从「组不持有该权限」出发"
+        );
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        {
+            let app = app.clone();
+            let operator = operator.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::add_group_item_status(&app, &operator, group_id, ESCALATED).await
+            }));
+        }
+        {
+            let app = app.clone();
+            let operator = operator.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::add_member_status(&app, &operator, group_id, operator.user_id).await
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(
+                handle
+                    .await
+                    .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+            );
+        }
+
+        assert!(
+            statuses.iter().all(|status| *status < 500),
+            "第 {round} 轮并发自提权不得泄漏 5xx（含死锁折算），实际 {statuses:?}"
+        );
+        assert!(
+            statuses.iter().filter(|status| **status == 200).count() <= 1,
+            "第 {round} 轮两条路径不可能都成功：串行执行时第二个请求必被 §8.1 子集校验\
+             拒绝（403），实际 {statuses:?}"
+        );
+        let escaped = harness::is_member(&app, group_id, operator.user_id).await
+            && harness::group_holds_item(&app, group_id, ESCALATED).await;
+        assert!(
+            !escaped,
+            "第 {round} 轮并发让 operator 拿到了它原本没有的权限 {ESCALATED}（响应 {statuses:?}）\
+             ——spec §8.1 与决策 D2「应用内不存在自提权路径」被打破"
+        );
+    }
+}
+
+/// spec §13 的扇出锁序测试：**同一组上并发加权限与加成员**不得死锁或超时。
+///
+/// 加权限会扇出锁住该组的**全部**成员（升序），加成员则锁「操作者 + 目标」两行；
+/// 两者都落在 `users` 的行锁上，因此这一次并发真正压的是「不同 Action 的取锁顺序
+/// 是否一致」。组里直写 40 名成员让扇出规模真实存在，两名操作者又都是组内成员，
+/// 使两组行锁必然相交——不按同一顺序取锁就会在这里成环，MySQL 牺牲一个返回 500。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_item_and_member_add_on_the_same_group_do_not_deadlock() {
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let admin = harness::bootstrap_admin(&app).await;
+        let group_id = harness::create_group(&app, &admin, "fanout", "并发扇出组").await;
+        // 扇出要有真实规模：先直写若干成员，让「加权限」那次事务确实要锁住一串用户行。
+        harness::seed_members_directly(&app, group_id, 40).await;
+
+        // 两名成员操作者：都在组内（因此两组行锁必然相交），都持 access.groups.write。
+        let item_operator =
+            harness::grant_only(&app, &admin, "fanout_a", "access.groups.write").await;
+        harness::grant_permission(&app, &admin, item_operator.user_id, "access.grants.read").await;
+        let member_operator =
+            harness::grant_only(&app, &admin, "fanout_b", "access.groups.write").await;
+        harness::add_member(&app, &admin, group_id, item_operator.user_id).await;
+        harness::add_member(&app, &admin, group_id, member_operator.user_id).await;
+        // 授权与入组都递增了授权版本，令牌必须在两者之后重签。
+        let item_operator = harness::relogin(&app, &item_operator).await;
+        let member_operator = harness::relogin(&app, &member_operator).await;
+        let newcomer = harness::register_with_code(&app, "fanout_new", "fanout_new@example.com")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        {
+            let app = app.clone();
+            let operator = item_operator.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                // 操作者已在组内且本来就持有这条权限，§8.1 子集校验放行——本用例测的是锁序，
+                // 不是提权判定。
+                harness::add_group_item_status(&app, &operator, group_id, "access.grants.read")
+                    .await
+            }));
+        }
+        {
+            let app = app.clone();
+            let operator = member_operator.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::add_member_status(&app, &operator, group_id, newcomer).await
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(
+                handle
+                    .await
+                    .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+            );
+        }
+        assert_eq!(
+            statuses,
+            vec![200, 200],
+            "第 {round} 轮同组并发加权限与加成员不得死锁/超时（死锁会被折算成 500），\
+             实际 {statuses:?}"
+        );
+    }
+}
+
+/// spec §13 的锁序测试：**同一组、两名成员操作者并发加权限**不得死锁。
+///
+/// 操作者行锁若写成「先单独锁操作者自己、再按升序锁受影响成员行」，这里必然成环：
+/// 两名操作者各持自己的行，再各自去要对方那一行（A 持 A 等 B，B 持 B 等 A），
+/// MySQL 会牺牲一个，客户端收到 500。升序才是唯一不会成环的取锁顺序。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_item_adds_by_two_member_operators_do_not_deadlock() {
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let admin = harness::bootstrap_admin(&app).await;
+        let group_id = harness::create_group(&app, &admin, "shared", "共同维护的组").await;
+        // 两名操作者各持 `access.groups.write`（否则调用不了条目 Action）外加一条
+        // 它准备写进组的权限（否则会撞上 §8.1 的子集校验）。两条权限必须互不相同，
+        // 否则并发插入会撞上 `(group_id, permission)` 唯一键，把锁序问题掩盖成幂等。
+        let first = harness::grant_only(&app, &admin, "member_a", "access.groups.write").await;
+        harness::grant_permission(&app, &admin, first.user_id, "access.grants.read").await;
+        let second = harness::grant_only(&app, &admin, "member_b", "access.groups.write").await;
+        harness::grant_permission(&app, &admin, second.user_id, "account.users.read").await;
+        harness::add_member(&app, &admin, group_id, first.user_id).await;
+        harness::add_member(&app, &admin, group_id, second.user_id).await;
+        // 授权与入组都会递增各自的授权版本，令牌必须在两者之后重签。
+        let first = harness::relogin(&app, &first).await;
+        let second = harness::relogin(&app, &second).await;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for (operator, permission) in [
+            (first.clone(), "access.grants.read"),
+            (second.clone(), "account.users.read"),
+        ] {
+            let app = app.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::add_group_item_status(&app, &operator, group_id, permission).await
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(
+                handle
+                    .await
+                    .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+            );
+        }
+        assert_eq!(
+            statuses,
+            vec![200, 200],
+            "第 {round} 轮两名成员操作者并发加权限不得死锁/超时，实际 {statuses:?}"
         );
     }
 }
