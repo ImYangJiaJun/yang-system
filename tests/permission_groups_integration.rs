@@ -1124,6 +1124,29 @@ mod harness {
         .unwrap_or_else(|error| panic!("直写组条目 {permission} 失败: {error}"));
     }
 
+    /// 直写一条组条目行并**原样返回**数据库结果（用于断言约束兜底，不 panic）。
+    ///
+    /// 与 [`insert_item_row`] 同列口径，区别只在于把错误交回调用方：本函数专门用来
+    /// 断言 `permission_group_item.group_id → permission_group.id` 这条外键真的存在
+    /// （MySQL 1452），以及「同一条 INSERT 在目标组存在时成功」这条反向对照。
+    pub async fn try_insert_item_row(
+        app: &BuiltApp,
+        group_id: i64,
+        permission: &str,
+        granted_by: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO permission_group_item (group_id, permission, granted_by, occurred_at) \
+             VALUES (?, ?, ?, UNIX_TIMESTAMP())",
+        )
+        .bind(group_id)
+        .bind(permission)
+        .bind(granted_by)
+        .execute(pool_of(app))
+        .await
+        .map(|_| ())
+    }
+
     /// 用已注册账号登录换取 Access Token。
     ///
     /// 「组事实变更后旧 Token 失效」必须拿**变更前**签发的那个 Token 去验证，
@@ -2622,5 +2645,69 @@ async fn group_mutations_without_step_up_are_rejected() {
     assert!(
         !harness::is_member(&app, group_id, member).await,
         "被拒的成员写入不得落库"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R5：`permission_group_item.group_id → permission_group.id` 的外键兜底。
+// ---------------------------------------------------------------------------
+
+/// spec §8.3：条目表的 `group_id` 必须有真外键，孤儿条目必须被**数据库**拒绝。
+///
+/// 缺陷形态：表声明里只有 `user_group` 的两条外键（`fk_user_group_user` /
+/// `fk_user_group_group`），条目表一条也没有。应用层「删组前先查条目」只是一次无锁
+/// SELECT，绕过它（或今后新增的任意写入路径）就能把指向不存在组的条目行落库；
+/// 删掉仍有条目的组时也没有数据库兜底。
+///
+/// 断言刻意分成两半，缺一不可：
+/// 1. **反向对照**——同一条 INSERT 打到真实存在的组必须成功。没有这一条，
+///    「被拒」可能来自权限字符串 CHECK 或别的约束，读起来像是外键生效了但并不是。
+/// 2. **正题**——`group_id` 指向不存在的组时，数据库必须直接以 1452 拒绝。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn an_item_pointing_at_a_missing_group_is_rejected_by_the_database() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "real", "真实组").await;
+
+    // 反向对照：目标组存在时，同样的列口径必须能落库。
+    harness::insert_item_row(&app, group_id, "access.grants.read", admin.user_id).await;
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        1,
+        "夹具必须先把「正常条目能落库」这件事钉住，否则下面的拒绝无法归因"
+    );
+
+    // 正题：目标组不存在。id 由自增主键加上一个远大于当前规模的偏移得到。
+    let missing_group_id = group_id + 1_000_000;
+    let outcome =
+        harness::try_insert_item_row(&app, missing_group_id, "access.grants.read", admin.user_id)
+            .await;
+    let error = match outcome {
+        Ok(()) => panic!(
+            "group_id={missing_group_id} 指向不存在的组，条目行却被数据库接受了\
+             ——spec §8.3 的外键 permission_group_item.group_id → permission_group.id 缺失"
+        ),
+        Err(error) => error,
+    };
+    let code = match &error {
+        // `DatabaseError::code()` 给的是 SQLSTATE（23000，整个「完整性约束违规」类），
+        // 粒度不够——必须取 MySQL 的错误号才钉得住「是外键拒绝」这件事。
+        sqlx::Error::Database(database_error) => database_error
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .map(sqlx::mysql::MySqlDatabaseError::number),
+        other => panic!("期望数据库约束错误（1452），实际 {other:?}"),
+    };
+    assert_eq!(
+        code,
+        Some(1452),
+        "外键缺失时这条 INSERT 会成功、孤儿条目于是可以落库；实际错误 {error}"
+    );
+
+    // 被拒的那一条不得留下任何行。
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        1,
+        "被拒的孤儿条目不得落库（组内仍应只有反向对照那一条）"
     );
 }

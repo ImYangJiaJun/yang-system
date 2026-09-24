@@ -50,6 +50,7 @@ fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError>
 /// 组 → 权限条目。
 pub(crate) fn group_items_table_spec() -> Result<TableSpec, BaseError> {
     let name = table_name("permission_group_item")?;
+    let groups = table_name("permission_group")?;
     let fields = yang_base::fields! {
         id => Key::new().title("ID"),
         group_id => Int::new().title("权限组").require(true).filterable(true)
@@ -75,6 +76,13 @@ pub(crate) fn group_items_table_spec() -> Result<TableSpec, BaseError> {
         .check_named(
             "chk_permission_group_item_permission_format",
             "regexp_like(`permission`, '^[a-z][a-z0-9_]*(\\\\.[a-z][a-z0-9_]*)+$')",
+        )
+        // 外键规则固定 RESTRICT：删除仍有条目的组会被数据库拒绝（spec §8.3），
+        // 与删组的应用层前置检查构成纵深防御；条目表也因此不可能留下孤儿行。
+        .foreign_key_named(
+            "fk_permission_group_item_group",
+            [field_ref(&name, ITEM_GROUP_ID)?],
+            [field_ref(&groups, "id")?],
         ))
 }
 
@@ -182,6 +190,44 @@ mod tests {
             [
                 "fk_user_group_user->users.id",
                 "fk_user_group_group->permission_group.id"
+            ]
+        );
+    }
+
+    /// spec §8.3 要求的三条外键必须**全部**存在，且各自指向正确的表与列。
+    ///
+    /// 只断言外键名发现不了「名字对了、目标指向另一张表」这类错误，因此逐条钉住
+    /// (本地列 → 目标列) 的完整形状。`permission_group_item.group_id →
+    /// permission_group.id` 这一条曾整体缺失：删组应用层检查之外没有数据库兜底，
+    /// 条目表可以留下指向不存在组的孤儿行。
+    #[test]
+    fn every_group_fact_table_declares_its_foreign_keys_from_spec_section_8_3() {
+        let mut declared: Vec<String> = Vec::new();
+        for spec in [group_items_table_spec(), user_group_table_spec()] {
+            let spec = spec.unwrap_or_else(|error| panic!("{error}"));
+            for foreign_key in &spec.foreign_keys {
+                let columns: Vec<String> =
+                    foreign_key.fields.iter().map(ToString::to_string).collect();
+                let referenced: Vec<String> = foreign_key
+                    .referenced_fields
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                declared.push(format!(
+                    "{}: [{}] -> [{}]",
+                    foreign_key.name,
+                    columns.join(","),
+                    referenced.join(",")
+                ));
+            }
+        }
+        assert_eq!(
+            declared,
+            [
+                "fk_permission_group_item_group: [permission_group_item.group_id] \
+                 -> [permission_group.id]",
+                "fk_user_group_user: [user_group.user_id] -> [users.id]",
+                "fk_user_group_group: [user_group.group_id] -> [permission_group.id]",
             ]
         );
     }
