@@ -2263,6 +2263,489 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
+// R1（收尾回合）：成员关系读锁定化——成员变更必须以**成员行**为串行化点。
+// ---------------------------------------------------------------------------
+
+/// 用 Barrier 同时驱动两条组成员写请求（各自携带先行取得的一次性 proof）。
+///
+/// 两个任务的操作者**分别给出**：并发用例必须能用两个不同的账号发起请求，否则两次
+/// 请求会因为锁批里共有的操作者行而被串行化，从而压不出「两个并发请求各自读到同一份
+/// 陈旧快照」这个窗口。
+///
+/// 把重认证移出临界窗口是既有并发用例的统一做法：Barrier 对齐的必须是
+/// 「开事务 → 读判据 → 写事实」那一段，而不是三跳 Step-up 的耗时抖动。
+async fn concurrent_member_mutations(
+    app: &BuiltApp,
+    group_id: i64,
+    left: (harness::Admin, &'static str, i64, String),
+    right: (harness::Admin, &'static str, i64, String),
+) -> Vec<u16> {
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for (operator, action, user_id, proof) in [left, right] {
+        let app = app.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            harness::member_mutation_with_proof(&app, &operator, action, group_id, user_id, &proof)
+                .await
+                .0
+        }));
+    }
+    let mut statuses = Vec::new();
+    for handle in handles {
+        statuses.push(
+            handle
+                .await
+                .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+        );
+    }
+    statuses
+}
+
+/// spec §8.2 的不可达态在**成员移除**路径上同样不可达：并发移出管理员不得把组清零。
+///
+/// 缺陷形态：守卫的成员名单来自 `list_members_in_tx` 的**普通一致性读**，而「移出一个
+/// 成员」改的是 `user_group` 的成员行、不是 `users.status`——守卫持有的 users 行锁因此
+/// 完全串行化不了成员变更。两个并发的移出各自读到同一份陈旧名单 [A,B]、各自数出 2 名
+/// 启用管理员，双双放行，`system_admin` 组成员归零（spec §8.2 明称该状态不可达）。
+///
+/// 真库 + 两条独立连接 + Barrier：两个任务先各自取好一次性 proof，Barrier 对齐的因此
+/// 是「开事务 → 读成员 → 判据 → 删成员行」那一段。两个场景各跑三轮，避免调度偶然。
+///
+/// 断言只钉住不安全的那件事——最终必须仍有至少一名启用管理员，且两个请求不得都成功。
+/// 败者是被守卫拦下（400/403）还是被授权版本水位线拦下（401）都无关紧要：三者都只是
+/// 拒绝，不改变不变量。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_admin_removals_never_leave_zero_active_admins() {
+    // 场景一：同一名管理员并发发两条移出——一条移出自己，一条移出另一名管理员。
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let first = harness::bootstrap_admin(&app).await;
+        let second = harness::add_second_admin(&app, &first, "admin2").await;
+        let group_id = harness::system_admin_group_id(&app).await;
+        assert_eq!(
+            harness::active_member_count(&app, group_id).await,
+            2,
+            "第 {round} 轮场景一必须从两名启用管理员出发，否则并发窗口压不出来"
+        );
+
+        let remove_other = harness::member_mutation_proof(
+            &app,
+            &first,
+            "remove_group_member",
+            group_id,
+            second.user_id,
+        )
+        .await;
+        let remove_self = harness::member_mutation_proof(
+            &app,
+            &first,
+            "remove_group_member",
+            group_id,
+            first.user_id,
+        )
+        .await;
+
+        let statuses = concurrent_member_mutations(
+            &app,
+            group_id,
+            (
+                first.clone(),
+                "remove_group_member",
+                second.user_id,
+                remove_other,
+            ),
+            (
+                first.clone(),
+                "remove_group_member",
+                first.user_id,
+                remove_self,
+            ),
+        )
+        .await;
+
+        let active = harness::active_member_count(&app, group_id).await;
+        assert!(
+            active >= 1,
+            "第 {round} 轮场景一：同一管理员并发移出自己与另一名管理员后系统零管理员\
+             （响应 {statuses:?}）——spec §8.2 的不可达态被触达"
+        );
+        assert_eq!(
+            statuses.iter().filter(|status| **status == 200).count(),
+            1,
+            "第 {round} 轮场景一：两条并发移出恰好只能有一个成功（另一个必须被守卫或被\
+             授权版本水位线拦下），实际响应 {statuses:?}"
+        );
+    }
+
+    // 场景二：两名管理员**互相**移出对方（各自的操作者身份不同，锁集仍然相交）。
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let first = harness::bootstrap_admin(&app).await;
+        let second = harness::add_second_admin(&app, &first, "admin2").await;
+        let group_id = harness::system_admin_group_id(&app).await;
+        assert_eq!(
+            harness::active_member_count(&app, group_id).await,
+            2,
+            "第 {round} 轮场景二必须从两名启用管理员出发"
+        );
+
+        let first_removes_second = harness::member_mutation_proof(
+            &app,
+            &first,
+            "remove_group_member",
+            group_id,
+            second.user_id,
+        )
+        .await;
+        let second_removes_first = harness::member_mutation_proof(
+            &app,
+            &second,
+            "remove_group_member",
+            group_id,
+            first.user_id,
+        )
+        .await;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for (operator, target, proof) in [
+            (first.clone(), second.user_id, first_removes_second),
+            (second.clone(), first.user_id, second_removes_first),
+        ] {
+            let app = app.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::member_mutation_with_proof(
+                    &app,
+                    &operator,
+                    "remove_group_member",
+                    group_id,
+                    target,
+                    &proof,
+                )
+                .await
+                .0
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(
+                handle
+                    .await
+                    .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+            );
+        }
+
+        let active = harness::active_member_count(&app, group_id).await;
+        assert!(
+            active >= 1,
+            "第 {round} 轮场景二：两名管理员并发互相移出后系统零管理员\
+             （响应 {statuses:?}）——spec §8.2 的不可达态被触达"
+        );
+        assert_eq!(
+            statuses.iter().filter(|status| **status == 200).count(),
+            1,
+            "第 {round} 轮场景二：互相移出恰好只能有一个成功（另一个必须被守卫拦下），\
+             实际响应 {statuses:?}"
+        );
+    }
+}
+
+/// 成员上限必须真的封死：并发把两名**不同**成员加进只剩一个空位的组，终态不得越过 200。
+///
+/// 缺陷形态：`add_group_member` 的上限判定建立在 `list_members_in_tx` 的**非锁定快照**上。
+/// 两名**不同操作者**并发加**不同**成员时，两个事务的锁批（操作者 + 目标）互不相交，
+/// 请求因此真的并发执行、各自判定 `len + 1 <= 200` 合法，成员数越过 `MAX_GROUP_MEMBERS`
+/// （`repository.rs` 里「成员集合被上限约束成有界规模」的注释随之失真）。
+///
+/// 操作者必须取两个不同账号：同一操作者的两次请求会因为锁批里共有的操作者行而被串行化，
+/// 那样压不出这个窗口（实测：同一操作者时本用例在缺陷代码上照样绿）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_adds_cannot_exceed_the_member_limit() {
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let admin = harness::bootstrap_admin(&app).await;
+        let group_id = harness::create_group(&app, &admin, "nearly_full", "只剩一个空位").await;
+        let seeded =
+            harness::seed_members_directly(&app, group_id, harness::MAX_GROUP_MEMBERS - 1).await;
+        assert_eq!(
+            seeded,
+            harness::MAX_GROUP_MEMBERS - 1,
+            "第 {round} 轮夹具必须先把组填到只剩一个空位"
+        );
+
+        let left = harness::register_with_code(&app, "limit_left", "limit_left@example.com")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let right = harness::register_with_code(&app, "limit_right", "limit_right@example.com")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let left_operator =
+            harness::grant_only(&app, &admin, "limit_op_left", "access.groups.write").await;
+        let right_operator =
+            harness::grant_only(&app, &admin, "limit_op_right", "access.groups.write").await;
+
+        let left_proof = harness::member_mutation_proof(
+            &app,
+            &left_operator,
+            "add_group_member",
+            group_id,
+            left,
+        )
+        .await;
+        let right_proof = harness::member_mutation_proof(
+            &app,
+            &right_operator,
+            "add_group_member",
+            group_id,
+            right,
+        )
+        .await;
+
+        let statuses = concurrent_member_mutations(
+            &app,
+            group_id,
+            (left_operator, "add_group_member", left, left_proof),
+            (right_operator, "add_group_member", right, right_proof),
+        )
+        .await;
+
+        assert_eq!(
+            statuses.iter().filter(|status| **status == 200).count(),
+            1,
+            "第 {round} 轮只剩一个空位时两次并发加成员只能成功一个，实际响应 {statuses:?}"
+        );
+        assert_eq!(
+            harness::member_rows_of_group(&app, group_id).await,
+            u64::try_from(harness::MAX_GROUP_MEMBERS).unwrap_or(u64::MAX),
+            "第 {round} 轮并发加成员后组内必须恰好 {} 人，不得越过上限（响应 {statuses:?}）",
+            harness::MAX_GROUP_MEMBERS
+        );
+    }
+}
+
+/// 并发把两名**不同**成员加进同一个**空**组：两次都合法（两名成员，上限 200 之内），
+/// 必须双双成功，绝不能死锁。
+///
+/// 这是收尾回合修掉的死锁形态，且与 `concurrent_adds_cannot_exceed_the_member_limit`
+/// 互补：那条用例的组已有 199 名成员，成员行 `FOR UPDATE` 会取到 199 把**记录锁**，
+/// 两事务因此天然串行化，压不出缺陷；本条从一个**成员集合为空**的组出发，旧实现里成员行
+/// `FOR UPDATE` 在空集上只取到彼此兼容的**间隙锁**，根本没有串行化——两名不同操作者的
+/// users 行锁批又不相交（不同操作者、不同目标），于是两事务都读到空名单、都放行、
+/// 都去 INSERT，最后在插入意向锁与对方的间隙锁上互相等待，MySQL 牺牲一个返回 40001 → 500。
+///
+/// 断言直接钉死「响应里不得出现任何非 200」：死锁被折算成 500，一次都不允许。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_adds_of_different_members_do_not_deadlock() {
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let admin = harness::bootstrap_admin(&app).await;
+        // 全新空组：成员集合为空，正是间隙锁压不出串行化、旧实现必死锁的初态。
+        let group_id = harness::create_group(&app, &admin, "empty_race", "空组并发加").await;
+        assert_eq!(
+            harness::member_rows_of_group(&app, group_id).await,
+            0,
+            "第 {round} 轮夹具必须从成员集合为空的组出发，否则压不出旧缺陷"
+        );
+
+        let left = harness::register_with_code(&app, "race_left", "race_left@example.com")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let right = harness::register_with_code(&app, "race_right", "race_right@example.com")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        // 操作者必须是两个**不同**账号：同一操作者会让两次请求的 users 行锁批相交、
+        // 在锁上被串行化，那样压不出「锁批不相交却都放行」的窗口。
+        let left_operator =
+            harness::grant_only(&app, &admin, "race_op_left", "access.groups.write").await;
+        let right_operator =
+            harness::grant_only(&app, &admin, "race_op_right", "access.groups.write").await;
+
+        let left_proof = harness::member_mutation_proof(
+            &app,
+            &left_operator,
+            "add_group_member",
+            group_id,
+            left,
+        )
+        .await;
+        let right_proof = harness::member_mutation_proof(
+            &app,
+            &right_operator,
+            "add_group_member",
+            group_id,
+            right,
+        )
+        .await;
+
+        let statuses = concurrent_member_mutations(
+            &app,
+            group_id,
+            (left_operator, "add_group_member", left, left_proof),
+            (right_operator, "add_group_member", right, right_proof),
+        )
+        .await;
+
+        assert_eq!(
+            statuses,
+            vec![200, 200],
+            "第 {round} 轮并发加两名不同成员到空组不得死锁（死锁会被折算成 500），\
+             实际响应 {statuses:?}"
+        );
+        assert_eq!(
+            harness::member_rows_of_group(&app, group_id).await,
+            2,
+            "第 {round} 轮两次都成功时组内必须恰好两名成员"
+        );
+    }
+}
+
+/// 幂等分支不得被上限误拒：重复添加一个**已经在组里**的成员不新增任何人，必须幂等成功。
+///
+/// 缺陷形态：上限判定 `ensure_member_limit(len + 1)` 排在 `insert_member_in_tx` 的幂等判定
+/// **之前**，于是组满 200 人时重复加一个已在组内的成员会被判成「第 201 名」而拒绝
+/// （400）——本次请求根本不会新增成员，这是纯粹的误拒。判定口径必须是「本次是否真的会
+/// 新增」。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn adding_an_existing_member_at_the_limit_stays_idempotent() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "capped", "满员的组").await;
+    let target = harness::register_with_code(&app, "cap_target", "cap_target@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    // 先填到 199 名占位成员，再经真实 Action 把 target 加成第 200 名（这一名是合法的）。
+    let seeded =
+        harness::seed_members_directly(&app, group_id, harness::MAX_GROUP_MEMBERS - 1).await;
+    assert_eq!(seeded, harness::MAX_GROUP_MEMBERS - 1);
+    harness::add_member(&app, &admin, group_id, target).await;
+    assert_eq!(
+        harness::member_rows_of_group(&app, group_id).await,
+        u64::try_from(harness::MAX_GROUP_MEMBERS).unwrap_or(u64::MAX),
+        "夹具必须先把组填到恰好上限，且 target 已是成员"
+    );
+    assert!(harness::is_member(&app, group_id, target).await);
+
+    // 重复添加同一名已成为成员的账号：本次不会新增任何人 → 必须幂等成功。
+    let (status, message) = harness::add_member_outcome(&app, &admin, group_id, target).await;
+    assert_eq!(
+        status, 200,
+        "重复添加已在组内的成员不得被成员上限误判为超限（本次不会新增任何成员）：{message}"
+    );
+    assert_eq!(
+        harness::member_rows_of_group(&app, group_id).await,
+        u64::try_from(harness::MAX_GROUP_MEMBERS).unwrap_or(u64::MAX),
+        "幂等分支不得改动成员数"
+    );
+}
+
+/// spec §13 的扇出锁序测试：**同一组上并发「移出成员」与「加权限」**不得死锁或超时。
+///
+/// 移出成员会在同一个事务里读全权组成员并逐个锁住成员的 `users` 行（守卫与扇出），
+/// 加权限则按升序扇出锁住该组的全部成员——两者必然在同一批用户行上相交。若成员变更
+/// 路径在持有成员行锁之后才去取用户行锁、而别的路径以相反顺序取锁，这里就会成环，
+/// MySQL 牺牲一个返回 500。本用例钉住「不成环」：两条路径都必须成功。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_member_removal_and_item_add_do_not_deadlock() {
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let admin = harness::bootstrap_admin(&app).await;
+        let second = harness::add_second_admin(&app, &admin, "admin2").await;
+        let third = harness::add_second_admin(&app, &admin, "admin3").await;
+        let admin_group = harness::system_admin_group_id(&app).await;
+        // 扇出要有真实规模：另两名管理员都在同一个普通组里，给这个组加权限会锁住
+        // 「操作者 + 全体成员」三行用户行，正好与移出成员那次事务的用户行锁相交。
+        //
+        // 刻意**不**把操作者自己写进这个组：入组会递增成员自己的授权版本，操作者的
+        // 令牌会随之失效，后续请求会停在 401（与「移出成员」无关的噪声）。操作者
+        // 本身是全权组成员，已持有目录里全部权限，因此不加进组也照样能加条目。
+        let shared = harness::create_group(&app, &admin, "mixed", "并发锁序组").await;
+        harness::add_member(&app, &admin, shared, second.user_id).await;
+        harness::add_member(&app, &admin, shared, third.user_id).await;
+
+        let remove_proof = harness::member_mutation_proof(
+            &app,
+            &admin,
+            "remove_group_member",
+            admin_group,
+            third.user_id,
+        )
+        .await;
+        let item_proof = harness::item_mutation_proof(
+            &app,
+            &admin,
+            "add_group_item",
+            shared,
+            "account.users.read",
+        )
+        .await;
+
+        let removed = third.user_id;
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        {
+            let app = app.clone();
+            let operator = admin.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::member_mutation_with_proof(
+                    &app,
+                    &operator,
+                    "remove_group_member",
+                    admin_group,
+                    removed,
+                    &remove_proof,
+                )
+                .await
+                .0
+            }));
+        }
+        {
+            let app = app.clone();
+            let operator = admin.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::item_mutation_with_proof(
+                    &app,
+                    &operator,
+                    "add_group_item",
+                    shared,
+                    "account.users.read",
+                    &item_proof,
+                )
+                .await
+                .0
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(
+                handle
+                    .await
+                    .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+            );
+        }
+        assert_eq!(
+            statuses,
+            vec![200, 200],
+            "第 {round} 轮同一组上并发移出成员与加权限不得死锁/超时（死锁会被折算成 500），\
+             实际响应 {statuses:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // R3：条目路径与成员路径之间的自提权 TOCTOU（同一账号两个并发请求即可完成）。
 // ---------------------------------------------------------------------------
 

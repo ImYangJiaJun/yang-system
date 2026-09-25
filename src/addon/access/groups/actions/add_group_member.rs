@@ -82,12 +82,12 @@ async fn join_group_once(
 ) -> Result<bool, BaseError> {
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
-        // 并发串行化与锁序：在读取任何有效权限/组条目快照之前，按 `user_id` 升序
-        // 一次性锁定本事务会触碰的两类用户行——**操作者自己**与**目标用户**。
+        // 第一把锁：users 行。按 `user_id` 升序一次性锁定本事务会触碰的两类用户行
+        // ——**操作者自己**与**目标用户**。
         //
         // 操作者行是防自提权的串行化点：`add_group_item` 与 `add_group_member` 的判据
         // 都是无锁 SELECT，同一账号并发发起两者时会各自读到对方未提交的快照、各自
-        // 通过 §8.1 子集校验，进而完成自提权。把操作者行纳入本事务的第一批锁后，
+        // 通过 §8.1 子集校验，进而完成自提权。把操作者行纳入本事务的锁批后，
         // 后到者一定在先到者提交之后才读到判据快照，两条路径不再能互相穿透。
         //
         // 这里把操作者行**显式**写进锁批，而不是依赖「目标恰好就是操作者」这个巧合：
@@ -109,21 +109,37 @@ async fn join_group_once(
         //    之后，后到者一定会在 `insert_member_in_tx` 的前置读取里看到先到者刚提交
         //    的成员行，直接返回幂等结果，根本走不到 INSERT。
         //
-        // 锁序纪律：这必须是事务里的**第一把**锁，且必须按升序**整集**加锁
-        // （理由见 `lock_users_ascending_in_tx`）——写成「先锁操作者、再锁目标」会让
-        // 两个互相加对方的账号各持自己的行等对方的行，直接构成死锁环。它一旦靠后，
-        // 本函数还会在持有外键父行锁之后再去等它，重新制造上面第 1 条那个环。
+        // 锁序纪律：必须按升序**整集**加锁（理由见 `lock_users_ascending_in_tx`）——写成
+        // 「先锁操作者、再锁目标」会让两个互相加对方的账号各持自己的行等对方的行，
+        // 直接构成死锁环。
         let mut lock_set = BTreeSet::new();
         lock_set.insert(operator_id);
         lock_set.insert(input.user_id);
         lock_users_ascending_in_tx(access, ctx, &mut transaction, &lock_set).await?;
 
+        // 第二把锁：**目标组的组行**（`FOR UPDATE`）。它是成员变更的串行化点：
+        // 同一组的两个成员变更在这里排队，后到者读到的成员名单必然包含先到者的提交，
+        // 于是「幂等判定」与「成员上限判定」第一次真正建立在一份不会漂移的名单上。
+        //
+        // 缺陷形态（真库已证伪）：上限判定原先建立在 `list_members_in_tx` 的**非锁定**
+        // 快照上，两名不同操作者并发加不同成员时事务锁批互不相交、互不阻塞，各自读到
+        // 「199 名成员」而双双放行，成员数越过 `MAX_GROUP_MEMBERS`。
+        //
+        // 锁序：必须在 users 行锁**之后**取（全局锁序见 `domain::groups::admin` 的模块
+        // 注释）。这不是任意的——`add_group_item` 先锁 users 行、再在插入条目时由外键取
+        // 父组行的 S 锁，次序正是「users 行 → 组行」；成员变更若反过来就会与它成环。
+        // 也正因为组行是**主键等值命中的记录锁**（不是间隙锁），它对空成员集合的组同样
+        // 能真正串行化——旧实现拿成员行 `FOR UPDATE` 当串行化点时，空组上只剩彼此兼容的
+        // 间隙锁，两个并发加成员都通过它、随后靠插入意向锁与间隙锁互锁成环（40001）。
         let group = access
             .groups()
-            .find_by_id_in_tx(ctx, &mut transaction, input.group_id)
+            .lock_group_in_tx(ctx, &mut transaction, input.group_id)
             .await?
             .ok_or_else(|| BaseError::RecordNotFound("权限组".to_string()))?;
 
+        // 以下普通读是本事务的**第一批一致性读**：Read View 在此建立，必然晚于两把行锁，
+        // 因此能看到先于持锁的全部提交；持锁期间同一组的成员变更又被组行锁挡住，
+        // 这份成员名单在提交前不会变。
         let members = access
             .groups()
             .list_members_in_tx(ctx, &mut transaction, group.id)
@@ -139,9 +155,16 @@ async fn join_group_once(
 
         // 成员上限：本接口是唯一能**增加**成员的路径，`ensure_member_limit` 不在这里
         // 调用，组就能经 API 无界增长，`repository.rs` 里「成员集合被 MAX_GROUP_MEMBERS
-        // 约束成有界规模」的注释也就与事实不符。本次插入会新增一行，因此交给它的必须是
-        // 「插入后」的成员数：该函数的口径是「超过上限才拒绝」，恰好 200 名合法。
-        ensure_member_limit(members.len() as u64 + 1)?;
+        // 约束成有界规模」的注释也就与事实不符。判定口径必须是「**本次是否真的会新增**」：
+        //
+        // - 目标已是成员时本次不会新增任何人，重复调用必须按幂等成功返回，不能被上限
+        //   误拒（缺陷形态：判定排在幂等分支之前，组满 200 人时重复加一个已在组内的成员
+        //   会被判成「第 201 名」而拒绝）；
+        // - 真的会新增时，交给它的必须是「插入后」的成员数，该函数的口径是「超过上限才
+        //   拒绝」，恰好 200 名合法。成员数读自组行锁保护下的名单，事务提交前不会漂移。
+        if !members.contains(&input.user_id) {
+            ensure_member_limit(members.len() as u64 + 1)?;
+        }
 
         // spec §8.1 主不变量：任何操作都不得使调用者自身有效权限增大。
         // 只有「目标就是调用者自己」时才存在提权可能；修改他人是正常的授权管理行为。

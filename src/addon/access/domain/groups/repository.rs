@@ -20,7 +20,7 @@ use std::sync::Arc;
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery};
 use yang_base::BaseError;
-use yang_db::Transaction;
+use yang_db::{field, table, CompareOp, QueryBuilder, Transaction};
 
 /// 内置全权组的固定标识：引导首个账号时幂等创建。
 pub(crate) const SYSTEM_ADMIN_GROUP_KEY: &str = "system_admin";
@@ -426,6 +426,62 @@ impl GroupRepository {
             .collect::<Result<Vec<i64>, BaseError>>()?;
         members.sort_unstable();
         Ok(members)
+    }
+
+    /// 按主键读取组事实，并**锁住这一行**（`permission_group` 主键上的 `FOR UPDATE`，
+    /// 返回 `None` 表示组不存在）。
+    ///
+    /// 这把行锁是成员变更的**串行化点**。`permission_group.id` 是主键，等值命中已存在的
+    /// 行时 InnoDB 只加**记录锁**、不加间隙锁——这是唯一索引等值命中的特例，也是它优于
+    /// 「锁成员行」的地方（见下）。锁住它之后，「读成员名单 → 判据 → 写成员行」整段被
+    /// 串行化：同一组的后到者一定在先到者提交之后才读到成员名单，成员上限判定与幂等判定
+    /// 因此建立在不会漂移的名单上。
+    ///
+    /// **为什么不能拿 `user_group` 的成员行当串行化点（收尾回合真库实测的死锁）**：
+    /// 对一个**成员集合为空**的组做 `SELECT ... WHERE group_id = ? FOR UPDATE` 只会命中
+    /// 间隙锁，而间隙锁之间彼此兼容——于是「第一把锁」根本没串行化任何东西。两个并发
+    /// 加成员都通过它、都读到空名单；随后一方先拿到 users 行锁，另一方在 users 行上排队；
+    /// 先到者接着 INSERT，它的**插入意向锁**却与后到者仍持有的间隙锁冲突。环闭合，MySQL
+    /// 只能牺牲一个（真库 InnoDB 报告：一方持 `fk_user_group_group` 上的 X 间隙锁等 users
+    /// 行，另一方持 users 行等 `user_group` 上的插入意向锁），客户端拿到 40001 → 500。
+    /// 换成组行记录锁后，同一组的成员变更在**第一步**就排队，间隙锁连出现的机会都没有。
+    ///
+    /// **锁序**：调用方必须**先**取 users 行锁、**再**调用本方法，即相对次序恒为
+    /// 「users 行 → 组行」（`add_group_member` 与 `remove_group_member` 都遵守；
+    /// 全局锁序见 `domain::groups::admin` 的模块注释）。这条次序不是任意选的：
+    /// `add_group_item` 先按升序锁 users 行、再在插入条目时由外键取**父组行**的 S 锁，
+    /// 次序正是「users 行 → 组行」。成员变更若反过来（组行 → users 行），两条路径就会在
+    /// 同一组行与同一批 users 行上构成 ABBA 环——把一个死锁换成另一个。
+    pub(crate) async fn lock_group_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        group_id: i64,
+    ) -> Result<Option<GroupRecord>, BaseError> {
+        let rows = transaction
+            .select_for_update::<(i64, String, String, Option<String>, i64)>(
+                QueryBuilder::from_pool(ctx.tools().mysql()?.pool(), table!("permission_group"))
+                    .field(field!("id"))
+                    .field(field!("group_key"))
+                    .field(field!("title"))
+                    .field(field!("description"))
+                    .field(field!("created_by"))
+                    .where_and(field!("id"), CompareOp::Eq, group_id)?,
+            )
+            .await
+            .map_err(BaseError::from)?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(
+                |(id, group_key, title, description, created_by)| GroupRecord {
+                    id,
+                    group_key,
+                    title,
+                    description,
+                    created_by,
+                },
+            ))
     }
 
     /// 删除一个用户**在所有组**里的成员行，返回删除行数（账号删除时的孤儿清理）。
