@@ -42,7 +42,7 @@
 - **运行支撑表是定长数组**：`infrastructure_definitions() -> Result<[TableDefinition; 6], BaseError>`（`src/infrastructure/schema.rs:47-56`），并有精确断言 6 张表名的测试（同文件 `:289-303`）。该数组的既定定位是「非 UI 运行支撑表」。
 - **外键规则恒为 `RESTRICT` 且不可变**：`foreign_key_named` 不接受 `ON DELETE`/`ON UPDATE`（`crates/yang-base/src/table/definition.rs:628-655`）；`schema_sync` 只增不删，永不删除表、列、索引或约束（`docs/contracts/SCHEMA.md:12,30`）。→ **外键一旦声明就永久存在**。
 - **权限字符串不允许通配**：`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$` 与 DB CHECK `chk_authz_grant_permission_format` 双重约束（`grants/table.rs:60-63`）。`*` 与 `system.*` 均非法。
-- **已声明的权限全集（10 条）**：`access.grants.read`、`access.grants.write`、`account.users.read`、`account.users.manage`、`demo.notes.read`、`demo.notes.write`、`feishu.datasource.read`、`feishu.datasource.write`、`feishu.datasource.secret`、`feishu.option.read`。
+- **已声明的权限全集**：撰写时 10 条（`access.grants.read`、`access.grants.write`、`account.users.read`、`account.users.manage`、`demo.notes.read`、`demo.notes.write`、`feishu.datasource.read`、`feishu.datasource.write`、`feishu.datasource.secret`、`feishu.option.read`）。本分支交付后为 **13 条**：新增 §9.1 的 `access.groups.read` / `access.groups.write`，以及凭据签发拆分引入的 `account.users.reset_credentials`（见 §9.1；它同时是管理员等价权限，见 §8.1）。
 
 ### 2.3 直接阻断目标实现的四个缺口
 
@@ -286,6 +286,28 @@ before = 调用者当前的有效权限集合
 
 该不变量必须有单元测试（覆盖上述两条提权路径）与集成测试（真实 Action 调用被拒）。
 
+**附加规则二（G2）：把管理员等价权限授予他人，要求调用者本身是全权组成员。**
+
+防自提权只约束「操作使自己权限增大」，挡不住危害面同级、方向相反的另一条路径：**调用者把
+管理员等价权限授予别人**（直授他人、把该权限加进某个组、或把用户加进已持有该权限的组），这
+等于把管理员身份转授出去。因此对管理员等价权限的**授予侧**单独加闸门，要求调用者是内置全权组
+`system_admin` 的成员：
+
+- **判据**是调用者的组成员身份，而不是「调用者是否持有该权限」——全权组成员天然持有全部权限，
+  他们执行这类授予必须放行。
+- **三条路径**（缺一即漏）：`grant_permission`（直授）、`add_group_item`（把权限加进组）、
+  `add_group_member`（把用户加进持有该权限的组）。第三条最容易漏：组本身没变，变的是成员，
+  加成员会把组已有的全部权限（含管理员等价那条）转授出去，因此判据看**目标组的条目**，
+  而不是本次请求里带了哪条权限。
+- **fail-closed**：内置全权组不存在 ⇒ 视作无人在组内，一律拒绝（此时没有任何主体有资格授予
+  这类权限）。首账号引导直接建组成员行、不「授予权限」，故不经本闸门，不受影响。
+- 被拒返回 `PermissionDenied` → **403**（见 §9.3），消息点名该权限与它为何是管理员等价。
+
+管理员等价权限的**显式清单**（`src/addon/access/domain/sensitive_permissions.rs`，代码侧唯一
+事实来源，逐条附理由、由测试钉住）见 §9.1。`access.grants.write` / `access.groups.write` 刻意
+不在清单内：它们能改动授权事实，但上述闸门让它们无论如何都授不出管理员等价权限，是「危害面被
+闸门封顶的委派权限」，一并列入只会把正常运营彻底锁死。
+
 ### 8.2 最后一名管理员守卫
 
 **管理员的定义（写死）**：属于 `system_admin` 组的 `status = 'active'` 用户。
@@ -327,7 +349,21 @@ before = 调用者当前的有效权限集合
 
 ### 9.1 新增权限
 
-`access.groups.read`、`access.groups.write`。只要 Action 声明 `.permissions(...)`，即自动进入权限目录（`permission_catalog.rs:40-72`），也自动包含在 `system_admin` 组的有效权限内。
+`access.groups.read`、`access.groups.write`；另有凭据签发拆分引入的 `account.users.reset_credentials`（从 `account.users.manage` 中剥离，`admin_issue_password_reset` 改声明它）。只要 Action 声明 `.permissions(...)`，即自动进入权限目录（`permission_catalog.rs:40-72`），也自动包含在 `system_admin` 组的有效权限内。
+
+三条权限的定位不同：`access.groups.*` 是权限组的读写面；`account.users.reset_credentials` 对任意账号签发密码重置凭证、可夺取其身份，因此被列入**管理员等价权限清单**。
+
+**管理员等价权限清单（G2，代码侧唯一事实来源）**：`src/addon/access/domain/sensitive_permissions.rs` 的 `ADMIN_EQUIVALENT_PERMISSIONS` 显式列出「获得或夺取其他主体凭据/身份，或绕过其余一切授权检查」的权限，每条附中文理由（理由会拼进 403 的拒绝信息）。当前 3 条：
+
+| 权限 | 为什么是管理员等价 |
+|---|---|
+| `account.users.reset_credentials` | 对任意账号签发密码重置凭证：凭此重置其口令并登录成他 |
+| `feishu.datasource.secret` | 回显数据源封存的 Token 明文，拿到即可冒充该数据源调用本系统 |
+| `feishu.datasource.write` | 创建/轮换数据源会把新凭据明文返回给调用者，签发即持有 |
+
+清单结果被 `project_permissions` 写进 `PermissionEntry::admin_equivalent`，随目录读接口返回；授予侧的闸门见 §8.1 附加规则二，错误语义见 §9.3。清单与冻结 Catalog 的一致性由单测 `every_listed_permission_is_declared_by_the_catalog` 与集成测试 `the_permission_catalog_marks_exactly_the_admin_equivalent_permissions` 钉住（权限一旦改名，两处都会变红）。
+
+> **修订（G2，2026-09-26）**：本节原只列本规格新增的 `access.groups.*`；随凭据签发拆分与管理员等价清单落地，补入 `account.users.reset_credentials` 与清单表，使「新增/受关注的权限」与代码一致。
 
 ### 9.2 Action 清单（挂在 `access.groups`）
 
@@ -374,6 +410,7 @@ before = 调用者当前的有效权限集合
 | 移除最后一名管理员 | `ParamInvalid("user_id", ...)` | 400 |
 | 组权限变更时成员数超上限（§6.3） | `ParamInvalid("member_count", ...)` | 400 |
 | 自提权尝试（子集校验失败） | `PermissionDenied` | 403 |
+| 非全权组成员授予/传递管理员等价权限（直授、加组条目、加组成员） | `PermissionDenied`，消息含权限名与理由 | 403 |
 | 写操作缺少/无效/已消费的 Step-up proof | `StepUpRequired` | 428 |
 | 目录未安装 | `ConfigError` | 500（fail-closed） |
 
@@ -426,7 +463,7 @@ before = 调用者当前的有效权限集合
 |---|---|
 | `docs/architecture/foundation-baseline.md:37` | **D2 修订**（§3.1） |
 | `docs/architecture/foundation-baseline.md:39` | **D4 标注**已按预留接口扩展（§3.2） |
-| `docs/contracts/AUTHZ_GRANTS.md` | 重写「初始授权」章节（引导为主路径、运维 SQL 为灾备）；新增权限组契约章节；更新权限目录来源描述（当前漏述 `module.default_permissions` 来源） |
+| `docs/contracts/AUTHZ_GRANTS.md` | 重写「初始授权」章节（引导为主路径、运维 SQL 为灾备）；新增权限组契约章节；更新权限目录来源描述（当前漏述 `module.default_permissions` 来源）；新增「管理员等价权限」节（清单、目录标记与授予闸门，G2） |
 | `docs/architecture/authorization-writers.md` | 登记新 writer：组生命周期、哨兵声明 |
 | `docs/contracts/SCHEMA.md` | 无需改动（声明式 Schema 不变） |
 | `AGENTS.md:7`、`AGENTS.md:35` | 「没有任何账号会成为系统最终管理员」「access 为预留端口、权限管理未交付」两处口径 |

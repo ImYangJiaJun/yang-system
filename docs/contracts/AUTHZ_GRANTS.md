@@ -1,7 +1,7 @@
 # 授权存储与权限目录契约
 
 **生成：** 2026-09-03
-**更新：** 2026-09-26（账号管理拆分出独立的凭据签发权限 `account.users.reset_credentials`）；
+**更新：** 2026-09-26（新增「管理员等价权限」显式清单与授予闸门；账号管理拆分出独立的凭据签发权限 `account.users.reset_credentials`）；
 2026-09-24（首账号引导成为初始授权主路径；新增一层权限组）
 **范围：** `access` Addon（`src/addon/access/`）提供的权限基础设施：权限目录、
 直授存储、权限组、Token 授权快照扩展与授权管理接口。
@@ -17,7 +17,8 @@
   （`src/addon/access/domain/permission_catalog.rs` 的 `project_permissions`，两者取并集后
   按权限字符串稳定排序，声明者按操作 ID 稳定排序去重）。组合根在 `AppBuilder::build`
   后安装投影（`src/app.rs`），运行期只读；目录未安装时 `entries()` / `ensure_declared`
-  一律 fail-closed（`ConfigError`）。
+  一律 fail-closed（`ConfigError`）。每条条目另带一个**危害面标记** `admin_equivalent`
+  （见「管理员等价权限」节），随目录读接口 `GET /api/v1/access/permissions` 一起返回。
 - **有效权限 = 直授 ∪ 组权限**：`authz_grant` 的直授行，以及该用户所属全部权限组的
   贡献（普通组取条目与目录的交集；内置全权组取**整个目录**，见下）。Token 中的角色
   仍为账号域固定的 `user`（组名不写入 `roles`），权限由 access 的
@@ -39,7 +40,51 @@
 
 拆分后两条权限各自独立授予：只持 `account.users.manage` 不再能签发重置凭证。二者都由
 Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限目录，内置全权组
-（`system_admin`）按目录自动持有二者。
+（`system_admin`）按目录自动持有二者。两条中只有 `account.users.reset_credentials` 是
+「管理员等价权限」（见下节），`account.users.manage` 不是。
+
+### 管理员等价权限（清单与授予闸门）
+
+有些权限的危害面不是「能改某个业务对象」，而是**能获得或夺取其他主体的凭据/身份，或能绕过
+其余一切授权检查**。把这样的权限授予任何人（包括授予别人），都等于把管理员身份转授出去，
+因此不能让只持 `access.grants.write` / `access.groups.write` 的委派者自行完成。
+
+**清单是代码侧的显式、可评审事实**（`src/addon/access/domain/sensitive_permissions.rs` 的
+`ADMIN_EQUIVALENT_PERMISSIONS`，唯一事实来源），当前恰有 3 条，每条附中文理由（理由会拼进
+403 的拒绝信息，因此在生产路径上真的被读取）：
+
+| 管理员等价权限 | 为什么等价 |
+|---|---|
+| `account.users.reset_credentials` | 对任意账号签发密码重置凭证：凭此重置其口令并登录成他，即夺取该账号的身份与全部权限 |
+| `feishu.datasource.secret` | 回显数据源封存的 Token 明文；该 Token 是数据源主体的入站凭据，拿到即可冒充该数据源调用本系统，不再经任何授权检查 |
+| `feishu.datasource.write` | 创建与轮换数据源都会把新凭据的明文返回给调用者（`create_datasource_table` / `rotate_token`），签发即持有，与直接读取凭据等价 |
+
+清单刻意**不含** `access.grants.write` / `access.groups.write` / `account.users.manage`：前两者能
+改动授权事实，但授予侧的闸门让它们无论如何都授不出管理员等价权限，是「危害面被闸门封顶的
+委派权限」，一并列入只会把正常运营彻底锁死；`account.users.manage` 只能停用/启用账号（受
+「只有全权组成员能修改全权组成员」守卫约束），既不签发凭据也夺不走身份。
+
+**目录标记**：`project_permissions` 对每条已声明权限查该清单，把结果写进
+`PermissionEntry::admin_equivalent`，随目录读接口返回。前端据此把危害面显示出来——
+「可配置的前提是每个权限的危害面可见」。
+
+**授予闸门**：向任何主体授予或传递管理员等价权限时，要求调用者**本身是内置全权组
+`system_admin` 的成员**（判据是组成员身份，而不是「调用者是否持有该权限」）。三条路径都被
+覆盖：
+
+| 路径 | 接口 | 守卫 |
+|---|---|---|
+| 直接授予 | `POST /api/v1/access/grants` | `ensure_may_grant_permission_in_tx`（判据看本次要授予的权限） |
+| 把该权限加进组 | `POST /api/v1/access/groups/items` | 同上（判据看本次要加的权限） |
+| 把用户加进**已持有**该权限的组 | `POST /api/v1/access/groups/members` | `ensure_may_modify_members_of_group_in_tx`（判据看目标组的条目：变的是成员，转授的是组已有的全部权限） |
+
+被拒时返回 `PermissionDenied` → **403**，消息点名该权限与理由。**fail-closed**：内置全权组
+不存在时视为无人在组内，一律拒绝——此时没有任何主体有资格授予管理员等价权限。首账号引导
+（`SystemOwnerClaimer`）**不经这条闸门**（它直接建组成员行，不「授予权限」），因此闸门不会挡住
+引导。权限改名后清单会静默失效，故两处测试钉住它：单测
+`every_listed_permission_is_declared_by_the_catalog` 用真实冻结 Catalog 断言清单每条仍被声明；
+集成测试 `the_permission_catalog_marks_exactly_the_admin_equivalent_permissions` 从目录读接口
+整体比对「被标记集合 == 清单」。
 
 ## `authz_grant` 表
 
@@ -167,6 +212,7 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 | 移除最后一名 active 管理员（移出组 / 停用 / 删除） | `ParamInvalid("user_id")` | 400 |
 | 自提权尝试（子集校验失败） | `PermissionDenied`，消息点名新增的权限 | 403 |
 | 非 `system_admin` 成员修改该组成员 | `PermissionDenied` | 403 |
+| 非 `system_admin` 成员授予/传递管理员等价权限（直授、加组条目、加组成员） | `PermissionDenied`，消息含权限名与理由 | 403 |
 | 目录未安装 | `ConfigError` | 500（fail-closed） |
 
 **两处口径提示**：其一，设计 §9.3 曾把「删除仍有成员的组」「移除最后一名管理员」
@@ -208,6 +254,13 @@ writer 边界登记见 `docs/architecture/authorization-writers.md`：
 并发下多个注册请求只有一个能持有哨兵行，因此**恰好产生一个管理员**；仲裁发生在数据库层，
 应用层不判空。运维可经 `GET /api/v1/access/groups`（内置组的 `is_builtin` /
 `effective_all`）与 `GET /api/v1/access/groups/{id}` 的成员列表确认引导结果。
+
+**与管理员等价权限闸门的关系**：管理员等价权限（见前文「管理员等价权限」节）只能由
+`system_admin` 组成员授予。引导恰好在同一事务内建立 `system_admin` 组、把首个账号加为成员，
+因此引导完成后系统**总有一位有资格授予这类权限的成员**，不会陷入「需要管理员才能造出管理员」
+的死锁；而引导完成前（无全权组成员）任何管理员等价权限都授不出去，这是 fail-closed 的预期
+行为（正好挡住「先靠一条伪造/误授的管理员等价权限自举成管理员」）。灾备 SQL 路径直接写真事实行、
+不经应用层闸门；但若改用管理接口授予这类权限，操作者同样必须是该组成员。
 
 ## 灾备路径（运维 SQL）
 
@@ -268,6 +321,10 @@ COMMIT;
   与 grants 只覆盖 grant/revoke 同例）。组条目与组成员的变更**不挂重认证中间件**，其防线
   是「防自提权子集校验 + 最后管理员守卫 + Step-up 保护的组生命周期」——即攻击者无法凭空
   获得一个自己能写的新组，也无法越过后两条不变量。
+- **管理员等价权限的授予闸门**：`POST /access/grants`、`POST /access/groups/items`、
+  `POST /access/groups/members` 三条路径在涉及管理员等价权限（见「管理员等价权限」节）时，
+  要求调用者是内置全权组 `system_admin` 成员，否则 403。这三条接口本身仍分别要求
+  `access.grants.write` / `access.groups.write`，闸门是在其之上追加的一层主体判据。
 - **全部写操作**（组生命周期、条目、成员）都写 append-only 审计，按
   `docs/contracts/AUDIT.md` 契约记录。
 - 加组权限经 `ensure_declared` fail-closed；**移组权限刻意不做目录校验**，已从 Catalog
