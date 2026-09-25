@@ -47,6 +47,23 @@ pub(crate) trait SystemAuthorizationPort: Send + Sync {
         target_user_id: i64,
     ) -> Result<bool, BaseError>;
 
+    /// spec §8.1 附加规则在账号生命周期路径上的落地：**只有全权组成员能修改全权组成员**。
+    ///
+    /// 与 `add_group_member` / `remove_group_member` 的守卫是同一条机制——同一个
+    /// `system_admin` 成员集合、同一句拒绝文案——只是调用点在账号域（account 不依赖
+    /// access，跨域事实一律经本端口）。目标用户不是全权组成员时恒放行：修改非全权组
+    /// 成员是正常的账号管理行为。
+    ///
+    /// 返回 `Err(PermissionDenied)`（403）表示「调用者不是全权组成员，而目标已是」，
+    /// 该操作必须被拒绝。
+    async fn ensure_operator_may_modify_system_admin_member(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        operator_id: i64,
+        target_user_id: i64,
+    ) -> Result<(), BaseError>;
+
     /// 账号删除时清理其授权事实（`authz_grant` 直授与 `user_group` 成员行）。
     ///
     /// 必须经 access 的 writer 方法完成，**不得**在 account 侧直写这两张表，

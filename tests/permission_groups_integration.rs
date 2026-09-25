@@ -907,8 +907,11 @@ mod harness {
 
     /// 携带**已取得的** proof 驱动组成员写 Action，折算为（状态码, 消息）。
     ///
-    /// 并发用例必须这样调用：把重认证移出临界窗口后，Barrier 对齐的才是真正的
-    /// 「事务内读判据 → 写事实」那一段。
+    /// 并发用例必须这样调用：把 argon2 重认证的耗时从两次请求里剔除，两个请求才可能
+    /// 真的重叠。注意 Barrier 对齐的是**请求起点**（`barrier.wait()` 在整次 dispatch
+    /// 之前），不是「事务内读判据 → 写事实」那一段——那之前还有 JWT 鉴权、proof 验签与
+    /// Redis 单次消费，之后还有一条审计 INSERT。临界段的重叠靠真库的独立连接与行锁，
+    /// 不靠 Barrier 本身精确对齐。
     pub async fn member_mutation_with_proof(
         app: &BuiltApp,
         operator: &Admin,
@@ -1012,7 +1015,9 @@ mod harness {
     /// 用操作者本人的密码完成一次 Step-up 重认证，返回一次性 proof。
     ///
     /// 与 [`step_up_dispatch_with_path`] 内部那两跳等价，单独抽出来是为了让并发用例
-    /// 能把重认证**移出**临界窗口：先取好 proof，再用 Barrier 同时发起携 proof 的那一次调用。
+    /// 把重认证的耗时从两次请求里剔除：先取好 proof，再用 Barrier 同时发起携 proof 的
+    /// 那一次调用。Barrier 对齐的是请求起点，不是事务临界段（见
+    /// [`member_mutation_with_proof`] 的说明）。
     async fn complete_step_up(
         app: &BuiltApp,
         admin: &Admin,
@@ -1397,11 +1402,12 @@ mod harness {
 
     /// 预先取得一次 Step-up 重认证的 proof。
     ///
-    /// 并发用例必须把重认证**移出**临界窗口：`step_up_dispatch` 内部是「无 proof
+    /// 并发用例必须把重认证的耗时从请求里剔除：`step_up_dispatch` 内部是「无 proof
     /// 触发 challenge → 完成重认证 → 带 proof 重试」三跳，两个任务在这三跳上的
     /// 抖动（含 argon2 校验耗时）会远超真正要观测的事务窗口，用例会退化成
     /// 「串行两次调用」，根本压不到临界点。因此这里只负责取 proof，由用例自己在
-    /// 拿到两份 proof 之后用 Barrier 同时发起携带 proof 的那一次调用。
+    /// 拿到两份 proof 之后用 Barrier 同时发起携带 proof 的那一次调用。即便如此，
+    /// Barrier 对齐的也只是请求起点；事务临界段的重叠由真库的独立连接与行锁保证。
     ///
     /// proof 与 Action 绑定（challenge 由该 Action 的无 proof 调用签发），
     /// 所以 `action` 必须与随后携带它的那次调用完全一致。
@@ -1475,8 +1481,11 @@ mod harness {
 
     /// 携带**已取得的** proof 自助停用，折算为 HTTP 状态码。
     ///
-    /// 与 `disable_self_status` 的区别只在于 proof 由调用方先行取得，从而让
-    /// 真正的临界区（开启事务 → 读管理员计数 → 写停用）能被 Barrier 精确对齐。
+    /// 与 `disable_self_status` 的区别只在于 proof 由调用方先行取得，使两次请求不必
+    /// 各自等一次 argon2 重认证。这里**不**声称 Barrier 能对齐临界区：`barrier.wait()`
+    /// 在整次 dispatch **之前**，它之后还有 JWT 鉴权、proof 验签、Redis 单次消费，然后
+    /// 才进事务；临界段（开事务 → 读管理员计数 → 写停用）的重叠由两条独立连接与
+    /// `users` 行锁保证，Barrier 只负责让两次请求被同时投出。
     pub async fn disable_self_with_proof(app: &BuiltApp, actor: &Admin, proof: &str) -> u16 {
         let authorization = format!("Bearer {}", actor.token);
         match dispatch(
@@ -1879,6 +1888,14 @@ async fn the_last_system_admin_cannot_be_removed_from_the_admin_group() {
 /// 且设计同节要求「不为个别用例扩展框架错误类型」，因此拒绝落成既有的 `ParamInvalid`
 /// （400）——与 `remove_group_member` 的最后管理员守卫同一取舍。断言要钉住的事实不变：
 /// 三条路径都必须被拒、绝不能是 5xx，且拒绝后账号状态与成员关系原封不动。
+///
+/// **停用路径落到 403 而非 400**：操作者刻意选非全权组成员，于是先撞上 §8.1 的
+/// admin-only 守卫（`a_non_admin_cannot_disable_a_system_admin_member` 钉的就是它）。
+/// 两条守卫在停用路径上的相对次序决定了这一点：admin-only 判定在前，最后管理员判定在后，
+/// 而非管理员根本没有资格停用全权组成员，也就走不到 §8.2 那一步。这不削弱本条要钉的不变量
+/// （最后一名管理员一样没被停用，状态与成员行原封不动），只是说明在 `admin_disable_user`
+/// 上 §8.2 已被 §8.1 蕴含：任何已认证的操作者只要本身是全权组成员，就自己也是启用管理员，
+/// 目标便不可能是「最后一名」。删除与自停用两条路径没有这条前置，仍由 §8.2 以 400 拒绝。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要真实 MySQL/Redis"]
 async fn the_last_system_admin_cannot_be_disabled_or_deleted() {
@@ -1890,7 +1907,10 @@ async fn the_last_system_admin_cannot_be_disabled_or_deleted() {
     let manager = harness::grant_only(&app, &admin, "manager", "account.users.manage").await;
 
     let disable_status = harness::admin_disable_status(&app, &manager, admin.user_id).await;
-    assert_eq!(disable_status, 400, "最后一名系统管理员不可被停用");
+    assert_eq!(
+        disable_status, 403,
+        "非全权组成员不得停用全权组成员（§8.1 admin-only 守卫先于 §8.2 生效）"
+    );
 
     let delete_status = harness::delete_account_status(&app, &admin).await;
     assert_eq!(delete_status, 400, "最后一名系统管理员不可被删除");
@@ -1915,7 +1935,11 @@ async fn the_last_system_admin_cannot_be_disabled_or_deleted() {
     );
 }
 
-/// 有两名管理员时，移除其一必须成功（守卫不能过度收紧）。
+/// 有两名管理员时，停用其一必须成功（守卫不能过度收紧）。
+///
+/// 它是 [`a_non_admin_cannot_disable_a_system_admin_member`] 的活性对照：操作者
+/// `first` **就是**全权组成员，因此 §8.1 的 admin-only 守卫必须放行——若守卫被写成
+/// 「一律拒绝」，只有这一条会变红。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要真实 MySQL/Redis"]
 async fn one_of_two_admins_can_be_disabled() {
@@ -1929,6 +1953,50 @@ async fn one_of_two_admins_can_be_disabled() {
         harness::user_status(&app, second.user_id).await,
         "disabled",
         "停用必须真的落库"
+    );
+}
+
+/// spec §8.1 附加规则：**只有全权组成员能修改全权组成员**——管理端停用路径同样适用。
+///
+/// 缺陷形态：`add_group_member` / `remove_group_member` 都有这条 admin-only 守卫，
+/// `admin_disable_user` 只有 §8.2 的最后管理员判定。于是持 `account.users.manage` 的
+/// 非管理员可以反复停用全权组成员——只要每次停用后组内仍剩 >=1 名启用管理员，最后管理员
+/// 判定就一路放行，直到只剩他指定的那一名。停用与移出的区别只在于目标账号多了一层
+/// 「被停用」，因此这条守卫必须与成员变更路径完全对称。
+///
+/// 守卫不得过度收紧的对照由 [`one_of_two_admins_can_be_disabled`] 覆盖：全权组成员停用
+/// 另一名全权组成员必须仍然放行（200）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_non_admin_cannot_disable_a_system_admin_member() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    let second = harness::add_second_admin(&app, &first, "admin2").await;
+    // 攻击者：只直授 `account.users.manage`，完全不在全权组内。
+    let outsider = harness::grant_only(&app, &first, "outsider", "account.users.manage").await;
+    let group_id = harness::system_admin_group_id(&app).await;
+
+    // 夹具必须从「两名启用管理员」出发：此时最后管理员判定会放行（去掉一个仍剩一个），
+    // 因此这一次停用能否被拦下，只取决于 admin-only 守卫在不在。
+    assert_eq!(
+        harness::active_member_count(&app, group_id).await,
+        2,
+        "夹具必须从两名启用管理员出发，否则最后管理员判定会先拦下，用例测不到 admin-only 守卫"
+    );
+
+    let status = harness::admin_disable_status(&app, &outsider, second.user_id).await;
+    assert_eq!(
+        status, 403,
+        "非全权组成员不得修改全权组成员，必须 403 PermissionDenied"
+    );
+    assert_eq!(
+        harness::user_status(&app, second.user_id).await,
+        "active",
+        "被拒的停用不得改动账号状态"
+    );
+    assert!(
+        harness::is_member(&app, group_id, second.user_id).await,
+        "被拒的操作不得顺手删掉全权组成员行"
     );
 }
 
@@ -1976,8 +2044,10 @@ async fn deleting_an_account_leaves_no_orphan_authorization_rows() {
 
 /// spec §8.2：**无论并发如何交错**，系统都不得失去最后一名启用管理员。
 ///
-/// 两个管理员各自自助停用，用真库两条独立连接 + Barrier 让两次「读管理员计数 →
-/// 写停用」真正撞在一起。若计数是在事务外经连接池无锁读出的（缺陷形态），两边都会
+/// 两个管理员各自自助停用，用真库两条独立连接 + Barrier 让两次请求被同时投出。
+/// （Barrier 对齐的是请求起点：`wait()` 之后还有鉴权、proof 验签与 Redis 消费，才进事务；
+/// 两次「读管理员计数 → 写停用」的重叠由独立连接与 `users` 行锁保证，不是 Barrier 的功劳。）
+/// 若计数是在事务外经连接池无锁读出的（缺陷形态），两边都会
 /// 读到「还有两名」，双双放行，system_admin 组被清零；只有把成员行在**调用方事务内**
 /// 按 `user_id` 升序 `FOR UPDATE` 逐个锁定后再判启用状态，第二个进入者才会看到
 /// 第一个的提交从而被守卫拦下。
@@ -2005,7 +2075,8 @@ async fn concurrent_self_disables_never_leave_zero_active_admins() {
             "第 {round} 轮夹具必须从两名启用管理员出发，否则并发窗口压不出来"
         );
 
-        // 重认证先行完成，临界区只留「事务内读计数 + 写停用」。
+        // 重认证先行完成，两次请求的耗时差只剩「鉴权 → 验签 → 读计数 → 写停用」，
+        // 其中真正要撞在一起的是各自事务里的读计数与写停用。
         let first_proof = harness::step_up_proof_for(&app, &first, "disable_self").await;
         let second_proof = harness::step_up_proof_for(&app, &second, "disable_self").await;
 
@@ -2034,11 +2105,19 @@ async fn concurrent_self_disables_never_leave_zero_active_admins() {
             "第 {round} 轮并发自助停用两名管理员后系统零管理员（响应 {statuses:?}）\
              ——spec §8.2 的不可达态被触达"
         );
-        // 反向钉住「不得双双放行」：清零必然意味着两次都成功，所以这一条与上面
-        // 那条等价，但它把「拒绝」这件事也钉进事实里，避免未来把守卫改成静默忽略。
-        assert!(
-            statuses.iter().filter(|status| **status == 200).count() <= 1,
-            "第 {round} 轮两个并发停用不得都成功，实际响应 {statuses:?}"
+        // 恰好一条成功：这是「两个请求真的撞上了」的活性证据，两个方向都不能松。
+        //   - 两条都 200 ⇒ 守卫不原子，组被清零（已被上一条断言钉住）；
+        //   - 两条都不是 200（例如 [500,500] 双双被回滚、[400,400] 全部提前出局）⇒
+        //     什么都没发生，用例退化成同义反复，同样是回归。
+        // 设计上必然恰好一条 200：先到者通过守卫并停用自己；后到者或被守卫拒绝（400，
+        // 它读到先到者已停用、再停用自己就零管理员），或被 MySQL 挑中做死锁牺牲者并
+        // 原子回滚（500）——被回滚的一方什么都没写。这里因此不再写 `<= 1`：那个较宽的
+        // 形式会被 [500,500] / [400,400] 满足，恰好漏掉上面第二种回归。
+        assert_eq!(
+            statuses.iter().filter(|status| **status == 200).count(),
+            1,
+            "第 {round} 轮两个并发停用必须恰好一条成功（既不得双双放行，也不得双双被拒），\
+             实际响应 {statuses:?}"
         );
     }
 }
@@ -2204,9 +2283,10 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
 
-        // 重认证移出临界窗口：两个任务各持一份一次性 proof。若让每个任务在 Barrier 之后
+        // 重认证先做完：两个任务各持一份一次性 proof。若让每个任务在 Barrier 之后
         // 自己走「challenge → argon2 → 重试」三跳，两次真正插入会被 argon2 的耗时错开，
-        // 用例会退化成串行两次调用，压不到唯一键冲突那条路径。
+        // 用例会退化成串行两次调用，压不到唯一键冲突那条路径。（Barrier 对齐请求起点，
+        // 两次插入是否真的撞在唯一键上由真库的独立连接与索引锁决定。）
         let mut proofs = Vec::new();
         for _ in 0..2 {
             proofs.push(
@@ -2263,7 +2343,9 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
-// R1（收尾回合）：成员关系读锁定化——成员变更必须以**成员行**为串行化点。
+// R1（收尾回合）：成员关系读锁定化——成员变更必须串行化，且判据必须在持锁之后读。
+// 串行化点与锁序的权威描述见 src/addon/access/domain/groups/admin.rs 的模块注释；
+// 收尾回合已把串行化点从「成员行」改为「目标组组行」，此处不复述，避免再次漂移。
 // ---------------------------------------------------------------------------
 
 /// 用 Barrier 同时驱动两条组成员写请求（各自携带先行取得的一次性 proof）。
@@ -2272,8 +2354,10 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
 /// 请求会因为锁批里共有的操作者行而被串行化，从而压不出「两个并发请求各自读到同一份
 /// 陈旧快照」这个窗口。
 ///
-/// 把重认证移出临界窗口是既有并发用例的统一做法：Barrier 对齐的必须是
-/// 「开事务 → 读判据 → 写事实」那一段，而不是三跳 Step-up 的耗时抖动。
+/// 把重认证的耗时剔出请求是既有并发用例的统一做法。要说准 Barrier 的作用：它对齐的是
+/// **请求起点**——`wait()` 之后还有 JWT 鉴权、proof 验签与 Redis 单次消费才进事务，
+/// 事务提交之后还有审计 INSERT——不是「开事务 → 读判据 → 写事实」那一段。它只是保证
+/// 两次请求被同时投出，临界段的重叠由独立连接与行锁负责。
 async fn concurrent_member_mutations(
     app: &BuiltApp,
     group_id: i64,
@@ -2310,8 +2394,9 @@ async fn concurrent_member_mutations(
 /// 完全串行化不了成员变更。两个并发的移出各自读到同一份陈旧名单 [A,B]、各自数出 2 名
 /// 启用管理员，双双放行，`system_admin` 组成员归零（spec §8.2 明称该状态不可达）。
 ///
-/// 真库 + 两条独立连接 + Barrier：两个任务先各自取好一次性 proof，Barrier 对齐的因此
-/// 是「开事务 → 读成员 → 判据 → 删成员行」那一段。两个场景各跑三轮，避免调度偶然。
+/// 真库 + 两条独立连接 + Barrier：两个任务先各自取好一次性 proof，Barrier 只对齐两次
+/// 请求的**起点**（它之后还有鉴权、验签与 Redis 消费），事务临界段的重叠由两条独立
+/// 连接与行锁负责。两个场景各跑三轮，避免调度偶然。
 ///
 /// 断言只钉住不安全的那件事——最终必须仍有至少一名启用管理员，且两个请求不得都成功。
 /// 败者是被守卫拦下（400/403）还是被授权版本水位线拦下（401）都无关紧要：三者都只是
@@ -2795,8 +2880,9 @@ async fn concurrent_item_add_and_self_member_add_cannot_self_escalate() {
 
         // 两条路径都是授权事实变更、都已在 Step-up 登记内，因此都要重认证。取 proof
         // 的那一次调用只留在 Step-up 守卫里（连 Action 都没进），不会动上面刚断言的
-        // 前置事实；把重认证**移出**临界窗口后，Barrier 对齐的才是「各自第一条普通读
-        // 建立快照」那一刻——这正是缺陷暴露的窗口。
+        // 前置事实；把重认证的耗时剔出请求后，两次请求才会被 Barrier 同时投出，各自的
+        // 事务也才有机会在「第一条普通读建立快照」那一刻重叠——这正是缺陷暴露的窗口。
+        // （Barrier 对齐的仍只是请求起点，不是快照建立本身；重叠是否发生由真库调度决定。）
         let item_proof =
             harness::item_mutation_proof(&app, &operator, "add_group_item", group_id, ESCALATED)
                 .await;
@@ -2860,10 +2946,18 @@ async fn concurrent_item_add_and_self_member_add_cannot_self_escalate() {
             statuses.iter().all(|status| *status < 500),
             "第 {round} 轮并发自提权不得泄漏 5xx（含死锁折算），实际 {statuses:?}"
         );
-        assert!(
-            statuses.iter().filter(|status| **status == 200).count() <= 1,
-            "第 {round} 轮两条路径不可能都成功：串行执行时第二个请求必被 §8.1 子集校验\
-             拒绝（403），实际 {statuses:?}"
+        // 恰好一条成功——两个方向都要钉：
+        //   - 两条都 200 ⇒ 两条路径各自读到对方的陈旧快照，完成了自提权（下面那条
+        //     `escaped` 断言也会随之变红）；
+        //   - 两条都不是 200 ⇒ 两条路径被互相卡死。串行执行时先到者必合法（先加条目
+        //     时操作者还不是成员、入组不改变其权限；先入组时组里还没有该条目、入组同样
+        //     不改变其权限），后到者才被 §8.1 子集校验拒绝（403），因此 [403,403] 这种
+        //     「全都拒掉」的过度串行化同样违反设计意图，`<= 1` 会把它放过去。
+        assert_eq!(
+            statuses.iter().filter(|status| **status == 200).count(),
+            1,
+            "第 {round} 轮两条并发路径必须恰好一条成功（另一条被 §8.1 子集校验拒绝），\
+             实际 {statuses:?}"
         );
         let escaped = harness::is_member(&app, group_id, operator.user_id).await
             && harness::group_holds_item(&app, group_id, ESCALATED).await;
@@ -2906,9 +3000,9 @@ async fn concurrent_item_and_member_add_on_the_same_group_do_not_deadlock() {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
 
-        // 重认证必须移出临界窗口，否则 argon2 的耗时会错开两次真正的事务，
-        // 「不同 Action 的取锁顺序是否一致」就压不出来了。proof 与操作者主体绑定，
-        // 因此两人各取各的。
+        // 重认证必须先做完，否则 argon2 的耗时会错开两次真正的事务，「不同 Action 的
+        // 取锁顺序是否一致」就压不出来了。proof 与操作者主体绑定，因此两人各取各的。
+        // （Barrier 只对齐请求起点；两次事务的重叠由独立连接与行锁决定。）
         let item_proof = harness::item_mutation_proof(
             &app,
             &item_operator,
@@ -3008,8 +3102,9 @@ async fn concurrent_item_adds_by_two_member_operators_do_not_deadlock() {
         let first = harness::relogin(&app, &first).await;
         let second = harness::relogin(&app, &second).await;
 
-        // 重认证移出临界窗口（proof 与主体绑定，两人各取各的），Barrier 对齐的才是
-        // 两次「锁操作者行 + 按升序锁成员行」的事务本身。
+        // 重认证先做完（proof 与主体绑定，两人各取各的），Barrier 才能让两次请求被同时
+        // 投出，从而给「锁操作者行 + 按升序锁成员行」的两次事务一个真正重叠的机会。
+        // Barrier 对齐的是请求起点，两次事务是否重叠由真库的独立连接与行锁决定。
         let first_proof = harness::item_mutation_proof(
             &app,
             &first,

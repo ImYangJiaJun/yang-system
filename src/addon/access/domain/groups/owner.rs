@@ -5,6 +5,7 @@
 //! 「用户表为空则本次注册者晋升」是典型 TOCTOU，在并发下会产出多个管理员。
 
 use super::admin::{count_active_system_admins_in_tx, invalidate_users_in_tx};
+use super::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::context::Access;
 use crate::addon::account::{OwnerClaimOutcome, SystemAuthorizationPort, SystemOwnerClaimer};
 use async_trait::async_trait;
@@ -108,4 +109,47 @@ impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
             .await?;
         Ok(())
     }
+
+    async fn ensure_operator_may_modify_system_admin_member(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        operator_id: i64,
+        target_user_id: i64,
+    ) -> Result<(), BaseError> {
+        // 与组成员 Action 的守卫同源：按 `group_key` 找到内置全权组，读它的成员名单，
+        // 再判「目标在名单内、而操作者不在」。这里刻意复用
+        // `count_active_system_admins_in_tx` 所用的同一对仓库读（`find_by_key_in_tx` +
+        // `list_members_in_tx`），不另造一套成员查询；也刻意**不**取组行锁——账号生命
+        // 周期路径与成员变更同向（都先锁目标 users 行），设计 §6.3 为本类路径记的例外
+        // 同样适用于本守卫（完整论证见 `admin.rs` 模块注释与
+        // `count_active_system_admins_in_tx`）。
+        let Some(group) = self
+            .access
+            .groups()
+            .find_by_key_in_tx(ctx, transaction, SYSTEM_ADMIN_GROUP_KEY)
+            .await?
+        else {
+            // 内置全权组不存在 ⇒ 系统里没有「全权组成员」需要保护，放行。
+            return Ok(());
+        };
+        let members = self
+            .access
+            .groups()
+            .list_members_in_tx(ctx, transaction, group.id)
+            .await?;
+        if members.contains(&target_user_id) && !members.contains(&operator_id) {
+            return Err(system_admin_member_guard());
+        }
+        Ok(())
+    }
+}
+
+/// 「只有全权组成员能修改全权组成员」的统一拒绝（spec §8.1 附加规则）。
+///
+/// 与 `add_group_member` / `remove_group_member` 里那句逐字相同：三条路径必须给出同一
+/// 句文案，客户端才能用同一个判据认出撞上的是哪条守卫。消息同样只说明规则，不泄漏
+/// 「目标是不是管理员」这类授权事实。
+fn system_admin_member_guard() -> BaseError {
+    BaseError::PermissionDenied("只有系统管理员可以修改系统管理员组的成员".to_string())
 }
