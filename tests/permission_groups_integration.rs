@@ -664,6 +664,77 @@ mod harness {
             .unwrap_or_else(|| panic!("创建权限组响应缺少 id: {}", response.message))
     }
 
+    /// 尝试建组并折算为（HTTP 状态码, 消息）。
+    ///
+    /// 与 [`create_group`] 的唯一差别是**不 panic**：保留 key 用例要观测的是「被拒」，
+    /// 而不是让夹具直接把用例炸掉。成功时消息是成功文案。
+    pub async fn create_group_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        group_key: &str,
+        title: &str,
+    ) -> (u16, String) {
+        match step_up_dispatch(
+            app,
+            "access.groups",
+            "create_group",
+            json!({ "group_key": group_key, "title": title }),
+            operator,
+        )
+        .await
+        {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
+    }
+
+    /// 按 `group_key` 统计成员行数（保留 key 用例：被拒的创建不得留下任何成员行）。
+    ///
+    /// 走 `user_group ⋈ permission_group` 而不是单个 group_id：保留 key 用例要断言的
+    /// 恰恰是「没有以该 key 建出的组，因此也不该有挂在它名下的成员行」。
+    pub async fn member_rows_of_group_key(app: &BuiltApp, group_key: &str) -> u64 {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_group ug JOIN permission_group g ON ug.group_id = g.id \
+             WHERE g.group_key = ?",
+        )
+        .bind(group_key)
+        .fetch_one(pool_of(app))
+        .await
+        .unwrap_or_else(|error| panic!("按 key {group_key} 统计成员行失败: {error}"));
+        u64::try_from(count).unwrap_or_else(|error| panic!("成员行数为负: {error}"))
+    }
+
+    /// 直接从库里抹掉内置全权组（条目行 → 成员行 → 组行），复现设计 §7.3 的灾备态。
+    ///
+    /// 这是保留 key 唯一可能被公开创建路径抢占的状态：正常引导后该 key 已在库中，重复
+    /// 建组只会撞唯一键，测不到「创建期拒绝」这条防线。触发真实灾备流程（手工重放运维
+    /// SQL）对集成测试过重，且会污染被测事实，故按灾备模板的效果直接落库——
+    /// 夹具直写是本文件的既定例外（见文件头与 `insert_group`）。
+    ///
+    /// 删除顺序遵从外键 RESTRICT：先条目、再成员，最后组行。
+    pub async fn drop_builtin_admin_group(app: &BuiltApp) {
+        let group_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM permission_group WHERE group_key = ?")
+                .bind(SYSTEM_ADMIN_GROUP_KEY)
+                .fetch_all(pool_of(app))
+                .await
+                .unwrap_or_else(|error| panic!("读取内置全权组失败: {error}"));
+        for group_id in group_ids {
+            for table in ["permission_group_item", "user_group"] {
+                sqlx::query(&format!("DELETE FROM {table} WHERE group_id = ?"))
+                    .bind(group_id)
+                    .execute(pool_of(app))
+                    .await
+                    .unwrap_or_else(|error| panic!("清理内置组的 {table} 行失败: {error}"));
+            }
+            sqlx::query("DELETE FROM permission_group WHERE id = ?")
+                .bind(group_id)
+                .execute(pool_of(app))
+                .await
+                .unwrap_or_else(|error| panic!("删除内置全权组 {group_id} 失败: {error}"));
+        }
+    }
+
     /// 删组并折算为 HTTP 状态码（成功为 200，其余由用例断言）。
     pub async fn delete_group_status(app: &BuiltApp, admin: &Admin, group_id: i64) -> u16 {
         match step_up_dispatch(
@@ -3854,4 +3925,135 @@ async fn the_permission_catalog_marks_exactly_the_admin_equivalent_permissions()
             "{permission} 不是管理员等价权限，不得被标记"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// H1：保留 group_key 在创建路径上的硬拒绝，及「全权组伪造」所依赖的 admin-only 守卫。
+// ---------------------------------------------------------------------------
+
+/// 保留 `group_key` 必须在**创建路径**上被硬拒绝，而不是靠别处的守卫兜住。
+///
+/// 缺陷形态：`create_group` 不保留任何 key，而 `resolve_group_permissions` 判断一个组
+/// 是否全权**只看 `group_key == "system_admin"`**（命中即返回整个权限目录）。正常引导后
+/// 该 key 已在库中，重复建组会撞唯一键，因此这条路径只在**内置组不在库中**时可达——即
+/// 设计 §7.3 的灾备态（哨兵/数据被误删、或按运维 SQL 手工重建的窗口）。此时任何持
+/// `access.groups.write` 的账号都能建出一个同名的**空组**，它一经解析就等价于整个目录。
+///
+/// 用例用直写复现那个窗口（[`harness::drop_builtin_admin_group`]）——只有在同名 key
+/// 不存在时，这次创建才可能成功，缺陷版本因此必然变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn create_group_rejects_the_reserved_system_admin_key() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 攻击者：只直授 `access.groups.write`，完全不在全权组内。
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.groups.write").await;
+    // 复现 §7.3 的零管理员窗口：内置全权组当前不在库中。
+    harness::drop_builtin_admin_group(&app).await;
+    assert!(
+        !harness::group_exists(&app, SYSTEM_ADMIN_GROUP_KEY).await,
+        "夹具必须先复现同名 key 不存在的状态，否则唯一键会替实现挡下这次创建，用例测不到防线"
+    );
+
+    let (status, message) =
+        harness::create_group_outcome(&app, &outsider, SYSTEM_ADMIN_GROUP_KEY, "伪造的全权组")
+            .await;
+    assert_eq!(
+        status, 400,
+        "保留 key 必须以 ParamInvalid→400 被拒绝，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("保留"),
+        "拒绝信息必须说明该 key 被保留，实际 {message}"
+    );
+    assert!(
+        !harness::group_exists(&app, SYSTEM_ADMIN_GROUP_KEY).await,
+        "被拒的创建不得落库：库中不得出现解析为整个目录的组"
+    );
+    assert_eq!(
+        harness::member_rows_of_group_key(&app, SYSTEM_ADMIN_GROUP_KEY).await,
+        0,
+        "被拒的创建不得留下任何成员行"
+    );
+}
+
+/// 反向对照：普通 key 建组必须仍然成功。
+///
+/// 没有这一条，`create_group` 的保留 key 判定即便被写成「一律拒绝」，上面那条用例也照样
+/// 会绿——拒绝面过宽同样是故障，会把正常建组能力整个砍掉。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn create_group_still_accepts_an_ordinary_key() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.groups.write").await;
+
+    let (status, message) = harness::create_group_outcome(&app, &outsider, "ops", "运营组").await;
+    assert_eq!(
+        status, 200,
+        "普通 key 建组必须成功，实际 {status}: {message}"
+    );
+    assert!(harness::group_exists(&app, "ops").await, "建组必须真的落库");
+    assert_eq!(
+        harness::member_rows_of_group_key(&app, "ops").await,
+        0,
+        "刚建的组不该有任何成员行"
+    );
+}
+
+/// 显式化「暗门不可利用」所依赖的那条隐式假设：`add_group_member` 的 admin-only 守卫
+/// 的**加入方向**。
+///
+/// 缺陷形态：该守卫（`add_group_member.rs`「只有全权组成员能修改全权组成员」）此前只有
+/// 「移出」方向有用例（见 `a_non_admin_cannot_remove_members_of_the_system_admin_group`），
+/// 「加入」方向零覆盖。而保留 key 若能从创建路径写出（见上一条用例），这个空组能否被
+/// 利用来提权**完全**取决于这条守卫——它挡不住的话，非全权组成员就能把自己或同伙塞进
+/// 那个解析为整个目录的组。
+///
+/// 判据是「调用者是否为该组成员」，与保留 key 拒绝是两条独立防线；两条都在，公开 API
+/// 才无法造出解析为整个目录的组。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_non_admin_cannot_add_members_to_the_system_admin_group() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    // 第二名管理员让夹具从一个真实的「两名启用管理员」全权组出发。
+    harness::add_second_admin(&app, &first, "admin2").await;
+    // 攻击者：只直授 `access.groups.write`，完全不在全权组内。
+    let outsider = harness::grant_only(&app, &first, "outsider", "access.groups.write").await;
+    let target = harness::register_with_code(&app, "target", "target@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册加成员目标失败: {error}"));
+    let group_id = harness::system_admin_group_id(&app).await;
+    let before = harness::member_rows_of_group(&app, group_id).await;
+    assert_eq!(before, 2, "夹具必须从两名管理员出发");
+
+    // 加**自己**：§8.1 附加规则的 admin-only 守卫直接拒绝。
+    let self_status = harness::add_member_status(&app, &outsider, group_id, outsider.user_id).await;
+    assert_eq!(
+        self_status, 403,
+        "非全权组成员不得把自己加进全权组，必须 403 PermissionDenied"
+    );
+    assert!(
+        !harness::is_member(&app, group_id, outsider.user_id).await,
+        "被拒的自我加入不得落成员行"
+    );
+
+    // 加**他人**：这条路径不触发 §8.1 自提权判定（改动的是他人权限），能否被拦下
+    // **只**取决于 admin-only 守卫——正是「暗门不可利用」所依赖的那条判据。
+    let other_status = harness::add_member_status(&app, &outsider, group_id, target).await;
+    assert_eq!(
+        other_status, 403,
+        "非全权组成员不得把他人加进全权组，必须 403 PermissionDenied"
+    );
+    assert!(
+        !harness::is_member(&app, group_id, target).await,
+        "被拒的加入不得落成员行"
+    );
+
+    assert_eq!(
+        harness::member_rows_of_group(&app, group_id).await,
+        before,
+        "被拒的两次加入都不得改变成员行数"
+    );
 }

@@ -262,6 +262,12 @@ Token 签发/刷新路径
 
 `docs/contracts/AUTHZ_GRANTS.md:49-107` 的运维 SQL 模板**保留**，但定位从「主路径」改为「灾备路径」：当哨兵行被误删、或需要在数据库被清空后重新引导时使用。该章节需同步改写，明确两条路径的优先级与一致性要求（仍必须遵守同一事务三件事）。
 
+> **修订（H1，2026-09-26）**：灾备态里「内置全权组暂时不在库中」的那个窗口**不再能被公开
+> API 抢占**。保留 key（`system_admin`）在 `create_group` 上被硬拒绝（§8.1 附加规则三），
+> 因此窗口期内任何持 `access.groups.write` 的账号都无法经接口造出同名组，重建内置组只能走
+> 本节的 SQL 模板或引导路径。本节原先把该窗口视作「只能裸 SQL 恢复」的操作约束，现已由
+> 创建路径的拒绝升级为机械保证。
+
 ## 八、不变量与防线
 
 ### 8.1 防自提权（保住 D2 实质的核心）
@@ -307,6 +313,38 @@ before = 调用者当前的有效权限集合
 事实来源，逐条附理由、由测试钉住）见 §9.1。`access.grants.write` / `access.groups.write` 刻意
 不在清单内：它们能改动授权事实，但上述闸门让它们无论如何都授不出管理员等价权限，是「危害面被
 闸门封顶的委派权限」，一并列入只会把正常运营彻底锁死。
+
+**附加规则三（H1，2026-09-26）：解析期保留的 `group_key` 在创建路径上硬拒绝。**
+
+`resolve_group_permissions`（`domain/groups/resolution.rs`）判断一个组是否全权**只看
+`group_key == "system_admin"`**——命中即返回整个权限目录，与组条目、成员都无关。也就是说
+这个字符串本身就是全权组的身份，是一个在**解析期**被特殊解释的值。
+
+缺陷形态（上一轮对抗复核发现的暗门）：`create_group` 原先不保留任何 key，而 `group_key`
+的参数模式 `^[a-z][a-z0-9_]*$` 允许 `system_admin`。于是持 `access.groups.write` 的账号只要
+在**内置组不在库中**时（唯一可达状态：§7.3 灾备 SQL 手工重建、或误删数据后的零管理员态）
+建一个 key 为 `system_admin` 的**空组**，它一经解析就等于整个权限目录。
+
+这条路径此前「恰好」不可利用，依赖的是本章的 admin-only 附加规则（「非全权组成员不得修改
+全权组成员」）挡住了往这个空组里加人。但那层依赖是**偶然**的，而且当时只有「移出」方向有
+集成用例、「加入」方向零覆盖——守卫一旦被改坏，暗门立刻变成可提权。本回合把偶然依赖改成
+构造保证，并把依赖显式化：
+
+- **保留 key 集合**定义在 `resolution.rs`（`RESERVED_GROUP_KEYS`，当前 `{system_admin}`，
+  带中文理由）。`create_group` 对集合内任何 key 一律 `ParamInvalid("group_key")` → **400**，
+  且不落任何组行——拒绝发生在事务之前，是纯输入判定。集合的完整性由
+  `create_group.rs` 的单测钉住（集合非空 + 成员清单与独立复述的期望值一致 + 逐个成员都被
+  建组路径拒绝）。
+- **admin-only 守卫补「加入」方向用例**：`a_non_admin_cannot_add_members_to_the_system_admin_group`
+  断言非全权组成员往全权组加**自己**与加**他人**都返回 403 且不落成员行。加他人那条尤其关键：
+  它不触发自提权判定，能否被拦下**只**取决于这条守卫。
+- **`group_key` 不可被改写**：`update_group` 的输入里根本没有 `group_key` 参数
+  （`deny_unknown_fields`，单测钉住），写入侧 `update_group_in_tx` 也只写
+  `title`/`description`——否则「先建普通组、再把 key 改成 `system_admin`」会绕过上面的拒绝。
+
+两者共同构成不变量：**公开 API 无法造出解析为整个权限目录的组**。唯一能产生全权组的路径是
+首账号引导（`ensure_system_admin_group_in_tx` 在引导事务内幂等创建），这是设计允许的，不经
+`create_group`。直接写库 / 灾备 SQL（§7.3）不在 API 威胁模型内，被有意排除。
 
 ### 8.2 最后一名管理员守卫
 
@@ -395,7 +433,7 @@ before = 调用者当前的有效权限集合
 
 **幂等语义**：与会话既有契约一致——重复添加成员/条目返回 `changed: false`，不递增版本、不写 outbox（对齐 `docs/contracts/AUTHZ_GRANTS.md:75-77`）。
 
-**内置组保护**：对 `group_key = 'system_admin'` 的 `update`/`delete`/`items`/`items/remove` 一律拒绝（400，说明该组权限由目录计算）。
+**内置组保护**：对 `group_key = 'system_admin'` 的 `update`/`delete`/`items`/`items/remove` 一律拒绝（400，说明该组权限由目录计算）。`create` 方向同样拒绝该保留 key（§8.1 附加规则三），使「只有引导能产生全权组」由创建路径的构造保证，而不是靠 admin-only 守卫兜住。
 
 ### 9.3 错误语义
 
@@ -405,6 +443,7 @@ before = 调用者当前的有效权限集合
 |---|---|---|
 | 组不存在 | `RecordNotFound` | 404 |
 | `group_key` 重复 | `ParamInvalid`（重复键经 `From<DbError>` 会映射为 `ParamInvalid(索引名)`） | 400 |
+| `group_key` 为解析期保留值（`system_admin`） | `ParamInvalid("group_key", ...)`，消息说明该 key 被保留（§8.1 附加规则三） | 400 |
 | 组内权限未在目录声明 | `ParamInvalid("permission")`（经 `ensure_declared`） | 400 |
 | 删除仍有成员的组 | 应用层前置检查返回 `ParamInvalid("group_id", ...)` | 400 |
 | 移除最后一名管理员 | `ParamInvalid("user_id", ...)` | 400 |

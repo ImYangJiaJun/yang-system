@@ -24,6 +24,24 @@ pub(crate) fn catalog_permissions(
         .collect())
 }
 
+/// 语义在**解析期**被特殊解释、因而不可被公开创建路径占用的保留 `group_key` 集合。
+///
+/// [`resolve_group_permissions`] 判断一个组是否全权**只看 `group_key` 字符串**——
+/// 命中 [`SYSTEM_ADMIN_GROUP_KEY`] 即返回**整个权限目录**，与组条目、成员无关。也就是说
+/// 这个字符串就是全权组的身份。因此这些 key 不能被公开的建组路径占用：任何持
+/// `access.groups.write` 的账号若能写出同名 key，就等于凭空造出一个解析为全权目录的空组
+/// （唯一可达状态是内置组不在库中时，见设计 §7.3 的灾备态）。
+///
+/// 把它们集中在这里，是为了让「保留」这件事有一个可被测试钉住的**集合**，而不是散落在
+/// 各 Action 里的字面量比较。新增解析期特殊语义的 key 时必须同时把条目加进来：
+/// `create_group.rs` 的单测会逐项校验集合里每个成员都被建组路径拒绝，漏加即失去创建期防线。
+pub(crate) const RESERVED_GROUP_KEYS: &[&str] = &[SYSTEM_ADMIN_GROUP_KEY];
+
+/// 该 `group_key` 是否为解析期保留值（见 [`RESERVED_GROUP_KEYS`]）。
+pub(crate) fn is_reserved_group_key(group_key: &str) -> bool {
+    RESERVED_GROUP_KEYS.contains(&group_key)
+}
+
 /// 一个组对有效权限的贡献。
 ///
 /// 内置全权组取整个目录（因此未来新增 Action 的权限自动纳入）；

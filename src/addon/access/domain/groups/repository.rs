@@ -259,6 +259,12 @@ impl GroupRepository {
     }
 
     /// 改写组事实的展示字段，返回影响行数（0 表示组不存在）。
+    ///
+    /// **只写 `title` / `description`，永不触碰 `group_key`**：`group_key` 是组在解析期的
+    /// 身份（保留 key 直接决定有效权限，见 `resolution::RESERVED_GROUP_KEYS`），一旦有路径
+    /// 能改写它，「先建普通组、再把 key 改成 `system_admin`」就会绕过 `create_group` 的保留
+    /// key 拒绝。这里把「展示字段」与「身份字段」在写入口上分开，正是同一条防线的第二个半边；
+    /// 与 `update_group` Action 输入里根本没有 `group_key` 参数互为印证。
     pub(crate) async fn update_group_in_tx(
         &self,
         ctx: &ActionContext,
