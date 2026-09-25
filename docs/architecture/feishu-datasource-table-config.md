@@ -299,6 +299,11 @@ feishu_datasource_field              ← 新表：字段绑定
 （用户已确认「现在没有开始使用，可以直接清空数据库」）。因此不设计迁移，
 也不存在派生代际共存问题；`DERIVE_RULE_VERSION` 无需 bump（派生口径未变）。
 
+> **这条「无需 bump」只对本次改动成立**，它的前提逐字写在同一句里：「派生口径未变」。
+> §8.1 的三级链修复**要改派生口径**，因此那一次**必须 bump**，并且会无差别重写一轮
+> 全部绑定。届时「库是空的」这条前提要先核实再引用——若届时已有数据，churn 从
+> 「无所谓」变成「停用全部 L3+ 旧行」。
+
 ---
 
 ## 6. 拉取编排
@@ -430,6 +435,81 @@ POST /api/v1/feishu/approval/options/{source_key}
    回退全量；而清单只列**启用中**的绑定，所以「子启用 + 父停用」那一行会照常显示 key。
    解析父因此**必须在完整 `fields[]` 里找**——先 `filter(enabled)` 再找会把这一态退化成
    「没有父」，既不给 key、也不说父为什么停了，而那恰恰是这条级联现在取不到选项的原因。
+
+### 8.1 三级链的修复规格（2026-09-26 裁定，尚未落码）
+
+**诊断**：三级链恒空是一处口径不对称，两个函数只差一个入参。
+
+- 读端拿**父行的真实 `option_id`** 去与子行做等值匹配：`approval_options.rs` 的
+  `resolve_parent_key` 收父行的 `option_id`，再由 `where_in("parent_key", …)` 过滤子行。
+- 子行的 `parent_key` 却由 `derive.rs::parent_option_id` 算出，而它把 `option_id_of` 的
+  中间参数**硬编码成 `None`**（`option_id_of(parent_source_key, None, parent_label)`），
+  只按父**文案**哈希——等价于断言「父源自己没有父」。
+- 父行自己的 id 走 `option_id_of(source_key, Some(&parent_key), label)`。父行是三级链的
+  中间列时它的 `parent_key` 非空，于是**祖父键也被哈希进 id**。
+
+两者只差 `Some(父行的父键)` 与 `None` 这一个入参，所以 `L3.parent_key` 与 `L2.option_id`
+**恒不相等**。而读端按 `option_id` 或 `label` 都能解析到父行，存在性检查因此通过——失败
+形态落在 `code=0` + 空 options 的**静默空集**，不是可归因的 40004。
+
+被破坏的不变量是 `option/table.rs` 明文写下的那条：**级联父键存的是父数据源的
+`option_id`**。
+
+**修法（选定 A）：把父键由「单跳」改为「祖先链自根向下折叠」**，构造性恢复该不变量。
+
+新增 `option_id_of_chain(sources, labels)`（两个等长切片，root→本行，逐级折叠；每级
+`label` 先 trim，trim 后为空则**跳过该级**——与 `derive.rs` 现有「空父文案 → 无父」同口径），
+然后子行的 `parent_key` 取**祖先链**折叠值，子行自己的 `option_id` 取**祖先链 + 本行**
+折叠值。于是 `L3.parent_key` 与 `L2` 作为自己派生时的 `option_id` 由**同一个函数、同一组
+输入**算出，相等是构造性的，不依赖任何巧合，任意深度成立。
+
+配套改动：`RawValue.parent_label: Option<&str>` → 有序祖先文案链；`linkage.rs` 的 `Linkage`
+由「父 `source_key` + 父列名」扩为祖先链（模块注释里「只有两个成员」是上一轮为去冗余做的
+裁定，本次是**有真实消费者**地加回这一维，注释与 ledger 必须同步改写）；
+`pull.rs::parent_linkage` 沿 `parent_field_id` 上溯拼链；`extract_values_owned` /
+`OwnedRawValue` 对每一级祖先列各读一格。
+
+**祖先列本来就在快照里**：`resolve_targets` 取的是「绑定列 + 直接父列」的**并集**，而三级
+链的三列都是绑定列，所以 `field_names` 覆盖得到（今天靠 L2 绑定偶然贡献 L1）。要补的是
+**取值那一跳**——L3 的绑定今天只读「本列 + 直接父列」——不是查询。
+
+**否决的修法**：
+
+- **C｜另存一份「不含量父键」的简化父键**：简化键按 label 折叠，**非单射**——同名父行坍成
+  一个匹配键，跨祖父分支**静默取错子集**。把一个「取不到」的 bug 换成「取错」的 bug。
+- **B｜读端换掉 `where_in` 的写法**：换的只是匹配的写法，被匹配的 `parent_key` **列本身
+  没变**（仍是那个硬编码 `None` 算出来的值），所以仍然空。
+
+**影响面**：
+
+1. `DERIVE_RULE_VERSION` **必须 bump**——`derive.rs` 的常量注释写明了「改动派生口径时必须
+   手动 bump」，否则换了规则而源内容不变时新列永远填不上。§5 与任务书里那两句
+   「无需 bump」的前提都是**派生口径未变**，本次前提失效，两处都要订正。
+2. bump + 口径变更会让**每一条绑定**走一次整批 upsert 与补集停用（无差别重写一轮，即使
+   两级链的内容没变）。旧 L3 行按 `find_doomed` 置 `enabled = false`，**不物理删除**
+   （物理清理是运维动作）。
+3. **已提交的审批单**：单里存的就是 `@i18n@<option_id>`，L3+ 的旧 id 变更后旧值再也解析
+   不到行。设计已把这种断链记为**子树级、已接受**（见 §11 与 `feishu-option-ingest.md` 的
+   U5）。本仓没有任何读取审批实例 form value 的消费端，所以不会在本仓冒错。
+4. **push 源不受影响、也修不到**：push 行的 `option_id` 由推送方自选，`to_record` 从不写
+   `parent_key`；而 pull 子行的父必然是 pull 绑定。push 源当父或当子的洞，A 既不碰也不修。
+5. 测试：`derive.rs` 现有用例最长两级，需补三级链用例——断言 `L3.parent_key` 等于以
+   `[L1_src]` 派生 `L2` 时的 `option_id`，并断言「同名 L2 挂不同 L1」时子树 id 不再坍缩；
+   `pull.rs` 补三级链的 `field_names` 与取值用例；所有构造 `RawValue` 的用例按新字段形状改写。
+6. 文档：本节、§5 的「无需 bump」、§11 的对应条目、`linkage.rs` 与 `derive.rs` 的模块
+   注释、以及任务书里「派生规则不改 → 不要 bump」那一条，同批更新。
+
+**动代码前必须先实测的四项**（读代码定不下来，不要用假设代替）：
+
+1. **生产库是否真的空**。§5 记的是「上线前清空（用户已确认）」。若已有数据，A 会停用
+   全部 L3+ 旧行——先查真实行数与 `enabled` 分布。
+2. **L1 / L2 / L3 三列是否在同一条 record 上共现**。A 的「同行递归」完全建立在这个前提上；
+   现有证据只是**配置层**的（`field_binding.rs` 的 `accepts_a_three_level_chain`），缺一份
+   真实快照。若不同行共现，A 要退化成「回查父行真实 id」的变体，那是完全不同的改法。
+3. **`resolve_targets` 在当前三级链下是否真的覆盖到 L1 列**。确认之后第 7 条那一跳才只做
+   断言、不改代码。
+4. 单源 enabled 行数是否 ≥ `MAX_COMPLEMENT`（`pull.rs`）。命中时本轮**跳过补集停用**，
+   新 L3 行已插而旧行仍 enabled → 重复态、需人工介入。
 
 ---
 
@@ -639,13 +719,13 @@ POST /api/v1/feishu/approval/options/{source_key}
    一个控件挂多个联动参数不再 fail-closed（详见 §8）。
    端到端证据：`tests/feishu_approval_options_integration.rs::approval_options_resolves_the_parent_by_its_label`。
 
-   **尚未解决（本设计另一处押注也跟着失败了）**：`derive.rs:118` 让子行的 `parent_key`
-   走 `parent_option_id(...)`，而那个函数硬编码「父源自己没有父」。于是父级一旦是
-   **三级链的中间列**（自己也有 `parent_field_id`），它的真实 `option_id` 含祖父键哈希、
-   与子行存的 `parent_key` **恒不相等**，`where_in("parent_key", …)` 恒命中 0 行。
-   即设计 §4.7 列出的 `费用大类 → 费用类型 → 银行流水摘要-编码` 这条三级链
-   **端到端不成立**，且失败形态是静默空集。修它要动 `option_id` 派生口径
-   （会连带换掉整棵子树的 id），须单独裁定，不在本次读端修复内。
+   ~~**尚未解决（本设计另一处押注也跟着失败了）**~~ **已于 2026-09-26 裁定，修法见 §8.1。**
+   问题本身没变：`derive.rs` 的 `parent_option_id` 把「父源自己没有父」硬编码进了父键的
+   哈希，于是父级一旦是**三级链的中间列**，它的真实 `option_id` 含祖父键哈希、与子行存的
+   `parent_key` **恒不相等**，`where_in("parent_key", …)` 恒命中 0 行。即 §4.7 列出的
+   `费用大类 → 费用类型 → 银行流水摘要-编码` 这条三级链**端到端不成立**，
+   且失败形态是**静默空集**。修它要动 `option_id` 派生口径（会连带换掉整棵子树的 id），
+   §8.1 给出了口径、影响面与落码前必须实测的四项。
 3. **`records/list` → `records/search` 必须迁，但不是本次**。勾的列一多，GET 的
    URL 变长、响应变大，而 `1254030 TooLargeResponse` 被归为不可重试。
    迁移**不是换 URL**：`field_names` 要变成真 `string[]`、数字列从 string 变 number、

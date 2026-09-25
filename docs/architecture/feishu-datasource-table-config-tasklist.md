@@ -30,6 +30,9 @@ React + TypeScript（Vitest）、飞书 OpenAPI（多维表格）。
 - **出站响应契约一字不改**：`{code,msg,data}`、HTTP 恒 200、`data.result` 明文为对象、
   2.5 秒主动收口（`approval_options.rs:51`）。
 - **派生规则不改**：`option_id` 的哈希输入与形状不变 → **不要 bump `DERIVE_RULE_VERSION`**。
+  > ⚠️ 这条禁令的适用范围**仅限本次表级化改动**，因为它自己的前提就是「派生口径未变」。
+  > 设计 §8.1 的三级链修复**要改派生口径**，那一次必须 bump，并会无差别重写一轮全部绑定。
+  > 不要把本条读成一条永久约束。
 - **MSRV 1.80 是硬门禁**（`Cargo.toml:5`、`ci.yml:73-98`）。新增依赖必须冷缓存验证。
 - **Key 加密不在本次范围**（设计文档决策 D11）。不要改 `encrypt_enabled` 默认值、
   不要动 `feishu.encryption_key` 的作用域、不要新增 `key_cipher`。
