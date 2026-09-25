@@ -1,4 +1,8 @@
 //! 管理端启用目标账号（需权限 + Step-up，路线图 D-1）。
+//!
+//! 与 [`super::admin_disable_user`] 完全对称：启用一名全权组成员同样会改动该组成员的
+//! 授权事实（撤销一次合法的停用决定、让其权限与会话复活），因此同样受 spec §8.1 的
+//! 「只有全权组成员能修改全权组成员」守卫约束。
 
 use crate::addon::account::domain::status::UserStatus;
 use crate::addon::account::Account;
@@ -41,6 +45,23 @@ pub(super) async fn handle(
                 "只有已停用的账号可以被启用".to_string(),
             ));
         }
+        // spec §8.1 附加规则：**只有全权组成员能修改全权组成员**。与 `admin_disable_user`
+        // 及 `add_group_member` / `remove_group_member` 是同一条守卫（同一机制、同一句拒绝
+        // 文案），经由账号域的 `SystemAuthorizationPort` 复用 access 侧的成员读——启用一名
+        // 被停用的全权组成员，恢复的也是该成员的授权事实，与停用/移出成员同理。
+        //
+        // 少了本守卫，持 `account.users.manage` 的非管理员就能把被合法停用的管理员**重新
+        // 启用**：§8.2 的最后管理员判定、或另一名管理员的处置被单方面撤销，被停用者的权限
+        // 与会话随之复活。停用与启用是同一枚硬币的两面，守卫必须完全对称。
+        account
+            .system_authorization()
+            .ensure_operator_may_modify_system_admin_member(
+                &ctx,
+                &mut transaction,
+                operator_id,
+                input.id,
+            )
+            .await?;
         Account::activate_locked_in_tx(&mut transaction, &locked).await?;
         let event = audit::succeeded_event(
             &ctx,

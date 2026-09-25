@@ -608,6 +608,16 @@ async fn delete_account_removes_avatar_row() -> anyhow::Result<()> {
     let outcome = async {
         let sender = CapturingEmailSender::default();
         let app = build_avatar_app(&control, &redis, &sender).await?;
+        // 首账号会被引导 claimer 变成系统管理员，而 spec §8.2 禁止删除最后一名
+        // 启用的系统管理员（Task 13）。先消费掉那个名额，owner 才是可删除的普通账号。
+        register_and_login(
+            &app,
+            &sender,
+            "avatar_bootstrap",
+            "avatar.bootstrap@example.com",
+            45_201,
+        )
+        .await?;
         let (owner_token, owner_id) = register_and_login(
             &app,
             &sender,

@@ -56,6 +56,7 @@ export {
   type ModulePageDefinition,
 } from "./catalog/module-pages";
 export { useUiCatalog } from "./catalog/use-catalog";
+export { hasOperation } from "./catalog/has-operation";
 
 // contracts —— 契约类型与校验
 export type {

@@ -3,15 +3,20 @@
 //! 业务用例流程内联在各 Action 文件的 `handle` 中；Action 只从 `Access`
 //! 获取能力，与 account 的 `Account` 上下文同构。
 
+use super::groups::GroupRepository;
 use super::permission_catalog::PermissionCatalogHandle;
 use super::repository::GrantRepository;
 use crate::authorization::AuthorizationPort;
 use yang_base::BaseError;
 use yang_db::Transaction;
 
-/// access 模块上下文：聚合授权存储、权限目录投影与授权失效公共端口。
+/// access 模块上下文：聚合授权存储、权限组事实与权限目录投影、授权失效公共端口。
 pub(crate) struct Access {
     grants: GrantRepository,
+    // 组事实的消费者（Token 签发的有效权限解析在 Task 5、管理 Action 在 Task 10+）
+    // 晚于本任务接入，故与 `access/domain/groups/` 同例显式豁免 dead-code 门禁。
+    #[allow(dead_code)]
+    groups: GroupRepository,
     permission_catalog: PermissionCatalogHandle,
     authorization: AuthorizationPort,
 }
@@ -19,11 +24,13 @@ pub(crate) struct Access {
 impl Access {
     pub(crate) fn new(
         grants: GrantRepository,
+        groups: GroupRepository,
         permission_catalog: PermissionCatalogHandle,
         authorization: AuthorizationPort,
     ) -> Self {
         Self {
             grants,
+            groups,
             permission_catalog,
             authorization,
         }
@@ -32,6 +39,12 @@ impl Access {
     /// 授权事实表的唯一持久化边界。
     pub(crate) fn grants(&self) -> &GrantRepository {
         &self.grants
+    }
+
+    /// 权限组事实的唯一持久化边界。
+    #[allow(dead_code)]
+    pub(crate) fn groups(&self) -> &GroupRepository {
+        &self.groups
     }
 
     /// 运行期权限目录投影（决策 D3：Catalog 是唯一事实来源）。

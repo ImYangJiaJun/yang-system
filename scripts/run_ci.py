@@ -225,6 +225,32 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "Permission groups token signing integration",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "permission_groups_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
+        "首账号引导并发仲裁集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "system_owner_bootstrap_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Refresh rotation load benchmark",
         (
             "cargo",

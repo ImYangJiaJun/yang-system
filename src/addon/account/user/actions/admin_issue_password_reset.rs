@@ -1,4 +1,11 @@
-//! 管理端为目标用户签发密码重置凭证（需权限 + Step-up，路线图 D-2）。
+//! 管理端为目标用户签发密码重置凭证（需独立权限 + Step-up，路线图 D-2）。
+//!
+//! **凭据签发与日常用户管理分属两个权限**：本 Action 要求
+//! `account.users.reset_credentials`，而**不是**停用/启用共用的 `account.users.manage`。
+//! 原因是一旦两者共用，持 `account.users.manage` 的非管理员就能给任意账号（含系统管理员）
+//! 签发重置凭证、重置其口令并登录成他，一步拿到全部权限——`account.users.manage` 于是
+//! 实质等价于 root。拆成独立权限后，这个危害面在权限粒度上可见、可被单独审计与收窄，
+//! 不再和「日常启用/停用」混在同一个名字下。
 
 use crate::addon::account::Account;
 use crate::audit;
@@ -91,7 +98,9 @@ pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec 
         .route(HttpMethod::Post, "/api/v1/users/{id}/password-reset-tokens")
         .display_name("签发重置凭证")
         .description("管理端为目标用户签发一次性密码重置凭证（明文只回显一次）")
-        .permissions(["account.users.manage"])
+        // 独立权限：凭据签发能夺取任意账号（含系统管理员），危害面与同名的
+        // `account.users.manage`（日常启用/停用）完全不同，必须分开声明。
+        .permissions(["account.users.reset_credentials"])
         .register()
 }
 

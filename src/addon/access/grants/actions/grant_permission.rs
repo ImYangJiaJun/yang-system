@@ -1,6 +1,7 @@
 //! 授予目标用户一个已声明的权限（幂等）。
 
 use crate::addon::access::domain::context::Access;
+use crate::addon::access::domain::groups::admin::ensure_may_grant_permission_in_tx;
 use crate::addon::access::domain::permission_catalog::{PERMISSION_MAX_LENGTH, PERMISSION_PATTERN};
 use crate::audit;
 use schemars::JsonSchema;
@@ -64,6 +65,17 @@ pub(super) async fn handle(
         if !locked.is_active() {
             return Err(BaseError::Unauthorized("目标用户已停用".to_string()));
         }
+        // G2 闸门：管理员等价权限只能由全权组成员授予。放在目标 users 行锁**之后**——
+        // 本函数的「第一条普通读即快照起点」纪律要求判据读晚于行锁（完整论证见
+        // `add_group_item` 的同类说明）。权限不是管理员等价时本函数直接返回、不读库。
+        ensure_may_grant_permission_in_tx(
+            &access,
+            &ctx,
+            &mut transaction,
+            operator_id,
+            &input.permission,
+        )
+        .await?;
         if access
             .grants()
             .exists_in_tx(&ctx, &mut transaction, input.user_id, &input.permission)

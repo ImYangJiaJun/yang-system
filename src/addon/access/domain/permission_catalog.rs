@@ -3,6 +3,7 @@
 //! Catalog 是权限字符串的唯一事实来源；本模块把它投影为稳定排序的目录，
 //! 组合根在 `AppBuilder` 冻结后安装一次，之后运行期只读。
 
+use super::sensitive_permissions::is_admin_equivalent;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -15,11 +16,17 @@ pub(crate) const PERMISSION_PATTERN: &str = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*
 /// 权限字符串的最大存储长度。
 pub(crate) const PERMISSION_MAX_LENGTH: usize = 128;
 
-/// 权限目录中的一个条目：权限字符串与声明它的操作 ID 列表。
+/// 权限目录中的一个条目：权限字符串、声明它的操作 ID 列表，以及危害面标记。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub(crate) struct PermissionEntry {
     permission: String,
     declared_by: Vec<String>,
+    /// 该权限是否为「管理员等价权限」（G2）。
+    ///
+    /// 目录本身推不出这一点（它只记录「有哪些权限」），标记由代码侧的显式清单
+    /// `sensitive_permissions` 给出。随条目一起序列化到目录读接口，前端据此把危害面
+    /// 显示出来——「可配置的前提是每个权限的危害面可见」。
+    admin_equivalent: bool,
 }
 
 impl PermissionEntry {
@@ -30,6 +37,11 @@ impl PermissionEntry {
     #[cfg(test)]
     pub(crate) fn declared_by(&self) -> &[String] {
         &self.declared_by
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admin_equivalent(&self) -> bool {
+        self.admin_equivalent
     }
 }
 
@@ -63,9 +75,11 @@ pub(crate) fn project_permissions(addons: &[AddonSpec]) -> Vec<PermissionEntry> 
         .map(|(permission, mut declared_by)| {
             declared_by.sort();
             declared_by.dedup();
+            let admin_equivalent = is_admin_equivalent(&permission);
             PermissionEntry {
                 permission,
                 declared_by,
+                admin_equivalent,
             }
         })
         .collect()
@@ -221,6 +235,34 @@ mod tests {
     }
 
     #[test]
+    fn projection_marks_admin_equivalent_permissions_from_the_explicit_list() {
+        // 标记来自代码侧清单（`sensitive_permissions`），不是 Catalog 能推出的：
+        // 同一份投影里，清单内的权限必须为 true、清单外必须为 false。
+        let addons = vec![addon(
+            "account",
+            vec![module(
+                "account.user",
+                &["account.users.manage"],
+                &[(
+                    "admin_issue_password_reset",
+                    &["account.users.reset_credentials"][..],
+                )],
+            )],
+        )];
+
+        let entries = project_permissions(&addons);
+        let flag = |permission: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.permission() == permission)
+                .unwrap_or_else(|| panic!("投影应包含 {permission}"))
+                .admin_equivalent()
+        };
+        assert!(flag("account.users.reset_credentials"), "清单内必须标记");
+        assert!(!flag("account.users.manage"), "清单外不得标记");
+    }
+
+    #[test]
     fn handle_is_fail_closed_before_and_after_install() {
         let handle = PermissionCatalogHandle::new();
         assert!(matches!(handle.entries(), Err(BaseError::ConfigError(_))));
@@ -233,6 +275,7 @@ mod tests {
             .install(vec![PermissionEntry {
                 permission: "access.grants.read".to_string(),
                 declared_by: vec!["access.grants.list_permissions".to_string()],
+                admin_equivalent: false,
             }])
             .unwrap_or_else(|error| panic!("首次安装应成功: {error}"));
         let entries = handle

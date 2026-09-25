@@ -101,6 +101,15 @@ export const appRoutes = [
             }),
             hydrateFallbackElement: <RouteFallback />,
           },
+          {
+            // 权限组管理面：同样路由级 lazy，页面文件在 features/access/views/。
+            path: "access/groups",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/access/views/PermissionGroupsPage")
+              ).default,
+            }),
+          },
           ...devOnlyRoutes,
         ],
       },

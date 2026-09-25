@@ -51,6 +51,14 @@ pub(super) async fn handle(
                 "账号已停用或已删除".to_string(),
             ));
         }
+        // spec §8.2：最后一名系统管理员不得把自己删掉。
+        if !account
+            .system_authorization()
+            .remains_an_admin_after(&ctx, &mut transaction, user_id)
+            .await?
+        {
+            return Err(Account::last_system_admin_guard("删除"));
+        }
         // FK 前置清理：作废该用户全部未消费重置凭证（匿名化后不允许再重置）。
         Account::invalidate_resets_in_tx(&mut transaction, user_id).await?;
         // 隐私清理：同事务删除头像行（匿名化后不得保留可识别图片）。
@@ -66,6 +74,11 @@ pub(super) async fn handle(
         account
             .login_events()
             .delete_all_for_user_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
+        // spec §8.3：账号删除必须清理授权事实，避免孤儿授权行。
+        account
+            .system_authorization()
+            .purge_user_facts_in_tx(&ctx, &mut transaction, user_id)
             .await?;
         // 匿名化：username 改写保唯一、email 置 NULL 释放、status=deleted、双版本递增。
         Account::anonymize_locked_in_tx(&mut transaction, &locked, &deleted_username).await?;

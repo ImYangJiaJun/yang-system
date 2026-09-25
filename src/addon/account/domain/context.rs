@@ -21,7 +21,9 @@ use crate::addon::account::domain::password_reset::{
     invalidate_all_for_user_in_tx, lock_in_tx, IssuedPasswordReset, LockedPasswordReset,
     PasswordResetReference,
 };
-use crate::addon::account::domain::system_owner::{OwnerClaimOutcome, SystemOwnerClaimer};
+use crate::addon::account::domain::system_owner::{
+    OwnerClaimOutcome, SystemAuthorizationPort, SystemOwnerClaimer,
+};
 use crate::addon::account::user::table::{UserView, STATUS};
 use crate::audit;
 use crate::config::{SecuritySettings, TotpSettings};
@@ -73,6 +75,7 @@ pub(crate) struct Account {
     rate_limiter: Arc<AuthRateLimiter>,
     grant_resolver: Arc<dyn GrantResolver>,
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
+    system_authorization: Arc<dyn SystemAuthorizationPort>,
     step_up_manager: Option<Arc<StepUpManager>>,
     issue_refresh_credential_version: bool,
     password_reset_ttl_seconds: u64,
@@ -90,6 +93,7 @@ impl Account {
         security: &SecuritySettings,
         grant_resolver: Arc<dyn GrantResolver>,
         system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
+        system_authorization: Arc<dyn SystemAuthorizationPort>,
         step_up_manager: Option<Arc<StepUpManager>>,
     ) -> Result<Self, BaseError> {
         Ok(Self {
@@ -101,6 +105,7 @@ impl Account {
             rate_limiter: Arc::new(AuthRateLimiter::new(security.rate_limit_config())),
             grant_resolver,
             system_owner_claimer,
+            system_authorization,
             step_up_manager,
             issue_refresh_credential_version: security.issue_refresh_credential_version,
             password_reset_ttl_seconds: security.password_reset_ttl_seconds,
@@ -154,7 +159,6 @@ impl Account {
         self.totp_settings.as_ref()
     }
 
-    /// 在注册事务中竞争唯一最终管理员哨兵（当前骨架为不声明的默认实现）。
     /// 从当前请求 access token 的 claims 提取会话标识（无 token/老格式返回 None）。
     pub(crate) fn session_id_from_request(&self, ctx: &ActionContext) -> Option<String> {
         let token = ctx.request.token()?;
@@ -166,15 +170,40 @@ impl Account {
             .map(str::to_string)
     }
 
+    /// 在注册事务中竞争唯一最终管理员哨兵（当前骨架为不声明的默认实现）。
+    ///
+    /// `ctx` 透传给声明器：实现方写授权事实必须经受信 writer，
+    /// 而 writer 需要 `ctx` 取得连接池（`trusted_query`）。
     pub(crate) async fn claim_system_owner(
         &self,
+        ctx: &ActionContext,
         transaction: &mut Transaction,
         user_id: i64,
         username: &str,
     ) -> Result<OwnerClaimOutcome, BaseError> {
         self.system_owner_claimer
-            .claim(transaction, user_id, username)
+            .claim(ctx, transaction, user_id, username)
             .await
+    }
+
+    /// 账号生命周期所需的授权事实端口（最后管理员判定与账号事实清理）。
+    ///
+    /// account 域不依赖 access 域，跨域事实一律经此端口（组合根注入）。
+    pub(crate) fn system_authorization(&self) -> &Arc<dyn SystemAuthorizationPort> {
+        &self.system_authorization
+    }
+
+    /// 账号生命周期守卫的统一拒绝：目标账号是最后一名启用的系统管理员。
+    ///
+    /// 计划此处写的是 `BaseError::Conflict`（409）：`yang_base::BaseError` 并没有该
+    /// 变体，且设计 §9.3 要求「不为个别用例扩展框架错误类型」，因此沿用既有的
+    /// `ParamInvalid`——与 `remove_group_member` 的最后管理员守卫、成员上限拒绝
+    /// 同一取舍，消息里给出可执行的处置办法。
+    pub(crate) fn last_system_admin_guard(action: &str) -> BaseError {
+        BaseError::ParamInvalid(
+            "user_id".to_string(),
+            format!("不能{action}最后一名启用的系统管理员，否则系统将无人可管理权限"),
+        )
     }
 
     // ---- 跨用例共享机制 ----
@@ -701,5 +730,25 @@ mod tests {
         cache.del(&[key, concurrent_key]).await?;
         cache.close().await;
         Ok(())
+    }
+
+    /// spec §8.2 的守卫拒绝必须是**可归因的客户端错误**，绝不能映射成 5xx。
+    #[test]
+    fn last_system_admin_guard_is_a_readable_client_error() {
+        let error = Account::last_system_admin_guard("停用");
+        assert_eq!(
+            error.code(),
+            BaseError::ParamInvalid("user_id".to_string(), String::new()).code(),
+            "必须是既有的 ParamInvalid 错误码（框架没有 Conflict 变体）"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("停用") && message.contains("系统管理员"),
+            "必须说明撞上的是哪条守卫、阻止的是什么动作，实际 {message}"
+        );
+        assert!(
+            !matches!(error.category(), yang_base::error::ErrorCategory::Server),
+            "守卫拒绝不是服务端故障，绝不能映射成 5xx"
+        );
     }
 }

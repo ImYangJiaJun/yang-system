@@ -23,13 +23,19 @@
 | C-1 会话持久化 | ✅ 已完成 | `user_session` 表 + claims `session_id`（登录生成/refresh 继承）+ 60s 节流 + 设备列表/逐台撤销 |
 | C-2 登录历史 | ✅ 已完成 | `login_event` 表 + 成功/失败粗粒度记录 + `GET /users/security-events` |
 | C-3 新设备登录提醒 | ✅ 已完成 | `NewDeviceEmailSender` SMTP 实现，best-effort 不阻塞登录 |
-| D 管理动作 | ✅ 已完成 | admin_disable/enable + 管理签发重置凭证 + 用户列表（`.permissions` + Step-up + 审计） |
+| D 管理动作 | ✅ 已完成 | admin_disable/enable（`account.users.manage`）+ 管理签发重置凭证（`account.users.reset_credentials`，管理员等价权限）+ 用户列表（`.permissions` + Step-up + 审计） |
 | E-1 TOTP MFA | ✅ 已完成 | `[security.totp]` AEAD 密钥域 + users 三列 + setup/activate/deactivate Action + 登录两段式（密码通过后返回 `SecondFactorRequired` 进入验证码阶段，错码返参数错误；密码错误仍统一 `InvalidPassword` 防枚举）+ Step-up 第二因子强制 + 恢复码单次消费；deactivate 需登录 + Step-up（已激活账号须同时出示第二因子），停用即清空密钥/恢复码并全端失效；认证器不可用时登录第二因子可改用 `[email.mfa]` 备用邮箱验证码（等时密码重验防枚举、独立密钥域、单次消费，框架侧新增 `VerificationCodeSender`/`request_via` 投递端口）；前端交互面（登录两段式弹窗含邮箱验证码切换、Step-up 对话框 mfa_code、账号中心设置弹窗二维码/密钥/恢复码回显与关闭入口）已补齐 |
 | E-2 账号删除 | ✅ 已完成 | 匿名化（username 改写 + email 置 NULL + status=deleted + 双版本）+ FK 前置清理 |
 | E-3 OIDC 端口 | ✅ 已完成 | `domain/oidc.rs::ExternalIdentityProvider` 端口定义（不建表不接 Client） |
 | E-4 多因子任选登录 | 🚧 阶段 1 已完成 | 详见 `docs/architecture/multi-factor-login.md`：因子分类模型（同类别内任选）；阶段 1 已修复邮箱验证码登录绕过 TOTP 的缺口（方案 A：框架验证码引擎 `verify_only` 只验不消费 + 备用邮箱通道作第二因子严格禁用，lib_yang `cc9756d` + `c31f594`/`76ced5b`/`66ada17`）；阶段 2 框架登录挑战协议（lib_yang 扩展，未实施）；阶段 3 Passkey 评估 |
 
-> **完成状态口径**：进度表「✅ 已完成」指相关 Action/契约已落地并通过门禁，不表示该能力在生产中已可交付使用——尤其「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）当前无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口，待「首次管理员授予」引导机制明确后再启用。
+> **完成状态口径**：进度表「✅ 已完成」指相关 Action/契约已落地并通过门禁，不表示该能力在生产中已可交付使用。
+>
+> **2026-09-24 更正**：「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）**曾**无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口。该状态已由「权限组与首账号引导」交付终结：**首个成功注册的账号在同一事务内被引导为系统管理员**（并发仲裁交给 `system_owner` 哨兵表的唯一约束，不做判空逻辑；运维 SQL 降为灾备路径），`access` 另交付**一层权限组**（`permission_group` / `permission_group_item` / `user_group`，有效权限 = 直授 ∪ 组权限），并补齐最后管理员守卫与防自提权不变量。设计见 `docs/architecture/2026-09-24-permission-groups-and-bootstrap-design.md`，契约见 `docs/contracts/AUTHZ_GRANTS.md`。
+>
+> **2026-09-26 更正（安全边界收口）**：对抗复核发现 `admin_issue_password_reset` 原先与日常启停共用 `account.users.manage`，而它对**路径参数指定的任意账号**签发密码重置凭证——持该权限的非管理员可重置系统管理员口令后登录成他，于是 `account.users.manage` 实质等价 root。已按两条修法收口：**(c)** 凭据签发拆为独立权限 `account.users.reset_credentials`（危害面在权限粒度上可见）；**(b)** 权限目录新增「管理员等价权限」显式清单与授予闸门——授予这类权限（`account.users.reset_credentials`、`feishu.datasource.secret`、`feishu.datasource.write`）要求调用者本身是内置全权组 `system_admin` 成员，否则 403。见设计 §8.1 附加规则二、§9.1 与 `docs/contracts/AUTHZ_GRANTS.md`「管理员等价权限」节。
+>
+> **历史记录（原文，2026-09-05）**：进度表「✅ 已完成」指相关 Action/契约已落地并通过门禁，不表示该能力在生产中已可交付使用——尤其「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）当前无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口，待「首次管理员授予」引导机制明确后再启用。
 
 > **外键现状修正**：路线图 3.2 第 10 条「无外键」已不成立——`src/infrastructure/schema.rs:187-198`
 > 声明了 `fk_password_reset_token_user` 与 `fk_password_reset_token_requested_by` 两条外键，
@@ -53,7 +59,7 @@
 
 以下不是骨架简化，而是架构资产，新能力必须遵守同一套契约：
 
-- **无「最终管理员」不变量**：账户管理权限经 `access` Addon 的 grants 授予特定身份，实现「有管理动作、无超级管理员」，不引入 Keycloak 式 admin 账号。
+- **不做不可降权的超级账号**（2026-09-24 按 D2 修订改正）：账户管理权限经 `access` Addon 的直授与权限组授予特定身份，不引入 Keycloak 式 admin 账号。首个注册账号被引导为系统管理员，但它是**普通、可降权、可停用、可删除**的授权事实（内置全权组 `system_admin` 的成员行），且应用内不存在自提权路径。原表述「无『最终管理员』不变量：…实现『有管理动作、无超级管理员』」已随引导机制引入而废止。
 - 双版本失效（`authz_version` / `credential_version`）+ Outbox 传播，writer 契约见 `docs/architecture/authorization-writers.md`。
 - 敏感操作 Step-up + append-only 审计（`docs/contracts/AUDIT.md`）。
 - 防枚举统一响应、验证码/令牌只存摘要、原子单次消费。
@@ -188,6 +194,8 @@
 - `POST /api/v1/users/{id}/password-reset-tokens`：管理签发重置凭证（启用 `requested_by_user` 列的既定语义，凭证只回显一次）。
 - `GET /api/v1/users`（分页列表，email 字段遵循既有 system 角色可见性约束）。
 - 全部走既有 permission 校验 + Step-up + 审计；权限经 access grants 授予运营身份。
+- **凭据签发独立成权限**：管理签发重置凭证用 `account.users.reset_credentials`，与停用/启用的 `account.users.manage` 分开授予。二者危害面不同（前者对路径参数指定的任意账号签发凭证），混在一条权限里会让「日常启停」实质等价于 root。
+- **管理员等价权限与授予闸门**：`account.users.reset_credentials` 被列入「管理员等价权限」清单（另有 `feishu.datasource.secret` / `feishu.datasource.write`），授予它——无论直授、加组条目还是加组成员——都要求调用者本身是内置全权组 `system_admin` 成员，否则 403。清单与闸门见设计 §8.1 附加规则二、§9.1 与 `docs/contracts/AUTHZ_GRANTS.md`「管理员等价权限」节。
 
 ### 阶段 E：第二因子、删除与外部身份
 

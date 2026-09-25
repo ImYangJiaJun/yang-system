@@ -12,7 +12,7 @@ use super::domain::context::Account;
 use super::domain::login_event::LoginEventRepository;
 use super::domain::repository::UserRepository;
 use super::domain::session::SessionRepository;
-use super::{GrantResolver, SystemOwnerClaimer};
+use super::{GrantResolver, SystemAuthorizationPort, SystemOwnerClaimer};
 use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionValidator, RequestFingerprintResolver};
 use crate::config::SecuritySettings;
@@ -30,6 +30,7 @@ pub(super) fn build_module(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
+    system_authorization: Arc<dyn SystemAuthorizationPort>,
     authorization_validator: AuthorizationVersionValidator,
     step_up: Option<StepUpServices>,
 ) -> Result<ModuleSpec, BaseError> {
@@ -44,6 +45,7 @@ pub(super) fn build_module(
         &security,
         grant_resolver,
         system_owner_claimer,
+        system_authorization,
         step_up.as_ref().map(StepUpServices::manager),
     )?);
 

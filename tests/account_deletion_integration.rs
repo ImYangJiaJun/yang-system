@@ -119,6 +119,15 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "login_event",
         "audit_event",
         "authorization_outbox",
+        // 组与授权事实表：首账号引导会把注册者写进内置全权组，`user_group` 与
+        // `system_owner` 因此对 `users` 持有 RESTRICT 外键；`authz_grant` 无外键，
+        // 但按 `user_id` 计数时会串到下一轮。漏删它们时收尾 `DROP users` 会以
+        // 3730 失败（`permission_groups_integration` 的夹具同因）。
+        "user_group",
+        "permission_group_item",
+        "permission_group",
+        "system_owner",
+        "authz_grant",
         "users",
     ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
@@ -272,6 +281,10 @@ async fn delete_account_clears_credentials_sessions_and_login_events() -> anyhow
         let runtime = app.runtime;
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let username = format!("delete_{suffix}");
+        // 首账号会被引导 claimer 变成系统管理员，而 spec §8.2 禁止删除最后一名
+        // 启用的系统管理员（Task 13）。先消费掉那个名额——否则本用例的被删账号
+        // 一出生就是系统管理员，撞在新守卫上。
+        register_and_login(&runtime, suffix - 1, 42_100).await?;
         let token = register_and_login(&runtime, suffix, 42_101).await?;
 
         // 记录删除前的用户 ID 与密码摘要（删除后 username 会被改写，后续按 ID 查询）。

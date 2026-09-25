@@ -50,6 +50,15 @@ pub(super) async fn handle(
         if !locked.status().is_active() {
             return Err(BaseError::PermissionDenied("账号已经停用".to_string()));
         }
+        // spec §8.2：最后一名系统管理员不得把自己停用出系统（无上帝账号兜底，
+        // 只能靠运维手工 SQL 恢复）。
+        if !account
+            .system_authorization()
+            .remains_an_admin_after(&ctx, &mut transaction, user_id)
+            .await?
+        {
+            return Err(Account::last_system_admin_guard("停用"));
+        }
         Account::disable_locked_in_tx(&mut transaction, &locked).await?;
         let event = audit::succeeded_event(
             &ctx,
