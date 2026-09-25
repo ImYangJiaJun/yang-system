@@ -25,7 +25,7 @@
 - **`#[cfg(test)]` 代码同样受 `expect_used = "deny"` 约束**：**不得**用 `.expect(..)` 及其"取错误值"变体（clippy 把它们统一归到 `expect_used`），取错误值一律用 `match` 或 `unwrap_or_else(|e| panic!(..))`。**修订理由**：本计划早先版本在 Task 4、Task 6 共 3 处用了 `.expect(..)` 的错误值版本，`cargo clippy --all-targets -- -D warnings` 会直接拒掉。
 - **死代码门禁与任务边界的矛盾（每任务必须处理）**：计划按任务切分，而「消费者的落地晚于生产者的任务」是本计划的常态——例如 Task 1 声明的列名常量要到 Task 3+ 才被 writer 使用，Task 3 的解析函数要到 Task 5 才被 resolver 使用。因此**每个只落地生产者、消费者在后续任务的任务，都必须在文件顶部加文件级 `#![allow(dead_code)]`（或 `#![allow(unused_imports)]`）并附一句中文理由**，指明消费者落在哪个任务。**修订理由**：本计划原本要求「每步 clippy 必须 0 警告」，但按任务边界切分时该要求在中间步骤**不可满足**；把豁免写成显式且有理由的声明，才能既过门禁又不掩盖真实死代码（仓库既有惯例，见 `src/addon/access/groups/table.rs`、`src/addon/access/domain/groups/tables.rs` 与 `mod.rs`）。
 - **一 Action 一文件**，形态为「自包含 register」：恰好一个 `pub(super) async fn handle` + 一个 `pub(super) fn register(module, access)`；`actions/mod.rs` 只保留 `mod` 声明与 `ACTIONS` 数组。禁止在业务代码用 `#[derive(Action)]`。改完必须跑 `python scripts/check_architecture.py`。
-- **每个 Action 必须挂 Step-up 与 append-only 审计**（`docs/contracts/AUDIT.md`）。
+- **每个 Action 必须写 append-only 审计；Step-up 只挂写操作**（`docs/contracts/AUDIT.md`、spec §9.2）。**修订**：原写「每个 Action 必须挂 Step-up」，把只读 Action 也算进重认证，精确化为「变更授权事实的**写操作**必挂、只读 Action 不挂」——理由与判据见 spec §9.2 的修订块（只读判据 = 声明权限非空且全为 `.read`）。
 - **命名**：不得把新类型命名为 `PermissionGroup`——框架已有同名结构（`crates/yang-base/src/router/middleware.rs:83-101`，语义是「Action 要求的一组权限 + All/Any」）。统一使用 `Group` 词根。
 - **仓库文档与注释一律中文**；`yang-base` 有 `#![warn(missing_docs)]`，应用 crate 无此强制但保持注释密度与邻近文件一致。
 - **门禁**：每任务结束跑 `python scripts/run_ci.py quick`；涉及真实 MySQL/Redis 的行为补 `run_ci.py integration`（测试库名以 `_test` 结尾、Redis DB 15、`--test-threads=1`）。

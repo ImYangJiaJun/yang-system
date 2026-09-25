@@ -331,7 +331,7 @@ before = 调用者当前的有效权限集合
 
 ### 9.2 Action 清单（挂在 `access.groups`）
 
-全部为 `POST`/`GET` 显式路径，全部挂 Step-up 中间件并写 append-only 审计（对齐 `docs/contracts/AUDIT.md`）。
+全部为 `POST`/`GET` 显式路径，并写 append-only 审计（对齐 `docs/contracts/AUDIT.md`）。**Step-up 只挂写操作**：变更授权事实的 Action（建/改/删组、加/移除条目、加/移出成员）逐个挂 `StepUpMiddleware`；两个只读 GET（`list_groups` / `get_group`）**不挂**。
 
 | 接口 | 所需权限 | 说明 |
 |---|---|---|
@@ -344,6 +344,18 @@ before = 调用者当前的有效权限集合
 | `POST /api/v1/access/groups/items/remove` | `access.groups.write` | 移除权限（**不做**目录校验，对齐 `revoke_permission.rs:48` 的反向宽容语义） |
 | `POST /api/v1/access/groups/members` | `access.groups.write` | 加成员（受 §8.1 子集校验约束） |
 | `POST /api/v1/access/groups/members/remove` | `access.groups.write` | 移出成员（受 §8.2 守卫约束） |
+
+> **修订（收尾回合，精确化 Step-up 挂载范围）**：本节原写「全部 Action 挂 Step-up」，
+> 把重认证的保护面放大了。重认证保护的是**授权事实的变更**——只有写操作会改这份事实；
+> 对只读的浏览 Action 也返回 428，会把「看一眼有哪些权限组」这种日常操作变成每一步都要
+> 密码重认证，收益为零、摩擦很大。故精确化为「**写操作必挂、只读不挂**」。
+>
+> 判据不靠人工列举：**声明了非空且全部以 `.read` 结尾权限的 Action 视为只读**，权限为空
+> （公开或未声明）或含非 `.read` 权限的一律按写操作 fail-closed 处理。该判据在
+> `src/addon/access/groups/mod.rs` 的守卫测试里从冻结 Catalog 自动推出；「登记清单 ==
+> 写 Action 集合」由单测锁定，「中间件真的被逐项挂上」由集成用例
+> `every_group_write_action_without_step_up_is_rejected` 在真实装配路径上逐个 Action
+> 取证（框架不对外暴露可查询的中间件列表，故只能以「不带 proof 必须被拒为 428」取证）。
 
 **幂等语义**：与会话既有契约一致——重复添加成员/条目返回 `changed: false`，不递增版本、不写 outbox（对齐 `docs/contracts/AUTHZ_GRANTS.md:75-77`）。
 
@@ -362,7 +374,10 @@ before = 调用者当前的有效权限集合
 | 移除最后一名管理员 | `ParamInvalid("user_id", ...)` | 400 |
 | 组权限变更时成员数超上限（§6.3） | `ParamInvalid("member_count", ...)` | 400 |
 | 自提权尝试（子集校验失败） | `PermissionDenied` | 403 |
+| 写操作缺少/无效/已消费的 Step-up proof | `StepUpRequired` | 428 |
 | 目录未安装 | `ConfigError` | 500（fail-closed） |
+
+只读 Action（`list_groups` / `get_group`）按 §9.2 修订不挂 Step-up，因此永不返回 428。
 
 > **修订理由（对齐实现的事实订正）**：本表原先把「删除仍有成员的组」「移除最后一名管理员」定成
 > HTTP 冲突码，这是**文档错、代码对**：`yang_base::BaseError` **没有 `Conflict` 变体**
@@ -431,6 +446,7 @@ before = 调用者当前的有效权限集合
 | 防自提权 | 为自己添加超集权限组被拒（403）；非 `system_admin` 成员不能修改该组成员；`system_admin` 成员的移出受限 |
 | 最后管理员 | 最后一名 active 管理员不可被停用、不可被自我删除、不可被移出全权组；两管理员时可移除其一 |
 | **成员关系锁序（收尾回合补）** | 零管理员态不可达：同一管理员并发移出自己 + 另一名、两名管理员互相移出，各若干轮（真库、多条独立连接、`tokio::sync::Barrier`），终态必须仍有 >=1 名启用管理员且两个请求不得都成功；并发加成员不得越过 `MAX_GROUP_MEMBERS`；**并发加两名不同成员到空组两次都必须 200（无死锁）**；满员时重复加已在组内的成员仍幂等成功；并发重复加同一成员两次都幂等成功（无死锁）；并发「移出成员」与「加权限」无死锁 |
+| **Step-up 挂载（收尾回合补）** | `access.groups` 的**每个写 Action** 不带 proof 的调用必须被拒为 428（从冻结 Catalog 枚举、含此前零调用的 `update_group`），两个只读 GET 不得返回 428；单测另锁「Step-up 登记清单 == 冻结 Catalog 的写 Action 集合」 |
 | 引用完整性 | 删除仍有成员的组被拒（400，见 §9.3）；账号删除后无孤儿 `authz_grant` 与 `user_group` 行 |
 | 错误语义 | 各场景 HTTP 码与 §9.3 一致；前端不依赖字段名分支 |
 | **非回归红线** | `tests/refresh_load_benchmark.rs` 不受影响（本设计不触碰校验热路径） |

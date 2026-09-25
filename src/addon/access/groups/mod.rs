@@ -47,10 +47,16 @@ pub(super) fn build_module(
     Ok(module)
 }
 
-/// 需要 Step-up 重认证的组写操作：组生命周期、组条目、组成员都直接改变授权事实。
+/// 需要 Step-up 重认证的组**写操作**：组生命周期、组条目、组成员都直接改变授权事实。
+///
+/// **只读 Action（`list_groups` / `get_group`）刻意不在此列**：重认证保护的是授权事实
+/// 的变更，对只读也返回 428 会把「浏览权限组」变成每步重认证（spec §9.2 修订）。
 ///
 /// 本清单必须与冻结 Catalog 里 `access.groups` 的全部非只读 Action 逐项相等；
-/// 该等式的守护测试见下方 `every_group_mutation_is_step_up_protected`。
+/// 「登记清单 == 写 Action 集合」的守护测试见下方 `every_group_mutation_is_step_up_protected`；
+/// 「中间件真的被逐项挂上」的守护测试见集成用例
+/// `every_group_write_action_without_step_up_is_rejected`——`ModuleSpec` 的中间件列表是
+/// `pub(crate)`，本 crate 读不到，只能在真实装配路径上逐个 Action 取证。
 fn step_up_targets() -> Vec<yang_base::definition::ActionRef> {
     vec![
         yang_base::action!("access.groups.create_group"),
@@ -141,6 +147,13 @@ mod tests {
     /// 判据完全来自 Catalog（非只读 = 需要重认证），因此「新增一个组管理 Action 却
     /// 忘了登记 Step-up」必然让本测试变红；反过来，登记一个 Catalog 里不存在的
     /// Action（拼写错误）同样变红。
+    ///
+    /// **本测试只覆盖「登记」这一半**：`ModuleSpec` 的中间件列表是 `pub(crate)`
+    /// （`crates/yang-base/src/definition/spec.rs:732`），`yang-system` 读不到，因此这里
+    /// 无法断言中间件真的被逐项挂上——`build_module` 的挂载循环若只挂第一项，本测试仍会
+    /// 全绿。另一半（挂载真的发生）由集成用例
+    /// `every_group_write_action_without_step_up_is_rejected` 在真实装配路径上以
+    /// 「逐个写 Action 不带 proof 必须被拒为 428」证明；两份合起来才是完整守卫。
     #[test]
     fn every_group_mutation_is_step_up_protected() {
         let app = frozen_catalog();

@@ -945,6 +945,33 @@ mod harness {
         .await
     }
 
+    /// 从冻结 Catalog 现场枚举 `access.groups` 的写 Action 名（非只读判据与
+    /// `src/addon/access/groups/mod.rs` 的守卫测试同源：声明了非空且全部以 `.read`
+    /// 结尾权限的 Action 才算只读，其余一律按写操作 fail-closed 处理）。
+    pub fn groups_write_actions(app: &BuiltApp) -> Vec<String> {
+        let module = app
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .find(|module| module.name.as_str() == "access.groups")
+            .unwrap_or_else(|| panic!("冻结 Catalog 必须包含 access.groups 模块"));
+        let mut actions: Vec<String> = module
+            .actions()
+            .iter()
+            .filter(|action| {
+                action.permissions.is_empty()
+                    || !action
+                        .permissions
+                        .iter()
+                        .all(|permission| permission.ends_with(".read"))
+            })
+            .map(|action| action.name.as_str().to_string())
+            .collect();
+        actions.sort();
+        actions
+    }
+
     fn pool_of(app: &BuiltApp) -> &sqlx::MySqlPool {
         app.tools()
             .mysql()
@@ -3224,6 +3251,86 @@ async fn group_mutations_without_step_up_are_rejected() {
         !harness::is_member(&app, group_id, member).await,
         "被拒的成员写入不得落库"
     );
+}
+
+/// spec §9.2 修订 + 本回合 F3：`access.groups` 的**每个写 Action** 都必须真的挂上
+/// Step-up 中间件，两个只读 Action 不得挂。
+///
+/// 这条不变量有两个半边，缺一不可：
+/// 1. **登记半边**——`step_up_targets()` 必须等于冻结 Catalog 的写 Action 集合
+///    （`src/addon/access/groups/mod.rs` 的 `every_group_mutation_is_step_up_protected`）。
+/// 2. **挂载半边**——登记清单里的每个 Action 都真的挂了中间件。**框架不对外暴露可查询的
+///    中间件列表**（`ModuleSpec::middlewares()` 是 `pub(crate)`，本仓库读不到），因此只能
+///    从真实装配路径取证：现场枚举写 Action，逐个发**不带 Step-up proof** 的认证请求，
+///    断言全部被拒为 `StepUpRequired`(428)。中间件在 Action 输入解码之前短路，所以空
+///    body 也足以取证——挂载一旦漏掉，请求会落到 Handler（解码失败或直接成功），于是读到
+///    的不再是 428。
+///
+/// 为什么必须按 Catalog 枚举而不能照抄一份清单：`update_group` 此前在全仓 `tests/` 下零
+/// 调用，它的中间件漏挂没有任何用例能发现（本回合 R4 复核发现的缺口）。按 Catalog 枚举
+/// 天然把它纳入取证范围，今后新增写 Action 也自动进入。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn every_group_write_action_without_step_up_is_rejected() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 只读反向对照需要一个真实存在的组，故先经完整 Step-up 建一个。
+    let group_id = harness::create_group(&app, &admin, "readonly", "只读对照组").await;
+
+    let write_actions = harness::groups_write_actions(&app);
+    assert!(
+        write_actions.len() >= 7,
+        "access.groups 的写 Action 至少应有 7 个（建/改/删组 + 加/移除条目 + 加/移出成员），实际 {write_actions:?}——Catalog 判据被削弱了"
+    );
+    assert!(
+        write_actions.iter().any(|action| action == "update_group"),
+        "覆盖缺口：update_group 是唯一零调用的写 Action，必须落在取证范围内，实际 {write_actions:?}"
+    );
+
+    for action in &write_actions {
+        match harness::group_action_without_step_up(&app, &admin, action, json!({})).await {
+            Err(BaseError::StepUpRequired(_)) => {}
+            Ok(response) => panic!(
+                "{action} 的 Step-up 中间件没有真的挂上：不带 proof 也执行了（code={}，{}）",
+                response.code, response.message
+            ),
+            Err(other) => panic!(
+                "{action} 必须被 Step-up 中间件拒为 StepUpRequired（428），实际 {other}——中间件漏挂时请求会落到 Handler，表现正是别的错误"
+            ),
+        }
+    }
+
+    // 反向对照（spec §9.2 修订）：只读 Action 不挂 Step-up，因此不携带 proof 也必须放行。
+    let authorization = format!("Bearer {}", admin.token);
+    let listed = dispatch_with_path(
+        &app,
+        "access.groups",
+        "list_groups",
+        json!({}),
+        &[("authorization", authorization.as_str())],
+        52_400,
+        &[],
+    )
+    .await;
+    match listed {
+        Ok(response) => assert_eq!(response.code, 0, "只读列表应直接成功：{}", response.message),
+        Err(other) => panic!("只读 list_groups 不该被 Step-up 拦截，实际 {other}"),
+    }
+    let group_id_param = group_id.to_string();
+    let detailed = dispatch_with_path(
+        &app,
+        "access.groups",
+        "get_group",
+        json!({}),
+        &[("authorization", authorization.as_str())],
+        52_400,
+        &[("group_id", group_id_param.as_str())],
+    )
+    .await;
+    match detailed {
+        Ok(response) => assert_eq!(response.code, 0, "只读详情应直接成功：{}", response.message),
+        Err(other) => panic!("只读 get_group 不该被 Step-up 拦截，实际 {other}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
