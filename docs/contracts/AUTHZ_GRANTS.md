@@ -1,7 +1,8 @@
 # 授权存储与权限目录契约
 
 **生成：** 2026-09-03
-**更新：** 2026-09-24（首账号引导成为初始授权主路径；新增一层权限组）
+**更新：** 2026-09-26（账号管理拆分出独立的凭据签发权限 `account.users.reset_credentials`）；
+2026-09-24（首账号引导成为初始授权主路径；新增一层权限组）
 **范围：** `access` Addon（`src/addon/access/`）提供的权限基础设施：权限目录、
 直授存储、权限组、Token 授权快照扩展与授权管理接口。
 
@@ -23,6 +24,22 @@
   `AuthzGrantResolver` 与 `GroupGrantResolver` 在签发/刷新时分别读入 claims。
 - 只能授予目录中已声明的权限；未声明的权限在管理接口处被拒绝（fail-closed）。
 - 新增权限：`access.groups.read`、`access.groups.write`（权限组管理面，见「权限组」）。
+
+### 账号管理的两个写权限（凭据签发已拆分）
+
+账号域管理面曾把「日常启停」与「凭据签发」混在同一个 `account.users.manage` 下。二者
+危害面完全不同：前者只改账号状态，后者对**路径参数指定的任意账号**签发一次性密码重置
+凭证——凭该凭证可重置口令并登录成目标（含系统管理员），一步拿到全部权限，于是
+`account.users.manage` 实质等价于 root。现拆分为两条独立权限：
+
+| 权限 | 覆盖的 Action | 危害面 |
+|---|---|---|
+| `account.users.manage` | `admin_disable_user`、`admin_enable_user` | 改变账号启用状态；受 spec §8.1 admin-only 守卫与 §8.2 最后管理员守卫约束 |
+| `account.users.reset_credentials` | `admin_issue_password_reset` | 为任意账号签发密码重置凭证，可夺取该账号（含系统管理员）；受 Step-up 保护 |
+
+拆分后两条权限各自独立授予：只持 `account.users.manage` 不再能签发重置凭证。二者都由
+Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限目录，内置全权组
+（`system_admin`）按目录自动持有二者。
 
 ## `authz_grant` 表
 

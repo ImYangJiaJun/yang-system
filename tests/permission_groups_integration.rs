@@ -1397,6 +1397,56 @@ mod harness {
         }
     }
 
+    /// 尝试管理端启用目标账号并折算为 HTTP 状态码。
+    ///
+    /// 与 [`admin_disable_status`] 完全对称：`admin_enable_user` 同样要求
+    /// `account.users.manage` 且受 Step-up 保护，目标用户也是**路径参数**
+    /// （`/api/v1/users/{id}/enable`），必须经 `step_up_dispatch_with_path` 传入
+    /// `request.path_params`。运行期只校验 Step-up 是否挂上（无 proof 即成功会被
+    /// 折算成 `ConfigError`→500）。
+    pub async fn admin_enable_status(app: &BuiltApp, operator: &Admin, target_user_id: i64) -> u16 {
+        let target = target_user_id.to_string();
+        match step_up_dispatch_with_path(
+            app,
+            "account.user",
+            "admin_enable_user",
+            json!({}),
+            operator,
+            &[("id", target.as_str())],
+        )
+        .await
+        {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
+    /// 尝试管理端签发密码重置凭证并折算为 HTTP 状态码。
+    ///
+    /// `admin_issue_password_reset` 受 Step-up 保护，`input.id` 是**路径参数**
+    /// （`/api/v1/users/{id}/password-reset-tokens`）。这里只观测「调用是否被接受」，
+    /// 刻意不读响应里的明文凭证——明文只回显一次，测试不需要它。
+    pub async fn admin_issue_password_reset_status(
+        app: &BuiltApp,
+        operator: &Admin,
+        target_user_id: i64,
+    ) -> u16 {
+        let target = target_user_id.to_string();
+        match step_up_dispatch_with_path(
+            app,
+            "account.user",
+            "admin_issue_password_reset",
+            json!({}),
+            operator,
+            &[("id", target.as_str())],
+        )
+        .await
+        {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
     /// 尝试自助停用当前账号并折算为 HTTP 状态码。
     pub async fn disable_self_status(app: &BuiltApp, actor: &Admin) -> u16 {
         match step_up_dispatch(app, "account.user", "disable_self", json!({}), actor).await {
@@ -2024,6 +2074,137 @@ async fn a_non_admin_cannot_disable_a_system_admin_member() {
     assert!(
         harness::is_member(&app, group_id, second.user_id).await,
         "被拒的操作不得顺手删掉全权组成员行"
+    );
+}
+
+/// spec §8.1 附加规则：管理端**启用**路径必须与停用/成员变更完全对称。
+///
+/// 缺陷形态：`admin_enable_user` 只声明 `account.users.manage`，没有任何 admin-only
+/// 守卫。非管理员于是能重新启用一名被合法停用的全权组成员，撤销合法停用决定、让被停用者
+/// 的权限与会话复活——与 `admin_disable_user` 缺少守卫时是同一类越权，只是方向相反。
+/// 目标先由另一名管理员合法停用，因此启用动作能走到守卫，而不是先被状态前置拦下。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_non_admin_cannot_enable_a_disabled_system_admin_member() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    let second = harness::add_second_admin(&app, &first, "admin2").await;
+    // 攻击者：只直授 `account.users.manage`，完全不在全权组内。
+    let outsider = harness::grant_only(&app, &first, "outsider", "account.users.manage").await;
+
+    // 前置：由全权组成员合法停用 second（还有 first 在，§8.2 最后管理员判定放行）。
+    let disable_status = harness::admin_disable_status(&app, &first, second.user_id).await;
+    assert_eq!(
+        disable_status, 200,
+        "夹具前置：管理员停用第二管理员必须成功"
+    );
+    assert_eq!(
+        harness::user_status(&app, second.user_id).await,
+        "disabled",
+        "夹具前置：second 必须真的处于停用"
+    );
+
+    let status = harness::admin_enable_status(&app, &outsider, second.user_id).await;
+    assert_eq!(
+        status, 403,
+        "非全权组成员不得修改全权组成员，必须 403 PermissionDenied"
+    );
+    assert_eq!(
+        harness::user_status(&app, second.user_id).await,
+        "disabled",
+        "被拒的启用不得把账号翻回 active"
+    );
+}
+
+/// [`a_non_admin_cannot_enable_a_disabled_system_admin_member`] 的活性对照：
+/// 全权组成员启用另一名被停用的全权组成员必须仍然放行（守卫不得过度收紧）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_system_admin_can_enable_a_disabled_system_admin_member() {
+    let app = harness::build_test_app().await;
+    let first = harness::bootstrap_admin(&app).await;
+    let second = harness::add_second_admin(&app, &first, "admin2").await;
+
+    let disable_status = harness::admin_disable_status(&app, &first, second.user_id).await;
+    assert_eq!(
+        disable_status, 200,
+        "夹具前置：管理员停用第二管理员必须成功"
+    );
+
+    let status = harness::admin_enable_status(&app, &first, second.user_id).await;
+    assert_eq!(status, 200, "全权组成员启用被停用的全权组成员必须允许");
+    assert_eq!(
+        harness::user_status(&app, second.user_id).await,
+        "active",
+        "启用必须真的落库"
+    );
+}
+
+/// 凭据签发必须与日常用户管理分属两个权限：只持 `account.users.manage` 的调用者
+/// 不得签发密码重置凭证。
+///
+/// 缺陷形态：`admin_issue_password_reset` 与停用/启用共用 `account.users.manage`，
+/// 且目标取自路径参数、对任意账号签发。持该权限的非管理员于是可以给系统管理员签发
+/// 重置凭证、重置其口令并登录成他，一步拿到全部权限——`account.users.manage` 实质
+/// 等价于 root。拆分后该 Action 要求独立权限 `account.users.reset_credentials`，
+/// 只持 manage 的调用者必须被拒。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn only_account_users_manage_cannot_issue_password_reset() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 攻击者：只持 `account.users.manage`，即拆分前的「管理用户」权限。
+    let manager = harness::grant_only(&app, &admin, "manager", "account.users.manage").await;
+
+    let status = harness::admin_issue_password_reset_status(&app, &manager, admin.user_id).await;
+    assert_eq!(
+        status, 403,
+        "只持 account.users.manage 不得签发重置凭证（已不再持有该权限）"
+    );
+}
+
+/// [`only_account_users_manage_cannot_issue_password_reset`] 的活性对照：持新权限
+/// `account.users.reset_credentials` 的调用者必须能正常签发（拆分不得把功能一并锁死）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn the_split_reset_credential_permission_can_issue_password_reset() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let issuer =
+        harness::grant_only(&app, &admin, "issuer", "account.users.reset_credentials").await;
+
+    let status = harness::admin_issue_password_reset_status(&app, &issuer, admin.user_id).await;
+    assert_eq!(
+        status, 200,
+        "持有 account.users.reset_credentials 必须能签发"
+    );
+}
+
+/// 拆分是**声明层**的事实：`admin_issue_password_reset` 只能声明
+/// `account.users.reset_credentials`，不得再挂着 `account.users.manage`。
+///
+/// 只断言运行期行为不够——若有人把 `account.users.manage` 加回来（或两权限并列），
+/// 上面两条行为用例仍可能通过，本用例才会变红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn admin_issue_password_reset_declares_only_the_split_permission() {
+    let app = harness::build_test_app().await;
+    let mut permissions: Vec<String> = Vec::new();
+    for addon in app.catalog().addons() {
+        for module in &addon.modules {
+            for action in module.actions() {
+                if module.name.as_str() == "account.user"
+                    && action.name.as_str() == "admin_issue_password_reset"
+                {
+                    permissions = action.permissions.clone();
+                }
+            }
+        }
+    }
+    assert_eq!(
+        permissions,
+        vec!["account.users.reset_credentials".to_string()],
+        "签发重置凭证必须只声明拆分后的独立权限"
     );
 }
 
