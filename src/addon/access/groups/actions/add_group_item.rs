@@ -2,8 +2,8 @@
 
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
-    assert_no_self_escalation, effective_permissions_of_in_tx, ensure_member_limit,
-    invalidate_users_in_tx, lock_users_ascending_in_tx,
+    assert_no_self_escalation, effective_permissions_of_in_tx, ensure_may_grant_permission_in_tx,
+    ensure_member_limit, invalidate_users_in_tx, lock_users_ascending_in_tx,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::permission_catalog::{PERMISSION_MAX_LENGTH, PERMISSION_PATTERN};
@@ -115,6 +115,19 @@ pub(super) async fn handle(
         // 上限在加锁前已判定过一次；这里再按锁后快照复核一次，避免探查与加锁之间
         // 有成员加入把组顶到上限之外。
         ensure_member_limit(members.len() as u64)?;
+
+        // G2 闸门：把管理员等价权限加进组同样是「授予」，只能由全权组成员执行。
+        // 本次新增的就是 `input.permission`（已在上方 `ensure_declared` 确认属于目录），
+        // 因此直接按它判定。这条与下面的 §8.1 提权校验彼此独立：这条问「你有没有资格
+        // 授予」，那条问「这次操作会不会让你自己变大」——非成员调用者不触发后者。
+        ensure_may_grant_permission_in_tx(
+            &access,
+            &ctx,
+            &mut transaction,
+            operator_id,
+            &input.permission,
+        )
+        .await?;
 
         // spec §8.1 路径二：给自己**已属于**的组加一条自己没有的权限，同样是自提权。
         // 组权限只影响成员，因此只有调用者本身在该组内时这条不变量才可能被破坏。

@@ -57,6 +57,7 @@
 // 接入，与 `repository.rs` / `resolution.rs` 同例显式豁免 dead-code 门禁。
 #![allow(dead_code)]
 
+use super::super::sensitive_permissions::{admin_equivalent_entry, AdminEquivalentPermission};
 use super::repository::{GroupRecord, MAX_GROUP_MEMBERS, SYSTEM_ADMIN_GROUP_KEY};
 use super::resolution::{catalog_permissions, resolve_group_permissions};
 use crate::addon::access::domain::context::Access;
@@ -208,6 +209,108 @@ pub(crate) fn assert_no_self_escalation(
         "该操作会使你自己的权限增加（{}），已拒绝",
         added.join(", ")
     )))
+}
+
+/// G2 闸门：把管理员等价权限授予任何主体时，要求调用者本身是全权组成员。
+///
+/// 判据是**调用者是否为内置全权组的成员**，而不是「调用者是否持有该权限」——全权组
+/// 成员天然持有全部权限（含管理员等价权限），他们执行这类授予必须放行。成员判定复用
+/// 与所有 §8.1 守卫同一对仓库读（`find_by_key_in_tx` + `list_members_in_tx`），不另造
+/// 平行实现。
+///
+/// 权限不是管理员等价时不做任何读、直接放行。
+///
+/// **锁序**：本函数只做无锁 SELECT，不取新锁；调用方必须已按全局锁序持有本事务要触碰的
+/// users 行（三条授予路径都在进入判据前完成这批行锁）。
+pub(crate) async fn ensure_may_grant_permission_in_tx(
+    access: &Access,
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    operator_id: i64,
+    permission: &str,
+) -> Result<(), BaseError> {
+    let Some(entry) = admin_equivalent_entry(permission) else {
+        return Ok(());
+    };
+    if operator_is_system_admin_member_in_tx(access, ctx, transaction, operator_id).await? {
+        return Ok(());
+    }
+    Err(BaseError::PermissionDenied(format!(
+        "权限 {} 是管理员等价权限（{}），只有系统管理员可以授予",
+        entry.permission, entry.reason
+    )))
+}
+
+/// G2 闸门：目标组持有管理员等价权限时，把用户加进该组同样要求调用者是全权组成员。
+///
+/// 这条最容易漏：组本身没有变化，变的是成员——加成员会把组已有的全部权限（含管理员
+/// 等价那条）转授给新成员。因此判据看的是**目标组的条目**，不是本次请求里带了哪条权限。
+pub(crate) async fn ensure_may_modify_members_of_group_in_tx(
+    access: &Access,
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    operator_id: i64,
+    group_id: i64,
+) -> Result<(), BaseError> {
+    let Some(entry) = group_admin_equivalent_item_in_tx(access, ctx, transaction, group_id).await?
+    else {
+        return Ok(());
+    };
+    if operator_is_system_admin_member_in_tx(access, ctx, transaction, operator_id).await? {
+        return Ok(());
+    }
+    Err(BaseError::PermissionDenied(format!(
+        "该权限组持有管理员等价权限 {}（{}），只有系统管理员可以修改它的成员",
+        entry.permission, entry.reason
+    )))
+}
+
+/// 目标组条目里第一条管理员等价权限；没有则 `None`。
+///
+/// 只看条目名是否命中清单，不要求它同时已被 Catalog 声明：命中即按危害面处理
+/// （fail-closed）。悬空条目至多让一次合法操作被多拦一次，不会放过任何真实授予。
+async fn group_admin_equivalent_item_in_tx(
+    access: &Access,
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    group_id: i64,
+) -> Result<Option<&'static AdminEquivalentPermission>, BaseError> {
+    for permission in access
+        .groups()
+        .list_items_in_tx(ctx, transaction, group_id)
+        .await?
+    {
+        if let Some(entry) = admin_equivalent_entry(&permission) {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
+}
+
+/// 调用者是否是内置全权组的成员。
+///
+/// 与 §8.1 附加规则（`ensure_operator_may_modify_system_admin_member`）同一份成员读。
+/// 内置全权组不存在 ⇒ 系统里没有全权组成员 ⇒ 一律返回 `false`，闸门 fail-closed 拒绝：
+/// 此时没有任何主体有资格授予管理员等价权限。引导路径（`SystemOwnerClaimer`）不经本闸门
+/// 产生管理员，因此这条拒绝不会挡住首账号引导。
+async fn operator_is_system_admin_member_in_tx(
+    access: &Access,
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    operator_id: i64,
+) -> Result<bool, BaseError> {
+    let Some(group) = access
+        .groups()
+        .find_by_key_in_tx(ctx, transaction, SYSTEM_ADMIN_GROUP_KEY)
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(access
+        .groups()
+        .list_members_in_tx(ctx, transaction, group.id)
+        .await?
+        .contains(&operator_id))
 }
 
 /// 组成员数上限检查；超过上限必须明确报错而不是静默做 O(N) 行锁事务。

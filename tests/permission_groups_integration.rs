@@ -30,6 +30,17 @@ use common::{take_registration_code, RegistrationEmailToolsExt};
 const PASSWORD: &str = "correct-horse-battery-staple";
 const GROUP_READ_PERMISSION: &str = "access.grants.read";
 const SYSTEM_ADMIN_GROUP_KEY: &str = "system_admin";
+/// 管理员等价权限的期望集合（G2）。
+///
+/// 刻意在测试侧**独立复述**一遍清单，而不是从应用侧读回来：这样「清单里每条仍是
+/// 当前 Catalog 已声明的权限」才有独立的判据——权限改名后清单会静默失效，只有这份
+/// 与代码侧清单分离的期望值才能把它钉红。生产清单见
+/// `src/addon/access/domain/sensitive_permissions.rs`。
+const ADMIN_EQUIVALENT_PERMISSIONS: [&str; 3] = [
+    "account.users.reset_credentials",
+    "feishu.datasource.secret",
+    "feishu.datasource.write",
+];
 
 fn database_config() -> DatabaseConfig {
     DatabaseConfig::default()
@@ -824,6 +835,30 @@ mod harness {
         .unwrap_or_else(|error| panic!("授予账号 {user_id} 权限 {permission} 失败: {error}"));
     }
 
+    /// 尝试授予权限并折算为 HTTP 状态码（403 = 撞上管理员等价闸门）。
+    ///
+    /// 与 [`grant_permission`] 的唯一差别是**不 panic**：管理员等价权限的闸门用例
+    /// 刻意用一个非全权组成员当操作者，需要观测「被拒」而不是让夹具直接炸掉。
+    pub async fn grant_permission_status(
+        app: &BuiltApp,
+        operator: &Admin,
+        user_id: i64,
+        permission: &str,
+    ) -> u16 {
+        match step_up_dispatch(
+            app,
+            "access.grants",
+            "grant_permission",
+            json!({ "user_id": user_id, "permission": permission }),
+            operator,
+        )
+        .await
+        {
+            Ok(_) => 200,
+            Err(error) => http_status(&error),
+        }
+    }
+
     /// 再引导一名系统管理员：注册后经真实成员 Action 加入内置全权组。
     ///
     /// 入组会递增该账号的授权版本，因此令牌在入组**之后**签发——否则它一出生就是
@@ -1140,6 +1175,47 @@ mod harness {
         .await
         .unwrap_or_else(|error| panic!("查询组 {group_id} 的条目 {permission} 失败: {error}"));
         count > 0
+    }
+
+    /// 读取权限目录（`GET /api/v1/access/permissions`），返回每条条目的原始 JSON。
+    ///
+    /// 直接读 JSON 而不是复用应用侧结构体：集成测试是独立 crate，`PermissionEntry`
+    /// 是 `pub(crate)`，而本用例要钉住的正是**传输层真的把危害面标记发出去了**。
+    pub async fn list_permission_entries(app: &BuiltApp, operator: &Admin) -> Vec<Value> {
+        let authorization = format!("Bearer {}", operator.token);
+        let response = dispatch(
+            app,
+            "access.grants",
+            "list_permissions",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("读取权限目录失败: {error}"));
+        response
+            .data
+            .as_ref()
+            .and_then(|data| data["permissions"].as_array())
+            .cloned()
+            .unwrap_or_else(|| panic!("权限目录响应缺少 permissions 数组: {response:?}"))
+    }
+
+    /// 目录里某条已声明权限的 `admin_equivalent` 标记；权限未声明时 panic。
+    ///
+    /// 返回 `Option<bool>` 而不是 `bool`：标记字段**整体缺失**（尚未实现）与
+    /// 「标记为 false」是两件事，前者必须让用例红，不能被 `unwrap_or(false)` 吞掉。
+    pub async fn catalog_flag_of(
+        app: &BuiltApp,
+        operator: &Admin,
+        permission: &str,
+    ) -> Option<bool> {
+        list_permission_entries(app, operator)
+            .await
+            .iter()
+            .find(|entry| entry["permission"].as_str() == Some(permission))
+            .unwrap_or_else(|| panic!("目录中必须声明 {permission}"))["admin_equivalent"]
+            .as_bool()
     }
 
     /// 直写一条组条目行（用于构造目录里已不存在的孤儿条目）。
@@ -3576,4 +3652,206 @@ async fn an_item_pointing_at_a_missing_group_is_rejected_by_the_database() {
         1,
         "被拒的孤儿条目不得落库（组内仍应只有反向对照那一条）"
     );
+}
+
+// ---------------------------------------------------------------------------
+// G2：管理员等价权限的目录标记与授予闸门。
+// ---------------------------------------------------------------------------
+
+/// G2 闸门（路径一）：非全权组成员不得把管理员等价权限直接授予他人。
+///
+/// 缺陷形态：`grant_permission` 只校验「权限已声明」与「目标账号启用」，对**谁能授予
+/// 什么**没有任何限制。于是持 `access.grants.write` 的非管理员可以把
+/// `account.users.reset_credentials` 授给任意账号（包括他自己），再借该权限给系统
+/// 管理员签发重置凭证、重置其口令并登录成他——闸门缺失时 `access.grants.write` 是
+/// 通往 root 的跳板。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_non_admin_cannot_grant_an_admin_equivalent_permission() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 攻击者：只直授 `access.grants.write`（非管理员等价），完全不在全权组内。
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.grants.write").await;
+    // 目标：普通账号，此刻只直授了一条非管理员等价权限。
+    let target = harness::grant_only(&app, &admin, "target", "demo.notes.read").await;
+
+    let status = harness::grant_permission_status(
+        &app,
+        &outsider,
+        target.user_id,
+        "account.users.reset_credentials",
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "非全权组成员不得授予管理员等价权限，必须 403 PermissionDenied"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target.user_id).await,
+        1,
+        "被拒的授予不得落库（目标应仍只有夹具给的那一条 demo.notes.read）"
+    );
+}
+
+/// G2 闸门（路径二）：非全权组成员不得把管理员等价权限加进组。
+///
+/// 与路径一的差别在于授权事实换成了组条目：闸门若只看「直接授予」，任何人都能先建
+/// 一个组、把管理员等价权限写进条目，再把同伙拉进组绕过它。调用者刻意不是该组成员，
+/// 以排除 §8.1 自提权判定先把它拦下的可能——那样这条用例就测不到 G2 闸门。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_non_admin_cannot_add_an_admin_equivalent_permission_to_a_group() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.groups.write").await;
+    let group_id = harness::create_group(&app, &admin, "ops", "运营组").await;
+    assert!(
+        !harness::is_member(&app, group_id, outsider.user_id).await,
+        "调用者必须不在目标组内，否则 §8.1 自提权判定会先拦下，用例测不到 G2 闸门"
+    );
+
+    let status = harness::add_group_item_status(
+        &app,
+        &outsider,
+        group_id,
+        "account.users.reset_credentials",
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "非全权组成员不得把管理员等价权限加进组，必须 403 PermissionDenied"
+    );
+    assert!(
+        !harness::group_holds_item(&app, group_id, "account.users.reset_credentials").await,
+        "被拒的条目不得落库"
+    );
+}
+
+/// G2 闸门（路径三）：非全权组成员不得把用户加进一个**已含**管理员等价权限的组。
+///
+/// 这是最容易漏的一条：组本身没有任何变化，变的是成员——「加成员」会把组的全部权限
+/// （含管理员等价那条）转授给新成员。只看「本次请求里带了哪条权限」的闸门会放它过去。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_non_admin_cannot_add_a_member_to_a_group_holding_admin_equivalent_permissions() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.groups.write").await;
+    let target = harness::grant_only(&app, &admin, "target", "demo.notes.read").await;
+    // 前置：由全权组成员把管理员等价权限写进组（这条操作本身必须放行）。
+    let group_id = harness::create_group(&app, &admin, "credential_ops", "凭据运营组").await;
+    assert_eq!(
+        harness::add_group_item_status(&app, &admin, group_id, "account.users.reset_credentials")
+            .await,
+        200,
+        "夹具前置：全权组成员必须能把管理员等价权限加进组"
+    );
+
+    let status = harness::add_member_status(&app, &outsider, group_id, target.user_id).await;
+    assert_eq!(
+        status, 403,
+        "非全权组成员不得把用户加进持有管理员等价权限的组，必须 403 PermissionDenied"
+    );
+    assert!(
+        !harness::is_member(&app, group_id, target.user_id).await,
+        "被拒的成员写入不得落库"
+    );
+}
+
+/// G2 闸门的活性对照：全权组成员执行三条路径必须全部放行。
+///
+/// 判据是「调用者是否为全权组成员」，不是「调用者是否持有该权限」——内置全权组的成员
+/// 天然持有全部权限（含管理员等价权限），闸门不得把他们一并锁死，否则系统管理员再也
+/// 无法委派凭据类权限，引导后立刻变成不可运维。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_system_admin_can_grant_admin_equivalent_permissions_and_membership() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let target = harness::grant_only(&app, &admin, "target", "demo.notes.read").await;
+
+    // 路径一：直接授予。
+    assert_eq!(
+        harness::grant_permission_status(
+            &app,
+            &admin,
+            target.user_id,
+            "account.users.reset_credentials"
+        )
+        .await,
+        200,
+        "全权组成员必须能直接授予管理员等价权限"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target.user_id).await,
+        2,
+        "授予必须真的落库（夹具原一条 + 新增一条）"
+    );
+
+    // 路径二：加进组。
+    let group_id = harness::create_group(&app, &admin, "credential_ops", "凭据运营组").await;
+    assert_eq!(
+        harness::add_group_item_status(&app, &admin, group_id, "account.users.reset_credentials")
+            .await,
+        200,
+        "全权组成员必须能把管理员等价权限加进组"
+    );
+    assert!(harness::group_holds_item(&app, group_id, "account.users.reset_credentials").await);
+
+    // 路径三：把成员加进已含管理员等价权限的组。
+    let other = harness::grant_only(&app, &admin, "other", "demo.notes.read").await;
+    assert_eq!(
+        harness::add_member_status(&app, &admin, group_id, other.user_id).await,
+        200,
+        "全权组成员必须能把用户加进持有管理员等价权限的组"
+    );
+    assert!(harness::is_member(&app, group_id, other.user_id).await);
+}
+
+/// 权限目录必须把危害面发出来：每条管理员等价权限带标记，非管理员等价的不带。
+///
+/// 用例把「带标记的权限集合」与测试侧独立复述的期望值**整体比对**，因此它同时钉住
+/// 两件事：(1) 运行期真的按清单打了标记；(2) 清单里每条都仍是当前 Catalog 已声明的
+/// 权限——权限改名后它不会出现在目录里，集合随之少一项而失败，清单无法静默失效。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn the_permission_catalog_marks_exactly_the_admin_equivalent_permissions() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+
+    let mut flagged: Vec<String> = harness::list_permission_entries(&app, &admin)
+        .await
+        .iter()
+        .filter(|entry| entry["admin_equivalent"].as_bool() == Some(true))
+        .map(|entry| {
+            entry["permission"]
+                .as_str()
+                .unwrap_or_else(|| panic!("目录条目缺少 permission 字符串: {entry}"))
+                .to_string()
+        })
+        .collect();
+    flagged.sort();
+    let expected: Vec<String> = ADMIN_EQUIVALENT_PERMISSIONS
+        .iter()
+        .map(|permission| permission.to_string())
+        .collect();
+    assert_eq!(
+        flagged, expected,
+        "目录标记的管理员等价集合必须恰好等于清单；少一项说明清单里的权限已不在 Catalog"
+    );
+
+    // 反向对照：运营/读取类权限一律不得被标成管理员等价——标记一旦过宽，
+    // 闸门会把正常委派一并锁死。
+    for permission in [
+        "access.grants.write",
+        "access.groups.write",
+        "account.users.manage",
+        "demo.notes.read",
+    ] {
+        assert_eq!(
+            harness::catalog_flag_of(&app, &admin, permission).await,
+            Some(false),
+            "{permission} 不是管理员等价权限，不得被标记"
+        );
+    }
 }

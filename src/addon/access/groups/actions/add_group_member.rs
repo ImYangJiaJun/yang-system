@@ -2,8 +2,9 @@
 
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
-    assert_no_self_escalation, effective_permissions_of_in_tx, ensure_member_limit,
-    invalidate_users_in_tx, lock_users_ascending_in_tx, simulate_after_join,
+    assert_no_self_escalation, effective_permissions_of_in_tx,
+    ensure_may_modify_members_of_group_in_tx, ensure_member_limit, invalidate_users_in_tx,
+    lock_users_ascending_in_tx, simulate_after_join,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
@@ -152,6 +153,19 @@ async fn join_group_once(
                 "只有系统管理员可以修改系统管理员组的成员".to_string(),
             ));
         }
+
+        // G2 闸门：目标组持有管理员等价权限时，加成员同样是一种「授予」——组本身没有
+        // 变化，变的是成员：新成员会继承组的全部权限（含管理员等价那条）。判据因此看
+        // **目标组的条目**，而不是本次请求里带了哪条权限（这条路径没有权限参数）。
+        // 放在组行锁与成员/条目读之后，判据所见的条目不会漂移。
+        ensure_may_modify_members_of_group_in_tx(
+            access,
+            ctx,
+            &mut transaction,
+            operator_id,
+            group.id,
+        )
+        .await?;
 
         // 成员上限：本接口是唯一能**增加**成员的路径，`ensure_member_limit` 不在这里
         // 调用，组就能经 API 无界增长，`repository.rs` 里「成员集合被 MAX_GROUP_MEMBERS
