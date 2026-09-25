@@ -838,6 +838,34 @@ export type HealthReport = {
 ///
 /// **不带 Token 明文**：明文只在用户点「复制 Token」时经回显端点取一次、
 /// 或轮换之后由那次响应带回。清单是常驻的一页，凭据不该一直躺在里面。
+/// 一条绑定的**级联父**，以及运维要拿它去填的那个值。
+///
+/// # `linkageKey` 到底是什么
+///
+/// 它是**父绑定的 `field_id`**（形如 `fldCaTg1`），不是审批表单里那个控件的代码
+/// （形如 `widget17796881173030001`）。判据是服务端的比较对象：
+/// `approval_options.rs` 的 `linkage_filter_target` 只拿请求里的联动参数键与
+/// `parent_field_id` 比（trim + 大小写不敏感），从不比较 widget 代码——那个值在
+/// 它的单测里和「随便什么键」并列归入「不命中」。填 widget 代码只会退化成通配。
+///
+/// 运维要把它填进**审批后台那个联动控件的「参数代码」**（官方文档里的
+/// `linkageConfigs[].key`）。那个格子是自由文本，所以这是一条**本项目的约定**，
+/// 不是飞书的要求。
+export type CredentialParent = {
+  /// 联动参数键。父字段没被解析出名字时，它也是这一行唯一能指认对象的东西。
+  linkageKey: string;
+  /// 父字段的展示名；还没解析出来时退回 `field_id`（与 `FieldBindingsTable` 同一取舍：
+  /// 这一栏是给人对着飞书那张表看的，而 `field_id` 在飞书界面上不出现）。
+  label: string;
+  /// 父绑定是否**启用中**。父被停用时服务端按「无父」处理
+  /// （`approval_options.rs` 的 `load_parent_source_key` 要求父启用），这条级联
+  /// 整个取不到选项——那时这一块不能只写「复制它」。
+  ///
+  /// 与「父根本不存在」折在同一个 `false` 里是刻意的：对运维而言两者的下一步动作
+  /// 相同（回向导把父列修好），而这一个布尔值答不出更细的区分。
+  enabled: boolean;
+};
+
 export type CredentialItem = {
   fieldId: string;
   fieldName: string | null;
@@ -847,6 +875,8 @@ export type CredentialItem = {
   /// 把「拿不到」画成「从未轮换」是一句可查证的假话，所以两者分开。
   tokenRotatedAt?: number | null;
   enabled: boolean;
+  /// 级联父。`null` = 这条绑定没有父（扁平字段），清单上不出现「联动 key」那一项。
+  parent: CredentialParent | null;
 };
 
 /// 表级行的字段绑定 → 拷贝清单行。
@@ -854,22 +884,52 @@ export type CredentialItem = {
 /// **只列启用中的绑定**：停用的绑定出站会吃 `SOURCE_DISABLED`，把它们摆进
 /// 「粘到控件里」的清单，会让人配出一个永远取不到选项的控件。
 ///
+/// 但解析父**必须在完整集合里找**（包括停用的那几条）：只在已筛过的集合里找，
+/// 父被停用的子绑定会退化成「没有父」，于是它既不显示联动 key、也不说父已停用
+/// ——而那恰恰是这条级联现在取不到选项的原因。
+///
 /// 抽成纯函数是为了可测——「哪几行会出现在清单上」正是最容易在改动中无声漂移的地方。
 export function credentialItems(item: {
   fields: DatasourceFieldBinding[];
 }): CredentialItem[] {
+  const byFieldId = new Map(
+    item.fields.map((binding) => [binding.fieldId, binding]),
+  );
   return item.fields
     .filter((binding) => binding.enabled)
-    .map((binding) => ({
-      fieldId: binding.fieldId,
-      fieldName: binding.fieldName,
-      sourceKey: binding.sourceKey,
-      // 原样透传三态：数字 = 那次轮换的时间、`null` = 从未轮换、
-      // `undefined` = 这一列没拿到。**不能写死**——写死的后果是那一列
-      // 永远显示「—」，用户看不到刚换过的凭据是什么时候换的。
-      tokenRotatedAt: binding.tokenRotatedAt,
-      enabled: binding.enabled,
-    }));
+    .map((binding) => {
+      // 父指针为空 = 扁平字段。**空串也算没有**：`parent_field_id` 是自由文本列，
+      // 后端对它的每一处消费都先 `trim` 再判空，这里跟着同一口径。
+      const parentFieldId = binding.parentFieldId?.trim() ?? "";
+      const parent =
+        parentFieldId === "" ? undefined : byFieldId.get(parentFieldId);
+      return {
+        fieldId: binding.fieldId,
+        fieldName: binding.fieldName,
+        sourceKey: binding.sourceKey,
+        // 原样透传三态：数字 = 那次轮换的时间、`null` = 从未轮换、
+        // `undefined` = 这一列没拿到。**不能写死**——写死的后果是那一列
+        // 永远显示「—」，用户看不到刚换过的凭据是什么时候换的。
+        tokenRotatedAt: binding.tokenRotatedAt,
+        enabled: binding.enabled,
+        parent:
+          parentFieldId === ""
+            ? null
+            : {
+                linkageKey: parentFieldId,
+                label: parent?.fieldName ?? parentFieldId,
+                enabled: parent?.enabled === true,
+              },
+      };
+    });
+}
+
+/// 清单上一行的称呼：字段名认得出来就用它，认不出退回标识。
+///
+/// 它是复制按钮可访问名的一部分——一页有多行、每行三个复制点，只喊「复制」
+/// 屏幕阅读器用户分不出按的是哪一个。
+export function credentialLabel(item: CredentialItem): string {
+  return item.fieldName ?? item.sourceKey;
 }
 
 /// 界面值 → `linkage_mapping` 文本。`null` 返回空串（表示不写这一项）。

@@ -596,7 +596,7 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
     const calls = renderTableDetail();
 
     await waitFor(() => expect(credentialRows()).toHaveLength(1));
-    await user.click(screen.getByRole("button", { name: "复制 Token" }));
+    await user.click(screen.getByRole("button", { name: /^复制 Token：/ }));
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith("revealed-token");
     });

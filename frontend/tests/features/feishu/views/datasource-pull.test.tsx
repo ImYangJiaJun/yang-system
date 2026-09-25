@@ -192,9 +192,9 @@ describe("详情页 · 取选项接口地址", () => {
     const shown = await screen.findByText(
       /\/api\/v1\/feishu\/approval\/options\/expense_category$/,
     );
-    await user.click(screen.getByRole("button", { name: "复制 URL" }));
+    await user.click(screen.getByRole("button", { name: /^复制接口地址：/ }));
 
-    // 复制的是**显示的那一份原值**——截断只影响呈现，不影响剪贴板。
+    // 复制的是**块里显示的那一份原值**（地址现在整串渲染，不再截断）。
     expect(writeText).toHaveBeenCalledWith(shown.textContent);
   });
 });
