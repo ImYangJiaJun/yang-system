@@ -64,6 +64,170 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/access/groups": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * 权限组列表
+     * @description 列出全部权限组及其成员数、权限数与孤儿条目数
+     */
+    get: operations["access.groups.list_groups"];
+    put?: never;
+    /**
+     * 创建权限组
+     * @description 创建一个权限组
+     */
+    post: operations["access.groups.create_group"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/access/groups/delete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 删除权限组
+     * @description 删除一个权限组；组内仍有成员时拒绝
+     */
+    post: operations["access.groups.delete_group"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/access/groups/items": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 加入组权限
+     * @description 向权限组追加一条已声明的权限（幂等）
+     */
+    post: operations["access.groups.add_group_item"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/access/groups/items/remove": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 移除组权限
+     * @description 从权限组移除一条权限（幂等；已不在目录中的孤儿条目同样可清理）
+     */
+    post: operations["access.groups.remove_group_item"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/access/groups/members": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 加入组成员
+     * @description 把一个用户加入权限组（幂等；受防自提权子集校验约束）
+     */
+    post: operations["access.groups.add_group_member"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/access/groups/members/remove": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 移出组成员
+     * @description 把一个用户移出权限组（幂等；最后一个系统管理员不可移出）
+     */
+    post: operations["access.groups.remove_group_member"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/access/groups/update": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 修改权限组
+     * @description 修改权限组的展示名与描述（组标识不可改）
+     */
+    post: operations["access.groups.update_group"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/access/groups/{group_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * 权限组详情
+     * @description 读取权限组的条目（含孤儿标记）、成员与内置组标记
+     */
+    get: operations["access.groups.get_group"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/access/permissions": {
     parameters: {
       query?: never;
@@ -985,8 +1149,14 @@ export interface components {
       data?: unknown;
       message: string;
     };
-    /** @description 权限目录中的一个条目：权限字符串与声明它的操作 ID 列表。 */
+    /** @description 权限目录中的一个条目：权限字符串、声明它的操作 ID 列表，以及危害面标记。 */
     PermissionEntry: {
+      /**
+       * @description 该权限是否为「管理员等价权限」（G2）。
+       *
+       *     目录本身推不出这一点（它只记录「有哪些权限」），标记由代码侧的显式清单 `sensitive_permissions` 给出。随条目一起序列化到目录读接口，前端据此把危害面 显示出来——「可配置的前提是每个权限的危害面可见」。
+       */
+      admin_equivalent: boolean;
       declared_by: string[];
       permission: string;
     };
@@ -1745,6 +1915,981 @@ export interface operations {
         };
       };
     };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.list_groups": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "application/json": Record<string, never>;
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.create_group": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          /** @default null */
+          description?: string | null;
+          group_key: string;
+          title: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.delete_group": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          /** Format: int64 */
+          group_id: number;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.add_group_item": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          /** Format: int64 */
+          group_id: number;
+          permission: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.remove_group_item": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          /** Format: int64 */
+          group_id: number;
+          permission: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.add_group_member": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          /** Format: int64 */
+          group_id: number;
+          /** Format: int64 */
+          user_id: number;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.remove_group_member": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          /** Format: int64 */
+          group_id: number;
+          /** Format: int64 */
+          user_id: number;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.update_group": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": {
+          /** @default null */
+          description?: string | null;
+          /** Format: int64 */
+          group_id: number;
+          title: string;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "access.groups.get_group": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        group_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
     responses: {
       /** @description 成功 */
       200: {
