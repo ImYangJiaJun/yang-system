@@ -300,9 +300,10 @@ feishu_datasource_field              ← 新表：字段绑定
 也不存在派生代际共存问题；`DERIVE_RULE_VERSION` 无需 bump（派生口径未变）。
 
 > **这条「无需 bump」只对本次改动成立**，它的前提逐字写在同一句里：「派生口径未变」。
-> §8.1 的三级链修复**要改派生口径**，因此那一次**必须 bump**，并且会无差别重写一轮
-> 全部绑定。届时「库是空的」这条前提要先核实再引用——若届时已有数据，churn 从
-> 「无所谓」变成「停用全部 L3+ 旧行」。
+> §8.1 的三级链修复**要改派生口径**，因此那一次**必须 bump**——
+> **已于 2026-09-27 发生**（`DERIVE_RULE_VERSION` 1 → 2，`afcf0e5`），它会无差别重写一轮
+> 全部绑定。**「库是空的」这条前提至今未在云上核实过**（本机解析不了云端 MySQL 的主机名）：
+> 若那把库里已有数据，churn 不是「无所谓」，而是停用其全部深度 ≥2 的旧行。
 
 ---
 
@@ -374,6 +375,11 @@ POST /api/v1/feishu/approval/options/{source_key}
 
 三条绑定、两条父指针，不需要在界面上配「三级」。
 
+> **「深度由链涌现」这句话在 2026-09-27 之前是空头支票**：读端拿父行真实的 `option_id`
+> 去匹配，而写端算父键时假定「父源自己没有父」，于是父一旦是链的中间列，**子项一个都匹配
+> 不上**（真机 `fldm0j5do3` 43 个子项 0 命中），下拉静默变空。现在写端改成沿祖先链折叠，
+> 这句话才成立。改动与验证见 §8.1。
+
 **与现状的差异**：现在的 `linkage_mapping` 是
 `{"<控件代码>":{"parent_source_key":…,"parent_field":…}}`
 （`src/addon/feishu/domain/linkage.rs:5-10` 是形状的唯一事实源），
@@ -436,7 +442,7 @@ POST /api/v1/feishu/approval/options/{source_key}
    解析父因此**必须在完整 `fields[]` 里找**——先 `filter(enabled)` 再找会把这一态退化成
    「没有父」，既不给 key、也不说父为什么停了，而那恰恰是这条级联现在取不到选项的原因。
 
-### 8.1 三级链的修复规格（2026-09-26 裁定，尚未落码）
+### 8.1 三级链的修复规格（2026-09-26 裁定，2026-09-27 落码）
 
 **诊断**：三级链恒空是一处口径不对称，两个函数只差一个入参。
 
@@ -455,7 +461,15 @@ POST /api/v1/feishu/approval/options/{source_key}
 被破坏的不变量是 `option/table.rs` 明文写下的那条：**级联父键存的是父数据源的
 `option_id`**。
 
-**修法（选定 A）：把父键由「单跳」改为「祖先链自根向下折叠」**，构造性恢复该不变量。
+**修法（选定 A，已落码）：把父键由「单跳」改为「祖先链自根向下折叠」**，构造性恢复该不变量。
+
+> **落码记（2026-09-27，`afcf0e5`）**：`derive.rs` 的 `parent_option_id` 换成
+> `ancestor_key`；`RawValue.parent_label` → `ancestors: &[&str]`；`linkage.rs` 的 `Linkage`
+> 由「一个父」扩成祖先链；`pull::parent_linkage` 沿 `parent_field_id` 上溯拼链（**带 visited
+> 守卫**——`validate_fields` 拒自环，但手工改库能造出 a→b→a，不设守卫会把一轮拉取卡死）；
+> `extract_values_owned` 对每级祖先列各读同一条 record 里的一格。
+> **`option_id` 的公式一个字没改**——只换父键的算法，相等因此是构造性的。
+> `DERIVE_RULE_VERSION` 1 → 2。
 
 新增 `option_id_of_chain(sources, labels)`（两个等长切片，root→本行，逐级折叠；每级
 `label` 先 trim，trim 后为空则**跳过该级**——与 `derive.rs` 现有「空父文案 → 无父」同口径），

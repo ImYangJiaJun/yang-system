@@ -149,6 +149,20 @@ parent_option_id(父source_key, 父文案) = option_id_of(父source_key, None, �
 （`approval_options.rs:170-181`），对不上就返回 `40004`，第三级候选集恒为空。
 要支持三级必须把 `RawValue.parent_label` 扩展成祖先链，属独立改动。
 
+> **后续（2026-09-27，`afcf0e5`）**：那项「独立改动」已经做了——`RawValue.parent_label`
+> 扩成了祖先链，父键改为从根逐级折叠（`derive.rs::ancestor_key`），
+> `DERIVE_RULE_VERSION` 1 → 2。规格与验证见
+> `docs/architecture/feishu-datasource-table-config.md` §8.1。
+>
+> 两点要分清：
+>
+> - **D2 是产品裁定，没有变**。银行网点这条链仍然只做两级——§4.6 的理由（三级会把 23%
+>   的数据变成不可达）是数据形状决定的，与派生能力无关。
+> - 上面那段的技术结论**已过期**：三级不再恒空。而且失败形态也不再是 `40004`——读端
+>   后来改成「按 `option_id` 或 `label` 都能解析到父行」，于是对不上时存在性检查会通过，
+>   失败退化成 `code=0` + 空 options 的**静默空集**（真机实测 `fldm0j5do3` 0/43）。
+>   这也是它一直没被当成 bug 抓出来的原因。
+
 **读端过滤**（`approval_options.rs:330-339`）：先取数据源行的 `linkage_mapping`，
 再 `resolve_parent_key`，命中则把 `where_eq("parent_key", …)` 挂在**顶层**
 （顶层条件隐式 AND，不影响 keyset 游标）。飞书回传值经 `normalize_linkage_value`
