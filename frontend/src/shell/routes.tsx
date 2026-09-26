@@ -109,6 +109,10 @@ export const appRoutes = [
                 await import("@/features/access/views/PermissionGroupsPage")
               ).default,
             }),
+            // 与其它路由级 lazy 页面同一约定：硬导航时必须给兜底，
+            // 否则首次导航完成前是空白，react-router 还会打 HydrateFallback 警告
+            // （见 RouteFallback.tsx；tests/shell/routes.test.tsx 逐条钉住这条约定）。
+            hydrateFallbackElement: <RouteFallback />,
           },
           ...devOnlyRoutes,
         ],
