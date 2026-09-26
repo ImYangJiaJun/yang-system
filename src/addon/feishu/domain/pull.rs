@@ -32,7 +32,7 @@ use super::bitable::{
 };
 use super::context::FeishuContext;
 use super::derive::{derive_options, snapshot_digest, DerivedOption, RawValue};
-use super::linkage::Linkage;
+use super::linkage::{Linkage, LinkageLevel};
 use super::option_write::{
     apply_option_rows, count_option_rows, disable_option_rows, find_foreign_option_owner,
     OptionWriteItem, OptionWriteOutcome,
@@ -399,13 +399,23 @@ async fn pull_table_inner(
         outcome.fields += 1;
         let linkage = parent_linkage(field, &table.bindings, &bound)?;
         let values = extract_values_owned(&snapshot, &field.field_name, linkage.as_ref());
-        // 派生要 `&[RawValue]`；这里把自有载体借出去，派生完即丢。
-        let raw: Vec<RawValue<'_>> = values.iter().map(OwnedRawValue::as_raw).collect();
+        // 派生要 `&[RawValue]`，而 `RawValue.ancestors` 是借用切片——先把每行的祖先引用
+        // 算好（它活到本语句块末），再借出去；派生完即丢。
+        let ancestor_refs: Vec<Vec<&str>> = values
+            .iter()
+            .map(|value| value.ancestors.iter().map(String::as_str).collect())
+            .collect();
+        let raw: Vec<RawValue<'_>> = values
+            .iter()
+            .zip(ancestor_refs.iter())
+            .map(|(value, refs)| value.as_raw(refs))
+            .collect();
         let derived = derive_options(
             &binding.source_key,
-            linkage
+            &linkage
                 .as_ref()
-                .map(|linkage| linkage.parent_source_key.as_str()),
+                .map(Linkage::source_keys)
+                .unwrap_or_default(),
             &raw,
         );
         let digest = snapshot_digest(&derived);
@@ -736,35 +746,61 @@ fn bind_fields(
     Ok(bound)
 }
 
-/// 一条绑定的父列声明：父的 `source_key` 与父的**当前**名字。
+/// 一条绑定的祖先链：从**根到直接父**，每级给出「父的 `source_key`」与「父的**当前**名字」。
 ///
-/// 名字取**解析后**的那一份，不能用绑定行上的缓存——缓存是上一轮的名字，父列改名后
-/// 按旧名字读快照会一片空白（`record.fields.get` 取不到键，全部子项静默变成无父）。
+/// 沿 `parent_field_id` 反复上溯，所以任意深度都能拼出完整一条链。每级的名字取
+/// **解析后**的那一份，不能用绑定行上的缓存——缓存是上一轮的名字，父列改名后按旧名字
+/// 读快照会一片空白（`record.fields.get` 取不到键，整棵子树的父键一起塌成空）。
+///
+/// # 为什么必须防环
+///
+/// `validate_fields` 拒自环与缺失父，但**手工改库能造出 a→b→a**。上溯不设 visited
+/// 守卫的话，一轮拉取会在这里**卡死**——不是报错，是 worker 再也不返回。卡死比报错
+/// 难查得多，所以这里宁可直接失败并点名。
 fn parent_linkage(
     field: &BoundField,
     bindings: &[TableBinding],
     bound: &[BoundField],
 ) -> Result<Option<Linkage>, BaseError> {
-    let Some(parent_field_id) = field.parent_field_id.as_deref() else {
+    let Some(first_parent) = field.parent_field_id.as_deref() else {
         return Ok(None);
     };
-    let (Some(parent_binding), Some(parent_field)) = (
-        bindings
-            .iter()
-            .find(|other| other.field_id == parent_field_id),
-        bound.iter().find(|other| other.field_id == parent_field_id),
-    ) else {
-        // `bind_fields` 已经挡过一次；这是同一条判据的第二道，防的是将来有人绕过它
-        // 单独调用本函数。
-        return Err(BaseError::ConfigError(format!(
-            "字段绑定 {} 的父列 {parent_field_id} 不在本表的启用绑定里",
-            field.field_id
-        )));
-    };
-    Ok(Some(Linkage {
-        parent_source_key: parent_binding.source_key.clone(),
-        parent_field: parent_field.field_name.clone(),
-    }))
+
+    let mut chain: Vec<LinkageLevel> = Vec::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    visited.insert(field.field_id.as_str());
+    let mut next = Some(first_parent);
+
+    while let Some(parent_field_id) = next {
+        if !visited.insert(parent_field_id) {
+            return Err(BaseError::ConfigError(format!(
+                "字段绑定 {} 的父指针成环（回到 {parent_field_id}）：上溯停不下来，本轮整表停止",
+                field.field_id
+            )));
+        }
+        let (Some(parent_binding), Some(parent_field)) = (
+            bindings
+                .iter()
+                .find(|other| other.field_id == parent_field_id),
+            bound.iter().find(|other| other.field_id == parent_field_id),
+        ) else {
+            // `bind_fields` 已经挡过一次；这是同一条判据的第二道，防的是将来有人绕过它
+            // 单独调用本函数。
+            return Err(BaseError::ConfigError(format!(
+                "字段绑定 {} 的父列 {parent_field_id} 不在本表的启用绑定里",
+                field.field_id
+            )));
+        };
+        chain.push(LinkageLevel {
+            source_key: parent_binding.source_key.clone(),
+            field_name: parent_field.field_name.clone(),
+        });
+        next = parent_field.parent_field_id.as_deref();
+    }
+
+    // 上溯得到的是「直接父 → 根」，而派生要「根 → 直接父」：折叠必须从根往下。
+    chain.reverse();
+    Ok(Some(Linkage { ancestors: chain }))
 }
 
 /// 绑定行的 `field_name` 缓存是否落后于本轮解析出来的名字。
@@ -808,19 +844,27 @@ fn extract_values_owned(
                 continue;
             }
         };
-        let parent_label = linkage.and_then(|linkage| {
-            record
-                .fields
-                .get(&linkage.parent_field)
-                .and_then(|value| match cell_label(value) {
-                    CellValue::Text(label) => Some(label),
-                    _ => None,
+        // 每一级祖先各读**同一条 record** 里那一列（A7b：同行共现，不去父表反查）。
+        // 取不到（列不在快照里）或不是文本（人员/地理位置等多值列）都记成**空串**，
+        // 由派生的两条空级规则处理：直接父为空 ⇒ 本行无父；中间级为空 ⇒ 跳过那一级。
+        let ancestors = match linkage {
+            None => Vec::new(),
+            Some(linkage) => linkage
+                .ancestors
+                .iter()
+                .map(|level| {
+                    record
+                        .fields
+                        .get(&level.field_name)
+                        .and_then(|value| match cell_label(value) {
+                            CellValue::Text(label) => Some(label),
+                            _ => None,
+                        })
+                        .unwrap_or_default()
                 })
-        });
-        values.push(OwnedRawValue {
-            parent_label,
-            label,
-        });
+                .collect(),
+        };
+        values.push(OwnedRawValue { ancestors, label });
     }
     if unsupported > 0 {
         // 非空告警：静默丢弃会让「取数列选错类型」表现为「选项莫名变少」。
@@ -833,17 +877,21 @@ fn extract_values_owned(
     values
 }
 
-/// [`RawValue`] 的自有版本。
+/// [`RawValue`] 的自有版本。`ancestors` 从根到直接父，取不到的那一级是空串。
 #[derive(Debug, Clone)]
 struct OwnedRawValue {
-    parent_label: Option<String>,
+    ancestors: Vec<String>,
     label: String,
 }
 
 impl OwnedRawValue {
-    fn as_raw(&self) -> RawValue<'_> {
+    /// 借出成 [`RawValue`]。
+    ///
+    /// `ancestor_refs` 必须与 `self.ancestors` 等长：`RawValue.ancestors` 是一个**借用的
+    /// 切片**，而在 `as_raw` 里现算的话活不过返回值，所以由调用方先算好再传进来。
+    fn as_raw<'a>(&'a self, ancestor_refs: &'a [&'a str]) -> RawValue<'a> {
         RawValue {
-            parent_label: self.parent_label.as_deref(),
+            ancestors: ancestor_refs,
             label: self.label.as_str(),
         }
     }
@@ -1010,12 +1058,14 @@ mod tests {
         }
     }
 
-    /// 级联声明。形状只有两个成员——`cascade_field` 已随「形状收敛到
-    /// `domain/linkage.rs`」一并去掉（它零消费）。
+    /// 一级祖先的级联声明。`cascade_field` 已随「形状收敛到 `domain/linkage.rs`」
+    /// 去掉（它零消费）；2026-09-27 又把「一个父」扩成「一串祖先」，见该模块文档。
     fn linkage() -> Linkage {
         Linkage {
-            parent_source_key: "currency".to_string(),
-            parent_field: "父".to_string(),
+            ancestors: vec![LinkageLevel {
+                source_key: "currency".to_string(),
+                field_name: "父".to_string(),
+            }],
         }
     }
 
@@ -1026,8 +1076,8 @@ mod tests {
         let values = extract_values_owned(&snap, "子", Some(&linkage()));
         assert_eq!(values.len(), 2);
         assert_eq!(values[0].label, "6.9025");
-        assert_eq!(values[0].parent_label.as_deref(), Some("USD 美元"));
-        assert_eq!(values[1].parent_label.as_deref(), Some("HKD 港币"));
+        assert_eq!(values[0].ancestors, vec!["USD 美元"]);
+        assert_eq!(values[1].ancestors, vec!["HKD 港币"]);
     }
 
     #[test]
@@ -1035,7 +1085,7 @@ mod tests {
         let snap = snapshot(vec![("甲", "父值")]);
         let values = extract_values_owned(&snap, "子", None);
         assert_eq!(values.len(), 1);
-        assert!(values[0].parent_label.is_none());
+        assert!(values[0].ancestors.is_empty());
     }
 
     #[test]
@@ -1095,13 +1145,15 @@ mod tests {
 
     #[test]
     fn owned_raw_value_borrows_correctly() {
+        // `ancestors` 是借用切片，所以引用必须先算好再传进来（见 `as_raw` 的说明）
         let owned = OwnedRawValue {
-            parent_label: Some("USD".to_string()),
+            ancestors: vec!["大类".to_string(), "USD".to_string()],
             label: "6.9".to_string(),
         };
-        let raw = owned.as_raw();
+        let refs: Vec<&str> = owned.ancestors.iter().map(String::as_str).collect();
+        let raw = owned.as_raw(&refs);
         assert_eq!(raw.label, "6.9");
-        assert_eq!(raw.parent_label, Some("USD"));
+        assert_eq!(raw.ancestors, vec!["大类", "USD"]);
     }
 
     /// 预检必须**拒绝**，并给出原因。断言的是拒绝本身——通过就意味着这条用例的前提塌了。
@@ -1243,21 +1295,21 @@ mod tests {
         // （derive.rs 的两处都 trim），否则子项指向一个不存在的父 option_id
         // ——失效形态是「下拉静默变空」，不报错。
         let parent_rows = [RawValue {
-            parent_label: None,
+            ancestors: &[],
             label: "CNY 人民币\n",
         }];
         let child_rows = [
             RawValue {
-                parent_label: Some("CNY 人民币\n"),
+                ancestors: &["CNY 人民币\n"],
                 label: "1.0000",
             },
             RawValue {
-                parent_label: Some("CNY 人民币"),
+                ancestors: &["CNY 人民币"],
                 label: "1.0000",
             },
         ];
-        let parent = derive_options("currency", None, &parent_rows);
-        let child = derive_options("fx", Some("currency"), &child_rows);
+        let parent = derive_options("currency", &[], &parent_rows);
+        let child = derive_options("fx", &["currency"], &child_rows);
         assert_eq!(parent.len(), 1, "两种写法折叠成同一个父选项");
         assert_eq!(child.len(), 1, "同父同文案只派生一个子选项");
         assert_eq!(
@@ -1272,15 +1324,15 @@ mod tests {
         // 但都不得挂到一个空父上。
         let rows = [
             RawValue {
-                parent_label: Some("推广测评服务费"),
+                ancestors: &["推广测评服务费"],
                 label: "   ",
             },
             RawValue {
-                parent_label: Some("   "),
+                ancestors: &["   "],
                 label: "pay for services-X",
             },
         ];
-        let derived = derive_options("summary", Some("fee_type"), &rows);
+        let derived = derive_options("summary", &["fee_type"], &rows);
         assert_eq!(derived.len(), 1, "空文案不产出选项（derive.rs 的 trim）");
         assert_eq!(derived[0].parent_key, "", "父文案为空时落无父键，不挂空父");
     }
@@ -1291,15 +1343,15 @@ mod tests {
         // 推广测评服务费 与 预付储值款）。设计答案：各派生一个，互不覆盖。
         let rows = [
             RawValue {
-                parent_label: Some("推广测评服务费"),
+                ancestors: &["推广测评服务费"],
                 label: "pay for services-YL-AR",
             },
             RawValue {
-                parent_label: Some("预付储值款"),
+                ancestors: &["预付储值款"],
                 label: "pay for services-YL-AR",
             },
         ];
-        let derived = derive_options("summary", Some("fee_type"), &rows);
+        let derived = derive_options("summary", &["fee_type"], &rows);
         assert_eq!(derived.len(), 2, "同文案不同父必须派生两个选项");
         assert_ne!(derived[0].parent_key, derived[1].parent_key);
     }
@@ -1312,6 +1364,24 @@ mod tests {
             table_binding("fldB", Some("汇率"), Some("fldA")),
         ];
         assert_eq!(resolve_targets(&bindings), vec!["fldA", "fldB"]);
+    }
+
+    #[test]
+    fn the_targets_cover_every_ancestor_of_a_deep_chain() {
+        // 四级链的祖先列靠**绑定之间的并集**覆盖：L4 只声明 L3 是父，但 L3 的绑定
+        // 自己声明了 L2，L2 又声明 L1——所以四列全在集合里。
+        // 这条是「祖先列本来就在快照里、要补的只是取值那一跳」的机械依据；
+        // 哪天有人把 resolve_targets 改成「只取直接父且不叠加」，这里会红。
+        let bindings = vec![
+            table_binding("fldL1", Some("交易类型"), None),
+            table_binding("fldL2", Some("费用大类"), Some("fldL1")),
+            table_binding("fldL3", Some("费用类型"), Some("fldL2")),
+            table_binding("fldL4", Some("银行流水摘要"), Some("fldL3")),
+        ];
+        assert_eq!(
+            resolve_targets(&bindings),
+            vec!["fldL1", "fldL2", "fldL3", "fldL4"]
+        );
     }
 
     #[test]
@@ -1370,8 +1440,70 @@ mod tests {
         let linkage = parent_linkage(&bound[1], &bindings, &bound)
             .unwrap_or_else(|error| panic!("应可解析: {error}"))
             .unwrap_or_else(|| panic!("fldB 声明了父列"));
-        assert_eq!(linkage.parent_source_key, "currency");
-        assert_eq!(linkage.parent_field, "币种（改名后）");
+        assert_eq!(
+            linkage.ancestors,
+            vec![LinkageLevel {
+                source_key: "currency".to_string(),
+                field_name: "币种（改名后）".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_ancestor_chain_is_built_root_first_for_any_depth() {
+        // 上溯得到的是「直接父 → 根」，而折叠必须从根往下——顺序反了会让父键整条算错，
+        // 且错法是「静默空下拉」，不报错。真机上那条链是四级。
+        let bindings = vec![
+            table_binding("fldL1", Some("交易类型"), None),
+            table_binding("fldL2", Some("费用大类"), Some("fldL1")),
+            table_binding("fldL3", Some("费用类型"), Some("fldL2")),
+            table_binding("fldL4", Some("银行流水摘要"), Some("fldL3")),
+        ];
+        let resolved = vec![
+            ("fldL1".to_string(), "交易类型".to_string()),
+            ("fldL2".to_string(), "费用大类".to_string()),
+            ("fldL3".to_string(), "费用类型".to_string()),
+            ("fldL4".to_string(), "银行流水摘要".to_string()),
+        ];
+        let bound =
+            bind_fields(&bindings, &resolved).unwrap_or_else(|error| panic!("应可绑定: {error}"));
+        let linkage = parent_linkage(&bound[3], &bindings, &bound)
+            .unwrap_or_else(|error| panic!("应可解析: {error}"))
+            .unwrap_or_else(|| panic!("fldL4 声明了父列"));
+        assert_eq!(
+            linkage
+                .ancestors
+                .iter()
+                .map(|l| l.field_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["交易类型", "费用大类", "费用类型"],
+            "从根到直接父；反了的话折叠出来是另一条键"
+        );
+        assert_eq!(linkage.source_keys().len(), 3);
+    }
+
+    #[test]
+    fn a_parent_pointer_cycle_fails_loudly_instead_of_hanging() {
+        // `validate_fields` 拒自环与缺失父，但**手工改库能造出 a→b→a**。
+        // 上溯不设 visited 守卫的话这里会死循环——不是报错，是 worker 卡住不返回。
+        // 两条都在启用绑定里，所以 `bind_fields` 那道「父不在集合里」挡不住它
+        let bindings = vec![
+            table_binding("fldA", Some("甲"), Some("fldB")),
+            table_binding("fldB", Some("乙"), Some("fldA")),
+        ];
+        let resolved = vec![
+            ("fldA".to_string(), "甲".to_string()),
+            ("fldB".to_string(), "乙".to_string()),
+        ];
+        let bound =
+            bind_fields(&bindings, &resolved).unwrap_or_else(|error| panic!("应可绑定: {error}"));
+        let error = parent_linkage(&bound[0], &bindings, &bound)
+            .err()
+            .unwrap_or_else(|| panic!("成环必须失败，不能静默上溯"));
+        assert!(
+            error.to_string().contains("成环"),
+            "错误里要说明是成环: {error}"
+        );
     }
 
     #[test]
