@@ -1,6 +1,8 @@
-//! 首个注册账号声明系统最终管理员的持久化端口。
+//! 账号域对外暴露的两个跨域端口：首个注册账号的引导声明，以及账号生命周期
+//! 所需的授权事实（最后管理员不变量与账号事实清理）。
 
 use async_trait::async_trait;
+use yang_base::action::ActionContext;
 use yang_base::BaseError;
 use yang_db::Transaction;
 
@@ -8,9 +10,6 @@ use yang_db::Transaction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OwnerClaimOutcome {
     /// 当前注册事务成功声明了唯一最终管理员。
-    ///
-    /// 当前骨架没有平台管理域，该变体仅保留给未来重新引入声明器的 Addon。
-    #[allow(dead_code)]
     Claimed { admin_id: i64 },
     /// 最终管理员已经由另一个已提交或正在提交的事务声明。
     AlreadyClaimed,
@@ -20,28 +19,59 @@ pub(crate) enum OwnerClaimOutcome {
 #[async_trait]
 pub(crate) trait SystemOwnerClaimer: Send + Sync {
     /// 在创建用户的同一事务中竞争唯一最终管理员哨兵。
+    ///
+    /// `ctx` 是必需参数：实现方必须经受信 writer 写入授权事实，
+    /// 而 writer 需要 `ctx` 取得连接池（`trusted_query`）。
     async fn claim(
         &self,
+        ctx: &ActionContext,
         transaction: &mut Transaction,
         user_id: i64,
         username: &str,
     ) -> Result<OwnerClaimOutcome, BaseError>;
 }
 
-/// 不声明最终管理员的默认声明器。
+/// account 生命周期所需的授权事实端口：由 access 域实现。
 ///
-/// 当前骨架只保留 account Addon：注册流程照常完成，
-/// 但任何账号都不会成为系统最终管理员。
-pub(crate) struct NoSystemOwnerClaimer;
-
+/// 存在的理由是依赖方向：account 不能依赖 access（会成环），因此把
+/// 「系统管理员不变量」与「账号事实清理」这两个跨域操作抽成端口，
+/// 经组合根注入——与 `SystemOwnerClaimer`、`GrantResolver` 同一模式。
 #[async_trait]
-impl SystemOwnerClaimer for NoSystemOwnerClaimer {
-    async fn claim(
+pub(crate) trait SystemAuthorizationPort: Send + Sync {
+    /// 目标用户在「被停用/被删除/被移出全权组」之后，系统是否仍有
+    /// 至少一名启用的系统管理员。返回 `false` 表示该操作必须被拒绝。
+    async fn remains_an_admin_after(
         &self,
-        _transaction: &mut Transaction,
-        _user_id: i64,
-        _username: &str,
-    ) -> Result<OwnerClaimOutcome, BaseError> {
-        Ok(OwnerClaimOutcome::AlreadyClaimed)
-    }
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        target_user_id: i64,
+    ) -> Result<bool, BaseError>;
+
+    /// spec §8.1 附加规则在账号生命周期路径上的落地：**只有全权组成员能修改全权组成员**。
+    ///
+    /// 与 `add_group_member` / `remove_group_member` 的守卫是同一条机制——同一个
+    /// `system_admin` 成员集合、同一句拒绝文案——只是调用点在账号域（account 不依赖
+    /// access，跨域事实一律经本端口）。目标用户不是全权组成员时恒放行：修改非全权组
+    /// 成员是正常的账号管理行为。
+    ///
+    /// 返回 `Err(PermissionDenied)`（403）表示「调用者不是全权组成员，而目标已是」，
+    /// 该操作必须被拒绝。
+    async fn ensure_operator_may_modify_system_admin_member(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        operator_id: i64,
+        target_user_id: i64,
+    ) -> Result<(), BaseError>;
+
+    /// 账号删除时清理其授权事实（`authz_grant` 直授与 `user_group` 成员行）。
+    ///
+    /// 必须经 access 的 writer 方法完成，**不得**在 account 侧直写这两张表，
+    /// 否则绕过 `docs/architecture/authorization-writers.md` 的 writer 边界。
+    async fn purge_user_facts_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        user_id: i64,
+    ) -> Result<(), BaseError>;
 }

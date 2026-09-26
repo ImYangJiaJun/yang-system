@@ -122,6 +122,14 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "login_event",
         "audit_event",
         "authorization_outbox",
+        // 组与授权事实表：首账号引导会把注册者写进内置全权组，`user_group` 与
+        // `system_owner` 因此对 `users` 持有 RESTRICT 外键。漏删它们时收尾
+        // `DROP users` 会以 3730 失败（`account_deletion_integration` 的夹具同因）。
+        "user_group",
+        "permission_group_item",
+        "permission_group",
+        "system_owner",
+        "authz_grant",
         "users",
     ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))

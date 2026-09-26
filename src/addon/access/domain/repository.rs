@@ -104,6 +104,24 @@ impl GrantRepository {
         Ok(())
     }
 
+    /// 删除目标用户的**全部**直授权限，返回删除行数（账号删除时的孤儿清理）。
+    ///
+    /// 账号删除后直授事实已无意义，必须一次清干净，否则留下指向已匿名化账号的
+    /// 悬空行（spec §8.3）。与 [`Self::delete_in_tx`] 的区别是不指定权限字符串。
+    pub(crate) async fn delete_all_of_user_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        user_id: i64,
+    ) -> Result<u64, BaseError> {
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(user_id.into()))?
+            .delete_in_tx(transaction)
+            .await?;
+        Ok(affected)
+    }
+
     /// 删除一条直授权限事实，返回影响行数（0 表示目标用户本就没有该权限）。
     pub(crate) async fn delete_in_tx(
         &self,

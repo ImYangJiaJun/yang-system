@@ -47,6 +47,32 @@ pub(super) async fn handle(
         if !locked.status().is_active() {
             return Err(BaseError::PermissionDenied("目标账号已停用".to_string()));
         }
+        // spec §8.1 附加规则：**只有全权组成员能修改全权组成员**。与 `add_group_member` /
+        // `remove_group_member` 是同一条守卫（同一机制、同一句拒绝文案），经由账号域的
+        // `SystemAuthorizationPort` 复用 access 侧的成员读——停用一名全权组成员改的也是
+        // 该组成员的授权事实，与移出成员同理。
+        //
+        // **必须排在下面 §8.2 的最后管理员判定之前**：那条判定只在「停用后一名都不剩」
+        // 时才拒绝，因此它对「组里还剩 >=2 名启用管理员」的停用一律放行。少了本守卫，
+        // 持 `account.users.manage` 的非管理员就能把管理员逐个停用——每次都能通过最后
+        // 管理员判定，反复执行直到组内只剩他指定的那一名，把守卫本身变成摆设。
+        account
+            .system_authorization()
+            .ensure_operator_may_modify_system_admin_member(
+                &ctx,
+                &mut transaction,
+                operator_id,
+                input.id,
+            )
+            .await?;
+        // spec §8.2：不能移除最后一名 active 系统管理员。
+        if !account
+            .system_authorization()
+            .remains_an_admin_after(&ctx, &mut transaction, input.id)
+            .await?
+        {
+            return Err(Account::last_system_admin_guard("停用"));
+        }
         Account::disable_locked_in_tx(&mut transaction, &locked).await?;
         let event = audit::succeeded_event(
             &ctx,
