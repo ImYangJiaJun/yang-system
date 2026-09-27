@@ -645,12 +645,42 @@ pub(crate) struct RecordsSnapshot {
 }
 
 /// 拉取一页并做业务码检查。
+/// **唯一的重试入口**（GET 形态）：带 body 的写请求用 [`send_json`]。
 async fn fetch_page<T: for<'de> Deserialize<'de>>(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
     tokens: &TenantTokenProvider,
     url: &str,
     query: Vec<(String, String)>,
+) -> Result<T, OutboundFailure> {
+    send_json(
+        transport,
+        sleeper,
+        tokens,
+        OutboundMethod::Get,
+        url,
+        query,
+        None,
+        PULL_REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+/// 带 JSON body 的出站请求 + 信封解码。
+///
+/// 与 `fetch_page` 共用「token 失效 → 清缓存强制刷新 → 重试本页」的补救，
+/// 只是多支持方法与 body 两维——写路径（`records/search`、`records/batch_update`）
+/// 需要 POST + body，而 GET 用的 `fetch_page` 保持原样不动。
+#[allow(clippy::too_many_arguments)]
+async fn send_json<T: for<'de> Deserialize<'de>>(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    method: OutboundMethod,
+    url: &str,
+    query: Vec<(String, String)>,
+    body: Option<serde_json::Value>,
+    timeout_secs: u64,
 ) -> Result<T, OutboundFailure> {
     // 每页最多允许**一次**「token 失效 → 清缓存强制刷新 → 重试本页」。
     // 不做递归：第二次仍失效说明不是缓存陈旧。
@@ -665,12 +695,16 @@ async fn fetch_page<T: for<'de> Deserialize<'de>>(
             })?;
 
         let request = OutboundRequest {
-            method: OutboundMethod::Get,
+            method,
             url: url.to_string(),
             query: query.clone(),
             bearer_token: Some(token),
-            json_body: None,
-            timeout_secs: Some(PULL_REQUEST_TIMEOUT_SECS),
+            json_body: body.clone(),
+            timeout_secs: Some(timeout_secs),
+            // 幂等：审批派发路径上的写是同值覆盖（回写同一记录的同一编号），
+            // search 是只读。真正的幂等保证在创建审批实例那一步（uuid），
+            // 不在这里；这里标 true 是为了让 429/5xx 能进退避重试——
+            // `disposition` 在 `idempotent == false` 时对 Retry 类失败直接 Give。
             idempotent: true,
         };
 
@@ -972,10 +1006,153 @@ pub(crate) async fn list_all_fields(
     Ok(items)
 }
 
+// ---------------------------------------------------------------------------
+// 审批派发路径：查询记录（带筛选）与批量回写
+// ---------------------------------------------------------------------------
+
+/// 单次查询记录的行数上限。
+///
+/// 官方《查询记录》是 **500**，与《列出记录》的 `PAGE_SIZE` 同值但**出处不同**——
+/// 两个接口的上限各自独立，将来一方调整不会自动带动另一方，所以不复用同一个常量。
+pub(crate) const SEARCH_PAGE_SIZE: u32 = 500;
+
+/// 批量回写的子批上限。
+///
+/// `batch_update` 单次上限是 **1000**，这里取 100 不是照抄上限，而是两条约束的
+/// 交集：
+///
+/// 1. 批量写是**全有全无**语义（官方：「响应状态是全部成功或者失败，不存在部分
+///    成功或失败的结果」），所以批越小、一条毒记录牵连的无辜记录越少；
+/// 2. 官方对 `1254607` 的排查建议就是「降低批量请求的 page_size」。
+///
+/// 回写失败时的处置是**折半拆批**直到定位到具体记录，所以这个值同时是拆分的起点。
+pub(crate) const BACKFILL_CHUNK: usize = 100;
+
+/// 查询记录接口的 URL。
+pub(crate) fn search_records_url(app_token: &str, table_id: &str) -> anyhow::Result<String> {
+    validate_path_segment("app_token", app_token)?;
+    validate_path_segment("table_id", table_id)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
+    ))
+}
+
+/// 批量回写接口的 URL。
+pub(crate) fn batch_update_records_url(app_token: &str, table_id: &str) -> anyhow::Result<String> {
+    validate_path_segment("app_token", app_token)?;
+    validate_path_segment("table_id", table_id)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
+    ))
+}
+
+/// 一条待回写的记录：记录 id + 要写的单元格。
+pub(crate) type BackfillRow = (String, BTreeMap<String, serde_json::Value>);
+
+/// 批量回写记录的单元格。
+///
+/// **全有全无**：任一记录触发字段转换类错误（如文本字段收到超长串），整批以非 0
+/// code 返回且**没有任何 per-record 失败列表**可读。所以调用方必须能容忍「整批
+/// 零条落库」并据此重试或拆批——本函数只如实返回失败，不做拆分（拆分在编排层，
+/// 因为那里才知道哪些记录属于同一批）。
+pub(crate) async fn batch_update_records(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    rows: &[BackfillRow],
+) -> Result<(), OutboundFailure> {
+    let url = batch_update_records_url(&coordinates.app_token, &coordinates.table_id).map_err(
+        |error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: error.to_string(),
+        },
+    )?;
+
+    let records: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(record_id, fields)| {
+            serde_json::json!({
+                "record_id": record_id,
+                "fields": fields,
+            })
+        })
+        .collect();
+    let body = serde_json::json!({ "records": records });
+
+    // 用 `serde_json::Value` 接响应而不是定义结构体：这个接口的响应体形态对本调用
+    // 者没有信息量（成功侧 `records` 一律相同），只有成败与错误码有用——而那由
+    // `classify` 在信封层判掉了。
+    let _: serde_json::Value = send_json(
+        transport,
+        sleeper,
+        tokens,
+        OutboundMethod::Post,
+        &url,
+        Vec::new(),
+        Some(body),
+        PULL_REQUEST_TIMEOUT_SECS,
+    )
+    .await?;
+    Ok(())
+}
+
+/// 回写单元格的取值形态。
+///
+/// 多维表格的写入类型与读取不同：**文本字段直接写字符串**，不是读回来时的
+/// `[{"text": …}]` 形态。这条差异是静默的——写错形态不会报错，只是单元格内容
+/// 变成字面的 JSON 文本。
+pub(crate) fn backfill_cell(value: &str) -> serde_json::Value {
+    serde_json::Value::String(value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ---- 审批派发：写路径 ----
+
+    #[test]
+    fn batch_update_url_targets_the_batch_update_endpoint() {
+        let url = batch_update_records_url("appbcbWCzen6", "tblsRc9GRRX")
+            .unwrap_or_else(|error| panic!("应可构造: {error}"));
+        assert!(url.ends_with("/records/batch_update"), "{url}");
+    }
+
+    #[test]
+    fn search_url_targets_the_search_endpoint() {
+        let url = search_records_url("appbcbWCzen6", "tblsRc9GRRX")
+            .unwrap_or_else(|error| panic!("应可构造: {error}"));
+        assert!(url.ends_with("/records/search"), "{url}");
+    }
+
+    #[test]
+    fn batch_update_rejects_unsafe_path_segments() {
+        // 与既有 `validate_path_segment` 同一条防线：路径段里混进斜杠或查询串
+        // 会让请求打到别的端点。
+        assert!(batch_update_records_url("bad/token", "tbl").is_err());
+        assert!(search_records_url("app", "bad?x=1").is_err());
+    }
+
+    #[test]
+    fn backfill_chunk_supports_halving_to_a_single_record() {
+        // 折半拆批是毒记录隔离的唯一手段，要能收敛到 1 条。取 2 的幂
+        // （100 不是 2 的幂，但连续折半最终落在 1 或 2——只要能被反复整除到 ≤1 即可）。
+        let mut size = BACKFILL_CHUNK;
+        while size > 1 {
+            size /= 2;
+        }
+        assert_eq!(size, 1, "折半必须能收敛到单条");
+    }
+
+    #[test]
+    fn backfill_cell_writes_a_plain_string_not_a_polymorphic_object() {
+        // 写入形态与读取形态不同：读回来是 [{"text": …}]，写进去是裸字符串。
+        // 写错是静默的——单元格内容会变成字面的 JSON 文本。
+        assert_eq!(backfill_cell("202609280001"), json!("202609280001"));
+        assert!(backfill_cell("x").is_string());
+    }
 
     // ---- 列出数据表 ----
 
