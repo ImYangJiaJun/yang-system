@@ -44,7 +44,10 @@ pub(crate) fn build_addon(
     .module(datasource::build_field_module()?)
     // 审批派发：同样三张表 = 三个 module。只有主表带 Action，
     // 字段映射表与任务表由 `FeishuContext` 跨表访问。
-    .module(approval::build_module()?)
+    .module(approval::build_module(
+        Arc::clone(&context),
+        settings.as_deref(),
+    )?)
     .module(approval::build_field_map_module()?)
     .module(approval::build_task_module()?)
     .module(option::build_module(

@@ -54,6 +54,31 @@ pub(crate) enum DispatchResult {
     Retryable { message: String },
 }
 
+impl DispatchResult {
+    /// 折算成给工作流的响应。
+    ///
+    /// # 语义映射（不要随手改）
+    ///
+    /// - `Backfilled` → 成功。工作流可据此发消息或写日志。
+    /// - `Waiting` → **也报成功**。它的含义是「本轮数据还没填完，没做任何事」——
+    ///   报失败会让工作流把它当异常（甚至触发重试），而这是使用者的正常中间状态。
+    ///   真正的信号在 message 里。
+    /// - `Terminal` → 失败。原因已写进表格字段，工作流无需再写。
+    /// - `Retryable` → 失败，但**可重试**：没写任何字段，再点一次按钮就会重来。
+    pub(crate) fn response_parts(&self) -> (bool, String, Option<String>) {
+        match self {
+            Self::Backfilled { serial_number } => (
+                true,
+                format!("已创建审批实例，编号 {serial_number}"),
+                Some(serial_number.clone()),
+            ),
+            Self::Waiting { reason } => (true, format!("本轮未处理：{reason}"), None),
+            Self::Terminal { message } => (false, message.clone(), None),
+            Self::Retryable { message } => (false, format!("暂时失败，可重试：{message}"), None),
+        }
+    }
+}
+
 /// 一条记录的处理输入。
 pub(crate) struct DispatchInput<'a> {
     pub(crate) coordinates: &'a BitableCoordinates,
@@ -74,7 +99,7 @@ pub(crate) struct DispatchInput<'a> {
 /// 抽成 trait 是为了让编排逻辑（含 60012 回捞）能在不碰真实飞书的前提下测——
 /// 编排的正确性全在这些分支的**顺序与归属**上，而那正是最该被测的部分。
 #[async_trait::async_trait]
-pub(crate) trait Backfill {
+pub(crate) trait Backfill: Send + Sync {
     /// 把文本写进指定记录的指定字段。
     async fn write(
         &self,

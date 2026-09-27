@@ -1106,6 +1106,62 @@ pub(crate) fn backfill_cell(value: &str) -> serde_json::Value {
     serde_json::Value::String(value.to_string())
 }
 
+/// 查询记录的 `data`。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SearchRecordsData {
+    #[serde(default)]
+    pub(crate) items: Vec<RecordItem>,
+}
+
+/// 按条件查询记录（单页）。
+///
+/// 与《列出记录》的差异（迁移时必须一起改，见本文件头部说明）：`field_names` 是
+/// 真正的 `string[]`（不是 JSON 数组字符串），数字类单元格是 number（不是字符串）。
+/// 本函数只发一页、不做收敛断言——调用方按 `record_id` 过滤时结果本就是一行。
+pub(crate) async fn search_records(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    body: serde_json::Value,
+) -> Result<SearchRecordsData, OutboundFailure> {
+    let url =
+        search_records_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
+            OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: error.to_string(),
+            }
+        })?;
+    send_json(
+        transport,
+        sleeper,
+        tokens,
+        OutboundMethod::Post,
+        &url,
+        Vec::new(),
+        Some(body),
+        PULL_REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+/// 构造「按 `record_id` 取一条」的查询体。
+///
+/// `record_id` 是**系统字段**，用 `field_name: "record_id"` 过滤（官方支持）。
+/// 只投影需要的字段：多读列既慢，又可能因为某列形态异常而使整个查询失败。
+pub(crate) fn record_by_id_query(record_id: &str, field_names: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                { "field_name": "record_id", "operator": "is", "value": [record_id] }
+            ]
+        },
+        "field_names": field_names,
+        "automatic_fields": false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

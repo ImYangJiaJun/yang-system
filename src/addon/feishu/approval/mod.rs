@@ -39,16 +39,21 @@ pub(crate) mod table;
 use yang_base::definition::{ModuleName, ModuleSpec};
 use yang_base::BaseError;
 
+use crate::config::FeishuSettings;
+
+use super::domain::context::FeishuContext;
+use std::sync::Arc;
+
 /// 本 module 的名字。
 const MODULE: &str = "feishu.approval";
 
 /// 装配 `feishu.approval` Module。
-///
-/// 暂不接收 `FeishuContext`：本任务只落地三张表，派发端点与其表访问在后续任务
-/// 一并决定归属（扩展现有 `FeishuContext` 还是给审批单开一个）。现在传一个用不到
-/// 的 context 只会制造假依赖。
-pub(crate) fn build_module() -> Result<ModuleSpec, BaseError> {
-    Ok(ModuleSpec::new(module_name()?).table(table::table_spec()?))
+pub(crate) fn build_module(
+    context: Arc<FeishuContext>,
+    settings: Option<&FeishuSettings>,
+) -> Result<ModuleSpec, BaseError> {
+    let spec = ModuleSpec::new(module_name()?).table(table::table_spec()?);
+    actions::register_all(spec, context, settings)
 }
 
 /// 字段映射表所在的 Module：只有表，没有 Action。
