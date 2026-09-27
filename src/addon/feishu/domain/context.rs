@@ -11,8 +11,9 @@ use super::repository::Repository;
 
 /// addon 级共享上下文。
 ///
-/// 三张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
-/// module 的主表**，所以跨表访问（选项 module 读数据源表）必须经这个上下文。
+/// 六张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
+/// module 的主表**，所以跨表访问（选项 module 读数据源表、审批派发读三张审批表）
+/// 必须经这个上下文。
 #[derive(Clone)]
 pub(crate) struct FeishuContext {
     datasource: Repository,
@@ -21,21 +22,37 @@ pub(crate) struct FeishuContext {
     #[allow(dead_code)]
     datasource_field: Repository,
     option: Repository,
+    /// 审批派发配置表。
+    #[allow(dead_code)]
+    approval_config: Repository,
+    /// 审批字段映射表。
+    #[allow(dead_code)]
+    approval_field_map: Repository,
+    /// 审批认领队列表。
+    #[allow(dead_code)]
+    approval_task: Repository,
     settings: Option<Arc<FeishuSettings>>,
 }
 
 impl FeishuContext {
     /// 构造上下文。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         datasource: Repository,
         datasource_field: Repository,
         option: Repository,
+        approval_config: Repository,
+        approval_field_map: Repository,
+        approval_task: Repository,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
         Self {
             datasource,
             datasource_field,
             option,
+            approval_config,
+            approval_field_map,
+            approval_task,
             settings,
         }
     }
@@ -59,6 +76,26 @@ impl FeishuContext {
     /// 选项表。
     pub(crate) fn options(&self) -> &Repository {
         &self.option
+    }
+
+    /// 审批派发配置表。
+    ///
+    /// 消费者（dispatch Action 与派发 worker）在后续任务接入。
+    #[allow(dead_code)]
+    pub(crate) fn approval_configs(&self) -> &Repository {
+        &self.approval_config
+    }
+
+    /// 审批字段映射表。消费者同上。
+    #[allow(dead_code)]
+    pub(crate) fn approval_field_maps(&self) -> &Repository {
+        &self.approval_field_map
+    }
+
+    /// 审批认领队列表。消费者同上。
+    #[allow(dead_code)]
+    pub(crate) fn approval_tasks(&self) -> &Repository {
+        &self.approval_task
     }
 
     /// 集成配置；`None` 表示 `[feishu]` 段缺席。

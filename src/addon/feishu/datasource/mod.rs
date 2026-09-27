@@ -141,6 +141,28 @@ mod tests {
                     crate::addon::feishu::option::table::table_spec()
                         .unwrap_or_else(|e| panic!("{e}")),
                 ),
+                Arc::clone(&pool),
+            ),
+            // 审批派发的三张表：本用例只读路由表，不碰它们，但上下文构造需要它们。
+            Repository::new(
+                definition(
+                    crate::addon::feishu::approval::table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::approval::domain::field_map_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::approval::domain::task_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
                 pool,
             ),
             // `settings: None` → `can_pull()` 为假，三个出站端点不会注册。本用例

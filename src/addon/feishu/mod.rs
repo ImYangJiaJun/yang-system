@@ -79,6 +79,18 @@ pub(crate) fn build_context(
             option::table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
+        Repository::new(
+            approval::table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::field_map_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::task_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
         settings,
     )))
 }
