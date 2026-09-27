@@ -4,6 +4,7 @@
 //! 选项写入 API。所有飞书契约细节（请求/响应形状、加解密、来源校验）收敛在
 //! `domain/` 内，module 层只做装配。
 
+pub(crate) mod approval;
 pub(crate) mod datasource;
 pub(crate) mod domain;
 pub(crate) mod option;
@@ -41,6 +42,11 @@ pub(crate) fn build_addon(
     // 只声明绑定表、不带 Action：一张表 = 一个 module 是框架的硬形状，
     // 而绑定表由 `feishu.datasource` 的 Action 经 `FeishuContext` 跨表访问。
     .module(datasource::build_field_module()?)
+    // 审批派发：同样三张表 = 三个 module。只有主表带 Action，
+    // 字段映射表与任务表由 `FeishuContext` 跨表访问。
+    .module(approval::build_module()?)
+    .module(approval::build_field_map_module()?)
+    .module(approval::build_task_module()?)
     .module(option::build_module(
         context,
         settings.as_deref(),
