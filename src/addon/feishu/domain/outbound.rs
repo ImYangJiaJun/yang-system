@@ -79,6 +79,37 @@ pub(crate) const CODES_RETRYABLE: &[i32] = &[1254036, 1254607, 1255001, 1255002]
 /// （尤其开启高级权限后应用不在授权群里）走的是 `1254302`，而不是 HTTP 403。
 pub(crate) const CODES_PERMISSION_DENIED: &[i32] = &[1254302, 1254303];
 
+/// 审批域瞬态错误。
+///
+/// 官方排查建议原文即「降低请求频率，并重试」（`instance/create.md:115`）。它常以
+/// **HTTP 400** 返回，所以必须走业务码分支，429 分支兜不住它。
+///
+/// **这不是频控码**——真正的频控是 [`CODE_RATE_LIMITED`] / [`CODE_TOO_MANY_REQUEST`]，
+/// 由 429 或业务码分支处理。两者语义不同（一个是本服务打太快，一个是飞书内部出错），
+/// 混称会让实现者把码表填错。
+///
+/// 与 [`CODES_RETRYABLE`] **并列**判断而不合并：后者是多维表格域的语义，混在一起会让
+/// 「这张表覆盖哪些业务域」变得不可读。多维表格不会返回 `1395001`，所以并表对既有
+/// 拉取路径是严格加法。
+pub(crate) const CODES_RETRYABLE_APPROVAL: &[i32] = &[1395001];
+
+/// uuid 冲突：该 uuid 已经创建过审批实例（`instance/create.md:43`）。
+///
+/// **语义是「响应丢失、实例其实已建成功」，不是失败。** 处置是按 uuid 反查实例详情
+/// 取回 `instance_code` 与 `serial_number` 后继续回填。
+///
+/// 所以**绝不能落 [`FailureKind::Fatal`]**——`Fatal` 在本模块的含义是「配置/权限错了，
+/// 别重试」，与这里要做的「一次查询后继续」正好相反。落错的后果是把一条真实存在、
+/// 只是响应丢了的审批单写成终态错误文案，而回填字段写进去就是不可逆的扫描闸门。
+pub(crate) const CODE_UUID_CONFLICT: i32 = 60012;
+
+/// 审批实例不存在（`instance/get.md:512`）。
+///
+/// 回捞 uuid 时用它区分两种情形：「并发窗口内实例确实还没建好」（应回到 create 重试）
+/// 与「实例已建但查询暂时失败」（应退避重试）。**不要**把它当终态——
+/// 那会把刚建成的实例写成「找不到」，反而制造第二条不可恢复路径。
+pub(crate) const CODE_INSTANCE_NOT_FOUND: i32 = 1390003;
+
 // ---------------------------------------------------------------------------
 // 请求/响应
 // ---------------------------------------------------------------------------
@@ -224,6 +255,15 @@ pub(crate) enum FailureKind {
     /// 凭证失效：补救是「清缓存 + 强制刷新一次 + 重试一次」，**不是**退避重试
     /// （重复退避换不出新 token）。
     TokenExpired,
+    /// uuid 冲突：实例此前已创建成功，只是响应丢了。
+    ///
+    /// 交上层按 uuid 反查实例详情取回 `instance_code`；**不重试、不写终态字段**。
+    /// 见 [`CODE_UUID_CONFLICT`]。
+    UuidConflict,
+    /// 实例不存在：回捞时用来区分并发窗口与真实未创建。
+    ///
+    /// 交上层决定是否回到 create；**不是**终态。见 [`CODE_INSTANCE_NOT_FOUND`]。
+    InstanceNotFound,
     /// 绝不重试，且**不动** token 缓存。
     Fatal { code: i32 },
 }
@@ -265,10 +305,17 @@ pub(crate) fn classify(
         } else if code == CODE_RATE_LIMITED
             || code == CODE_TOO_MANY_REQUEST
             || CODES_RETRYABLE.contains(&code)
+            || CODES_RETRYABLE_APPROVAL.contains(&code)
         {
             return Some(FailureKind::Retry {
                 retry_after_seconds: rate_limit_reset_seconds(headers),
             });
+        } else if code == CODE_UUID_CONFLICT {
+            // 必须在 Fatal 兜底之前：它的语义是「实例已存在，去反查」，
+            // 与 Fatal 的「配置/权限错了，别重试」正好相反。
+            return Some(FailureKind::UuidConflict);
+        } else if code == CODE_INSTANCE_NOT_FOUND {
+            return Some(FailureKind::InstanceNotFound);
         } else {
             // 1254030（确定性过大）/ 1254024（字段名不匹配）/ 1254302（无权限）/
             // 1254003 / 1254040 / 1254041 …：都是重试无用的配置或权限问题。
@@ -328,6 +375,14 @@ pub(crate) fn fatal_hint(code: i32) -> Option<&'static str> {
             "凭证未携带 / 格式错 / 类型错：重新换取 token 修不了，\
              检查 Authorization 头的拼装与凭证类型（本链路只发 tenant_access_token）",
         ),
+        // 审批域终态码。这三条不加文案的话，运维只会看到 `HTTP 400: {...}` 裸响应，
+        // 拿不到任何排查方向——而它们的处置各不相同。
+        1390001 => Some(
+            "表单控件参数错误：用「查看指定审批定义」核对控件 id/type 与取值形态；\
+             报错含 `控件= widget…` 时按该 id 反查对应控件的配置",
+        ),
+        1390013 => Some("不支持自定义审批流程：该审批定义不能通过 API 发起"),
+        1390015 => Some("审批定义已停用：去审批管理后台启用该定义后重试"),
         _ => None,
     }
 }
@@ -456,7 +511,14 @@ pub(crate) fn disposition(
     match kind {
         // 凭证失效与确定性失败都不退避重试。前者的补救是「清缓存 + 强制刷新一次」，
         // 由调用方在上层做（见 `list_all_records`），在这里退避只会白等。
-        FailureKind::TokenExpired | FailureKind::Fatal { .. } => Disposition::Give,
+        //
+        // 审批域的两个新类别同样交上层：`UuidConflict` 的处置是按 uuid 反查实例
+        // （重发同一 uuid 永远还是冲突），`InstanceNotFound` 的处置是回到 create
+        // 或退避——两者都需要上层上下文，本层退避没有意义。
+        FailureKind::TokenExpired
+        | FailureKind::UuidConflict
+        | FailureKind::InstanceNotFound
+        | FailureKind::Fatal { .. } => Disposition::Give,
         FailureKind::Retry {
             retry_after_seconds,
         } => {
@@ -1030,5 +1092,84 @@ mod tests {
         let result = send_with_retry(&transport, &sleeper, &get_request(), PULL_RETRY).await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(sleeper.waits_ms(), vec![3_000], "必须按响应头的秒数等待");
+    }
+
+    // ---- 审批域码（approval） ----
+
+    /// 审批域码的分类口径。**显式列举**，不遍历常量表——遍历式断言挡不住
+    /// 「设计声明可重试、常量表却没登记」这类漂移（`:649` 的类型只自证表本身）。
+    #[test]
+    fn approval_domain_codes_are_classified_as_designed() {
+        // 1395001：官方明文「降低请求频率，并重试」（instance/create.md:115）。
+        // 它常以 HTTP 400 返回，所以必须走业务码分支而非 429 分支。
+        assert!(
+            matches!(
+                classify(400, &empty_headers(), &body_with_code(1395001)),
+                Some(FailureKind::Retry { .. })
+            ),
+            "1395001 是审批域瞬态错误，必须可重试"
+        );
+
+        // 60012：uuid 冲突 = 实例已存在，不是失败。
+        // 落 Fatal 会把「响应丢失、实例已建」写成终态错误并永久钉死该行。
+        assert!(
+            matches!(
+                classify(400, &empty_headers(), &body_with_code(60012)),
+                Some(FailureKind::UuidConflict)
+            ),
+            "60012 必须单列为幂等命中，不能落 Fatal"
+        );
+
+        // 1390003：实例不存在。回捞 uuid 时用它区分「并发窗口」与「实例已建但查询失败」。
+        assert!(
+            matches!(
+                classify(400, &empty_headers(), &body_with_code(1390003)),
+                Some(FailureKind::InstanceNotFound)
+            ),
+            "1390003 必须可区分，供上层决定是否回到 create"
+        );
+
+        // 1390001 / 1390013 / 1390015：终态，且必须给出可行动文案。
+        for code in [1390001, 1390013, 1390015] {
+            match classify(400, &empty_headers(), &body_with_code(code)) {
+                Some(FailureKind::Fatal { code: got }) => {
+                    assert_eq!(got, code);
+                    assert!(
+                        fatal_hint(code).is_some(),
+                        "码 {code} 缺少 fatal_hint 文案，运维只会看到裸错误体"
+                    );
+                }
+                other => panic!("码 {code} 期望 Fatal，实际 {other:?}"),
+            }
+        }
+    }
+
+    /// 幂等请求遇可重试失败必须真的退避重试。
+    ///
+    /// 与 `non_idempotent_requests_are_never_retried`（:814）成对：那条锁反向。
+    /// 创建审批实例是有副作用的 POST，若误标 `idempotent = false`，这条不变式会
+    /// 让它一次都不重试——而 uuid 的服务端幂等使重发是安全的。
+    #[test]
+    fn idempotent_requests_do_retry_on_retryable_failure() {
+        let kind = FailureKind::Retry {
+            retry_after_seconds: None,
+        };
+        assert!(matches!(
+            disposition(kind, 1, true, PULL_RETRY),
+            Disposition::RetryAfter(_)
+        ));
+    }
+
+    /// 两个新增类别都不退避重试：处置在上层（按 uuid 反查 / 回到 create）。
+    #[test]
+    fn new_kinds_are_given_not_retried() {
+        assert_eq!(
+            disposition(FailureKind::UuidConflict, 1, true, PULL_RETRY),
+            Disposition::Give
+        );
+        assert_eq!(
+            disposition(FailureKind::InstanceNotFound, 1, true, PULL_RETRY),
+            Disposition::Give
+        );
     }
 }
