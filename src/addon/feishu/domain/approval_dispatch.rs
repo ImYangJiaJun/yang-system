@@ -82,6 +82,15 @@ pub(crate) trait Backfill {
         field_id: &str,
         text: &str,
     ) -> Result<(), OutboundFailure>;
+
+    /// 一次写多条（同一字段）。**全有全无**：任一记录失败即整批零条落库。
+    ///
+    /// 分批与毒记录隔离由 [`backfill_in_chunks`] 负责，这里只管发一批。
+    async fn write_many(
+        &self,
+        field_id: &str,
+        rows: &[(String, String)],
+    ) -> Result<(), OutboundFailure>;
 }
 
 /// 真实实现：经 `bitable::batch_update_records` 写单个单元格。
@@ -100,15 +109,29 @@ impl Backfill for BitableBackfill<'_> {
         field_id: &str,
         text: &str,
     ) -> Result<(), OutboundFailure> {
-        let mut fields = BTreeMap::new();
-        fields.insert(field_id.to_string(), backfill_cell(text));
-        let rows = vec![(record_id.to_string(), fields)];
+        let rows = vec![(record_id.to_string(), text.to_string())];
+        self.write_many(field_id, &rows).await
+    }
+
+    async fn write_many(
+        &self,
+        field_id: &str,
+        rows: &[(String, String)],
+    ) -> Result<(), OutboundFailure> {
+        let records: Vec<crate::addon::feishu::domain::bitable::BackfillRow> = rows
+            .iter()
+            .map(|(record_id, text)| {
+                let mut fields = BTreeMap::new();
+                fields.insert(field_id.to_string(), backfill_cell(text));
+                (record_id.clone(), fields)
+            })
+            .collect();
         super::bitable::batch_update_records(
             self.transport,
             self.sleeper,
             self.tokens,
             self.coordinates,
-            &rows,
+            &records,
         )
         .await
     }
@@ -387,6 +410,79 @@ pub(crate) fn widget_maps_from_rows(
     Some(widgets)
 }
 
+// ---------------------------------------------------------------------------
+// 分批回写与毒记录隔离
+// ---------------------------------------------------------------------------
+
+/// 一批回写的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct BackfillReport {
+    /// 成功写进多维表格的记录 id。
+    pub(crate) written: Vec<String>,
+    /// 回写失败的记录：记录 id + 原因。这些记录的审批实例**已经创建**，
+    /// 只是编号没写进去——所以它们必须落成「可重试」而不是「终止」。
+    pub(crate) failed: Vec<(String, String)>,
+}
+
+/// 把一批「记录 id → 回填文本」写进多维表格。
+///
+/// # 为什么必须分批
+///
+/// 多维表格的批量写是**全有全无**语义（官方：「响应状态是全部成功或者失败，
+/// 不存在部分成功或失败的结果」），且响应体**没有 per-record 失败列表**可读。
+/// 所以按搜索的一整页（500 条）一次提交时，一条毒记录会让整页零条落库——而
+/// 审批实例创建是**已经发生的外部副作用**，等于批量制造孤儿实例。
+///
+/// # 毒记录隔离
+///
+/// 子批失败就**对半拆**，直到定位到具体记录。这是「没有 per-record 失败列表」
+/// 逼出来的唯一可行做法。定位到之后只把该条记为失败，其余照常落库。
+///
+/// 拆批的安全性来自全有全无语义本身：失败即整批零条落库，所以对半拆不会
+/// 写重复。
+pub(crate) async fn backfill_in_chunks(
+    backfill: &dyn Backfill,
+    field_id: &str,
+    rows: &[(String, String)],
+) -> BackfillReport {
+    let mut report = BackfillReport::default();
+    for chunk in rows.chunks(super::bitable::BACKFILL_CHUNK) {
+        write_chunk(backfill, field_id, chunk, &mut report).await;
+    }
+    report
+}
+
+/// 写一个子批；失败则对半拆，直到定位到单条。
+async fn write_chunk(
+    backfill: &dyn Backfill,
+    field_id: &str,
+    chunk: &[(String, String)],
+    report: &mut BackfillReport,
+) {
+    match backfill.write_many(field_id, chunk).await {
+        Ok(()) => report
+            .written
+            .extend(chunk.iter().map(|(record_id, _)| record_id.clone())),
+        Err(failure) => {
+            if chunk.len() == 1 {
+                // 收敛到单条仍失败：这条就是毒记录。
+                let (record_id, _) = &chunk[0];
+                report
+                    .failed
+                    .push((record_id.clone(), failure.message.clone()));
+                return;
+            }
+            // 对半拆（用 `div_ceil` 让奇数批的前半多一条，两半都非空）。
+            let middle = chunk.len().div_ceil(2);
+            let (head, tail) = chunk.split_at(middle);
+            // 递归深度是对数级（100 → 50 → 25 → … → 1），不会爆栈。
+            // 用 `Box::pin` 是因为 async 递归需要显式装箱。
+            Box::pin(write_chunk(backfill, field_id, head, report)).await;
+            Box::pin(write_chunk(backfill, field_id, tail, report)).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +637,8 @@ mod tests {
     struct RecordingBackfill {
         writes: Mutex<Vec<(String, String, String)>>,
         fail: bool,
+        /// 毒记录名单：这批里出现任一即让整批失败（复刻全有全无语义）。
+        poison: Mutex<Vec<String>>,
     }
 
     impl RecordingBackfill {
@@ -548,6 +646,15 @@ mod tests {
             Self {
                 writes: Mutex::new(Vec::new()),
                 fail: true,
+                poison: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_poison(record_id: &str) -> Self {
+            Self {
+                writes: Mutex::new(Vec::new()),
+                fail: false,
+                poison: Mutex::new(vec![record_id.to_string()]),
             }
         }
 
@@ -567,12 +674,19 @@ mod tests {
             field_id: &str,
             text: &str,
         ) -> Result<(), OutboundFailure> {
+            self.write_many(field_id, &[(record_id.to_string(), text.to_string())])
+                .await
+        }
+
+        async fn write_many(
+            &self,
+            field_id: &str,
+            rows: &[(String, String)],
+        ) -> Result<(), OutboundFailure> {
             if let Ok(mut writes) = self.writes.lock() {
-                writes.push((
-                    record_id.to_string(),
-                    field_id.to_string(),
-                    text.to_string(),
-                ));
+                for (record_id, text) in rows {
+                    writes.push((record_id.clone(), field_id.to_string(), text.clone()));
+                }
             }
             if self.fail {
                 return Err(OutboundFailure {
@@ -581,6 +695,15 @@ mod tests {
                     },
                     message: "回写失败".to_string(),
                 });
+            }
+            // 毒记录模拟：全有全无——批里出现任一毒记录即整批失败。
+            if let Ok(poison) = self.poison.lock() {
+                if rows.iter().any(|(record_id, _)| poison.contains(record_id)) {
+                    return Err(OutboundFailure {
+                        kind: FailureKind::Fatal { code: 1254060 },
+                        message: "字段转换失败（毒记录在批内）".to_string(),
+                    });
+                }
             }
             Ok(())
         }
@@ -1047,6 +1170,107 @@ mod tests {
         assert_eq!(
             widgets[0].option_map.get("已批准").map(String::as_str),
             Some("va")
+        );
+    }
+
+    // ---- 分批回写与毒记录隔离（Task 8） ----
+
+    fn rows(count: usize) -> Vec<(String, String)> {
+        (0..count)
+            .map(|index| (format!("rec{index:04}"), format!("SN{index:04}")))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn small_batch_is_written_in_one_call() {
+        let backfill = RecordingBackfill::default();
+        let report = backfill_in_chunks(&backfill, "fld_backfill", &rows(50)).await;
+        assert_eq!(report.written.len(), 50);
+        assert!(report.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_larger_than_chunk_is_split() {
+        // 250 条应拆成 3 个子批（100/100/50），绝不一次提交 500。
+        let backfill = RecordingBackfill::default();
+        let report = backfill_in_chunks(&backfill, "fld_backfill", &rows(250)).await;
+        assert_eq!(report.written.len(), 250);
+        assert!(report.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poison_record_is_isolated_and_the_rest_land() {
+        // 全有全无：一条毒记录会让整批失败。折半拆批要能把它单独揪出来，
+        // 其余记录照常落库——否则一次坏回写会丢掉整批结果，而审批实例
+        // **已经创建**，等于批量制造孤儿实例。
+        let backfill = RecordingBackfill::with_poison("rec0007");
+        let report = backfill_in_chunks(&backfill, "fld_backfill", &rows(20)).await;
+
+        assert_eq!(report.failed.len(), 1, "应只定位到一条毒记录：{report:?}");
+        assert_eq!(report.failed[0].0, "rec0007");
+        assert_eq!(report.written.len(), 19, "其余记录必须照常落库");
+        assert!(
+            !report.written.contains(&"rec0007".to_string()),
+            "毒记录不得出现在成功列表里"
+        );
+    }
+
+    #[tokio::test]
+    async fn poison_record_does_not_block_later_chunks() {
+        // 毒记录不得楔住整批：它落在第一个子批里时，后续子批照常处理。
+        let backfill = RecordingBackfill::with_poison("rec0003");
+        let report = backfill_in_chunks(&backfill, "fld_backfill", &rows(250)).await;
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "rec0003");
+        assert_eq!(
+            report.written.len(),
+            249,
+            "毒记录之后的记录仍须写入：{report:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_batch_failure_yields_all_failed_not_panic() {
+        // 整批失败（如网络断）时，每条都被逐个判定，不 panic、不静默丢记录。
+        let backfill = RecordingBackfill::failing();
+        let report = backfill_in_chunks(&backfill, "fld_backfill", &rows(5)).await;
+        assert!(report.written.is_empty());
+        assert_eq!(report.failed.len(), 5, "每条都要有归宿：{report:?}");
+    }
+
+    #[tokio::test]
+    async fn empty_batch_writes_nothing() {
+        let backfill = RecordingBackfill::default();
+        let report = backfill_in_chunks(&backfill, "fld_backfill", &[]).await;
+        assert!(report.written.is_empty());
+        assert!(report.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chunk_size_boundary_is_exact() {
+        // 恰好一个子批时不应触发拆批；多一条则应拆成两批。
+        let exact = RecordingBackfill::default();
+        let report = backfill_in_chunks(
+            &exact,
+            "fld_backfill",
+            &rows(crate::addon::feishu::domain::bitable::BACKFILL_CHUNK),
+        )
+        .await;
+        assert_eq!(
+            report.written.len(),
+            crate::addon::feishu::domain::bitable::BACKFILL_CHUNK
+        );
+
+        let over = RecordingBackfill::default();
+        let report = backfill_in_chunks(
+            &over,
+            "fld_backfill",
+            &rows(crate::addon::feishu::domain::bitable::BACKFILL_CHUNK + 1),
+        )
+        .await;
+        assert_eq!(
+            report.written.len(),
+            crate::addon::feishu::domain::bitable::BACKFILL_CHUNK + 1
         );
     }
 }
