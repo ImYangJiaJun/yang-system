@@ -1,4 +1,5 @@
 pub(crate) mod alert;
+pub(crate) mod approval_uuid;
 pub(crate) mod bitable;
 pub(crate) mod context;
 pub(crate) mod crypto;
