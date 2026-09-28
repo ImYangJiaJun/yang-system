@@ -11,18 +11,21 @@ import {
   HEALTH_REPORT_KEYS,
   OPTION_ITEM_KEYS,
   PULL_SCHEDULE_KEYS,
+  XLSX_OPERATION_IDS,
   checkDatasourceHealth,
   fetchPullSchedule,
   createDatasourceTable,
   deleteDatasourceTable,
   enabledBindingInputs,
   feishuQueryKeys,
+  importXlsxFiles,
   listBitableFields,
   listBitableTables,
   listBitableViews,
   listDatasources,
   listOptions,
   precheckApprovalOptions,
+  probeXlsxHeaders,
   requireAction,
   revealFieldToken,
   rotateFieldToken,
@@ -56,6 +59,20 @@ const DATASOURCE_LIST_ACTION: ActionDemoSchema = {
   request_media_type: "json",
   response_kind: "json",
   requires_auth: true,
+};
+
+/// xlsx 两个端点的 multipart 规格。**必须给**：引擎在构造 FormData 前会检查
+/// `action.multipart`（限额与内容类型的唯一来源），缺了它整条请求直接抛错。
+const MULTIPART_SPEC: NonNullable<ActionDemoSchema["multipart"]> = {
+  max_fields: 1,
+  max_files: 32,
+  max_file_bytes: 16 * 1024 * 1024,
+  max_text_field_bytes: 64 * 1024,
+  max_total_bytes: 16 * 1024 * 1024,
+  allowed_content_types: [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ],
+  lifecycle: "request_scoped",
 };
 
 /// 部署里真实存在的那一套（字段级 `create_datasource` / `update_datasource` /
@@ -95,6 +112,22 @@ const DEPLOYED_ACTIONS: ActionDemoSchema[] = [
     operation_id: "feishu.option.approval_options",
     path: "/api/v1/feishu/approval/options/{source_key}",
     requires_auth: false,
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: XLSX_OPERATION_IDS.probe,
+    path: "/api/v1/feishu/datasources/xlsx/probe",
+    request_media_type: "multipart",
+    multipart: MULTIPART_SPEC,
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: XLSX_OPERATION_IDS.importFiles,
+    // `datasource_id` 在路径段里，而服务端的 `params()` 是空集（文件走 body、
+    // id 走路径）——url 由 api 层自己补全，这条替身如实照抄服务端声明的形状。
+    path: "/api/v1/feishu/datasources/{datasource_id}/import",
+    request_media_type: "multipart",
+    multipart: MULTIPART_SPEC,
   },
 ];
 
@@ -694,6 +727,16 @@ describe("投影契约（emit ↔ read）", () => {
   /// `status` / `ingest_mode` 在契约里标 `enforced_by: backend`（后端表声明里有
   /// `.options(..)`，那边逐字对账）；`default_locale` 标 `enforced_by: frontend`——
   /// **后端对它零校验**，界面是唯一的守卫，所以这边这条断言就是它全部的防线。
+  it("ingest_mode 的取值域确实是三项", () => {
+    // 正向断言，防止契约写错表名（`enums.feishu_datasource`）导致上面那条
+    // 「界面值 == 契约值」静默变成 `[...] == undefined` 式的空转。
+    expect(CONTRACT.enums?.feishu_datasource?.ingest_mode?.values).toEqual([
+      "push",
+      "pull",
+      "xlsx_import",
+    ]);
+  });
+
   it("轴二：枚举取值域与契约一致（含只有界面在守的那个）", () => {
     const ingest = CONTRACT.enums?.feishu_datasource?.ingest_mode;
     expect(INGEST_MODE_OPTIONS.map((option) => option.value)).toEqual(
@@ -1196,7 +1239,7 @@ describe("表级配置的元数据端点", () => {
     expect(fields).toEqual([{ fieldId: "fldA", fieldName: "币种", type: 3 }]);
   });
 
-  it("createDatasourceTable：勾选集合原样发出，父指针是 field_id", async () => {
+  it("createDatasourceTable：勾选集合原样发出，父指针是 field_id，且带列名", async () => {
     const calls = stubFetch({
       code: 0,
       data: {
@@ -1242,11 +1285,13 @@ describe("表级配置的元数据端点", () => {
       fields: [
         {
           field_id: "fldA",
+          field_name: "币种/Currency",
           source_key: "payment_currency",
           parent_field_id: null,
         },
         {
           field_id: "fldB",
+          field_name: "汇率/Exchange Rate",
           source_key: "payment_fx_rate",
           parent_field_id: "fldA",
         },
@@ -1281,10 +1326,200 @@ describe("表级配置的元数据端点", () => {
     expect(calls[0]?.body).not.toHaveProperty("bitable_view_id");
   });
 
+  it("xlsx 源：不发多维表格坐标，ingest_mode 与 field_name 都按调用方给的发", async () => {
+    // 两件事在这条里一起钉住：
+    // 1. xlsx 源**没有**多维表格坐标，发了会被服务端当成坐标去解析（那张表在飞书侧
+    //    根本不存在）；
+    // 2. `field_name` 必须带上——后端对每条启用绑定 require 列名，漏了会让审批外部
+    //    选项**整批装配失败**（范围是全表，不止这条数据源）。
+    const calls = stubFetch({ code: 0, data: { datasource_id: 9 } });
+    await createDatasourceTable(
+      {
+        title: "银行网点",
+        ingestMode: "xlsx_import",
+        fields: [
+          {
+            fieldId: "开户行行名",
+            fieldName: "开户行行名",
+            // 列名就是身份，没有官方类型码；这个字段不参与请求构造。
+            type: 0,
+            sourceKey: "col_2",
+            parentFieldId: null,
+          },
+        ],
+      },
+      tableDeps,
+    );
+
+    expect(calls[0]?.body).toEqual({
+      title: "银行网点",
+      ingest_mode: "xlsx_import",
+      fields: [
+        {
+          field_id: "开户行行名",
+          field_name: "开户行行名",
+          source_key: "col_2",
+          parent_field_id: null,
+        },
+      ],
+    });
+    for (const key of [
+      "bitable_base_token",
+      "bitable_table_id",
+      "bitable_view_id",
+    ]) {
+      expect(calls[0]?.body).not.toHaveProperty(key);
+    }
+  });
+
   it("目录里没有这条 Action 时抛错，且一个请求都不发", async () => {
     const calls = stubFetch({ code: 0, data: { tables: [] } });
     await expect(listBitableTables("app1", deps)).rejects.toThrow(
       /找不到 Action「feishu\.datasource\.list_bitable_tables」/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("xlsx 导入端点", () => {
+  /// `stubFetch` 把 body 当 JSON 解，而 multipart 的 body 是 FormData——在它上面
+  /// `JSON.parse` 会炸。这一组自带一个 stub，把 FormData 原样留下来断言。
+  function stubMultipart(payload: unknown) {
+    const calls: Array<{ url: string; method: string; form: FormData }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        calls.push({
+          url,
+          method: init?.method ?? "GET",
+          form: init?.body as FormData,
+        });
+        return Promise.resolve(jsonResponse(payload));
+      }),
+    );
+    return calls;
+  }
+
+  function xlsxFile(name = "bank_1.xlsx"): File {
+    return new File(["PK\x03\x04"], name, {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+  }
+
+  it("probe：文件挂在顶层的 files 上，回执转成领域形状", async () => {
+    // 「顶层 File[]」是硬约束：包成 `{ files: { items: [...] } }` 会被引擎
+    // `JSON.stringify` 成一个文本字段，服务端只会看到一段 JSON 字符串。
+    const calls = stubMultipart({
+      code: 0,
+      data: {
+        sheet_name: "境内银行网点信息管理",
+        sheets: ["境内银行网点信息管理", "Sheet2"],
+        header_row: 1,
+        columns: [
+          { name: "开户行行名", index: 2 },
+          { name: "联行号", index: 5 },
+        ],
+        files: [{ name: "bank_1.xlsx" }],
+      },
+    });
+    const probe = await probeXlsxHeaders([xlsxFile()], deps);
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/xlsx/probe");
+    expect(calls[0]?.method).toBe("POST");
+    const parts = calls[0]?.form.getAll("files") ?? [];
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toBeInstanceOf(File);
+    expect(probe).toEqual({
+      sheetName: "境内银行网点信息管理",
+      sheets: ["境内银行网点信息管理", "Sheet2"],
+      headerRow: 1,
+      columns: [
+        { name: "开户行行名", index: 2 },
+        { name: "联行号", index: 5 },
+      ],
+      files: [{ name: "bank_1.xlsx" }],
+    });
+  });
+
+  it("importFiles：datasource_id 填进路径段，文件同样在顶层", async () => {
+    // 服务端的 `ImportInput::params()` 是空集（id 走路径、文件走 multipart body），
+    // 引擎的路径替换因此填不进去——url 由 api 层自己补全，这条测试盯的就是它。
+    const calls = stubMultipart({
+      code: 0,
+      data: {
+        datasource_id: 7,
+        elapsed_ms: 1200,
+        files: [{ name: "bank_1.xlsx", rows_read: 5 }],
+        bindings: [
+          {
+            source_key: "bank_branch",
+            fetched: 5,
+            derived: 5,
+            disabled: 1,
+            unchanged: false,
+            // 服务端会发它，但界面没有一句话要用它——解析结果里**不该**出现。
+            snapshot_digest: "digest",
+            anomalies: [{ label: "很长的一行", reason: "超长，已截断" }],
+            truncated_details: false,
+          },
+        ],
+      },
+    });
+    const report = await importXlsxFiles(7, [xlsxFile()], deps);
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/7/import");
+    expect(calls[0]?.form.getAll("files")).toHaveLength(1);
+    expect(report).toEqual({
+      datasourceId: 7,
+      elapsedMs: 1200,
+      files: [{ name: "bank_1.xlsx", rowsRead: 5 }],
+      bindings: [
+        {
+          sourceKey: "bank_branch",
+          fetched: 5,
+          derived: 5,
+          disabled: 1,
+          unchanged: false,
+          skippedReason: null,
+          anomalies: [{ label: "很长的一行", reason: "超长，已截断" }],
+          truncatedDetails: false,
+        },
+      ],
+    });
+  });
+
+  it("被跳过的那条绑定的原因要读出来——它是「这条怎么一行没动」的唯一解释", async () => {
+    stubMultipart({
+      code: 0,
+      data: {
+        datasource_id: 7,
+        elapsed_ms: 10,
+        files: [],
+        bindings: [
+          {
+            source_key: "bank_branch",
+            fetched: 5,
+            derived: 0,
+            disabled: 0,
+            unchanged: false,
+            skipped_reason:
+              "本轮派生出 0 个选项，而本地仍有已启用选项——拒绝清空",
+            anomalies: [],
+            truncated_details: true,
+          },
+        ],
+      },
+    });
+    const report = await importXlsxFiles(7, [xlsxFile()], deps);
+    expect(report.bindings[0]?.skippedReason).toContain("拒绝清空");
+    expect(report.bindings[0]?.truncatedDetails).toBe(true);
+  });
+
+  it("目录里没有导入端点时抛错，且一个请求都不发", async () => {
+    const calls = stubMultipart({ code: 0, data: {} });
+    await expect(importXlsxFiles(7, [xlsxFile()], tableDeps)).rejects.toThrow(
+      /找不到 Action「feishu\.datasource\.import_xlsx」/,
     );
     expect(calls).toHaveLength(0);
   });

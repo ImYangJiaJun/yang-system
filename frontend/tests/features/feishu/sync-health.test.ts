@@ -38,6 +38,14 @@ describe("syncHealth", () => {
     expect(health.title).not.toContain("正常");
   });
 
+  it("xlsx 源不显示成「由多维表格推送」", () => {
+    // 这个档位是运维看到的第一句话。把文件导入的源说成「靠多维表格自动化推送」
+    // 会让人去那张根本不存在的多维表格里找自动化日志。
+    const health = syncHealth(item({ ingestMode: "xlsx_import" }));
+    expect(health.title).not.toContain("多维表格");
+    expect(health.title).toContain("文件导入");
+  });
+
   it("停用优先于一切，且不把停用前的失败计数当现状", () => {
     const health = syncHealth(
       item({

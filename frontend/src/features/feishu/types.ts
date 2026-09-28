@@ -56,10 +56,12 @@ export function statusLabel(status: DatasourceStatus): string {
 /// 取数方式：后端 `datasource/table.rs` 的 Radio 取值域。
 ///
 /// - `push`：多维表格自动化工作流持管理 Token 推选项过来（存量数据源都是这种）；
-/// - `pull`：服务端按 `feishu.pull_interval_seconds` 自己去多维表格拉。
+/// - `pull`：服务端按 `feishu.pull_interval_seconds` 自己去多维表格拉；
+/// - `xlsx_import`：由人上传 xlsx 文件导入；服务端不出网，也没有定时同步。
 ///
-/// 两种方式的**失败面完全不同**：`push` 出问题看不出任何服务端状态（没有那次请求），
-/// `pull` 才有 `lastSuccessAt` / `consecutiveFailures` 可看。表单里切换它是有后果的。
+/// 三种方式的**失败面完全不同**：`push` 与 `xlsx_import` 都没有服务端状态可看
+/// （前者没有那次请求，后者没有那次出网），只有 `pull` 才有
+/// `lastSuccessAt` / `consecutiveFailures` 可看。表单里切换它是有后果的。
 export type IngestMode = "push" | "pull" | "xlsx_import";
 
 export const INGEST_MODE_OPTIONS: ReadonlyArray<{
@@ -507,6 +509,19 @@ export function syncHealth(item: DatasourceItem): SyncHealth {
       title: "已停用",
       detail:
         "数据源处于停用状态，不参与拉取。下面的时间是它停用前的最后一次记录。",
+    };
+  }
+
+  // **xlsx 这一档必须排在下面「非 pull」那一档之前**：后者是「凡是拉取之外的都算
+  // 多维表格推送」，排反了这个分支永远走不到，界面会对着一个根本没有多维表格的
+  // 文件导入源说「去那张多维表格的自动化日志里确认」。
+  if (asIngestMode(item.ingestMode) === "xlsx_import") {
+    return {
+      tone: "info",
+      title: "文件导入",
+      detail:
+        "这个数据源的选项由人上传 xlsx 文件导入，服务端不出网、也没有定时同步。" +
+        "要看它是不是最新的，去「重新导入」那一步看最近一次导入的记录。",
     };
   }
 

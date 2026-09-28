@@ -516,6 +516,46 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/feishu/datasources/xlsx/probe": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 解析 xlsx 表头
+     * @description 读上传文件的表头（只看第一张 sheet），供配置向导勾列；不写库
+     */
+    post: operations["feishu.datasource.probe_xlsx_headers"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/feishu/datasources/{datasource_id}/import": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * 导入 xlsx
+     * @description 按每条绑定的列名取值、派生选项并落库；整份快照替换该数据源的选项
+     */
+    post: operations["feishu.datasource.import_xlsx"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/feishu/options/query": {
     parameters: {
       query?: never;
@@ -1471,6 +1511,8 @@ export interface components {
       /** @description 进 URL 路径段的数据源标识；全局唯一、创建后不可改。 */
       source_key: string;
     };
+    /** Format: binary */
+    UploadedFile: string;
     /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
     OrderByItem__3: {
       /**
@@ -4636,6 +4678,227 @@ export interface operations {
            * @description 目标数据源的 `id`。
            */
           datasource_id: number;
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.probe_xlsx_headers": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "multipart/form-data": {
+          /** @description 上传的 xlsx 文件，至少一个；同名 part 重复出现即为多文件。 */
+          files: components["schemas"]["UploadedFile"][];
+        };
+      };
+    };
+    responses: {
+      /** @description 成功 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            /** @constant */
+            code: 0;
+            /**
+             * ApiResponse
+             * @description API 响应
+             *
+             *     统一的 API 响应格式，用于所有 Action 的返回值
+             *
+             *     # 字段
+             *
+             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+             *
+             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+             *
+             *     # 示例
+             *
+             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+             *
+             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+             *
+             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+             */
+            data: {
+              /**
+               * Format: int32
+               * @description 状态码
+               *
+               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+               */
+              code: number;
+              /**
+               * @description 响应数据
+               *
+               *     成功时包含业务数据，失败时通常为 None
+               */
+              data?: unknown;
+              /**
+               * @description 响应消息
+               *
+               *     描述操作结果的文本信息
+               */
+              message: string;
+            };
+            message: string;
+          };
+        };
+      };
+      /** @description 请求参数错误 */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 未认证 */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 权限不足 */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+      /** @description 服务器内部错误 */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  "feishu.datasource.import_xlsx": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        "multipart/form-data": {
+          /**
+           * Format: int64
+           * @description URL 路径段里的表级数据源 `id`。
+           */
+          datasource_id: number;
+          /** @description 上传的 xlsx 文件，按上传顺序拼接为一份快照。上限见 `register`。 */
+          files: components["schemas"]["UploadedFile"][];
         };
       };
     };

@@ -43,6 +43,7 @@ import type {
   DatasourceListQuery,
   DatasourceStatusFilter,
   HealthReport,
+  IngestMode,
   ListPage,
   OptionItem,
   OptionListQuery,
@@ -95,6 +96,17 @@ export const TABLE_OPERATION_IDS = {
   reveal: "feishu.datasource.reveal_token",
   /// 轮换 Token：写，事务内换 hash + cipher + 轮换时间。
   rotate: "feishu.datasource.rotate_token",
+} as const;
+
+/// xlsx 文件导入的两个 Action。
+///
+/// 两个都**不出网**，服务端因此没有给它们 `settings.can_pull()` 门控：没有飞书凭证的
+/// 环境里它们照样注册、照样可用（这正是文件导入存在的理由）。
+export const XLSX_OPERATION_IDS = {
+  /// 只读表头：上传文件 → 回列名。不写库。
+  probe: "feishu.datasource.probe_xlsx_headers",
+  /// 导数据：上传同一批文件 → 建选项。写。
+  importFiles: "feishu.datasource.import_xlsx",
 } as const;
 
 /// 详情页默认排序：按「最近推送」倒序，并以唯一键 `option_id` 收尾。
@@ -720,13 +732,19 @@ export async function listBitableFields(
 
 /* ---------------------------- 表级配置：创建 ----------------------------- */
 
-/// 一次「建表级数据源」的完整提交物。
+/// 一次「建表级数据源」的完整提交物。**两个向导共用**：
+///
+/// - 多维表格向导：给全部三项坐标，`ingestMode` 省略（= `pull`）；
+/// - xlsx 向导：**三项坐标都不给**（给了会被服务端当成多维表格坐标去解析，而这张表
+///   在飞书侧根本不存在），`ingestMode` 给 `xlsx_import`。
 export type CreateTableSubmission = {
   title: string;
-  appToken: string;
-  tableId: string;
+  /// 取数方式。省略 = `pull`（多维表格向导那条路的老行为，由服务端按间隔拉）。
+  ingestMode?: IngestMode;
+  appToken?: string;
+  tableId?: string;
   /// 空串 = 取全表。**不发这个键**（发空串会被后端当成「有一个空坐标」）。
-  viewId: string;
+  viewId?: string;
   fields: TableWizardField[];
 };
 
@@ -750,17 +768,25 @@ export async function createDatasourceTable(
 ): Promise<CreatedTable> {
   const body: Record<string, unknown> = {
     title: input.title,
-    ingest_mode: "pull",
-    bitable_base_token: input.appToken,
-    bitable_table_id: input.tableId,
+    // 由调用方决定：多维表格向导用 `pull`，xlsx 向导用 `xlsx_import`。
+    ingest_mode: input.ingestMode ?? "pull",
     fields: input.fields.map((field) => ({
       field_id: field.fieldId,
+      // xlsx 绑定必须带列名：后端对每条启用绑定 require("field_name")，
+      // 留空会让审批外部选项**整批装配失败**（且范围是全表，不止本数据源）。
+      // 多维表格那条路给了也无害——`pull` 每轮会按解析结果回写覆盖它。
+      field_name: field.fieldName,
       source_key: field.sourceKey,
       // 显式 `null`（后端 `#[serde(default)] Option<String>`，两者同义，但写出来更清楚）
       parent_field_id: field.parentFieldId,
     })),
   };
-  if (input.viewId.trim() !== "") body.bitable_view_id = input.viewId.trim();
+  // 多维表格专用坐标：xlsx 源三项都不给（给了反而会被解析成坐标）。
+  if (input.appToken !== undefined) body.bitable_base_token = input.appToken;
+  if (input.tableId !== undefined) body.bitable_table_id = input.tableId;
+  if (input.viewId !== undefined && input.viewId.trim() !== "") {
+    body.bitable_view_id = input.viewId.trim();
+  }
 
   const result = await invokeFeishuAction(
     deps,
@@ -818,6 +844,215 @@ export function useTableWizardClient(): TableWizardClient {
         listBitableFields(appToken, tableId, deps),
       createTable: (input: CreateTableSubmission) =>
         createDatasourceTable(input, deps),
+    }),
+    [deps],
+  );
+}
+
+/* ------------------------------ xlsx 文件导入 ----------------------------- */
+
+/// 探表头的回执（`probe_xlsx_headers`）。**只读表头**，不含任何数据行。
+export type XlsxHeaderProbe = {
+  /// 读了哪张 sheet。**只读第一张**——`sheets` 多于一项时由界面提示这件事。
+  sheetName: string;
+  /// 文件里所有 sheet 的名字。
+  sheets: string[];
+  /// 表头在第几行（1-based）。它也是导入时跳掉表头行的依据。
+  headerRow: number;
+  /// **全部列**（服务端不做任何类型/语义过滤），`index` 是 1-based 物理列号。
+  columns: Array<{ name: string; index: number }>;
+  /// 这次探测的文件，按上传顺序。
+  files: Array<{ name: string }>;
+};
+
+/// 导入回执里的一条绑定（`import_xlsx` 的 `bindings[]`）。
+///
+/// `snapshot_digest` **刻意不解析**：它是服务端拿来判断「这一轮要不要写库」的内部
+/// 状态，界面上没有一句话要用它，读进来只会多一个没人看的字段。
+export type XlsxBindingReport = {
+  sourceKey: string;
+  /// 这次读到的行数。口径是「在**被请求的列**里至少有一个非空」的行——
+  /// 它**不是文件的总行数**（没勾的列与整行全空的都被丢掉了）。
+  fetched: number;
+  /// 派生出的选项数。
+  derived: number;
+  /// 这一轮被补集停用的选项数。
+  disabled: number;
+  /// 内容没变、也没有已停用行要复活 → 这一轮什么都没写。
+  unchanged: boolean;
+  /// 非空 = 这一轮**跳过**了这条绑定（它派生出 0 个选项而本地仍有启用选项），
+  /// 原因在这里。跳过意味着那条绑定的选项**一行没动**。
+  skippedReason: string | null;
+  /// 异常行逐条（如文案超长被截断，那行不入飞书但仍在库里）。
+  anomalies: Array<{ label: string; reason: string }>;
+  /// 异常清单被服务端上限截断过，真实条数看不到。
+  truncatedDetails: boolean;
+};
+
+/// 导入回执（`import_xlsx`）。
+export type XlsxImportReport = {
+  datasourceId: number;
+  elapsedMs: number;
+  files: Array<{ name: string; rowsRead: number }>;
+  bindings: XlsxBindingReport[];
+};
+
+function parseXlsxHeaderProbe(data: unknown): XlsxHeaderProbe {
+  const record = asRecord(data);
+  const rawColumns = record?.columns;
+  const rawFiles = record?.files;
+  return {
+    sheetName: asString(record?.sheet_name),
+    sheets: Array.isArray(record?.sheets)
+      ? record.sheets.filter((item): item is string => typeof item === "string")
+      : [],
+    // 缺 `header_row` 时兜成 1 而不是 0：导入要按它跳掉表头行，兜成 0 会把表头
+    // 当成一行数据导进去。
+    headerRow: asNumber(record?.header_row, 1),
+    columns: Array.isArray(rawColumns)
+      ? rawColumns
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((item) => ({
+            name: asString(item.name),
+            index: asNumber(item.index, 0),
+          }))
+          // 没有列名的列勾不了（列名就是这条绑定的身份），留着只会画一个空标签
+          .filter((column) => column.name !== "")
+      : [],
+    files: Array.isArray(rawFiles)
+      ? rawFiles
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((item) => ({ name: asString(item.name) }))
+      : [],
+  };
+}
+
+function parseXlsxBindingReport(
+  raw: Record<string, unknown>,
+): XlsxBindingReport {
+  const rawAnomalies = raw.anomalies;
+  return {
+    sourceKey: asString(raw.source_key),
+    fetched: asNumber(raw.fetched, 0),
+    derived: asNumber(raw.derived, 0),
+    disabled: asNumber(raw.disabled, 0),
+    unchanged: raw.unchanged === true,
+    skippedReason: asNullableString(raw.skipped_reason),
+    anomalies: Array.isArray(rawAnomalies)
+      ? rawAnomalies
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((item) => ({
+            label: asString(item.label),
+            reason: asString(item.reason),
+          }))
+      : [],
+    truncatedDetails: raw.truncated_details === true,
+  };
+}
+
+function parseXlsxImportReport(data: unknown): XlsxImportReport {
+  const record = asRecord(data);
+  const rawFiles = record?.files;
+  const rawBindings = record?.bindings;
+  return {
+    datasourceId: asNumber(record?.datasource_id, 0),
+    elapsedMs: asNumber(record?.elapsed_ms, 0),
+    files: Array.isArray(rawFiles)
+      ? rawFiles
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((item) => ({
+            name: asString(item.name),
+            rowsRead: asNumber(item.rows_read, 0),
+          }))
+      : [],
+    bindings: Array.isArray(rawBindings)
+      ? rawBindings
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map(parseXlsxBindingReport)
+      : [],
+  };
+}
+
+/// 探测一批 xlsx 文件的表头（向导第一步）。**不写库**。
+///
+/// `files` 必须是 values **顶层**的 `File[]`：引擎的 `appendMultipart` 只识别顶层
+/// `File` 或「全是 File 的数组」，包成 `{ files: { items: [...] } }` 会被
+/// `JSON.stringify` 成一个文本字段，服务端只会看到一段 JSON 字符串。
+export async function probeXlsxHeaders(
+  files: File[],
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<XlsxHeaderProbe> {
+  const result = await invokeFeishuAction(
+    deps,
+    XLSX_OPERATION_IDS.probe,
+    { files },
+    signal,
+  );
+  return parseXlsxHeaderProbe(result.data);
+}
+
+/// 把一批 xlsx 导入某条数据源：整份快照替换它的选项。**写**。
+///
+/// 与 [`probeXlsxHeaders`] 一样，`files` 在 values 顶层。
+export async function importXlsxFiles(
+  datasourceId: number,
+  files: File[],
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<XlsxImportReport> {
+  const declared = requireAction(deps.catalog, XLSX_OPERATION_IDS.importFiles);
+  // `datasource_id` 在**路径段**里，而服务端的 `ImportInput::params()` 是空集
+  // （文件名走 multipart body、id 走路径，两个来源各读各的），引擎的路径替换因此
+  // 填不进去，会在最后一步抛「路径仍有未填写参数」——与 `approval_options` 同一条
+  // 约束。这里显式补全并清空 params，让 `files` 落进 body。
+  const action: ActionDemoSchema = {
+    ...declared,
+    path: declared.path.replace(
+      "{datasource_id}",
+      encodeURIComponent(String(datasourceId)),
+    ),
+    params: [],
+  };
+  const result = await invokeAction(action, { files }, deps.session, signal);
+  return parseXlsxImportReport(result.data);
+}
+
+/// xlsx 导入向导要用的一组数据访问入口（**与 [`TableWizardClient`] 同一注入范式**：
+/// 组件只经注入的 client 访问数据，不摸 `useSessionCredentials` / `useUiCatalog`，
+/// 于是渲染它不必先把整棵应用壳搭起来）。
+export type XlsxImportClient = {
+  probe: (files: File[]) => Promise<XlsxHeaderProbe>;
+  createTable: (input: CreateTableSubmission) => Promise<CreatedTable>;
+  importFiles: (
+    datasourceId: number,
+    files: File[],
+  ) => Promise<XlsxImportReport>;
+};
+
+/// 绑定当前会话与界面目录的 xlsx 导入入口。
+export function useXlsxImportClient(): XlsxImportClient {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  return useMemo(
+    () => ({
+      probe: (files: File[]) => probeXlsxHeaders(files, deps),
+      createTable: (input: CreateTableSubmission) =>
+        createDatasourceTable(input, deps),
+      importFiles: (datasourceId: number, files: File[]) =>
+        importXlsxFiles(datasourceId, files, deps),
     }),
     [deps],
   );
@@ -948,7 +1183,7 @@ export function useCredentialClient(): CredentialClient {
 /// 请求后台立刻跑一轮。**只回「已受理」**——真正的结果靠轮询数据源行收口。
 ///
 /// 后端刻意不在这里同步拉：一条大表可能超过 HTTP 请求超时（`[http].request_timeout_seconds`，
-/// 默认 30 秒），届时客户端看到报错而服务端还在跑，两边对不上。
+/// 默认 60 秒），届时客户端看到报错而服务端还在跑，两边对不上。
 ///
 /// 入参是**表级主键** `datasource_id`：拉取的单位是一张表（设计 §6.2），
 /// 按 `source_key` 点名一条字段没有意义。后端 `PullNowInput` 是

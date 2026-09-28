@@ -4810,6 +4810,318 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/feishu/datasources/xlsx/probe": {
+      "post": {
+        "description": "读上传文件的表头（只看第一张 sheet），供配置向导勾列；不写库",
+        "operationId": "feishu.datasource.probe_xlsx_headers",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "UploadedFile": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "description": "Action 输入：框架上传的临时文件句柄。\n\n与 [`ProbeInput`] 分开是因为 `UploadedFile` **不可在单测里构造**， 且临时文件必须在这一层读掉——handler 一返回框架就删。",
+                "properties": {
+                  "files": {
+                    "description": "上传的 xlsx 文件，至少一个；同名 part 重复出现即为多文件。",
+                    "items": {
+                      "$ref": "#/definitions/UploadedFile"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "files"
+                ],
+                "title": "ProbeUploadInput",
+                "type": "object"
+              },
+              "x-yang-multipart": {
+                "allowed_content_types": [
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                ],
+                "lifecycle": "request_scoped",
+                "max_fields": 1,
+                "max_file_bytes": 16777216,
+                "max_files": 32,
+                "max_text_field_bytes": 65536,
+                "max_total_bytes": 16777216
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "解析 xlsx 表头",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/datasources/{datasource_id}/import": {
+      "post": {
+        "description": "按每条绑定的列名取值、派生选项并落库；整份快照替换该数据源的选项",
+        "operationId": "feishu.datasource.import_xlsx",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "UploadedFile": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "description": "导入输入。\n\n`files` 与 `datasource_id` 来自**两个不同的来源**（multipart body 与 URL 路径）， 所以 [`ImportInput::decode`] 是手写的——默认实现只做一次单 body 反序列化。",
+                "properties": {
+                  "datasource_id": {
+                    "description": "URL 路径段里的表级数据源 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "files": {
+                    "description": "上传的 xlsx 文件，按上传顺序拼接为一份快照。上限见 `register`。",
+                    "items": {
+                      "$ref": "#/definitions/UploadedFile"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "datasource_id",
+                  "files"
+                ],
+                "title": "ImportInput",
+                "type": "object"
+              },
+              "x-yang-multipart": {
+                "allowed_content_types": [
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                ],
+                "lifecycle": "request_scoped",
+                "max_fields": 1,
+                "max_file_bytes": 16777216,
+                "max_files": 32,
+                "max_text_field_bytes": 65536,
+                "max_total_bytes": 16777216
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "导入 xlsx",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.datasource.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/feishu/options/query": {
       "post": {
         "description": "分页查询飞书选项",
