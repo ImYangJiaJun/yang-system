@@ -965,6 +965,9 @@ request_timeout_seconds = 60       # 30 → 60
 
 ```rust
 // 在 option/table.rs 的 TableSpec 上（index_named）
+// ⚠️ TableSpec::index_named 收的是 FieldRef 不是 &str 字面量——
+// 下面这种 `["source_key", ...]` 是 Table（命令式 builder）的签名。
+// 正确形态照抄 demo/notes/table.rs（绑 table_name + field_ref helper）。
 .index_named(
     "idx_feishu_option_pick",
     ["source_key", "enabled", "sort_order", "option_id"],

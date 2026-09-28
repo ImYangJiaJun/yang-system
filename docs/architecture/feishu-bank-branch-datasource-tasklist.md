@@ -1032,6 +1032,12 @@ cargo test --test feishu_option_index_integration --locked -- --ignored --test-t
         )
 ```
 
+> ⚠️ **上面这个形态是错的——`TableSpec::index_named` 收的不是 `&str` 字面量。**
+> `["source_key", ...]` 那种写法是 **`Table`（命令式 builder）** 的签名。
+> `option/table.rs` 用的是 `TableSpec`，它的 `index_named` 要 **`FieldRef`**：
+> 照抄 `demo/notes/table.rs` 的形态（绑 `table_name`、用同一个 `field_ref` helper）。
+> 索引名与列清单不变。**以仓库里 `src/addon/feishu/option/table.rs` 的成品为准。**
+
 - [ ] **Step 5: 运行确认通过**
 
 重复 Step 3 的命令，预期 PASS。再跑一次 Schema 集成测试确认没打破别的：

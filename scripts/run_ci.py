@@ -277,6 +277,19 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "飞书选项复合索引集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "feishu_option_index_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "飞书取选项端点集成测试",
         (
             "cargo",

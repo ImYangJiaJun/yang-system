@@ -1,6 +1,8 @@
 //! `feishu_option` 表声明——Schema 的唯一事实来源。
 
-use yang_base::definition::{Int, Key, Str, Switch, TableSpec, Text, Timestamp};
+use yang_base::definition::{
+    FieldName, FieldRef, Int, Key, Str, Switch, TableName, TableSpec, Text, Timestamp,
+};
 use yang_base::BaseError;
 
 /// 声明选项表。
@@ -14,7 +16,8 @@ use yang_base::BaseError;
 ///    （`simple_builder!` 只实例化 9 个 builder，导出列表里也没有 `Json`）。
 ///    这两列从不被 SQL 查询进内部，只在读写时由 `domain/` 自己 serde 转换。
 pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
-    Ok(TableSpec::new(yang_base::table!("feishu_option"))
+    let table_name = yang_base::table!("feishu_option");
+    Ok(TableSpec::new(table_name.clone())
         .title("飞书选项")
         .fields(yang_base::fields! {
             id => Key::new().title("ID"),
@@ -99,7 +102,29 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             extra => Text::new().title("扩展字段"),
             created_at => Timestamp::new().created_at().title("创建时间"),
             updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
-        }))
+        })
+        // 出站端点的复合索引。前两个等值前缀（source_key, enabled）之后，
+        // 索引序恰好是 ORDER BY 的 (sort_order, option_id)，filesort 因此消失。
+        // 设计 §5.10：实测端点 375–556 ms → 126–278 ms。**不是硬前提**，
+        // 但不加时每请求扫 15 万行的 filesort 在并发下才是真危险的部分。
+        .index_named(
+            "idx_feishu_option_pick",
+            [
+                field_ref(&table_name, "source_key")?,
+                field_ref(&table_name, "enabled")?,
+                field_ref(&table_name, "sort_order")?,
+                field_ref(&table_name, "option_id")?,
+            ],
+        ))
+}
+
+/// 构造指向本表字段的 `FieldRef`。
+///
+/// `TableSpec::index_named` 收的是 `FieldRef`（表名 + 字段名），不像
+/// `infrastructure/schema.rs` 的 `Table` 命令式 builder 那样直接吃字符串。
+fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError> {
+    let field = FieldName::new(field).map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    Ok(FieldRef::new(table_name.clone(), field))
 }
 
 #[cfg(test)]
