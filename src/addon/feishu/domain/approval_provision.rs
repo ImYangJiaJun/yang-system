@@ -487,11 +487,19 @@ async fn load_external_options(
         if !enabled {
             continue;
         }
-        let name: String = binding.require("field_name")?;
-        let name = name.trim().to_string();
-        if name.is_empty() {
+        // 名字为空/缺失：这条绑定无从参与按名匹配，跳过——但**必须留痕**（见下）。
+        let Some(name) = binding_display_name(binding)? else {
+            // 「跳过」是兜底，不是常态：走到这里说明上游有绑定漏写了名字
+            // （`create_datasource_table` / `update_datasource_table` 都该写上），
+            // 那是个要修的 bug。静默 `continue` 会让它永远不被发现，而它的后果
+            // （某个控件少一个候选列）又很难归因——所以这里明确 warn 并带上
+            // 能定位的 `source_key`。
+            tracing::warn!(
+                source_key = %binding.optional::<String>("source_key")?.unwrap_or_default(),
+                "字段绑定的 field_name 为空，跳过它——列名是身份，没有名字就无法按名匹配"
+            );
             continue;
-        }
+        };
         let source: String = binding.require("source_key")?;
         match name_to_source.get(&name) {
             Some(existing) if *existing != source && !ambiguous.contains(&name) => {
@@ -526,6 +534,26 @@ async fn load_external_options(
         )]));
     }
     Ok(out)
+}
+
+/// 取一条绑定的展示名。**缺失或空白一律返回 `None`（跳过），不报错。**
+///
+/// 为什么不能 `require`：这个函数扫的是**全表**的启用绑定，任何一条名字为空的
+/// 绑定（历史数据、或建源时漏写了 `field_name` 的 xlsx 绑定）都会让
+/// 「首次派发自动建配置」整批失败。跳过它只是少一个候选列，
+/// 而整批失败是功能不可用——两者代价差一个量级。
+///
+/// 调用方**必须**为这个 `None` 留一条带 `source_key` 的告警：空名不是常态，
+/// 它是上游漏写的症状。
+fn binding_display_name(binding: &Record) -> Result<Option<String>, BaseError> {
+    let Some(name) = binding.optional::<String>("field_name")? else {
+        return Ok(None);
+    };
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(name))
 }
 
 /// 某个 `source_key` 下**启用中**的 `label → option_id`。
@@ -858,5 +886,49 @@ mod tests {
 
     fn json_str(value: &str) -> Value {
         Value::String(value.to_string())
+    }
+
+    #[test]
+    fn a_binding_row_with_a_blank_name_is_skipped_not_fatal() {
+        // 装配扫的是**全表**的启用绑定，所以任何一条名字为空的绑定
+        // 都会把整批装配打挂——包括与本数据源无关的那些。
+        // 空名/缺名应当**跳过这一条**（它本来也无从匹配），而不是让整个
+        // 建配置流程失败。
+        use yang_base::table::Record;
+        let mut row = Record::new();
+        row.insert("field_name", serde_json::json!(null));
+        row.insert("source_key", serde_json::json!("orphan"));
+        row.insert("enabled", serde_json::json!(true));
+        assert_eq!(
+            binding_display_name(&row).unwrap_or_else(|error| panic!("{error}")),
+            None,
+            "名字为空或缺失的绑定应被跳过"
+        );
+    }
+
+    #[test]
+    fn a_binding_row_with_a_blank_string_name_is_also_skipped() {
+        // 上一条走的是 `null`（列可空、xlsx 绑定漏写时的样子），它只穿到
+        // `optional` 那一层就返回了；**空串与纯空白**是另一条路径——要穿过
+        // trim 之后的那道判定。两条分支会被不同的改动打穿，得分开钉住：
+        // 实测把 `is_empty` 那道判定删掉，上一条照样绿，只有这一条会红。
+        for value in ["", "   ", "\t"] {
+            let mut row = Record::new();
+            row.insert("field_name", serde_json::json!(value));
+            row.insert("source_key", serde_json::json!("orphan"));
+            assert_eq!(
+                binding_display_name(&row).unwrap_or_else(|error| panic!("{error}")),
+                None,
+                "空串/纯空白（{value:?}）也要跳过——拿空名去按名匹配等于没名字"
+            );
+        }
+
+        // 键整个缺失（老行没这一列）同理。
+        let row = Record::new();
+        assert_eq!(
+            binding_display_name(&row).unwrap_or_else(|error| panic!("{error}")),
+            None,
+            "没有 field_name 这一列时也要跳过"
+        );
     }
 }

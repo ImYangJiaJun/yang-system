@@ -1454,8 +1454,15 @@ export interface components {
         };
     /** @description 一条字段绑定的输入。 */
     FieldBindingInput: {
-      /** @description 多维表格字段 ID。**身份就是它**，不是字段名——改名不能断链。 */
+      /** @description 多维表格字段 ID，或（xlsx 导入时）**列名**。**身份就是它**，改名不能断链。 */
       field_id: string;
+      /**
+       * @description 展示用名字。多维表格那条路留空（由 `pull` 每轮解析回写）；**xlsx 导入必须给**，与 `field_id` 同值。
+       *
+       *     为什么必须给：审批外部选项装配**按列名**把控件与数据源配对，没有名字这条绑定就无从参与； `approval_provision` 只会跳过它（只 warn 不报错），于是某个控件静默少一个候选列。
+       * @default null
+       */
+      field_name: string | null;
       /**
        * @description 同表内的父列 `field_id`；无父给 `null` 或省略。
        * @default null
@@ -4401,7 +4408,7 @@ export interface operations {
           /** @description 勾选的字段。至少一条。 */
           fields: components["schemas"]["FieldBindingInput"][];
           /**
-           * @description 取数方式：`push`（默认）/ `pull`。
+           * @description 取数方式：`push`（默认，多维表格工作流推送）/ `pull`（定时拉取）/ `xlsx_import`（文件导入）。
            * @default null
            */
           ingest_mode?: string | null;

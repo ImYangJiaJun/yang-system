@@ -32,7 +32,7 @@ use crate::infrastructure::audit;
 pub(super) struct CreateTableInput {
     /// 展示名。
     pub(super) title: String,
-    /// 取数方式：`push`（默认）/ `pull`。
+    /// 取数方式：`push`（默认，多维表格工作流推送）/ `pull`（定时拉取）/ `xlsx_import`（文件导入）。
     #[serde(default)]
     pub(super) ingest_mode: Option<String>,
     /// 多维表格 app_token；`pull` 时必填。
@@ -176,6 +176,17 @@ pub(super) async fn handle(
             let mut binding = Record::new();
             binding.insert("datasource_id", serde_json::json!(datasource_id));
             binding.insert("field_id", serde_json::json!(field.field_id.trim()));
+            // 两个都写：`field_id` 是身份，`field_name` 是审批装配要的名字
+            // ——装配按**列名**把控件与数据源配对，没名字这条绑定就无从参与
+            // （`approval_provision` 只会跳过它，于是某个控件静默少一个候选列）。
+            if let Some(name) = field
+                .field_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                binding.insert("field_name", serde_json::json!(name));
+            }
             binding.insert("source_key", serde_json::json!(&source_key));
             binding.insert("token_hash", serde_json::json!(&credential.hash));
             binding.insert("token_cipher", serde_json::json!(&credential.cipher));
@@ -242,6 +253,8 @@ mod tests {
     fn field(field_id: &str, source_key: &str, parent: Option<&str>) -> FieldBindingInput {
         FieldBindingInput {
             field_id: field_id.to_string(),
+            // 这几条用例只考入参校验，与展示名无关。
+            field_name: None,
             source_key: source_key.to_string(),
             parent_field_id: parent.map(str::to_string),
         }

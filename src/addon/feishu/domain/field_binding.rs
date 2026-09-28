@@ -15,8 +15,18 @@ use super::source_key::valid_source_key;
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FieldBindingInput {
-    /// 多维表格字段 ID。**身份就是它**，不是字段名——改名不能断链。
+    /// 多维表格字段 ID，或（xlsx 导入时）**列名**。**身份就是它**，改名不能断链。
     pub(crate) field_id: String,
+    /// 展示用名字。多维表格那条路留空（由 `pull` 每轮解析回写）；**xlsx 导入必须给**，与 `field_id` 同值。
+    ///
+    /// 为什么必须给：审批外部选项装配**按列名**把控件与数据源配对，没有名字这条绑定就无从参与；
+    /// `approval_provision` 只会跳过它（只 warn 不报错），于是某个控件静默少一个候选列。
+    // **不要删这个属性**：schemars 只在有 `#[serde(default)]` 时才往产物里写
+    // `"default": null`（`required` 不受影响——`Option` 本就豁免），删掉会让已提交的
+    // `frontend/contracts/openapi.json` / `api-types.ts` 与源码不同步，且没有门禁会拦住。
+    // 要补说明请用 `//`：`///` 会进 schema 的 description，同样造成不同步。
+    #[serde(default)]
+    pub(crate) field_name: Option<String>,
     /// 进 URL 路径段的数据源标识；全局唯一、创建后不可改。
     pub(crate) source_key: String,
     /// 同表内的父列 `field_id`；无父给 `null` 或省略。
@@ -140,6 +150,8 @@ mod tests {
     fn field(field_id: &str, source_key: &str, parent: Option<&str>) -> FieldBindingInput {
         FieldBindingInput {
             field_id: field_id.to_string(),
+            // 多维表格那条路不给名字；这几条用例只考校验，与名字无关。
+            field_name: None,
             source_key: source_key.to_string(),
             parent_field_id: parent.map(str::to_string),
         }
@@ -212,5 +224,35 @@ mod tests {
     fn rejects_an_illegal_source_key_shape() {
         let fields = vec![field("fldA", "Bad-Key", None)];
         assert!(validate_fields(&fields).is_err());
+    }
+
+    #[test]
+    fn a_binding_may_carry_its_column_name() {
+        // xlsx 导入的绑定没有「多维表格字段 ID」可解析，列名就是身份。
+        // 建源时必须把它同时写进 field_id 与 field_name —— 只写前者的话，
+        // approval_provision 会**跳过**这条绑定（只 warn）并点名控件 `Invalid`，
+        // 于是那个控件静默少一个候选列。
+        let json = serde_json::json!({
+            "field_id": "开户行行名",
+            "field_name": "开户行行名",
+            "source_key": "bank_branch_name",
+            "parent_field_id": null,
+        });
+        let input: FieldBindingInput =
+            serde_json::from_value(json).unwrap_or_else(|error| panic!("应可反序列化: {error}"));
+        assert_eq!(input.field_name.as_deref(), Some("开户行行名"));
+    }
+
+    #[test]
+    fn a_binding_without_a_column_name_still_parses() {
+        // 多维表格那条路不给 field_name（它由 pull 每轮解析回写），
+        // 所以这个字段必须是可选的，不能把它变成必填。
+        let json = serde_json::json!({
+            "field_id": "fldXXXXXXXX",
+            "source_key": "payment_currency",
+        });
+        let input: FieldBindingInput =
+            serde_json::from_value(json).unwrap_or_else(|error| panic!("应可反序列化: {error}"));
+        assert!(input.field_name.is_none());
     }
 }

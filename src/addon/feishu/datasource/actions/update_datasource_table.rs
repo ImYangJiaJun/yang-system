@@ -246,6 +246,18 @@ pub(super) async fn handle(
             let mut binding = Record::new();
             binding.insert("datasource_id", serde_json::json!(input.datasource_id));
             binding.insert("field_id", serde_json::json!(field.field_id.trim()));
+            // 新增分支同样要写名字（与创建路径同一理由）：装配按**列名**配对，
+            // 没名字这条绑定就会被 `approval_provision` 跳过。
+            // 「更新已有绑定」那个分支**刻意不碰它**——碰 `source_key`/凭据等于换
+            // URL、飞书侧已配控件全断，列名也是同一类身份信息，改了要重走配置。
+            if let Some(name) = field
+                .field_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                binding.insert("field_name", serde_json::json!(name));
+            }
             binding.insert("source_key", serde_json::json!(field.source_key.trim()));
             binding.insert("token_hash", serde_json::json!(token_hash));
             binding.insert("token_cipher", serde_json::json!(token_cipher));
@@ -344,6 +356,8 @@ mod tests {
     fn field(field_id: &str, source_key: &str, parent: Option<&str>) -> FieldBindingInput {
         FieldBindingInput {
             field_id: field_id.to_string(),
+            // 这几条用例只考差异计算与校验，与展示名无关。
+            field_name: None,
             source_key: source_key.to_string(),
             parent_field_id: parent.map(str::to_string),
         }
