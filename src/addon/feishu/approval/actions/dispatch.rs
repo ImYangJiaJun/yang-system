@@ -40,6 +40,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
+use crate::feishu_approval_worker::ApprovalDispatchHandle;
 
 /// 派发端点的输入契约。
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -117,7 +118,7 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
 
 /// 处理派发请求。
 pub(super) async fn handle(
-    _ctx: ActionContext,
+    ctx: ActionContext,
     input: DispatchInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
@@ -146,12 +147,24 @@ pub(super) async fn handle(
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
-        Some(record_id) => dispatch_single(&_ctx, &context, config_id, record_id).await,
+        Some(record_id) => dispatch_single(&ctx, &context, config_id, record_id).await,
         // ---- 全表：异步受理 ----
+        //
+        // 受理**必须在白名单校验之后**：把 Token 当成「可以指任意表格」的通行证
+        // 是本端点最大的越权面。上面那句 `config` 查询就是白名单，通过了才放行。
         None => {
-            // 受理的实现在后续任务（worker）里落地。当前版本明确返回「未启用」，
-            // 而不是假装受理成功——后者会让工作流显示成功而实际什么都没做。
-            Ok(ApiResponse::fail(50101, "全表派发尚未启用，请使用行内按钮"))
+            // 拿不到句柄说明 worker 没起（凭证缺失）。**不返回 accepted**——
+            // 那会让工作流显示成功而实际什么都没发生。
+            let handle = ctx.tools().extension::<ApprovalDispatchHandle>()?;
+            handle.request_dispatch()?;
+
+            // 语义是「跑一轮全队列」，**不是**只跑本表。
+            //
+            // 用方原意就是「处理所有没有审批编号的数据」，而这三张表是按
+            // `(base_token, table_id)` 配置的；按表分流会让同一队列出现「点了 A 的
+            // 按钮却不处理 B 的数据」这种反直觉行为。多表并发时谁先点谁先跑整批，
+            // 结果仍是一致的（uuid 幂等兜底）。
+            response(true, "已受理，处理结果稍后回填至表格".to_string(), None)
         }
     }
 }

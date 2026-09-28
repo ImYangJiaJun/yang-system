@@ -23,7 +23,9 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     Ok(TableSpec::new(yang_base::table!("feishu_approval_config"))
         .title("飞书审批派发配置")
         .fields(yang_base::fields! {
-            id => Key::new().title("ID"),
+            // 配置行要按 id 定位（`dispatch_single` 的 `where_primary_key_eq` 走类型校验
+            // 不走这一位），但排序用于控制台列表，一并开着与 datasource 对齐。
+            id => Key::new().title("ID").filterable(true).sortable(true),
             title => Str::new()
                 .title("配置名")
                 .require(true)

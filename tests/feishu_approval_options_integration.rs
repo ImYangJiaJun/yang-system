@@ -164,6 +164,9 @@ fn feishu_settings(encryption_key: Option<&str>) -> Arc<FeishuSettings> {
         // 请求参数日志保持关闭：本文件的断言全部落在端点行为上，而开启后每个
         // 请求都会多写一行含 Token 明文的日志（见 `feishu.log_inbound_requests`）。
         log_inbound_requests: false,
+        approval_create_rate_per_minute: 90,
+        approval_scan_interval_seconds: 30,
+        approval_base_timezone: "Asia/Shanghai".to_string(),
     })
 }
 

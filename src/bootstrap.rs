@@ -8,6 +8,7 @@ use crate::addon::feishu::domain::alert::{FeishuAlertSender, FeishuAlertSenderHa
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
+use crate::feishu_approval_worker::{ApprovalDispatchHandle, ApprovalDispatchWorker};
 use crate::feishu_pull::{FeishuPullHandle, FeishuPullWorker};
 use anyhow::Context;
 use std::future::Future;
@@ -28,6 +29,7 @@ const TRIGGER_OPERATION_EXIT: &str = "operation_exit";
 const PHASE_HTTP_DRAIN: &str = "http_drain";
 const PHASE_AUTHORIZATION_OUTBOX_WORKER: &str = "authorization_outbox_worker";
 const PHASE_FEISHU_PULL_WORKER: &str = "feishu_pull_worker";
+const PHASE_FEISHU_APPROVAL_WORKER: &str = "feishu_approval_worker";
 const PHASE_TOOLS_CLOSE: &str = "tools_close";
 const PHASE_OBSERVABILITY: &str = "observability";
 
@@ -110,6 +112,10 @@ async fn run_after_telemetry_initialized(
     // 就位，否则「立即拉取」与「下次自动拉取」两个 Action 取不到它。
     // 段未配置时这里注册的是一个永远不会被读到的空壳（那两个 Action 也只在
     // can_pull() 时才注册），行为与未集成飞书一致。
+    // 审批派发的手动触发句柄。**同样无条件注册**：dispatch Action 只在
+    // `can_pull()` 为真时才注册，但句柄本身必须先于 Tools 定型，否则那个
+    // Action 取不到它（与飞书拉取句柄同一条理由）。
+    let (approval_dispatch_handle, approval_dispatch_requests) = ApprovalDispatchHandle::new();
     let (feishu_pull_handle, feishu_pull_requests) =
         FeishuPullHandle::new(settings.feishu.as_ref().map_or_else(
             crate::config::default_feishu_pull_interval_seconds,
@@ -142,6 +148,7 @@ async fn run_after_telemetry_initialized(
         // 运行期句柄，照 `AuthorizationVersionCache` 的先例走 extension 槽：
         // `FeishuContext` 描述的是「有哪些表与什么配置」，不该混进 worker 的运行时状态。
         .extension(feishu_pull_handle.clone())
+        .extension(approval_dispatch_handle.clone())
         .config(log_identity)
         .config(settings.email.verification.engine_config())
         .config(settings.email.password_reset.link_config());
@@ -186,6 +193,7 @@ async fn run_after_telemetry_initialized(
             telemetry,
             feishu_pull_handle,
             feishu_pull_requests,
+            approval_dispatch_requests,
         ),
         tools.close(),
         &shutdown_budget,
@@ -217,6 +225,7 @@ fn combine_operation_and_cleanup<T>(
 ///
 /// 该函数整体位于 [`run_then_cleanup`] 的 operation 边界内，因此应用构建、schema、
 /// 地址解析/绑定、服务运行失败以及正常退出都会进入同一个关闭出口。
+#[allow(clippy::too_many_arguments)] // 8 个参数：新增审批派发的通道后越过了默认 7 的上限；收成结构体会改动更大的接口面。
 async fn run_after_tools_created(
     settings: &Settings,
     initializer_mysql: Database,
@@ -225,6 +234,7 @@ async fn run_after_tools_created(
     telemetry: &mut TelemetryRuntime,
     feishu_pull_handle: FeishuPullHandle,
     feishu_pull_requests: mpsc::UnboundedReceiver<Option<i64>>,
+    approval_dispatch_requests: mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
@@ -272,11 +282,33 @@ async fn run_after_tools_created(
                 FeishuPullWorker::start(
                     Arc::clone(&tools),
                     feishu,
-                    feishu_context,
+                    Arc::clone(&feishu_context),
                     feishu_pull_handle,
                     feishu_pull_requests,
                 )
                 .context("启动飞书出站拉取 Worker 失败")?,
+            )
+        }
+        None => None,
+    };
+    // 审批派发 Worker：与拉取 Worker 同一条准入（`can_pull()`），共用同一份
+    // `FeishuContext`。两者**都跑**是设计的一部分——拉取只写数据源，派发只写
+    // 审批任务，互不触碰对方的表。
+    let approval_worker = match settings.feishu.as_ref().filter(|feishu| feishu.can_pull()) {
+        Some(feishu) => {
+            let feishu_context = crate::addon::feishu::build_context(
+                Arc::new(tools.mysql()?.pool().clone()),
+                Some(Arc::new(feishu.clone())),
+            )
+            .context("构建审批派发上下文失败")?;
+            Some(
+                ApprovalDispatchWorker::start(
+                    Arc::clone(&tools),
+                    feishu,
+                    feishu_context,
+                    approval_dispatch_requests,
+                )
+                .context("启动审批派发 Worker 失败")?,
             )
         }
         None => None,
@@ -329,8 +361,17 @@ async fn run_after_tools_created(
             .map_err(anyhow::Error::from),
         None => Ok(()),
     };
-    // `and` 保留第一个错误：两个都失败时先看到的是更早那个阶段的问题。
-    let shutdown_result = outbox_shutdown.and(feishu_shutdown);
+    // 审批派发同一批次里收口：它与拉取共用出站与数据库，任何一个泄漏都会让
+    // `Tools` 在关闭预算内拿不到干净的引用。顺序紧跟拉取，不额外串一层预算。
+    let approval_shutdown = match approval_worker {
+        Some(worker) => shutdown_budget
+            .run_phase(PHASE_FEISHU_APPROVAL_WORKER, worker.shutdown())
+            .await
+            .map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    // `and` 保留第一个错误：三者都失败时先看到的是更早那个阶段的问题。
+    let shutdown_result = outbox_shutdown.and(feishu_shutdown).and(approval_shutdown);
     match (serve_result, shutdown_result) {
         (Err(serve_error), Err(worker_error)) => {
             tracing::error!(

@@ -630,6 +630,30 @@ pub struct FeishuSettings {
     /// 因此没有运行期开销。
     #[serde(default)]
     pub log_inbound_requests: bool,
+    /// 审批派发的创建速率上限（次/分钟）。
+    ///
+    /// 官方创建审批实例的限速是 **100 次/分钟**，这里默认 90 留 10% 余量给手工
+    /// 操作与网络重试。令牌桶按这个速率匀速放行，且**放 Redis 而不是进程内存**——
+    /// 进程内桶每次重启清零，会让「重启 → 桶满 → 瞬间打爆配额」。
+    ///
+    /// `approval_rate_limit::min_interval_ms` 会把它折算成两次创建之间的最小间隔；
+    /// 取 0 会按最慢（1 次/分钟）处理而不是「不限速」——一次配置手误不该打爆配额。
+    #[serde(default = "default_approval_create_rate_per_minute")]
+    pub approval_create_rate_per_minute: u32,
+    /// 审批派发 worker 的空转轮询间隔（秒）。
+    ///
+    /// 页面按钮是人工低频动作，这个循环主要跑**异步受理**的全表任务。间隔太长
+    /// 会让受理后延迟明显，太短则空转烧数据库。
+    #[serde(default = "default_approval_scan_interval_seconds")]
+    pub approval_scan_interval_seconds: u64,
+    /// 多维表格日期的时区（IANA 名），供 `date` 控件的值转换用。
+    ///
+    /// 多维表格的日期是**不带时区**的毫秒时间戳，而审批 `date` 控件要带偏移量的
+    /// RFC3339，所以必须显式给定——猜错会让审批里的时间整体偏移。
+    ///
+    /// 单配置级的 `base_timezone` 覆盖此处的默认值；这里只给一个部署初值。
+    #[serde(default = "default_approval_base_timezone")]
+    pub approval_base_timezone: String,
 }
 
 /// 出站拉取间隔下限：低于 1 分钟会让飞书侧频控（bitable 列出记录 20 次/秒，
@@ -638,8 +662,43 @@ const FEISHU_MIN_PULL_INTERVAL_SECONDS: u64 = 10;
 /// 上限取 24 小时：再长就等于关掉了同步，应当显式停用数据源而不是把间隔调到天上。
 const FEISHU_MAX_PULL_INTERVAL_SECONDS: u64 = 86_400;
 
+/// 审批创建速率的上限（次/分钟）。
+///
+/// 这是**飞书的**限速而不是我们的偏好：官方对创建审批实例是 100 次/分钟。
+const APPROVAL_MAX_CREATE_RATE_PER_MINUTE: u32 = 100;
+
+/// 审批派发轮询间隔下限：再短就等于把扫描轮空转烧数据库。
+const APPROVAL_MIN_SCAN_INTERVAL_SECONDS: u64 = 5;
+
+/// 上限取 10 分钟：再长就等于把「异步受理」变成摆设——用户点了页面按钮要等 10 分钟
+/// 才开始处理，那还不如不提供这个入口。
+const APPROVAL_MAX_SCAN_INTERVAL_SECONDS: u64 = 600;
+
 pub(crate) const fn default_feishu_pull_interval_seconds() -> u64 {
     900
+}
+
+/// 审批创建速率上限的默认值。
+///
+/// 官方限速 100 次/分钟，取 90 留 10% 余量给手工操作与网络重试——留的余量不能
+/// 是 0：重试同样在消耗配额，满了之后会连重试都没法做。
+pub(crate) const fn default_approval_create_rate_per_minute() -> u32 {
+    90
+}
+
+/// 审批派发轮询间隔的默认值（秒）。
+pub(crate) const fn default_approval_scan_interval_seconds() -> u64 {
+    30
+}
+
+/// 多维表格日期时区的默认值。
+///
+/// 本部署的使用场景是境内业务（无夏令时），`FixedOffset::from_iana` 只认少数几个
+/// 常用名，上海是其中之一。
+///
+/// 不写成 `const fn`：常量上下文里不能调用 `to_string()`。
+pub fn default_approval_base_timezone() -> String {
+    "Asia/Shanghai".to_string()
 }
 
 /// 告警阈值下限：**2 轮**。
@@ -936,6 +995,31 @@ impl Settings {
                 bail!(
                     "feishu.alert_failure_threshold 必须在 {FEISHU_MIN_ALERT_THRESHOLD}..={FEISHU_MAX_ALERT_THRESHOLD} 范围内"
                 );
+            }
+            // 审批创建速率上限。**上限卡在 100**：那是官方对创建审批实例的限速，
+            // 配得更高没有任何作用（飞书会拒），只会让人以为「速率已经调高了」
+            // 却仍成片撞限流。下限 1：0 在 `min_interval_ms` 里按最慢处理，
+            // 但那是个兜底语义，配置里不该出现——要「不跑」就该关掉集成。
+            if !(1..=APPROVAL_MAX_CREATE_RATE_PER_MINUTE)
+                .contains(&feishu.approval_create_rate_per_minute)
+            {
+                bail!(
+                    "feishu.approval_create_rate_per_minute 必须在 1..={APPROVAL_MAX_CREATE_RATE_PER_MINUTE} 范围内（官方创建审批实例限速 100 次/分钟）"
+                );
+            }
+            // 轮询间隔：下限防止空转烧数据库，上限防止「定时兜底」变成摆设。
+            if !(APPROVAL_MIN_SCAN_INTERVAL_SECONDS..=APPROVAL_MAX_SCAN_INTERVAL_SECONDS)
+                .contains(&feishu.approval_scan_interval_seconds)
+            {
+                bail!(
+                    "feishu.approval_scan_interval_seconds 必须在 {APPROVAL_MIN_SCAN_INTERVAL_SECONDS}..={APPROVAL_MAX_SCAN_INTERVAL_SECONDS} 范围内"
+                );
+            }
+            // 时区只校验非空：完整的 IANA 名单校验属于飞书审批域的语义，
+            // 放在这里会让 config 依赖 addon 层（依赖方向是反的）。真正的解析在
+            // worker 启动时做，失败会让启动报错而不是静默跳过。
+            if feishu.approval_base_timezone.trim().is_empty() {
+                bail!("feishu.approval_base_timezone 不能为空");
             }
             // 收件人逐个校验（空列表合法 = 不告警）。放在**启动期**而不是首次告警时：
             // 一个空白项或拼错的地址在投递那一刻只会静默失败，运维却以为告警在跑。

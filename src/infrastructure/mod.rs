@@ -2,5 +2,6 @@
 
 pub mod audit;
 pub mod authorization;
+pub mod feishu_approval_worker;
 pub mod feishu_pull;
 pub mod schema;

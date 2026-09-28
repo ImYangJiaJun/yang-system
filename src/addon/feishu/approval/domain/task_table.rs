@@ -38,7 +38,11 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     Ok(TableSpec::new(yang_base::table!("feishu_approval_task"))
         .title("飞书审批派发任务")
         .fields(yang_base::fields! {
-            id => Key::new().title("ID"),
+            // 排序与筛选都要：认领查询按 `id` 升序取批（`page` 分页依赖排序），
+            // 按 `id` 定位要走 `where_gt`/`where_eq`。DSL 的 `sortable`/`filterable`
+            // 是 **fail-closed**——漏了只在运行期报 FieldPermissionDenied，
+            // 启动与单测都发现不了（见 `bootstrap` 首轮日志的那次真实失败）。
+            id => Key::new().title("ID").filterable(true).sortable(true),
             config_id => Int::new()
                 .title("所属配置")
                 .require(true)

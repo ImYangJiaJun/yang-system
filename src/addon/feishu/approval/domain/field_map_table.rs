@@ -25,7 +25,8 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
         TableSpec::new(yang_base::table!("feishu_approval_field_map"))
             .title("飞书审批字段映射")
             .fields(yang_base::fields! {
-                id => Key::new().title("ID"),
+                // 同 `task_table`：DSL 的 `sortable`/`filterable` 是 fail-closed，漏了只在运行期报错。
+            id => Key::new().title("ID").filterable(true).sortable(true),
                 // 指向 `feishu_approval_config.id`。无外键（理由见本文件顶部）。
                 //
                 // `filterable` 必开：处理一条记录时要按 config_id 取出全部映射，
