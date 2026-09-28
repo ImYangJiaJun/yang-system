@@ -323,6 +323,21 @@ def build() -> None:
     ]
     write_xlsx(OUT_DIR / "column_all_blank.xlsx", [("Sheet1", [BANK_HEADER, *blank_column_rows])])
 
+    # 数据行之间夹一个**整行空行**（第 3 行，每个单元格都写了空串——空行是**有单元格但
+    # 全空**，不是整行缺失：后者在 XML 里根本不产生单元格，钉不住「空单元格不算数据行」
+    # 这条分支）。`rows_read` 只数非空行，而这个区分是**逐绑定空快照守卫的承重项**：
+    # 空行若被当数据行，一份「只有空行」的文件会报 rows_read = N 而非 0，守卫静默失效。
+    blank_row = [""] * len(BANK_HEADER)
+    write_xlsx(
+        OUT_DIR / "blank_row_between.xlsx",
+        [("Sheet1", [
+            BANK_HEADER,
+            bank_row(1, "中国工商银行成都春熙路支行", "中国工商银行", "102651000011"),
+            blank_row,
+            bank_row(2, "浙商银行CIPS虚拟行号", "", "316651000014"),
+        ])],
+    )
+
     # 数值型联行号：t="n" 而非 inlineStr
     numeric_row = [1, "中国工商银行成都春熙路支行", "中国工商银行", "中国工商银行", 102651000011, "某某路 1 号", "", 510100]
     write_xlsx(OUT_DIR / "numeric_code.xlsx", [("Sheet1", [BANK_HEADER, numeric_row])])
@@ -335,6 +350,17 @@ def build() -> None:
     write_xlsx(
         OUT_DIR / "overlong_value.xlsx",
         [("Sheet1", [BANK_HEADER, bank_row(1, "长" * 300, "中国工商银行", "102651000011")])],
+    )
+
+    # 超长文案 **且带首尾空白**：`overlong_value.xlsx` 的 `"长"*300` 钉不住「截断之后
+    # 还要再 trim 一次」这条——`read_snapshot` 读出来就已经 trim 过首尾了，所以本夹具
+    # 真正要构造的是**空白落在截断边界上**：值 = 2 个前导空格 + 254 个「长」+ 1 个空格
+    # + 50 个「长」+ 2 个尾随空格。trim 后是 305 字符，截到 255 时**末尾正好留一个空格**，
+    # 于是「截断后的 key」与「派生时 trim 过的文案」不是同一个串。
+    padded = "  " + "长" * 254 + " " + "长" * 50 + "  "
+    write_xlsx(
+        OUT_DIR / "overlong_padded_value.xlsx",
+        [("Sheet1", [BANK_HEADER, bank_row(1, padded, "中国工商银行", "102651000011")])],
     )
 
     # 两个 sheet：第二张表头不同（验证只读第一张）

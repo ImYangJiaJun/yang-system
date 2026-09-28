@@ -757,7 +757,13 @@ fn bind_fields(
 /// `validate_fields` 拒自环与缺失父，但**手工改库能造出 a→b→a**。上溯不设 visited
 /// 守卫的话，一轮拉取会在这里**卡死**——不是报错，是 worker 再也不返回。卡死比报错
 /// 难查得多，所以这里宁可直接失败并点名。
-fn parent_linkage(
+///
+/// # 为什么是 `pub(crate)`
+///
+/// 文件导入（`datasource/actions/import_xlsx.rs`）的祖先链与拉取是同一件事、同一组
+/// 输入，所以它复用本函数而不是再写一份——**再写一份等于把上面那条防环守卫复制两遍**，
+/// 手工改库造出的环会在一处被挡、在另一处把请求卡死。
+pub(crate) fn parent_linkage(
     field: &BoundField,
     bindings: &[TableBinding],
     bound: &[BoundField],

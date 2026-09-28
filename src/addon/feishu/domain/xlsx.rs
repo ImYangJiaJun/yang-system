@@ -21,8 +21,6 @@
 //! `guarded` 把 panic 变成 [`XlsxError::Unreadable`]：畸形文件的结果是「这一份导入失败」，
 //! 而不是一次 panic。
 
-#![allow(dead_code)] // 嗅探先落地并自带测试；消费者（xlsx 导入 Action）在后续任务接入。
-
 use calamine::{Cell, DataRef, Reader as _, Xlsx};
 
 /// zip 魔数：xlsx 是 zip，`PK\x03\x04`。
@@ -151,7 +149,10 @@ fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// 读出 xlsx 第一张 sheet 的表头行。
 ///
-/// 只认列名，不认识绑定；只读表头那一行，**不扫全表**——探表头要快就快在这里。
+/// 只认列名，不认识绑定。**代价不是「只读一行」**：`Xlsx::new` 会**急切读完整个
+/// `xl/sharedStrings.xml`**（真实 Excel 导出默认就走 sharedStrings 形态），所以这一层是
+/// O(整份字符串表)，只是不读 sheetData 的数据行——比全量导入便宜，但不是 O(表头行)。
+/// 与 `probe_xlsx_headers` 的模块文档同一口径。
 pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
     if !sniff_is_zip(bytes) {
         return Err(XlsxError::NotZip);
@@ -166,7 +167,8 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
     let sheet_names = workbook.sheet_names().to_vec();
     let sheet_name = sheet_names.first().cloned().ok_or(XlsxError::EmptyHeader)?;
 
-    // **只读表头行，不扫全表**——probe Action 快就快在这里。
+    // 只驱动表头那一行就 `break`（`header_row` 一旦确定，后续行直接跳出循环）——
+    // 省下的是 sheetData 的遍历，字符串表那一段已经在 `Xlsx::new` 里读完。
     let mut reader = guarded("打开工作表", || {
         workbook
             .worksheet_cells_reader(&sheet_name)
@@ -706,6 +708,31 @@ mod tests {
             "拼接顺序必须是传入顺序——序号是接续的两半"
         );
         assert_eq!(snapshot.rows[4].get("序号").map(String::as_str), Some("5"));
+    }
+
+    #[test]
+    fn a_blank_row_between_data_rows_is_not_counted() {
+        // `rows_read` 只数**非空行**，而这个区分是承重的：逐绑定空快照守卫（「这一列
+        // 整列为空 → 不派生任何选项 → 跳过写库」）与表级守卫都拿它判「本轮是不是空快照」。
+        // 空行若被当成数据行，一份「只有空行」的文件会报 `rows_read = N` 而非 0，
+        // 守卫**静默失效**——不报错，只是本该拒绝的那一轮照常跑补集停用。
+        //
+        // 夹具里的空行是「每个单元格都有、但都是空串」（不是整行缺单元格）：后者在 XML
+        // 里根本不产生单元格，钉不住 `cell_text` 那条空串分支。
+        let want = vec!["开户行行名".to_string(), "联行号".to_string()];
+        let snapshot = read_snapshot(
+            &[(
+                "blank_row_between.xlsx".to_string(),
+                fixture("blank_row_between.xlsx"),
+            )],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+        assert_eq!(snapshot.rows.len(), 2, "两份数据行");
+        assert_eq!(
+            snapshot.per_file[0].rows_read, 2,
+            "夹在中间的那个整行空行**不计入** rows_read"
+        );
     }
 
     #[test]

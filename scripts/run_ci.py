@@ -302,6 +302,19 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "飞书 xlsx 导入集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "feishu_xlsx_import_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 

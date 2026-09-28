@@ -2820,6 +2820,21 @@ pub(super) async fn handle(
             .map_err(|error| BaseError::ConfigError(format!("读上传文件 {name} 失败：{error}")))?;
         loaded.push((name, bytes));
     }
+    // **文件之间**表头必须完全一致——`read_snapshot` 把这条前置条件交给调用方
+    // （它只逐个文件比对必需列，从不做文件之间的比对）。**这里必须自己调**：
+    // 「重新导入」不经过探表头（详情页直接调导入），只在探表头做校验会漏掉那条路径。
+    // 注意与 D9 的「多列忽略」不矛盾：那是「单文件 vs 配置」，这是「文件 vs 文件」。
+    let headers: Vec<(String, xlsx::SheetHeader)> = loaded
+        .iter()
+        .map(|(name, bytes)| {
+            xlsx::read_header(bytes)
+                .map(|header| (name.clone(), header))
+                .map_err(|error| BaseError::ParamInvalid("files".to_string(), format!("{name}：{error}")))
+        })
+        .collect::<Result<_, _>>()?;
+    xlsx::require_consistent_headers(&headers)
+        .map_err(|error| BaseError::ParamInvalid("files".to_string(), error.to_string()))?;
+
     let snapshot = xlsx::read_snapshot(&loaded, &columns)
         .map_err(|error| BaseError::ParamInvalid("files".to_string(), error.to_string()))?;
 
