@@ -113,8 +113,8 @@ pnpm --dir frontend test
 
   | 文件 | 用途 | 关键形状 |
   |---|---|---|
-  | `bank_1.xlsx` | 正常主路径 | 8 列（`序号/开户行行名/归属银行/归属银行编码/联行号/开户行地址/地区名称/地区编码`），6 行，全文本 |
-  | `bank_2.xlsx` | 多文件拼接 | 与 `bank_1` 表头**完全相同**，另 4 行，`序号` 接续 |
+  | `bank_1.xlsx` | 正常主路径 | 8 列（`序号/开户行行名/归属银行/归属银行编码/联行号/开户行地址/地区名称/地区编码`），**3 行**，全文本（`序号` 是数值单元格） |
+  | `bank_2.xlsx` | 多文件拼接 | 与 `bank_1` 表头**完全相同**，另 **2 行**，`序号` 接续（4、5） |
   | `header_missing_column.xlsx` | 缺列即拒 | 表头少 `联行号` |
   | `header_extra_column.xlsx` | 多列忽略 | 表头多一列 `备注` |
   | `header_mismatch_two.xlsx` | 两文件互不一致 | 表头少 `归属银行`（与 `bank_1` 配用） |
@@ -132,6 +132,11 @@ pnpm --dir frontend test
 - [ ] **Step 1: 写生成脚本**
 
 创建 `scripts/make_xlsx_fixtures.py`：
+
+> **以仓库里的脚本为准。** 下面这段代码块是初版；实现时经一轮修复补了两处（见 Step 2 后的注记）：
+> zip 条目改用固定 `date_time` 的 `ZipInfo`（重跑逐字节可复现），
+> 以及给带首尾空白的 `<t>` 加 `xml:space="preserve"`。
+> **直接照下面这段抄会得到不可复现的版本**——请打开 `scripts/make_xlsx_fixtures.py` 对照。
 
 ```python
 """生成 xlsx 解析测试夹具。
@@ -336,7 +341,7 @@ def build() -> None:
     # （`feishu_option.label` 是 max_length(255)，不截断会在插库时才炸）
     write_xlsx(
         OUT_DIR / "overlong_value.xlsx",
-        [("Sheet1", [BANK_HEADER, bank_row(1, &"长" * 300, "中国工商银行", "102651000011")])],
+        [("Sheet1", [BANK_HEADER, bank_row(1, "长" * 300, "中国工商银行", "102651000011")])],
     )
 
     # 两个 sheet：第二张表头不同（验证只读第一张）
@@ -364,7 +369,13 @@ if __name__ == "__main__":
 python scripts/make_xlsx_fixtures.py
 ```
 
-预期：打印 13 个文件名与字节数，无异常。
+预期：打印 **16 行**——15 个夹具（14 个 `.xlsx` + `not_a_zip.bin`）**加上 `README.md`**
+（脚本遍历的是整个目录，README 也在里面）。无异常。
+
+> 脚本用**固定 `date_time`** 写 zip 条目，所以重跑**逐字节可复现**：
+> 连跑两次后 `git status --short tests/fixtures/xlsx/` 必须为空。
+> 不这样做的后果是——计划要求「改夹具必须重跑生成脚本」，而重跑会把 14 个已提交的
+> 二进制全弄脏（内容没变、只有时间戳变），评审时得逐个解释。
 
 - [ ] **Step 3: 独立验证产物是合法 xlsx（不依赖 Rust）**
 
