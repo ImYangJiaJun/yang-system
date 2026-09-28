@@ -38,6 +38,7 @@ use super::approval_match::{
 use super::bitable::{list_all_fields, BitableCoordinates};
 use super::context::FeishuContext;
 use super::outbound::{OutboundTransport, Sleeper};
+use super::repository::all_pages;
 use super::tenant_token::TenantTokenProvider;
 
 /// 自动建配置的入参。三个坐标由工作流在 `raw_body` 里写死——它们是**只有调用方
@@ -463,14 +464,16 @@ async fn load_external_options(
     // `feishu_datasource_field.field_name` 是**缓存列**、不是 `filterable`，
     // 所以这里不能把 WHERE 下推到库（会吃 FieldPermissionDenied）——扫全表后在内存里
     // 按名配对。这张表是「字段绑定」，行数量级在百级（每数据源几列）。
-    let bindings = context
-        .datasource_fields()
-        .query()
-        .select_fields(&["field_name", "source_key", "enabled"])?
-        .page(1, 500)?
-        .all()
-        .await
-        .map_err(|error| ProvisionError::Store(error.to_string()))?;
+    let bindings = all_pages(
+        context.datasource_fields().query().select_fields(&[
+            "field_name",
+            "source_key",
+            "enabled",
+        ])?,
+        MAX_BINDING_PAGES,
+    )
+    .await
+    .map_err(|error| ProvisionError::Store(error.to_string()))?;
 
     // 名字 → source_key。**重名即歧义**：两张表都有「公司名称/Company name」时，
     // 取哪一个都是猜——猜错的后果是把选项映射建到别的数据源上，而症状是提交时
@@ -539,16 +542,17 @@ async fn load_options(
     context: &FeishuContext,
     source_key: &str,
 ) -> Result<BTreeMap<String, String>, ProvisionError> {
-    let rows = context
-        .options()
-        .query()
-        .select_fields(&["option_id", "label"])?
-        .where_eq("source_key", serde_json::json!(source_key))?
-        .where_eq("enabled", serde_json::json!(true))?
-        .page(1, 500)?
-        .all()
-        .await
-        .map_err(|error| ProvisionError::Store(error.to_string()))?;
+    let rows = all_pages(
+        context
+            .options()
+            .query()
+            .select_fields(&["option_id", "label"])?
+            .where_eq("source_key", serde_json::json!(source_key))?
+            .where_eq("enabled", serde_json::json!(true))?,
+        MAX_OPTION_PAGES,
+    )
+    .await
+    .map_err(|error| ProvisionError::Store(error.to_string()))?;
 
     if rows.is_empty() {
         return Err(ProvisionError::Invalid(vec![format!(
@@ -582,6 +586,13 @@ async fn load_options(
     }
     Ok(map)
 }
+
+/// 扫字段绑定表时的页数上界。绑定行数量级在百级（每数据源几列），给足余量。
+const MAX_BINDING_PAGES: usize = 20;
+
+/// 读单个数据源选项时的页数上界。实测最大的一个源有 226 条选项（3 页），
+/// 给到 50 页是留量而不是预期。
+const MAX_OPTION_PAGES: usize = 50;
 
 /// 标题截断到列上限（100），避免插入期才报「字符串超长」。
 fn truncate_title(approval_name: &str, table_id: &str) -> String {

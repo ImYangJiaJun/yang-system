@@ -59,6 +59,7 @@ use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
     HttpClientTransport, OutboundTransport, TokioSleeper,
 };
+use crate::addon::feishu::domain::repository::all_pages;
 use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
 };
@@ -76,10 +77,23 @@ use crate::infrastructure::audit;
 /// 让「条件没生效」以显式报错出现。
 const SEED_MAX_PAGES: u32 = 20;
 
-/// 播种时一次读多少条已有任务行（用来判「新建还是拉回待处理」）。
-const SEED_MAX_TASKS: usize = 2000;
+/// 播种时最多翻多少页已有任务行（每页 `PAGE_SIZE` 行，用来判「新建还是拉回待处理」）。
+///
+/// 行数与多维表格的记录数同量级，所以必须真翻页，不能「一次读够」。这里只是防失控的
+/// 上界；超了 `all_pages` 会**报错**而不是截断——截断会让没读到的行被当成「不存在」，
+/// 于是重复插入，而重复插入撞的是唯一索引，报错点离真正的原因很远。
+const SEED_MAX_TASK_PAGES: usize = 20;
 
+/// 播种时最多翻多少页启用中的配置行。配置是「一张多维表格一条」，量级个位到十位。
+const SEED_MAX_CONFIG_PAGES: usize = 10;
+
+/// 认领一批处理多少条。
 const CLAIM_BATCH: usize = 50;
+
+/// 编译期守护：`CLAIM_BATCH` 是**手工挑**的数，一旦被调到框架上限之上，`claim`
+/// 会在运行期直接失败——不是少取几条。上限是 fail-closed 的拒绝语义，而运行期只留
+/// 一行 WARN，很容易被当成噪音（播种就是这么挂掉的）。
+const _: () = assert!(CLAIM_BATCH <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE);
 
 /// 单轮最坏耗时上界（秒）。
 ///
@@ -428,11 +442,8 @@ async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
             "approval_code",
             "backfill_field",
         ])?
-        .where_eq("enabled", serde_json::json!(true))?
-        // `page_size` 缺省是 10；配置数量不多但也别踩这个坑。
-        .page(1, 200)?
-        .all()
-        .await?;
+        .where_eq("enabled", serde_json::json!(true))?;
+    let configs = all_pages(configs, SEED_MAX_CONFIG_PAGES).await?;
 
     let mut seeded = 0usize;
     for config in configs {
@@ -488,15 +499,16 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
     }
 
     // 已有的任务行：按 record_id 建索引，决定「新建」还是「拉回 pending」。
-    let existing = runner
-        .context
-        .approval_tasks()
-        .query()
-        .select_fields(&["id", "record_id", "state"])?
-        .where_eq("config_id", serde_json::json!(config_id))?
-        .page(1, SEED_MAX_TASKS)?
-        .all()
-        .await?;
+    let existing = all_pages(
+        runner
+            .context
+            .approval_tasks()
+            .query()
+            .select_fields(&["id", "record_id", "state"])?
+            .where_eq("config_id", serde_json::json!(config_id))?,
+        SEED_MAX_TASK_PAGES,
+    )
+    .await?;
     let mut by_record: BTreeMap<String, (i64, String)> = BTreeMap::new();
     for row in &existing {
         by_record.insert(
