@@ -29,4 +29,5 @@ pub(crate) mod schema_anchor;
 pub(crate) mod source_key;
 pub(crate) mod tenant_token;
 pub(crate) mod token;
+pub(crate) mod uploaded_files;
 pub(crate) mod xlsx;

@@ -17,6 +17,7 @@ pub(super) mod list_bitable_fields;
 pub(super) mod list_bitable_tables;
 pub(super) mod list_bitable_views;
 pub(super) mod list_datasources;
+pub(super) mod probe_xlsx_headers;
 pub(super) mod pull_now;
 pub(super) mod pull_probe;
 pub(super) mod pull_schedule;
@@ -50,6 +51,9 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = list_bitable_fields::register(module, Arc::clone(&context));
     let module = reveal_token::register(module, Arc::clone(&context));
     let module = rotate_token::register(module, Arc::clone(&context));
+    // 探表头**不出网**，所以不受下面的 `can_pull()` 门控约束：
+    // 没有飞书凭证的环境里，xlsx 导入照样要能用。
+    let module = probe_xlsx_headers::register(module, Arc::clone(&context));
 
     if context
         .settings()
