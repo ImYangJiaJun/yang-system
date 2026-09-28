@@ -123,6 +123,7 @@ pnpm --dir frontend test
   | `header_spaces.xlsx` | 表头 trim | 表头带首尾空格（`" 序号 "`），其余正常 |
   | `bank_shared_strings.xlsx` | **sharedStrings 形态**（Task 6 补） | 走 `t="s"` + `xl/sharedStrings.xml`，内容与 `bank_1` **等值**。**这是真实 Excel 导出的默认形态**——不加它，`DataRef::SharedString` 那个臂零覆盖 |
   | `header_reordered.xlsx` | **列序无关**（Task 6 补） | 与 `bank_1` **列集合相同、顺序不同**。不加它，「按名取值不按位置」这条性质就只是一句没人验的声明 |
+  | `shared_strings_missing.xlsx` | **panic 防护**（Task 7 补） | 含 `t="s"` 单元格但**不带** `xl/sharedStrings.xml` 部件（rels 与 Content_Types 的声明仍在）。命中 calamine `cells_reader.rs:356` 的 `&strings[idx]` **无边界检查** → 直接索引 panic。断言它**返回 `Err(Unreadable)` 而不是 panic** |
   | `header_long.xlsx` | 超长拒 | 一个 65 字符的列名 |
   | `column_all_blank.xlsx` | 整列为空 | `联行号` 列全部为空（配 `column_code_empty` 名称，供 Task 10 的守卫测试） |
   | `numeric_code.xlsx` | 数值不推断 | `联行号` 是数值单元格（非文本） |
@@ -371,7 +372,7 @@ if __name__ == "__main__":
 python scripts/make_xlsx_fixtures.py
 ```
 
-预期：打印 **18 行**——17 个夹具（16 个 `.xlsx` + `not_a_zip.bin`）**加上 `README.md`**
+预期：打印 **19 行**——18 个夹具（17 个 `.xlsx` + `not_a_zip.bin`）**加上 `README.md`**
 （脚本遍历的是整个目录，README 也在里面）。无异常。
 
 > 其中 `bank_shared_strings.xlsx` 与 `header_reordered.xlsx` 是 Task 6 补的（见夹具表）。
@@ -1254,6 +1255,14 @@ cargo test --lib --locked feishu::domain::xlsx
 - [ ] **Step 3: 实现**
 
 在 `xlsx.rs` 里实现。要点逐条：
+
+> ⚠️ **下面代码里有一处真错，实施时实测发现**：第 1663 行那句
+> `if row_number <= current_row { continue; }` **是错的**——`current_row` 是**随行推进**的变量，
+> 于是每行第二个及以后的单元格全被跳过，**只有第一列能被读到**。正确写法是
+> `if row_number <= header.header_row { continue; }`（注释「表头行及其之前」才是原意）。
+>
+> **这一处的危险在于它很安静**：草稿自带的 7 条测试里 4 条会因此转红，但**如果你要的列恰好只有第一列，
+> 全部测试照样绿**。以仓库里的 `src/addon/feishu/domain/xlsx.rs` 成品为准。
 
 > ⚠️ **下面这段代码块里的 calamine API 是错的**（实施时实测，三处）：
 > ① `calamine::XlsxCell` **不存在**——`next_cell()` 返回的是 `Cell<DataRef<'a>>`；

@@ -8,6 +8,18 @@
 //! 也不管列够不够、多一点少一点。那是上层绑定解析的活。
 //! 这里只负责把表头如实读出来，并挡住「列名本身就不合法」的输入
 //! （重名、空名、超长），以及多文件之间表头不一致这种整体性错误。
+//!
+//! 行这一层**同样只认列名**：`read_snapshot` 交出的是「列名 → 单元格文本」，
+//! 要哪几列由调用方给（= 全部启用绑定的 `field_id`），但这里**不知道绑定是什么**——
+//! 不判断哪一列绑到哪个字段，也不把行投影成 `RawValue`，更不管空快照该不该拒绝。
+//! 那些都是 Task 10 导入 Action 的活。分层清楚，这一层才能被完整单测覆盖。
+//!
+//! **对 calamine 的每一处入口调用（`Xlsx::new` / `worksheet_cells_reader` / `next_cell`）
+//! 都过 [`guarded`]**：calamine 0.30.1 读 `t="s"` 单元格时是 `&strings[idx]`，
+//! **没有边界检查**（`xlsx/cells_reader.rs`）——一个「有 `t="s"` 却没有
+//! `xl/sharedStrings.xml` 部件」的 zip（用户上传即可构造）会让它下标越界 panic。
+//! `guarded` 把 panic 变成 [`XlsxError::Unreadable`]：畸形文件的结果是「这一份导入失败」，
+//! 而不是一次 panic。
 
 #![allow(dead_code)] // 嗅探先落地并自带测试；消费者（xlsx 导入 Action）在后续任务接入。
 
@@ -59,6 +71,8 @@ pub(crate) enum XlsxError {
         missing: Vec<String>,
         extra: Vec<String>,
     },
+    /// 表头里缺了我们需要的列。`missing` 是缺的那些（不是全部要的）。
+    HeaderMissingColumns { file: String, missing: Vec<String> },
 }
 
 impl std::fmt::Display for XlsxError {
@@ -83,9 +97,57 @@ impl std::fmt::Display for XlsxError {
                     "文件 {file} 的表头与其它文件不一致：缺 {missing:?}、多 {extra:?}"
                 )
             }
+            Self::HeaderMissingColumns { file, missing } => {
+                write!(f, "文件 {file} 的表头缺少必需列：{}", missing.join("、"))
+            }
         }
     }
 }
+
+/// 把一个对 calamine 的调用关进 `catch_unwind`：panic → [`XlsxError::Unreadable`]。
+///
+/// 为什么需要这层：calamine 0.30.1 读 `t="s"` 单元格时做的是 `&strings[idx]`，
+/// **没有边界检查**（`xlsx/cells_reader.rs` 的 `read_v`）。一个 zip 只要写了
+/// `<c r="A1" t="s"><v>0</v></c>` 却**不带** `xl/sharedStrings.xml` 部件，`strings`
+/// 就是空的，`&strings[0]` 直接下标越界 panic——而这是**用户上传即可触发**的输入面
+/// （畸形或缺部件的 xlsx）。仓库没有 `panic = "abort"`，所以后果是丢连接 + 日志里一段
+/// panic 栈，不是挂进程：严重度中等，但防护的代价几乎为零。
+///
+/// `catch_unwind` 要求 `UnwindSafe`，而 `&mut XlsxCellReader` 不是；这里用
+/// [`std::panic::AssertUnwindSafe`] 包住。断言成立的理由是我们**不读** panic 之后可能
+/// 处于不一致状态的任何内存：一旦捕获到 panic 就整份放弃这个文件，直接返回错误。
+/// 这不是 `unsafe`（`unsafe_code = "forbid"` 管不到它），只是对编译器的一个承诺。
+///
+/// **panic 的默认 hook 仍然会把栈打给 stderr**——这里只是把它变成可返回的错误，
+/// **没有静音**。日志里留痕是可接受的；静音反而会藏掉不该藏的 bug。
+fn guarded<T>(what: &str, call: impl FnOnce() -> Result<T, XlsxError>) -> Result<T, XlsxError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(result) => result,
+        Err(payload) => Err(XlsxError::Unreadable(format!(
+            "{what}时解析库内部 panic：{}",
+            panic_reason(payload.as_ref())
+        ))),
+    }
+}
+
+/// panic 载荷转文案。`panic!` 的载荷是 `&'static str`，`format!` 出来的是 `String`；
+/// 两者都不是就给个兜底——**绝不能在这里再 panic 一次**。
+fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "未知原因".to_string()
+    }
+}
+
+// 三处 calamine 入口（`Xlsx::new` / `worksheet_cells_reader` / `next_cell`）都用
+// `guarded(...)` 就地包一个闭包。`next_cell()` 那处没法抽成公共函数：`XlsxCellReader`
+// 在 calamine 0.30.1 里**取不到名字**（`mod xlsx` 私有，`pub use
+// cells_reader::XlsxCellReader` 也跟着不可见），而 `Cell<DataRef<'a>>` 的返回值必须和
+// 游标借出的那个 `'a` 对上，`impl Trait` 也糊不过去。好在它返回的 `'a` 借自 workbook
+// 的字符串表、**不是** `&mut reader` 这次调用的借出，所以闭包返回值不牵连捕获的借用。
 
 /// 读出 xlsx 第一张 sheet 的表头行。
 ///
@@ -97,26 +159,30 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
     // calamine 只能从 Read + Seek 构造。文件是请求作用域的临时文件，
     // 但这一层收 &[u8] 以便单测直接喂夹具字节。
     let cursor = std::io::Cursor::new(bytes);
-    let mut workbook =
-        Xlsx::new(cursor).map_err(|error| XlsxError::Unreadable(error.to_string()))?;
+    let mut workbook = guarded("打开工作簿", || {
+        Xlsx::new(cursor).map_err(|error| XlsxError::Unreadable(error.to_string()))
+    })?;
 
     let sheet_names = workbook.sheet_names().to_vec();
     let sheet_name = sheet_names.first().cloned().ok_or(XlsxError::EmptyHeader)?;
 
     // **只读表头行，不扫全表**——probe Action 快就快在这里。
-    let mut reader = workbook
-        .worksheet_cells_reader(&sheet_name)
-        .map_err(|error| XlsxError::Unreadable(error.to_string()))?;
+    let mut reader = guarded("打开工作表", || {
+        workbook
+            .worksheet_cells_reader(&sheet_name)
+            .map_err(|error| XlsxError::Unreadable(error.to_string()))
+    })?;
 
     let mut columns: Vec<(String, usize)> = Vec::new();
     let mut header_row = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // XlsxCellReader 是**手拉游标、不实现 Iterator**，必须 while let 驱动。
-    while let Some(cell) = reader
-        .next_cell()
-        .map_err(|error| XlsxError::Unreadable(error.to_string()))?
-    {
+    while let Some(cell) = guarded("遍历单元格", || {
+        reader
+            .next_cell()
+            .map_err(|error| XlsxError::Unreadable(error.to_string()))
+    })? {
         let (row, column) = cell.get_position();
         let text = cell_text(cell);
         let text = text.trim();
@@ -195,6 +261,146 @@ pub(crate) fn require_consistent_headers(
         }
     }
     Ok(reference.into_iter().map(str::to_string).collect())
+}
+
+/// 一行：列名 → 单元格文本。只保留 `columns` 里要的列。
+pub(crate) type RowValues = std::collections::HashMap<String, String>;
+
+/// 一个文件读了多少行（导入回执要按文件报）。
+///
+/// `rows_read` **只数非空行**：整行全空的行被丢掉、不计入。xlsx 文件末尾常有大量空行，
+/// 把它们当数据行会让「一个文件 0 行」和「一个文件 10 万行空行」无法区分，
+/// 而逐绑定的空快照守卫（「这一列全空 → 不派生任何选项」）正是靠这个区分。
+#[derive(Debug)]
+pub(crate) struct FileRows {
+    pub(crate) name: String,
+    pub(crate) rows_read: usize,
+}
+
+/// 一份快照：多个文件**按顺序拼接**的全部行。
+#[derive(Debug)]
+pub(crate) struct ImportSnapshot {
+    pub(crate) rows: Vec<RowValues>,
+    pub(crate) per_file: Vec<FileRows>,
+}
+
+/// 读全部数据行。`columns` 是要取回的列名集合（= 全部启用绑定的 `field_id`）。
+/// 表头行本身不算数据行；整行全空的行跳过。
+///
+/// **只认列名，不认识绑定**：这里不知道哪列绑到哪个字段，也不做 `RawValue` 投影。
+/// 缺列即拒（[`XlsxError::HeaderMissingColumns`]，点名缺哪列），多列忽略（D9）。
+///
+/// 内存行为：**只把 `columns` 里的列放进 `RowValues`**，没要的列连 `String` 都不分配；
+/// 单元格为空则连键都不插（「缺值」与「空串」同义），整行全空则整行丢弃。
+/// 15.4 万行的真实文件下，这三点就是「几十 MB」和「几百 MB」的差别。
+pub(crate) fn read_snapshot(
+    files: &[(String, Vec<u8>)],
+    columns: &[String],
+) -> Result<ImportSnapshot, XlsxError> {
+    let wanted: std::collections::HashSet<&str> = columns.iter().map(String::as_str).collect();
+    let mut rows = Vec::new();
+    let mut per_file = Vec::with_capacity(files.len());
+
+    for (name, bytes) in files {
+        // 每个文件都重新解析表头：文件之间的一致性由调用方用
+        // `require_consistent_headers` 单独把守（那一层的错误文案更具体）。
+        let header = read_header(bytes)?;
+
+        let present: std::collections::HashSet<&str> =
+            header.columns.iter().map(|(n, _)| n.as_str()).collect();
+        let missing: Vec<String> = columns
+            .iter()
+            .filter(|column| !present.contains(column.as_str()))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(XlsxError::HeaderMissingColumns {
+                file: name.clone(),
+                missing,
+            });
+        }
+
+        let cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut workbook = guarded("打开工作簿", || {
+            Xlsx::new(cursor).map_err(|error| XlsxError::Unreadable(error.to_string()))
+        })?;
+        let mut reader = guarded("打开工作表", || {
+            workbook
+                .worksheet_cells_reader(&header.sheet_name)
+                .map_err(|error| XlsxError::Unreadable(error.to_string()))
+        })?;
+
+        // 列号 → 列名。用 1-based 列号做键，因为游标只给位置不给名字。
+        let by_index: std::collections::HashMap<usize, &str> = header
+            .columns
+            .iter()
+            .map(|(column_name, index)| (*index, column_name.as_str()))
+            .collect();
+
+        let mut current_row = header.header_row; // 表头行本身不算数据行
+        let mut current: RowValues = RowValues::new();
+        let mut rows_read = 0usize;
+        let mut pending = false;
+
+        // **XlsxCellReader 是手拉游标、不实现 Iterator**，必须 while let 驱动。
+        while let Some(cell) = guarded("遍历单元格", || {
+            reader
+                .next_cell()
+                .map_err(|error| XlsxError::Unreadable(error.to_string()))
+        })? {
+            let (row_index, column_index) = cell.get_position();
+            let row_number = row_index as usize + 1;
+            let column_number = column_index as usize + 1;
+
+            // 表头行及其之前全部跳过。比的是 `header.header_row` 而**不是** `current_row`：
+            // `current_row` 在下面会被更新成「当前正在收口的这一行」，拿它比 `<=` 的话，
+            // 同一行里第二个及以后的单元格都会落进这里被 continue 掉——
+            // 结果只剩每行的第一列能被读到（只勾第一列时测试照样绿，是个很安静的错）。
+            if row_number <= header.header_row {
+                continue;
+            }
+            if row_number != current_row {
+                // 换行了：把上一行收口。
+                if pending {
+                    rows_read += 1;
+                    rows.push(std::mem::take(&mut current));
+                } else {
+                    // 整行全空：不置 `pending`，这里把它丢掉，也**不计入 `rows_read`**。
+                    current.clear();
+                }
+                current_row = row_number;
+                pending = false;
+            }
+
+            let Some(column_name) = by_index.get(&column_number) else {
+                continue; // 没勾选的列，直接不进内存
+            };
+            // 没要的列也跳过（by_index 已按 header.columns 过滤，双保险）
+            if !wanted.contains(*column_name) {
+                continue;
+            }
+
+            let text = cell_text(cell).trim().to_string();
+            if text.is_empty() {
+                continue; // 空单元格不进 map —— 省内存，且"缺值"与"空串"同义
+            }
+            pending = true;
+            current.insert((*column_name).to_string(), text);
+        }
+
+        // 最后一个文件最后一行也要收口（`while let` 退出时没有"换行"事件）。
+        if pending {
+            rows_read += 1;
+            rows.push(current);
+        }
+
+        per_file.push(FileRows {
+            name: name.clone(),
+            rows_read,
+        });
+    }
+
+    Ok(ImportSnapshot { rows, per_file })
 }
 
 /// 单元格取文本。**不做数值/日期推断**（设计 §5.7）：
@@ -414,5 +620,171 @@ mod tests {
             "要点名文件: {message}"
         );
         assert!(message.contains("归属银行"), "要点名缺哪列: {message}");
+    }
+
+    #[test]
+    fn reads_data_rows_keyed_by_column_name() {
+        let want = vec!["开户行行名".to_string(), "联行号".to_string()];
+        let snapshot = read_snapshot(
+            &[("bank_1.xlsx".to_string(), fixture("bank_1.xlsx"))],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+
+        assert_eq!(snapshot.rows.len(), 3, "bank_1 有 3 个数据行");
+        assert_eq!(snapshot.per_file[0].rows_read, 3);
+        assert_eq!(
+            snapshot.rows[0].get("开户行行名").map(String::as_str),
+            Some("中国工商银行成都春熙路支行")
+        );
+        assert_eq!(
+            snapshot.rows[0].get("联行号").map(String::as_str),
+            Some("102651000011")
+        );
+    }
+
+    #[test]
+    fn only_the_requested_columns_are_kept() {
+        let want = vec!["联行号".to_string()];
+        let snapshot = read_snapshot(
+            &[("bank_1.xlsx".to_string(), fixture("bank_1.xlsx"))],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+        assert!(
+            !snapshot.rows[0].contains_key("开户行行名"),
+            "没要的列不该留在内存里——15.4 万行时这是实打实的内存"
+        );
+    }
+
+    #[test]
+    fn numeric_cells_are_not_guessed_into_zero_padded_strings() {
+        // Review Focus 第 3 条：Excel 把 `联行号` 存成数值时，前导零已经丢了。
+        // 导入器**不做**「看起来像数字就补零」这类猜测——那是源文件的错。
+        // 这条测试的价值是**把行为钉住**：读出来就是数值的原样文本，
+        // 不是 `102651000011`（补零）也不是 `1.02651000011E11`（科学计数）。
+        let want = vec!["联行号".to_string()];
+        let snapshot = read_snapshot(
+            &[(
+                "numeric_code.xlsx".to_string(),
+                fixture("numeric_code.xlsx"),
+            )],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+        let value = snapshot.rows[0]
+            .get("联行号")
+            .map(String::as_str)
+            .unwrap_or("");
+        assert!(!value.is_empty(), "数值单元格不应读成空串");
+        assert!(
+            !value.contains('E') && !value.contains('e'),
+            "不该出现科学计数法，实际 {value:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_files_are_concatenated_in_order() {
+        let want = vec!["序号".to_string()];
+        let snapshot = read_snapshot(
+            &[
+                ("bank_1.xlsx".to_string(), fixture("bank_1.xlsx")),
+                ("bank_2.xlsx".to_string(), fixture("bank_2.xlsx")),
+            ],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+
+        assert_eq!(snapshot.rows.len(), 5, "3 + 2");
+        assert_eq!(snapshot.per_file.len(), 2);
+        assert_eq!(snapshot.per_file[0].name, "bank_1.xlsx");
+        assert_eq!(snapshot.per_file[0].rows_read, 3);
+        assert_eq!(snapshot.per_file[1].rows_read, 2);
+        assert_eq!(
+            snapshot.rows[0].get("序号").map(String::as_str),
+            Some("1"),
+            "拼接顺序必须是传入顺序——序号是接续的两半"
+        );
+        assert_eq!(snapshot.rows[4].get("序号").map(String::as_str), Some("5"));
+    }
+
+    #[test]
+    fn a_header_only_file_yields_zero_rows() {
+        let want = vec!["联行号".to_string()];
+        let snapshot = read_snapshot(
+            &[("only_header.xlsx".to_string(), fixture("only_header.xlsx"))],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("只有表头应能解析: {error}"));
+        assert!(snapshot.rows.is_empty());
+        assert_eq!(snapshot.per_file[0].rows_read, 0);
+    }
+
+    #[test]
+    fn a_missing_wanted_column_is_reported_by_name() {
+        // 夹具 `header_missing_column.xlsx` 没有 `联行号` 列，
+        // 但我们要取它 —— 必须报出来，而不是静默读成空串。
+        let want = vec!["开户行行名".to_string(), "联行号".to_string()];
+        let error = read_snapshot(
+            &[(
+                "header_missing_column.xlsx".to_string(),
+                fixture("header_missing_column.xlsx"),
+            )],
+            &want,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("缺列必须被拒"));
+        assert!(
+            matches!(&error, XlsxError::HeaderMissingColumns { .. }),
+            "实际: {error:?}"
+        );
+        assert!(format!("{error}").contains("联行号"), "要点名缺哪列");
+    }
+
+    #[test]
+    fn extra_columns_are_ignored() {
+        // D9：缺列即拒，**多列忽略**——用户在同一份文件里加了别的列是无害的。
+        let want = vec!["开户行行名".to_string(), "联行号".to_string()];
+        let snapshot = read_snapshot(
+            &[(
+                "header_extra_column.xlsx".to_string(),
+                fixture("header_extra_column.xlsx"),
+            )],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("多列应被忽略: {error}"));
+        assert_eq!(snapshot.rows.len(), 1);
+    }
+
+    #[test]
+    fn a_shared_string_cell_without_the_string_table_is_an_error_not_a_panic() {
+        // 畸形输入（用户上传即可触发）：单元格写成 `t="s"` + 下标，包里却**没有**
+        // `xl/sharedStrings.xml` 部件（夹具里连 `[Content_Types].xml` 和 rels 的声明都还在）。
+        // calamine 0.30.1 在 `src/xlsx/cells_reader.rs` 里是 `&strings[idx]`、**没有边界检查**
+        // ——空字符串表 + 下标 0 就是一次下标越界 panic。
+        //
+        // 这条断言为什么**就是**「没 panic」的证据：`read_header` / `read_snapshot` 把对
+        // calamine 的入口调用（`Xlsx::new` / `worksheet_cells_reader` / `next_cell`）包进了
+        // `guarded`，panic 在那一层被转成 `Err(Unreadable)`。所以能走到下面 `matches!` 这一行，
+        // 本身就说明 panic 已经被接住了——否则测试线程早在 `read_header` 里就因 panic 失败，
+        // 压根执行不到这两条断言。
+        let want = vec!["联行号".to_string()];
+        let bytes = fixture("shared_strings_missing.xlsx");
+
+        let header_error = read_header(&bytes)
+            .err()
+            .unwrap_or_else(|| panic!("缺 sharedStrings 部件必须报错，不能假装读成功"));
+        assert!(
+            matches!(&header_error, XlsxError::Unreadable(_)),
+            "实际: {header_error:?}"
+        );
+
+        let error = read_snapshot(&[("shared_strings_missing.xlsx".to_string(), bytes)], &want)
+            .err()
+            .unwrap_or_else(|| panic!("缺 sharedStrings 部件必须报错"));
+        assert!(
+            matches!(&error, XlsxError::Unreadable(_)),
+            "实际: {error:?}"
+        );
     }
 }

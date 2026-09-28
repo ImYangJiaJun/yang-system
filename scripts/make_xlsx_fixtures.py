@@ -134,12 +134,22 @@ def write_xlsx(
     path: Path,
     sheets: list[tuple[str, list[list[object]]]],
     shared_strings: bool = False,
+    drop_shared_strings_part: bool = False,
 ) -> None:
     """写一个 xlsx。sheets 是 [(sheet 名, 行数据)]，至少一张。
 
     `shared_strings=True` 时文本走 `xl/sharedStrings.xml`（单元格是 `t="s"` + 下标），
     也就是真实 Excel 导出的默认形态；数值仍走 `t="n"`，不进字符串表。
+
+    `drop_shared_strings_part=True` 时**故意不写 `xl/sharedStrings.xml` 这个部件本身**，
+    而 `[Content_Types].xml` 与 rels 里的声明照常保留——模拟「写了一半/被截断」的畸形导出：
+    清单说有这么个部件，包里却没有。calamine 0.30.1 读到 `t="s"` 会做 `&strings[idx]`
+    且**没有边界检查**（`src/xlsx/cells_reader.rs`），空字符串表 + 下标 0 就是一次下标越界
+    panic——这是**用户上传即可触发**的输入面。`shared_strings_missing.xlsx` 用它来钉住
+    `xlsx.rs` 里那道把 panic 转成 `Err` 的 catch_unwind 防护。
     """
+    if drop_shared_strings_part and not shared_strings:
+        raise ValueError("drop_shared_strings_part 只在 shared_strings=True 时有意义")
     strings = SharedStrings() if shared_strings else None
     # 字符串表是被 sheet 的单元格填出来的，所以 sheet XML 必须先渲染
     sheet_docs = [sheet_xml(rows, strings) for _, rows in sheets]
@@ -194,7 +204,7 @@ def write_xlsx(
         archive.writestr(zip_entry("xl/_rels/workbook.xml.rels"), workbook_rels)
         for i, doc in enumerate(sheet_docs, start=1):
             archive.writestr(zip_entry(f"xl/worksheets/sheet{i}.xml"), doc)
-        if strings is not None:
+        if strings is not None and not drop_shared_strings_part:
             archive.writestr(zip_entry("xl/sharedStrings.xml"), strings.to_xml())
 
 
@@ -236,6 +246,18 @@ def build() -> None:
         OUT_DIR / "bank_shared_strings.xlsx",
         [("境内银行网点信息管理", bank(rows=common_rows))],
         shared_strings=True,
+    )
+
+    # 畸形：单元格照常写成 `t="s"` + 下标（清单里也声明了 sharedStrings），
+    # 但**包里没有 `xl/sharedStrings.xml` 部件**——被截断的导出就是这个样子。
+    # calamine 0.30.1 读 `t="s"` 时是 `&strings[idx]`、**没有边界检查**，空表 + 下标 0
+    # 就是下标越界 panic。这是用户上传即可触发的输入面，`xlsx.rs` 里那道 catch_unwind
+    # 防护正是为它加的；这条夹具就是那道防护的回归测试。
+    write_xlsx(
+        OUT_DIR / "shared_strings_missing.xlsx",
+        [("境内银行网点信息管理", bank(rows=common_rows))],
+        shared_strings=True,
+        drop_shared_strings_part=True,
     )
 
     # 与 bank_1 的列**集合相同、顺序不同**：`联行号` 挪到第 2 列、`序号` 挪到第 3 列。
