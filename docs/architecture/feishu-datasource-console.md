@@ -487,6 +487,12 @@ frontend/src/features/feishu/
 4. **在多维表格配自动化推送选项** —— HTTP 节点带 `Authorization: Bearer <管理 Token>`
    调写入接口，选项随表格变动自动更新。
 
+> **第 4 步不是唯一一条路。** 取数方式有三种：上面四步走的是 `push`（等飞书推），
+> 另有 `pull`（服务端定时拉取）与 **`xlsx_import`**（在控制台上传 xlsx、勾列导入，
+> 服务端解析后落成同一份选项数据）。三条路**出口完全一致**，见
+> `docs/architecture/feishu-bank-branch-datasource.md`。
+> 所以**指引文案不能只讲推送**——xlsx 源的用户会被那份用不上的多维表格自动化步骤误导。
+
 ### 5.6 两个视图各展示什么
 
 `list_datasources` 的表级行返回 `id` / `title` / `status` / `updated_at` /

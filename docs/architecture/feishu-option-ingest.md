@@ -160,7 +160,7 @@
 | `ApiResponse::fail(...)` 的 HTTP 状态是 Action 的 `success_status`（默认 200） | `axum.rs:253`、`response.rs:251` | **鉴权失败对飞书工作流表现为 HTTP 200** |
 | workspace `reqwest` 用 `default-tls`；生产镜像**构建阶段不装任何系统包** | `lib_yang/Cargo.toml:69`、`docker/app/Dockerfile:13-34` | 开 `http` feature 后**预计构建失败** → §6-P0 |
 | `authorization.outbox_poll_interval_ms` 硬限 `10..=250` | `config/mod.rs:1236-1238` | 轮询间隔**不能复用该配置位** |
-| `http.request_timeout_seconds` 默认 30 秒，据此挂 `TimeoutLayer`（超时会**取消 handler future**） | `config/mod.rs:159-161`、`axum.rs:326-331` | 通知端点不能内联拉取 |
+| `http.request_timeout_seconds` 默认 60 秒，据此挂 `TimeoutLayer`（超时会**取消 handler future**） | `config/mod.rs:161-165`、`axum.rs:326-331` | 通知端点不能内联拉取 |
 | 默认 `RetryConfig` 只重试 `502/503/504`，且 `retry_non_idempotent = false` | `crates/yang-base/src/http/request.rs:104-115` | 覆盖不到 429 / 401 / 403 → §5.3 必须显式配置 |
 
 ### 4.6 实测数据（T 时刻快照）
@@ -376,7 +376,7 @@ POST /api/v1/feishu/inbound/datasources/{source_key}/notify
   `target.module() != 所在 module`，**构建期直接失败**。
 - `source_key` 进路径段（官方明示链接不支持查询参数）。
 - **Action 保持 `public`**，复用 `ManagementTokenMiddleware`。**DTO 不设 `deny_unknown_fields`**。
-- **收到即 ACK，绝不当场拉取**：`TimeoutLayer` 默认 30 秒会**取消 handler future**，
+- **收到即 ACK，绝不当场拉取**：`TimeoutLayer`（默认 60 秒）会**取消 handler future**，
   若拉取实现在请求里会被截断在**写了一半快照**的状态；而飞书节点上限 60 秒。
 
 ### 5.8 防抖与并发（单实例，简化版）

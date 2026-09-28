@@ -451,7 +451,7 @@ export default function DatasourceDetailPage() {
     latestImportedQuery.data?.items[0]?.updatedAt ?? null;
 
   /// 重新导入成功：关对话框、给回执、**回读选项**（导入写的就是选项行，不回读的话
-  /// 屏幕上还是导入前那份数据，「最近导入」也还停在上一轮）。
+  /// 屏幕上还是导入前那份数据，「最近写库的导入」也还停在上一轮）。
   function handleReimported(report: XlsxImportReport) {
     setReimportOpen(false);
     setReimportNotice(
@@ -969,7 +969,7 @@ function SyncPanel({
 }: {
   item: DatasourceItem;
   pull: PullTrigger;
-  /// xlsx 源的「最近导入」：本页能拿到的、最近的选项行写入时刻（见页面里的推导）。
+  /// xlsx 源的「最近写库的导入」：本页能拿到的、最近的选项行写入时刻（见页面里的推导）。
   latestImportedAt: number | null;
   onPullNow: () => void;
   onReimport: () => void;

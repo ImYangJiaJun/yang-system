@@ -107,7 +107,7 @@ mod tests {
     use super::*;
 
     use crate::addon::feishu::domain::repository::Repository;
-    use yang_base::definition::HttpMethod;
+    use yang_base::definition::{ActionMediaType, HttpMethod};
 
     /// 装配好的 `feishu.datasource` module。
     ///
@@ -180,6 +180,37 @@ mod tests {
             .iter()
             .map(|spec| (spec.route.method, spec.route.path.clone()))
             .collect()
+    }
+
+    /// 两个 xlsx 端点的 multipart 契约必须钉在**服务端下发的 catalog** 上。
+    ///
+    /// 前端引擎读的是 UI Catalog（`request_media_type` + `multipart` 限额），
+    /// **不是 `openapi.json`**：这两个字段一旦退回 `Json` / 缺 `MultipartSpec`，
+    /// 前端会按 JSON 发请求、文件整批丢掉，而 OpenAPI 快照测试不会红。
+    /// `max_files = 32` 同理——它是「一次最多传几个文件」的唯一事实来源。
+    #[tokio::test]
+    async fn the_xlsx_actions_declare_multipart_in_the_catalog() {
+        let module = registered_datasource_module();
+        for path in [
+            "/api/v1/feishu/datasources/xlsx/probe",
+            "/api/v1/feishu/datasources/{datasource_id}/import",
+        ] {
+            let action = module
+                .actions()
+                .iter()
+                .find(|spec| spec.route.path == path)
+                .unwrap_or_else(|| panic!("{path} 应在 catalog 里"));
+            assert_eq!(
+                action.request_media_type,
+                ActionMediaType::Multipart,
+                "{path} 必须声明 multipart，否则前端按 JSON 发请求"
+            );
+            let multipart = action
+                .multipart
+                .as_ref()
+                .unwrap_or_else(|| panic!("{path} 缺 MultipartSpec"));
+            assert_eq!(multipart.max_files, 32, "{path} 的 max_files 应钉在 32");
+        }
     }
 
     #[tokio::test]

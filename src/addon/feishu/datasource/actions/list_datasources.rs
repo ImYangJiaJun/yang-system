@@ -127,9 +127,11 @@ pub(super) struct DatasourceItem {
     /// 注意它**不是**「选项的最后推送时间」——那个在 `list_options` 的
     /// `updated_at` 上。这里回答的是「这条数据源记录最后一次被改动是什么时候」。
     updated_at: i64,
-    /// 取数方式：`push`（多维表格工作流推送）/ `pull`（服务端定时拉取）。
+    /// 取数方式：`push`（多维表格工作流推送）/ `pull`（服务端定时拉取）/
+    /// `xlsx_import`（控制台上传文件导入）。
     ingest_mode: String,
-    /// 多维表格坐标。`push` 数据源这三项为空。
+    /// 多维表格坐标。**只有 `pull` 数据源会填**——`push` 等飞书推、`xlsx_import`
+    /// 的数据来自上传文件，两者都不需要表的坐标（创建时也只对 `pull` 强制必填）。
     bitable_base_token: Option<String>,
     bitable_table_id: Option<String>,
     bitable_view_id: Option<String>,

@@ -50,11 +50,11 @@ docker/app/                  # 后端生产镜像 Dockerfile（构建上下文�
 docker/mysql/init/           # 本地 MySQL 建库脚本
 ```
 
-`feishu` addon 现有三个 module：`datasource`（表级数据源 + 字段绑定 + 元数据/体检/拉取）、`option`（外部选项的取数与入站写入）与 `approval`（审批派发：把多维表格的一行变成一个飞书审批实例并回填编号）。派发端点 `POST /api/v1/feishu/approval/dispatch` 与既有机器入口同一条鉴权纪律（`ManagementTokenMiddleware` + `public` Action），另外在 handler 内强制 `base_token`/`table_id` 落在已配置的启用行内——管理 Token 是全局单值、不按数据源绑定，那道白名单是本端点防越权的唯一一条。worker 见 `src/infrastructure/feishu_approval_worker.rs`。
+`feishu` addon 现有三个 module：`datasource`（表级数据源 + 字段绑定 + 元数据/体检/拉取）、`option`（外部选项的取数与入站写入）与 `approval`（审批派发：把多维表格的一行变成一个飞书审批实例并回填编号）。`datasource` 的取数方式有 `push` / `pull` / `xlsx_import` 三种（多维表格推送 / 服务端定时拉取 / 控制台上传 xlsx 导入），三条路出口一致，xlsx 导入见 `docs/architecture/feishu-bank-branch-datasource.md`。派发端点 `POST /api/v1/feishu/approval/dispatch` 与既有机器入口同一条鉴权纪律（`ManagementTokenMiddleware` + `public` Action），另外在 handler 内强制 `base_token`/`table_id` 落在已配置的启用行内——管理 Token 是全局单值、不按数据源绑定，那道白名单是本端点防越权的唯一一条。worker 见 `src/infrastructure/feishu_approval_worker.rs`。
 
 `account.user` 模块的 `actions/` 当前包含：注册/登录/登出/刷新/me、邮箱验证码（注册、换邮箱、MFA 备用）、密码（改密、找回、重置）、用户名与邮箱变更、会话列举与撤销、自助停用与匿名化删除、安全事件、Step-up、TOTP（setup/activate/deactivate），以及管理动作（停用/启用用户、签发重置凭证、用户列表）。
 
-前端内部约定：`frontend/src/` 按「引擎/应用分离」组织（与 react-admin/Strapi 等 Schema 驱动管理台同构，决策见 `docs/architecture/frontend-rebuild/README.md` 进度日志）：`engine/` 是与业务无关的通用解释引擎——`engine/renderers/`（table/form/action/module 解释器）、`engine/contracts/`（zod + Ajv 白名单 + OpenAPI 生成类型）、`engine/catalog/`（后端 Catalog 的导航投影与缓存）、`engine/http/`（Action 调用协议与 HTTP 基础设施）、`engine/session/`（浏览器会话协议：SessionController 纯 TS 状态机 + `use-session.ts` 唯一允许 import react 的薄壳 + 生命周期请求），公共出口是 `engine/index.ts`；`features/` 按业务域组织——`features/auth/`（登录/注册/重置密码/身份选择页面、流程请求 api.ts、StepUpDialog、身份 store）、`features/account/`（账号设置页、TOTP 设置对话框、账号 api）、`features/demo/`（自定义视图示例），自定义视图注册表在 `features/registry.ts`（静态注册表，禁止按后端字符串动态 import），自定义视图按域放在 `features/<域>/views/`；`shell/` 是应用外壳（routes/auth-gate/session-bridge/AppLayout/通用页面编排）；`shared/` 是 shadcn 源码组件（`shared/ui/`）、单语言产品文案（`shared/lib/product-locale.ts`）与品牌静态资源（`shared/assets/`）；`main.tsx` 是唯一 `createRoot` 入口（架构门禁锁定）。依赖方向：`shared` ← `engine` ← `features` ← `shell`；`engine/` 禁止 import `features/` 与 `shell/`，features 各域之间禁止互相 import。`frontend/src/` 只承载生产代码；单元测试集中在 `frontend/tests/`（镜像 src 目录结构，经 `@/` 别名引用被测源码，共享 helper 与 fixture 在 `tests/helpers/`、`tests/fixtures/`，`@test/` 别名指向 `tests/`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。**前端结构规则的约束性权威记录是 `frontend/AGENTS.md`**（分层职责、依赖方向、新文件归位判断、门禁对照表）；任何结构演进必须在同一提交内同步该文件、本文件、ADR 进度日志与门禁脚本。
+前端内部约定：`frontend/src/` 按「引擎/应用分离」组织（与 react-admin/Strapi 等 Schema 驱动管理台同构，决策见 `docs/architecture/frontend-rebuild/README.md` 进度日志）：`engine/` 是与业务无关的通用解释引擎——`engine/renderers/`（table/form/action/module 解释器）、`engine/contracts/`（zod + Ajv 白名单 + OpenAPI 生成类型）、`engine/catalog/`（后端 Catalog 的导航投影与缓存）、`engine/http/`（Action 调用协议与 HTTP 基础设施）、`engine/session/`（浏览器会话协议：SessionController 纯 TS 状态机 + `use-session.ts` 唯一允许 import react 的薄壳 + 生命周期请求），公共出口是 `engine/index.ts`；`features/` 按业务域组织——`features/auth/`（登录/注册/重置密码/身份选择页面、流程请求 api.ts、StepUpDialog、身份 store）、`features/account/`（账号设置页、TOTP 设置对话框、账号 api）、`features/feishu/`（飞书数据源控制台：`views/` 的列表 / 详情自定义页、`components/` 的表格与 xlsx 导入向导、`api.ts`）、`features/demo/`（自定义视图示例），自定义视图注册表在 `features/registry.ts`（静态注册表，禁止按后端字符串动态 import），自定义视图按域放在 `features/<域>/views/`；`shell/` 是应用外壳（routes/auth-gate/session-bridge/AppLayout/通用页面编排）；`shared/` 是 shadcn 源码组件（`shared/ui/`）、单语言产品文案（`shared/lib/product-locale.ts`）与品牌静态资源（`shared/assets/`）；`main.tsx` 是唯一 `createRoot` 入口（架构门禁锁定）。依赖方向：`shared` ← `engine` ← `features` ← `shell`；`engine/` 禁止 import `features/` 与 `shell/`，features 各域之间禁止互相 import。`frontend/src/` 只承载生产代码；单元测试集中在 `frontend/tests/`（镜像 src 目录结构，经 `@/` 别名引用被测源码，共享 helper 与 fixture 在 `tests/helpers/`、`tests/fixtures/`，`@test/` 别名指向 `tests/`），Playwright 规格在 `frontend/e2e/` 和 `frontend/e2e-production/`（`*.spec.ts`）。**前端结构规则的约束性权威记录是 `frontend/AGENTS.md`**（分层职责、依赖方向、新文件归位判断、门禁对照表）；任何结构演进必须在同一提交内同步该文件、本文件、ADR 进度日志与门禁脚本。
 
 ## 构建、测试与开发命令
 
@@ -132,10 +132,38 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
 - **MSRV 1.80 守护**：`.cargo/config.toml` 已配置 `resolver.incompatible-rust-versions = "fallback"`，解析依赖时优先选择兼容 `rust-version = "1.80"` 的版本；新增或升级依赖后必须冷缓存验证 MSRV，不能只信 CI 绿——Swatinem 缓存命中会跳过依赖清单解析，掩盖不兼容（且缓存闲置 7 天会被 GitHub 清除）。验证命令（与 CI 同环境）：
 
   ```bash
-  docker run --rm -v /d/code/lib_yang:/ws -w /ws/project/yang-system \
+  # ⚠️ Git Bash（MSYS）下四个坑。本机实测（rust:1.80.1-slim，2026-09-29）：
+  #
+  # ① **不写 `MSYS_NO_PATHCONV=1` 前缀**（宿主侧又用 `/d/...`）时，下面这条会直接
+  #    失败（exit 125），不是静默：MSYS 把 `-w /ws/project/yang-system` 改写成
+  #    `C:/Program Files/Git/ws/project/yang-system`，docker 报
+  #    「the working directory '...' is invalid」。带上前缀就不会走到这一步。
+  #
+  # ② `-w` 出问题别用「干脆删掉 `-w`」的办法对付：容器回到镜像默认工作目录 `/`，
+  #    cargo 报「could not find Cargo.toml in /」并 exit 101；挂载为空时是同类报错
+  #    （工作目录是空的 /ws/...），同样 101。两种都要读输出，别只看「命令跑完了」。
+  #
+  # ③ 会**假绿**的是漏掉 `-e RUSTUP_TOOLCHAIN=1.80.1`：主检出根目录的
+  #    `rust-toolchain.toml` 钉着 1.97.1，rustup 会去下载并改用 1.97.1——不报错，
+  #    只打一行 `info: syncing channel updates …` 然后 **exit 0**（所以别只扫有没有
+  #    错误行）。该假绿依赖 1.97.1 可下载，离线时反而会响亮失败。
+  #    另外别给它接管道：`… | tail` 时 `$?` 报的是 tail 的 0。
+  #
+  # ④ 漏掉 `-e CARGO_TARGET_DIR` 不会假绿，但容器会把 1.80.1 的产物写进宿主工作树的
+  #    `project/yang-system/target`（root 属主）；漏 `-e CARGO_HOME` 无此问题
+  #    （镜像默认 `CARGO_HOME` 下没有 `registry/`，容器又是 `--rm`，不存在热缓存）。
+  #
+  # 可用形态 = 关掉路径转换 + 宿主侧写 `D:/...`（容器内的 `-w` 仍用 Linux 路径）。
+  MSYS_NO_PATHCONV=1 docker run --rm \
+    -v D:/code/lib_yang:/ws -w /ws/project/yang-system \
     -e CARGO_HOME=/tmp/ch -e CARGO_TARGET_DIR=/tmp/ct -e RUSTUP_TOOLCHAIN=1.80.1 \
     rust:1.80.1-slim cargo check --all-targets --locked
   ```
+
+  **在 worktree 里验时不能照抄上面这条**：它挂的是主检出 `D:/code/lib_yang`，
+  工作树里的改动根本没进容器，验出来的是别人的代码。worktree 已镜像了
+  `crates/` 与 `project/` 的层级，把 `-v`/`-w` 两处路径一起换成工作树根即可
+  （例如 `-v D:/code/lib_yang-wt:/ws -w /ws/project/yang-system`）。
 
   注意索引里的 `rust_version` 元数据不足以判定兼容性（存在缺元数据但清单声明 `edition2024` 的 crate，如 `ar_archive_writer 0.5.1`），只有用 1.80 实际编译才算数。已知的版本约束：`lettre` 精确锁 `=0.11.19`（0.11.20+ 需要 Rust 1.85）；`async-compression 0.4.33 + compression-codecs 0.4.32` 组合有宏展开缺陷，固定使用 0.4.32 + 0.4.31。
 

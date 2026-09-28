@@ -474,7 +474,7 @@ Ruling F11: 编辑对话框**只改名称**，并把这一刻**启用中**的绑
 绿：`views/harness.ts` 的目录换成真实的表级七个端点（`create/update/delete_datasource_table` + 三个 bitable 元数据 + `pull_now`），路由桩按 method 分流 `/datasources/table`；`api.test.ts` 的 `DEPLOYED_ACTIONS` 同改。三个退役 id 在 `frontend/` 里已经一个都不剩（`grep` 只命中说明性注释）。
 
 Ruling F12: 契约快照**用仓库脚本重新生成**，不手改。
-— 命令：`python scripts/dump_openapi.py`（内部 `cargo run --locked --example openapi-dump frontend/contracts/openapi.json` + `pnpm exec openapi-typescript`），之后必须对 `src/engine/contracts/api-types.ts` 跑一次 `prettier --write`——`.prettierignore` 里写的是 `src/contracts/api-types.ts`（**路径漂移，少了 `engine/`**），所以生成物其实一直在格式门禁里。
+— 命令：`python scripts/dump_openapi.py`（内部 `cargo run --locked --example openapi-dump frontend/contracts/openapi.json` + `pnpm exec openapi-typescript`），之后必须对 `src/engine/contracts/api-types.ts` 跑一次 `prettier --write`——`.prettierignore` 里写的是 `src/contracts/api-types.ts`（**路径漂移，少了 `engine/`**），所以生成物其实一直在格式门禁里。**2026-09-28 已把该行改成真身路径**，生成物自此真正被忽略，`prettier --write` 那一步随之不再必需。
 — diff 范围只有飞书那一批路径（`grep` 过 `/api/v1/...` 的新增 path 全是 `feishu.datasource.*`），退役的三个 id 消失、表级七个出现。`pull_now` / `pull_schedule` / `pull_probe` **不在快照里**是正常的：它们只在 `can_pull()` 为真时才注册（与 `api.ts` 的既有注释一致）。
 — **跑过两次**：第一次在 `54849f0`（Rust 链的 H3/H5 修复尚未提交），第二次在 `2f77b63`（含 `5a7d523` 的 `token_rotated_at` 投影）。两次产物**逐字节相同**（`git status frontend/` 干净），dump 是确定性的；`token_rotated_at` 不出现在快照里也正常——那些端点的响应体是 `serde_json::json!` 拼的，不是带 `JsonSchema` 的类型，所以响应 schema 本来就是泛化的。
 — Cost if wrong: 生成物与后端源码同步，无行为影响。

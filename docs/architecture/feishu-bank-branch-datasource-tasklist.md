@@ -3956,6 +3956,17 @@ git commit -m "feat(feishu): 数据源新建入口二选一 + 详情页重新导
 
 - [ ] **Step 1: 改三处文档**
 
+**外加一件：清理因新增第三种取数方式而陈旧的散文描述。** 这些都不影响行为，
+但两处是**用户可见的**，而且没有任何其它任务会碰到它们——不在这里收口就会永久留下：
+
+| 位置 | 问题 |
+|---|---|
+| `src/addon/feishu/datasource/actions/pull_now.rs:12-13` | 「（默认 30 秒）」——默认值已在 Task 3 改成 60 |
+| `src/addon/feishu/datasource/actions/list_datasources.rs:130` | 「取数方式：`push`（多维表格工作流推送）/ `pull`（服务端定时拉取）。」——现在是三种 |
+| `src/addon/feishu/datasource/actions/list_datasources.rs:132` | 「`push` 数据源这三项为空」——xlsx 源同样为空 |
+| `src/addon/feishu/domain/pull.rs:269` | `NotPullable::PushMode::reason()` 对**任何非 pull** 都说「取数方式是『手工推送』…只有『定时拉取』才拉得动」。而「立即拉取」按钮只看目录权限、不看 `ingestMode`，所以运维对 xlsx 源点它会**看到一句假话**。措辞要覆盖「不是定时拉取」这一类，而不是假定只有 push |
+| `docs/architecture/feishu-option-ingest.md:163` 与 `:379` | 仍写「默认 30 秒」；`:163` 的锚点也漂了（引 `config/mod.rs:159-161`，实际已推到 `:161-165`） |
+
 - `AGENTS.md` 里那句「`feishu` addon 现有三个 module：…」后面补一句：
   `datasource` 的取数方式有 `push` / `pull` / `xlsx_import` 三种，
   xlsx 导入见 `docs/architecture/feishu-bank-branch-datasource.md`。

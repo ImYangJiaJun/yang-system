@@ -1,7 +1,8 @@
 # 飞书外部数据源（xlsx 文件导入）— 设计
 
 **日期**：2026-09-28（2026-09-21 初稿、2026-09-23 重写、2026-09-28 改为通用导入流程）
-**状态**：设计已裁定并逐条核实（2026-09-28），待复核后实施
+**状态**：**已实施**（2026-09-28 设计裁定并逐条核实，同日按本计划落地；后端两个端点、
+解析层、配置、契约、前端向导与入口接线全部交付）
 **范围**：`project/yang-system`（后端 + 前端）
 **前置阅读**：`docs/architecture/feishu-option-ingest.md`、
 `docs/architecture/feishu-option-ingest-controls.md`、
@@ -427,7 +428,8 @@ ancestor_key = 从根到直接父逐级折叠（derive::ancestor_key）
   `cargo check --all-targets --locked`（`.github/workflows/ci.yml`）。
   实际工具链 1.97.1，但 1.80 那个 job 过不了就是过不了。
 - **`calamine` 只能锁 0.30.x**：0.30.1 → MSRV 1.75；0.31–0.35 → 1.83；0.36.1 → 1.88。
-  写 `calamine = "=0.30.1"`。**已在 Rust 1.80.0 上实测编译通过**（连带 `zip 4.2.0`）。
+  写 `calamine = "=0.30.1"`。**已在 Rust 1.80.x 上实测编译通过**（连带 `zip 4.2.0`；
+  具体版本与来源见本节末的「当前状态」）。
 - 生效机制是 `.cargo/config.toml` 的
   `resolver.incompatible-rust-versions = "fallback"`；移除它会让解析选到
   `zip 4.6.x`（需 1.82）从而弄坏 msrv job。
@@ -441,7 +443,11 @@ ancestor_key = 从根到直接父逐级折叠（derive::ancestor_key）
 - yang-system 被 `lib_yang/Cargo.toml` 的 `exclude` 排除在工作区外，**没有 cargo-deny 门禁**
   （`deny.toml` 只在框架仓库）——新增依赖的许可证审查是**人工责任**；
   上述 crates 的许可证均落在框架 allowlist 内。
-- **当前状态**：`calamine` **尚未**加入 `Cargo.toml`（本设计要做的第一件事之一）。
+- **当前状态**：`calamine = "=0.30.1"` 已加入 `Cargo.toml`，并已在 **Rust 1.80.1 上冷缓存实测通过**
+  （空 `CARGO_HOME` / `CARGO_TARGET_DIR` 跑 `cargo check --all-targets --locked`，`exit 0`；
+  容器内 `rustc --version` 确为 1.80.1，镜像 digest 就是官方 `library/rust`）。
+  **这是本机 docker 实测，不是 CI**——CI 的 `msrv` job 用 `toolchain: "1.80"`
+  （`.github/workflows/ci.yml`，今天解析到 1.80.1），要等本分支推上去才会跑。
 
 ### 4.8 出站端点：缺陷已修，但有性能边界
 
@@ -613,6 +619,11 @@ ingest_mode => Radio::<String>::new()
 
 轮询选表用 `where_eq("ingest_mode", "pull")`，所以 `xlsx_import` 的数据源
 **不会被定时任务碰**——正是想要的行为。
+
+> **落地状态**：上述四处取值域已全部落地并保持一致（`datasource/table.rs`、
+> `create_datasource_table.rs`、`update_datasource_table.rs`、
+> `frontend/contracts/feishu-projections.json`），两个新 Action 见
+> `datasource/actions/probe_xlsx_headers.rs` 与 `datasource/actions/import_xlsx.rs`。
 
 > **一处机制纠正（与 09-23 版的写法相反）**：`ingest_mode` 虽然声明成 `Radio`
 > 且带 `.varchar(16)`，它编译出来是 **`FieldType::String { max_length: 16 }`，不是 `Enum`**
@@ -963,8 +974,12 @@ MultipartSpec::new(["application/vnd.openxmlformats-officedocument.spreadsheetml
 两次补集停用还会互相覆盖。处置：
 
 - **前端**：导入进行中禁用按钮（最基本的一道）。
-- **后端**：导入 Action 需**互斥**——以 `datasource_id` 为键加锁
-  （或复用既有的 Redis 能力），拿不到锁直接返回「该数据源正在导入中」。
+- **后端**：导入 Action 需**互斥**——以 `datasource_id` 为键加锁，拿不到锁直接返回
+  「该数据源正在导入中」。**落地形态是进程内的**（`import_xlsx.rs` 的静态表
+  `IMPORTING` + `ImportGuard` 的 `Drop` 释放）。
+  > ⚠️ **这道锁只在单实例部署下成立。** 多实例（蓝绿双活、横向扩容）时每个进程
+  > 一份 `IMPORTING`，互斥**静默失效**——两次并发导入会各写各的，正是本节要挡的交错。
+  > 那时必须换成 Redis 分布式锁，并处理锁超时与续租（代码注释里已写明这条升级路径）。
 - **不做**幂等键：导入是「整体替换」，重复执行的结果与执行一次相同，
   真正要防的是**并发交错**，不是重复提交。
 
@@ -1124,7 +1139,7 @@ request_timeout_seconds = 60       # 30 → 60
 **门禁**
 
 - `python scripts/run_ci.py` 全链，含 `--locked`。
-- **新增依赖后必须确认 `cargo +1.80.0 check --locked` 仍通过**；`calamine` 锁 `=0.30.1`；
+- **新增依赖后必须确认 `cargo +1.80.1 check --locked` 仍通过**（CI 的 `msrv` job 用 `1.80`）；`calamine` 锁 `=0.30.1`；
   不要动 `.cargo/config.toml` 的 fallback resolver。
 - 改 `ingest_mode` 选项集、加两个新 Action 后**重新生成 OpenAPI 快照与 TS 类型**
   （`python scripts/dump_openapi.py`）。**注意它不会更新

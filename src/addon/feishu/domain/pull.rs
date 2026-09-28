@@ -252,7 +252,8 @@ pub(crate) async fn load_pull_tables(context: &FeishuContext) -> Result<Vec<Pull
 /// （`pull_table` 会直接返回）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotPullable {
-    /// 取数方式是 `push`：服务端不主动出网，等飞书多维表格自动化来推。
+    /// 取数方式不是 `pull`：`push`（等飞书多维表格自动化来推）或 `xlsx_import`
+    /// （数据来自控制台上传的文件）。两种都不走服务端定时出网这条路径。
     PushMode,
     /// 已停用。
     Disabled,
@@ -266,7 +267,10 @@ impl NotPullable {
     /// 给人看的一句话，必须点出**具体**缺什么。
     pub(crate) fn reason(self) -> &'static str {
         match self {
-            Self::PushMode => "取数方式是「手工推送」——服务端不主动出网，只有「定时拉取」才拉得动",
+            Self::PushMode => {
+                "取数方式是「手工推送」或「文件导入」，不是「定时拉取」——\
+                 服务端只对「定时拉取」的数据源出网拉数"
+            }
             Self::Disabled => "数据源已停用",
             Self::MissingBaseToken => "缺少 Base Token",
             Self::MissingTableId => "缺少数据表 ID",

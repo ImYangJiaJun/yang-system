@@ -19,8 +19,9 @@ src/
 │   ├── http/        # Action 调用协议与 HTTP 基础设施
 │   ├── session/     # 浏览器会话协议（状态机/跨标签页协调/Step-up/生命周期）
 │   └── index.ts     # 引擎公共出口
-├── features/    # 业务域（当前仅 auth）与自定义视图
+├── features/    # 业务域与自定义视图
 │   ├── auth/        # 登录/注册/重置/身份选择页面、流程请求 api.ts、StepUpDialog、身份 store
+│   ├── feishu/      # 飞书数据源控制台：views/（列表 / 详情自定义页）、components/（含 XlsxImportWizard 导入向导）与 api.ts
 │   ├── <域>/views/  # 各域自定义视图（如 demo/views/DemoItemInsight.tsx）
 │   ├── registry.ts          # 自定义视图静态注册表（唯一入口）
 │   └── custom-view-boundary.tsx
