@@ -82,7 +82,3 @@ aead_key = "replace-with-an-independent-32-byte-totp-aead-key"
 # Prometheus 使用独立运维监听地址（默认 127.0.0.1:9090），生产环境必须保持开启；
 # 未部署 OpenTelemetry Collector 时 traces 保持关闭，启用方式见配置契约文档。
 metrics_enabled = true
-
-# 日志输出格式："json"（单行，采集端用，默认）或 "pretty"（多行缩进，命令行窗口里读）。
-# 两者的事件与字段完全一致，只差排版——本地调试用 pretty，生产保持 json。
-log_format = "json"

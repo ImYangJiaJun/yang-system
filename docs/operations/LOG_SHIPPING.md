@@ -7,14 +7,20 @@
 
 ## stdout JSON 契约（对采集器的要求）
 
-- 服务标准输出默认是**一行一个 JSON object**；`logging.filter` 只控制目标与
+> ### ⚠️ 本文的前提当前**不成立**，接线采集器前必须先做一件事
+>
+> 应用现在的标准输出是**人读多行格式**（`tracing_subscriber` 的 `pretty`），
+> 理由是这套部署**没有采集器**、stdout 的唯一读者是人。**多行格式下按行切分会把
+> 一条事件拆成若干无主片段，字段全丢**，本文以下所有约定都会失效。
+>
+> 所以接采集器之前，**先把标准输出改回「一行一个 JSON object」**
+> （`crates/yang-runtime/src/observability/telemetry.rs` 的 tracing 装配层），
+> 再照本文接线。字段本身不用动——两种格式下事件与字段完全一致。
+
+- 接线之后，服务标准输出应为**一行一个 JSON object**；`logging.filter` 只控制目标与
   级别，不改变编码格式。采集器必须按 JSON 解析（Fluent Bit 的 `json` parser /
   Vector 的 `decoding.codec = "json"`），不要用正则提取，也不要依赖中文
   `message` 文本做路由。
-- **接线采集器之前，必须确认 `observability.log_format = "json"`**（默认值即此）。
-  `pretty` 会把一条事件摊成多行——对按行切分的采集器，一条事件变成若干无主片段、
-  字段全丢。`pretty` 只为命令行窗口而存在，见 `OBSERVABILITY.md`「结构化日志」。
-  本文以下所有约定（按 JSON 解析、字段原样保留）都**以 `json` 格式为前提**。
 - 每次 Action 派发恰有一条 `Action 执行完成` 规范事件；顶层固定字段
   `service` / `version` / `environment` / `operation` / `request_id` /
   `result` / `error_code` / `error` / `duration_ms`，以及 span 字段

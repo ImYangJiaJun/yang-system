@@ -2,14 +2,20 @@
 
 ## 结构化日志
 
-服务标准输出默认是**一行一个 JSON object**，由 `observability.log_format` 选择：
-`json`（默认，生产用）或 `pretty`（多行缩进、字段逐行对齐，命令行窗口里读）。
-两者是**同一份事件、同一批字段**，只差排版——`pretty` 不新增也不丢弃任何字段。
-`logging.filter` 只控制目标与级别，不改变格式。
+服务标准输出是**人读格式**：一条事件占多行，字段排成 `key: value` 并着色
+（`tracing_subscriber` 的 `pretty`）。**事件与字段本身与结构化契约完全一致**，
+只是排版不同——字段没少也没多，`docs/operations/LOG_SHIPPING.md` 列的那批顶层字段
+一个不少。
 
-采集器必须按 JSON 解析，不应依赖中文 message 文本；**`log_format = "pretty"` 时
-采集器按行切分会把一条事件拆成多个无主片段**，所以它只用于本地/联调终端，
-生产保持 `json`（`deploy/config.cloud.example.toml` 里已注明）。
+> **为什么不是单行 JSON**：这套部署**没有采集器**（`deploy/compose.infra.yaml` 与
+> `deploy-blue-green.sh` 里都没有 fluent-bit / vector），stdout 的唯一读者是人。
+> 给一个「将来可能用得上」的开关，换来的是两种格式都要维护、且没人会记得切。
+>
+> **代价与前置条件**：多行格式下按行切分会把一条事件拆成若干无主片段，字段全丢，
+> `grep`/`jq` 也不再好使。**接线采集器之前必须先改回单行 JSON**——那条前置条件写在
+> `docs/operations/LOG_SHIPPING.md` 顶部，改日志格式之前先读它。
+
+`logging.filter` 只控制目标与级别，不改变格式。
 
 每次 Action 派发恰有一条 `Action 执行完成` 规范事件，覆盖公开请求、认证失败、
 业务错误和成功结果。事件顶层字段固定为：
