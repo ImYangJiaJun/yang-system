@@ -149,6 +149,42 @@ describe("xlsx 导入向导 · 源标识与父列", () => {
     expect(sourceKeyInput.value).not.toContain("开户行行名");
   });
 
+  it("库上已有的源标识当场判为占用：默认值是列号派生的，第二条源必然撞", async () => {
+    // `source_key` 是**全局**唯一索引，而默认值 `col_2` / `col_5` 派生自列号——每份文件
+    // 的列号都是那几样小整数，所以第二条 xlsx 源只要勾了同列号的列，默认值就撞。
+    // 撞上唯一索引的后果是「创建并导入」按下去才失败，错误里只有一句键名。
+    //
+    // 这一栏**只查得到本次提交内部**的重复，跨数据源那半只能由调用方（列表页）喂进来。
+    const client = stubClient();
+    render(
+      <XlsxImportWizard
+        client={client}
+        takenSourceKeys={new Set(["col_2"])}
+        onCancel={vi.fn()}
+      />,
+    );
+    await userEvent.type(screen.getByLabelText("名称"), "银行网点");
+    await userEvent.upload(screen.getByLabelText("xlsx 文件"), file());
+    await userEvent.click(screen.getByRole("button", { name: "解析表头" }));
+    await screen.findByText("开户行行名");
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+    // 勾「开户行行名」（第 2 列 → 默认键 col_2，正好是已被占用的那个）
+    await userEvent.click(screen.getByLabelText("开户行行名"));
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "源标识已被占用：col_2",
+    );
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+
+    // 改成一个没被占用的键就放行——错误针对的是**那个键**，不是这一栏本身
+    const input = screen.getByLabelText("开户行行名 的源标识");
+    await userEvent.clear(input);
+    await userEvent.type(input, "bank_name");
+    expect(screen.queryByText(/源标识已被占用/)).toBeNull();
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+  });
+
   it("父列下拉只列同源内已勾选的其它列", async () => {
     // A11：父子关系在同源内（后端 load_parent_source_key 按 datasource_id 过滤）。
     // 列一个跨源的父选项只会让用户在提交后才被拒。
@@ -220,7 +256,9 @@ describe("xlsx 导入向导 · 源标识与父列", () => {
     expect(datasourceId).toBe(9); // stubClient 里 createTable 回的 datasourceId
     expect(passed?.[0]).toBe(uploaded);
 
-    // 建源请求里 field_name 必须带上（漏了会让审批选项装配整批失败）
+    // 建源请求里 field_name 必须带上：漏了服务端会**跳过这条绑定**，于是那个审批
+    // 控件少一个候选列（宽容跳过 + 告警，不是整批失败——这条注释与它复述的口径
+    // 一起被 Task 8 的改动修正过）
     const submission = vi.mocked(client.createTable).mock.calls[0]?.[0];
     expect(submission?.ingestMode).toBe("xlsx_import");
     for (const field of submission?.fields ?? []) {

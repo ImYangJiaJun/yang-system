@@ -13,8 +13,10 @@
  *
  * # 三个契约事实（写错了在真实使用里才会炸）
  *
- * - **列名即身份**：`field_id` 与 `field_name` 都写列名。服务端对每条启用绑定
- *   `require("field_name")`，漏了会让**审批外部选项整批装配失败**（范围是全表）。
+ * - **列名即身份**：`field_id` 与 `field_name` 都写列名。`field_name` 是绑定行上的
+ *   **展示名**，审批外部选项装配按它给出候选列；漏了（或只有空白）时服务端
+ *   **宽容跳过**这一条绑定（告警，不报错），代价是那个控件**少一个候选列**——
+ *   不是整批失败、范围也不是全表。
  * - **`source_key` 不能直接用中文列名**：它要求 ASCII `[a-z0-9_]`、首字节小写字母、
  *   1..=64 字节，且是全局唯一的出站路由键。所以默认值由列号派生（[`defaultSourceKey`]），
  *   而不是拿列名硬转。
@@ -118,6 +120,16 @@ type RowConfig = {
 
 export type XlsxImportWizardProps = {
   client: XlsxImportClient;
+  /// 库里**已经存在**的源标识（`source_key` 是全局唯一索引，不是每条数据源各自一份）。
+  ///
+  /// 为什么必须由调用方喂进来：默认值是 [`defaultSourceKey`] 从**列号**派生的
+  /// （`col_2` / `col_5`），而列号在每份文件里都是那几样小整数——**第二条** xlsx 源
+  /// 只要勾了与第一条同列号的列，默认值就撞。而向导自己只查得到**本次提交内部**的重复。
+  /// 撞上唯一索引的后果是「创建并导入」按下去才失败，错误里只有一句键名。
+  ///
+  /// 调用方（`DatasourceListPage`）握着的只有**当前那一页**数据源，所以这是
+  /// 「挡掉看得见的那批」而不是完整校验——漏网的那一发仍由库上的唯一索引拒。
+  takenSourceKeys?: ReadonlySet<string>;
   /// 关掉向导（用户点了取消、或关掉对话框）。
   onCancel: () => void;
   /// 建源与导入**都成功**之后调用。调用方通常据此回读列表并关掉向导。
@@ -131,8 +143,14 @@ export type XlsxImportWizardProps = {
   open?: boolean;
 };
 
+/// 没传 `takenSourceKeys` 时的空集合。**模块级常量**：写成解构默认值
+/// （`takenSourceKeys = new Set()`）会让每次渲染都是一个新对象，下面的
+/// `useMemo` 依赖每次都变。
+const NO_TAKEN_KEYS: ReadonlySet<string> = new Set();
+
 export function XlsxImportWizard({
   client,
+  takenSourceKeys = NO_TAKEN_KEYS,
   onCancel,
   onSubmitted,
   open = true,
@@ -200,10 +218,17 @@ export function XlsxImportWizard({
         // 唯一索引在库上，撞了会以 ParamInvalid 冒泡——与其让创建整个失败，
         // 不如在这里说清是哪一行。
         messages.push(`源标识重复：${key}（它进 URL 路径段，必须全局唯一）。`);
+      } else if (takenSourceKeys.has(key)) {
+        // **跨数据源**的重复：`source_key` 是全局唯一索引，而这几个默认值是从列号
+        // 派生的——第二条 xlsx 源勾同一个列号就撞。库上那一发要到「创建并导入」
+        // 按下去才失败，错误里只有一句键名，所以在这里先说。
+        messages.push(
+          `源标识已被占用：${key}（它进 URL 路径段，全局唯一——列表里已有别的字段绑定在用这个标识）。`,
+        );
       }
     }
     return messages;
-  }, [selected, configs]);
+  }, [selected, configs, takenSourceKeys]);
 
   const canSubmit = chosenColumns.length > 0 && sourceKeyErrors.length === 0;
 
@@ -471,6 +496,11 @@ export function XlsxImportWizard({
         {report.bindings.map((binding) => (
           <p key={binding.sourceKey}>
             {`${binding.sourceKey}：读到 ${binding.fetched} 行 → ${binding.derived} 个选项，停用 ${binding.disabled} 条`}
+            {/* 「停用 0 条」有两种含义，这一种是**根本没扫**（已启用选项数超过单轮
+                上限）。不写出来的话它读起来就是「没什么要停用的」——而旧选项还启着。 */}
+            {binding.complementSkipped === null
+              ? ""
+              : `｜这一轮没做补集停用（已启用 ${binding.complementSkipped} 条，超过单轮上限），改过名或删掉的旧选项仍保持启用`}
             {binding.unchanged ? "（内容没变，本轮没写库）" : ""}
             {binding.skippedReason === null
               ? ""

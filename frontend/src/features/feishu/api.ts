@@ -787,8 +787,11 @@ export async function createDatasourceTable(
     ingest_mode: input.ingestMode ?? "pull",
     fields: input.fields.map((field) => ({
       field_id: field.fieldId,
-      // xlsx 绑定必须带列名：后端对每条启用绑定 require("field_name")，
-      // 留空会让审批外部选项**整批装配失败**（且范围是全表，不止本数据源）。
+      // xlsx 绑定必须带列名：列名就是这条绑定的身份（`field_id` = `field_name` = 列名），
+      // 而绑定行上的 `field_name` 是**展示名**——审批外部选项装配按它给出候选列。
+      // 留空（或只有空白）时服务端**宽容跳过**这条绑定（`binding_display_name` 返回
+      // `None` + 告警，不报错），代价是那个控件**少一个候选列**；范围不是全表，
+      // 也不会让整批装配失败。（这条注释曾经说反了：Task 8 之前确实是 `require`。）
       // 多维表格那条路给了也无害——`pull` 每轮会按解析结果回写覆盖它。
       field_name: field.fieldName,
       source_key: field.sourceKey,
@@ -893,6 +896,12 @@ export type XlsxBindingReport = {
   derived: number;
   /// 这一轮被补集停用的选项数。
   disabled: number;
+  /// **非 null = 这一轮压根没扫补集**，值是当时已启用的选项数。
+  ///
+  /// 单轮补集停用的上限是 2 万条，而银行网点那份实测文件有 15 万多条选项：每一轮都走
+  /// 这一支。没有它，`disabled: 0` 在「扫完了没有要停用的」与「根本没扫」之间没有区别
+  /// ——而后者意味着改过名/删掉的旧选项**仍然启用着**，继续被出站喂给飞书控件。
+  complementSkipped: number | null;
   /// 内容没变、也没有已停用行要复活 → 这一轮什么都没写。
   unchanged: boolean;
   /// 非空 = 这一轮**跳过**了这条绑定（它派生出 0 个选项而本地仍有启用选项），
@@ -953,6 +962,7 @@ function parseXlsxBindingReport(
     fetched: asNumber(raw.fetched, 0),
     derived: asNumber(raw.derived, 0),
     disabled: asNumber(raw.disabled, 0),
+    complementSkipped: asNullableNumber(raw.complement_skipped),
     unchanged: raw.unchanged === true,
     skippedReason: asNullableString(raw.skipped_reason),
     anomalies: Array.isArray(rawAnomalies)
@@ -1023,7 +1033,7 @@ export async function importXlsxFiles(
 ): Promise<XlsxImportReport> {
   const declared = requireAction(deps.catalog, XLSX_OPERATION_IDS.importFiles);
   // `datasource_id` 在**路径段**里，而服务端的 `ImportInput::params()` 是空集
-  // （文件名走 multipart body、id 走路径，两个来源各读各的），引擎的路径替换因此
+  // （**文件**走 multipart body、id 走路径，两个来源各读各的），引擎的路径替换因此
   // 填不进去，会在最后一步抛「路径仍有未填写参数」——与 `approval_options` 同一条
   // 约束。这里显式补全并清空 params，让 `files` 落进 body。
   const action: ActionDemoSchema = {

@@ -34,7 +34,10 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 subtle = "2.6"
 # xlsx 解析（外部数据源的文件导入）。精确锁定：0.31–0.35 需要 Rust 1.83、
 # 0.36.1 需要 1.88，都过不了 MSRV 1.80 那个 job。
-calamine = "=0.30.1"
+# `dates` 是 `ExcelDateTime::as_datetime()` 的开关（日期单元格要的是可读形态，
+# 不是裸序列号，见 `domain/xlsx.rs::cell_text`）。它只把已经在本工作区的 chrono
+# 挂到 calamine 上（sqlx 早就带进来了），不新增包。
+calamine = { version = "=0.30.1", features = ["dates"] }
 
 [features]
 default = ["account"]

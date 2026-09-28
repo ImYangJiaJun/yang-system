@@ -22,7 +22,7 @@ CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-{sheet_overrides}{shared_strings_override}
+{sheet_overrides}{shared_strings_override}{styles_override}
 </Types>
 """
 
@@ -30,6 +30,18 @@ SHARED_STRINGS_OVERRIDE = (
     '<Override PartName="/xl/sharedStrings.xml" '
     'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
 )
+
+STYLES_OVERRIDE = (
+    '<Override PartName="/xl/styles.xml" '
+    'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+)
+
+# 第 0 项 `numFmtId="0"` = 普通（`CellFormat::Other`），第 1 项 `numFmtId="14"`
+# = 内置的 `mm-dd-yy`，calamine 的 `builtin_format_by_id` 把它判成 `CellFormat::DateTime`。
+STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>
+"""
 
 ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -90,27 +102,70 @@ class SharedStrings:
         )
 
 
-def cell_xml(ref: str, value: object, strings: SharedStrings | None = None) -> str:
+def cell_xml(
+    ref: str,
+    value: object,
+    strings: SharedStrings | None = None,
+    date_style: int | None = None,
+) -> str:
     """一个单元格。字符串走 inlineStr（或 sharedStrings），数值走 n。
 
     **这个区别正是 numeric_code 夹具的意义**——数值永远不进字符串表。
+
+    `date_style` 非 None 时给数值单元格挂上 `s="<样式号>"`——日期在 xlsx 里就是
+    「数值 + 日期格式」，不给样式号 calamine 只会读成 `Float`。
     """
+    style = f' s="{date_style}"' if date_style is not None else ""
     if isinstance(value, str):
         if strings is not None:
-            return f'<c r="{ref}" t="s"><v>{strings.index(value)}</v></c>'
-        return f'<c r="{ref}" t="inlineStr"><is>{text_element(value)}</is></c>'
-    return f'<c r="{ref}" t="n"><v>{value}</v></c>'
+            return f'<c r="{ref}"{style} t="s"><v>{strings.index(value)}</v></c>'
+        return f'<c r="{ref}"{style} t="inlineStr"><is>{text_element(value)}</is></c>'
+    return f'<c r="{ref}"{style} t="n"><v>{value}</v></c>'
 
 
-def sheet_xml(rows: list[list[object]], strings: SharedStrings | None = None) -> str:
+def iso_cell_xml(ref: str, value: str) -> str:
+    """`t="d"` 的单元格：值是**ISO 8601 文本**（不是序列号）。
+
+    OOXML 允许这种写法，calamine 侧对应 `DataRef::DateTimeIso`。
+    """
+    return f'<c r="{ref}" t="d"><v>{escape_text(value)}</v></c>'
+
+
+def sheet_xml(
+    rows: list[list[object]],
+    strings: SharedStrings | None = None,
+    inline_rows: int = 0,
+    date_rows: dict[int, int] | None = None,
+    iso_cells: dict[str, str] | None = None,
+) -> str:
+    """一行行渲染。
+
+    `inline_rows`：前 N 行（1-based）的字符串**不**进字符串表、写成 inlineStr，
+    其余行照常走 `t="s"`。`shared_strings_missing_data_row.xlsx` 靠它把
+    「表头 inlineStr + 数据行 `t="s"`」凑出来——没有这个组合，`read_header` 会先
+    panic，`read_snapshot` 那道守卫永远走不到。
+
+    `date_rows`：行号 → 样式号，给该行的数值单元格挂上日期格式。
+    `iso_cells`：单元格引用 → ISO 文本，写成 `t="d"`。
+    """
+    date_rows = date_rows or {}
+    iso_cells = iso_cells or {}
     lines = []
     for row_index, row in enumerate(rows, start=1):
-        cells = "".join(
-            cell_xml(f"{column_letter(col_index)}{row_index}", value, strings)
-            for col_index, value in enumerate(row)
-            if value is not None
-        )
-        lines.append(f'<row r="{row_index}">{cells}</row>')
+        row_strings = None if row_index <= inline_rows else strings
+        style = date_rows.get(row_index)
+        cells = []
+        for col_index, value in enumerate(row):
+            ref = f"{column_letter(col_index)}{row_index}"
+            if ref in iso_cells:
+                # `t="d"` 的格子值在 `iso_cells` 里，行数据里只留一个占位列
+                # （`None`）——所以这一支**必须**排在下面那个 None 跳过之前。
+                cells.append(iso_cell_xml(ref, iso_cells[ref]))
+            elif value is None:
+                continue
+            else:
+                cells.append(cell_xml(ref, value, row_strings, style))
+        lines.append(f'<row r="{row_index}">{"".join(cells)}</row>')
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
@@ -135,6 +190,10 @@ def write_xlsx(
     sheets: list[tuple[str, list[list[object]]]],
     shared_strings: bool = False,
     drop_shared_strings_part: bool = False,
+    styles: bool = False,
+    inline_rows: int = 0,
+    date_rows: dict[int, int] | None = None,
+    iso_cells: dict[str, str] | None = None,
 ) -> None:
     """写一个 xlsx。sheets 是 [(sheet 名, 行数据)]，至少一张。
 
@@ -147,12 +206,20 @@ def write_xlsx(
     且**没有边界检查**（`src/xlsx/cells_reader.rs`），空字符串表 + 下标 0 就是一次下标越界
     panic——这是**用户上传即可触发**的输入面。`shared_strings_missing.xlsx` 用它来钉住
     `xlsx.rs` 里那道把 panic 转成 `Err` 的 catch_unwind 防护。
+
+    `styles=True` 时写 `xl/styles.xml`：`cellXfs` 的第 0 项是普通格式、第 1 项是
+    内置日期格式 `numFmtId="14"`。日期单元格靠 `s="1"` 才被判成 `DataRef::DateTime`——
+    `formats` 是空的（没有这个部件）时，calamine 一律读成 `Float`。
     """
     if drop_shared_strings_part and not shared_strings:
         raise ValueError("drop_shared_strings_part 只在 shared_strings=True 时有意义")
+    if (date_rows or iso_cells) and not styles:
+        raise ValueError("date_rows / iso_cells 只在 styles=True 时有意义")
     strings = SharedStrings() if shared_strings else None
     # 字符串表是被 sheet 的单元格填出来的，所以 sheet XML 必须先渲染
-    sheet_docs = [sheet_xml(rows, strings) for _, rows in sheets]
+    sheet_docs = [
+        sheet_xml(rows, strings, inline_rows, date_rows, iso_cells) for _, rows in sheets
+    ]
 
     overrides = "".join(
         f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
@@ -169,14 +236,22 @@ def write_xlsx(
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         f"<sheets>{sheet_entries}</sheets></workbook>"
     )
-    # 字符串表的关系**排在 sheet 之后**（rId 从 len(sheets)+1 起），不能挤掉 sheet 的 rId1..N
-    shared_rel = (
-        f'<Relationship Id="rId{len(sheets) + 1}" '
-        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" '
-        'Target="sharedStrings.xml"/>'
-        if strings is not None
-        else ""
-    )
+    # 字符串表与样式的 rel **排在 sheet 之后**（rId 从 len(sheets)+1 起），
+    # 不能挤掉 sheet 的 rId1..N
+    extra_rels = []
+    if strings is not None:
+        extra_rels.append(
+            f'<Relationship Id="rId{len(sheets) + 1}" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" '
+            'Target="sharedStrings.xml"/>'
+        )
+    if styles:
+        extra_rels.append(
+            f'<Relationship Id="rId{len(sheets) + 1 + (1 if strings is not None else 0)}" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+            'Target="styles.xml"/>'
+        )
+    shared_rel = "".join(extra_rels)
     workbook_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -197,6 +272,7 @@ def write_xlsx(
             CONTENT_TYPES.format(
                 sheet_overrides=overrides,
                 shared_strings_override=SHARED_STRINGS_OVERRIDE if strings is not None else "",
+                styles_override=STYLES_OVERRIDE if styles else "",
             ),
         )
         archive.writestr(zip_entry("_rels/.rels"), ROOT_RELS)
@@ -206,6 +282,8 @@ def write_xlsx(
             archive.writestr(zip_entry(f"xl/worksheets/sheet{i}.xml"), doc)
         if strings is not None and not drop_shared_strings_part:
             archive.writestr(zip_entry("xl/sharedStrings.xml"), strings.to_xml())
+        if styles:
+            archive.writestr(zip_entry("xl/styles.xml"), STYLES_XML)
 
 
 # 银行形状的表头——与设计 §4.6 的真实文件同列同名（但只放几行，夹具要小）
@@ -341,6 +419,36 @@ def build() -> None:
     # 数值型联行号：t="n" 而非 inlineStr
     numeric_row = [1, "中国工商银行成都春熙路支行", "中国工商银行", "中国工商银行", 102651000011, "某某路 1 号", "", 510100]
     write_xlsx(OUT_DIR / "numeric_code.xlsx", [("Sheet1", [BANK_HEADER, numeric_row])])
+
+    # 日期列：Excel 存的是「序列号 + 日期格式」，所以数值那一格必须带 `s="1"`
+    # （calamine 据 number format 判成 `DataRef::DateTime`）。第二行换成 OOXML 另一种
+    # 写法 `t="d"`（ISO 8601 文本，calamine 侧是 `DataRef::DateTimeIso`）。
+    # 两行都要能被读成**可读形态**：曾经一个打裸序列号、一个静默读成空串。
+    # 45292 = 2024-01-01（Excel 纪元 1899-12-30 起算，见 calamine 的 `as_datetime`）。
+    write_xlsx(
+        OUT_DIR / "date_cells.xlsx",
+        [("Sheet1", [
+            ["开户日", "备注"],
+            [45292, "数值型日期"],
+            [None, "ISO 型日期"],
+        ])],
+        styles=True,
+        date_rows={2: 1},
+        iso_cells={"A3": "2024-01-15T00:00:00"},
+    )
+
+    # 「表头 inlineStr、数据行 `t="s"`」+ 缺 sharedStrings 部件：`shared_strings_missing.xlsx`
+    # 的表头自己就是 `t="s"`，所以 `read_header` 先 panic，`read_snapshot` 的 `next_cell`
+    # 那道守卫**永远走不到**（删掉它全套测试照样绿）。这份夹具把表头写成 inlineStr、
+    # 数据行的**第一个单元格写成数值**——`read_header` 读到它时按「换行了」跳出，
+    # 于是它能正常返回；`read_snapshot` 继续往后读，碰到 B2 的 `t="s"` 才撞上 panic。
+    write_xlsx(
+        OUT_DIR / "shared_strings_missing_data_row.xlsx",
+        [("Sheet1", [BANK_HEADER, bank_row(1, "中国工商银行成都春熙路支行", "中国工商银行", "102651000011")])],
+        shared_strings=True,
+        drop_shared_strings_part=True,
+        inline_rows=1,
+    )
 
     # 只有表头
     write_xlsx(OUT_DIR / "only_header.xlsx", [("Sheet1", [BANK_HEADER])])

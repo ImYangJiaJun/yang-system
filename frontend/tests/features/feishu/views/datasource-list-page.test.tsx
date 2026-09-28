@@ -171,6 +171,43 @@ describe("飞书数据源列表页 · 新建入口二选一", () => {
     }
   });
 
+  it("把列表里已有的源标识喂给 xlsx 向导：第二条源的同列号默认值当场被判占用", async () => {
+    // `source_key` 是全局唯一索引，而向导的默认值是列号派生的（`col_2`）——列表里那条
+    // 数据源已经用掉了 `col_2`，第二条源勾「开户行行名」（第 2 列）就会撞。
+    // 这一条钉的是**接线**：列表页握着 `fields[].sourceKey`，必须喂进向导。
+    const user = userEvent.setup();
+    const existing = datasourceWire({
+      id: 1,
+      title: "已有的一条",
+      fields: [{ field_id: "开户行行名", source_key: "col_2", enabled: true }],
+    });
+    stubFeishuApi({ datasourceList: () => listPage([existing]) });
+    renderList();
+    await screen.findByText("已有的一条");
+
+    await chooseXlsx(user);
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("名称"), "银行网点");
+    await user.upload(
+      within(dialog).getByLabelText("xlsx 文件"),
+      new File(["PK\x03\x04"], "bank_1.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "解析表头" }));
+    await within(dialog).findByText("开户行行名");
+    await user.click(within(dialog).getByRole("button", { name: "下一步" }));
+    await user.click(within(dialog).getByLabelText("开户行行名"));
+    await user.click(within(dialog).getByRole("button", { name: "下一步" }));
+
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "源标识已被占用：col_2",
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "下一步" }),
+    ).toBeDisabled();
+  });
+
   it("选多维表格仍开原来的向导（一行没改）", async () => {
     stubFeishuApi({
       datasourceList: () => listPage([datasourceWire()]),

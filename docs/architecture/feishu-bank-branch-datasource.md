@@ -799,10 +799,22 @@ MultipartSpec::new(["application/vnd.openxmlformats-officedocument.spreadsheetml
 选中文件后**直接打导入 Action**，不再走建源与配对——因为绑定已经配好了，
 表头一致即可（这正是 §5.7 严格口径能成立的前提）。
 
-> **顺手堵一个洞**：向导中途刷新页面会让 state 清空、用户从头再来，
-> 而重来会**再建一个数据源**（`create_datasource_table` 没有幂等键，`title` 会重名）。
-> 处置：建源后立刻把 `datasource_id` 记进 URL/路由 state，
-> 让「刷新」落回该数据源的详情页而不是向导第 1 步。这条不写进后端，属前端路由设计。
+> **⚠️ 已知未做：向导中途刷新不留痕（2026-09-29 终审裁定）。**
+> 本节曾写着「建源后立刻把 `datasource_id` 记进 URL/路由 state，让刷新落回详情页」，
+> **从未实现，也从未派成任务**。终审在此把它改成显式的「已知未做」，而不是留一句看起来
+> 像已交付的设计：本轮不改，理由有两条。
+>
+> 1. **代价与收益不成比例**。这条要动的是列表页的**状态载体**：`useListQuery` 刻意把
+>    搜索/筛选/排序/分页放在 React state + localStorage（见 `frontend/src/features/feishu/
+>    list-query.ts` 的模块文档），而「刷新后还记得刚建了哪条源」只能靠 URL/路由 state——
+>    等于给这个页面新引入一套与既有状态并存的载体，还要定义它**什么时候清掉**
+>    （导入成功之后？下次打开向导？），否则那句「别再建一条」会一直挂着说假话。
+> 2. **残余风险是可恢复的、且已经响亮**：建源成功而导入失败时向导**不回滚**、也不关对话框，
+>    原地写明「数据源已建好（#N），但导入失败……重试只会重发导入这一步」；真刷新之后
+>    重走一遍会撞 `title` 重名（`create_datasource_table` 没有幂等键），那是一次**明确的失败**，
+>    不是静默的重复建源——用户回列表页就能看见那条零选项的源。
+>
+> 要补的话，正确的入口是给建源加幂等键，而不是在前端记一个会过期的 id。
 
 **文件生命周期（D11）**：第 1 步的文件只用于探表头，服务端读完即丢；
 前端把 `File` 对象**留在向导 state 里**，第 4 步重新 POST 同一批文件执行导入。
@@ -1051,12 +1063,22 @@ request_timeout_seconds = 60       # 30 → 60
             { "name": "境内银行网点信息管理-2.xlsx", "rows_read": 54386 }],
   "bindings": [
     { "source_key": "bank_branch_name", "fetched": 154386, "derived": 154362,
-      "disabled": 0, "snapshot_digest": "…", "unchanged": false, "anomalies": [] },
+      "disabled": 0, "complement_skipped": 154362, "snapshot_digest": "…",
+      "unchanged": false, "skipped_reason": null, "anomalies": [] },
     { "source_key": "bank_branch_code", "fetched": 154386, "derived": 154386,
-      "disabled": 0, "snapshot_digest": "…", "unchanged": false, "anomalies": [] }
+      "disabled": 0, "complement_skipped": 154362, "snapshot_digest": "…",
+      "unchanged": false, "skipped_reason": null, "anomalies": [] }
   ]
 }
 ```
+
+> 上例两条绑定的 `complement_skipped` **都不是 null**，这不是笔误：单轮补集停用的上限是
+> 2 万条（`MAX_COMPLEMENT`，与 `pull.rs::find_doomed` 同款），而这份文件有 15 万多个选项
+> ——**每一轮的补集停用都会被跳过**。上限本身是既定设计（不在视图完整时做批量停用），
+> 但**跳过必须看得见**：`disabled: 0` 在「扫完了没有要停用的」与「根本没扫」之间没有区别，
+> 而后者意味着改过名、删掉的旧选项仍然 `enabled = true`，继续被出站喂给飞书控件。
+> 所以回执带 `complement_skipped`（非 null = 本轮**没扫**，值 = 当时已启用的选项数），
+> 前端两处回执都把它渲染出来。**2026-09-29 终审补**（此前两处各自都对、合起来是静默的）。
 
 （上例的 `anomalies` 都为空，是 A14 的预期结果——银行文件里那几行「脏」数据机械上合法，
 见 §4.6。真有超长值时，该字段最多列 100 条并附 `truncated_details: true`。）
@@ -1088,8 +1110,9 @@ request_timeout_seconds = 60       # 30 → 60
 「取数方式不是定时拉取」分支返回 `40905`；语义不动），
 并给一个**重新导入**入口（§5.6）。
 
-**审计**：导入**挂** `ActionLogMiddleware`（与 `pull` 一致，它是写操作）。
-探表头**不挂**（不写库）。
+**审计**：导入与探表头**都挂** `ActionLogMiddleware`——两条同处 `datasource` module，
+框架没有 Action 级挂载点，做不到「一条挂一条不挂」（完整裁定见上面那段，
+本条是 09-23 版旧说法在此处的残留，2026-09-29 终审清理）。
 
 ## 6. 测试与门禁
 

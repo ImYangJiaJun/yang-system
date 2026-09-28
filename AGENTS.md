@@ -107,7 +107,9 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
 
   覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理、匿名化删除后的凭据与 PII 清理、逐台会话撤销后 refresh 被拒，飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护），以及权限组并入 Token claims（组名不进 `roles`）、首账号引导的哨兵并发仲裁，以及审批派发的全链路（`60012` 走 uuid 回捞、等待态不写字段、回写折半隔离毒记录、认领游标不原地空转、令牌桶限速与官方 100/分钟上界的不变式、告警正反演练走 `promtool`）。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs`、`feishu_approval_options_integration.rs`、`account_deletion_integration.rs`、`session_revocation_integration.rs`、`permission_groups_integration.rs` 与 `system_owner_bootstrap_integration.rs` 十二个入口。
 
-- 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
+- 无数值覆盖率门槛，但改变的行为必须有测试覆盖。**每处新增分支至少做一次「摘除式」变异**
+  （把新加的那一条判断/守卫删掉，确认对应测试**变红**，再改回来），理由与做法见
+  `docs/guides/TESTING_SILENT_FAILURES.md`——这条链上的静默错误全是变异检验抓出来的。
 
 ## 安全注意事项
 
@@ -161,9 +163,23 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
   ```
 
   **在 worktree 里验时不能照抄上面这条**：它挂的是主检出 `D:/code/lib_yang`，
-  工作树里的改动根本没进容器，验出来的是别人的代码。worktree 已镜像了
-  `crates/` 与 `project/` 的层级，把 `-v`/`-w` 两处路径一起换成工作树根即可
-  （例如 `-v D:/code/lib_yang-wt:/ws -w /ws/project/yang-system`）。
+  工作树里的改动根本没进容器，验出来的是别人的代码。但**只把 `-v` 换成工作树根还不够**：
+  工作树里的 `crates/` 是指向主检出的**符号链接**，Docker Desktop 的 bind mount 不跟随
+  它——容器里 `/ws/crates/yang-base` 不存在（2026-09-29 实测：exit 101，
+  `error inheriting edition … failed to find a workspace root`；只挂 `project/` 时更早一步
+  报 `No such file or directory`）。要把真目录**再挂一份到同一个容器路径**：
+
+  ```bash
+  MSYS_NO_PATHCONV=1 docker run --rm \
+    -v D:/code/lib_yang-wt:/ws -v D:/code/lib_yang/crates:/ws/crates \
+    -w /ws/project/yang-system \
+    -e CARGO_HOME=/tmp/ch -e CARGO_TARGET_DIR=/tmp/ct -e RUSTUP_TOOLCHAIN=1.80.1 \
+    rust:1.80.1-slim cargo check --all-targets --locked
+  ```
+
+  这一形态在 worktree 里实测通过（冷 `CARGO_HOME`、`--all-targets --locked`、58 秒
+  `Finished`）。工作树根那份 `Cargo.toml` 也必须在挂载里——`crates/*` 要继承它的
+  `workspace.package.*`。
 
   注意索引里的 `rust_version` 元数据不足以判定兼容性（存在缺元数据但清单声明 `edition2024` 的 crate，如 `ar_archive_writer 0.5.1`），只有用 1.80 实际编译才算数。已知的版本约束：`lettre` 精确锁 `=0.11.19`（0.11.20+ 需要 Rust 1.85）；`async-compression 0.4.33 + compression-codecs 0.4.32` 组合有宏展开缺陷，固定使用 0.4.32 + 0.4.31。
 

@@ -491,25 +491,29 @@ async fn import_binding(
             source_key = %binding.source_key,
             "本轮派生出 0 个选项但本地仍有已启用选项：跳过这条绑定，不动它的补集"
         );
-        return Ok(serde_json::json!({
-            "source_key": binding.source_key,
-            "fetched": snapshot.rows.len(),
-            "derived": 0,
-            "disabled": 0,
-            "unchanged": false,
+        return Ok(binding_report(BindingReport {
+            source_key: &binding.source_key,
+            fetched: snapshot.rows.len(),
+            derived: 0,
+            disabled: 0,
+            unchanged: false,
             // **发绑定行上已经存着的那个摘要，不是本轮算出来的空摘要**：
             // 跳过 = 这一轮什么都没写，所以「这条绑定现在的内容是什么」仍然是旧值。
             // 发空摘要会被读成「它的内容现在是空的」——与事实正相反，而回执正是
             // 运维判断「这轮到底发生了什么」的唯一依据。
-            "snapshot_digest": &binding.snapshot_digest,
-            "skipped_reason": "本轮派生出 0 个选项，而本地仍有已启用选项——拒绝清空",
-            "anomalies": anomaly_report(&anomaly_by_label),
-            "truncated_details": anomaly_by_label.len() > ANOMALY_LIMIT,
+            snapshot_digest: binding.snapshot_digest.as_deref(),
+            skipped_reason: Some("本轮派生出 0 个选项，而本地仍有已启用选项——拒绝清空"),
+            // 整条绑定都跳过了，补集自然也没跑——但那件事已经由 `skipped_reason`
+            // 说清楚了（比「没做补集停用」更重），再报一次只是噪音。
+            complement_skipped: None,
+            anomalies: anomaly_report(&anomaly_by_label),
+            truncated_details: anomaly_by_label.len() > ANOMALY_LIMIT,
         }));
     }
 
     // 跨源夺取预检与补集扫描都在进事务前做完：前者是可归因的业务失败，后者只读。
     let mut doomed = Vec::new();
+    let mut complement_skipped = None;
     if !unchanged {
         let ids: Vec<String> = derived
             .iter()
@@ -522,7 +526,9 @@ async fn import_binding(
                 "选项 id {option_id} 已属于数据源 {owner}，拒绝改写其归属"
             )));
         }
-        doomed = find_doomed_for(context, &binding.source_key, &derived).await?;
+        let scan = find_doomed_for(context, &binding.source_key, &derived).await?;
+        doomed = scan.doomed;
+        complement_skipped = scan.skipped_at;
     }
 
     // 事务：**用 ctx.begin_transaction()**，不要照抄 pull.rs 的 `database.transaction()`
@@ -606,17 +612,63 @@ async fn import_binding(
     .await;
     let disabled = FeishuContext::finish_transaction(transaction, result).await?;
 
-    Ok(serde_json::json!({
-        "source_key": binding.source_key,
-        "fetched": snapshot.rows.len(),
-        "derived": derived.len(),
-        "disabled": disabled,
-        "snapshot_digest": digest,
-        "unchanged": unchanged,
-        // 异常行逐条可归因。**不静默截断**：省略时给 `truncated_details` 与真实总数。
-        "anomalies": anomaly_report(&anomaly_by_label),
-        "truncated_details": anomaly_by_label.len() > ANOMALY_LIMIT,
+    Ok(binding_report(BindingReport {
+        source_key: &binding.source_key,
+        fetched: snapshot.rows.len(),
+        derived: derived.len(),
+        disabled,
+        unchanged,
+        snapshot_digest: Some(&digest),
+        skipped_reason: None,
+        // **非 null = 这一轮压根没扫补集**（已启用选项数达单轮上限，见 `find_doomed_for`）。
+        // 不带它的话，`disabled: 0` 在两种含义之间没有区别：「扫完了没有要停用的」与
+        // 「没扫」——而银行网点那份文件是后者，每一轮都是。
+        //
+        // `unchanged` 那一轮不走这里：它压根没写库，回执上的「内容没变，本轮没写库」
+        // 已经把「什么都没做」说全了。
+        complement_skipped,
+        anomalies: anomaly_report(&anomaly_by_label),
+        truncated_details: anomaly_by_label.len() > ANOMALY_LIMIT,
     }))
+}
+
+/// 一条绑定的回执。
+///
+/// **抽成一个纯函数是为了可单测**：`import_binding` 的其余部分都要真库
+/// （`FeishuContext`）才能跑，而这张回执是用户唯一看得见「这一轮到底做了什么」的地方
+/// ——不抽出来，「补集被跳过时必须说出来」这条就只能靠集成测试钉。
+struct BindingReport<'a> {
+    source_key: &'a str,
+    fetched: usize,
+    derived: usize,
+    disabled: u64,
+    unchanged: bool,
+    snapshot_digest: Option<&'a str>,
+    skipped_reason: Option<&'a str>,
+    /// 非 `None` = 本轮跳过了补集停用，值是当时已启用的选项数。
+    complement_skipped: Option<usize>,
+    anomalies: Vec<serde_json::Value>,
+    truncated_details: bool,
+}
+
+/// 把上面的结构渲染成回执 JSON。
+///
+/// `skipped_reason` 与 `complement_skipped` **都在这里，缺省是 `null`**：两条分支
+/// （跳过整条绑定 / 照常落库）的键集必须一致，不然消费方得按分支猜哪个键在。
+fn binding_report(report: BindingReport<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "source_key": report.source_key,
+        "fetched": report.fetched,
+        "derived": report.derived,
+        "disabled": report.disabled,
+        "snapshot_digest": report.snapshot_digest,
+        "unchanged": report.unchanged,
+        "skipped_reason": report.skipped_reason,
+        "complement_skipped": report.complement_skipped,
+        // 异常行逐条可归因。**不静默截断**：省略时给 `truncated_details` 与真实总数。
+        "anomalies": report.anomalies,
+        "truncated_details": report.truncated_details,
+    })
 }
 
 /// 绑定行的状态回写：本轮摘要 + 最近导入时间。
@@ -782,17 +834,34 @@ const _: () = assert!(SCAN_PAGE_SIZE <= yang_base::table::MAX_TABLE_QUERY_PAGE_S
 /// 单轮补集停用的规模上限：超过就**跳过本轮停用**，只告警。
 const MAX_COMPLEMENT: usize = 20_000;
 
+/// 补集扫描的结果。
+struct DoomedScan {
+    /// 本地有、本轮派生结果里没有的选项 id（该被停用）。
+    doomed: Vec<String>,
+    /// 本轮**跳过了**补集停用时的已启用行数；跑了扫描则是 `None`。
+    ///
+    /// 这个字段是承重的：`find_doomed_for` 返回空 `Vec` 有两种含义——「扫完了，没有
+    /// 该停用的」与「**根本没扫**，因为你的表超过单轮上限」。回执上它们都写成
+    /// `disabled: 0`，读起来都是「没什么要停用的」，而后者是**什么都没做**。
+    /// 银行网点那份实测文件有 154,362 条选项，每一轮都走的是后者。
+    skipped_at: Option<usize>,
+}
+
 /// 找出「本地有、本轮派生结果里没有」的选项 id（补集）。
 ///
 /// 与 `pull::find_doomed` 同形，但不依赖 `PullDeps`——导入不出网，用不上 transport。
 ///
 /// 规模保护分两步：**先 `count` 判是否超限，再分页扫**。顺序不能反——先扫再判的话，
 /// 大表会把上限那么多行读进来才发现该跳过。
+///
+/// **跳过的理由要交回调用方**（见 [`DoomedScan::skipped_at`]）。这一段是从 `pull.rs`
+/// 逐字抄来的，抄得没错——但在 worker 里没人看日志（那里 `tracing::warn` 就够），
+/// 在 Action 里用户盯着回执：回执不说，用户就以为「没什么要停用的」。
 async fn find_doomed_for(
     context: &FeishuContext,
     source_key: &str,
     derived: &[DerivedOption],
-) -> Result<Vec<String>, BaseError> {
+) -> Result<DoomedScan, BaseError> {
     let live: std::collections::HashSet<&str> = derived
         .iter()
         .map(|option| option.option_id.as_str())
@@ -816,7 +885,10 @@ async fn find_doomed_for(
             limit = MAX_COMPLEMENT,
             "已启用选项达到单轮上限，本轮跳过补集停用（未确保视图完整时不做批量停用）"
         );
-        return Ok(Vec::new());
+        return Ok(DoomedScan {
+            doomed: Vec::new(),
+            skipped_at: Some(enabled),
+        });
     }
 
     // 第二步：分页扫完。`count` 已保证行数在上限内，所以页数有界。
@@ -839,7 +911,10 @@ async fn find_doomed_for(
             doomed.push(option_id);
         }
     }
-    Ok(doomed)
+    Ok(DoomedScan {
+        doomed,
+        skipped_at: None,
+    })
 }
 
 /// 当前时间（unix 秒）。
@@ -889,6 +964,62 @@ mod tests {
         assert_eq!(report.len(), 2);
         assert_eq!(report[0]["label"], "a");
         assert_eq!(report[1]["label"], "b");
+    }
+
+    #[test]
+    fn a_skipped_complement_scan_is_visible_in_the_receipt() {
+        // 单轮补集停用的上限是 2 万，而银行网点那份实测文件有 154,362 条选项
+        // （设计 §4.6）——**每一轮补集停用都被跳过**：改过名、删掉的旧选项永远
+        // 保持 `enabled = true`，继续被出站喂给飞书控件。而那件事在回执上只表现为
+        // `disabled: 0`，与「扫完了，没有要停用的」长得一模一样。
+        //
+        // 上限本身是设计决策（与 `pull.rs` 逐字同款），不动；回执必须自己说清
+        // 这一轮**没有**做补集停用。这条用例钉的就是那一个字。
+        let skipped = binding_report(BindingReport {
+            source_key: "bank_branch",
+            fetched: 154_386,
+            derived: 154_362,
+            disabled: 0,
+            unchanged: false,
+            snapshot_digest: Some("digest"),
+            skipped_reason: None,
+            complement_skipped: Some(154_362),
+            anomalies: Vec::new(),
+            truncated_details: false,
+        });
+        assert_eq!(
+            skipped["complement_skipped"],
+            serde_json::json!(154_362),
+            "跳过了补集停用就必须在回执里写出来（值 = 当时已启用的选项数），\
+             否则 `disabled: 0` 会被读成「没什么要停用的」"
+        );
+
+        // 真的扫过一轮时这里是 `null`：两种情形在回执上**必须可分辨**，
+        // 而这正是消费方（前端回执）依据的那一个键。
+        let scanned = binding_report(BindingReport {
+            source_key: "bank_branch",
+            fetched: 10,
+            derived: 10,
+            disabled: 2,
+            unchanged: false,
+            snapshot_digest: Some("digest"),
+            skipped_reason: None,
+            complement_skipped: None,
+            anomalies: Vec::new(),
+            truncated_details: false,
+        });
+        assert_eq!(scanned["complement_skipped"], serde_json::Value::Null);
+        assert_eq!(scanned["disabled"], serde_json::json!(2));
+
+        // 两条分支（整条绑定被跳过 / 照常落库）的键集必须一致：`skipped_reason` 与
+        // `complement_skipped` 都在，缺省是 `null`。少一个键，消费方就得按分支猜。
+        let keys = |value: &serde_json::Value| -> Vec<String> {
+            value
+                .as_object()
+                .map(|map| map.keys().cloned().collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(keys(&skipped), keys(&scanned), "回执的键集不能随分支变化");
     }
 
     #[test]

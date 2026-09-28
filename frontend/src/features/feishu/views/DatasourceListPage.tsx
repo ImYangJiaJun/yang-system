@@ -22,7 +22,7 @@
  * 「当前页为空」不构成任何结论（结果集可能只是缩小了），那是页码越界，夹回有效页即可。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
@@ -156,8 +156,25 @@ export default function DatasourceListPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
-  const items = listQuery.data?.items ?? [];
+  // `items` 单独 memo：`?? []` 每次渲染都是一个新数组，直接铺下去会让下面那个
+  // `useMemo`（以及下游向导的 `sourceKeyErrors`）每次都重算，等于没 memo。
+  const items = useMemo(() => listQuery.data?.items ?? [], [listQuery.data]);
   const total = listQuery.data?.total ?? null;
+  /// 这一页里已经用掉的源标识，交给 xlsx 向导做重名预检。
+  ///
+  /// `source_key` 是**全局**唯一索引，而这个页面握着的是当前那一页——所以这道预检
+  /// 挡的是「看得见的那批」，不是完整校验（列表没有「列出全部 `source_key`」的端点，
+  /// 而列表查询本身分页）。挡不住的仍由库上的唯一索引拒（响亮的 1062）。
+  /// 值域取 `fields[].sourceKey`（含停用的绑定）：停用的绑定照样占着那个键。
+  const takenSourceKeys = useMemo(
+    () =>
+      new Set(
+        items.flatMap((item) =>
+          item.fields.map((binding) => binding.sourceKey),
+        ),
+      ),
+    [items],
+  );
   const page = controller.state.page;
   const pageSize = controller.state.pageSize;
   const { setPage } = controller;
@@ -568,6 +585,7 @@ export default function DatasourceListPage() {
       <XlsxImportWizard
         open={createKind === "xlsx"}
         client={xlsxClient}
+        takenSourceKeys={takenSourceKeys}
         onCancel={closeWizard}
         onSubmitted={submitXlsxWizard}
       />

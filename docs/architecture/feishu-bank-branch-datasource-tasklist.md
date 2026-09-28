@@ -56,8 +56,13 @@ python scripts/run_ci.py full
 # feishu addon 单测
 cargo test --lib --locked feishu
 
-# MSRV 冷缓存验证（新增依赖后必做；注意挂载整个 lib_yang 根）
-docker run --rm -v /d/code/lib_yang:/ws -w /ws/project/yang-system \
+# MSRV 冷缓存验证（新增依赖后必做）。**必须带 MSYS_NO_PATHCONV=1**，否则 Git Bash 会把
+# `-w /ws/...` 改写成 Windows 路径、docker 直接 exit 125（四个坑的完整清单见根 AGENTS.md
+# 的「MSRV 1.80 守护」）。挂载整个 lib_yang 根；在 worktree 里验时 -v 换成工作树根
+# （例如 D:/code/lib_yang-wt），否则验的是别人的代码——而且**还要把真 crates 目录再挂一份**
+# （worktree 里的 crates/ 是指向主检出的符号链接，Docker 不跟随，实测 exit 101）。
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v D:/code/lib_yang:/ws -w /ws/project/yang-system \
   -e CARGO_HOME=/tmp/ch -e CARGO_TARGET_DIR=/tmp/ct -e RUSTUP_TOOLCHAIN=1.80.1 \
   rust:1.80.1-slim cargo check --all-targets --locked
 

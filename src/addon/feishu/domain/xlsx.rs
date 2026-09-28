@@ -405,12 +405,25 @@ pub(crate) fn read_snapshot(
     Ok(ImportSnapshot { rows, per_file })
 }
 
-/// 单元格取文本。**不做数值/日期推断**（设计 §5.7）：
+/// 单元格取文本。**不做数值推断**（设计 §5.7）：
 /// 数值原样按 `DataRef` 的显示取，`联行号` 若被 Excel 存成数值本就会丢前导零，
 /// 那是源文件的错，导入器不做「看起来像数字就补零」这类猜测。
 ///
 /// 数值一律走 `to_string()` 而**不是 `{:?}`**——`f64` 的 Debug 会给出 `1.0`，
 /// 而真实 Excel 里 `1` 就该是 `1`。
+///
+/// **日期那一臂曾经是坏的**（两处，都在下面标了「回归」）：
+/// `DateTime` 打的是一串裸序列号（`ExcelDateTime` 的 `Display` 就是 `{value}`，
+/// calamine 0.30.1 `datatype.rs`），而 `DateTimeIso` / `DurationIso` 被并进空串那一臂
+/// ——于是 `t="d"` 的单元格**整列静默读成空**：那一列派生 0 个选项，逐绑定空快照守卫
+/// 把这一轮说成「我跳过了它」，没有任何一句话能把它与「我的日期列没导进来」联系起来。
+/// 设计 §5.7 只替**数值**丢前导零辩护过，日期整类没被提到。
+///
+/// 日期**不是推断**：`t="d"` 的单元格里本来就是 ISO 8601 文本，原样透传；
+/// 数值型日期（Excel 存的是「序列号 + 日期格式」，calamine 据 number format 判成
+/// `DateTime`）交给 calamine 自己的 `as_datetime()` 换成可读形态
+/// （`NaiveDateTime` 的 `Display`，形如 `2024-01-01 00:00:00`）。
+/// 换算不出来（序列号越界）时退回序列号本身——**宁可难看，不可编**。
 fn cell_text(cell: Cell<DataRef<'_>>) -> String {
     match cell.get_value() {
         DataRef::String(text) => text.clone(),
@@ -418,10 +431,17 @@ fn cell_text(cell: Cell<DataRef<'_>>) -> String {
         DataRef::Float(number) => number.to_string(),
         DataRef::Int(number) => number.to_string(),
         DataRef::Bool(value) => value.to_string(),
-        DataRef::DateTime(value) => value.to_string(),
-        DataRef::Empty | DataRef::Error(_) | DataRef::DateTimeIso(_) | DataRef::DurationIso(_) => {
-            String::new()
-        }
+        // 回归：`t="d"` 的单元格本来就是字符串，**原样透传**。
+        DataRef::DateTimeIso(text) => text.clone(),
+        // 回归：数值型日期走 `as_datetime()`，不是裸 f64。
+        DataRef::DateTime(value) => value
+            .as_datetime()
+            .map(|stamp| stamp.to_string())
+            .unwrap_or_else(|| value.as_f64().to_string()),
+        // xlsx 侧产不出它（`cells_reader` 的 `t="d"` 只走 `DateTimeIso`），
+        // 一并透传是让这一臂不再是**静默丢弃**——与上面那条同一个道理。
+        DataRef::DurationIso(text) => text.clone(),
+        DataRef::Empty | DataRef::Error(_) => String::new(),
     }
 }
 
@@ -812,6 +832,68 @@ mod tests {
         assert!(
             matches!(&error, XlsxError::Unreadable(_)),
             "实际: {error:?}"
+        );
+    }
+
+    #[test]
+    fn read_snapshot_swallows_a_missing_string_table_in_the_data_rows() {
+        // 上一条钉的是 `read_header` 那道守卫（夹具的表头自己就是 `t="s"`，它在
+        // `read_header` 里就 panic 了）。`read_snapshot` 里那道 `next_cell` 守卫
+        // **因此是零覆盖的**——把它删掉，全套测试照样绿。
+        //
+        // 这份夹具把两行拆开：表头写成 inlineStr，数据行的**第一个**单元格写成数值。
+        // `read_header` 读到那个数值时按「换行了」跳出循环，正常返回；`read_snapshot`
+        // 继续往后读到 B2 的 `t="s"`，才撞上同一处越界。
+        let bytes = fixture("shared_strings_missing_data_row.xlsx");
+
+        // 前提：这一份必须**读得进** read_header，否则它和上面那份夹具没有区别，
+        // 这条测试就退化成同一道守卫的第二个副本（对 read_snapshot 那道依然零覆盖）。
+        let header = read_header(&bytes)
+            .unwrap_or_else(|error| panic!("表头是 inlineStr，应能正常解析: {error}"));
+        assert_eq!(
+            header.header_row, 1,
+            "表头必须仍然被认成第 1 行——下沉说明数据行的第一个单元格没被当成换行"
+        );
+
+        let want = vec!["开户行行名".to_string()];
+        let error = read_snapshot(
+            &[("shared_strings_missing_data_row.xlsx".to_string(), bytes)],
+            &want,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("数据行缺 sharedStrings 部件必须报错，不能假装读成功"));
+        assert!(
+            matches!(&error, XlsxError::Unreadable(_)),
+            "实际: {error:?}"
+        );
+    }
+
+    #[test]
+    fn date_cells_read_as_readable_text_not_raw_serial_numbers() {
+        // 日期两臂曾经都是坏的：`DataRef::DateTime` 打的是裸序列号（`ExcelDateTime` 的
+        // `Display`），`DataRef::DateTimeIso` 被并进空串那一臂——`t="d"` 的单元格整列
+        // 静默读成空，那一列派生 0 个选项，用户只在「这一轮跳过了它」里看见结果。
+        // 设计 §5.7 只替数值丢前导零辩护过，日期整类没被提到。
+        let want = vec!["开户日".to_string()];
+        let snapshot = read_snapshot(
+            &[("date_cells.xlsx".to_string(), fixture("date_cells.xlsx"))],
+            &want,
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+
+        assert_eq!(snapshot.rows.len(), 2, "两行都是数据行");
+        // 数值型日期（`s="1"` + 内置日期格式）：45292 = 2024-01-01。
+        // 断言写成**精确值**而不是「不含数字」：后者对一串乱码也成立。
+        assert_eq!(
+            snapshot.rows[0].get("开户日").map(String::as_str),
+            Some("2024-01-01 00:00:00"),
+            "数值型日期要换成可读形态，不是 45292 这种序列号"
+        );
+        // `t="d"` 的单元格：本来就是 ISO 文本，原样透传。
+        assert_eq!(
+            snapshot.rows[1].get("开户日").map(String::as_str),
+            Some("2024-01-15T00:00:00"),
+            "ISO 形态的日期不能读成空串——整列变空会被读成「这一列没数据」"
         );
     }
 }

@@ -218,8 +218,8 @@ function parseDatasourceId(raw: string | undefined): number | null {
 /// 逐项都留着，因为它们各自对应一种**要做不同处置**的情形：`rowsRead` 是文件里读到
 /// 多少行（不是总行数）、`derived` 是派生出的选项数、`skippedReason` 非空表示这一轮
 /// **跳过了**这条绑定（它一行都没动，这是最容易被读成「导入成功」的一种）、异常行数
-/// 表示有几行没喂给飞书。少了任何一项，回执就只能说「跑完了」——而那句话回答不了
-/// 「跑对了吗」。
+/// 表示有几行没喂给飞书、`complementSkipped` 非空表示这一轮**没做补集停用**。
+/// 少了任何一项，回执就只能说「跑完了」——而那句话回答不了「跑对了吗」。
 function reimportReceipt(title: string, report: XlsxImportReport): string {
   const files = report.files
     .map((file) => `${file.name}：${file.rowsRead} 行`)
@@ -230,6 +230,15 @@ function reimportReceipt(title: string, report: XlsxImportReport): string {
         `${binding.sourceKey}：读到 ${binding.fetched} 行 → ${binding.derived} 个选项`,
       ];
       if (binding.disabled > 0) parts.push(`停用 ${binding.disabled} 条`);
+      // **必须在「停用 0 条」说话**：`disabled` 为 0 有两种含义，而这一种是「根本没扫」。
+      // 不说的话，这句读起来就是「没什么要停用的」——改过名、删掉的旧选项仍然启用着，
+      // 继续被出站喂给飞书控件，而回执看起来一切正常。（单轮上限 2 万条；银行网点那份
+      // 实测文件有 15 万多条，每一轮都走这一支。）
+      if (binding.complementSkipped !== null) {
+        parts.push(
+          `这一轮没有做补集停用：该字段已启用 ${binding.complementSkipped} 条，超过单轮上限——改过名或删掉的旧选项仍保持启用`,
+        );
+      }
       if (binding.unchanged) parts.push("内容没变，本轮没写库");
       if (binding.skippedReason !== null) {
         parts.push(`这一轮跳过了它：${binding.skippedReason}`);
@@ -546,7 +555,12 @@ export default function DatasourceDetailPage() {
       </div>
 
       <p aria-live="polite" className={NEUTRAL_BAR}>
-        选项由多维表格自动推送，控制台只读——这里能看到什么，取决于多维表格那边推了什么。
+        {/* 「选项从哪来」这一句**必须按取数方式分**：对文件导入源说「由多维表格自动推送」
+            是当场可证伪的（它根本没有多维表格），而这一屏上面那一句正是下文
+            `OptionEmptyState` 的依据。下面两级「停用」的解释两类源通用，不分。 */}
+        {isXlsxSource
+          ? "选项由上传的 xlsx 文件导入，控制台只读——这里能看到什么，取决于最近一次成功导入写进库的内容。"
+          : "选项由多维表格自动推送，控制台只读——这里能看到什么，取决于多维表格那边推了什么。"}
         两个层级的「停用」不一样：
         <span className="font-medium">数据源级停用</span>
         会让飞书审批里用它的控件整个取不到选项；
@@ -720,7 +734,10 @@ export default function DatasourceDetailPage() {
             </TableBody>
           </Table>
         ) : items.length === 0 ? (
-          <OptionEmptyState sourceKey={optionSourceKey} />
+          <OptionEmptyState
+            sourceKey={optionSourceKey}
+            ingestMode={datasource?.ingestMode ?? ""}
+          />
         ) : (
           <>
             <OptionTable items={items} orderBy={orderBy} onSort={toggleSort} />
@@ -856,22 +873,50 @@ function CredentialSection({ datasource }: { datasource: DatasourceItem }) {
  * 权限位），而服务端的选项查询对不存在的 `source_key` 也只是回一个空结果集——
  * 「数据源不存在」与「有数据源但没推过选项」在这一页长得一模一样。
  * 所以这里只说能证明的那半句：**这一页没有选项**，剩下两种可能要用户自己去列表页分。
+ *
+ * **取数方式必须传进来**：这段文案的另一半是「选项从哪来、怎么让它来」，
+ * 而两类源在这件事上完全不同。曾经这里只认「多维表格推送」，于是文件导入源
+ * 被指着去做一条**它根本没有的**多维表格自动化：目标地址、自动化日志、跑过没有
+ * ——三句话句句不成立。这条路可达性很高：向导建源成功而导入失败时会刻意留着一条
+ * 零选项的数据源，逐绑定守卫跳过与空快照整轮失败也都落到这一屏。
  */
-function OptionEmptyState({ sourceKey }: { sourceKey: string }) {
+function OptionEmptyState({
+  sourceKey,
+  ingestMode,
+}: {
+  sourceKey: string;
+  ingestMode: string;
+}) {
+  const isXlsx = asIngestMode(ingestMode) === "xlsx_import";
   return (
     <div className="space-y-3 rounded-xl border border-border bg-card p-5">
       <div className="space-y-1">
-        <h2 className="text-base font-medium">还没有选项推过来</h2>
+        <h2 className="text-base font-medium">
+          {isXlsx ? "还没有导入过选项" : "还没有选项推过来"}
+        </h2>
         <p className="text-sm text-muted-foreground">
-          这一页没有拉到任何选项。可能是多维表格那边的自动化还没往这里推过，
+          这一页没有拉到任何选项。
+          {isXlsx
+            ? "可能是这条数据源刚建好、文件导入那一步还没跑成，"
+            : "可能是多维表格那边的自动化还没往这里推过，"}
           也可能是这个数据源已经不在了（例如刚被删除）——这一页确认不了它是否还存在，
           回列表页看一眼就知道。
         </p>
         <p className="text-sm text-muted-foreground">
-          如果它确实还在，那选项只能从多维表格那边来，控制台不能手工添加。
-          觉得应该已经有了的话：先确认那条自动化的目标地址就是这个数据源标识
-          <span className="mx-1 font-mono">{sourceKey}</span>
-          ，再确认它至少成功跑过一次；推送成功后回到这一页就能看到。
+          {isXlsx ? (
+            <>
+              如果它确实还在，那这一条源只能靠人上传文件导入，控制台不能手工添加。
+              点上面的「重新导入」喂一批表头与它一致的文件，导完回到这一页就能看到
+              ——每个字段的选项都是那一列的值。
+            </>
+          ) : (
+            <>
+              如果它确实还在，那选项只能从多维表格那边来，控制台不能手工添加。
+              觉得应该已经有了的话：先确认那条自动化的目标地址就是这个数据源标识
+              <span className="mx-1 font-mono">{sourceKey}</span>
+              ，再确认它至少成功跑过一次；推送成功后回到这一页就能看到。
+            </>
+          )}
         </p>
       </div>
     </div>
@@ -1036,10 +1081,16 @@ function SyncPanel({
           ["最近写库的导入", formatUnixSeconds(latestImportedAt ?? 0)],
         ] as Array<[string, string]>)
       : []),
-    ["最近成功同步", formatUnixSeconds(item.lastSuccessAt ?? 0)],
-    ["最近尝试拉取", formatUnixSeconds(item.lastPullAt ?? 0)],
+    // 这两行的**写者只有拉取路径**（`pull` worker 写 `last_success_at` / `last_pull_at`），
+    // 而 xlsx 源与推送源服务端都不拉它们——所以那一行恒为「—」，两行并排摆着就是在说
+    // 「这个源从来没同步成功过」。这与上面 `pulled` 挡掉「下次自动拉取」是同一条道理，
+    // 而且推送源的 `syncHealth` 徽章本来就写着「没有同步状态可看」，多两行「—」正是与它打架。
     ...(pulled
-      ? ([["下次自动拉取", nextPull.label]] as Array<[string, string]>)
+      ? ([
+          ["最近成功同步", formatUnixSeconds(item.lastSuccessAt ?? 0)],
+          ["最近尝试拉取", formatUnixSeconds(item.lastPullAt ?? 0)],
+          ["下次自动拉取", nextPull.label],
+        ] as Array<[string, string]>)
       : []),
   ];
   // 「坐标不全」不再在这里补一行：顶部的 `syncHealth` 徽章已经会说这件事，

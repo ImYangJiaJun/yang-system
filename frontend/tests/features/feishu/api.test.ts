@@ -1508,6 +1508,8 @@ describe("xlsx 导入端点", () => {
           fetched: 5,
           derived: 5,
           disabled: 1,
+          // 服务端**没发**这个键（旧实例）时折成 null = 「扫过补集了」，与真发了 null 同义。
+          complementSkipped: null,
           unchanged: false,
           skippedReason: null,
           anomalies: [{ label: "很长的一行", reason: "超长，已截断" }],
@@ -1515,6 +1517,35 @@ describe("xlsx 导入端点", () => {
         },
       ],
     });
+  });
+
+  it("complement_skipped 非 null = 这一轮没扫补集，条数要读出来", async () => {
+    // 「停用 0 条」有两种含义：扫完了没有要停用的，与**根本没扫**（已启用选项数超过
+    // 单轮上限）。银行网点那份实测文件是后者，而这两种在界面上的处置完全不同——
+    // 后者意味着改过名、删掉的旧选项仍然启用着，继续被出站喂给飞书控件。
+    stubMultipart({
+      code: 0,
+      data: {
+        datasource_id: 7,
+        elapsed_ms: 10,
+        files: [{ name: "bank_1.xlsx", rows_read: 154386 }],
+        bindings: [
+          {
+            source_key: "bank_branch",
+            fetched: 154386,
+            derived: 154362,
+            disabled: 0,
+            complement_skipped: 154362,
+            unchanged: false,
+            anomalies: [],
+            truncated_details: false,
+          },
+        ],
+      },
+    });
+    const report = await importXlsxFiles(7, [xlsxFile()], deps);
+    expect(report.bindings[0]?.complementSkipped).toBe(154362);
+    expect(report.bindings[0]?.disabled).toBe(0);
   });
 
   it("被跳过的那条绑定的原因要读出来——它是「这条怎么一行没动」的唯一解释", async () => {

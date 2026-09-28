@@ -723,6 +723,81 @@ describe("飞书数据源详情页 · xlsx 源", () => {
     });
   });
 
+  it("0 选项时不出现「多维表格」字样：这条源靠上传文件，没有那条自动化", async () => {
+    // **可达性很高**：向导建源成功而导入失败时刻意留着一条「已建好但零选项」的数据源，
+    // 用户关掉对话框落到详情页看到的就是这一屏；逐绑定守卫跳过、空快照整轮失败也都
+    // 落到这里。而这一屏曾经整段在讲多维表格的自动化（目标地址、跑过没有、
+    // 「选项只能从多维表格那边来」）——三句话对一个文件导入源句句不成立。
+    //
+    // 断言**整屏**没有「多维表格」：上面那条页面级说明也会这么说，而它同样是假话。
+    renderXlsxDetail({ optionList: () => listPage([]) });
+
+    expect(
+      await screen.findByRole("heading", { name: "还没有导入过选项" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/多维表格/)).toBeNull();
+    // 换成真的能做的那一步：空态指着同一屏上的「重新导入」按钮
+    expect(
+      screen.getByText(/点上面的「重新导入」喂一批表头与它一致的文件/, {
+        selector: "p",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新导入" }),
+    ).toBeInTheDocument();
+  });
+
+  it("不渲染两行恒为「—」的拉取状态：这两个写者只有拉取路径", async () => {
+    // `last_success_at` / `last_pull_at` 只由 pull worker 写，xlsx 源服务端不拉它，
+    // 所以那两行恒为「—」——两行并排摆着就是在说「这个源从来没同步成功过」。
+    // （与 `pulled` 挡掉「下次自动拉取」是同一条道理，那一处早就挡了。）
+    renderXlsxDetail();
+    await screen.findByRole("heading", { name: "同步" });
+
+    expect(syncRow("最近成功同步")).toBeNull();
+    expect(syncRow("最近尝试拉取")).toBeNull();
+    expect(syncRow("最近写库的导入")).not.toBeNull();
+    // 拉取源照旧要看得见这两行——挡的是取数方式，不是这两行本身
+    expect(syncRow("取数方式")).toBe("文件导入");
+  });
+
+  it("导入回执说出「这一轮没做补集停用」：disabled 为 0 有两种含义", async () => {
+    // 单轮补集停用的上限是 2 万，而银行网点那份实测文件有 15 万多条选项——每一轮都
+    // 走「跳过」这一支：改过名、删掉的旧选项仍然启用着，继续被出站喂给飞书控件。
+    // 回执上它只表现为 `disabled: 0`，与「扫完了，没有要停用的」长得一模一样。
+    const user = userEvent.setup();
+    renderXlsxDetail({
+      xlsxImport: () => ({
+        datasource_id: DATASOURCE_ID,
+        elapsed_ms: 900,
+        files: [{ name: "bank_2.xlsx", rows_read: 154386 }],
+        bindings: [
+          {
+            source_key: "bank_branch",
+            fetched: 154386,
+            derived: 154362,
+            disabled: 0,
+            complement_skipped: 154362,
+            unchanged: false,
+            skipped_reason: null,
+            anomalies: [],
+            truncated_details: false,
+          },
+        ],
+      }),
+    });
+    await screen.findByText("差旅费");
+
+    await user.click(await screen.findByRole("button", { name: "重新导入" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.upload(within(dialog).getByLabelText("xlsx 文件"), XLSX_FILE());
+    await user.click(within(dialog).getByRole("button", { name: "开始导入" }));
+
+    expect(
+      await screen.findByText(/这一轮没有做补集停用：该字段已启用 154362 条/),
+    ).toBeInTheDocument();
+  });
+
   it("不做体检：一个 health_check 请求都不发，体检区块整块不渲染", async () => {
     // 设计 §5.11：xlsx 源不走体检。它的权限位就是 `feishu.datasource.write`（凡能建
     // 数据源的身份都有它），所以只按权限位放行的话，每打开一次详情页都会自动发一次
