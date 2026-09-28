@@ -150,6 +150,12 @@ export function XlsxImportWizard({
 
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
+  /// 探表头那组说明是不是**已经不对应当前这批文件**了。
+  ///
+  /// 只在冻结后换重试文件时置起：那时「要导入的文件」已经是新名字，而 probe 的结论
+  /// 说的是第一次那批——两行并排摆着，看上去像换文件没生效。换文件不重探（配置已冻结，
+  /// 重探也改不了任何绑定），所以只能说清它是哪一批文件的结论。
+  const [probeStale, setProbeStale] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   /// 建源的结果。**非 null 就代表数据源已经在库里了**——重试只重发导入那一步，
@@ -205,6 +211,7 @@ export function XlsxImportWizard({
     setFiles(next);
     // 换了文件，上一批的探表头结果、勾选与配置一律作废：列名即身份，对不上就是白配。
     setProbe(null);
+    setProbeStale(false);
     setSelected([]);
     setConfigs({});
     setProbeError(null);
@@ -242,6 +249,7 @@ export function XlsxImportWizard({
   async function probeHeaders() {
     setProbing(true);
     setProbeError(null);
+    setProbeStale(false);
     try {
       const result = await client.probe(files);
       setSelected([]);
@@ -332,9 +340,20 @@ export function XlsxImportWizard({
 
   /// 探表头读到的三件事里，有两条必须说出来（[`headerRowNote`] 与 sheet 数），
   /// 第三条是服务端**实际读到的文件**——它与用户选的是不是同一批，只有这里能看。
+  ///
+  /// 冻结后换过文件（[`probeStale`]）时这组说明**不再描述当前这批文件**：那时它说的
+  /// 是第一次解析的结论，而「要导入的文件」已经是新的。所以明说是哪一批的结论，
+  /// 并收起那句指着旧文件的「服务端读到的文件」——留着它就成了「换文件没生效」。
   const probeNotes =
     probe === null ? null : (
       <div className="space-y-1 rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
+        {probeStale ? (
+          <p>
+            {
+              "下面几条是基于首次解析的结论，已经与现在要导入的那批文件无关：配置在建源那一刻就落定了，换文件不会重读表头。要按新文件的表头重配，只能删掉这条数据源重建。"
+            }
+          </p>
+        ) : null}
         {probe.sheets.length > 1 ? (
           <p>
             {`这份文件有 ${probe.sheets.length} 张 sheet，只读了第一张（${probe.sheetName}）：其余 sheet 的列不进这次导入。`}
@@ -343,9 +362,11 @@ export function XlsxImportWizard({
           <p>{`读的是 sheet「${probe.sheetName}」。`}</p>
         )}
         {probe.headerRow !== 1 ? <p>{headerRowNote(probe.headerRow)}</p> : null}
-        <p>
-          {`服务端读到的文件：${probe.files.map((item) => item.name).join("、") || "（无）"}`}
-        </p>
+        {probeStale ? null : (
+          <p>
+            {`服务端读到的文件：${probe.files.map((item) => item.name).join("、") || "（无）"}`}
+          </p>
+        )}
       </div>
     );
 
@@ -522,7 +543,7 @@ export function XlsxImportWizard({
                 }
               />
               <p className="text-xs text-muted-foreground">
-                可以一次选多份：它们的表头必须**完全一致**，不一致会被整批拒掉。
+                可以一次选多份：它们的表头必须完全一致，不一致会被整批拒掉。
                 文件只留在浏览器里，第 4 步重新上传同一批——不用再选一次。
               </p>
             </div>
@@ -625,9 +646,11 @@ export function XlsxImportWizard({
                   type="file"
                   multiple
                   accept=".xlsx"
-                  onChange={(event) =>
-                    setFiles(Array.from(event.target.files ?? []))
-                  }
+                  onChange={(event) => {
+                    setFiles(Array.from(event.target.files ?? []));
+                    // 换了文件，探表头那组说明就不再描述当前这批（它说的是第一次解析）。
+                    setProbeStale(true);
+                  }}
                 />
                 <p className="text-xs text-muted-foreground">
                   换一批文件重试是允许的；新文件的表头必须与上面这几列一致，

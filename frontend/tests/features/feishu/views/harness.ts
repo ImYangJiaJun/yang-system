@@ -68,6 +68,10 @@ export type FeishuApiStubOptions = {
   reveal?: Handler;
   /// 轮换 Token（写）。
   rotate?: Handler;
+  /// xlsx 探表头（只读表头、不写库）与导入（写）。两个都**不出网**，所以不在
+  /// `pull_now` 那条 can_pull 门控上——没有飞书凭证的部署照样有它们。
+  xlsxProbe?: Handler;
+  xlsxImport?: Handler;
 };
 
 export function jsonResponse(payload: unknown, status = 200): Response {
@@ -176,6 +180,19 @@ function catalogFor(options: FeishuApiStubOptions) {
         "feishu.datasource.pull_now",
         "POST",
         "/api/v1/feishu/datasources/pull-now",
+      ),
+      // xlsx 文件导入（T12 的探表头、T14 的重新导入）。服务端两侧同样要求
+      // `feishu.datasource.write`，所以跟着这一组权限位走；它们**不出网**，
+      // 因此不受 can_pull 门控——没有飞书凭证的环境里它们照样注册。
+      action(
+        "feishu.datasource.probe_xlsx_headers",
+        "POST",
+        "/api/v1/feishu/datasources/xlsx/probe",
+      ),
+      action(
+        "feishu.datasource.import_xlsx",
+        "POST",
+        "/api/v1/feishu/datasources/{datasource_id}/import",
       ),
     );
   }
@@ -404,6 +421,31 @@ export function stubFeishuApi(
       }
       if (url.endsWith("/api/v1/feishu/datasources/rotate-token")) {
         return respond(options.rotate, payload, { token: "rotated-token" });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/xlsx/probe")) {
+        return respond(options.xlsxProbe, payload, {
+          sheet_name: "Sheet1",
+          sheets: ["Sheet1"],
+          header_row: 1,
+          columns: [
+            { name: "开户行行名", index: 2 },
+            { name: "联行号", index: 5 },
+          ],
+          files: [{ name: "bank_1.xlsx" }],
+        });
+      }
+      // 导入的 `datasource_id` 在**路径段**里（body 是 multipart，这里读不到它），
+      // 所以只认路径形状。
+      if (
+        url.includes("/api/v1/feishu/datasources/") &&
+        url.endsWith("/import")
+      ) {
+        return respond(options.xlsxImport, payload, {
+          datasource_id: 9,
+          elapsed_ms: 1200,
+          files: [{ name: "bank_1.xlsx", rows_read: 5 }],
+          bindings: [],
+        });
       }
       if (url.includes("/api/v1/feishu/approval/options/")) {
         return respond(options.approvalOptions, payload, {

@@ -103,6 +103,91 @@ function renderList() {
   return renderTestApp({ path: "/feishu/datasources", authenticated: true });
 }
 
+/// 二选一入口：点「添加数据源」之后**还要选一次**。这里选的是多维表格那条老路。
+///
+/// 页头与正文（空态）各有一个「添加数据源」，它们开的是同一个二选一；取**最后一个**
+/// 是因为空态那个才有「空态里的入口也接上了」这层意思。
+async function chooseBitable(user: ReturnType<typeof userEvent.setup>) {
+  const buttons = await screen.findAllByRole("button", {
+    name: "添加数据源",
+  });
+  await user.click(buttons[buttons.length - 1]!);
+  await user.click(await screen.findByRole("button", { name: /多维表格/ }));
+}
+
+/// 二选一里的另一条路。
+async function chooseXlsx(user: ReturnType<typeof userEvent.setup>) {
+  const buttons = await screen.findAllByRole("button", {
+    name: "添加数据源",
+  });
+  await user.click(buttons[buttons.length - 1]!);
+  await user.click(await screen.findByRole("button", { name: /文件导入/ }));
+}
+
+/// 三个多维表格元数据端点：选了文件导入就不该碰到它们中的任何一个。
+const BITABLE_METADATA_PATHS = [
+  "/api/v1/feishu/datasources/bitable-tables",
+  "/api/v1/feishu/datasources/bitable-views",
+  "/api/v1/feishu/datasources/bitable-fields",
+];
+
+describe("飞书数据源列表页 · 新建入口二选一", () => {
+  it("「添加数据源」先让人选多维表格还是文件导入", async () => {
+    // 无 xlsx 桩：这一步不该发出任何请求（选完才决定打哪条端点）。
+    const calls = stubFeishuApi({
+      datasourceList: () => listPage([datasourceWire()]),
+    });
+    renderList();
+    // 先等页面自己那几发（目录/会话/列表）落定，再数「开二选一」这一下有没有带请求。
+    await screen.findByText("部门");
+    const before = calls.length;
+    await userEvent.click(
+      await screen.findByRole("button", { name: "添加数据源" }),
+    );
+
+    // 两个选项都在；**此时还没有打开任何向导**
+    expect(
+      screen.getByRole("button", { name: /多维表格/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /文件导入/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/第 1 步／共 4 步/)).not.toBeInTheDocument();
+    // 选之前一个新请求都不发（向导各自在自己的第 1 步才动网络）
+    expect(calls.length).toBe(before);
+  });
+
+  it("选文件导入才开 xlsx 向导，且不发多维表格的元数据请求", async () => {
+    const calls = stubFeishuApi({
+      datasourceList: () => listPage([datasourceWire()]),
+    });
+    renderList();
+    await chooseXlsx(userEvent.setup());
+
+    expect(await screen.findByText(/导入 xlsx 文件/)).toBeInTheDocument();
+    // 关键：没有打 list_bitable_tables/views/fields 中的任何一个
+    for (const path of BITABLE_METADATA_PATHS) {
+      expect(countCalls(calls, path)).toBe(0);
+    }
+  });
+
+  it("选多维表格仍开原来的向导（一行没改）", async () => {
+    stubFeishuApi({
+      datasourceList: () => listPage([datasourceWire()]),
+      bitableTables: () => ({ tables: [] }),
+    });
+    renderList();
+    await chooseBitable(userEvent.setup());
+
+    // 原向导的第 1 步文案原样在（它是「填名称与 Base Token，拉取这个 App 下的数据表」）。
+    // 断言整句而不是 `/Base Token/`：向导自己有两处提到它（步骤行与输入框标签），
+    // 二选一那张牌上也提到一次，按子串会命中多个。
+    expect(
+      await screen.findByText(/第 1 步／共 4 步：填名称与 Base Token/),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("飞书数据源列表页 · 四种状态", () => {
   it("空态：四步指引就是页面正文，工具栏与空栅格都不渲染", async () => {
     stubFeishuApi({ datasourceList: () => listPage([]) });
@@ -328,11 +413,7 @@ describe("飞书数据源列表页 · 建源入口是表级向导", () => {
     user: ReturnType<typeof userEvent.setup>,
     title = "部门",
   ) {
-    // 页头与工具栏各有一个「添加数据源」，两个开的是同一个向导。
-    const [add] = await screen.findAllByRole("button", {
-      name: "添加数据源",
-    });
-    await user.click(add!);
+    await chooseBitable(user);
     await user.type(await screen.findByLabelText("名称"), title);
     await user.type(screen.getByLabelText(/Base Token/), APP_TOKEN);
     await user.click(screen.getByRole("button", { name: "拉取数据表" }));
@@ -355,10 +436,7 @@ describe("飞书数据源列表页 · 建源入口是表级向导", () => {
     stubFeishuApi({ datasourceList: () => listPage([datasourceWire()]) });
     renderList();
 
-    const [add] = await screen.findAllByRole("button", {
-      name: "添加数据源",
-    });
-    await user.click(add!);
+    await chooseBitable(user);
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("配置表级数据源")).toBeInTheDocument();
     expect(within(dialog).getByLabelText(/Base Token/)).toBeInTheDocument();
@@ -376,8 +454,7 @@ describe("飞书数据源列表页 · 建源入口是表级向导", () => {
     expect(
       await screen.findByRole("heading", { name: "还没有数据源" }),
     ).toBeInTheDocument();
-    const buttons = screen.getAllByRole("button", { name: "添加数据源" });
-    await user.click(buttons[buttons.length - 1]!);
+    await chooseBitable(user);
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("配置表级数据源")).toBeInTheDocument();
   });
@@ -619,7 +696,69 @@ describe("飞书数据源列表页 · 编辑按表级主键提交", () => {
         // 只送启用中的那一条：服务端对集合里出现的已有绑定会写 `enabled = true`，
         // 把停用的那条塞回去等于悄悄把它重新启用。
         fields: [
-          { field_id: "fldA", source_key: "dept_sales", parent_field_id: null },
+          {
+            field_id: "fldA",
+            field_name: "费用类型",
+            source_key: "dept_sales",
+            parent_field_id: null,
+          },
+        ],
+      });
+    });
+  });
+
+  it("新增绑定必须带上列名：漏了它，审批装配会静默跳过这条绑定", async () => {
+    // 后端只在**新增**分支写 `field_name`（已有绑定刻意不碰它），装配按列名配对控件；
+    // 名字为空的绑定会被跳过且只 warn——某个控件少一个候选列，界面上看不出来。
+    // 建源那条路已经带上了（Task 8），编辑这条是同一个 bug 的另一个入口。
+    const user = userEvent.setup();
+    const calls = stubFeishuApi({
+      datasourceList: () =>
+        listPage([
+          datasourceWire({
+            id: 7,
+            title: "部门",
+            fields: [
+              {
+                field_id: "fldA",
+                field_name: "费用类型",
+                source_key: "dept_sales",
+                parent_field_id: null,
+                enabled: true,
+              },
+              // 拿不到名字的绑定（投影里 `field_name` 为 null）不伪造一个名字：
+              // 后端是「非空才写」，这个键整个不出现。
+              {
+                field_id: "fldC",
+                field_name: null,
+                source_key: "dept_new",
+                parent_field_id: null,
+                enabled: true,
+              },
+            ],
+          }),
+        ]),
+    });
+    renderList();
+
+    const dialog = await openEditor(user);
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      const put = calls.find((call) => call.method === "PUT");
+      expect(put?.body).toMatchObject({
+        fields: [
+          {
+            field_id: "fldA",
+            field_name: "费用类型",
+            source_key: "dept_sales",
+          },
+          // 名字读不到 → 该键不出现（不是空串）
+          {
+            field_id: "fldC",
+            source_key: "dept_new",
+            parent_field_id: null,
+          },
         ],
       });
     });

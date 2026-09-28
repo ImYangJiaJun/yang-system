@@ -1064,8 +1064,19 @@ describe("updateDatasourceTable", () => {
         datasourceId: 7,
         title: "新名称",
         fields: [
-          { fieldId: "fldA", sourceKey: "dept_sales", parentFieldId: null },
-          { fieldId: "fldB", sourceKey: "dept_sub", parentFieldId: "fldA" },
+          {
+            fieldId: "fldA",
+            fieldName: "费用类型",
+            sourceKey: "dept_sales",
+            parentFieldId: null,
+          },
+          {
+            fieldId: "fldB",
+            // 拿不到列名的绑定（投影里是 `Option`）不伪造一个：整个键不出现。
+            fieldName: null,
+            sourceKey: "dept_sub",
+            parentFieldId: "fldA",
+          },
         ],
       },
       deps,
@@ -1077,7 +1088,14 @@ describe("updateDatasourceTable", () => {
       datasource_id: 7,
       title: "新名称",
       fields: [
-        { field_id: "fldA", source_key: "dept_sales", parent_field_id: null },
+        // `field_name` 必须在：新增的绑定后端靠它把绑定与审批控件配对，
+        // 漏了这条绑定会被装配跳过（只 warn），某个控件静默少一个候选列。
+        {
+          field_id: "fldA",
+          field_name: "费用类型",
+          source_key: "dept_sales",
+          parent_field_id: null,
+        },
         { field_id: "fldB", source_key: "dept_sub", parent_field_id: "fldA" },
       ],
     });
@@ -1093,7 +1111,12 @@ describe("updateDatasourceTable", () => {
       {
         datasourceId: 7,
         fields: [
-          { fieldId: "fldA", sourceKey: "dept_sales", parentFieldId: null },
+          {
+            fieldId: "fldA",
+            fieldName: "费用类型",
+            sourceKey: "dept_sales",
+            parentFieldId: null,
+          },
         ],
       },
       deps,
@@ -1129,7 +1152,12 @@ describe("enabledBindingInputs", () => {
         ],
       }),
     ).toEqual([
-      { fieldId: "fldA", sourceKey: "dept_sales", parentFieldId: null },
+      {
+        fieldId: "fldA",
+        fieldName: "费用类型",
+        sourceKey: "dept_sales",
+        parentFieldId: null,
+      },
     ]);
   });
 });

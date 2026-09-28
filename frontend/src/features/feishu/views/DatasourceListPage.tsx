@@ -28,6 +28,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/shared/ui/dialog";
 
 import {
   enabledBindingInputs,
@@ -35,6 +42,7 @@ import {
   useDatasourceList,
   useFeishuActions,
   useTableWizardClient,
+  useXlsxImportClient,
 } from "../api";
 import type { CreatedTable, CreateTableSubmission } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -48,6 +56,7 @@ import {
   TokenPrecheckNotice,
   type TokenPrecheckMode,
 } from "../components/TokenPrecheckNotice";
+import { XlsxImportWizard } from "../components/XlsxImportWizard";
 import { useListQuery } from "../list-query";
 import type {
   DatasourceFieldBinding,
@@ -95,6 +104,13 @@ type ConfirmTarget = {
   title: string;
 };
 
+/// 建源的两种来源。「添加数据源」先问这一个，再开对应的向导。
+///
+/// 两条路的产出完全不同：多维表格那条要靠 Base Token 出网拉坐标与字段，xlsx 那条
+/// 是上传文件读表头。合成一个向导会把两套无关的字段与失败面塞在一起（设计 D12），
+/// 所以入口处二分，向导各自独立。
+type CreateKind = "bitable" | "xlsx";
+
 /// 预检状态。`result` 为 null 表示还在检——这一屏必须显示真实标识。
 ///
 /// `datasourceId` 与 `sourceKey` **两个都要**：前者是「哪一条数据源」（详情页的身份，
@@ -121,10 +137,13 @@ export default function DatasourceListPage() {
   const queryClient = useQueryClient();
   const actions = useFeishuActions();
   const wizardClient = useTableWizardClient();
+  const xlsxClient = useXlsxImportClient();
   const controller = useListQuery();
   const listQuery = useDatasourceList(controller.query);
 
-  const [wizardOpen, setWizardOpen] = useState(false);
+  /// 「添加数据源」先弹的二选一。`null` = 还没选（对话框停在那里）。
+  const [createKind, setCreateKind] = useState<CreateKind | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(
     null,
@@ -216,14 +235,22 @@ export default function DatasourceListPage() {
     });
   }
 
+  /// 「添加数据源」：先问「哪来的数据」，选完才开对应的向导。
   function openCreate() {
     setEditError(null);
     setActionError(null);
-    setWizardOpen(true);
+    setCreateKind(null);
+    setPickerOpen(true);
   }
 
   function closeWizard() {
-    setWizardOpen(false);
+    setCreateKind(null);
+  }
+
+  /// 二选一 → 对应向导。**这一下不发任何请求**：两套向导各自在自己的第 1 步才动网络。
+  function chooseCreateKind(kind: CreateKind) {
+    setPickerOpen(false);
+    setCreateKind(kind);
   }
 
   /// 列表项上的「编辑」入口：那一行握着名称与绑定，编辑态因此不必再查一次。
@@ -286,7 +313,7 @@ export default function DatasourceListPage() {
     created: CreatedTable,
     submission: CreateTableSubmission,
   ) {
-    setWizardOpen(false);
+    closeWizard();
     void (async () => {
       await refreshList();
       const first = created.credentials[0];
@@ -301,6 +328,36 @@ export default function DatasourceListPage() {
       } else {
         setActionNotice(
           `已创建「${submission.title}」，但它一条字段绑定都没有——回配置向导勾几列。`,
+        );
+      }
+    })();
+  }
+
+  /// xlsx 向导提交成功：收尾与上面那条**同一套**（关向导 → 回读 → 首条凭据预检），
+  /// 只有回执文案不同——这条源不出网、没有定时同步，下次更新走详情页的「重新导入」。
+  ///
+  /// 「已建好、导入失败」这一态**不经过这里**：那时向导自己不关（`onSubmitted`
+  /// 只在两个请求都成功之后才被调用），原地给出「数据源已建好（#N），但导入失败」，
+  /// 并允许换一批文件重试导入那一步。
+  function submitXlsxWizard(
+    created: CreatedTable,
+    submission: CreateTableSubmission,
+  ) {
+    closeWizard();
+    void (async () => {
+      setActionNotice(
+        `已创建「${submission.title}」（#${created.datasourceId}）并完成首次导入。` +
+          "这条数据源不会自动同步——以后要更新选项，到详情页点「重新导入」。",
+      );
+      await refreshList();
+      const first = created.credentials[0];
+      if (first !== undefined) {
+        await runPrecheck(
+          created.datasourceId,
+          first.sourceKey,
+          submission.title,
+          first.token,
+          "create",
         );
       }
     })();
@@ -495,11 +552,24 @@ export default function DatasourceListPage() {
         </>
       )}
 
+      <CreateSourcePicker
+        open={pickerOpen}
+        onPick={chooseCreateKind}
+        onCancel={() => setPickerOpen(false)}
+      />
+
       <DatasourceTableWizard
-        open={wizardOpen}
+        open={createKind === "bitable"}
         client={wizardClient}
         onCancel={closeWizard}
         onSubmitted={submitWizard}
+      />
+
+      <XlsxImportWizard
+        open={createKind === "xlsx"}
+        client={xlsxClient}
+        onCancel={closeWizard}
+        onSubmitted={submitXlsxWizard}
       />
 
       <DatasourceEditDialog
@@ -535,6 +605,75 @@ export default function DatasourceListPage() {
         onCancel={() => setConfirmTarget(null)}
       />
     </main>
+  );
+}
+
+/// 「添加数据源」的二选一。
+///
+/// **先问来源再开向导**，不是礼貌问题：两个向导的第 1 步问的是完全不同的东西
+/// （Base Token vs 上传文件），而**建好之后不能互相转换**——直接开多维表格那个，
+/// 等于替手上只有一份 xlsx 的人假定他有张多维表格，他会一路填到第 4 步才发现不对。
+function CreateSourcePicker({
+  open,
+  onPick,
+  onCancel,
+}: {
+  open: boolean;
+  onPick: (kind: CreateKind) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onCancel();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>添加数据源</DialogTitle>
+          <DialogDescription>
+            这份选项数据从哪来？两条路的配置、更新方式与失败面都不一样，建好之后不能互相转换。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SourceKindCard
+            title="多维表格"
+            detail="填 Base Token 拉取数据表与字段；选项由多维表格的自动化推送，或由服务端定时拉取。"
+            onPick={() => onPick("bitable")}
+          />
+          <SourceKindCard
+            title="文件导入"
+            detail="上传一批表头一致的 xlsx，读表头后勾列出选项；服务端不出网，更新靠重新上传文件。"
+            onPick={() => onPick("xlsx")}
+          />
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/// 二选一里的一张牌。整张是按钮（不是「标题 + 旁边一个链接」）：点哪儿都算选它。
+function SourceKindCard({
+  title,
+  detail,
+  onPick,
+}: {
+  title: string;
+  detail: string;
+  onPick: () => void;
+}) {
+  return (
+    <Button
+      variant="outline"
+      onClick={onPick}
+      className="h-full flex-col items-start gap-1 p-3 text-left whitespace-normal"
+    >
+      <span className="font-medium">{title}</span>
+      <span className="text-xs font-normal text-muted-foreground">
+        {detail}
+      </span>
+    </Button>
   );
 }
 

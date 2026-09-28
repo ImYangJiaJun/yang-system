@@ -359,4 +359,32 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
       vi.mocked(client.createTable).mock.calls[0]?.[0],
     );
   });
+
+  it("冻结后换了重试文件：探表头那组说明不再假装描述当前文件", async () => {
+    // 冻结之后唯一还能动的就是文件。换过之后，屏幕上是「要导入的文件：bank_2.xlsx」，
+    // 而探表头那组说明仍在说「服务端读到的文件：bank_1.xlsx」——两行并排摆着，
+    // 看上去像换文件没生效。那组说明是**首次解析**的结果，就必须这么说。
+    const client = stubClient({
+      importFiles: vi.fn().mockRejectedValue(new Error("文件表头不一致")),
+    });
+    await driveToStep4(client);
+    await userEvent.click(screen.getByRole("button", { name: "创建并导入" }));
+    await screen.findByRole("alert");
+
+    // 换文件之前：它说的就是当前文件，不需要任何限定
+    expect(
+      screen.getByText(/服务端读到的文件：bank_1\.xlsx/),
+    ).toBeInTheDocument();
+
+    await userEvent.upload(
+      screen.getByLabelText("重试导入用的 xlsx 文件"),
+      file("bank_2.xlsx"),
+    );
+
+    // 换文件之后：「要导入的文件」已是新名字，探表头那组改为**明说基于首次解析**，
+    // 且不再有那句指着旧文件的「服务端读到的文件」。
+    expect(screen.getByText(/要导入的文件：bank_2\.xlsx/)).toBeInTheDocument();
+    expect(screen.getByText(/基于首次解析/)).toBeInTheDocument();
+    expect(screen.queryByText(/服务端读到的文件/)).toBeNull();
+  });
 });

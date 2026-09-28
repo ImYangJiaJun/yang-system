@@ -551,6 +551,11 @@ export async function listOptions(
 /// 一条字段绑定在**写**方向的形状（后端 `FieldBindingInput`）。
 export type FieldBindingInput = {
   fieldId: string;
+  /// 列名。**审批外部选项装配按它配对**——名字为空的绑定会被
+  /// `approval_provision` 跳过（只 warn），于是某个控件静默少一个候选列。
+  /// 拿不到时为 `null`（xlsx 导入的绑定与多维表格的字段都有名字，但投影是
+  /// `Option`，缺了不能编）。
+  fieldName: string | null;
   sourceKey: string;
   parentFieldId: string | null;
 };
@@ -567,6 +572,7 @@ export function enabledBindingInputs(item: {
     .filter((binding) => binding.enabled)
     .map((binding) => ({
       fieldId: binding.fieldId,
+      fieldName: binding.fieldName,
       sourceKey: binding.sourceKey,
       parentFieldId: binding.parentFieldId,
     }));
@@ -592,11 +598,20 @@ export async function updateDatasourceTable(
 ): Promise<{ inserted: number; updated: number; disabled: number }> {
   const body: Record<string, unknown> = {
     datasource_id: input.datasourceId,
-    fields: input.fields.map((field) => ({
-      field_id: field.fieldId,
-      source_key: field.sourceKey,
-      parent_field_id: field.parentFieldId,
-    })),
+    fields: input.fields.map((field) => {
+      const entry: Record<string, unknown> = {
+        field_id: field.fieldId,
+        source_key: field.sourceKey,
+        parent_field_id: field.parentFieldId,
+      };
+      // **新增**绑定时后端才写这个列（已有绑定刻意不动它——列名与 `source_key`、
+      // 凭据同属身份信息，改了要重走配置），而留空会让审批装配跳过这条绑定。
+      // 与建源那条路同一个理由（见 `createDatasourceTable`）。后端是「非空才写」，
+      // 所以拿不到名字时**整个键不出现**（空串与缺键同义，但缺键更清楚）。
+      const name = field.fieldName?.trim() ?? "";
+      if (name !== "") entry.field_name = name;
+      return entry;
+    }),
   };
   if (input.title !== undefined) body.title = input.title;
 

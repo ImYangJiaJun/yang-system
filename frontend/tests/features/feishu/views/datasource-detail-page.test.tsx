@@ -1,12 +1,14 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
+import { formatUnixSeconds } from "@/features/feishu/types";
 import { renderTestApp } from "@test/helpers/render-app";
 
 import {
   bodiesOf,
+  countCalls,
   datasourceWire,
   jsonResponse,
   listPage,
@@ -609,5 +611,222 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
       calls.filter((call) => call.url.endsWith("/rotate-token")),
     ).toHaveLength(0);
     vi.unstubAllGlobals();
+  });
+});
+
+/// xlsx 源：它没有上游可探、也没有定时同步，因此详情页要说的是另一组事实——
+/// 「视图」那一格对它不适用、「最近导入」才是它的同步状态，另给一个**重新导入**入口。
+describe("飞书数据源详情页 · xlsx 源", () => {
+  const XLSX_ROW = datasourceWire({
+    id: DATASOURCE_ID,
+    title: "银行网点",
+    ingest_mode: "xlsx_import",
+    fields: [
+      {
+        field_id: "开户行行名",
+        field_name: "开户行行名",
+        source_key: "bank_branch",
+        parent_field_id: null,
+        enabled: true,
+      },
+    ],
+  });
+  /// `TWO_OPTIONS` 两条的 `updated_at` 不同（差旅费 1758000000、餐费 1758003600）：
+  /// 「最近导入」要的是**更新的那一条**，而不是数组里第一条。这个差额是下面那条用例
+  /// 全部鉴别力的来源——数组顺序与时间顺序刻意相反。
+  const IMPORT_AT = 1758003600;
+  const XLSX_FILE = () =>
+    new File(["PK\x03\x04"], "bank_2.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+
+  /// 选项端点：**按请求的排序与分页回答**。
+  ///
+  /// 「最近导入」那一发问的是「最新的一条」（按时间倒序、`page_size: 1`）。照搬全量数组
+  /// 会让它拿到数组第一条（旧的那条），于是这一格无论实现对不对都断言不出来——
+  /// 桩比真实服务端「宽容」，坏掉的消费方就会一直绿。
+  function pagedOptions(body: Record<string, unknown>) {
+    const [first] = Array.isArray(body.order_by) ? body.order_by : [];
+    const clause = first as { field?: string; direction?: string } | undefined;
+    const desc = clause?.field === "updated_at" && clause.direction === "Desc";
+    const rows = [...TWO_OPTIONS].sort((a, b) =>
+      desc
+        ? (b.updated_at as number) - (a.updated_at as number)
+        : (a.updated_at as number) - (b.updated_at as number),
+    );
+    return listPage(rows.slice(0, Number(body.page_size ?? 10)));
+  }
+
+  function renderXlsxDetail(options: Parameters<typeof stubFeishuApi>[0] = {}) {
+    const calls = stubDetail({
+      datasourceList: () => listPage([XLSX_ROW]),
+      optionList: pagedOptions,
+      ...options,
+    });
+    renderDetail();
+    return calls;
+  }
+
+  /// 「同步」面板里某一行的值：`<dt>` 的文案是行名，值在它旁边的 `<dd>`。
+  function syncRow(label: string): string | null {
+    const name = Array.from(document.querySelectorAll("dt")).find(
+      (node) => node.textContent === label,
+    );
+    return name?.parentElement?.querySelector("dd")?.textContent ?? null;
+  }
+
+  it("「视图」那一格不再说「—」：它属于多维表格，xlsx 源没有它", async () => {
+    renderXlsxDetail();
+
+    await screen.findByRole("heading", { name: "同步" });
+    expect(syncRow("视图 ID")).toBe("—（文件导入）");
+    // 坐标三项对这条源本来就不适用；视图那一格不能说成「缺一个坐标」
+    expect(syncRow("Base Token")).toBe("—");
+  });
+
+  it("「最近写库的导入」报的是最新那条选项的写入时间，且与用户怎么排下面那张表无关", async () => {
+    // 这一格答的是「上一次真的写进库是什么时候」：服务端**确实**记着「最近一次导入」
+    // （绑定行的 `last_push_at`，跳库那一轮也写），但那一列没有投影到前端，能读到的
+    // 只有选项行的写入时间——它只在真正写库的那一轮才有新值，所以措辞收窄到「写库」。
+    // 而它**不能**从上面那张表推：那张表由用户任意排序，点一次列头（升序）之后它第一页
+    // 装的就是最旧的十条，那时这一格会说成几小时前，而实际是刚刚。
+    const user = userEvent.setup();
+    const calls = renderXlsxDetail();
+
+    await screen.findByText("差旅费");
+    expect(syncRow("最近写库的导入")).toBe(formatUnixSeconds(IMPORT_AT));
+
+    // 把下面那张表排成升序之后再读同一格：值不能跟着变
+    await user.click(screen.getByRole("button", { name: "按最近写入排序" }));
+    await waitFor(() =>
+      expect(
+        bodiesOf(calls, OPTIONS_PATH).some(
+          (body) =>
+            (body?.order_by as Array<{ direction?: string }> | undefined)?.[0]
+              ?.direction === "Asc" && Number(body?.page_size) > 1,
+        ),
+      ).toBe(true),
+    );
+    expect(syncRow("最近写库的导入")).toBe(formatUnixSeconds(IMPORT_AT));
+
+    // 并且问的是「最新的一条」：倒序 + 只取一条
+    const latest = bodiesOf(calls, OPTIONS_PATH).find(
+      (body) => body?.page_size === 1,
+    );
+    expect(latest).toMatchObject({
+      source_key: "bank_branch",
+      page: 1,
+      order_by: [
+        { field: "updated_at", direction: "Desc" },
+        { field: "option_id", direction: "Asc" },
+      ],
+    });
+  });
+
+  it("不做体检：一个 health_check 请求都不发，体检区块整块不渲染", async () => {
+    // 设计 §5.11：xlsx 源不走体检。它的权限位就是 `feishu.datasource.write`（凡能建
+    // 数据源的身份都有它），所以只按权限位放行的话，每打开一次详情页都会自动发一次
+    // 必然失败的请求（后端对「没有坐标且不是 pull」的源回 40905），再把那个失败画成
+    // 「体检坏了」——而这一类源本来就没有体检这回事。
+    //
+    // 「这个端点确实会被调用」那一半由同文件「体检与凭据清单」组的 pull 源用例钉住
+    // （同一份 `tableConfig` 目录、同一条路由），所以这里不是在断言一个永不触发的调用。
+    const calls = renderXlsxDetail({ tableConfig: true });
+    await screen.findByText("差旅费");
+
+    expect(countCalls(calls, "/api/v1/feishu/datasources/table/health")).toBe(
+      0,
+    );
+    expect(screen.queryByRole("heading", { name: "体检" })).toBeNull();
+  });
+
+  it("不渲染「立即拉取」：后端会以「取数方式不是定时拉取」拒掉它", async () => {
+    renderXlsxDetail();
+
+    await screen.findByRole("heading", { name: "同步" });
+    // 目录里有 `pull_now`（同一个部署），但这条源拉不动——按钮点下去必然 40903。
+    expect(screen.queryByRole("button", { name: "立即拉取" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "重新导入" }),
+    ).toBeInTheDocument();
+  });
+
+  it("重新导入：只发导入请求、**不走建源**，成功后回读选项并给回执", async () => {
+    const user = userEvent.setup();
+    const calls = renderXlsxDetail({
+      xlsxImport: () => ({
+        datasource_id: DATASOURCE_ID,
+        elapsed_ms: 900,
+        files: [{ name: "bank_2.xlsx", rows_read: 42 }],
+        bindings: [
+          {
+            source_key: "bank_branch",
+            fetched: 42,
+            derived: 40,
+            disabled: 0,
+            unchanged: false,
+            skipped_reason: null,
+            anomalies: [],
+            truncated_details: false,
+          },
+        ],
+      }),
+    });
+    await screen.findByText("差旅费");
+    const optionCallsBefore = countCalls(calls, OPTIONS_PATH);
+
+    await user.click(await screen.findByRole("button", { name: "重新导入" }));
+    const dialog = await screen.findByRole("dialog");
+    // 绑定已经配好了：这一步只问文件（不问名称、也不勾列）
+    expect(within(dialog).queryByLabelText("名称")).toBeNull();
+    await user.upload(within(dialog).getByLabelText("xlsx 文件"), XLSX_FILE());
+    await user.click(within(dialog).getByRole("button", { name: "开始导入" }));
+
+    // 导入端点是这条源的 `/import`；**建源端点一个都没打**（那会撞 title 重名，
+    // 而且会把已经配好的绑定整份重写）。
+    await waitFor(() =>
+      expect(
+        calls.filter(
+          (call) =>
+            call.method === "POST" &&
+            call.url.endsWith(`/datasources/${DATASOURCE_ID}/import`),
+        ),
+      ).toHaveLength(1),
+    );
+    expect(
+      calls.filter((call) => call.url.endsWith("/datasources/table")),
+    ).toHaveLength(0);
+
+    // 回执：读了哪个文件、多少行，以及逐绑定的派生结果
+    expect(
+      await screen.findByText(/已重新导入「银行网点」/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/bank_2\.xlsx：42 行/)).toBeInTheDocument();
+    // 导入完成后这一页的选项必须回读（新数据已经在库里了）
+    await waitFor(() =>
+      expect(countCalls(calls, OPTIONS_PATH)).toBeGreaterThan(
+        optionCallsBefore,
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("导入被拒：后端原文留在对话框里，不关掉也不给回执", async () => {
+    const user = userEvent.setup();
+    renderXlsxDetail({
+      xlsxImport: () =>
+        jsonResponse({ code: 40907, message: "这条数据源已停用" }, 409),
+    });
+    await screen.findByText("差旅费");
+
+    await user.click(await screen.findByRole("button", { name: "重新导入" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.upload(within(dialog).getByLabelText("xlsx 文件"), XLSX_FILE());
+    await user.click(within(dialog).getByRole("button", { name: "开始导入" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "这条数据源已停用",
+    );
+    expect(screen.queryByText(/已重新导入/)).toBeNull();
   });
 });

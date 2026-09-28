@@ -58,6 +58,7 @@ import {
   DATASOURCE_OPERATION_IDS,
   DEFAULT_OPTION_ORDER_BY,
   TABLE_OPERATION_IDS,
+  XLSX_OPERATION_IDS,
   canWriteDatasources,
   checkDatasourceHealth,
   hasOperation,
@@ -66,12 +67,15 @@ import {
   useFeishuActions,
   useOptionList,
   usePullSchedule,
+  useXlsxImportClient,
 } from "../api";
+import type { XlsxImportReport } from "../api";
 import { CredentialChecklist } from "../components/CredentialChecklist";
 import { FieldBindingsTable } from "../components/FieldBindingsTable";
 import { DatasourceHealthPanel } from "../components/DatasourceHealthPanel";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
+import { XlsxReimportDialog } from "../components/XlsxReimportDialog";
 import { DEFAULT_PAGE_SIZE } from "../list-query";
 import type {
   DatasourceGap,
@@ -81,6 +85,7 @@ import type {
   OrderByClause,
 } from "../types";
 import {
+  asIngestMode,
   credentialItems,
   datasourceGap,
   describeNextPull,
@@ -208,6 +213,38 @@ function parseDatasourceId(raw: string | undefined): number | null {
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
+/// 一次重新导入的回执，压成一行。
+///
+/// 逐项都留着，因为它们各自对应一种**要做不同处置**的情形：`rowsRead` 是文件里读到
+/// 多少行（不是总行数）、`derived` 是派生出的选项数、`skippedReason` 非空表示这一轮
+/// **跳过了**这条绑定（它一行都没动，这是最容易被读成「导入成功」的一种）、异常行数
+/// 表示有几行没喂给飞书。少了任何一项，回执就只能说「跑完了」——而那句话回答不了
+/// 「跑对了吗」。
+function reimportReceipt(title: string, report: XlsxImportReport): string {
+  const files = report.files
+    .map((file) => `${file.name}：${file.rowsRead} 行`)
+    .join("、");
+  const bindings = report.bindings
+    .map((binding) => {
+      const parts = [
+        `${binding.sourceKey}：读到 ${binding.fetched} 行 → ${binding.derived} 个选项`,
+      ];
+      if (binding.disabled > 0) parts.push(`停用 ${binding.disabled} 条`);
+      if (binding.unchanged) parts.push("内容没变，本轮没写库");
+      if (binding.skippedReason !== null) {
+        parts.push(`这一轮跳过了它：${binding.skippedReason}`);
+      }
+      if (binding.anomalies.length > 0) {
+        parts.push(
+          `异常 ${binding.anomalies.length} 行${binding.truncatedDetails ? "（还有更多没列出来）" : ""}`,
+        );
+      }
+      return parts.join("，");
+    })
+    .join("；");
+  return `已重新导入「${title}」：${files}${bindings === "" ? "" : `。${bindings}`}`;
+}
+
 /// 「这条数据源没渲染出来」的那一块。五种原因分开说（判定在 `types.ts` 的
 /// `datasourceGap`，纯函数可测），这里只负责呈现。
 ///
@@ -294,8 +331,13 @@ export default function DatasourceDetailPage() {
   const { id: rawId } = useParams<{ id: string }>();
   const datasourceId = parseDatasourceId(rawId);
   const actions = useFeishuActions();
+  const xlsxClient = useXlsxImportClient();
   // 403 态的「重试」重拉的是**界面目录**：权限刚开通时目录还是上一份缓存。
   const catalog = useUiCatalog();
+  const [reimportOpen, setReimportOpen] = useState(false);
+  /// 重新导入的回执。它是**唯一**记录「这一轮导了什么、写了多少」的地方——
+  /// 服务端只回这一次，库里不留（导入不写表级时间戳）。
+  const [reimportNotice, setReimportNotice] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [orderBy, setOrderBy] = useState<OrderByClause[]>(
@@ -374,6 +416,53 @@ export default function DatasourceDetailPage() {
   });
   const items = optionsQuery.data?.items ?? [];
   const total = optionsQuery.data?.total ?? null;
+
+  /// xlsx 源的「最近一次**写库**的导入」。
+  ///
+  /// 措辞是收窄过的，别写成「最近一次导入」：服务端**确实**记着导入时刻——绑定行的
+  /// `last_push_at`，`import_xlsx::persist_binding_status` 在**每一轮**都写它（内容没变
+  /// 而跳库的那一轮也写，与选项行同事务）。只是那一列没进 `list_datasources` 的
+  /// `BINDING_ITEM_COLUMNS` / `FieldBindingItem`，前端读不到（要投影它得同时动后端列清单、
+  /// `feishu-projections.json`、`FIELD_BINDING_KEYS` 并重跑 `gen:contracts`——跨后端的
+  /// 契约变更，另开一条）。所以这一格只能退到**选项行自己的写入时间**，而它只在真正写库
+  /// 的那一轮才有新值。
+  ///
+  /// 于是「刚点完重新导入、回执说内容没变本轮没写库，这一格还是几天前」不再自相矛盾——
+  /// 它答的就是「上一次真的写进库是什么时候」。
+  ///
+  /// 它**必须另取一发**（`page_size: 1` + 按时间倒序），不能拿上面那张表来推：那张表由
+  /// 用户任意排序，点一次列头（升序）之后它第一页装的就是**最旧**的十条，把这一页的最大值
+  /// 当成最近一次写库，说的会是一句假话（显示成几小时前，而实际是刚刚）。只查一条，代价
+  /// 是一发几十字节的请求，换的是这一格**无论表格怎么排都是同一个答案**。
+  ///
+  /// 取不到（这个字段还没有选项）时给 `null`：那一格显示「—」，不编一个时间。
+  const isXlsxSource =
+    asIngestMode(datasource?.ingestMode ?? "") === "xlsx_import";
+  const latestImportedQuery = useOptionList(
+    {
+      sourceKey: optionSourceKey,
+      page: 1,
+      pageSize: 1,
+      orderBy: DEFAULT_OPTION_ORDER_BY,
+    },
+    { enabled: isXlsxSource && optionSourceKey !== "" },
+  );
+  const latestImportedAt =
+    latestImportedQuery.data?.items[0]?.updatedAt ?? null;
+
+  /// 重新导入成功：关对话框、给回执、**回读选项**（导入写的就是选项行，不回读的话
+  /// 屏幕上还是导入前那份数据，「最近导入」也还停在上一轮）。
+  function handleReimported(report: XlsxImportReport) {
+    setReimportOpen(false);
+    setReimportNotice(
+      reimportReceipt(
+        datasource?.title ?? `#${String(report.datasourceId)}`,
+        report,
+      ),
+    );
+    void optionsQuery.refetch();
+    void latestImportedQuery.refetch();
+  }
 
   // 落定：`lastPullAt` 变了就说明这一轮跑过了。**成功失败都算**（见 `pullLanded`）——
   // 失败的一轮同样写了 `last_pull_at`，拿它当判据是为了不让按钮在失败时一直转。
@@ -472,6 +561,12 @@ export default function DatasourceDetailPage() {
         <DatasourceGapNote gap={gap} onRetry={retryDatasource} />
       ) : null}
 
+      {reimportNotice !== null ? (
+        <p aria-live="polite" className={NEUTRAL_BAR}>
+          {reimportNotice}
+        </p>
+      ) : null}
+
       {gap === null && datasource !== null ? (
         <>
           <section className="space-y-3 rounded-xl border border-border bg-card p-5">
@@ -479,14 +574,26 @@ export default function DatasourceDetailPage() {
             <SyncPanel
               item={datasource}
               pull={pull}
+              latestImportedAt={latestImportedAt}
               onPullNow={() => void handlePullNow()}
+              onReimport={() => setReimportOpen(true)}
             />
           </section>
 
-          <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-            <h2 className="text-base font-medium">体检</h2>
-            <HealthSection datasource={datasource} />
-          </section>
+          {/*
+            xlsx 源**不走体检**（设计 §5.11）：它按 §4.1 不带多维表格坐标，而后端的
+            `health_check` 对「没有坐标且不是定时拉取」的源一律回 40905。那粒 Action 的
+            权限位就是 `feishu.datasource.write`（凡能建数据源的身份都有它），所以只要渲染
+            这个区块，每打开一次详情页就会自动发出一次必然失败的请求，再把那个失败画成
+            「体检坏了」——而这一类源本来就没有体检这回事。整块不渲染，而不是渲染一个
+            「不做体检」：后者仍在暗示这里本该有一次。
+          */}
+          {isXlsxSource ? null : (
+            <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+              <h2 className="text-base font-medium">体检</h2>
+              <HealthSection datasource={datasource} />
+            </section>
+          )}
 
           <section className="space-y-3 rounded-xl border border-border bg-card p-5">
             <h2 className="text-base font-medium">
@@ -631,6 +738,16 @@ export default function DatasourceDetailPage() {
           </>
         )}
       </section>
+
+      {datasource !== null && datasourceId !== null ? (
+        <XlsxReimportDialog
+          open={reimportOpen}
+          datasourceId={datasourceId}
+          client={xlsxClient}
+          onImported={handleReimported}
+          onCancel={() => setReimportOpen(false)}
+        />
+      ) : null}
     </main>
   );
 }
@@ -846,11 +963,16 @@ function OptionTable({
 function SyncPanel({
   item,
   pull,
+  latestImportedAt,
   onPullNow,
+  onReimport,
 }: {
   item: DatasourceItem;
   pull: PullTrigger;
+  /// xlsx 源的「最近导入」：本页能拿到的、最近的选项行写入时刻（见页面里的推导）。
+  latestImportedAt: number | null;
   onPullNow: () => void;
+  onReimport: () => void;
 }) {
   const catalog = useUiCatalog();
   const schedule = usePullSchedule();
@@ -860,6 +982,14 @@ function SyncPanel({
   const now = useNowSeconds();
   const nextPull = describeNextPull(schedule.data ?? null, now);
 
+  const mode = asIngestMode(item.ingestMode);
+  /// 「拉取」这条线上的东西（按钮与「下次自动拉取」）只对**定时拉取**源成立。
+  /// xlsx 与推送两类源服务端都不拉它们：给前者渲染一个「立即拉取」，点下去必然是
+  /// 40903（取数方式不是定时拉取）；渲染一个具体的「下次自动拉取」时刻，等于说它会被
+  /// 自动同步——那是假的。
+  const pulled = mode === "pull";
+  const isXlsx = mode === "xlsx_import";
+
   // 按钮只在**真的能触发**时才渲染：目录里有 `pull_now` 才说明服务端起了 worker。
   // 没有它却渲染一个按钮，点下去只会得到「UI 目录里找不到 Action」——那是把
   // 「这个部署没开导出站拉取」错报成一次功能故障。
@@ -867,8 +997,17 @@ function SyncPanel({
   // `id !== null` 也要一起要求：拉取按表级主键定位，缺它这个按钮点下去
   // 什么也发不出去（旧形状的行没有 `id`）。
   const canTrigger =
+    pulled &&
     item.id !== null &&
     hasOperation(catalog.data, DATASOURCE_OPERATION_IDS.pullNow) &&
+    canWriteDatasources(catalog.data);
+
+  // 「重新导入」与「立即拉取」同一粒写权限的要求，但走的是**另一个端点**
+  // （`feishu.datasource.import_xlsx`）：目录里没有它就不渲染，与拉取那条同一取舍。
+  const canReimport =
+    isXlsx &&
+    item.id !== null &&
+    hasOperation(catalog.data, XLSX_OPERATION_IDS.importFiles) &&
     canWriteDatasources(catalog.data);
 
   const rows: Array<[string, string]> = [
@@ -876,9 +1015,11 @@ function SyncPanel({
     ["Base Token", item.bitableBaseToken ?? "—"],
     ["数据表 ID", item.bitableTableId ?? "—"],
     // 视图可空 = **整表拉取**，不是「缺一个坐标」。写「—」会被读成后者。
+    // xlsx 源根本没有视图这一层（坐标三项对它都不适用），所以那一格明说原因——
+    // 光写「—」会被读成「这个坐标没配」。
     [
       "视图 ID",
-      item.bitableViewId ?? (item.ingestMode === "pull" ? "整表" : "—"),
+      item.bitableViewId ?? (pulled ? "整表" : isXlsx ? "—（文件导入）" : "—"),
     ],
     // 「取数列」这一行删掉了：一条表级行有 N 条绑定，每条各自取自己那一列，
     // 单一取数列在表级模型里**不存在**（它曾经恒显示「—」）。改报绑定数，
@@ -887,9 +1028,19 @@ function SyncPanel({
       "取数字段",
       `${item.fields.filter((binding) => binding.enabled).length} 个启用中（共 ${item.fields.length} 条绑定）`,
     ],
+    // 导入类源的「同步」其实只有一件事：上一次真的写进库是什么时候。**措辞收窄到
+    // 「写库」**——绑定行的 `last_push_at`（每一轮导入都写，含跳库那一轮）没有投影到
+    // 前端，这里读的是选项行的写入时间，见页面里 `latestImportedAt` 的推导。
+    ...(isXlsx
+      ? ([
+          ["最近写库的导入", formatUnixSeconds(latestImportedAt ?? 0)],
+        ] as Array<[string, string]>)
+      : []),
     ["最近成功同步", formatUnixSeconds(item.lastSuccessAt ?? 0)],
     ["最近尝试拉取", formatUnixSeconds(item.lastPullAt ?? 0)],
-    ["下次自动拉取", nextPull.label],
+    ...(pulled
+      ? ([["下次自动拉取", nextPull.label]] as Array<[string, string]>)
+      : []),
   ];
   // 「坐标不全」不再在这里补一行：顶部的 `syncHealth` 徽章已经会说这件事，
   // 而它的判据（Base Token + 数据表 ID）现在与表级模型一致。
@@ -911,6 +1062,17 @@ function SyncPanel({
             {pull.kind === "pending" ? "正在拉取…" : "立即拉取"}
           </Button>
         ) : null}
+        {canReimport ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className={canTrigger ? undefined : "ml-auto"}
+            onClick={onReimport}
+          >
+            <RefreshCw aria-hidden="true" />
+            重新导入
+          </Button>
+        ) : null}
       </div>
 
       <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
@@ -924,7 +1086,9 @@ function SyncPanel({
         ))}
       </dl>
 
-      <p className="text-xs text-muted-foreground">{nextPull.detail}</p>
+      {pulled ? (
+        <p className="text-xs text-muted-foreground">{nextPull.detail}</p>
+      ) : null}
 
       {pull.kind === "landed" ? (
         <p aria-live="polite" className={NEUTRAL_BAR}>
