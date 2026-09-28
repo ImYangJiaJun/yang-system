@@ -22,9 +22,14 @@ CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-{sheet_overrides}
+{sheet_overrides}{shared_strings_override}
 </Types>
 """
+
+SHARED_STRINGS_OVERRIDE = (
+    '<Override PartName="/xl/sharedStrings.xml" '
+    'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
+)
 
 ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -43,27 +48,65 @@ def column_letter(index: int) -> str:
     return letters
 
 
-def cell_xml(ref: str, value: object) -> str:
-    """一个单元格。字符串走 inlineStr，数值走 n——**这个区别正是 numeric_code 夹具的意义**。"""
-    if isinstance(value, str):
-        escaped = (
-            value.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
+def escape_text(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def text_element(value: str) -> str:
+    """`<t>` 元素。inlineStr 与 sharedStrings 两条路共用，保证两种形态内容一致。
+
+    首尾空白只有配上 xml:space="preserve" 才是**显著**的（OOXML 的规定）：否则消费者
+    可以合法地把它 trim 掉，`header_spaces` 就再也测不出 read_header 的 trim（空测试）。
+    真实 Excel 写带空格的值时也是这么写的。
+    """
+    preserve = ' xml:space="preserve"' if value != value.strip() else ""
+    return f"<t{preserve}>{escape_text(value)}</t>"
+
+
+class SharedStrings:
+    """`xl/sharedStrings.xml` 的字符串表：文本 → 下标，按**首次出现顺序**编号。
+
+    真实 Excel 导出默认走这个形态（单元格写成 `t="s"` + 一个指向本表的下标），
+    而不是 inlineStr。`bank_shared_strings.xlsx` 存在的意义就是让 calamine 的
+    `DataRef::SharedString` 这条臂有夹具可打——否则那条臂在 15 个夹具上零覆盖。
+    """
+
+    def __init__(self) -> None:
+        self._index: dict[str, int] = {}
+        self._count = 0
+
+    def index(self, value: str) -> int:
+        self._count += 1
+        if value not in self._index:
+            self._index[value] = len(self._index)
+        return self._index[value]
+
+    def to_xml(self) -> str:
+        items = "".join(f"<si>{text_element(value)}</si>" for value in self._index)
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            f'count="{self._count}" uniqueCount="{len(self._index)}">{items}</sst>'
         )
-        # 首尾空白只有配上 xml:space="preserve" 才是**显著**的（OOXML 的规定）：否则消费者
-        # 可以合法地把它 trim 掉，`header_spaces` 就再也测不出 read_header 的 trim（空测试）。
-        # 真实 Excel 写带空格的值时也是这么写的。
-        preserve = ' xml:space="preserve"' if value != value.strip() else ""
-        return f'<c r="{ref}" t="inlineStr"><is><t{preserve}>{escaped}</t></is></c>'
+
+
+def cell_xml(ref: str, value: object, strings: SharedStrings | None = None) -> str:
+    """一个单元格。字符串走 inlineStr（或 sharedStrings），数值走 n。
+
+    **这个区别正是 numeric_code 夹具的意义**——数值永远不进字符串表。
+    """
+    if isinstance(value, str):
+        if strings is not None:
+            return f'<c r="{ref}" t="s"><v>{strings.index(value)}</v></c>'
+        return f'<c r="{ref}" t="inlineStr"><is>{text_element(value)}</is></c>'
     return f'<c r="{ref}" t="n"><v>{value}</v></c>'
 
 
-def sheet_xml(rows: list[list[object]]) -> str:
+def sheet_xml(rows: list[list[object]], strings: SharedStrings | None = None) -> str:
     lines = []
     for row_index, row in enumerate(rows, start=1):
         cells = "".join(
-            cell_xml(f"{column_letter(col_index)}{row_index}", value)
+            cell_xml(f"{column_letter(col_index)}{row_index}", value, strings)
             for col_index, value in enumerate(row)
             if value is not None
         )
@@ -87,8 +130,20 @@ def zip_entry(name: str) -> zipfile.ZipInfo:
     return info
 
 
-def write_xlsx(path: Path, sheets: list[tuple[str, list[list[object]]]]) -> None:
-    """写一个 xlsx。sheets 是 [(sheet 名, 行数据)]，至少一张。"""
+def write_xlsx(
+    path: Path,
+    sheets: list[tuple[str, list[list[object]]]],
+    shared_strings: bool = False,
+) -> None:
+    """写一个 xlsx。sheets 是 [(sheet 名, 行数据)]，至少一张。
+
+    `shared_strings=True` 时文本走 `xl/sharedStrings.xml`（单元格是 `t="s"` + 下标），
+    也就是真实 Excel 导出的默认形态；数值仍走 `t="n"`，不进字符串表。
+    """
+    strings = SharedStrings() if shared_strings else None
+    # 字符串表是被 sheet 的单元格填出来的，所以 sheet XML 必须先渲染
+    sheet_docs = [sheet_xml(rows, strings) for _, rows in sheets]
+
     overrides = "".join(
         f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
@@ -104,6 +159,14 @@ def write_xlsx(path: Path, sheets: list[tuple[str, list[list[object]]]]) -> None
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         f"<sheets>{sheet_entries}</sheets></workbook>"
     )
+    # 字符串表的关系**排在 sheet 之后**（rId 从 len(sheets)+1 起），不能挤掉 sheet 的 rId1..N
+    shared_rel = (
+        f'<Relationship Id="rId{len(sheets) + 1}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" '
+        'Target="sharedStrings.xml"/>'
+        if strings is not None
+        else ""
+    )
     workbook_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -113,19 +176,26 @@ def write_xlsx(path: Path, sheets: list[tuple[str, list[list[object]]]]) -> None
             f'Target="worksheets/sheet{i}.xml"/>'
             for i in range(1, len(sheets) + 1)
         )
+        + shared_rel
         + "</Relationships>"
     )
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
-            zip_entry("[Content_Types].xml"), CONTENT_TYPES.format(sheet_overrides=overrides)
+            zip_entry("[Content_Types].xml"),
+            CONTENT_TYPES.format(
+                sheet_overrides=overrides,
+                shared_strings_override=SHARED_STRINGS_OVERRIDE if strings is not None else "",
+            ),
         )
         archive.writestr(zip_entry("_rels/.rels"), ROOT_RELS)
         archive.writestr(zip_entry("xl/workbook.xml"), workbook)
         archive.writestr(zip_entry("xl/_rels/workbook.xml.rels"), workbook_rels)
-        for i, (_, rows) in enumerate(sheets, start=1):
-            archive.writestr(zip_entry(f"xl/worksheets/sheet{i}.xml"), sheet_xml(rows))
+        for i, doc in enumerate(sheet_docs, start=1):
+            archive.writestr(zip_entry(f"xl/worksheets/sheet{i}.xml"), doc)
+        if strings is not None:
+            archive.writestr(zip_entry("xl/sharedStrings.xml"), strings.to_xml())
 
 
 # 银行形状的表头——与设计 §4.6 的真实文件同列同名（但只放几行，夹具要小）
@@ -156,6 +226,30 @@ def build() -> None:
 
     write_xlsx(OUT_DIR / "bank_1.xlsx", [("境内银行网点信息管理", bank(rows=common_rows))])
     write_xlsx(OUT_DIR / "bank_2.xlsx", [("境内银行网点信息管理", bank(rows=tail_rows))])
+
+    # 与 bank_1 **同一份内容**，只是文本走 `xl/sharedStrings.xml`（`t="s"` + 下标）——
+    # 真实 Excel 导出的默认形态。没有它，`cell_text` 的 `DataRef::SharedString` 臂零覆盖：
+    # 其余 14 个夹具全是 inlineStr，那条臂写错（比如返回空串）没有任何测试会红。
+    # 注意：空串也要照常进表（`<si><t></t></si>`），否则下标会整体错位——
+    # calamine 对 `<si><t></t></si>` 返回 `Some("")` 并照样压栈，下标与这里一致。
+    write_xlsx(
+        OUT_DIR / "bank_shared_strings.xlsx",
+        [("境内银行网点信息管理", bank(rows=common_rows))],
+        shared_strings=True,
+    )
+
+    # 与 bank_1 的列**集合相同、顺序不同**：`联行号` 挪到第 2 列、`序号` 挪到第 3 列。
+    # 表头名一个字不改，数据行跟着列序走。用来钉住 require_consistent_headers
+    # 「按名取值、不按位置」——没有它，把实现改成按序列比对也照样绿。
+    reordered = [
+        "开户行行名", "联行号", "序号", "归属银行",
+        "归属银行编码", "开户行地址", "地区名称", "地区编码",
+    ]
+    reordered_row = [
+        "中国工商银行成都春熙路支行", "102651000011", 1, "中国工商银行",
+        "中国工商银行", "某某路 1 号", "", "510100",
+    ]
+    write_xlsx(OUT_DIR / "header_reordered.xlsx", [("Sheet1", [reordered, reordered_row])])
 
     # 缺列：少 `联行号`
     missing = ["序号", "开户行行名", "归属银行", "归属银行编码", "开户行地址", "地区名称", "地区编码"]

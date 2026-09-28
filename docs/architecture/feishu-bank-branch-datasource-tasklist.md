@@ -121,6 +121,8 @@ pnpm --dir frontend test
   | `header_duplicate.xlsx` | 重名拒 | 表头有两个 `联行号` |
   | `header_blank.xlsx` | 空列名跳过 | 第 3 列表头为空串 |
   | `header_spaces.xlsx` | 表头 trim | 表头带首尾空格（`" 序号 "`），其余正常 |
+  | `bank_shared_strings.xlsx` | **sharedStrings 形态**（Task 6 补） | 走 `t="s"` + `xl/sharedStrings.xml`，内容与 `bank_1` **等值**。**这是真实 Excel 导出的默认形态**——不加它，`DataRef::SharedString` 那个臂零覆盖 |
+  | `header_reordered.xlsx` | **列序无关**（Task 6 补） | 与 `bank_1` **列集合相同、顺序不同**。不加它，「按名取值不按位置」这条性质就只是一句没人验的声明 |
   | `header_long.xlsx` | 超长拒 | 一个 65 字符的列名 |
   | `column_all_blank.xlsx` | 整列为空 | `联行号` 列全部为空（配 `column_code_empty` 名称，供 Task 10 的守卫测试） |
   | `numeric_code.xlsx` | 数值不推断 | `联行号` 是数值单元格（非文本） |
@@ -369,8 +371,15 @@ if __name__ == "__main__":
 python scripts/make_xlsx_fixtures.py
 ```
 
-预期：打印 **16 行**——15 个夹具（14 个 `.xlsx` + `not_a_zip.bin`）**加上 `README.md`**
+预期：打印 **18 行**——17 个夹具（16 个 `.xlsx` + `not_a_zip.bin`）**加上 `README.md`**
 （脚本遍历的是整个目录，README 也在里面）。无异常。
+
+> 其中 `bank_shared_strings.xlsx` 与 `header_reordered.xlsx` 是 Task 6 补的（见夹具表）。
+> 脚本要为前者支持 **sharedStrings 形态**：多写 `xl/sharedStrings.xml`、两处关系登记、
+> 单元格用 `t="s"` + `<v>下标</v>`。两个坑：**字符串表必须先于 sheet 渲染**
+> （表是被单元格填出来的）；**空串也要进表**（去 calamine 源码确认 `read_string`
+> 对 `<si><t></t></si>` 返回 `Some("")`，只有无 `<t>` 的 `<si/>` 才不压栈），
+> 否则下标整体错位、表头会指向错的文本。新 rel 的 `rId` 取 `len(sheets)+1`，别挤占 sheet 的 `rId1..N`。
 
 > 脚本用**固定 `date_time`** 写 zip 条目，所以重跑**逐字节可复现**：
 > 连跑两次后 `git status --short tests/fixtures/xlsx/` 必须为空。
@@ -1190,9 +1199,6 @@ git commit -m "perf(feishu): 出站端点复合索引 idx_feishu_option_pick"
         assert_eq!(header.columns[0].0, "序号", "表头里的空白要被 trim 掉");
         assert_eq!(header.columns[1].0, "开户行行名");
     }
-```
-
-
 
     #[test]
     fn reads_only_the_first_sheet_but_reports_all_names() {
@@ -1248,6 +1254,17 @@ cargo test --lib --locked feishu::domain::xlsx
 - [ ] **Step 3: 实现**
 
 在 `xlsx.rs` 里实现。要点逐条：
+
+> ⚠️ **下面这段代码块里的 calamine API 是错的**（实施时实测，三处）：
+> ① `calamine::XlsxCell` **不存在**——`next_cell()` 返回的是 `Cell<DataRef<'a>>`；
+> ② 没有 `cell.value()`，只有 **`get_value()`**；
+> ③ **`DataRef` 比 `Data` 多一个 `SharedString(&str)` 变体**，照抄下面的 `Data` match
+> **会因不完备而编译不过**——而那个多出来的臂**恰好是真实 Excel 导出的主路径**
+> （默认走 `sharedStrings.xml`，`t="s"`），所以它必须被夹具覆盖到，不能只是「为编译而写」。
+>
+> **以仓库里的 `src/addon/feishu/domain/xlsx.rs` 成品为准**；下面只表达意图与不变量
+> （R7 不加 trim 补偿、数值走 `to_string()` 不走 `{:?}`）。
+
 
 ```rust
 use calamine::{Data, Reader as _, Xlsx};
@@ -1388,7 +1405,8 @@ impl std::fmt::Display for XlsxError {
 cargo test --lib --locked feishu::domain::xlsx
 ```
 
-预期：全部 PASS（9 条表头测试 + Task 2 的 2 条嗅探测试）。
+预期：全部 PASS（**11 条**表头测试 + Task 2 的 2 条嗅探测试 = 13 条）。
+其中两条是补测加的：sharedStrings 与 inlineStr 解析结果**相等**、列重排也能通过一致性校验。
 
 - [ ] **Step 5: 提交**
 
