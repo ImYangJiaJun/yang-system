@@ -72,10 +72,10 @@ impl CreateTableInput {
             ));
         }
         if let Some(mode) = self.ingest_mode.as_deref() {
-            if !matches!(mode, "push" | "pull") {
+            if !matches!(mode, "push" | "pull" | "xlsx_import") {
                 return Err(BaseError::ParamInvalid(
                     "ingest_mode".to_string(),
-                    "取数方式只能是 push 或 pull".to_string(),
+                    "取数方式只能是 push、pull 或 xlsx_import".to_string(),
                 ));
             }
         }
@@ -371,6 +371,18 @@ mod tests {
         let mut input = two_level();
         input.ingest_mode = Some("telepathy".to_string());
         assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_the_xlsx_import_mode() {
+        // 第三种取数方式：文件导入。白名单是手写的 matches!，漏一处就是
+        // 「向导建得出来、编辑保存不了」——所以 create 与 update 两处都要有这条断言。
+        let mut input = two_level();
+        input.ingest_mode = Some("xlsx_import".to_string());
+        assert!(
+            input.validate().is_ok(),
+            "xlsx_import 必须被 create 路径接受"
+        );
     }
 
     #[test]

@@ -48,7 +48,11 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .title("取数方式")
                 .require(true)
                 .varchar(16)
-                .options([("push", "手工推送"), ("pull", "定时拉取")])
+                .options([
+                    ("push", "手工推送"),
+                    ("pull", "定时拉取"),
+                    ("xlsx_import", "文件导入"),
+                ])
                 .default("push")
                 .filterable(true),
             // --- 多维表格坐标：三个路径段 ---

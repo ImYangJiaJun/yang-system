@@ -124,7 +124,7 @@
         "enforced_by": "backend"
       },
       "ingest_mode": {
-        "values": ["push", "pull"],
+        "values": ["push", "pull", "xlsx_import"],
         "enforced_by": "backend"
       }
     },

@@ -60,7 +60,7 @@ export function statusLabel(status: DatasourceStatus): string {
 ///
 /// 两种方式的**失败面完全不同**：`push` 出问题看不出任何服务端状态（没有那次请求），
 /// `pull` 才有 `lastSuccessAt` / `consecutiveFailures` 可看。表单里切换它是有后果的。
-export type IngestMode = "push" | "pull";
+export type IngestMode = "push" | "pull" | "xlsx_import";
 
 export const INGEST_MODE_OPTIONS: ReadonlyArray<{
   value: IngestMode;
@@ -76,6 +76,11 @@ export const INGEST_MODE_OPTIONS: ReadonlyArray<{
     value: "pull",
     label: "定时拉取",
     hint: "服务端按配置的间隔主动拉取，需要先配好应用凭证与坐标。",
+  },
+  {
+    value: "xlsx_import",
+    label: "文件导入",
+    hint: "由人上传 xlsx 文件导入选项；服务端不出网，也没有定时同步。",
   },
 ];
 

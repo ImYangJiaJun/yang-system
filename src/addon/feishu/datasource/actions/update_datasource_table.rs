@@ -131,10 +131,10 @@ impl UpdateTableInput {
             }
         }
         if let Some(mode) = self.ingest_mode.as_deref() {
-            if !matches!(mode, "push" | "pull") {
+            if !matches!(mode, "push" | "pull" | "xlsx_import") {
                 return Err(BaseError::ParamInvalid(
                     "ingest_mode".to_string(),
-                    "取数方式只能是 push 或 pull".to_string(),
+                    "取数方式只能是 push、pull 或 xlsx_import".to_string(),
                 ));
             }
         }
@@ -433,6 +433,16 @@ mod tests {
         assert!(
             input.validate().is_err(),
             "取消勾选全部要走删除，不是更新成空"
+        );
+    }
+
+    #[test]
+    fn accepts_the_xlsx_import_mode() {
+        let mut input = input_with(vec![field("fldA", "a", None)]);
+        input.ingest_mode = Some("xlsx_import".to_string());
+        assert!(
+            input.validate().is_ok(),
+            "xlsx_import 必须被 update 路径接受——两处白名单是两份拷贝"
         );
     }
 }

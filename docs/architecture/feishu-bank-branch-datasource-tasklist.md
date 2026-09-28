@@ -842,11 +842,20 @@ cargo test --lib --locked the_enum_domains_in_the_contract_match_the_table_decla
 cargo test --lib --locked feishu
 pnpm --dir frontend test -- features/feishu/api.test.ts
 python scripts/dump_openapi.py
+pnpm --dir frontend format
 ```
 
 预期：全 PASS。`dump_openapi.py` 会重生成
 `frontend/contracts/openapi.json` 与 `frontend/src/engine/contracts/api-types.ts`
 （**两个生成物禁止手改**，一起提交）。
+
+> ⚠️ **那条 `pnpm format` 不是可选的。** `openapi-typescript` 产的是 **4 空格缩进**，
+> 而入库件是 **2 空格**（prettier 格式），脚本自己**不跑 prettier**。
+> 所以裸跑 `dump_openapi.py` 会产生**上万行纯缩进 churn**、并让 `pnpm format:check` 变红。
+> **先 `dump_openapi.py` 再 `pnpm format`**，然后 `git diff --stat` 看一眼——
+> 如果生成物实际没变（本次枚举改动就属这种，`ingest_mode` 在 OpenAPI 里是
+> `Option<String>`、取值域只活在运行时表 DSL），prettier 之后的 diff 会是**空的**，
+> 那就**不要提交这两个生成物**。
 
 > **`dump_openapi.py` 不会更新 `feishu-projections.json`**——那个是手工维护的，
 > 已在 Step 4 改过。别指望脚本替你改。
@@ -3427,12 +3436,18 @@ Task 9 与 Task 10 加了两个新 Action，OpenAPI 快照与 TS 类型**必须�
 
 ```bash
 python scripts/dump_openapi.py
+pnpm --dir frontend format
 ```
 
 预期：`frontend/contracts/openapi.json` 与
 `frontend/src/engine/contracts/api-types.ts` 出现
 `probe_xlsx_headers` 与 `import_xlsx` 两条。
 **这两个文件是生成物，禁止手改**——一起提交。
+
+> ⚠️ **`pnpm format` 不是可选的**（Task 4 实测踩过）：`openapi-typescript` 产 4 空格、
+> 入库件是 2 空格，脚本不跑 prettier。**先 `dump_openapi.py` 再 `pnpm format`**，
+> 否则是上万行纯缩进 churn + `format:check` 变红。
+> 这一次生成物**会真的变**（两个新 Action 要投影进去），所以要提交。
 
 > 顺带确认它们带上了 `request_media_type: "multipart"` 与 `multipart` 限制契约
 > （`SchemaField` 与 `appendMultipart` 靠这两项工作）。
