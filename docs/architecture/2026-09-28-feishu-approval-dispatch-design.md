@@ -153,9 +153,19 @@ Content-Type: application/json
 | `approval_code` | Str | 目标审批定义 |
 | `applicant_field` | Str | 申请人员字段的 **field_id** |
 | `backfill_field` | Str | 回填字段的 **field_id** |
+| `base_timezone` | Str | Base 时区（IANA 名），日期控件折 RFC3339 用 |
 | `enabled` | Radio | 启用/停用 |
 | `form_snapshot` | Text | `approvals/get` 返回的控件结构快照（JSON） |
 | `form_snapshot_at` | Datetime | 快照时间 |
+
+**唯一索引 `(base_token, table_id)`**（实现期补）。理由不是「防重复」而是**并发首调**：
+两个工作流同时点第一次按钮时会各建一份配置，此后每次派发读到哪一份都不确定（两份
+的映射可能不同）。有唯一索引时后到的那次插入直接失败，被 `dispatch` 端点折成
+「配置已存在」，语义正确且不需要额外加锁。
+
+**`base_token`/`table_id` 同时是白名单**（§9.1）：派发端点强制校验坐标落在**已配置且
+启用**的行内。管理 Token 是全局单值、不按数据源绑定，光靠它保密等于把「以任意用户
+身份创建审批实例」的能力开放到所有协作表格上。
 
 **为什么是独立表而不是复用 `feishu_datasource`**：后者是「外部选项的数据源」，语义是「这个字段的可选值从哪里来」（`docs/architecture/feishu-option-ingest.md:16-18`）。本表是「这张表的这批行要创建什么审批」，两者不共享生命周期，也不共享读写路径。复用会迫使两套完全不同的语义挤在一张表里。
 
@@ -168,11 +178,17 @@ Content-Type: application/json
 | `widget_id` | Str | 审批控件的 id（来自 `approvals/get`） |
 | `widget_type` | Str | 控件类型（快照，用于选转换器） |
 | `bitable_field` | Str | 多维表格字段的 **field_id** |
+| `bitable_field_name` | Str | 建配置当时的列名，**仅供控制台展示** |
 | `required` | Bool | 快照的必填标志 |
 | `converter` | Str | 转换器标识（见 §6.2） |
 | `option_map` | Text | 选项映射（单选/多选的选项名 ↔ 选项 value），JSON |
 
 **用 `field_id` 而不是字段名作 key**：用户在多维表格里改列名会静默失配（现有 `feishu_datasource_field` 表同时存 `field_id` 与 `field_name`，`src/addon/feishu/datasource/domain/field_table.rs:13-84`，本设计对齐该做法——存 id 作 key，另存 name 仅供控制台展示）。
+
+> **但「存 id」只适用于本服务的库，不适用于飞书接口的入参。** 飞书**记录类**接口一律
+> 按**列名**定位字段（见 §6.5），所以每次调用都要在边界上把 id 折成当前列名。这条
+> 是实测踩出来的——初稿只在**读**侧做了折算（`rekey_cells_by_field_id`），**写**侧
+> 漏了，于是回写带着 `fld…` 去打一个按名匹配的接口。
 
 ### 5.2 处理状态表 `feishu_approval_task`
 
@@ -250,15 +266,48 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 
 ## 六、处理流程
 
-### 6.1 前置校验（配置保存时，一次）
+### 6.1 前置校验：首次派发时自动建配置
 
-保存配置时调一次 `GET /open-apis/approval/v4/approvals/:approval_code`（`docs/reference/feishu/approval/server-docs/approval-v4/approval/get.md`），把控件结构存进 `form_snapshot`。同时做三项校验：
+**默认链路不需要人工配映射。** 使用方的多维表格列名与审批控件名**严格对应**，所以
+配置改由**首次派发时自动创建**：端点发现 `(base_token, table_id)` 没有配置行时，就
+取定义、取列、**按名匹配**、校验，全过才在同一事务里写入配置 + 映射。
 
-1. **`is_external` 必须为 `false`**。三方定义不能调 `instances create`。
-2. **不含 API 不支持的控件**。清单见 `~/.claude/skills/lark-approval/references/lark-approval-instance-form-control-parameters.md:14-30`：`text`（说明）、`mutableGroup`（引用多维表格）、`account`（收款账户）、`serialNumber`（流水号）、`tripGroup`（出差控件组）、`apaascorehrOnboardingGroup`、`apaascorehrRegularateGroup`、`remedyGroupV2`、`apaascorehrJobAdjustGroup`、`apaascorehrOffboardingGroup`。
-3. **映射完整性**：每个必填控件的 `id` 都有映射项。
+调用方为此必须在请求体里给出三条**只有它知道**的信息：`approval_code`（提哪个定义）、
+`applicant_field`（谁当发起人）、`backfill_field`（编号写回哪列）。三条**要么全给、
+要么全不给**——半套的后果是「配置建了但没有回填列」，而校验失败正是要写进回填列的
+（§6.1.2），没有它错误就只剩 HTTP 响应，页面按钮拿不到。
 
-> 注意：`is_external` 字段名与控件不支持清单的**确切判据**（「定义里存在就报错」还是「传了才报错」）在本地文档中无明文，§11 限制 6 列为待实测。
+#### 6.1.1 按名匹配（`approval_match`）
+
+| 规则 | 判据 |
+|---|---|
+| 控件 ↔ 列 | 控件 `name` 与列 `field_name` 都 `trim` 后**精确相等** |
+| 一列只服务一个控件 | 按 `field_id` 判重（用列名当键会漏掉「两条控件指向被改过名的同一列」） |
+| 同名多列 | 报错，不挑一列——飞书按名字取值会取到不确定的那一列 |
+| 固定选项 | 控件 `option[].text` ↔ 列 `property.options[].name`，取 `option[].value` |
+
+两个关键坐标（申请人、回填列）接受 **`field_id` 或列名**：请求体由人在工作流的
+`raw_body` 里写死，两种形态都自然。**优先按 id 匹配**（id 稳定，列名可改可重名），
+但**存储一律用 id**。
+
+#### 6.1.2 三项校验与「一次报全」
+
+1. **三方定义**：`approvals get` **不返回 `is_external`**（实测，该字段只在
+   `approvals/search` 里）。判据改为「**`approvals get` 拿不到 `form`**」——三方定义
+   走 `external_approvals` 另一个资源，取不到表单。
+2. **不含 API 不支持的控件**：`text`、`mutableGroup`、`serialNumber`、各类
+   `*Group`（见 `lark-approval-instance-form-control-parameters.md:14-30`）。
+3. **不含需人工准备值的控件**：`address`（地理库 id）、`connect`（已存在的
+   `instance_code`）、`attachment*` / `image*` / `document`（file code）。
+   **必填的拦下、可选的放行**——留空提交对可选控件是合法的。
+
+**失败原因一次返回全部**，不是遇到第一个就停：改一条跑一轮会让使用方来回多轮。
+原因落到两个地方——HTTP 响应（工作流日志）+ **回填列**（表格里的人），后者的文案带
+`[配置]` 前缀，与 `classify_failure` 写的**数据类**错误区分开（同一个单元格里会同时
+出现「缺必填列」与「配置校验不过」，处置完全不同）。
+
+任一校验不过时**一个字节都不落库**：半套配置（有配置没映射）会让之后每次派发都卡在
+「该配置没有字段映射」，而配置行看着是好的。
 
 ### 6.2 类型转换
 
@@ -287,7 +336,40 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 - **`date`**：多维表格日期是**毫秒时间戳**，需按 Base 时区转 RFC3339。**Base 时区必须作为配置项显式指定**，不要猜测（多维表格不带时区信息，审批 date 控件要带偏移量）。
 - **`option`**：单选/多选需要在配置时把**多维表格的选项文案**映射到**审批控件的选项 value**（`option_map` 列）。两者不一定同名，必须显式配。
 
-> `address`、`connect`、`attachmentV2`/`image` 这几类需要用户直接提供 token/id（`lark-approval-instance-value-sourcing.md:88-97`），本设计**不自动准备**——若目标审批定义含这类控件，配置保存时应明确报错而非静默传空。
+#### 6.2.1 `option` 是**多态字段**（实测）
+
+同一个 `option` 键在不同控件上分别是**缺失 / `null` / 数组 / 对象**：
+
+| 形态 | 实测出现在 | 语义 |
+|---|---|---|
+| 缺失 | `input` | 该控件没有选项概念 |
+| `null` | `input`（另一个控件） | 同上，但**键存在** |
+| `array` | `radioV2`（固定选项） | 固定选项，`text`/`value` 可派生 |
+| `object` | `fieldList` / `connect` | **不是选项**，是该控件的配置 |
+
+所以判别器是**两维**的：`type` 决定控件语义，`option` 的**类型**决定值能否派生。
+用 `Option<WidgetOptions>`（untagged 枚举外面套一层 `Option`）表达——这是唯一**不依赖
+变体声明顺序**的写法：untagged 的单元变体会抢在数组与对象之前匹配，把后面两个 arm
+全挡死（实测踩过）。
+
+另外实测 `externalData.key` 是**空字符串**，不能当取数源；链接态要认的是
+`externalDataLinkage == true`（且 `rename = "externalData"` 不能省——字段名是驼峰，
+漏了它该位恒为 `None`，症状是「链接态被当成非链接」）。
+
+#### 6.2.2 需要人工准备值的控件
+
+`address`、`connect`、`attachmentV2`/`image` 这几类需要用户直接提供 token/id
+（`lark-approval-instance-value-sourcing.md:88-97`），本设计**不自动准备**——配置期就
+明确报错而非静默传空（静默传空会让飞书收到一个看似合法的空控件，错误信息指向飞书
+而不是指向配置）。
+
+#### 6.2.3 空值与「不传」
+
+- **空**有多种形态：`null`、空串、空数组、以及 `{"text": ""}` 这类只有空内容的
+  多态单元格。最后一种最容易漏——只看 `map.is_empty()` 会把它判成有值，于是必填
+  校验放行、飞书侧报 `1390001`，错误指向飞书而不是指向这份数据。
+- **可选控件在空值时整个 JSON 都不能传**（官方 FAQ `approval-related-faqs.md:86-89`）：
+  一旦传入控件 JSON，就必须设 `value`，否则接口报错。
 
 ### 6.3 等待语义：必填缺失不写字段
 
@@ -320,6 +402,33 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 ### 6.5 回写
 
 按 §7.1 的分批规则 `POST .../records/batch_update` 写回填字段。
+
+**`records[].fields` 按「列名」作键，不是 `field_id`。**《数据结构概述》：
+「`fields` 字段为 map 型，由**字段名称**和其具体内容的键值对组成」，`key` 一栏写的就是
+「多维表格数据表中的字段名称」；官方每个写示例（`batch_create` / `batch_update` /
+`update`）也都是列名。
+
+而本服务的配置里存的是 `field_id`（§5.1，刻意如此——改列名不该让配置失效）。两条轴
+不同源，所以**每次派发都要在边界上折一次**，与读侧的
+`bitable::rekey_cells_by_field_id` 正好是同一件事的两个方向：
+
+```
+配置行 backfill_field = "fldSerial"     ← 存 id
+        ↓ bitable::resolve_field_name(&fields, "fldSerial")
+写请求 fields = {"审批编号": "202609280001"}   ← 用名
+```
+
+用 `resolve_field_name` 而不是就地 `find`：它同时拦「列被删了」与「**列名不唯一**」。
+后者尤其重要——按名写的接口在重名前会写到不确定的那一列上，那比「写不进去」更坏。
+所以 `DispatchInput` 的对应字段叫 `backfill_field_name` 并要求调用方传**列名**：
+让「写到哪一列」在调用处一眼可见，而不是埋在一个看着像 id 的字符串里。
+
+> 这条是**端到端 mock 实测**逼出来的：初稿只在读侧折算了 id→名，写侧直接把配置值当
+> 键发出去。更刺眼的是，同一个 worker 里**上一步**刚用 `resolve_field_name` 把同一个
+> id 折成列名去填筛选器（`filter.field_name` 必须用名），下一步回写却用回了 id——
+> 一个函数里两套口径。初次真机联调请确认飞书是否**也**接受 id 作键（官方错误表里
+> `1254044 FieldIdNotFound` 与 `1254045 FieldNameNotFound` 并存，即 id 可能也认）；
+> 按列名写在「只认名」与「都认」两种假设下都成立，按 id 写只在后者成立，故取前者。
 
 ## 七、幂等与限速
 
@@ -526,7 +635,13 @@ create 返回 60012
 3. **一个配置对应一个审批定义**。同一张表里不同行走不同审批定义不受支持。若将来需要，扩展点是 `feishu_approval_config` 加一条「按字段值选择配置」的规则表。
 4. **改配置换审批定义会再建一个实例**。`approval_code` 纳入了 uuid 派生（§5.4），所以同一行的旧 uuid 不会阻挡新建——语义是「换了定义就是新单子」，使用方需知悉。
 5. **`serial_number` 立即可查性未验证**。文档未承诺，缓解见 §6.4（`1390003` 判可重试而非终态）。
-6. **`is_external` 字段名与「不支持的控件」的确切判据未验证**。本地文档只有控件清单，没有 `approvals/get` 响应中判定 `is_external` 的字段名，也没有「定义含不支持控件时是构造时报错还是调用时报错」的明文。实现前需用真实审批定义实测一次。
+6. ~~**`is_external` 字段名与「不支持的控件」的确切判据未验证**~~ → **已实测**：
+   `approvals get` **不返回 `is_external`**（该字段只在 `approvals/search` 里），判据
+   改为「`approvals get` 拿不到 `form`」；**不支持的控件清单**以
+   `lark-approval-instance-form-control-parameters.md:14-30` 为准，**定义里存在且必填
+   就拦**（可选控件留空提交是合法的）。详见 §6.1.2。
+   遗留：`search_launchable` **只支持 `user_access_token`**，`tenant_access_token`
+   用不了——所以「列出可用定义」这类功能不要指望它。
 7. **`serial_number` 的稳定时间窗**。刚创建后立即 `get` 是否稳定返回，以及是否有延迟窗口，未知。若实测发现窗口较长，`140003` 之外还需容忍 `serial_number` 为空但实例已存在的响应。
 8. **批量任务的「立即返回 accepted」不含进度查询**。工作流侧拿不到处理进度，只能看表格回填结果。若需要进度，扩展点是加一个查询端点（用现有管理 Token 鉴权）。
 
@@ -542,7 +657,53 @@ create 返回 60012
 | M4 | `is_external` 字段名、不支持控件的确切判据 | §6.1 校验的实现 |
 | M5 | 100 次/分钟是应用级还是租户级 | §7.7 令牌桶是否需要跨应用协调 |
 | M6 | 单条链路端到端耗时 | 确认在 60 秒超时内（§3.1） |
-| M7 | **测试审批定义** `D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E`（`往来付款类型/Current Payment Type_正式流程_自动化测试`）的 `form` 是否只含 API 支持的控件、`is_external` 是否为 `false` | §6.1 的前置校验要拿它做第一次实测。**该定义已在其表单里用外部数据源调本系统**，所以两端的凭据与网络连通性已就位——只是**创建实例**这条新链路还没跑过 |
+| M7 | **测试审批定义** `D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E`（`往来付款类型/Current Payment Type_正式流程_自动化测试`）的 `form` 是否只含 API 支持的控件 | §6.1 的前置校验要拿它做第一次实测。**该定义已在其表单里用外部数据源调本系统**，所以两端的凭据与网络连通性已就位——只是**创建实例**这条新链路还没跑过。⚠️ 该定义含 `connect`/`attachmentV2`/`fieldList`，且 `办公地点(Office location)` 是 `option: []` 又未链接外部数据源（派生不出选项）——**拿它直接联调会被配置期校验正确拒绝**；端到端联调需要另建一个只含文本/数字/日期/单选/多选的测试定义 |
+| M8 | **`batch_update` 的 `fields` 是否也接受 `field_id` 作键** | §6.5。官方错误表里 `1254044 FieldIdNotFound` 与 `1254045 FieldNameNotFound` 并存，即 id 可能也认；文档的规范表述与全部写示例都指向**列名**。实现已按列名（两种假设下都成立）。验证方式：对一条**已存在**的记录，用 `field_id` 作键写回它**现有的值**（内容不变的写），看回包是 `0` 还是 `1254044` |
+| M9 | **`records/batch_get` 是否真的没有 `field_names`** | §6.5 / 读路径。实测请求体只有 `record_ids` / `user_id_type` / `with_shared_url` / `automatic_fields`，`field_names` 只出现在**错误表**里——实现已去掉该投影。若某个租户上它其实接受，投影回退属于优化而非正确性 |
+| M10 | **`isEmpty` 筛选的 `value` 必须是 `[]`** | 播种扫描（§5.2）。传 `null` 或不传会吃 `1254018`。实现按空数组，已由 `empty_field_filter` 钉住 |
+
+### 12.1 本地文档副本与真实响应不符之处（已实测，实现按实测）
+
+飞书开放平台的文档**不能当作准确依据**。以下是本功能实测推翻了本地文档副本的七处，
+每一处都会变成**静默故障**或**误导性报错**——所以写代码前先用 `lark-cli` 对着真实租户
+取一次报文（只读），再照着实测写：
+
+| # | 文档说 | 实测是 | 不对时的症状 |
+|---|---|---|---|
+| 1 | 控件 `name` 「必须以 `@i18n@` 开头」 | 服务端已解好的可读中文（`公司名称/Company name`） | 按名匹配的前提；信文档就走不通 |
+| 2 | `option` 是选项数组 | **四种形态**：缺失 / `null` / 数组 / 对象 | 解析崩或静默判成「有选项但派生不出」 |
+| 3 | `externalData.key` 是取数源 | 实测是**空字符串** | 拿它查数据源必然查空 |
+| 4 | `records/batch_get` 有 `field_names` | 请求体**没有**该参数（只在错误表里） | 轻则被忽略、重则整批 400，而错误指向「字段名不匹配」 |
+| 5 | （未言明） | 响应 `fields` **按列名**作键，而配置存 `field_id` | **每条记录都「缺少申请人」，不报错**——最危险的一处 |
+| 6 | `record_id` 是记录字段 | 它是**响应里的系统字段、不可过滤** | 拿它当 `filter.field_name` 得不到按 id 的定位 |
+| 7 | `isEmpty` 的 `value` 随便 | 必须是**空数组** `[]` | 吃 `1254018` |
+
+另有两处**接口能力**的实测结论：`approvals get` 不返回 `is_external`（§6.1.2）、
+`search_launchable` 只支持 `user_access_token`（§11 限制 6）。
+
+这些结论都钉成了测试夹具（先例：
+`approval_match::tests::real_form_shape_parses_with_all_four_option_kinds` 直接喂真实
+响应字节）。本地文档副本在 `docs/reference/feishu/`，可作**线索**，不可作**结论**。
+
+### 12.2 端到端 mock 实测（合成数据，不依赖真实租户）
+
+真实定义 `D0557DA6-…` 不能用来联调（见 M7），所以另有一组**合成**定义 + 合成列名的
+端到端用例（`approval/actions/dispatch.rs` 的 `tests::end_to_end_*`）：传输换成脚本化
+回放并记录每个真实请求体，数据库换成惰性连接池，其余全是生产代码。
+
+它验的是**接缝**——那是单测证明不了、又最容易静默出错的地方：
+
+- **正路**：6 个控件按名匹配 → 列名解析成 `field_id` → 转换器与选项映射 → 读记录 →
+  按 id 重映射 → `form` 组装 → 创建 → 取编号 → 回写。断言逐字段核对**发给飞书的两个
+  请求体**：`form` 是压缩后的 JSON **字符串**、数字传 JSON 数字、日期折成
+  `2026-09-28T00:00:00+08:00`、单选传字符串而多选传数组、可选控件空值时整个 JSON 都
+  不传、`uuid` 由 (表格坐标, 定义, 记录) 派生。
+- **错路**：必填控件在表里没有同名列 → 建配置失败、原因**点名**该控件、并带 `[配置]`
+  前缀写进回填列；同时钉住「校验不过时一个字节都不落库」。
+
+两条结论都做过**变异验证**（改完即还原）：把 `rekey_cells_by_field_id` 改成不换键 →
+正路用例红在「重映射后必须能按 `field_id` 取到申请人」；去掉 `[配置]` 前缀 → 错路用例
+红在「必须带 `[配置]` 前缀」。**§6.5 的写键缺陷正是这一轮实测发现的。**
 
 ## 十三、实施顺序
 
