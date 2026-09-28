@@ -36,6 +36,7 @@
 //! `uuid` 是最后一道防线：即使某条记录被重复处理，飞书也只会回 `60012`，
 //! 走回捞路径拿到同一个实例，不会重复建单。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,6 +53,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
     DispatchInput as OrchestrationInput, DispatchResult,
 };
 use crate::addon::feishu::domain::approval_rate_limit::acquire_create_slot;
+use crate::addon::feishu::domain::approval_uuid::derive_uuid;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
@@ -67,6 +69,16 @@ use crate::infrastructure::audit;
 ///
 /// 与回填子批同量级：认领一批、处理一批、回填一批，批内失败不影响其他批。
 /// 取大了会让单轮耗时过长（创建受速率限制），也拉长租约。
+/// 播种时最多翻多少页（每页 500 条）。
+///
+/// 防失控而不是分页参数：筛选条件没生效时一页页拉全表会把这一轮无限拖长，
+/// 而 worker 是单线程的——它卡住等于整个队列停摆。到上限即失败，
+/// 让「条件没生效」以显式报错出现。
+const SEED_MAX_PAGES: u32 = 20;
+
+/// 播种时一次读多少条已有任务行（用来判「新建还是拉回待处理」）。
+const SEED_MAX_TASKS: usize = 2000;
+
 const CLAIM_BATCH: usize = 50;
 
 /// 单轮最坏耗时上界（秒）。
@@ -281,14 +293,28 @@ async fn run_loop(
     }
 }
 
-/// 跑一轮：认领 → 逐条处理 → 写回结果。
+/// 跑一轮：播种 → 认领 → 逐条处理 → 写回结果。
 ///
-/// **没有批量标记。** 状态推进只发生在 [`record_outcome`]（逐条、处理结束时）：
-/// 这条路经本身就有「崩溃前未处理 → 进 `creating` → 下一轮不认领」的风险，
-/// 所以崩溃恢复靠 `claim` 直接认领 `creating`（单实例 + 单线程 ⇒ 此时没有别人
-/// 正在处理），下一轮 `record_outcome` 覆盖它。
+/// # 播种是这条链路的地基
+///
+/// `claim` 只认领**已存在**的任务行，而任务行从来不是人工建的——所以没有
+/// [`seed_tasks`] 的话，队列永远是空的，页面按钮点一次就只受理一个空轮。
+///
+/// # 崩溃恢复也靠播种
+///
+/// 状态推进发生在 [`record_outcome`]（逐条、处理结束时）。进程在轮中被
+/// `docker stop` 杀掉时，剩下的任务停在 `creating`，而 `claim` 只要 `pending`——
+/// 没有播种的话它们**永远**不会被再认领。播种把「回填列为空」当成唯一判据，
+/// 于是 `creating`（崩溃遗留）、`terminal`（人工清空字段要重试）、`backfilled`
+/// （清空字段要重发）都会被拉回 `pending`。
 async fn run_round(runner: &RoundRunner, cursor: &mut ResumeCursor) {
     let started = std::time::Instant::now();
+    match seed_tasks(runner).await {
+        Ok(0) => {}
+        Ok(seeded) => tracing::info!(seeded, "审批派发播种了新任务"),
+        // 播种失败不中断整轮：已有的待处理任务仍然值得跑，而播种下一轮还会再来。
+        Err(error) => tracing::warn!(error = %error, "审批派发播种失败"),
+    }
     let claimed = match claim(runner, cursor).await {
         Ok(claimed) => claimed,
         Err(error) => {
@@ -373,6 +399,151 @@ struct ClaimedTask {
     widgets: Vec<WidgetMap>,
 }
 
+/// 播种：把「回填列为空」的多维表格记录变成待处理任务。
+///
+/// # 判据只有一个：回填列是不是空的
+///
+/// 这也是使用方的**重试通道**——清空那一格就等于「这条再来一遍」。所以已存在的
+/// 任务行不是「跳过」，而是**按需拉回 `pending`**：
+///
+/// | 库里状态 | 字段为空意味着 | 处置 |
+/// |---|---|---|
+/// | `creating` | 上一轮崩在这条上 | 拉回 `pending` |
+/// | `terminal` | 人工清空要重试 | 拉回 `pending` |
+/// | `backfilled` | 人工清空要重发 | 拉回 `pending`（uuid 幂等兜底，不会重复建单） |
+/// | `pending` | 已在队列里 | 不动 |
+///
+/// # 为什么要读全表而不是「只看有任务的行」
+///
+/// 首次运行时库里一条任务都没有——不扫表就永远不会有第一条。
+async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
+    let configs = runner
+        .context
+        .approval_configs()
+        .query()
+        .select_fields(&[
+            "id",
+            "base_token",
+            "table_id",
+            "approval_code",
+            "backfill_field",
+        ])?
+        .where_eq("enabled", serde_json::json!(true))?
+        // `page_size` 缺省是 10；配置数量不多但也别踩这个坑。
+        .page(1, 200)?
+        .all()
+        .await?;
+
+    let mut seeded = 0usize;
+    for config in configs {
+        match seed_config(runner, &config).await {
+            Ok(count) => seeded += count,
+            // 一条配置坏掉不该拖垮别的配置：记下来，下一轮再来。
+            Err(error) => {
+                let config_id: i64 = config.require("id").unwrap_or_default();
+                tracing::warn!(error = %error, config_id, "审批派发播种跳过该配置");
+            }
+        }
+    }
+    Ok(seeded)
+}
+
+/// 单条配置的播种。
+async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<usize> {
+    let config_id: i64 = config.require("id")?;
+    let base_token: String = config.require("base_token")?;
+    let table_id: String = config.require("table_id")?;
+    let approval_code: String = config.require("approval_code")?;
+    let backfill_field_id: String = config.require("backfill_field")?;
+
+    let coordinates = BitableCoordinates {
+        app_token: base_token.clone(),
+        table_id: table_id.clone(),
+        view_id: None,
+    };
+
+    // 筛选按**列名**（不是 id）：`filter.field_name` 与 `field_names` 同一条口径。
+    let fields = bitable::list_all_fields(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &coordinates,
+    )
+    .await
+    .map_err(|failure| anyhow::anyhow!("读取表结构失败：{}", failure.message))?;
+    let backfill_name = bitable::resolve_field_name(&fields, &backfill_field_id)?;
+
+    let pending_records = bitable::search_all_records(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &coordinates,
+        bitable::empty_field_filter(&backfill_name),
+        SEED_MAX_PAGES,
+    )
+    .await
+    .map_err(|failure| anyhow::anyhow!("筛选待处理记录失败：{}", failure.message))?;
+    if pending_records.is_empty() {
+        return Ok(0);
+    }
+
+    // 已有的任务行：按 record_id 建索引，决定「新建」还是「拉回 pending」。
+    let existing = runner
+        .context
+        .approval_tasks()
+        .query()
+        .select_fields(&["id", "record_id", "state"])?
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .page(1, SEED_MAX_TASKS)?
+        .all()
+        .await?;
+    let mut by_record: BTreeMap<String, (i64, String)> = BTreeMap::new();
+    for row in &existing {
+        by_record.insert(
+            row.require("record_id")?,
+            (row.require("id")?, row.require("state")?),
+        );
+    }
+
+    let mut seeded = 0usize;
+    for record in &pending_records {
+        if record.record_id.is_empty() {
+            continue;
+        }
+        match by_record.get(&record.record_id) {
+            Some((_, state)) if state == "pending" => {}
+            Some((task_id, state)) => {
+                // 拉回 `pending` 并清掉上一轮的结论：字段为空是**唯一**判据，
+                // 库里那条旧结论（失败原因或已回填）已经不再成立。
+                let mut row = Record::new();
+                row.insert("state", serde_json::json!("pending"));
+                row.insert("last_error", serde_json::Value::Null);
+                runner
+                    .context
+                    .approval_tasks()
+                    .query()
+                    .where_primary_key_eq(serde_json::json!(task_id))?
+                    .update(row)
+                    .await?;
+                tracing::debug!(record_id = %record.record_id, from = %state, "审批任务被拉回待处理");
+            }
+            None => {
+                // 幂等键与派发路径**同源**：同一个 record 只有一条任务行，
+                // 重复播种会撞 `record_id` 唯一索引而不是建出第二条。
+                let uuid = derive_uuid(&base_token, &table_id, &approval_code, &record.record_id);
+                let mut row = Record::new();
+                row.insert("config_id", serde_json::json!(config_id));
+                row.insert("record_id", serde_json::json!(&record.record_id));
+                row.insert("uuid", serde_json::json!(uuid));
+                row.insert("state", serde_json::json!("pending"));
+                runner.context.approval_tasks().query().insert(row).await?;
+                seeded += 1;
+            }
+        }
+    }
+    Ok(seeded)
+}
+
 /// 认领待处理任务。
 ///
 /// 判据是 `feishu_approval_task` 的状态，**不是**多维表格的回填字段是否为空
@@ -383,8 +554,12 @@ struct ClaimedTask {
 /// 原设计照搬 `authorization_outbox` 的 `state='creating' AND lease_until <= now`，
 /// 那条是**跨实例**并发的产物。本 worker 是单实例（部署形态决策 A10）+ 单线程
 /// 循环，每轮开始时根本没有别的执行者持有 `creating`，再判租约只是多一次时钟
-/// 依赖。崩溃恢复由「重启后重新认领」承担：`claim` 直接认领 `pending`（单实例
-/// + 单线程 ⇒ 无并发），`record_outcome` 在处理结束时把它改写成稳定状态。
+/// 依赖。
+///
+/// **但「只认 `pending`」这条不能单独成立**：轮中崩溃留下的 `creating` 行永远不会
+/// 自己回到 `pending`，`claim` 也就永远不再看它们。补上这一环的是 [`seed_tasks`]
+/// ——它以「回填列为空」为唯一判据，把崩溃遗留、人工清空要重试的行一并拉回
+/// `pending`。两者的分工是：**播种决定「谁该被处理」，认领决定「这一轮处理哪一批」**。
 async fn claim(runner: &RoundRunner, cursor: &ResumeCursor) -> anyhow::Result<Vec<ClaimedTask>> {
     // 游标下界：上一轮已处理到的位置。空游标时不加条件（从头开始）。
     let mut query = runner.context.approval_tasks().query();

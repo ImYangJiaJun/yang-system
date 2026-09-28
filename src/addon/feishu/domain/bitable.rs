@@ -1150,6 +1150,13 @@ pub(crate) fn backfill_cell(value: &str) -> serde_json::Value {
 pub(crate) struct SearchRecordsData {
     #[serde(default)]
     pub(crate) items: Vec<RecordItem>,
+    #[serde(default)]
+    pub(crate) has_more: bool,
+    /// `has_more=false` 时**根本不出现**——写成 `String` 会反序列化失败。
+    #[serde(default)]
+    pub(crate) page_token: Option<String>,
+    #[serde(default)]
+    pub(crate) total: Option<i64>,
 }
 
 /// 按条件查询记录（单页）。
@@ -1163,6 +1170,7 @@ pub(crate) async fn search_records(
     tokens: &TenantTokenProvider,
     coordinates: &BitableCoordinates,
     body: serde_json::Value,
+    page_token: Option<&str>,
 ) -> Result<SearchRecordsData, OutboundFailure> {
     let url =
         search_records_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
@@ -1171,17 +1179,89 @@ pub(crate) async fn search_records(
                 message: error.to_string(),
             }
         })?;
+    // `page_token` / `page_size` 是**查询参数**（不是请求体字段）——《查询记录》的
+    // 请求体只有 `filter` / `sort` / `field_names` / `automatic_fields` 那几项。
+    let mut query = vec![("page_size".to_string(), SEARCH_PAGE_SIZE.to_string())];
+    if let Some(page_token) = page_token.filter(|token| !token.is_empty()) {
+        query.push(("page_token".to_string(), page_token.to_string()));
+    }
     send_json(
         transport,
         sleeper,
         tokens,
         OutboundMethod::Post,
         &url,
-        Vec::new(),
+        query,
         Some(body),
         PULL_REQUEST_TIMEOUT_SECS,
     )
     .await
+}
+
+/// 翻页取**全部**命中的记录。
+///
+/// # 为什么要收敛断言之外还给上限
+///
+/// `max_pages` 是**防失控**而不是分页参数：筛选条件写错（比如过滤条件没生效）时，
+/// 一页页拉全表会把这一轮无限拖长，而 worker 是单线程的——它卡住就等于整个队列停摆。
+/// 到上限即报错，让「条件没生效」以显式失败出现，而不是以「跑了十分钟」出现。
+pub(crate) async fn search_all_records(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    body: serde_json::Value,
+    max_pages: u32,
+) -> Result<Vec<RecordItem>, OutboundFailure> {
+    let mut items = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..max_pages {
+        let page = search_records(
+            transport,
+            sleeper,
+            tokens,
+            coordinates,
+            body.clone(),
+            cursor.as_deref(),
+        )
+        .await?;
+        items.extend(page.items);
+        if !page.has_more {
+            return Ok(items);
+        }
+        match page.page_token.filter(|token| !token.is_empty()) {
+            Some(token) => cursor = Some(token),
+            // `has_more=true` 却不给 `page_token`：继续翻会**原样重取第一页**
+            // （死循环 + 重复行），所以这里必须失败而不是硬翻。
+            None => {
+                return Err(OutboundFailure {
+                    kind: FailureKind::Fatal { code: 0 },
+                    message: "查询记录返回 has_more=true 却没有 page_token".to_string(),
+                })
+            }
+        }
+    }
+    Err(OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: format!("查询记录翻页超过 {max_pages} 页仍未收敛"),
+    })
+}
+
+/// 「某列为空」的筛选体。
+///
+/// `isEmpty` 的 `value` 必须是**空数组**（官方字段目标值说明：operator 为
+/// `isEmpty`/`isNotEmpty` 时需填空值 `[]`）——传 null 或不传都会吃 `1254018`。
+pub(crate) fn empty_field_filter(field_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                { "field_name": field_name, "operator": "isEmpty", "value": [] }
+            ]
+        },
+        // 系统字段（创建人/创建时间…）没有 field_id，取回来会在重映射那步报错。
+        "automatic_fields": false,
+    })
 }
 
 /// 按 `record_id` 列表取记录（`records/batch_get`，单次最多 100 条）。
