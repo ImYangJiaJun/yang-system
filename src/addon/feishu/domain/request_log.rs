@@ -22,10 +22,22 @@
 //!
 //! 例外条款的正式记录在 `OBSERVABILITY.md`，采集与保留侧的配套在
 //! `docs/operations/LOG_SHIPPING.md`。
+//!
+//! # 请求与响应是**两行**，按 `request_id` 关联
+//!
+//! `飞书机器入口请求参数` 在**派发前**落，`飞书机器入口响应参数` 在**派发后**落。
+//! 不合并成一行是刻意的：被管理 Token 中间件拒掉的请求根本走不到响应那一行，而
+//! 「token 配错了」正是最需要从日志里认出来的情形——它必须留下请求那一行。
+//!
+//! 响应体这一行不能省。框架的 `Action 执行完成` 只有 `result` / `error_code` /
+//! `duration_ms`，**没有响应体**；而 `code` 对了不等于体对了——取选项接口返回的是
+//! `ResponseBody::raw`，整条响应都不走框架包络，只有这里能看到飞书实际收到了什么。
+
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
-use yang_base::action::{ActionContext, ApiResponse, Request};
+use yang_base::action::{ActionContext, ApiResponse, Request, ResponseAttachment};
 use yang_base::definition::ActionRef;
 use yang_base::router::{Middleware, Next};
 use yang_base::BaseError;
@@ -61,8 +73,17 @@ impl Middleware for MachineRequestLogMiddleware {
     async fn handle(&self, ctx: ActionContext, next: Next<'_>) -> Result<ApiResponse, BaseError> {
         // 先记后派发：被管理 Token 中间件拒掉的请求也必须留痕——「token 配错了」
         // 正是最需要从日志里认出来的情形，而它恰恰是走不到 Handler 的那一类。
+        //
+        // 关联字段必须在 `next.run` **之前**摘出来：`ctx` 会被移进下游，之后
+        // `request_id` 与部署身份都拿不到，而它们正是把两行拼成一次调用的键。
+        let meta = ResponseMeta::capture(&ctx);
         emit(&ctx);
-        next.run(ctx).await
+
+        let started = Instant::now();
+        let outcome = next.run(ctx).await;
+        emit_response(&meta, started.elapsed(), &outcome);
+
+        outcome
     }
 }
 
@@ -71,10 +92,7 @@ impl Middleware for MachineRequestLogMiddleware {
 /// 成败不在这里判定：请求的结局由同一 `request_id` 的 `Action 执行完成` 规范事件承载，
 /// 两行按 `request_id` 关联（关联键的约定见 `docs/operations/LOG_SHIPPING.md`）。
 fn emit(ctx: &ActionContext) {
-    let operation = ctx
-        .dispatch_target()
-        .map(|(module, action)| format!("{module}.{action}"))
-        .unwrap_or_else(|| "unknown.unknown".to_string());
+    let operation = operation_of(ctx);
     // 与 `Action 执行完成` 规范事件共用同一份部署身份：采集侧按 `service` + `environment`
     // 划分索引流（见 `docs/operations/LOG_SHIPPING.md`），缺了这三个字段的事件会落到
     // 另一条流里，排障时要跨流检索。
@@ -97,14 +115,144 @@ fn emit(ctx: &ActionContext) {
     );
 }
 
+/// 本次调用的 `module.action`。未经 `Registry::dispatch` 时落兜底值。
+fn operation_of(ctx: &ActionContext) -> String {
+    ctx.dispatch_target()
+        .map(|(module, action)| format!("{module}.{action}"))
+        .unwrap_or_else(|| "unknown.unknown".to_string())
+}
+
+/// 响应日志要用的关联字段。
+///
+/// 与请求那一行共用同一份部署身份与同一个 `request_id`，两者缺一采集侧就串不起来
+/// （约定见 `docs/operations/LOG_SHIPPING.md`）。
+struct ResponseMeta {
+    identity: LogIdentity,
+    operation: String,
+    request_id: String,
+}
+
+impl ResponseMeta {
+    fn capture(ctx: &ActionContext) -> Self {
+        Self {
+            identity: LogIdentity::from_tools(ctx.tools()),
+            operation: operation_of(ctx),
+            request_id: ctx.request_id().to_string(),
+        }
+    }
+}
+
+/// 落一条响应参数日志。
+///
+/// `duration_ms` 与框架的 `Action 执行完成` 重复了一次：这是为了让响应这行**能单独读**
+/// ——排查时是 `grep <request_id>` 抓出两行，而不是再去跨事件类型拼一次。
+fn emit_response(meta: &ResponseMeta, elapsed: Duration, outcome: &Result<ApiResponse, BaseError>) {
+    let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let (code, message, body) = match outcome {
+        Ok(response) => (
+            response.code,
+            response.message.clone(),
+            ResponseSnapshot::of(response),
+        ),
+        // 派发失败时框架随后会把它折成错误响应，这里先把**原始错误**留下：
+        // `code` 是框架错误码，`message` 是给运维看的排查线索。
+        Err(error) => (
+            error.code(),
+            error.to_string(),
+            ResponseSnapshot::none("error"),
+        ),
+    };
+
+    // 成败用两条不同级别：`code == 0` 是正常一次调用，其余都该在 `warn` 上被看见。
+    // 字段列表两臂一致，是为了让 `grep <request_id>` 出来的两行**同形**。
+    if code == 0 {
+        tracing::info!(
+            service = %meta.identity.service,
+            version = %meta.identity.version,
+            environment = %meta.identity.environment,
+            operation = %meta.operation,
+            request_id = %meta.request_id,
+            code,
+            message = %message,
+            body_shape = %body.shape,
+            body = %body.body,
+            body_bytes = body.body_bytes,
+            body_truncated = body.body_truncated,
+            duration_ms,
+            "飞书机器入口响应参数"
+        );
+    } else {
+        tracing::warn!(
+            service = %meta.identity.service,
+            version = %meta.identity.version,
+            environment = %meta.identity.environment,
+            operation = %meta.operation,
+            request_id = %meta.request_id,
+            code,
+            message = %message,
+            body_shape = %body.shape,
+            body = %body.body,
+            body_bytes = body.body_bytes,
+            body_truncated = body.body_truncated,
+            duration_ms,
+            "飞书机器入口响应参数"
+        );
+    }
+}
+
+/// 响应体快照。与请求侧共用同一个字节上限与截断规则。
+struct ResponseSnapshot {
+    /// `raw` 是**不套框架包络**的原始体（`ResponseBody::raw`）；`envelope` 是 `data`
+    /// 字段；`empty` 是没有响应体；`error` 是派发失败。四者形态不同，混在一起看会
+    /// 把「体是空的」误读成「体丢了」。
+    shape: &'static str,
+    body: String,
+    body_bytes: usize,
+    body_truncated: bool,
+}
+
+impl ResponseSnapshot {
+    fn of(response: &ApiResponse) -> Self {
+        // 先看原始体：取选项接口走的就是这条路，而它正是本中间件最需要看清的响应
+        // ——整条体都不在 `data` 里，只看 `data` 会得到一个空字符串。
+        if let Some(ResponseAttachment::Raw { body, .. }) = &response.attachment {
+            return Self::from_text("raw", body);
+        }
+        match &response.data {
+            Some(data) => Self::from_text("envelope", &data.to_string()),
+            None => Self::from_text("empty", ""),
+        }
+    }
+
+    fn none(shape: &'static str) -> Self {
+        Self::from_text(shape, "")
+    }
+
+    fn from_text(shape: &'static str, text: &str) -> Self {
+        // 与请求侧同一套约定：先量线上字节，再重排展示。
+        let body_bytes = text.len();
+        let display = pretty_json(text);
+        let (body, body_truncated) = truncate(&display);
+        Self {
+            shape,
+            body: body.to_string(),
+            body_bytes,
+            body_truncated,
+        }
+    }
+}
+
 /// 一次请求的可落日志快照。各成员都已序列化成字符串，可直接进结构化日志。
 pub(crate) struct RequestSnapshot {
     method: String,
     path_params: String,
     query: String,
     headers: String,
+    /// **展示形态**：是 JSON 就带缩进（人读格式下会摊成多行）。
     body: String,
+    /// **线上原始**字节数（重排与截断之前）。
     body_bytes: usize,
+    /// **展示文本**是否被截断——与 `body_bytes` 口径不同，见 [`pretty_json`]。
     body_truncated: bool,
 }
 
@@ -113,9 +261,11 @@ pub(crate) struct RequestSnapshot {
 /// 抽成只吃 [`Request`] 与 method 的纯函数，是为了让**截断**与**序列化**这两件容易
 /// 悄悄坏掉的事能在单测里覆盖：它们坏掉时不报错，只是日志里少一段或格式变样。
 pub(crate) fn snapshot(request: &Request, method: Option<&str>) -> RequestSnapshot {
-    let body = request.body.to_string();
-    let body_bytes = body.len();
-    let (body, body_truncated) = truncate(&body);
+    let raw = request.body.to_string();
+    // **先量字节，再重排**：`body_bytes` 是线上原始大小，重排只改展示。
+    let body_bytes = raw.len();
+    let display = pretty_json(&raw);
+    let (body, body_truncated) = truncate(&display);
     RequestSnapshot {
         method: method.unwrap_or("UNKNOWN").to_string(),
         path_params: json_of(&request.path_params),
@@ -124,6 +274,25 @@ pub(crate) fn snapshot(request: &Request, method: Option<&str>) -> RequestSnapsh
         body: body.to_string(),
         body_bytes,
         body_truncated,
+    }
+}
+
+/// 把 JSON 文本按缩进重排，供**人读**；不是 JSON 就原样返回。
+///
+/// # 为什么要重排
+///
+/// `log_format = "pretty"` 的原样打印值里的换行：缩进后的报文会**真的换行**，
+/// 一次调用里的长报文于是摊开成多行。`log_format = "json"` 则把换行转义掉，
+/// 整条事件仍是**单行合法 JSON**。同一批字段、两种排版，不需要维护两份日志语句。
+///
+/// # 它不改变任何计数
+///
+/// `body_bytes` 记的始终是**线上原始**字节数（重排前量的），`body` 才是展示形态。
+/// 两者不相等是刻意的：报文的字节数要用来说「对方到底发了多少」。
+fn pretty_json(text: &str) -> String {
+    match serde_json::from_str::<Value>(text) {
+        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_string()),
+        Err(_) => text.to_string(),
     }
 }
 
@@ -155,6 +324,10 @@ fn truncate(body: &str) -> (&str, bool) {
     (&body[..end], true)
 }
 
+// 这两行事件各自的**内容**都在下面测到了，但 `handle` 对它们的**接线**没有：
+// `Next` 的字段全是 `pub(crate)`，`yang-system` 侧造不出一个可用的 `Next`，
+// 于是「派发前后各调一次」这条只能靠读代码保证。请求那一行同样是这个状态
+// ——不是漏了，是这一层在框架外测不到。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,7 +417,25 @@ mod tests {
         let snapshot = snapshot(&request, Some("POST"));
 
         assert!(!snapshot.body_truncated);
-        assert_eq!(snapshot.body_bytes, snapshot.body.len());
+        // 两个口径必须分开断言：`body_bytes` 是**线上原始**长度，`body` 是**缩进后**的
+        // 展示形态。只断言「两者都非零」会让「重排没生效」或「字节数被改成展示长度」
+        // 这两类错都溜过去——而后者会让「对方到底发了多少」这句话失去依据。
+        assert_eq!(
+            snapshot.body_bytes,
+            request.body.to_string().len(),
+            "body_bytes 必须是重排前的线上长度"
+        );
+        // 用 `lines()` 而不是找换行字符：断言的是「摊成了多行」这件事本身，
+        // 顺带避开在 Rust 源码里写转义字符。
+        assert!(
+            snapshot.body.lines().count() > 1,
+            "JSON 体应当被缩进成多行，实际: {}",
+            snapshot.body
+        );
+        assert!(
+            snapshot.body.len() > snapshot.body_bytes,
+            "缩进后的展示文本应当比线上原文长"
+        );
         assert!(snapshot.body.contains("widget17796881173030001"));
         assert!(snapshot.body.contains("@i18n@currency:CNY"));
     }
@@ -356,6 +547,153 @@ mod tests {
             "截断标记的取值不对: {line}"
         );
         assert!(line.contains("\"body_bytes\""), "字节数缺失: {line}");
+    }
+
+    /// 在捕获式 subscriber 下跑一段代码，返回落下来的日志文本。
+    fn capture(run: impl FnOnce()) -> String {
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(buffer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        buffer.text()
+    }
+
+    fn response_meta() -> ResponseMeta {
+        ResponseMeta {
+            identity: LogIdentity::new("yang-system", "0.1.0", "test"),
+            operation: "feishu.option.approval_options".to_string(),
+            request_id: "req-1".to_string(),
+        }
+    }
+
+    /// 响应体这一行存在的**唯一**理由：`code` 对了不等于体对了。取选项接口返回的是
+    /// `ResponseBody::raw`，整条响应都不走框架包络——只看 `data` 会得到一个空串，
+    /// 于是「响应是空的」和「响应没被记下来」在日志里长得一模一样。
+    #[test]
+    fn response_event_carries_the_raw_wire_body() {
+        let mut response = ApiResponse::success_value(json!({ "ignored": true }), "ok");
+        response.attachment = Some(ResponseAttachment::Raw {
+            body: r#"{"code":0,"msg":"success!","data":{"result":{"options":[{"id":"fldeysrdna:d22258711825"}]}}}"#.to_string(),
+            content_type: "application/json".to_string(),
+        });
+
+        let line =
+            capture(|| emit_response(&response_meta(), Duration::from_millis(7), &Ok(response)));
+
+        assert!(
+            line.contains("飞书机器入口响应参数"),
+            "事件没落日志: {line}"
+        );
+        assert!(
+            line.contains(r#""body_shape":"raw""#),
+            "原始体必须被识别为 raw，否则读日志的人会把包络与原始体混为一谈: {line}"
+        );
+        assert!(
+            line.contains("fldeysrdna:d22258711825"),
+            "原始响应体的内容没进日志——这正是加这一行的目的: {line}"
+        );
+        assert!(
+            !line.contains("ignored"),
+            "有原始体时不该再退回 data——那会让两处内容互相矛盾: {line}"
+        );
+        assert!(line.contains(r#""code":0"#), "业务码未落日志: {line}");
+        assert!(line.contains(r#""duration_ms":7"#), "耗时未落日志: {line}");
+        assert!(
+            line.contains(r#""request_id":"req-1""#),
+            "关联键未落日志: {line}"
+        );
+        assert!(
+            line.contains(r#""body_truncated":false"#),
+            "截断标记取值不对: {line}"
+        );
+    }
+
+    /// 没有原始体时退回框架包络的 `data`——控制台 Action 走的是这条路。
+    #[test]
+    fn response_event_falls_back_to_the_envelope_data() {
+        let response = ApiResponse::success_value(json!({ "upserted": 3 }), "ok");
+
+        let line =
+            capture(|| emit_response(&response_meta(), Duration::from_millis(1), &Ok(response)));
+
+        assert!(
+            line.contains(r#""body_shape":"envelope""#),
+            "应识别为包络体: {line}"
+        );
+        assert!(line.contains("upserted"), "data 内容没进日志: {line}");
+    }
+
+    /// 完全没有响应体时 `shape` 是 `empty` 而不是 `raw`——否则「空体」与「原始体为空」
+    /// 分不开，而这两件事的成因完全不同。
+    #[test]
+    fn empty_response_body_is_labelled_empty() {
+        let line = capture(|| {
+            emit_response(
+                &response_meta(),
+                Duration::from_millis(1),
+                &Ok(ApiResponse::fail(40401, "数据源不存在")),
+            )
+        });
+
+        assert!(
+            line.contains(r#""body_shape":"empty""#),
+            "应标记为空体: {line}"
+        );
+        assert!(
+            line.contains(r#""body_bytes":0"#),
+            "空体的字节数应为 0: {line}"
+        );
+    }
+
+    /// 派发失败要留下**框架错误码**与原始错误文本：响应那一行此时不存在，运维只能靠这里。
+    #[test]
+    fn failed_dispatch_is_logged_with_the_framework_error_code() {
+        let line = capture(|| {
+            emit_response(
+                &response_meta(),
+                Duration::from_millis(2),
+                &Err(BaseError::ConfigError("下游配置缺失".to_string())),
+            )
+        });
+
+        assert!(
+            line.contains(r#""body_shape":"error""#),
+            "应标记为派发失败: {line}"
+        );
+        assert!(
+            line.contains("下游配置缺失"),
+            "原始错误文本没进日志: {line}"
+        );
+        assert!(
+            line.contains(&format!(
+                r#""code":{}"#,
+                BaseError::ConfigError(String::new()).code()
+            )),
+            "框架错误码未落日志: {line}"
+        );
+    }
+
+    /// 超大响应体同样按字节上限截断，且**原始大小**要留着——「截了多少」事后无法还原。
+    #[test]
+    fn oversized_response_bodies_are_truncated_with_the_original_size_kept() {
+        let huge = "x".repeat(MAX_BODY_BYTES + 1024);
+        let mut response = ApiResponse::success_value(json!({}), "ok");
+        response.attachment = Some(ResponseAttachment::Raw {
+            body: huge.clone(),
+            content_type: "application/json".to_string(),
+        });
+
+        let line =
+            capture(|| emit_response(&response_meta(), Duration::from_millis(1), &Ok(response)));
+
+        assert!(line.contains(r#""body_truncated":true"#), "未截断: {line}");
+        assert!(
+            line.contains(&format!(r#""body_bytes":{}"#, huge.len())),
+            "body_bytes 必须是截断前的原始长度: {line}"
+        );
     }
 
     /// 未接入传输层时 method 缺省，快照仍要可落日志而不是丢弃整条记录。

@@ -2,8 +2,14 @@
 
 ## 结构化日志
 
-服务标准输出固定为一行一个 JSON object，`logging.filter` 只控制目标与级别，不改变
-编码格式。日志采集器必须按 JSON 解析，不应依赖中文 message 文本。
+服务标准输出默认是**一行一个 JSON object**，由 `observability.log_format` 选择：
+`json`（默认，生产用）或 `pretty`（多行缩进、字段逐行对齐，命令行窗口里读）。
+两者是**同一份事件、同一批字段**，只差排版——`pretty` 不新增也不丢弃任何字段。
+`logging.filter` 只控制目标与级别，不改变格式。
+
+采集器必须按 JSON 解析，不应依赖中文 message 文本；**`log_format = "pretty"` 时
+采集器按行切分会把一条事件拆成多个无主片段**，所以它只用于本地/联调终端，
+生产保持 `json`（`deploy/config.cloud.example.toml` 里已注明）。
 
 每次 Action 派发恰有一条 `Action 执行完成` 规范事件，覆盖公开请求、认证失败、
 业务错误和成功结果。事件顶层字段固定为：
@@ -29,6 +35,13 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 回传的真实报文（`linkage_params` 的字段形状项目从未观测过）。开启期间 stdout 含凭据
 明文，**不得在生产开启**；一旦开启，采集与保留策略须按 `LOG_SHIPPING.md` 的例外条款
 重新评估。其余 Action 一律不受影响，控制台侧的 Action 永远不记录请求体。
+
+同一开关下还会落一条 `飞书机器入口响应参数`（派发**之后**）：业务码、消息、响应体
+（超过 64 KiB 截断并保留原始字节数）与耗时。两行按 `request_id` 关联。
+响应体不含凭据——这三个入口返回的是选项或写入结果；加它的理由是框架的
+`Action 执行完成` **不带响应体**，而 `code` 对了不等于体对了（取选项接口返回
+`ResponseBody::raw`，整条响应都不走框架包络，只看 `data` 会得到空串）。
+请求与响应分行是刻意的：被管理 Token 拒掉的请求走不到响应那一行，而它必须留痕。
 
 ## Prometheus 指标
 

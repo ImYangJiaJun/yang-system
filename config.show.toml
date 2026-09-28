@@ -367,6 +367,13 @@ traces_export_timeout_seconds = 5
 # 默认：2000，允许 50..=10000
 readiness_budget_ms = 2000
 
+# 日志输出格式。
+# json   —— 单行一个 object，采集端按 service/environment 分索引流（默认）。
+# pretty —— 多行缩进、字段逐行对齐，命令行窗口里读。
+# 两种格式的**事件与字段完全一致**，只差排版，所以切格式不会丢字段。
+# 默认："json"
+log_format = "json"
+
 [logging]
 # tracing 过滤器：只控制级别，不改变生产 JSON 日志结构（一行一个 object）。
 # 默认："yang_system=info,tower_http=info"
