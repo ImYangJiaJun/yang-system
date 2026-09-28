@@ -3,6 +3,7 @@ pub(crate) mod approval;
 pub(crate) mod approval_convert;
 pub(crate) mod approval_dispatch;
 pub(crate) mod approval_match;
+pub(crate) mod approval_provision;
 pub(crate) mod approval_rate_limit;
 pub(crate) mod approval_uuid;
 pub(crate) mod bitable;

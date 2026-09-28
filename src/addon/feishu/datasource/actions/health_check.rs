@@ -370,6 +370,7 @@ mod tests {
             field_name: field_name.to_string(),
             field_type: Some(3),
             ui_type: Some("SingleSelect".to_string()),
+            property: None,
         }
     }
 

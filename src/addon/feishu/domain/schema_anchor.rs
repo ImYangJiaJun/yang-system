@@ -854,6 +854,7 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
     assert!(
         added.is_empty(),
         "有站点落进了宽松档而没人注意到（防线在静默降级）：{added:?}
+明细：{weak:?}
          要么把归属解析做准，要么在 `expected` 里记账并写明理由"
     );
     assert!(

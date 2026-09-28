@@ -306,6 +306,45 @@ pub(crate) struct FieldItem {
     /// 字段 UI 类型（`SingleSelect` / `MultiSelect` / `Text` …）。
     #[serde(default)]
     pub(crate) ui_type: Option<String>,
+    /// 字段属性。**单选/多选的选项就在这里**（`property.options[].name`）。
+    ///
+    /// 官方《列出字段》的响应里，选项**不在字段顶层**而嵌在 `property` 下——
+    /// 没有这一位时按名匹配会拿到空选项，症状是「单选控件的选项一个都派生不出来」，
+    /// 而列本身明明有选项。
+    #[serde(default)]
+    pub(crate) property: Option<FieldProperty>,
+}
+
+/// 字段属性。只取本模块用得到的一项。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FieldProperty {
+    /// 选项列表；单选/多选之外的字段类型没有这一项。
+    #[serde(default)]
+    pub(crate) options: Vec<PropertyOption>,
+}
+
+/// 一个字段选项。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PropertyOption {
+    #[serde(default)]
+    pub(crate) name: String,
+}
+
+impl FieldItem {
+    /// 该字段的选项名列表（非选项类字段返回空）。
+    pub(crate) fn option_names(&self) -> Vec<String> {
+        self.property
+            .as_ref()
+            .map(|property| {
+                property
+                    .options
+                    .iter()
+                    .map(|option| option.name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// 官方《多维表格记录数据结构》里值形态为**单值**的字段类型。
@@ -1145,21 +1184,165 @@ pub(crate) async fn search_records(
     .await
 }
 
-/// 构造「按 `record_id` 取一条」的查询体。
+/// 按 `record_id` 列表取记录（`records/batch_get`，单次最多 100 条）。
 ///
-/// `record_id` 是**系统字段**，用 `field_name: "record_id"` 过滤（官方支持）。
-/// 只投影需要的字段：多读列既慢，又可能因为某列形态异常而使整个查询失败。
-pub(crate) fn record_by_id_query(record_id: &str, field_names: &[String]) -> serde_json::Value {
-    serde_json::json!({
-        "filter": {
-            "conjunction": "and",
-            "conditions": [
-                { "field_name": "record_id", "operator": "is", "value": [record_id] }
-            ]
-        },
-        "field_names": field_names,
+/// # 为什么不是「查询记录 + filter」
+///
+/// 原实现用 `filter: {field_name: "record_id", operator: "is"}`，而 `record_id`
+/// 是**响应里的系统字段、不是可过滤字段**——《记录筛选参数填写说明》的
+/// `field_name` 结构里只有普通字段（`record-filter-guide.md` 全文举的例是
+/// 「字段1 / 职位 / 销售额」），把系统字段塞进去得不到一条按 id 的定位。
+/// `records/batch_get` 是官方给的正解：入参就是 `record_ids[]`。
+///
+/// 顺带比原来的写法省一次「拉多页 + 本地过滤」的往返：这里一次请求就拿到目标行。
+pub(crate) async fn get_records_by_ids(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    record_ids: &[String],
+) -> Result<Vec<RecordItem>, OutboundFailure> {
+    ensure_ids(record_ids)?;
+
+    let url = format!(
+        "{}/records/batch_get",
+        records_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
+            OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: error.to_string(),
+            }
+        })?,
+    );
+    // **不投影**。《批量获取记录》的请求体只声明了 `record_ids` / `user_id_type` /
+    // `with_shared_url` / `automatic_fields` 四个参数——`field_names` 只出现在它的
+    // **错误表**里（`1254024 InvalidFieldNames`），没有进请求参数表。
+    //
+    // 拿不准时宁可不投：传一个对方不认的参数，轻则被忽略、重则整批 400，而症状会
+    // 指向「字段名不匹配」——与真正的原因（参数不存在）完全无关。少投影的代价只是
+    // 多返回几列，而 `RecordItem.fields` 是 `BTreeMap<String, Value>`，任何形态都吃得下。
+    //
+    // `automatic_fields: false` 必须留着：它挡掉 `created_by` / `created_time` 这类
+    // **没有 field_id 的系统字段**，它们进了 `fields` 之后 [`rekey_cells_by_field_id`]
+    // 会因为找不到对应列而报错。
+    let body = serde_json::json!({
+        "record_ids": record_ids,
         "automatic_fields": false,
-    })
+    });
+
+    let data: BatchGetRecordsData = send_json(
+        transport,
+        sleeper,
+        tokens,
+        OutboundMethod::Post,
+        &url,
+        Vec::new(),
+        Some(body),
+        PULL_REQUEST_TIMEOUT_SECS,
+    )
+    .await?;
+
+    // 高级权限拒绝与「不存在」都显式报错，而不是静默返回空——空集会让调用方
+    // 误判成「记录已删」，随后把任务置终态，而记录其实还在。
+    if !data.forbidden_record_ids.is_empty() || !data.absent_record_ids.is_empty() {
+        return Err(OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: format!(
+                "取记录被拒或记录不存在：forbidden={:?} absent={:?}",
+                data.forbidden_record_ids, data.absent_record_ids
+            ),
+        });
+    }
+    Ok(data.records)
+}
+
+/// 把官方响应的 `fields`（**按字段名**作键）重映射成按 `field_id` 作键。
+///
+/// # 为什么这一步必须存在
+///
+/// 官方《批量获取记录》的示例是 `{"fields": {"单选": "选项1"}}`——键是**列名**。
+/// 而本域的配置存的是 `field_id`，`applicant_open_id` 与 `build_form` 也按 id 取值。
+///
+/// 两边对不上的症状是**每条记录都「缺少申请人」**：不报错、不告警，只是永远停在
+/// 「数据不完整」的等待态——因为按 id 去查一个按名作键的 map 永远查不到。
+/// 这类静默失败只在真实跑一条时才暴露，所以判据在这里就写死。
+///
+/// # 列名可以变，id 不能
+///
+/// 重映射按**当前**字段名解析：用户改列名后 dispatch 仍然工作（配置里的 id 不变，
+/// 每次现场解析）。这正是「存 id、按名匹配」这条纪律的运行期收益。
+///
+/// # 找不到的键一律报错，不静默保留
+///
+/// 静默保留一个原键，后果是域里按 id 取不到 → 又变成「缺少申请人」——把这次修复
+/// 挪到别处而不是消除它。宁可在这里失败并点名是哪个键。
+pub(crate) fn rekey_cells_by_field_id(
+    fields: &[FieldItem],
+    cells: &BTreeMap<String, serde_json::Value>,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let mut out = serde_json::Map::new();
+    let mut unknown: Vec<&str> = Vec::new();
+    for (key, value) in cells {
+        // 已经是 id 的直接收下：个别接口两种键都给，防御性写法没有代价。
+        if fields.iter().any(|field| field.field_id == key.as_str()) {
+            out.insert(key.clone(), value.clone());
+            continue;
+        }
+        // 列名不唯一时 `resolve_field_name` 会点名报错——比取到不确定的一列强。
+        match fields
+            .iter()
+            .find(|field| field.field_name.trim() == key.trim())
+        {
+            Some(field) => {
+                out.insert(field.field_id.clone(), value.clone());
+            }
+            None => unknown.push(key),
+        }
+    }
+
+    ensure!(
+        unknown.is_empty(),
+        "响应里的这些键既不是字段 id 也不是已知列名：{}（它们多半是未投影的系统字段，         或该列已从表里删除）",
+        unknown.join("、")
+    );
+    Ok(out)
+}
+
+/// `records/batch_get` 的入参校验：官方单次 1~100 条，且不允许空串 id。
+fn ensure_ids(record_ids: &[String]) -> Result<(), OutboundFailure> {
+    // 不用 `ensure!`：它返回 `anyhow::Error`，而本函数返回 `OutboundFailure`
+    // （失败分类是出站层的语义，不该在这一层被折成 `Fatal{code:0}` 以外的任何东西）。
+    let reason = if record_ids.is_empty() {
+        Some("record_ids 不能为空".to_string())
+    } else if record_ids.len() > 100 {
+        Some(format!(
+            "record_ids 单次最多 100 条，实际 {}",
+            record_ids.len()
+        ))
+    } else if record_ids.iter().any(|id| id.trim().is_empty()) {
+        Some("record_ids 不得含空值".to_string())
+    } else {
+        None
+    };
+    match reason {
+        Some(message) => Err(OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// `records/batch_get` 的 `data`。
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BatchGetRecordsData {
+    #[serde(default)]
+    pub(crate) records: Vec<RecordItem>,
+    /// 高级权限下被拒绝的记录 id。
+    #[serde(default)]
+    pub(crate) forbidden_record_ids: Vec<String>,
+    /// 表里已经不存在的记录 id。
+    #[serde(default)]
+    pub(crate) absent_record_ids: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1255,6 +1438,7 @@ mod tests {
             field_name: field_name.to_string(),
             field_type: Some(3),
             ui_type: Some("SingleSelect".to_string()),
+            property: None,
         }
     }
 
@@ -1496,6 +1680,7 @@ mod tests {
             field_name: field_name.to_string(),
             field_type: Some(3),
             ui_type: Some("SingleSelect".to_string()),
+            property: None,
         }
     }
 
@@ -1547,6 +1732,7 @@ mod tests {
             field_name: "取数列".to_string(),
             field_type: Some(field_type),
             ui_type: ui_type.map(str::to_string),
+            property: None,
         }
     }
 
@@ -1591,6 +1777,7 @@ mod tests {
             field_name: "取数列".to_string(),
             field_type: None,
             ui_type: None,
+            property: None,
         };
         assert!(check_coordinate_field(&unknown).is_ok());
     }

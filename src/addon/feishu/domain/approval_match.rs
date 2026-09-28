@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use super::approval_convert::{Converter, WidgetMap};
+use super::bitable::FieldItem;
 
 /// 审批定义 `form` 字段里的多态 `option` 取值。
 ///
@@ -151,6 +152,83 @@ pub(crate) struct Column {
     pub(crate) field_name: String,
     /// 列里的选项名。只有 select 类型的列才有。
     pub(crate) options: Vec<String>,
+}
+
+/// 由《列出字段》的响应构造按名匹配用的列集合。
+///
+/// # 为什么这一步不能省
+///
+/// 按名匹配要的是**列名 + 选项名**，而两样都只在 `list_all_fields` 里——
+/// 直接用调用方传来的列名会丢掉选项（`property.options[].name`），
+/// 单选控件的选项值就派生不出来。
+///
+/// # 只留匹配要用的三样
+///
+/// `field_type` / `ui_type` 一概不进 [`Column`]：类型兼容性判定（`check_type_compatibility`
+/// 当前只拦「列是选项而控件要数字」这类）**只看有没有选项**，不需要类型码。
+/// 多留两样只会让「`Column` 是什么」变模糊。
+pub(crate) fn columns_from_fields(fields: &[FieldItem]) -> Vec<Column> {
+    fields
+        .iter()
+        .map(|field| Column {
+            field_id: field.field_id.clone(),
+            field_name: field.field_name.trim().to_string(),
+            options: field.option_names(),
+        })
+        .collect()
+}
+
+/// 解析一个「可能是 `field_id`、也可能是列名」的坐标字符串。
+///
+/// # 为什么两种都要接受
+///
+/// 请求体由人在工作流的 `raw_body` 里写死，两种形态都自然——有人写 id（从
+/// 列表接口复制来的），有人写列名（自己起的）。**优先按 `field_id` 匹配**：
+/// id 是稳定标识，而列名可以被改、也可能有重名；只在 id 不命中时才退到按名匹配。
+///
+/// # 用 id 存、用名匹配是两条轴，不要混
+///
+/// 本函数**只做解析**，不决定存什么：解析结果总带 `field_id` 与 `field_name`，
+/// 存储一律用 id（用户改列名不会让配置失效），而 API 的投影与回写用名
+/// （见 `bitable::get_records_by_ids` 的 `field_names` 与 `batch_update` 的 `fields` key）。
+pub(crate) fn resolve_field_coord<'a>(columns: &'a [Column], given: &str) -> Option<&'a Column> {
+    let target = given.trim();
+    if target.is_empty() {
+        return None;
+    }
+    columns
+        .iter()
+        .find(|column| column.field_id == target)
+        .or_else(|| columns.iter().find(|column| column.field_name == target))
+}
+
+/// 与 [`resolve_field_coord`] 对称的**逐项解析**：一条配置的两个关键坐标
+/// 与全部映射行，全部一次性解析完。
+///
+/// 返回 `None` 表示「坐标里有一个在表里找不到」——调用方据此报错并回填，
+/// 而不是带着半套坐标继续跑（半套的后果是：创建成功了，但回填写进错的列）。
+pub(crate) struct ResolvedCoords<'a> {
+    pub(crate) applicant: &'a Column,
+    pub(crate) backfill: &'a Column,
+}
+
+/// 解析申请与回填两个坐标；任一失败即 `None`。
+pub(crate) fn resolve_key_coords<'a>(
+    columns: &'a [Column],
+    applicant: &str,
+    backfill: &str,
+) -> Option<ResolvedCoords<'a>> {
+    let applicant = resolve_field_coord(columns, applicant)?;
+    let backfill = resolve_field_coord(columns, backfill)?;
+    // 同一列被当申请又当回填：提交时会把发起人当成编号读，两边都是错的。
+    // 与其让它静默错，不如在配置期拒绝。
+    if applicant.field_id == backfill.field_id {
+        return None;
+    }
+    Some(ResolvedCoords {
+        applicant,
+        backfill,
+    })
 }
 
 /// 按名匹配的失败原因。
@@ -508,6 +586,8 @@ fn converter_for(widget_type: &str) -> Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 只有本模块的测试构造 `FieldItem`，生产路径用的是 `columns_from_fields`。
+    use super::super::bitable::{FieldProperty, PropertyOption};
 
     /// 真实响应的最小复刻：`option` 的四种形态**都**要覆盖，因为它们是
     /// 「按类型判别」这条设计的全部依据。
@@ -665,6 +745,83 @@ mod tests {
                 errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
             ),
         }
+    }
+
+    #[test]
+    fn columns_from_fields_carry_options_from_property() {
+        // 选项在 `property.options` 里——没有这一步，单选控件一个值都派生不出。
+        let fields = vec![
+            FieldItem {
+                field_id: "fldA".to_string(),
+                field_name: "  收款方类型/Type of payee  ".to_string(),
+                field_type: Some(3),
+                ui_type: Some("SingleSelect".to_string()),
+                property: Some(FieldProperty {
+                    options: vec![
+                        PropertyOption {
+                            name: "个人".to_string(),
+                        },
+                        PropertyOption {
+                            name: "企业".to_string(),
+                        },
+                    ],
+                }),
+            },
+            FieldItem {
+                field_id: "fldB".to_string(),
+                field_name: "SWIFT Address".to_string(),
+                field_type: Some(1),
+                ui_type: Some("Text".to_string()),
+                property: None,
+            },
+        ];
+        let columns = columns_from_fields(&fields);
+        assert_eq!(columns.len(), 2);
+        // 名字要 trim：多维表格的列名首尾空格会被官方去一次，但保险起见本地再去。
+        assert_eq!(columns[0].field_name, "收款方类型/Type of payee");
+        assert_eq!(columns[0].options, vec!["个人", "企业"]);
+        assert!(columns[1].options.is_empty(), "无 property 的列是空选项");
+    }
+
+    #[test]
+    fn resolve_field_coord_accepts_id_and_name() {
+        let columns = vec![
+            column("SWIFT Address", "fldA", &[]),
+            column("收款方类型/Type of payee", "fldB", &["个人"]),
+        ];
+        // 用 id 与用名都要能解析到同一条。
+        assert_eq!(
+            resolve_field_coord(&columns, "fldB").map(|column| column.field_id.as_str()),
+            Some("fldB")
+        );
+        assert_eq!(
+            resolve_field_coord(&columns, "收款方类型/Type of payee")
+                .map(|column| column.field_id.as_str()),
+            Some("fldB")
+        );
+        // id 优先于名字（同名不同 id 时取 id 那条）。
+        assert!(resolve_field_coord(&columns, "fldA").is_some());
+        // 找不到与空串都返回 None。
+        assert!(resolve_field_coord(&columns, "不存在的列").is_none());
+        assert!(resolve_field_coord(&columns, "   ").is_none());
+    }
+
+    #[test]
+    fn same_column_as_applicant_and_backfill_is_rejected() {
+        // 同一列被当申请又当回填：提交时会把发起人当成编号读。
+        let columns = vec![column("申请人", "fldP", &[])];
+        assert!(
+            resolve_key_coords(&columns, "fldP", "fldP").is_none(),
+            "申请与回填同列应拒绝"
+        );
+        // 不同列要能过。
+        let columns = vec![
+            column("申请人", "fldP", &[]),
+            column("审批编号", "fldB", &[]),
+        ];
+        assert!(resolve_key_coords(&columns, "fldP", "fldB").is_some());
+        // 任一坐标解析不到即整体 None（调用方据此报错，而不是带半套坐标继续跑）。
+        assert!(resolve_key_coords(&columns, "fldP", "没有的列").is_none());
     }
 
     #[test]

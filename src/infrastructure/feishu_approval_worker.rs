@@ -519,27 +519,45 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         view_id: None,
     };
 
-    // 只投影需要的字段：多读列既慢，又可能因为某列形态异常而使整个查询失败。
-    let mut field_names: Vec<String> = task
-        .widgets
-        .iter()
-        .map(|widget| widget.bitable_field.clone())
-        .collect();
-    field_names.push(task.applicant_field.clone());
-    field_names.sort();
-    field_names.dedup();
-
-    let found = bitable::search_records(
+    // 表结构要先拿：官方《批量获取记录》的 `fields` **按字段名**作键，而域里按
+    // `field_id` 取值（配置存 id）。不重映射的话按 id 永远查不到，每条记录都判成
+    // 「缺少申请人」——不报错，只是永远停在等待态。
+    let fields = match bitable::list_all_fields(
         runner.transport(),
         runner.sleeper.as_ref(),
         &runner.tokens,
         &coordinates,
-        bitable::record_by_id_query(&task.record_id, &field_names),
+    )
+    .await
+    {
+        Ok(fields) => fields,
+        // 表结构拿不到多半是凭证/网络抖动，判可重试。
+        Err(failure) => {
+            return DispatchResult::Retryable {
+                message: format!("读取表结构失败：{}", failure.message),
+            }
+        }
+    };
+
+    // 不投影：官方 `records/batch_get` 的请求体没有 `field_names` 参数。
+    let found = bitable::get_records_by_ids(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &coordinates,
+        std::slice::from_ref(&task.record_id),
     )
     .await;
     let cells: serde_json::Map<String, serde_json::Value> = match found {
-        Ok(data) => match data.items.into_iter().next() {
-            Some(record) => record.fields.into_iter().collect(),
+        Ok(items) => match items.into_iter().next() {
+            Some(record) => match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
+                Ok(cells) => cells,
+                Err(error) => {
+                    return DispatchResult::Terminal {
+                        message: format!("解析记录字段失败：{error}"),
+                    }
+                }
+            },
             None => {
                 return DispatchResult::Terminal {
                     message: "多维表格里已找不到该记录".to_string(),
