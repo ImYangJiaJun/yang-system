@@ -61,6 +61,7 @@ use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
 };
 use crate::config::FeishuSettings;
+use crate::infrastructure::audit;
 
 /// 一次认领最多取多少条。
 ///
@@ -295,6 +296,9 @@ async fn run_round(runner: &RoundRunner, cursor: &mut ResumeCursor) {
             return;
         }
     };
+    // 队列深度：**告警的表达式**。连续为 0 说明没有积压；持续为 `CLAIM_BATCH`
+    // 说明一批被处理掉了但还有——积压本身由 `idled` 分支的 gauge 兜底。
+    metrics::gauge!("feishu_approval_pending").set(claimed.len() as f64);
     if claimed.is_empty() {
         return;
     }
@@ -310,6 +314,12 @@ async fn run_round(runner: &RoundRunner, cursor: &mut ResumeCursor) {
         // 未处理的保持 `pending`，下一轮自然重扫。
         let Some(redis) = runner.tools.cache().ok() else {
             tracing::warn!("Redis 不可用，审批派发中断本轮");
+            metrics::counter!(
+                "feishu_approval_round_total",
+                "result" => "idle",
+                "reason" => "redis_unavailable"
+            )
+            .increment(1);
             idled = true;
             break;
         };
@@ -317,6 +327,12 @@ async fn run_round(runner: &RoundRunner, cursor: &mut ResumeCursor) {
             acquire_create_slot(redis, &runner.deployment, runner.rate_per_minute).await
         {
             tracing::warn!(error = %failure.message, "取创建名额失败，中断本轮");
+            metrics::counter!(
+                "feishu_approval_round_total",
+                "result" => "idle",
+                "reason" => "rate_limit"
+            )
+            .increment(1);
             idled = true;
             break;
         }
@@ -346,6 +362,7 @@ async fn run_round(runner: &RoundRunner, cursor: &mut ResumeCursor) {
 /// 一条已认领的任务及其全部配置（一次查全，避免处理时再查库）。
 struct ClaimedTask {
     id: i64,
+    config_id: i64,
     record_id: String,
     base_token: String,
     table_id: String,
@@ -482,6 +499,7 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
 
     Ok(Some(ClaimedTask {
         id: row.require("id")?,
+        config_id,
         record_id: row.require("record_id")?,
         base_token: config.require("base_token")?,
         table_id: config.require("table_id")?,
@@ -600,6 +618,70 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
     };
     if let Err(error) = result {
         tracing::warn!(error = %error, task_id = task.id, "写回审批任务状态失败");
+    }
+
+    // 指标：按结论分桶。`terminal` 与 `waiting` 分开是关键——前者要人动，
+    // 后者只要等，混在一个桶里就分不清「有人卡住了」与「数据还没填完」。
+    metrics::counter!(
+        "feishu_approval_dispatch_total",
+        "outcome" => match outcome {
+            DispatchResult::Backfilled { .. } => "backfilled",
+            DispatchResult::Waiting { .. } => "waiting",
+            DispatchResult::Retryable { .. } => "retryable",
+            DispatchResult::Terminal { .. } => "terminal",
+        }
+    )
+    .increment(1);
+
+    // 审计：只有**成功创建了审批单**才落事件。
+    //
+    // 依据是 `docs/contracts/AUDIT.md` 的高权限口径——本动作以系统身份创建了
+    // 有外部副作用、可被追责的审批单据，这正是「谁、何时、对哪一行、发了哪个
+    // 实例」必须留痕的理由。等待态与失败不落：它们是**没有发生的事**，
+    // 落进 append-only 审计只会制造噪音，而且失败原因已在多维表格与 `last_error`
+    // 各有出处。
+    //
+    // 摘要键避开 `token`/`hash` 等敏感词（`validate_summary_key` 会拒收）。
+    if let DispatchResult::Backfilled { serial_number } = outcome {
+        // 本函数不返回 `Result`（状态写失败只记日志，不该中断「报告刚发生的事」），
+        // 所以构造链里的 `?` 全部改成显式 `match` + 日志。
+        let constructed: Result<_, BaseError> = (|| {
+            let config_entity = audit::entity("feishu_approval_config", task.config_id)?;
+            let task_entity = audit::entity("feishu_approval_task", task.id)?;
+            let summary = audit::summary([
+                ("outcome_code", serde_json::json!("created")),
+                ("record_id", serde_json::json!(task.record_id.clone())),
+                ("serial_number", serde_json::json!(serial_number.clone())),
+            ])?;
+            audit::succeeded_system_event_without_ctx(
+                "feishu-approval-worker",
+                "feishu.approval_dispatch",
+                Some(config_entity),
+                task_entity,
+                summary,
+            )
+        })();
+        // 审计构造失败不该吞掉「审批单已创建」这个事实：记日志后继续，
+        // 任务状态那次写回仍然有效。
+        if let Err(error) = &constructed {
+            tracing::error!(error = %error, task_id = task.id, "审批派发审计事件构造失败");
+        }
+        if let Ok(event) = constructed {
+            match runner.tools.mysql() {
+                Ok(database) => {
+                    if let Err(error) = audit::append_independent(database.pool(), &event).await {
+                        tracing::error!(
+                            error = %error,
+                            task_id = task.id,
+                            "审批派发审计写入失败"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, task_id = task.id, "审批派发审计取库失败");
+                }
+            }
+        }
     }
 }
 

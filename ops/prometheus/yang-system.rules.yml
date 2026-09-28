@@ -87,6 +87,35 @@ groups:
           summary: "authorization outbox propagation exceeds two seconds"
           runbook: "docs/contracts/SLO.md"
 
+      # 审批派发积压：`dispatch` 端点受理了（页面按钮点了、返回 accepted），
+      # 但队列深度连续 15 分钟没降到阈值以下。三条要一起看的语义：
+      # - 认领批 = 50，所以「深度持续 ≥ 1」可能是健康吞吐，也可能是真卡住；
+      # - `for: 15m` 覆盖两轮完整重试（单轮预算 300s × 2），避免在退避期间误报；
+      # - 若同时 `feishu_approval_dispatch_total{outcome="terminal"}` 在涨，
+      #   说明不是积压而是配置问题——见 runbook 的区分步骤。
+      - alert: YangSystemApprovalDispatchBacklog
+        expr: feishu_approval_pending > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: feishu_approval
+        annotations:
+          summary: "feishu approval dispatch queue has stayed non-empty for 15 minutes"
+          runbook: "docs/contracts/SLO.md"
+
+      # 创建实例持续失败：官方限速 100 次/分钟，撞限流时会同时看到
+      # `reason="rate_limit"` 的中断与 `outcome="retryable"` 的重试。
+      # 连续 5 分钟非零意味着要么限速配得太高，要么飞书侧在拒绝。
+      - alert: YangSystemApprovalDispatchFailing
+        expr: increase(feishu_approval_dispatch_total{outcome="terminal"}[5m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+          component: feishu_approval
+        annotations:
+          summary: "feishu approval dispatch is landing in terminal state repeatedly"
+          runbook: "docs/contracts/SLO.md"
+
       - alert: YangSystemResourcePoolExhausted
         expr: |
           (

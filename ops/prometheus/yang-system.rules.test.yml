@@ -142,3 +142,62 @@ tests:
       - eval_time: 15m
         alertname: YangSystemShutdownPhaseTimedOut
         exp_alerts: []
+
+  # 审批派发积压：队列深度连续 15 分钟非零，应触发 warning。
+  - interval: 1m
+    input_series:
+      - series: 'feishu_approval_pending{job="yang-system", instance="127.0.0.1:9090"}'
+        values: '5x24'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: YangSystemApprovalDispatchBacklog
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              instance: 127.0.0.1:9090
+              severity: warning
+              component: feishu_approval
+            exp_annotations:
+              summary: "feishu approval dispatch queue has stayed non-empty for 15 minutes"
+              runbook: "docs/contracts/SLO.md"
+
+  # 积压反例：队列深度恒为 0（没有待处理记录），不应触发。
+  - interval: 1m
+    input_series:
+      - series: 'feishu_approval_pending{job="yang-system", instance="127.0.0.1:9090"}'
+        values: '0x24'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: YangSystemApprovalDispatchBacklog
+        exp_alerts: []
+
+  # 审批创建持续终态失败：1/min 持续 30 分钟，应触发 warning。
+  - interval: 1m
+    input_series:
+      - series: 'feishu_approval_dispatch_total{job="yang-system", instance="127.0.0.1:9090", outcome="terminal"}'
+        values: '0+1x34'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: YangSystemApprovalDispatchFailing
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              instance: 127.0.0.1:9090
+              # `increase()` 保留原序列的标签——`outcome="terminal"` 是选择器
+              # 约束，也在告警上出现，运维按它一眼分清「终态失败」与「waiting」。
+              outcome: terminal
+              severity: warning
+              component: feishu_approval
+            exp_annotations:
+              summary: "feishu approval dispatch is landing in terminal state repeatedly"
+              runbook: "docs/contracts/SLO.md"
+
+  # 终态失败反例：全部走 waiting（数据还没填完，不是错误），不应触发。
+  - interval: 1m
+    input_series:
+      - series: 'feishu_approval_dispatch_total{job="yang-system", instance="127.0.0.1:9090", outcome="waiting"}'
+        values: '0+1x34'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: YangSystemApprovalDispatchFailing
+        exp_alerts: []
