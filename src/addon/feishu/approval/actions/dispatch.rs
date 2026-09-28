@@ -355,14 +355,37 @@ async fn backfill_provision_failure(
         coordinates: &coordinates,
     };
 
-    // 回填的是**配置的错误**，不是数据的错误，所以要留个前缀让人分得开：
-    // 表格里同时会出现「缺必填列」（数据问题）与「配置校验不过」（本问题）。
-    let message = format!("[配置] {failure}");
-    if let Err(error) = writer.write(record_id, backfill_field, &message).await {
+    if let Err(error) = write_config_failure(&writer, record_id, backfill_field, failure).await {
         // 回填失败不改变结论——错误已经返回给工作流了。这里降级为日志：
         // 真正的原因（配置没建好）比「报错没写进表格」更值得留下。
         tracing::warn!(error = %error.message, "配置校验失败的回填写入失败");
     }
+}
+
+/// 把「配置校验不过」写进回填列。
+///
+/// # 为什么单独抽出来
+///
+/// 这是「配置期报错」**唯一的用户可见出口**：HTTP 响应只有工作流日志看得到，而
+/// 点按钮的人在多维表格里。整条链路——文案前缀、写哪一列、单元格形态——都只有在
+/// 真的写一次之后才知道对不对，所以它必须能被端到端用例直接驱动。
+/// `backfill_provision_failure` 里那层 `ActionContext`/凭证构造与本函数无关，
+/// 不该成为它的测试门槛（`Backfill` trait 当初也是为同一个理由抽的）。
+///
+/// # 前缀 `[配置]` 不能省
+///
+/// 同一个回填列里会同时出现两类文本：**数据问题**（「缺必填列」，由
+/// `classify_failure` 写入）与**配置问题**（本函数）。没有前缀，表格里的人分不开
+/// 「去补这一行的数据」和「去改配置」——而这两件事的处置完全不同。
+async fn write_config_failure(
+    backfill: &dyn Backfill,
+    record_id: &str,
+    backfill_field: &str,
+    failure: &ProvisionError,
+) -> Result<(), crate::addon::feishu::domain::outbound::OutboundFailure> {
+    backfill
+        .write(record_id, backfill_field, &format!("[配置] {failure}"))
+        .await
 }
 
 /// 同步处理一条记录。
@@ -663,5 +686,644 @@ mod tests {
             .as_object()
             .map(|o| o.contains_key("serial_number"))
             .unwrap_or(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // 端到端 mock 实测
+    // -----------------------------------------------------------------------
+    //
+    // 这一组用例用**合成**的审批定义 + **合成**的多维表格列，把整条默认链路真的走
+    // 一遍：列出字段 → 取审批定义 → 按名匹配 → 读记录 → 重映射 → 组装 form →
+    // 创建实例 → 取编号 → 回写。
+    //
+    // # 为什么必须有这一组
+    //
+    // 各模块的单测都是「喂一个函数」——它们证明每一段是对的，证明不了**接起来**是对的。
+    // 这条链路上真正的风险全在接缝处，而且是静默的那一类：响应 `fields` 按列名作键
+    // 而配置存 `field_id`（对不上的症状是「每条记录都缺少申请人」，不报错）、
+    // `form` 必须是压缩后的 JSON **字符串**而不是对象、单选传字符串而多选传数组。
+    // 这些只有把整条链跑通、再把**发给飞书的请求体**逐字段对一遍才验得到。
+    //
+    // # 唯一的替身是网络与数据库
+    //
+    // 传输换成 `ReplayTransport`（回放脚本化响应 + 记录每个真实请求体），数据库换成
+    // 惰性连接池（这些用例根本不查库——`load_external_options` 在没有链接型控件时
+    // 会短路返回空表）。其余全是生产代码，包括 `derive_uuid`、`rekey_cells_by_field_id`、
+    // `BitableBackfill`、`build_form`。
+    //
+    // # 合成数据不是随手编的
+    //
+    // 每份响应都按**实测过的真实形状**造：`form` 是 JSON 字符串、`option` 的多种
+    // 形态各出现一次、`property.options[].name` 才是选项所在、`batch_get` 的
+    // `fields` 按列名作键。依据见 `approval_match` 模块文档。
+
+    use crate::addon::feishu::domain::approval_convert::Converter;
+    use crate::addon::feishu::domain::approval_dispatch::DispatchResult;
+    use crate::addon::feishu::domain::approval_uuid::derive_uuid;
+    use crate::addon::feishu::domain::outbound::{
+        OutboundRequest, OutboundResponse, OutboundTransport, Sleeper,
+    };
+    use crate::addon::feishu::domain::tenant_token::{
+        FeishuCredentials, TenantTokenCache, TenantTokenProvider,
+    };
+    use serde_json::{json, Value};
+    use std::sync::Mutex;
+
+    const E2E_BASE_TOKEN: &str = "appE2ETestToken";
+    const E2E_TABLE_ID: &str = "tblE2ETestTable";
+    const E2E_APPROVAL_CODE: &str = "CODE-E2E-TEST";
+    const E2E_RECORD_ID: &str = "recE2E001";
+    const E2E_APPLICANT_OPEN_ID: &str = "ou_applicant_e2e";
+    /// `2026-09-28T00:00:00+08:00` 的毫秒时间戳。日期控件的输入形态就是这个。
+    const E2E_PAY_DATE_MILLIS: i64 = 1_790_524_800_000;
+
+    /// 一个被记录下来的出站请求。
+    ///
+    /// 记的是**完整请求体**而不只是方法与 URL：端到端要验的正是「发给飞书的那份
+    /// JSON 对不对」（`form` 里的控件值、`batch_update` 的单元格形态），
+    /// 只看 URL 等于什么都没验。
+    #[derive(Debug, Clone)]
+    struct SeenRequest {
+        method: String,
+        url: String,
+        body: Option<Value>,
+    }
+
+    /// 回放式传输：按脚本依次吐响应，并把每个请求原样记下来。
+    struct ReplayTransport {
+        script: Mutex<std::collections::VecDeque<(u16, String)>>,
+        seen: Mutex<Vec<SeenRequest>>,
+    }
+
+    impl ReplayTransport {
+        fn new(responses: Vec<(u16, String)>) -> Self {
+            Self {
+                script: Mutex::new(responses.into_iter().collect()),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<SeenRequest> {
+            self.seen
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default()
+        }
+
+        /// 按「方法 + 完整 URL」精确定位一次请求。
+        ///
+        /// 用完整 URL 而不是子串：创建实例与取实例详情的前缀相同
+        /// （`/approval/v4/instances` 与 `/approval/v4/instances/:id`），子串匹配会把
+        /// 两者混起来，而「创建请求体对不对」正是本组用例的核心断言。
+        fn took(&self, method: &str, url: &str) -> SeenRequest {
+            self.seen()
+                .into_iter()
+                .find(|request| request.method == method && request.url == url)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "必须向 {method} {url} 发过一次请求；实际收到：{:#?}",
+                        self.seen()
+                    )
+                })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundTransport for ReplayTransport {
+        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(SeenRequest {
+                    method: format!("{:?}", request.method),
+                    url: request.url.clone(),
+                    body: request.json_body.clone(),
+                });
+            }
+            let mut script = self
+                .script
+                .lock()
+                .map_err(|error| BaseError::ConfigError(error.to_string()))?;
+            let (status, body) = script.pop_front().ok_or_else(|| {
+                BaseError::ConfigError(format!(
+                    "回放脚本已耗尽，但代码又发了第 {} 个请求：{:?} {}",
+                    self.seen().len() + 1,
+                    request.method,
+                    request.url
+                ))
+            })?;
+            Ok(OutboundResponse {
+                status,
+                body,
+                headers: std::collections::BTreeMap::new(),
+            })
+        }
+    }
+
+    struct NoSleep;
+
+    #[async_trait::async_trait]
+    impl Sleeper for NoSleep {
+        async fn sleep(&self, _duration: std::time::Duration) {}
+    }
+
+    /// 恒命中的假 token 缓存——回放用例不该把配额花在换 token 上。
+    ///
+    /// 用 `TenantTokenProvider` 的真实构造而不是伪造它：它不是 trait，而是带
+    /// 缓存/锁逻辑的结构体，伪造它会绕开「token 失效补救」那段真实逻辑。
+    struct FakeCache;
+
+    #[async_trait::async_trait]
+    impl TenantTokenCache for FakeCache {
+        async fn get(&self) -> anyhow::Result<Option<String>> {
+            Ok(Some("t-e2e".to_string()))
+        }
+        async fn put(&self, _token: &str, _ttl_seconds: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn invalidate(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn acquire_lock(&self, _owner: &str, _ttl_seconds: i64) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn release_lock(&self, _owner: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// token provider 只在缓存未命中时才会用它，而 `FakeCache` 恒命中。
+    struct NeverCalledTransport;
+
+    #[async_trait::async_trait]
+    impl OutboundTransport for NeverCalledTransport {
+        async fn send(&self, _request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
+            Err(BaseError::ConfigError(
+                "FakeCache 恒命中，不应走到换 token 那一步".to_string(),
+            ))
+        }
+    }
+
+    fn e2e_tokens() -> TenantTokenProvider {
+        TenantTokenProvider::new(
+            Arc::new(FakeCache),
+            Arc::new(NeverCalledTransport),
+            Arc::new(NoSleep),
+            FeishuCredentials {
+                app_id: "cli_e2e".to_string(),
+                app_secret: "secret".to_string(),
+            },
+            "e2e",
+        )
+        .unwrap_or_else(|error| panic!("应可构造 token provider: {error}"))
+    }
+
+    /// 惰性连接池的上下文。这些用例**不查库**——`load_external_options` 在没有
+    /// 链接型控件时会短路返回空表，所以不需要真的数据库。
+    ///
+    /// `connect_lazy` 不建立任何连接，但它要求一个 Tokio 上下文。
+    fn e2e_context() -> FeishuContext {
+        use crate::addon::feishu::domain::repository::Repository;
+        use yang_base::definition::TableSpec;
+
+        let pool = Arc::new(
+            sqlx::MySqlPool::connect_lazy("mysql://user:pass@localhost:3306/yang")
+                .unwrap_or_else(|error| panic!("惰性连接池应可构造: {error}")),
+        );
+        let definition = |spec: Result<TableSpec, _>| {
+            spec.unwrap_or_else(|error| panic!("{error}"))
+                .table_definition()
+                .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"))
+        };
+        let repository =
+            |spec: Result<TableSpec, _>| Repository::new(definition(spec), Arc::clone(&pool));
+        FeishuContext::new(
+            repository(crate::addon::feishu::datasource::table::table_spec()),
+            repository(crate::addon::feishu::datasource::domain::field_table::table_spec()),
+            repository(crate::addon::feishu::option::table::table_spec()),
+            repository(crate::addon::feishu::approval::table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::field_map_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::task_table::table_spec()),
+            None,
+        )
+    }
+
+    fn e2e_coordinates() -> BitableCoordinates {
+        BitableCoordinates {
+            app_token: E2E_BASE_TOKEN.to_string(),
+            table_id: E2E_TABLE_ID.to_string(),
+            view_id: None,
+        }
+    }
+
+    /// 合成审批定义：6 个控件，覆盖「无 `option` 键 / `option: null` / 固定选项数组 /
+    /// 可选控件」几种形态，类型跨 文本 / 数字 / 日期 / 单选 / 多选。
+    fn e2e_form() -> Value {
+        json!([
+            {"id": "w1", "name": "公司名称", "type": "input", "required": true},
+            {"id": "w2", "name": "付款金额", "type": "number", "required": true, "option": null},
+            {"id": "w3", "name": "付款日期", "type": "date", "required": true},
+            {"id": "w4", "name": "收款方类型", "type": "radioV2", "required": true,
+             "option": [{"value": "opt-person", "text": "个人"}, {"value": "opt-corp", "text": "企业"}]},
+            {"id": "w5", "name": "费用标签", "type": "checkboxV2", "required": false,
+             "option": [{"value": "opt-travel", "text": "差旅"}, {"value": "opt-meal", "text": "餐饮"}]},
+            {"id": "w6", "name": "备注", "type": "input", "required": false}
+        ])
+    }
+
+    /// 合成多维表格字段：**列名与控件名严格对应**——这正是默认链路（免人工配映射）
+    /// 的前置条件。另外两列（申请人 / 审批编号）是使用方自己的列，与控件名不同名。
+    ///
+    /// `total` 必须有：`list_all_fields` 末尾的 `assert_converged` 拿它证明快照完整。
+    fn e2e_fields_body() -> String {
+        json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "has_more": false,
+                "total": 8,
+                "items": [
+                    {"field_id": "fldCompany", "field_name": "公司名称", "type": 1, "ui_type": "Text"},
+                    {"field_id": "fldAmount", "field_name": "付款金额", "type": 2, "ui_type": "Number"},
+                    {"field_id": "fldPayDate", "field_name": "付款日期", "type": 5, "ui_type": "DateTime"},
+                    // 选项在 `property.options[].name`——不在字段顶层。少了这一层，
+                    // 单选控件的选项一个都派生不出来，而列里明明有选项。
+                    {"field_id": "fldPayeeType", "field_name": "收款方类型", "type": 3,
+                     "ui_type": "SingleSelect", "property": {"options": [{"name": "个人"}, {"name": "企业"}]}},
+                    {"field_id": "fldTags", "field_name": "费用标签", "type": 4,
+                     "ui_type": "MultiSelect", "property": {"options": [{"name": "差旅"}, {"name": "餐饮"}]}},
+                    {"field_id": "fldRemark", "field_name": "备注", "type": 1, "ui_type": "Text"},
+                    {"field_id": "fldApplicant", "field_name": "申请人", "type": 11, "ui_type": "User"},
+                    {"field_id": "fldSerial", "field_name": "审批编号", "type": 1, "ui_type": "Text"}
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    /// 合成审批定义响应。
+    ///
+    /// `form` 是 **JSON 字符串**（真实形态是字符串里再套一层 JSON 数组），
+    /// 且**不返回 `is_external`**——实测 `approvals get` 就是没有这一位，缺字段时
+    /// 必须落到「非三方定义」。这里刻意不给，把那个默认值钉住。
+    fn e2e_definition_body(form: &Value) -> String {
+        json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "approval_name": "端到端测试审批",
+                "form": serde_json::to_string(form).unwrap_or_else(|error| panic!("{error}"))
+            }
+        })
+        .to_string()
+    }
+
+    /// 合成 `records/batch_get` 响应。
+    ///
+    /// **`fields` 按列名作键**——这是实测出来的真实形态，也是整条链路上最容易静默
+    /// 出错的一处：按 `field_id` 去查这个 map 永远查不到，症状是每条记录都
+    /// 「缺少申请人」而不报任何错。
+    fn e2e_record_body() -> String {
+        json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "records": [{
+                    "record_id": E2E_RECORD_ID,
+                    "fields": {
+                        "公司名称": "成都某某科技有限公司",
+                        "付款金额": 1234.56,
+                        "付款日期": E2E_PAY_DATE_MILLIS,
+                        "收款方类型": "个人",
+                        "费用标签": ["差旅", "餐饮"],
+                        // 可选控件留空：整个控件 JSON 都不该出现在 form 里。
+                        "备注": "",
+                        "申请人": [{"id": E2E_APPLICANT_OPEN_ID}],
+                        // 回填列此刻是空的——它正是「没有审批编号」的判据。
+                        "审批编号": ""
+                    }
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    fn e2e_ok_body(data: Value) -> String {
+        json!({"code": 0, "msg": "success", "data": data}).to_string()
+    }
+
+    /// 端到端（一）：合成定义 + 合成列名 → 自动建配置 → 单条派发 → 回填。
+    ///
+    /// 断言分两层：**建出来的配置**（列名解析成 id、转换器、选项映射）与
+    /// **发给飞书的两个请求体**（`form` 的控件值、`batch_update` 的单元格）。
+    /// 后者是这一组用例存在的理由——它逐字段钉住了格式约定。
+    #[tokio::test]
+    async fn end_to_end_provision_then_dispatch_then_backfill() {
+        let transport = Arc::new(ReplayTransport::new(vec![
+            // 建配置：先列字段，再取定义。
+            (200, e2e_fields_body()),
+            (200, e2e_definition_body(&e2e_form())),
+            // 派发：`dispatch_single` 会**再列一次**字段（读侧重映射要用）。
+            (200, e2e_fields_body()),
+            (200, e2e_record_body()),
+            (200, e2e_ok_body(json!({"instance_code": "INST-E2E-001"}))),
+            (
+                200,
+                e2e_ok_body(json!({
+                    "instance_code": "INST-E2E-001",
+                    "serial_number": "202609280001",
+                    "status": "PENDING"
+                })),
+            ),
+            (200, e2e_ok_body(json!({}))),
+        ]));
+        let tokens = e2e_tokens();
+        let sleeper = NoSleep;
+        let context = e2e_context();
+
+        // ---- 第一段：自动建配置 ----
+        let plan = build_plan(
+            transport.as_ref(),
+            &sleeper,
+            &tokens,
+            &context,
+            &ProvisionInput {
+                base_token: E2E_BASE_TOKEN,
+                table_id: E2E_TABLE_ID,
+                approval_code: E2E_APPROVAL_CODE,
+                // 调用方写的是**列名**（工作流里人就这么写），要解析成 id 存起来。
+                applicant_field: "申请人",
+                backfill_field: "审批编号",
+                base_timezone: "Asia/Shanghai",
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("自动建配置应当成功: {error}"));
+
+        assert_eq!(
+            plan.applicant_field_id, "fldApplicant",
+            "存的是 field_id 而不是列名——改列名不该让配置失效"
+        );
+        assert_eq!(plan.backfill_field_id, "fldSerial");
+        assert_eq!(plan.approval_name, "端到端测试审批");
+        assert_eq!(plan.widgets.len(), 6, "6 个控件都该按名匹配上");
+
+        let widget = |id: &str| {
+            plan.widgets
+                .iter()
+                .find(|widget| widget.widget_id == id)
+                .unwrap_or_else(|| panic!("控件 {id} 未进映射：{:#?}", plan.widgets))
+        };
+        // 转换器在**配置期**就定好，运行期不再按 type 推断——少一处会漂移的地方。
+        assert_eq!(widget("w1").converter, Converter::Direct);
+        assert_eq!(
+            widget("w3").converter,
+            Converter::Date,
+            "date 控件要折成 RFC3339"
+        );
+        assert_eq!(widget("w4").converter, Converter::Option);
+        assert_eq!(widget("w5").converter, Converter::Option);
+        assert_eq!(widget("w4").bitable_field, "fldPayeeType");
+        assert_eq!(
+            widget("w4").option_map.get("个人").map(String::as_str),
+            Some("opt-person"),
+            "选项映射派生的是**审批控件的 option value**，不是列表里的文案"
+        );
+        assert_eq!(
+            widget("w5").option_map.get("餐饮").map(String::as_str),
+            Some("opt-meal")
+        );
+
+        // ---- 第二段：派发 ----
+        //
+        // 复刻 `dispatch_single` 的接线（它本身要 `ActionContext` 才能读配置行，而配置
+        // 行在库里，mock 用例够不着）。这里少掉的只有「从库里读配置行」，
+        // 其余每一步都是生产函数。
+        let coordinates = e2e_coordinates();
+        let fields = bitable::list_all_fields(transport.as_ref(), &sleeper, &tokens, &coordinates)
+            .await
+            .unwrap_or_else(|failure| panic!("列出字段应成功: {}", failure.message));
+        let records = bitable::get_records_by_ids(
+            transport.as_ref(),
+            &sleeper,
+            &tokens,
+            &coordinates,
+            &[E2E_RECORD_ID.to_string()],
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("取记录应成功: {}", failure.message));
+        let cells = bitable::rekey_cells_by_field_id(
+            &fields,
+            &records
+                .first()
+                .unwrap_or_else(|| panic!("应取回一条记录"))
+                .fields,
+        )
+        .unwrap_or_else(|error| panic!("按 id 重映射应成功: {error}"));
+        assert!(
+            cells.contains_key("fldApplicant"),
+            "重映射后必须能按 field_id 取到申请人，否则会静默停在「缺少申请人」"
+        );
+
+        let backfill = BitableBackfill {
+            transport: transport.as_ref(),
+            sleeper: &sleeper,
+            tokens: &tokens,
+            coordinates: &coordinates,
+        };
+        let result = dispatch_one(
+            transport.as_ref(),
+            &sleeper,
+            &tokens,
+            &backfill,
+            &OrchestrationInput {
+                coordinates: &coordinates,
+                record_id: E2E_RECORD_ID,
+                cells: &cells,
+                applicant_field: &plan.applicant_field_id,
+                backfill_field: &plan.backfill_field_id,
+                approval_code: E2E_APPROVAL_CODE,
+                widgets: &plan.widgets,
+                timezone_offset: FixedOffset::from_iana("Asia/Shanghai")
+                    .unwrap_or_else(|error| panic!("{error}")),
+            },
+        )
+        .await;
+        assert_eq!(
+            result,
+            DispatchResult::Backfilled {
+                serial_number: "202609280001".to_string()
+            },
+            "整条链应跑通并回填编号"
+        );
+
+        // ---- 第三段：逐字段核对发给飞书的请求体 ----
+
+        let create = transport.took(
+            "Post",
+            &crate::addon::feishu::domain::approval::create_instance_url(),
+        );
+        let body = create
+            .body
+            .unwrap_or_else(|| panic!("创建实例请求必须带 body"));
+        assert_eq!(body["approval_code"], json!(E2E_APPROVAL_CODE));
+        assert_eq!(
+            body["open_id"],
+            json!(E2E_APPLICANT_OPEN_ID),
+            "发起人取的是申请人列里的第一个 open_id"
+        );
+        assert_eq!(
+            body["uuid"],
+            json!(derive_uuid(
+                E2E_BASE_TOKEN,
+                E2E_TABLE_ID,
+                E2E_APPROVAL_CODE,
+                E2E_RECORD_ID
+            )),
+            "uuid 必须由 (表格坐标, 定义, 记录) 派生——它是唯一的服务端幂等键"
+        );
+
+        // `form` 是**压缩后的 JSON 数组字符串**，不是 JSON 对象。
+        let form_text = body["form"]
+            .as_str()
+            .unwrap_or_else(|| panic!("form 必须是字符串，实际是 {}", body["form"]));
+        let form: Value = serde_json::from_str(form_text)
+            .unwrap_or_else(|error| panic!("form 应是可解析的 JSON: {error}"));
+        let item = |id: &str| {
+            form.as_array()
+                .and_then(|items| items.iter().find(|item| item["id"] == json!(id)))
+                .cloned()
+        };
+        assert_eq!(
+            item("w1").unwrap_or_else(|| panic!("w1 应在 form 里：{form}"))["value"],
+            json!("成都某某科技有限公司")
+        );
+        assert!(
+            item("w2").unwrap_or_else(|| panic!("w2 应在 form 里：{form}"))["value"].is_number(),
+            "数字控件必须传 JSON 数字；传字符串会被 1390001 拒掉整单"
+        );
+        assert_eq!(
+            item("w3").unwrap_or_else(|| panic!("w3 应在 form 里：{form}"))["value"],
+            json!("2026-09-28T00:00:00+08:00"),
+            "毫秒时间戳要按时区折成带偏移量的 RFC3339"
+        );
+        assert_eq!(
+            item("w4").unwrap_or_else(|| panic!("w4 应在 form 里：{form}"))["value"],
+            json!("opt-person"),
+            "单选控件传**单个字符串**"
+        );
+        assert_eq!(
+            item("w5").unwrap_or_else(|| panic!("w5 应在 form 里：{form}"))["value"],
+            json!(["opt-travel", "opt-meal"]),
+            "多选控件传数组，且值是 option value"
+        );
+        assert!(
+            item("w6").is_none(),
+            "可选控件在空值时**整个 JSON 都不能传**——传了就必须给 value，否则接口报错"
+        );
+
+        let update = transport.took(
+            "Post",
+            &bitable::batch_update_records_url(E2E_BASE_TOKEN, E2E_TABLE_ID)
+                .unwrap_or_else(|error| panic!("{error}")),
+        );
+        assert_eq!(
+            update.body.unwrap_or_else(|| panic!("回写必须带 body")),
+            json!({
+                "records": [{
+                    "record_id": E2E_RECORD_ID,
+                    "fields": {"fldSerial": "202609280001"}
+                }]
+            }),
+            "回写的是编号文本，键是配置里存的回填列 field_id"
+        );
+    }
+
+    /// 端到端（二）：配置校验不过时，原因要**点名**，并且真的写进多维表格。
+    ///
+    /// 「配置期就报错」这句话的落点是回填列而不是 HTTP 响应：点按钮的人在表格里，
+    /// 而工作流的 `response_value` 只有 `accepted` / `message` / `serial_number`
+    /// 三个字段，页面按钮连这三个都拿不到。所以这条用例验两件事——**报什么**与
+    /// **写哪儿**。
+    #[tokio::test]
+    async fn end_to_end_config_failure_is_written_back_to_the_table() {
+        // 最常见的配置错误：定义里有个必填控件「部门」，而表里没有同名列。
+        let form = json!([
+            {"id": "w1", "name": "公司名称", "type": "input", "required": true},
+            {"id": "w9", "name": "部门", "type": "input", "required": true}
+        ]);
+        let transport = Arc::new(ReplayTransport::new(vec![
+            (200, e2e_fields_body()),
+            (200, e2e_definition_body(&form)),
+            (200, e2e_ok_body(json!({}))),
+        ]));
+        let tokens = e2e_tokens();
+        let sleeper = NoSleep;
+        let context = e2e_context();
+
+        let failure = build_plan(
+            transport.as_ref(),
+            &sleeper,
+            &tokens,
+            &context,
+            &ProvisionInput {
+                base_token: E2E_BASE_TOKEN,
+                table_id: E2E_TABLE_ID,
+                approval_code: E2E_APPROVAL_CODE,
+                applicant_field: "申请人",
+                backfill_field: "审批编号",
+                base_timezone: "Asia/Shanghai",
+            },
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("缺必填列必须建不出配置"));
+
+        let ProvisionError::Invalid(reasons) = &failure else {
+            panic!("应是校验失败（可修），实际是 {failure:?}");
+        };
+        assert!(
+            reasons.iter().any(|reason| reason.contains("部门")),
+            "原因必须点名是哪个控件，否则使用方无从下手：{reasons:?}"
+        );
+
+        // 写回回填列——走的是生产代码里 `backfill_provision_failure` 调用的同一个函数。
+        let coordinates = e2e_coordinates();
+        let backfill = BitableBackfill {
+            transport: transport.as_ref(),
+            sleeper: &sleeper,
+            tokens: &tokens,
+            coordinates: &coordinates,
+        };
+        write_config_failure(&backfill, E2E_RECORD_ID, "审批编号", &failure)
+            .await
+            .unwrap_or_else(|error| panic!("回填应成功: {}", error.message));
+
+        let update = transport.took(
+            "Post",
+            &bitable::batch_update_records_url(E2E_BASE_TOKEN, E2E_TABLE_ID)
+                .unwrap_or_else(|error| panic!("{error}")),
+        );
+        let cell = update.body.unwrap_or_else(|| panic!("回写必须带 body"));
+        let text = cell["records"][0]["fields"]["审批编号"]
+            .as_str()
+            .unwrap_or_else(|| panic!("写进单元格的应是文本：{cell}"))
+            .to_string();
+        assert!(
+            text.starts_with("[配置]"),
+            "必须带 `[配置]` 前缀，否则表格里的人分不开「去补数据」与「去改配置」：{text}"
+        );
+        assert!(
+            text.contains("部门"),
+            "写进表格的原因同样要点名缺的是哪个控件：{text}"
+        );
+
+        // 校验不过时**一个字节都不该落库**：配置与映射必须同生同死，半套配置
+        // （有配置没映射）会让之后每一次派发都卡在「该配置没有字段映射」，
+        // 而配置行看着是好的。所以这里只该有「列字段 → 取定义 → 写错误」三次调用。
+        assert_eq!(
+            transport.seen().len(),
+            3,
+            "校验不过时不该再发别的请求（尤其不该有创建实例）：{:#?}",
+            transport.seen()
+        );
     }
 }
