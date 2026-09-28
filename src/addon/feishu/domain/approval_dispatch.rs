@@ -88,7 +88,14 @@ pub(crate) struct DispatchInput<'a> {
     /// 申请人的人员字段 id。
     pub(crate) applicant_field: &'a str,
     /// 回填字段 id。
-    pub(crate) backfill_field: &'a str,
+    /// 回填列的**当前列名**（不是 `field_id`）。
+    ///
+    /// `batch_update` 的 `records[].fields` 是**按列名**作键的 map（《数据结构概述》：
+    /// 「key 是多维表格数据表中的字段名称」，官方每个写示例也都是列名），而配置里
+    /// 存的是 `field_id`（刻意如此——改列名不该让配置失效）。两条轴的差由**调用方**
+    /// 在拿到表结构后现场补上，与读侧的 `rekey_cells_by_field_id` 是同一件事的两个
+    /// 方向。这里收列名而不是 id，正是为了让「写到哪一列」在调用处一眼可见。
+    pub(crate) backfill_field_name: &'a str,
     pub(crate) approval_code: &'a str,
     pub(crate) widgets: &'a [WidgetMap],
     pub(crate) timezone_offset: FixedOffset,
@@ -211,7 +218,7 @@ pub(crate) async fn dispatch_one(
                 // 该行每轮都被重新捞出、每轮都失败一次，用户却看不到任何线索。
                 let message = sanitize_terminal_message(&message, 0);
                 let _ = backfill
-                    .write(input.record_id, input.backfill_field, &message)
+                    .write(input.record_id, input.backfill_field_name, &message)
                     .await;
                 DispatchResult::Terminal { message }
             };
@@ -289,7 +296,7 @@ pub(crate) async fn dispatch_one(
 
     // ---- 6. 回写 ----
     match backfill
-        .write(input.record_id, input.backfill_field, &serial_number)
+        .write(input.record_id, input.backfill_field_name, &serial_number)
         .await
     {
         Ok(()) => DispatchResult::Backfilled { serial_number },
@@ -338,7 +345,7 @@ async fn classify_failure(
             // 回写失败也不改变结论：终态的判据是「这个记录本身有问题」，
             // 而错误文案写不进去只是让用户少了一个排查线索。
             let _ = backfill
-                .write(input.record_id, input.backfill_field, &message)
+                .write(input.record_id, input.backfill_field_name, &message)
                 .await;
             DispatchResult::Terminal { message }
         }
@@ -743,7 +750,7 @@ mod tests {
             record_id: "rec001",
             cells,
             applicant_field: "fld_applicant",
-            backfill_field: "fld_backfill",
+            backfill_field_name: "审批编号",
             approval_code: "4202AD96-9EC1",
             widgets,
             timezone_offset: FixedOffset::from_seconds(8 * 3600)
@@ -802,7 +809,9 @@ mod tests {
             backfill.writes(),
             vec![(
                 "rec001".to_string(),
-                "fld_backfill".to_string(),
+                // `batch_update` 的 `fields` 按**列名**作键，所以域里收的是列名而不是
+                // `field_id`（解析由调用方在拿到表结构后做，见 `DispatchInput` 的说明）。
+                "审批编号".to_string(),
                 "202609280001".to_string()
             )]
         );

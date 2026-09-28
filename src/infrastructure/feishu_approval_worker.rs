@@ -746,6 +746,19 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         }
     };
 
+    // 回填列：配置里存的是 `field_id`，而 `batch_update` 的 `records[].fields` 按
+    // **列名**作键——与上面那条筛选同一个口径（「按列名，不是 id」），所以要在这里
+    // 补一次解析。少了它，回写会带着 `fld…` 去打一个按名匹配的接口。
+    let backfill_field_name = match bitable::resolve_field_name(&fields, &task.backfill_field) {
+        Ok(name) => name,
+        // 列被删了/改名后重名：重试好不了，判终态（回填列本身写不进去，只能留日志）。
+        Err(error) => {
+            return DispatchResult::Terminal {
+                message: format!("回填列不可用：{error}"),
+            }
+        }
+    };
+
     let backfill = BitableBackfill {
         transport: runner.transport(),
         sleeper: runner.sleeper.as_ref(),
@@ -762,7 +775,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
             record_id: &task.record_id,
             cells: &cells,
             applicant_field: &task.applicant_field,
-            backfill_field: &task.backfill_field,
+            backfill_field_name: &backfill_field_name,
             approval_code: &task.approval_code,
             widgets: &task.widgets,
             timezone_offset: task.timezone_offset,

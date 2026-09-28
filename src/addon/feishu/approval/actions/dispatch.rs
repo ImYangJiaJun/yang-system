@@ -477,6 +477,21 @@ async fn dispatch_single(
         }
     };
 
+    // ---- 回填列：配置存 `field_id`，而写接口按**列名**作键 ----
+    //
+    // `batch_update` 的 `records[].fields` 是按列名作键的 map（《数据结构概述》：
+    // 「key 是多维表格数据表中的字段名称」），而配置里存的是 id（`insert_plan`
+    // 刻意如此——改列名不该让配置失效）。这一步就是两条轴之间的桥，与读侧的
+    // `rekey_cells_by_field_id` 正好是同一件事的两个方向。
+    //
+    // 与 worker 的 `process_one` 用**同一个** `bitable::resolve_field_name`：同名
+    // 不唯一时它报错而不是挑一列——按名字写的接口在这种情况下会写到不确定的那一列
+    // 上，那比「写不进去」更坏。
+    let backfill_field_name = match bitable::resolve_field_name(&fields, &backfill_field) {
+        Ok(name) => name,
+        Err(error) => return Ok(ApiResponse::fail(50004, format!("回填列不可用：{error}"))),
+    };
+
     // ---- 读记录 ----
     //
     // 走 `records/batch_get` 而不是「查询记录 + filter」：`record_id` 是**响应里的
@@ -527,7 +542,7 @@ async fn dispatch_single(
             record_id,
             cells: &cells,
             applicant_field: &applicant_field,
-            backfill_field: &backfill_field,
+            backfill_field_name: &backfill_field_name,
             approval_code: &approval_code,
             widgets: &widgets,
             timezone_offset,
@@ -1123,6 +1138,13 @@ mod tests {
             "重映射后必须能按 field_id 取到申请人，否则会静默停在「缺少申请人」"
         );
 
+        // 与 `dispatch_single` 同一步：配置里存的是 `field_id`，而写接口按列名作键。
+        // 这里刻意走**同一个**解析器（而不是直接写死字面量），否则「配置里存的到底是
+        // id 还是名」这条接线断了也没人发现。
+        let backfill_field_name = bitable::resolve_field_name(&fields, &plan.backfill_field_id)
+            .unwrap_or_else(|error| panic!("回填列应可解析成当前列名: {error}"));
+        assert_eq!(backfill_field_name, "审批编号");
+
         let backfill = BitableBackfill {
             transport: transport.as_ref(),
             sleeper: &sleeper,
@@ -1139,7 +1161,7 @@ mod tests {
                 record_id: E2E_RECORD_ID,
                 cells: &cells,
                 applicant_field: &plan.applicant_field_id,
-                backfill_field: &plan.backfill_field_id,
+                backfill_field_name: &backfill_field_name,
                 approval_code: E2E_APPROVAL_CODE,
                 widgets: &plan.widgets,
                 timezone_offset: FixedOffset::from_iana("Asia/Shanghai")
@@ -1230,10 +1252,10 @@ mod tests {
             json!({
                 "records": [{
                     "record_id": E2E_RECORD_ID,
-                    "fields": {"fldSerial": "202609280001"}
+                    "fields": {"审批编号": "202609280001"}
                 }]
             }),
-            "回写的是编号文本，键是配置里存的回填列 field_id"
+            "回写的是编号文本，键是回填列的**列名**（batch_update 按名作键）"
         );
     }
 
