@@ -2,7 +2,9 @@
 //!
 //! 一条配置表达「**这张多维表格**的这批行要创建**哪个审批定义**的实例」。
 
-use yang_base::definition::{Key, Str, Switch, TableSpec, Text, Timestamp};
+use yang_base::definition::{
+    FieldName, FieldRef, Key, Str, Switch, TableName, TableSpec, Text, Timestamp,
+};
 use yang_base::BaseError;
 
 /// 声明审批派发配置表。
@@ -20,7 +22,9 @@ use yang_base::BaseError;
 /// `form_snapshot` 只能存 JSON 文本，由 `domain/` 自己 serde 转换。与
 /// `feishu_option.i18n` / `extra` 同一条已知取舍。
 pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
-    Ok(TableSpec::new(yang_base::table!("feishu_approval_config"))
+    let table_name = TableName::new("feishu_approval_config")
+        .map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    Ok(TableSpec::new(table_name.clone())
         .title("飞书审批派发配置")
         .fields(yang_base::fields! {
             // 配置行要按 id 定位（`dispatch_single` 的 `where_primary_key_eq` 走类型校验
@@ -89,7 +93,32 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             form_snapshot_at => Timestamp::new().title("快照时间"),
             created_at => Timestamp::new().created_at().title("创建时间"),
             updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
-        }))
+        })
+        // 一张表**至多一条**配置：这是自动创建语义的**唯一性保证**。
+        //
+        // 派发端点在配置不存在时**自动创建**（无需人工配 CRUD），所以真正的并发
+        // 风险是「两个请求同时判定『不存在』」——两条都插进去会让 `approval_configs()`
+        // 的查询取到不确定的一行。这条复合唯一索引让第二条以唯一键冲突失败，
+        // 调用方随即改读已存在的那条。
+        //
+        // 用 `unique_named` 而不是两条 `.unique(true)`：后者建的是**单列**唯一索引，
+        // 给不了「坐标组合唯一」的语义。
+        .unique_named(
+            "uk_feishu_approval_config_coords",
+            [
+                field_ref(&table_name, "base_token")?,
+                field_ref(&table_name, "table_id")?,
+            ],
+        ))
+}
+
+/// 把字段名折成 `FieldRef`，供复合唯一索引用。
+///
+/// 与 `access::grants::table` 的同名 helper 同构——`unique_named` 收的是
+/// `FieldRef` 而不是裸字符串。
+fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError> {
+    let field = FieldName::new(field).map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    Ok(FieldRef::new(table_name.clone(), field))
 }
 
 #[cfg(test)]
