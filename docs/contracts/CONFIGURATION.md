@@ -272,11 +272,29 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
   采集与保留策略须按 [`LOG_SHIPPING.md`](../operations/LOG_SHIPPING.md) 的例外条款
   重新评估。关闭时不注册中间件，没有运行期开销。
 
+- `feishu.approval_create_rate_per_minute`（整数，默认 `90`，有效范围 `1..=100`）：
+  审批实例创建的速率上限。**上限卡在官方的 100 次/分钟**——配更高没有任何作用
+  （飞书会拒），只会让人以为「速率已经调高了」却仍成片撞限流。默认 90 留 10%
+  余量给手工操作与网络重试；重试同样在消耗配额，余量为 0 时连重试都没法做。
+  令牌桶落在 Redis 而不是进程内存，因此**跨重启守恒**（进程内桶每次重启清零，
+  会形成「重启 → 桶满 → 瞬间打爆配额」）。
+- `feishu.approval_scan_interval_seconds`（整数，默认 `30`，有效范围 `5..=600`）：
+  审批派发 worker 的空转轮询间隔。下限防空转烧数据库，上限防「异步受理」变成
+  摆设——再长的话用户点了页面按钮要等很久才开始处理。
+- `feishu.approval_base_timezone`（文本，默认 `Asia/Shanghai`）：多维表格日期转
+  审批 `date` 控件时用的时区。多维表格的日期是**不带时区**的毫秒时间戳，而审批控件
+  要带偏移量的 RFC3339，所以必须显式给定；猜错会让审批里的时间整体偏移。
+  只认少数几个常用 IANA 名（上海/东京/新加坡/香港/UTC），**解析失败会让启动失败**
+  ——「点了按钮一直没反应」比「启动报错」难查得多。单配置级的 `base_timezone`
+  会覆盖这里（配置无效则回退回这个默认值，不把整条配置的记录判死）。
+
 对应环境变量：`YANG_SYSTEM_FEISHU_ENABLED`、`YANG_SYSTEM_FEISHU_MANAGEMENT_API_TOKEN`、
 `YANG_SYSTEM_FEISHU_ENCRYPTION_KEY`。
 
 `app_id` / `app_secret` / `pull_interval_seconds` / `alert_recipients` /
-`alert_failure_threshold` / `log_inbound_requests` **不登记环境变量**。这是刻意的：
+`alert_failure_threshold` / `log_inbound_requests` /
+`approval_create_rate_per_minute` / `approval_scan_interval_seconds` /
+`approval_base_timezone` **不登记环境变量**。这是刻意的：
 环境变量是白名单，未登记的名称会让进程启动失败——`YANG_SYSTEM_FEISHU_APP_SECRET`
 因此会被直接拒绝，secret 只能从 secret 目录进来。
 

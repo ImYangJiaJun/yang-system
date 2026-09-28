@@ -33,7 +33,7 @@ src/
 │   │   │                    # policy/status/system_owner/email_delivery/login_event/mfa/oidc
 │   │   └── user/            # module 三件套：mod.rs（装配+展示投影）、table.rs（表声明）、actions/（自包含 Action）
 │   ├── access/              # 权限管理面：权限目录 + 直授 + 权限组 + 首账号引导（grants/ 与 groups/ 两个 module）
-│   └── demo/                # 前端演示（notes CRUD）
+│   ├── demo/                # 前端演示（notes CRUD）
 ├── config/                  # 不可变运行配置（mod.rs）、配置源合成（source.rs）
 ├── infrastructure/          # 审计（audit/）、授权一致性（authorization/）、声明式 Schema（schema.rs）
 ├── app.rs                   # 所有业务 Addon 的唯一组合根
@@ -49,6 +49,8 @@ frontend/deploy/             # 生产 Nginx 配置、前端镜像 Dockerfile 与
 docker/app/                  # 后端生产镜像 Dockerfile（构建上下文为 lib_yang 仓库根）
 docker/mysql/init/           # 本地 MySQL 建库脚本
 ```
+
+`feishu` addon 现有三个 module：`datasource`（表级数据源 + 字段绑定 + 元数据/体检/拉取）、`option`（外部选项的取数与入站写入）与 `approval`（审批派发：把多维表格的一行变成一个飞书审批实例并回填编号）。派发端点 `POST /api/v1/feishu/approval/dispatch` 与既有机器入口同一条鉴权纪律（`ManagementTokenMiddleware` + `public` Action），另外在 handler 内强制 `base_token`/`table_id` 落在已配置的启用行内——管理 Token 是全局单值、不按数据源绑定，那道白名单是本端点防越权的唯一一条。worker 见 `src/infrastructure/feishu_approval_worker.rs`。
 
 `account.user` 模块的 `actions/` 当前包含：注册/登录/登出/刷新/me、邮箱验证码（注册、换邮箱、MFA 备用）、密码（改密、找回、重置）、用户名与邮箱变更、会话列举与撤销、自助停用与匿名化删除、安全事件、Step-up、TOTP（setup/activate/deactivate），以及管理动作（停用/启用用户、签发重置凭证、用户列表）。
 
@@ -103,7 +105,7 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
   python scripts/run_ci.py integration
   ```
 
-  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理、匿名化删除后的凭据与 PII 清理、逐台会话撤销后 refresh 被拒，飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护），以及权限组并入 Token claims（组名不进 `roles`）与首账号引导的哨兵并发仲裁。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs`、`feishu_approval_options_integration.rs`、`account_deletion_integration.rs`、`session_revocation_integration.rs`、`permission_groups_integration.rs` 与 `system_owner_bootstrap_integration.rs` 十二个入口。
+  覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例并发 apply、登录 MFA 备用邮箱验证码与 TOTP 停用链路、邮箱验证码免密登录链路（含 key 域隔离与防枚举）、头像上传/读取/注销清理、匿名化删除后的凭据与 PII 清理、逐台会话撤销后 refresh 被拒，飞书外部选项的 Schema 级验证与取选项/写入端点的端到端行为（字面严格信封、分页推进、关键词检索、加密路径、管理 Token 鉴权、跨数据源归属保护），以及权限组并入 Token claims（组名不进 `roles`）、首账号引导的哨兵并发仲裁，以及审批派发的全链路（`60012` 走 uuid 回捞、等待态不写字段、回写折半隔离毒记录、认领游标不原地空转、令牌桶限速与官方 100/分钟上界的不变式、告警正反演练走 `promtool`）。集成测试单线程运行（`--test-threads=1`），测试会重建业务测试表与 `b05_schema_*` 专用表。当前 `tests/` 下有 `registration_email_integration.rs`、`refresh_load_benchmark.rs`、`schema_apply_integration.rs`、`mfa_email_code_integration.rs`、`login_email_code_integration.rs`、`avatar_integration.rs`、`feishu_options_integration.rs`、`feishu_approval_options_integration.rs`、`account_deletion_integration.rs`、`session_revocation_integration.rs`、`permission_groups_integration.rs` 与 `system_owner_bootstrap_integration.rs` 十二个入口。
 
 - 无数值覆盖率门槛，但改变的行为必须有测试覆盖。
 

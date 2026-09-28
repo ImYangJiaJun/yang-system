@@ -8,16 +8,37 @@
 > | Task 2 三张表与 Schema | ✅ 完成 | `367c275` |
 > | Task 3 `uuid` 派生 | ✅ 完成 | `ae8f288` |
 > | Task 4 控件值转换器 | ✅ 完成 | `9013d85` |
-> | Task 5 多维表格写路径 | ⬜ 未开始 | |
-> | Task 6 审批 API 客户端 | ⬜ 未开始 | |
-> | Task 7 单条处理编排（含 60012 回捞） | ⬜ 未开始 | |
-> | Task 8 分批回写与毒记录隔离 | ⬜ 未开始 | |
-> | Task 9 Redis 令牌桶限速 | ⬜ 未开始 | |
-> | Task 10 dispatch Action 与路由 | ⬜ 未开始 | |
-> | Task 11 后台 worker | ⬜ 未开始 | |
-> | Task 12 审计与可观测性 | ⬜ 未开始 | |
-> | Task 13 控制台配置页 | ⬜ 未开始 | |
-> | Task 14 文档同步 | ⬜ 未开始 | |
+> | Task 5 多维表格写路径 | ✅ 完成 | `a89529c` |
+> | Task 6 审批 API 客户端 | ✅ 完成 | `8450281` |
+> | Task 7 单条处理编排（含 60012 回捞） | ✅ 完成 | `cbfe626` |
+> | Task 8 分批回写与毒记录隔离 | ✅ 完成 | `a48746c` |
+> | Task 9 Redis 令牌桶限速 | ✅ 完成 | `5cc91aa` |
+> | Task 10 dispatch Action 与路由 | ✅ 完成 | `67008f5` |
+> | Task 11 后台 worker | ✅ 完成 | `f9b1723` |
+> | Task 12 审计与可观测性 | ✅ 完成 | `2e1a007` |
+> | Task 13 控制台配置页 | ⚠️ 范围受阻（见下） | |
+> | Task 14 文档同步 | ✅ 完成 | |
+>
+> ### Task 13 的范围缺口（实现期发现，计划本身漏列）
+>
+> 计划给 Task 13 列的文件清单**只有前端**，但 `feishu.approval` 目前只有一个
+> `dispatch_approval` Action——**没有配置 CRUD**。没有 CRUD，`feishu_approval_config`
+> 只能靠裸 SQL 填，控制台页面无从建起。
+>
+> 补齐需要**先**做的后端（计划未列）：
+>
+> 1. `approval` module 的配置 CRUD Action：创建 / 更新 / 删除 / 列表（四个，
+>    每个一文件，走 `feishu.datasource.write` 同档权限）；
+> 2. 字段映射的批量 upsert（一次请求写多条映射，与既有 `upsert_options` 同形态）；
+> 3. 控件列表 Action：按配置调 `approvals get` 拉控件结构，供映射表单选控件并显示
+>    `required`；**这一项正是设计 §6.1「保存期校验」的落地点**，也是为什么配置
+>    保存必须经 Action 而不是直接写库；
+> 4. 上面三个 Action **会进入 OpenAPI 契约**（受保护 Action，不依赖 `can_pull()`），
+>    于是 Task 10 的「不进契约」结论只对 `dispatch` 本身成立——前端可复用生成类型，
+>    `dispatch` 仍要手写类型。
+>
+> Task 13 因此拆成两段：**13a 后端配置 CRUD**（上面三项）与 **13b 前端页面**。
+> 13a 未排期，13b 依赖 13a。
 >
 > **实现期对计划的修正**（都已落进代码注释）：
 >
