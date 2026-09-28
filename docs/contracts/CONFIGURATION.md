@@ -50,8 +50,8 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 |---|---|
 | `app.name` | `yang-system` |
 | `http.bind` | `127.0.0.1:8080` |
-| `http.max_body_bytes` | `1048576`（1 MiB，允许至 16 MiB） |
-| `http.request_timeout_seconds` | `30` |
+| `http.max_body_bytes` | `16777216`（16 MiB，允许至 16 MiB） |
+| `http.request_timeout_seconds` | `60` |
 | `http.max_concurrency` | `256` |
 | `mysql.max_connections` / `min_connections` | `20` / `2` |
 | `mysql.connect_timeout_seconds` / `idle_timeout_seconds` / `max_lifetime_seconds` | `10` / `600` / `1800` |

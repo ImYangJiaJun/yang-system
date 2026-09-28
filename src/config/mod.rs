@@ -153,11 +153,15 @@ fn default_http_bind() -> String {
 }
 
 const fn default_http_max_body_bytes() -> usize {
-    1_048_576
+    // 16 MiB。xlsx 文件导入的 MultipartSpec.max_total_bytes 取同一上限，
+    // 而启动期 fail-closed 要求它不大于本值——默认值更低会让最小配置起不来。
+    16 * 1024 * 1024
 }
 
 const fn default_http_request_timeout_seconds() -> u64 {
-    30
+    // 60 秒。实测 15.4 万行落库 9.5–33.4 秒（三次运行差 3.5 倍），
+    // 30 秒的默认值会被最差那次打穿（设计 §5.8）。
+    60
 }
 
 const fn default_http_max_concurrency() -> usize {
@@ -1751,7 +1755,10 @@ link_base_url = "http://localhost:5273"
 
         assert_eq!(settings.app.name, "yang-system");
         assert_eq!(settings.http.bind, "127.0.0.1:8080");
-        assert_eq!(settings.http.max_body_bytes, 1_048_576);
+        // 16 MiB：multipart 导入的 MultipartSpec 需要它，且启动期 fail-closed
+        // 要求 max_total_bytes <= max_body_bytes。默认值低于此会让最小配置起不来。
+        assert_eq!(settings.http.max_body_bytes, 16 * 1024 * 1024);
+        assert_eq!(settings.http.request_timeout_seconds, 60);
         assert_eq!(settings.mysql.max_connections, 20);
         assert_eq!(settings.mysql.max_lifetime_seconds, Some(1800));
         assert_eq!(settings.redis.wait_timeout_seconds, 10);
