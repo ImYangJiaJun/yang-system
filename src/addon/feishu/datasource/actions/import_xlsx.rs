@@ -140,6 +140,55 @@ impl ImportInput {
     }
 }
 
+/// 导入互斥：同一数据源同时只允许一次导入。
+///
+/// **进程内**即可：本应用是单实例部署。多实例时要换成 Redis 分布式锁，
+/// 并处理锁超时与续租——那时这段注释就是升级说明。
+static IMPORTING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
+    std::sync::OnceLock::new();
+
+/// 一条数据源的导入占用凭证。存活期间即持有占用，`Drop` 时释放。
+///
+/// **不持有 `MutexGuard`**（`acquire` 里那个在函数返回前就落了）：std 的 `MutexGuard`
+/// 不是 `Send`，把它揣在结构里会让 `handle` 的 future 变成非 `Send`，而它要交给 axum。
+/// 占用的事实记在 `IMPORTING` 这张表里，凭证只记着自己占的是哪一条。这样一来
+/// `Drop` 也覆盖了所有返回路径——`?` 提前返回与 panic 展开都会走到它。
+pub(super) struct ImportGuard {
+    datasource_id: i64,
+}
+
+/// 该数据源已有一次导入在跑。
+pub(super) struct ImportBusy;
+
+impl ImportGuard {
+    pub(super) fn acquire(datasource_id: i64) -> Result<Self, ImportBusy> {
+        let set = IMPORTING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        // 中毒的锁不该让导入永久不可用：恢复内部数据继续用。
+        let mut guard = set.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !guard.insert(datasource_id) {
+            return Err(ImportBusy);
+        }
+        Ok(Self { datasource_id })
+    }
+
+    /// 测试专用别名。
+    ///
+    /// 生产侧只该从 `handle` 拿锁，「测试能拿到一把锁」与「端点会拿锁」是两件事，
+    /// 名字分开是为了让测试读起来不像在生产路径上。
+    #[cfg(test)]
+    pub(super) fn acquire_for_test(datasource_id: i64) -> Result<Self, ImportBusy> {
+        Self::acquire(datasource_id)
+    }
+}
+
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        let set = IMPORTING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        let mut guard = set.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.remove(&self.datasource_id);
+    }
+}
+
 /// 一条表级数据源的校验视图。
 struct DatasourceRow {
     ingest_mode: String,
@@ -217,6 +266,22 @@ pub(super) async fn handle(
             return Ok(ApiResponse::fail(code, message.to_string()));
         }
     }
+
+    // 拿互斥锁：**在所有校验之后、读文件之前**。
+    //
+    // 位置是刻意的两端：放在校验之前，一个参数写错的请求（数据源不存在、不是导入源、
+    // 已停用）也会占住锁，把人触发的重试从「立刻被拒」变成「看运气」；放在读文件之后，
+    // 则已经白白解析了一遍——而两次请求争的正是解析完以后的落库那一段。
+    //
+    // 为什么必须挡：`pull.rs` 是单 worker 串行跑的，天然不会自我并发；导入是人触发的，
+    // 必然会（手抖点两下、两个运维同时操作）。逐绑定事务交错会让两次补集停用互相覆盖，
+    // 而补集停用是**全量视图**语义——交错的后果是选项被错误地停用。
+    let _guard = ImportGuard::acquire(input.datasource_id).map_err(|ImportBusy| {
+        BaseError::ParamInvalid(
+            "datasource_id".to_string(),
+            "这条数据源正在导入中，请等它跑完再试".to_string(),
+        )
+    })?;
 
     // 步骤 2：读文件（**替换 pull 的 list_all_records**）。
     // 必需列 = 全部启用绑定的 field_id（xlsx 侧列名 = field_id，Task 8 保证非空）。
@@ -824,6 +889,29 @@ mod tests {
         assert_eq!(report.len(), 2);
         assert_eq!(report[0]["label"], "a");
         assert_eq!(report[1]["label"], "b");
+    }
+
+    #[test]
+    fn a_second_concurrent_import_is_rejected() {
+        let held = ImportGuard::acquire_for_test(7);
+        assert!(held.is_ok(), "第一次应拿到");
+        let second = ImportGuard::acquire_for_test(7);
+        assert!(
+            matches!(second, Err(ImportBusy)),
+            "同一数据源的第二次并发导入必须被拒"
+        );
+    }
+
+    #[test]
+    fn a_different_datasource_is_not_blocked() {
+        // **id 与上一条错开**：登记表是进程级静态量，而 `#[test]` 默认跑在并行线程上。
+        // 两条测试都用 7 的话，谁先拿到、谁后拿到是调度决定的——互相抢同一把锁会让
+        // 这条测试随机失败（`.unwrap_or_else(|_| panic!(...))` 直接炸）。
+        let _held = ImportGuard::acquire_for_test(107).unwrap_or_else(|_| panic!("第一次应拿到"));
+        assert!(
+            ImportGuard::acquire_for_test(108).is_ok(),
+            "不同数据源互不影响"
+        );
     }
 
     #[test]
