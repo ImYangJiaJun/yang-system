@@ -18,8 +18,8 @@
  *   **宽容跳过**这一条绑定（告警，不报错），代价是那个控件**少一个候选列**——
  *   不是整批失败、范围也不是全表。
  * - **`source_key` 不能直接用中文列名**：它要求 ASCII `[a-z0-9_]`、首字节小写字母、
- *   1..=64 字节，且是全局唯一的出站路由键。所以默认值由列号派生（[`defaultSourceKey`]），
- *   而不是拿列名硬转。
+ *   1..=64 字节，且是全局唯一的出站路由键。所以默认值由列号派生（[`fallbackSourceKey`]）
+ *   并**避开已知占用的那些**（`col_2` 被占就顺延 `col_2_2`），而不是拿列名硬转。
  * - **服务端零暂存（D11）**：第 1 步的文件只用于探表头，服务端读完即丢。`File` 对象
  *   **留在本组件的 state 里**，第 4 步重传同一批——用户只选一次文件。
  *
@@ -36,7 +36,7 @@
  * 于是它可以脱离整棵应用壳被渲染与测试。
  */
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
@@ -73,6 +73,7 @@ import type {
   XlsxImportClient,
   XlsxImportReport,
 } from "../api";
+import { describeImportProgress, useImportProgress } from "../import-progress";
 import { isValidSourceKey } from "../types";
 
 /// Radix Select 不接受空串作为 item 的 value，所以「无父」另给一个哨兵值。
@@ -81,20 +82,45 @@ const NO_PARENT = "__none__";
 const THEAD = "text-xs text-muted-foreground";
 
 const SOURCE_KEY_HELP =
-  "源标识进接口 URL 路径段，全局唯一、创建后不可修改。默认按列号派生（col_2 / col_5 …），直接可用。";
+  "源标识进接口 URL 路径段，全局唯一、创建后不可修改。默认按列号派生（col_2 / col_5 …）；" +
+  "这个列号已经被别的数据源占用时，会自动顺延到下一个没被占用的（col_2_2 …）。可以直接用，也可以改。";
 
 const SOURCE_KEY_WARNING =
   "改这一栏之前想清楚：源标识进的是那个审批控件的外部选项地址。换一个就等于换了地址——" +
   "必须回审批后台把控件里的外部选项地址一并改掉，否则它会立刻取不到任何选项。";
 
-/// 从列名派生一个合法的 `source_key`。
+/// 从列号派生一个合法的 `source_key`，**并避开已知占用的那些**。
 ///
 /// 后端要求 1..=64 字节、首字节小写 ASCII 字母、其余 `[a-z0-9_]` —— 中文列名直接拿去当
 /// `source_key` 会被拒，而「把中文转成 pinyin」这类猜测不该由一个配置向导做（同一立场见
 /// 设计 A14：只留机械可判定的规则）。所以初值取**列号**：`col_2` 这种键稳定、可读、
 /// 且永远落在这个字符集里，用户可以改。
-function defaultSourceKey(columnIndex: number): string {
-  return `col_${columnIndex}`;
+///
+/// **为什么必须顺延**：`source_key` 是**全表唯一**的路由键，而列号在每份文件里都是同样
+/// 那几个小整数——第二条 xlsx 源只要勾同列号，默认值就与第一条逐字相撞，界面上却只报
+/// 「已被占用」、不给可用值（用户只能自己编四个键）。这里按已知集合顺延到第一个空闲的
+/// 变体（`col_2` → `col_2_2`）。
+///
+/// **已知集合只是提示**：`takenSourceKeys` 握着的是列表**当前这一页**（搜索/筛选/翻页都
+/// 会改变它），所以这里买到的是「别让默认值生来就撞」，不是唯一性保证——真撞了由服务端
+/// 点名拒（400 带键值），唯一索引仍是最终权威。
+function freeSourceKey(base: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= 1000; n += 1) {
+    const candidate = `${base}_${n}`;
+    // 候选自身必须仍然合法：`col_2` 这类基底很短，但 `_1000` 会把它推到 64 字节附近。
+    if (candidate.length > 64) break;
+    if (!taken.has(candidate)) return candidate;
+  }
+  // 全被占：退回基底，让预检当场报出来——不编造一个前端会判「不是合法源标识」的建议。
+  return base;
+}
+
+function fallbackSourceKey(
+  columnIndex: number,
+  taken: ReadonlySet<string>,
+): string {
+  return freeSourceKey(`col_${columnIndex}`, taken);
 }
 
 /// 表头下沉的提示文案（R18）。
@@ -122,13 +148,14 @@ export type XlsxImportWizardProps = {
   client: XlsxImportClient;
   /// 库里**已经存在**的源标识（`source_key` 是全局唯一索引，不是每条数据源各自一份）。
   ///
-  /// 为什么必须由调用方喂进来：默认值是 [`defaultSourceKey`] 从**列号**派生的
-  /// （`col_2` / `col_5`），而列号在每份文件里都是那几样小整数——**第二条** xlsx 源
-  /// 只要勾了与第一条同列号的列，默认值就撞。而向导自己只查得到**本次提交内部**的重复。
-  /// 撞上唯一索引的后果是「创建并导入」按下去才失败，错误里只有一句键名。
+  /// 为什么必须由调用方喂进来：默认值是从**列号**派生的（`col_2` / `col_5`），而列号在
+  /// 每份文件里都是那几样小整数——**第二条** xlsx 源只要勾了与第一条同列号的列，默认值
+  /// 就与它逐字相撞。有了这份集合，[`freeSourceKey`] 才能把默认值顺延到没用过的那一个
+  /// （`col_2` → `col_2_2`），而不是让用户自己编四个键。
   ///
   /// 调用方（`DatasourceListPage`）握着的只有**当前那一页**数据源，所以这是
-  /// 「挡掉看得见的那批」而不是完整校验——漏网的那一发仍由库上的唯一索引拒。
+  /// 「别让默认值生来就撞」而不是完整校验——漏网的那一发到提交时才失败，由服务端
+  /// 点名是哪个键（`ParamInvalid`，400）。
   takenSourceKeys?: ReadonlySet<string>;
   /// 关掉向导（用户点了取消、或关掉对话框）。
   onCancel: () => void;
@@ -186,12 +213,46 @@ export function XlsxImportWizard({
     useState<CreateTableSubmission | null>(null);
   const [report, setReport] = useState<XlsxImportReport | null>(null);
 
+  /// 提交中的实时进度。**只在「导入那一步」轮询**：建源阶段数据源还不存在
+  /// （`created === null`），拿不到 id，也没什么可报的（见提交里那句「创建数据源与绑定」）。
+  const progress = useImportProgress(
+    client,
+    submitting && created !== null ? created.datasourceId : null,
+  );
+
   /// 数据源一旦建好，**配置就冻结**：列、源标识、父列、名称都已经写进库了，
   /// 界面上再改也发不出去——那不是「下次生效」，而是**静默丢弃**（用户以为自己
   /// 改成功了，导入跑的却是第一次那份）。所以冻结之后：配置只读、没有回退入口、
   /// 交回调用方的提交物取自 [`sentSubmission`]；**只有文件还能换**（第一次导入失败后
   /// 换一批重试是合理需求，原文件本身就可能是坏的）。
   const frozen = created !== null;
+
+  /// **导入成功之后关掉向导 = 这一次到此为止**，把状态清干净。
+  ///
+  /// 组件在列表页是**常驻挂载**的（`open` 只是个开关），不挂载/卸载就不会自动重置：
+  /// 成功那一屏（`report !== null`）里主按钮是「已导入」、上一步禁用、重试文件输入不
+  /// 渲染——关掉再打开还是这一屏，**同一次页面会话里第二条 xlsx 源建不出来**，只能
+  /// 刷新整页。而刷新后重开向导，正是「默认键与已有源撞车」那四条错误的现场。
+  ///
+  /// **只清成功这一态**：`report === null`（建源成功但导入失败）那一屏是**活的**——
+  /// 文件和绑定都还在状态里，关掉再打开能直接点「重试导入」，清掉反而要重选一次文件。
+  useEffect(() => {
+    if (open || report === null) return;
+    setStep(1);
+    setTitle("");
+    setFiles([]);
+    setProbe(null);
+    setSelected([]);
+    setConfigs({});
+    setProbing(false);
+    setProbeError(null);
+    setProbeStale(false);
+    setSubmitting(false);
+    setSubmitError(null);
+    setCreated(null);
+    setSentSubmission(null);
+    setReport(null);
+  }, [open, report]);
 
   /// 勾选顺序无关紧要，展示与提交一律按**表头里列的顺序**——界面看到的行序与落到
   /// 后端的行序一致，排查时才不会对不上。
@@ -201,36 +262,54 @@ export function XlsxImportWizard({
     [probe, selected],
   );
 
-  const sourceKeyErrors = useMemo<string[]>(() => {
+  /// 按**列名**索引的源标识问题。用 Map 而不是数组：文案要 join 成一句，而绑定表还要
+  /// 拿它把出错的那一行标出来（`aria-invalid`）——数组只能定位到「第几条」。
+  ///
+  /// 遍历的是 `chosenColumns`（表头列序）而不是 `selected`（勾选顺序）：四个问题摆出来时
+  /// 顺序与表格里的行序一致，才不用来回对。
+  const keyIssues = useMemo<Map<string, string>>(() => {
+    // **冻结之后这道预检必须停掉。** 配置已经写进库了，列表回读回来的
+    // `takenSourceKeys` 里正好有**它自己那几个键**——于是每一条都报「已被占用」，
+    // 而 `canSubmit` 拿它去禁「重试导入」。冻结态的输入框是只读的，改不了，
+    // 用户就被自己的键永久按死在失败那一屏。撞库的窗口在第一轮提交时已经过去了。
+    if (frozen) {
+      return new Map();
+    }
     const seen = new Map<string, number>();
-    for (const name of selected) {
-      const key = configs[name]?.sourceKey.trim() ?? "";
+    for (const column of chosenColumns) {
+      const key = configs[column.name]?.sourceKey.trim() ?? "";
       seen.set(key, (seen.get(key) ?? 0) + 1);
     }
-    const messages: string[] = [];
-    for (const name of selected) {
-      const key = configs[name]?.sourceKey.trim() ?? "";
+    const issues = new Map<string, string>();
+    for (const column of chosenColumns) {
+      const key = configs[column.name]?.sourceKey.trim() ?? "";
       if (!isValidSourceKey(key)) {
-        messages.push(
+        issues.set(
+          column.name,
           `「${key}」不是合法源标识：必须是小写字母开头的 [a-z0-9_]（只含小写字母、数字与下划线），最长 64 字节。`,
         );
       } else if ((seen.get(key) ?? 0) > 1) {
         // 唯一索引在库上，撞了会以 ParamInvalid 冒泡——与其让创建整个失败，
         // 不如在这里说清是哪一行。
-        messages.push(`源标识重复：${key}（它进 URL 路径段，必须全局唯一）。`);
+        issues.set(
+          column.name,
+          `源标识重复：${key}（它进 URL 路径段，必须全局唯一）。`,
+        );
       } else if (takenSourceKeys.has(key)) {
-        // **跨数据源**的重复：`source_key` 是全局唯一索引，而这几个默认值是从列号
-        // 派生的——第二条 xlsx 源勾同一个列号就撞。库上那一发要到「创建并导入」
-        // 按下去才失败，错误里只有一句键名，所以在这里先说。
-        messages.push(
-          `源标识已被占用：${key}（它进 URL 路径段，全局唯一——列表里已有别的字段绑定在用这个标识）。`,
+        // **跨数据源**的重复：`source_key` 是全局唯一索引。默认值已经会顺延避让
+        // （[`freeSourceKey`]），命中这一条说明用户**手改**成了某个在用的键——
+        // 或那个键在别的页上，本地这份只是列表当前页（挡看得见的那批）。
+        // 库上那一发要到「创建并导入」按下去才失败，所以在这里先说。
+        issues.set(
+          column.name,
+          `源标识已被占用：${key}（它进 URL 路径段，全局唯一——已有别的字段绑定在用这个标识，停用的绑定也算占用）。`,
         );
       }
     }
-    return messages;
-  }, [selected, configs, takenSourceKeys]);
+    return issues;
+  }, [frozen, chosenColumns, configs, takenSourceKeys]);
 
-  const canSubmit = chosenColumns.length > 0 && sourceKeyErrors.length === 0;
+  const canSubmit = chosenColumns.length > 0 && keyIssues.size === 0;
 
   function chooseFiles(next: File[]) {
     setFiles(next);
@@ -242,7 +321,8 @@ export function XlsxImportWizard({
     setProbeError(null);
   }
 
-  function toggle(name: string, columnIndex: number) {
+  function toggle(column: XlsxHeaderProbe["columns"][number]) {
+    const name = column.name;
     setSelected((previous) =>
       previous.includes(name)
         ? previous.filter((candidate) => candidate !== name)
@@ -261,10 +341,16 @@ export function XlsxImportWizard({
         }
         return next;
       }
+      // 默认键**只在勾选这一刻取一次**，之后不跟随 `takenSourceKeys` 变化：它是要抄进
+      // 审批控件外部选项地址的可见值，在用户看不见的时候被改名比撞车更难查。
+      const taken = new Set<string>([
+        ...takenSourceKeys,
+        ...Object.values(previous).map((config) => config.sourceKey.trim()),
+      ]);
       return {
         ...previous,
         [name]: {
-          sourceKey: defaultSourceKey(columnIndex),
+          sourceKey: fallbackSourceKey(column.index, taken),
           parentFieldId: null,
         },
       };
@@ -351,7 +437,7 @@ export function XlsxImportWizard({
   const alert =
     submitFailure ??
     probeError ??
-    (sourceKeyErrors.length > 0 ? sourceKeyErrors.join("；") : null);
+    (keyIssues.size > 0 ? [...keyIssues.values()].join("；") : null);
 
   /// 冻结之后**必须明说为什么**：界面上的列与源标识看起来还能读懂，若不说，
   /// 用户会以为自己还能改（而改了既不生效也不报错，是最坏的一种失败）。
@@ -423,7 +509,14 @@ export function XlsxImportWizard({
                   aria-label={`${column.name} 的源标识`}
                   value={config?.sourceKey ?? ""}
                   readOnly={frozen}
-                  onChange={(event) =>
+                  // 出问题的是**某一行**，不是「有四条错误」：alert 把四句 join 成一段，
+                  // 不指行的话用户得自己拿键值回表里对。shadcn 的 Input 自带
+                  // `aria-invalid:` 红框样式，一行属性就够。
+                  aria-invalid={keyIssues.has(column.name)}
+                  onChange={(event) => {
+                    // 上一次提交是**按当时那个键**失败/成功的，键一改这句就不再描述
+                    // 屏幕上的东西。只在这一处清：改父列不该顺手抹掉它。
+                    setSubmitError(null);
                     setConfigs((previous) => ({
                       ...previous,
                       [column.name]: {
@@ -431,8 +524,8 @@ export function XlsxImportWizard({
                         parentFieldId:
                           previous[column.name]?.parentFieldId ?? null,
                       },
-                    }))
-                  }
+                    }));
+                  }}
                   className="font-mono"
                   autoComplete="off"
                   spellCheck={false}
@@ -619,9 +712,7 @@ export function XlsxImportWizard({
                         <Checkbox
                           id={checkboxId}
                           checked={selected.includes(column.name)}
-                          onCheckedChange={() =>
-                            toggle(column.name, column.index)
-                          }
+                          onCheckedChange={() => toggle(column)}
                         />
                       </TableCell>
                       <TableCell>
@@ -688,6 +779,16 @@ export function XlsxImportWizard({
                 </p>
               </div>
             ) : null}
+            {/* 提交中的进度行。建源那一半**报不出来**（还没有 id），只能说它正在发生；
+                导入那一半才能问到阶段与计数。按钮上的「正在导入…」不动：它是文案，
+                这行才是可查证的观测。 */}
+            {submitting ? (
+              <p role="status" className="text-xs text-muted-foreground">
+                {created === null
+                  ? "正在创建数据源与绑定…"
+                  : describeImportProgress(progress, files)}
+              </p>
+            ) : null}
             {receipt}
           </div>
         ) : null}
@@ -719,10 +820,7 @@ export function XlsxImportWizard({
               下一步
             </Button>
           ) : step === 3 ? (
-            <Button
-              disabled={sourceKeyErrors.length > 0}
-              onClick={() => setStep(4)}
-            >
+            <Button disabled={keyIssues.size > 0} onClick={() => setStep(4)}>
               下一步
             </Button>
           ) : step === 4 ? (

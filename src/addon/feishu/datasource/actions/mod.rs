@@ -12,6 +12,7 @@
 
 pub(super) mod create_datasource_table;
 pub(super) mod delete_datasource_table;
+pub(super) mod get_import_progress;
 pub(super) mod health_check;
 pub(super) mod import_xlsx;
 pub(super) mod list_bitable_fields;
@@ -52,10 +53,11 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = list_bitable_fields::register(module, Arc::clone(&context));
     let module = reveal_token::register(module, Arc::clone(&context));
     let module = rotate_token::register(module, Arc::clone(&context));
-    // 探表头与导入**都不出网**，所以不受下面的 `can_pull()` 门控约束：
-    // 没有飞书凭证的环境里，xlsx 导入照样要能用。
+    // 探表头、导入与查导入进度**都不出网**，所以不受下面的 `can_pull()` 门控约束：
+    // 没有飞书凭证的环境里，xlsx 导入照样要能用——包括看它跑到哪了。
     let module = probe_xlsx_headers::register(module, Arc::clone(&context));
     let module = import_xlsx::register(module, Arc::clone(&context));
+    let module = get_import_progress::register(module, Arc::clone(&context));
 
     if context
         .settings()

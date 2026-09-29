@@ -35,7 +35,6 @@ use super::derive::{derive_options, snapshot_digest, DerivedOption, RawValue};
 use super::linkage::{Linkage, LinkageLevel};
 use super::option_write::{
     apply_option_rows, count_option_rows, disable_option_rows, find_foreign_option_owner,
-    OptionWriteItem, OptionWriteOutcome,
 };
 use super::outbound::{OutboundFailure, OutboundTransport, Sleeper};
 use super::tenant_token::TenantTokenProvider;
@@ -138,8 +137,9 @@ pub(crate) struct TablePullOutcome {
     pub(crate) fields: usize,
     /// 内容未变而跳过写库的字段数。
     pub(crate) skipped: usize,
-    pub(crate) inserted: u64,
-    pub(crate) updated: u64,
+    /// 写入路径 `rows_affected` 之和，**不是行数**（多行 ODKU 的 `rows_affected`
+    /// ∈ `[N,2N]`，也分不出 inserted/updated；口径见 `option_write` 模块文档）。
+    pub(crate) rows_affected: u64,
     pub(crate) disabled: u64,
 }
 
@@ -476,16 +476,14 @@ async fn pull_table_inner(
             },
         )
         .await?;
-        outcome.inserted += written.options.inserted;
-        outcome.updated += written.options.updated;
+        outcome.rows_affected += written.rows_affected;
         outcome.disabled += written.disabled;
 
         tracing::info!(
             source_key = %binding.source_key,
             fetched = outcome.fetched,
             derived = derived.len(),
-            inserted = written.options.inserted,
-            updated = written.options.updated,
+            rows_affected = written.rows_affected,
             disabled = written.disabled,
             "飞书数据源字段同步完成"
         );
@@ -496,7 +494,8 @@ async fn pull_table_inner(
 /// 一条绑定本轮落库的计数。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct BindingWrite {
-    options: OptionWriteOutcome,
+    /// 选项写入的 `rows_affected`（口径见 [`TablePullOutcome::rows_affected`]）。
+    rows_affected: u64,
     disabled: u64,
 }
 
@@ -539,13 +538,13 @@ async fn persist_binding(
     let result = async {
         let mut written = BindingWrite::default();
         if plan.replace_options {
-            let items: Vec<OptionWriteItem> = plan
+            let rows: Vec<Record> = plan
                 .derived
                 .iter()
-                .map(|option| to_write_item(&binding.source_key, option))
+                .map(|option| to_option_row(&binding.source_key, option))
                 .collect();
-            written.options =
-                apply_option_rows(options, &mut transaction, &binding.source_key, &items).await?;
+            written.rows_affected =
+                apply_option_rows(options, &mut transaction, &binding.source_key, rows).await?;
             written.disabled =
                 disable_option_rows(options, &mut transaction, &binding.source_key, plan.doomed)
                     .await?;
@@ -911,7 +910,10 @@ impl OwnedRawValue {
 ///
 /// `enabled` 必须显式写 `true`：出站拉取是整行替换，某行被补集停用后又重新出现时
 /// 要能复活。这与入站 upsert 的「合并」语义不同，也是本函数不复用 `to_record` 的原因。
-fn to_write_item(source_key: &str, option: &DerivedOption) -> OptionWriteItem {
+///
+/// 列集**全批同一份**（每个 `DerivedOption` 都走这里），这是批量 upsert 的硬前提；
+/// `option_id`/`source_key` 由 `apply_option_rows` 从赋值列里剔除（身份列，见其文档）。
+fn to_option_row(source_key: &str, option: &DerivedOption) -> Record {
     let mut record = Record::new();
     record.insert("option_id", serde_json::json!(option.option_id));
     record.insert("source_key", serde_json::json!(source_key));
@@ -920,10 +922,7 @@ fn to_write_item(source_key: &str, option: &DerivedOption) -> OptionWriteItem {
     record.insert("enabled", serde_json::json!(true));
     record.insert("parent_key", serde_json::json!(option.parent_key));
     record.insert("last_push_at", serde_json::json!(now_seconds()));
-    OptionWriteItem {
-        option_id: option.option_id.clone(),
-        record,
-    }
+    record
 }
 
 /// 补集扫描的每页大小。**必须 ≤ 框架硬上限**：`TableQuery::page` 对超限是
@@ -1129,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn write_item_replaces_the_whole_row_and_reenables() {
+    fn option_row_replaces_the_whole_row_and_reenables() {
         // 整行替换：`enabled` 显式写 true，否则「停用→重新出现」的行永远复活不了
         let option = DerivedOption {
             option_id: "demo:abc".to_string(),
@@ -1137,9 +1136,8 @@ mod tests {
             parent_key: String::new(),
             sort_order: 3,
         };
-        let item = to_write_item("demo", &option);
-        assert_eq!(item.option_id, "demo:abc");
-        let record = item.record;
+        let record = to_option_row("demo", &option);
+        assert_eq!(record.get("option_id"), Some(&json!("demo:abc")));
         assert_eq!(record.get("enabled"), Some(&json!(true)));
         assert_eq!(record.get("sort_order"), Some(&json!(3)));
         assert_eq!(record.get("source_key"), Some(&json!("demo")));

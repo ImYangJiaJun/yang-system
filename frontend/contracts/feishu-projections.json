@@ -107,6 +107,22 @@
       "query_only": {}
     }
   },
+  "get_import_progress": {
+    "result": {
+      "emitted": [
+        "stage",
+        "files_total",
+        "files_done",
+        "file_index",
+        "rows_done",
+        "rows_total",
+        "bindings_total",
+        "bindings_done"
+      ],
+      "backend_only": {},
+      "query_only": {}
+    }
+  },
   "client_fields": {
     "list_datasources": {
       "order_by": ["title", "id"],

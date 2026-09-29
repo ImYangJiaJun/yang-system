@@ -9,7 +9,7 @@
 //! 这里只负责把表头如实读出来，并挡住「列名本身就不合法」的输入
 //! （重名、空名、超长），以及多文件之间表头不一致这种整体性错误。
 //!
-//! 行这一层**同样只认列名**：`read_snapshot` 交出的是「列名 → 单元格文本」，
+//! 行这一层**同样只认列名**：`read_snapshot_with_progress` 交出的是「列名 → 单元格文本」，
 //! 要哪几列由调用方给（= 全部启用绑定的 `field_id`），但这里**不知道绑定是什么**——
 //! 不判断哪一列绑到哪个字段，也不把行投影成 `RawValue`，更不管空快照该不该拒绝。
 //! 那些都是 Task 10 导入 Action 的活。分层清楚，这一层才能被完整单测覆盖。
@@ -286,6 +286,36 @@ pub(crate) struct ImportSnapshot {
     pub(crate) per_file: Vec<FileRows>,
 }
 
+/// 解析途中上报的进度。**旁路观测**：它不参与任何判断，改不了也报错不了解析结果
+/// （回调没有返回值）。
+///
+/// 计数口径有一处刻意的不一致，别顺手统一：`rows_done` 是**物理**行序号（表头下一行
+/// 算 1，空行也计），而回执里的 `rows_read` 是**非空**数据行数。前者要在解析途中单调
+/// 推进（那时还不知道这一行会不会被丢掉），后者要回答「读进来几行」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotProgress {
+    /// 正在解析第几个文件（1-based）。
+    pub(crate) file_index: u32,
+    /// 本轮一共几个文件。
+    pub(crate) files_total: u32,
+    /// 已越过的物理行序号（表头下一行算 1，含空行）。
+    pub(crate) rows_done: u64,
+    /// 该文件的数据行总数（来自 `<dimension>`）；拿不到 = `None`。
+    pub(crate) rows_total: Option<u64>,
+}
+
+/// 读全部数据行、不报进度：[`read_snapshot_with_progress`] 的薄壳，只服务测试。
+///
+/// 生产侧唯一的调用方（导入 Action）要报进度，所以它走带回调的那个名字；这里留着
+/// 老名字是为了让既有的一批用例不必为了一个新参数全体改签名。
+#[cfg(test)]
+pub(crate) fn read_snapshot(
+    files: &[(String, Vec<u8>)],
+    columns: &[String],
+) -> Result<ImportSnapshot, XlsxError> {
+    read_snapshot_with_progress(files, columns, &mut |_| {})
+}
+
 /// 读全部数据行。`columns` 是要取回的列名集合（= 全部启用绑定的 `field_id`）。
 /// 表头行本身不算数据行；整行全空的行跳过。
 ///
@@ -295,18 +325,25 @@ pub(crate) struct ImportSnapshot {
 /// 内存行为：**只把 `columns` 里的列放进 `RowValues`**，没要的列连 `String` 都不分配；
 /// 单元格为空则连键都不插（「缺值」与「空串」同义），整行全空则整行丢弃。
 /// 15.4 万行的真实文件下，这三点就是「几十 MB」和「几百 MB」的差别。
-pub(crate) fn read_snapshot(
+///
+/// `on_progress` 在每个文件的开头（`rows_done = 0`，此时才拿得到 `<dimension>` 分母）
+/// 与每越过一行时各调一次。它是**同步**回调，调用方要把它挪到 `spawn_blocking` 里
+/// 才不会占着 tokio worker——解析本来就是同步 CPU 活。
+pub(crate) fn read_snapshot_with_progress(
     files: &[(String, Vec<u8>)],
     columns: &[String],
+    on_progress: &mut dyn FnMut(SnapshotProgress),
 ) -> Result<ImportSnapshot, XlsxError> {
     let wanted: std::collections::HashSet<&str> = columns.iter().map(String::as_str).collect();
     let mut rows = Vec::new();
     let mut per_file = Vec::with_capacity(files.len());
 
-    for (name, bytes) in files {
+    for (offset, (name, bytes)) in files.iter().enumerate() {
         // 每个文件都重新解析表头：文件之间的一致性由调用方用
         // `require_consistent_headers` 单独把守（那一层的错误文案更具体）。
         let header = read_header(bytes)?;
+        let file_index = offset as u32 + 1;
+        let files_total = files.len() as u32;
 
         let present: std::collections::HashSet<&str> =
             header.columns.iter().map(|(n, _)| n.as_str()).collect();
@@ -331,6 +368,17 @@ pub(crate) fn read_snapshot(
                 .worksheet_cells_reader(&header.sheet_name)
                 .map_err(|error| XlsxError::Unreadable(error.to_string()))
         })?;
+
+        // 分母只在**建好 reader 之后**才拿得到：`<dimension>` 是 calamine 打开工作表时
+        // 从 XML 头读出来的。同一份值后面每个事件都复用，免得中途换成 `None` 把前端
+        // 已经显示出来的分母抹掉。
+        let rows_total = rows_total_from(reader.dimensions().end.0, header.header_row);
+        on_progress(SnapshotProgress {
+            file_index,
+            files_total,
+            rows_done: 0,
+            rows_total,
+        });
 
         // 列号 → 列名。用 1-based 列号做键，因为游标只给位置不给名字。
         let by_index: std::collections::HashMap<usize, &str> = header
@@ -372,6 +420,14 @@ pub(crate) fn read_snapshot(
                 }
                 current_row = row_number;
                 pending = false;
+                // 越过一行报一次。`row_number > header.header_row` 是上面那个 `continue`
+                // 保证的，不会下溢。
+                on_progress(SnapshotProgress {
+                    file_index,
+                    files_total,
+                    rows_done: (row_number - header.header_row) as u64,
+                    rows_total,
+                });
             }
 
             let Some(column_name) = by_index.get(&column_number) else {
@@ -395,6 +451,16 @@ pub(crate) fn read_snapshot(
             rows_read += 1;
             rows.push(current);
         }
+        // 收口处补报一次。**实录**：在当前口径（报**物理行序号**）下它与「进入最后一行」
+        // 那次事件的数值相同——进入即已报过，所以删掉它没有用例会红。留着是因为它是
+        // 唯一的「这个文件读完了」显式事件：调用方不必从最后一条事件的含意去推断，
+        // 而且口径一旦改成「已收口行数」（含空行的定义会跟着变），它就成了承重的那条。
+        on_progress(SnapshotProgress {
+            file_index,
+            files_total,
+            rows_done: (current_row - header.header_row) as u64,
+            rows_total,
+        });
 
         per_file.push(FileRows {
             name: name.clone(),
@@ -403,6 +469,21 @@ pub(crate) fn read_snapshot(
     }
 
     Ok(ImportSnapshot { rows, per_file })
+}
+
+/// 由 `<dimension>` 的末行推出「这个文件有几行数据」。
+///
+/// `(0, 0)` 是 calamine 在**缺 `<dimension>` 元素**时的静默默认值
+/// （`Dimensions::default()`）⇒ 分母不可信，返回 `None`（前端那时只报计数、不报分母，
+/// 而不是画出「0 / 0 行」的假分母）。下溢（dimension 比表头行还小）同样 `None`。
+///
+/// `end_row` 是 **0-based** 的末行下标，`header_row` 是 **1-based** 的表头行号：
+/// 数据行数 = `(end_row + 1) - header_row`。
+fn rows_total_from(dimension_end_row: u32, header_row: usize) -> Option<u64> {
+    if dimension_end_row == 0 {
+        return None;
+    }
+    (u64::from(dimension_end_row) + 1).checked_sub(u64::try_from(header_row).ok()?)
 }
 
 /// 单元格取文本。**不做数值推断**（设计 §5.7）：
@@ -894,6 +975,104 @@ mod tests {
             snapshot.rows[1].get("开户日").map(String::as_str),
             Some("2024-01-15T00:00:00"),
             "ISO 形态的日期不能读成空串——整列变空会被读成「这一列没数据」"
+        );
+    }
+
+    #[test]
+    fn read_snapshot_with_progress_reports_the_file_and_the_last_row() {
+        // bank_1.xlsx：表头 1 行 + 3 个数据行。行号是**物理**序号（含空行），所以最后
+        // 一行的 `rows_done` 是 3，与逐文件收口的 `rows_read` 对齐。
+        //
+        // 夹具**没有 `<dimension>` 元素**（生成脚本只写 sheetData），所以这里的分母恒是
+        // `None`——这正是真实世界里的第二种文件（非 Excel 导出）该有的行为：宁可只报
+        // 计数，也不要画出一个假的「共 0 行」分母。`Some` 那一支由 `rows_total_from`
+        // 自己的用例覆盖。
+        let want = vec!["开户行行名".to_string()];
+        let mut events: Vec<SnapshotProgress> = Vec::new();
+        let snapshot = read_snapshot_with_progress(
+            &[("bank_1.xlsx".to_string(), fixture("bank_1.xlsx"))],
+            &want,
+            &mut |event| events.push(event),
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+
+        assert_eq!(snapshot.rows.len(), 3, "夹具本身是 3 行");
+        let first = events
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("至少要报一次"));
+        assert_eq!(
+            (
+                first.file_index,
+                first.files_total,
+                first.rows_done,
+                first.rows_total
+            ),
+            (1, 1, 0, None),
+            "首个事件建好 reader 之后、读数据行之前"
+        );
+        assert!(
+            events.iter().any(|event| event.rows_done == 2),
+            "换行分支要报中间行，否则进度一跳到底：{events:?}"
+        );
+        let last = events
+            .last()
+            .copied()
+            .unwrap_or_else(|| panic!("至少要报一次"));
+        assert_eq!(
+            last.rows_done, 3,
+            "收口处要补报最后一行，否则进度停在倒数第二行：{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_file_is_reported_under_its_own_index() {
+        // 多文件的 `file_index` / `files_total` 是**进度条**的那一半：两个文件接起来时
+        // 分母必须跟着走，否则前端会一直显示「第 1 / 共 2 个文件」。
+        let want = vec!["序号".to_string()];
+        let mut events: Vec<SnapshotProgress> = Vec::new();
+        read_snapshot_with_progress(
+            &[
+                ("bank_1.xlsx".to_string(), fixture("bank_1.xlsx")),
+                ("bank_2.xlsx".to_string(), fixture("bank_2.xlsx")),
+            ],
+            &want,
+            &mut |event| events.push(event),
+        )
+        .unwrap_or_else(|error| panic!("应能解析: {error}"));
+
+        let second_file: Vec<SnapshotProgress> = events
+            .iter()
+            .copied()
+            .filter(|event| event.file_index == 2)
+            .collect();
+        assert!(!second_file.is_empty(), "第二个文件也要报：{events:?}");
+        assert!(
+            second_file.iter().all(|event| event.files_total == 2),
+            "分母是**本轮全部文件数**，不是当前文件：{events:?}"
+        );
+        assert_eq!(
+            second_file.first().map(|event| event.rows_done),
+            Some(0),
+            "每个文件从头开始报，第二个文件也不例外"
+        );
+    }
+
+    #[test]
+    fn rows_total_from_returns_none_when_the_dimension_is_missing() {
+        // `(0, 0)` 是 calamine 在缺 `<dimension>` 时的默认值：当真了就会画出
+        // 「已读 R / 共 0 行」这种假分母。
+        assert_eq!(rows_total_from(0, 1), None, "缺 dimension 时分母不可信");
+        assert_eq!(
+            rows_total_from(154_386, 1),
+            Some(154_386),
+            "数据行数 = (0-based 末行 + 1) − 表头行号"
+        );
+        assert_eq!(rows_total_from(1, 1), Some(1), "表头 + 1 行数据");
+        assert_eq!(
+            rows_total_from(2, 5),
+            None,
+            "dimension 比表头还小：下溢归 None"
         );
     }
 }

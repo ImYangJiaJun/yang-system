@@ -9,6 +9,7 @@ import {
   FIELD_BINDING_KEYS,
   HEALTH_MISSING_FIELD_KEYS,
   HEALTH_REPORT_KEYS,
+  IMPORT_PROGRESS_KEYS,
   OPTION_ITEM_KEYS,
   PULL_SCHEDULE_KEYS,
   XLSX_OPERATION_IDS,
@@ -18,6 +19,7 @@ import {
   deleteDatasourceTable,
   enabledBindingInputs,
   feishuQueryKeys,
+  getImportProgress,
   importXlsxFiles,
   listBitableFields,
   listBitableTables,
@@ -128,6 +130,28 @@ const DEPLOYED_ACTIONS: ActionDemoSchema[] = [
     path: "/api/v1/feishu/datasources/{datasource_id}/import",
     request_media_type: "multipart",
     multipart: MULTIPART_SPEC,
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    // **写字面量，不写 `XLSX_OPERATION_IDS.importProgress`**：替身照抄常量的话，
+    // 常量本身拼错一个字母时两边一起错，测试照样绿——而真实后果是
+    // `requireAction` 抛「目录里找不到 Action」。这条字面量正是那个错字的哨兵。
+    operation_id: "feishu.datasource.get_import_progress",
+    method: "GET",
+    path: "/api/v1/feishu/datasources/{datasource_id}/import-progress",
+    // `datasource_id` 这条**必须**声明成路径参数：与上面导入端点不同，本 handler 的
+    // `params()` 里真有它，引擎据此替换 `{datasource_id}`。漏了它（或改成空集），
+    // 引擎会在最后一步抛「路径仍有未填写参数」——替身必须与目录形状一致，
+    // 否则测的是一个服务端不存在的端点。
+    params: [
+      {
+        name: "datasource_id",
+        source: "path",
+        required: true,
+        title: "数据源",
+        description: "",
+      },
+    ],
   },
 ];
 
@@ -470,6 +494,7 @@ describe("投影契约（emit ↔ read）", () => {
     ["health_check", "report", HEALTH_REPORT_KEYS],
     ["health_check", "missing_field", HEALTH_MISSING_FIELD_KEYS],
     ["pull_schedule", "result", PULL_SCHEDULE_KEYS],
+    ["get_import_progress", "result", IMPORT_PROGRESS_KEYS],
   ] as const;
 
   /// 探针值：**每一个都必须与「缺键时的兜底值」不同**，否则「解析器到底读没读这个键」
@@ -772,6 +797,34 @@ describe("投影契约（emit ↔ read）", () => {
 
     const schedule = await fetchPullSchedule(TABLE_DEPS);
     expect(schedule).toEqual(expectedFrom(PULL_SCHEDULE_KEYS, SCHEDULE_PROBE));
+  });
+
+  /// 探针取的是**解析期**那一拍：八个键全非 null，且 `rows_done`(41) < `rows_total`
+  /// (154386) ——兜底值全是 `null`，所以任何一项没被读到都会当场显形。
+  const IMPORT_PROGRESS_PROBE: Record<string, unknown> = {
+    stage: "parsing",
+    files_total: 3,
+    files_done: 2,
+    file_index: 2,
+    rows_done: 41,
+    rows_total: 154386,
+    bindings_total: 5,
+    bindings_done: 1,
+  };
+
+  it("导入进度：同上", async () => {
+    stubFetch({
+      code: 0,
+      data: wireFrom(
+        CONTRACT.get_import_progress?.result?.emitted ?? [],
+        IMPORT_PROGRESS_PROBE,
+      ),
+    });
+
+    const progress = await getImportProgress(7, deps);
+    expect(progress).toEqual(
+      expectedFrom(IMPORT_PROGRESS_KEYS, IMPORT_PROGRESS_PROBE),
+    );
   });
 });
 
@@ -1581,6 +1634,53 @@ describe("xlsx 导入端点", () => {
       /找不到 Action「feishu\.datasource\.import_xlsx」/,
     );
     expect(calls).toHaveLength(0);
+  });
+
+  it("importProgress：GET，且路径里的 id 由引擎替换（不吃导入那条补丁）", async () => {
+    // 与上面那条正相反：本端点的 params() 里真声明了 `datasource_id`（source=path），
+    // 引擎的路径替换填得进去——所以 api 层**不做** `path.replace` 那种手工补全。
+    const calls = stubFetch({
+      code: 0,
+      data: {
+        stage: "writing",
+        files_total: 1,
+        files_done: 1,
+        file_index: 1,
+        rows_done: 154386,
+        rows_total: 154386,
+        bindings_total: 4,
+        bindings_done: 3,
+      },
+    });
+
+    const progress = await getImportProgress(7, deps);
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/7/import-progress");
+    expect(calls[0]?.method).toBe("GET");
+    expect(progress.stage).toBe("writing");
+    expect(progress.bindingsDone).toBe(3);
+  });
+
+  it("认不出的 stage 折成 idle 且字段全 null——前端不猜新阶段", async () => {
+    // 服务端将来加一个阶段（如 `finalizing`），旧前端的字段读法就没有依据了。
+    // 折成 idle 只丢这一拍的精度（文案本来就是不确定态）；按「上一个已知阶段」读
+    // 则会画出一句可查证的假话。
+    stubFetch({
+      code: 0,
+      data: { stage: "finalizing", files_total: 1, rows_done: 9 },
+    });
+
+    const progress = await getImportProgress(7, deps);
+    expect(progress).toEqual({
+      stage: "idle",
+      filesTotal: null,
+      filesDone: null,
+      fileIndex: null,
+      rowsDone: null,
+      rowsTotal: null,
+      bindingsTotal: null,
+      bindingsDone: null,
+    });
   });
 });
 

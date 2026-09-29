@@ -468,6 +468,31 @@ async fn dispatch_probe(
     response
 }
 
+/// 派发一次导入进度查询（GET 端点，`datasource_id` 走**路径参数**）。
+async fn dispatch_progress(
+    app: &Arc<BuiltApp>,
+    token: &str,
+    datasource_id: i64,
+) -> anyhow::Result<Value> {
+    let authorization = format!("Bearer {token}");
+    let id = datasource_id.to_string();
+    let response = dispatch(
+        app,
+        "feishu.datasource",
+        "get_import_progress",
+        json!({}),
+        &[("datasource_id", id.as_str())],
+        &[("authorization", authorization.as_str())],
+    )
+    .await?;
+    ensure!(
+        response.code == 0,
+        "进度查询应成功，实际 {}",
+        response.message
+    );
+    response_data(&response)
+}
+
 async fn count_options(
     database: &Database,
     source_key: &str,
@@ -1177,4 +1202,110 @@ async fn a_binding_with_nothing_to_derive_on_an_empty_source_is_not_skipped() {
     }
     .await;
     finish(outcome, "空源上的空派生").await;
+}
+
+// 16. 第二轮导入**不刷新 created_at**、但必须真的写这一行（`updated_at` 前进）。
+//
+//     这条钉的是批量 ODKU 的赋值列纪律：`created_at` 在 INSERT 列里、**绝不**在赋值列里，
+//     否则「创建时间只在首次插入时写」这条语义就没了。
+//     它**不能**写成「原样连导两次」：第二轮内容未变且本地没有已停用行时会走 `unchanged`
+//     短路，一行都不写，created_at 的断言**空过**。所以先停用一行造出 `disabled_rows > 0`，
+//     逼第二轮真的走「预检 → 写 → 补集」，并把 `updated_at` 压成哨兵 0——两轮落在同一秒时
+//     它不会变，而 0 是框架写不出来的值，写没写一目了然。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn a_second_import_keeps_created_at_and_moves_updated_at() {
+    let outcome = async {
+        let (database, app, token) = prepare_app().await?;
+        // 只种一条绑定（行名）——本用例只关心它。
+        let datasource_id = seed_xlsx_datasource(
+            &database,
+            "xlsx_import",
+            &[("开户行行名", "bank_branch_name", None)],
+        )
+        .await?;
+
+        dispatch_import(&app, &token, datasource_id, &["bank_1.xlsx"]).await?;
+        let (option_id, label_before, created_before): (String, String, i64) = sqlx::query_as(
+            "SELECT `option_id`, `label`, `created_at` FROM `feishu_option` \
+             WHERE `source_key` = 'bank_branch_name' ORDER BY `id` LIMIT 1",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert!(created_before > 0, "前置条件：首轮由框架写入 created_at");
+
+        sqlx::query(
+            "UPDATE `feishu_option` SET `enabled` = 0, `updated_at` = 0 WHERE `option_id` = ?",
+        )
+        .bind(&option_id)
+        .execute(database.pool())
+        .await?;
+
+        dispatch_import(&app, &token, datasource_id, &["bank_1.xlsx"]).await?;
+
+        let (created_after, updated_after, enabled_after, label_after): (i64, i64, bool, String) =
+            sqlx::query_as(
+                "SELECT `created_at`, `updated_at`, `enabled`, `label` FROM `feishu_option` \
+                 WHERE `option_id` = ?",
+            )
+            .bind(&option_id)
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(
+            created_after, created_before,
+            "**第二次导入绝不能刷新 created_at**（它不在 ODKU 的赋值列里）"
+        );
+        assert!(
+            updated_after > 0,
+            "第二轮必须真的写了这一行（updated_at 从哨兵 0 前进）——否则本用例的 created_at 断言是空过的"
+        );
+        assert!(enabled_after, "被补集停用的行这一轮必须复活");
+        // 文案本身不会变：`option_id` 由 `source_key + 父键 + label` 派生（`derive.rs` 的
+        // `option_id_of`），同一行改文案就会变成另一个 id（插入新行）而不是更新这一行。
+        // 所以「同一行 + 新文案」在现有夹具下不可达，这条只能钉「身份与文案原地不动」。
+        assert_eq!(label_after, label_before, "同一 option_id 的文案不变");
+        Ok(())
+    }
+    .await;
+    finish(outcome, "第二轮不刷 created_at").await;
+}
+
+// 17. 进度端点的端到端形状：路径参数 + 鉴权 + 固定键集，且**导入前后都答 idle**。
+//
+//     导入在 handler 里同步跑完，进度条目随 `ImportGuard::Drop` 消失，所以「结束之后
+//     查得到 idle」正是这条链路的正确终态；而数据源不存在（或已删）也恒 200/idle ——
+//     端点不查库，也绝不用 404 表达「没在跑」。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn a_finished_import_reports_idle_progress() {
+    let outcome = async {
+        let (database, app, token) = prepare_app().await?;
+        let datasource_id =
+            seed_xlsx_datasource(&database, "xlsx_import", &bank_bindings()).await?;
+
+        let before = dispatch_progress(&app, &token, datasource_id).await?;
+        assert_eq!(before["stage"], "idle", "没有导入在跑就是 idle");
+        assert_eq!(
+            before.as_object().map(serde_json::Map::len),
+            Some(8),
+            "键集固定（与 Rust 结构体逐字对齐）: {before}"
+        );
+
+        dispatch_import(&app, &token, datasource_id, &["bank_1.xlsx"]).await?;
+
+        let after = dispatch_progress(&app, &token, datasource_id).await?;
+        assert_eq!(
+            after["stage"], "idle",
+            "导入结束（handler 返回）后条目必须随 ImportGuard 消失，不留转圈的假条目"
+        );
+        assert_eq!(after.as_object().map(serde_json::Map::len), Some(8));
+
+        // 不存在的数据源同样恒 200/idle：这条端点的答案是「本进程上这条源有没有导入在跑」，
+        // 它不查库，所以也不该用 404 表达「没在跑」。
+        let unknown = dispatch_progress(&app, &token, 999_999_999).await?;
+        assert_eq!(unknown["stage"], "idle");
+        Ok(())
+    }
+    .await;
+    finish(outcome, "进度端点").await;
 }

@@ -37,14 +37,15 @@ import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
 
 import type { XlsxImportClient, XlsxImportReport } from "../api";
+import { describeImportProgress, useImportProgress } from "../import-progress";
 
 export type XlsxReimportDialogProps = {
   open: boolean;
   /// 要导入到哪条数据源（表级主键）。
   datasourceId: number;
-  /// 只要导入这一个入口——建源与探表头都不该出现在这条路上（类型这么写，
-  /// 传进来的 `useXlsxImportClient()` 也只被用到这一个方法）。
-  client: Pick<XlsxImportClient, "importFiles">;
+  /// 只要导入与查进度两个入口——建源与探表头都不该出现在这条路上（类型这么写，
+  /// 传进来的 `useXlsxImportClient()` 也只被用到这两个方法）。
+  client: Pick<XlsxImportClient, "importFiles" | "importProgress">;
   /// 导入成功：调用方据此回读选项、给回执并关掉对话框。
   ///
   /// 交回整份回执（而不是一个布尔）是因为回执里那几行（读了 N 行 → 派生 M 个选项、
@@ -64,6 +65,11 @@ export function XlsxReimportDialog({
   const [files, setFiles] = useState<File[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /// 导入期间的实时进度。**15 万行那一档真正走的入口**（建源向导只走一次，此后每次
+  /// 更新数据都经过这里）：那一跑是几分钟，除这行字之外没有任何东西能说明「它还在动」。
+  /// pending 之外不轮询——这条源平时没有导入在跑，每秒问一次只是白打服务端。
+  const progress = useImportProgress(client, pending ? datasourceId : null);
 
   function close() {
     setFiles([]);
@@ -126,6 +132,12 @@ export function XlsxReimportDialog({
             可以一次选多份：它们的表头必须完全一致。文件只留在浏览器里，直接上传。
           </p>
         </div>
+
+        {pending ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            {describeImportProgress(progress, files)}
+          </p>
+        ) : null}
 
         <DialogFooter>
           <Button variant="ghost" onClick={close} disabled={pending}>

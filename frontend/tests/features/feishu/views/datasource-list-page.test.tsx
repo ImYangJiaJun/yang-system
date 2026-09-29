@@ -171,10 +171,11 @@ describe("飞书数据源列表页 · 新建入口二选一", () => {
     }
   });
 
-  it("把列表里已有的源标识喂给 xlsx 向导：第二条源的同列号默认值当场被判占用", async () => {
+  it("把列表里已有的源标识喂给 xlsx 向导：第二条源的默认键当场避开它", async () => {
     // `source_key` 是全局唯一索引，而向导的默认值是列号派生的（`col_2`）——列表里那条
-    // 数据源已经用掉了 `col_2`，第二条源勾「开户行行名」（第 2 列）就会撞。
-    // 这一条钉的是**接线**：列表页握着 `fields[].sourceKey`，必须喂进向导。
+    // 数据源已经用掉了 `col_2`，第二条源勾「开户行行名」（第 2 列）本该撞上去。
+    // 这一条钉的是**接线**：列表页握着 `fields[].sourceKey`，必须喂进向导，默认值才能
+    // 顺延到 `col_2_2`（不给它的话默认值照旧是必撞的 `col_2`）。
     const user = userEvent.setup();
     const existing = datasourceWire({
       id: 1,
@@ -198,14 +199,20 @@ describe("飞书数据源列表页 · 新建入口二选一", () => {
     await within(dialog).findByText("开户行行名");
     await user.click(within(dialog).getByRole("button", { name: "下一步" }));
     await user.click(within(dialog).getByLabelText("开户行行名"));
+
     await user.click(within(dialog).getByRole("button", { name: "下一步" }));
 
+    // 源标识那一栏在第 3 步的绑定表里
+    const input = within(dialog).getByLabelText("开户行行名 的源标识");
+    expect(input).toHaveValue("col_2_2");
+    expect(within(dialog).queryByText(/源标识已被占用/)).toBeNull();
+
+    // 集合仍然在起作用（不只是「永远 +_2」）：手敲回那个被占用的键，当场被拦
+    await user.clear(input);
+    await user.type(input, "col_2");
     expect(within(dialog).getByRole("alert")).toHaveTextContent(
       "源标识已被占用：col_2",
     );
-    expect(
-      within(dialog).getByRole("button", { name: "下一步" }),
-    ).toBeDisabled();
   });
 
   it("选多维表格仍开原来的向导（一行没改）", async () => {

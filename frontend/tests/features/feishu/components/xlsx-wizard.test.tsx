@@ -14,7 +14,7 @@
  * 因此这里不依赖会话与界面目录——那两样由 `api.test.ts` 单独钉住。
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -23,6 +23,7 @@ import type {
   CreatedTable,
   CreateTableSubmission,
   XlsxImportClient,
+  XlsxImportReport,
 } from "@/features/feishu/api";
 
 function stubClient(
@@ -48,6 +49,17 @@ function stubClient(
       elapsedMs: 1200,
       files: [{ name: "bank_1.xlsx", rowsRead: 5 }],
       bindings: [],
+    }),
+    // 默认答 idle：绝大多数用例不关心进度，而 idle 正好让状态行显示不确定态文案。
+    importProgress: vi.fn().mockResolvedValue({
+      stage: "idle",
+      filesTotal: null,
+      filesDone: null,
+      fileIndex: null,
+      rowsDone: null,
+      rowsTotal: null,
+      bindingsTotal: null,
+      bindingsDone: null,
     }),
     ...overrides,
   };
@@ -149,12 +161,11 @@ describe("xlsx 导入向导 · 源标识与父列", () => {
     expect(sourceKeyInput.value).not.toContain("开户行行名");
   });
 
-  it("库上已有的源标识当场判为占用：默认值是列号派生的，第二条源必然撞", async () => {
-    // `source_key` 是**全局**唯一索引，而默认值 `col_2` / `col_5` 派生自列号——每份文件
-    // 的列号都是那几样小整数，所以第二条 xlsx 源只要勾了同列号的列，默认值就撞。
-    // 撞上唯一索引的后果是「创建并导入」按下去才失败，错误里只有一句键名。
-    //
-    // 这一栏**只查得到本次提交内部**的重复，跨数据源那半只能由调用方（列表页）喂进来。
+  it("第二条 xlsx 源：默认键避开已占用的那个（col_2 → col_2_2）", async () => {
+    // `source_key` 是**全局**唯一索引，而默认值派生自列号——每份文件的列号都是那几样
+    // 小整数，所以第二条 xlsx 源只要勾了同列号的列，默认值就与第一条**逐字相撞**。
+    // 旧行为是照旧给 `col_2`、只报一句「已被占用」，用户得自己编四个键；现在默认值
+    // 顺延到第一个空闲变体，界面直接可用。
     const client = stubClient();
     render(
       <XlsxImportWizard
@@ -168,20 +179,51 @@ describe("xlsx 导入向导 · 源标识与父列", () => {
     await userEvent.click(screen.getByRole("button", { name: "解析表头" }));
     await screen.findByText("开户行行名");
     await userEvent.click(screen.getByRole("button", { name: "下一步" }));
-    // 勾「开户行行名」（第 2 列 → 默认键 col_2，正好是已被占用的那个）
+    // 勾「开户行行名」（第 2 列 → 默认键该是 col_2，但那个被占了）
     await userEvent.click(screen.getByLabelText("开户行行名"));
     await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    // 源标识那一栏在第 3 步的绑定表里
+    expect(screen.getByLabelText("开户行行名 的源标识")).toHaveValue("col_2_2");
+    expect(screen.queryByText(/源标识已被占用/)).toBeNull();
+    expect(screen.getByText(/第 3 步/)).toBeInTheDocument();
+  });
+
+  it("手改回一个已被占用的键：当场报占用，并把那一行标出来", async () => {
+    // 顺延只解决「默认值生来就撞」。用户**手改**成一个在用的键（或占用者在列表别的页、
+    // 本地这份集合够不着）仍要在这里被拦住——而且得指出是**哪一行**：alert 把几条
+    // join 成一段，不指行就得自己拿键值回表里对。
+    const client = stubClient();
+    render(
+      <XlsxImportWizard
+        client={client}
+        takenSourceKeys={new Set(["col_2"])}
+        onCancel={vi.fn()}
+      />,
+    );
+    await userEvent.type(screen.getByLabelText("名称"), "银行网点");
+    await userEvent.upload(screen.getByLabelText("xlsx 文件"), file());
+    await userEvent.click(screen.getByRole("button", { name: "解析表头" }));
+    await screen.findByText("开户行行名");
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+    await userEvent.click(screen.getByLabelText("开户行行名"));
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    const input = screen.getByLabelText("开户行行名 的源标识");
+    await userEvent.clear(input);
+    await userEvent.type(input, "col_2");
 
     expect(screen.getByRole("alert")).toHaveTextContent(
       "源标识已被占用：col_2",
     );
+    expect(input).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
 
     // 改成一个没被占用的键就放行——错误针对的是**那个键**，不是这一栏本身
-    const input = screen.getByLabelText("开户行行名 的源标识");
     await userEvent.clear(input);
     await userEvent.type(input, "bank_name");
     expect(screen.queryByText(/源标识已被占用/)).toBeNull();
+    expect(input).toHaveAttribute("aria-invalid", "false");
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
   });
 
@@ -266,6 +308,53 @@ describe("xlsx 导入向导 · 源标识与父列", () => {
       expect(field.fieldId).toBe(field.fieldName);
     }
   });
+
+  it("导入进行中显示 role=status 的实时进度；导入完成后状态行消失、回执出现", async () => {
+    // 按钮文案从点下去那一刻起就是「正在导入…」，几分钟里一个字母都不变——没有这行
+    // 状态字，用户看到的与卡死完全一样（15 万行那一档真的要跑几分钟）。
+    let resolveImport: ((report: XlsxImportReport) => void) | undefined;
+    const importFiles = vi.fn(
+      () =>
+        new Promise<XlsxImportReport>((resolve) => {
+          resolveImport = resolve;
+        }),
+    );
+    const client = stubClient({
+      importFiles,
+      importProgress: vi.fn().mockResolvedValue({
+        stage: "parsing",
+        filesTotal: 1,
+        filesDone: 1,
+        fileIndex: 1,
+        rowsDone: 12,
+        rowsTotal: 154386,
+        bindingsTotal: 2,
+        bindingsDone: 0,
+      }),
+    });
+    await driveToStep4(client);
+    await userEvent.click(screen.getByRole("button", { name: "创建并导入" }));
+
+    // 建源那一半答不出进度（还没有 id），所以第一拍是「正在上传文件」那种不确定态；
+    // 等导入那一步开始轮询，文案才换成阶段与计数。
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "正在解析数据：第 1/1 个文件，已读 12 / 共 154386 行…",
+      );
+    });
+
+    await act(async () => {
+      resolveImport?.({
+        datasourceId: 9,
+        elapsedMs: 1200,
+        files: [{ name: "bank_1.xlsx", rowsRead: 5 }],
+        bindings: [],
+      });
+    });
+
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+    expect(screen.getByText(/数据源 #9 已建好/)).toBeInTheDocument();
+  });
 });
 
 describe("xlsx 导入向导 · 探表头里必须说出来的两件事", () => {
@@ -333,6 +422,53 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
     expect(screen.getByText(/第 4 步/)).toBeInTheDocument();
     expect(client.createTable).toHaveBeenCalledTimes(1);
 
+    await userEvent.click(screen.getByRole("button", { name: "重试导入" }));
+    await waitFor(() => expect(importFiles).toHaveBeenCalledTimes(2));
+    expect(client.createTable).toHaveBeenCalledTimes(1);
+  });
+
+  it("建源后列表回读把这次的键报成「已占用」时，重试导入不能被自己按死", async () => {
+    // 列表页的 `takenSourceKeys` 来自一次**回读**：导入那一发可能跑几十秒（`staleTime`
+    // 才 15s），回来时数据源已经进了列表，于是向导**自己刚写进去的** `col_2` / `col_5`
+    // 也在那个集合里。照着它禁用按钮，冻结态的输入框又是只读的（改不了键），
+    // 用户就只剩「删掉数据源重建」这一条路。
+    const importFiles = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("HTTP 408"))
+      .mockResolvedValue({
+        datasourceId: 9,
+        elapsedMs: 10,
+        files: [],
+        bindings: [],
+      });
+    const client = stubClient({ importFiles });
+    const view = (taken: ReadonlySet<string>) => (
+      <XlsxImportWizard
+        client={client}
+        takenSourceKeys={taken}
+        onCancel={vi.fn()}
+      />
+    );
+    const { rerender } = render(view(new Set()));
+    await userEvent.type(screen.getByLabelText("名称"), "银行网点");
+    await userEvent.upload(screen.getByLabelText("xlsx 文件"), file());
+    await userEvent.click(screen.getByRole("button", { name: "解析表头" }));
+    await screen.findByText("开户行行名");
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+    await userEvent.click(screen.getByLabelText("开户行行名"));
+    await userEvent.click(screen.getByLabelText("联行号"));
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "创建并导入" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /数据源已建好（#9），但导入失败/,
+    );
+
+    // 列表回读：这次建出来的绑定，键就是向导自己派生的那两个
+    rerender(view(new Set(["col_2", "col_5"])));
+
+    expect(screen.getByRole("button", { name: "重试导入" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "重试导入" }));
     await waitFor(() => expect(importFiles).toHaveBeenCalledTimes(2));
     expect(client.createTable).toHaveBeenCalledTimes(1);
@@ -424,5 +560,34 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
     expect(screen.getByText(/要导入的文件：bank_2\.xlsx/)).toBeInTheDocument();
     expect(screen.getByText(/基于首次解析/)).toBeInTheDocument();
     expect(screen.queryByText(/服务端读到的文件/)).toBeNull();
+  });
+
+  it("导入成功之后关掉再打开 = 全新向导（不是「已导入」那一屏）", async () => {
+    // 组件在列表页是**常驻挂载**的（open 只是开关），不重置就一直是最后一态：成功那屏
+    // 主按钮是「已导入」、上一步禁用、没有文件输入——关掉再打开还是它，同一次页面会话
+    // 里第二条 xlsx 源建不出来，只能刷新整页。而刷新后重开向导，正是「默认键与已有源
+    // 撞车」那几条错误的现场。
+    const client = stubClient();
+    const view = (open: boolean) => (
+      <XlsxImportWizard client={client} onCancel={vi.fn()} open={open} />
+    );
+    const { rerender } = render(view(true));
+    await userEvent.type(screen.getByLabelText("名称"), "银行网点");
+    await userEvent.upload(screen.getByLabelText("xlsx 文件"), file());
+    await userEvent.click(screen.getByRole("button", { name: "解析表头" }));
+    await screen.findByText("开户行行名");
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+    await userEvent.click(screen.getByLabelText("开户行行名"));
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+    await userEvent.click(screen.getByRole("button", { name: "下一步" }));
+    await userEvent.click(screen.getByRole("button", { name: "创建并导入" }));
+    await screen.findByText(/数据源 #9 已建好/);
+
+    rerender(view(false));
+    rerender(view(true));
+
+    expect(screen.getByText(/第 1 步/)).toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toHaveValue("");
+    expect(screen.queryByText(/数据源 #9 已建好/)).toBeNull();
   });
 });

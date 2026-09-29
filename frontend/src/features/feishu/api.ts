@@ -98,15 +98,23 @@ export const TABLE_OPERATION_IDS = {
   rotate: "feishu.datasource.rotate_token",
 } as const;
 
-/// xlsx 文件导入的两个 Action。
+/// xlsx 文件导入的三个 Action。
 ///
-/// 两个都**不出网**，服务端因此没有给它们 `settings.can_pull()` 门控：没有飞书凭证的
+/// 三个都**不出网**，服务端因此没有给它们 `settings.can_pull()` 门控：没有飞书凭证的
 /// 环境里它们照样注册、照样可用（这正是文件导入存在的理由）。
 export const XLSX_OPERATION_IDS = {
   /// 只读表头：上传文件 → 回列名。不写库。
   probe: "feishu.datasource.probe_xlsx_headers",
   /// 导数据：上传同一批文件 → 建选项。写。
   importFiles: "feishu.datasource.import_xlsx",
+  /// 查导入进度：只读**进程内**状态，不写库、不碰飞书。
+  ///
+  /// 鉴权**与 `importFiles` 不是同一粒**：导入端点是 `feishu.datasource.write`
+  /// （`import_xlsx.rs` 的 `.permissions`），本端点是 `feishu.datasource.read`。
+  /// 两个方向都要知道：只读身份看得见进度、看不见导入入口；而**只有 write 没有 read**
+  /// 的身份能导入、查进度却会 403——`useImportProgress` 把失败一律吞掉，那一侧的进度行
+  /// 就会静默停在「正在上传文件…」这种不确定态，不报错也不前进。
+  importProgress: "feishu.datasource.get_import_progress",
 } as const;
 
 /// 详情页默认排序：按「最近推送」倒序，并以唯一键 `option_id` 收尾。
@@ -921,6 +929,41 @@ export type XlsxImportReport = {
   bindings: XlsxBindingReport[];
 };
 
+/// 导入阶段（`get_import_progress`）。**这就是后端的线格式取值**：认不出的取值一律
+/// 折成 `idle`（见 [`parseImportProgress`]），前端不猜新阶段。
+export type ImportStage = "idle" | "loading" | "parsing" | "writing";
+
+/// 一次导入的进度快照。**每一项都是可空的**，因为各阶段的字段集不同：
+/// `file_index` / `rows_*` 只在解析期有值，`bindings_*` 只在写入期有值。
+///
+/// 两条口径**刻意不同**、不许「顺手统一」（[`describeImportProgress`] 的文案按它写）：
+/// - `rowsDone` 是**物理**行序号（含空行），回执里的 `rowsRead` 是**非空**数据行数；
+/// - `bindingsDone` 是「已开始处理」的绑定数，所以它**到不了** `bindingsTotal`。
+export type ImportProgress = {
+  stage: ImportStage;
+  filesTotal: number | null;
+  filesDone: number | null;
+  fileIndex: number | null;
+  rowsDone: number | null;
+  rowsTotal: number | null;
+  bindingsTotal: number | null;
+  bindingsDone: number | null;
+};
+
+/// 导入进度的**前端一半契约**（后端 `assert_keys` 读的是同一份
+/// `frontend/contracts/feishu-projections.json`）。键一个不多一个不少：多一个就是读
+/// 一个后端不发的键（恒 `null`，界面会把它当成「服务端说没有」），少一个就是死投影。
+export const IMPORT_PROGRESS_KEYS = {
+  stage: "stage",
+  files_total: "filesTotal",
+  files_done: "filesDone",
+  file_index: "fileIndex",
+  rows_done: "rowsDone",
+  rows_total: "rowsTotal",
+  bindings_total: "bindingsTotal",
+  bindings_done: "bindingsDone",
+} as const satisfies Record<string, keyof ImportProgress>;
+
 function parseXlsxHeaderProbe(data: unknown): XlsxHeaderProbe {
   const record = asRecord(data);
   const rawColumns = record?.columns;
@@ -1003,6 +1046,53 @@ function parseXlsxImportReport(data: unknown): XlsxImportReport {
   };
 }
 
+const IMPORT_STAGES: readonly ImportStage[] = [
+  "idle",
+  "loading",
+  "parsing",
+  "writing",
+];
+
+function isImportStage(value: unknown): value is ImportStage {
+  return IMPORT_STAGES.some((stage) => stage === value);
+}
+
+/// 一个全 `null` 的 idle 快照。它是**兜底值**：认不出响应时交回它，界面据此显示
+/// 不确定态（而不是画一个假的「0/0」进度）。
+function idleImportProgress(): ImportProgress {
+  return {
+    stage: "idle",
+    filesTotal: null,
+    filesDone: null,
+    fileIndex: null,
+    rowsDone: null,
+    rowsTotal: null,
+    bindingsTotal: null,
+    bindingsDone: null,
+  };
+}
+
+/// 进度解析：**认不出的 stage 折成 idle + 全 null，前端不猜**。
+///
+/// 为什么不把未知 stage 当成「上一个已知阶段」：这是个每 1 秒打一次的旁路观测端点，
+/// 服务端将来加一个阶段（如 `finalizing`）时，旧前端把它的字段按别的阶段读出来，
+/// 画的就是一句可查证的假话；折成 idle 只丢了这一拍的精度，而文案本身就是不确定态。
+function parseImportProgress(data: unknown): ImportProgress {
+  const record = asRecord(data);
+  const stage = record?.stage;
+  if (!isImportStage(stage)) return idleImportProgress();
+  return {
+    stage,
+    filesTotal: asNullableNumber(record?.files_total),
+    filesDone: asNullableNumber(record?.files_done),
+    fileIndex: asNullableNumber(record?.file_index),
+    rowsDone: asNullableNumber(record?.rows_done),
+    rowsTotal: asNullableNumber(record?.rows_total),
+    bindingsTotal: asNullableNumber(record?.bindings_total),
+    bindingsDone: asNullableNumber(record?.bindings_done),
+  };
+}
+
 /// 探测一批 xlsx 文件的表头（向导第一步）。**不写库**。
 ///
 /// `files` 必须是 values **顶层**的 `File[]`：引擎的 `appendMultipart` 只识别顶层
@@ -1048,6 +1138,28 @@ export async function importXlsxFiles(
   return parseXlsxImportReport(result.data);
 }
 
+/// 查一条数据源**当前这一拍**的导入进度。**不写库**。
+///
+/// **不吃 [`importXlsxFiles`] 那个人工补路径的补丁**：本端点的 `params()` 声明了
+/// `datasource_id` 是路径参数，引擎的路径替换因此填得进去（补了反而会因为
+/// `params: []` 而把 id 当未知值塞进 body）。
+///
+/// 恒 200：数据源不存在、已删、本进程上没有导入在跑，三者都答 `idle`。
+/// 服务端**不用 404** 表达「没在跑」——那会让前端把正常态读成故障。
+export async function getImportProgress(
+  datasourceId: number,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ImportProgress> {
+  const result = await invokeFeishuAction(
+    deps,
+    XLSX_OPERATION_IDS.importProgress,
+    { datasource_id: datasourceId },
+    signal,
+  );
+  return parseImportProgress(result.data);
+}
+
 /// xlsx 导入向导要用的一组数据访问入口（**与 [`TableWizardClient`] 同一注入范式**：
 /// 组件只经注入的 client 访问数据，不摸 `useSessionCredentials` / `useUiCatalog`，
 /// 于是渲染它不必先把整棵应用壳搭起来）。
@@ -1058,6 +1170,7 @@ export type XlsxImportClient = {
     datasourceId: number,
     files: File[],
   ) => Promise<XlsxImportReport>;
+  importProgress: (datasourceId: number) => Promise<ImportProgress>;
 };
 
 /// 绑定当前会话与界面目录的 xlsx 导入入口。
@@ -1078,6 +1191,8 @@ export function useXlsxImportClient(): XlsxImportClient {
         createDatasourceTable(input, deps),
       importFiles: (datasourceId: number, files: File[]) =>
         importXlsxFiles(datasourceId, files, deps),
+      importProgress: (datasourceId: number) =>
+        getImportProgress(datasourceId, deps),
     }),
     [deps],
   );

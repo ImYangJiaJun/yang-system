@@ -363,8 +363,7 @@ async fn run_once(runner: &RoundRunner, only: Option<i64>) -> anyhow::Result<()>
                 fetched = outcome.fetched,
                 fields = outcome.fields,
                 skipped = outcome.skipped,
-                inserted = outcome.inserted,
-                updated = outcome.updated,
+                rows_affected = outcome.rows_affected,
                 disabled = outcome.disabled,
                 "飞书表级数据源同步完成"
             ),
