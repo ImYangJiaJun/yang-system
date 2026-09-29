@@ -28,6 +28,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/shared/ui/table";
+import { ChevronRight } from "lucide-react";
 
 import type { DatasourceFieldBinding } from "../types";
 import { orderBindingsForDisplay } from "../types";
@@ -83,17 +84,27 @@ export function FieldBindingsTable({
               data-slot="binding-row"
               data-depth={depth}
               data-selected={selected ? "true" : undefined}
-              className={selected ? "bg-accent/40" : undefined}
+              className={
+                selected
+                  ? "bg-primary/10 border-l-[3px] border-l-primary"
+                  : "hover:bg-muted/50"
+              }
             >
               <TableCell style={{ paddingInlineStart: depth * INDENT_PX }}>
                 <button
                   type="button"
                   aria-pressed={selected}
                   title={binding.fieldId}
-                  className="rounded-sm text-left font-medium focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:outline-none"
+                  className="cursor-pointer rounded-sm text-left font-medium underline decoration-dotted decoration-primary/40 hover:text-primary hover:decoration-primary focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:outline-none transition-colors"
                   onClick={() => onSelect(binding.sourceKey)}
                 >
-                  {binding.fieldName ?? "（字段名还没解析出来）"}
+                  <span className="flex items-center gap-1">
+                    {binding.fieldName ?? "（字段名还没解析出来）"}
+                    <ChevronRight
+                      className="h-3 w-3 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                  </span>
                 </button>
               </TableCell>
               <TableCell className="font-mono text-xs">

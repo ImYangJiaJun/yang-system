@@ -441,11 +441,11 @@ export function XlsxImportWizard({
 
   /// 冻结之后**必须明说为什么**：界面上的列与源标识看起来还能读懂，若不说，
   /// 用户会以为自己还能改（而改了既不生效也不报错，是最坏的一种失败）。
-  const frozenNotice = !frozen ? null : (
+  /// 但导入成功之后不再需要这张卡片——回执已经说清楚了。
+  const frozenNotice = !frozen || report !== null ? null : (
     <p className="rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
       {`数据源已建好（#${created?.datasourceId}）：列、源标识、父列与名称都按第一次提交落定，已经写进库里了，这里不再改——要改配置请先删掉这条数据源再重建。`}
-      {/* 只有还没导入成功时才谈「重试」：成功之后按钮已经是「已导入」了。 */}
-      {report === null ? "下面的文件可以换一批重试导入。" : ""}
+      下面的文件可以换一批重试导入。
     </p>
   );
 
@@ -754,31 +754,6 @@ export function XlsxImportWizard({
                 ——两者各自可重试，重试只会重发导入这一步，不会再建一个数据源。
               </p>
             </div>
-            {frozen && report === null ? (
-              <div className="space-y-1.5">
-                <Label htmlFor={`${idPrefix}-retry-files`}>
-                  重试导入用的 xlsx 文件
-                </Label>
-                {/* 配置冻结之后**唯一还能动的**就是文件：原文件本身可能就是坏的
-                    （表头不一致、列缺了），换一批重试是最常见的处置。绑定不动，
-                    所以新文件的表头必须与已落定的那几列一致，否则服务端整批拒。 */}
-                <Input
-                  id={`${idPrefix}-retry-files`}
-                  type="file"
-                  multiple
-                  accept=".xlsx"
-                  onChange={(event) => {
-                    setFiles(Array.from(event.target.files ?? []));
-                    // 换了文件，探表头那组说明就不再描述当前这批（它说的是第一次解析）。
-                    setProbeStale(true);
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  换一批文件重试是允许的；新文件的表头必须与上面这几列一致，
-                  否则服务端会整批拒掉。
-                </p>
-              </div>
-            ) : null}
             {/* 提交中的进度行。建源那一半**报不出来**（还没有 id），只能说它正在发生；
                 导入那一半才能问到阶段与计数。按钮上的「正在导入…」不动：它是文案，
                 这行才是可查证的观测。 */}
