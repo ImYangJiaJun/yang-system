@@ -38,6 +38,8 @@
 
 import { useEffect, useId, useMemo, useState } from "react";
 
+import { Loader2 } from "lucide-react";
+
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import {
@@ -195,12 +197,6 @@ export function XlsxImportWizard({
 
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
-  /// 探表头那组说明是不是**已经不对应当前这批文件**了。
-  ///
-  /// 只在冻结后换重试文件时置起：那时「要导入的文件」已经是新名字，而 probe 的结论
-  /// 说的是第一次那批——两行并排摆着，看上去像换文件没生效。换文件不重探（配置已冻结，
-  /// 重探也改不了任何绑定），所以只能说清它是哪一批文件的结论。
-  const [probeStale, setProbeStale] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   /// 建源的结果。**非 null 就代表数据源已经在库里了**——重试只重发导入那一步，
@@ -246,7 +242,6 @@ export function XlsxImportWizard({
     setConfigs({});
     setProbing(false);
     setProbeError(null);
-    setProbeStale(false);
     setSubmitting(false);
     setSubmitError(null);
     setCreated(null);
@@ -315,7 +310,6 @@ export function XlsxImportWizard({
     setFiles(next);
     // 换了文件，上一批的探表头结果、勾选与配置一律作废：列名即身份，对不上就是白配。
     setProbe(null);
-    setProbeStale(false);
     setSelected([]);
     setConfigs({});
     setProbeError(null);
@@ -360,7 +354,6 @@ export function XlsxImportWizard({
   async function probeHeaders() {
     setProbing(true);
     setProbeError(null);
-    setProbeStale(false);
     try {
       const result = await client.probe(files);
       setSelected([]);
@@ -441,30 +434,22 @@ export function XlsxImportWizard({
 
   /// 冻结之后**必须明说为什么**：界面上的列与源标识看起来还能读懂，若不说，
   /// 用户会以为自己还能改（而改了既不生效也不报错，是最坏的一种失败）。
-  /// 但导入成功之后不再需要这张卡片——回执已经说清楚了。
-  const frozenNotice = !frozen || report !== null ? null : (
-    <p className="rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
-      {`数据源已建好（#${created?.datasourceId}）：列、源标识、父列与名称都按第一次提交落定，已经写进库里了，这里不再改——要改配置请先删掉这条数据源再重建。`}
-      下面的文件可以换一批重试导入。
-    </p>
-  );
+  /// 但导入成功之后不再需要这张卡片——回执已经说清楚了；正在导入时也不显示——
+  /// 那时说「可以换一批重试导入」是一句还没兑现的假话，进度卡片才是那几秒的观测。
+  /// 重试只会重发同一批文件（`File` 留在浏览器 state 里），不再有换文件的入口。
+  const frozenNotice =
+    !frozen || report !== null || submitting ? null : (
+      <p className="rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
+        {`数据源已建好（#${created?.datasourceId}）：列、源标识、父列与名称都按第一次提交落定，已经写进库里了，这里不再改——要改配置请先删掉这条数据源再重建。`}
+        重试会重发同一批文件；要换一批文件，只能删掉这条数据源重建。
+      </p>
+    );
 
   /// 探表头读到的三件事里，有两条必须说出来（[`headerRowNote`] 与 sheet 数），
   /// 第三条是服务端**实际读到的文件**——它与用户选的是不是同一批，只有这里能看。
-  ///
-  /// 冻结后换过文件（[`probeStale`]）时这组说明**不再描述当前这批文件**：那时它说的
-  /// 是第一次解析的结论，而「要导入的文件」已经是新的。所以明说是哪一批的结论，
-  /// 并收起那句指着旧文件的「服务端读到的文件」——留着它就成了「换文件没生效」。
   const probeNotes =
     probe === null ? null : (
       <div className="space-y-1 rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
-        {probeStale ? (
-          <p>
-            {
-              "下面几条是基于首次解析的结论，已经与现在要导入的那批文件无关：配置在建源那一刻就落定了，换文件不会重读表头。要按新文件的表头重配，只能删掉这条数据源重建。"
-            }
-          </p>
-        ) : null}
         {probe.sheets.length > 1 ? (
           <p>
             {`这份文件有 ${probe.sheets.length} 张 sheet，只读了第一张（${probe.sheetName}）：其余 sheet 的列不进这次导入。`}
@@ -473,11 +458,9 @@ export function XlsxImportWizard({
           <p>{`读的是 sheet「${probe.sheetName}」。`}</p>
         )}
         {probe.headerRow !== 1 ? <p>{headerRowNote(probe.headerRow)}</p> : null}
-        {probeStale ? null : (
-          <p>
-            {`服务端读到的文件：${probe.files.map((item) => item.name).join("、") || "（无）"}`}
-          </p>
-        )}
+        <p>
+          {`服务端读到的文件：${probe.files.map((item) => item.name).join("、") || "（无）"}`}
+        </p>
       </div>
     );
 
@@ -745,25 +728,38 @@ export function XlsxImportWizard({
 
         {step === 4 ? (
           <div className="space-y-3">
-            {bindingsTable}
-            <div className="space-y-1 rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
-              <p>{`要导入的文件：${files.map((item) => item.name).join("、") || "（无）"}`}</p>
-              <p>
-                提交分两步：先建数据源与绑定（配置），再上传同一批文件导数据。
-                <strong>第一步成功、第二步失败时不会回滚数据源</strong>
-                ——两者各自可重试，重试只会重发导入这一步，不会再建一个数据源。
-              </p>
-            </div>
-            {/* 提交中的进度行。建源那一半**报不出来**（还没有 id），只能说它正在发生；
-                导入那一半才能问到阶段与计数。按钮上的「正在导入…」不动：它是文案，
-                这行才是可查证的观测。 */}
+            {/* 提交中的进度条：整个第 4 步最值得盯的一行，放在最上面并且画成
+                带图标的卡片——原来那句细灰小字藏在表格与说明下面，导入几秒到几分钟，
+                人看不见它还以为卡住了。建源那一半**报不出来**（还没有 id），只能
+                说它正在发生；导入那一半才能问到阶段与计数。按钮上的「正在导入…」
+                不动：它是文案，这行才是可查证的观测。 */}
             {submitting ? (
-              <p role="status" className="text-xs text-muted-foreground">
-                {created === null
-                  ? "正在创建数据源与绑定…"
-                  : describeImportProgress(progress, files)}
-              </p>
+              <div
+                role="status"
+                className="flex items-center gap-2 rounded-md border border-border bg-muted/50 px-3 py-2.5 text-sm"
+              >
+                <Loader2
+                  className="h-4 w-4 shrink-0 animate-spin"
+                  aria-hidden="true"
+                />
+                <span className="font-medium">
+                  {created === null
+                    ? "正在创建数据源与绑定…"
+                    : describeImportProgress(progress, files)}
+                </span>
+              </div>
             ) : null}
+            {report === null ? (
+              <div className="space-y-1 rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
+                <p>{`要导入的文件：${files.map((item) => item.name).join("、") || "（无）"}`}</p>
+                <p>
+                  提交分两步：先建数据源与绑定（配置），再上传同一批文件导数据。
+                  <strong>第一步成功、第二步失败时不会回滚数据源</strong>
+                  ——两者各自可重试，重试只会重发导入这一步，不会再建一个数据源。
+                </p>
+              </div>
+            ) : null}
+            {bindingsTable}
             {receipt}
           </div>
         ) : null}

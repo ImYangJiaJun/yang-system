@@ -474,11 +474,12 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
     expect(client.createTable).toHaveBeenCalledTimes(1);
   });
 
-  it("配置冻结：回不去、表只读，但文件可换；交回调用方的就是真发出去的那份", async () => {
+  it("配置冻结：回不去、表只读、不再有换文件入口；交回调用方的就是真发出去的那份", async () => {
     // 建源成功之后，界面上看得见的配置**已经写进库了**。允许继续编辑却发不出去，
     // 是一条用户从屏幕上无法自查的坏路径：他改完点了重试，跑的还是第一份绑定，
-    // 而调用方还会收到一份从未发出去的提交物。所以：配置冻结（并说明为什么），
-    // 只有文件能换（原文件本身可能就是坏的）。
+    // 而调用方还会收到一份从未发出去的提交物。所以：配置冻结（并说明为什么）。
+    // 重试只重发导入这一步，且文件留在浏览器 state 里——向导里不再有换文件入口
+    // （要换一批文件只能删掉这条数据源重建）。
     const importFiles = vi
       .fn()
       .mockRejectedValueOnce(new Error("文件表头不一致"))
@@ -490,7 +491,7 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
       });
     const client = stubClient({ importFiles });
     const onSubmitted = vi.fn();
-    await driveToStep4(client, { onSubmitted });
+    const uploaded = await driveToStep4(client, { onSubmitted });
 
     // 先配一个父列，再提交——这份配置就是「落定」下来的那一份
     await userEvent.click(screen.getByLabelText("联行号 的父列"));
@@ -512,18 +513,17 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
     );
     expect(screen.getByLabelText("联行号 的父列")).toBeDisabled();
 
-    // 文件仍可换：换一份重试导入
-    const retryFile = file("bank_2.xlsx");
-    await userEvent.upload(
-      screen.getByLabelText("重试导入用的 xlsx 文件"),
-      retryFile,
-    );
+    // 冻结后不再有「换一批文件」的输入——重试只会重发同一批 File（浏览器里留着）
+    expect(
+      screen.queryByLabelText("重试导入用的 xlsx 文件"),
+    ).not.toBeInTheDocument();
+
+    // 重试：只重发导入（不再建源），且用的还是第 1 步那个 File 实例
     await userEvent.click(screen.getByRole("button", { name: "重试导入" }));
 
     await waitFor(() => expect(importFiles).toHaveBeenCalledTimes(2));
-    // 只重发导入（不再建源），且用的是换过的那份新文件
     expect(client.createTable).toHaveBeenCalledTimes(1);
-    expect(importFiles.mock.calls[1]?.[1]?.[0]).toBe(retryFile);
+    expect(importFiles.mock.calls[1]?.[1]?.[0]).toBe(uploaded);
     // 交回调用方的是**真发出去的那一份**（同一个对象），不是界面重算的
     expect(onSubmitted.mock.calls[0]?.[0]).toEqual({
       datasourceId: 9,
@@ -534,10 +534,10 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
     );
   });
 
-  it("冻结后换了重试文件：探表头那组说明不再假装描述当前文件", async () => {
-    // 冻结之后唯一还能动的就是文件。换过之后，屏幕上是「要导入的文件：bank_2.xlsx」，
-    // 而探表头那组说明仍在说「服务端读到的文件：bank_1.xlsx」——两行并排摆着，
-    // 看上去像换文件没生效。那组说明是**首次解析**的结果，就必须这么说。
+  it("导入失败后探表头那组说明仍只描述服务端实际读到的那批文件", async () => {
+    // 冻结之后唯一能动的入口（换文件）已经不在了，所以「换文件后说明该换口径」的
+    // 情形不会再发生——探表头那组说明恒描述**服务端实际读到**的那批文件，不需要
+    // 任何「基于首次解析」的限定语。
     const client = stubClient({
       importFiles: vi.fn().mockRejectedValue(new Error("文件表头不一致")),
     });
@@ -545,21 +545,12 @@ describe("xlsx 导入向导 · 建源成功而导入失败", () => {
     await userEvent.click(screen.getByRole("button", { name: "创建并导入" }));
     await screen.findByRole("alert");
 
-    // 换文件之前：它说的就是当前文件，不需要任何限定
+    // 它说的就是当前这批：服务端读到的文件与「要导入的文件」同名，且没有限定语
     expect(
       screen.getByText(/服务端读到的文件：bank_1\.xlsx/),
     ).toBeInTheDocument();
-
-    await userEvent.upload(
-      screen.getByLabelText("重试导入用的 xlsx 文件"),
-      file("bank_2.xlsx"),
-    );
-
-    // 换文件之后：「要导入的文件」已是新名字，探表头那组改为**明说基于首次解析**，
-    // 且不再有那句指着旧文件的「服务端读到的文件」。
-    expect(screen.getByText(/要导入的文件：bank_2\.xlsx/)).toBeInTheDocument();
-    expect(screen.getByText(/基于首次解析/)).toBeInTheDocument();
-    expect(screen.queryByText(/服务端读到的文件/)).toBeNull();
+    expect(screen.getByText(/要导入的文件：bank_1\.xlsx/)).toBeInTheDocument();
+    expect(screen.queryByText(/基于首次解析/)).toBeNull();
   });
 
   it("导入成功之后关掉再打开 = 全新向导（不是「已导入」那一屏）", async () => {
