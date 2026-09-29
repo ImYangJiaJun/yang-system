@@ -12,6 +12,8 @@ import {
   StepUpDialogHost,
   type StepUpProofHandler,
 } from "@/features/auth/components/step-up-host";
+import { ToastProvider } from "@/shared/providers/toast-provider";
+import { Toaster } from "@/shared/ui/toaster";
 import { appRoutes } from "./routes";
 
 export default function App() {
@@ -54,12 +56,15 @@ export default function App() {
     <SessionControllerContext.Provider value={controller}>
       <IdentityStoreContext.Provider value={identityStore}>
         <QueryClientProvider client={queryClient}>
-          <RouterProvider router={router} />
-          <StepUpDialogHost
-            onReady={(handler) => {
-              stepUpDelegate.current = handler;
-            }}
-          />
+          <ToastProvider>
+            <RouterProvider router={router} />
+            <StepUpDialogHost
+              onReady={(handler) => {
+                stepUpDelegate.current = handler;
+              }}
+            />
+            <Toaster />
+          </ToastProvider>
         </QueryClientProvider>
       </IdentityStoreContext.Provider>
     </SessionControllerContext.Provider>

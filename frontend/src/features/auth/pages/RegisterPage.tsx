@@ -5,10 +5,12 @@ import { register, requestRegistrationEmail } from "@/features/auth/api";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import { useToast } from "@/shared/lib/toast";
 
 /// 创建账号（旧 RegisterPage.vue 语义）：先请求邮箱验证码（含重发冷却）再提交。
 export default function RegisterPage() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [emailCode, setEmailCode] = useState("");
@@ -18,7 +20,6 @@ export default function RegisterPage() {
   const [sendingCode, setSendingCode] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [resendRemaining, setResendRemaining] = useState(0);
-  const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
@@ -33,7 +34,6 @@ export default function RegisterPage() {
   const sendCode = async () => {
     if (sendingCode || resendRemaining > 0) return;
     setErrorMessage("");
-    setStatusMessage("");
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) {
       setErrorMessage("请输入邮箱");
@@ -43,12 +43,12 @@ export default function RegisterPage() {
     try {
       const challenge = await requestRegistrationEmail(normalizedEmail);
       setEmail(normalizedEmail);
-      setStatusMessage(
+      toast.info(
         `若邮箱可用于注册，验证码将在 ${Math.ceil(challenge.expiresIn / 60)} 分钟内送达。`,
       );
       setResendRemaining(challenge.resendAfter);
     } catch (cause) {
-      setErrorMessage(
+      toast.error(
         cause instanceof Error ? cause.message : "验证码发送失败，请稍后重试",
       );
     } finally {
@@ -179,14 +179,6 @@ export default function RegisterPage() {
             />
           </div>
 
-          {statusMessage && (
-            <p
-              aria-live="polite"
-              className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
-            >
-              {statusMessage}
-            </p>
-          )}
           {errorMessage && (
             <p
               role="alert"

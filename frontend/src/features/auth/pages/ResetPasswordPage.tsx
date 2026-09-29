@@ -7,6 +7,7 @@ import { useSessionController } from "@/engine/session/use-session";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import { useToast } from "@/shared/lib/toast";
 
 /// 重置密码（旧 ResetPasswordPage.vue 语义）：一次性凭证 + 新密码；
 /// 凭证可由链接 query（?token=）预填。成功后清空会话并广播凭据变更。
@@ -14,6 +15,7 @@ export default function ResetPasswordPage() {
   const controller = useSessionController();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const toast = useToast();
   const [resetToken, setResetToken] = useState(searchParams.get("token") ?? "");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -45,9 +47,10 @@ export default function ResetPasswordPage() {
       setConfirmPassword("");
       controller.clearSession("credentials-changed");
       publishSessionEnd("credentials-changed");
+      toast.success("密码已重置，请使用新密码登录");
       navigate("/login", { replace: true });
     } catch (cause) {
-      setErrorMessage(
+      toast.error(
         cause instanceof Error ? cause.message : "密码重置失败，请稍后重试",
       );
     } finally {

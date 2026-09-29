@@ -53,6 +53,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/shared/ui/table";
+import { useToast } from "@/shared/lib/toast";
 
 import {
   DATASOURCE_OPERATION_IDS,
@@ -341,12 +342,10 @@ export default function DatasourceDetailPage() {
   const datasourceId = parseDatasourceId(rawId);
   const actions = useFeishuActions();
   const xlsxClient = useXlsxImportClient();
+  const toast = useToast();
   // 403 态的「重试」重拉的是**界面目录**：权限刚开通时目录还是上一份缓存。
   const catalog = useUiCatalog();
   const [reimportOpen, setReimportOpen] = useState(false);
-  /// 重新导入的回执。它是**唯一**记录「这一轮导了什么、写了多少」的地方——
-  /// 服务端只回这一次，库里不留（导入不写表级时间戳）。
-  const [reimportNotice, setReimportNotice] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [orderBy, setOrderBy] = useState<OrderByClause[]>(
@@ -463,7 +462,7 @@ export default function DatasourceDetailPage() {
   /// 屏幕上还是导入前那份数据，「最近写库的导入」也还停在上一轮）。
   function handleReimported(report: XlsxImportReport) {
     setReimportOpen(false);
-    setReimportNotice(
+    toast.success(
       reimportReceipt(
         datasource?.title ?? `#${String(report.datasourceId)}`,
         report,
@@ -573,12 +572,6 @@ export default function DatasourceDetailPage() {
           是把一个事实说三遍——而它们说的还可能都是错的（见 `DatasourceGapNote`）。 */}
       {gap !== null ? (
         <DatasourceGapNote gap={gap} onRetry={retryDatasource} />
-      ) : null}
-
-      {reimportNotice !== null ? (
-        <p aria-live="polite" className={NEUTRAL_BAR}>
-          {reimportNotice}
-        </p>
       ) : null}
 
       {gap === null && datasource !== null ? (

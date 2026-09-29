@@ -42,6 +42,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Skeleton } from "@/shared/ui/skeleton";
+import { useToast } from "@/shared/lib/toast";
 import {
   buildAccountModulePages,
   visibleAccountIdentities,
@@ -168,17 +169,16 @@ function DensityMenu() {
 /// 侧边栏底部用户区：登出入口（endSession 清空会话后由认证门控自动跳 /login）。
 function SidebarSessionFooter() {
   const controller = useSessionController();
+  const toast = useToast();
   const [loggingOut, setLoggingOut] = useState(false);
-  const [error, setError] = useState("");
 
   const onLogout = async () => {
     if (loggingOut) return;
     setLoggingOut(true);
-    setError("");
     try {
       await controller.endSession();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
       setLoggingOut(false);
     }
   };
@@ -195,11 +195,6 @@ function SidebarSessionFooter() {
         <LogOut className="size-4" />
         {loggingOut ? "正在退出…" : "退出登录"}
       </Button>
-      {error && (
-        <p role="alert" className="mt-1 px-2 text-xs text-destructive">
-          {error}
-        </p>
-      )}
     </div>
   );
 }

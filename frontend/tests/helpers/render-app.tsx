@@ -9,6 +9,8 @@ import { createIdentityStore, storeIdentity } from "@/features/auth/identity";
 import { IdentityStoreContext } from "@/features/auth/use-identity";
 import { appRoutes } from "@/shell/routes";
 import { createSessionResetHandler } from "@/shell/session-reset";
+import { ToastProvider } from "@/shared/providers/toast-provider";
+import { Toaster } from "@/shared/ui/toaster";
 
 /**
  * 测试渲染 helper：与 App.tsx 相同的 provider 组合
@@ -33,7 +35,10 @@ function TestProviders({
     <SessionControllerContext.Provider value={controller}>
       <IdentityStoreContext.Provider value={identityStore}>
         <QueryClientProvider client={queryClient}>
-          {children ?? <RouterProvider router={router} />}
+          <ToastProvider>
+            {children ?? <RouterProvider router={router} />}
+            <Toaster />
+          </ToastProvider>
         </QueryClientProvider>
       </IdentityStoreContext.Provider>
     </SessionControllerContext.Provider>

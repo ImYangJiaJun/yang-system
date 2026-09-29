@@ -395,7 +395,7 @@ describe("LoginPage", () => {
     await user.type(screen.getByLabelText("密码"), "wrong-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
+    expect(await screen.findByRole("status")).toHaveTextContent(
       "账号或密码错误",
     );
     expect(controller.getSnapshot().loggedIn).toBe(false);
@@ -537,7 +537,7 @@ describe("LoginPage 验证码登录模式", () => {
     await user.type(screen.getByLabelText("邮箱"), "alice@example.com");
     await user.click(screen.getByRole("button", { name: "发送验证码" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/请求过于频繁/);
+    expect(await screen.findByRole("status")).toHaveTextContent(/请求过于频繁/);
     expect(controller.getSnapshot().loggedIn).toBe(false);
     // 失败不进入冷却，可立即重试。
     const resend = screen.getByRole("button", { name: "发送验证码" });
@@ -578,9 +578,7 @@ describe("LoginPage 验证码登录模式", () => {
     await user.type(screen.getByLabelText("验证码"), "000000");
     await user.click(screen.getByRole("button", { name: "登录" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "验证码错误或已过期",
-    );
+    expect(await screen.findByText("验证码错误或已过期")).toBeInTheDocument();
     expect(controller.getSnapshot().loggedIn).toBe(false);
   });
 

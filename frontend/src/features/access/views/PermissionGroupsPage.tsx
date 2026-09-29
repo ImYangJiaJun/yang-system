@@ -32,6 +32,7 @@ import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/lib/utils";
+import { useToast } from "@/shared/lib/toast";
 
 import {
   accessGroupQueryKeys,
@@ -59,10 +60,10 @@ export default function PermissionGroupsPage() {
   const catalog = useUiCatalog();
   const actions = useGroupActions();
   const listQuery = useGroupList();
+  const toast = useToast();
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
   const groups = listQuery.data ?? [];
@@ -88,13 +89,14 @@ export default function PermissionGroupsPage() {
   /// 所有写操作的共同外壳：清提示 → 执行 → 回读 → 落提示；失败就把服务端原文亮出来。
   function submit(action: () => Promise<void>, successMessage?: string) {
     setError(null);
-    setNotice(null);
     setPending(true);
     void (async () => {
       try {
         await action();
         await refresh();
-        if (successMessage !== undefined) setNotice(successMessage);
+        if (successMessage !== undefined) {
+          toast.success(successMessage);
+        }
       } catch (cause) {
         setError(messageOf(cause));
       } finally {
@@ -119,15 +121,6 @@ export default function PermissionGroupsPage() {
           className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {error}
-        </p>
-      ) : null}
-
-      {notice ? (
-        <p
-          aria-live="polite"
-          className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
-        >
-          {notice}
         </p>
       ) : null}
 

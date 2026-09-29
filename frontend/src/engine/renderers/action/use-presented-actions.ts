@@ -48,6 +48,8 @@ interface UsePresentedActionsOptions {
     result: import("@/engine/http/types").InvocationResult,
   ) => void;
   redirect?: (location: string) => void;
+  /// 通知回调：成功/失败/警告消息。默认使用内部 notice 状态，可覆盖为 toast。
+  onNotice?: (notice: ActionNotice) => void;
 }
 
 export function usePresentedActions(options: UsePresentedActionsOptions) {
@@ -180,18 +182,28 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
           result.location,
         );
       }
-      setNotice({
+      const notice: ActionNotice = {
         type: "positive",
         message: result.message || "操作成功",
-      });
+      };
+      if (options.onNotice) {
+        options.onNotice(notice);
+      } else {
+        setNotice(notice);
+      }
       setDialog(null);
       await options.reload();
     } catch (cause) {
       if (cause instanceof Error && cause.name === "AbortError") return;
-      setNotice({
+      const notice: ActionNotice = {
         type: "negative",
         message: cause instanceof Error ? cause.message : String(cause),
-      });
+      };
+      if (options.onNotice) {
+        options.onNotice(notice);
+      } else {
+        setNotice(notice);
+      }
     } finally {
       if (abortRef.current === requestController) {
         abortRef.current = undefined;

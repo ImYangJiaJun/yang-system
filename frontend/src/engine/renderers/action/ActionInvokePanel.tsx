@@ -12,6 +12,7 @@ import { ContractError } from "@/engine/contracts/ui-catalog";
 import type { ActionDemoSchema } from "@/engine/contracts/ui-catalog";
 import { initialObject } from "@/engine/contracts/json-schema";
 import { JsonSchemaForm } from "@/engine/renderers/form/JsonSchemaForm";
+import { useToast } from "@/shared/lib/toast";
 
 /**
  * Action 调试面板（旧 ActionDemo.vue 语义平移）：
@@ -26,20 +27,15 @@ export function ActionInvokePanel({
 }) {
   const session = useSessionCredentials();
   const formId = useId();
+  const toast = useToast();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<InvocationResult>();
-  const [error, setError] = useState<{
-    message: string;
-    details?: unknown;
-    requestId?: string;
-  }>();
   const abortRef = useRef<AbortController | undefined>(undefined);
 
   const submit = async (values: Record<string, unknown>) => {
     if (loading) return;
     if (result?.blobUrl) URL.revokeObjectURL(result.blobUrl);
     setResult(undefined);
-    setError(undefined);
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
@@ -51,17 +47,14 @@ export function ActionInvokePanel({
         controller.signal,
       );
       setResult(invocation);
+      toast.success(`调用成功（HTTP ${invocation.status}）`);
     } catch (cause) {
       if (cause instanceof ApiError) {
-        setError({
-          message: cause.message,
-          details: cause.details,
-          requestId: cause.requestId,
-        });
+        toast.error(cause.message, { duration: 8000 });
       } else if (cause instanceof ContractError) {
-        setError({ message: cause.message, details: cause.details });
+        toast.error(cause.message, { duration: 8000 });
       } else if (cause instanceof Error && cause.name !== "AbortError") {
-        setError({ message: cause.message });
+        toast.error(cause.message);
       }
     } finally {
       setLoading(false);
@@ -135,25 +128,6 @@ export function ActionInvokePanel({
           </Button>
         )}
       </div>
-
-      {error && (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm"
-        >
-          <strong className="text-destructive">{error.message}</strong>
-          {error.requestId && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              request-id: {error.requestId}
-            </p>
-          )}
-          {error.details !== undefined && (
-            <pre className="mt-2 overflow-x-auto rounded bg-background p-2 text-xs">
-              {JSON.stringify(error.details, null, 2)}
-            </pre>
-          )}
-        </div>
-      )}
 
       {result && (
         <div data-testid="action-result" className="space-y-2">

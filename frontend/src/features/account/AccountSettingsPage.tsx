@@ -36,6 +36,7 @@ import { copyText } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import { useToast } from "@/shared/lib/toast";
 
 /// 账号设置页：资料展示 + 修改密码 + 修改用户名 + 停用账号。
 ///
@@ -67,8 +68,8 @@ export default function AccountSettingsPage() {
   const [emailCooldown, setEmailCooldown] = useState(0);
 
   const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const toast = useToast();
 
   // 登录设备
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -111,7 +112,6 @@ export default function AccountSettingsPage() {
     // 清空 value 允许重复选择同一文件再次触发 change。
     event.target.value = "";
     if (!file || busy) return;
-    setMessage("");
     setErrorMessage("");
     setBusy("avatar");
     try {
@@ -119,9 +119,9 @@ export default function AccountSettingsPage() {
       await uploadAvatar(prepared.contentBase64, prepared.mime, token);
       await queryClient.invalidateQueries({ queryKey: ["me"] });
       await loadProfile();
-      setMessage("头像已更新");
+      toast.success("头像已更新");
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -143,7 +143,6 @@ export default function AccountSettingsPage() {
 
   const kickSession = async (sessionId: string) => {
     if (busy) return;
-    setMessage("");
     setErrorMessage("");
     setBusy(`kick-${sessionId}`);
     try {
@@ -151,10 +150,10 @@ export default function AccountSettingsPage() {
         revokeSession(sessionId, token, undefined, proof),
       );
       if (done === undefined) return; // 用户取消 Step-up
-      setMessage("该设备已退出登录");
+      toast.success("该设备已退出登录");
       void loadSessions();
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -180,7 +179,6 @@ export default function AccountSettingsPage() {
   const submitPassword = async (event: FormEvent) => {
     event.preventDefault();
     if (busy) return;
-    setMessage("");
     setErrorMessage("");
     if (newPassword.length < 10) {
       setErrorMessage("新密码至少 10 个字符");
@@ -199,11 +197,11 @@ export default function AccountSettingsPage() {
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      setMessage("密码已修改。凭据已变更，请使用新密码重新登录。");
+      toast.info("密码已修改，请使用新密码重新登录");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -212,7 +210,6 @@ export default function AccountSettingsPage() {
   const submitUsername = async (event: FormEvent) => {
     event.preventDefault();
     if (busy) return;
-    setMessage("");
     setErrorMessage("");
     if (!newUsername.trim()) {
       setErrorMessage("用户名不能为空");
@@ -224,11 +221,11 @@ export default function AccountSettingsPage() {
         changeUsername(newUsername.trim(), token, undefined, proof),
       );
       if (result === undefined) return; // 用户取消
-      setMessage("用户名已修改。凭据已变更，请使用新用户名重新登录。");
+      toast.info("用户名已修改，请使用新用户名重新登录");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -236,7 +233,6 @@ export default function AccountSettingsPage() {
 
   const sendEmailCode = async () => {
     if (busy || emailCooldown > 0) return;
-    setMessage("");
     setErrorMessage("");
     if (!newEmail.trim()) {
       setErrorMessage("请输入新邮箱");
@@ -247,9 +243,9 @@ export default function AccountSettingsPage() {
       const challenge = await requestChangeEmail(newEmail.trim(), token);
       setEmailCodeSent(true);
       setEmailCooldown(challenge.resendAfter);
-      setMessage("换绑验证码已发送，请在 10 分钟内输入");
+      toast.info("换绑验证码已发送，请在 10 分钟内输入");
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -270,7 +266,6 @@ export default function AccountSettingsPage() {
   const submitEmail = async (event: FormEvent) => {
     event.preventDefault();
     if (busy) return;
-    setMessage("");
     setErrorMessage("");
     if (!emailCodeSent || !emailCode.trim()) {
       setErrorMessage("请先获取换绑验证码并输入");
@@ -282,11 +277,11 @@ export default function AccountSettingsPage() {
         changeEmail(newEmail.trim(), emailCode.trim(), token, undefined, proof),
       );
       if (result === undefined) return; // 用户取消
-      setMessage("邮箱已更换。凭据已变更，请使用新邮箱重新登录。");
+      toast.info("邮箱已更换，请使用新邮箱重新登录");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -294,7 +289,6 @@ export default function AccountSettingsPage() {
 
   const startTotpSetup = async () => {
     if (busy) return;
-    setMessage("");
     setErrorMessage("");
     setTotpError("");
     setBusy("totp-setup");
@@ -308,7 +302,7 @@ export default function AccountSettingsPage() {
       setTotpCodesCopied(false);
       setCopyCodesFailed(false);
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -360,7 +354,6 @@ export default function AccountSettingsPage() {
   /// 全部恢复码作废、会话失效，回到登录页。
   const closeTotp = async () => {
     if (busy) return;
-    setMessage("");
     setErrorMessage("");
     if (
       !window.confirm(
@@ -375,11 +368,11 @@ export default function AccountSettingsPage() {
         deactivateTotp(token, undefined, proof),
       );
       if (result === undefined) return; // 用户取消 Step-up
-      setMessage("双重验证已关闭，请重新登录。");
+      toast.info("双重验证已关闭，请重新登录");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -387,7 +380,6 @@ export default function AccountSettingsPage() {
 
   const disableAccount = async () => {
     if (busy) return;
-    setMessage("");
     setErrorMessage("");
     if (!profile) return;
     if (
@@ -402,7 +394,7 @@ export default function AccountSettingsPage() {
       const disabled = await controller.disableAccount();
       if (disabled) navigate("/login", { replace: true });
     } catch (cause) {
-      setErrorMessage(cause instanceof Error ? cause.message : String(cause));
+      toast.error(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
@@ -428,15 +420,6 @@ export default function AccountSettingsPage() {
           className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {profileError}
-        </p>
-      )}
-
-      {message && (
-        <p
-          aria-live="polite"
-          className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
-        >
-          {message}
         </p>
       )}
 

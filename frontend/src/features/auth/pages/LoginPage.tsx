@@ -17,6 +17,7 @@ import { MfaChallengeDialog } from "@/features/auth/components/MfaChallengeDialo
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import { useToast } from "@/shared/lib/toast";
 import logoDarkUrl from "@/shared/assets/logo-dark.png";
 import logoLightUrl from "@/shared/assets/logo-light.png";
 
@@ -35,6 +36,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const snapshot = useSessionSnapshot();
+  const toast = useToast();
   const [mode, setMode] = useState<LoginMode>("password");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -47,7 +49,6 @@ export default function LoginPage() {
   const [codeSent, setCodeSent] = useState(false);
   const [codeCooldown, setCodeCooldown] = useState(0);
   const [sendingCode, setSendingCode] = useState(false);
-  const [infoMessage, setInfoMessage] = useState("");
   // 第二因子阶段：记录触发 MFA 的登录方式，第二段按原方式重发凭据。
   const [mfaMode, setMfaMode] = useState<LoginMode | null>(null);
   const [mfaError, setMfaError] = useState("");
@@ -59,8 +60,6 @@ export default function LoginPage() {
       : endReason === "session-expired"
         ? "登录状态已过期，请重新登录"
         : "";
-  const successMessage =
-    searchParams.get("registered") === "1" ? "账号已创建，请登录" : "";
 
   /// 统一的登录尝试：第一阶段（无码）或第二阶段（带 mfaCode）。
   const attemptLogin = async (mfaCode?: string) => {
@@ -82,7 +81,7 @@ export default function LoginPage() {
         );
       } else {
         // 后端错误（401/错误码 envelope）已由 api/auth 映射为 ApiError.message
-        setErrorMessage(
+        toast.error(
           cause instanceof Error ? cause.message : "登录失败，请稍后重试",
         );
       }
@@ -113,7 +112,6 @@ export default function LoginPage() {
     if (next === mode) return;
     setMode(next);
     setErrorMessage("");
-    setInfoMessage("");
     // 切换登录方式即放弃未完成的第二因子阶段。
     setMfaMode(null);
     setMfaError("");
@@ -125,7 +123,6 @@ export default function LoginPage() {
   const sendLoginEmailCode = async () => {
     if (sendingCode || codeCooldown > 0) return;
     setErrorMessage("");
-    setInfoMessage("");
     const email = loginEmail.trim();
     if (!email || !EMAIL_PATTERN.test(email)) {
       setErrorMessage("请输入有效的邮箱地址");
@@ -136,9 +133,9 @@ export default function LoginPage() {
       const challenge = await requestLoginEmailCode(email);
       setCodeSent(true);
       setCodeCooldown(challenge.resendAfter);
-      setInfoMessage("验证码已发送，请查收邮箱后输入完成登录");
+      toast.info("验证码已发送，请查收邮箱后输入完成登录");
     } catch (cause) {
-      setErrorMessage(
+      toast.error(
         cause instanceof Error ? cause.message : "发送失败，请稍后重试",
       );
     } finally {
@@ -160,7 +157,6 @@ export default function LoginPage() {
   /// 验证码登录提交：第一段（无码）或第二段（带 mfaCode 重发同一验证码）。
   const attemptEmailCodeLogin = async (mfaCode?: string) => {
     setErrorMessage("");
-    setInfoMessage("");
     setMfaError("");
     setSubmitting(true);
     try {
@@ -181,7 +177,7 @@ export default function LoginPage() {
           cause instanceof Error ? cause.message : "登录失败，请稍后重试",
         );
       } else {
-        setErrorMessage(
+        toast.error(
           cause instanceof Error ? cause.message : "登录失败，请稍后重试",
         );
       }
@@ -382,20 +378,12 @@ export default function LoginPage() {
                 {errorMessage}
               </p>
             )}
-            {successMessage && (
+            {searchParams.get("registered") === "1" && (
               <p
                 aria-live="polite"
                 className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
               >
-                {successMessage}
-              </p>
-            )}
-            {infoMessage && (
-              <p
-                aria-live="polite"
-                className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
-              >
-                {infoMessage}
+                账号已创建，请登录
               </p>
             )}
 

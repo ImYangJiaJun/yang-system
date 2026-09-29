@@ -30,6 +30,7 @@ import {
   outputProperties,
   schemaColumn,
 } from "./primary-model";
+import { useToast } from "@/shared/lib/toast";
 
 const PAGE_SIZE = 20;
 
@@ -46,6 +47,7 @@ export function PrimaryActionPanel({
 }) {
   const session = useSessionCredentials();
   const action = page.primaryAction;
+  const toast = useToast();
   const [data, setData] = useState<unknown>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -117,6 +119,15 @@ export function PrimaryActionPanel({
     actions,
     selectedRows: [],
     reload: () => setRefreshTick((prev) => prev + 1),
+    onNotice: (notice) => {
+      if (notice.type === "positive") {
+        toast.success(notice.message);
+      } else if (notice.type === "negative") {
+        toast.error(notice.message);
+      } else {
+        toast.warning(notice.message);
+      }
+    },
   });
 
   if (!action && presented.directToolbarActions.length === 0) {
@@ -255,23 +266,6 @@ export function PrimaryActionPanel({
           >
             下一页
           </Button>
-        </div>
-      )}
-
-      {presented.notice && (
-        <div
-          role="status"
-          className="fixed right-4 bottom-4 rounded-md border border-border bg-background px-4 py-2 text-sm shadow-lg"
-        >
-          {presented.notice.message}
-          <button
-            type="button"
-            className="ml-3 text-muted-foreground hover:text-foreground"
-            aria-label="关闭通知"
-            onClick={presented.dismissNotice}
-          >
-            ✕
-          </button>
         </div>
       )}
 
