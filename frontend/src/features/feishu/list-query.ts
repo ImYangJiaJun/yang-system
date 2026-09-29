@@ -28,7 +28,7 @@ export const VIEW_STORAGE_KEY = "yang.feishu.datasource.view";
 
 export const DEFAULT_VIEW: DatasourceView = "ledger";
 
-export const PAGE_SIZE_OPTIONS = [10, 20, 50] as const;
+export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 export const DEFAULT_PAGE_SIZE = 10;
 
 /// 默认排序：按名称升序（与后端 `list_datasources` 的兜底一致），

@@ -75,8 +75,10 @@ describe("FieldBindingsTable", () => {
     expect(rows(container)[2]?.dataset.depth).toBe("2");
   });
 
-  it("父字段显示**名字**（不是 field_id）——这一栏是给人对照飞书那张表的", () => {
-    render(
+  it("父子关系用缩进表达：子行缩进到父行之下，不再单列「父字段」", () => {
+    // 曾经是一张六列表格，父子关系靠「父字段」那一列点名；现在是树形导航，
+    // 层级由 `data-depth` + 行内缩进表达——父在前、子紧随其后，缩进随深度递增。
+    const { container } = render(
       <FieldBindingsTable
         bindings={CHAIN}
         selectedSourceKey={null}
@@ -84,12 +86,21 @@ describe("FieldBindingsTable", () => {
       />,
     );
 
-    const childRow = rows(document.body).find((row) =>
-      row.textContent?.includes("费用类型/Fee Type*"),
+    const rowEls = rows(document.body);
+    expect(rowEls.map((row) => row.dataset.depth)).toEqual(["0", "1", "2"]);
+    // 子行的缩进比父行深（`paddingInlineStart` 由 `data-depth` 推导）
+    const depth0 = rowEls.find((row) => row.dataset.depth === "0");
+    const depth1 = rowEls.find((row) => row.dataset.depth === "1");
+    const depth2 = rowEls.find((row) => row.dataset.depth === "2");
+    expect(Number(depth0?.dataset.depth)).toBeLessThan(
+      Number(depth1?.dataset.depth),
     );
-    expect(childRow).toHaveTextContent("费用大类/Main Exp Cat*");
-    // `fldCat` 只应出现在 title 属性里，不铺在单元格里
-    expect(childRow?.textContent).not.toContain("fldCat");
+    expect(Number(depth1?.dataset.depth)).toBeLessThan(
+      Number(depth2?.dataset.depth),
+    );
+    // `fldCat` 只应出现在 title 属性里，不铺成可见文本
+    const visible = container.textContent ?? "";
+    expect(visible).not.toContain("fldCat");
   });
 
   it("点一行把那个字段的 source_key 交给上层（它同时就是切换器）", async () => {

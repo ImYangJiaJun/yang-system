@@ -76,7 +76,6 @@ import { DatasourceHealthPanel } from "../components/DatasourceHealthPanel";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { XlsxReimportDialog } from "../components/XlsxReimportDialog";
-import { DEFAULT_PAGE_SIZE } from "../list-query";
 import type {
   DatasourceGap,
   DatasourceItem,
@@ -98,6 +97,10 @@ import {
 } from "../types";
 
 const SKELETON_ROWS = 5;
+
+/// 选项表默认每页条数。详情页是逐条看数据的入口，一屏装下更多行比列表页
+/// 更重要——默认 50，而不是列表页共享的 10（`DEFAULT_PAGE_SIZE`）。
+const DETAIL_PAGE_SIZE = 50;
 
 /// 「立即拉取」的轮询节拍与总预算。
 ///
@@ -348,7 +351,7 @@ export default function DatasourceDetailPage() {
   /// 服务端只回这一次，库里不留（导入不写表级时间戳）。
   const [reimportNotice, setReimportNotice] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [pageSize, setPageSize] = useState(DETAIL_PAGE_SIZE);
   const [orderBy, setOrderBy] = useState<OrderByClause[]>(
     DEFAULT_OPTION_ORDER_BY,
   );
@@ -532,7 +535,7 @@ export default function DatasourceDetailPage() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-4xl space-y-6 p-6">
+    <main className="mx-auto w-full max-w-6xl space-y-6 p-6">
       <div className="space-y-2">
         {/* 仓库没有 Breadcrumb：返回入口放在页头正上方，是全页唯一一处能回列表的地方。 */}
         <Link
@@ -581,68 +584,16 @@ export default function DatasourceDetailPage() {
         </p>
       ) : null}
 
-      {gap === null && datasource !== null ? (
-        <>
-          <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-            <h2 className="text-base font-medium">同步</h2>
-            <SyncPanel
-              item={datasource}
-              pull={pull}
-              latestImportedAt={latestImportedAt}
-              onPullNow={() => void handlePullNow()}
-              onReimport={() => setReimportOpen(true)}
-            />
-          </section>
-
-          {/*
-            xlsx 源**不走体检**（设计 §5.11）：它按 §4.1 不带多维表格坐标，而后端的
-            `health_check` 对「没有坐标且不是定时拉取」的源一律回 40905。那粒 Action 的
-            权限位就是 `feishu.datasource.write`（凡能建数据源的身份都有它），所以只要渲染
-            这个区块，每打开一次详情页就会自动发出一次必然失败的请求，再把那个失败画成
-            「体检坏了」——而这一类源本来就没有体检这回事。整块不渲染，而不是渲染一个
-            「不做体检」：后者仍在暗示这里本该有一次。
-          */}
-          {isXlsxSource ? null : (
-            <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-              <h2 className="text-base font-medium">体检</h2>
-              <HealthSection datasource={datasource} />
-            </section>
-          )}
-
-          <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-            <h2 className="text-base font-medium">
-              凭据清单（每字段一组 URL + Token）
-            </h2>
-            <CredentialSection datasource={datasource} />
-          </section>
-        </>
-      ) : null}
-
-      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-base font-medium">选项</h2>
-          {total !== null &&
-          optionsQuery.isSuccess &&
-          !optionsQuery.isPlaceholderData ? (
-            <span className="text-xs text-muted-foreground tabular-nums">
-              共 {total} 条
-            </span>
-          ) : null}
-        </div>
-
+      {/* 主体两栏：左栏字段树（切换器），右栏选项表。凭据与同步/体检在下方全宽。 */}
+      <div className="flex items-start gap-6">
         {gap === null && datasource !== null && bindings.length > 0 ? (
-          <div className="space-y-3">
-            <p className="text-xs text-muted-foreground">
-              当前查看的是字段
-              <span className="font-medium">
-                「
-                {bindings.find(
-                  (binding) => binding.sourceKey === optionSourceKey,
-                )?.fieldName ?? optionSourceKey}
-                」
-              </span>
-              的选项。点下面字段表中任意一行的名称可以切换——级联的父列紧挨在它的子列上方。
-            </p>
+          <aside
+            aria-label="字段"
+            className="sticky top-6 w-64 shrink-0 space-y-2 rounded-xl border border-border bg-card p-4"
+          >
+            <h2 className="text-xs font-semibold tracking-wide text-muted-foreground">
+              字段
+            </h2>
             <FieldBindingsTable
               bindings={bindings}
               selectedSourceKey={optionSourceKey}
@@ -656,105 +607,205 @@ export default function DatasourceDetailPage() {
                 setPage(1);
               }}
             />
-          </div>
+          </aside>
         ) : null}
 
-        {/* 权限不足**最先判**：那时数据源那一发请求根本没发，
+        <section className="min-w-0 flex-1 space-y-3 rounded-xl border border-border bg-card p-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-base font-medium">选项</h2>
+            {total !== null &&
+            optionsQuery.isSuccess &&
+            !optionsQuery.isPlaceholderData ? (
+              <span className="text-xs text-muted-foreground tabular-nums">
+                共 {total} 条
+              </span>
+            ) : null}
+          </div>
+
+          {gap === null && datasource !== null && bindings.length > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              当前查看的是字段
+              <span className="font-medium">
+                「
+                {bindings.find(
+                  (binding) => binding.sourceKey === optionSourceKey,
+                )?.fieldName ?? optionSourceKey}
+                」
+              </span>
+              的选项。点左侧字段树中任意一行的名称可以切换——级联的父列缩进在它的子列上方。
+            </p>
+          ) : null}
+
+          {/* 权限不足**最先判**：那时数据源那一发请求根本没发，
             `gap` 会是 `forbidden`/`loading`，而这两态都答不出「有没有选项」。 */}
-        {!actions.canReadOptions ? (
-          <div className="space-y-3">
+          {!actions.canReadOptions ? (
+            <div className="space-y-3">
+              <div
+                role="alert"
+                className="space-y-1 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                <p className="font-medium">你没有查看选项的权限</p>
+                <p>
+                  {/* 三个权限位彼此独立：`datasource.read` 没拿到时，连「能看数据源本身」
+                    这句话都不成立，所以这里按实际拿到的权限分两句说。 */}
+                  {actions.canRead
+                    ? "当前身份可以看数据源本身，但看不到它下面的选项——这一栏是空的，"
+                    : "当前身份既看不到数据源本身，也看不到它下面的选项——这一栏是空的，"}
+                  <span className="font-medium">不代表它真的没有选项</span>
+                  {actions.canRead
+                    ? "。如果刚刚才开通权限，重试一次刷新界面目录即可。"
+                    : "，这个数据源是否存在这一页同样确认不了。如果刚刚才开通权限，重试一次刷新界面目录即可。"}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void catalog.refetch()}
+              >
+                <RefreshCw aria-hidden="true" />
+                重试
+              </Button>
+            </div>
+          ) : gap !== null ? (
+            <p aria-live="polite" className={NEUTRAL_BAR}>
+              这条数据源还没取到，所以不知道选项该按哪个字段取——先看上面那条说明。
+            </p>
+          ) : optionSourceKey === "" ? (
+            <p aria-live="polite" className={NEUTRAL_BAR}>
+              这条数据源还没有字段绑定，所以没有可看的选项。用配置向导给它勾几列。
+            </p>
+          ) : optionsQuery.isError ? (
             <div
               role="alert"
-              className="space-y-1 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
             >
-              <p className="font-medium">你没有查看选项的权限</p>
-              <p>
-                {/* 三个权限位彼此独立：`datasource.read` 没拿到时，连「能看数据源本身」
-                    这句话都不成立，所以这里按实际拿到的权限分两句说。 */}
-                {actions.canRead
-                  ? "当前身份可以看数据源本身，但看不到它下面的选项——这一栏是空的，"
-                  : "当前身份既看不到数据源本身，也看不到它下面的选项——这一栏是空的，"}
-                <span className="font-medium">不代表它真的没有选项</span>
-                {actions.canRead
-                  ? "。如果刚刚才开通权限，重试一次刷新界面目录即可。"
-                  : "，这个数据源是否存在这一页同样确认不了。如果刚刚才开通权限，重试一次刷新界面目录即可。"}
-              </p>
+              <span>
+                {optionsQuery.error instanceof Error
+                  ? optionsQuery.error.message
+                  : "选项列表没有拉到数据"}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void optionsQuery.refetch()}
+              >
+                <RefreshCw aria-hidden="true" />
+                重试
+              </Button>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void catalog.refetch()}
-            >
-              <RefreshCw aria-hidden="true" />
-              重试
-            </Button>
-          </div>
-        ) : gap !== null ? (
-          <p aria-live="polite" className={NEUTRAL_BAR}>
-            这条数据源还没取到，所以不知道选项该按哪个字段取——先看上面那条说明。
-          </p>
-        ) : optionSourceKey === "" ? (
-          <p aria-live="polite" className={NEUTRAL_BAR}>
-            这条数据源还没有字段绑定，所以没有可看的选项。用配置向导给它勾几列。
-          </p>
-        ) : optionsQuery.isError ? (
-          <div
-            role="alert"
-            className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            <span>
-              {optionsQuery.error instanceof Error
-                ? optionsQuery.error.message
-                : "选项列表没有拉到数据"}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void optionsQuery.refetch()}
-            >
-              <RefreshCw aria-hidden="true" />
-              重试
-            </Button>
-          </div>
-        ) : optionsQuery.isPending || optionsQuery.isPlaceholderData ? (
-          // `isPlaceholderData` **必须**并进来：`keepPreviousData` 让切字段那一帧先拿
-          // **上一个字段**的 items/total 顶上，而那一刻 `isPending` / `isError` 都是
-          // false、`isSuccess` 还是 true。不排除它，画出来的就是「新字段的名字 + 旧字段
-          // 的行」，旧字段恰好为空时还会对新字段说「还没有选项推过来」——一句当场可证伪
-          // 的假话。列表页早已这么判（`DatasourceListPage` 的 `settled`），沿用同一条纪律。
-          <Table>
-            <TableBody>
-              {Array.from({ length: SKELETON_ROWS }, (_, index) => (
-                <TableRow key={index}>
-                  <TableCell colSpan={7}>
-                    <Skeleton className="h-4 w-full" />
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        ) : items.length === 0 ? (
-          <OptionEmptyState
-            sourceKey={optionSourceKey}
-            ingestMode={datasource?.ingestMode ?? ""}
-          />
-        ) : (
-          <>
-            <OptionTable items={items} orderBy={orderBy} onSort={toggleSort} />
-            <ListPagination
-              page={page}
-              pageSize={pageSize}
-              total={total}
-              pending={optionsQuery.isFetching}
-              onPageChange={setPage}
-              onPageSizeChange={(next) => {
-                setPageSize(next);
-                setPage(1);
-              }}
+          ) : optionsQuery.isPending || optionsQuery.isPlaceholderData ? (
+            // `isPlaceholderData` **必须**并进来：`keepPreviousData` 让切字段那一帧先拿
+            // **上一个字段**的 items/total 顶上，而那一刻 `isPending` / `isError` 都是
+            // false、`isSuccess` 还是 true。不排除它，画出来的就是「新字段的名字 + 旧字段
+            // 的行」，旧字段恰好为空时还会对新字段说「还没有选项推过来」——一句当场可证伪
+            // 的假话。列表页早已这么判（`DatasourceListPage` 的 `settled`），沿用同一条纪律。
+            <Table>
+              <TableBody>
+                {Array.from({ length: SKELETON_ROWS }, (_, index) => (
+                  <TableRow key={index}>
+                    <TableCell colSpan={7}>
+                      <Skeleton className="h-4 w-full" />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : items.length === 0 ? (
+            <OptionEmptyState
+              sourceKey={optionSourceKey}
+              ingestMode={datasource?.ingestMode ?? ""}
             />
-          </>
-        )}
-      </section>
+          ) : (
+            <>
+              <OptionTable
+                items={items}
+                orderBy={orderBy}
+                onSort={toggleSort}
+              />
+              <ListPagination
+                page={page}
+                pageSize={pageSize}
+                total={total}
+                pending={optionsQuery.isFetching}
+                onPageChange={setPage}
+                onPageSizeChange={(next) => {
+                  setPageSize(next);
+                  setPage(1);
+                }}
+              />
+            </>
+          )}
+        </section>
+      </div>
+      {/* /主体两栏：左栏字段树 + 右栏选项表 */}
+
+      {gap === null && datasource !== null ? (
+        <div className="space-y-6">
+          {/* 凭据清单：整组常驻、全宽，配置飞书审批控件时逐项复制 */}
+          <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+            <h2 className="text-base font-medium">
+              凭据清单（每字段一组 URL + Token）
+            </h2>
+            <CredentialSection datasource={datasource} />
+          </section>
+
+          {/*
+            同步与体检是**低频运维信息**，折叠成一行标题、需要时展开。
+            关键状态已在标题行用徽章常驻（`syncHealth`），不靠展开才知道。
+          */}
+          <details
+            open
+            className="group rounded-xl border border-border bg-card"
+          >
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-4 [&::-webkit-details-marker]:hidden">
+              <h2 className="text-base font-medium">同步</h2>
+              <span className="text-xs text-muted-foreground">
+                坐标 · 最近成功 · 下次拉取
+              </span>
+              <span className="ml-auto text-xs text-muted-foreground transition-transform group-open:rotate-90">
+                ▸
+              </span>
+            </summary>
+            <div className="px-5 pb-5">
+              <SyncPanel
+                item={datasource}
+                pull={pull}
+                latestImportedAt={latestImportedAt}
+                onPullNow={() => void handlePullNow()}
+                onReimport={() => setReimportOpen(true)}
+              />
+            </div>
+          </details>
+
+          {/*
+            xlsx 源**不走体检**（设计 §5.11）：它按 §4.1 不带多维表格坐标，而后端的
+            `health_check` 对「没有坐标且不是定时拉取」的源一律回 40905。那粒 Action 的
+            权限位就是 `feishu.datasource.write`（凡能建数据源的身份都有它），所以只要渲染
+            这个区块，每打开一次详情页就会自动发出一次必然失败的请求，再把那个失败画成
+            「体检坏了」——而这一类源本来就没有体检这回事。整块不渲染，而不是渲染一个
+            「不做体检」：后者仍在暗示这里本该有一次。
+          */}
+          {isXlsxSource ? null : (
+            <details
+              open
+              className="group rounded-xl border border-border bg-card"
+            >
+              <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-4 [&::-webkit-details-marker]:hidden">
+                <h2 className="text-base font-medium">体检</h2>
+                <span className="text-xs text-muted-foreground">
+                  勾选的列在不在表里
+                </span>
+                <span className="ml-auto text-xs text-muted-foreground transition-transform group-open:rotate-90">
+                  ▸
+                </span>
+              </summary>
+              <div className="px-5 pb-5">
+                <HealthSection datasource={datasource} />
+              </div>
+            </details>
+          )}
+        </div>
+      ) : null}
 
       {datasource !== null && datasourceId !== null ? (
         <XlsxReimportDialog

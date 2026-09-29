@@ -1,5 +1,5 @@
 /**
- * 字段绑定表：一条数据源 = 一张表，这张表就是它的 N 个字段。
+ * 字段树：一条数据源 = 一张表，这张表就是它的 N 个字段，**按树形导航展示**。
  *
  * # 为什么需要它
  *
@@ -9,9 +9,16 @@
  *
  * # 它同时是切换器
  *
- * 点一行就把下面的选项表切到那个字段。**不另做一个下拉**：「像表格一样看整表」
+ * 点一行就把右边的选项表切到那个字段。**不另做一个下拉**：「像导航一样看整表」
  * 与「切到某个字段」本来就是同一件事的两面，拆成两个控件只会让人在两个地方
  * 各选一次。
+ *
+ * # 树形而不是表格
+ *
+ * 曾经它是一张六列表格（字段 / 标识 / 父字段 / 加密返回 / 默认语言 / 状态），
+ * 那几列把「切换器」埋进了信息表里，第一眼不知道可以点。现在改为**树形导航**：
+ * 每行只留字段名按钮 + 逐字段的状态/加密/语言徽标，父子的层级关系由
+ * 缩进 + 连接线表达——级联结构一眼可见，切换动作也回到了页面第二层。
  *
  * # 行序是父子相邻，不是按名字排
  *
@@ -20,14 +27,6 @@
  * 屏幕阅读器下都会散架。
  */
 
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/shared/ui/table";
 import { ChevronRight } from "lucide-react";
 
 import type { DatasourceFieldBinding } from "../types";
@@ -40,7 +39,7 @@ import {
 
 /// 每一级缩进的宽度（px）。用内联 padding 而不是空格：空格在复制/窄屏/
 /// 屏幕阅读器下都会散架，「缩进」这件事必须由布局表达。
-const INDENT_PX = 16;
+const INDENT_PX = 20;
 
 export type FieldBindingsTableProps = {
   bindings: DatasourceFieldBinding[];
@@ -56,82 +55,59 @@ export function FieldBindingsTable({
 }: FieldBindingsTableProps) {
   if (bindings.length === 0) return null;
 
-  // 父字段显示**名字**而不是 `field_id`：这一栏是给人对照飞书那张表看的，
-  // 而 `field_id` 在飞书界面上不出现。认不出名字（还没解析出来）时退回 id。
-  const nameOf = (fieldId: string): string => {
-    const parent = bindings.find((binding) => binding.fieldId === fieldId);
-    return parent?.fieldName ?? fieldId;
-  };
-
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>字段</TableHead>
-          <TableHead>标识</TableHead>
-          <TableHead>父字段</TableHead>
-          <TableHead>加密返回</TableHead>
-          <TableHead>默认语言</TableHead>
-          <TableHead>状态</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {orderBindingsForDisplay(bindings).map(({ binding, depth }) => {
-          const selected = binding.sourceKey === selectedSourceKey;
-          return (
-            <TableRow
-              key={binding.fieldId}
-              data-slot="binding-row"
-              data-depth={depth}
-              data-selected={selected ? "true" : undefined}
-              className={
-                selected
-                  ? "bg-primary/10 border-l-[3px] border-l-primary"
-                  : "hover:bg-muted/50"
-              }
+    <nav aria-label="字段" className="space-y-1">
+      {orderBindingsForDisplay(bindings).map(({ binding, depth }) => {
+        const selected = binding.sourceKey === selectedSourceKey;
+        return (
+          <div
+            key={binding.fieldId}
+            data-slot="binding-row"
+            data-depth={depth}
+            data-selected={selected ? "true" : undefined}
+            className={`group flex items-center gap-2 rounded-md border px-2 py-1.5 transition-colors ${
+              selected
+                ? "border-accent bg-accent/10"
+                : "border-transparent hover:bg-muted/50"
+            }`}
+          >
+            {/* 字段名即切换器：可点击的那一半。层级由缩进表达，父级用点标记。 */}
+            <button
+              type="button"
+              aria-pressed={selected}
+              title={binding.fieldId}
+              style={{ paddingInlineStart: depth * INDENT_PX }}
+              className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-sm text-left font-medium focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:outline-none"
+              onClick={() => onSelect(binding.sourceKey)}
             >
-              <TableCell style={{ paddingInlineStart: depth * INDENT_PX }}>
-                <button
-                  type="button"
-                  aria-pressed={selected}
-                  title={binding.fieldId}
-                  className="cursor-pointer rounded-sm text-left font-medium underline decoration-dotted decoration-primary/40 hover:text-primary hover:decoration-primary focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:outline-none transition-colors"
-                  onClick={() => onSelect(binding.sourceKey)}
+              {depth > 0 ? (
+                <span
+                  aria-hidden="true"
+                  className="text-muted-foreground/70 text-xs leading-none"
                 >
-                  <span className="flex items-center gap-1">
-                    {binding.fieldName ?? "（字段名还没解析出来）"}
-                    <ChevronRight
-                      className="h-3 w-3 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                  </span>
-                </button>
-              </TableCell>
-              <TableCell className="font-mono text-xs">
-                {binding.sourceKey}
-              </TableCell>
-              <TableCell className="text-xs">
-                {binding.parentFieldId === null
-                  ? "—"
-                  : nameOf(binding.parentFieldId)}
-              </TableCell>
-              <TableCell>
-                {/* 关掉时**什么都不渲染**（不是画一个「未加密」）——那是这一层的
-                    真实语义，与列表页原先那两列恒画「—」的假话正好相反。 */}
-                <EncryptBadge enabled={binding.encryptEnabled} />
-              </TableCell>
-              <TableCell>
-                <LocaleBadge locale={binding.defaultLocale} />
-              </TableCell>
-              <TableCell>
-                <DatasourceStatusBadge
-                  status={binding.enabled ? "active" : "disabled"}
-                />
-              </TableCell>
-            </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
+                  └
+                </span>
+              ) : null}
+              <span className="truncate">
+                {binding.fieldName ?? "（字段名还没解析出来）"}
+              </span>
+              <ChevronRight
+                className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${
+                  selected ? "rotate-90" : ""
+                }`}
+                aria-hidden="true"
+              />
+            </button>
+            <span className="flex shrink-0 items-center gap-1.5">
+              <EncryptBadge enabled={binding.encryptEnabled} />
+              <LocaleBadge locale={binding.defaultLocale} />
+              <DatasourceStatusBadge
+                status={binding.enabled ? "active" : "disabled"}
+              />
+            </span>
+          </div>
+        );
+      })}
+    </nav>
   );
 }

@@ -467,11 +467,12 @@ describe("飞书数据源详情页 · 字段表即切换器", () => {
     const user = userEvent.setup();
     const calls = stubDetail({
       datasourceList: () => listPage([TWO_FIELDS]),
-      optionList: () => listPage(TWO_OPTIONS, { total: 25 }),
+      // 详情页默认每页 50 条（`DETAIL_PAGE_SIZE`），所以总数要超过 50 才有第 2 页。
+      optionList: () => listPage(TWO_OPTIONS, { total: 60 }),
     });
     renderDetail();
 
-    // 父字段有 25 条 ⇒ 有第 2 页
+    // 父字段有 60 条 ⇒ 默认 50 条/页下仍有第 2 页
     await screen.findByText("差旅费");
     await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => {
