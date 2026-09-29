@@ -1074,6 +1074,12 @@ request_timeout_seconds = 60       # 30 → 60
 所有其它端点。缓解：multipart 路由自身有 per-route 的 `DefaultBodyLimit`，
 且导入接口受权限门控。
 
+**应用边缘 nginx 必须配同等上限**：`frontend/deploy/nginx.conf` 的
+`client_max_body_size` 须 ≥ `max_body_bytes`——缺它时 nginx 默认 1 MiB，会在请求
+到达后端前直接 413（2026-09-29 线上实测，4.8 MB 的 xlsx 探表头即复现）。
+已由 `frontend/scripts/verify-deployment-contract.mjs` 的变异测试机械守卫
+（把 16m 变异回 1m 必须被拒绝）。
+
 ### 5.10 复合索引（强烈建议；实测后确认**不是**硬前提）
 
 ```rust

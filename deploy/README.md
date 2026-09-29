@@ -374,6 +374,7 @@ curl --noproxy '*' -I http://127.0.0.1:18654/
 | `curl --noproxy '*' http://127.0.0.1:18654/` 不通 | 端口没发布 / 绑错地址，或容器没起来。看 `docker ps` 的端口映射与 `docker logs yang-backend` |
 | **浏览器打不开、报 503** | ⚠️ **先怀疑系统代理**：Windows 代理会让 Chrome 对不可达端口返回**假 503**。用 `curl.exe --noproxy "*"` 直连复验；真不通再查云安全组是否放行了该端口（当前只放行 `80/443` 与 `18000-19000`） |
 | 前端 502 | 前端容器没起来，或它没加入后端容器的网络命名空间（`--network container:` 写错） |
+| 上传 xlsx 报 **413 Request Entity Too Large** | 应用边缘 nginx 的 `client_max_body_size` 没对齐后端的 16 MiB 上限（缺省时 nginx 默认 1 MiB，请求到不了后端）。改 `frontend/deploy/nginx.conf` 后重新部署前端镜像；此对齐由 `frontend/scripts/verify-deployment-contract.mjs` 机械守卫 |
 | `refresh` 之后 readiness 一直不 200 | 新推上去的配置有问题。看 `refresh` 的输出：没用 `-SyncConfig` 时它不会回滚，配置得自己修；用了的话它会把备份还原并重启（输出里会写「配置已回滚」） |
 | `refresh` 报告「库 X 里一张表都没有」 | 应用启动了但 schema 同步没生效——通常是配置里的库名/账号不对（`docker logs yang-backend` 里会有线索）。清库本身没失败，别把它当成功 |
 | 清库后表数正常，但**登不进去** | 这是预期行为：清库后没有任何账号，注册出来的账号零权限。按 `docs/contracts/AUTHZ_GRANTS.md` 手工插 `authz_grant` |

@@ -39,6 +39,7 @@ const mutations = [
     'add_header X-Frame-Options "DENY" always;',
     '# add_header X-Frame-Options "DENY" always;',
   ],
+  ["client_max_body_size 16m;", "client_max_body_size 1m;"],
 ];
 
 for (const [target, replacement] of mutations) {
@@ -103,6 +104,10 @@ function verifyContract(source) {
     [
       "proxy_set_header X-Forwarded-Proto $yang_forwarded_proto;",
       "应用边缘必须把受约束的外部协议传给后端",
+    ],
+    [
+      "client_max_body_size 16m;",
+      "Nginx 缺少上传体上限（须与后端 http.max_body_bytes / MultipartSpec 的 16 MiB 对齐，否则 nginx 默认 1m 会在请求到达后端前直接 413）",
     ],
   ]) {
     requireDirective(activeLines, directive, message);
