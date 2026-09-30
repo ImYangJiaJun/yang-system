@@ -33,6 +33,9 @@ use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
+use crate::addon::feishu::approval::domain::request_log_writer::{
+    normalized_requested_by, outcome_for, Outcome, RequestLog,
+};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
     dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
@@ -49,7 +52,10 @@ use crate::feishu_approval_worker::ApprovalDispatchHandle;
 use crate::addon::feishu::domain::approval_dispatch::Backfill;
 
 /// 派发端点的输入契约。
-#[derive(Debug, Deserialize, JsonSchema)]
+///
+/// `Serialize` 是请求记录落库需要的：`request_body` 列存的就是本结构的序列化
+/// 原文（见 `domain/request_log_writer.rs`）。
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DispatchInput {
     /// 多维表格 token。
@@ -59,6 +65,10 @@ pub(super) struct DispatchInput {
     /// 单条处理时的记录 id；省略表示处理全表待处理记录。
     #[serde(default)]
     pub(super) record_id: Option<String>,
+    /// 请求人（工作流触发人）。工作流模板在 `raw_body` 里带 `$.step_btn.user`；
+    /// 未带或 trim 后为空时落库统一记 `feishu-workflow`。仅记录用，不影响派发。
+    #[serde(default)]
+    pub(super) requested_by: Option<String>,
     /// 目标审批定义。**配置不存在时**由它建配置（首次调用）。
     ///
     /// 只有三条配置信息是「只有调用方知道」的——要提哪个定义、谁当发起人、
@@ -99,6 +109,16 @@ impl DispatchInput {
                 return Err(BaseError::ParamInvalid(
                     "record_id".to_string(),
                     "传了就必须非空；处理全表请整个省略该字段".to_string(),
+                ));
+            }
+        }
+        // 请求人只记录不参与派发：trim 后空串按缺失处理（落 `feishu-workflow`），
+        // 非空则长度受控——列上限 varchar(128) 按字符数计。
+        if let Some(requested_by) = &self.requested_by {
+            if requested_by.trim().chars().count() > 128 {
+                return Err(BaseError::ParamInvalid(
+                    "requested_by".to_string(),
+                    "不能超过 128 个字符".to_string(),
                 ));
             }
         }
@@ -176,13 +196,97 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         .register()
 }
 
+/// 一次派发请求的结果记录事实：所有出口（含 `validate()` 失败）都收敛成它，
+/// 外层**唯一一处**组装响应并落库——散落的出口各写一遍必漏。
+struct DispatchOutcome {
+    /// 结果四桶。
+    outcome: Outcome,
+    /// 结果说明（复用响应 message；失败时为可行动原因）。
+    message: String,
+    /// 单条成功时的审批单编号。
+    serial_number: Option<String>,
+    /// 配置存在或建成后关联；校验失败与配置未建成（40401/35600）的请求为空。
+    config_id: Option<i64>,
+    /// 原本要返回给工作流的结果。落记录绝不改变它——写失败只降级日志，
+    /// 派发已提交到 task 表与飞书，不能被日志拖死。
+    response: Result<ApiResponse, BaseError>,
+}
+
+impl DispatchOutcome {
+    /// `ApiResponse::fail` 出口：记录文案与响应文案同源，不写第二遍。
+    fn fail(code: i32, config_id: Option<i64>, message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            outcome: Outcome::Failed,
+            message: message.clone(),
+            serial_number: None,
+            config_id,
+            response: Ok(ApiResponse::fail(code, message)),
+        }
+    }
+
+    /// 内部错误冒泡出口：`Err(BaseError)` 原样保留，文案用错误的 Display。
+    fn internal(config_id: Option<i64>, error: BaseError) -> Self {
+        Self {
+            outcome: Outcome::Failed,
+            message: error.to_string(),
+            serial_number: None,
+            config_id,
+            response: Err(error),
+        }
+    }
+
+    /// 成功 / 等待 / 受理出口（响应走 `success` 通道）。
+    fn success(
+        outcome: Outcome,
+        config_id: Option<i64>,
+        accepted: bool,
+        message: String,
+        serial_number: Option<String>,
+    ) -> Self {
+        Self {
+            outcome,
+            message: message.clone(),
+            serial_number: serial_number.clone(),
+            config_id,
+            response: response(accepted, message, serial_number),
+        }
+    }
+}
+
 /// 处理派发请求。
 pub(super) async fn handle(
     ctx: ActionContext,
     input: DispatchInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
-    input.validate()?;
+    // 业务主体抽成内部函数、返回结构化结果而不是直接 return：每个出口
+    // （含 `validate()` 失败——它也要落一条 failed 记录，且要落在还能拿到
+    // `request_body` 的位置）都收敛成一条可落库的记录事实。落库用独立连接
+    // （`TableQuery::insert` 不经事务自动提交），写失败只降级日志。
+    let outcome = match handle_dispatch(&ctx, &input, &context).await {
+        Ok(outcome) => outcome,
+        // 白名单查询这类「连 config_id 都拿不到」的内部错误：折算成失败记录。
+        Err(error) => DispatchOutcome::internal(None, error),
+    };
+    write_request_log(&context, &input, &outcome).await;
+    outcome.response
+}
+
+/// 派发业务主体。
+///
+/// 返回 `Err` 的只有白名单查询这类「连 config_id 都拿不到」的内部错误；
+/// 已知 `config_id` 的单条/受理/建配置出口都在内部折算成
+/// [`DispatchOutcome`]（见各分支）。
+async fn handle_dispatch(
+    ctx: &ActionContext,
+    input: &DispatchInput,
+    context: &FeishuContext,
+) -> Result<DispatchOutcome, BaseError> {
+    // 校验失败**不冒泡**——它同样要落记录，这里兜住再折算成失败出口。
+    if let Err(error) = input.validate() {
+        return Ok(DispatchOutcome::internal(None, error));
+    }
 
     // ---- 白名单校验：坐标必须在已配置且启用的行内 ----
     //
@@ -206,24 +310,25 @@ pub(super) async fn handle(
         Some(row) => row.require("id")?,
         None => {
             if !input.has_provision_fields() {
-                return Ok(ApiResponse::fail(
+                return Ok(DispatchOutcome::fail(
                     40401,
+                    None,
                     "该多维表格未配置审批派发。首次调用请同时给出 approval_code / applicant_field / backfill_field",
                 ));
             }
             // 建配置要在飞书与本库两端取数，凭证缺了根本走不下去。
             let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
-                return Ok(ApiResponse::fail(50301, "飞书出站凭证未配置"));
+                return Ok(DispatchOutcome::fail(50301, None, "飞书出站凭证未配置"));
             };
 
-            match provision(&ctx, &context, settings, &input).await {
+            match provision(ctx, context, settings, input).await {
                 Ok(id) => id,
                 Err(failure) => {
                     // 报错要**同时**回填与返回：回填让表格里的人看见，返回让工作流
                     // 的日志里也有原文。回填失败只降级为「只返回」——配置根本没建成，
                     // 也不该因为回填这一下而把真实原因盖掉。
-                    backfill_provision_failure(&ctx, settings, &input, &failure).await;
-                    return Ok(ApiResponse::fail(35600, failure.to_string()));
+                    backfill_provision_failure(ctx, settings, input, &failure).await;
+                    return Ok(DispatchOutcome::fail(35600, None, failure.to_string()));
                 }
             }
         }
@@ -231,7 +336,11 @@ pub(super) async fn handle(
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
-        Some(record_id) => dispatch_single(&ctx, &context, config_id, record_id).await,
+        Some(record_id) => match dispatch_single(ctx, context, config_id, record_id).await {
+            Ok(outcome) => Ok(outcome),
+            // 单条内部的 `?` 出口：config_id 在调用点已知，失败记录带上它。
+            Err(error) => Ok(DispatchOutcome::internal(Some(config_id), error)),
+        },
         // ---- 全表：异步受理 ----
         //
         // 受理**必须在白名单校验之后**：把 Token 当成「可以指任意表格」的通行证
@@ -239,8 +348,13 @@ pub(super) async fn handle(
         None => {
             // 拿不到句柄说明 worker 没起（凭证缺失）。**不返回 accepted**——
             // 那会让工作流显示成功而实际什么都没发生。
-            let handle = ctx.tools().extension::<ApprovalDispatchHandle>()?;
-            handle.request_dispatch()?;
+            let handle = match ctx.tools().extension::<ApprovalDispatchHandle>() {
+                Ok(handle) => handle,
+                Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
+            };
+            if let Err(error) = handle.request_dispatch() {
+                return Ok(DispatchOutcome::internal(Some(config_id), error));
+            }
 
             // 语义是「跑一轮全队列」，**不是**只跑本表。
             //
@@ -248,8 +362,66 @@ pub(super) async fn handle(
             // `(base_token, table_id)` 配置的；按表分流会让同一队列出现「点了 A 的
             // 按钮却不处理 B 的数据」这种反直觉行为。多表并发时谁先点谁先跑整批，
             // 结果仍是一致的（uuid 幂等兜底）。
-            response(true, "已受理，处理结果稍后回填至表格".to_string(), None)
+            Ok(DispatchOutcome::success(
+                Outcome::Accepted,
+                Some(config_id),
+                true,
+                "已受理，处理结果稍后回填至表格".to_string(),
+                None,
+            ))
         }
+    }
+}
+
+/// 把一次派发请求落成一条请求记录（独立连接自动提交）。
+///
+/// 写失败只降级 `tracing::error!`，**绝不改变派发结果**——见
+/// [`DispatchOutcome::response`] 的注释。
+async fn write_request_log(
+    context: &FeishuContext,
+    input: &DispatchInput,
+    outcome: &DispatchOutcome,
+) {
+    let request_body = match serde_json::to_string(input) {
+        Ok(body) => body,
+        Err(error) => {
+            // 输入全是字符串字段，序列化失败实际不可达；真发生了也宁可不记
+            // 也不记半行（request_body 必填）。
+            tracing::error!(error = %error, "派发请求体序列化失败，放弃落请求记录");
+            return;
+        }
+    };
+    let log = RequestLog {
+        requested_by: normalized_requested_by(input.requested_by.as_deref()),
+        base_token: input.base_token.trim().to_string(),
+        table_id: input.table_id.trim().to_string(),
+        config_id: outcome.config_id,
+        record_id: input
+            .record_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        request_body,
+        outcome: outcome.outcome,
+        message: outcome.message.clone(),
+        serial_number: outcome.serial_number.clone(),
+        // 返回信封的 `data` JSON 原文；失败出口（`Err` 冒泡或 `ApiResponse::fail`）
+        // 没有 data，落 NULL。
+        response_body: outcome
+            .response
+            .as_ref()
+            .ok()
+            .and_then(|response| response.data.as_ref())
+            .map(|data| data.to_string()),
+    };
+    if let Err(error) = context
+        .approval_request_logs()
+        .query()
+        .insert(log.into_record())
+        .await
+    {
+        tracing::error!(error = %error, "审批派发请求记录写入失败");
     }
 }
 
@@ -392,14 +564,21 @@ async fn write_config_failure(
 ///
 /// 编排逻辑在 `domain::approval_dispatch`；这里负责取配置、读记录、装配出站栈、
 /// 折算响应——都是「把领域能力接起来」的接线工作，不含业务判断。
+///
+/// 业务失败出口折成 [`DispatchOutcome::fail`]；`?` 冒泡的内部错误由调用点
+/// （已知 `config_id`）统一折算成失败记录。
 async fn dispatch_single(
     ctx: &ActionContext,
     context: &FeishuContext,
     config_id: i64,
     record_id: &str,
-) -> Result<ApiResponse, BaseError> {
+) -> Result<DispatchOutcome, BaseError> {
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
-        return Ok(ApiResponse::fail(50301, "飞书出站凭证未配置"));
+        return Ok(DispatchOutcome::fail(
+            50301,
+            Some(config_id),
+            "飞书出站凭证未配置",
+        ));
     };
 
     // ---- 配置 ----
@@ -430,19 +609,25 @@ async fn dispatch_single(
         .map(|record| record.into_map())
         .collect();
     let Some(widgets) = widget_maps_from_rows(&map_maps, |_| None) else {
-        return Ok(ApiResponse::fail(
+        return Ok(DispatchOutcome::fail(
             50001,
+            Some(config_id),
             "字段映射配置损坏（转换器标识非法）",
         ));
     };
     if widgets.is_empty() {
-        return Ok(ApiResponse::fail(50002, "该配置没有字段映射"));
+        return Ok(DispatchOutcome::fail(
+            50002,
+            Some(config_id),
+            "该配置没有字段映射",
+        ));
     }
     let timezone_offset = match FixedOffset::from_iana(base_timezone.trim()) {
         Ok(offset) => offset,
         Err(error) => {
-            return Ok(ApiResponse::fail(
+            return Ok(DispatchOutcome::fail(
                 50003,
+                Some(config_id),
                 format!("Base 时区不可用：{error}"),
             ))
         }
@@ -470,8 +655,9 @@ async fn dispatch_single(
     {
         Ok(fields) => fields,
         Err(failure) => {
-            return Ok(ApiResponse::fail(
+            return Ok(DispatchOutcome::fail(
                 50201,
+                Some(config_id),
                 format!("读取表结构失败：{}", failure.message),
             ))
         }
@@ -489,7 +675,13 @@ async fn dispatch_single(
     // 上，那比「写不进去」更坏。
     let backfill_field_name = match bitable::resolve_field_name(&fields, &backfill_field) {
         Ok(name) => name,
-        Err(error) => return Ok(ApiResponse::fail(50004, format!("回填列不可用：{error}"))),
+        Err(error) => {
+            return Ok(DispatchOutcome::fail(
+                50004,
+                Some(config_id),
+                format!("回填列不可用：{error}"),
+            ))
+        }
     };
 
     // ---- 读记录 ----
@@ -509,17 +701,25 @@ async fn dispatch_single(
             Some(record) => match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
                 Ok(cells) => cells,
                 Err(error) => {
-                    return Ok(ApiResponse::fail(
+                    return Ok(DispatchOutcome::fail(
                         50201,
+                        Some(config_id),
                         format!("解析记录字段失败：{error}"),
                     ))
                 }
             },
-            None => return Ok(ApiResponse::fail(40402, "多维表格里找不到该记录")),
+            None => {
+                return Ok(DispatchOutcome::fail(
+                    40402,
+                    Some(config_id),
+                    "多维表格里找不到该记录",
+                ))
+            }
         },
         Err(failure) => {
-            return Ok(ApiResponse::fail(
+            return Ok(DispatchOutcome::fail(
                 50201,
+                Some(config_id),
                 format!("读取记录失败：{}", failure.message),
             ))
         }
@@ -550,8 +750,15 @@ async fn dispatch_single(
     )
     .await;
 
+    let outcome = outcome_for(&result);
     let (accepted, message, serial_number) = result.response_parts();
-    response(accepted, message, serial_number)
+    Ok(DispatchOutcome::success(
+        outcome,
+        Some(config_id),
+        accepted,
+        message,
+        serial_number,
+    ))
 }
 
 /// 组一个扁平响应体。
@@ -587,6 +794,7 @@ mod tests {
             base_token: "appbcbWCzen6".to_string(),
             table_id: "tblsRc9GRRX".to_string(),
             record_id: Some("rec001".to_string()),
+            requested_by: Some("测试触发人".to_string()),
             approval_code: None,
             applicant_field: None,
             backfill_field: None,
@@ -667,6 +875,34 @@ mod tests {
     }
 
     #[test]
+    fn requested_by_is_optional_and_blank_is_treated_as_missing() {
+        // 未带（旧工作流报文）与 trim 后空串都合法——落库统一记 feishu-workflow。
+        let mut input = valid_input();
+        input.requested_by = None;
+        assert!(input.validate().is_ok(), "未带 requested_by 合法");
+
+        let mut input = valid_input();
+        input.requested_by = Some("   ".to_string());
+        assert!(input.validate().is_ok(), "trim 后空串按缺失处理，不报错");
+
+        let mut input = valid_input();
+        input.requested_by = Some("  张三  ".to_string());
+        assert!(input.validate().is_ok(), "带空白的请求人合法");
+    }
+
+    #[test]
+    fn overlong_requested_by_is_rejected() {
+        // 列上限 varchar(128) 按字符数计——中文按字符而不是按字节。
+        let mut input = valid_input();
+        input.requested_by = Some("张".repeat(129));
+        assert!(input.validate().is_err(), "129 个字符应被拒");
+
+        let mut input = valid_input();
+        input.requested_by = Some("张".repeat(128));
+        assert!(input.validate().is_ok(), "恰好 128 个字符合法");
+    }
+
+    #[test]
     fn result_body_is_flat_for_workflow_reference() {
         // 工作流 response_value 只能引用声明过的字段，嵌套结构取不到。
         let body = DispatchResultBody {
@@ -701,6 +937,66 @@ mod tests {
             .as_object()
             .map(|o| o.contains_key("serial_number"))
             .unwrap_or(true));
+    }
+
+    #[test]
+    fn failure_accepted_flag_is_forwarded_not_hardcoded() {
+        // 回归（对抗性验证抓到）：重构把单条失败出口的 accepted 从 false 翻成 true，
+        // 工作流会按 accepted 分支把失败当成功、Retryable 依赖 accepted 的重试不触发。
+        // `response` 的 accepted 必须由调用方透传——失败（Terminal/Retryable）为 false，
+        // 等待与受理（Waiting/批量）为 true。
+        let failed = response(false, "暂时失败，可重试：飞书服务错误".to_string(), None)
+            .unwrap_or_else(|error| panic!("应可构造: {error}"));
+        let failed_data = failed
+            .data
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .and_then(|object| object.get("accepted"))
+            .cloned()
+            .unwrap_or_else(|| panic!("accepted 字段必须在 data 里"));
+        assert_eq!(
+            failed_data,
+            serde_json::json!(false),
+            "失败出口 accepted 必须为 false"
+        );
+
+        let waiting = response(true, "本轮未处理：缺少必填字段".to_string(), None)
+            .unwrap_or_else(|error| panic!("应可构造: {error}"));
+        let waiting_data = waiting
+            .data
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .and_then(|object| object.get("accepted"))
+            .cloned()
+            .unwrap_or_else(|| panic!("accepted 字段必须在 data 里"));
+        assert_eq!(
+            waiting_data,
+            serde_json::json!(true),
+            "等待出口 accepted 必须为 true"
+        );
+    }
+
+    #[test]
+    fn dispatch_outcome_success_forwards_the_accepted_flag() {
+        // 回归的第二道防线：即使 response 本身正确，DispatchOutcome::success 若仍硬编码
+        // `true` 也会在装配层把失败翻成成功——两处必须各自守住。
+        let outcome =
+            DispatchOutcome::success(Outcome::Failed, Some(1), false, "失败".to_string(), None);
+        let response = outcome
+            .response
+            .unwrap_or_else(|error| panic!("应可构造: {error}"));
+        let data = response
+            .data
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .and_then(|object| object.get("accepted"))
+            .cloned()
+            .unwrap_or_else(|| panic!("accepted 字段必须在 data 里"));
+        assert_eq!(
+            data,
+            serde_json::json!(false),
+            "DispatchOutcome::success 必须透传 accepted=false"
+        );
     }
 
     // -----------------------------------------------------------------------

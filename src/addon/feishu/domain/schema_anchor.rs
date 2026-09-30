@@ -850,6 +850,11 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         "option/actions/upsert_options.rs",
         "datasource/actions/list_datasources.rs",
         "datasource/actions/rotate_token.rs",
+        // 纯组装逻辑，不碰仓库：`request_log_writer` 的 `into_record` 只是把请求
+        // 事实折成 Record——没有查询/写调用可锚。缺口由该模块的
+        // `record_keys_are_declared_on_the_request_log_table` 单测原地补上
+        // （键 ⊆ 表声明的列 + 必填列齐全），不依赖本扫描。
+        "approval/domain/request_log_writer.rs",
     ]
     .into_iter()
     .collect();
