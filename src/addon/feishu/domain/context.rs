@@ -1,4 +1,4 @@
-//! 飞书 addon 的模块上下文：聚合三张表的 Repository 与集成配置，并提供事务收尾。
+//! 飞书 addon 的模块上下文：聚合全部表的 Repository 与集成配置，并提供事务收尾。
 
 use std::sync::Arc;
 
@@ -11,8 +11,8 @@ use super::repository::Repository;
 
 /// addon 级共享上下文。
 ///
-/// 六张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
-/// module 的主表**，所以跨表访问（选项 module 读数据源表、审批派发读三张审批表）
+/// 七张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
+/// module 的主表**，所以跨表访问（选项 module 读数据源表、审批派发读四张审批表）
 /// 必须经这个上下文。
 #[derive(Clone)]
 pub(crate) struct FeishuContext {
@@ -31,6 +31,9 @@ pub(crate) struct FeishuContext {
     /// 审批认领队列表。
     #[allow(dead_code)]
     approval_task: Repository,
+    /// 审批派发请求记录表。
+    #[allow(dead_code)]
+    approval_request_log: Repository,
     settings: Option<Arc<FeishuSettings>>,
 }
 
@@ -44,6 +47,7 @@ impl FeishuContext {
         approval_config: Repository,
         approval_field_map: Repository,
         approval_task: Repository,
+        approval_request_log: Repository,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
         Self {
@@ -53,6 +57,7 @@ impl FeishuContext {
             approval_config,
             approval_field_map,
             approval_task,
+            approval_request_log,
             settings,
         }
     }
@@ -96,6 +101,12 @@ impl FeishuContext {
     #[allow(dead_code)]
     pub(crate) fn approval_tasks(&self) -> &Repository {
         &self.approval_task
+    }
+
+    /// 审批派发请求记录表。消费者（dispatch 落记录）在后续任务接入。
+    #[allow(dead_code)]
+    pub(crate) fn approval_request_logs(&self) -> &Repository {
+        &self.approval_request_log
     }
 
     /// 集成配置；`None` 表示 `[feishu]` 段缺席。

@@ -143,7 +143,7 @@ mod tests {
                 ),
                 Arc::clone(&pool),
             ),
-            // 审批派发的三张表：本用例只读路由表，不碰它们，但上下文构造需要它们。
+            // 审批派发的四张表：本用例只读路由表，不碰它们，但上下文构造需要它们。
             Repository::new(
                 definition(
                     crate::addon::feishu::approval::table::table_spec()
@@ -161,6 +161,13 @@ mod tests {
             Repository::new(
                 definition(
                     crate::addon::feishu::approval::domain::task_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::approval::domain::request_log_table::table_spec()
                         .unwrap_or_else(|e| panic!("{e}")),
                 ),
                 pool,

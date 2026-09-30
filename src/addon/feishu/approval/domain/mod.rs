@@ -4,4 +4,5 @@
 //! module 层只保留主表（`table.rs`）与 Action 注册表，其余表归 `domain/`。
 
 pub(crate) mod field_map_table;
+pub(crate) mod request_log_table;
 pub(crate) mod task_table;

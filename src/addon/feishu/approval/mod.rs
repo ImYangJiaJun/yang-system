@@ -3,11 +3,13 @@
 //! 本模块让多维表格里的一行业务数据由本服务自动创建对应的飞书原生审批实例，
 //! 并把 `serial_number` 回填到该行。
 //!
-//! # 为什么是三张表
+//! # 为什么是四张表
 //!
 //! - `feishu_approval_config`：一条配置 = 一个多维表格 ↔ 一个审批定义。
 //! - `feishu_approval_field_map`：审批控件 ↔ 多维表格字段的映射（一对多）。
 //! - `feishu_approval_task`：**认领队列**，不只是记账表。
+//! - `feishu_approval_request_log`：派发端点的**逐次请求记录**（一次入口请求一行，
+//!   与 task 表的逐条处理状态机分工——见 `domain/request_log_table.rs`）。
 //!
 //! # 为什么「是否已处理」的判据在库里，而不是多维表格的字段上
 //!
@@ -73,6 +75,11 @@ pub(crate) fn build_task_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(task_module_name()?).table(domain::task_table::table_spec()?))
 }
 
+/// 派发请求记录表所在的 Module：同上，只有表。
+pub(crate) fn build_request_log_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(request_log_module_name()?).table(domain::request_log_table::table_spec()?))
+}
+
 fn module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new(MODULE).map_err(config_error)
 }
@@ -83,6 +90,10 @@ fn field_map_module_name() -> Result<ModuleName, BaseError> {
 
 fn task_module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new("feishu.approval_task").map_err(config_error)
+}
+
+fn request_log_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_request_log").map_err(config_error)
 }
 
 fn config_error(error: impl std::fmt::Display) -> BaseError {

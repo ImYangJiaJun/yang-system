@@ -93,6 +93,7 @@ mod tests {
             repository(crate::addon::feishu::approval::table::table_spec()),
             repository(crate::addon::feishu::approval::domain::field_map_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
             None,
         ));
 

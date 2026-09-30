@@ -26,7 +26,7 @@
 //!
 //! - **能定 → 严格**：列必须存在，且按动词要求的能力位必须开着
 //!   （`where_*` 要 `filterable`，`order_by` 要 `sortable`——fail-closed 的就是这两位）。
-//! - **定不了 → 宽松**：列必须至少在**三张表之一**上存在（抓拼写，放行跨表）。
+//! - **定不了 → 宽松**：列必须至少在**已登记表之一**上存在（抓拼写，放行跨表）。
 //!   共享 helper 的表由调用方给（例如 `option_write::apply_option_rows` 的
 //!   `options: &Repository`），静态解析不到。
 //!
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 use yang_base::definition::TableSpec;
 
-/// 三张表：`(表名, 声明, 代码里认它的接收者写法)`。
+/// 已登记的表：`(表名, 声明, 代码里认它的接收者写法)`。
 ///
 /// 接收者写法是**字面匹配**的锚：语句里出现它，就把这个站点归到这张表。
 fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
@@ -68,9 +68,9 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             spec(crate::addon::feishu::option::table::table_spec(), "选项"),
             "options()",
         ),
-        // 审批派发的三张表。把它们登记进来，新写的站点就进入**严格档**
+        // 审批派发的四张表。把它们登记进来，新写的站点就进入**严格档**
         // ——列必须存在且能力位（filterable / sortable）开着，而不是落到
-        // 「三张表之一有就行」的宽松档。派发端点正是最需要这层保护的地方：
+        // 「七张表之一有就行」的宽松档。派发端点正是最需要这层保护的地方：
         // 它按 (base_token, table_id) 做白名单反查，写错列名会让白名单静默失效。
         (
             "feishu_approval_config",
@@ -95,6 +95,14 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
                 "审批认领队列",
             ),
             "approval_tasks()",
+        ),
+        (
+            "feishu_approval_request_log",
+            spec(
+                crate::addon::feishu::approval::domain::request_log_table::table_spec(),
+                "派发请求记录",
+            ),
+            "approval_request_logs()",
         ),
     ]
 }
@@ -764,7 +772,7 @@ fn every_field_used_on_a_table_is_declared_there_with_the_required_capability() 
                     }
                 }
                 None => {
-                    // 归属定不下来：只要求它在三张表之一上存在（抓拼写）。
+                    // 归属定不下来：只要求它在已登记表之一上存在（抓拼写）。
                     let known = tables
                         .iter()
                         .any(|(_, spec, _)| field_state(spec, &site.field).is_some());
@@ -829,7 +837,7 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
 
     // 为什么是这些：`option_write.rs` 的表由**调用方**传进来（`options: &Repository`），
     // 静态解析不到；其余几处的函数体同时碰了两张表（既有绑定表又有选项表），
-    // 函数级锚点不唯一、语句窗口也没有锚点——都退到「至少在三张表之一上存在」。
+    // 函数级锚点不唯一、语句窗口也没有锚点——都退到「至少在一张已登记表上存在」。
     // 它们用的列（`option_id` / `source_key` / `parent_key` / `title` / `id`）都确实
     // 在那张表上，所以目前没有假红；**但这份清单只能靠改代码变短，不能悄悄变长**。
     // 弱档按**文件**记账，理由写在文件上：逐站点钉 50 多条三元组只会变成噪声，
