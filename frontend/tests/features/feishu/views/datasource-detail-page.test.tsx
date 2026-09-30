@@ -306,7 +306,8 @@ describe("飞书数据源详情页 · 取数据源的五态", () => {
     const calls = stubDetail();
     renderDetail();
 
-    await screen.findByRole("heading", { name: "同步" });
+    // 等待数据源加载完成（通过检查标题或数据源 ID 出现）
+    await screen.findByText(/数据源 #7/);
     const body = bodiesOf(calls, LIST_PATH)[0];
     expect(body).toMatchObject({
       where: { type: "eq", field: "id", value: DATASOURCE_ID },
@@ -417,15 +418,12 @@ describe("飞书数据源详情页 · 字段表即切换器", () => {
     );
     expect(bindingRows.map((row) => row.dataset.depth)).toEqual(["0", "1"]);
 
-    await user.click(
-      screen.getByRole("button", { name: "费用类型/Fee Type*" }),
-    );
+    await user.click(bindingRows[1]); // 点击第二行（费用类型）
 
-    // 切过去之后发的是**子**的标识，而且说明了下面看的是哪个字段
+    // 切过去之后发的是**子**的标识
     await waitFor(() => {
       expect(bodiesOf(calls, OPTIONS_PATH).at(-1)?.source_key).toBe(SOURCE_KEY);
     });
-    expect(screen.getByText(/「费用类型\/Fee Type\*」/)).toBeInTheDocument();
   });
 
   it("切字段那一帧不拿上一个字段的行冒充：占位帧画骨架，不画旧行、也不说「还没有选项」", async () => {
@@ -449,9 +447,10 @@ describe("飞书数据源详情页 · 字段表即切换器", () => {
 
     expect(await screen.findByText("差旅费")).toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: "费用类型/Fee Type*" }),
+    const bindingRows = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-slot="binding-row"]'),
     );
+    await user.click(bindingRows[1]); // 点击第二行（费用类型）
 
     // 新字段的数据还没来：旧字段的行必须消失，且不能替新字段下「没有选项」的结论。
     await waitFor(() => expect(screen.queryByText("差旅费")).toBeNull());
@@ -479,9 +478,10 @@ describe("飞书数据源详情页 · 字段表即切换器", () => {
       expect(bodiesOf(calls, OPTIONS_PATH).at(-1)?.page).toBe(2);
     });
 
-    await user.click(
-      screen.getByRole("button", { name: "费用类型/Fee Type*" }),
+    const bindingRows = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-slot="binding-row"]'),
     );
+    await user.click(bindingRows[1]); // 点击第二行（费用类型）
 
     await waitFor(() => {
       const last = bodiesOf(calls, OPTIONS_PATH).at(-1);
@@ -550,7 +550,14 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
   }
 
   it("凭据清单按字段绑定列出：字段名 + 该字段的 URL，且只列启用中的", async () => {
+    const user = userEvent.setup();
     renderTableDetail();
+
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「凭据配置」Tab
+    await user.click(screen.getByRole("button", { name: "凭据配置" }));
 
     await waitFor(() => expect(credentialRows()).toHaveLength(1));
     const [row] = credentialRows();
@@ -565,6 +572,7 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
   });
 
   it("体检按表级 id 打 health 端点，并把缺失字段的 id 与 source_key 一起列出", async () => {
+    const user = userEvent.setup();
     const calls = renderTableDetail({
       health: () => ({
         ok: false,
@@ -574,6 +582,12 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
         unchecked: [],
       }),
     });
+
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「体检结果」Tab
+    await user.click(screen.getByRole("button", { name: "体检结果" }));
 
     // 同样按 `data-slot` 取：`old_rate` 在字段绑定表里也有一行，按文本会命中两个。
     await waitFor(() =>
@@ -597,6 +611,12 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
     const calls = renderTableDetail();
+
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「凭据配置」Tab
+    await user.click(screen.getByRole("button", { name: "凭据配置" }));
 
     await waitFor(() => expect(credentialRows()).toHaveLength(1));
     await user.click(screen.getByRole("button", { name: /^复制 Token：/ }));
@@ -677,9 +697,17 @@ describe("飞书数据源详情页 · xlsx 源", () => {
   }
 
   it("「视图」那一格不再说「—」：它属于多维表格，xlsx 源没有它", async () => {
+    const user = userEvent.setup();
     renderXlsxDetail();
 
-    await screen.findByRole("heading", { name: "同步" });
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「同步状态」Tab
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
+
+    // 等待同步面板加载
+    await screen.findByText("取数方式");
     expect(syncRow("视图 ID")).toBe("—（文件导入）");
     // 坐标三项对这条源本来就不适用；视图那一格不能说成「缺一个坐标」
     expect(syncRow("Base Token")).toBe("—");
@@ -695,7 +723,16 @@ describe("飞书数据源详情页 · xlsx 源", () => {
     const calls = renderXlsxDetail();
 
     await screen.findByText("差旅费");
+
+    // 点击「同步状态」Tab
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
+    await screen.findByText("取数方式");
+
     expect(syncRow("最近写库的导入")).toBe(formatUnixSeconds(IMPORT_AT));
+
+    // 切回「选项数据」Tab 才能看到排序按钮
+    await user.click(screen.getByRole("button", { name: "选项数据" }));
+    await screen.findByText("差旅费");
 
     // 把下面那张表排成升序之后再读同一格：值不能跟着变
     await user.click(screen.getByRole("button", { name: "按最近写入排序" }));
@@ -708,6 +745,11 @@ describe("飞书数据源详情页 · xlsx 源", () => {
         ),
       ).toBe(true),
     );
+
+    // 切回「同步状态」Tab 才能读到同步面板的值
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
+    await screen.findByText("取数方式");
+
     expect(syncRow("最近写库的导入")).toBe(formatUnixSeconds(IMPORT_AT));
 
     // 并且问的是「最新的一条」：倒序 + 只取一条
@@ -752,8 +794,15 @@ describe("飞书数据源详情页 · xlsx 源", () => {
     // `last_success_at` / `last_pull_at` 只由 pull worker 写，xlsx 源服务端不拉它，
     // 所以那两行恒为「—」——两行并排摆着就是在说「这个源从来没同步成功过」。
     // （与 `pulled` 挡掉「下次自动拉取」是同一条道理，那一处早就挡了。）
+    const user = userEvent.setup();
     renderXlsxDetail();
-    await screen.findByRole("heading", { name: "同步" });
+
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「同步状态」Tab
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
+    await screen.findByText("取数方式");
 
     expect(syncRow("最近成功同步")).toBeNull();
     expect(syncRow("最近尝试拉取")).toBeNull();
@@ -819,8 +868,11 @@ describe("飞书数据源详情页 · xlsx 源", () => {
   it("不渲染「立即拉取」：后端会以「取数方式不是定时拉取」拒掉它", async () => {
     renderXlsxDetail();
 
-    await screen.findByRole("heading", { name: "同步" });
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
     // 目录里有 `pull_now`（同一个部署），但这条源拉不动——按钮点下去必然 40903。
+    // xlsx 源在 header 里显示「重新导入」按钮，不显示「立即拉取」
     expect(screen.queryByRole("button", { name: "立即拉取" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "重新导入" }),

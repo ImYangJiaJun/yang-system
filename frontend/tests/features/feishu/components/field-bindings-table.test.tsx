@@ -1,17 +1,16 @@
+/**
+ * 字段绑定表：一条数据源 = 一张表，这张表就是它的 N 个字段，同时也是切换器。
+ *
+ * C3/C4 设计：简化为树形导航，每行只留状态点 + 字段名 + sourceKey，
+ * 父子关系用 `ml-5` 缩进表达，不再显示加密/语言/状态徽标。
+ */
+
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { FieldBindingsTable } from "@/features/feishu/components/FieldBindingsTable";
 import type { DatasourceFieldBinding } from "@/features/feishu/types";
-
-/**
- * 字段绑定表：一条数据源 = 一张表，这张表就是它的 N 个字段，同时也是切换器。
- *
- * 它替掉的是一句谎话——原先列表页有「加密返回 / 默认语言」两列，读的却是**表级行**
- * 上早已不存在的键，于是对每一条数据源都恒画「—」与一个空语言徽标。那两个属性
- * 属于**绑定层**，只有在这里逐字段显示才是真的。
- */
 
 function binding(
   overrides: Partial<DatasourceFieldBinding> = {},
@@ -56,7 +55,7 @@ const CHAIN = [
 ];
 
 describe("FieldBindingsTable", () => {
-  it("一条绑定一行，行序是父→子（连带深度），缩进由 padding 表达", () => {
+  it("一条绑定一行，行序是父→子（连带深度），子行用 ml-5 缩进", () => {
     const { container } = render(
       <FieldBindingsTable
         bindings={CHAIN}
@@ -73,40 +72,17 @@ describe("FieldBindingsTable", () => {
     expect(rows(container)[1]?.dataset.depth).toBe("1");
     expect(rows(container)[2]).toHaveTextContent("银行流水摘要-编码");
     expect(rows(container)[2]?.dataset.depth).toBe("2");
-  });
 
-  it("父子关系用缩进表达：子行缩进到父行之下，不再单列「父字段」", () => {
-    // 曾经是一张六列表格，父子关系靠「父字段」那一列点名；现在是树形导航，
-    // 层级由 `data-depth` + 行内缩进表达——父在前、子紧随其后，缩进随深度递增。
-    const { container } = render(
-      <FieldBindingsTable
-        bindings={CHAIN}
-        selectedSourceKey={null}
-        onSelect={() => {}}
-      />,
-    );
-
-    const rowEls = rows(document.body);
-    expect(rowEls.map((row) => row.dataset.depth)).toEqual(["0", "1", "2"]);
-    // 子行的缩进比父行深（`paddingInlineStart` 由 `data-depth` 推导）
-    const depth0 = rowEls.find((row) => row.dataset.depth === "0");
-    const depth1 = rowEls.find((row) => row.dataset.depth === "1");
-    const depth2 = rowEls.find((row) => row.dataset.depth === "2");
-    expect(Number(depth0?.dataset.depth)).toBeLessThan(
-      Number(depth1?.dataset.depth),
-    );
-    expect(Number(depth1?.dataset.depth)).toBeLessThan(
-      Number(depth2?.dataset.depth),
-    );
-    // `fldCat` 只应出现在 title 属性里，不铺成可见文本
-    const visible = container.textContent ?? "";
-    expect(visible).not.toContain("fldCat");
+    // 子行有 ml-5 类名
+    expect(rows(container)[1]).toHaveClass("ml-5");
+    expect(rows(container)[2]).toHaveClass("ml-5");
+    expect(rows(container)[0]).not.toHaveClass("ml-5");
   });
 
   it("点一行把那个字段的 source_key 交给上层（它同时就是切换器）", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
-    render(
+    const { container } = render(
       <FieldBindingsTable
         bindings={CHAIN}
         selectedSourceKey={null}
@@ -114,13 +90,11 @@ describe("FieldBindingsTable", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "费用类型/Fee Type*" }),
-    );
+    await user.click(rows(container)[1]); // 点击第二行（费用类型）
     expect(onSelect).toHaveBeenCalledWith("fee_type");
   });
 
-  it("当前正在看的那一行被标出来（aria-pressed），别的行没有", () => {
+  it("当前正在看的那一行被标出来（bg-blue-50 + border-l-[3px]），别的行没有", () => {
     render(
       <FieldBindingsTable
         bindings={CHAIN}
@@ -129,36 +103,24 @@ describe("FieldBindingsTable", () => {
       />,
     );
 
-    expect(
-      screen.getByRole("button", { name: "费用类型/Fee Type*", pressed: true }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "费用大类/Main Exp Cat*" }),
-    ).toHaveAttribute("aria-pressed", "false");
-  });
-
-  it("加密返回与默认语言是**逐字段**的，不再是一句对整条源说的话", () => {
-    render(
-      <FieldBindingsTable
-        bindings={[
-          binding({ encryptEnabled: true, defaultLocale: "en_us" }),
-          binding({ fieldId: "fldB", sourceKey: "fx", defaultLocale: "ja_jp" }),
-        ]}
-        selectedSourceKey={null}
-        onSelect={() => {}}
-      />,
+    const selectedRow = rows(document.body).find(
+      (row) => row.dataset.selected === "true",
     );
+    expect(selectedRow).toBeInTheDocument();
+    expect(selectedRow).toHaveTextContent("费用类型/Fee Type*");
+    expect(selectedRow).toHaveClass("bg-blue-50");
+    expect(selectedRow).toHaveClass("border-l-[3px]");
 
-    // 只有开了的那一条才有「加密返回」标记（表头也有这三个字，所以按行取）
-    const bodyRows = rows(document.body);
-    expect(bodyRows[0]).toHaveTextContent("加密返回");
-    expect(bodyRows[1]).not.toHaveTextContent("加密返回");
-    // 两条各自的语言都如实显示，而不是一个空徽标
-    expect(screen.getByText("English")).toBeInTheDocument();
-    expect(screen.getByText("日本語")).toBeInTheDocument();
+    // 其他行没有选中样式
+    const otherRows = rows(document.body).filter(
+      (row) => row.dataset.selected !== "true",
+    );
+    otherRows.forEach((row) => {
+      expect(row).not.toHaveClass("bg-blue-50");
+    });
   });
 
-  it("停用的绑定仍然列出来（它还会被整表拉取跳过，必须看得见）", () => {
+  it("停用的绑定用灰色状态点表达（不再显示「已停用」文字）", () => {
     render(
       <FieldBindingsTable
         bindings={[
@@ -169,13 +131,28 @@ describe("FieldBindingsTable", () => {
       />,
     );
 
-    expect(
-      screen.getByRole("button", { name: "币种/Currency" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("已停用")).toBeInTheDocument();
+    const row = rows(document.body)[0];
+    expect(row).toBeInTheDocument();
+    // 状态点是灰色（bg-gray-400）而不是绿色（bg-green-500）
+    const statusDot = row?.querySelector(".bg-gray-400");
+    expect(statusDot).toBeInTheDocument();
   });
 
-  it("一条绑定都没有时整块不渲染（空表会被读成「这张表没有列」）", () => {
+  it("启用的绑定用绿色状态点表达", () => {
+    render(
+      <FieldBindingsTable
+        bindings={[binding({ enabled: true })]}
+        selectedSourceKey={null}
+        onSelect={() => {}}
+      />,
+    );
+
+    const row = rows(document.body)[0];
+    const statusDot = row?.querySelector(".bg-green-500");
+    expect(statusDot).toBeInTheDocument();
+  });
+
+  it("一条绑定都没有时整块不渲染", () => {
     const { container } = render(
       <FieldBindingsTable
         bindings={[]}
@@ -184,5 +161,18 @@ describe("FieldBindingsTable", () => {
       />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("底部显示图例：绿色点 = 启用中，黄色点 = 有问题", () => {
+    render(
+      <FieldBindingsTable
+        bindings={[binding()]}
+        selectedSourceKey={null}
+        onSelect={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("启用中")).toBeInTheDocument();
+    expect(screen.getByText("有问题")).toBeInTheDocument();
   });
 });

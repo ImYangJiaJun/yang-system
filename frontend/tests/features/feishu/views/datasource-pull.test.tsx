@@ -74,6 +74,7 @@ function pullSource(overrides: Record<string, unknown> = {}) {
 
 describe("详情页 · 下次自动拉取", () => {
   it("显示服务端报的下次时间与配置的间隔", async () => {
+    const user = userEvent.setup();
     const nextRunAt = Math.floor(Date.now() / 1000) + 720;
     stubFeishuApi({
       datasourceList: () => listPage([pullSource()]),
@@ -82,6 +83,12 @@ describe("详情页 · 下次自动拉取", () => {
     });
     renderDetail();
 
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「同步状态」Tab
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
+
     // 行标签是静态的，值要等排程查询落定——先 await 值，别 await 标签。
     expect(await screen.findByText(/约 12 分钟后/)).toBeInTheDocument();
     expect(screen.getByText("下次自动拉取")).toBeInTheDocument();
@@ -89,12 +96,19 @@ describe("详情页 · 下次自动拉取", () => {
   });
 
   it("排程答不出来时说「正在拉取」，不编一个时间", async () => {
+    const user = userEvent.setup();
     stubFeishuApi({
       datasourceList: () => listPage([pullSource()]),
       optionList: () => listPage([]),
       pullSchedule: () => ({ interval_seconds: 900, next_run_at: null }),
     });
     renderDetail();
+
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「同步状态」Tab
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
 
     expect(await screen.findByText("正在拉取")).toBeInTheDocument();
   });
@@ -118,6 +132,9 @@ describe("详情页 · 立即拉取", () => {
     renderDetail();
 
     await user.click(await screen.findByRole("button", { name: /立即拉取/ }));
+
+    // 点击「同步状态」Tab 查看状态更新
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
 
     await waitFor(
       () => expect(screen.getByText(/这一轮已经跑过了/)).toBeInTheDocument(),
@@ -151,6 +168,9 @@ describe("详情页 · 立即拉取", () => {
 
     await user.click(await screen.findByRole("button", { name: /立即拉取/ }));
 
+    // 点击「同步状态」Tab 查看错误信息
+    await user.click(screen.getByRole("button", { name: "同步状态" }));
+
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "取数方式是「手工推送」",
     );
@@ -167,7 +187,10 @@ describe("详情页 · 立即拉取", () => {
     });
     renderDetail();
 
-    expect(await screen.findByText("下次自动拉取")).toBeInTheDocument();
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 按钮在 header 里，应该不存在
     expect(
       screen.queryByRole("button", { name: /立即拉取/ }),
     ).not.toBeInTheDocument();
@@ -186,6 +209,12 @@ describe("详情页 · 取选项接口地址", () => {
       pullSchedule: () => ({ interval_seconds: 900, next_run_at: null }),
     });
     renderDetail();
+
+    // 等待数据源加载完成
+    await screen.findByText(/数据源 #7/);
+
+    // 点击「凭据配置」Tab
+    await user.click(screen.getByRole("button", { name: "凭据配置" }));
 
     // 一条数据源有 N 个字段 = N 个地址，所以地址在**凭据清单**里一行一个：
     // 页面顶部那块「取选项接口地址」在表级化之后没有单一值可填，已经删掉。
