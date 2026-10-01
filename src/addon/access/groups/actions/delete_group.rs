@@ -54,13 +54,19 @@ pub(super) async fn handle(
         if member_count > 0 {
             return Err(group_has_members(Some(member_count)));
         }
+        // 先删条目（条目表有 fk_permission_group_item_group RESTRICT 引用本表），
+        // 再删组——顺序调换才能绕过外键拒绝；与删组成员的顺序无关（成员已在前面检查）。
+        access
+            .groups()
+            .delete_items_of_group_in_tx(&ctx, &mut transaction, group.id)
+            .await?;
         let affected_rows = match access
             .groups()
             .delete_group_in_tx(&ctx, &mut transaction, group.id)
             .await
         {
             Ok(rows) => rows,
-            // 兜底路径与前置检查看到的是同一件事（「还有人引用这个组」），必须折算成
+            // 兜底路径：并发窗口内写入的成员行（当前事务快照不可见），必须折算成
             // 同一个可读拒绝，绝不能把 500 泄漏给客户端。
             Err(error) if is_referential_constraint(&error) => {
                 return Err(group_has_members(None));
@@ -70,11 +76,6 @@ pub(super) async fn handle(
         if affected_rows == 0 {
             return Err(BaseError::RecordNotFound("权限组".to_string()));
         }
-        // 条目表没有到本表的外键，数据库不会替我们清理，留着就是悬空条目行。
-        access
-            .groups()
-            .delete_items_of_group_in_tx(&ctx, &mut transaction, group.id)
-            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,
@@ -112,16 +113,17 @@ pub(super) async fn handle(
 /// ——与 `ensure_member_limit` 对同类「资源状态冲突」的取舍一致。
 fn group_has_members(member_count: Option<u64>) -> BaseError {
     let message = match member_count {
-        Some(count) => format!("该权限组仍有 {count} 名成员，请先移出成员"),
-        None => "该权限组仍有成员，请先移出成员".to_string(),
+        Some(count) => format!("该权限组仍有 {count} 个成员，请先移出成员"),
+        None => "该权限组仍有成员引用，请先移出成员".to_string(),
     };
     BaseError::ParamInvalid("group_id".to_string(), message)
 }
 
 /// 该错误是否表示「外键 RESTRICT 拒绝了这次删除」。
 ///
-/// `permission_group` 上只有 `user_group` 的外键能被 DELETE 违反，因此认出
-/// 「约束类错误」就足够，不必去解析 MySQL 的报文案（跨库、跨版本都不稳定）。
+/// `permission_group` 上有 `permission_group_item` 与 `user_group` 两条外键（均
+/// RESTRICT）能被 DELETE 违反，因此认出「约束类错误」就足够，不必去解析 MySQL
+/// 的报文案（跨库、跨版本都不稳定）。
 fn is_referential_constraint(error: &BaseError) -> bool {
     matches!(
         error,

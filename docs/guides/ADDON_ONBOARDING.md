@@ -69,6 +69,17 @@ src/addon/<addon>/
   Input（实现 `ParamInput`，参考 `list_notes.rs`/内置 `SelectAction` 契约）。
 - 权限：`.permissions(["<addon>.<module>.read"|".write"])`。权限字符串须匹配
   `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`；声明即进入权限目录，无需其他登记。
+- **管理员等价登记义务**：若新增 Action 的权限属于"管理员等价类"——持有该权限可
+  **获得或夺取其他主体的凭据/身份**，或可**绕过其余一切授权检查**（典型例子：签发
+  密码重置凭证、回显密钥明文、写入会返回新凭据的创建接口）——则必须在该权限声明
+  的同时，把权限字符串与中文理由追加到
+  `src/addon/access/domain/sensitive_permissions.rs` 的
+  `ADMIN_EQUIVALENT_PERMISSIONS` 数组中，否则 G2 授予闸门不会对该权限生效。
+  清单是代码侧的显式、可评审事实（与授权 writer allowlist 同形式），逐条附理由，
+  由单测 `every_listed_permission_is_declared_by_the_catalog` 钉住它与冻结 Catalog
+  的一致性；集成测试再整体比对一次。同类接口的多条权限（如创建与轮换走两条权限）
+  需要一并登记，理由是两条各自独立的风险；`docs/contracts/AUTHZ_GRANTS.md` 的
+  「管理员等价权限」节有完整判据与登记示例。
 - 路由：显式 `/api/v1/...`（如 `POST /api/v1/demo/notes`）。
 - 写操作用例范式：开事务 → 经 domain writer 改事实 →
   `audit::succeeded_event(...)` + `audit::append_in_tx(...)` 同事务审计 →

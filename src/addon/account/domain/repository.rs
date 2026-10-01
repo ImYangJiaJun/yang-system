@@ -422,16 +422,17 @@ impl UserRepository {
         // TOCTOU 双消费（此前两并发请求可同时读到同一摘要集并各自成功）。
         let pool = ctx.tools().mysql()?.pool().clone();
         let locked = transaction
-            .select_for_update::<(i64,)>(
+            .select_for_update::<(i64, i64)>(
                 QueryBuilder::from_pool(&pool, table!("users"))
                     .field(field!("id"))
+                    .field(field!("authz_version"))
                     .where_and(field!("id"), CompareOp::Eq, id)?,
             )
             .await
             .map_err(BaseError::from)?;
-        if locked.is_empty() {
+        let Some((_user_id, authz_version)) = locked.into_iter().next() else {
             return Ok(false);
-        }
+        };
         let rows = self
             .trusted_query(ctx)?
             .select_fields(USER_TOTP_FIELDS)?
@@ -465,6 +466,23 @@ impl UserRepository {
                 format!("用户 {id} 恢复码消费未精确影响一行"),
             )));
         }
+        // 恢复码消费使授权事实发生变化（恢复码是认证器丢失的逃生通道，消费后必须使
+        // 旧 Access Token 失效）。在已持有的用户行锁内递增授权版本并写入 Outbox。
+        let next_authz = super::authz_version::next_authz_version(authz_version)?;
+        let updated = transaction
+            .table(table!("users"))
+            .where_and(field!("id"), CompareOp::Eq, id)?
+            .where_and(field!("authz_version"), CompareOp::Eq, authz_version)?
+            .update(&serde_json::json!({
+                "authz_version": next_authz,
+            }))
+            .await?;
+        if updated != 1 {
+            return Err(BaseError::from(yang_db::DbError::TransactionError(
+                format!("用户 {id} 恢复码消费后授权版本在持锁事务内发生意外变化"),
+            )));
+        }
+        super::authz_version::append_authorization_outbox(transaction, id, next_authz).await?;
         Ok(true)
     }
 

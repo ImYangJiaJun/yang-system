@@ -242,8 +242,9 @@ impl GroupRepository {
 
     /// 删除一个组的全部权限条目，返回删除行数。
     ///
-    /// 条目表只有唯一键与 CHECK、没有到 `permission_group` 的外键，删组时数据库
-    /// 不会替我们清理，因此这里必须显式删——否则会留下悬空条目行。
+    /// 条目表已有 `fk_permission_group_item_group` 外键（RESTRICT），但 `delete_group`
+    /// Action 会在删除组之前先调用本方法删条目（见 `delete_group.rs`），因此这里仍是
+    /// 显式清理——先删条目再删组才能绕过外键拒绝。
     pub(crate) async fn delete_items_of_group_in_tx(
         &self,
         ctx: &ActionContext,

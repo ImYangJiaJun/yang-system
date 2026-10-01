@@ -610,7 +610,7 @@ async fn delete_account_removes_avatar_row() -> anyhow::Result<()> {
         let app = build_avatar_app(&control, &redis, &sender).await?;
         // 首账号会被引导 claimer 变成系统管理员，而 spec §8.2 禁止删除最后一名
         // 启用的系统管理员（Task 13）。先消费掉那个名额，owner 才是可删除的普通账号。
-        register_and_login(
+        let (bootstrap_token, _bootstrap_id) = register_and_login(
             &app,
             &sender,
             "avatar_bootstrap",
@@ -626,7 +626,7 @@ async fn delete_account_removes_avatar_row() -> anyhow::Result<()> {
             45_201,
         )
         .await?;
-        let (observer_token, _observer_id) = register_and_login(
+        let (_observer_token, _observer_id) = register_and_login(
             &app,
             &sender,
             "avatar_observer",
@@ -697,7 +697,7 @@ async fn delete_account_removes_avatar_row() -> anyhow::Result<()> {
             .fetch_one(control.pool())
             .await?;
         ensure!(stored == 0, "delete_account 必须删除头像行");
-        let fetched = get_avatar(&app, &observer_token, owner_id, 45_201).await?;
+        let fetched = get_avatar(&app, &bootstrap_token, owner_id, 45_201).await?;
         let fetched_data = fetched.data.context("get_avatar 响应缺少 data")?;
         ensure!(
             fetched_data["etag"] == Value::Null && fetched_data["data_url"] == Value::Null,

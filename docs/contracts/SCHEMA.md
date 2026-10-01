@@ -25,6 +25,23 @@
 错误会给出表名、字段或约束名，以及最多 20 个按主键排序的冲突主键。运维人员手动修复
 这些行后重启即可；无需伪造版本号或跳过某个历史脚本。
 
+## 权限相关表清单
+
+以下 5 张表构成权限系统的存储层，声明在 `src/addon/access/` 下，启动时经声明式 Schema
+增量同步：
+
+| 表 | 核心字段 | 唯一键 | 外键 |
+|---|---|---|---|
+| `authz_grant` | `id`, `user_id`, `permission`, `granted_by`, `occurred_at` | `uk_authz_grant_user_permission` (`user_id`, `permission`) | — |
+| `permission_group` | `id`, `group_key`, `title`, `description`, `created_by`, `occurred_at` | `uk_permission_group_key` (`group_key`) | — |
+| `permission_group_item` | `id`, `group_id`, `permission`, `granted_by`, `occurred_at` | `uk_permission_group_item` (`group_id`, `permission`) | `fk_permission_group_item_group` → `permission_group.id` (RESTRICT) |
+| `user_group` | `id`, `user_id`, `group_id`, `granted_by`, `occurred_at` | `uk_user_group` (`user_id`, `group_id`) | `fk_user_group_user` → `users.id` (RESTRICT)； `fk_user_group_group` → `permission_group.id` (RESTRICT) |
+| `system_owner` | `id`, `sentinel_key`, `user_id`, `claimed_at` | `uk_system_owner_sentinel` (`sentinel_key`) | — |
+
+`authz_grant` 由 `src/addon/access/grants/table.rs` 声明；其余四张由
+`src/addon/access/domain/groups/tables.rs` 的 `infrastructure_definitions()` 输出。
+全部走声明式 Schema，零 SQL 迁移文件。权限系统契约详见 `docs/contracts/AUTHZ_GRANTS.md`。
+
 ## 边界
 
 当前同步是保数据、fail-closed 的兼容演进工具，不支持自动删列、缩短字符串、任意数值

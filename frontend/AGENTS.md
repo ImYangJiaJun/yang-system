@@ -21,6 +21,7 @@ src/
 │   └── index.ts     # 引擎公共出口
 ├── features/    # 业务域与自定义视图
 │   ├── auth/        # 登录/注册/重置/身份选择页面、流程请求 api.ts、StepUpDialog、身份 store
+│   ├── access/      # 权限组管理：views/（列表 / 详情页）、components/、api.ts
 │   ├── feishu/      # 飞书数据源控制台：views/（列表 / 详情自定义页）、components/（含 XlsxImportWizard 导入向导）与 api.ts
 │   ├── <域>/views/  # 各域自定义视图（如 demo/views/DemoItemInsight.tsx）
 │   ├── registry.ts          # 自定义视图静态注册表（唯一入口）

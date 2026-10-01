@@ -229,6 +229,13 @@ export default function AppLayout() {
     ),
   );
 
+  // 权限组入口的权限门控。
+  const canReadAccessGroups = Boolean(
+    catalog?.actions.some(
+      (action) => action.operation_id === "access.groups.list_groups",
+    ),
+  );
+
   // 审批派发控制台两入口的权限门控（设计 §5.3）：与数据源位独立——一个身份可能
   // 只有审批 read（看得见派发记录）而没有数据源位。「审批派发」与「派发记录」
   // 是同一对 read 权限位下的两条路，分开问。
@@ -282,6 +289,30 @@ export default function AppLayout() {
               </li>
             </ul>
           </div>
+          {canReadAccessGroups && (
+            <div>
+              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                权限管理
+              </p>
+              <ul className="space-y-0.5">
+                <li>
+                  <NavLink
+                    to="/access/groups"
+                    className={({ isActive }) =>
+                      cn(
+                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                        isActive &&
+                          "bg-accent font-medium text-accent-foreground",
+                      )
+                    }
+                  >
+                    <ShieldCheck className="size-4 shrink-0" />
+                    权限组
+                  </NavLink>
+                </li>
+              </ul>
+            </div>
+          )}
           {(canReadFeishuDatasources ||
             canReadFeishuApprovalConfigs ||
             canReadFeishuApprovalRequests) && (
@@ -341,6 +372,30 @@ export default function AppLayout() {
                     </NavLink>
                   </li>
                 )}
+              </ul>
+            </div>
+          )}
+          {canReadAccessGroups && (
+            <div>
+              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                权限管理
+              </p>
+              <ul className="space-y-0.5">
+                <li>
+                  <NavLink
+                    to="/access/groups"
+                    className={({ isActive }) =>
+                      cn(
+                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                        isActive &&
+                          "bg-accent font-medium text-accent-foreground",
+                      )
+                    }
+                  >
+                    <ShieldCheck className="size-4 shrink-0" />
+                    权限组
+                  </NavLink>
+                </li>
               </ul>
             </div>
           )}

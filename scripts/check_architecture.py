@@ -157,12 +157,25 @@ GENERIC_TABLE_WRITE_RE = re.compile(
     r"\.(?:insert(?:_returning_id)?(?:_in_tx)?|update(?:_in_tx)?|"
     r"delete(?:_in_tx)?)\s*\("
 )
-PROTECTED_MODULE_PATHS = ("src/addon/account/",)
+PROTECTED_MODULE_PATHS = ("src/addon/account/", "src/addon/access/")
 INTERNAL_ACTION_BYPASS_PATTERNS = {
     "ActionContext.plugins": re.compile(r"\.\s*plugins\s*\("),
     "Registry.resolve_typed": re.compile(r"\.\s*resolve_typed\s*(?:::\s*<[^;]+?>)?\s*\("),
     "TypedActionHandle": re.compile(r"\bTypedActionHandle\b"),
 }
+SENSITIVE_PERMISSIONS_FILE = (
+    "src/addon/access/domain/sensitive_permissions.rs"
+)
+ADMIN_EQUIVALENT_PERMISSION_RE = re.compile(
+    r'permission:\s*"([a-z][a-z0-9_.]*)"'
+)
+ACTION_PERMISSION_RE = re.compile(
+    r'\.\s*permissions\s*\(\s*\[(.*?)\]\)'
+)
+PERMISSION_STRING_RE = re.compile(r'"([a-z][a-z0-9_.]*)"')
+ADMIN_EQUIVALENT_KEYWORDS = (
+    "secret", "credential", "reset", "token", "rotate", "key",
+)
 
 
 def derived_action_count(source: str) -> int:
@@ -846,6 +859,59 @@ def check_source_layout(root: Path) -> list[str]:
     return errors
 
 
+def check_admin_equivalent_coverage(root: Path) -> list[str]:
+    """检查管理员等价权限清单是否覆盖了所有可疑权限。
+
+    解析 `sensitive_permissions.rs` 中的已登记清单，再扫描 `actions/` 目录中
+    声明的全部权限字符串，对含有敏感关键词（secret/credential/reset/token/rotate/key）
+    但不在清单中的权限发出警告，帮助 addon 作者避免漏登记。
+    """
+
+    errors: list[str] = []
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return errors
+
+    # 1. 解析已登记的管理员等价权限清单
+    sensitive_path = root / SENSITIVE_PERMISSIONS_FILE
+    if not sensitive_path.is_file():
+        return []  # 非完整检出或无 access addon 时不检查
+
+    sensitive_source = sensitive_path.read_text(encoding="utf-8")
+    listed_permissions = set(
+        ADMIN_EQUIVALENT_PERMISSION_RE.findall(sensitive_source)
+    )
+    if not listed_permissions:
+        return [f"{SENSITIVE_PERMISSIONS_FILE}: 未能解析出任何登记权限"]
+
+    # 2. 扫描 actions/ 下的全部权限声明
+    declared_permissions: set[str] = set()
+    for actions_dir in action_directories(root):
+        for path in sorted(actions_dir.glob("*.rs")):
+            if path.name == "mod.rs":
+                continue
+            source = production_source(path.read_text(encoding="utf-8"))
+            for match in ACTION_PERMISSION_RE.finditer(source):
+                body = match.group(1)
+                declared_permissions.update(PERMISSION_STRING_RE.findall(body))
+
+    # 3. 对有敏感关键词却未登记的管理员等价权限发出警告
+    for permission in sorted(declared_permissions):
+        if permission in listed_permissions:
+            continue
+        for keyword in ADMIN_EQUIVALENT_KEYWORDS:
+            if keyword in permission:
+                errors.append(
+                    f"权限 {permission} 包含敏感关键词「{keyword}」，但未在 "
+                    f"{SENSITIVE_PERMISSIONS_FILE} 的 ADMIN_EQUIVALENT_PERMISSIONS "
+                    "中登记——若无管理员等价风险，请确认并忽略此警告；"
+                    "若有，请追加登记并附中文理由"
+                )
+                break
+
+    return errors
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     errors.extend(check_source_layout(root))
@@ -863,6 +929,7 @@ def check(root: Path) -> list[str]:
     errors.extend(check_raw_sql_boundaries(root))
     errors.extend(check_authorization_writer_boundaries(root))
     errors.extend(check_frontend_boundaries(root))
+    errors.extend(check_admin_equivalent_coverage(root))
     return errors
 
 
@@ -1299,6 +1366,52 @@ def self_test() -> None:
         errors = check_authorization_writer_boundaries(root)
         assert any("授权事实表 users" in error for error in errors), (
             "必须拒绝跨模块 raw SQL 写授权事实"
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        # 构造敏感权限清单与 action 文件
+        sensitive = root / SENSITIVE_PERMISSIONS_FILE
+        sensitive.parent.mkdir(parents=True)
+        write(
+            sensitive,
+            "pub(crate) const ADMIN_EQUIVALENT_PERMISSIONS: &[AdminEquivalentPermission] = &[\n"
+            '    AdminEquivalentPermission { permission: "feishu.datasource.secret", reason: "…" },\n'
+            "];\n",
+        )
+        actions = root / "src" / "addon" / "demo" / "actions"
+        write(
+            actions / "mod.rs",
+            "mod list;\nfn register_all() { let _ = list::register; }\n",
+        )
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\npub(super) fn register() {}\n",
+        )
+        assert check_admin_equivalent_coverage(root) == [], (
+            "未声明权限的 action 不应触发管理员等价检查"
+        )
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\npub(super) fn register(m: ModuleSpec) {\n"
+            '    m.action_fn(name, handle).permissions(["demo.notes.read"]).register()\n'
+            "}\n",
+        )
+        errors = check_admin_equivalent_coverage(root)
+        assert any("敏感关键词" not in (error or "") for error in errors) or not errors, (
+            "普通读权限不应触发敏感关键词警告"
+        )
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\npub(super) fn register(m: ModuleSpec) {\n"
+            '    m.action_fn(name, handle).permissions(["demo.secret.read"]).register()\n'
+            "}\n",
+        )
+        errors = check_admin_equivalent_coverage(root)
+        assert any("敏感关键词" in error for error in errors), (
+            "含敏感关键词的权限必须触发警告"
         )
 
 

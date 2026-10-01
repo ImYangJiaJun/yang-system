@@ -82,7 +82,10 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
 - 核心链路：`Addon/Module/fields!/params!` → `AppBuilder` → Catalog / Registry / TableDefinition → OpenAPI/UI、HTTP dispatch、Schema。请求处理顺序：auth → authz_version → permission → Step-up guard → Action → 业务事实 + 版本 + Outbox/audit。
 - `fields!` 是 Schema、输入输出约束、OpenAPI 和查询策略的唯一字段事实来源；`params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；**禁止引入进程级数据库/Redis/Tools 单例**。
-- 当前没有租户域；裸 SQL 路径的边界登记见 `docs/architecture/raw-sql-boundaries.md`。
+- 当前没有租户域（`src/addon/org/` 与 `src/addon/work/` 目录均不存在），
+  因此 tenant-boundary 门禁 `check_tenant_boundaries` 当前为空转（`TENANT_BOUNDARY_KINDS`
+  定义的 8 种风险模式均无代码可扫描）；裸 SQL 路径的边界登记见
+  `docs/architecture/raw-sql-boundaries.md`。
 - 数据库结构由 `src/infrastructure/schema.rs` 的声明统一驱动：启动时先只读计划和旧数据预检，全部安全后才保数据增量同步；冲突会输出表、对象和主键并拒绝启动。**不要新增 SQL 迁移文件**（仓库刻意不设 `migrations/` 目录）。规则见 `docs/contracts/SCHEMA.md`。
 - 前端业务导航由后端 Catalog 投影驱动，通用 `ModulePage` 解释 TableView/JSON Schema 表单/操作语义；需要特殊交互的页面必须在 `frontend/src/features/registry.ts` 静态注册表中显式登记，未登记或加载失败时回退到通用 TableView。**不要根据后端返回的字符串构造动态 import**。
 

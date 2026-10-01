@@ -24,8 +24,10 @@ import {
   hasOperation,
   invokeAction,
   useSessionCredentials,
+  useSessionController,
   useUiCatalog,
 } from "@/engine";
+import { StepUpRequiredError } from "@/engine/http/errors";
 import type {
   ActionDemoSchema,
   InvocationResult,
@@ -208,12 +210,14 @@ async function invokeGroupAction(
   operationId: string,
   values: Record<string, unknown>,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<InvocationResult> {
   return invokeAction(
     requireGroupAction(deps.catalog, operationId),
     values,
     deps.session,
     signal,
+    { stepUpProof },
   );
 }
 
@@ -268,6 +272,7 @@ export async function createGroup(
   input: CreateGroupInput,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<number> {
   const result = await invokeGroupAction(
     deps,
@@ -278,6 +283,7 @@ export async function createGroup(
       description: input.description,
     },
     signal,
+    stepUpProof,
   );
   return asNumber(asRecord(result.data)?.id, 0);
 }
@@ -293,6 +299,7 @@ export async function updateGroup(
   input: UpdateGroupInput,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<void> {
   await invokeGroupAction(
     deps,
@@ -303,6 +310,7 @@ export async function updateGroup(
       description: input.description,
     },
     signal,
+    stepUpProof,
   );
 }
 
@@ -311,12 +319,14 @@ export async function deleteGroup(
   groupId: number,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<void> {
   await invokeGroupAction(
     deps,
     GROUP_OPERATION_IDS.remove,
     { group_id: groupId },
     signal,
+    stepUpProof,
   );
 }
 
@@ -326,12 +336,14 @@ export async function addGroupItem(
   permission: string,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<void> {
   await invokeGroupAction(
     deps,
     GROUP_OPERATION_IDS.addItem,
     { group_id: groupId, permission },
     signal,
+    stepUpProof,
   );
 }
 
@@ -341,12 +353,14 @@ export async function removeGroupItem(
   permission: string,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<void> {
   await invokeGroupAction(
     deps,
     GROUP_OPERATION_IDS.removeItem,
     { group_id: groupId, permission },
     signal,
+    stepUpProof,
   );
 }
 
@@ -355,12 +369,14 @@ export async function addGroupMember(
   userId: number,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<void> {
   await invokeGroupAction(
     deps,
     GROUP_OPERATION_IDS.addMember,
     { group_id: groupId, user_id: userId },
     signal,
+    stepUpProof,
   );
 }
 
@@ -369,12 +385,14 @@ export async function removeGroupMember(
   userId: number,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
+  stepUpProof?: string,
 ): Promise<void> {
   await invokeGroupAction(
     deps,
     GROUP_OPERATION_IDS.removeMember,
     { group_id: groupId, user_id: userId },
     signal,
+    stepUpProof,
   );
 }
 
@@ -440,6 +458,9 @@ export function useGroupDetail(
 ///
 /// 变更函数本身**不缓存失效**——写接口只回计数或幂等标记，页面提交后必须回读，
 /// 所以失效由调用方（页面）统一挂在 `accessGroupQueryKeys.root()` 上。
+///
+/// 每个写操作内置 Step-up 重试：收到 428 challenge 时自动弹重认证对话框并重放请求；
+/// 用户取消重认证时函数静默返回（`createGroup` 返回 0，其余无操作）。
 export type GroupActions = {
   canRead: boolean;
   canManage: boolean;
@@ -456,28 +477,74 @@ export function useGroupActions(): GroupActions {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
+  const controller = useSessionController();
 
   const deps = useMemo<AccessInvokeDeps>(
     () => ({ catalog: catalogData, session }),
     [catalogData, session],
   );
 
+  /// Step-up 透明重试：首次请求遇 428 时弹重认证对话框换 proof 后重放。
+  const request = useMemo(
+    () =>
+      <T,>(
+        fn: (proof: string | undefined) => Promise<T>,
+      ): Promise<T | undefined> => runProtected(fn, controller),
+    [controller],
+  );
+
   return useMemo(
     () => ({
       canRead: canReadGroups(catalogData),
       canManage: canManageGroups(catalogData),
-      createGroup: (input: CreateGroupInput) => createGroup(input, deps),
-      updateGroup: (input: UpdateGroupInput) => updateGroup(input, deps),
-      deleteGroup: (groupId: number) => deleteGroup(groupId, deps),
-      addItem: (groupId: number, permission: string) =>
-        addGroupItem(groupId, permission, deps),
-      removeItem: (groupId: number, permission: string) =>
-        removeGroupItem(groupId, permission, deps),
-      addMember: (groupId: number, userId: number) =>
-        addGroupMember(groupId, userId, deps),
-      removeMember: (groupId: number, userId: number) =>
-        removeGroupMember(groupId, userId, deps),
+      createGroup: async (input: CreateGroupInput) => {
+        const result = await request((proof) =>
+          createGroup(input, deps, undefined, proof),
+        );
+        return result ?? 0;
+      },
+      updateGroup: async (input: UpdateGroupInput) => {
+        await request((proof) => updateGroup(input, deps, undefined, proof));
+      },
+      deleteGroup: async (groupId: number) => {
+        await request((proof) => deleteGroup(groupId, deps, undefined, proof));
+      },
+      addItem: async (groupId: number, permission: string) => {
+        await request((proof) =>
+          addGroupItem(groupId, permission, deps, undefined, proof),
+        );
+      },
+      removeItem: async (groupId: number, permission: string) => {
+        await request((proof) =>
+          removeGroupItem(groupId, permission, deps, undefined, proof),
+        );
+      },
+      addMember: async (groupId: number, userId: number) => {
+        await request((proof) =>
+          addGroupMember(groupId, userId, deps, undefined, proof),
+        );
+      },
+      removeMember: async (groupId: number, userId: number) => {
+        await request((proof) =>
+          removeGroupMember(groupId, userId, deps, undefined, proof),
+        );
+      },
     }),
-    [catalogData, deps],
+    [catalogData, deps, request],
   );
+}
+
+/// Step-up 透明重试：首次请求遇 428 时通过 controller 弹对话框换 proof 后重放。
+async function runProtected<T>(
+  request: (proof: string | undefined) => Promise<T>,
+  controller: ReturnType<typeof useSessionController>,
+): Promise<T | undefined> {
+  try {
+    return await request(undefined);
+  } catch (cause) {
+    if (!(cause instanceof StepUpRequiredError)) throw cause;
+    const proof = await controller.requestStepUpProof(cause.challenge);
+    if (!proof) return undefined; // 用户取消
+    return await request(proof);
+  }
 }

@@ -320,7 +320,7 @@ pub(crate) async fn disable_locked_user_and_increment_versions(
     Ok((next_authz, next_credential))
 }
 
-async fn append_authorization_outbox(
+pub(crate) async fn append_authorization_outbox(
     transaction: &mut Transaction,
     user_id: i64,
     authz_version: i64,
@@ -339,7 +339,7 @@ async fn append_authorization_outbox(
     Ok(())
 }
 
-fn next_authz_version(current: i64) -> Result<i64, BaseError> {
+pub(crate) fn next_authz_version(current: i64) -> Result<i64, BaseError> {
     current
         .checked_add(1)
         .filter(|next| *next > 1)

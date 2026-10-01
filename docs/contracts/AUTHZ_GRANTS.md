@@ -121,8 +121,9 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 `permission_group_item`（运行支撑表）：`id`、`group_id`（必填）、`permission`
 （`PERMISSION_PATTERN` + `chk_permission_group_item_permission_format`）、`granted_by`、
 `occurred_at`；UNIQUE `uk_permission_group_item (group_id, permission)`。
-**该表刻意不声明外键**，因此删除组时由应用层在同一事务内显式清理条目行
-（`delete_items_of_group_in_tx`），数据库不会替我们清。
+已有 FK `fk_permission_group_item_group (group_id → permission_group.id)`，规则为**RESTRICT**——
+删除组时数据库拒绝仍有条目的组，因此删除组时应用层必须先删条目再删组（`delete_items_of_group_in_tx`），
+与应用层前置检查构成纵深防御。
 
 `user_group`（运行支撑表）：`id`、`user_id`、`group_id`、`granted_by`、`occurred_at`；
 UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user → users.id`、
@@ -310,16 +311,16 @@ COMMIT;
 | 删组 | `POST /api/v1/access/groups/delete` | `access.groups.write` | 是 |
 | 组列表 | `GET /api/v1/access/groups` | `access.groups.read` | 否 |
 | 组详情 | `GET /api/v1/access/groups/{group_id}` | `access.groups.read` | 否 |
-| 加组权限 | `POST /api/v1/access/groups/items` | `access.groups.write` | 否 |
-| 移组权限 | `POST /api/v1/access/groups/items/remove` | `access.groups.write` | 否 |
-| 加组成员 | `POST /api/v1/access/groups/members` | `access.groups.write` | 否 |
-| 移组成员 | `POST /api/v1/access/groups/members/remove` | `access.groups.write` | 否 |
+| 加组权限 | `POST /api/v1/access/groups/items` | `access.groups.write` | 是 |
+| 移组权限 | `POST /api/v1/access/groups/items/remove` | `access.groups.write` | 是 |
+| 加组成员 | `POST /api/v1/access/groups/members` | `access.groups.write` | 是 |
+| 移组成员 | `POST /api/v1/access/groups/members/remove` | `access.groups.write` | 是 |
 
 说明：
 
-- **Step-up 覆盖范围是建/改/删组三个入口**（`access/groups/mod.rs` 的 `step_up_targets`，
-  与 grants 只覆盖 grant/revoke 同例）。组条目与组成员的变更**不挂重认证中间件**，其防线
-  是「防自提权子集校验 + 最后管理员守卫 + Step-up 保护的组生命周期」——即攻击者无法凭空
+- **Step-up 覆盖全部 7 个组写 Action**（`access/groups/mod.rs` 的 `step_up_targets`，
+  与 grants 只覆盖 grant/revoke 同例）。组条目与组成员的变更同样挂重认证中间件，
+  是「防自提权子集校验 + 最后管理员守卫 + Step-up」三层防线——即攻击者无法凭空
   获得一个自己能写的新组，也无法越过后两条不变量。
 - **管理员等价权限的授予闸门**：`POST /access/grants`、`POST /access/groups/items`、
   `POST /access/groups/members` 三条路径在涉及管理员等价权限（见「管理员等价权限」节）时，

@@ -24,7 +24,7 @@ import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
 
-import { useUiCatalog } from "@/engine";
+import { useUiCatalog, StepUpRequiredError, useSessionController } from "@/engine";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
@@ -59,6 +59,7 @@ export default function PermissionGroupsPage() {
   const queryClient = useQueryClient();
   const catalog = useUiCatalog();
   const actions = useGroupActions();
+  const controller = useSessionController();
   const listQuery = useGroupList();
   const toast = useToast();
 
@@ -87,7 +88,8 @@ export default function PermissionGroupsPage() {
   }
 
   /// 所有写操作的共同外壳：清提示 → 执行 → 回读 → 落提示；失败就把服务端原文亮出来。
-  function submit(action: () => Promise<void>, successMessage?: string) {
+  /// 遇到 428（StepUpRequiredError）时会弹重认证对话框，换 proof 后自动重放一次。
+  function submit(action: (proof?: string) => Promise<void>, successMessage?: string) {
     setError(null);
     setPending(true);
     void (async () => {
@@ -98,7 +100,21 @@ export default function PermissionGroupsPage() {
           toast.success(successMessage);
         }
       } catch (cause) {
-        setError(messageOf(cause));
+        if (cause instanceof StepUpRequiredError) {
+          try {
+            const proof = await controller.requestStepUpProof(cause.challenge);
+            if (!proof) return; // 用户取消重认证
+            await action(proof);
+            await refresh();
+            if (successMessage !== undefined) {
+              toast.success(successMessage);
+            }
+          } catch (retryCause) {
+            setError(messageOf(retryCause));
+          }
+        } else {
+          setError(messageOf(cause));
+        }
       } finally {
         setPending(false);
       }
@@ -156,8 +172,8 @@ export default function PermissionGroupsPage() {
             busy={pending}
             onSelect={setSelectedId}
             onCreate={(input) =>
-              submit(async () => {
-                await actions.createGroup(input);
+              submit(async (proof) => {
+                await actions.createGroup(input, proof);
               }, `已创建权限组「${input.title}」`)
             }
           />
@@ -358,7 +374,7 @@ function GroupDetailPanel({
   error: unknown;
   onRetry: () => void;
   actions: ReturnType<typeof useGroupActions>;
-  submit: (action: () => Promise<void>, successMessage?: string) => void;
+  submit: (action: (proof?: string) => Promise<void>, successMessage?: string) => void;
   busy: boolean;
   visibleCatalogActionCount: number;
 }) {
@@ -414,12 +430,12 @@ function GroupDetailPanel({
               detail={detail}
               busy={busy}
               onRename={(title, description) =>
-                submit(async () => {
+                submit(async (proof) => {
                   await actions.updateGroup({
                     groupId: detail.id,
                     title,
                     description,
-                  });
+                  }, proof);
                 }, "已更新该组的展示信息")
               }
             />
@@ -428,8 +444,8 @@ function GroupDetailPanel({
               size="sm"
               disabled={busy}
               onClick={() =>
-                submit(async () => {
-                  await actions.deleteGroup(detail.id);
+                submit(async (proof) => {
+                  await actions.deleteGroup(detail.id, proof);
                 }, `已删除权限组「${detail.title}」`)
               }
             >
@@ -524,7 +540,7 @@ function ItemPanel({
 }: {
   detail: GroupDetail;
   actions: ReturnType<typeof useGroupActions>;
-  submit: (action: () => Promise<void>, successMessage?: string) => void;
+  submit: (action: (proof?: string) => Promise<void>, successMessage?: string) => void;
   busy: boolean;
   visibleCatalogActionCount: number;
 }) {
@@ -583,10 +599,11 @@ function ItemPanel({
                         checked
                         disabled={busy}
                         onCheckedChange={() =>
-                          submit(async () => {
+                          submit(async (proof) => {
                             await actions.removeItem(
                               detail.id,
                               item.permission,
+                              proof,
                             );
                           }, `已移除「${item.permission}」`)
                         }
@@ -628,8 +645,8 @@ function ItemPanel({
                 const permission = draft.trim();
                 if (permission === "") return;
                 setDraft("");
-                submit(async () => {
-                  await actions.addItem(detail.id, permission);
+                submit(async (proof) => {
+                  await actions.addItem(detail.id, permission, proof);
                 }, `已加入「${permission}」`);
               }}
             >
@@ -667,7 +684,7 @@ function MemberPanel({
 }: {
   detail: GroupDetail;
   actions: ReturnType<typeof useGroupActions>;
-  submit: (action: () => Promise<void>, successMessage?: string) => void;
+  submit: (action: (proof?: string) => Promise<void>, successMessage?: string) => void;
   busy: boolean;
 }) {
   const [draft, setDraft] = useState("");
@@ -699,8 +716,8 @@ function MemberPanel({
                   aria-label={`移出成员 #${memberId}`}
                   disabled={busy}
                   onClick={() =>
-                    submit(async () => {
-                      await actions.removeMember(detail.id, memberId);
+                    submit(async (proof) => {
+                      await actions.removeMember(detail.id, memberId, proof);
                     }, `已移出成员 #${memberId}`)
                   }
                 >
@@ -719,8 +736,8 @@ function MemberPanel({
             event.preventDefault();
             if (userId === null) return;
             setDraft("");
-            submit(async () => {
-              await actions.addMember(detail.id, userId);
+            submit(async (proof) => {
+              await actions.addMember(detail.id, userId, proof);
             }, `已把用户 #${userId} 加入该组`);
           }}
         >

@@ -77,8 +77,8 @@ pub(crate) fn group_items_table_spec() -> Result<TableSpec, BaseError> {
             "chk_permission_group_item_permission_format",
             "regexp_like(`permission`, '^[a-z][a-z0-9_]*(\\\\.[a-z][a-z0-9_]*)+$')",
         )
-        // 外键规则固定 RESTRICT：删除仍有条目的组会被数据库拒绝（spec §8.3），
-        // 与删组的应用层前置检查构成纵深防御；条目表也因此不可能留下孤儿行。
+        // 外键 fk_permission_group_item_group 固定 RESTRICT：删除仍有条目的组会被数据库拒绝
+        //（spec §8.3），与删组的应用层前置检查构成纵深防御；因此 delete_group 先删条目再删组。
         .foreign_key_named(
             "fk_permission_group_item_group",
             [field_ref(&name, ITEM_GROUP_ID)?],

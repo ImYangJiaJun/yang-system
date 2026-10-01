@@ -569,4 +569,127 @@ describe("权限组管理页", () => {
     ).toBeInTheDocument();
     expect(calls.some((call) => call.url.endsWith(LIST_PATH))).toBe(false);
   });
+
+  it("新建权限组会发出建组 POST 并刷新列表", async () => {
+    const user = userEvent.setup();
+    const calls = stubAccessApi({
+      groupList: () => ({ groups: [] }),
+    });
+
+    renderPage();
+
+    expect(
+      await screen.findByText("还没有权限组。用下面的表单建第一个。"),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("组标识"), "ops");
+    await user.type(screen.getByLabelText("展示名"), "运维组");
+    await user.click(screen.getByRole("button", { name: "新建权限组" }));
+
+    await waitFor(() => {
+      const posts = callsTo(calls, LIST_PATH).filter(
+        (c) => c.method === "POST",
+      );
+      expect(posts).toHaveLength(1);
+      expect(posts[0]?.body).toEqual({
+        group_key: "ops",
+        title: "运维组",
+        description: undefined,
+      });
+    });
+    // 列表回读
+    await waitFor(() => {
+      expect(
+        callsTo(calls, LIST_PATH).filter((c) => c.method === "GET").length,
+      ).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("修改组展示名会发出改名 POST 并刷新详情", async () => {
+    const user = userEvent.setup();
+    const calls = stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2, title: "运维" })] }),
+      groupDetail: () => groupDetailWire({ id: 2, title: "运维" }),
+    });
+
+    renderPage();
+
+    // 选中组后改名表单出现在详情面板里
+    await screen.findByRole("button", { name: "删除该组" });
+    const detailHeading = screen.getByRole("heading", { name: "运维" });
+    const detailPanel = detailHeading.closest("header");
+    expect(detailPanel).not.toBeNull();
+    const renameTitle = within(detailPanel!).getByLabelText("展示名");
+    await user.clear(renameTitle);
+    await user.type(renameTitle, "生产运维");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(callsTo(calls, `${LIST_PATH}/update`)).toHaveLength(1);
+    });
+    expect(callsTo(calls, `${LIST_PATH}/update`)[0]?.body).toEqual({
+      group_id: 2,
+      title: "生产运维",
+      description: undefined,
+    });
+    // 详情回读
+    await waitFor(() => {
+      expect(detailCalls(calls).length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("删除组会发出删除 POST 并刷新列表", async () => {
+    const user = userEvent.setup();
+    const calls = stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2, title: "运维" })] }),
+      groupDetail: () => groupDetailWire({ id: 2 }),
+    });
+
+    renderPage();
+
+    await screen.findByRole("button", { name: "删除该组" });
+    await user.click(screen.getByRole("button", { name: "删除该组" }));
+
+    await waitFor(() => {
+      expect(callsTo(calls, `${LIST_PATH}/delete`)).toHaveLength(1);
+    });
+    expect(callsTo(calls, `${LIST_PATH}/delete`)[0]?.body).toEqual({
+      group_id: 2,
+    });
+    // 列表回读
+    await waitFor(() => {
+      expect(
+        callsTo(calls, LIST_PATH).filter((c) => c.method === "GET").length,
+      ).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("加入一条权限会发出加权限 POST 并刷新详情", async () => {
+    const user = userEvent.setup();
+    const calls = stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      groupDetail: () => groupDetailWire({ id: 2 }),
+    });
+
+    renderPage();
+
+    await screen.findByText(
+      "该组还没有任何权限条目，成员加进来也不会得到权限。",
+    );
+
+    await user.type(screen.getByLabelText("权限标识"), "account.users.read");
+    await user.click(screen.getByRole("button", { name: "加入权限" }));
+
+    await waitFor(() => {
+      expect(callsTo(calls, ITEMS_PATH)).toHaveLength(1);
+    });
+    expect(callsTo(calls, ITEMS_PATH)[0]?.body).toEqual({
+      group_id: 2,
+      permission: "account.users.read",
+    });
+    // 详情回读
+    await waitFor(() => {
+      expect(detailCalls(calls).length).toBeGreaterThanOrEqual(2);
+    });
+  });
 });
