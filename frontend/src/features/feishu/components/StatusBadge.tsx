@@ -18,13 +18,15 @@ import { cn } from "@/shared/lib/utils";
 import type { DatasourceStatus } from "../types";
 import { localeLabel, statusLabel } from "../types";
 
-export type ToneName = "positive" | "warning" | "info" | "neutral";
+export type ToneName = "positive" | "warning" | "info" | "neutral" | "danger";
 
 const TONE_CLASS: Record<ToneName, string> = {
   positive: "border-tone-positive/40 bg-tone-positive/10 text-tone-positive",
   warning: "border-tone-warning/40 bg-tone-warning/10 text-tone-warning",
   info: "border-tone-info/40 bg-tone-info/10 text-tone-info",
   neutral: "border-border bg-muted/50 text-muted-foreground",
+  // 无 tone 语义的失败态（如派发记录 outcome=failed）用主题 destructive 色。
+  danger: "border-destructive/40 bg-destructive/10 text-destructive",
 };
 
 export type StatusBadgeProps = {

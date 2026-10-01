@@ -4,7 +4,9 @@ import {
   Check,
   ChevronsUpDown,
   CircleUser,
+  ClipboardList,
   Database,
+  Send,
   LogOut,
   Moon,
   Puzzle,
@@ -227,6 +229,20 @@ export default function AppLayout() {
     ),
   );
 
+  // 审批派发控制台两入口的权限门控（设计 §5.3）：与数据源位独立——一个身份可能
+  // 只有审批 read（看得见派发记录）而没有数据源位。「审批派发」与「派发记录」
+  // 是同一对 read 权限位下的两条路，分开问。
+  const canReadFeishuApprovalConfigs = Boolean(
+    catalog?.actions.some(
+      (action) => action.operation_id === "feishu.approval.list_configs",
+    ),
+  );
+  const canReadFeishuApprovalRequests = Boolean(
+    catalog?.actions.some(
+      (action) => action.operation_id === "feishu.approval.list_requests",
+    ),
+  );
+
   return (
     <div className="flex h-svh overflow-hidden bg-background text-foreground">
       <aside className="flex h-full w-60 shrink-0 flex-col border-r border-border">
@@ -266,27 +282,65 @@ export default function AppLayout() {
               </li>
             </ul>
           </div>
-          {canReadFeishuDatasources && (
+          {(canReadFeishuDatasources ||
+            canReadFeishuApprovalConfigs ||
+            canReadFeishuApprovalRequests) && (
             <div>
               <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
                 飞书集成
               </p>
               <ul className="space-y-0.5">
-                <li>
-                  <NavLink
-                    to="/feishu/datasources"
-                    className={({ isActive }) =>
-                      cn(
-                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                        isActive &&
-                          "bg-accent font-medium text-accent-foreground",
-                      )
-                    }
-                  >
-                    <Database className="size-4 shrink-0" />
-                    飞书数据源
-                  </NavLink>
-                </li>
+                {canReadFeishuDatasources && (
+                  <li>
+                    <NavLink
+                      to="/feishu/datasources"
+                      className={({ isActive }) =>
+                        cn(
+                          "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                          isActive &&
+                            "bg-accent font-medium text-accent-foreground",
+                        )
+                      }
+                    >
+                      <Database className="size-4 shrink-0" />
+                      飞书数据源
+                    </NavLink>
+                  </li>
+                )}
+                {canReadFeishuApprovalConfigs && (
+                  <li>
+                    <NavLink
+                      to="/feishu/approval/configs"
+                      className={({ isActive }) =>
+                        cn(
+                          "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                          isActive &&
+                            "bg-accent font-medium text-accent-foreground",
+                        )
+                      }
+                    >
+                      <Send className="size-4 shrink-0" />
+                      审批派发
+                    </NavLink>
+                  </li>
+                )}
+                {canReadFeishuApprovalRequests && (
+                  <li>
+                    <NavLink
+                      to="/feishu/approval/requests"
+                      className={({ isActive }) =>
+                        cn(
+                          "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                          isActive &&
+                            "bg-accent font-medium text-accent-foreground",
+                        )
+                      }
+                    >
+                      <ClipboardList className="size-4 shrink-0" />
+                      派发记录
+                    </NavLink>
+                  </li>
+                )}
               </ul>
             </div>
           )}

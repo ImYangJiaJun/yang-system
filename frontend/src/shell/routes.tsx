@@ -102,6 +102,26 @@ export const appRoutes = [
             hydrateFallbackElement: <RouteFallback />,
           },
           {
+            // 审批派发控制台：配置页。同样路由级 lazy + 兜底（硬导航约定见下）。
+            path: "feishu/approval/configs",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/feishu/views/ApprovalConfigsPage")
+              ).default,
+            }),
+            hydrateFallbackElement: <RouteFallback />,
+          },
+          {
+            // 审批派发控制台：派发记录页。
+            path: "feishu/approval/requests",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/feishu/views/ApprovalRequestsPage")
+              ).default,
+            }),
+            hydrateFallbackElement: <RouteFallback />,
+          },
+          {
             // 权限组管理面：同样路由级 lazy，页面文件在 features/access/views/。
             path: "access/groups",
             lazy: async () => ({

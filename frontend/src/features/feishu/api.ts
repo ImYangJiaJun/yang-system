@@ -35,6 +35,12 @@ import type {
 
 import { withStableOrder } from "./list-query";
 import type {
+  ApprovalConfigItem,
+  ApprovalConfigMap,
+  ApprovalRequestItem,
+  ApprovalRequestsQuery,
+  ApprovalTaskItem,
+  ApprovalWidget,
   BitableField,
   BitableTable,
   BitableView,
@@ -79,6 +85,24 @@ export const DATASOURCE_OPERATION_IDS = {
 export const OPTION_OPERATION_IDS = {
   list: "feishu.option.list_options",
   approvalOptions: "feishu.option.approval_options",
+} as const;
+
+/// 审批派发控制台的 7 个 Action。
+///
+/// **每一粒都必须是服务端真实注册过的 `operation_id`**（逐个对着
+/// `src/addon/feishu/approval/actions/*.rs` 的 `action_name!(...)` 核过）。
+/// 服务端 `action_name!` 的展开形态是「模块名 + 点 + 动作名」，七个动作的模块名
+/// 都是 `feishu.approval`（注册在 `approval/mod.rs` 的 `build_module`）。
+/// 与数据源 Action 不同，它们**无条件注册**（不挂 `can_pull()` 门禁）：控制台
+/// 不依赖飞书凭证存在，`create_config` / `list_widgets` 运行时按其自身逻辑校验。
+export const APPROVAL_OPERATION_IDS = {
+  listConfigs: "feishu.approval.list_configs",
+  createConfig: "feishu.approval.create_config",
+  updateConfig: "feishu.approval.update_config",
+  deleteConfig: "feishu.approval.delete_config",
+  listWidgets: "feishu.approval.list_widgets",
+  listRequests: "feishu.approval.list_requests",
+  listTasks: "feishu.approval.list_tasks",
 } as const;
 
 /// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。
@@ -159,6 +183,16 @@ export function canReadOptions(catalog: UiCatalog | undefined): boolean {
   return hasOperation(catalog, OPTION_OPERATION_IDS.list);
 }
 
+/// 能否看审批派发控制台（侧边栏两条 NavLink 的渲染条件）。
+export function canReadApproval(catalog: UiCatalog | undefined): boolean {
+  return hasOperation(catalog, APPROVAL_OPERATION_IDS.listConfigs);
+}
+
+/// 能否操作审批派发配置（启停/删除/新建向导的渲染条件）。
+export function canWriteApproval(catalog: UiCatalog | undefined): boolean {
+  return hasOperation(catalog, APPROVAL_OPERATION_IDS.createConfig);
+}
+
 /* -------------------------------- query key ------------------------------- */
 
 /// 顶层键：会话边界（`session-reset` 的 `queryClient.clear()`）按前缀清空查询缓存，
@@ -198,6 +232,35 @@ export const feishuQueryKeys = {
         pageSize: query.pageSize,
         orderBy:
           query.orderBy.length > 0 ? query.orderBy : DEFAULT_OPTION_ORDER_BY,
+      },
+    ] as const,
+  approvalConfigs: () => [FEISHU_QUERY_ROOT, "approval-configs"] as const,
+  approvalConfigList: (query: {
+    page: number;
+    pageSize: number;
+    search: string;
+  }) =>
+    [
+      ...feishuQueryKeys.approvalConfigs(),
+      // 入参必须进 key：漏掉 search，react-query 15s staleTime 内搜索只改闭包
+      // 不改 key，缓存命中旧的全量列表，用户感知为搜索失效（同 datasourceList 的教训）。
+      {
+        page: query.page,
+        pageSize: query.pageSize,
+        search: query.search.trim(),
+      },
+    ] as const,
+  approvalRequests: () => [FEISHU_QUERY_ROOT, "approval-requests"] as const,
+  approvalRequestList: (query: ApprovalRequestsQuery) =>
+    [
+      ...feishuQueryKeys.approvalRequests(),
+      {
+        page: query.page,
+        pageSize: query.pageSize,
+        baseToken: query.baseToken.trim(),
+        tableId: query.tableId.trim(),
+        outcome: query.outcome,
+        orderBy: withStableOrder(query.orderBy),
       },
     ] as const,
 };
@@ -1597,4 +1660,444 @@ export function useFeishuActions(): FeishuActions {
     precheckToken: precheck,
     pullNow: trigger,
   };
+}
+
+/* --------------------------- 审批派发控制台 --------------------------- */
+
+/// 配置列表的请求体。坐标列不可搜（`searchable` 只覆盖 `title`），
+/// 缺省键一律用 `undefined` 省略。
+function buildApprovalConfigListBody(query: {
+  page: number;
+  pageSize: number;
+  search: string;
+}): Record<string, unknown> {
+  const search = query.search.trim();
+  return {
+    page: query.page,
+    page_size: query.pageSize,
+    search: search === "" ? undefined : search,
+    // 恒非空：分页要有确定性全序，否则翻页会漏行或重复（后端兜底也是同一对键）。
+    order_by: [
+      { field: "updated_at", direction: "Desc" },
+      { field: "id", direction: "Asc" },
+    ],
+    count_total: true,
+  };
+}
+
+/// 记录列表的请求体：坐标/结果筛选折成 `where` 树（`outcome` 已声明 filterable）。
+function buildApprovalRequestsBody(
+  query: ApprovalRequestsQuery,
+): Record<string, unknown> {
+  const baseToken = query.baseToken.trim();
+  const tableId = query.tableId.trim();
+  const where: Record<string, unknown>[] = [];
+  if (baseToken !== "") {
+    where.push({ type: "eq", field: "base_token", value: baseToken });
+  }
+  if (tableId !== "") {
+    where.push({ type: "eq", field: "table_id", value: tableId });
+  }
+  if (query.outcome !== "all") {
+    where.push({ type: "eq", field: "outcome", value: query.outcome });
+  }
+  return {
+    page: query.page,
+    page_size: query.pageSize,
+    where:
+      where.length === 0
+        ? undefined
+        : where.length === 1
+          ? where[0]
+          : { type: "and", conditions: where },
+    order_by: withStableOrder(query.orderBy),
+    count_total: true,
+  };
+}
+
+function parseApprovalConfigMap(
+  raw: Record<string, unknown>,
+): ApprovalConfigMap | null {
+  const widgetId = asString(raw.widget_id);
+  if (widgetId === "") return null;
+  return {
+    widgetId,
+    widgetType: asString(raw.widget_type),
+    bitableField: asString(raw.bitable_field),
+    bitableFieldName: asNullableString(raw.bitable_field_name),
+    required: raw.required === true,
+    converter: asString(raw.converter, "direct"),
+  };
+}
+
+function parseApprovalConfigItem(
+  raw: Record<string, unknown>,
+): ApprovalConfigItem | null {
+  const id = typeof raw.id === "number" ? raw.id : null;
+  if (id === null) return null;
+  const rawMaps = raw.maps;
+  const maps = Array.isArray(rawMaps)
+    ? rawMaps
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map(parseApprovalConfigMap)
+        .filter((item): item is ApprovalConfigMap => item !== null)
+    : [];
+  return {
+    id,
+    title: asString(raw.title),
+    baseToken: asString(raw.base_token),
+    tableId: asString(raw.table_id),
+    approvalCode: asString(raw.approval_code),
+    applicantField: asString(raw.applicant_field),
+    backfillField: asString(raw.backfill_field),
+    baseTimezone: asString(raw.base_timezone),
+    enabled: raw.enabled === true,
+    formSnapshotAt: asNullableNumber(raw.form_snapshot_at),
+    updatedAt: asNumber(raw.updated_at, 0),
+    maps,
+  };
+}
+
+function parseApprovalWidget(
+  raw: Record<string, unknown>,
+): ApprovalWidget | null {
+  const id = asString(raw.id);
+  return id === ""
+    ? null
+    : {
+        id,
+        name: asString(raw.name),
+        type: asString(raw.type),
+        required: raw.required === true,
+      };
+}
+
+function parseApprovalRequestItem(
+  raw: Record<string, unknown>,
+): ApprovalRequestItem | null {
+  const id = typeof raw.id === "number" ? raw.id : null;
+  if (id === null) return null;
+  return {
+    id,
+    requestedBy: asNullableString(raw.requested_by),
+    baseToken: asString(raw.base_token),
+    tableId: asString(raw.table_id),
+    configId: asNullableNumber(raw.config_id),
+    recordId: asNullableString(raw.record_id),
+    requestBody: asString(raw.request_body),
+    outcome: asString(raw.outcome),
+    message: asString(raw.message),
+    serialNumber: asNullableString(raw.serial_number),
+    responseBody: asNullableString(raw.response_body),
+    createdAt: asNumber(raw.created_at, 0),
+  };
+}
+
+function parseApprovalTaskItem(
+  raw: Record<string, unknown>,
+): ApprovalTaskItem | null {
+  const id = typeof raw.id === "number" ? raw.id : null;
+  if (id === null) return null;
+  return {
+    id,
+    configId: asNumber(raw.config_id, 0),
+    recordId: asString(raw.record_id),
+    state: asString(raw.state),
+    instanceCode: asNullableString(raw.instance_code),
+    serialNumber: asNullableString(raw.serial_number),
+    attempts: asNumber(raw.attempts, 0),
+    lastError: asNullableString(raw.last_error),
+    createdAt: asNumber(raw.created_at, 0),
+    updatedAt: asNumber(raw.updated_at, 0),
+  };
+}
+
+/// 配置列表（`feishu.approval.list_configs`）。
+export async function listApprovalConfigs(
+  query: { page: number; pageSize: number; search: string },
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ListPage<ApprovalConfigItem>> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.listConfigs,
+    buildApprovalConfigListBody(query),
+    signal,
+  );
+  return parsePage(result.data, parseApprovalConfigItem);
+}
+
+/// 创建配置（`feishu.approval.create_config`）：六件套全部必填，由服务端整条
+/// `build_plan + insert_plan` 校验链把关——失败（含唯一冲突「该多维表格已配置」）
+/// 一律抛 `ApiError`，message 是可行动原因。
+export type CreateApprovalConfigInput = {
+  baseToken: string;
+  tableId: string;
+  approvalCode: string;
+  applicantField: string;
+  backfillField: string;
+  baseTimezone: string;
+};
+
+export async function createApprovalConfig(
+  input: CreateApprovalConfigInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<number> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.createConfig,
+    {
+      base_token: input.baseToken.trim(),
+      table_id: input.tableId.trim(),
+      approval_code: input.approvalCode.trim(),
+      applicant_field: input.applicantField.trim(),
+      backfill_field: input.backfillField.trim(),
+      base_timezone: input.baseTimezone.trim(),
+    },
+    signal,
+  );
+  const data = asRecord(result.data);
+  return asNumber(data?.config_id, 0);
+}
+
+/// 更新配置（`feishu.approval.update_config`）：仅 title/enabled/base_timezone 三项，
+/// 全可省、至少给一个；省略的键不出现（`deny_unknown_fields` 下「留空 = 不改」）。
+export type UpdateApprovalConfigPatch = {
+  title?: string;
+  enabled?: boolean;
+  baseTimezone?: string;
+};
+
+export async function updateApprovalConfig(
+  configId: number,
+  patch: UpdateApprovalConfigPatch,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<void> {
+  const body: Record<string, unknown> = { config_id: configId };
+  if (patch.title !== undefined) body.title = patch.title;
+  if (patch.enabled !== undefined) body.enabled = patch.enabled;
+  if (patch.baseTimezone !== undefined) body.base_timezone = patch.baseTimezone;
+  await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.updateConfig,
+    body,
+    signal,
+  );
+}
+
+/// 删除配置（`feishu.approval.delete_config`）：配置行 + 映射行 + pending 任务行
+/// 同事务删除；backfilled/terminal 任务保留作流水。
+export async function deleteApprovalConfig(
+  configId: number,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<{ deletedMaps: number; deletedPendingTasks: number }> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.deleteConfig,
+    { config_id: configId },
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    deletedMaps: asNumber(data?.deleted_field_maps, 0),
+    deletedPendingTasks: asNumber(data?.deleted_pending_tasks, 0),
+  };
+}
+
+/// 控件预览（`feishu.approval.list_widgets`）：按 approval_code 出站调飞书并解析表单。
+/// 归 write 侧（出站耗频控配额），目录里没有它时 `requireAction` 抛错。
+export async function listApprovalWidgets(
+  approvalCode: string,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ApprovalWidget[]> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.listWidgets,
+    { approval_code: approvalCode.trim() },
+    signal,
+  );
+  return listOf(result.data, "widgets", parseApprovalWidget);
+}
+
+/// 派发记录（`feishu.approval.list_requests`）。请求体/返回体原文随行返回，本地展开。
+export async function listApprovalRequests(
+  query: ApprovalRequestsQuery,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ListPage<ApprovalRequestItem>> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.listRequests,
+    buildApprovalRequestsBody(query),
+    signal,
+  );
+  return parsePage(result.data, parseApprovalRequestItem);
+}
+
+/// 任务列表（`feishu.approval.list_tasks`）：批量受理行的下钻视图，按 config_id 过滤。
+export async function listApprovalTasks(
+  query: { page: number; pageSize: number; configId: number },
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<ListPage<ApprovalTaskItem>> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.listTasks,
+    {
+      page: query.page,
+      page_size: query.pageSize,
+      where: { type: "eq", field: "config_id", value: query.configId },
+      order_by: [
+        { field: "updated_at", direction: "Desc" },
+        { field: "id", direction: "Asc" },
+      ],
+      count_total: true,
+    },
+    signal,
+  );
+  return parsePage(result.data, parseApprovalTaskItem);
+}
+
+/// 配置列表页的查询 hook。搜索词去抖由页面自己做（照 `useListQuery` 的
+/// `useDebouncedValue`），这里只接分页。
+export function useApprovalConfigList(
+  query: { page: number; pageSize: number; search: string },
+  options: { enabled?: boolean } = {},
+): UseQueryResult<ListPage<ApprovalConfigItem>> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled: canReadApproval(catalogData) && options.enabled !== false,
+    queryKey: feishuQueryKeys.approvalConfigList(query),
+    queryFn: ({ signal }) =>
+      listApprovalConfigs(query, { catalog: catalogData, session }, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+  });
+}
+
+/// 记录列表页的查询 hook。
+export function useApprovalRequestList(
+  query: ApprovalRequestsQuery,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<ListPage<ApprovalRequestItem>> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled: canReadApproval(catalogData) && options.enabled !== false,
+    queryKey: feishuQueryKeys.approvalRequestList(query),
+    queryFn: ({ signal }) =>
+      listApprovalRequests(query, { catalog: catalogData, session }, signal),
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
+  });
+}
+
+/// 任务列表 hook（记录页的「查看任务」下钻）。`configId` 为 null 时不发请求。
+export function useApprovalTasks(
+  configId: number | null,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<ListPage<ApprovalTaskItem>> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled:
+      canReadApproval(catalogData) &&
+      configId !== null &&
+      options.enabled !== false,
+    queryKey: [FEISHU_QUERY_ROOT, "approval-tasks", configId],
+    queryFn: ({ signal }) =>
+      listApprovalTasks(
+        { page: 1, pageSize: 20, configId: configId as number },
+        { catalog: catalogData, session },
+        signal,
+      ),
+    staleTime: 15_000,
+  });
+}
+
+/// 配置页与向导要用的「已绑定目录与会话」的审批写操作入口。
+export type ApprovalActions = {
+  canRead: boolean;
+  canWrite: boolean;
+  updateConfig: (
+    configId: number,
+    patch: UpdateApprovalConfigPatch,
+  ) => Promise<void>;
+  deleteConfig: (
+    configId: number,
+  ) => Promise<{ deletedMaps: number; deletedPendingTasks: number }>;
+};
+
+export function useApprovalActions(): ApprovalActions {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  const updateConfig = useCallback(
+    (configId: number, patch: UpdateApprovalConfigPatch) =>
+      updateApprovalConfig(configId, patch, deps),
+    [deps],
+  );
+  const deleteConfig = useCallback(
+    (configId: number) => deleteApprovalConfig(configId, deps),
+    [deps],
+  );
+
+  return {
+    canRead: canReadApproval(catalogData),
+    canWrite: canWriteApproval(catalogData),
+    updateConfig,
+    deleteConfig,
+  };
+}
+
+/// 建配置向导要用的一组数据访问入口（可注入，照 `TableWizardClient` 的形态）。
+///
+/// 前三个是既有元数据端点（`list_bitable_*`），与建数据源向导共用；后两个是本域新增。
+export type ApprovalWizardClient = {
+  listTables: (appToken: string) => Promise<BitableTable[]>;
+  listViews: (appToken: string, tableId: string) => Promise<BitableView[]>;
+  listFields: (appToken: string, tableId: string) => Promise<BitableField[]>;
+  listWidgets: (approvalCode: string) => Promise<ApprovalWidget[]>;
+  createConfig: (input: CreateApprovalConfigInput) => Promise<number>;
+};
+
+export function useApprovalWizardClient(): ApprovalWizardClient {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  return useMemo(
+    () => ({
+      listTables: (appToken: string) => listBitableTables(appToken, deps),
+      listViews: (appToken: string, tableId: string) =>
+        listBitableViews(appToken, tableId, deps),
+      listFields: (appToken: string, tableId: string) =>
+        listBitableFields(appToken, tableId, deps),
+      listWidgets: (approvalCode: string) =>
+        listApprovalWidgets(approvalCode, deps),
+      createConfig: (input: CreateApprovalConfigInput) =>
+        createApprovalConfig(input, deps),
+    }),
+    [deps],
+  );
 }

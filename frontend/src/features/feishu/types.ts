@@ -967,3 +967,109 @@ export function buildLinkageMapping(value: LinkageFormValue | null): string {
     [key]: { parent_source_key: parentSourceKey, parent_field: parentField },
   });
 }
+
+/* --------------------------- 审批派发控制台 --------------------------- */
+
+/// 一条字段映射（`list_configs` 的 `maps[]`）。对齐靠 `bitableField`（id 不随改名变）。
+export type ApprovalConfigMap = {
+  widgetId: string;
+  widgetType: string;
+  bitableField: string;
+  bitableFieldName: string | null;
+  required: boolean;
+  /// 值转换器：`direct` / `date` / `option`。
+  converter: string;
+};
+
+/// 审批派发配置行（`list_configs` 的 `items[]`）。
+export type ApprovalConfigItem = {
+  id: number;
+  title: string;
+  baseToken: string;
+  tableId: string;
+  approvalCode: string;
+  applicantField: string;
+  backfillField: string;
+  baseTimezone: string;
+  enabled: boolean;
+  /// 控件结构快照时间（unix 秒）；建配置时快照拉取失败则为 null。
+  formSnapshotAt: number | null;
+  updatedAt: number;
+  /// 空数组表示该配置没有映射。
+  maps: ApprovalConfigMap[];
+};
+
+/// 审批定义控件（`list_widgets` 的 `widgets[]`）。
+export type ApprovalWidget = {
+  id: string;
+  name: string;
+  type: string;
+  required: boolean;
+};
+
+/// 派发请求结果四桶（`feishu_approval_request_log.outcome`）。
+export type ApprovalOutcome = "succeeded" | "waiting" | "accepted" | "failed";
+
+/// outcome 筛选项：`all` 是纯界面值（不过滤），不属于后端取值域。
+export const APPROVAL_OUTCOME_OPTIONS: ReadonlyArray<{
+  value: ApprovalOutcome | "all";
+  label: string;
+}> = [
+  { value: "all", label: "全部" },
+  { value: "succeeded", label: "成功" },
+  { value: "waiting", label: "等待" },
+  { value: "accepted", label: "批量受理" },
+  { value: "failed", label: "失败" },
+];
+
+/// outcome → 展示名。认不出的值原样回显（与 `ingestModeLabel` 同一取舍）。
+export function approvalOutcomeLabel(value: string): string {
+  return (
+    APPROVAL_OUTCOME_OPTIONS.find((option) => option.value === value)?.label ??
+    value
+  );
+}
+
+/// 派发请求记录行（`list_requests` 的 `items[]`）。
+///
+/// `requestBody` / `responseBody` 是**原文 JSON 文本**（落库就是字符串），
+/// 页面本地展开，不在读侧解析。
+export type ApprovalRequestItem = {
+  id: number;
+  requestedBy: string | null;
+  baseToken: string;
+  tableId: string;
+  configId: number | null;
+  recordId: string | null;
+  requestBody: string;
+  outcome: string;
+  message: string;
+  serialNumber: string | null;
+  responseBody: string | null;
+  createdAt: number;
+};
+
+/// 审批派发任务行（`list_tasks` 的 `items[]`）。
+export type ApprovalTaskItem = {
+  id: number;
+  configId: number;
+  recordId: string;
+  /// pending / creating / created / backfilled / terminal。
+  state: string;
+  instanceCode: string | null;
+  serialNumber: string | null;
+  attempts: number;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/// 记录页的查询：分页 + 按坐标/结果筛选。
+export type ApprovalRequestsQuery = {
+  page: number;
+  pageSize: number;
+  baseToken: string;
+  tableId: string;
+  outcome: ApprovalOutcome | "all";
+  orderBy: OrderByClause[];
+};
