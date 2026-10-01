@@ -66,7 +66,7 @@
 
 - **新增第 7 个 Action `list_tasks`**：批量派发记录行只有「已受理」，逐条成败在
   `feishu_approval_task`；控制台需要看到（§5.3）。
-- 保留原设计 §12 之后追加的待实测项：**M10** `$.step_btn.user` 形态（纯字符串或对象，
+- 保留原设计 §12 之后追加的待实测项：**M11** `$.step_btn.user` 形态（纯字符串或对象，
   对象则取子字段；真机联调时确认）。
 
 ## 三、数据模型：新表 `feishu_approval_request_log`
@@ -114,7 +114,7 @@
 - `DispatchInput` 加 `#[serde(default)] requested_by: Option<String>`（trim 非空校验，
   ≤128 字符）。`deny_unknown_fields` 下旧工作流报文不受影响。
 - 工作流模板（原设计 §4.1）更新：`raw_body` 增加 `"requested_by":"$.step_btn.user"`
-  段。M10 未实测前先按原样引用，联调确认形态。
+  段。M11 未实测前先按原样引用，联调确认形态（09-28 设计 §12 的 M10 已被 isEmpty 占用，故顺延 M11）。
 - 测试夹具：`valid_input`（`dispatch.rs:585-594`）补字段；`first_call_input` 用
   `..valid_input()` 结构体更新语法自动继承。
 - **注意**：`DispatchInput` 目前无 `Serialize`，`request_body` 落库需要补 derive。
@@ -191,7 +191,7 @@ Terminal / Retryable / validate 失败 / 内部 Err）。`dispatch_single` 内�
   其余「找茬注释」不顺手清理，遵守精准局部修改）。
 - `docs/contracts/AUDIT.md`：登记 3 个新审计事件（create/update/delete config）。
 - 原设计文档 `2026-09-28-feishu-approval-dispatch-design.md`：§4.1 模板补
-  `requested_by`、补「请求记录」一节与 M10、M 表同步；实施计划文档顶部进度表
+  `requested_by`、补「请求记录」一节与 M11、M 表同步；实施计划文档顶部进度表
   标记 Task 13 完成与本次承接。
 
 ## 七、非目标与既有语义（写明，避免实现期漂移）

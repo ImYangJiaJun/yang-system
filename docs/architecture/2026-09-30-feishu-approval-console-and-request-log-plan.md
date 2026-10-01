@@ -220,7 +220,7 @@
 - Modify: `AGENTS.md`（新 module/表/7 Action/权限键/requested_by/向导权限说明）
 - Modify: `docs/contracts/AUDIT.md`（「必须覆盖的高权限变化」登记 3 个新审计 Action）
 - Modify: `docs/architecture/2026-09-28-feishu-approval-dispatch-design.md`
-  （§4.1 模板补 requested_by、补请求记录一节、M 表标 M10）
+  （§4.1 模板补 requested_by、补请求记录一节、M 表标 M11（09-28 设计 M10 已被占用，待实测项顺延 M11））
 - Modify: `docs/architecture/2026-09-28-feishu-approval-dispatch-plan.md`
   （进度表：Task 13 标记完成/承接；或登记到本计划）
 

@@ -34,7 +34,9 @@ Debug 只展示摘要字段名，不展示值。
 
 - 用户注册；
 - 改密、密码重置、自助停用；
-- 全设备退出（logout 撤销会话水位）。
+- 全设备退出（logout 撤销会话水位）；
+- 审批派发配置的创建 / 更新 / 删除（`create_config` / `update_config` / `delete_config`，
+  user actor，与业务同一事务，Succeeded 事件带 after_summary）。
 
 当前 writer 从 Registry 注入的可信 `module + action` 生成事件 action，不接受请求体
 提供 action；上述账号安全 Action 都只能调用 `append_in_tx` 并传入

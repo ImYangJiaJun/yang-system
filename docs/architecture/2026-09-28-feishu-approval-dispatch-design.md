@@ -96,6 +96,8 @@
         "raw_body": [
           { "value_type": "text", "value": "{\"base_token\":\"<base_token>\",\"table_id\":\"<table_id>\",\"record_id\":\"" },
           { "value_type": "ref", "value": "$.step_btn.recordId" },
+          { "value_type": "text", "value": "\",\"requested_by\":\"" },
+          { "value_type": "ref", "value": "$.step_btn.user" },
           { "value_type": "text", "value": "\"}" }
         ],
         "response_type": "json",
@@ -113,6 +115,8 @@
 ```
 
 > `raw_body` 用 `text + ref + text` 拼接（`lark-base-workflow-schema.md:666-678` 示例 6）。
+> `requested_by` 引用 `$.step_btn.user`（行内与页面按钮的触发器输出均有 `user`；该值形态
+> 待实测，见 §12 M11；未带的旧工作流不破坏，落库记 `feishu-workflow`，见 §5.5）。
 > `response_type=json` 时后续节点**只能引用 `response_value` 中声明过的字段**（`lark-base-workflow-schema.md:418,827`），所以响应体必须扁平，不要嵌套。
 
 ### 4.2 端点契约
@@ -263,6 +267,19 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 - `NS` 取一个固定常量命名空间。
 
 **`uuid` 必须持久化**（`feishu_approval_task.uuid`，唯一索引），因为它是崩溃恢复的唯一对账键——响应丢失时 `instance_code` 根本不存在。
+
+### 5.5 派发请求记录表 `feishu_approval_request_log`（2026-09-30 承接追加）
+
+每次打到派发端点的请求在 `feishu_approval_request_log` 落一行记录（**入口请求一记**，
+单条与批量都记；表字段定义见 `docs/architecture/2026-09-30-feishu-approval-console-and-request-log-design.md` §3）。
+与 `feishu_approval_task`（§5.2）的分工：task 表承载逐条处理状态机，本表只记「这一请求
+打进来、结果如何」——单条同步请求记最终结果（编号或失败原因），批量请求记「已受理」，
+逐条结果由 task 表承载、控制台可下钻。请求人取请求体 `requested_by`（§4.1，工作流模板
+引用 `$.step_btn.user`），未带记 `feishu-workflow`。落库用独立连接、写失败仅降级
+`tracing::error!`，绝不影响派发结果；管理 Token 鉴权失败与反序列化 400 不落此表。
+本表由纯绑定表 module `feishu.approval_request_log` 承载（无 Action，照
+`approval::build_task_module` 形态）。实现与详细设计见
+`docs/architecture/2026-09-30-feishu-approval-console-and-request-log-design.md`。
 
 ## 六、处理流程
 
@@ -666,6 +683,7 @@ create 返回 60012
 | M8 | **`batch_update` 的 `fields` 是否也接受 `field_id` 作键** | §6.5。官方错误表里 `1254044 FieldIdNotFound` 与 `1254045 FieldNameNotFound` 并存，即 id 可能也认；文档的规范表述与全部写示例都指向**列名**。实现已按列名（两种假设下都成立）。验证方式：对一条**已存在**的记录，用 `field_id` 作键写回它**现有的值**（内容不变的写），看回包是 `0` 还是 `1254044` |
 | M9 | **`records/batch_get` 是否真的没有 `field_names`** | §6.5 / 读路径。实测请求体只有 `record_ids` / `user_id_type` / `with_shared_url` / `automatic_fields`，`field_names` 只出现在**错误表**里——实现已去掉该投影。若某个租户上它其实接受，投影回退属于优化而非正确性 |
 | M10 | **`isEmpty` 筛选的 `value` 必须是 `[]`** | 播种扫描（§5.2）。传 `null` 或不传会吃 `1254018`。实现按空数组，已由 `empty_field_filter` 钉住 |
+| M11 | **`$.step_btn.user` 的形态（纯字符串或对象，对象则取子字段）** | §4.1 的 `raw_body` 补 `requested_by` 段（引用该值）。行内与页面按钮的触发器输出均有 `user`；未带的旧工作流不破坏，落库记 `feishu-workflow`。真机联调时确认 |
 
 ### 12.1 本地文档副本与真实响应不符之处（已实测，实现按实测）
 
