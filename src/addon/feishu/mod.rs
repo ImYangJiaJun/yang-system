@@ -47,6 +47,7 @@ pub(crate) fn build_addon(
     .module(approval::build_module(
         Arc::clone(&context),
         settings.as_deref(),
+        authorization_validator.clone(),
     )?)
     .module(approval::build_field_map_module()?)
     .module(approval::build_task_module()?)

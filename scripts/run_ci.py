@@ -315,6 +315,19 @@ INTEGRATION = (
             "--test-threads=1",
         ),
     ),
+    Command(
+        "审批派发控制台与落记录集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "feishu_approval_dispatch_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
 )
 
 

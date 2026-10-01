@@ -850,6 +850,13 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         "option/actions/upsert_options.rs",
         "datasource/actions/list_datasources.rs",
         "datasource/actions/rotate_token.rs",
+        // `group_maps` 是纯组装逻辑（收 `&[Record]`，没有仓库接收者可锚）——与
+        // `list_datasources.rs::group_bindings` 同一条形态；文件里另两处
+        // `order_by:id` / `order_by:updated_at` 与 list_datasources 的同名弱档
+        // 条目同因（`query = query.order_by(..)` 重赋值后语句级锚点丢失）。
+        // 用到的列（config 的 id/updated_at、field_map 的 widget_id/bitable_field
+        // /required/converter…）都在各自表声明上，缺口由该文件的单测钉列。
+        "approval/actions/list_configs.rs",
         // 纯组装逻辑，不碰仓库：`request_log_writer` 的 `into_record` 只是把请求
         // 事实折成 Record——没有查询/写调用可锚。缺口由该模块的
         // `record_keys_are_declared_on_the_request_log_table` 单测原地补上

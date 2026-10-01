@@ -130,8 +130,12 @@ impl ResumeCursor {
 /// 手动触发的共享句柄。
 ///
 /// 照 `FeishuPullHandle` 的先例：注册进 `Tools` 供 Action 取用。
+///
+/// `pub` 而不是 `pub(crate)`：集成测试（独立 crate）要注入这个句柄才能端到端走
+/// dispatch 的「批量受理」出口（`tests/feishu_approval_dispatch_integration.rs`）；
+/// 生产装配仍只有 `bootstrap.rs` 一处调用 [`ApprovalDispatchHandle::new`]。
 #[derive(Clone)]
-pub(crate) struct ApprovalDispatchHandle {
+pub struct ApprovalDispatchHandle {
     trigger: mpsc::UnboundedSender<()>,
 }
 
@@ -139,7 +143,7 @@ impl ApprovalDispatchHandle {
     /// 建一对：句柄给 Action，接收端给 worker。
     ///
     /// 无界通道：触发是低频动作，没有一个值得让 HTTP 请求等它的背压。
-    pub(crate) fn new() -> (Self, mpsc::UnboundedReceiver<()>) {
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<()>) {
         let (trigger, requests) = mpsc::unbounded_channel();
         (Self { trigger }, requests)
     }

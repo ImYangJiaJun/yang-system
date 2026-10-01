@@ -4,8177 +4,9536 @@
  */
 
 export interface paths {
-  "/.well-known/yang/ui-catalog": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/.well-known/yang/ui-catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * UI 目录
+         * @description 返回当前请求身份可访问的 Action 演示契约
+         */
+        get: operations["account.user.ui_catalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * UI 目录
-     * @description 返回当前请求身份可访问的 Action 演示契约
-     */
-    get: operations["account.user.ui_catalog"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/grants": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 授予权限
+         * @description 授予目标用户一个已声明的权限（幂等）
+         */
+        post: operations["access.grants.grant_permission"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 授予权限
-     * @description 授予目标用户一个已声明的权限（幂等）
-     */
-    post: operations["access.grants.grant_permission"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/grants/revoke": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/grants/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 撤销权限
+         * @description 撤销目标用户的一个直授权限（幂等）
+         */
+        post: operations["access.grants.revoke_permission"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 撤销权限
-     * @description 撤销目标用户的一个直授权限（幂等）
-     */
-    post: operations["access.grants.revoke_permission"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 权限组列表
+         * @description 列出全部权限组及其成员数、权限数与孤儿条目数
+         */
+        get: operations["access.groups.list_groups"];
+        put?: never;
+        /**
+         * 创建权限组
+         * @description 创建一个权限组
+         */
+        post: operations["access.groups.create_group"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 权限组列表
-     * @description 列出全部权限组及其成员数、权限数与孤儿条目数
-     */
-    get: operations["access.groups.list_groups"];
-    put?: never;
-    /**
-     * 创建权限组
-     * @description 创建一个权限组
-     */
-    post: operations["access.groups.create_group"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups/delete": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 删除权限组
+         * @description 删除一个权限组；组内仍有成员时拒绝
+         */
+        post: operations["access.groups.delete_group"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 删除权限组
-     * @description 删除一个权限组；组内仍有成员时拒绝
-     */
-    post: operations["access.groups.delete_group"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups/items": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 加入组权限
+         * @description 向权限组追加一条已声明的权限（幂等）
+         */
+        post: operations["access.groups.add_group_item"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 加入组权限
-     * @description 向权限组追加一条已声明的权限（幂等）
-     */
-    post: operations["access.groups.add_group_item"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups/items/remove": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups/items/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 移除组权限
+         * @description 从权限组移除一条权限（幂等；已不在目录中的孤儿条目同样可清理）
+         */
+        post: operations["access.groups.remove_group_item"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 移除组权限
-     * @description 从权限组移除一条权限（幂等；已不在目录中的孤儿条目同样可清理）
-     */
-    post: operations["access.groups.remove_group_item"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups/members": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 加入组成员
+         * @description 把一个用户加入权限组（幂等；受防自提权子集校验约束）
+         */
+        post: operations["access.groups.add_group_member"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 加入组成员
-     * @description 把一个用户加入权限组（幂等；受防自提权子集校验约束）
-     */
-    post: operations["access.groups.add_group_member"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups/members/remove": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups/members/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 移出组成员
+         * @description 把一个用户移出权限组（幂等；最后一个系统管理员不可移出）
+         */
+        post: operations["access.groups.remove_group_member"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 移出组成员
-     * @description 把一个用户移出权限组（幂等；最后一个系统管理员不可移出）
-     */
-    post: operations["access.groups.remove_group_member"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups/update": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 修改权限组
+         * @description 修改权限组的展示名与描述（组标识不可改）
+         */
+        post: operations["access.groups.update_group"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 修改权限组
-     * @description 修改权限组的展示名与描述（组标识不可改）
-     */
-    post: operations["access.groups.update_group"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/groups/{group_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/groups/{group_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 权限组详情
+         * @description 读取权限组的条目（含孤儿标记）、成员与内置组标记
+         */
+        get: operations["access.groups.get_group"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 权限组详情
-     * @description 读取权限组的条目（含孤儿标记）、成员与内置组标记
-     */
-    get: operations["access.groups.get_group"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/permissions": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 权限目录
+         * @description 查询全部 Action 声明的权限集合
+         */
+        get: operations["access.grants.list_permissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 权限目录
-     * @description 查询全部 Action 声明的权限集合
-     */
-    get: operations["access.grants.list_permissions"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/access/users/{user_id}/grants": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/access/users/{user_id}/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 用户授权列表
+         * @description 查询目标用户的全部直授权限
+         */
+        get: operations["access.grants.list_user_grants"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 用户授权列表
-     * @description 查询目标用户的全部直授权限
-     */
-    get: operations["access.grants.list_user_grants"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/demo/notes": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/demo/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 创建便签
+         * @description 创建一条归属当前用户的便签
+         */
+        post: operations["demo.notes.create_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 创建便签
-     * @description 创建一条归属当前用户的便签
-     */
-    post: operations["demo.notes.create_note"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/demo/notes/delete": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/demo/notes/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 删除便签
+         * @description 删除一条归属当前用户的便签
+         */
+        post: operations["demo.notes.delete_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 删除便签
-     * @description 删除一条归属当前用户的便签
-     */
-    post: operations["demo.notes.delete_note"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/demo/notes/query": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/demo/notes/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 便签列表
+         * @description 分页查询当前用户的便签（仅本人数据）
+         */
+        post: operations["demo.notes.list_notes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 便签列表
-     * @description 分页查询当前用户的便签（仅本人数据）
-     */
-    post: operations["demo.notes.list_notes"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/demo/notes/update": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/demo/notes/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 更新便签
+         * @description 更新一条归属当前用户的便签
+         */
+        post: operations["demo.notes.update_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 更新便签
-     * @description 更新一条归属当前用户的便签
-     */
-    post: operations["demo.notes.update_note"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/bitable-fields": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/approval/configs/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 创建审批派发配置
+         * @description 手动创建飞书审批派发配置（与首调自动建共用同一条校验链）
+         */
+        post: operations["feishu.approval.create_config"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 列出多维表格字段
-     * @description 列出一张数据表的全部字段（含类型码），供配置向导勾选
-     */
-    post: operations["feishu.datasource.list_bitable_fields"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/bitable-tables": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/approval/configs/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 删除审批派发配置
+         * @description 删除配置、它的字段映射与待处理任务；已完结任务保留作流水
+         */
+        post: operations["feishu.approval.delete_config"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 列出多维表格数据表
-     * @description 用自建应用凭证列出某个多维表格 App 下的数据表，供配置向导选择
-     */
-    post: operations["feishu.datasource.list_bitable_tables"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/bitable-views": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/approval/configs/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 审批派发配置列表
+         * @description 分页查询飞书审批派发配置
+         */
+        post: operations["feishu.approval.list_configs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 列出多维表格视图
-     * @description 列出一张数据表下的视图，供配置向导选择（视图决定拉取哪些行）
-     */
-    post: operations["feishu.datasource.list_bitable_views"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/query": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/approval/configs/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 更新审批派发配置
+         * @description 更新配置名、启用开关或 Base 时区；坐标与审批三件套不可改
+         */
+        post: operations["feishu.approval.update_config"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 数据源列表
-     * @description 分页查询飞书数据源
-     */
-    post: operations["feishu.datasource.list_datasources"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/reveal-token": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/approval/definitions/widgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 列出审批定义控件
+         * @description 按审批定义 code 调 approvals get 并解析表单，返回控件列表供向导预览
+         */
+        post: operations["feishu.approval.list_widgets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 回显凭据
-     * @description 取出该字段绑定上封存的 Token 明文（纯读，不改变任何状态；每次追加审计）
-     */
-    post: operations["feishu.datasource.reveal_token"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/rotate-token": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/approval/requests/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 派发请求记录列表
+         * @description 分页查询飞书审批派发请求记录
+         */
+        post: operations["feishu.approval.list_requests"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 轮换凭据
-     * @description 重新签发 Token（旧值立即失效，控件需回审批后台改）；每次追加审计
-     */
-    post: operations["feishu.datasource.rotate_token"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/table": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/approval/tasks/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 审批派发任务列表
+         * @description 分页查询飞书审批派发任务，可按配置与状态过滤
+         */
+        post: operations["feishu.approval.list_tasks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    /**
-     * 更新表级数据源
-     * @description 整份替换字段绑定集合；已有绑定保留其 source_key 与凭据
-     */
-    put: operations["feishu.datasource.update_datasource_table"];
-    /**
-     * 新建表级数据源
-     * @description 一次写入表级行与 N 条字段绑定（含系统生成的凭据），同一事务
-     */
-    post: operations["feishu.datasource.create_datasource_table"];
-    /**
-     * 删除表级数据源
-     * @description 删除数据源、它的全部字段绑定；其选项行只停用不删除
-     */
-    delete: operations["feishu.datasource.delete_datasource_table"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/table/health": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/bitable-fields": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 列出多维表格字段
+         * @description 列出一张数据表的全部字段（含类型码），供配置向导勾选
+         */
+        post: operations["feishu.datasource.list_bitable_fields"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 数据源体检
-     * @description 把勾选的字段与表实际字段比对，列出不可自愈的问题（改名不算问题）
-     */
-    post: operations["feishu.datasource.health_check"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/xlsx/probe": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/bitable-tables": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 列出多维表格数据表
+         * @description 用自建应用凭证列出某个多维表格 App 下的数据表，供配置向导选择
+         */
+        post: operations["feishu.datasource.list_bitable_tables"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 解析 xlsx 表头
-     * @description 读上传文件的表头（只看第一张 sheet），供配置向导勾列；不写库
-     */
-    post: operations["feishu.datasource.probe_xlsx_headers"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/{datasource_id}/import": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/bitable-views": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 列出多维表格视图
+         * @description 列出一张数据表下的视图，供配置向导选择（视图决定拉取哪些行）
+         */
+        post: operations["feishu.datasource.list_bitable_views"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 导入 xlsx
-     * @description 按每条绑定的列名取值、派生选项并落库；整份快照替换该数据源的选项
-     */
-    post: operations["feishu.datasource.import_xlsx"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/datasources/{datasource_id}/import-progress": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 数据源列表
+         * @description 分页查询飞书数据源
+         */
+        post: operations["feishu.datasource.list_datasources"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * xlsx 导入进度
-     * @description 查询该数据源在本进程内的导入阶段与计数；不写库
-     */
-    get: operations["feishu.datasource.get_import_progress"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/feishu/options/query": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/reveal-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 回显凭据
+         * @description 取出该字段绑定上封存的 Token 明文（纯读，不改变任何状态；每次追加审计）
+         */
+        post: operations["feishu.datasource.reveal_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 选项列表
-     * @description 分页查询飞书选项
-     */
-    post: operations["feishu.option.list_options"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/rotate-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 轮换凭据
+         * @description 重新签发 Token（旧值立即失效，控件需回审批后台改）；每次追加审计
+         */
+        post: operations["feishu.datasource.rotate_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 用户列表
-     * @description 管理端分页列出用户（邮箱字段遵循 system 角色可见性）
-     */
-    get: operations["account.user.list_users"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/avatar": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/table": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 更新表级数据源
+         * @description 整份替换字段绑定集合；已有绑定保留其 source_key 与凭据
+         */
+        put: operations["feishu.datasource.update_datasource_table"];
+        /**
+         * 新建表级数据源
+         * @description 一次写入表级行与 N 条字段绑定（含系统生成的凭据），同一事务
+         */
+        post: operations["feishu.datasource.create_datasource_table"];
+        /**
+         * 删除表级数据源
+         * @description 删除数据源、它的全部字段绑定；其选项行只停用不删除
+         */
+        delete: operations["feishu.datasource.delete_datasource_table"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 读取头像
-     * @description 读取指定用户头像（JSON 内嵌 data URL，无头像时字段为 null）
-     */
-    get: operations["account.user.get_avatar"];
-    put?: never;
-    /**
-     * 上传头像
-     * @description 上传当前用户头像（PNG/JPEG/WebP/GIF，解码后 ≤ 40 KiB，宽高 ≤ 1024）
-     */
-    post: operations["account.user.upload_avatar"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/change-email": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/table/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 数据源体检
+         * @description 把勾选的字段与表实际字段比对，列出不可自愈的问题（改名不算问题）
+         */
+        post: operations["feishu.datasource.health_check"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 更换邮箱
-     * @description 校验新邮箱验证码并完成换绑，撤销已有会话
-     */
-    post: operations["account.user.change_email"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/change-email-verifications": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/xlsx/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 解析 xlsx 表头
+         * @description 读上传文件的表头（只看第一张 sheet），供配置向导勾列；不写库
+         */
+        post: operations["feishu.datasource.probe_xlsx_headers"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 请求换绑验证码
-     * @description 向新邮箱发送一次性换绑验证码（独立验证码 key 域）
-     */
-    post: operations["account.user.request_change_email"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/change-password": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/{datasource_id}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 导入 xlsx
+         * @description 按每条绑定的列名取值、派生选项并落库；整份快照替换该数据源的选项
+         */
+        post: operations["feishu.datasource.import_xlsx"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 修改密码
-     * @description 校验当前密码并使已有会话失效
-     */
-    post: operations["account.user.change_password"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/change-username": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/datasources/{datasource_id}/import-progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * xlsx 导入进度
+         * @description 查询该数据源在本进程内的导入阶段与计数；不写库
+         */
+        get: operations["feishu.datasource.get_import_progress"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 修改用户名
-     * @description 修改当前用户名并撤销已有会话
-     */
-    post: operations["account.user.change_username"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/delete": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/feishu/options/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 选项列表
+         * @description 分页查询飞书选项
+         */
+        post: operations["feishu.option.list_options"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 删除账号
-     * @description 匿名化删除当前账号（username 改写、email 释放、双版本失效）
-     */
-    post: operations["account.user.delete_account"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/disable": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 用户列表
+         * @description 管理端分页列出用户（邮箱字段遵循 system 角色可见性）
+         */
+        get: operations["account.user.list_users"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 停用当前账号
-     * @description 停用当前账号，并撤销此前签发的全部会话
-     */
-    post: operations["account.user.disable_self"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/export": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/avatar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 读取头像
+         * @description 读取指定用户头像（JSON 内嵌 data URL，无头像时字段为 null）
+         */
+        get: operations["account.user.get_avatar"];
+        put?: never;
+        /**
+         * 上传头像
+         * @description 上传当前用户头像（PNG/JPEG/WebP/GIF，解码后 ≤ 40 KiB，宽高 ≤ 1024）
+         */
+        post: operations["account.user.upload_avatar"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 导出个人数据
-     * @description 导出当前用户的个人数据（资料、会话、安全事件）
-     */
-    get: operations["account.user.export_data"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/login": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/change-email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 更换邮箱
+         * @description 校验新邮箱验证码并完成换绑，撤销已有会话
+         */
+        post: operations["account.user.change_email"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 登录
-     * @description 校验账号密码并签发 Token
-     */
-    post: operations["account.user.login"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/login-by-email-code": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/change-email-verifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 请求换绑验证码
+         * @description 向新邮箱发送一次性换绑验证码（独立验证码 key 域）
+         */
+        post: operations["account.user.request_change_email"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 邮箱验证码登录
-     * @description 校验邮箱一次性验证码并签发 Token（免密登录，两段式 MFA，验证码单次消费）
-     */
-    post: operations["account.user.login_by_email_code"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/login-email-code": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/change-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 修改密码
+         * @description 校验当前密码并使已有会话失效
+         */
+        post: operations["account.user.change_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 请求登录邮箱验证码
-     * @description 向登录邮箱发送一次性免密登录验证码（统一 accepted 响应防枚举）
-     */
-    post: operations["account.user.request_login_email_code"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/logout": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/change-username": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 修改用户名
+         * @description 修改当前用户名并撤销已有会话
+         */
+        post: operations["account.user.change_username"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 退出全部会话
-     * @description 递增持久会话版本并撤销当前账号此前签发的全部 Access 与 Refresh Token
-     */
-    post: operations["account.user.logout"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/me": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 删除账号
+         * @description 匿名化删除当前账号（username 改写、email 释放、双版本失效）
+         */
+        post: operations["account.user.delete_account"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 当前用户
-     * @description 读取当前已认证用户
-     */
-    get: operations["account.user.me"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/mfa/email-code": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用当前账号
+         * @description 停用当前账号，并撤销此前签发的全部会话
+         */
+        post: operations["account.user.disable_self"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 请求登录 MFA 邮箱验证码
-     * @description 认证器不可用时向注册邮箱发送一次性登录验证码（等时密码校验防枚举）
-     */
-    post: operations["account.user.request_mfa_email_code"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/mfa/totp/activate": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 导出个人数据
+         * @description 导出当前用户的个人数据（资料、会话、安全事件）
+         */
+        get: operations["account.user.export_data"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * TOTP 激活
-     * @description 校验一次性码后启用 TOTP 第二因子，签发恢复码
-     */
-    post: operations["account.user.totp_activate"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/mfa/totp/deactivate": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 登录
+         * @description 校验账号密码并签发 Token
+         */
+        post: operations["account.user.login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * TOTP 停用
-     * @description 关闭 TOTP 第二因子并作废全部恢复码，既有会话失效
-     */
-    post: operations["account.user.totp_deactivate"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/mfa/totp/setup": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/login-by-email-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 邮箱验证码登录
+         * @description 校验邮箱一次性验证码并签发 Token（免密登录，两段式 MFA，验证码单次消费）
+         */
+        post: operations["account.user.login_by_email_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * TOTP 配置初始化
-     * @description 生成 TOTP 共享密钥与 otpauth URI（未激活）
-     */
-    post: operations["account.user.totp_setup"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/refresh": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/login-email-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 请求登录邮箱验证码
+         * @description 向登录邮箱发送一次性免密登录验证码（统一 accepted 响应防枚举）
+         */
+        post: operations["account.user.request_login_email_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 刷新 Token
-     * @description 轮换 Refresh Token 并签发新 Token 对
-     */
-    post: operations["account.user.refresh"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/register": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 退出全部会话
+         * @description 递增持久会话版本并撤销当前账号此前签发的全部 Access 与 Refresh Token
+         */
+        post: operations["account.user.logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 注册用户
-     * @description 创建一个新用户
-     */
-    post: operations["account.user.register"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/registration-email-verifications": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 当前用户
+         * @description 读取当前已认证用户
+         */
+        get: operations["account.user.me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 发送注册邮箱验证码
-     * @description 按邮箱、来源地址和全局容量限制投递一次性注册验证码
-     */
-    post: operations["account.user.request_registration_email"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/request-password-reset": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/mfa/email-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 请求登录 MFA 邮箱验证码
+         * @description 认证器不可用时向注册邮箱发送一次性登录验证码（等时密码校验防枚举）
+         */
+        post: operations["account.user.request_mfa_email_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 请求密码重置
-     * @description 向已验证邮箱投递一次性密码重置链接；响应不暴露邮箱是否注册
-     */
-    post: operations["account.user.request_password_reset"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/reset-password": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/mfa/totp/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * TOTP 激活
+         * @description 校验一次性码后启用 TOTP 第二因子，签发恢复码
+         */
+        post: operations["account.user.totp_activate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 重置密码
-     * @description 消费短期单次凭证并使已有会话失效
-     */
-    post: operations["account.user.reset_password"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/security-events": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/mfa/totp/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * TOTP 停用
+         * @description 关闭 TOTP 第二因子并作废全部恢复码，既有会话失效
+         */
+        post: operations["account.user.totp_deactivate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 安全事件
-     * @description 查询当前用户的登录安全事件（分页、仅本人）
-     */
-    get: operations["account.user.security_events"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/sessions": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/mfa/totp/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * TOTP 配置初始化
+         * @description 生成 TOTP 共享密钥与 otpauth URI（未激活）
+         */
+        post: operations["account.user.totp_setup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * 登录设备
-     * @description 列出当前用户活跃会话并标记当前设备
-     */
-    get: operations["account.user.list_sessions"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/sessions/revoke": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 刷新 Token
+         * @description 轮换 Refresh Token 并签发新 Token 对
+         */
+        post: operations["account.user.refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 撤销会话
-     * @description 按 session_id 撤销单个登录设备
-     */
-    post: operations["account.user.revoke_session"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/step-up/complete": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 注册用户
+         * @description 创建一个新用户
+         */
+        post: operations["account.user.register"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 完成敏感操作重认证
-     * @description 重新校验账号密码并把短期 challenge 升级为一次性 proof
-     */
-    post: operations["account.user.step_up_complete"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/{id}/disable": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/registration-email-verifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 发送注册邮箱验证码
+         * @description 按邮箱、来源地址和全局容量限制投递一次性注册验证码
+         */
+        post: operations["account.user.request_registration_email"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 停用用户
-     * @description 管理端停用目标账号并撤销其全部会话
-     */
-    post: operations["account.user.admin_disable_user"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/{id}/enable": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/request-password-reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 请求密码重置
+         * @description 向已验证邮箱投递一次性密码重置链接；响应不暴露邮箱是否注册
+         */
+        post: operations["account.user.request_password_reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 启用用户
-     * @description 管理端启用被停用的目标账号
-     */
-    post: operations["account.user.admin_enable_user"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/users/{id}/password-reset-tokens": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/api/v1/users/reset-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 重置密码
+         * @description 消费短期单次凭证并使已有会话失效
+         */
+        post: operations["account.user.reset_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * 签发重置凭证
-     * @description 管理端为目标用户签发一次性密码重置凭证（明文只回显一次）
-     */
-    post: operations["account.user.admin_issue_password_reset"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
+    "/api/v1/users/security-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 安全事件
+         * @description 查询当前用户的登录安全事件（分页、仅本人）
+         */
+        get: operations["account.user.security_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 登录设备
+         * @description 列出当前用户活跃会话并标记当前设备
+         */
+        get: operations["account.user.list_sessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/sessions/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 撤销会话
+         * @description 按 session_id 撤销单个登录设备
+         */
+        post: operations["account.user.revoke_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/step-up/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 完成敏感操作重认证
+         * @description 重新校验账号密码并把短期 challenge 升级为一次性 proof
+         */
+        post: operations["account.user.step_up_complete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用用户
+         * @description 管理端停用目标账号并撤销其全部会话
+         */
+        post: operations["account.user.admin_disable_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 启用用户
+         * @description 管理端启用被停用的目标账号
+         */
+        post: operations["account.user.admin_enable_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}/password-reset-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 签发重置凭证
+         * @description 管理端为目标用户签发一次性密码重置凭证（明文只回显一次）
+         */
+        post: operations["account.user.admin_issue_password_reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
-  schemas: {
-    ApiError: {
-      code: number;
-      data?: unknown;
-      message: string;
-    };
-    /** @description 权限目录中的一个条目：权限字符串、声明它的操作 ID 列表，以及危害面标记。 */
-    PermissionEntry: {
-      /**
-       * @description 该权限是否为「管理员等价权限」（G2）。
-       *
-       *     目录本身推不出这一点（它只记录「有哪些权限」），标记由代码侧的显式清单 `sensitive_permissions` 给出。随条目一起序列化到目录读接口，前端据此把危害面 显示出来——「可配置的前提是每个权限的危害面可见」。
-       */
-      admin_equivalent: boolean;
-      declared_by: string[];
-      permission: string;
-    };
-    /** @description 单条直授权限的对外视图。 */
-    GrantView: {
-      /** Format: int64 */
-      granted_by: number;
-      /** Format: int64 */
-      id: number;
-      /** Format: int64 */
-      occurred_at: number;
-      permission: string;
-    };
-    /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
-    OrderByItem: {
-      /**
-       * @description 方向，缺省为 Asc
-       * @default Asc
-       */
-      direction: components["schemas"]["SortOrder"];
-      /** @description 字段名 */
-      field: string;
-    };
-    /** @description 排序方向。 */
-    SortOrder: "Asc" | "Desc";
-    /**
-     * @description WHERE 条件枚举
-     *
-     *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
-     *
-     *     # 变体
-     *
-     *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
-     *
-     *     # 示例
-     *
-     *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
-     *
-     *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
-     *
-     *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
-     *
-     *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
-     *
-     *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
-     *
-     *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
-     */
-    WhereCondition:
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "eq";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "in";
-          /** @description 值列表 */
-          values: unknown[];
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @description 匹配模式 */
-          pattern: string;
-          /** @enum {string} */
-          type: "like";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "gt";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "gte";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "lt";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "lte";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "is_null";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "is_not_null";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "ne";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @description 区间上界 */
-          hi: unknown;
-          /** @description 区间下界 */
-          lo: unknown;
-          /** @enum {string} */
-          type: "between";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "not_in";
-          /** @description 值列表 */
-          values: unknown[];
-        }
-      | {
-          /** @description 子条件列表 */
-          conditions: components["schemas"]["WhereCondition"][];
-          /** @enum {string} */
-          type: "and";
-        }
-      | {
-          /** @description 子条件列表 */
-          conditions: components["schemas"]["WhereCondition"][];
-          /** @enum {string} */
-          type: "or";
+    schemas: {
+        ApiError: {
+            code: number;
+            data?: unknown;
+            message: string;
         };
-    /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
-    OrderByItem__2: {
-      /**
-       * @description 方向，缺省为 Asc
-       * @default Asc
-       */
-      direction: components["schemas"]["SortOrder"];
-      /** @description 字段名 */
-      field: string;
-    };
-    /**
-     * @description WHERE 条件枚举
-     *
-     *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
-     *
-     *     # 变体
-     *
-     *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
-     *
-     *     # 示例
-     *
-     *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
-     *
-     *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
-     *
-     *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
-     *
-     *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
-     *
-     *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
-     *
-     *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
-     */
-    WhereCondition__2:
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "eq";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "in";
-          /** @description 值列表 */
-          values: unknown[];
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @description 匹配模式 */
-          pattern: string;
-          /** @enum {string} */
-          type: "like";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "gt";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "gte";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "lt";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "lte";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "is_null";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "is_not_null";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "ne";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @description 区间上界 */
-          hi: unknown;
-          /** @description 区间下界 */
-          lo: unknown;
-          /** @enum {string} */
-          type: "between";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "not_in";
-          /** @description 值列表 */
-          values: unknown[];
-        }
-      | {
-          /** @description 子条件列表 */
-          conditions: components["schemas"]["WhereCondition__2"][];
-          /** @enum {string} */
-          type: "and";
-        }
-      | {
-          /** @description 子条件列表 */
-          conditions: components["schemas"]["WhereCondition__2"][];
-          /** @enum {string} */
-          type: "or";
+        /** @description 权限目录中的一个条目：权限字符串、声明它的操作 ID 列表，以及危害面标记。 */
+        PermissionEntry: {
+            /**
+             * @description 该权限是否为「管理员等价权限」（G2）。
+             *
+             *     目录本身推不出这一点（它只记录「有哪些权限」），标记由代码侧的显式清单 `sensitive_permissions` 给出。随条目一起序列化到目录读接口，前端据此把危害面 显示出来——「可配置的前提是每个权限的危害面可见」。
+             */
+            admin_equivalent: boolean;
+            declared_by: string[];
+            permission: string;
         };
-    /** @description 一条字段绑定的输入。 */
-    FieldBindingInput: {
-      /** @description 多维表格字段 ID，或（xlsx 导入时）**列名**。**身份就是它**，改名不能断链。 */
-      field_id: string;
-      /**
-       * @description 展示用名字。多维表格那条路留空（由 `pull` 每轮解析回写）；**xlsx 导入必须给**，与 `field_id` 同值。
-       *
-       *     为什么必须给：审批外部选项装配**按列名**把控件与数据源配对，没有名字这条绑定就无从参与； `approval_provision` 只会跳过它（只 warn 不报错），于是某个控件静默少一个候选列。
-       * @default null
-       */
-      field_name: string | null;
-      /**
-       * @description 同表内的父列 `field_id`；无父给 `null` 或省略。
-       * @default null
-       */
-      parent_field_id: string | null;
-      /** @description 进 URL 路径段的数据源标识；全局唯一、创建后不可改。 */
-      source_key: string;
-    };
-    /** Format: binary */
-    UploadedFile: string;
-    /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
-    OrderByItem__3: {
-      /**
-       * @description 方向，缺省为 Asc
-       * @default Asc
-       */
-      direction: components["schemas"]["SortOrder"];
-      /** @description 字段名 */
-      field: string;
-    };
-    /**
-     * @description WHERE 条件枚举
-     *
-     *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
-     *
-     *     # 变体
-     *
-     *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
-     *
-     *     # 示例
-     *
-     *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
-     *
-     *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
-     *
-     *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
-     *
-     *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
-     *
-     *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
-     *
-     *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
-     */
-    WhereCondition__3:
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "eq";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "in";
-          /** @description 值列表 */
-          values: unknown[];
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @description 匹配模式 */
-          pattern: string;
-          /** @enum {string} */
-          type: "like";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "gt";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "gte";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "lt";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "lte";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "is_null";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "is_not_null";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "ne";
-          /** @description 比较值 */
-          value: unknown;
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @description 区间上界 */
-          hi: unknown;
-          /** @description 区间下界 */
-          lo: unknown;
-          /** @enum {string} */
-          type: "between";
-        }
-      | {
-          /** @description 字段名 */
-          field: string;
-          /** @enum {string} */
-          type: "not_in";
-          /** @description 值列表 */
-          values: unknown[];
-        }
-      | {
-          /** @description 子条件列表 */
-          conditions: components["schemas"]["WhereCondition__3"][];
-          /** @enum {string} */
-          type: "and";
-        }
-      | {
-          /** @description 子条件列表 */
-          conditions: components["schemas"]["WhereCondition__3"][];
-          /** @enum {string} */
-          type: "or";
+        /** @description 单条直授权限的对外视图。 */
+        GrantView: {
+            /** Format: int64 */
+            granted_by: number;
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            occurred_at: number;
+            permission: string;
         };
-    /**
-     * @description 用户账号状态：启用、停用或已删除（匿名化，路线图 E-2）。
-     * @enum {string}
-     */
-    UserStatus: "active" | "disabled" | "deleted";
-    /** @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。 */
-    UserView: {
-      /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
-      avatar_version?: string | null;
-      /** Format: int64 */
-      created_at: number;
-      email?: string | null;
-      /** Format: int64 */
-      email_verified_at?: number | null;
-      /** Format: int64 */
-      id: number;
-      status: components["schemas"]["UserStatus"];
-      /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
-      totp_activated: boolean;
-      /** Format: int64 */
-      updated_at: number;
-      username: string;
+        /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+        OrderByItem: {
+            /**
+             * @description 方向，缺省为 Asc
+             * @default Asc
+             */
+            direction: components["schemas"]["SortOrder"];
+            /** @description 字段名 */
+            field: string;
+        };
+        /** @description 排序方向。 */
+        SortOrder: "Asc" | "Desc";
+        /**
+         * @description WHERE 条件枚举
+         *
+         *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+         *
+         *     # 变体
+         *
+         *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+         *
+         *     # 示例
+         *
+         *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+         *
+         *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+         *
+         *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+         *
+         *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+         *
+         *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+         *
+         *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+         */
+        WhereCondition: {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "eq";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 匹配模式 */
+            pattern: string;
+            /** @enum {string} */
+            type: "like";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_not_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "ne";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 区间上界 */
+            hi: unknown;
+            /** @description 区间下界 */
+            lo: unknown;
+            /** @enum {string} */
+            type: "between";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "not_in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition"][];
+            /** @enum {string} */
+            type: "and";
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition"][];
+            /** @enum {string} */
+            type: "or";
+        };
+        /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+        OrderByItem__2: {
+            /**
+             * @description 方向，缺省为 Asc
+             * @default Asc
+             */
+            direction: components["schemas"]["SortOrder"];
+            /** @description 字段名 */
+            field: string;
+        };
+        /**
+         * @description WHERE 条件枚举
+         *
+         *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+         *
+         *     # 变体
+         *
+         *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+         *
+         *     # 示例
+         *
+         *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+         *
+         *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+         *
+         *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+         *
+         *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+         *
+         *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+         *
+         *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+         */
+        WhereCondition__2: {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "eq";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 匹配模式 */
+            pattern: string;
+            /** @enum {string} */
+            type: "like";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_not_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "ne";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 区间上界 */
+            hi: unknown;
+            /** @description 区间下界 */
+            lo: unknown;
+            /** @enum {string} */
+            type: "between";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "not_in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__2"][];
+            /** @enum {string} */
+            type: "and";
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__2"][];
+            /** @enum {string} */
+            type: "or";
+        };
+        /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+        OrderByItem__3: {
+            /**
+             * @description 方向，缺省为 Asc
+             * @default Asc
+             */
+            direction: components["schemas"]["SortOrder"];
+            /** @description 字段名 */
+            field: string;
+        };
+        /**
+         * @description WHERE 条件枚举
+         *
+         *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+         *
+         *     # 变体
+         *
+         *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+         *
+         *     # 示例
+         *
+         *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+         *
+         *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+         *
+         *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+         *
+         *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+         *
+         *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+         *
+         *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+         */
+        WhereCondition__3: {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "eq";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 匹配模式 */
+            pattern: string;
+            /** @enum {string} */
+            type: "like";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_not_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "ne";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 区间上界 */
+            hi: unknown;
+            /** @description 区间下界 */
+            lo: unknown;
+            /** @enum {string} */
+            type: "between";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "not_in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__3"][];
+            /** @enum {string} */
+            type: "and";
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__3"][];
+            /** @enum {string} */
+            type: "or";
+        };
+        /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+        OrderByItem__4: {
+            /**
+             * @description 方向，缺省为 Asc
+             * @default Asc
+             */
+            direction: components["schemas"]["SortOrder"];
+            /** @description 字段名 */
+            field: string;
+        };
+        /**
+         * @description WHERE 条件枚举
+         *
+         *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+         *
+         *     # 变体
+         *
+         *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+         *
+         *     # 示例
+         *
+         *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+         *
+         *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+         *
+         *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+         *
+         *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+         *
+         *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+         *
+         *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+         */
+        WhereCondition__4: {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "eq";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 匹配模式 */
+            pattern: string;
+            /** @enum {string} */
+            type: "like";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_not_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "ne";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 区间上界 */
+            hi: unknown;
+            /** @description 区间下界 */
+            lo: unknown;
+            /** @enum {string} */
+            type: "between";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "not_in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__4"][];
+            /** @enum {string} */
+            type: "and";
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__4"][];
+            /** @enum {string} */
+            type: "or";
+        };
+        /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+        OrderByItem__5: {
+            /**
+             * @description 方向，缺省为 Asc
+             * @default Asc
+             */
+            direction: components["schemas"]["SortOrder"];
+            /** @description 字段名 */
+            field: string;
+        };
+        /**
+         * @description WHERE 条件枚举
+         *
+         *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+         *
+         *     # 变体
+         *
+         *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+         *
+         *     # 示例
+         *
+         *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+         *
+         *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+         *
+         *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+         *
+         *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+         *
+         *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+         *
+         *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+         */
+        WhereCondition__5: {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "eq";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 匹配模式 */
+            pattern: string;
+            /** @enum {string} */
+            type: "like";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_not_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "ne";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 区间上界 */
+            hi: unknown;
+            /** @description 区间下界 */
+            lo: unknown;
+            /** @enum {string} */
+            type: "between";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "not_in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__5"][];
+            /** @enum {string} */
+            type: "and";
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__5"][];
+            /** @enum {string} */
+            type: "or";
+        };
+        /** @description 一条字段绑定的输入。 */
+        FieldBindingInput: {
+            /** @description 多维表格字段 ID，或（xlsx 导入时）**列名**。**身份就是它**，改名不能断链。 */
+            field_id: string;
+            /**
+             * @description 展示用名字。多维表格那条路留空（由 `pull` 每轮解析回写）；**xlsx 导入必须给**，与 `field_id` 同值。
+             *
+             *     为什么必须给：审批外部选项装配**按列名**把控件与数据源配对，没有名字这条绑定就无从参与； `approval_provision` 只会跳过它（只 warn 不报错），于是某个控件静默少一个候选列。
+             * @default null
+             */
+            field_name: string | null;
+            /**
+             * @description 同表内的父列 `field_id`；无父给 `null` 或省略。
+             * @default null
+             */
+            parent_field_id: string | null;
+            /** @description 进 URL 路径段的数据源标识；全局唯一、创建后不可改。 */
+            source_key: string;
+        };
+        /** Format: binary */
+        UploadedFile: string;
+        /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
+        OrderByItem__6: {
+            /**
+             * @description 方向，缺省为 Asc
+             * @default Asc
+             */
+            direction: components["schemas"]["SortOrder"];
+            /** @description 字段名 */
+            field: string;
+        };
+        /**
+         * @description WHERE 条件枚举
+         *
+         *     定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。
+         *
+         *     # 变体
+         *
+         *     - `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)
+         *
+         *     # 示例
+         *
+         *     ```rust use yang_base::table::WhereCondition; use serde_json::json;
+         *
+         *     // 等于条件 let eq_condition = WhereCondition::Eq { field: "status".to_string(), value: json!("active"), };
+         *
+         *     // 包含条件 let in_condition = WhereCondition::In { field: "role".to_string(), values: vec![json!("admin"), json!("user")], };
+         *
+         *     // 模糊匹配 let like_condition = WhereCondition::Like { field: "name".to_string(), pattern: "%alice%".to_string(), };
+         *
+         *     // 大于条件 let gt_condition = WhereCondition::Gt { field: "age".to_string(), value: json!(18), };
+         *
+         *     // 空值判断 let is_null_condition = WhereCondition::IsNull { field: "deleted_at".to_string(), }; ```
+         */
+        WhereCondition__6: {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "eq";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 匹配模式 */
+            pattern: string;
+            /** @enum {string} */
+            type: "like";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "gte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lt";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "lte";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "is_not_null";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "ne";
+            /** @description 比较值 */
+            value: unknown;
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @description 区间上界 */
+            hi: unknown;
+            /** @description 区间下界 */
+            lo: unknown;
+            /** @enum {string} */
+            type: "between";
+        } | {
+            /** @description 字段名 */
+            field: string;
+            /** @enum {string} */
+            type: "not_in";
+            /** @description 值列表 */
+            values: unknown[];
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__6"][];
+            /** @enum {string} */
+            type: "and";
+        } | {
+            /** @description 子条件列表 */
+            conditions: components["schemas"]["WhereCondition__6"][];
+            /** @enum {string} */
+            type: "or";
+        };
+        /**
+         * @description 用户账号状态：启用、停用或已删除（匿名化，路线图 E-2）。
+         * @enum {string}
+         */
+        UserStatus: "active" | "disabled" | "deleted";
+        /** @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。 */
+        UserView: {
+            /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
+            avatar_version?: string | null;
+            /** Format: int64 */
+            created_at: number;
+            email?: string | null;
+            /** Format: int64 */
+            email_verified_at?: number | null;
+            /** Format: int64 */
+            id: number;
+            status: components["schemas"]["UserStatus"];
+            /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
+            totp_activated: boolean;
+            /** Format: int64 */
+            updated_at: number;
+            username: string;
+        };
+        /** @description 用户可见的安全事件视图。 */
+        LoginEventView: {
+            failure_reason?: string | null;
+            ip: string;
+            /** Format: int64 */
+            occurred_at: number;
+            result: string;
+            user_agent: string;
+        };
+        /** @description 单条会话展示视图（供 GET /users/sessions 返回）。 */
+        SessionView: {
+            /** Format: int64 */
+            created_at: number;
+            current: boolean;
+            ip: string;
+            /** Format: int64 */
+            last_seen_at: number;
+            /** Format: int64 */
+            revoked_at?: number | null;
+            session_id: string;
+            user_agent: string;
+        };
+        /** @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。 */
+        UserView__2: {
+            /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
+            avatar_version?: string | null;
+            /** Format: int64 */
+            created_at: number;
+            email?: string | null;
+            /** Format: int64 */
+            email_verified_at?: number | null;
+            /** Format: int64 */
+            id: number;
+            status: components["schemas"]["UserStatus"];
+            /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
+            totp_activated: boolean;
+            /** Format: int64 */
+            updated_at: number;
+            username: string;
+        };
+        CompleteStepUpCredentials: {
+            /**
+             * @description 账号启用 TOTP 时必填的第二因子一次性码（验收：不得降级为单因子）。
+             * @default null
+             */
+            mfa_code: string | null;
+            password: string;
+            username: string;
+        };
     };
-    /** @description 用户可见的安全事件视图。 */
-    LoginEventView: {
-      failure_reason?: string | null;
-      ip: string;
-      /** Format: int64 */
-      occurred_at: number;
-      result: string;
-      user_agent: string;
-    };
-    /** @description 单条会话展示视图（供 GET /users/sessions 返回）。 */
-    SessionView: {
-      /** Format: int64 */
-      created_at: number;
-      current: boolean;
-      ip: string;
-      /** Format: int64 */
-      last_seen_at: number;
-      /** Format: int64 */
-      revoked_at?: number | null;
-      session_id: string;
-      user_agent: string;
-    };
-    /** @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。 */
-    UserView__2: {
-      /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
-      avatar_version?: string | null;
-      /** Format: int64 */
-      created_at: number;
-      email?: string | null;
-      /** Format: int64 */
-      email_verified_at?: number | null;
-      /** Format: int64 */
-      id: number;
-      status: components["schemas"]["UserStatus"];
-      /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
-      totp_activated: boolean;
-      /** Format: int64 */
-      updated_at: number;
-      username: string;
-    };
-    CompleteStepUpCredentials: {
-      /**
-       * @description 账号启用 TOTP 时必填的第二因子一次性码（验收：不得降级为单因子）。
-       * @default null
-       */
-      mfa_code: string | null;
-      password: string;
-      username: string;
-    };
-  };
-  responses: never;
-  parameters: never;
-  requestBodies: never;
-  headers: never;
-  pathItems: never;
+    responses: never;
+    parameters: never;
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-  "account.user.ui_catalog": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    "account.user.ui_catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.grants.grant_permission": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          permission: string;
-          /** Format: int64 */
-          user_id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.grants.revoke_permission": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          permission: string;
-          /** Format: int64 */
-          user_id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.list_groups": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.create_group": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @default null */
-          description?: string | null;
-          group_key: string;
-          title: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.delete_group": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** Format: int64 */
-          group_id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "access.groups.add_group_item": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** Format: int64 */
-          group_id: number;
-          permission: string;
+    "access.grants.grant_permission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody: {
+            content: {
+                "application/json": {
+                    permission: string;
+                    /** Format: int64 */
+                    user_id: number;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.remove_group_item": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** Format: int64 */
-          group_id: number;
-          permission: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.add_group_member": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** Format: int64 */
-          group_id: number;
-          /** Format: int64 */
-          user_id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.remove_group_member": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** Format: int64 */
-          group_id: number;
-          /** Format: int64 */
-          user_id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.update_group": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @default null */
-          description?: string | null;
-          /** Format: int64 */
-          group_id: number;
-          title: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.groups.get_group": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        group_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "access.grants.list_permissions": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    "access.grants.revoke_permission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /** ListPermissionsResult */
-            data: {
-              permissions: components["schemas"]["PermissionEntry"][];
+        requestBody: {
+            content: {
+                "application/json": {
+                    permission: string;
+                    /** Format: int64 */
+                    user_id: number;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "access.grants.list_user_grants": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        user_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /** ListUserGrantsResult */
-            data: {
-              grants: components["schemas"]["GrantView"][];
-              /** Format: int64 */
-              user_id: number;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "demo.notes.create_note": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @default null */
-          content?: string | null;
-          title: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "demo.notes.delete_note": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** Format: int64 */
-          id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "demo.notes.list_notes": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * @description 是否额外执行 COUNT 查询
-           * @default false
-           */
-          count_total?: boolean;
-          /** @description 排序规则列表 */
-          order_by?: components["schemas"]["OrderByItem"][];
-          /**
-           * Format: uint32
-           * @description 页码（1 起步），缺省 1
-           * @default 1
-           */
-          page?: number;
-          /**
-           * Format: uint32
-           * @description 每页条数，缺省 10，必须 1..=100
-           * @default 10
-           */
-          page_size?: number;
-          /**
-           * @description 在表定义声明的 searchable 字段中执行关键词搜索。
-           * @default null
-           */
-          search?: string | null;
-          /**
-           * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件
-           * @default null
-           */
-          where?: components["schemas"]["WhereCondition"] | null;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ListNotesResult
-             * @description 标准分页行数据输出。
-             */
-            data: {
-              items: {
-                [key: string]: unknown;
-              }[];
-              /** Format: uint32 */
-              page: number;
-              /** Format: uint32 */
-              page_size: number;
-              /** Format: uint64 */
-              total?: number | null;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "demo.notes.update_note": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @default null */
-          content?: string | null;
-          /** Format: int64 */
-          id: number;
-          /** @default null */
-          title?: string | null;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "feishu.datasource.list_bitable_fields": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /** @description 多维表格 app_token。 */
-          app_token: string;
-          /** @description 数据表 ID。 */
-          table_id: string;
+    "access.groups.list_groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.list_bitable_tables": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /** @description 多维表格 app_token（`feishu.cn/base/<这一段>`）。 */
-          app_token: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.list_bitable_views": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /** @description 多维表格 app_token。 */
-          app_token: string;
-          /** @description 数据表 ID。 */
-          table_id: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.list_datasources": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * @description 是否额外执行 COUNT 查询。
-           * @default false
-           */
-          count_total?: boolean;
-          /** @description 排序规则列表。 */
-          order_by?: components["schemas"]["OrderByItem__2"][];
-          /**
-           * Format: uint32
-           * @description 页码（1 起步），缺省 1。
-           * @default 1
-           */
-          page?: number;
-          /**
-           * Format: uint32
-           * @description 每页条数，缺省 10，必须 1..=100。
-           * @default 10
-           */
-          page_size?: number;
-          /**
-           * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
-           * @default null
-           */
-          search?: string | null;
-          /**
-           * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
-           * @default null
-           */
-          source_key?: string | null;
-          /**
-           * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
-           * @default null
-           */
-          where?: components["schemas"]["WhereCondition__2"] | null;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.reveal_token": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /** @description 目标字段绑定的 `source_key`（进 URL 的数据源标识，全局唯一）。 */
-          source_key: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.rotate_token": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /** @description 目标字段绑定的 `source_key`。 */
-          source_key: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "feishu.datasource.update_datasource_table": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * @description 多维表格 app_token；省略即不改。**给空串表示清空该坐标。**
-           * @default null
-           */
-          bitable_base_token?: string | null;
-          /** @default null */
-          bitable_table_id?: string | null;
-          /** @default null */
-          bitable_view_id?: string | null;
-          /**
-           * Format: int64
-           * @description 目标数据源的 `id`。
-           */
-          datasource_id: number;
-          /** @description 期望的字段绑定集合（整份替换）。 */
-          fields: components["schemas"]["FieldBindingInput"][];
-          /**
-           * @description 取数方式；省略即不改。
-           * @default null
-           */
-          ingest_mode?: string | null;
-          /**
-           * @description 展示名；省略即不改。
-           * @default null
-           */
-          title?: string | null;
+    "access.groups.create_group": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @default null */
+                    description?: string | null;
+                    group_key: string;
+                    title: string;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.create_datasource_table": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * @description 多维表格 app_token；`pull` 时必填。
-           * @default null
-           */
-          bitable_base_token?: string | null;
-          /**
-           * @description 数据表 ID；`pull` 时必填。
-           * @default null
-           */
-          bitable_table_id?: string | null;
-          /**
-           * @description 视图 ID；省略表示取全表。**它只决定拉取哪些行**，不影响能勾哪些字段。
-           * @default null
-           */
-          bitable_view_id?: string | null;
-          /** @description 勾选的字段。至少一条。 */
-          fields: components["schemas"]["FieldBindingInput"][];
-          /**
-           * @description 取数方式：`push`（默认，多维表格工作流推送）/ `pull`（定时拉取）/ `xlsx_import`（文件导入）。
-           * @default null
-           */
-          ingest_mode?: string | null;
-          /** @description 展示名。 */
-          title: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.delete_datasource_table": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * Format: int64
-           * @description 目标数据源的 `id`。
-           */
-          datasource_id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.health_check": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * Format: int64
-           * @description 目标数据源的 `id`。
-           */
-          datasource_id: number;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.probe_xlsx_headers": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "multipart/form-data": {
-          /** @description 上传的 xlsx 文件，至少一个；同名 part 重复出现即为多文件。 */
-          files: components["schemas"]["UploadedFile"][];
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.datasource.import_xlsx": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "multipart/form-data": {
-          /**
-           * Format: int64
-           * @description URL 路径段里的表级数据源 `id`。
-           */
-          datasource_id: number;
-          /** @description 上传的 xlsx 文件，按上传顺序拼接为一份快照。上限见 `register`。 */
-          files: components["schemas"]["UploadedFile"][];
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "feishu.datasource.get_import_progress": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        datasource_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    "access.groups.delete_group": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: int64 */
+                    group_id: number;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "feishu.option.list_options": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * @description 是否额外执行 COUNT 查询。
-           * @default false
-           */
-          count_total?: boolean;
-          /** @description 排序规则列表。 */
-          order_by?: components["schemas"]["OrderByItem__3"][];
-          /**
-           * Format: uint32
-           * @description 页码（1 起步），缺省 1。
-           * @default 1
-           */
-          page?: number;
-          /**
-           * Format: uint32
-           * @description 每页条数，缺省 10，必须 1..=100。
-           * @default 10
-           */
-          page_size?: number;
-          /**
-           * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
-           * @default null
-           */
-          search?: string | null;
-          /**
-           * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
-           * @default null
-           */
-          source_key?: string | null;
-          /**
-           * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
-           * @default null
-           */
-          where?: components["schemas"]["WhereCondition__3"] | null;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.list_users": {
-    parameters: {
-      query?: {
-        page?: number | null;
-        page_size?: number | null;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /** UsersPage */
-            data: {
-              users: components["schemas"]["UserView"][];
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.get_avatar": {
-    parameters: {
-      query: {
-        user_id: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * GetAvatarOutput
-             * @description 头像读取结果：两个字段始终序列化，无头像时都为 null。
-             */
-            data: {
-              data_url?: string | null;
-              etag?: string | null;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.upload_avatar": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @description 头像图片字节的 base64 编码（解码后 ≤ 40 KiB）。 */
-          content_base64: string;
-          /** @description 图片 MIME 类型：image/png、image/jpeg、image/webp、image/gif。 */
-          mime: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * UploadAvatarOutput
-             * @description 上传成功后的头像版本（内容 etag，前端据此失效缓存）。
-             */
-            data: {
-              avatar_version: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.change_email": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          email_code: string;
-          new_email: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "account.user.request_change_email": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          new_email: string;
+    "access.groups.add_group_item": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ChangeEmailCodeAccepted
-             * @description 请求被接受后的统一响应（不暴露邮箱是否可注册）。
-             */
-            data: {
-              /** @description 请求已被接受（不保证邮件真实投递）。 */
-              accepted: boolean;
-              /**
-               * Format: uint64
-               * @description 验证码有效期（秒）。
-               */
-              expires_in: number;
-              /**
-               * Format: uint64
-               * @description 重发冷却（秒）。
-               */
-              resend_after: number;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: int64 */
+                    group_id: number;
+                    permission: string;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.change_password": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          new_password: string;
-          old_password: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.change_username": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          new_username: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.delete_account": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @description 二次确认文案：必须等于「delete my account」才执行。 */
-          confirmation: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.disable_self": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.export_data": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * DataExport
-             * @description 个人数据导出载荷：资料 + 会话 + 登录安全事件（可机器读取的结构化 JSON）。
-             */
-            data: {
-              security_events: components["schemas"]["LoginEventView"][];
-              sessions: components["schemas"]["SessionView"][];
-              user: components["schemas"]["UserView__2"];
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "account.user.login": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /**
-           * @description 可选业务扩展字段。
-           * @default null
-           */
-          extra?: unknown;
-          /** @description 登录凭据。 */
-          password: string;
-          /** @description 用户名、邮箱或其他登录标识。 */
-          username: string;
+    "access.groups.remove_group_item": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: int64 */
+                    group_id: number;
+                    permission: string;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.login_by_email_code": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @description 登录邮箱。 */
-          email: string;
-          /** @description 邮箱一次性验证码（6 位数字）。 */
-          email_code: string;
-          /**
-           * @description 第二因子验证码（账号已激活 TOTP 时第二段提交：TOTP 动态码或一次性恢复码）。
-           * @default null
-           */
-          mfa_code?: string | null;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.request_login_email_code": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          /** @description 登录邮箱。 */
-          email: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * RegistrationEmailCodeAccepted
-             * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
-             */
-            data: {
-              /** @description 请求已被接受（不保证邮件真实投递）。 */
-              accepted: boolean;
-              /**
-               * Format: uint64
-               * @description 验证码有效期（秒）。
-               */
-              expires_in: number;
-              /**
-               * Format: uint64
-               * @description 重发冷却（秒）。
-               */
-              resend_after: number;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.logout": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.me": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * UserView
-             * @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。
-             */
-            data: {
-              /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
-              avatar_version?: string | null;
-              /** Format: int64 */
-              created_at: number;
-              email?: string | null;
-              /** Format: int64 */
-              email_verified_at?: number | null;
-              /** Format: int64 */
-              id: number;
-              status: components["schemas"]["UserStatus"];
-              /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
-              totp_activated: boolean;
-              /** Format: int64 */
-              updated_at: number;
-              username: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.request_mfa_email_code": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          /** @description 登录凭据。 */
-          password: string;
-          /** @description 用户名、邮箱或其他登录标识。 */
-          username: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * RegistrationEmailCodeAccepted
-             * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
-             */
-            data: {
-              /** @description 请求已被接受（不保证邮件真实投递）。 */
-              accepted: boolean;
-              /**
-               * Format: uint64
-               * @description 验证码有效期（秒）。
-               */
-              expires_in: number;
-              /**
-               * Format: uint64
-               * @description 重发冷却（秒）。
-               */
-              resend_after: number;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "account.user.totp_activate": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          code: string;
-          secret: string;
+    "access.groups.add_group_member": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: int64 */
+                    group_id: number;
+                    /** Format: int64 */
+                    user_id: number;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.totp_deactivate": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.totp_setup": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.refresh": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.register": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          email: string;
-          email_code: string;
-          password: string;
-          username: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * UserView
-             * @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。
-             */
-            data: {
-              /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
-              avatar_version?: string | null;
-              /** Format: int64 */
-              created_at: number;
-              email?: string | null;
-              /** Format: int64 */
-              email_verified_at?: number | null;
-              /** Format: int64 */
-              id: number;
-              status: components["schemas"]["UserStatus"];
-              /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
-              totp_activated: boolean;
-              /** Format: int64 */
-              updated_at: number;
-              username: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.request_registration_email": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          email: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * RegistrationEmailCodeAccepted
-             * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
-             */
-            data: {
-              /** @description 请求已被接受（不保证邮件真实投递）。 */
-              accepted: boolean;
-              /**
-               * Format: uint64
-               * @description 验证码有效期（秒）。
-               */
-              expires_in: number;
-              /**
-               * Format: uint64
-               * @description 重发冷却（秒）。
-               */
-              resend_after: number;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "account.user.request_password_reset": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          email: string;
+    "access.groups.remove_group_member": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * RequestPasswordResetAccepted
-             * @description 请求被接受后的统一响应（不暴露邮箱是否注册）。
-             */
-            data: {
-              /** @description 请求已被接受（不保证邮件真实投递）。 */
-              accepted: boolean;
-              /**
-               * Format: uint64
-               * @description 重置凭证有效期（秒）。
-               */
-              expires_in: number;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: int64 */
+                    group_id: number;
+                    /** Format: int64 */
+                    user_id: number;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.reset_password": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          new_password: string;
-          reset_token: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.security_events": {
-    parameters: {
-      query?: {
-        page?: number | null;
-        page_size?: number | null;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * SecurityEventsPage
-             * @description 分页的安全事件列表。
-             */
-            data: {
-              events: components["schemas"]["LoginEventView"][];
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.list_sessions": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": Record<string, never>;
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * SessionsList
-             * @description 会话列表响应；`current` 标记请求发起的当前设备。
-             */
-            data: {
-              sessions: components["schemas"]["SessionView"][];
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.revoke_session": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": {
-          session_id: string;
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.step_up_complete": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        "application/json": {
-          challenge: string;
-          credentials: components["schemas"]["CompleteStepUpCredentials"];
-        };
-      };
-    };
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * StepUpProof
-             * @description 凭据重认证成功后签发的短期 proof。
-             */
-            data: {
-              /**
-               * Format: uint64
-               * @description 从重认证成功时刻起的有效秒数。
-               */
-              expires_in: number;
-              /** @description 提交给敏感 Action 的签名 proof。 */
-              proof: string;
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
-  "account.user.admin_disable_user": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    "access.groups.update_group": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @default null */
+                    description?: string | null;
+                    /** Format: int64 */
+                    group_id: number;
+                    title: string;
+                };
             };
-            message: string;
-          };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.admin_enable_user": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
             };
-            message: string;
-          };
-        };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-    };
-  };
-  "account.user.admin_issue_password_reset": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description 成功 */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            /** @constant */
-            code: 0;
-            /**
-             * ApiResponse
-             * @description API 响应
-             *
-             *     统一的 API 响应格式，用于所有 Action 的返回值
-             *
-             *     # 字段
-             *
-             *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
-             *
-             *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
-             *
-             *     # 示例
-             *
-             *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
-             *
-             *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
-             *
-             *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
-             */
-            data: {
-              /**
-               * Format: int32
-               * @description 状态码
-               *
-               *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
-               */
-              code: number;
-              /**
-               * @description 响应数据
-               *
-               *     成功时包含业务数据，失败时通常为 None
-               */
-              data?: unknown;
-              /**
-               * @description 响应消息
-               *
-               *     描述操作结果的文本信息
-               */
-              message: string;
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
             };
-            message: string;
-          };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
         };
-      };
-      /** @description 请求参数错误 */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 未认证 */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 权限不足 */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
-      /** @description 服务器内部错误 */
-      500: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ApiError"];
-        };
-      };
     };
-  };
+    "access.groups.get_group": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "access.grants.list_permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /** ListPermissionsResult */
+                        data: {
+                            permissions: components["schemas"]["PermissionEntry"][];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "access.grants.list_user_grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /** ListUserGrantsResult */
+                        data: {
+                            grants: components["schemas"]["GrantView"][];
+                            /** Format: int64 */
+                            user_id: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "demo.notes.create_note": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @default null */
+                    content?: string | null;
+                    title: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "demo.notes.delete_note": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: int64 */
+                    id: number;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "demo.notes.list_notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 是否额外执行 COUNT 查询
+                     * @default false
+                     */
+                    count_total?: boolean;
+                    /** @description 排序规则列表 */
+                    order_by?: components["schemas"]["OrderByItem"][];
+                    /**
+                     * Format: uint32
+                     * @description 页码（1 起步），缺省 1
+                     * @default 1
+                     */
+                    page?: number;
+                    /**
+                     * Format: uint32
+                     * @description 每页条数，缺省 10，必须 1..=100
+                     * @default 10
+                     */
+                    page_size?: number;
+                    /**
+                     * @description 在表定义声明的 searchable 字段中执行关键词搜索。
+                     * @default null
+                     */
+                    search?: string | null;
+                    /**
+                     * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件
+                     * @default null
+                     */
+                    where?: components["schemas"]["WhereCondition"] | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ListNotesResult
+                         * @description 标准分页行数据输出。
+                         */
+                        data: {
+                            items: {
+                                [key: string]: unknown;
+                            }[];
+                            /** Format: uint32 */
+                            page: number;
+                            /** Format: uint32 */
+                            page_size: number;
+                            /** Format: uint64 */
+                            total?: number | null;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "demo.notes.update_note": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @default null */
+                    content?: string | null;
+                    /** Format: int64 */
+                    id: number;
+                    /** @default null */
+                    title?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.create_config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 申请人员字段（`field_id` **或**列名都接受，落库统一存 id）。 */
+                    applicant_field: string;
+                    /** @description 审批定义 code。 */
+                    approval_code: string;
+                    /** @description 回填字段（同上）。 */
+                    backfill_field: string;
+                    /** @description Base 时区（IANA 名）。多维表格日期是不带时区的毫秒时间戳，而审批 `date` 控件要带偏移量——猜错会让审批里的时间整体偏移，所以必须显式给定。 */
+                    base_timezone: string;
+                    /** @description 多维表格 token。 */
+                    base_token: string;
+                    /** @description 数据表 id。 */
+                    table_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.delete_config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: int64
+                     * @description 目标配置的 `id`。
+                     */
+                    config_id: number;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.list_configs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 是否额外执行 COUNT 查询。
+                     * @default false
+                     */
+                    count_total?: boolean;
+                    /** @description 排序规则列表。 */
+                    order_by?: components["schemas"]["OrderByItem__2"][];
+                    /**
+                     * Format: uint32
+                     * @description 页码（1 起步），缺省 1。
+                     * @default 1
+                     */
+                    page?: number;
+                    /**
+                     * Format: uint32
+                     * @description 每页条数，缺省 10，必须 1..=100。
+                     * @default 10
+                     */
+                    page_size?: number;
+                    /**
+                     * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
+                     * @default null
+                     */
+                    search?: string | null;
+                    /**
+                     * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
+                     * @default null
+                     */
+                    source_key?: string | null;
+                    /**
+                     * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
+                     * @default null
+                     */
+                    where?: components["schemas"]["WhereCondition__2"] | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.update_config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description Base 时区（IANA 名）；省略即不改。
+                     * @default null
+                     */
+                    base_timezone?: string | null;
+                    /**
+                     * Format: int64
+                     * @description 目标配置的 `id`。
+                     */
+                    config_id: number;
+                    /**
+                     * @description 启用开关；省略即不改。
+                     * @default null
+                     */
+                    enabled?: boolean | null;
+                    /**
+                     * @description 展示名；省略即不改。
+                     * @default null
+                     */
+                    title?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.list_widgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 审批定义 code。 */
+                    approval_code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.list_requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 是否额外执行 COUNT 查询。
+                     * @default false
+                     */
+                    count_total?: boolean;
+                    /** @description 排序规则列表。 */
+                    order_by?: components["schemas"]["OrderByItem__3"][];
+                    /**
+                     * Format: uint32
+                     * @description 页码（1 起步），缺省 1。
+                     * @default 1
+                     */
+                    page?: number;
+                    /**
+                     * Format: uint32
+                     * @description 每页条数，缺省 10，必须 1..=100。
+                     * @default 10
+                     */
+                    page_size?: number;
+                    /**
+                     * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
+                     * @default null
+                     */
+                    search?: string | null;
+                    /**
+                     * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
+                     * @default null
+                     */
+                    source_key?: string | null;
+                    /**
+                     * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
+                     * @default null
+                     */
+                    where?: components["schemas"]["WhereCondition__3"] | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.approval.list_tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 是否额外执行 COUNT 查询。
+                     * @default false
+                     */
+                    count_total?: boolean;
+                    /** @description 排序规则列表。 */
+                    order_by?: components["schemas"]["OrderByItem__4"][];
+                    /**
+                     * Format: uint32
+                     * @description 页码（1 起步），缺省 1。
+                     * @default 1
+                     */
+                    page?: number;
+                    /**
+                     * Format: uint32
+                     * @description 每页条数，缺省 10，必须 1..=100。
+                     * @default 10
+                     */
+                    page_size?: number;
+                    /**
+                     * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
+                     * @default null
+                     */
+                    search?: string | null;
+                    /**
+                     * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
+                     * @default null
+                     */
+                    source_key?: string | null;
+                    /**
+                     * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
+                     * @default null
+                     */
+                    where?: components["schemas"]["WhereCondition__4"] | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.list_bitable_fields": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 多维表格 app_token。 */
+                    app_token: string;
+                    /** @description 数据表 ID。 */
+                    table_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.list_bitable_tables": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 多维表格 app_token（`feishu.cn/base/<这一段>`）。 */
+                    app_token: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.list_bitable_views": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 多维表格 app_token。 */
+                    app_token: string;
+                    /** @description 数据表 ID。 */
+                    table_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.list_datasources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 是否额外执行 COUNT 查询。
+                     * @default false
+                     */
+                    count_total?: boolean;
+                    /** @description 排序规则列表。 */
+                    order_by?: components["schemas"]["OrderByItem__5"][];
+                    /**
+                     * Format: uint32
+                     * @description 页码（1 起步），缺省 1。
+                     * @default 1
+                     */
+                    page?: number;
+                    /**
+                     * Format: uint32
+                     * @description 每页条数，缺省 10，必须 1..=100。
+                     * @default 10
+                     */
+                    page_size?: number;
+                    /**
+                     * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
+                     * @default null
+                     */
+                    search?: string | null;
+                    /**
+                     * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
+                     * @default null
+                     */
+                    source_key?: string | null;
+                    /**
+                     * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
+                     * @default null
+                     */
+                    where?: components["schemas"]["WhereCondition__5"] | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.reveal_token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 目标字段绑定的 `source_key`（进 URL 的数据源标识，全局唯一）。 */
+                    source_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.rotate_token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 目标字段绑定的 `source_key`。 */
+                    source_key: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.update_datasource_table": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 多维表格 app_token；省略即不改。**给空串表示清空该坐标。**
+                     * @default null
+                     */
+                    bitable_base_token?: string | null;
+                    /** @default null */
+                    bitable_table_id?: string | null;
+                    /** @default null */
+                    bitable_view_id?: string | null;
+                    /**
+                     * Format: int64
+                     * @description 目标数据源的 `id`。
+                     */
+                    datasource_id: number;
+                    /** @description 期望的字段绑定集合（整份替换）。 */
+                    fields: components["schemas"]["FieldBindingInput"][];
+                    /**
+                     * @description 取数方式；省略即不改。
+                     * @default null
+                     */
+                    ingest_mode?: string | null;
+                    /**
+                     * @description 展示名；省略即不改。
+                     * @default null
+                     */
+                    title?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.create_datasource_table": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 多维表格 app_token；`pull` 时必填。
+                     * @default null
+                     */
+                    bitable_base_token?: string | null;
+                    /**
+                     * @description 数据表 ID；`pull` 时必填。
+                     * @default null
+                     */
+                    bitable_table_id?: string | null;
+                    /**
+                     * @description 视图 ID；省略表示取全表。**它只决定拉取哪些行**，不影响能勾哪些字段。
+                     * @default null
+                     */
+                    bitable_view_id?: string | null;
+                    /** @description 勾选的字段。至少一条。 */
+                    fields: components["schemas"]["FieldBindingInput"][];
+                    /**
+                     * @description 取数方式：`push`（默认，多维表格工作流推送）/ `pull`（定时拉取）/ `xlsx_import`（文件导入）。
+                     * @default null
+                     */
+                    ingest_mode?: string | null;
+                    /** @description 展示名。 */
+                    title: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.delete_datasource_table": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: int64
+                     * @description 目标数据源的 `id`。
+                     */
+                    datasource_id: number;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.health_check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * Format: int64
+                     * @description 目标数据源的 `id`。
+                     */
+                    datasource_id: number;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.probe_xlsx_headers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "multipart/form-data": {
+                    /** @description 上传的 xlsx 文件，至少一个；同名 part 重复出现即为多文件。 */
+                    files: components["schemas"]["UploadedFile"][];
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.import_xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: int64
+                     * @description URL 路径段里的表级数据源 `id`。
+                     */
+                    datasource_id: number;
+                    /** @description 上传的 xlsx 文件，按上传顺序拼接为一份快照。上限见 `register`。 */
+                    files: components["schemas"]["UploadedFile"][];
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.datasource.get_import_progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                datasource_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "feishu.option.list_options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 是否额外执行 COUNT 查询。
+                     * @default false
+                     */
+                    count_total?: boolean;
+                    /** @description 排序规则列表。 */
+                    order_by?: components["schemas"]["OrderByItem__6"][];
+                    /**
+                     * Format: uint32
+                     * @description 页码（1 起步），缺省 1。
+                     * @default 1
+                     */
+                    page?: number;
+                    /**
+                     * Format: uint32
+                     * @description 每页条数，缺省 10，必须 1..=100。
+                     * @default 10
+                     */
+                    page_size?: number;
+                    /**
+                     * @description 在表定义声明的 `searchable` 字段中执行关键词搜索。
+                     * @default null
+                     */
+                    search?: string | null;
+                    /**
+                     * @description 按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。
+                     * @default null
+                     */
+                    source_key?: string | null;
+                    /**
+                     * @description where 布尔过滤树（JSON key 为 `"where"`），缺省无条件。
+                     * @default null
+                     */
+                    where?: components["schemas"]["WhereCondition__6"] | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.list_users": {
+        parameters: {
+            query?: {
+                page?: number | null;
+                page_size?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /** UsersPage */
+                        data: {
+                            users: components["schemas"]["UserView"][];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.get_avatar": {
+        parameters: {
+            query: {
+                user_id: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * GetAvatarOutput
+                         * @description 头像读取结果：两个字段始终序列化，无头像时都为 null。
+                         */
+                        data: {
+                            data_url?: string | null;
+                            etag?: string | null;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.upload_avatar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description 头像图片字节的 base64 编码（解码后 ≤ 40 KiB）。 */
+                    content_base64: string;
+                    /** @description 图片 MIME 类型：image/png、image/jpeg、image/webp、image/gif。 */
+                    mime: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * UploadAvatarOutput
+                         * @description 上传成功后的头像版本（内容 etag，前端据此失效缓存）。
+                         */
+                        data: {
+                            avatar_version: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.change_email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    email_code: string;
+                    new_email: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.request_change_email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    new_email: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ChangeEmailCodeAccepted
+                         * @description 请求被接受后的统一响应（不暴露邮箱是否可注册）。
+                         */
+                        data: {
+                            /** @description 请求已被接受（不保证邮件真实投递）。 */
+                            accepted: boolean;
+                            /**
+                             * Format: uint64
+                             * @description 验证码有效期（秒）。
+                             */
+                            expires_in: number;
+                            /**
+                             * Format: uint64
+                             * @description 重发冷却（秒）。
+                             */
+                            resend_after: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.change_password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    new_password: string;
+                    old_password: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.change_username": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    new_username: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.delete_account": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description 二次确认文案：必须等于「delete my account」才执行。 */
+                    confirmation: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.disable_self": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.export_data": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * DataExport
+                         * @description 个人数据导出载荷：资料 + 会话 + 登录安全事件（可机器读取的结构化 JSON）。
+                         */
+                        data: {
+                            security_events: components["schemas"]["LoginEventView"][];
+                            sessions: components["schemas"]["SessionView"][];
+                            user: components["schemas"]["UserView__2"];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description 可选业务扩展字段。
+                     * @default null
+                     */
+                    extra?: unknown;
+                    /** @description 登录凭据。 */
+                    password: string;
+                    /** @description 用户名、邮箱或其他登录标识。 */
+                    username: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.login_by_email_code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description 登录邮箱。 */
+                    email: string;
+                    /** @description 邮箱一次性验证码（6 位数字）。 */
+                    email_code: string;
+                    /**
+                     * @description 第二因子验证码（账号已激活 TOTP 时第二段提交：TOTP 动态码或一次性恢复码）。
+                     * @default null
+                     */
+                    mfa_code?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.request_login_email_code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description 登录邮箱。 */
+                    email: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * RegistrationEmailCodeAccepted
+                         * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
+                         */
+                        data: {
+                            /** @description 请求已被接受（不保证邮件真实投递）。 */
+                            accepted: boolean;
+                            /**
+                             * Format: uint64
+                             * @description 验证码有效期（秒）。
+                             */
+                            expires_in: number;
+                            /**
+                             * Format: uint64
+                             * @description 重发冷却（秒）。
+                             */
+                            resend_after: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * UserView
+                         * @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。
+                         */
+                        data: {
+                            /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
+                            avatar_version?: string | null;
+                            /** Format: int64 */
+                            created_at: number;
+                            email?: string | null;
+                            /** Format: int64 */
+                            email_verified_at?: number | null;
+                            /** Format: int64 */
+                            id: number;
+                            status: components["schemas"]["UserStatus"];
+                            /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
+                            totp_activated: boolean;
+                            /** Format: int64 */
+                            updated_at: number;
+                            username: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.request_mfa_email_code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 登录凭据。 */
+                    password: string;
+                    /** @description 用户名、邮箱或其他登录标识。 */
+                    username: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * RegistrationEmailCodeAccepted
+                         * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
+                         */
+                        data: {
+                            /** @description 请求已被接受（不保证邮件真实投递）。 */
+                            accepted: boolean;
+                            /**
+                             * Format: uint64
+                             * @description 验证码有效期（秒）。
+                             */
+                            expires_in: number;
+                            /**
+                             * Format: uint64
+                             * @description 重发冷却（秒）。
+                             */
+                            resend_after: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.totp_activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    code: string;
+                    secret: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.totp_deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.totp_setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    email: string;
+                    email_code: string;
+                    password: string;
+                    username: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * UserView
+                         * @description 可安全返回给客户端的用户视图，不包含密码摘要与 TOTP 密钥。
+                         */
+                        data: {
+                            /** @description 头像内容版本（etag）；无头像为 null。不从 users 记录读取，由 `Account::view_by_id` 组装视图时经 `with_avatar_version` 注入。 */
+                            avatar_version?: string | null;
+                            /** Format: int64 */
+                            created_at: number;
+                            email?: string | null;
+                            /** Format: int64 */
+                            email_verified_at?: number | null;
+                            /** Format: int64 */
+                            id: number;
+                            status: components["schemas"]["UserStatus"];
+                            /** @description TOTP 第二因子是否已激活（由 `totp_activated_at` 投影为布尔值，不泄露密钥）。 */
+                            totp_activated: boolean;
+                            /** Format: int64 */
+                            updated_at: number;
+                            username: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.request_registration_email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    email: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * RegistrationEmailCodeAccepted
+                         * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
+                         */
+                        data: {
+                            /** @description 请求已被接受（不保证邮件真实投递）。 */
+                            accepted: boolean;
+                            /**
+                             * Format: uint64
+                             * @description 验证码有效期（秒）。
+                             */
+                            expires_in: number;
+                            /**
+                             * Format: uint64
+                             * @description 重发冷却（秒）。
+                             */
+                            resend_after: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.request_password_reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    email: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * RequestPasswordResetAccepted
+                         * @description 请求被接受后的统一响应（不暴露邮箱是否注册）。
+                         */
+                        data: {
+                            /** @description 请求已被接受（不保证邮件真实投递）。 */
+                            accepted: boolean;
+                            /**
+                             * Format: uint64
+                             * @description 重置凭证有效期（秒）。
+                             */
+                            expires_in: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.reset_password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    new_password: string;
+                    reset_token: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.security_events": {
+        parameters: {
+            query?: {
+                page?: number | null;
+                page_size?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * SecurityEventsPage
+                         * @description 分页的安全事件列表。
+                         */
+                        data: {
+                            events: components["schemas"]["LoginEventView"][];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.list_sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * SessionsList
+                         * @description 会话列表响应；`current` 标记请求发起的当前设备。
+                         */
+                        data: {
+                            sessions: components["schemas"]["SessionView"][];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.revoke_session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    session_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.step_up_complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    challenge: string;
+                    credentials: components["schemas"]["CompleteStepUpCredentials"];
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * StepUpProof
+                         * @description 凭据重认证成功后签发的短期 proof。
+                         */
+                        data: {
+                            /**
+                             * Format: uint64
+                             * @description 从重认证成功时刻起的有效秒数。
+                             */
+                            expires_in: number;
+                            /** @description 提交给敏感 Action 的签名 proof。 */
+                            proof: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.admin_disable_user": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.admin_enable_user": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.admin_issue_password_reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * ApiResponse
+                         * @description API 响应
+                         *
+                         *     统一的 API 响应格式，用于所有 Action 的返回值
+                         *
+                         *     # 字段
+                         *
+                         *     - `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）
+                         *
+                         *     标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。
+                         *
+                         *     # 示例
+                         *
+                         *     ```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;
+                         *
+                         *     // 创建成功响应 let response = ApiResponse::success( json!({ "id": 123, "name": "Alice" }), "操作成功" ); assert_eq!(response.code, 0);
+                         *
+                         *     // 创建失败响应 let response = ApiResponse::fail(400001, "参数错误"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```
+                         */
+                        data: {
+                            /**
+                             * Format: int32
+                             * @description 状态码
+                             *
+                             *     - 0: 成功 - 非零: 失败（具体错误码由业务定义）
+                             */
+                            code: number;
+                            /**
+                             * @description 响应数据
+                             *
+                             *     成功时包含业务数据，失败时通常为 None
+                             */
+                            data?: unknown;
+                            /**
+                             * @description 响应消息
+                             *
+                             *     描述操作结果的文本信息
+                             */
+                            message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
 }
