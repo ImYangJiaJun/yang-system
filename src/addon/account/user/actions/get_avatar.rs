@@ -37,9 +37,9 @@ pub(super) async fn handle(
     let actor = ctx.actor()?;
     let caller_id = actor.user_id();
     if input.user_id != caller_id {
-        let user = ctx.authenticated_user().ok_or_else(|| {
-            BaseError::Unauthorized("需要登录".to_string())
-        })?;
+        let user = ctx
+            .authenticated_user()
+            .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?;
         if !user.has_permission("account.users.read") {
             return Err(BaseError::PermissionDenied(
                 "无权限读取他人头像".to_string(),
