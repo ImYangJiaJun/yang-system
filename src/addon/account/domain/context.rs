@@ -170,8 +170,13 @@ impl Account {
             .map(str::to_string)
     }
 
-    /// 在注册事务中竞争唯一最终管理员哨兵（当前骨架为不声明的默认实现）。
+    /// 在注册事务中竞争唯一最终管理员哨兵。
     ///
+    /// 哨兵仲裁由组合根注入的 `SystemOwnerClaimer` 完成（`src/app.rs` 注入
+    /// access 域的 `AccessSystemOwnerClaimer`，见
+    /// `src/addon/access/domain/groups/owner.rs`）：写 `system_owner` 哨兵行经
+    /// UNIQUE + CHECK 仲裁并发，唯一成功者被引导为系统管理员，
+    /// `AlreadyClaimed` 是正常业务结果（降级为普通注册，不阻断注册）。
     /// `ctx` 透传给声明器：实现方写授权事实必须经受信 writer，
     /// 而 writer 需要 `ctx` 取得连接池（`trusted_query`）。
     pub(crate) async fn claim_system_owner(
