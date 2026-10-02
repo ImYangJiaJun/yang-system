@@ -289,30 +289,6 @@ export default function AppLayout() {
               </li>
             </ul>
           </div>
-          {canReadAccessGroups && (
-            <div>
-              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
-                权限管理
-              </p>
-              <ul className="space-y-0.5">
-                <li>
-                  <NavLink
-                    to="/access/groups"
-                    className={({ isActive }) =>
-                      cn(
-                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                        isActive &&
-                          "bg-accent font-medium text-accent-foreground",
-                      )
-                    }
-                  >
-                    <ShieldCheck className="size-4 shrink-0" />
-                    权限组
-                  </NavLink>
-                </li>
-              </ul>
-            </div>
-          )}
           {(canReadFeishuDatasources ||
             canReadFeishuApprovalConfigs ||
             canReadFeishuApprovalRequests) && (
