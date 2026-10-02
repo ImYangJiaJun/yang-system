@@ -201,3 +201,92 @@ tests:
       - eval_time: 30m
         alertname: YangSystemApprovalDispatchFailing
         exp_alerts: []
+
+  # outbox 传播正例：最老 pending 年龄恒为 6 秒（>2 且 >5），持续超过 for 窗口，
+  # warning（>2s）与 critical（>5s）应同时触发，形成分级升级。
+  - interval: 1m
+    input_series:
+      - series: 'authz_outbox_oldest_age_seconds{job="yang-system", instance="127.0.0.1:9090"}'
+        values: '6x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: YangSystemAuthorizationPropagationDelayed
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              instance: 127.0.0.1:9090
+              severity: warning
+              slo: authorization_freshness
+            exp_annotations:
+              summary: "authorization outbox propagation exceeds two seconds"
+              runbook: "docs/contracts/SLO.md"
+      - eval_time: 10m
+        alertname: YangSystemAuthorizationPropagationStalled
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              instance: 127.0.0.1:9090
+              severity: critical
+              slo: authorization_freshness
+            exp_annotations:
+              summary: "authorization outbox propagation exceeds five seconds"
+              runbook: "docs/contracts/SLO.md"
+
+  # outbox 传播分级反例：最老 pending 年龄恒为 3 秒，>2 秒的 warning 应触发，
+  # >5 秒的 critical 不应触发——验证两级阈值各自独立生效。
+  - interval: 1m
+    input_series:
+      - series: 'authz_outbox_oldest_age_seconds{job="yang-system", instance="127.0.0.1:9090"}'
+        values: '3x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: YangSystemAuthorizationPropagationDelayed
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              instance: 127.0.0.1:9090
+              severity: warning
+              slo: authorization_freshness
+            exp_annotations:
+              summary: "authorization outbox propagation exceeds two seconds"
+              runbook: "docs/contracts/SLO.md"
+      - eval_time: 10m
+        alertname: YangSystemAuthorizationPropagationStalled
+        exp_alerts: []
+
+  # 传播 p99 正例：5m 窗口内桶计数累计 90/98/99/100（每桶每分钟增量相同，
+  # 构造成比例速率），rank=0.99 落入 le=5 桶，p99≈5s >= 2s，且持续超过 for 窗口，
+  # 应触发 warning。
+  - interval: 1m
+    input_series:
+      - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="1"}'
+        values: '0+90x24'
+      - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="2.5"}'
+        values: '0+98x24'
+      - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="5"}'
+        values: '0+99x24'
+      - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="+Inf"}'
+        values: '0+100x24'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: YangSystemAuthorizationPropagationP99High
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              severity: warning
+              slo: authorization_freshness
+            exp_annotations:
+              summary: "authorization propagation p99 exceeds two seconds"
+              runbook: "docs/contracts/SLO.md"
+
+  # 传播 p99 反例：桶计数累计 99/100（p99≈1s，低于 2 秒目标），不应触发。
+  - interval: 1m
+    input_series:
+      - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="1"}'
+        values: '0+99x24'
+      - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="2.5"}'
+        values: '0+100x24'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: YangSystemAuthorizationPropagationP99High
+        exp_alerts: []

@@ -28,6 +28,14 @@ groups:
             0.95,
             sum by (job, le) (rate(yang_system_action_duration_seconds_bucket[5m]))
           )
+      # 授权传播 SLI（ADR §7 默认目标：健康状态下 p99 不高于 2 秒）。
+      # 出口在 src/infrastructure/authorization/worker.rs:238，直方图无自定义 label。
+      - record: yang_system:sli_authz_propagation_p99_seconds:rate5m
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (job, le) (rate(authz_propagation_seconds_bucket[5m]))
+          )
 
   - name: yang-system-slo-alerts
     rules:
@@ -85,6 +93,31 @@ groups:
           slo: authorization_freshness
         annotations:
           summary: "authorization outbox propagation exceeds two seconds"
+          runbook: "docs/contracts/SLO.md"
+
+      # 超过 ADR §7 安全硬上限：outbox 最老 pending 年龄 > 5 秒即严重告警
+      # （ADR：超过 2 秒告警，超过 5 秒严重告警）。与上面的 warning 形成分级：
+      # >2s 先降级提示，>5s 升级 critical。
+      - alert: YangSystemAuthorizationPropagationStalled
+        expr: authz_outbox_oldest_age_seconds > 5
+        for: 5m
+        labels:
+          severity: critical
+          slo: authorization_freshness
+        annotations:
+          summary: "authorization outbox propagation exceeds five seconds"
+          runbook: "docs/contracts/SLO.md"
+
+      # 授权传播 SLI 违背：p99 传播延迟 >= 2 秒（ADR §7 默认目标「p99 不高于 2 秒」，
+      # 直方图存在，见 yang-system-slo-recording 组的 recording rule）。
+      - alert: YangSystemAuthorizationPropagationP99High
+        expr: yang_system:sli_authz_propagation_p99_seconds:rate5m >= 2
+        for: 15m
+        labels:
+          severity: warning
+          slo: authorization_freshness
+        annotations:
+          summary: "authorization propagation p99 exceeds two seconds"
           runbook: "docs/contracts/SLO.md"
 
       # 审批派发积压：`dispatch` 端点受理了（页面按钮点了、返回 accepted），
