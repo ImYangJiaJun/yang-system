@@ -46,14 +46,18 @@ pub(super) async fn handle(
     let operator_id = ctx.actor()?.user_id();
     // 目标用户必须先存在：外键只能告诉我们「这次插入失败了」，分不出是用户不存在
     // 还是组被并发删掉。先读一次版本快照，剩下的失败原因就只有后者（见下方兜底）。
-    if access
+    //
+    // 注意这里只判**存在性**，不在快照上判停用：`find_authorization_version` 是无锁读，
+    // 快照与事务内 INSERT 之间存在 TOCTOU 窗口（快照后、插入前用户被停用仍会放行）。
+    // 停用校验的权威位置在 [`join_group_once`] 事务内持锁之后（与直授路径
+    // `grant_permission` 同款锁后判定、同错误形态），这里不再重复。
+    let Some(_) = access
         .authorization()
         .find_authorization_version(ctx.tools().mysql()?.pool(), input.user_id)
         .await?
-        .is_none()
-    {
+    else {
         return Err(BaseError::UserNotFound(format!("用户 {}", input.user_id)));
-    }
+    };
 
     let changed = join_group_once(&ctx, &access, &input, operator_id).await?;
 
@@ -117,6 +121,24 @@ async fn join_group_once(
         lock_set.insert(operator_id);
         lock_set.insert(input.user_id);
         lock_users_ascending_in_tx(access, ctx, &mut transaction, &lock_set).await?;
+
+        // 停用校验（权威判定）：目标 users 行已由上面那批 `FOR UPDATE` 锁持有。
+        // 停用路径（`disable_self` / `admin_disable_user`）要改状态必须先取同一把
+        // 行锁，因此这里锁内重读的 `is_active` 与后续成员 INSERT 之间不存在并发
+        // 窗口——与直授路径 `grant_permission` 同款「锁后判定」、同错误形态。
+        // （旧实现把校验放在事务外的无锁快照上：快照后、插入前用户被停用时仍会
+        // 放行，原注释「停用账号不能经此路径获得任何权限」超出实际保证。）
+        let target = access
+            .authorization()
+            .lock_authorization_version(
+                ctx.tools().mysql()?.pool(),
+                &mut transaction,
+                input.user_id,
+            )
+            .await?;
+        if !target.is_active() {
+            return Err(BaseError::Unauthorized("目标用户已停用".to_string()));
+        }
 
         // 第二把锁：**目标组的组行**（`FOR UPDATE`）。它是成员变更的串行化点：
         // 同一组的两个成员变更在这里排队，后到者读到的成员名单必然包含先到者的提交，

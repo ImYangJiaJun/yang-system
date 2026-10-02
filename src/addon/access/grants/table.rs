@@ -57,6 +57,17 @@ pub(crate) fn grants_table_spec() -> Result<TableSpec, BaseError> {
                 field_ref(&table_name, PERMISSION)?,
             ],
         )
+        // 反查索引：按 permission 检索命中该权限的全部授予行（权限下钻/审计反查）。
+        // 复合唯一键前缀是 user_id，覆盖不了 `WHERE permission = ?` 这类查询。
+        .index_named(
+            "idx_authz_grant_permission",
+            [field_ref(&table_name, PERMISSION)?],
+        )
+        // 审计检索索引：按授权操作人追溯授权历史（`WHERE granted_by = ?`），避免全表扫。
+        .index_named(
+            "idx_authz_grant_granted_by",
+            [field_ref(&table_name, GRANTED_BY)?],
+        )
         .check_named(
             "chk_authz_grant_permission_format",
             "regexp_like(`permission`, '^[a-z][a-z0-9_]*(\\\\.[a-z][a-z0-9_]*)+$')",

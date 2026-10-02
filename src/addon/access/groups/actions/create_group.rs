@@ -60,6 +60,29 @@ fn reject_reserved_group_key(group_key: &str) -> Result<(), BaseError> {
     Ok(())
 }
 
+/// 框架缺陷的临时折算：`TableQuery::insert_returning_id_in_tx`（yang-base
+/// `src/table/table_query/write.rs:146`）用 `.map_err(BaseError::DatabaseExecuteFailed)`
+/// 直接构造错误，绕过 `From<DbError>` 的「唯一键冲突→ParamInvalid」特判（该特判在
+/// yang-base `src/error/mod.rs` 的 From 实现里，对所有 `?` 传播路径生效）。
+/// 因此 AUTHZ_GRANTS.md §错误码表承诺的「group_key 撞唯一键→400」在本路径落不到，
+/// 实测泄漏成 DatabaseExecuteFailed→500。这里按报文点名冲突索引
+/// `uk_permission_group_key` 识别并折算成既有的参数错误语义；框架侧修好
+/// （write.rs 改用 `?` 传播）后本折算可整体删除。
+///
+/// 只认「撞 `uk_permission_group_key` 的唯一键冲突」：外键/非空/CHECK 等其它约束
+/// 错误必须原样放行——那是真实数据故障，不该伪装成输入错误。
+fn fold_duplicate_group_key(error: BaseError) -> BaseError {
+    if let BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(message)) = &error {
+        if message.contains("Duplicate entry") && message.contains("uk_permission_group_key") {
+            return BaseError::ParamInvalid(
+                "group_key".to_string(),
+                "该组标识已被占用".to_string(),
+            );
+        }
+    }
+    error
+}
+
 pub(super) async fn handle(
     ctx: ActionContext,
     input: CreateGroupInput,
@@ -72,8 +95,8 @@ pub(super) async fn handle(
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
         // 组本身不是权限：建组既不需要过目录校验，也不改变任何人的有效权限，
-        // 因此这里没有扇出失效。`group_key` 撞唯一键时由 `From<DbError>` 折算成
-        // 既有的参数错误语义，原样上抛。
+        // 因此这里没有扇出失效。`group_key` 撞唯一键由 `fold_duplicate_group_key`
+        // 折算成既有的参数错误语义（400），原样上抛。
         let group_id = access
             .groups()
             .insert_group_in_tx(
@@ -84,7 +107,8 @@ pub(super) async fn handle(
                 input.description.as_deref(),
                 operator_id,
             )
-            .await?;
+            .await
+            .map_err(fold_duplicate_group_key)?;
         let event = audit::succeeded_event(
             &ctx,
             None,
@@ -214,5 +238,42 @@ mod tests {
             reject_reserved_group_key("system_admin_ops").is_ok(),
             "判据必须是完整相等，不能退化成前缀匹配"
         );
+    }
+
+    /// 框架缺陷的临时折算（根因：yang-base `write.rs` 的 `insert_returning_id_in_tx`
+    /// 用 `.map_err(BaseError::DatabaseExecuteFailed)` 直包，绕过 `From<DbError>` 的
+    /// 唯一键特判）钉住应用侧兜底：撞 `uk_permission_group_key` 的唯一键冲突必须
+    /// 折算成 `ParamInvalid("group_key")`→400；外键/非空等其它约束错误必须原样放行。
+    #[test]
+    fn duplicate_group_key_folds_to_param_invalid_but_other_constraints_pass_through() {
+        let duplicate = fold_duplicate_group_key(BaseError::DatabaseExecuteFailed(
+            yang_db::DbError::ConstraintError(
+                "Duplicate entry 'ops' for key 'permission_group.uk_permission_group_key'"
+                    .to_string(),
+            ),
+        ));
+        match duplicate {
+            BaseError::ParamInvalid(field, message) => {
+                assert_eq!(field, "group_key", "必须点名 group_key");
+                assert_eq!(message, "该组标识已被占用");
+            }
+            other => panic!("唯一键冲突必须折算成 ParamInvalid，实际 {other:?}"),
+        }
+
+        for message in [
+            "Cannot add or update a child row: a foreign key constraint fails",
+            "Column 'title' cannot be null",
+        ] {
+            let passthrough = fold_duplicate_group_key(BaseError::DatabaseExecuteFailed(
+                yang_db::DbError::ConstraintError(message.to_string()),
+            ));
+            assert!(
+                matches!(
+                    passthrough,
+                    BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))
+                ),
+                "其它约束错误必须原样放行（保持 500 语义），实际 {passthrough:?}"
+            );
+        }
     }
 }

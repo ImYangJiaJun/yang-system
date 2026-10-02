@@ -91,6 +91,9 @@ pub(crate) fn authorization_outbox() -> Result<TableDefinition, BaseError> {
             "idx_authorization_outbox_user_version",
             ["user_id", "authz_version"],
         )
+        // 清理索引：delete_published_before 按 published_at 删除超过保留期的已发布行
+        //（保留 7 天后分批清理，见 authorization-freshness-adr），无此索引每轮全表扫。
+        .index_named("idx_authorization_outbox_published_at", ["published_at"])
         .build()
 }
 

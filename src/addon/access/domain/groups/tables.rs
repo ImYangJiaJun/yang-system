@@ -73,6 +73,12 @@ pub(crate) fn group_items_table_spec() -> Result<TableSpec, BaseError> {
                 field_ref(&name, ITEM_PERMISSION)?,
             ],
         )
+        // 反查索引：按 permission 检索「哪些组持有该权限」（权限下钻/审计反查）。
+        // 复合唯一键前缀是 group_id，覆盖不了 `WHERE permission = ?` 这类查询。
+        .index_named(
+            "idx_permission_group_item_permission",
+            [field_ref(&name, ITEM_PERMISSION)?],
+        )
         .check_named(
             "chk_permission_group_item_permission_format",
             "regexp_like(`permission`, '^[a-z][a-z0-9_]*(\\\\.[a-z][a-z0-9_]*)+$')",
@@ -111,6 +117,12 @@ pub(crate) fn user_group_table_spec() -> Result<TableSpec, BaseError> {
                 field_ref(&name, MEMBER_USER_ID)?,
                 field_ref(&name, MEMBER_GROUP_ID)?,
             ],
+        )
+        // 反查索引：按 group_id 检索「某组当前的全部成员」（组详情/审计反查）。
+        // 复合唯一键前缀是 user_id，覆盖不了 `WHERE group_id = ?` 这类查询。
+        .index_named(
+            "idx_user_group_group_id",
+            [field_ref(&name, MEMBER_GROUP_ID)?],
         )
         // 外键规则固定 RESTRICT：删除仍有成员的组会被数据库拒绝（spec §8.3）。
         .foreign_key_named(

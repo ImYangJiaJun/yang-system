@@ -90,6 +90,10 @@ impl AuthorizationOutboxRepository {
                 1,
                 "user_id,authz_version",
             ),
+            // 清理索引：delete_published_before 按 published_at 分批删除保留期已过的
+            // 已发布行（与 schema.rs 的 authorization_outbox() 声明一致），无此索引
+            // 每轮清理全表扫描。
+            ("idx_authorization_outbox_published_at", 1, "published_at"),
         ] {
             ensure!(
                 indexes.get(name) == Some(&(non_unique, columns.to_string())),
@@ -247,19 +251,36 @@ impl AuthorizationOutboxRepository {
     }
 
     /// 删除已发布且超过保留期的 Outbox 行，防止无界增长。
+    ///
+    /// 分批删除（每批 LIMIT 1000，循环到删完或不足一批），与 ADR
+    /// 「已发布事件保留 7 天后分批清理，不执行无界单次删除」对齐：
+    /// 单条无界 DELETE 在积压量大时会一次锁定/扫描过行，且语句执行期间
+    /// 与同表 claim/发布路径互相阻塞；每批是短小语句，批次间自动提交，
+    /// 不会长期持锁。
     pub(super) async fn delete_published_before(
         &self,
         retention_seconds: u64,
     ) -> anyhow::Result<u64> {
-        let result = sqlx::query(
-            "DELETE FROM authorization_outbox \
-             WHERE state = 'published' AND published_at < UNIX_TIMESTAMP() - ?",
-        )
-        .bind(retention_seconds as i64)
-        .execute(&self.pool)
-        .await
-        .context("清理已发布 Outbox 行失败")?;
-        Ok(result.rows_affected())
+        const BATCH_LIMIT: u64 = 1000;
+        let mut deleted_total: u64 = 0;
+        loop {
+            let result = sqlx::query(
+                "DELETE FROM authorization_outbox \
+                 WHERE state = 'published' AND published_at < UNIX_TIMESTAMP() - ? \
+                 LIMIT ?",
+            )
+            .bind(retention_seconds as i64)
+            .bind(BATCH_LIMIT as i64)
+            .execute(&self.pool)
+            .await
+            .context("清理已发布 Outbox 行失败")?;
+            let deleted = result.rows_affected();
+            deleted_total += deleted;
+            if deleted < BATCH_LIMIT {
+                break; // 剩余不足一批或已删完
+            }
+        }
+        Ok(deleted_total)
     }
 }
 
