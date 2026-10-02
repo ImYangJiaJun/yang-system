@@ -487,9 +487,10 @@ export function useGroupActions(): GroupActions {
   /// Step-up 透明重试：首次请求遇 428 时弹重认证对话框换 proof 后重放。
   const request = useMemo(
     () =>
-      <T,>(
+      <T>(
         fn: (proof: string | undefined) => Promise<T>,
-      ): Promise<T | undefined> => runProtected(fn, controller),
+      ): Promise<T | undefined> =>
+        runProtected(fn, controller),
     [controller],
   );
 

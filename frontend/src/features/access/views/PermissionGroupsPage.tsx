@@ -586,7 +586,10 @@ function ItemPanel({
                         disabled={busy}
                         onCheckedChange={() =>
                           submit(async () => {
-                            await actions.removeItem(detail.id, item.permission);
+                            await actions.removeItem(
+                              detail.id,
+                              item.permission,
+                            );
                           }, `已移除「${item.permission}」`)
                         }
                       />
