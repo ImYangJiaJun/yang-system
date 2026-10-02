@@ -64,6 +64,9 @@ pub(super) async fn handle(
 
 /// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——查看自己的头像；读他人头像须
+    // account.users.read（handler 内按目标用户校验）
+
     module
         .action_fn(yang_base::action_name!("get_avatar"), move |ctx, input| {
             handle(ctx, input, Arc::clone(&account))

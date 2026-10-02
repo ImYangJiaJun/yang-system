@@ -125,6 +125,8 @@ pub(super) async fn handle(
 
 /// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——删除自己的账号（含二次确认文案）
+
     // 发布开关关闭时不注册（依赖双版本失效传播）。
     if !account.credential_mutations_enabled() {
         return module;
