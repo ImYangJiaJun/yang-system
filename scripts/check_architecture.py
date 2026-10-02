@@ -173,6 +173,21 @@ ACTION_PERMISSION_RE = re.compile(
     r'\.\s*permissions\s*\(\s*\[(.*?)\]\)'
 )
 PERMISSION_STRING_RE = re.compile(r'"([a-z][a-z0-9_.]*)"')
+# register 构建链里的 Action 名来源：action_fn(yang_base::action_name!("name"), ...)
+# 捕获组允许 ':'——框架内置 CRUD 的 module:action 键同样是合法来源，由
+# check_action_authorization 在提取后按「冒号键」显式排除（语义真实的活分支，
+# 而不是靠捕获组匹配不到而静默跳过）。
+ACTION_NAME_IN_REGISTER_RE = re.compile(
+    r'action_fn\s*\(\s*yang_base::action_name!\s*\(\s*"([a-z][a-z0-9_:]*)"\s*\)'
+)
+ACTION_PUBLIC_MARKER_RE = re.compile(r"\.\s*public\s*\(\s*\)")
+ACTION_PERMISSIONS_MARKER_RE = re.compile(r"\.\s*permissions\s*\(")
+# 「登录即可」自服务操作的显式声明：必须写在 register 函数体内（授权决策与
+# 注册链同处一地），形如 `// auth: authenticated-only 自服务操作——……`。
+ACTION_AUTHENTICATED_MARKER_RE = re.compile(r"//\s*auth:\s*authenticated-only\b")
+ACTION_REGISTER_BODY_RE = re.compile(
+    r"(?m)^\s*pub\(super\)\s+fn\s+register\s*\([^)]*\)\s*(?:->\s*\w+)?\s*\{"
+)
 ADMIN_EQUIVALENT_KEYWORDS = (
     "secret", "credential", "reset", "token", "rotate", "key",
 )
@@ -264,6 +279,252 @@ def check_actions_outside_directories(root: Path) -> list[str]:
     return errors
 
 
+def strip_literals(source: str, keep_line_comments: bool = False) -> str:
+    """剥离注释与字符串/字符字面量，产出与源文本等长的代码骨架。
+
+    被替换的内容一律变为空白，换行保留——行号与 (?m)^ 锚点不漂移，骨架可以
+    直接按源文本的偏移切片。覆盖：// 行注释（keep_line_comments=True 时原样
+    保留，供以注释形态声明的 // auth: 标记使用）、/* */ 块注释、"..." /
+    '...' 普通字面量（处理 \\ 转义与 \\u{...}）、r#"..."# 原始字符串、
+    b/br/c/cr 前缀字面量；生命周期标记 'a / 'static / '_ 不是字符字面量，
+    保持原样。花括号配对与标记判定必须只在骨架文本上进行：注释/字符串里的
+    { } 与伪装标记不再干扰结果。
+    """
+    result = list(source)
+    n = len(source)
+    index = 0
+    while index < n:
+        char = source[index]
+        if char == '"':
+            end = _quoted_literal_end(source, index)
+            _blank_span(source, index, end, result)
+            index = end
+            continue
+        if char == "'":
+            end = _char_literal_end(source, index)
+            if end is not None:
+                _blank_span(source, index, end, result)
+                index = end
+                continue
+        if char == "/" and index + 1 < n:
+            if source[index + 1] == "/":
+                end = _line_comment_end(source, index)
+                if not keep_line_comments:
+                    _blank_span(source, index, end, result)
+                index = end
+                continue
+            if source[index + 1] == "*":
+                end = _block_comment_end(source, index)
+                _blank_span(source, index, end, result)
+                index = end
+                continue
+        if char in "brc":
+            end = _prefixed_literal_end(source, index)
+            if end is not None:
+                _blank_span(source, index, end, result)
+                index = end
+                continue
+        index += 1
+    return "".join(result)
+
+
+def _blank_span(source: str, start: int, end: int, result: list[str]) -> None:
+    """把 [start, end) 替换为空白；保留换行以维持行号与 (?m)^ 锚点。"""
+    end = min(end, len(source))
+    for j in range(start, end):
+        result[j] = "\n" if source[j] == "\n" else " "
+
+
+def _quoted_literal_end(source: str, quote_index: int) -> int:
+    """普通带转义字面量（"..." / '...' / b"..." / c'...'）的结束下标。
+
+    反斜杠与其后一个字符整体跳过（含 \\"、\\\\、\\u——\\u{...} 的后续花括号
+    按普通内容消费，不会提前遇到假闭引号）；未闭合时视为延伸到文件结尾。
+    """
+    quote = source[quote_index]
+    n = len(source)
+    index = quote_index + 1
+    while index < n:
+        if source[index] == "\\":
+            index += 2
+        elif source[index] == quote:
+            return index + 1
+        else:
+            index += 1
+    return n
+
+
+def _char_literal_end(source: str, index: int) -> int | None:
+    """index 指向 '；是字符字面量时返回结束下标，生命周期 'a / 'static / '_ 返回 None。"""
+    if index + 1 >= len(source):
+        return None
+    if source[index + 1] == "\\":
+        return _quoted_literal_end(source, index)  # '\n' '\'' '\u{...}'
+    if index + 2 < len(source) and source[index + 2] == "'":
+        return index + 3  # 'x'（'{'、' ' 等单字符字面量）
+    return None
+
+
+def _line_comment_end(source: str, index: int) -> int:
+    end = source.find("\n", index)
+    return len(source) if end == -1 else end
+
+
+def _block_comment_end(source: str, index: int) -> int:
+    end = source.find("*/", index + 2)
+    return len(source) if end == -1 else end + 2
+
+
+def _count_hashes(source: str, index: int) -> int:
+    count = 0
+    while index + count < len(source) and source[index + count] == "#":
+        count += 1
+    return count
+
+
+def _raw_string_end(source: str, quote_index: int, hashes: int) -> int | None:
+    """quote_index 指向 #* 之后的引号；是原始字符串（r"..." / r#"..."#）时返回结束下标。"""
+    if quote_index >= len(source) or source[quote_index] != '"':
+        return None
+    closing = '"' + "#" * hashes
+    end = source.find(closing, quote_index + 1)
+    return len(source) if end == -1 else end + 1 + hashes
+
+
+def _prefixed_literal_end(source: str, index: int) -> int | None:
+    """index 指向 b/r/c 前缀；构成前缀字面量时返回结束下标，否则 None。"""
+    if index + 1 >= len(source):
+        return None
+    char = source[index]
+    nxt = source[index + 1]
+    if char == "b":
+        if nxt == '"':
+            return _quoted_literal_end(source, index + 1)  # b"..." 字节串
+        if nxt == "'":
+            return _quoted_literal_end(source, index + 1)  # b'x' 字节字符
+        if nxt == "r":
+            hashes = _count_hashes(source, index + 2)
+            return _raw_string_end(source, index + 2 + hashes, hashes)  # br#"..."#
+        return None
+    if char == "r":
+        hashes = _count_hashes(source, index + 1)
+        return _raw_string_end(source, index + 1 + hashes, hashes)  # r#"..."#
+    if char == "c":
+        if nxt == '"':
+            return _quoted_literal_end(source, index + 1)  # c"..." C 串
+        if nxt == "'":
+            return _quoted_literal_end(source, index + 1)  # c'x' C 字符
+        if nxt == "r":
+            hashes = _count_hashes(source, index + 2)
+            return _raw_string_end(source, index + 2 + hashes, hashes)  # cr#"..."#
+        return None
+    return None
+
+
+def action_register_chain(source: str, skeleton: str) -> tuple[str, str, int] | None:
+    """提取 register 函数的构建链主体与它在源文件中的起始偏移。
+
+    花括号配对在骨架文本（strip_literals 剥离注释/字符串后的等长文本）上进行，
+    注释与字符串字面量里的 { } 不再干扰深度；返回 (原始函数体, 骨架函数体,
+    函数体起点偏移)，骨架与原始文本同长同偏移，可直接切片。找不到 register
+    时返回 None。文件级「恰好一个 register」的契约由 check_action_directory
+    单独保证。
+    """
+
+    match = ACTION_REGISTER_BODY_RE.search(skeleton)
+    if match is None:
+        return None
+    depth = 1
+    for index in range(match.end(), len(skeleton)):
+        if skeleton[index] == "{":
+            depth += 1
+        elif skeleton[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return (
+                    source[match.end() : index],
+                    skeleton[match.end() : index],
+                    match.end(),
+                )
+    return None
+
+
+def check_action_authorization(root: Path) -> list[str]:
+    """非 public 的业务 Action 必须显式声明授权方式，禁止「仅登录」的灰色授权。
+
+    逐条检查 `src/addon/**/actions/*.rs` 的 register 构建链：Action 名取自
+    `action_fn(yang_base::action_name!("..."))`，既未标记 public（`.public()` /
+    `is_public`），也未调用 `.permissions(...)` 声明权限键，又未在 register
+    函数体内用 `// auth: authenticated-only` 显式声明「登录即可」的自服务语义，
+    一律报错。三种表达缺一不可：自服务操作必须显式写注释，不能靠「恰好没声明
+    权限键」蒙混。框架内置 CRUD 的冒号风格键（module:action）不算业务 Action，
+    自动排除。
+
+    判定全部基于 strip_literals 产出的骨架文本：花括号配对、Action 名提取与
+    `.public(` / `.permissions(` / `is_public` 只在「注释+字符串全剥离」的骨架
+    上搜索，注释/字符串里的伪装标记不再生效；`// auth:` 标记本身就是行注释，
+    合法形态不能被剥离，改在「只剥字符串与块注释、保留行注释」的变体上匹配，
+    字符串字面量里的伪装因此失效而真实注释标记照常识别。
+    """
+
+    errors: list[str] = []
+    directories = [
+        directory
+        for directory in action_directories(root)
+        if (root / "src" / "addon") in directory.parents
+    ]
+    for directory in directories:
+        for path in sorted(directory.glob("*.rs")):
+            if path.name == "mod.rs":
+                continue
+            source = path.read_text(encoding="utf-8")
+            skeleton = strip_literals(source)
+            chain = action_register_chain(source, skeleton)
+            if chain is None:
+                continue
+            body, skeleton_body, body_start = chain
+            # Action 名本身是字符串字面量，不能在骨架上提取；先在原始文本匹配，
+            # 再用骨架验证匹配位置落在真实代码里——注释/字符串里带转义引号的
+            # 伪装调用（如 "action_name!(\"list\")"）在骨架上是一段空白，直接
+            # 跳过并继续找下一个真实调用。
+            name_match = next(
+                (
+                    match
+                    for match in ACTION_NAME_IN_REGISTER_RE.finditer(body)
+                    if skeleton_body[match.start() : match.end()].strip()
+                ),
+                None,
+            )
+            if name_match is None:
+                continue
+            name = name_match.group(1)
+            if ":" in name:
+                continue  # 框架内置 CRUD 的 module:action 键，不算业务 Action
+            if (
+                ACTION_PUBLIC_MARKER_RE.search(skeleton_body) is not None
+                or "is_public" in skeleton_body
+                or ACTION_PERMISSIONS_MARKER_RE.search(skeleton_body) is not None
+            ):
+                continue
+            # auth 标记的合法形态就是 register 体内的 // 行注释：保留行注释、
+            # 剥离字符串与块注释后再匹配，字符串字面量里的伪装不再生效。
+            if (
+                ACTION_AUTHENTICATED_MARKER_RE.search(
+                    strip_literals(body, keep_line_comments=True)
+                )
+                is not None
+            ):
+                continue
+            line_number = source.count("\n", 0, body_start + name_match.start()) + 1
+            errors.append(
+                f"{path.relative_to(root)}:{line_number}: Action {name} 既未标记 "
+                "public、也未声明 .permissions([...])、register 体内更无 "
+                "// auth: authenticated-only 自服务标记；非 public 的 Action "
+                "必须显式声明授权方式"
+            )
+    return errors
+
+
 MODULE_CONTAINER_ENTRIES = {"mod.rs", "table.rs", "actions", "domain"}
 
 
@@ -342,23 +603,33 @@ def preceding_tenant_boundary(
 
 
 def tenant_code_boundaries(root: Path) -> tuple[set[tuple[str, str]], list[str]]:
-    tenant_roots = [
-        root / "src" / "addon" / name
-        for name in ("org", "work")
-        if (root / "src" / "addon" / name).is_dir()
-    ]
-    if not tenant_roots:
+    addon_root = root / "src" / "addon"
+    if not addon_root.is_dir():
         return set(), []
+
+    # 扫描域：租户域目录（org/work，若存在）内适用全部风险模式；整个 addon 树
+    # 的裸 SQL 路径（sqlx::query 等）同样必须携带紧邻的 // tenant-boundary 声明。
+    tenant_roots = [
+        addon_root / name
+        for name in ("org", "work")
+        if (addon_root / name).is_dir()
+    ]
+    non_tenant_kinds = {"raw-sql": TENANT_RISK_PATTERNS["raw-sql"]}
 
     errors: list[str] = []
     declared: set[tuple[str, str]] = set()
     used: set[tuple[str, str]] = set()
     owners: dict[str, tuple[str, Path]] = {}
-    paths = sorted(path for tenant_root in tenant_roots for path in tenant_root.rglob("*.rs"))
+    paths = sorted(addon_root.rglob("*.rs"))
     for path in paths:
         source = production_source(path.read_text(encoding="utf-8"))
         lines = source.splitlines()
         relative = path.relative_to(root)
+        in_tenant_domain = any(
+            relative.is_relative_to(Path("src") / "addon" / name)
+            for name in ("org", "work")
+            if (addon_root / name).is_dir()
+        )
         for line_number, line in enumerate(lines, start=1):
             declaration = TENANT_CODE_BOUNDARY_RE.fullmatch(line)
             if declaration is None:
@@ -373,7 +644,8 @@ def tenant_code_boundaries(root: Path) -> tuple[set[tuple[str, str]], list[str]]
             owners[boundary[1]] = (boundary[0], path)
             declared.add(boundary)
 
-        for kind, pattern in TENANT_RISK_PATTERNS.items():
+        kinds = TENANT_RISK_PATTERNS if in_tenant_domain else non_tenant_kinds
+        for kind, pattern in kinds.items():
             for match in pattern.finditer(source):
                 line_number = source.count("\n", 0, match.start()) + 1
                 boundary = preceding_tenant_boundary(lines, line_number)
@@ -391,13 +663,14 @@ def tenant_code_boundaries(root: Path) -> tuple[set[tuple[str, str]], list[str]]
                     continue
                 used.add(boundary)
 
-        for legacy, pattern in TENANT_FORBIDDEN_PATTERNS.items():
-            for match in pattern.finditer(source):
-                line_number = source.count("\n", 0, match.start()) + 1
-                errors.append(
-                    f"{relative}:{line_number}: 禁止旧租户绕过表达 {legacy}，"
-                    "repository 必须使用非可选普通租户或显式系统 capability"
-                )
+        if in_tenant_domain:
+            for legacy, pattern in TENANT_FORBIDDEN_PATTERNS.items():
+                for match in pattern.finditer(source):
+                    line_number = source.count("\n", 0, match.start()) + 1
+                    errors.append(
+                        f"{relative}:{line_number}: 禁止旧租户绕过表达 {legacy}，"
+                        "repository 必须使用非可选普通租户或显式系统 capability"
+                    )
 
     for kind, boundary_id in sorted(declared - used):
         path = owners[boundary_id][1].relative_to(root)
@@ -921,6 +1194,7 @@ def check(root: Path) -> list[str]:
     for directory in directories:
         errors.extend(check_action_directory(root, directory))
     errors.extend(check_actions_outside_directories(root))
+    errors.extend(check_action_authorization(root))
     errors.extend(check_module_layout(root))
     errors.extend(check_tenant_boundaries(root))
     errors.extend(check_tenant_isolation_evidence(root))
@@ -1073,6 +1347,143 @@ def self_test() -> None:
 
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
+        actions = root / "src" / "addon" / "demo" / "actions"
+        write(actions / "mod.rs", "mod list;\nfn register_all() { let _ = list::register; }\n")
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            '        .route(HttpMethod::Get, "/api/v1/demo/list")\n'
+            "        .register()\n"
+            "}\n",
+        )
+        errors = check_action_authorization(root)
+        assert any("list" in error for error in errors), (
+            "必须拒绝既非 public 又无权限声明的 Action"
+        )
+        assert any(
+            re.search(r"actions[\\/]list\.rs:\d+:", error) is not None
+            for error in errors
+        ), "零权限 Action 错误必须带 文件:行"
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            '        .permissions(["demo.list.read"])\n'
+            "        .register()\n"
+            "}\n",
+        )
+        assert check_action_authorization(root) == [], "声明权限键的 Action 应通过"
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            "    // auth: authenticated-only 自服务操作——查看自己的列表\n"
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            "        .register()\n"
+            "}\n",
+        )
+        assert check_action_authorization(root) == [], (
+            "register 体内显式声明 authenticated-only 的 Action 应通过"
+        )
+
+        write(
+            actions / "list.rs",
+            "// auth: authenticated-only 自服务操作——写在文件头不算数\n"
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            "        .register()\n"
+            "}\n",
+        )
+        assert any("list" in error for error in check_action_authorization(root)), (
+            "authenticated-only 标记必须落在 register 函数体内（授权决策与注册链同处一地）"
+        )
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            "        .public()\n"
+            "        .register()\n"
+            "}\n",
+        )
+        assert check_action_authorization(root) == [], "标记 public 的 Action 应通过"
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    m.action_fn(yang_base::action_name!("demo:list"), handle)\n'
+            "        .register()\n"
+            "}\n",
+        )
+        assert check_action_authorization(root) == [], (
+            "框架内置 CRUD 的冒号风格键（module:action）不算业务 Action，应被排除"
+        )
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            "        .public(m.is_public)\n"
+            "        .register()\n"
+            "}\n",
+        )
+        assert check_action_authorization(root) == [], (
+            "register 体内以 is_public 声明公开语义的 Action 应通过"
+        )
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    let note = "// auth: authenticated-only 伪装标记";\n'
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            "        .register()\n"
+            "}\n",
+        )
+        errors = check_action_authorization(root)
+        assert any("list" in error for error in errors), (
+            "字符串字面量里的 // auth: 伪装不得让裸 Action 通过"
+        )
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            "    // .permissions([\"demo.list.read\"]) 注释掉的不算数\n"
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            "        .register()\n"
+            "}\n",
+        )
+        errors = check_action_authorization(root)
+        assert any("list" in error for error in errors), (
+            "注释里的 .permissions( 调用不得冒充权限声明"
+        )
+
+        write(
+            actions / "list.rs",
+            "pub(super) async fn handle() {}\n"
+            "pub(super) fn register(m: ModuleSpec) -> ModuleSpec {\n"
+            '    let sql = "SELECT { } FROM t";\n'
+            '    m.action_fn(yang_base::action_name!("list"), handle)\n'
+            "        .register()\n"
+            "}\n",
+        )
+        errors = check_action_authorization(root)
+        assert any("list" in error for error in errors), (
+            "register 体内字符串字面量的花括号不得让裸 Action 漏检"
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
         write(
             root / "src" / "audit_mutation.rs",
             'fn mutate() { sqlx::query("DELETE FROM `audit_event`"); }\n',
@@ -1174,6 +1585,32 @@ def self_test() -> None:
             "<!-- tenant-boundary: raw-sql demo-lookup -->\n",
         )
         assert check_tenant_boundaries(root) == [], "完整租户旁路声明应通过"
+
+        addon_repository = root / "src" / "addon" / "demo" / "repository.rs"
+        write(
+            addon_repository,
+            "async fn load(pool: &sqlx::MySqlPool) {\n"
+            '    sqlx::query("SELECT 1").fetch_one(pool).await;\n'
+            "}\n",
+        )
+        errors = check_tenant_boundaries(root)
+        assert any("raw-sql 租户旁路缺少" in error for error in errors), (
+            "addon 内裸 SQL 路径同样必须携带 tenant-boundary 声明"
+        )
+        write(
+            addon_repository,
+            "async fn load(pool: &sqlx::MySqlPool) {\n"
+            "    // tenant-boundary: raw-sql demo-addon-lookup\n"
+            '    sqlx::query("SELECT 1").fetch_one(pool).await;\n'
+            "}\n",
+        )
+        write(
+            root / TENANT_BOUNDARY_DOCUMENT,
+            "<!-- tenant-boundary: raw-sql demo-lookup -->\n"
+            "<!-- tenant-boundary: raw-sql demo-addon-lookup -->\n",
+        )
+        assert check_tenant_boundaries(root) == [], "addon 内裸 SQL 声明齐全应通过"
+        addon_repository.unlink()
 
         write(
             repository,
