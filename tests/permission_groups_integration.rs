@@ -1359,6 +1359,29 @@ mod harness {
         }
     }
 
+    /// 该 Access Token 是否已被判定为**不可用**，接受「已撤销」与「版本过期」两种死法。
+    ///
+    /// [`member_token_is_stale`] 只认 `AuthorizationStale`，而撤销路径的
+    /// `revoke_by_subject` 会把主题的 Token **直接标为已撤销**（`TokenRevoked`）——
+    /// 那是比版本过期更强的即时收敛。撤销用例的探针必须同时接受这两种形态。
+    pub async fn member_token_is_dead(app: &BuiltApp, token: &str) -> bool {
+        let authorization = format!("Bearer {token}");
+        match dispatch(
+            app,
+            "account.user",
+            "me",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
+        {
+            Ok(_) => false,
+            Err(BaseError::TokenRevoked) | Err(BaseError::AuthorizationStale) => true,
+            Err(other) => panic!("Token 可用性探针返回预期外错误: {other}"),
+        }
+    }
+
     /// 组条目写 Action 的请求体（proof 的指纹绑定它，故取 proof 与真调用必须同源）。
     fn item_body(group_id: i64, permission: &str) -> Value {
         json!({ "group_id": group_id, "permission": permission })
@@ -1777,6 +1800,100 @@ mod harness {
                     panic!("统计 {table} 中用户 {user_id} 的行数失败: {error}")
                 });
         u64::try_from(count).unwrap_or_else(|error| panic!("{table} 行数为负: {error}"))
+    }
+
+    /// 按 `group_key` 统计组行数（重复 key 用例：被拒的创建不得留下第二行）。
+    pub async fn group_rows_of_key(app: &BuiltApp, group_key: &str) -> u64 {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM permission_group WHERE group_key = ?")
+                .bind(group_key)
+                .fetch_one(pool_of(app))
+                .await
+                .unwrap_or_else(|error| panic!("统计权限组 {group_key} 行数失败: {error}"));
+        u64::try_from(count).unwrap_or_else(|error| panic!("组行数为负: {error}"))
+    }
+
+    /// 尝试改组展示信息并折算为（HTTP 状态码, 消息）。
+    ///
+    /// `update_group` 是受 Step-up 保护的写 Action（`step_up_targets()` 登记），
+    /// 因此与建/删组同走完整重认证；成功时消息是成功文案（用例只会在拒绝路径上读它）。
+    pub async fn update_group_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        group_id: i64,
+        title: &str,
+    ) -> (u16, String) {
+        match step_up_dispatch(
+            app,
+            "access.groups",
+            "update_group",
+            json!({ "group_id": group_id, "title": title }),
+            operator,
+        )
+        .await
+        {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
+    }
+
+    /// 撤销直授权限（受 Step-up 保护），折算为（HTTP 状态码, 消息）。
+    ///
+    /// 与 [`grant_permission_status`] 同构，只是目标 Action 换成 `revoke_permission`——
+    /// 撤销路径同样要求重认证与 `access.grants.write`。
+    pub async fn revoke_permission_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        user_id: i64,
+        permission: &str,
+    ) -> (u16, String) {
+        match step_up_dispatch(
+            app,
+            "access.grants",
+            "revoke_permission",
+            json!({ "user_id": user_id, "permission": permission }),
+            operator,
+        )
+        .await
+        {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
+    }
+
+    /// 查询目标用户的直授权限（`GET /api/v1/access/users/{user_id}/grants`），返回原始结果。
+    ///
+    /// 只读接口不经 Step-up；`user_id` 是路径参数，必须走 `path_params`（写进 body
+    /// 会被判为缺参，见 [`dispatch_with_path`] 的说明）。
+    pub async fn list_user_grants(
+        app: &BuiltApp,
+        operator: &Admin,
+        user_id: i64,
+    ) -> Result<ApiResponse, BaseError> {
+        let authorization = format!("Bearer {}", operator.token);
+        let user_id_param = user_id.to_string();
+        dispatch_with_path(
+            app,
+            "access.grants",
+            "list_user_grants",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+            &[("user_id", user_id_param.as_str())],
+        )
+        .await
+    }
+
+    /// 尝试查询目标用户直授权限并折算为（HTTP 状态码, 消息）。
+    pub async fn list_user_grants_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        user_id: i64,
+    ) -> (u16, String) {
+        match list_user_grants(app, operator, user_id).await {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
     }
 }
 
@@ -4056,4 +4173,395 @@ async fn a_non_admin_cannot_add_members_to_the_system_admin_group() {
         before,
         "被拒的两次加入都不得改变成员行数"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 错误码表补齐：组不存在/目标用户不存在→404、group_key 重复→400、
+// 内置 system_admin 组被改/删/增删条目→400（docs/contracts/AUTHZ_GRANTS.md
+// §错误码表），以及 revoke_permission / list_user_grants 两个零覆盖接口与
+// 框架级缺权限 403 的端到端断言。
+// ---------------------------------------------------------------------------
+
+/// 错误码表第一行：`add_group_member` 目标组不存在必须折算成 404。
+///
+/// 缺陷形态：组不存在若被漏折算（或折算成 500/别的状态），客户端无法区分
+/// 「组已被删」与「服务端故障」。契约钉死 `RecordNotFound`→404；实现侧
+/// （`add_group_member.rs`）在锁组行时判定，外键兜底同一支。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn add_group_member_rejects_a_missing_group_with_404() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "real", "真实组").await;
+    let member = harness::register_with_code(&app, "member", "member@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册目标用户失败: {error}"));
+
+    // 组 id 由自增主键分配，真实组 id 加一个远大于当前规模的偏移必然不存在
+    // （与 `an_item_pointing_at_a_missing_group_is_rejected_by_the_database`
+    // 同款取法）。
+    let missing_group_id = group_id + 1_000_000;
+    let (status, message) =
+        harness::add_member_outcome(&app, &admin, missing_group_id, member).await;
+    assert_eq!(
+        status, 404,
+        "目标组不存在必须 RecordNotFound→404，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("记录未找到"),
+        "拒绝信息必须是记录未找到语义，实际 {message}"
+    );
+}
+
+/// 错误码表第二行：`add_group_member` 目标用户不存在必须折算成 404。
+///
+/// 契约钉死 `UserNotFound`→404；实现侧（`add_group_member.rs`）在开事务前按
+/// 用户版本快照判存在性，因此这里只可能是 404，绝不会落到外键兜底。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn add_group_member_rejects_a_missing_target_user_with_404() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::create_group(&app, &admin, "real", "真实组").await;
+
+    let missing_user = 999_999;
+    let (status, message) = harness::add_member_outcome(&app, &admin, group_id, missing_user).await;
+    assert_eq!(
+        status, 404,
+        "目标用户不存在必须 UserNotFound→404，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("用户未找到"),
+        "拒绝信息必须点名用户未找到，实际 {message}"
+    );
+    assert_eq!(
+        harness::member_rows_of_group(&app, group_id).await,
+        0,
+        "被拒的加成员不得落任何成员行"
+    );
+}
+
+/// 错误码表第二行的另一条接口：`list_user_grants` 目标用户不存在必须折算成 404。
+///
+/// 这是 `list_user_grants` 在本文件里第一次被端到端调用，同时钉住「user_id 走
+/// 路径参数」的形态（写进 body 会被判为缺参，见 `dispatch_with_path` 的说明）。
+/// 契约钉死 `UserNotFound`→404（`list_user_grants.rs` 按版本快照判存在性）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn list_user_grants_rejects_a_missing_target_user_with_404() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+
+    let missing_user = 999_999;
+    let (status, message) = harness::list_user_grants_outcome(&app, &admin, missing_user).await;
+    assert_eq!(
+        status, 404,
+        "目标用户不存在必须 UserNotFound→404，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("用户未找到"),
+        "拒绝信息必须点名用户未找到，实际 {message}"
+    );
+}
+
+/// 错误码表第三行：`group_key` 撞唯一键必须 400。
+///
+/// 契约（docs/contracts/AUTHZ_GRANTS.md §错误码表第三行）钉死：`group_key` 重复 →
+/// `ParamInvalid("group_key")` → **400**。框架层（yang-base `table/table_query/write.rs`
+/// 的 `insert_returning_id_in_tx`）用 `.map_err(BaseError::DatabaseExecuteFailed)` 直包、
+/// 绕过 `From<DbError>` 的唯一键特判，因此 `create_group.rs` 在应用侧做了临时折算
+/// （认报文中的唯一索引名 `uk_permission_group_key`，见该文件的
+/// `fold_duplicate_group_key`）。本用例钉住折算后的契约形态：400 + 可归因文案，
+/// 且不泄漏 Duplicate entry 数据库报文；框架侧修好后本用例仍须保持通过。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn create_group_rejects_a_duplicate_group_key_with_param_invalid_400() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+
+    let (status1, message1) = harness::create_group_outcome(&app, &admin, "ops", "运营组").await;
+    assert_eq!(status1, 200, "首次建组必须成功，实际 {status1}: {message1}");
+
+    let (status2, message2) = harness::create_group_outcome(&app, &admin, "ops", "重复组").await;
+    assert_eq!(
+        status2, 400,
+        "重复 group_key 必须 ParamInvalid→400（契约 AUTHZ_GRANTS.md 错误码表第三行），实际 {status2}: {message2}"
+    );
+    assert!(
+        message2.contains("该组标识已被占用"),
+        "400 必须给出可归因文案，实际 {message2}"
+    );
+    assert!(
+        message2.contains("group_key"),
+        "400 必须点名 group_key，实际 {message2}"
+    );
+    assert!(
+        !message2.contains("Duplicate entry"),
+        "400 不得泄漏数据库唯一键报文，实际 {message2}"
+    );
+    assert_eq!(
+        harness::group_rows_of_key(&app, "ops").await,
+        1,
+        "被拒的重复创建不得留下第二行组事实"
+    );
+}
+
+/// 错误码表第五行：内置 `system_admin` 组被改/删/增删条目一律 400。
+///
+/// 契约钉死 `ParamInvalid("group_id")`→400：内置组的权限由权限目录计算、展示
+/// 信息由引导流程写定，任何改写路径都不该存在第二口径。反向对照打在普通组上，
+/// 拒绝面过宽同样是故障。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn builtin_system_admin_group_is_immune_to_update_delete_and_item_changes() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let group_id = harness::system_admin_group_id(&app).await;
+
+    let (status, message) = harness::update_group_outcome(&app, &admin, group_id, "改名").await;
+    assert_eq!(
+        status, 400,
+        "改内置组展示信息必须被拒，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("内置"),
+        "拒绝信息必须点名内置组，实际 {message}"
+    );
+
+    let status = harness::delete_group_status(&app, &admin, group_id).await;
+    assert_eq!(status, 400, "删内置组必须被拒，实际 {status}");
+
+    let status = harness::add_group_item_status(&app, &admin, group_id, "access.grants.read").await;
+    assert_eq!(status, 400, "给内置组加条目必须被拒，实际 {status}");
+
+    let status =
+        harness::remove_group_item_status(&app, &admin, group_id, "access.grants.read").await;
+    assert_eq!(status, 400, "从内置组移条目必须被拒，实际 {status}");
+
+    assert!(
+        harness::group_exists_by_id(&app, group_id).await,
+        "四次被拒的调用不得让内置组消失"
+    );
+
+    // 反向对照：同一批操作打在普通组上必须成功——拒绝面过宽同样是故障。
+    // 删除放在最后：普通组没有成员，不会先撞上「组内非空」守卫（该守卫另有用例
+    // `deleting_a_group_with_members_is_rejected` 钉住）。
+    let normal_id = harness::create_group(&app, &admin, "ops", "运营组").await;
+    let (status, message) = harness::update_group_outcome(&app, &admin, normal_id, "改名").await;
+    assert_eq!(
+        status, 200,
+        "普通组必须能改展示信息，实际 {status}: {message}"
+    );
+    let status =
+        harness::add_group_item_status(&app, &admin, normal_id, "access.grants.read").await;
+    assert_eq!(status, 200, "普通组必须能加条目，实际 {status}");
+    let status =
+        harness::remove_group_item_status(&app, &admin, normal_id, "access.grants.read").await;
+    assert_eq!(status, 200, "普通组必须能移条目，实际 {status}");
+    let status = harness::delete_group_status(&app, &admin, normal_id).await;
+    assert_eq!(status, 200, "空普通组必须能删除，实际 {status}");
+    assert!(
+        !harness::group_exists_by_id(&app, normal_id).await,
+        "删除必须真的落库，组行不得残留"
+    );
+}
+
+/// `revoke_permission` 的端到端覆盖：撤销直授事实、令牌立即失效、幂等。
+///
+/// 契约（AUTHZ_GRANTS.md §写入一致性）：撤销必须在同一事务里删事实行 + 递增授权
+/// 版本 + 追加 Outbox，并由 `revoke_by_subject` 立即收敛 Redis 水位线——旧 Access
+/// Token 必须在撤销后**立刻**失效，而不是等 Outbox 异步传播。重复撤销幂等
+/// （`changed: false`），不再递增版本。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn revoke_permission_removes_the_grant_stales_the_token_and_stays_idempotent() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let holder = harness::grant_only(&app, &admin, "revokee", "access.grants.read").await;
+    assert_eq!(
+        harness::grant_rows_of_user(&app, holder.user_id).await,
+        1,
+        "夹具必须先造出一条直授事实"
+    );
+    let version_before = harness::authz_version_of(&app, holder.user_id).await;
+
+    let (status, message) =
+        harness::revoke_permission_outcome(&app, &admin, holder.user_id, "access.grants.read")
+            .await;
+    assert_eq!(status, 200, "撤销必须成功，实际 {status}: {message}");
+    assert!(
+        message.contains("已撤销"),
+        "成功文案必须说明权限已撤销，实际 {message}"
+    );
+
+    // 事实行删除 + 授权版本递增（写入一致性契约的三个动作）。
+    assert_eq!(
+        harness::grant_rows_of_user(&app, holder.user_id).await,
+        0,
+        "撤销后直授事实行必须消失"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder.user_id).await,
+        version_before + 1,
+        "撤销必须单调递增授权版本"
+    );
+    // 旧令牌立即失效：撤销路径经 `revoke_by_subject` 把令牌标为已撤销（TokenRevoked），
+    // 比版本水位线（AuthorizationStale）更强的即时收敛，不等 Outbox 异步传播。
+    assert!(
+        harness::member_token_is_dead(&app, &holder.token).await,
+        "撤销后旧 Access Token 必须立即不可用"
+    );
+
+    // 幂等：重复撤销仍成功，但不再改变任何事实（版本不得再增）。
+    let (status, message) =
+        harness::revoke_permission_outcome(&app, &admin, holder.user_id, "access.grants.read")
+            .await;
+    assert_eq!(
+        status, 200,
+        "重复撤销必须幂等成功，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("本就没有该权限"),
+        "幂等文案必须说明目标本就没有该权限，实际 {message}"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder.user_id).await,
+        version_before + 1,
+        "幂等撤销不得再次递增授权版本"
+    );
+}
+
+/// `list_user_grants` 的端到端覆盖：返回目标用户的全部直授权限。
+///
+/// 契约（AUTHZ_GRANTS.md 管理接口表）：`GET /api/v1/access/users/{user_id}/grants`
+/// 只需 `access.grants.read`、不经 Step-up。断言按权限名排序后整体比对，钉住
+/// 响应形态与字段名；零直授账号必须返回空数组而不是缺字段。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn list_user_grants_returns_the_direct_grants_of_the_target_user() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let holder = harness::grant_only(&app, &admin, "granteeb", "access.grants.read").await;
+    harness::grant_permission(&app, &admin, holder.user_id, "access.grants.write").await;
+
+    let response = harness::list_user_grants(&app, &admin, holder.user_id)
+        .await
+        .unwrap_or_else(|error| panic!("查询用户授权失败: {error}"));
+    assert_eq!(
+        response.code, 0,
+        "查询用户授权必须成功: {}",
+        response.message
+    );
+    let data = response
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("查询响应缺少 data: {response:?}"));
+    assert_eq!(
+        data["user_id"].as_i64(),
+        Some(holder.user_id),
+        "响应必须回显目标 user_id"
+    );
+    let mut got: Vec<String> = data["grants"]
+        .as_array()
+        .unwrap_or_else(|| panic!("grants 必须是数组: {data}"))
+        .iter()
+        .map(|grant| {
+            grant["permission"]
+                .as_str()
+                .unwrap_or_else(|| panic!("条目缺少 permission 字符串: {grant}"))
+                .to_string()
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            "access.grants.read".to_string(),
+            "access.grants.write".to_string()
+        ],
+        "必须恰好返回该用户的全部直授权限"
+    );
+
+    // 反向对照：无任何直授的账号返回空数组（不是缺字段、更不是报错）。
+    let empty_user = harness::register_with_code(&app, "no_grants", "no_grants@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册零直授账号失败: {error}"));
+    let response = harness::list_user_grants(&app, &admin, empty_user)
+        .await
+        .unwrap_or_else(|error| panic!("查询零直授账号失败: {error}"));
+    let data = response
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("查询响应缺少 data: {response:?}"));
+    assert_eq!(
+        data["grants"].as_array().map(Vec::len),
+        Some(0),
+        "零直授账号必须返回空数组，实际 {data}"
+    );
+}
+
+/// 框架级缺权限判定：持 A 权限调需 B 权限的 Action 必须 403 PermissionDenied。
+///
+/// 既有 403 用例全部是**业务层**拒绝（自提权 / 全权组成员守卫 / 管理员等价闸门），
+/// 框架中间件的「Action 声明权限 ⊄ 调用者持有权限 → PermissionDenied(403)」这条
+/// 链路此前零端到端断言。契约（AUTHZ_GRANTS.md 管理接口表）：`list_groups` 需要
+/// `access.groups.read`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_user_without_the_required_permission_is_rejected_with_403() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 持 A（access.grants.read），调需 B（access.groups.read）的 Action。
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.grants.read").await;
+    let authorization = format!("Bearer {}", outsider.token);
+
+    match dispatch(
+        &app,
+        "access.groups",
+        "list_groups",
+        json!({}),
+        &[("authorization", authorization.as_str())],
+        52_400,
+    )
+    .await
+    {
+        Err(BaseError::PermissionDenied(message)) => assert!(
+            message.contains("access.groups.read"),
+            "拒绝信息必须点名缺失的权限，实际 {message}"
+        ),
+        Ok(response) => panic!(
+            "缺权限调用必须被拒，实际成功（code={}，{}）",
+            response.code, response.message
+        ),
+        Err(other) => panic!("缺权限必须 PermissionDenied→403，实际 {other}"),
+    }
+
+    // 写 Action 同一判据：持 access.grants.read 调需 access.groups.write 的
+    // create_group——完整走完 Step-up 后仍被权限中间件拒绝。
+    let (status, message) = harness::create_group_outcome(&app, &outsider, "sneak", "越权组").await;
+    assert_eq!(
+        status, 403,
+        "缺 access.groups.write 建组必须 403，实际 {status}: {message}"
+    );
+    assert!(
+        !harness::group_exists(&app, "sneak").await,
+        "被拒的建组不得落库"
+    );
+
+    // 反向对照：持 B 的账号必须能列出。
+    let reader = harness::grant_only(&app, &admin, "reader", "access.groups.read").await;
+    let authorization = format!("Bearer {}", reader.token);
+    match dispatch(
+        &app,
+        "access.groups",
+        "list_groups",
+        json!({}),
+        &[("authorization", authorization.as_str())],
+        52_400,
+    )
+    .await
+    {
+        Ok(response) => assert_eq!(response.code, 0, "持权限列表必须成功：{}", response.message),
+        Err(other) => panic!("持 access.groups.read 必须能 list_groups，实际 {other}"),
+    }
 }
