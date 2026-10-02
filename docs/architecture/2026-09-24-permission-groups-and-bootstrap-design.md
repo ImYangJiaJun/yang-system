@@ -42,7 +42,7 @@
 - **运行支撑表是定长数组**：`infrastructure_definitions() -> Result<[TableDefinition; 6], BaseError>`（`src/infrastructure/schema.rs:47-56`），并有精确断言 6 张表名的测试（同文件 `:289-303`）。该数组的既定定位是「非 UI 运行支撑表」。
 - **外键规则恒为 `RESTRICT` 且不可变**：`foreign_key_named` 不接受 `ON DELETE`/`ON UPDATE`（`crates/yang-base/src/table/definition.rs:628-655`）；`schema_sync` 只增不删，永不删除表、列、索引或约束（`docs/contracts/SCHEMA.md:12,30`）。→ **外键一旦声明就永久存在**。
 - **权限字符串不允许通配**：`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$` 与 DB CHECK `chk_authz_grant_permission_format` 双重约束（`grants/table.rs:60-63`）。`*` 与 `system.*` 均非法。
-- **已声明的权限全集**：撰写时 10 条（`access.grants.read`、`access.grants.write`、`account.users.read`、`account.users.manage`、`demo.notes.read`、`demo.notes.write`、`feishu.datasource.read`、`feishu.datasource.write`、`feishu.datasource.secret`、`feishu.option.read`）。本分支交付后为 **13 条**：新增 §9.1 的 `access.groups.read` / `access.groups.write`，以及凭据签发拆分引入的 `account.users.reset_credentials`（见 §9.1；它同时是管理员等价权限，见 §8.1）。
+- **已声明的权限全集**：撰写时 10 条（`access.grants.read`、`access.grants.write`、`account.users.read`、`account.users.manage`、`demo.notes.read`、`demo.notes.write`、`feishu.datasource.read`、`feishu.datasource.write`、`feishu.datasource.secret`、`feishu.option.read`）。本分支交付后为 **13 条**：新增 §9.1 的 `access.groups.read` / `access.groups.write`，以及凭据签发拆分引入的 `account.users.reset_credentials`（见 §9.1；它同时是管理员等价权限，见 §8.1）。此后审批派发控制台又经 Action 声明投影入 `feishu.approval.read` / `feishu.approval.write`（`src/addon/feishu/approval/actions/*.rs`），**当前权限目录全集为 15 条**（口径：冻结 Catalog 投影的并集，`project_permissions`；`GET /api/v1/access/permissions` 可核实）。
 
 ### 2.3 直接阻断目标实现的四个缺口
 

@@ -194,7 +194,10 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 
 重复添加成员/条目、重复移除、移出本就不在组内的用户，都返回 `changed: false`：
 **不递增任何人的授权版本、不写 Outbox、不写审计事件**（与 grants 的既有契约一致）。
-建组时 `group_key` 撞唯一键由 `From<DbError>` 折算成 `ParamInvalid`。
+建组时 `group_key` 撞唯一键由**应用侧 `fold_duplicate_group_key` 折算**成 `ParamInvalid`
+（识别 `uk_permission_group_key` 唯一键冲突，不误伤外键/非空等其它约束错误）；该折算
+存在的根因是框架侧 `write.rs:146` 的 `insert_returning_id_in_tx` 用
+`.map_err(BaseError::DatabaseExecuteFailed)` 直包，绕过了 `From<DbError>` 的唯一键特判。
 
 ### 错误码表
 
@@ -205,7 +208,7 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 |---|---|---|
 | 组不存在 | `RecordNotFound` | 404 |
 | 目标用户不存在（加成员前的前置读取） | `UserNotFound` | 404 |
-| `group_key` 重复 | `ParamInvalid`（唯一键冲突经 `From<DbError>` 折算，索引名 `uk_permission_group_key`） | 400 |
+| `group_key` 重复 | `ParamInvalid`（应用侧 `fold_duplicate_group_key` 识别 `uk_permission_group_key` 冲突并折算；框架侧 `write.rs:146` 的 `DatabaseExecuteFailed` 直包为该折算存在的根因） | 400 |
 | 组内权限未在目录声明 | `ParamInvalid("permission")`（经 `ensure_declared`） | 400 |
 | 内置 `system_admin` 组被改/删/增删条目 | `ParamInvalid("group_id")` | 400 |
 | 删除仍有成员的组 | `ParamInvalid("group_id")`，消息含实际成员数 | 400 |

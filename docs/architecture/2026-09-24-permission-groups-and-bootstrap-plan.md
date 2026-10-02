@@ -136,7 +136,7 @@
   - `pub(crate) fn groups_table_spec() -> Result<TableSpec, BaseError>`
   - `pub(super) fn build_module(...) -> Result<ModuleSpec, BaseError>`（本任务先只装表，Action 在 Task 10+ 加）
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 创建 `src/addon/access/groups/table.rs`，先只写测试与常量占位：
 
@@ -182,12 +182,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test --lib --locked groups::table`
 Expected: 编译失败，`cannot find function groups_table_spec` / `cannot find value GROUP_KEY_PATTERN`
 
-- [ ] **Step 3: 实现表声明**
+- [x] **Step 3: 实现表声明**
 
 在 `src/addon/access/groups/table.rs` 的测试模块之上插入：
 
@@ -278,12 +278,12 @@ fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError>
 
 同时在测试模块里补上 `use super::*;` 已在，需确认 `TableSpec.fields` 与 `validation.max_length` 的字段名与 `grants/table.rs` 测试一致——**若 `spec.indexes` 或 `validation.max_length` 的访问方式编译不过，照 `src/addon/access/grants/table.rs:71-101` 的既有测试写法调整**（该文件已有同形状断言，是权威参照）。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test --lib --locked groups::table`
 Expected: PASS（2 tests）
 
-- [ ] **Step 5: 建模块装配文件并接入 access**
+- [x] **Step 5: 建模块装配文件并接入 access**
 
 创建 `src/addon/access/groups/mod.rs`：
 
@@ -352,12 +352,12 @@ pub(super) fn build_module(
     })
 ```
 
-- [ ] **Step 6: 确认建表真的发生**
+- [x] **Step 6: 确认建表真的发生**
 
 Run: `python scripts/check_architecture.py && cargo test --lib --locked`
 Expected: 架构门禁通过；全部单元测试通过
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/addon/access/groups/ src/addon/access/mod.rs
@@ -381,7 +381,7 @@ git commit -m "feat(access): 新增 permission_group 表与 access.groups 模块
   - `pub(crate) fn system_owner_table_spec() -> Result<TableSpec, BaseError>`（表名 `system_owner`）
   - 常量：`ITEM_GROUP_ID`、`ITEM_PERMISSION`、`ITEM_GRANTED_BY`、`ITEM_OCCURRED_AT`、`MEMBER_USER_ID`、`MEMBER_GROUP_ID`、`OWNER_SENTINEL_KEY`、`OWNER_USER_ID`、`OWNER_CLAIMED_AT`、`SENTINEL_KEY_VALUE: &str = "system-owner"`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 创建 `src/addon/access/domain/groups/tables.rs`，先只写测试：
 
@@ -456,12 +456,12 @@ mod tests {
 
 > `spec.table.name`、`spec.checks`、`spec.foreign_keys` 的确切字段名以 `crates/yang-base/src/definition/spec.rs` 的 `TableSpec` 定义与 `src/addon/access/grants/table.rs` 既有测试为准；如字段名不同，按实际调整断言而非改变表设计。
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --lib --locked groups::tables`
 Expected: 编译失败，找不到三个 `*_table_spec`
 
-- [ ] **Step 3: 实现三张表**
+- [x] **Step 3: 实现三张表**
 
 ```rust
 //! 权限组的三张运行支撑表声明：组-权限条目、用户-组关系、引导哨兵。
@@ -613,12 +613,12 @@ pub(crate) fn system_owner_table_spec() -> Result<TableSpec, BaseError> {
 
 > `TableSpec::unique_named` / `check_named` / `foreign_key_named` 的确切签名参照 `src/addon/access/grants/table.rs:50-63` 与 `src/infrastructure/schema.rs:187-201` 的既有用法。`field_ref` 若在多个文件重复，允许各自私有（与 `grants/table.rs:66-69` 的既有做法一致）。
 
-- [ ] **Step 4: 运行确认三张表定义通过**
+- [x] **Step 4: 运行确认三张表定义通过**
 
 Run: `cargo test --lib --locked groups::tables`
 Expected: PASS（4 tests）
 
-- [ ] **Step 5: 写 `infrastructure_definitions` 的失败断言**
+- [x] **Step 5: 写 `infrastructure_definitions` 的失败断言**
 
 修改 `src/infrastructure/schema.rs` 的测试：
 
@@ -644,12 +644,12 @@ Expected: PASS（4 tests）
     }
 ```
 
-- [ ] **Step 6: 运行确认失败**
+- [x] **Step 6: 运行确认失败**
 
 Run: `cargo test --lib --locked infrastructure_schema_is_complete_and_versionless`
 Expected: FAIL——数组长度不匹配（当前 `[TableDefinition; 6]`）
 
-- [ ] **Step 7: 扩展数组到 9**
+- [x] **Step 7: 扩展数组到 9**
 
 把 `src/infrastructure/schema.rs:47` 的签名改为：
 
@@ -665,12 +665,12 @@ fn infrastructure_definitions() -> Result<[TableDefinition; 9], BaseError> {
         crate::addon::access::domain::groups::tables::system_owner_table_spec()?.table_definition()?,
 ```
 
-- [ ] **Step 8: 运行确认通过**
+- [x] **Step 8: 运行确认通过**
 
 Run: `cargo test --lib --locked infrastructure && python scripts/check_architecture.py`
 Expected: PASS；架构门禁通过
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add src/addon/access/domain/groups/ src/infrastructure/schema.rs
@@ -715,7 +715,7 @@ git commit -m "feat(access): 声明组的条目表/成员表与引导哨兵表�
   - `Access::groups(&self) -> &GroupRepository`（`context.rs` 新增访问器）
   - writer 标记：`// authorization-writer: access-group-lifecycle src/addon/access/domain/groups/repository.rs`
 
-- [ ] **Step 1: 写失败的测试（受信投影边界）**
+- [x] **Step 1: 写失败的测试（受信投影边界）**
 
 创建 `src/addon/access/domain/groups/mod.rs`：
 
@@ -828,12 +828,12 @@ mod tests {
 
 > `table.bind(pool)` 的接收类型以 `src/addon/access/grants/table.rs:104-133` 的既有测试为准（那里传 `Arc<MySqlPool>`）。若 `Database::from_pool` 的签名与之不符，照 `src/addon/access/domain/repository.rs:158-166` 的用法调整——两处都有同形状的可用样例。
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --lib --locked groups::repository`
 Expected: 编译失败，找不到 `GroupRepository`
 
-- [ ] **Step 3: 实现 Repository**
+- [x] **Step 3: 实现 Repository**
 
 按 `src/addon/access/domain/repository.rs` 的形状实现（`trusted_query` 用 `ctx.tools().mysql()?.pool().clone()` + `bind(pool).query([SYSTEM_ROLE])`）。每个方法的 SQL 语义如下，实现时全部经 `trusted_query` 走 `TableQuery`，**不写原始 SQL**：
 
@@ -906,12 +906,12 @@ impl GroupRepository {
 
 其余方法按同名 `GrantRepository` 方法（`repository.rs:51-125`）的写法逐一实现：`select_fields(...)` + `where_eq(...)` + `all_in_tx(transaction)` 读；`insert_in_tx(transaction, record)` 写；`delete_in_tx(transaction)` 返回受影响行数。`list_members_in_tx` 必须显式按 `MEMBER_USER_ID` 升序返回（`order_by` 或查询后 `sort_unstable()`），因为扇出失效依赖升序锁序。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test --lib --locked groups::repository`
 Expected: PASS
 
-- [ ] **Step 5: 接入 `Access` 上下文**
+- [x] **Step 5: 接入 `Access` 上下文**
 
 在 `src/addon/access/domain/context.rs` 给 `Access` 加字段与方法：
 
@@ -942,7 +942,7 @@ impl Access {
 
 在 `src/addon/access/grants/mod.rs:35-39` 的 `Access::new(...)` 调用点补上 `GroupRepository::new(...)` 参数（用 Task 2 的三张表定义构造）。
 
-- [ ] **Step 6: 登记 writer 边界**
+- [x] **Step 6: 登记 writer 边界**
 
 在 `docs/architecture/authorization-writers.md` 的「授权事实」表格追加一行：
 
@@ -962,7 +962,7 @@ impl Access {
 <!-- authorization-writer: access-group-lifecycle src/addon/access/domain/groups/repository.rs -->
 ```
 
-- [ ] **Step 7: 跑门禁并提交**
+- [x] **Step 7: 跑门禁并提交**
 
 Run: `python scripts/check_architecture.py && cargo test --lib --locked`
 Expected: 门禁通过（writer allowlist 与 raw-sql-boundary 均满足）
@@ -989,7 +989,7 @@ git commit -m "feat(access): 组事实受信 writer 与 writer 边界登记"
 
 **为什么是纯函数**：spec §8.1 要求「提权校验」与「实际解析」共用同一实现，否则两条路径会漂移。把可测的合并/排序/孤儿判定抽成不依赖数据库的纯函数，是保证这一点的最小手段。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```rust
 #[cfg(test)]
@@ -1081,12 +1081,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --lib --locked groups::resolution`
 Expected: 编译失败，找不到 `resolve_group_permissions`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```rust
 //! 有效权限解析：把「用户所在组」折叠为权限集合。
@@ -1151,12 +1151,12 @@ pub(crate) fn orphan_items<'a>(items: &'a [String], catalog: &[String]) -> Vec<&
 }
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test --lib --locked groups::resolution`
 Expected: PASS（6 tests）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/addon/access/domain/groups/resolution.rs
@@ -1184,7 +1184,7 @@ git commit -m "feat(access): 有效权限解析纯函数（含全权组与孤儿
 
 **关键语义**：解析结果**只并入 permissions，不并入 roles**。角色保持账号域固定的 `user`，与 `access/domain/resolver.rs:71` 的既有断言一致（spec §6.1）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```rust
 #[cfg(test)]
@@ -1213,14 +1213,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --lib --locked access::domain::group_resolver`
 Expected: 编译失败
 
 > **修订理由**：本计划早先版本写的是 `cargo test --lib --locked groups::group_resolver`。该过滤串在本仓库**匹配 0 个用例却退出 0**（模块路径是 `access::domain::group_resolver` 而非 `groups::group_resolver`），是典型的假绿——门禁会"通过"而测试根本没跑。实际可复现的输出是 `running 0 tests … 0 passed; 0 filtered out`，改成 `access::domain::group_resolver` 后匹配到 2 个用例。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```rust
 //! Token 签发时的权限组解析：把用户所在组折叠为附加权限。
@@ -1294,12 +1294,12 @@ impl GrantResolver for GroupGrantResolver {
 }
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test --lib --locked access::domain::group_resolver`
 Expected: PASS
 
-- [ ] **Step 5: 接入组合根**
+- [x] **Step 5: 接入组合根**
 
 在 `src/addon/access/mod.rs` 的 `AccessAddon` 增加出口：
 
@@ -1321,14 +1321,14 @@ Expected: PASS
     ];
 ```
 
-- [ ] **Step 6: 端到端验证解析进入 claims**
+- [x] **Step 6: 端到端验证解析进入 claims**
 
 在 `tests/permission_groups_integration.rs` 新建集成测试，覆盖「用户入组后签发的 Token 含组内权限」与「内置全权组 Token 含全部目录权限」两个用例。夹具按 `tests/account_deletion_integration.rs:31-240` 的既有写法自行构造（该文件展示了 build_app、`sync_with_database`、TokenManager、dispatch 的完整套路）。**注意**：该仓库的 `tests/common/mod.rs` 只有 68 行、仅提供注册验证码捕获，没有通用夹具，本任务不要求先补公共夹具。
 
 Run: `python scripts/run_ci.py integration`
 Expected: PASS
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/addon/access/ src/app.rs tests/permission_groups_integration.rs
@@ -1352,7 +1352,7 @@ git commit -m "feat(access): GroupGrantResolver 接入 Token 签发，组权限�
   - `pub(crate) async fn count_active_system_admins_in_tx(access: &Access, ctx: &ActionContext, transaction: &mut Transaction) -> Result<u64, BaseError>`
   - `pub(crate) fn ensure_member_limit(member_count: u64) -> Result<(), BaseError>`
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```rust
 #[cfg(test)]
@@ -1421,12 +1421,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --lib --locked groups::admin`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```rust
 //! 组管理的事务编排：扇出失效、提权校验、最后管理员判定与成员上限。
@@ -1577,12 +1577,12 @@ pub(crate) async fn count_active_system_admins_in_tx(
 }
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test --lib --locked groups::admin`
 Expected: PASS（4 tests——锁序那条同义反复用例已删除，真实锁序验证见 Task 12 之后的集成用例）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/addon/access/domain/groups/admin.rs
@@ -1607,7 +1607,7 @@ git commit -m "feat(access): 扇出失效、提权校验与成员上限机制"
 
 **为什么必须改签名**：唯一受信 writer（`GrantRepository`、`GroupRepository`）的每个方法都需要 `ctx` 去拿连接池做 `trusted_query`（`access/domain/repository.rs:45-48`）。不传 `ctx`，实现方就只能绕过 writer 直写，直接违反 `authorization-writers.md` 的硬约束。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 在 `src/addon/account/domain/system_owner.rs` 追加：
 
@@ -1651,12 +1651,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --lib --locked account::domain::system_owner`
 Expected: 编译失败——`claim` 参数数量不匹配
 
-- [ ] **Step 3: 改签名与所有实现/调用点**
+- [x] **Step 3: 改签名与所有实现/调用点**
 
 `system_owner.rs` 的 trait 与默认实现：
 
@@ -1718,12 +1718,12 @@ impl SystemOwnerClaimer for NoSystemOwnerClaimer {
 
 顺便修掉 `context.rs:157` 那处挂错的文档注释（「在注册事务中竞争唯一最终管理员哨兵」当前挂在 `session_id_from_request` 上，是 port 半弃置期的遗留）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test --lib --locked && python scripts/check_architecture.py`
 Expected: 全部通过
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/addon/account/
@@ -1751,7 +1751,7 @@ git commit -m "refactor(account): SystemOwnerClaimer 端口透传 ActionContext 
 
 **依赖方向**：access 已单向依赖 account（`access/domain/resolver.rs:6` 等），account 目录内 grep 不到 `crate::addon::access`，因此把实现放在 access 不会形成编译期循环。
 
-- [ ] **Step 1: 写失败的集成测试**
+- [x] **Step 1: 写失败的集成测试**
 
 claimer 的全部行为都是数据库行为（写哨兵、入组、递增版本），没有可单测的纯逻辑面。**不要写"断言 enum 变体等于它自己"这类同义反复的测试**——那只会制造虚假信心。TDD 在这里落在集成层：先把「哨兵只被夺到一次」的契约写成失败测试。
 
@@ -1780,12 +1780,12 @@ async fn a_second_claim_returns_already_claimed_instead_of_failing() {
 
 （`harness::claim_owner` 需在测试夹具里直接经注册事务调用 claimer，或经 `register_with_code` 间接驱动；取更贴近真实路径的那种。`reset_business_tables` 必须清空 `system_owner`、`user_group`、`permission_group`。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --test system_owner_bootstrap_integration -- --ignored --test-threads=1 a_second_claim_returns_already_claimed`
 Expected: FAIL——当前注入的是 `NoSystemOwnerClaimer`，首个 claim 返回 `AlreadyClaimed` 而非 `Claimed`
 
-- [ ] **Step 3: 实现 claimer**
+- [x] **Step 3: 实现 claimer**
 
 ```rust
 //! `SystemOwnerClaimer` 的 access 实现：引导首个注册账号为系统管理员。
@@ -1877,12 +1877,12 @@ impl SystemOwnerClaimer for AccessSystemOwnerClaimer {
 
 （`trusted_owner` 与 `trusted_query` 同形，绑 `system_owner` 表定义——即 `GroupRepository::new` 的第四个参数，Task 3 已定型。）
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cargo test --lib --locked groups::owner`
 Expected: PASS
 
-- [ ] **Step 5: 组合根换注入**
+- [x] **Step 5: 组合根换注入**
 
 `src/addon/access/mod.rs` 增加出口：
 
@@ -1901,7 +1901,7 @@ Expected: PASS
 
 同时删除 `src/addon/account/mod.rs:35-37` 的 `no_system_owner_claimer()`——它已无调用方。若保留会造成「存在一个永不使用的空实现」的误导。删除后须确认 `cargo clippy --all-targets --all-features --locked -- -D warnings` 通过。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/addon/access/ src/app.rs src/addon/account/mod.rs
@@ -1924,7 +1924,7 @@ git commit -m "feat(access): 首个注册账号引导为系统管理员的 claim
 
 **语义变更**：`AlreadyClaimed` 是**正常业务结果**，不得阻断注册。当前 `register.rs` 用 `?` 在同一事务闭包内上抛，会让「首个用户因哨兵竞争失败而注册失败」。只有真实数据库故障才回滚整个注册事务。
 
-- [ ] **Step 1: 写失败的集成测试**
+- [x] **Step 1: 写失败的集成测试**
 
 创建 `tests/system_owner_bootstrap_integration.rs`，夹具按 `tests/account_deletion_integration.rs` 的既有套路构造。核心用例：
 
@@ -1985,12 +1985,12 @@ async fn later_registrations_degrade_to_plain_users() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --test system_owner_bootstrap_integration -- --ignored --test-threads=1`
 Expected: `concurrent_first_registrations_produce_exactly_one_system_owner` 失败——当前注入的是 `NoSystemOwnerClaimer`，没有管理员产生
 
-- [ ] **Step 3: 改注册流程的降级语义**
+- [x] **Step 3: 改注册流程的降级语义**
 
 `register.rs` 的事务闭包：
 
@@ -2020,12 +2020,12 @@ Expected: `concurrent_first_registrations_produce_exactly_one_system_owner` 失�
 
 同时删掉 `register.rs:93-94` 那段「当前骨架注入的是不声明的默认实现，永不进入 Claimed 分支」的注释——它已与事实相反。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `python scripts/run_ci.py integration`
 Expected: PASS（两个新用例通过，且既有 8 个集成入口不回归）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/addon/account/user/actions/register.rs tests/system_owner_bootstrap_integration.rs
@@ -2079,7 +2079,7 @@ pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
 }
 ```
 
-- [ ] **Step 1: 写 `delete_group` 的失败测试（含 Review Focus 3 竞态）**
+- [x] **Step 1: 写 `delete_group` 的失败测试（含 Review Focus 3 竞态）**
 
 在 `tests/permission_groups_integration.rs` 追加：
 
@@ -2145,12 +2145,12 @@ async fn delete_races_add_member_without_orphans_or_500() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --test permission_groups_integration -- --ignored --test-threads=1`
 Expected: 编译失败（`harness::create_group` 等尚不存在，接口未注册）
 
-- [ ] **Step 3: 实现五个 Action**
+- [x] **Step 3: 实现五个 Action**
 
 **`create_group.rs`**——输入 `group_key`（`GROUP_KEY_PATTERN` / `GROUP_KEY_MAX_LENGTH`）、`title`（1–128）、`description`（≤255，可选）。事务内：`ensure_declared` 不需要（组本身不是权限）；直接 `insert_group_in_tx`；捕获唯一键冲突返回既有的 `ParamInvalid` 语义；写审计。不需要扇出（新组无成员）。
 
@@ -2198,7 +2198,7 @@ Expected: 编译失败（`harness::create_group` 等尚不存在，接口未注�
 
 **`get_group.rs`**——路径参数 `group_id`；返回条目列表（含每条的 `is_orphan` 布尔）、成员列表、以及 `effective_all: bool`（`group_key == SYSTEM_ADMIN_GROUP_KEY`，spec §15 第 3 条要求接口显式表达内置组无条目可展示）。
 
-- [ ] **Step 4: 注册与 Step-up**
+- [x] **Step 4: 注册与 Step-up**
 
 `src/addon/access/groups/actions/mod.rs` 照 `grants/actions/mod.rs:1-39` 的形状写（`mod` 声明 + `ACTIONS` 数组 + `register_all`）。`groups/mod.rs` 补：
 
@@ -2214,12 +2214,12 @@ fn step_up_targets() -> Vec<yang_base::definition::ActionRef> {
 
 并在 `build_module` 里按 `grants/mod.rs:52-58` 的写法挂载 `step_up.middleware(...)`。
 
-- [ ] **Step 5: 运行确认通过**
+- [x] **Step 5: 运行确认通过**
 
 Run: `python scripts/run_ci.py integration && python scripts/check_architecture.py`
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/addon/access/groups/ tests/permission_groups_integration.rs
@@ -2240,7 +2240,7 @@ git commit -m "feat(access): 权限组 CRUD 接口与删除竞态对抗测试"
 - Consumes: Task 4 的 `resolution`、Task 6 的 `invalidate_users_in_tx` / `ensure_member_limit`
 - Produces: 两个 Action；权限 `access.groups.write`
 
-- [ ] **Step 1: 写失败测试（含 Review Focus 4 边界与 Review Focus 1 目录未装）**
+- [x] **Step 1: 写失败测试（含 Review Focus 4 边界与 Review Focus 1 目录未装）**
 
 ```rust
 /// spec §6.3：组权限变更必须让全部成员的 Token 失效。
@@ -2288,12 +2288,12 @@ async fn group_permission_change_respects_the_member_limit() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --test permission_groups_integration -- --ignored --test-threads=1`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 **`add_group_item.rs`**：
 
@@ -2339,12 +2339,12 @@ Expected: 编译失败
 
 **`remove_group_item.rs`**：与上对称，但**不做 `ensure_declared`**——对齐 `revoke_permission.rs:48` 的反向宽容语义（已从 Catalog 移除的权限也必须能清理，否则孤儿条目无法清除）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `python scripts/run_ci.py integration`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/addon/access/groups/actions/ tests/permission_groups_integration.rs
@@ -2367,7 +2367,7 @@ git commit -m "feat(access): 组权限条目接口，含成员上限与扇出失
 
 **这是 spec §8.1 的落点**——保住 D2 实质的地方。
 
-- [ ] **Step 1: 写失败测试（Review Focus 2 与两条提权路径）**
+- [x] **Step 1: 写失败测试（Review Focus 2 与两条提权路径）**
 
 ```rust
 /// spec §8.1 路径一：给自己加一个权限超集的组必须被拒。
@@ -2417,12 +2417,12 @@ async fn admin_can_remove_themselves_when_another_admin_remains() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --test permission_groups_integration -- --ignored --test-threads=1`
 Expected: 编译失败
 
-- [ ] **Step 3: 实现 `add_group_member.rs`**
+- [x] **Step 3: 实现 `add_group_member.rs`**
 
 ```rust
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
@@ -2474,7 +2474,7 @@ Expected: 编译失败
 
 `simulate_after_join` 是 `admin.rs` 里的一个私有辅助：取用户当前有效权限，再并入目标组对该用户的贡献（复用 `resolve_group_permissions`），**不写库**。
 
-- [ ] **Step 4: 实现 `remove_group_member.rs`**
+- [x] **Step 4: 实现 `remove_group_member.rs`**
 
 与加成员对称，外加最后管理员守卫：
 
@@ -2522,12 +2522,12 @@ Expected: 编译失败
 
 移出操作**不**受 §8.1 约束（它只会减少权限，不会增加）——这是刻意的，管理员必须能退出。
 
-- [ ] **Step 5: 运行确认通过**
+- [x] **Step 5: 运行确认通过**
 
 Run: `python scripts/run_ci.py integration`
 Expected: PASS（四条新用例全部通过）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/addon/access/groups/actions/ src/addon/access/domain/groups/admin.rs tests/permission_groups_integration.rs
@@ -2565,7 +2565,7 @@ git commit -m "feat(access): 组成员接口与防自提权不变量"
 
 **依赖方向注意**：account 域**不能**依赖 access 域（会成环）。因此守卫不能直接调 `access::...`。正确做法是把「系统管理员人数」抽象成一个 account 域端口，由 access 提供实现，经组合根注入——沿用 `SystemOwnerClaimer` 与 `GrantResolver` 的既有模式。
 
-- [ ] **Step 1: 定义 account 域的守卫端口与失败测试**
+- [x] **Step 1: 定义 account 域的守卫端口与失败测试**
 
 在 `src/addon/account/domain/system_owner.rs` 追加端口：
 
@@ -2649,12 +2649,12 @@ async fn deleting_an_account_leaves_no_orphan_authorization_rows() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cargo test --test permission_groups_integration -- --ignored --test-threads=1`
 Expected: 三个断言中至少「停用/删除最后管理员」与「孤儿行」失败
 
-- [ ] **Step 3: 实现端口与三处守卫**
+- [x] **Step 3: 实现端口与三处守卫**
 
 在 `src/addon/access/domain/groups/owner.rs` 增加实现（复用 `count_active_system_admins_in_tx`）：
 
@@ -2735,12 +2735,12 @@ impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
             .await?;
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `python scripts/run_ci.py integration && python scripts/check_architecture.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/addon/account/ src/addon/access/ tests/permission_groups_integration.rs
@@ -2767,7 +2767,7 @@ git commit -m "feat(account): 最后管理员守卫与账号删除的授权事�
 - 依赖方向 `shared ← engine ← features ← shell`；`features/access/` 不得 import `features/feishu/`。
 - 因此本任务要先把 `hasOperation` 下沉到 `engine/`（见 Step 1）——这同时修掉 feishu 域私有实现的跨域复用障碍。
 
-- [ ] **Step 1: 把 `hasOperation` 下沉到 engine 并写失败测试**
+- [x] **Step 1: 把 `hasOperation` 下沉到 engine 并写失败测试**
 
 移动 `frontend/src/features/feishu/api.ts:121-129` 的 `hasOperation` 到 `frontend/src/engine/catalog/has-operation.ts`，从 `engine/index.ts` 导出；`features/feishu/api.ts` 改为从 engine 引入（保持其对外签名不变）。现有 `frontend/tests/features/feishu/api.test.ts` 必须继续通过——这是不含回归的证明。
 
@@ -2804,7 +2804,7 @@ Expected: FAIL（模块不存在）
 
 实现后 Run 同上，Expected: PASS；再 Run `pnpm --dir frontend exec vitest run tests/features/feishu/` 确认无回归。
 
-- [ ] **Step 2: 写页面的失败测试**
+- [x] **Step 2: 写页面的失败测试**
 
 ```tsx
 import { describe, expect, it } from "vitest";
@@ -2837,7 +2837,7 @@ describe("canManageGroups", () => {
 Run: `pnpm --dir frontend exec vitest run tests/features/access/`
 Expected: FAIL
 
-- [ ] **Step 3: 实现 api 与页面**
+- [x] **Step 3: 实现 api 与页面**
 
 `frontend/src/features/access/api.ts` 导出 `canManageGroups(catalog)`（基于 `hasOperation(catalog, "access.groups.create_group")`）与读写请求函数。`PermissionGroupsPage.tsx` 渲染三块：组列表（含 `is_builtin` 与 `orphan_item_count` 徽标）、选中组的权限条目矩阵（勾选即加/移权限，写入后经 `invalidate` 重拉）、成员列表（加/移成员）。
 
@@ -2845,16 +2845,16 @@ Expected: FAIL
 - `effective_all === true` 的内置组：不渲染条目矩阵，改为一句说明「该组的权限由权限目录实时计算，共 N 项」。
 - 条目标 `is_orphan === true`：以警示样式渲染并提示「该权限已不在权限目录中，可安全移除」。
 
-- [ ] **Step 4: 登记静态视图与路由**
+- [x] **Step 4: 登记静态视图与路由**
 
 `frontend/src/features/registry.ts` 的字面量表加一条 `"access.groups.list_groups": PermissionGroupsPage`（键与后端 Action 名一致，静态 import）。`frontend/src/shell/routes.tsx` 加 `/access/groups` 路由并挂在 `RequireAuth` 下。
 
-- [ ] **Step 5: 运行前端门禁**
+- [x] **Step 5: 运行前端门禁**
 
 Run: `pnpm --dir frontend check`
 Expected: format:check → lint → typecheck → test → verify:locale-contract → build → verify:production-build → verify:bundle-budget → verify:deployment-contract 全部通过。若首屏 bundle 超预算，把新页面改为路由级 `lazy` 加载。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add frontend/src/features/access/ frontend/src/features/registry.ts frontend/src/shell/routes.tsx frontend/src/engine/catalog/has-operation.ts frontend/src/features/feishu/api.ts frontend/tests/
@@ -2873,22 +2873,22 @@ git commit -m "feat(frontend): 权限组管理视图，hasOperation 下沉到 en
 - Consumes: Task 10–13 全部新增 Action
 - Produces: 更新后的契约快照与 TS 类型
 
-- [ ] **Step 1: 重生成契约**
+- [x] **Step 1: 重生成契约**
 
 Run: `python scripts/dump_openapi.py`
 Expected: `frontend/contracts/openapi.json` 与 `frontend/src/engine/contracts/api-types.ts` 被更新；新 Action 出现在 operation 列表中。**两个生成物禁止手改**，只能经该脚本产生。
 
-- [ ] **Step 2: 验证契约测试不回归**
+- [x] **Step 2: 验证契约测试不回归**
 
 Run: `pnpm --dir frontend exec vitest run tests/engine/contracts/openapi-contract.test.ts`
 Expected: PASS。该测试断言 `operationCount >= 19`（下限）且每个 operation 的输入 Schema 都能过 `compileDynamicSchema` 白名单——新接口的输入必须全部通过白名单，若有字段类型不被支持，回到 Task 10–12 调整输入声明。
 
-- [ ] **Step 3: 全量门禁**
+- [x] **Step 3: 全量门禁**
 
 Run: `python scripts/run_ci.py quick && pnpm --dir frontend check`
 Expected: 全部通过
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add frontend/contracts/openapi.json frontend/src/engine/contracts/api-types.ts
@@ -2912,27 +2912,27 @@ git commit -m "chore(contracts): 重新生成 OpenAPI 快照与前端类型"
 
 **为什么这是独立任务**：这五处修订是 D2/D4 决策变更的正式记录。spec §12 已列出全部条目；仓库对文档/代码同步要求严格，遗漏任一处都会造成口径矛盾。放在最后是因为文档必须描述**已实现**的状态，而不是计划。
 
-- [ ] **Step 1: 修订 D2 与 D4**
+- [x] **Step 1: 修订 D2 与 D4**
 
 `docs/architecture/foundation-baseline.md:37` 的 D2 改为 spec §3.1 的修订后表述（引导式一次性、可降权、无自提权路径），并保留原文作为修订记录。`:39` 的 D4 标注「已按预留接口扩展出一层权限组；仍不引入组嵌套与角色继承」。
 
-- [ ] **Step 2: 重写 `AUTHZ_GRANTS.md`**
+- [x] **Step 2: 重写 `AUTHZ_GRANTS.md`**
 
 - 「初始授权（运维）」章节：应用引导为**主路径**，运维 SQL 降为**灾备路径**（spec §7.3），两条路径都要保留同一事务三件事的要求。
 - 新增「权限组」章节：三张表的形状、`system_admin` 内置组的计算语义、§8.1 提权不变量、§8.2 最后管理员守卫、幂等语义、错误码表。
 - 修正既有的目录来源描述：`project_permissions` 同时合并 `module.default_permissions`（`permission_catalog.rs:44-49`），当前文档只写了 Action 来源。
 - 新增权限清单：`access.groups.read` / `access.groups.write`。
 
-- [ ] **Step 3: 修正 AGENTS.md 与路线图口径**
+- [x] **Step 3: 修正 AGENTS.md 与路线图口径**
 
 `AGENTS.md:7` 删去「也没有任何账号会成为系统最终管理员」；`:35` 的「access（授权端口（预留，无冷启动引导，权限管理未交付））」改为实际状态。`docs/architecture/account-system-roadmap.md:32` 的「权限管理面整体不可达、属预留端口」改为已完成引导与权限组交付，并保留该段作为历史记录。
 
-- [ ] **Step 4: 核对文档与代码一致性**
+- [x] **Step 4: 核对文档与代码一致性**
 
 Run: `python scripts/check_architecture.py && python scripts/run_ci.py quick`
 Expected: 通过。另需人工核对：`AGENTS.md:106-107` 关于 `tests/` 入口数量的描述——本计划新增两个集成测试文件后需同步更新该计数（当前文档写「八个入口」，实际已有 10 个 `.rs`，属既有漂移，本任务顺带修正）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add docs/ AGENTS.md
