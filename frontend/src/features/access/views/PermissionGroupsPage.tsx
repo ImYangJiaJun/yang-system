@@ -14,6 +14,10 @@
  *    新建/改名/删除整块消失（禁用表示「此刻不可用」，这里表示「这个入口不属于你」）。
  * 4. **写完全部回读**。九个写接口没有一个会回最新条目或成员，页面每次写完都把
  *    `access` 这个前缀下的查询一起作废重拉，不做乐观更新。
+ * 5. **加权限走候选目录，不手输**：候选来自权限目录读接口
+ *    （`access.grants.list_permissions`），与「能管理组」是两粒独立权限位——
+ *    缺目录那粒时加入表单换成一句说明（同样是不渲染，不是禁用）。
+ *    管理员等价权限在候选中带危害面徽标。
  *
  * 「共 N 项」里的 N 取的是**当前身份在界面目录里能看到的 Action 数**：
  * UI 目录不投影权限清单，服务端的完整口径只在权限目录里，页面拿不到。
@@ -24,21 +28,31 @@ import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
 
-import { useUiCatalog } from "@/engine";
+import { hasOperation, useUiCatalog } from "@/engine";
+import { SESSION_REFRESHED_EVENT } from "@/engine/session/auth-session";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/lib/utils";
 import { useToast } from "@/shared/lib/toast";
 
 import {
   accessGroupQueryKeys,
+  GROUP_OPERATION_IDS,
   useGroupActions,
   useGroupDetail,
   useGroupList,
+  usePermissionCatalog,
 } from "../api";
 import type { GroupDetail, GroupSummary } from "../api";
 
@@ -85,6 +99,22 @@ export default function PermissionGroupsPage() {
       queryKey: accessGroupQueryKeys.root(),
     });
   }
+
+  /// 会话刷新（`yang:session-refreshed`）后把 access 前缀查询一起作废重拉：
+  /// 别处对当前账号授权事实的改动（如权限授予）要目标用户刷新会话才生效，
+  /// 事件到达这里就是「现在生效了」——列表、详情、候选目录整块回读一次。
+  /// 与 `refresh()` 同一粒失效调用；`queryClient` 稳定，订阅只挂一次。
+  useEffect(() => {
+    const onSessionRefreshed = () => {
+      void queryClient.invalidateQueries({
+        queryKey: accessGroupQueryKeys.root(),
+      });
+    };
+    window.addEventListener(SESSION_REFRESHED_EVENT, onSessionRefreshed);
+    return () => {
+      window.removeEventListener(SESSION_REFRESHED_EVENT, onSessionRefreshed);
+    };
+  }, [queryClient]);
 
   /// 所有写操作的共同外壳：清提示 → 执行 → 回读 → 落提示；失败就把服务端原文亮出来。
   /// 428（Step-up）已由 `useGroupActions` 内置的 `request`/`runProtected` 透明处理，
@@ -530,7 +560,24 @@ function ItemPanel({
   busy: boolean;
   visibleCatalogActionCount: number;
 }) {
-  const [draft, setDraft] = useState("");
+  const uiCatalog = useUiCatalog();
+  const permissionCatalog = usePermissionCatalog();
+  const [selectedPermission, setSelectedPermission] = useState<string | null>(
+    null,
+  );
+
+  /// 加权限的候选来源是权限目录（`access.grants.list_permissions`），它与「能管理组」
+  /// 是两粒独立的权限位：缺目录那粒时入口不渲染（见文件头不变量 3），移除不受影响。
+  const canSeeCatalog =
+    actions.canManage &&
+    hasOperation(uiCatalog.data, GROUP_OPERATION_IDS.listPermissions);
+
+  /// 候选 = 目录中「组里还没有」的权限：已在矩阵里的那条没有再加一次的意义
+  /// （服务端幂等，但留着只会让下拉里出现一条选不出新效果的选项）。
+  const candidates = (permissionCatalog.data ?? []).filter(
+    (entry) =>
+      !detail.items.some((item) => item.permission === entry.permission),
+  );
 
   return (
     <section
@@ -623,35 +670,91 @@ function ItemPanel({
           )}
 
           {actions.canManage ? (
-            <form
-              className="flex flex-wrap items-end gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const permission = draft.trim();
-                if (permission === "") return;
-                setDraft("");
-                submit(async () => {
-                  await actions.addItem(detail.id, permission);
-                }, `已加入「${permission}」`);
-              }}
-            >
-              <div className="min-w-0 flex-1 basis-48 space-y-1">
-                <Label htmlFor="permission-group-item-draft">权限标识</Label>
-                <Input
-                  id="permission-group-item-draft"
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  placeholder="account.users.read"
-                />
+            canSeeCatalog && permissionCatalog.isError ? (
+              // 目录查询失败：候选下拉里「空」和「加载中」之外不该有第三种面孔，
+              // 失败态必须单独画出来，否则和「加载出了空目录」无法区分。
+              <div
+                role="alert"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                <span>权限目录加载失败，请重试；移除不受影响。</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void permissionCatalog.refetch()}
+                >
+                  <RefreshCw aria-hidden="true" />
+                  重试
+                </Button>
               </div>
-              <Button type="submit" size="sm" disabled={busy}>
-                <Plus aria-hidden="true" />
-                加入权限
-              </Button>
-              <p className="w-full text-xs text-muted-foreground">
-                只能加入服务端权限目录里已声明的权限标识（填错会被直接拒掉）。
+            ) : canSeeCatalog ? (
+              <form
+                className="flex flex-wrap items-end gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (selectedPermission === null) return;
+                  const permission = selectedPermission;
+                  setSelectedPermission(null);
+                  submit(async () => {
+                    await actions.addItem(detail.id, permission);
+                  }, `已加入「${permission}」`);
+                }}
+              >
+                <div className="min-w-0 flex-1 basis-48 space-y-1">
+                  <Label htmlFor="permission-group-item-candidate">
+                    权限标识
+                  </Label>
+                  <Select
+                    value={selectedPermission ?? ""}
+                    onValueChange={setSelectedPermission}
+                  >
+                    <SelectTrigger
+                      id="permission-group-item-candidate"
+                      className="w-full"
+                      disabled={busy || permissionCatalog.isPending}
+                    >
+                      <SelectValue
+                        placeholder={
+                          permissionCatalog.isPending
+                            ? "正在加载权限目录…"
+                            : "从权限目录中选择…"
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {candidates.map((entry) => (
+                        <SelectItem
+                          key={entry.permission}
+                          value={entry.permission}
+                        >
+                          <span className="font-mono">{entry.permission}</span>
+                          {entry.adminEquivalent ? (
+                            <Badge variant="destructive">管理员等价</Badge>
+                          ) : null}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={busy || selectedPermission === null}
+                >
+                  <Plus aria-hidden="true" />
+                  加入权限
+                </Button>
+                <p className="w-full text-xs text-muted-foreground">
+                  候选即权限目录中已声明的权限，不再手输；标「管理员等价」的
+                  权限会显著扩大危害面，授予前请确认。
+                </p>
+              </form>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                当前身份看不到权限目录（需要 access.grants.read），
+                不能在此添加权限；移除不受影响。
               </p>
-            </form>
+            )
           ) : null}
         </>
       )}

@@ -5,7 +5,8 @@
  * 就等于这个身份没有那粒权限位。
  *
  * 这里断言的是**只有页面能证明的事**：内置全权组没有条目矩阵但有目录计数、
- * 孤儿条目被单独标出来、勾选/取消真的发出写请求并回读、无写权限时写入口不渲染。
+ * 孤儿条目被单独标出来、勾选/取消真的发出写请求并回读、无写权限时写入口不渲染、
+ * 加权限走候选目录（含管理员等价徽标）、`session-refreshed` 后整块回读。
  * 断言「渲染了一个 div」没有意义，所以每条用例都末了核对发出去的请求。
  */
 
@@ -14,7 +15,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { UiCatalog } from "@/engine/contracts/ui-catalog";
-import { clearStoredSession } from "@/engine/session/auth-session";
+import {
+  clearStoredSession,
+  SESSION_REFRESHED_EVENT,
+} from "@/engine/session/auth-session";
 import { canManageGroups } from "@/features/access/api";
 import { renderTestApp } from "@test/helpers/render-app";
 
@@ -34,6 +38,7 @@ const ITEMS_REMOVE_PATH = `${ITEMS_PATH}/remove`;
 const MEMBERS_PATH = `${LIST_PATH}/members`;
 const MEMBERS_REMOVE_PATH = `${MEMBERS_PATH}/remove`;
 const DETAIL_PATH = /\/api\/v1\/access\/groups\/\d+$/;
+const PERMISSIONS_PATH = "/api/v1/access/permissions";
 
 type RecordedCall = {
   url: string;
@@ -123,10 +128,17 @@ const WRITE_ACTIONS = [
   ]),
 ];
 
+/// 权限目录读接口（注册在 `access.grants` 模块，权限位 `access.grants.read`）。
+const PERMISSION_ACTIONS = [
+  action("access.grants.list_permissions", "GET", PERMISSIONS_PATH),
+];
+
 type StubOptions = {
-  /// 目录里有没有 `access.groups.read` / `access.groups.write`。
+  /// 目录里有没有 `access.groups.read` / `access.groups.write` /
+  /// `access.grants.list_permissions`（三粒独立权限位）。
   read?: boolean;
   write?: boolean;
+  permissions?: boolean;
   groupList?: Handler;
   groupDetail?: Handler;
   createGroup?: Handler;
@@ -136,6 +148,7 @@ type StubOptions = {
   removeItem?: Handler;
   addMember?: Handler;
   removeMember?: Handler;
+  permissionsList?: Handler;
 };
 
 /// **本文件所有用例共用一个可见 Action 集合**：内置组的目录计数要按它算。
@@ -143,6 +156,7 @@ function visibleActions(options: StubOptions) {
   const actions = [];
   if (options.read ?? true) actions.push(...READ_ACTIONS);
   if (options.write ?? true) actions.push(...WRITE_ACTIONS);
+  if (options.permissions ?? true) actions.push(...PERMISSION_ACTIONS);
   return actions;
 }
 
@@ -153,6 +167,7 @@ function catalogFor(options: StubOptions): Response {
   const flags = [
     (options.read ?? true) ? "1" : "0",
     (options.write ?? true) ? "1" : "0",
+    (options.permissions ?? true) ? "1" : "0",
   ].join("");
   return jsonResponse({
     code: 0,
@@ -204,6 +219,34 @@ export function groupDetailWire(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/// 权限目录的测试投影：普通权限与管理员等价权限各若干条
+/// （`admin_equivalent` 标记对齐 `sensitive_permissions.rs` 的清单口径）。
+function permissionWire(overrides: Record<string, unknown> = {}) {
+  return {
+    permission: "account.users.read",
+    declared_by: ["account.users.list_users"],
+    admin_equivalent: false,
+    ...overrides,
+  };
+}
+
+const PERMISSION_CATALOG = [
+  permissionWire(),
+  permissionWire({
+    permission: "demo.notes.read",
+    declared_by: ["demo.notes.list_notes"],
+  }),
+  permissionWire({
+    permission: "demo.notes.write",
+    declared_by: ["demo.notes.create_note"],
+  }),
+  permissionWire({
+    permission: "account.users.reset_credentials",
+    declared_by: ["account.users.reset_credentials"],
+    admin_equivalent: true,
+  }),
+];
+
 async function respond(
   handler: Handler | undefined,
   body: Record<string, unknown>,
@@ -236,6 +279,10 @@ function stubAccessApi(options: StubOptions = {}): RecordedCall[] {
       if (url.endsWith("/.well-known/yang/ui-catalog"))
         return catalogFor(options);
       if (url.endsWith("/api/v1/users/me")) return envelope(ME);
+      if (url.endsWith(PERMISSIONS_PATH))
+        return respond(options.permissionsList, payload, {
+          permissions: PERMISSION_CATALOG,
+        });
       if (url.endsWith(ITEMS_REMOVE_PATH))
         return respond(options.removeItem, payload, {
           group_id: payload.group_id,
@@ -414,10 +461,10 @@ describe("权限组管理页", () => {
     const list = await screen.findByRole("list", { name: "权限组列表" });
     await user.click(within(list).getByRole("button", { name: /系统管理员/ }));
 
-    // 目录里这个身份看得到 2 个读 Action + 7 个写 Action。
+    // 目录里这个身份看得到 2 个读 Action + 7 个写 Action + 1 个权限目录读接口。
     expect(
       await screen.findByText(
-        "该组的权限由权限目录实时计算，共 9 项，不在此处逐条列出。",
+        "该组的权限由权限目录实时计算，共 10 项，不在此处逐条列出。",
       ),
     ).toBeInTheDocument();
     // 矩阵整块不渲染：一个复选框都没有
@@ -664,7 +711,7 @@ describe("权限组管理页", () => {
     });
   });
 
-  it("加入一条权限会发出加权限 POST 并刷新详情", async () => {
+  it("从候选目录选择一条权限会发出加权限 POST 并刷新详情", async () => {
     const user = userEvent.setup();
     const calls = stubAccessApi({
       groupList: () => ({ groups: [groupWire({ id: 2 })] }),
@@ -677,7 +724,11 @@ describe("权限组管理页", () => {
       "该组还没有任何权限条目，成员加进来也不会得到权限。",
     );
 
-    await user.type(screen.getByLabelText("权限标识"), "account.users.read");
+    // 候选是下拉选择，不是自由文本：打开候选目录，选中「account.users.read」提交
+    await user.click(screen.getByRole("combobox", { name: "权限标识" }));
+    await user.click(
+      await screen.findByRole("option", { name: "account.users.read" }),
+    );
     await user.click(screen.getByRole("button", { name: "加入权限" }));
 
     await waitFor(() => {
@@ -690,6 +741,143 @@ describe("权限组管理页", () => {
     // 详情回读
     await waitFor(() => {
       expect(detailCalls(calls).length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("候选里标出管理员等价权限的危害面徽标", async () => {
+    const user = userEvent.setup();
+    stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      groupDetail: () => groupDetailWire({ id: 2 }),
+    });
+
+    renderPage();
+
+    await screen.findByText(
+      "该组还没有任何权限条目，成员加进来也不会得到权限。",
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "权限标识" }));
+    const sensitive = await screen.findByRole("option", {
+      name: /reset_credentials/,
+    });
+    expect(sensitive).toHaveTextContent("管理员等价");
+    // 普通权限不背同一块徽标
+    expect(
+      screen.getByRole("option", { name: "account.users.read" }),
+    ).not.toHaveTextContent("管理员等价");
+  });
+
+  it("候选列表不含组里已有的权限", async () => {
+    const user = userEvent.setup();
+    stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2, item_count: 1 })] }),
+      groupDetail: () => ({
+        ...groupDetailWire({ id: 2 }),
+        items: [{ permission: "account.users.read", is_orphan: false }],
+      }),
+    });
+
+    renderPage();
+
+    await screen.findByRole("list", { name: "组权限条目" });
+
+    await user.click(screen.getByRole("combobox", { name: "权限标识" }));
+    // 目录已加载（出现别的选项），但已在组里的那条不在候选里
+    await screen.findByRole("option", { name: /reset_credentials/ });
+    expect(
+      screen.queryByRole("option", { name: "account.users.read" }),
+    ).toBeNull();
+  });
+
+  it("能管理组但看不到权限目录时，加权限入口换成说明且不发目录请求", async () => {
+    const calls = stubAccessApi({
+      permissions: false,
+      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      groupDetail: () => groupDetailWire({ id: 2 }),
+    });
+
+    renderPage();
+
+    await screen.findByText(
+      "该组还没有任何权限条目，成员加进来也不会得到权限。",
+    );
+    expect(screen.queryByRole("button", { name: "加入权限" })).toBeNull();
+    expect(screen.getByText(/看不到权限目录/)).toBeInTheDocument();
+    // 不渲染入口的同时也不许发注定 403 的目录请求
+    expect(callsTo(calls, PERMISSIONS_PATH)).toHaveLength(0);
+  });
+
+  it("权限目录查询失败时，候选下拉换成错误说明并给出重试入口", async () => {
+    const user = userEvent.setup();
+    let failed = true;
+    const calls = stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      groupDetail: () => groupDetailWire({ id: 2 }),
+      // 目录第一次返回 500：失败态必须和「加载出了空目录」的合法空态区分开
+      permissionsList: () =>
+        failed
+          ? jsonResponse({ code: 50001, message: "服务内部错误" }, 500)
+          : { permissions: PERMISSION_CATALOG },
+    });
+
+    renderPage();
+
+    await screen.findByText(
+      "该组还没有任何权限条目，成员加进来也不会得到权限。",
+    );
+
+    // 失败态：先等目录查询失败 settle（ItemPanel 挂载时才发目录请求），
+    // 再断言候选下拉与提交按钮都不渲染、换成「加载失败」说明
+    expect(
+      await screen.findByText("权限目录加载失败，请重试；移除不受影响。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "权限标识" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "加入权限" })).toBeNull();
+
+    // 重试入口真实可用：失败一次后点重试，目录重新拉到，候选下拉回来
+    failed = false;
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => {
+      expect(callsTo(calls, PERMISSIONS_PATH).length).toBeGreaterThanOrEqual(2);
+    });
+    await screen.findByRole("combobox", { name: "权限标识" });
+  });
+
+  it("收到 session-refreshed 事件后把 access 前缀查询一起作废重拉", async () => {
+    const calls = stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      groupDetail: () => groupDetailWire({ id: 2 }),
+    });
+
+    renderPage();
+
+    await screen.findByRole("list", { name: "权限组列表" });
+    const listGets = () =>
+      callsTo(calls, LIST_PATH).filter((call) => call.method === "GET").length;
+    // 等详情与候选目录都加载完再派发事件：`invalidateQueries` 只重拉**活跃**查询，
+    // 事件若在详情（及其挂载的 ItemPanel）就绪前到达，候选目录查询还没挂载、
+    // 不会被这次失效覆盖——那测的就不是「整块回读」了。
+    await waitFor(() => {
+      expect(detailCalls(calls).length).toBe(1);
+    });
+    await waitFor(() => {
+      expect(callsTo(calls, PERMISSIONS_PATH).length).toBe(1);
+    });
+    expect(listGets()).toBe(1);
+
+    // 别处对当前账号的授权改动（如权限授予）要刷新会话才生效：
+    // 事件一到，页面把列表、详情、候选目录整块作废重拉。
+    window.dispatchEvent(new CustomEvent(SESSION_REFRESHED_EVENT));
+
+    await waitFor(() => {
+      expect(listGets()).toBeGreaterThanOrEqual(2);
+    });
+    await waitFor(() => {
+      expect(detailCalls(calls).length).toBeGreaterThanOrEqual(2);
+    });
+    await waitFor(() => {
+      expect(callsTo(calls, PERMISSIONS_PATH).length).toBeGreaterThanOrEqual(2);
     });
   });
 });

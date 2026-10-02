@@ -35,11 +35,13 @@ import type {
   UiCatalog,
 } from "@/engine";
 
-/// 权限组管理面要用的九个 Action。
+/// 权限组管理面要用的十个 operation：九个组 Action + 一个权限目录读接口。
 ///
 /// **每一粒都必须是服务端真实注册过的 `operation_id`**（逐个对着
 /// `src/addon/access/groups/actions/*.rs` 的 `action_name!(...)` 核过，模块名是
-/// `access.groups`）。写一个不存在的 id 的后果不是报错而是**静默**：`hasOperation`
+/// `access.groups`；`listPermissions` 除外——它注册在 `src/addon/access/grants/actions/
+/// list_permissions.rs`，模块名是 `access.grants`，权限位 `access.grants.read`）。
+/// 写一个不存在的 id 的后果不是报错而是**静默**：`hasOperation`
 /// 恒为 false，于是整个写侧永远不渲染——界面上看不出任何异常。
 export const GROUP_OPERATION_IDS = {
   list: "access.groups.list_groups",
@@ -51,6 +53,8 @@ export const GROUP_OPERATION_IDS = {
   removeItem: "access.groups.remove_group_item",
   addMember: "access.groups.add_group_member",
   removeMember: "access.groups.remove_group_member",
+  /// 权限目录（组条目候选的来源）：只读，不带 Step-up 语义。
+  listPermissions: "access.grants.list_permissions",
 } as const;
 
 /* ------------------------------- 权限门控 -------------------------------- */
@@ -106,6 +110,16 @@ export type GroupDetail = {
   members: number[];
 };
 
+/// 权限目录里的一条权限（对齐 `grants/actions/list_permissions.rs` 的 `PermissionEntry`）。
+///
+/// `adminEquivalent` 为真表示「管理员等价权限」（G2）：授予它等于交出一部分系统
+/// 管理能力，界面上必须把危害面标出来（设计 `sensitive_permissions.rs`）。
+export type PermissionCatalogEntry = {
+  permission: string;
+  declaredBy: string[];
+  adminEquivalent: boolean;
+};
+
 /* ------------------------------- 响应解析 -------------------------------- */
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -150,6 +164,23 @@ function parseGroupItem(raw: Record<string, unknown>): GroupItemEntry | null {
   return permission === ""
     ? null
     : { permission, isOrphan: raw.is_orphan === true };
+}
+
+/// 一条目录条目。没有权限字符串的条目没有候选意义（选了也发不出去），直接丢掉。
+function parsePermissionEntry(
+  raw: Record<string, unknown>,
+): PermissionCatalogEntry | null {
+  const permission = asString(raw.permission);
+  if (permission === "") return null;
+  return {
+    permission,
+    declaredBy: Array.isArray(raw.declared_by)
+      ? raw.declared_by.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : [],
+    adminEquivalent: raw.admin_equivalent === true,
+  };
 }
 
 function parseGroupDetail(data: unknown, groupId: number): GroupDetail {
@@ -255,6 +286,26 @@ export async function getGroup(
     signal,
   );
   return parseGroupDetail(result.data, groupId);
+}
+
+/// 读权限目录：组条目候选的来源。**只读**，不需要 Step-up。
+export async function listPermissions(
+  deps: AccessInvokeDeps,
+  signal?: AbortSignal,
+): Promise<PermissionCatalogEntry[]> {
+  const result = await invokeGroupAction(
+    deps,
+    GROUP_OPERATION_IDS.listPermissions,
+    {},
+    signal,
+  );
+  const raw = asRecord(result.data)?.permissions;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== undefined)
+    .map(parsePermissionEntry)
+    .filter((item): item is PermissionCatalogEntry => item !== null);
 }
 
 /* ------------------------------- 写 ------------------------------- */
@@ -411,6 +462,9 @@ export const accessGroupQueryKeys = {
   root: () => [ACCESS_QUERY_ROOT] as const,
   groups: () => [ACCESS_QUERY_ROOT, "groups"] as const,
   group: (groupId: number) => [ACCESS_QUERY_ROOT, "groups", groupId] as const,
+  /// 权限目录挂在同一前缀下：页面「写完全部回读」与 `session-refreshed`
+  /// 事件做一次前缀失效时，它跟着一起作废重拉。
+  permissions: () => [ACCESS_QUERY_ROOT, "permissions"] as const,
 };
 
 /* --------------------------------- hooks --------------------------------- */
@@ -451,6 +505,28 @@ export function useGroupDetail(
       return getGroup(groupId, { catalog: catalogData, session }, signal);
     },
     staleTime: 5_000,
+  });
+}
+
+/// 权限目录（组条目候选的来源）。
+///
+/// 只为「加权限」表单服务，所以 `enabled` 同时看两粒独立的权限位：能管理组
+/// （`create_group` 在目录里）才需要候选；能看到目录（`list_permissions` 在目录里）
+/// 才拉得到候选。缺后者时**不发注定 403 的往返**，页面改为说明为什么加不了。
+export function usePermissionCatalog(): UseQueryResult<
+  PermissionCatalogEntry[]
+> {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+  return useQuery({
+    enabled:
+      canManageGroups(catalogData) &&
+      hasOperation(catalogData, GROUP_OPERATION_IDS.listPermissions),
+    queryKey: accessGroupQueryKeys.permissions(),
+    queryFn: ({ signal }) =>
+      listPermissions({ catalog: catalogData, session }, signal),
+    staleTime: 60_000,
   });
 }
 
