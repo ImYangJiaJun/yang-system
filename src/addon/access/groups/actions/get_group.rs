@@ -1,6 +1,14 @@
 //! 读取一个权限组的详情：条目（含孤儿标记）、成员与内置组标记。
+//!
+//! 可见性（组所有者/成员/持 `access.groups.read`）在 handler 内判定；**不可见与
+//! 不存在统一返回 404**（`RecordNotFound` 同形态），不给调用者「组是否存在」的
+//! 侧信道（防自增 group_id 遍历枚举）。
 
 use crate::addon::access::domain::context::Access;
+use crate::addon::access::domain::groups::admin::{
+    operator_may_manage_group, operator_may_see_group, GROUP_READ_PERMISSION,
+    GROUP_WRITE_PERMISSION,
+};
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::groups::resolution::{catalog_permissions, orphan_items};
 use schemars::JsonSchema;
@@ -40,6 +48,9 @@ pub(super) struct GetGroupResult {
     items: Vec<GroupItemView>,
     /// 成员用户 ID，按 `user_id` 升序（与扇出失效的锁序同源）。
     members: Vec<i64>,
+    /// 当前操作者能否管理该组（组所有者或持有全局写权限）：由后端算好，
+    /// 前端据此显隐管理按钮，不再自行判权。
+    can_manage: bool,
 }
 
 /// 把条目字符串投影成响应条目：按权限字符串稳定排序，孤儿条目原样保留并打标记。
@@ -61,6 +72,15 @@ pub(super) async fn handle(
     input: GetGroupInput,
     access: Arc<Access>,
 ) -> Result<ApiResponse, BaseError> {
+    // 可见性判据的两粒输入来自请求 claims（与 list_groups 同一口径）：操作者是其
+    // 所有者或成员的组恒可见；否则必须持有全局读权限。
+    let operator_id = ctx.actor()?.user_id();
+    let has_read = ctx
+        .authenticated_user()
+        .is_some_and(|user| user.has_permission(GROUP_READ_PERMISSION));
+    let has_write = ctx
+        .authenticated_user()
+        .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION));
     let mut transaction = ctx.tools().mysql()?.read_only_transaction().await?;
     let result = async {
         let group = access
@@ -68,15 +88,22 @@ pub(super) async fn handle(
             .find_by_id_in_tx(&ctx, &mut transaction, input.group_id)
             .await?
             .ok_or_else(|| BaseError::RecordNotFound("权限组".to_string()))?;
+        let members = access
+            .groups()
+            .list_members_in_tx(&ctx, &mut transaction, group.id)
+            .await?;
+        // 不可见与不存在统一 404：对无全局读权限者屏蔽「组是否存在」这一侧信道
+        // （自增 group_id 可被遍历枚举），错误形态与 RecordNotFound 完全一致、不含
+        // 「组存在」信息。
+        if !operator_may_see_group(operator_id, &group, &members, has_read) {
+            return Err(BaseError::RecordNotFound("权限组".to_string()));
+        }
         let catalog = catalog_permissions(access.permission_catalog())?;
         let items = access
             .groups()
             .list_items_in_tx(&ctx, &mut transaction, group.id)
             .await?;
-        let members = access
-            .groups()
-            .list_members_in_tx(&ctx, &mut transaction, group.id)
-            .await?;
+        let can_manage = operator_may_manage_group(operator_id, &group, has_write);
         Ok(GetGroupResult {
             id: group.id,
             effective_all: group.group_key == SYSTEM_ADMIN_GROUP_KEY,
@@ -85,6 +112,7 @@ pub(super) async fn handle(
             description: group.description,
             items: item_views(&items, &catalog),
             members,
+            can_manage,
         })
     }
     .await;
@@ -93,8 +121,10 @@ pub(super) async fn handle(
     ApiResponse::success(view, "权限组详情")
 }
 
-/// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
+/// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——可见性在 handler 内判定
+    // （组所有者/成员，或全局读权限 access.groups.read）
     module
         .action_fn(yang_base::action_name!("get_group"), move |ctx, input| {
             handle(ctx, input, Arc::clone(&access))
@@ -102,7 +132,6 @@ pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
         .route(HttpMethod::Get, "/api/v1/access/groups/{group_id}")
         .display_name("权限组详情")
         .description("读取权限组的条目（含孤儿标记）、成员与内置组标记")
-        .permissions(["access.groups.read"])
         .register()
 }
 
@@ -165,6 +194,7 @@ mod tests {
             effective_all: false,
             items: item_views(&["access.groups.read".to_string()], &catalog()),
             members: vec![7],
+            can_manage: true,
         };
         let value = serde_json::to_value(&payload).unwrap_or_else(|error| panic!("{error}"));
         let keys: Vec<&str> = value
@@ -174,6 +204,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "can_manage",
                 "description",
                 "effective_all",
                 "group_key",

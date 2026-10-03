@@ -80,19 +80,14 @@ mod tests {
     /// 被测 Module 的全限定名。
     const GROUPS_MODULE: &str = "access.groups";
 
-    /// 只读权限后缀：声明的权限全都是 `.read` 才说明这个 Action 不改变授权事实。
-    const READ_PERMISSION_SUFFIX: &str = ".read";
+    /// 只读 Action 的显式名单：授权判定下沉到 handler 内实现后，Catalog 里不再有
+    /// 权限声明可供推导「只读」（9 个 Action 都不再声明权限键），改为逐项点名——
+    /// 新增只读 Action 而不登记进本名单，会把下方 Step-up 清单与写 Action 集合的
+    /// 相等性破坏（它会被当写 Action 要求登记 Step-up）。
+    const READ_ACTION_NAMES: &[&str] = &["list_groups", "get_group"];
 
-    /// 只读 Action 的判据必须能从 Catalog 自动得出，否则「新增 Action 忘了挂
-    /// Step-up」就永远测不出来。这里取 fail-closed 的反向定义：**只有**当 Action
-    /// 声明了非空且全部以 `.read` 结尾的权限集合时才算只读；权限为空（公开或未声明）
-    /// 或含非 `.read` 权限的一律按授权事实变更处理。
-    fn is_read_only(action: &ActionSpec) -> bool {
-        !action.permissions.is_empty()
-            && action
-                .permissions
-                .iter()
-                .all(|permission| permission.ends_with(READ_PERMISSION_SUFFIX))
+    fn is_read_action(action: &ActionSpec) -> bool {
+        READ_ACTION_NAMES.contains(&action.name.as_str())
     }
 
     /// 构建带 Step-up 的冻结 Catalog：元数据导出路径复用与运行时同源的组合根
@@ -133,7 +128,7 @@ mod tests {
         module
             .actions()
             .iter()
-            .filter(|action| !is_read_only(action))
+            .filter(|action| !is_read_action(action))
             .map(|action| {
                 let action_name = ActionName::new(action.name.as_str())
                     .unwrap_or_else(|error| panic!("Action {} 应是合法名称: {error}", action.name));
@@ -144,9 +139,9 @@ mod tests {
 
     /// 守卫：Step-up 登记必须与冻结 Catalog 里的组写 Action 集合逐项相等。
     ///
-    /// 判据完全来自 Catalog（非只读 = 需要重认证），因此「新增一个组管理 Action 却
-    /// 忘了登记 Step-up」必然让本测试变红；反过来，登记一个 Catalog 里不存在的
-    /// Action（拼写错误）同样变红。
+    /// 判据来自 Catalog 减去只读名单（`READ_ACTION_NAMES`，非只读 = 需要重认证），
+    /// 因此「新增一个组管理 Action 却忘了登记 Step-up」必然让本测试变红；反过来，
+    /// 登记一个 Catalog 里不存在的 Action（拼写错误）同样变红。
     ///
     /// **本测试只覆盖「登记」这一半**：`ModuleSpec` 的中间件列表是 `pub(crate)`
     /// （`crates/yang-base/src/definition/spec.rs:732`），`yang-system` 读不到，因此这里

@@ -3,8 +3,9 @@
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
     assert_no_self_escalation, effective_permissions_of_in_tx,
-    ensure_may_modify_members_of_group_in_tx, ensure_member_limit, invalidate_users_in_tx,
-    lock_users_ascending_in_tx, simulate_after_join,
+    ensure_may_modify_members_of_group_in_tx, ensure_member_limit,
+    ensure_operator_may_manage_group, invalidate_users_in_tx, lock_users_ascending_in_tx,
+    simulate_after_join, GROUP_WRITE_PERMISSION,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
@@ -175,6 +176,15 @@ async fn join_group_once(
                 "只有系统管理员可以修改系统管理员组的成员".to_string(),
             ));
         }
+        // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
+        // 内置全权组已由上面 §8.1 守卫先行判定，这里覆盖普通组；
+        // 判据只读 `created_by` 与 claims，不新增库读。
+        ensure_operator_may_manage_group(
+            operator_id,
+            &group,
+            ctx.authenticated_user()
+                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
+        )?;
 
         // G2 闸门：目标组持有管理员等价权限时，加成员同样是一种「授予」——组本身没有
         // 变化，变的是成员：新成员会继承组的全部权限（含管理员等价那条）。判据因此看
@@ -265,8 +275,10 @@ fn is_referential_constraint(error: &BaseError) -> bool {
     )
 }
 
-/// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
+/// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——组所有者或全局写权限持有者可管理
+    // （handler 内判定，非所有者一律 403）
     module
         .action_fn(
             yang_base::action_name!("add_group_member"),
@@ -275,7 +287,6 @@ pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
         .route(HttpMethod::Post, "/api/v1/access/groups/members")
         .display_name("加入组成员")
         .description("把一个用户加入权限组（幂等；受防自提权子集校验约束）")
-        .permissions(["access.groups.write"])
         .register()
 }
 

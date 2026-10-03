@@ -1,6 +1,10 @@
 //! 列出全部权限组：成员数、权限数、内置标记与孤儿条目数。
 
 use crate::addon::access::domain::context::Access;
+use crate::addon::access::domain::groups::admin::{
+    operator_may_manage_group, operator_may_see_group, GROUP_READ_PERMISSION,
+    GROUP_WRITE_PERMISSION,
+};
 use crate::addon::access::domain::groups::repository::{GroupRecord, SYSTEM_ADMIN_GROUP_KEY};
 use crate::addon::access::domain::groups::resolution::{catalog_permissions, orphan_items};
 use schemars::JsonSchema;
@@ -31,6 +35,9 @@ pub(super) struct GroupSummaryView {
     item_count: u64,
     is_builtin: bool,
     orphan_item_count: u64,
+    /// 当前操作者能否管理该组（组所有者或持有全局写权限）：由后端算好，
+    /// 前端据此显隐管理按钮，不再自行判权。
+    can_manage: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -44,6 +51,7 @@ fn summarize(
     member_count: u64,
     items: &[String],
     catalog: &[String],
+    can_manage: bool,
 ) -> GroupSummaryView {
     GroupSummaryView {
         id: group.id,
@@ -54,6 +62,7 @@ fn summarize(
         item_count: items.len() as u64,
         is_builtin: group.group_key == SYSTEM_ADMIN_GROUP_KEY,
         orphan_item_count: orphan_items(items, catalog).len() as u64,
+        can_manage,
     }
 }
 
@@ -62,6 +71,15 @@ pub(super) async fn handle(
     _input: EmptyInput,
     access: Arc<Access>,
 ) -> Result<ApiResponse, BaseError> {
+    // 可见性判据的两粒输入来自请求 claims（与 get_group 同一口径）：操作者是其
+    // 所有者或成员的组恒可见；否则必须持有全局读权限才看得到整张列表。
+    let operator_id = ctx.actor()?.user_id();
+    let has_read = ctx
+        .authenticated_user()
+        .is_some_and(|user| user.has_permission(GROUP_READ_PERMISSION));
+    let has_write = ctx
+        .authenticated_user()
+        .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION));
     // 只读列表：不写任何事实，也不需要扇出失效。
     let mut transaction = ctx.tools().mysql()?.read_only_transaction().await?;
     let result = async {
@@ -72,15 +90,25 @@ pub(super) async fn handle(
             .list_groups_in_tx(&ctx, &mut transaction)
             .await?
         {
-            let member_count = access
+            let members = access
                 .groups()
-                .count_members_in_tx(&ctx, &mut transaction, group.id)
+                .list_members_in_tx(&ctx, &mut transaction, group.id)
                 .await?;
+            // 非所有者/成员且无全局读权限的组对操作者不可见（成员数也一并不可见）。
+            if !operator_may_see_group(operator_id, &group, &members, has_read) {
+                continue;
+            }
             let items = access
                 .groups()
                 .list_items_in_tx(&ctx, &mut transaction, group.id)
                 .await?;
-            views.push(summarize(&group, member_count, &items, &catalog));
+            views.push(summarize(
+                &group,
+                members.len() as u64,
+                &items,
+                &catalog,
+                operator_may_manage_group(operator_id, &group, has_write),
+            ));
         }
         // 存储层不保证行序，管理列表按组标识稳定排序，避免每次刷新顺序漂移。
         views.sort_by(|left, right| left.group_key.cmp(&right.group_key));
@@ -92,16 +120,17 @@ pub(super) async fn handle(
     ApiResponse::success(ListGroupsResult { groups }, "权限组列表")
 }
 
-/// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
+/// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——可见性在 handler 内判定
+    // （组所有者/成员，或全局读权限 access.groups.read）
     module
         .action_fn(yang_base::action_name!("list_groups"), move |ctx, input| {
             handle(ctx, input, Arc::clone(&access))
         })
         .route(HttpMethod::Get, "/api/v1/access/groups")
         .display_name("权限组列表")
-        .description("列出全部权限组及其成员数、权限数与孤儿条目数")
-        .permissions(["access.groups.read"])
+        .description("列出可见的权限组及其成员数、权限数与孤儿条目数")
         .register()
 }
 
@@ -132,22 +161,27 @@ mod tests {
             "access.groups.read".to_string(),
             "removed.module.act".to_string(),
         ];
-        let view = summarize(&group("ops"), 2, &items, &catalog());
+        let view = summarize(&group("ops"), 2, &items, &catalog(), true);
         assert_eq!(view.id, 3);
         assert_eq!(view.group_key, "ops");
         assert_eq!(view.member_count, 2);
         assert_eq!(view.item_count, 2, "条目数是存量口径，孤儿也算在内");
         assert_eq!(view.orphan_item_count, 1, "只报目录外的条目");
         assert!(!view.is_builtin);
+        assert!(
+            view.can_manage,
+            "can_manage 必须原样投影（后端算好，前端不重判）"
+        );
 
         // 内置全权组的条目由目录计算，列表必须把它标出来让前端特判（spec §15 第 3 条）。
-        assert!(summarize(&group(SYSTEM_ADMIN_GROUP_KEY), 0, &[], &catalog()).is_builtin);
+        assert!(summarize(&group(SYSTEM_ADMIN_GROUP_KEY), 0, &[], &catalog(), false).is_builtin);
+        assert!(!summarize(&group(SYSTEM_ADMIN_GROUP_KEY), 0, &[], &catalog(), false).can_manage);
     }
 
     #[test]
     fn list_response_names_the_frontend_contract() {
         let payload = ListGroupsResult {
-            groups: vec![summarize(&group("ops"), 0, &[], &catalog())],
+            groups: vec![summarize(&group("ops"), 0, &[], &catalog(), true)],
         };
         let value = serde_json::to_value(&payload).unwrap_or_else(|error| panic!("{error}"));
         let group = value["groups"][0].clone();
@@ -158,6 +192,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "can_manage",
                 "description",
                 "group_key",
                 "id",

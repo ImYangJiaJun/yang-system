@@ -134,8 +134,10 @@ pub(super) async fn handle(
     )
 }
 
-/// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
+/// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——任何登录用户可建组，建完即组所有者；
+    // 管理权判定在 handler 内（所有者或全局写权限）
     module
         .action_fn(
             yang_base::action_name!("create_group"),
@@ -144,7 +146,6 @@ pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
         .route(HttpMethod::Post, "/api/v1/access/groups")
         .display_name("创建权限组")
         .description("创建一个权限组")
-        .permissions(["access.groups.write"])
         .register()
 }
 

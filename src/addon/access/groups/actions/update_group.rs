@@ -1,6 +1,9 @@
 //! 改写权限组的展示字段（`title` / `description`）。
 
 use crate::addon::access::domain::context::Access;
+use crate::addon::access::domain::groups::admin::{
+    ensure_operator_may_manage_group, GROUP_WRITE_PERMISSION,
+};
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
 use schemars::JsonSchema;
@@ -56,6 +59,14 @@ pub(super) async fn handle(
                 "内置系统管理员组不可修改展示信息".to_string(),
             ));
         }
+        // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
+        // 判据只读 `created_by` 与 claims，不新增任何库读；放行后才改写展示字段。
+        ensure_operator_may_manage_group(
+            operator_id,
+            &group,
+            ctx.authenticated_user()
+                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
+        )?;
         let affected = access
             .groups()
             .update_group_in_tx(
@@ -101,8 +112,10 @@ pub(super) async fn handle(
     )
 }
 
-/// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
+/// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——组所有者或全局写权限持有者可管理
+    // （handler 内判定，非所有者一律 403）
     module
         .action_fn(
             yang_base::action_name!("update_group"),
@@ -111,7 +124,6 @@ pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
         .route(HttpMethod::Post, "/api/v1/access/groups/update")
         .display_name("修改权限组")
         .description("修改权限组的展示名与描述（组标识不可改）")
-        .permissions(["access.groups.write"])
         .register()
 }
 

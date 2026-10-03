@@ -11,6 +11,13 @@ use std::sync::{Arc, OnceLock};
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
+/// 保留权限键：授权判定下沉到 handler 内实现后（`access.groups` 域），这些键不再由
+/// 任何 Action 以 `.permissions(...)` 声明，但仍是**可授予**的目录条目——授予闸门
+/// `ensure_declared`、claims 投影与 handler 内的 `has_permission` 判定都依赖目录存续。
+/// 投影时以模块名作为声明者，与 `module.default_permissions` 的口径一致。
+/// 新增保留键必须同时有对应的 handler 内判定消费它，防止「目录里有、判定不认」。
+pub(crate) const RETAINED_PERMISSION_KEYS: &[&str] = &["access.groups.read", "access.groups.write"];
+
 /// 权限字符串格式：点分隔的小写段（如 `access.grants.read`），至少两段。
 pub(crate) const PERMISSION_PATTERN: &str = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$";
 /// 权限字符串的最大存储长度。
@@ -69,6 +76,14 @@ pub(crate) fn project_permissions(addons: &[AddonSpec]) -> Vec<PermissionEntry> 
                 }
             }
         }
+    }
+    // 保留键补投影（见 [`RETAINED_PERMISSION_KEYS`]）：它们不来自任何 Action 声明，
+    // 直接并入目录，保证「授予闸门」与「handler 内判定」两侧看到同一份事实。
+    for retained in RETAINED_PERMISSION_KEYS {
+        declared
+            .entry(retained.to_string())
+            .or_default()
+            .push("access.groups".to_string());
     }
     declared
         .into_iter()
@@ -210,8 +225,12 @@ mod tests {
         assert_eq!(
             permissions,
             [
+                // 按字典序：grants < groups——保留键恒定在投影里（handler 内判定
+                // 依赖它们可授予、可入 claims），与 Action 声明的键同场排序。
                 "access.grants.read",
                 "access.grants.write",
+                "access.groups.read",
+                "access.groups.write",
                 "account.user.me",
                 "account.user.session",
             ]
@@ -221,17 +240,28 @@ mod tests {
             ["access.grants.list_permissions", "account.user.me"]
         );
         assert_eq!(entries[1].declared_by(), ["access.grants.grant_permission"]);
-        assert_eq!(entries[3].declared_by(), ["account.user"]);
+        assert_eq!(entries[5].declared_by(), ["account.user"]);
+        // 保留键的声明者是模块名（无 Action 声明它们，见 RETAINED_PERMISSION_KEYS）。
+        assert_eq!(entries[2].declared_by(), ["access.groups"]);
+        assert_eq!(entries[3].declared_by(), ["access.groups"]);
     }
 
     #[test]
-    fn projection_of_catalog_without_permissions_is_empty() {
+    fn projection_of_catalog_without_permissions_keeps_only_retained_keys() {
         let addons = vec![addon(
             "account",
             vec![module("account.user", &[], &[("me", &[][..])])],
         )];
 
-        assert!(project_permissions(&addons).is_empty());
+        // 没有 Action 声明权限时投影只剩保留键：目录的「空」不再是真空，
+        // 因为 `access.groups.read/write` 必须始终可授予（见 RETAINED_PERMISSION_KEYS）。
+        let entries = project_permissions(&addons);
+        let permissions: Vec<&str> = entries.iter().map(PermissionEntry::permission).collect();
+        assert_eq!(permissions, ["access.groups.read", "access.groups.write"]);
+        // 保留键的声明者是模块名（与 module.default_permissions 的口径一致）。
+        for entry in entries {
+            assert_eq!(entry.declared_by(), ["access.groups"]);
+        }
     }
 
     #[test]

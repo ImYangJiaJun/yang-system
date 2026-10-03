@@ -3,7 +3,8 @@
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
     assert_no_self_escalation, effective_permissions_of_in_tx, ensure_may_grant_permission_in_tx,
-    ensure_member_limit, invalidate_users_in_tx, lock_users_ascending_in_tx,
+    ensure_member_limit, ensure_operator_may_manage_group, invalidate_users_in_tx,
+    lock_users_ascending_in_tx, GROUP_WRITE_PERMISSION,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::permission_catalog::{PERMISSION_MAX_LENGTH, PERMISSION_PATTERN};
@@ -108,6 +109,14 @@ pub(super) async fn handle(
                 "内置系统管理员组的权限由权限目录计算，不能增删条目".to_string(),
             ));
         }
+        // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
+        // 判据只读 `created_by` 与 claims，不新增库读；判定建立在锁后组事实之上。
+        ensure_operator_may_manage_group(
+            operator_id,
+            &group,
+            ctx.authenticated_user()
+                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
+        )?;
         let members = access
             .groups()
             .list_members_in_tx(&ctx, &mut transaction, group.id)
@@ -198,8 +207,10 @@ pub(super) async fn handle(
     )
 }
 
-/// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
+/// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——组所有者或全局写权限持有者可管理
+    // （handler 内判定，非所有者一律 403）
     module
         .action_fn(
             yang_base::action_name!("add_group_item"),
@@ -208,7 +219,6 @@ pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
         .route(HttpMethod::Post, "/api/v1/access/groups/items")
         .display_name("加入组权限")
         .description("向权限组追加一条已声明的权限（幂等）")
-        .permissions(["access.groups.write"])
         .register()
 }
 

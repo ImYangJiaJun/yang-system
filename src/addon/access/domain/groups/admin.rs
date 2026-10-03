@@ -66,6 +66,57 @@ use yang_base::action::ActionContext;
 use yang_base::BaseError;
 use yang_db::Transaction;
 
+/// access.groups 域的全局读写权限键。
+///
+/// 授权判定下沉到 handler 内后，这两粒键不再由任何 Action 以 `.permissions(...)`
+/// 声明，但保留在权限目录里（见 `permission_catalog::RETAINED_PERMISSION_KEYS`），
+/// handler 内一律按请求 claims 判定——与 `get_avatar` 的 handler 内判定同款语义。
+pub(crate) const GROUP_READ_PERMISSION: &str = "access.groups.read";
+pub(crate) const GROUP_WRITE_PERMISSION: &str = "access.groups.write";
+
+/// 组可见性判据（读接口）：操作者是组所有者或成员、或持有全局读权限。
+///
+/// 纯函数不读库：`created_by` 与 `members` 由调用方提供（组行与成员名单），
+/// 读权限来自请求 claims。列表与详情共用同一判据，避免两处口径漂移。
+pub(crate) fn operator_may_see_group(
+    operator_id: i64,
+    group: &GroupRecord,
+    members: &[i64],
+    has_group_read: bool,
+) -> bool {
+    has_group_read || group.created_by == operator_id || members.contains(&operator_id)
+}
+
+/// 组管理权判据：操作者是组所有者、或持有全局写权限。
+///
+/// 与 [`operator_may_see_group`] 不同：**成员身份不带来管理权**（成员只带来可见性）。
+/// 读接口输出的 `can_manage` 与写接口的 403 判定必须共用这一粒，前端才敢拿
+/// `can_manage` 显隐管理按钮。
+pub(crate) fn operator_may_manage_group(
+    operator_id: i64,
+    group: &GroupRecord,
+    has_group_write: bool,
+) -> bool {
+    group.created_by == operator_id || has_group_write
+}
+
+/// 组管理守卫：`operator_may_manage_group` 的拒绝形态。
+///
+/// 403 消息点名两条判据，客户端能据此判断「补哪条才能继续」；不泄漏组内
+/// 其它授权事实（与 `system_admin_member_guard` 同例）。
+pub(crate) fn ensure_operator_may_manage_group(
+    operator_id: i64,
+    group: &GroupRecord,
+    has_group_write: bool,
+) -> Result<(), BaseError> {
+    if operator_may_manage_group(operator_id, group, has_group_write) {
+        return Ok(());
+    }
+    Err(BaseError::PermissionDenied(
+        "非该组所有者且无全局写权限，不能管理该组".to_string(),
+    ))
+}
+
 /// 使受影响用户的 Access Token 失效（spec §6.3）。
 ///
 /// **锁序**：必须按 `user_id` 升序加锁，这是防死锁的唯一手段。
@@ -597,5 +648,59 @@ mod tests {
         assert!(!missing.group_exists());
         assert_eq!(missing.total(), 0);
         assert!(!missing.target_included());
+    }
+
+    /// 组所有者语义的判据夹具：`created_by` 由各用例显式给出。
+    fn record(created_by: i64) -> GroupRecord {
+        GroupRecord {
+            id: 3,
+            group_key: "ops".to_string(),
+            title: "运维".to_string(),
+            description: None,
+            created_by,
+        }
+    }
+
+    #[test]
+    fn group_visibility_accepts_owner_member_and_global_read() {
+        let group = record(7);
+        let members = vec![5, 6];
+        // 三路判据各自由地成立：所有者、成员、全局读权限。
+        assert!(operator_may_see_group(7, &group, &members, false));
+        assert!(operator_may_see_group(5, &group, &members, false));
+        assert!(operator_may_see_group(9, &group, &members, true));
+        // 三者都不成立时不可见（局外人 + 无读权限）。
+        assert!(!operator_may_see_group(9, &group, &members, false));
+    }
+
+    #[test]
+    fn group_membership_does_not_confer_manage_rights() {
+        let group = record(7);
+        // 成员身份只带来可见性，不带来管理权——`can_manage` 与写守卫共用这一粒，
+        // 成员不能凭「在组里」改组的展示信息或条目。
+        assert!(!operator_may_manage_group(5, &group, false));
+        // 所有者与全局写权限各自放行。
+        assert!(operator_may_manage_group(7, &group, false));
+        assert!(operator_may_manage_group(5, &group, true));
+    }
+
+    #[test]
+    fn manage_guard_names_both_ways_to_get_in() {
+        let group = record(7);
+        assert!(ensure_operator_may_manage_group(7, &group, false).is_ok());
+        assert!(ensure_operator_may_manage_group(9, &group, true).is_ok());
+        let error = match ensure_operator_may_manage_group(9, &group, false) {
+            Ok(()) => panic!("非所有者且无写权限必须被拒"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, yang_base::BaseError::PermissionDenied(_)),
+            "守卫必须是 403，实际 {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("所有者") && message.contains("写权限"),
+            "消息必须点名两条判据，实际 {message}"
+        );
     }
 }

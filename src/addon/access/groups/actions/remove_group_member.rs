@@ -9,7 +9,8 @@
 
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
-    count_active_system_admins_of_members_in_tx, invalidate_users_in_tx, lock_users_ascending_in_tx,
+    count_active_system_admins_of_members_in_tx, ensure_operator_may_manage_group,
+    invalidate_users_in_tx, lock_users_ascending_in_tx, GROUP_WRITE_PERMISSION,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
@@ -151,6 +152,15 @@ pub(super) async fn handle(
                 return Err(last_admin_guard());
             }
         }
+        // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
+        // 内置全权组已由上面 §8.1/§8.2 守卫先行判定，这里覆盖普通组；
+        // 判据只读 `created_by` 与 claims，不新增库读。
+        ensure_operator_may_manage_group(
+            operator_id,
+            &group,
+            ctx.authenticated_user()
+                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
+        )?;
         // 这里**刻意不做** §8.1 的自提权（权限子集）校验：移出只会减少权限，永远不会让调用者的
         // 有效权限变大，而管理员必须能退出全权组（否则最后一个想走的管理员被锁死）。
 
@@ -206,8 +216,10 @@ fn last_admin_guard() -> BaseError {
     )
 }
 
-/// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
+/// 自包含注册：路由/认证声明与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
+    // auth: authenticated-only 自服务操作——组所有者或全局写权限持有者可管理
+    // （handler 内判定，非所有者一律 403）
     module
         .action_fn(
             yang_base::action_name!("remove_group_member"),
@@ -216,7 +228,6 @@ pub(super) fn register(module: ModuleSpec, access: Arc<Access>) -> ModuleSpec {
         .route(HttpMethod::Post, "/api/v1/access/groups/members/remove")
         .display_name("移出组成员")
         .description("把一个用户移出权限组（幂等；最后一个系统管理员不可移出）")
-        .permissions(["access.groups.write"])
         .register()
 }
 
