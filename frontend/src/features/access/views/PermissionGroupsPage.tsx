@@ -163,9 +163,7 @@ export default function PermissionGroupsPage() {
           aria-live="polite"
           className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
         >
-          {catalog.isPending
-            ? "正在加载权限目录…"
-            : "查看权限组需要先登录。"}
+          {catalog.isPending ? "正在加载权限目录…" : "查看权限组需要先登录。"}
         </p>
       ) : listQuery.isError ? (
         <div
@@ -261,9 +259,7 @@ function GroupListPanel({
       ) : groups.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           还没有权限组。
-          {canManage
-            ? "用下面的表单建第一个。"
-            : "登录后即可创建权限组。"}
+          {canManage ? "用下面的表单建第一个。" : "登录后即可创建权限组。"}
         </p>
       ) : (
         <ul aria-label="权限组列表" className="space-y-1">
