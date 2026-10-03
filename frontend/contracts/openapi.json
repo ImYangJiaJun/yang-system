@@ -164,6 +164,14 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "expires_at": {
+                    "default": null,
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
                   "permission": {
                     "type": "string"
                   },
@@ -278,6 +286,377 @@
           }
         ],
         "summary": "授予权限",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "access.grants.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/access/grants/batch": {
+      "post": {
+        "description": "批量授予直授权限：事务原子，任一失败整体回滚；已持有有效直授的条目幂等跳过",
+        "operationId": "access.grants.batch_grant_permissions",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "BatchGrantItem": {
+                    "additionalProperties": false,
+                    "description": "批量授予的单条输入。",
+                    "properties": {
+                      "expires_at": {
+                        "default": null,
+                        "description": "Unix 秒；缺省 = 永久有效。过期后权限在解析侧失效、行保留做审计。",
+                        "format": "int64",
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "permission": {
+                        "type": "string"
+                      },
+                      "user_id": {
+                        "format": "int64",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "permission",
+                      "user_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "items": {
+                    "items": {
+                      "$ref": "#/definitions/BatchGrantItem"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "items"
+                ],
+                "title": "BatchGrantPermissionsInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "definitions": {
+                        "BatchFailedItem": {
+                          "properties": {
+                            "index": {
+                              "format": "uint",
+                              "minimum": 0.0,
+                              "type": "integer"
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "index",
+                            "reason"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "description": "批量授予结果。",
+                      "properties": {
+                        "failed": {
+                          "description": "失败明细。事务原子语义下任一失败整体回滚，因此成功响应的该字段恒为空； 失败时以带条目索引的错误返回，不产生部分写入。",
+                          "items": {
+                            "$ref": "#/definitions/BatchFailedItem"
+                          },
+                          "type": "array"
+                        },
+                        "skipped": {
+                          "description": "幂等跳过的条目数（目标用户已持有**有效**直授）。",
+                          "format": "uint",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "succeeded": {
+                          "description": "实际写入（新增 + 续期）的条目数。",
+                          "format": "uint",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "failed",
+                        "skipped",
+                        "succeeded"
+                      ],
+                      "title": "BatchGrantPermissionsResult",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量授予权限",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "access.grants.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/access/grants/batch-revoke": {
+      "post": {
+        "description": "批量撤销直授权限：事务原子，任一失败整体回滚；本就没有该直授的条目幂等跳过",
+        "operationId": "access.grants.batch_revoke_permissions",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "BatchRevokeItem": {
+                    "additionalProperties": false,
+                    "description": "批量撤销的单条输入。",
+                    "properties": {
+                      "permission": {
+                        "type": "string"
+                      },
+                      "user_id": {
+                        "format": "int64",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "permission",
+                      "user_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "items": {
+                    "items": {
+                      "$ref": "#/definitions/BatchRevokeItem"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "items"
+                ],
+                "title": "BatchRevokePermissionsInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "definitions": {
+                        "BatchFailedItem": {
+                          "properties": {
+                            "index": {
+                              "format": "uint",
+                              "minimum": 0.0,
+                              "type": "integer"
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "index",
+                            "reason"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "description": "批量撤销结果。",
+                      "properties": {
+                        "failed": {
+                          "description": "失败明细。事务原子语义下任一失败整体回滚，因此成功响应的该字段恒为空； 失败时以带条目索引的错误返回，不产生部分写入。",
+                          "items": {
+                            "$ref": "#/definitions/BatchFailedItem"
+                          },
+                          "type": "array"
+                        },
+                        "skipped": {
+                          "description": "幂等跳过的条目数（目标用户本就没有该直授）。",
+                          "format": "uint",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "succeeded": {
+                          "description": "实际删除的条目数。",
+                          "format": "uint",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "failed",
+                        "skipped",
+                        "succeeded"
+                      ],
+                      "title": "BatchRevokePermissionsResult",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "批量撤销权限",
         "tags": [],
         "x-permission-mode": "all",
         "x-permissions": [
@@ -423,7 +802,7 @@
     },
     "/api/v1/access/groups": {
       "get": {
-        "description": "列出全部权限组及其成员数、权限数与孤儿条目数",
+        "description": "列出可见的权限组及其成员数、权限数与孤儿条目数",
         "operationId": "access.groups.list_groups",
         "parameters": [],
         "requestBody": {
@@ -537,9 +916,7 @@
         "summary": "权限组列表",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.read"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       },
@@ -675,9 +1052,7 @@
         "summary": "创建权限组",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.write"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -805,9 +1180,7 @@
         "summary": "删除权限组",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.write"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -939,9 +1312,7 @@
         "summary": "加入组权限",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.write"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -1073,9 +1444,7 @@
         "summary": "移除组权限",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.write"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -1208,9 +1577,7 @@
         "summary": "加入组成员",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.write"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -1343,9 +1710,7 @@
         "summary": "移出组成员",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.write"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -1484,9 +1849,7 @@
         "summary": "修改权限组",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.write"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -1605,9 +1968,7 @@
         "summary": "权限组详情",
         "tags": [],
         "x-permission-mode": "all",
-        "x-permissions": [
-          "access.groups.read"
-        ],
+        "x-permissions": [],
         "x-public": false,
         "x-yang-response-kind": "json"
       }
@@ -1783,8 +2144,20 @@
                       "$schema": "http://json-schema.org/draft-07/schema#",
                       "definitions": {
                         "GrantView": {
-                          "description": "单条直授权限的对外视图。",
+                          "description": "单条直授权限的对外视图（审计视图，过期行也展示）。",
                           "properties": {
+                            "expired": {
+                              "description": "派生标记：是否已过期（`expires_at <= now`）。过期后权限在解析侧失效， 行仍保留做审计；前端据此展示「已过期」并允许重新授予（走续期）。",
+                              "type": "boolean"
+                            },
+                            "expires_at": {
+                              "description": "Unix 秒；`None` = 永久有效。",
+                              "format": "int64",
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
                             "granted_by": {
                               "format": "int64",
                               "type": "integer"
@@ -1802,6 +2175,7 @@
                             }
                           },
                           "required": [
+                            "expired",
                             "granted_by",
                             "id",
                             "occurred_at",

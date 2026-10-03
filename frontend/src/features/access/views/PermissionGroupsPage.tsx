@@ -10,8 +10,10 @@
  * 2. **孤儿条目单独画**。目录收缩后组里会留下目录中已不存在的权限（设计 §8.4），
  *    服务端只标记不清理。它必须和正常条目长得不一样，并给出一条能点的退路：
  *    移除不做目录校验，所以孤儿只能靠移除来清。
- * 3. **权限门控是「不渲染」而不是「禁用」**：无写权限时复选框、加入表单与
- *    新建/改名/删除整块消失（禁用表示「此刻不可用」，这里表示「这个入口不属于你」）。
+ * 3. **权限门控是「不渲染」而不是「禁用」**：管理入口按**每个组**的 `canManage`
+ *    显隐（后端按「组所有者或全局写权限」算好，authenticated-only 后登录不再等于
+ *    可管理），复选框、加入表单与改名/删除整块消失（禁用表示「此刻不可用」，
+ *    这里表示「这个入口不属于你」）。只有新建组按钮按登录态渲染（登录即可建组）。
  * 4. **写完全部回读**。九个写接口没有一个会回最新条目或成员，页面每次写完都把
  *    `access` 这个前缀下的查询一起作废重拉，不做乐观更新。
  * 5. **加权限走候选目录，不手输**：候选来自权限目录读接口
@@ -161,7 +163,9 @@ export default function PermissionGroupsPage() {
           aria-live="polite"
           className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
         >
-          当前身份没有查看权限组的权限，请联系运维管理员开通。
+          {catalog.isPending
+            ? "正在加载权限目录…"
+            : "查看权限组需要先登录。"}
         </p>
       ) : listQuery.isError ? (
         <div
@@ -259,7 +263,7 @@ function GroupListPanel({
           还没有权限组。
           {canManage
             ? "用下面的表单建第一个。"
-            : "建组需要写权限，请联系运维管理员。"}
+            : "登录后即可创建权限组。"}
         </p>
       ) : (
         <ul aria-label="权限组列表" className="space-y-1">
@@ -440,7 +444,7 @@ function GroupDetailPanel({
           <p className="text-sm text-muted-foreground">{detail.description}</p>
         ) : null}
 
-        {actions.canManage && !detail.effectiveAll ? (
+        {detail.canManage && !detail.effectiveAll ? (
           <>
             <RenameGroupForm
               detail={detail}
@@ -561,15 +565,18 @@ function ItemPanel({
   visibleCatalogActionCount: number;
 }) {
   const uiCatalog = useUiCatalog();
-  const permissionCatalog = usePermissionCatalog();
+  // 目录只为「能管理当前组」的身份服务：authenticated-only 后登录不再等于可管理，
+  // 组级 `can_manage`（后端算好）才是「加权限表单要不要出现」的判据。
+  const permissionCatalog = usePermissionCatalog(detail.canManage);
   const [selectedPermission, setSelectedPermission] = useState<string | null>(
     null,
   );
 
-  /// 加权限的候选来源是权限目录（`access.grants.list_permissions`），它与「能管理组」
-  /// 是两粒独立的权限位：缺目录那粒时入口不渲染（见文件头不变量 3），移除不受影响。
+  /// 加权限的候选来源是权限目录（`access.grants.list_permissions`），它与「能管理
+  /// 这个组」是两粒独立的权限位：缺目录那粒时入口不渲染（见文件头不变量 3），
+  /// 移除不受影响。
   const canSeeCatalog =
-    actions.canManage &&
+    detail.canManage &&
     hasOperation(uiCatalog.data, GROUP_OPERATION_IDS.listPermissions);
 
   /// 候选 = 目录中「组里还没有」的权限：已在矩阵里的那条没有再加一次的意义
@@ -623,9 +630,9 @@ function ItemPanel({
                       : "border-border",
                   )}
                 >
-                  {actions.canManage ? (
+                  {detail.canManage ? (
                     // 勾选态恒为「在组里」：这个列表画的就是组现有的条目，
-                    // 取消勾选即移除。无写权限时连复选框都不渲染（见文件头不变量 3）。
+                    // 取消勾选即移除。不能管理这个组时连复选框都不渲染（见文件头不变量 3）。
                     <label className="flex items-center gap-2">
                       <Checkbox
                         aria-label={`${item.permission} 权限`}
@@ -669,7 +676,7 @@ function ItemPanel({
             </ul>
           )}
 
-          {actions.canManage ? (
+          {detail.canManage ? (
             canSeeCatalog && permissionCatalog.isError ? (
               // 目录查询失败：候选下拉里「空」和「加载中」之外不该有第三种面孔，
               // 失败态必须单独画出来，否则和「加载出了空目录」无法区分。
@@ -797,7 +804,7 @@ function MemberPanel({
               className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
             >
               <span className="text-sm">用户 #{memberId}</span>
-              {actions.canManage ? (
+              {detail.canManage ? (
                 <Button
                   variant="outline"
                   size="sm"
@@ -817,7 +824,7 @@ function MemberPanel({
         </ul>
       )}
 
-      {actions.canManage ? (
+      {detail.canManage ? (
         <form
           className="flex flex-wrap items-end gap-2"
           onSubmit={(event) => {

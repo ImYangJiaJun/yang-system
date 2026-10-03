@@ -44,6 +44,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/access/grants/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量授予权限
+         * @description 批量授予直授权限：事务原子，任一失败整体回滚；已持有有效直授的条目幂等跳过
+         */
+        post: operations["access.grants.batch_grant_permissions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/access/grants/batch-revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量撤销权限
+         * @description 批量撤销直授权限：事务原子，任一失败整体回滚；本就没有该直授的条目幂等跳过
+         */
+        post: operations["access.grants.batch_revoke_permissions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/access/grants/revoke": {
         parameters: {
             query?: never;
@@ -73,7 +113,7 @@ export interface paths {
         };
         /**
          * 权限组列表
-         * @description 列出全部权限组及其成员数、权限数与孤儿条目数
+         * @description 列出可见的权限组及其成员数、权限数与孤儿条目数
          */
         get: operations["access.groups.list_groups"];
         put?: never;
@@ -1349,6 +1389,29 @@ export interface components {
             data?: unknown;
             message: string;
         };
+        /** @description 批量授予的单条输入。 */
+        BatchGrantItem: {
+            /**
+             * Format: int64
+             * @description Unix 秒；缺省 = 永久有效。过期后权限在解析侧失效、行保留做审计。
+             * @default null
+             */
+            expires_at: number | null;
+            permission: string;
+            /** Format: int64 */
+            user_id: number;
+        };
+        BatchFailedItem: {
+            /** Format: uint */
+            index: number;
+            reason: string;
+        };
+        /** @description 批量撤销的单条输入。 */
+        BatchRevokeItem: {
+            permission: string;
+            /** Format: int64 */
+            user_id: number;
+        };
         /** @description 权限目录中的一个条目：权限字符串、声明它的操作 ID 列表，以及危害面标记。 */
         PermissionEntry: {
             /**
@@ -1360,8 +1423,15 @@ export interface components {
             declared_by: string[];
             permission: string;
         };
-        /** @description 单条直授权限的对外视图。 */
+        /** @description 单条直授权限的对外视图（审计视图，过期行也展示）。 */
         GrantView: {
+            /** @description 派生标记：是否已过期（`expires_at <= now`）。过期后权限在解析侧失效， 行仍保留做审计；前端据此展示「已过期」并允许重新授予（走续期）。 */
+            expired: boolean;
+            /**
+             * Format: int64
+             * @description Unix 秒；`None` = 永久有效。
+             */
+            expires_at?: number | null;
             /** Format: int64 */
             granted_by: number;
             /** Format: int64 */
@@ -2345,6 +2415,11 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
+                    /**
+                     * Format: int64
+                     * @default null
+                     */
+                    expires_at?: number | null;
                     permission: string;
                     /** Format: int64 */
                     user_id: number;
@@ -2401,6 +2476,174 @@ export interface operations {
                              *     描述操作结果的文本信息
                              */
                             message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "access.grants.batch_grant_permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    items: components["schemas"]["BatchGrantItem"][];
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * BatchGrantPermissionsResult
+                         * @description 批量授予结果。
+                         */
+                        data: {
+                            /** @description 失败明细。事务原子语义下任一失败整体回滚，因此成功响应的该字段恒为空； 失败时以带条目索引的错误返回，不产生部分写入。 */
+                            failed: components["schemas"]["BatchFailedItem"][];
+                            /**
+                             * Format: uint
+                             * @description 幂等跳过的条目数（目标用户已持有**有效**直授）。
+                             */
+                            skipped: number;
+                            /**
+                             * Format: uint
+                             * @description 实际写入（新增 + 续期）的条目数。
+                             */
+                            succeeded: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "access.grants.batch_revoke_permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    items: components["schemas"]["BatchRevokeItem"][];
+                };
+            };
+        };
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /**
+                         * BatchRevokePermissionsResult
+                         * @description 批量撤销结果。
+                         */
+                        data: {
+                            /** @description 失败明细。事务原子语义下任一失败整体回滚，因此成功响应的该字段恒为空； 失败时以带条目索引的错误返回，不产生部分写入。 */
+                            failed: components["schemas"]["BatchFailedItem"][];
+                            /**
+                             * Format: uint
+                             * @description 幂等跳过的条目数（目标用户本就没有该直授）。
+                             */
+                            skipped: number;
+                            /**
+                             * Format: uint
+                             * @description 实际删除的条目数。
+                             */
+                            succeeded: number;
                         };
                         message: string;
                     };

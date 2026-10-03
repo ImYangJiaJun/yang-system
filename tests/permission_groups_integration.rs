@@ -309,12 +309,26 @@ fn token_permissions(token: &str) -> anyhow::Result<Vec<String>> {
     Ok(token_grants(token)?.0)
 }
 
+/// 保留权限键的期望集合（生产镜像）。
+///
+/// `access.groups` 域的全局读写键不再由任何 Action 以 `.permissions(...)` 声明，
+/// 但仍是目录条目：可授予、可进入全权组 Token claims、由 handler 内判定消费。
+/// 生产清单见 `src/addon/access/domain/permission_catalog.rs` 的
+/// `RETAINED_PERMISSION_KEYS`。刻意在测试侧独立复述：与
+/// [`ADMIN_EQUIVALENT_PERMISSIONS`] 同款理由——清单增删时全权组期望值才能跟着变红。
+const RETAINED_PERMISSION_KEYS: [&str; 2] = ["access.groups.read", "access.groups.write"];
+
 /// 冻结 Catalog 声明的全部权限——内置全权组的期望值。
 ///
 /// 在测试侧独立重算目录（而不是复用 `project_permissions`），使断言真的能
-/// 抓住「组解析漏权限 / 多权限」的实现错误。
+/// 抓住「组解析漏权限 / 多权限」的实现错误。Action 声明与模块默认权限之外，
+/// 必须并入保留权限键（[`RETAINED_PERMISSION_KEYS`]）：它们虽无 Action 声明，
+/// 但作为目录条目可授予、并会进入全权组 Token claims。
 fn declared_permissions(app: &BuiltApp) -> Vec<String> {
     let mut declared: BTreeSet<String> = BTreeSet::new();
+    for retained in RETAINED_PERMISSION_KEYS {
+        declared.insert(retained.to_string());
+    }
     for addon in app.catalog().addons() {
         for module in &addon.modules {
             for permission in &module.default_permissions {
@@ -930,6 +944,29 @@ mod harness {
         }
     }
 
+    /// 授予单条直授权限并返回完整响应（`expires_at` 可缺省；续期用例观测 `changed`）。
+    ///
+    /// [`grant_permission`] / [`grant_permission_status`] 都丢弃或折算掉了响应体，
+    /// 续期用例需要读 `data.changed` 区分「续期（changed=true）」与「幂等跳过
+    /// （changed=false）」，因此需要这条保响应的夹具。
+    pub async fn grant_permission_response(
+        app: &BuiltApp,
+        operator: &Admin,
+        user_id: i64,
+        permission: &str,
+        expires_at: Option<i64>,
+    ) -> Result<ApiResponse, BaseError> {
+        let body = match expires_at {
+            Some(expires_at) => json!({
+                "user_id": user_id,
+                "permission": permission,
+                "expires_at": expires_at,
+            }),
+            None => json!({ "user_id": user_id, "permission": permission }),
+        };
+        step_up_dispatch(app, "access.grants", "grant_permission", body, operator).await
+    }
+
     /// 再引导一名系统管理员：注册后经真实成员 Action 加入内置全权组。
     ///
     /// 入组会递增该账号的授权版本，因此令牌在入组**之后**签发——否则它一出生就是
@@ -1051,9 +1088,14 @@ mod harness {
         .await
     }
 
-    /// 从冻结 Catalog 现场枚举 `access.groups` 的写 Action 名（非只读判据与
-    /// `src/addon/access/groups/mod.rs` 的守卫测试同源：声明了非空且全部以 `.read`
-    /// 结尾权限的 Action 才算只读，其余一律按写操作 fail-closed 处理）。
+    /// 只读 Action 的显式名单（生产镜像）：授权判定下沉到 handler 内实现后，
+    /// `access.groups` 的 Action 不再声明权限键，Catalog 里推不出「只读」，
+    /// 与 `src/addon/access/groups/mod.rs` 的 `READ_ACTION_NAMES` 同源逐项点名。
+    const GROUP_READ_ACTIONS: &[&str] = &["list_groups", "get_group"];
+
+    /// 从冻结 Catalog 现场枚举 `access.groups` 的写 Action 名：Catalog 全部 Action
+    /// 减去只读名单（[`GROUP_READ_ACTIONS`]），其余一律按写操作 fail-closed 处理——
+    /// 新增 Action 不登记进名单就会被当写操作要求挂 Step-up，登记半边立刻变红。
     pub fn groups_write_actions(app: &BuiltApp) -> Vec<String> {
         let module = app
             .catalog()
@@ -1065,13 +1107,7 @@ mod harness {
         let mut actions: Vec<String> = module
             .actions()
             .iter()
-            .filter(|action| {
-                action.permissions.is_empty()
-                    || !action
-                        .permissions
-                        .iter()
-                        .all(|permission| permission.ends_with(".read"))
-            })
+            .filter(|action| !GROUP_READ_ACTIONS.contains(&action.name.as_str()))
             .map(|action| action.name.as_str().to_string())
             .collect();
         actions.sort();
@@ -1894,6 +1930,167 @@ mod harness {
             Ok(response) => (200, response.message),
             Err(error) => (http_status(&error), error.to_string()),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 直授批量/过期任务起：批量授予/撤销夹具。
+    // -----------------------------------------------------------------------
+
+    /// 批量条目构造：无过期时间（缺省 = 永久有效）。
+    pub fn grant_item(user_id: i64, permission: &str) -> Value {
+        json!({ "user_id": user_id, "permission": permission })
+    }
+
+    /// 批量条目构造：带过期时间（Unix 秒）。
+    pub fn grant_item_with_expiry(user_id: i64, permission: &str, expires_at: i64) -> Value {
+        json!({ "user_id": user_id, "permission": permission, "expires_at": expires_at })
+    }
+
+    /// 批量撤销条目构造。
+    pub fn revoke_item(user_id: i64, permission: &str) -> Value {
+        json!({ "user_id": user_id, "permission": permission })
+    }
+
+    /// 驱动批量授予 Action：**完整**走 Step-up（已登记进 `step_up_targets`）。
+    pub async fn batch_grant_permissions(
+        app: &BuiltApp,
+        operator: &Admin,
+        items: &[Value],
+    ) -> Result<ApiResponse, BaseError> {
+        step_up_dispatch(
+            app,
+            "access.grants",
+            "batch_grant_permissions",
+            json!({ "items": items }),
+            operator,
+        )
+        .await
+    }
+
+    /// 尝试批量授予并折算为（HTTP 状态码, 消息）：拒绝路径（G2 闸门 / 超限）观测被拒。
+    pub async fn batch_grant_permissions_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        items: &[Value],
+    ) -> (u16, String) {
+        match batch_grant_permissions(app, operator, items).await {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
+    }
+
+    /// 驱动批量撤销 Action：**完整**走 Step-up（已登记进 `step_up_targets`）。
+    pub async fn batch_revoke_permissions(
+        app: &BuiltApp,
+        operator: &Admin,
+        items: &[Value],
+    ) -> Result<ApiResponse, BaseError> {
+        step_up_dispatch(
+            app,
+            "access.grants",
+            "batch_revoke_permissions",
+            json!({ "items": items }),
+            operator,
+        )
+        .await
+    }
+
+    /// 尝试批量撤销并折算为（HTTP 状态码, 消息）：拒绝路径观测被拒。
+    pub async fn batch_revoke_permissions_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        items: &[Value],
+    ) -> (u16, String) {
+        match batch_revoke_permissions(app, operator, items).await {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
+    }
+
+    /// 列出当前操作者可见的全部组 key（`list_groups` 响应的 group_key 集合，升序）。
+    pub async fn list_group_keys(app: &BuiltApp, operator: &Admin) -> Vec<String> {
+        let authorization = format!("Bearer {}", operator.token);
+        let response = dispatch(
+            app,
+            "access.groups",
+            "list_groups",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("列表权限组失败: {error}"));
+        assert_eq!(response.code, 0, "列表权限组必须成功: {}", response.message);
+        let mut keys: Vec<String> = response
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("列表响应缺少 data: {response:?}"))
+            .get("groups")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("groups 必须是数组: {response:?}"))
+            .iter()
+            .map(|group| {
+                group["group_key"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("组条目缺少 group_key: {group}"))
+                    .to_string()
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// 查询组详情并折算为（HTTP 状态码, 消息）。
+    ///
+    /// 可见性用例需要断言「不可见的组与不存在的组统一 404（RecordNotFound 同形态）」，
+    /// 因此必须把状态码与消息都拿回来做同形态比较。
+    pub async fn get_group_outcome(
+        app: &BuiltApp,
+        operator: &Admin,
+        group_id: i64,
+    ) -> (u16, String) {
+        let authorization = format!("Bearer {}", operator.token);
+        let group_id_param = group_id.to_string();
+        match dispatch_with_path(
+            app,
+            "access.groups",
+            "get_group",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            PEER_PORT,
+            &[("group_id", group_id_param.as_str())],
+        )
+        .await
+        {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
+    }
+
+    /// 从 `list_user_grants` 响应中取目标权限的视图条目（找不到返回 None）。
+    ///
+    /// 用例需要按权限名定位单条视图（`expires_at` / `expired` 字段），不关心其余条目。
+    pub async fn grant_view_of(
+        app: &BuiltApp,
+        operator: &Admin,
+        user_id: i64,
+        permission: &str,
+    ) -> Option<Value> {
+        let response = list_user_grants(app, operator, user_id)
+            .await
+            .unwrap_or_else(|error| panic!("查询用户授权失败: {error}"));
+        response
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("查询响应缺少 data: {response:?}"))
+            .get("grants")
+            .and_then(Value::as_array)
+            .and_then(|grants| {
+                grants
+                    .iter()
+                    .find(|grant| grant["permission"].as_str() == Some(permission))
+                    .cloned()
+            })
     }
 }
 
@@ -4504,21 +4701,29 @@ async fn list_user_grants_returns_the_direct_grants_of_the_target_user() {
 ///
 /// 既有 403 用例全部是**业务层**拒绝（自提权 / 全权组成员守卫 / 管理员等价闸门），
 /// 框架中间件的「Action 声明权限 ⊄ 调用者持有权限 → PermissionDenied(403)」这条
-/// 链路此前零端到端断言。契约（AUTHZ_GRANTS.md 管理接口表）：`list_groups` 需要
-/// `access.groups.read`。
+/// 链路此前零端到端断言。`access.groups` 域授权判定下沉到 handler 内实现后（见
+/// `groups/actions/*` 的 register 注释），**只有 `access.grants` 域仍以
+/// `.permissions(...)` 声明权限键**，因此这条链路改在 grants 域取证（契约
+/// AUTHZ_GRANTS.md 管理接口表）：`list_user_grants` 需要 `access.grants.read`、
+/// `grant_permission` 需要 `access.grants.write`。
+///
+/// `access.groups` 的新语义（登录即可建组 + 组级可见性）在同一用例后半段钉住：
+/// 无全局权限的账号建组必须成功（建完即组所有者）、列表只见自己的组；持全局读
+/// 权限的账号才看得到全部组。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要真实 MySQL/Redis"]
 async fn a_user_without_the_required_permission_is_rejected_with_403() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    // 持 A（access.grants.read），调需 B（access.groups.read）的 Action。
-    let outsider = harness::grant_only(&app, &admin, "outsider", "access.grants.read").await;
+    // 攻击者：只直授 access.groups.read，完全没有 grants 域权限。
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.groups.read").await;
     let authorization = format!("Bearer {}", outsider.token);
 
+    // 读 Action：持 access.groups.read 调需 access.grants.read 的 list_user_grants。
     match dispatch(
         &app,
-        "access.groups",
-        "list_groups",
+        "access.grants",
+        "list_user_grants",
         json!({}),
         &[("authorization", authorization.as_str())],
         52_400,
@@ -4526,7 +4731,7 @@ async fn a_user_without_the_required_permission_is_rejected_with_403() {
     .await
     {
         Err(BaseError::PermissionDenied(message)) => assert!(
-            message.contains("access.groups.read"),
+            message.contains("access.grants.read"),
             "拒绝信息必须点名缺失的权限，实际 {message}"
         ),
         Ok(response) => panic!(
@@ -4536,32 +4741,773 @@ async fn a_user_without_the_required_permission_is_rejected_with_403() {
         Err(other) => panic!("缺权限必须 PermissionDenied→403，实际 {other}"),
     }
 
-    // 写 Action 同一判据：持 access.grants.read 调需 access.groups.write 的
-    // create_group——完整走完 Step-up 后仍被权限中间件拒绝。
-    let (status, message) = harness::create_group_outcome(&app, &outsider, "sneak", "越权组").await;
+    // 写 Action 同一判据：持 access.groups.read 调需 access.grants.write 的
+    // grant_permission——完整走完 Step-up 后仍被权限中间件拒绝。
+    let target = harness::register_with_code(&app, "target", "target@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));
+    let status = harness::grant_permission_status(&app, &outsider, target, "demo.notes.read").await;
     assert_eq!(
         status, 403,
-        "缺 access.groups.write 建组必须 403，实际 {status}: {message}"
+        "缺 access.grants.write 授予必须 403 PermissionDenied，实际 {status}"
     );
-    assert!(
-        !harness::group_exists(&app, "sneak").await,
-        "被拒的建组不得落库"
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target).await,
+        0,
+        "被拒的授予不得落库"
     );
 
-    // 反向对照：持 B 的账号必须能列出。
-    let reader = harness::grant_only(&app, &admin, "reader", "access.groups.read").await;
-    let authorization = format!("Bearer {}", reader.token);
-    match dispatch(
+    // 反向对照：持 access.grants.read 的账号必须能查授权。
+    let reader = harness::grant_only(&app, &admin, "reader", "access.grants.read").await;
+    let response = harness::list_user_grants(&app, &reader, reader.user_id)
+        .await
+        .unwrap_or_else(|error| panic!("持权限查询授权失败: {error}"));
+    assert_eq!(
+        response.code, 0,
+        "持 access.grants.read 必须能查授权: {}",
+        response.message
+    );
+
+    // ---- access.groups 的新语义（handler 内判定）：登录即可建组 + 组级可见性 ----
+    // 前置组：管理员建一个「admin_group」，与后面的零权限用户无关（非其所有者/成员）。
+    let admin_group_id = harness::create_group(&app, &admin, "admin_group", "管理员的组").await;
+
+    // 无 access.groups.read 的旁观者建组必须成功（建完即组所有者；管理权由所有者
+    // 身份或全局写权限带来——create_group 的 register 注释「任何登录用户可建组」）。
+    let bystander_id = harness::register_with_code(&app, "bystander", "bystander@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 bystander 失败: {error}"));
+    let bystander = harness::Admin {
+        username: "bystander".to_string(),
+        user_id: bystander_id,
+        token: harness::login_as(&app, "bystander").await,
+    };
+    let (status, message) =
+        harness::create_group_outcome(&app, &bystander, "own", "自己的组").await;
+    assert_eq!(
+        status, 200,
+        "任何登录用户必须能建组（建完即所有者），实际 {status}: {message}"
+    );
+    assert!(harness::group_exists(&app, "own").await, "建组必须真的落库");
+
+    // 可见性：无 access.groups.read 的账号列表只见自己的组——管理员的组与内置
+    // 全权组都不可见（不是其所有者/成员）。
+    assert_eq!(
+        harness::list_group_keys(&app, &bystander).await,
+        ["own"],
+        "无全局读权限的账号只能看到自己的组"
+    );
+
+    // get_group 对「不可见」与「不存在」统一 404（RecordNotFound 同形态）：
+    // 无 read 的 bystander 查别人的组，与查一个不存在的组必须返回完全相同的
+    // （状态码, 消息），消除「自增 group_id 可遍历枚举组是否存在」的侧信道。
+    let hidden = harness::get_group_outcome(&app, &bystander, admin_group_id).await;
+    let missing = harness::get_group_outcome(&app, &bystander, admin_group_id + 1_000_000).await;
+    assert_eq!(
+        hidden.0, 404,
+        "不可见的组必须与不存在的组同形态 404，实际 {}: {}",
+        hidden.0, hidden.1
+    );
+    assert_eq!(
+        hidden, missing,
+        "「不可见」与「不存在」的响应必须逐字节同形态（不得泄漏组是否存在）"
+    );
+
+    // 反向对照：持 access.groups.read 的账号必须看到全部组（含内置全权组）。
+    let outsider_keys = harness::list_group_keys(&app, &outsider).await;
+    for key in ["system_admin", "admin_group", "own"] {
+        assert!(
+            outsider_keys.iter().any(|k| k == key),
+            "持 access.groups.read 必须能看到 {key}，实际 {outsider_keys:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 直授批量与过期语义：batch_grant_permissions / batch_revoke_permissions /
+// expires_at 的端到端用例（核心任务「直授批量/过期」的集成覆盖）。
+// ---------------------------------------------------------------------------
+
+/// 批量授予的端到端覆盖：多用户 × 多权限一次落库、计数正确、幂等重复全跳过。
+///
+/// 契约（AUTHZ_GRANTS.md 批量授予）：事务原子、同 user_id 多条合并为一次版本递增、
+/// 已持有有效直授的条目幂等跳过。断言分四段：响应计数 → Token claims → 数据库
+/// 事实（行数与版本）→ 重复调用幂等。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn batch_grant_permissions_writes_every_item_and_repeats_idempotently() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let alice = harness::register_with_code(&app, "alice", "alice@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 alice 失败: {error}"));
+    let bob = harness::register_with_code(&app, "bob", "bob@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 bob 失败: {error}"));
+
+    let items = [
+        harness::grant_item(alice, "access.grants.read"),
+        harness::grant_item(alice, "access.grants.write"),
+        harness::grant_item(bob, "access.groups.read"),
+        harness::grant_item(bob, "demo.notes.read"),
+    ];
+    let version_alice_before = harness::authz_version_of(&app, alice).await;
+    let response = harness::batch_grant_permissions(&app, &admin, &items)
+        .await
+        .unwrap_or_else(|error| panic!("批量授予失败: {error}"));
+    assert_eq!(response.code, 0, "批量授予必须成功: {}", response.message);
+    let data = response
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("批量授予响应缺少 data: {response:?}"));
+    assert_eq!(
+        data["succeeded"].as_u64(),
+        Some(4),
+        "四条款目必须全部实际写入: {data}"
+    );
+    assert_eq!(
+        data["skipped"].as_u64(),
+        Some(0),
+        "首次批量不得跳过: {data}"
+    );
+    assert_eq!(
+        data["failed"].as_array().map(Vec::len),
+        Some(0),
+        "成功响应的 failed 明细恒为空: {data}"
+    );
+
+    // 数据库事实：两名用户各落两行直授；alice 的两条写入合并为一次版本递增（+1 而非 +2）。
+    assert_eq!(
+        harness::grant_rows_of_user(&app, alice).await,
+        2,
+        "alice 应恰好两行直授"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, bob).await,
+        2,
+        "bob 应恰好两行直授"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, alice).await,
+        version_alice_before + 1,
+        "同 user_id 多条写入必须合并为一次授权版本递增"
+    );
+
+    // Token claims：批量授予后签发的新令牌必须含全部新权限（AuthzGrantResolver 注入）。
+    let alice_permissions = token_permissions(&harness::login_as(&app, "alice").await)
+        .unwrap_or_else(|error| panic!("校验 alice Token claims 失败: {error}"));
+    for permission in ["access.grants.read", "access.grants.write"] {
+        assert!(
+            alice_permissions.iter().any(|p| p == permission),
+            "alice 的新令牌必须含 {permission}，实际 {alice_permissions:?}"
+        );
+    }
+    let bob_permissions = token_permissions(&harness::login_as(&app, "bob").await)
+        .unwrap_or_else(|error| panic!("校验 bob Token claims 失败: {error}"));
+    for permission in ["access.groups.read", "demo.notes.read"] {
+        assert!(
+            bob_permissions.iter().any(|p| p == permission),
+            "bob 的新令牌必须含 {permission}，实际 {bob_permissions:?}"
+        );
+    }
+
+    // 幂等重复调用：目标已持有全部有效直授 → 全部跳过，不得再写行、不得再动版本。
+    let version_alice_after = harness::authz_version_of(&app, alice).await;
+    let response = harness::batch_grant_permissions(&app, &admin, &items)
+        .await
+        .unwrap_or_else(|error| panic!("幂等重放批量授予失败: {error}"));
+    assert_eq!(response.code, 0, "幂等重放必须成功: {}", response.message);
+    let data = response
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("幂等重放响应缺少 data: {response:?}"));
+    assert_eq!(
+        data["succeeded"].as_u64(),
+        Some(0),
+        "已持有的条目不得重复写入: {data}"
+    );
+    assert_eq!(
+        data["skipped"].as_u64(),
+        Some(4),
+        "已持有的条目必须全部计入幂等跳过: {data}"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, alice).await,
+        2,
+        "幂等重放不得新增行"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, bob).await,
+        2,
+        "幂等重放不得新增行"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, alice).await,
+        version_alice_after,
+        "幂等跳过不得递增授权版本"
+    );
+}
+
+/// 批量撤销的端到端覆盖：事实行删除、按用户合并版本递增、旧令牌失效、幂等重放。
+///
+/// 与单条撤销（`revoke_permission_removes_the_grant_stales_the_token_and_stays_idempotent`）
+/// 的差别：批量撤销没有 `revoke_by_subject` 即时收敛（批量版本只经 Outbox Worker
+/// 异步发布），旧令牌失效走「缓存键过期后回查主库」的常规窗口，与
+/// `admin_can_remove_themselves_when_another_admin_remains` 同款等待；
+/// 新签发的令牌则立即不含被撤销权限。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn batch_revoke_permissions_removes_rows_bumps_version_once_and_stales_old_tokens() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let holder = harness::register_with_code(&app, "holder", "holder@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 holder 失败: {error}"));
+
+    // 夹具：批量授予三条直授，随后签发令牌（claims 快照含三条）。
+    let grant_items = [
+        harness::grant_item(holder, "access.grants.read"),
+        harness::grant_item(holder, "access.grants.write"),
+        harness::grant_item(holder, "access.groups.read"),
+    ];
+    harness::batch_grant_permissions(&app, &admin, &grant_items)
+        .await
+        .unwrap_or_else(|error| panic!("批量授予夹具失败: {error}"));
+    assert_eq!(
+        harness::grant_rows_of_user(&app, holder).await,
+        3,
+        "夹具必须先造出三条直授"
+    );
+    let holder_token = harness::login_as(&app, "holder").await;
+    let version_before = harness::authz_version_of(&app, holder).await;
+
+    // 批量撤销其中两条。
+    let revoke_items = [
+        harness::revoke_item(holder, "access.grants.read"),
+        harness::revoke_item(holder, "access.groups.read"),
+    ];
+    let response = harness::batch_revoke_permissions(&app, &admin, &revoke_items)
+        .await
+        .unwrap_or_else(|error| panic!("批量撤销失败: {error}"));
+    assert_eq!(response.code, 0, "批量撤销必须成功: {}", response.message);
+    let data = response
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("批量撤销响应缺少 data: {response:?}"));
+    assert_eq!(
+        data["succeeded"].as_u64(),
+        Some(2),
+        "两条款目必须实际删除: {data}"
+    );
+    assert_eq!(
+        data["skipped"].as_u64(),
+        Some(0),
+        "首次批量不得跳过: {data}"
+    );
+    assert_eq!(
+        data["failed"].as_array().map(Vec::len),
+        Some(0),
+        "成功响应的 failed 明细恒为空: {data}"
+    );
+
+    // 事实层：行删除 + 版本恰好 +1（同 user 两条删除合并，而非 +2）。
+    assert_eq!(
+        harness::grant_rows_of_user(&app, holder).await,
+        1,
+        "撤销后只剩未被撤销的那条直授"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder).await,
+        version_before + 1,
+        "同 user_id 多条删除必须合并为一次授权版本递增"
+    );
+
+    // 新签发的令牌立即不含被撤销权限（解析侧按当前事实快照注入 claims）。
+    let fresh_permissions = token_permissions(&harness::login_as(&app, "holder").await)
+        .unwrap_or_else(|error| panic!("校验刷新 Token claims 失败: {error}"));
+    for permission in ["access.grants.read", "access.groups.read"] {
+        assert!(
+            !fresh_permissions.iter().any(|p| p == permission),
+            "刷新后的令牌不得再含被撤销的 {permission}，实际 {fresh_permissions:?}"
+        );
+    }
+    assert!(
+        fresh_permissions.iter().any(|p| p == "access.grants.write"),
+        "未被撤销的权限必须保留，实际 {fresh_permissions:?}"
+    );
+
+    // 旧令牌失效：批量撤销只递增版本 + 追加 Outbox，不经 revoke_by_subject 即时收敛。
+    // 水位线由 Outbox Worker 异步发布，本夹具不启动 Worker；校验器快速路径的缓存键
+    // 刚被旧版本回填（TTL 5s，ADR 承认的最坏陈旧窗口），需等它过期后回查主库才能观测
+    // 到 AuthorizationStale——与 `admin_can_remove_themselves_when_another_admin_remains`
+    // 的等待同款；等待期间不得发探针，否则会把旧版本重新回填进缓存。
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(
+        harness::member_token_is_stale(&app, &holder_token).await,
+        "批量撤销后旧 Token 必须失效（授权版本水位线）"
+    );
+
+    // 幂等：重复撤销同一批 → 全部跳过、不再删行、不再动版本。
+    let version_after = harness::authz_version_of(&app, holder).await;
+    let response = harness::batch_revoke_permissions(&app, &admin, &revoke_items)
+        .await
+        .unwrap_or_else(|error| panic!("幂等重放批量撤销失败: {error}"));
+    assert_eq!(response.code, 0, "幂等重放必须成功: {}", response.message);
+    let data = response
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("幂等重放响应缺少 data: {response:?}"));
+    assert_eq!(
+        data["succeeded"].as_u64(),
+        Some(0),
+        "本就没有的条目不得删除: {data}"
+    );
+    assert_eq!(
+        data["skipped"].as_u64(),
+        Some(2),
+        "本就没有的条目必须全部幂等跳过: {data}"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, holder).await,
+        1,
+        "幂等重放不得再删行"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder).await,
+        version_after,
+        "幂等撤销不得再次递增授权版本"
+    );
+}
+
+/// G2 闸门的批量形态：批量里混入管理员等价权限 → 非全权组成员**整批**被拒（403）。
+///
+/// 事务原子语义（AUTHZ_GRANTS.md 批量授予）：任一失败整体回滚，不得产生部分写入。
+/// 与单条闸门用例（`a_non_admin_cannot_grant_an_admin_equivalent_permission`）的差别
+/// 是「批内无罪的普通条目」也必须一起回滚，且错误信息带 `items[N]` 索引定位失败位置。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_batch_grant_containing_an_admin_equivalent_permission_is_rejected_whole() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // 攻击者：只直授 access.grants.write，完全不在全权组内（同单条闸门用例）。
+    let outsider = harness::grant_only(&app, &admin, "outsider", "access.grants.write").await;
+    let target = harness::register_with_code(&app, "target", "target@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));
+    let version_before = harness::authz_version_of(&app, target).await;
+
+    // 批内混入一条管理员等价权限（G2 清单：account.users.reset_credentials）。
+    let items = [
+        harness::grant_item(target, "access.grants.read"),
+        harness::grant_item(target, "account.users.reset_credentials"),
+    ];
+    let (status, message) = harness::batch_grant_permissions_outcome(&app, &outsider, &items).await;
+    assert_eq!(
+        status, 403,
+        "非全权组成员批量授予管理员等价权限必须 403 PermissionDenied，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("系统管理员"),
+        "拒绝信息必须点名只有系统管理员可以授予，实际 {message}"
+    );
+    assert!(
+        message.contains("items[1]"),
+        "拒绝信息必须带条目索引定位失败位置，实际 {message}"
+    );
+
+    // 无部分写入：被拒整批回滚，target 不得有任何直授行、授权版本不得动。
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target).await,
+        0,
+        "被拒的批量不得落任何直授行（批内无罪的普通条目一并回滚）"
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, target).await,
+        version_before,
+        "被拒的批量不得递增授权版本"
+    );
+
+    // 反向对照：同一操作者授予纯普通权限的批量必须成功——拒绝面过宽同样是故障。
+    let items = [
+        harness::grant_item(target, "access.grants.read"),
+        harness::grant_item(target, "demo.notes.read"),
+    ];
+    let response = harness::batch_grant_permissions(&app, &outsider, &items)
+        .await
+        .unwrap_or_else(|error| panic!("批量授予普通权限失败: {error}"));
+    assert_eq!(
+        response.code, 0,
+        "同一操作者批量授予普通权限必须成功: {}",
+        response.message
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target).await,
+        2,
+        "普通批量必须真的落库"
+    );
+}
+
+/// 过期语义的端到端覆盖：短命直授（expires_at = now+2s）先生效、到期后从新令牌
+/// claims 消失、行按审计保留并带 expired 派生标记。
+///
+/// 解析侧（`AuthzGrantResolver` → `list_by_user_in_tx`）把过期过滤下推到 SQL
+/// （`expires_at IS NULL OR expires_at > now`）：过期只让权限在读取侧失效，行不删，
+/// 为「重新授予走续期」保留审计痕迹。sleep 是集成测试的既定模式（同
+/// `admin_can_remove_themselves_when_another_admin_remains`）；到期判定是 wall-clock
+/// 秒级，睡过到期点后刷新令牌即可观测。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn an_expired_grant_disappears_from_refreshed_tokens_but_stays_for_audit() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let holder = harness::register_with_code(&app, "holder", "holder@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 holder 失败: {error}"));
+
+    // 授予一条永久 + 一条短命（now+2s）权限；短命条目的过期时间由批量条目显式携带。
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|error| panic!("系统时间早于 Unix epoch: {error}"))
+        .as_secs() as i64;
+    let expires_at = now + 2;
+    let items = [
+        harness::grant_item(holder, "access.grants.read"),
+        harness::grant_item_with_expiry(holder, "access.groups.read", expires_at),
+    ];
+    let response = harness::batch_grant_permissions(&app, &admin, &items)
+        .await
+        .unwrap_or_else(|error| panic!("批量授予（含短命条目）失败: {error}"));
+    assert_eq!(
+        response.code, 0,
+        "带 expires_at 的批量授予必须成功: {}",
+        response.message
+    );
+
+    // 未过期时立即签发：两条都在 claims（解析侧 SQL 过滤只挡已过期的行）。
+    let permissions = token_permissions(&harness::login_as(&app, "holder").await)
+        .unwrap_or_else(|error| panic!("校验未到期 Token claims 失败: {error}"));
+    assert!(
+        permissions.iter().any(|p| p == "access.groups.read"),
+        "未到期的短命权限必须仍在新令牌 claims 里，实际 {permissions:?}"
+    );
+    assert!(
+        permissions.iter().any(|p| p == "access.grants.read"),
+        "永久权限必须在新令牌 claims 里，实际 {permissions:?}"
+    );
+
+    // 审计视图：短命行此刻未过期、expires_at 原样回显。
+    let short_lived = harness::grant_view_of(&app, &admin, holder, "access.groups.read")
+        .await
+        .unwrap_or_else(|| panic!("审计视图缺少 access.groups.read 条目"));
+    assert_eq!(
+        short_lived["expires_at"].as_i64(),
+        Some(expires_at),
+        "审计视图必须回显原始 expires_at: {short_lived}"
+    );
+    assert_eq!(
+        short_lived["expired"].as_bool(),
+        Some(false),
+        "未到期的行不得标记已过期: {short_lived}"
+    );
+
+    // 睡过到期点（now+2s，等 3 秒保证 now > expires_at 的判定稳定成立）。
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // 刷新令牌：过期权限不再出现在 claims，永久那条不受影响。
+    let refreshed = token_permissions(&harness::login_as(&app, "holder").await)
+        .unwrap_or_else(|error| panic!("校验过期后刷新 Token claims 失败: {error}"));
+    assert!(
+        !refreshed.iter().any(|p| p == "access.groups.read"),
+        "过期后刷新令牌不得再含该权限，实际 {refreshed:?}"
+    );
+    assert!(
+        refreshed.iter().any(|p| p == "access.grants.read"),
+        "永久权限不受过期影响，实际 {refreshed:?}"
+    );
+
+    // 审计视图：过期行仍在（行保留做审计）、expired 标记翻转、行数不变。
+    let short_lived = harness::grant_view_of(&app, &admin, holder, "access.groups.read")
+        .await
+        .unwrap_or_else(|| panic!("审计视图缺少 access.groups.read 条目"));
+    assert_eq!(
+        short_lived["expires_at"].as_i64(),
+        Some(expires_at),
+        "过期行必须保留原始 expires_at: {short_lived}"
+    );
+    assert_eq!(
+        short_lived["expired"].as_bool(),
+        Some(true),
+        "审计视图必须把过期行标记为已过期: {short_lived}"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, holder).await,
+        2,
+        "过期只让权限在读取侧失效，直授行不得删除"
+    );
+}
+
+/// 续期语义的端到端覆盖：短命直授（expires_at = now+2s）过期后，对同一
+/// (user_id, permission) 重新授予（不带 expires_at = 永久）必须走续期分支——
+/// succeeded=1 而非幂等跳过、expires_at 被重置为 NULL（审计视图 expired=false、
+/// expires_at 空）、授权版本恰好递增一次、新令牌 claims 含该权限且后续刷新仍含
+/// （永久 = 不再随时间失效）。
+///
+/// 单条 `grant_permission` 与批量 `batch_grant_permissions` 各有一条续期路径
+/// （`renew_in_tx` 原地 UPDATE 保留审计痕迹，唯一键不允许插第二行），两个入口都测：
+/// 本次 minor 对抗指出的缺口正是单条路径没有端到端断言。sleep 是集成测试的既定
+/// 模式（同 `an_expired_grant_disappears_from_refreshed_tokens_but_stays_for_audit`）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let holder = harness::register_with_code(&app, "holder_renew", "holder_renew@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 holder_renew 失败: {error}"));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|error| panic!("系统时间早于 Unix epoch: {error}"))
+        .as_secs() as i64;
+    let expires_at = now + 2;
+
+    // ---- 单条 grant_permission 的续期路径 ----
+    let version_before = harness::authz_version_of(&app, holder).await;
+    let granted = harness::grant_permission_response(
         &app,
-        "access.groups",
-        "list_groups",
-        json!({}),
-        &[("authorization", authorization.as_str())],
-        52_400,
+        &admin,
+        holder,
+        "access.groups.read",
+        Some(expires_at),
     )
     .await
-    {
-        Ok(response) => assert_eq!(response.code, 0, "持权限列表必须成功：{}", response.message),
-        Err(other) => panic!("持 access.groups.read 必须能 list_groups，实际 {other}"),
+    .unwrap_or_else(|error| panic!("单条授予短命权限失败: {error}"));
+    assert_eq!(
+        granted.data.as_ref().unwrap()["changed"].as_bool(),
+        Some(true),
+        "首次授予必须 changed=true: {:?}",
+        granted.data
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder).await,
+        version_before + 1,
+        "首次授予必须恰好递增一次授权版本"
+    );
+
+    // 睡过到期点（now+2s，等 3 秒保证 now > expires_at 的判定稳定成立）。
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // 重新授予同一 (user_id, permission)，不带 expires_at = 永久续期。
+    let version_before = harness::authz_version_of(&app, holder).await;
+    let renewed =
+        harness::grant_permission_response(&app, &admin, holder, "access.groups.read", None)
+            .await
+            .unwrap_or_else(|error| panic!("单条续期失败: {error}"));
+    assert_eq!(
+        renewed.data.as_ref().unwrap()["changed"].as_bool(),
+        Some(true),
+        "过期行重授必须走续期分支（changed=true 而非幂等跳过）: {:?}",
+        renewed.data
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder).await,
+        version_before + 1,
+        "续期必须恰好递增一次授权版本（不得重复递增）"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, holder).await,
+        1,
+        "续期是原地 UPDATE，直授行数不得增加"
+    );
+
+    // 审计视图：expires_at 被重置为空（永久）、expired=false。
+    let renewed_view = harness::grant_view_of(&app, &admin, holder, "access.groups.read")
+        .await
+        .unwrap_or_else(|| panic!("审计视图缺少 access.groups.read 条目"));
+    assert!(
+        renewed_view["expires_at"].is_null(),
+        "续期为永久必须清空 expires_at: {renewed_view}"
+    );
+    assert_eq!(
+        renewed_view["expired"].as_bool(),
+        Some(false),
+        "续期后不得标记为已过期: {renewed_view}"
+    );
+
+    // claims：新令牌含该权限，且后续刷新仍含（永久 = 不再随时间失效）。
+    let permissions = token_permissions(&harness::login_as(&app, "holder_renew").await)
+        .unwrap_or_else(|error| panic!("校验续期后 Token claims 失败: {error}"));
+    assert!(
+        permissions.iter().any(|p| p == "access.groups.read"),
+        "续期后新令牌 claims 必须含该权限，实际 {permissions:?}"
+    );
+    let refreshed = token_permissions(&harness::login_as(&app, "holder_renew").await)
+        .unwrap_or_else(|error| panic!("校验再次刷新 Token claims 失败: {error}"));
+    assert!(
+        refreshed.iter().any(|p| p == "access.groups.read"),
+        "续期为永久后刷新令牌必须仍含该权限，实际 {refreshed:?}"
+    );
+
+    // ---- 批量 batch_grant_permissions 的续期路径（同款语义的另一入口） ----
+    // 前面的 sleep 已推进 wall-clock：批量条目的 expires_at 必须按此刻重新计算
+    // （handler 校验「过期时间必须大于当前时间」用的是它自己的时钟）。
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|error| panic!("系统时间早于 Unix epoch: {error}"))
+        .as_secs() as i64;
+    let expires_at = now + 2;
+    let version_before = harness::authz_version_of(&app, holder).await;
+    let short_lived = harness::batch_grant_permissions(
+        &app,
+        &admin,
+        &[harness::grant_item_with_expiry(
+            holder,
+            "demo.notes.read",
+            expires_at,
+        )],
+    )
+    .await
+    .unwrap_or_else(|error| panic!("批量授予短命权限失败: {error}"));
+    assert_eq!(
+        short_lived.data.as_ref().unwrap()["succeeded"].as_u64(),
+        Some(1),
+        "批量首次授予必须 succeeded=1: {:?}",
+        short_lived.data
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder).await,
+        version_before + 1,
+        "批量首次授予必须恰好递增一次授权版本"
+    );
+
+    // 睡过到期点后批量重授（永久）。
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let version_before = harness::authz_version_of(&app, holder).await;
+    let renewed = harness::batch_grant_permissions(
+        &app,
+        &admin,
+        &[harness::grant_item(holder, "demo.notes.read")],
+    )
+    .await
+    .unwrap_or_else(|error| panic!("批量续期失败: {error}"));
+    assert_eq!(
+        renewed.data.as_ref().unwrap()["succeeded"].as_u64(),
+        Some(1),
+        "过期行批量重授必须走续期分支（succeeded=1 而非 skipped）: {:?}",
+        renewed.data
+    );
+    assert_eq!(
+        renewed.data.as_ref().unwrap()["skipped"].as_u64(),
+        Some(0),
+        "续期不得计为幂等跳过: {:?}",
+        renewed.data
+    );
+    assert_eq!(
+        harness::authz_version_of(&app, holder).await,
+        version_before + 1,
+        "批量续期必须恰好递增一次授权版本"
+    );
+    let renewed_view = harness::grant_view_of(&app, &admin, holder, "demo.notes.read")
+        .await
+        .unwrap_or_else(|| panic!("审计视图缺少 demo.notes.read 条目"));
+    assert!(
+        renewed_view["expires_at"].is_null(),
+        "批量续期为永久必须清空 expires_at: {renewed_view}"
+    );
+    assert_eq!(
+        renewed_view["expired"].as_bool(),
+        Some(false),
+        "批量续期后不得标记为已过期: {renewed_view}"
+    );
+    let refreshed = token_permissions(&harness::login_as(&app, "holder_renew").await)
+        .unwrap_or_else(|error| panic!("校验批量续期后 Token claims 失败: {error}"));
+    assert!(
+        refreshed.iter().any(|p| p == "demo.notes.read"),
+        "批量续期为永久后刷新令牌必须仍含该权限，实际 {refreshed:?}"
+    );
+}
+
+/// 批量条数上限的端到端覆盖：>100 条必须 400（ParamInvalid）、101 条不落库；
+/// 100 条边界必须仍可受理（拒绝面过宽同样是故障）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn batch_actions_over_the_item_limit_are_rejected_with_400() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let target = harness::register_with_code(&app, "target", "target@example.com")
+        .await
+        .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));
+
+    // 批量授予：101 条 → 400，且不得落任何行。
+    let mut items = Vec::new();
+    for _ in 0..101 {
+        items.push(harness::grant_item(target, "access.grants.read"));
     }
+    let (status, message) = harness::batch_grant_permissions_outcome(&app, &admin, &items).await;
+    assert_eq!(
+        status, 400,
+        "超过 100 条上限必须 ParamInvalid→400，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("100"),
+        "拒绝信息必须点名上限条数，实际 {message}"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target).await,
+        0,
+        "被拒的批量不得落任何直授行"
+    );
+
+    // 边界反向对照：恰好 100 条必须仍可受理（批内同 user×perm 的重复条目幂等跳过）。
+    let mut items = Vec::new();
+    for _ in 0..100 {
+        items.push(harness::grant_item(target, "access.grants.read"));
+    }
+    let response = harness::batch_grant_permissions(&app, &admin, &items)
+        .await
+        .unwrap_or_else(|error| panic!("恰好 100 条的批量必须成功: {error}"));
+    assert_eq!(
+        response.code, 0,
+        "恰好 100 条必须成功: {}",
+        response.message
+    );
+    let data = response
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("恰好 100 条响应缺少 data: {response:?}"));
+    assert_eq!(
+        data["succeeded"].as_u64(),
+        Some(1),
+        "批内重复条目只写一次: {data}"
+    );
+    assert_eq!(
+        data["skipped"].as_u64(),
+        Some(99),
+        "批内重复条目按幂等跳过: {data}"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target).await,
+        1,
+        "同 (user_id, permission) 只落一行"
+    );
+
+    // 批量撤销同一条上限：101 条 → 400，不得删任何行。
+    let mut items = Vec::new();
+    for _ in 0..101 {
+        items.push(harness::revoke_item(target, "access.grants.read"));
+    }
+    let (status, message) = harness::batch_revoke_permissions_outcome(&app, &admin, &items).await;
+    assert_eq!(
+        status, 400,
+        "批量撤销超过 100 条上限必须 ParamInvalid→400，实际 {status}: {message}"
+    );
+    assert!(
+        message.contains("100"),
+        "拒绝信息必须点名上限条数，实际 {message}"
+    );
+    assert_eq!(
+        harness::grant_rows_of_user(&app, target).await,
+        1,
+        "被拒的批量撤销不得删任何行"
+    );
 }

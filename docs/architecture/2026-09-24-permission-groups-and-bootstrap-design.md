@@ -419,6 +419,13 @@ before = 调用者当前的有效权限集合
 | `POST /api/v1/access/groups/members` | `access.groups.write` | 加成员（受 §8.1 子集校验约束） |
 | `POST /api/v1/access/groups/members/remove` | `access.groups.write` | 移出成员（受 §8.2 守卫约束） |
 
+> **⚠ 2026-10-03 更新：本表已过时**，见 `docs/contracts/AUTHZ_GRANTS.md`「管理接口表」
+> 新口径——9 个组接口一律 authenticated-only，授权判定下沉 handler 内（写操作
+> owner OR `access.groups.write`；只读接口 owner/成员/持 `access.groups.read` 可见，
+> `get_group` 不可见与不存在统一 404）；`access.groups.read/write` 降为保留权限键
+> （`RETAINED_PERMISSION_KEYS`），可授予但不再被任何 Action 强制。本表保留为历史
+> 基线，不逐行改写。
+
 > **修订（收尾回合，精确化 Step-up 挂载范围）**：本节原写「全部 Action 挂 Step-up」，
 > 把重认证的保护面放大了。重认证保护的是**授权事实的变更**——只有写操作会改这份事实；
 > 对只读的浏览 Action 也返回 428，会把「看一眼有哪些权限组」这种日常操作变成每一步都要

@@ -60,14 +60,19 @@ export const GROUP_OPERATION_IDS = {
 /* ------------------------------- 权限门控 -------------------------------- */
 
 /// 能否看列表与详情（侧边栏入口与页面正文的渲染条件）。
+///
+/// `list_groups` 改为 authenticated-only 后（handler 内按可见性判定），登录用户
+/// 的目录里恒有这一粒——本函数实际上回答的是「是否已登录」。
 export function canReadGroups(catalog: UiCatalog | undefined): boolean {
   return hasOperation(catalog, GROUP_OPERATION_IDS.list);
 }
 
-/// 能否改（新建/改名/删除/加删条目/加删成员是否**渲染**，不是禁用）。
+/// 能否新建组（创建按钮的渲染条件）。
 ///
-/// 判据取 `create_group` 这一粒：九个接口的写侧都声明 `access.groups.write`，
-/// 目录按身份投影之后，有它就意味着这一整套写接口都在。
+/// `create_group` 改为 authenticated-only 后（任何登录用户可建组，建完即所有者），
+/// 登录用户的目录里恒有这一粒——本函数实际上回答的是「是否已登录」。
+/// 其余管理按钮（改名/删除/加删条目/加删成员）不再由它门控：那是**每个组**各自
+/// 的 `can_manage` 字段（后端算好）的职责，见 `GroupSummary.canManage`。
 export function canManageGroups(catalog: UiCatalog | undefined): boolean {
   return hasOperation(catalog, GROUP_OPERATION_IDS.create);
 }
@@ -87,6 +92,9 @@ export type GroupSummary = {
   itemCount: number;
   isBuiltin: boolean;
   orphanItemCount: number;
+  /// 当前身份能否管理这个组（后端按「组所有者或全局写权限」算好，
+  /// 前端只拿它显隐管理按钮，不再自行判权）。
+  canManage: boolean;
 };
 
 /// 一条组条目。`isOrphan` 为真是「这条权限已不在权限目录里」——**只标记不清理**，
@@ -108,6 +116,9 @@ export type GroupDetail = {
   effectiveAll: boolean;
   items: GroupItemEntry[];
   members: number[];
+  /// 当前身份能否管理这个组（后端按「组所有者或全局写权限」算好，
+  /// 前端只拿它显隐管理按钮，不再自行判权）。
+  canManage: boolean;
 };
 
 /// 权限目录里的一条权限（对齐 `grants/actions/list_permissions.rs` 的 `PermissionEntry`）。
@@ -155,6 +166,7 @@ function parseGroupSummary(raw: Record<string, unknown>): GroupSummary | null {
     itemCount: asNumber(raw.item_count, 0),
     isBuiltin: raw.is_builtin === true,
     orphanItemCount: asNumber(raw.orphan_item_count, 0),
+    canManage: raw.can_manage === true,
   };
 }
 
@@ -209,6 +221,9 @@ function parseGroupDetail(data: unknown, groupId: number): GroupDetail {
             typeof member === "number" && Number.isFinite(member),
         )
       : [],
+    // 缺 `can_manage` 时按「不能管理」处理：管理按钮不渲染，只留读侧——
+    // 猜成 true 会让一个管理不了的组露出会 403 的按钮
+    canManage: record?.can_manage === true,
   };
 }
 
@@ -510,18 +525,19 @@ export function useGroupDetail(
 
 /// 权限目录（组条目候选的来源）。
 ///
-/// 只为「加权限」表单服务，所以 `enabled` 同时看两粒独立的权限位：能管理组
-/// （`create_group` 在目录里）才需要候选；能看到目录（`list_permissions` 在目录里）
-/// 才拉得到候选。缺后者时**不发注定 403 的往返**，页面改为说明为什么加不了。
-export function usePermissionCatalog(): UseQueryResult<
-  PermissionCatalogEntry[]
-> {
+/// 只为「加权限」表单服务，所以 `enabled` 同时看两粒独立的权限位：**当前选中的组
+/// 可管理**（`detail.canManage`，后端算好——authenticated-only 后「登录即可」不再是
+/// 够格的判据）才需要候选；能看到目录（`list_permissions` 在目录里）才拉得到候选。
+/// 缺后者时**不发注定 403 的往返**，页面改为说明为什么加不了。
+export function usePermissionCatalog(
+  canManageGroup: boolean,
+): UseQueryResult<PermissionCatalogEntry[]> {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
   return useQuery({
     enabled:
-      canManageGroups(catalogData) &&
+      canManageGroup &&
       hasOperation(catalogData, GROUP_OPERATION_IDS.listPermissions),
     queryKey: accessGroupQueryKeys.permissions(),
     queryFn: ({ signal }) =>
@@ -539,6 +555,8 @@ export function usePermissionCatalog(): UseQueryResult<
 /// 用户取消重认证时函数静默返回（`createGroup` 返回 0，其余无操作）。
 export type GroupActions = {
   canRead: boolean;
+  /// 能否新建组（登录即可；authenticated-only 后与 canRead 同源）。
+  /// 改名/删除/加删条目/加删成员不再由它门控——那是组级 `canManage` 的职责。
   canManage: boolean;
   createGroup: (input: CreateGroupInput) => Promise<number>;
   updateGroup: (input: UpdateGroupInput) => Promise<void>;

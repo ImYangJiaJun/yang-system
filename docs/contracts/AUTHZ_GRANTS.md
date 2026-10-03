@@ -1,7 +1,9 @@
 # 授权存储与权限目录契约
 
 **生成：** 2026-09-03
-**更新：** 2026-09-26（新增「管理员等价权限」显式清单与授予闸门；账号管理拆分出独立的凭据签发权限 `account.users.reset_credentials`）；
+**更新：** 2026-10-03（管理接口表改新口径：9 个组接口 authenticated-only，授权判定下沉 handler 内；
+`access.groups.read/write` 降为保留权限键，不被任何 Action 强制；`get_group` 不可见与不存在统一 404）；
+2026-09-26（新增「管理员等价权限」显式清单与授予闸门；账号管理拆分出独立的凭据签发权限 `account.users.reset_credentials`）；
 2026-09-24（首账号引导成为初始授权主路径；新增一层权限组）
 **范围：** `access` Addon（`src/addon/access/`）提供的权限基础设施：权限目录、
 直授存储、权限组、Token 授权快照扩展与授权管理接口。
@@ -207,6 +209,7 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 | 场景 | 映射 | HTTP |
 |---|---|---|
 | 组不存在 | `RecordNotFound` | 404 |
+| 组不可见（`get_group`：非所有者/成员且无全局读权限） | `RecordNotFound`（与「不存在」同形态，防存在性枚举） | 404 |
 | 目标用户不存在（加成员前的前置读取） | `UserNotFound` | 404 |
 | `group_key` 重复 | `ParamInvalid`（应用侧 `fold_duplicate_group_key` 识别 `uk_permission_group_key` 冲突并折算；框架侧 `write.rs:146` 的 `DatabaseExecuteFailed` 直包为该折算存在的根因） | 400 |
 | 组内权限未在目录声明 | `ParamInvalid("permission")`（经 `ensure_declared`） | 400 |
@@ -309,26 +312,41 @@ COMMIT;
 | 撤销权限 | `POST /api/v1/access/grants/revoke` | `access.grants.write` | 是 |
 | 查询用户授权 | `GET /api/v1/access/users/{user_id}/grants` | `access.grants.read` | 否 |
 | 查询权限目录 | `GET /api/v1/access/permissions` | `access.grants.read` | 否 |
-| 建组 | `POST /api/v1/access/groups` | `access.groups.write` | 是 |
-| 改组展示信息 | `POST /api/v1/access/groups/update` | `access.groups.write` | 是 |
-| 删组 | `POST /api/v1/access/groups/delete` | `access.groups.write` | 是 |
-| 组列表 | `GET /api/v1/access/groups` | `access.groups.read` | 否 |
-| 组详情 | `GET /api/v1/access/groups/{group_id}` | `access.groups.read` | 否 |
-| 加组权限 | `POST /api/v1/access/groups/items` | `access.groups.write` | 是 |
-| 移组权限 | `POST /api/v1/access/groups/items/remove` | `access.groups.write` | 是 |
-| 加组成员 | `POST /api/v1/access/groups/members` | `access.groups.write` | 是 |
-| 移组成员 | `POST /api/v1/access/groups/members/remove` | `access.groups.write` | 是 |
+| 建组 | `POST /api/v1/access/groups` | 登录即可（authenticated-only） | 是 |
+| 改组展示信息 | `POST /api/v1/access/groups/update` | 登录即可（authenticated-only） | 是 |
+| 删组 | `POST /api/v1/access/groups/delete` | 登录即可（authenticated-only） | 是 |
+| 组列表 | `GET /api/v1/access/groups` | 登录即可（authenticated-only） | 否 |
+| 组详情 | `GET /api/v1/access/groups/{group_id}` | 登录即可（authenticated-only） | 否 |
+| 加组权限 | `POST /api/v1/access/groups/items` | 登录即可（authenticated-only） | 是 |
+| 移组权限 | `POST /api/v1/access/groups/items/remove` | 登录即可（authenticated-only） | 是 |
+| 加组成员 | `POST /api/v1/access/groups/members` | 登录即可（authenticated-only） | 是 |
+| 移组成员 | `POST /api/v1/access/groups/members/remove` | 登录即可（authenticated-only） | 是 |
 
 说明：
 
+- **9 个组接口一律 authenticated-only**（`access/groups/mod.rs` 只挂
+  `TokenAuthMiddleware`，任何 Action 不再声明权限键）：授权判定下沉到 handler 内
+  实现（与 `get_avatar` 的 handler 内判定同款语义）——
+  - 7 个写操作（`operator_may_manage_group` / `ensure_operator_may_manage_group`）：
+    操作者是组所有者或持 `access.groups.write` 可管理；**没有 write 的组所有者同样
+    可管理自己的组**；非所有者且无 write 一律 403。
+  - 2 个只读接口（`operator_may_see_group`）：组所有者、组成员或持
+    `access.groups.read` 可见；**`get_group` 对不可见的组与不存在的组统一返回 404**
+    （`RecordNotFound` 同形态），消除「自增 group_id 可遍历枚举组是否存在」的侧信道。
+- **`access.groups.read` / `access.groups.write` 是保留权限键**
+  （`permission_catalog.rs::RETAINED_PERMISSION_KEYS`）：常驻权限目录、可授予、
+  随 claims 投影，但**不被任何 Action 以 `.permissions(...)` 强制要求**——目录里的
+  声明者记作模块名 `access.groups`（无 Action 声明）。`system_admin` 组成员的有效
+  权限等于目录全集，因此仍持有这两粒键。
 - **Step-up 覆盖全部 7 个组写 Action**（`access/groups/mod.rs` 的 `step_up_targets`，
   与 grants 只覆盖 grant/revoke 同例）。组条目与组成员的变更同样挂重认证中间件，
   是「防自提权子集校验 + 最后管理员守卫 + Step-up」三层防线——即攻击者无法凭空
   获得一个自己能写的新组，也无法越过后两条不变量。
 - **管理员等价权限的授予闸门**：`POST /access/grants`、`POST /access/groups/items`、
   `POST /access/groups/members` 三条路径在涉及管理员等价权限（见「管理员等价权限」节）时，
-  要求调用者是内置全权组 `system_admin` 成员，否则 403。这三条接口本身仍分别要求
-  `access.grants.write` / `access.groups.write`，闸门是在其之上追加的一层主体判据。
+  要求调用者是内置全权组 `system_admin` 成员，否则 403。闸门是 `access.grants.write`
+  与 handler 内组管理权判定**之上**追加的一层主体判据（组条目/成员路径不再另行
+  要求 `access.groups.write`）。
 - **全部写操作**（组生命周期、条目、成员）都写 append-only 审计，按
   `docs/contracts/AUDIT.md` 契约记录。
 - 加组权限经 `ensure_declared` fail-closed；**移组权限刻意不做目录校验**，已从 Catalog

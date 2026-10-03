@@ -202,6 +202,9 @@ export function groupWire(overrides: Record<string, unknown> = {}) {
     item_count: 0,
     is_builtin: false,
     orphan_item_count: 0,
+    // 默认「当前身份可管理该组」（对齐真实后端：列表按可见性过滤，
+    // 能看见的组绝大多数是所有者/成员，管理按钮由 can_manage 驱动）。
+    can_manage: true,
     ...overrides,
   };
 }
@@ -215,6 +218,7 @@ export function groupDetailWire(overrides: Record<string, unknown> = {}) {
     effective_all: false,
     items: [],
     members: [],
+    can_manage: true,
     ...overrides,
   };
 }
@@ -573,12 +577,12 @@ describe("权限组管理页", () => {
     });
   });
 
-  it("只有读权限时仍能看列表与详情，但一个写入口都不渲染", async () => {
+  it("不是组所有者也没有全局写权限时能看列表与详情，但一个管理入口都不渲染", async () => {
     stubAccessApi({
       write: false,
-      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      groupList: () => ({ groups: [groupWire({ id: 2, can_manage: false })] }),
       groupDetail: () => ({
-        ...groupDetailWire({ id: 2, members: [7] }),
+        ...groupDetailWire({ id: 2, members: [7], can_manage: false }),
         items: [{ permission: "account.users.read", is_orphan: false }],
       }),
     });
@@ -596,23 +600,55 @@ describe("权限组管理页", () => {
       "用户 #7",
     );
 
-    // 写侧整块不渲染：复选框、加入表单、新建/改名/删除都不在
+    // 管理侧整块不渲染：复选框、加入/移出表单、改名/删除都不在
+    // （管理按钮由后端算好的组级 can_manage 驱动，不再看全局写权限位）
     expect(screen.queryByRole("checkbox")).toBeNull();
     expect(screen.queryByRole("button", { name: "加入成员" })).toBeNull();
     expect(screen.queryByRole("button", { name: "加入权限" })).toBeNull();
     expect(screen.queryByRole("button", { name: "新建权限组" })).toBeNull();
     expect(screen.queryByRole("button", { name: "删除该组" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
   });
 
-  it("没有读权限时不发列表请求，只说明联系管理员", async () => {
+  it("组所有者（can_manage=true）即使没有全局写权限也能管理该组", async () => {
+    stubAccessApi({
+      // 目录里没有 create_group（写侧权限位全缺），但后端对该组回了
+      // can_manage: true（本组所有者）——管理按钮按组级判据渲染。
+      write: false,
+      groupList: () => ({ groups: [groupWire({ id: 2, can_manage: true })] }),
+      groupDetail: () => ({
+        ...groupDetailWire({ id: 2, members: [7], can_manage: true }),
+        items: [{ permission: "account.users.read", is_orphan: false }],
+      }),
+    });
+
+    renderPage();
+
+    // 组级管理入口都在：改名、删除、条目复选框、加入权限、加入成员
+    await screen.findByRole("button", { name: "删除该组" });
+    expect(screen.getByRole("button", { name: "保存" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("checkbox", { name: "account.users.read 权限" }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("button", { name: "加入权限" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "加入成员" }),
+    ).toBeInTheDocument();
+    // 只有建组按钮看登录态权限位：目录里没有 create_group 时不渲染
+    expect(screen.queryByRole("button", { name: "新建权限组" })).toBeNull();
+  });
+
+  it("没有读权限时不发列表请求，只提示登录", async () => {
     const calls = stubAccessApi({ read: false });
 
     renderPage();
 
+    // authenticated-only 后，登录用户的目录恒含 list_groups；这个分支是防御性的
+    // （未登录/目录未就绪），提示语不再提「开通权限」。
     expect(
-      await screen.findByText(
-        "当前身份没有查看权限组的权限，请联系运维管理员开通。",
-      ),
+      await screen.findByText("查看权限组需要先登录。"),
     ).toBeInTheDocument();
     expect(calls.some((call) => call.url.endsWith(LIST_PATH))).toBe(false);
   });
