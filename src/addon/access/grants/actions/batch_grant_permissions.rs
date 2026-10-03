@@ -292,7 +292,7 @@ pub(super) async fn handle(
             let permissions: Vec<String> = writes
                 .iter()
                 .filter(|write| write_user_id(write) == *user_id)
-                .map(|write| write_permission(write))
+                .map(write_permission)
                 .collect();
             let event = audit::succeeded_event(
                 &ctx,

@@ -5283,7 +5283,7 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
     .await
     .unwrap_or_else(|error| panic!("单条授予短命权限失败: {error}"));
     assert_eq!(
-        granted.data.as_ref().unwrap()["changed"].as_bool(),
+        granted.data.as_ref().and_then(|d| d["changed"].as_bool()),
         Some(true),
         "首次授予必须 changed=true: {:?}",
         granted.data
@@ -5304,7 +5304,7 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
             .await
             .unwrap_or_else(|error| panic!("单条续期失败: {error}"));
     assert_eq!(
-        renewed.data.as_ref().unwrap()["changed"].as_bool(),
+        renewed.data.as_ref().and_then(|d| d["changed"].as_bool()),
         Some(true),
         "过期行重授必须走续期分支（changed=true 而非幂等跳过）: {:?}",
         renewed.data
@@ -5369,7 +5369,7 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
     .await
     .unwrap_or_else(|error| panic!("批量授予短命权限失败: {error}"));
     assert_eq!(
-        short_lived.data.as_ref().unwrap()["succeeded"].as_u64(),
+        short_lived.data.as_ref().and_then(|d| d["succeeded"].as_u64()),
         Some(1),
         "批量首次授予必须 succeeded=1: {:?}",
         short_lived.data
@@ -5391,13 +5391,13 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
     .await
     .unwrap_or_else(|error| panic!("批量续期失败: {error}"));
     assert_eq!(
-        renewed.data.as_ref().unwrap()["succeeded"].as_u64(),
+        renewed.data.as_ref().and_then(|d| d["succeeded"].as_u64()),
         Some(1),
         "过期行批量重授必须走续期分支（succeeded=1 而非 skipped）: {:?}",
         renewed.data
     );
     assert_eq!(
-        renewed.data.as_ref().unwrap()["skipped"].as_u64(),
+        renewed.data.as_ref().and_then(|d| d["skipped"].as_u64()),
         Some(0),
         "续期不得计为幂等跳过: {:?}",
         renewed.data
