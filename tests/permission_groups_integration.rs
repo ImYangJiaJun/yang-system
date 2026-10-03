@@ -5369,7 +5369,10 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
     .await
     .unwrap_or_else(|error| panic!("批量授予短命权限失败: {error}"));
     assert_eq!(
-        short_lived.data.as_ref().and_then(|d| d["succeeded"].as_u64()),
+        short_lived
+            .data
+            .as_ref()
+            .and_then(|d| d["succeeded"].as_u64()),
         Some(1),
         "批量首次授予必须 succeeded=1: {:?}",
         short_lived.data
