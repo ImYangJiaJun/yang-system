@@ -1,15 +1,16 @@
-//! 授予目标用户一个已声明的权限（幂等）。
+//! 授予目标用户一个已声明的权限（幂等；可带过期时间，过期后按续期处理）。
 
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::ensure_may_grant_permission_in_tx;
 use crate::addon::access::domain::permission_catalog::{PERMISSION_MAX_LENGTH, PERMISSION_PATTERN};
+use crate::addon::access::domain::repository::{current_unix_timestamp, is_expired};
 use crate::audit;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 use yang_base::action::{ActionContext, ApiResponse};
-use yang_base::definition::{HttpMethod, Key, ModuleSpec, Str};
+use yang_base::definition::{HttpMethod, Int, Key, ModuleSpec, Str};
 use yang_base::BaseError;
 
 yang_base::params! {
@@ -24,6 +25,10 @@ yang_base::params! {
             .min_length(3)
             .max_length(PERMISSION_MAX_LENGTH)
             .pattern(PERMISSION_PATTERN),
+        expires_at: Int::new()
+            .title("过期时间")
+            .description("Unix 秒；留空=永久有效。过期后权限在解析侧失效、行保留做审计")
+            .require(false),
     }
 }
 
@@ -50,6 +55,14 @@ pub(super) async fn handle(
     access
         .permission_catalog()
         .ensure_declared(&input.permission)?;
+    // 过期时间必须是未来时刻（等于 now 当刻即失效，同样拒绝）；留空=永久。
+    let now = current_unix_timestamp()?;
+    if input.expires_at.is_some_and(|expires_at| expires_at <= now) {
+        return Err(BaseError::ParamInvalid(
+            "expires_at".to_string(),
+            "过期时间必须大于当前时间".to_string(),
+        ));
+    }
 
     // 同一事务：写授权事实 + 递增目标用户授权版本 + 追加 Outbox（writer 契约）。
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
@@ -76,23 +89,41 @@ pub(super) async fn handle(
             &input.permission,
         )
         .await?;
-        if access
+        // 幂等 + 过期续期：有效直授（未过期）重复授予按 changed=false 跳过；
+        // 已过期的直授行按审计要求保留，只能原地续期（唯一键不允许插第二行）。
+        let existing = access
             .grants()
-            .exists_in_tx(&ctx, &mut transaction, input.user_id, &input.permission)
-            .await?
-        {
-            return Ok(false);
-        }
-        access
-            .grants()
-            .insert_in_tx(
-                &ctx,
-                &mut transaction,
-                input.user_id,
-                &input.permission,
-                operator_id,
-            )
+            .find_expiry_in_tx(&ctx, &mut transaction, input.user_id, &input.permission)
             .await?;
+        match existing {
+            Some(expires_at) if !is_expired(expires_at, now) => return Ok(false),
+            Some(_) => {
+                access
+                    .grants()
+                    .renew_in_tx(
+                        &ctx,
+                        &mut transaction,
+                        input.user_id,
+                        &input.permission,
+                        operator_id,
+                        input.expires_at,
+                    )
+                    .await?;
+            }
+            None => {
+                access
+                    .grants()
+                    .insert_in_tx(
+                        &ctx,
+                        &mut transaction,
+                        input.user_id,
+                        &input.permission,
+                        operator_id,
+                        input.expires_at,
+                    )
+                    .await?;
+            }
+        }
         access
             .authorization()
             .increment_locked_authorization_version(&mut transaction, &locked)
@@ -160,6 +191,25 @@ mod tests {
     }
 
     #[test]
+    fn expires_at_is_optional_and_parses_as_future_timestamp() {
+        // 留空 = 永久有效；显式提供则必须是未来时刻（handler 内校验 > now）。
+        let permanent = serde_json::from_value::<GrantPermissionInput>(serde_json::json!({
+            "user_id": 7,
+            "permission": "access.grants.read"
+        }))
+        .unwrap_or_else(|error| panic!("不留过期时间的授予应可解析: {error}"));
+        assert_eq!(permanent.expires_at, None);
+
+        let future = serde_json::from_value::<GrantPermissionInput>(serde_json::json!({
+            "user_id": 7,
+            "permission": "access.grants.read",
+            "expires_at": 1_800_000_000
+        }))
+        .unwrap_or_else(|error| panic!("未来过期时间应可解析: {error}"));
+        assert_eq!(future.expires_at, Some(1_800_000_000));
+    }
+
+    #[test]
     fn params_declare_permission_format_contract() {
         let params = GrantPermissionInput::params();
         let permission = params
@@ -177,5 +227,12 @@ mod tests {
             .find(|param| param.name.as_str() == "user_id")
             .unwrap_or_else(|| panic!("应声明 user_id 参数"));
         assert!(user_id.required);
+
+        let expires_at = params
+            .as_slice()
+            .iter()
+            .find(|param| param.name.as_str() == "expires_at")
+            .unwrap_or_else(|| panic!("应声明 expires_at 参数"));
+        assert!(!expires_at.required, "expires_at 必须可缺省（缺省=永久）");
     }
 }

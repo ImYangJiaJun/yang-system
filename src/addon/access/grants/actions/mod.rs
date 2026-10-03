@@ -3,6 +3,8 @@
 //! 每个 Action 的输入、路由、权限与业务用例都自包含在同名文件中；
 //! 这里只有模块清单和注册表数组，新增接口时加 `mod` 声明和数组一行即可。
 
+mod batch_grant_permissions;
+mod batch_revoke_permissions;
 mod grant_permission;
 mod list_permissions;
 mod list_user_grants;
@@ -26,6 +28,8 @@ macro_rules! action_registry {
 const ACTIONS: &[Register] = action_registry![
     grant_permission,
     revoke_permission,
+    batch_grant_permissions,
+    batch_revoke_permissions,
     list_user_grants,
     list_permissions,
     // scaffold:action-registration

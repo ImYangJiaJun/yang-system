@@ -41,6 +41,9 @@ impl GrantResolver for AuthzGrantResolver {
         user_id: i64,
         transaction: &mut Transaction,
     ) -> Result<AuthorizationGrants, BaseError> {
+        // 过期过滤已在 repository 层完成（list_by_user_in_tx 的 SQL 条件
+        // `expires_at IS NULL OR expires_at > now`）：过期行保留在表里做审计，
+        // 本层只注入未过期直授，这里不再重复过滤。
         let records = self
             .access
             .grants()

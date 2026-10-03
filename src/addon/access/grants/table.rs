@@ -13,8 +13,15 @@ pub(crate) const USER_ID: &str = "user_id";
 pub(crate) const PERMISSION: &str = "permission";
 pub(crate) const GRANTED_BY: &str = "granted_by";
 pub(crate) const OCCURRED_AT: &str = "occurred_at";
-pub(crate) const GRANT_RECORD_FIELDS: &[&str] =
-    &[GRANT_ID, USER_ID, PERMISSION, GRANTED_BY, OCCURRED_AT];
+pub(crate) const EXPIRES_AT: &str = "expires_at";
+pub(crate) const GRANT_RECORD_FIELDS: &[&str] = &[
+    GRANT_ID,
+    USER_ID,
+    PERMISSION,
+    GRANTED_BY,
+    OCCURRED_AT,
+    EXPIRES_AT,
+];
 
 /// 构建授权事实表的唯一 Schema 定义。
 pub(crate) fn grants_table_spec() -> Result<TableSpec, BaseError> {
@@ -42,6 +49,12 @@ pub(crate) fn grants_table_spec() -> Result<TableSpec, BaseError> {
         occurred_at => Timestamp::new()
                 .title("授权时间")
                 .created_at()
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+        expires_at => Int::new()
+                .title("过期时间")
+                .description("Unix 秒；NULL=永久有效。过期后权限在解析侧失效、行保留做审计")
+                .filterable(true)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
     };
@@ -83,6 +96,7 @@ fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError>
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use yang_base::table::FieldType;
 
     #[test]
     fn grant_schema_has_composite_unique_and_system_only_fields() {
@@ -111,6 +125,34 @@ mod tests {
         assert!(id.is_auto_increment());
     }
 
+    #[test]
+    fn grant_schema_declares_nullable_expiry_for_audit_retention() {
+        let spec = grants_table_spec().unwrap_or_else(|error| panic!("授权表定义应有效: {error}"));
+        let expires = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == EXPIRES_AT)
+            .unwrap_or_else(|| panic!("应存在 expires_at 字段"));
+        assert!(
+            !expires.storage.required,
+            "expires_at 必须可空（NULL=永久）"
+        );
+        assert!(expires.access.filterable, "过期过滤需要 SQL 层筛选能力");
+
+        let definition = spec
+            .table_definition()
+            .unwrap_or_else(|error| panic!("授权表定义应有效: {error}"));
+        let expires = definition
+            .field(EXPIRES_AT)
+            .unwrap_or_else(|| panic!("应存在 expires_at 字段"));
+        assert_eq!(
+            expires.field_type(),
+            &FieldType::BigInt,
+            "expires_at 存储为 64 位整数（unix 秒）"
+        );
+        assert!(!expires.is_required(), "expires_at 必须可空（NULL=永久）");
+    }
+
     #[tokio::test]
     async fn grant_facts_are_only_readable_and_writable_by_system_role() {
         let pool = sqlx::mysql::MySqlPoolOptions::new()
@@ -121,7 +163,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("授权表定义应有效: {error}"));
         let table = definition.bind(Arc::new(pool));
 
-        for field_name in [USER_ID, PERMISSION, GRANTED_BY, OCCURRED_AT] {
+        for field_name in [USER_ID, PERMISSION, GRANTED_BY, OCCURRED_AT, EXPIRES_AT] {
             let denied = table.query(["user"]).select_fields(&[field_name]);
             assert!(matches!(
                 denied,

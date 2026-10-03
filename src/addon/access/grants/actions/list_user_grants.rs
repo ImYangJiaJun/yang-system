@@ -1,6 +1,7 @@
-//! 查询目标用户的全部直授权限。
+//! 查询目标用户的全部直授权限（审计视图：含过期行，带 expired 派生标记）。
 
 use crate::addon::access::domain::context::Access;
+use crate::addon::access::domain::repository::{current_unix_timestamp, is_expired, GrantRecord};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::sync::Arc;
@@ -18,13 +19,18 @@ yang_base::params! {
     }
 }
 
-/// 单条直授权限的对外视图。
+/// 单条直授权限的对外视图（审计视图，过期行也展示）。
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct GrantView {
     id: i64,
     permission: String,
     granted_by: i64,
     occurred_at: i64,
+    /// Unix 秒；`None` = 永久有效。
+    expires_at: Option<i64>,
+    /// 派生标记：是否已过期（`expires_at <= now`）。过期后权限在解析侧失效，
+    /// 行仍保留做审计；前端据此展示「已过期」并允许重新授予（走续期）。
+    expired: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -60,9 +66,11 @@ pub(super) async fn handle(
         .read_only_transaction()
         .await
         .map_err(BaseError::from)?;
+    // 审计视图读取全部行（含过期行）：与解析侧（list_by_user_in_tx 的 SQL 过滤）
+    // 相反，这里要连过期行一起展示，expired 派生标记由展示层按同一时钟计算。
     let result = access
         .grants()
-        .list_by_user_in_tx(&ctx, &mut transaction, input.user_id)
+        .list_all_by_user_in_tx(&ctx, &mut transaction, input.user_id)
         .await;
     let records = match result {
         Ok(records) => {
@@ -77,18 +85,26 @@ pub(super) async fn handle(
         }
     };
 
+    let now = current_unix_timestamp()?;
     Ok(ListUserGrantsResult {
         user_id: input.user_id,
         grants: records
             .into_iter()
-            .map(|record| GrantView {
-                id: record.id,
-                permission: record.permission,
-                granted_by: record.granted_by,
-                occurred_at: record.occurred_at,
-            })
+            .map(|record| grant_view(record, now))
             .collect(),
     })
+}
+
+/// 把一条直授事实投影为对外视图（含 `expired` 派生标记，前端展示用）。
+fn grant_view(record: GrantRecord, now: i64) -> GrantView {
+    GrantView {
+        id: record.id,
+        permission: record.permission,
+        granted_by: record.granted_by,
+        occurred_at: record.occurred_at,
+        expires_at: record.expires_at,
+        expired: is_expired(record.expires_at, now),
+    }
 }
 
 /// 自包含注册：路由/权限声明与 Handler 在同一文件内原子绑定。
@@ -126,5 +142,30 @@ mod tests {
             "permission": "access.grants.write"
         }));
         assert!(injected.is_err(), "客户端不能注入过滤字段");
+    }
+
+    #[test]
+    fn view_flags_past_future_and_permanent_grants() {
+        let now = 1_700_000_000;
+        let record = |expires_at: Option<i64>| GrantRecord {
+            id: 1,
+            user_id: 7,
+            permission: "access.grants.read".to_string(),
+            granted_by: 9,
+            occurred_at: 1_690_000_000,
+            expires_at,
+        };
+
+        let expired = grant_view(record(Some(now - 1)), now);
+        assert!(expired.expired, "过去时刻必须标记为已过期");
+        assert_eq!(expired.expires_at, Some(now - 1));
+
+        let active = grant_view(record(Some(now + 1)), now);
+        assert!(!active.expired, "未来时刻未过期");
+        assert_eq!(active.expires_at, Some(now + 1));
+
+        let permanent = grant_view(record(None), now);
+        assert!(!permanent.expired, "NULL=永久，永不过期");
+        assert_eq!(permanent.expires_at, None);
     }
 }

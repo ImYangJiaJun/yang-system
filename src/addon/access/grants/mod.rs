@@ -90,6 +90,8 @@ fn step_up_targets() -> Vec<yang_base::definition::ActionRef> {
     vec![
         yang_base::action!("access.grants.grant_permission"),
         yang_base::action!("access.grants.revoke_permission"),
+        yang_base::action!("access.grants.batch_grant_permissions"),
+        yang_base::action!("access.grants.batch_revoke_permissions"),
     ]
 }
 
@@ -104,6 +106,8 @@ mod tests {
             vec![
                 yang_base::action!("access.grants.grant_permission"),
                 yang_base::action!("access.grants.revoke_permission"),
+                yang_base::action!("access.grants.batch_grant_permissions"),
+                yang_base::action!("access.grants.batch_revoke_permissions"),
             ]
         );
     }
