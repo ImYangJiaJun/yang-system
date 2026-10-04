@@ -95,6 +95,8 @@ export type GroupSummary = {
   /// 当前身份能否管理这个组（后端按「组所有者或全局写权限」算好，
   /// 前端只拿它显隐管理按钮，不再自行判权）。
   canManage: boolean;
+  /// 创建者用户 ID：用于展示「由用户 #N 创建」，让管理依据对操作者可见。
+  createdBy: number;
 };
 
 /// 一条组条目。`isOrphan` 为真是「这条权限已不在权限目录里」——**只标记不清理**，
@@ -119,6 +121,8 @@ export type GroupDetail = {
   /// 当前身份能否管理这个组（后端按「组所有者或全局写权限」算好，
   /// 前端只拿它显隐管理按钮，不再自行判权）。
   canManage: boolean;
+  /// 创建者用户 ID：用于展示「由用户 #N 创建」，让管理依据对操作者可见。
+  createdBy: number;
 };
 
 /// 权限目录里的一条权限（对齐 `grants/actions/list_permissions.rs` 的 `PermissionEntry`）。
@@ -167,6 +171,7 @@ function parseGroupSummary(raw: Record<string, unknown>): GroupSummary | null {
     isBuiltin: raw.is_builtin === true,
     orphanItemCount: asNumber(raw.orphan_item_count, 0),
     canManage: raw.can_manage === true,
+    createdBy: asNumber(raw.created_by, 0),
   };
 }
 
@@ -224,6 +229,7 @@ function parseGroupDetail(data: unknown, groupId: number): GroupDetail {
     // 缺 `can_manage` 时按「不能管理」处理：管理按钮不渲染，只留读侧——
     // 猜成 true 会让一个管理不了的组露出会 403 的按钮
     canManage: record?.can_manage === true,
+    createdBy: asNumber(record?.created_by, 0),
   };
 }
 

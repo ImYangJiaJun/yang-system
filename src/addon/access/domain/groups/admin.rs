@@ -117,6 +117,28 @@ pub(crate) fn ensure_operator_may_manage_group(
     ))
 }
 
+/// 从请求 claims 中读 `access.groups.write` 并调 [`ensure_operator_may_manage_group`]。
+///
+/// 7 个写 Action 的调用点共享同一段 claims 提取代码（`ctx.authenticated_user()
+/// .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION))`），任何新 Action
+/// 漏写或写错都会静默失去管理权守卫。这个包装把 claims 提取集中到一处，调用方只需
+/// 传入 `(operator_id, ctx, &group)` 即可——与直接调底层 `ensure_operator_may_manage_group`
+/// 完全等价，不改任何语义。
+///
+/// 读 Action 不使用本包装：它们用 [`operator_may_see_group`] 而非管理权守卫。
+pub(crate) fn ensure_operator_may_manage_group_from_ctx(
+    operator_id: i64,
+    ctx: &ActionContext,
+    group: &GroupRecord,
+) -> Result<(), BaseError> {
+    ensure_operator_may_manage_group(
+        operator_id,
+        group,
+        ctx.authenticated_user()
+            .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
+    )
+}
+
 /// 使受影响用户的 Access Token 失效（spec §6.3）。
 ///
 /// **锁序**：必须按 `user_id` 升序加锁，这是防死锁的唯一手段。

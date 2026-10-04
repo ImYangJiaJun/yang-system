@@ -2,6 +2,10 @@
 
 本清单是架构门禁的机器可读输入，不是“同一函数出现版本递增调用”的正则证明。事务正确性仍由 typed writer 与真实 MySQL 集成测试证明。
 
+> 交叉引用：本清单（含下方 `authorization-writer` 注册表）与 `scripts/check_architecture.py`
+> 中的 `AUTHORIZATION_WRITER_ALLOWLIST` 常量一一对应，门禁同时校验两者。
+> 增删 writer 或调整路径时，必须同步修改本文档与该常量，缺一处即 drift。
+
 ## 授权事实
 
 | 表 | 字段 | 唯一写入语义 |

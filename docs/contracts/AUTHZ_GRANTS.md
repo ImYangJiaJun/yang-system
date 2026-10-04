@@ -135,7 +135,10 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 `system_owner`（运行支撑表，语义上的单行哨兵）：`id`、`sentinel_key`
 （UNIQUE `uk_system_owner_sentinel` + CHECK `chk_system_owner_sentinel`，锁死取值
 `'system-owner'`）、`user_id`、`claimed_at`。**并发仲裁机制**：唯一约束与 CHECK 的组合
-使第二个插入者必然违反其一，引导不依赖任何「判空」判断。
+使第二个插入者必然违反其一，引导不依赖任何「判空」判断。**哨兵行在账号删除时不被清理**：
+它是「引导已发生过」的永久标记（而非「当前管理员是谁」的实时索引），`user_id` 在账号删除后
+指向已匿名化的用户是预期行为——删除管理员账号不应让系统回到可重新引导的状态。需要重新引导
+时走灾备 SQL 显式删除旧哨兵行。
 
 三张运行支撑表由 `src/addon/access/domain/groups/tables.rs` 声明，进入
 `infrastructure_definitions()`（数组长度由 6 扩为 9），`permission_group` 由
@@ -188,7 +191,7 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 | 入口 | 守卫 |
 |---|---|
 | `disable_self.rs`（自助停用） | 操作后系统若将无 active 管理员则拒绝 |
-| `delete_account.rs`（自助删除） | 同上守卫；并清理该用户的 `authz_grant` 与 `user_group` 行（防孤儿授权） |
+| `delete_account.rs`（自助删除） | 同上守卫；并清理该用户的 `authz_grant` 与 `user_group` 行（防孤儿授权）。**`system_owner` 哨兵行刻意保留**——哨兵是「引导已发生过」的永久标记，不是「当前管理员是谁」的实时索引。删除管理员账号不应让系统回到可重新引导的状态，否则任何后续注册都能竞争引导成为新系统管理员，违背「首个注册账号成为管理员、且仅一次」的不变量。需要重新引导时走灾备 SQL 显式删除旧哨兵行 |
 | `admin_disable_user.rs`（管理停用） | 保留既有自指防护，另加「最后一个」防护 |
 | `POST /api/v1/access/groups/members/remove` | 移出 `system_admin` 组的操作受同一守卫 |
 

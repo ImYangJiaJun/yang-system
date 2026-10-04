@@ -1,9 +1,7 @@
 //! 删除一个权限组。
 
 use crate::addon::access::domain::context::Access;
-use crate::addon::access::domain::groups::admin::{
-    ensure_operator_may_manage_group, GROUP_WRITE_PERMISSION,
-};
+use crate::addon::access::domain::groups::admin::ensure_operator_may_manage_group_from_ctx;
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
 use schemars::JsonSchema;
@@ -51,12 +49,7 @@ pub(super) async fn handle(
         }
         // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
         // 判据只读 `created_by` 与 claims，不新增任何库读。
-        ensure_operator_may_manage_group(
-            operator_id,
-            &group,
-            ctx.authenticated_user()
-                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
-        )?;
+        ensure_operator_may_manage_group_from_ctx(operator_id, &ctx, &group)?;
         // 应用层前置检查给出可读错误；数据库外键 RESTRICT 兜底并发窗口（spec §8.3）。
         let member_count = access
             .groups()

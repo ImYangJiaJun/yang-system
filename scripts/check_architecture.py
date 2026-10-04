@@ -136,6 +136,9 @@ AUTHORIZATION_WRITER_DOCUMENT = Path("docs/architecture/authorization-writers.md
 
 SOURCE_ROOT_DIRECTORIES = {"addon", "config", "infrastructure"}
 SOURCE_ROOT_FILES = {"app.rs", "bootstrap.rs", "lib.rs", "main.rs"}
+# 交叉引用：本 allowlist 与 docs/architecture/authorization-writers.md 的
+# authorization-writer 注册表（及"允许边界"表格）一一对应，check_authorization_writer_boundaries
+# 会双向校验。增删 writer 或调整路径时，必须同步修改文档与该常量，缺一处即 drift。
 AUTHORIZATION_WRITER_ALLOWLIST = {
     "src/addon/account/domain/repository.rs": "account-user-facts",
     "src/addon/account/domain/authz_version.rs": "account-security-version",
@@ -190,6 +193,32 @@ ACTION_REGISTER_BODY_RE = re.compile(
 )
 ADMIN_EQUIVALENT_KEYWORDS = (
     "secret", "credential", "reset", "token", "rotate", "key",
+)
+# ── G2: lock-before-gate 约束 ─────────────────────────────────────────
+#
+# 在事务内的写路径中，G2 闸门（权限判权）必须在行锁之后执行——否则闸门读到的
+# 快照可能早于行锁，导致并发写入突破判权（详见 grant_permission.rs L81-83 及
+# add_group_item.rs 同类注释）。
+#
+# LOCK_CALLS:  锁定目标用户或目标组的行级 SELECT … FOR UPDATE。
+# GATE_CALLS:  必须在行锁之后调用的判权函数。
+# 两者在 handle 函数体内的首次出现位置决定顺序——任何 gate 出现在 lock 之前
+# 都构成架构违规。
+LOCK_CALLS = (
+    "lock_authorization_version",
+    "lock_users_ascending_in_tx",
+    "lock_group_in_tx",
+)
+GATE_CALLS = (
+    "ensure_may_grant_permission_in_tx",
+    "ensure_operator_may_manage_group",
+    "ensure_may_modify_members_of_group_in_tx",
+)
+# 需要检查 lock-before-gate 的 action 文件路径前缀（相对 src/addon/）。
+# 只有同时包含行锁和判权调用的文件才受此约束。
+LOCK_GATE_SCOPED_PATHS = (
+    "src/addon/access/grants/actions/",
+    "src/addon/access/groups/actions/",
 )
 
 
@@ -1185,6 +1214,110 @@ def check_admin_equivalent_coverage(root: Path) -> list[str]:
     return errors
 
 
+REVOKE_BY_SUBJECT_RE = re.compile(r"\.revoke_by_subject\s*\(")
+# revoke_by_subject 设置 subject 水位线，立即杀死该用户全部已签发 Token。
+# 仅限以下两处生产代码调用：
+#   1. revoke_permission.rs — 单条撤销路径，事务提交后即时收敛 Redis；
+#   2. account/domain/context.rs — converge_revocation 集中封装，
+#      供 logout / disable_self / change_password 等账号安全事件共享。
+# 批量撤销（batch_revoke_permissions）必须走 Outbox + 版本传播，参考该文件头部注释。
+REVOKE_BY_SUBJECT_ALLOWED = {
+    "src/addon/access/grants/actions/revoke_permission.rs",
+    "src/addon/account/domain/context.rs",
+}
+
+
+def check_revoke_by_subject_placement(root: Path) -> list[str]:
+    """revoke_by_subject 仅限单条撤销路径与 converge_revocation 封装使用。
+
+    扫描 `src/` 下全部 `.rs` 文件，找到任何 `.revoke_by_subject(` 调用后，
+    检查文件相对路径是否在 allowlist 中；不在则报错。注释与字符串字面量中的
+    文字提及不会触发——正则只匹配真实的链式方法调用形态。
+    """
+
+    errors: list[str] = []
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return errors
+    for path in sorted(source_root.rglob("*.rs")):
+        source = production_source(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(root).as_posix()
+        if relative in REVOKE_BY_SUBJECT_ALLOWED:
+            continue
+        for match in REVOKE_BY_SUBJECT_RE.finditer(source):
+            line_number = source.count("\n", 0, match.start()) + 1
+            errors.append(
+                f"{relative}:{line_number}: revoke_by_subject 仅限单条撤销路径使用"
+                "（revoke_permission.rs）与 converge_revocation 封装"
+                "（account/domain/context.rs）；批量撤销必须走 Outbox + 版本传播，"
+                "参考 batch_revoke_permissions.rs 的注释"
+            )
+    return errors
+
+
+def check_lock_before_gate(root: Path) -> list[str]:
+    """事务内的 G2 闸门必须在行锁之后调用。
+
+    grant_permission.rs 的注释（L81-83）解释：权限判权函数的首次读取即快照起点，
+    必须在行级 SELECT … FOR UPDATE 之后，否则并发写入可绕过判权。同样的约束适用于
+    组管理类 action（ensure_operator_may_manage_group / ensure_may_modify_members_of_group_in_tx
+    必须在 lock_group_in_tx / lock_users_ascending_in_tx 之后）。
+
+    实现策略：在受约束路径的 action 文件中，找到 handle 函数体，分别定位首个 lock 调用
+    与首个 gate 调用的字符偏移。gate 出现在 lock 之前即违规。如果文件只含 lock 或只含
+    gate 则不受此约束（不报错）。
+    """
+
+    errors: list[str] = []
+    source_root = root / "src"
+    if not source_root.is_dir():
+        return errors
+    lock_re = re.compile(
+        r"\b(?:" + "|".join(re.escape(name) for name in LOCK_CALLS) + r")\s*\("
+    )
+    gate_re = re.compile(
+        r"\b(?:" + "|".join(re.escape(name) for name in GATE_CALLS) + r")\s*\("
+    )
+    handle_body_re = re.compile(
+        r"(?m)^\s*pub\(super\)\s+async\s+fn\s+handle\s*\([^)]*\)\s*(?:->\s*[^{]+)?\s*\{"
+    )
+    for path in sorted(source_root.rglob("*.rs")):
+        relative = path.relative_to(root).as_posix()
+        if not any(relative.startswith(scope) for scope in LOCK_GATE_SCOPED_PATHS):
+            continue
+        source = production_source(path.read_text(encoding="utf-8"))
+        skeleton = strip_literals(source)
+        handle_match = handle_body_re.search(skeleton)
+        if handle_match is None:
+            continue
+        # 提取 handle 函数体（花括号配对在骨架上进行，防止字符串/注释里的 { } 干扰）
+        depth = 1
+        body_start = handle_match.end()
+        body_end = len(skeleton)
+        for idx in range(body_start, len(skeleton)):
+            if skeleton[idx] == "{":
+                depth += 1
+            elif skeleton[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    body_end = idx
+                    break
+        handle_body = source[body_start:body_end]
+        lock_match = lock_re.search(handle_body)
+        gate_match = gate_re.search(handle_body)
+        if lock_match is None or gate_match is None:
+            continue  # 只含其一不受约束
+        if gate_match.start() < lock_match.start():
+            gate_line = source.count("\n", 0, body_start + gate_match.start()) + 1
+            lock_line = source.count("\n", 0, body_start + lock_match.start()) + 1
+            errors.append(
+                f"{relative}:{gate_line}: G2 闸门 {gate_match.group()} 出现在行锁 "
+                f"{lock_match.group()}（行 {lock_line}）之前——事务内的权限判权必须在 "
+                "行级 SELECT … FOR UPDATE 之后调用，否则快照一致性被破坏"
+            )
+    return errors
+
+
 def check(root: Path) -> list[str]:
     errors: list[str] = []
     errors.extend(check_source_layout(root))
@@ -1204,6 +1337,8 @@ def check(root: Path) -> list[str]:
     errors.extend(check_authorization_writer_boundaries(root))
     errors.extend(check_frontend_boundaries(root))
     errors.extend(check_admin_equivalent_coverage(root))
+    errors.extend(check_revoke_by_subject_placement(root))
+    errors.extend(check_lock_before_gate(root))
     return errors
 
 
@@ -1849,6 +1984,170 @@ def self_test() -> None:
         errors = check_admin_equivalent_coverage(root)
         assert any("敏感关键词" in error for error in errors), (
             "含敏感关键词的权限必须触发警告"
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        # 允许路径：revoke_permission.rs
+        write(
+            root / "src/addon/access/grants/actions/revoke_permission.rs",
+            "fn handle() { ctx.tools().token()?.revoke_by_subject(&uid); }\n",
+        )
+        assert check_revoke_by_subject_placement(root) == [], (
+            "revoke_permission.rs 是允许调用 revoke_by_subject 的路径"
+        )
+
+        # 允许路径：account/domain/context.rs（converge_revocation 封装）
+        write(
+            root / "src/addon/account/domain/context.rs",
+            "fn converge() { ctx.tools().token()?.revoke_by_subject(&uid); }\n",
+        )
+        assert check_revoke_by_subject_placement(root) == [], (
+            "context.rs 是允许调用 revoke_by_subject 的集中封装路径"
+        )
+
+        # 拒绝路径：其他任何文件
+        write(
+            root / "src/addon/access/grants/actions/batch_revoke_permissions.rs",
+            "fn batch() { ctx.tools().token()?.revoke_by_subject(&uid); }\n",
+        )
+        errors = check_revoke_by_subject_placement(root)
+        assert any("revoke_by_subject" in error for error in errors), (
+            "非允许路径调用 revoke_by_subject 必须报错"
+        )
+        assert any("batch_revoke_permissions" in error for error in errors), (
+            "错误信息必须包含违规文件路径"
+        )
+
+        # 注释中的文字提及不应触发
+        write(
+            root / "src/addon/access/grants/actions/batch_revoke_permissions.rs",
+            "// 与 revoke_permission 不同，批量撤销不调用 revoke_by_subject\n",
+        )
+        assert check_revoke_by_subject_placement(root) == [], (
+            "注释中的 revoke_by_subject 文字提及不应触发检查"
+        )
+
+        # 字符串字面量中的伪装不应触发
+        write(
+            root / "src/addon/access/grants/actions/batch_revoke_permissions.rs",
+            'fn _note() { let _ = "revoke_by_subject 仅限单条路径"; }\n',
+        )
+        assert check_revoke_by_subject_placement(root) == [], (
+            "字符串字面量中的 revoke_by_subject 不应触发检查"
+        )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        # 正确顺序：lock 在 gate 之前（应通过）
+        write(
+            root / "src/addon/access/grants/actions/grant_permission.rs",
+            "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
+            "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        assert check_lock_before_gate(root) == [], (
+            "lock 在 gate 之前的正确顺序应通过"
+        )
+
+        # 错误顺序：gate 在 lock 之前（应报错）
+        write(
+            root / "src/addon/access/grants/actions/grant_permission.rs",
+            "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
+            "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        errors = check_lock_before_gate(root)
+        assert any("G2 闸门" in error and "出现在行锁" in error for error in errors), (
+            "gate 在 lock 之前必须报错"
+        )
+        assert any("grant_permission.rs" in error for error in errors), (
+            "错误信息必须包含违规文件路径"
+        )
+
+        # 只有 lock 没有 gate（不受约束，应通过）
+        write(
+            root / "src/addon/access/grants/actions/grant_permission.rs",
+            "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        assert check_lock_before_gate(root) == [], (
+            "只有 lock 没有 gate 的 action 不受此约束"
+        )
+
+        # 只有 gate 没有 lock（不受约束，应通过）
+        write(
+            root / "src/addon/access/grants/actions/grant_permission.rs",
+            "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
+            "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        assert check_lock_before_gate(root) == [], (
+            "只有 gate 没有 lock 的 action 不受此约束"
+        )
+
+        # 非受约束路径（不在 LOCK_GATE_SCOPED_PATHS 内）不检查
+        write(
+            root / "src/addon/demo/actions/demo_action.rs",
+            "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
+            "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        assert check_lock_before_gate(root) == [], (
+            "非受约束路径的 action 不检查 lock-before-gate"
+        )
+
+        # 组管理路径同样受约束
+        write(
+            root / "src/addon/access/groups/actions/add_group_item.rs",
+            "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
+            "    ensure_operator_may_manage_group(&access, &ctx, group_id).await?;\n"
+            "    let locked = lock_users_ascending_in_tx(pool, &mut tx, user_ids).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        errors = check_lock_before_gate(root)
+        assert any("add_group_item.rs" in error for error in errors), (
+            "组管理 action 的 gate-before-lock 同样必须报错"
+        )
+        # 清理：后续测试不应受上面违规文件的影响
+        (root / "src/addon/access/groups/actions/add_group_item.rs").unlink()
+
+        # 注释中的文字提及不应触发（strip_literals 已剥离注释）
+        write(
+            root / "src/addon/access/grants/actions/grant_permission.rs",
+            "// ensure_may_grant_permission_in_tx 必须放在 lock_authorization_version 之后\n"
+            "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
+            "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        assert check_lock_before_gate(root) == [], (
+            "注释中的函数名提及不应影响检查"
+        )
+
+        # 字符串字面量中的伪装不应触发
+        write(
+            root / "src/addon/access/grants/actions/grant_permission.rs",
+            'pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n'
+            '    let _ = "lock_authorization_version 必须在 ensure_may_grant_permission_in_tx 之前";\n'
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
+            "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "}\n"
+            "pub(super) fn register() {}\n",
+        )
+        assert check_lock_before_gate(root) == [], (
+            "字符串字面量中的函数名伪装不应影响检查"
         )
 
 

@@ -4,8 +4,8 @@ use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
     assert_no_self_escalation, effective_permissions_of_in_tx,
     ensure_may_modify_members_of_group_in_tx, ensure_member_limit,
-    ensure_operator_may_manage_group, invalidate_users_in_tx, lock_users_ascending_in_tx,
-    simulate_after_join, GROUP_WRITE_PERMISSION,
+    ensure_operator_may_manage_group_from_ctx, invalidate_users_in_tx, lock_users_ascending_in_tx,
+    simulate_after_join,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
@@ -179,12 +179,7 @@ async fn join_group_once(
         // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
         // 内置全权组已由上面 §8.1 守卫先行判定，这里覆盖普通组；
         // 判据只读 `created_by` 与 claims，不新增库读。
-        ensure_operator_may_manage_group(
-            operator_id,
-            &group,
-            ctx.authenticated_user()
-                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
-        )?;
+        ensure_operator_may_manage_group_from_ctx(operator_id, ctx, &group)?;
 
         // G2 闸门：目标组持有管理员等价权限时，加成员同样是一种「授予」——组本身没有
         // 变化，变的是成员：新成员会继承组的全部权限（含管理员等价那条）。判据因此看

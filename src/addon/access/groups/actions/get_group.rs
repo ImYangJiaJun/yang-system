@@ -51,6 +51,9 @@ pub(super) struct GetGroupResult {
     /// 当前操作者能否管理该组（组所有者或持有全局写权限）：由后端算好，
     /// 前端据此显隐管理按钮，不再自行判权。
     can_manage: bool,
+    /// 创建者用户 ID：让前端能显示「由用户 #N 创建」，辅助判断当前身份是
+    /// 以所有者身份管理还是以写权限身份管理—— UX 透明度，不影响授权语义。
+    created_by: i64,
 }
 
 /// 把条目字符串投影成响应条目：按权限字符串稳定排序，孤儿条目原样保留并打标记。
@@ -113,6 +116,7 @@ pub(super) async fn handle(
             items: item_views(&items, &catalog),
             members,
             can_manage,
+            created_by: group.created_by,
         })
     }
     .await;
@@ -195,6 +199,7 @@ mod tests {
             items: item_views(&["access.groups.read".to_string()], &catalog()),
             members: vec![7],
             can_manage: true,
+            created_by: 1,
         };
         let value = serde_json::to_value(&payload).unwrap_or_else(|error| panic!("{error}"));
         let keys: Vec<&str> = value
@@ -205,6 +210,7 @@ mod tests {
             keys,
             [
                 "can_manage",
+                "created_by",
                 "description",
                 "effective_all",
                 "group_key",

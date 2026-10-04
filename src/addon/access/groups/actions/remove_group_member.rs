@@ -9,8 +9,8 @@
 
 use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
-    count_active_system_admins_of_members_in_tx, ensure_operator_may_manage_group,
-    invalidate_users_in_tx, lock_users_ascending_in_tx, GROUP_WRITE_PERMISSION,
+    count_active_system_admins_of_members_in_tx, ensure_operator_may_manage_group_from_ctx,
+    invalidate_users_in_tx, lock_users_ascending_in_tx,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
@@ -155,12 +155,7 @@ pub(super) async fn handle(
         // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
         // 内置全权组已由上面 §8.1/§8.2 守卫先行判定，这里覆盖普通组；
         // 判据只读 `created_by` 与 claims，不新增库读。
-        ensure_operator_may_manage_group(
-            operator_id,
-            &group,
-            ctx.authenticated_user()
-                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
-        )?;
+        ensure_operator_may_manage_group_from_ctx(operator_id, &ctx, &group)?;
         // 这里**刻意不做** §8.1 的自提权（权限子集）校验：移出只会减少权限，永远不会让调用者的
         // 有效权限变大，而管理员必须能退出全权组（否则最后一个想走的管理员被锁死）。
 

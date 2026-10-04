@@ -93,6 +93,14 @@ impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
         Ok(admins.keeps_at_least_one_admin())
     }
 
+    /// 清理该用户的授权事实：`authz_grant` 直授行与 `user_group` 组成员行。
+    ///
+    /// **刻意不清理 `system_owner` 哨兵行**：哨兵的语义是「引导已发生过」的永久标记，
+    /// 而不是「当前管理员是谁」的实时索引。账号删除后哨兵的 `user_id` 指向一个已匿名化
+    /// 的用户，但这是预期的——引导只发生一次，删除管理员账号不应让系统回到「可重新引导」
+    /// 的状态。若哨兵被一同清理，任何后续注册都能竞争引导、成为新的系统管理员，这违背了
+    /// 「首个注册账号成为管理员、且仅一次」的设计不变量。需要重新引导时，走灾备 SQL 路径
+    /// （`docs/contracts/AUTHZ_GRANTS.md` 的「灾备路径」节）显式删除旧哨兵行。
     async fn purge_user_facts_in_tx(
         &self,
         ctx: &ActionContext,

@@ -38,6 +38,9 @@ pub(super) struct GroupSummaryView {
     /// 当前操作者能否管理该组（组所有者或持有全局写权限）：由后端算好，
     /// 前端据此显隐管理按钮，不再自行判权。
     can_manage: bool,
+    /// 创建者用户 ID：让前端能显示「由用户 #N 创建」，辅助判断当前身份是
+    /// 以所有者身份管理还是以写权限身份管理——UX 透明度，不影响授权语义。
+    created_by: i64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -63,6 +66,7 @@ fn summarize(
         is_builtin: group.group_key == SYSTEM_ADMIN_GROUP_KEY,
         orphan_item_count: orphan_items(items, catalog).len() as u64,
         can_manage,
+        created_by: group.created_by,
     }
 }
 
@@ -193,6 +197,7 @@ mod tests {
             keys,
             [
                 "can_manage",
+                "created_by",
                 "description",
                 "group_key",
                 "id",

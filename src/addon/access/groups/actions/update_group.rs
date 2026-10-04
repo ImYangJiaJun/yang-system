@@ -1,9 +1,7 @@
 //! 改写权限组的展示字段（`title` / `description`）。
 
 use crate::addon::access::domain::context::Access;
-use crate::addon::access::domain::groups::admin::{
-    ensure_operator_may_manage_group, GROUP_WRITE_PERMISSION,
-};
+use crate::addon::access::domain::groups::admin::ensure_operator_may_manage_group_from_ctx;
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
 use schemars::JsonSchema;
@@ -61,12 +59,7 @@ pub(super) async fn handle(
         }
         // 组所有者语义：操作者须是组所有者、或持有全局写权限（claims）。
         // 判据只读 `created_by` 与 claims，不新增任何库读；放行后才改写展示字段。
-        ensure_operator_may_manage_group(
-            operator_id,
-            &group,
-            ctx.authenticated_user()
-                .is_some_and(|user| user.has_permission(GROUP_WRITE_PERMISSION)),
-        )?;
+        ensure_operator_may_manage_group_from_ctx(operator_id, &ctx, &group)?;
         let affected = access
             .groups()
             .update_group_in_tx(
