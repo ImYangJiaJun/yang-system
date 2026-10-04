@@ -99,3 +99,34 @@ export function buildPrimaryActionValues(
       : {}),
   };
 }
+
+/// 面板无法自动补全的必填参数：既不是自动下发的 page/limit/search，输入契约里
+/// 也没有默认值。这类参数必须人工填写（查询条件条），且主 Action 不能自动调用——
+/// 否则每次进页都发一个注定 400 的请求（如要求必填路径参数的直授查询，
+/// 2026-10-05 回归）。
+export function manualPrimaryParams(
+  action: ActionDemoSchema | undefined,
+): string[] {
+  if (!action) return [];
+  const autoSupplied = new Set(["page", "limit", "search"]);
+  const root = asJsonSchema(action.input_schema);
+  const resolved = effectiveSchema(root, root);
+  const properties = resolved.properties ?? {};
+  const needsManual = (name: string): boolean => {
+    if (autoSupplied.has(name)) return false;
+    const property = properties[name];
+    return !(
+      property !== undefined &&
+      effectiveSchema(root, property).default !== undefined
+    );
+  };
+  const names = new Set<string>();
+  for (const parameter of action.params ?? []) {
+    if (parameter.required && needsManual(parameter.name))
+      names.add(parameter.name);
+  }
+  for (const name of resolved.required ?? []) {
+    if (needsManual(name)) names.add(name);
+  }
+  return [...names].sort();
+}

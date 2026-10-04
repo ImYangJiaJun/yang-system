@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ActionDemoSchema } from "@/engine/contracts/ui-catalog";
 import {
   buildPrimaryActionValues,
+  manualPrimaryParams,
   outputProperties,
   schemaColumn,
 } from "@/engine/renderers/module/primary-model";
@@ -86,5 +87,46 @@ describe("primaryAction 回退模型", () => {
       title: "other",
       display: { kind: "text" },
     });
+  });
+});
+
+describe("manualPrimaryParams", () => {
+  const param = (name: string, source: "path" | "body" | "query") => ({
+    name,
+    source,
+    required: true,
+    title: name,
+    description: "",
+  });
+
+  it("必填且无默认值的参数（如直授查询的路径参数 user_id）判定为人工参数", () => {
+    const requiredPath: ActionDemoSchema = {
+      ...action,
+      input_schema: {
+        type: "object",
+        properties: { user_id: { type: "integer", title: "目标用户" } },
+        required: ["user_id"],
+      },
+      params: [param("user_id", "path")],
+    };
+    expect(manualPrimaryParams(requiredPath)).toEqual(["user_id"]);
+  });
+
+  it("page/limit/search 与带默认值的必填参数都不判定为人工参数", () => {
+    // 无必填参数的普通主 Action。
+    expect(manualPrimaryParams(action)).toEqual([]);
+    // 必填但有默认值。
+    const defaulted: ActionDemoSchema = {
+      ...action,
+      input_schema: {
+        type: "object",
+        properties: { mode: { type: "string", default: "all" } },
+        required: ["mode"],
+      },
+      params: [param("mode", "query")],
+    };
+    expect(manualPrimaryParams(defaulted)).toEqual([]);
+    // 无 Action 时没有人工参数。
+    expect(manualPrimaryParams(undefined)).toEqual([]);
   });
 });
