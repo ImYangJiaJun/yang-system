@@ -24,9 +24,13 @@
  * 「共 N 项」里的 N 取的是**当前身份在界面目录里能看到的 Action 数**：
  * UI 目录不投影权限清单，服务端的完整口径只在权限目录里，页面拿不到。
  * 所以这句话旁边必须写明它的口径，别让一个偏小的数被读成「这个组只有这么点权限」。
+ *
+ * 组管理面主体（`GroupManagementContent`）同时被权限工作台「按组」tab 复用：
+ * 会话刷新监听、写外壳、主从布局都在主体里，外层只差页面标题与 tab 外壳。
+ * 本文件 default 导出仍是独立页（注册表自定义视图入口），两者共用同一块内容。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
 
@@ -37,13 +41,6 @@ import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/shared/ui/select";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/lib/utils";
 import { useToast } from "@/shared/lib/toast";
@@ -54,24 +51,18 @@ import {
   useGroupActions,
   useGroupDetail,
   useGroupList,
-  usePermissionCatalog,
 } from "../api";
 import type { GroupDetail, GroupSummary } from "../api";
+import { PermissionBadge } from "../components/PermissionBadge";
+import { PermissionPickerDialog } from "../components/PermissionPickerDialog";
+import { UserPicker } from "../components/UserPicker";
+import { usePermissionMeta, useUserDirectory } from "../workspace-api";
 
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/// 用户 ID 输入框里的数字：只接受正整数，其余一律不提交（宁可什么都不做，
-/// 也不要发一个 `user_id: NaN` 出去——那会被服务端当成格式错误，报错还指不到人）。
-function parseUserId(raw: string): number | null {
-  const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) return null;
-  const value = Number(trimmed);
-  return Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-
-export default function PermissionGroupsPage() {
+export function GroupManagementContent() {
   const queryClient = useQueryClient();
   const catalog = useUiCatalog();
   const actions = useGroupActions();
@@ -139,16 +130,22 @@ export default function PermissionGroupsPage() {
     })();
   }
 
-  return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 p-6">
-      <div className="space-y-1">
-        <h1 className="text-xl font-semibold">权限组</h1>
-        <p className="text-sm text-muted-foreground">
-          组是「权限集合 + 成员」的粘合：把权限加进组，再把账号加进组，
-          账号就获得组里的全部权限。
-        </p>
-      </div>
+  /// 左栏危险徽标判据：组详情 items 里含管理员等价权限（G2）时给那一行
+  /// 亮「管理员等价」——详情只有当前选中组在内存里，所以徽标只出现在
+  /// 选中的那一行（列表其余组的详情没有拉，无从判断）。
+  const { meta } = usePermissionMeta();
+  const dangerSelected = useMemo(
+    () =>
+      detail !== null &&
+      !detail.effectiveAll &&
+      detail.items.some(
+        (item) => meta.get(item.permission)?.adminEquivalent === true,
+      ),
+    [detail, meta],
+  );
 
+  return (
+    <div className="space-y-6">
       {error ? (
         <p
           role="alert"
@@ -185,6 +182,7 @@ export default function PermissionGroupsPage() {
           <GroupListPanel
             groups={groups}
             selectedId={selectedGroupId}
+            dangerSelected={dangerSelected}
             pending={listQuery.isPending}
             canManage={actions.canManage}
             busy={pending}
@@ -210,6 +208,22 @@ export default function PermissionGroupsPage() {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/// 独立页壳（注册表自定义视图与旧入口仍在用）：标题 + 主体。
+export default function PermissionGroupsPage() {
+  return (
+    <main className="mx-auto w-full max-w-6xl space-y-6 p-6">
+      <div className="space-y-1">
+        <h1 className="text-xl font-semibold">权限组</h1>
+        <p className="text-sm text-muted-foreground">
+          组是「权限集合 + 成员」的粘合：把权限加进组，再把账号加进组，
+          账号就获得组里的全部权限。
+        </p>
+      </div>
+      <GroupManagementContent />
     </main>
   );
 }
@@ -219,6 +233,7 @@ export default function PermissionGroupsPage() {
 function GroupListPanel({
   groups,
   selectedId,
+  dangerSelected,
   pending,
   canManage,
   busy,
@@ -227,6 +242,8 @@ function GroupListPanel({
 }: {
   groups: GroupSummary[];
   selectedId: number | null;
+  /// 当前选中组的详情里是否含管理员等价条目（只有选中行能判断，见调用方）。
+  dangerSelected: boolean;
   pending: boolean;
   canManage: boolean;
   busy: boolean;
@@ -285,6 +302,9 @@ function GroupListPanel({
                     <span className="inline-flex items-center rounded-md border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
                       孤儿 {group.orphanItemCount}
                     </span>
+                  ) : null}
+                  {group.id === selectedId && dangerSelected ? (
+                    <PermissionBadge kind="danger" />
                   ) : null}
                 </span>
                 <span className="mt-0.5 block text-xs text-muted-foreground">
@@ -434,7 +454,7 @@ function GroupDetailPanel({
           <span className="font-mono text-xs text-muted-foreground">
             {detail.groupKey}
           </span>
-          {detail.effectiveAll ? <Badge variant="secondary">内置</Badge> : null}
+          {detail.effectiveAll ? <PermissionBadge kind="builtin" /> : null}
         </div>
         {detail.description !== null ? (
           <p className="text-sm text-muted-foreground">{detail.description}</p>
@@ -547,6 +567,39 @@ function RenameGroupForm({
 
 /* ------------------------------ 权限条目块 ------------------------------- */
 
+/// 条目文字：中文名与权限字符串不同才分两行；相同只留一行
+/// （目录里没有这条权限时 title 回退成字符串本身，两行一样没意义）。
+function PermissionItemText({
+  title,
+  permission,
+  orphan,
+}: {
+  title: string;
+  permission: string;
+  orphan: boolean;
+}) {
+  if (title === permission) {
+    return (
+      <span
+        className={cn(
+          "min-w-0 font-mono text-sm",
+          orphan && "text-destructive",
+        )}
+      >
+        {permission}
+      </span>
+    );
+  }
+  return (
+    <span className="min-w-0">
+      <span className="block text-sm font-medium">{title}</span>
+      <span className="block truncate font-mono text-xs text-muted-foreground">
+        {permission}
+      </span>
+    </span>
+  );
+}
+
 function ItemPanel({
   detail,
   actions,
@@ -561,12 +614,10 @@ function ItemPanel({
   visibleCatalogActionCount: number;
 }) {
   const uiCatalog = useUiCatalog();
-  // 目录只为「能管理当前组」的身份服务：authenticated-only 后登录不再等于可管理，
-  // 组级 `can_manage`（后端算好）才是「加权限表单要不要出现」的判据。
-  const permissionCatalog = usePermissionCatalog(detail.canManage);
-  const [selectedPermission, setSelectedPermission] = useState<string | null>(
-    null,
-  );
+  // 展示元数据（中文名/管理员等价/孤儿判据）与「添加条目」候选共用同一粒查询：
+  // usePermissionMeta 内部即 usePermissionCatalog(true)，同一 query key、缓存共享。
+  const { meta, isError, refetch } = usePermissionMeta();
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   /// 加权限的候选来源是权限目录（`access.grants.list_permissions`），它与「能管理
   /// 这个组」是两粒独立的权限位：缺目录那粒时入口不渲染（见文件头不变量 3），
@@ -575,12 +626,8 @@ function ItemPanel({
     detail.canManage &&
     hasOperation(uiCatalog.data, GROUP_OPERATION_IDS.listPermissions);
 
-  /// 候选 = 目录中「组里还没有」的权限：已在矩阵里的那条没有再加一次的意义
-  /// （服务端幂等，但留着只会让下拉里出现一条选不出新效果的选项）。
-  const candidates = (permissionCatalog.data ?? []).filter(
-    (entry) =>
-      !detail.items.some((item) => item.permission === entry.permission),
-  );
+  /// 已在该组的条目：弹窗候选中挪出去（服务端幂等，但选出来发请求没有新效果）。
+  const existingPermissions = detail.items.map((item) => item.permission);
 
   return (
     <section
@@ -612,69 +659,75 @@ function ItemPanel({
             </p>
           ) : (
             <ul aria-label="组权限条目" className="space-y-1">
-              {detail.items.map((item) => (
-                <li
-                  key={item.permission}
-                  data-slot="group-item"
-                  data-orphan={item.isOrphan ? "true" : "false"}
-                  className={cn(
-                    "flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2",
-                    // 孤儿条目：目录里已经没有这条权限了（设计 §8.4）。
-                    // 警示样式是为了让「这条其实不生效」在列表里一眼可辨。
-                    item.isOrphan
-                      ? "border-destructive/40 bg-destructive/10"
-                      : "border-border",
-                  )}
-                >
-                  {detail.canManage ? (
-                    // 勾选态恒为「在组里」：这个列表画的就是组现有的条目，
-                    // 取消勾选即移除。不能管理这个组时连复选框都不渲染（见文件头不变量 3）。
-                    <label className="flex items-center gap-2">
-                      <Checkbox
-                        aria-label={`${item.permission} 权限`}
-                        checked
-                        disabled={busy}
-                        onCheckedChange={() =>
-                          submit(async () => {
-                            await actions.removeItem(
-                              detail.id,
-                              item.permission,
-                            );
-                          }, `已移除「${item.permission}」`)
-                        }
+              {detail.items.map((item) => {
+                const itemMeta = meta.get(item.permission);
+                return (
+                  <li
+                    key={item.permission}
+                    data-slot="group-item"
+                    data-orphan={item.isOrphan ? "true" : "false"}
+                    className={cn(
+                      "flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2",
+                      // 孤儿条目：目录里已经没有这条权限了（设计 §8.4）。
+                      // 警示样式是为了让「这条其实不生效」在列表里一眼可辨。
+                      item.isOrphan
+                        ? "border-destructive/40 bg-destructive/10"
+                        : "border-border",
+                    )}
+                  >
+                    {detail.canManage ? (
+                      // 勾选态恒为「在组里」：这个列表画的就是组现有的条目，
+                      // 取消勾选即移除。不能管理这个组时连复选框都不渲染（见文件头不变量 3）。
+                      <label className="flex min-w-0 items-center gap-2">
+                        <Checkbox
+                          aria-label={`${itemMeta?.title ?? item.permission} 权限`}
+                          checked
+                          disabled={busy}
+                          onCheckedChange={() =>
+                            submit(async () => {
+                              await actions.removeItem(
+                                detail.id,
+                                item.permission,
+                              );
+                            }, `已移除「${item.permission}」`)
+                          }
+                        />
+                        <PermissionItemText
+                          title={itemMeta?.title ?? item.permission}
+                          permission={item.permission}
+                          orphan={item.isOrphan}
+                        />
+                      </label>
+                    ) : (
+                      <PermissionItemText
+                        title={itemMeta?.title ?? item.permission}
+                        permission={item.permission}
+                        orphan={item.isOrphan}
                       />
-                      <span
-                        className={cn(
-                          "font-mono text-sm",
-                          item.isOrphan && "text-destructive",
-                        )}
-                      >
-                        {item.permission}
+                    )}
+                    <span className="flex flex-wrap items-center gap-1">
+                      {itemMeta?.adminEquivalent ? (
+                        <PermissionBadge
+                          kind="danger"
+                          reason={itemMeta.reason}
+                        />
+                      ) : null}
+                      {item.isOrphan ? <PermissionBadge kind="orphan" /> : null}
+                    </span>
+                    {item.isOrphan ? (
+                      <span className="text-xs text-destructive">
+                        该权限已不在权限目录中，可安全移除
                       </span>
-                    </label>
-                  ) : (
-                    <span
-                      className={cn(
-                        "font-mono text-sm",
-                        item.isOrphan && "text-destructive",
-                      )}
-                    >
-                      {item.permission}
-                    </span>
-                  )}
-                  {item.isOrphan ? (
-                    <span className="text-xs text-destructive">
-                      该权限已不在权限目录中，可安全移除
-                    </span>
-                  ) : null}
-                </li>
-              ))}
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           )}
 
           {detail.canManage ? (
-            canSeeCatalog && permissionCatalog.isError ? (
-              // 目录查询失败：候选下拉里「空」和「加载中」之外不该有第三种面孔，
+            isError ? (
+              // 目录查询失败：候选里「空」和「加载中」之外不该有第三种面孔，
               // 失败态必须单独画出来，否则和「加载出了空目录」无法区分。
               <div
                 role="alert"
@@ -684,74 +737,28 @@ function ItemPanel({
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => void permissionCatalog.refetch()}
+                  onClick={() => void refetch()}
                 >
                   <RefreshCw aria-hidden="true" />
                   重试
                 </Button>
               </div>
             ) : canSeeCatalog ? (
-              <form
-                className="flex flex-wrap items-end gap-2"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (selectedPermission === null) return;
-                  const permission = selectedPermission;
-                  setSelectedPermission(null);
-                  submit(async () => {
-                    await actions.addItem(detail.id, permission);
-                  }, `已加入「${permission}」`);
-                }}
-              >
-                <div className="min-w-0 flex-1 basis-48 space-y-1">
-                  <Label htmlFor="permission-group-item-candidate">
-                    权限标识
-                  </Label>
-                  <Select
-                    value={selectedPermission ?? ""}
-                    onValueChange={setSelectedPermission}
-                  >
-                    <SelectTrigger
-                      id="permission-group-item-candidate"
-                      className="w-full"
-                      disabled={busy || permissionCatalog.isPending}
-                    >
-                      <SelectValue
-                        placeholder={
-                          permissionCatalog.isPending
-                            ? "正在加载权限目录…"
-                            : "从权限目录中选择…"
-                        }
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {candidates.map((entry) => (
-                        <SelectItem
-                          key={entry.permission}
-                          value={entry.permission}
-                        >
-                          <span className="font-mono">{entry.permission}</span>
-                          {entry.adminEquivalent ? (
-                            <Badge variant="destructive">管理员等价</Badge>
-                          ) : null}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div className="space-y-2 border-t border-border pt-3">
                 <Button
-                  type="submit"
+                  type="button"
                   size="sm"
-                  disabled={busy || selectedPermission === null}
+                  disabled={busy}
+                  onClick={() => setPickerOpen(true)}
                 >
                   <Plus aria-hidden="true" />
-                  加入权限
+                  添加条目
                 </Button>
-                <p className="w-full text-xs text-muted-foreground">
-                  候选即权限目录中已声明的权限，不再手输；标「管理员等价」的
-                  权限会显著扩大危害面，授予前请确认。
+                <p className="text-xs text-muted-foreground">
+                  从权限目录勾选要加入的权限（可多选）；已在该组的权限不在候选中。
+                  标「管理员等价」的权限会显著扩大危害面，加入前请确认。
                 </p>
-              </form>
+              </div>
             ) : (
               <p className="text-xs text-muted-foreground">
                 当前身份看不到权限目录（需要 access.grants.read），
@@ -761,6 +768,24 @@ function ItemPanel({
           ) : null}
         </>
       )}
+
+      <PermissionPickerDialog
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        mode="group"
+        busy={busy}
+        exclude={existingPermissions}
+        onSubmit={(selection) => {
+          if (selection.permissions.length === 0) return;
+          setPickerOpen(false);
+          submit(async () => {
+            // 逐条调用（幂等）：组条目没有批量写接口，多选结果依次写入
+            for (const permission of selection.permissions) {
+              await actions.addItem(detail.id, permission);
+            }
+          }, `已加入 ${selection.permissions.length} 条权限到该组`);
+        }}
+      />
     </section>
   );
 }
@@ -778,8 +803,13 @@ function MemberPanel({
   submit: (action: () => Promise<void>, successMessage?: string) => void;
   busy: boolean;
 }) {
-  const [draft, setDraft] = useState("");
-  const userId = parseUserId(draft);
+  const directory = useUserDirectory();
+  // 多选后一次「加入所选成员」提交：逐条写（没有批量接口），比点候选即写安全
+  // （误点一个候选不该立刻改授权事实）。
+  const [selected, setSelected] = useState<number[]>([]);
+  /// 内置全权组的成员操作一并锁定：权限由目录实时计算，成员是唯二可动的部分，
+  /// 但全权组是整个系统的最顶层授权面，加删成员必须走专门流程（只读）。
+  const locked = detail.effectiveAll;
 
   return (
     <section
@@ -799,8 +829,10 @@ function MemberPanel({
               key={memberId}
               className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
             >
-              <span className="text-sm">用户 #{memberId}</span>
-              {detail.canManage ? (
+              <span className="text-sm">
+                {directory.byId.get(memberId)?.username ?? `用户 #${memberId}`}
+              </span>
+              {detail.canManage && !locked ? (
                 <Button
                   variant="outline"
                   size="sm"
@@ -820,35 +852,27 @@ function MemberPanel({
         </ul>
       )}
 
-      {detail.canManage ? (
-        <form
-          className="flex flex-wrap items-end gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (userId === null) return;
-            setDraft("");
-            submit(async () => {
-              await actions.addMember(detail.id, userId);
-            }, `已把用户 #${userId} 加入该组`);
-          }}
-        >
-          <div className="space-y-1">
-            <Label htmlFor="permission-group-member-draft">
-              要加入的用户 ID
-            </Label>
-            <Input
-              id="permission-group-member-draft"
-              inputMode="numeric"
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder="7"
-            />
-          </div>
-          <Button type="submit" size="sm" disabled={busy || userId === null}>
+      {detail.canManage && !locked ? (
+        <div className="space-y-2 border-t border-border pt-3">
+          <UserPicker multiple value={selected} onChange={setSelected} />
+          <Button
+            type="button"
+            size="sm"
+            disabled={busy || selected.length === 0}
+            onClick={() => {
+              const userIds = [...selected];
+              setSelected([]);
+              submit(async () => {
+                for (const userId of userIds) {
+                  await actions.addMember(detail.id, userId);
+                }
+              }, `已把 ${userIds.length} 位用户加入该组`);
+            }}
+          >
             <Plus aria-hidden="true" />
-            加入成员
+            加入所选成员
           </Button>
-        </form>
+        </div>
       ) : null}
     </section>
   );

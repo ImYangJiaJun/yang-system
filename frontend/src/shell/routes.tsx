@@ -122,16 +122,28 @@ export const appRoutes = [
             hydrateFallbackElement: <RouteFallback />,
           },
           {
-            // 权限组管理面：同样路由级 lazy，页面文件在 features/access/views/。
-            path: "access/groups",
+            // 权限工作台：三视图（按用户/按功能/按组），同样路由级 lazy，
+            // 页面文件在 features/access/views/。
+            path: "access/workspace",
             lazy: async () => ({
               Component: (
-                await import("@/features/access/views/PermissionGroupsPage")
+                await import("@/features/access/views/PermissionWorkspacePage")
               ).default,
             }),
             // 与其它路由级 lazy 页面同一约定：硬导航时必须给兜底，
             // 否则首次导航完成前是空白，react-router 还会打 HydrateFallback 警告
             // （见 RouteFallback.tsx；tests/shell/routes.test.tsx 逐条钉住这条约定）。
+            hydrateFallbackElement: <RouteFallback />,
+          },
+          {
+            // 权限组管理面旧 URL：lazy 指向同一工作台页面，无 ?tab= 参数时
+            // 按路径默认「按组」tab（旧入口兼容，页面文件见上）。
+            path: "access/groups",
+            lazy: async () => ({
+              Component: (
+                await import("@/features/access/views/PermissionWorkspacePage")
+              ).default,
+            }),
             hydrateFallbackElement: <RouteFallback />,
           },
           ...devOnlyRoutes,

@@ -18,6 +18,7 @@ mod list_users;
 mod login;
 mod login_by_email_code;
 mod logout;
+mod lookup;
 mod me;
 mod refresh;
 mod register;
@@ -56,6 +57,7 @@ const ACTIONS: &[Register] = action_registry![
     login,
     list_sessions,
     list_users,
+    lookup, // authenticated-only：工作台用户查找，不声明 permissions
     refresh,
     admin_disable_user,
     admin_enable_user,

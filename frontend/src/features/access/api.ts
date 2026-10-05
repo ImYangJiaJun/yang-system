@@ -133,26 +133,30 @@ export type PermissionCatalogEntry = {
   permission: string;
   declaredBy: string[];
   adminEquivalent: boolean;
+  /// 管理员等价权限的警示文案（后端返回字符串或 null；老载荷缺失该字段时按 null 处理）。
+  reason: string | null;
 };
 
 /* ------------------------------- 响应解析 -------------------------------- */
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
+/// 四个基础解析原语在同域共享（`workspace-api.ts` 复用它们解析工作台响应）：
+/// 值形状的判据只有一处，两个数据层文件不会各自长出一套口径。
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
 }
 
-function asNumber(value: unknown, fallback: number): number {
+export function asNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function asString(value: unknown, fallback = ""): string {
+export function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
 /// 可空字符串：空串与缺失一律折成 `null`，避免界面出现「有值但不可见」的空白格。
-function asNullableString(value: unknown): string | null {
+export function asNullableString(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
@@ -197,6 +201,8 @@ function parsePermissionEntry(
         )
       : [],
     adminEquivalent: raw.admin_equivalent === true,
+    // 缺失兼容：老 mock 载荷没有 reason 字段时，asNullableString 直接折成 null
+    reason: asNullableString(raw.reason),
   };
 }
 
@@ -636,7 +642,9 @@ export function useGroupActions(): GroupActions {
 }
 
 /// Step-up 透明重试：首次请求遇 428 时通过 controller 弹对话框换 proof 后重放。
-async function runProtected<T>(
+/// 导出给 `workspace-api.ts` 复用（grants 的写 Action 同样挂在 Step-up 中间件下，
+/// 授予/撤销要走同一套重试外壳，判据只有一处）。
+export async function runProtected<T>(
   request: (proof: string | undefined) => Promise<T>,
   controller: ReturnType<typeof useSessionController>,
 ): Promise<T | undefined> {

@@ -359,6 +359,47 @@ impl GroupRepository {
             .collect()
     }
 
+    /// 读取持有指定权限条目的全部组事实及其成员数（权限下钻的审计读端）。
+    ///
+    /// 条目表按 `(group_id, permission)` 唯一（同组同权限只有一行），先去重取
+    /// group_id 列表、再逐组回查事实与成员数；组按 id 升序返回，保证同一权限的
+    /// 下钻结果稳定。条目外键 `fk_permission_group_item_group`（RESTRICT）保证条目
+    /// 必指向存在的组，回查不到时按数据完整性错误 fail-closed。
+    pub(crate) async fn list_groups_holding_item_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        permission: &str,
+    ) -> Result<Vec<(GroupRecord, u64)>, BaseError> {
+        let rows = self
+            .trusted_items(ctx)?
+            .select_fields(&[ITEM_GROUP_ID])?
+            .where_eq(
+                ITEM_PERMISSION,
+                serde_json::Value::String(permission.to_string()),
+            )?
+            .all_in_tx(transaction)
+            .await?;
+        let mut group_ids: Vec<i64> = rows
+            .iter()
+            .map(|record| record.require(ITEM_GROUP_ID))
+            .collect::<Result<Vec<i64>, BaseError>>()?;
+        group_ids.sort_unstable();
+        group_ids.dedup();
+        let mut groups = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            let group = self
+                .find_by_id_in_tx(ctx, transaction, group_id)
+                .await?
+                .ok_or_else(|| {
+                    BaseError::ConfigError(format!("权限条目指向不存在的组 {group_id}"))
+                })?;
+            let member_count = self.count_members_in_tx(ctx, transaction, group_id).await?;
+            groups.push((group, member_count));
+        }
+        Ok(groups)
+    }
+
     /// 追加一条用户-组关系；该用户已在此组时返回 `false`。
     pub(crate) async fn insert_member_in_tx(
         &self,
@@ -550,7 +591,7 @@ mod tests {
     };
     use sqlx::mysql::MySqlPoolOptions;
     use std::sync::Arc;
-    use yang_base::table::{Record, TableDefinition};
+    use yang_base::table::{Record, TableDefinition, WhereCondition};
     use yang_base::{action::ActionContext, action::Request, tools::ToolsBuilder};
     use yang_db::{Database, DatabaseConfig};
 
@@ -613,6 +654,30 @@ mod tests {
         let repository = test_repository();
         let ctx = test_context();
         assert!(repository.trusted_query(&ctx).is_ok());
+    }
+
+    #[tokio::test]
+    async fn holding_item_query_targets_the_permission_column() {
+        // list_groups_holding_item_in_tx 的过滤必须落在条目表的 permission 列上：
+        // 「持有该权限的组」不能借 (group_id, permission) 唯一键反推，必须按权限直查。
+        let repository = test_repository();
+        let ctx = test_context();
+        let query = repository
+            .trusted_items(&ctx)
+            .and_then(|query| query.select_fields(&[ITEM_GROUP_ID]))
+            .and_then(|query| {
+                query.where_eq(
+                    ITEM_PERMISSION,
+                    serde_json::Value::String("access.grants.read".to_string()),
+                )
+            })
+            .unwrap_or_else(|error| panic!("按权限过滤条目查询应可构建: {error}"));
+        let conditions = &query.get_query_params().where_conditions;
+        assert_eq!(conditions.len(), 1, "只按条目权限等值过滤");
+        assert!(matches!(
+            &conditions[0],
+            WhereCondition::Eq { field, value } if field == ITEM_PERMISSION && value == &serde_json::json!("access.grants.read")
+        ));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::addon::account::user::table::{
 };
 use std::sync::Arc;
 use yang_base::action::ActionContext;
-use yang_base::table::{Record, TableDefinition, TableQuery};
+use yang_base::table::{Record, TableDefinition, TableQuery, WhereCondition};
 use yang_base::BaseError;
 use yang_db::{field, table, CompareOp, QueryBuilder};
 
@@ -234,6 +234,27 @@ impl UserRepository {
             .page(page, page_size)?
             .all()
             .await?;
+        Ok(rows)
+    }
+
+    /// 分页搜索用户：q 为空/空白不过滤（与 `list_page` 同路径，正常分页）；
+    /// 非空按 username 或 email 包含匹配（LIKE `%q%`，通配符转义）。
+    ///
+    /// 查询下推到引擎的 LIKE 条件（users 表小、`page_size` 上限 50），
+    /// 返回 `USER_VIEW_FIELDS` 投影；超长关键词由引擎 QRY-1 上限（128 字节）
+    /// 统一拦截，调用方无需重复设限。
+    pub(crate) async fn search(
+        &self,
+        ctx: &ActionContext,
+        q: Option<&str>,
+        page: usize,
+        page_size: usize,
+    ) -> Result<Vec<Record>, BaseError> {
+        let mut query = self.trusted_query(ctx)?.select_fields(USER_VIEW_FIELDS)?;
+        if let Some(condition) = keyword_condition(q) {
+            query = query.where_tree(condition)?;
+        }
+        let rows = query.page(page, page_size)?.all().await?;
         Ok(rows)
     }
 
@@ -538,6 +559,32 @@ impl UserRepository {
     }
 }
 
+/// 把搜索关键词投影为 username OR email 的 LIKE 条件组；
+/// 空/空白关键词返回 None（不过滤，正常分页）。
+///
+/// LIKE 通配符按 `TableQuery::where_contains` 同口径转义（`%`/`_`/`\`），
+/// 避免用户输入被解释为 SQL LIKE 模式；超长模式由引擎 QRY-1 上限统一拦截。
+fn keyword_condition(q: Option<&str>) -> Option<WhereCondition> {
+    let keyword = q.map(str::trim).filter(|value| !value.is_empty())?;
+    let escaped = keyword
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+    Some(WhereCondition::Or {
+        conditions: vec![
+            WhereCondition::Like {
+                field: USERNAME.to_string(),
+                pattern: pattern.clone(),
+            },
+            WhereCondition::Like {
+                field: EMAIL.to_string(),
+                pattern,
+            },
+        ],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +627,35 @@ mod tests {
                 Err(BaseError::FieldPermissionDenied(_, field, _)) if field == field_name
             ));
         }
+    }
+
+    #[test]
+    fn keyword_condition_is_none_for_blank_and_or_group_for_search() {
+        assert!(keyword_condition(None).is_none());
+        assert!(keyword_condition(Some("")).is_none());
+        assert!(keyword_condition(Some("   ")).is_none());
+        let Some(WhereCondition::Or { conditions }) = keyword_condition(Some("  alice  ")) else {
+            panic!("非空关键词必须生成 OR 条件组");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            &conditions[0],
+            WhereCondition::Like { field, pattern } if field == USERNAME && pattern == "%alice%"
+        ));
+        assert!(matches!(
+            &conditions[1],
+            WhereCondition::Like { field, pattern } if field == EMAIL && pattern == "%alice%"
+        ));
+    }
+
+    #[test]
+    fn keyword_condition_escapes_like_wildcards() {
+        let Some(WhereCondition::Or { conditions }) = keyword_condition(Some("a_b%c\\d")) else {
+            panic!("非空关键词必须生成 OR 条件组");
+        };
+        let Some(WhereCondition::Like { pattern, .. }) = conditions.first() else {
+            panic!("OR 组首元素必须是 LIKE 条件");
+        };
+        assert_eq!(pattern, "%a\\_b\\%c\\\\d%");
     }
 }

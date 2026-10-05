@@ -6,6 +6,7 @@
 mod batch_grant_permissions;
 mod batch_revoke_permissions;
 mod grant_permission;
+mod list_holders;
 mod list_permissions;
 mod list_user_grants;
 mod revoke_permission;
@@ -32,6 +33,7 @@ const ACTIONS: &[Register] = action_registry![
     batch_revoke_permissions,
     list_user_grants,
     list_permissions,
+    list_holders,
     // scaffold:action-registration
 ];
 

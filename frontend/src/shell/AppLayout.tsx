@@ -359,7 +359,7 @@ export default function AppLayout() {
               <ul className="space-y-0.5">
                 <li>
                   <NavLink
-                    to="/access/groups"
+                    to="/access/workspace"
                     className={({ isActive }) =>
                       cn(
                         "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
@@ -369,7 +369,7 @@ export default function AppLayout() {
                     }
                   >
                     <ShieldCheck className="size-4 shrink-0" />
-                    权限组
+                    权限工作台
                   </NavLink>
                 </li>
               </ul>

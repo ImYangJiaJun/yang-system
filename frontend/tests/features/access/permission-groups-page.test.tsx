@@ -1,12 +1,14 @@
 /**
- * 权限组管理页（走真实路由 `/access/groups`，含 lazy 的 `.default` 约定与真实 api.ts）。
+ * 权限组管理（走真实路由 `/access/groups`——工作台「按组」tab，旧 URL 兼容；
+ * 含 lazy 的 `.default` 约定与真实 api.ts）。
  *
  * 桩只替换 `fetch`：权限按身份投影这一点用目录本身模拟——不给某粒 Action，
  * 就等于这个身份没有那粒权限位。
  *
  * 这里断言的是**只有页面能证明的事**：内置全权组没有条目矩阵但有目录计数、
  * 孤儿条目被单独标出来、勾选/取消真的发出写请求并回读、无写权限时写入口不渲染、
- * 加权限走候选目录（含管理员等价徽标）、`session-refreshed` 后整块回读。
+ * 加权限走候选目录弹窗（多选、管理员等价徽标、候选排除已在组的权限）、
+ * `session-refreshed` 后整块回读。
  * 断言「渲染了一个 div」没有意义，所以每条用例都末了核对发出去的请求。
  */
 
@@ -30,9 +32,10 @@ import { renderTestApp } from "@test/helpers/render-app";
  * 在夹具加载期先 import 一次，运行时照旧走自己的 `lazy: () => import(...)`（命中模块
  * 缓存），懒加载 + Suspense 那条路径仍然被覆盖。
  */
-await import("@/features/access/views/PermissionGroupsPage");
+await import("@/features/access/views/PermissionWorkspacePage");
 
 const LIST_PATH = "/api/v1/access/groups";
+const LOOKUP_PATH = "/api/v1/users/lookup";
 const ITEMS_PATH = `${LIST_PATH}/items`;
 const ITEMS_REMOVE_PATH = `${ITEMS_PATH}/remove`;
 const MEMBERS_PATH = `${LIST_PATH}/members`;
@@ -133,6 +136,16 @@ const PERMISSION_ACTIONS = [
   action("access.grants.list_permissions", "GET", PERMISSIONS_PATH),
 ];
 
+/// 工作台用户查找（成员名映射与成员添加的 UserPicker 都靠它；
+/// 目录里有它才会发 lookup 请求，没有时名字回退「用户 #id」）。
+const LOOKUP_ACTIONS = [
+  action("account.users.lookup", "GET", LOOKUP_PATH, [
+    param("q", "query", false),
+    param("page", "query", false),
+    param("page_size", "query", false),
+  ]),
+];
+
 type StubOptions = {
   /// 目录里有没有 `access.groups.read` / `access.groups.write` /
   /// `access.grants.list_permissions`（三粒独立权限位）。
@@ -149,11 +162,12 @@ type StubOptions = {
   addMember?: Handler;
   removeMember?: Handler;
   permissionsList?: Handler;
+  lookup?: Handler;
 };
 
 /// **本文件所有用例共用一个可见 Action 集合**：内置组的目录计数要按它算。
 function visibleActions(options: StubOptions) {
-  const actions = [];
+  const actions = [...LOOKUP_ACTIONS];
   if (options.read ?? true) actions.push(...READ_ACTIONS);
   if (options.write ?? true) actions.push(...WRITE_ACTIONS);
   if (options.permissions ?? true) actions.push(...PERMISSION_ACTIONS);
@@ -283,6 +297,27 @@ function stubAccessApi(options: StubOptions = {}): RecordedCall[] {
       if (url.endsWith("/.well-known/yang/ui-catalog"))
         return catalogFor(options);
       if (url.endsWith("/api/v1/users/me")) return envelope(ME);
+      if (url.includes(LOOKUP_PATH)) {
+        // 目录全量拉取（q 为空）默认返回空：成员名回退「用户 #id」；
+        // 搜索词非空时返回 bob（id 8），供成员添加的 UserPicker 用。
+        const q = new URL(url, "http://localhost").searchParams.get("q") ?? "";
+        return respond(
+          options.lookup,
+          { q },
+          q === ""
+            ? { users: [] }
+            : {
+                users: [
+                  {
+                    id: 8,
+                    username: "bob",
+                    email: "bob@example.com",
+                    status: "active",
+                  },
+                ],
+              },
+        );
+      }
       if (url.endsWith(PERMISSIONS_PATH))
         return respond(options.permissionsList, payload, {
           permissions: PERMISSION_CATALOG,
@@ -465,10 +500,11 @@ describe("权限组管理页", () => {
     const list = await screen.findByRole("list", { name: "权限组列表" });
     await user.click(within(list).getByRole("button", { name: /系统管理员/ }));
 
-    // 目录里这个身份看得到 2 个读 Action + 7 个写 Action + 1 个权限目录读接口。
+    // 目录里这个身份看得到 1 个 lookup + 2 个读 Action + 7 个写 Action
+    // + 1 个权限目录读接口（内置组的计数按整个 UI 目录的 Action 数算）。
     expect(
       await screen.findByText(
-        "该组的权限由权限目录实时计算，共 10 项，不在此处逐条列出。",
+        "该组的权限由权限目录实时计算，共 11 项，不在此处逐条列出。",
       ),
     ).toBeInTheDocument();
     // 矩阵整块不渲染：一个复选框都没有
@@ -560,10 +596,13 @@ describe("权限组管理页", () => {
     renderPage();
 
     const members = await screen.findByRole("list", { name: "组成员" });
+    // 目录全量拉取为空时名字回退「用户 #id」
     expect(members).toHaveTextContent("用户 #7");
 
-    await user.type(screen.getByLabelText("要加入的用户 ID"), "8");
-    await user.click(screen.getByRole("button", { name: "加入成员" }));
+    // 成员添加走 UserPicker：搜索出 bob（id 8），勾选后一次提交
+    await user.type(screen.getByLabelText("搜索用户"), "bob");
+    await user.click(await screen.findByRole("button", { name: /bob/ }));
+    await user.click(screen.getByRole("button", { name: "加入所选成员" }));
 
     await waitFor(() => {
       expect(callsTo(calls, MEMBERS_PATH)).toHaveLength(1);
@@ -600,11 +639,12 @@ describe("权限组管理页", () => {
       "用户 #7",
     );
 
-    // 管理侧整块不渲染：复选框、加入/移出表单、改名/删除都不在
+    // 管理侧整块不渲染：复选框、添加/移出入口、改名/删除都不在
     // （管理按钮由后端算好的组级 can_manage 驱动，不再看全局写权限位）
     expect(screen.queryByRole("checkbox")).toBeNull();
-    expect(screen.queryByRole("button", { name: "加入成员" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "加入权限" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "添加条目" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "加入所选成员" })).toBeNull();
+    expect(screen.queryByLabelText("搜索用户")).toBeNull();
     expect(screen.queryByRole("button", { name: "新建权限组" })).toBeNull();
     expect(screen.queryByRole("button", { name: "删除该组" })).toBeNull();
     expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
@@ -624,18 +664,16 @@ describe("权限组管理页", () => {
 
     renderPage();
 
-    // 组级管理入口都在：改名、删除、条目复选框、加入权限、加入成员
+    // 组级管理入口都在：改名、删除、条目复选框、添加条目、成员添加
     await screen.findByRole("button", { name: "删除该组" });
     expect(screen.getByRole("button", { name: "保存" })).toBeInTheDocument();
     expect(
       await screen.findByRole("checkbox", { name: "account.users.read 权限" }),
     ).toBeChecked();
     expect(
-      screen.getByRole("button", { name: "加入权限" }),
+      screen.getByRole("button", { name: "添加条目" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "加入成员" }),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("搜索用户")).toBeInTheDocument();
     // 只有建组按钮看登录态权限位：目录里没有 create_group 时不渲染
     expect(screen.queryByRole("button", { name: "新建权限组" })).toBeNull();
   });
@@ -747,7 +785,7 @@ describe("权限组管理页", () => {
     });
   });
 
-  it("从候选目录选择一条权限会发出加权限 POST 并刷新详情", async () => {
+  it("从候选目录弹窗选一条权限会发出加权限 POST 并刷新详情", async () => {
     const user = userEvent.setup();
     const calls = stubAccessApi({
       groupList: () => ({ groups: [groupWire({ id: 2 })] }),
@@ -760,12 +798,15 @@ describe("权限组管理页", () => {
       "该组还没有任何权限条目，成员加进来也不会得到权限。",
     );
 
-    // 候选是下拉选择，不是自由文本：打开候选目录，选中「account.users.read」提交
-    await user.click(screen.getByRole("combobox", { name: "权限标识" }));
+    // 候选是弹窗勾选，不是自由文本：打开「添加条目」，勾选「account.users.read」提交
+    await user.click(screen.getByRole("button", { name: "添加条目" }));
+    const dialog = await screen.findByRole("dialog");
     await user.click(
-      await screen.findByRole("option", { name: "account.users.read" }),
+      within(dialog).getByRole("checkbox", {
+        name: "account.users.read 权限",
+      }),
     );
-    await user.click(screen.getByRole("button", { name: "加入权限" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认加入" }));
 
     await waitFor(() => {
       expect(callsTo(calls, ITEMS_PATH)).toHaveLength(1);
@@ -793,15 +834,17 @@ describe("权限组管理页", () => {
       "该组还没有任何权限条目，成员加进来也不会得到权限。",
     );
 
-    await user.click(screen.getByRole("combobox", { name: "权限标识" }));
-    const sensitive = await screen.findByRole("option", {
-      name: /reset_credentials/,
+    await user.click(screen.getByRole("button", { name: "添加条目" }));
+    const dialog = await screen.findByRole("dialog");
+    const sensitive = within(dialog).getByRole("checkbox", {
+      name: "account.users.reset_credentials 权限",
     });
-    expect(sensitive).toHaveTextContent("管理员等价");
+    expect(sensitive.closest("label")).toHaveTextContent("管理员等价");
     // 普通权限不背同一块徽标
-    expect(
-      screen.getByRole("option", { name: "account.users.read" }),
-    ).not.toHaveTextContent("管理员等价");
+    const normal = within(dialog).getByRole("checkbox", {
+      name: "account.users.read 权限",
+    });
+    expect(normal.closest("label")).not.toHaveTextContent("管理员等价");
   });
 
   it("候选列表不含组里已有的权限", async () => {
@@ -818,11 +861,16 @@ describe("权限组管理页", () => {
 
     await screen.findByRole("list", { name: "组权限条目" });
 
-    await user.click(screen.getByRole("combobox", { name: "权限标识" }));
+    await user.click(screen.getByRole("button", { name: "添加条目" }));
+    const dialog = await screen.findByRole("dialog");
     // 目录已加载（出现别的选项），但已在组里的那条不在候选里
-    await screen.findByRole("option", { name: /reset_credentials/ });
+    await within(dialog).findByRole("checkbox", {
+      name: /reset_credentials/,
+    });
     expect(
-      screen.queryByRole("option", { name: "account.users.read" }),
+      within(dialog).queryByRole("checkbox", {
+        name: "account.users.read 权限",
+      }),
     ).toBeNull();
   });
 
@@ -844,7 +892,7 @@ describe("权限组管理页", () => {
     expect(callsTo(calls, PERMISSIONS_PATH)).toHaveLength(0);
   });
 
-  it("权限目录查询失败时，候选下拉换成错误说明并给出重试入口", async () => {
+  it("权限目录查询失败时，换成错误说明并给出重试入口；重试后可正常添加", async () => {
     const user = userEvent.setup();
     let failed = true;
     const calls = stubAccessApi({
@@ -864,20 +912,19 @@ describe("权限组管理页", () => {
     );
 
     // 失败态：先等目录查询失败 settle（ItemPanel 挂载时才发目录请求），
-    // 再断言候选下拉与提交按钮都不渲染、换成「加载失败」说明
+    // 再断言「添加条目」按钮不渲染、换成「加载失败」说明
     expect(
       await screen.findByText("权限目录加载失败，请重试；移除不受影响。"),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "权限标识" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "加入权限" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "添加条目" })).toBeNull();
 
-    // 重试入口真实可用：失败一次后点重试，目录重新拉到，候选下拉回来
+    // 重试入口真实可用：失败一次后点重试，目录重新拉到，添加入口回来
     failed = false;
     await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => {
       expect(callsTo(calls, PERMISSIONS_PATH).length).toBeGreaterThanOrEqual(2);
     });
-    await screen.findByRole("combobox", { name: "权限标识" });
+    await screen.findByRole("button", { name: "添加条目" });
   });
 
   it("收到 session-refreshed 事件后把 access 前缀查询一起作废重拉", async () => {

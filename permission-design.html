@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>权限配置可视化设计方案</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --primary-soft: #eff6ff;
+    --danger: #dc2626;
+    --danger-soft: #fef2f2;
+    --warn: #d97706;
+    --warn-soft: #fffbeb;
+    --ok: #16a34a;
+    --ok-soft: #f0fdf4;
+    --ink: #1f2937;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --mono: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    margin: 0;
+    line-height: 1.65;
+    font-size: 15px;
+  }
+  .page { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
+
+  /* 头部 */
+  header.hero {
+    background: linear-gradient(135deg, #1e3a8a, #2563eb);
+    color: #fff;
+    border-radius: 16px;
+    padding: 36px 40px;
+    margin-bottom: 28px;
+  }
+  header.hero h1 { margin: 0 0 10px; font-size: 28px; letter-spacing: .5px; }
+  header.hero p { margin: 0; opacity: .92; font-size: 15px; }
+  .hero-tag { display: inline-block; background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35);
+    padding: 2px 10px; border-radius: 999px; font-size: 12px; margin-bottom: 12px; }
+
+  /* 目录 */
+  nav.toc { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 24px; margin-bottom: 28px; }
+  nav.toc h2 { font-size: 14px; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  nav.toc a { color: var(--primary); text-decoration: none; font-size: 14px; margin-right: 16px; white-space: nowrap; }
+  nav.toc a:hover { text-decoration: underline; }
+
+  section { margin-bottom: 40px; }
+  h2.sec { font-size: 22px; border-bottom: 2px solid var(--line); padding-bottom: 8px; margin: 0 0 16px; }
+  h3 { font-size: 17px; margin: 24px 0 10px; }
+  h4 { font-size: 15px; margin: 18px 0 8px; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; margin: 14px 0; }
+  .note { background: var(--primary-soft); border-left: 4px solid var(--primary); padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 14px; margin: 12px 0; }
+  .warn { background: var(--warn-soft); border-left: 4px solid var(--warn); padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 14px; margin: 12px 0; }
+  .danger { background: var(--danger-soft); border-left: 4px solid var(--danger); padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 14px; margin: 12px 0; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; font-weight: 600; white-space: nowrap; }
+
+  code, .mono { font-family: var(--mono); font-size: 13px; background: #f1f5f9; padding: 1px 6px; border-radius: 5px; }
+  .badge { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.ok { background: var(--ok-soft); color: var(--ok); border: 1px solid #bbf7d0; }
+  .badge.danger { background: var(--danger-soft); color: var(--danger); border: 1px solid #fecaca; }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); border: 1px solid #fde68a; }
+  .badge.gray { background: #f3f4f6; color: var(--muted); border: 1px solid var(--line); }
+  .badge.blue { background: var(--primary-soft); color: var(--primary); border: 1px solid #bfdbfe; }
+
+  /* 对比条：现状 vs 方案 */
+  .before { border: 1px dashed #fca5a5; background: #fff7f7; border-radius: 12px; padding: 16px 20px; }
+  .before .lbl { font-size: 12px; font-weight: 700; color: var(--danger); margin-bottom: 8px; letter-spacing: 1px; }
+  .after { border: 1px solid #86efac; background: #f7fef9; border-radius: 12px; padding: 16px 20px; }
+  .after .lbl { font-size: 12px; font-weight: 700; color: var(--ok); margin-bottom: 8px; letter-spacing: 1px; }
+
+  /* Mockup 通用 */
+  .mock { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--card); margin: 16px 0; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+  .mock-bar { background: #f1f5f9; border-bottom: 1px solid var(--line); padding: 8px 16px; font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 8px; }
+  .mock-bar b { color: var(--ink); }
+  .mock-body { padding: 16px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #f87171; display: inline-block; }
+  .dot.y { background: #fbbf24; } .dot.g { background: #34d399; }
+  .field-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .input-mock { border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; font-size: 13px; background: #fff; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; min-width: 220px; }
+  .input-mock.focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,.12); color: var(--ink); }
+  .btn-mock { background: var(--primary); color: #fff; border: 0; border-radius: 8px; padding: 7px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn-mock.ghost { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+  .btn-mock.red { background: var(--danger); }
+  .btn-mock:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Tab */
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .tab { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 6px 16px; font-size: 13px; cursor: pointer; color: var(--muted); }
+  .tab.active { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* 权限行 */
+  .perm-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; background: #fff; }
+  .perm-row .name { font-weight: 600; font-size: 14px; }
+  .perm-row .key { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .perm-row .desc { font-size: 12px; color: var(--muted); flex: 1; }
+  .perm-row input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--primary); }
+  .group-block { margin-bottom: 14px; }
+  .group-title { font-size: 13px; font-weight: 700; color: var(--ink); padding: 6px 0; display: flex; align-items: center; gap: 8px; }
+  .group-title .cnt { font-size: 12px; color: var(--muted); font-weight: 400; }
+
+  /* 表格 mock */
+  .mini-table { width: 100%; font-size: 13px; border-collapse: collapse; }
+  .mini-table th { background: #f8fafc; font-size: 12px; color: var(--muted); }
+  .mini-table th, .mini-table td { border: 1px solid var(--line); padding: 6px 10px; }
+  .avatar { width: 22px; height: 22px; border-radius: 50%; background: #c7d2fe; color: #3730a3; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; margin-right: 6px; }
+
+  ul.tight { margin: 6px 0; padding-left: 22px; }
+  ul.tight li { margin: 4px 0; }
+  .step-num { display: inline-flex; width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 12px; font-weight: 700; align-items: center; justify-content: center; margin-right: 8px; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 48px; border-top: 1px solid var(--line); padding-top: 12px; }
+  @media (max-width: 720px) { .page { padding: 16px 12px 60px; } header.hero { padding: 24px; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="hero">
+  <span class="hero-tag">设计方案 · 评审稿 v1 · 2026-10-05</span>
+  <h1>权限配置可视化：从「打字符串」到「勾选工作台」</h1>
+  <p>现状的权限管理面要求操作者输入用户数字 ID 与权限字符串（如 <code style="background:rgba(255,255,255,.2);color:#fff">access.grants.read</code>），对业务同事不可用。<br>
+  本方案不改变任何权限模型（目录 / 直授 / 组 / 版本传播全部保留），只重做表达层，并补两个只读接口。</p>
+</header>
+
+<nav class="toc">
+  <h2>目录</h2>
+  <a href="#s1">1 现状痛点</a>
+  <a href="#s2">2 设计原则</a>
+  <a href="#s3">3 方案总览</a>
+  <a href="#s4">4 按用户</a>
+  <a href="#s5">5 按功能</a>
+  <a href="#s6">6 按组</a>
+  <a href="#s7">7 关键交互</a>
+  <a href="#s8">8 后端配合</a>
+  <a href="#s9">9 分期落地</a>
+  <a href="#s10">10 取舍与风险</a>
+  <a href="#s11">11 实现方案（已批准）</a>
+</nav>
+
+<!-- ================= 1 现状 ================= -->
+<section id="s1">
+  <h2 class="sec">1 · 现状：为什么业务同事用不了</h2>
+  <p>现在权限配置分布在两个页面，全部基于通用表单引擎，输入的粒度和人的心智模型完全脱节：</p>
+  <table>
+    <tr><th style="width:30%">现状</th><th>对业务同事的问题</th></tr>
+    <tr><td>「目标用户」是<strong>数字 ID</strong> 输入框（直授页的查询条件条 / 授予对话框）</td><td>同事不知道任何人的数字 ID，只认识名字 / 花名 / 手机号</td></tr>
+    <tr><td>「权限」是<strong>纯字符串文本框</strong>，如 <code>access.grants.read</code></td><td>看不懂、记不住、易拼错；填错目录外字符串直接被 400 拒（fail-closed 是安全特性，但交互零提示）</td></tr>
+    <tr><td>过期时间是 <strong>Unix 秒</strong>整数</td><td>无法理解「1700000000」是何时</td></tr>
+    <tr><td>权限组页成员是 <strong>「用户 #7」</strong>这样的数字</td><td>不知道是谁；加成员同样要输入用户 ID</td></tr>
+    <tr><td>没有「这个人到底能干什么」的总览</td><td>直授一页、组一页、有效权限（并集）只存在于签发快照里，任何界面都答不了这个最常见的问题</td></tr>
+    <tr><td>没有「谁能用这个功能」的反查</td><td>业务提需求「给运营开 XX 功能」，管理员只能逐个翻组、翻用户</td></tr>
+    <tr><td>管理员等价权限、孤儿条目虽有数据，但展示为普通文本</td><td>危险授出去没感觉；失效条目不知道什么意思</td></tr>
+  </table>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px;">
+    <div class="before">
+      <div class="lbl">▍现状：一次直授对话</div>
+      <div class="field-row">
+        <span class="input-mock">目标用户&nbsp;<span style="color:#9ca3af">请输入数字 ID…</span></span>
+      </div>
+      <div class="field-row">
+        <span class="input-mock" style="min-width:280px">权限&nbsp;<span style="color:#9ca3af">access.xxx.yyy 必须逐字手打</span></span>
+      </div>
+      <div class="field-row">
+        <span class="input-mock">过期时间&nbsp;<span style="color:#9ca3af">Unix 秒（留空永久）</span></span>
+      </div>
+      <span class="btn-mock" style="opacity:.6">提交（可能 400）</span>
+    </div>
+    <div class="after">
+      <div class="lbl">▍方案：同一次直授</div>
+      <div class="field-row">
+        <span class="input-mock focus">🔍 搜索用户… <span class="badge blue">王小明</span> <span class="badge gray">PM · 产品部</span></span>
+      </div>
+      <div class="field-row">
+        <span class="input-mock focus" style="min-width:280px">+ 添加权限…（从目录勾选）</span>
+      </div>
+      <div class="field-row">
+        <span class="input-mock focus">🗓 2026-12-31 <span style="color:#9ca3af">到期后自动失效</span></span>
+      </div>
+      <span class="btn-mock">提交授权</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 2 原则 ================= -->
+<section id="s2">
+  <h2 class="sec">2 · 设计原则</h2>
+  <ol style="padding-left:22px; margin:10px 0;">
+    <li style="margin:6px 0"><strong>人话优先</strong>：每个权限有中文名 + 所属功能分组 + 一句「能干什么」。中文名不需要后端改——UI 目录里的 Action 自带 <code>title</code> / <code>description</code>，用目录的 <code>declared_by</code> 即可映射出分组与说明。</li>
+    <li style="margin:6px 0"><strong>三个自然视角，一次只回答一个问题</strong>：按人（ta 有什么权限）、按功能（谁能用这个）、按组（角色怎么配）。</li>
+    <li style="margin:6px 0"><strong>勾选代替打字</strong>：所有权限位从目录里选，键盘只用于搜索。选择器与「授权」是同一件事的三处入口。</li>
+    <li style="margin:6px 0"><strong>危险可见</strong>：管理员等价权限（红）、孤儿条目（琥珀）、过期（灰/琥珀）全部徽标化并给出处置出路。</li>
+    <li style="margin:6px 0"><strong>模型零改动</strong>：目录、直授、组、Outbox 版本传播、G2 闸门、最后管理员不变量——全都不动。所有安全约束天然继承，本方案不引入新的授权路径。</li>
+  </ol>
+</section>
+
+<!-- ================= 3 总览 ================= -->
+<section id="s3">
+  <h2 class="sec">3 · 方案总览：权限工作台（Permission Workspace）</h2>
+  <p>把现有的「权限管理」「权限组」两个平铺页面，升级为一个左侧三个入口的工作台。三个视图共用同一套组件（用户选择器、目录选择弹窗、徽标），数据全部来自现有接口 + 一个新增只读接口：</p>
+  <div class="tabs" id="view-tabs">
+    <button class="tab active" data-tab="t-users">① 按用户</button>
+    <button class="tab" data-tab="t-func">② 按功能</button>
+    <button class="tab" data-tab="t-groups">③ 按组</button>
+  </div>
+
+  <div class="tab-panel active" id="t-users">
+    <div class="card">
+      <h4>按用户：搜索一个人 → 看 ta 的全部权限</h4>
+      <ul class="tight">
+        <li>顶部全局搜索：名字 / 花名 / 手机号，下拉候选带头像与部门。</li>
+        <li>用户权限总览三块：<strong>直授权限</strong>（分组勾选态 + 过期标签）、<strong>所属权限组</strong>（卡片）、<strong>有效权限</strong>（直授 ∪ 组的只读并集，标注来源）——直接回答「这个人能用什么」。</li>
+        <li>从总览上直接发起「授予 / 撤销」，无需离开页面。</li>
+      </ul>
+      <p style="margin:8px 0 0"><a href="#s4" style="color:var(--primary)">↓ 完整示意见 §4</a></p>
+    </div>
+  </div>
+  <div class="tab-panel" id="t-func">
+    <div class="card">
+      <h4>按功能：搜索一个功能 → 看谁能用、谁在用</h4>
+      <ul class="tight">
+        <li>权限目录按模块分组的浏览 + 搜索（中文名 / 字符串都搜）。</li>
+        <li>点开一条权限：基本信息（中文名、声明者、管理员等价警示）+ 两张持有者表：<strong>直授持有者</strong>（用户、授予人、时间、过期）、<strong>组持有者</strong>（组、成员数）。</li>
+        <li>页内一个「授权」按钮：选用户或选组，直接授出。</li>
+      </ul>
+      <div class="note">数据前提：现有库表已有按 permission 反查的索引（<code>idx_authz_grant_permission</code>）与组条目查询，只缺一个把它暴露出来的只读 Action（P2，见 §8）。</div>
+      <p style="margin:8px 0 0"><a href="#s5" style="color:var(--primary)">↓ 完整示意见 §5</a></p>
+    </div>
+  </div>
+  <div class="tab-panel" id="t-groups">
+    <div class="card">
+      <h4>按组：角色卡——给「角色」配权限、把人拖进角色</h4>
+      <ul class="tight">
+        <li>组列表卡片化：组名 + 描述 + 条目数 / 成员数 + 危险徽标 + 孤儿徽标。</li>
+        <li>组详情：条目改为<strong>勾选式</strong>（目录选择弹窗多选）；成员改为<strong>用户选择器</strong>（名字搜索，不再有「用户 #7」）。</li>
+        <li>内置全权组只读展示：锁图标 + 「权限由权限目录实时计算」，条目 = 全目录。</li>
+      </ul>
+      <p style="margin:8px 0 0"><a href="#s6" style="color:var(--primary)">↓ 完整示意见 §6</a></p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 4 按用户 ================= -->
+<section id="s4">
+  <h2 class="sec">4 · 视图一：按用户（人 → 权限）</h2>
+
+  <div class="mock">
+    <div class="mock-bar"><span class="dot g"></span><span class="dot y"></span><span class="dot"></span>&nbsp; 权限工作台 · 按用户 <b>/m/access.workspace?user=</b></div>
+    <div class="mock-body">
+      <div class="field-row">
+        <span class="input-mock focus" style="flex:1">🔍 搜索用户（姓名 / 手机号 / 花名）…</span>
+        <span class="btn-mock">查看权限</span>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px">候选：<span class="avatar">王</span>王小明 <span class="badge gray">产品部</span> <code>uid 7</code> &nbsp;·&nbsp; <span class="avatar">李</span>李小红 <span class="badge gray">运营部</span> <code>uid 12</code> &nbsp;·&nbsp; <span class="avatar">赵</span>赵刚 <span class="badge gray">研发部</span> <code>uid 3</code>（已停用）</div>
+
+      <div style="display:flex; gap:14px; flex-wrap:wrap;">
+        <!-- 左：直授 + 组 -->
+        <div style="flex:1.3; min-width:320px;">
+          <div class="group-title">直授权限 <span class="cnt">4 条 · 点击行内开关直接授 / 撤</span></div>
+          <div class="group-block">
+            <div class="group-title" style="font-size:12px;color:var(--muted)">📁 审批与工作流</div>
+            <div class="perm-row"><input type="checkbox" checked><span class="name">发起飞书审批</span><span class="key">feishu.approval.dispatch</span><span class="desc">提交一条审批流并等待回执</span><span class="badge blue">直授</span></div>
+            <div class="perm-row"><input type="checkbox" checked><span class="name">回查审批记录</span><span class="key">feishu.approval.read</span><span class="desc">查看本业务线审批历史</span><span class="badge blue">直授</span><span class="badge warn">7 天后过期</span></div>
+          </div>
+          <div class="group-block">
+            <div class="group-title" style="font-size:12px;color:var(--muted)">📁 账号与安全</div>
+            <div class="perm-row"><input type="checkbox" checked><span class="name">重置任意账号密码</span><span class="key">account.users.reset_credentials</span><span class="desc">签发密码重置凭证，可登录为他人</span><span class="badge danger">⚠ 管理员等价</span></div>
+            <div class="perm-row"><input type="checkbox"><span class="name">停用 / 启用账号</span><span class="key">account.users.manage</span><span class="desc">管理账号生命周期状态</span></div>
+          </div>
+          <div class="group-block">
+            <div class="group-title" style="font-size:12px;color:var(--muted)">📁 已移除模块</div>
+            <div class="perm-row"><input type="checkbox" checked><span class="name" style="color:var(--muted)">旧版导出</span><span class="key" style="color:#fca5a5">legacy.export.run</span><span class="desc">该权限已不在目录中，不生效</span><span class="badge warn">已失效</span></div>
+          </div>
+          <div class="field-row" style="margin-top:10px">
+            <span class="btn-mock ghost">＋ 授予新权限</span>
+          </div>
+
+          <div class="group-title" style="margin-top:16px">所属权限组 <span class="cnt">2 个</span></div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+            <div class="card" style="margin:0;padding:12px 14px">
+              <div style="font-weight:600;font-size:14px">产品运营组 <span class="badge gray">静态组</span></div>
+              <div style="font-size:12px;color:var(--muted);margin:4px 0">负责日常审批与内容管理</div>
+              <div style="font-size:12px">条目 <b>6</b> · 成员 <b>9</b> · 创建人 王小明</div>
+            </div>
+            <div class="card" style="margin:0;padding:12px 14px; border-color:#fecaca">
+              <div style="font-weight:600;font-size:14px">平台管理组 <span class="badge danger">含管理员等价</span></div>
+              <div style="font-size:12px;color:var(--muted);margin:4px 0">持有可回显凭据的敏感权限</div>
+              <div style="font-size:12px">条目 <b>3</b> · 成员 <b>2</b> · 创建人 赵刚</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右：有效权限并集 -->
+        <div style="flex:1; min-width:300px;">
+          <div class="group-title">有效权限（直授 ∪ 组） <span class="cnt">只读 · 签发生效口径</span></div>
+          <div class="card" style="margin:0; background:#f8fafc;">
+            <div class="perm-row" style="background:#fff"><span class="name">发起飞书审批</span><span class="key">feishu.approval.dispatch</span><span class="badge gray">来自 产品运营组</span></div>
+            <div class="perm-row" style="background:#fff"><span class="name">回查审批记录</span><span class="key">feishu.approval.read</span><span class="badge gray">直授</span></div>
+            <div class="perm-row" style="background:#fff"><span class="name">重置任意账号密码</span><span class="key">account.users.reset_credentials</span><span class="badge danger">⚠ 管理员等价</span></div>
+            <div style="font-size:12px;color:var(--muted);padding:6px 10px">⚠ 此并集为界面展示口径，实际生效以 Token 签发快照为准：授权变更后用户<strong>刷新会话</strong>才生效。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3>授权弹窗（三处视图共用的同一组件）</h3>
+  <div class="mock">
+    <div class="mock-bar"><span class="dot g"></span><span class="dot y"></span><span class="dot"></span>&nbsp; 授予权限 → 王小明（uid 7）</div>
+    <div class="mock-body">
+      <div class="field-row"><span class="input-mock focus" style="flex:1">🔍 搜索功能（中文名 / 权限字符串）…</span></div>
+      <div class="group-block">
+        <div class="group-title" style="font-size:12px;color:var(--muted)">📁 审批与工作流 <span class="cnt">声明者 feishu.approval</span></div>
+        <div class="perm-row"><input type="checkbox"><span class="name">发起飞书审批</span><span class="key">feishu.approval.dispatch</span><span class="desc">提交一条审批流并等待回执</span></div>
+        <div class="perm-row"><input type="checkbox"><span class="name">回查审批记录</span><span class="key">feishu.approval.read</span><span class="desc">查看本业务线审批历史</span></div>
+      </div>
+      <div class="group-block">
+        <div class="group-title" style="font-size:12px;color:var(--muted)">📁 账号与安全</div>
+        <div class="perm-row" id="admin-equiv-row"><input type="checkbox" id="admin-equiv"><span class="name" style="color:var(--danger)">重置任意账号密码</span><span class="key">account.users.reset_credentials</span><span class="desc">签发密码重置凭证，可登录为他人</span><span class="badge danger">⚠ 管理员等价</span></div>
+      </div>
+      <div id="admin-warn" class="danger" style="display:none">
+        你选中了 <strong>管理员等价权限</strong>：授予它等于交出一部分系统管理能力（重置任意账号密码）。只有<strong>系统管理员</strong>可以授出，提交后将产生安全审计事件。
+      </div>
+      <div class="field-row">
+        <span class="input-mock">🗓 过期时间：<b>2026-12-31</b> <span style="color:#9ca3af">（留空 = 永久有效）</span></span>
+        <span class="btn-mock" id="grant-btn" disabled>提交授权</span>
+        <span class="btn-mock ghost">取消</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 5 按功能 ================= -->
+<section id="s5">
+  <h2 class="sec">5 · 视图二：按功能（权限 → 人）</h2>
+  <div class="mock">
+    <div class="mock-bar"><span class="dot g"></span><span class="dot y"></span><span class="dot"></span>&nbsp; 权限工作台 · 按功能</div>
+    <div class="mock-body">
+      <div class="field-row">
+        <span class="input-mock focus" style="flex:1">🔍 搜索功能：如「审批」「凭据」「reset」…</span>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1.6fr; gap:14px;">
+        <div>
+          <div class="group-title" style="font-size:12px;color:var(--muted)">📁 审批与工作流</div>
+          <div class="perm-row"><span class="name">发起飞书审批</span><span class="key">feishu.approval.dispatch</span><span class="badge gray">2 组 · 5 人</span></div>
+          <div class="perm-row" style="border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,.12)"><span class="name">回查审批记录</span><span class="key">feishu.approval.read</span><span class="badge gray">1 组 · 11 人</span></div>
+          <div class="group-title" style="font-size:12px;color:var(--muted)">📁 账号与安全</div>
+          <div class="perm-row"><span class="name" style="color:var(--danger)">重置任意账号密码</span><span class="key">account.users.reset_credentials</span><span class="badge danger">⚠ 管理员等价</span></div>
+          <div class="perm-row"><span class="name">停用 / 启用账号</span><span class="key">account.users.manage</span><span class="badge gray">1 组 · 3 人</span></div>
+        </div>
+        <div class="card" style="margin:0">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px">
+            <span class="name" style="font-weight:700;font-size:15px">回查审批记录</span>
+            <span class="badge blue">feishu.approval.read</span>
+            <span class="badge gray">声明者 feishu.approval.read_approvals</span>
+          </div>
+          <div style="font-size:13px;color:var(--muted);margin-bottom:10px">查看本业务线审批历史与回执状态。</div>
+          <h4 style="margin:10px 0 6px;font-size:14px">直授持有者 <span class="badge gray">3 人</span></h4>
+          <table class="mini-table">
+            <tr><th>用户</th><th>授予人</th><th>授予时间</th><th>过期</th></tr>
+            <tr><td><span class="avatar">王</span>王小明</td><td>赵刚（uid 3）</td><td>2026-09-12</td><td><span class="badge ok">永久</span></td></tr>
+            <tr><td><span class="avatar">李</span>李小红</td><td>王小明（uid 7）</td><td>2026-09-28</td><td><span class="badge warn">2026-12-31</span></td></tr>
+            <tr><td><span class="avatar">孙</span>孙丽</td><td>王小明（uid 7）</td><td>2026-08-02</td><td><span class="badge gray">已过期</span></td></tr>
+          </table>
+          <h4 style="margin:10px 0 6px;font-size:14px">组持有者 <span class="badge gray">1 组 · 8 人</span></h4>
+          <table class="mini-table">
+            <tr><th>权限组</th><th>成员数</th><th>条目数</th><th>状态</th></tr>
+            <tr><td>产品运营组</td><td>8</td><td>6</td><td><span class="badge blue">持有中</span></td></tr>
+          </table>
+          <div class="field-row" style="margin-top:12px">
+            <span class="btn-mock">＋ 给用户 / 组授权</span>
+            <span class="btn-mock ghost">查看审计时间线</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note">这张表的数据源：直授行（含 granted_by / occurred_at / expired）现有 <code>list_user_grants</code> 已返回同形状字段，反查按 permission 侧新增 <code>list_holders</code> 只读 Action（§8-2）。</div>
+</section>
+
+<!-- ================= 6 按组 ================= -->
+<section id="s6">
+  <h2 class="sec">6 · 视图三：按组（角色卡）</h2>
+  <div class="mock">
+    <div class="mock-bar"><span class="dot g"></span><span class="dot y"></span><span class="dot"></span>&nbsp; 权限工作台 · 按组</div>
+    <div class="mock-body">
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-bottom:14px;">
+        <div class="card" style="margin:0;padding:12px 14px">
+          <div style="font-weight:600">产品运营组</div>
+          <div style="font-size:12px;color:var(--muted)">负责日常审批与内容管理</div>
+          <div style="font-size:12px;margin-top:4px">条目 <b>6</b> · 成员 <b>9</b> · 由 王小明 创建</div>
+        </div>
+        <div class="card" style="margin:0;padding:12px 14px; border-color:#fca5a5">
+          <div style="font-weight:600">平台管理组 <span class="badge danger">⚠ 管理员等价</span></div>
+          <div style="font-size:12px;color:var(--muted)">持有可回显凭据的敏感权限</div>
+          <div style="font-size:12px;margin-top:4px">条目 <b>3</b> · 成员 <b>2</b> · 由 赵刚 创建</div>
+        </div>
+        <div class="card" style="margin:0;padding:12px 14px; background:#f8fafc; border-style:dashed">
+          <div style="font-weight:600">🔒 系统管理员 <span class="badge gray">内置全权组</span></div>
+          <div style="font-size:12px;color:var(--muted)">权限 = 全目录实时计算，不可编辑</div>
+          <div style="font-size:12px;margin-top:4px">条目 <b>全部</b> · 成员 <b>2</b></div>
+        </div>
+      </div>
+
+      <div class="group-title">产品运营组 · 组详情 <span class="cnt">静态组</span></div>
+      <div style="display:flex; gap:14px; flex-wrap:wrap;">
+        <div style="flex:1.2; min-width:300px;">
+          <div class="group-title" style="font-size:12px;color:var(--muted)">组内权限条目（勾选式） <span class="cnt">6 条</span></div>
+          <div class="perm-row"><input type="checkbox" checked><span class="name">发起飞书审批</span><span class="key">feishu.approval.dispatch</span><span class="desc">提交一条审批流并等待回执</span></div>
+          <div class="perm-row"><input type="checkbox" checked><span class="name">回查审批记录</span><span class="key">feishu.approval.read</span><span class="desc">查看本业务线审批历史</span></div>
+          <div class="perm-row"><input type="checkbox" checked><span class="name" style="color:var(--danger)">重置任意账号密码</span><span class="key">account.users.reset_credentials</span><span class="badge danger">⚠ 管理员等价</span></div>
+          <div class="perm-row"><input type="checkbox"><span class="name" style="color:var(--muted)">旧版导出</span><span class="key" style="color:#fca5a5">legacy.export.run</span><span class="badge warn">已失效 · 可移除</span></div>
+          <div class="field-row" style="margin-top:8px"><span class="btn-mock ghost">＋ 添加条目</span><span class="btn-mock ghost">移除已失效条目</span></div>
+        </div>
+        <div style="flex:1; min-width:280px;">
+          <div class="group-title" style="font-size:12px;color:var(--muted)">成员（用户选择器） <span class="cnt">9 人</span></div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px">
+            <span class="badge blue" style="padding:4px 10px"><span class="avatar" style="width:16px;height:16px;font-size:9px;margin-right:4px">王</span>王小明 ✕</span>
+            <span class="badge blue" style="padding:4px 10px"><span class="avatar" style="width:16px;height:16px;font-size:9px;margin-right:4px">李</span>李小红 ✕</span>
+            <span class="badge blue" style="padding:4px 10px"><span class="avatar" style="width:16px;height:16px;font-size:9px;margin-right:4px">陈</span>陈静 ✕</span>
+            <span class="badge gray" style="padding:4px 10px">＋ 添加成员（搜索名字）</span>
+          </div>
+          <div class="note" style="font-size:13px">加成员与改条目同样受 G2 闸门约束：目标组含管理员等价权限时，只有系统管理员可改成员——交互上把这条写进确认文案。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 7 交互 ================= -->
+<section id="s7">
+  <h2 class="sec">7 · 关键交互细节</h2>
+  <div class="card">
+    <h4 style="margin-top:0">目录选择弹窗（三处共用，替代所有权限文本输入）</h4>
+    <ul class="tight">
+      <li>搜索框：中文名、权限字符串、模块名都搜。</li>
+      <li>按 <code>declared_by</code> 的模块分组折叠（「审批与工作流」「账号与安全」…），每组显示声明者。</li>
+      <li>管理员等价权限：红字 + 徽标；选中即出现红色警示条（图见 §4 弹窗）；提交按钮在含管理员等价选择时需二次确认。</li>
+      <li>找不到目标权限时显示空态引导：「该功能可能未启用或你无查看权限」，而不是让用户自己发明字符串。</li>
+    </ul>
+    <h4>过期时间</h4>
+    <ul class="tight">
+      <li>日期控件（非 Unix 秒），可选「永久」；展示侧给相对文案（「7 天后过期」「已过期」）。</li>
+    </ul>
+    <h4>生效提示</h4>
+    <ul class="tight">
+      <li>所有写操作成功后 toast：<strong>「已授权，对方刷新会话后生效」</strong>——与现有版本传播语义一致，不承诺即时生效。</li>
+    </ul>
+    <h4>徽标语义</h4>
+    <table>
+      <tr><th>徽标</th><th>含义</th><th>出路</th></tr>
+      <tr><td><span class="badge danger">⚠ 管理员等价</span></td><td>授予 = 交出部分系统管理能力（理由由代码侧清单提供）</td><td>仅系统管理员可授；界面给出拒绝理由文案</td></tr>
+      <tr><td><span class="badge warn">已失效</span></td><td>孤儿条目：权限已不在目录中，不参与解析</td><td>可移除（沿用现有 remove_item 语义，不自动清理）</td></tr>
+      <tr><td><span class="badge warn">N 天后过期</span> / <span class="badge gray">已过期</span></td><td>直授过期状态（expired 派生标记已有）</td><td>行内一键「续期」</td></tr>
+      <tr><td><span class="badge gray">来自 XX 组</span></td><td>有效权限并集的来源标注</td><td>点击跳转该组详情</td></tr>
+    </table>
+    <h4>空态</h4>
+    <ul class="tight">
+      <li>用户无任何权限：引导「授予第一条权限或加入一个权限组」。</li>
+      <li>组无条目：引导「添加条目」；全权组不显示该引导（只读）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 8 后端 ================= -->
+<section id="s8">
+  <h2 class="sec">8 · 后端配合清单（最小改动）</h2>
+  <p>原则：<strong>权限模型与全部写接口零改动</strong>，只补「表达层缺的数据」。已核对的现状：UI 目录含全部 Action 的 <code>title/description</code> 与模块信息，<code>PermissionEntry</code> 已含 <code>admin_equivalent</code> 与 <code>declared_by</code>。</p>
+  <table>
+    <tr><th style="width:26%">需要的数据</th><th style="width:30%">现状</th><th>方案</th></tr>
+    <tr>
+      <td>用户选择器（名字 / 搜索）</td>
+      <td><code>account.users.list_users</code> 已存在（需核对权限位与可见性）；组详情成员目前只回 <code>user_id</code> 数字</td>
+      <td><strong>P0 纯前端</strong>：前端拉一次用户列表做 id→名字映射（名字数据量小）。若 <code>list_users</code> 权限位过严，新增轻量只读 Action（authenticated-only，只回 id + 名字 + 启用态），专供权限工作台</td>
+    </tr>
+    <tr>
+      <td>权限中文名 / 分组</td>
+      <td>目录里 Action 自带 title，权限条目带 declared_by</td>
+      <td><strong>零后端改动</strong>：前端由 declared_by → 对应 Action → 中文名与模块分组；映射不到时回退显示字符串本身</td>
+    </tr>
+    <tr>
+      <td>「谁能用 X」反查（视图二）</td>
+      <td>表已有 <code>idx_authz_grant_permission</code> 反查索引与组条目查询，<strong>无对外接口</strong></td>
+      <td><strong>P2 新增一个只读 Action</strong>（如 <code>access.grants.list_holders</code>：permission → 直授持有者 + 组持有者），复用现有 repository 查询，无写路径</td>
+    </tr>
+    <tr>
+      <td>管理员等价理由文案</td>
+      <td>理由在代码侧清单 <code>ADMIN_EQUIVALENT_PERMISSIONS</code>，403 已用它；目录接口未回 reason 字段</td>
+      <td>P0 前端内置同一份映射（3 条，静态）；或后端在 <code>PermissionEntry</code> 序列化加 <code>reason</code> 字段（一行改动）——推荐后端加，避免双份清单漂移</td>
+    </tr>
+    <tr>
+      <td>直授审计字段（授予人 / 时间 / 过期）</td>
+      <td><code>list_user_grants</code> 已返回 <code>granted_by / occurred_at / expired</code></td>
+      <td><strong>零改动</strong>，前端直接画</td>
+    </tr>
+  </table>
+  <div class="warn"><strong>不要做的事</strong>：不加角色模型、不加权限通配符、不加运行期注册权限、不改 G2 闸门与最后管理员不变量——这些是当前 fail-closed 安全面的根基，本方案只重做「人怎么操作」，不重做「系统怎么判」。</div>
+</section>
+
+<!-- ================= 9 分期 ================= -->
+<section id="s9">
+  <h2 class="sec">9 · 分期落地</h2>
+  <table>
+    <tr><th style="width:10%">期</th><th style="width:40%">范围</th><th>验收标准</th></tr>
+    <tr>
+      <td><span class="badge blue">P0</span></td>
+      <td>纯前端，不动后端：
+        <ul class="tight" style="margin-top:4px">
+          <li>目录选择弹窗（替换三处权限文本输入）</li>
+          <li>权限中文名 / 模块分组映射</li>
+          <li>组页成员名字显示 + 用户选择器</li>
+          <li>过期日期控件、徽标（危险 / 孤儿 / 过期）、生效提示、空态</li>
+        </ul>
+      </td>
+      <td>业务同事可在无后端变更下完成一次完整授权：搜索名字 → 勾选功能 → 选过期时间 → 提交；全程无数字 ID、无字符串输入</td>
+    </tr>
+    <tr>
+      <td><span class="badge blue">P1</span></td>
+      <td>视图一「按用户」：用户权限总览（直授 + 组 + 有效权限并集）+ 页内授 / 撤 / 续期</td>
+      <td>打开任意用户，可一眼回答「ta 有哪些直授、在哪些组、有效权限是什么」，并可原地授权</td>
+    </tr>
+    <tr>
+      <td><span class="badge blue">P2</span></td>
+      <td>视图二「按功能」：目录分组浏览 + 持有者反查（新增 <code>list_holders</code> 只读 Action）+ 审计时间线</td>
+      <td>回答「谁能用 X 功能」并可从此页直接发起授权；反查结果与直授 / 组两页一致（同一数据源）</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ================= 10 取舍 ================= -->
+<section id="s10">
+  <h2 class="sec">10 · 取舍与风险</h2>
+  <table>
+    <tr><th style="width:34%">取舍 / 风险</th><th>处理</th></tr>
+    <tr><td>「有效权限」并集是界面计算口径，≠ 当前 Token 快照</td><td>明确标注「刷新会话后生效」；如需实时权威口径，P2 可选后端补 effective snapshot 只读 Action（与签发解析同一代码路径，保证口径一致）</td></tr>
+    <tr><td>用户量大时搜索性能</td><td>复用 list_users 分页 + 服务端过滤；名字映射一次缓存（staleTime 与现有查询一致）</td></tr>
+    <tr><td>权限条目多时分组树高度</td><td>折叠 + 搜索过滤，展开默认收起；按模块分组天然限高</td></tr>
+    <tr><td>名字 / 用户列表可见性</td><td>权限工作台本身已限访问者（目录门控），风险与现有组页一致；不新增全局用户导出</td></tr>
+    <tr><td>前端内置管理员等价理由（P0 过渡）可能漂移</td><td>P0 即推荐后端在目录接口回 <code>reason</code>（一行改动），避免双份清单；测试用冻结目录钉住</td></tr>
+    <tr><td>不改模型 = 界面能看到、但授不出去的组合</td><td>G2 闸门 / 最后管理员等约束在提交时返回 403 中文理由（现有错误文案已可读），弹窗内提示 + 二次确认缓解</td></tr>
+  </table>
+</section>
+
+<!-- ================= 11 实现方案 ================= -->
+<section id="s11">
+  <h2 class="sec">11 · 实现方案（2026-10-05 已批准，三视图一次性落地）</h2>
+  <p>基于代码现状核实的落地方案：<strong>权限模型零改动，所有写操作复用现有 Action</strong>（<code>grant_permission</code> / <code>revoke_permission</code> / 组 9 Action，G2 闸门、自提权、最后管理员不变量天然继承）。</p>
+
+  <h3>后端改动（3 个只读 Action + 1 个字段，无写路径）</h3>
+  <table>
+    <tr><th style="width:24%">改动</th><th style="width:44%">内容</th><th>位置 / 契约</th></tr>
+    <tr>
+      <td>① <code>account.users.lookup</code></td>
+      <td>用户选择器数据源。<strong>authenticated-only</strong>（不挂 <code>account.users.read</code>——工作台可见者不一定有它），只回 <code>id / username / email / status</code>，q 为空时正常分页不过滤（前端据此循环翻页构建全量目录），上限 50 条防 DoS</td>
+      <td><code>src/addon/account/user/actions/lookup.rs</code> + <code>UserRepository::search</code></td>
+    </tr>
+    <tr>
+      <td>② <code>access.grants.list_holders</code></td>
+      <td>「谁能用 X」反查。权限位 <code>["access.grants.read"]</code>，只读事务；直授持有者含过期行 + expired 派生标记，组持有者带成员数。复用 <code>idx_authz_grant_permission</code> 反查索引</td>
+      <td><code>src/addon/access/grants/actions/list_holders.rs</code> + <code>GrantRepository::list_by_permission_in_tx</code> + <code>GroupRepository::list_groups_holding_item_in_tx</code><br>响应：<code>{direct:[{user_id,granted_by,occurred_at,expires_at,expired}], groups:[{id,group_key,title,member_count}]}</code></td>
+    </tr>
+    <tr>
+      <td>③ <code>PermissionEntry.reason</code></td>
+      <td>管理员等价权限的中文理由随目录接口返回（避免前端双份清单漂移），<code>null</code> = 非管理员等价；测试用冻结目录钉住</td>
+      <td><code>src/addon/access/domain/permission_catalog.rs</code>，理由取 <code>sensitive_permissions</code> 清单</td>
+    </tr>
+  </table>
+
+  <h3>前端改动</h3>
+  <table>
+    <tr><th style="width:24%">件</th><th>内容</th></tr>
+    <tr><td>数据层 <code>features/access/workspace-api.ts</code></td><td><code>listUserLookup</code> / <code>useUserDirectory</code>（循环翻页 id→名字 Map）/ <code>listUserGrants</code>（复用现有接口）/ <code>listHolders</code> / <code>usePermissionMeta</code>（目录 + UI 目录 → 中文名 / 模块分组映射，命不中回退字符串）</td></tr>
+    <tr><td>共享组件 <code>features/access/components/</code></td><td><code>UserPicker</code>（lookup 搜索下拉）、<code>PermissionPickerDialog</code>（搜索 + 模块分组折叠 + 危险红条二次确认 + 过期日期控件，视图三无过期）、<code>PermissionBadge</code>（危险 / 孤儿 / 过期 / 来源）</td></tr>
+    <tr><td>三视图 <code>PermissionWorkspacePage</code></td><td>按用户（总览：直授分组 + 组卡片 + 有效权限并集；行内撤 / 重新授予）、按功能（目录浏览 + 持有者两张表 + 页内授权）、按组（现有 <code>PermissionGroupsPage</code> 原地升级：条目勾选 + 成员用户选择器 + 名字显示 + 内置锁）；<strong>全程无数字 ID、无权限字符串输入</strong></td></tr>
+    <tr><td>路由与入口</td><td><code>/access/workspace</code> 新增（lazy + RouteFallback）；<code>/access/groups</code> 指向工作台「按组」tab 兼容旧 URL；侧边栏「权限管理」区入口改为「权限工作台」</td></tr>
+  </table>
+
+  <h3>验证与验收</h3>
+  <ul class="tight">
+    <li>后端：新 Action 单测（参数契约 / 投影）+ 集成测试（lookup authenticated-only、list_holders 权限门禁与数据正确性）；前端：三视图垂直切片（对齐 <code>module-page-access-grants.test.tsx</code> 的 mock-fetch 模式）+ permission-meta 单测。</li>
+    <li>验收标准：业务同事不接触 ID 与权限字符串即可完成——查一个人看权限、查一个功能看谁能用、给角色配权限加人；危险权限全程可见带理由。</li>
+  </ul>
+
+  <h3>落地顺序</h3>
+  <ol class="tight">
+    <li>后端 3 Action + reason（并行：access 侧 / account 侧）</li>
+    <li>前端数据层 + 共享组件（与后端并行，契约在本文档钉住）</li>
+    <li>三视图页面 + 权限组页升级 + 路由入口</li>
+    <li>全量验证：<code>cargo test</code> / 前端全套件 + tsc / eslint / prettier</li>
+  </ol>
+</section>
+
+<footer>
+  设计评审稿 v2 · 含已批准的实现方案（§11）· 基于当前权限模型（目录投影 / 直授 authz_grant / 权限组 / Outbox 版本传播）。
+</footer>
+</div>
+
+<script>
+// 仅用于本设计稿的演示交互：视图 tab 切换 + 授权弹窗警示条
+(function () {
+  var tabs = document.querySelectorAll("#view-tabs .tab");
+  tabs.forEach(function (tab) {
+    tab.addEventListener("click", function () {
+      tabs.forEach(function (t) { t.classList.remove("active"); });
+      tab.classList.add("active");
+      document.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.remove("active"); });
+      var panel = document.getElementById(tab.dataset.tab);
+      if (panel) panel.classList.add("active");
+    });
+  });
+  var adminCheck = document.getElementById("admin-equiv");
+  if (adminCheck) {
+    adminCheck.addEventListener("change", function () {
+      var warn = document.getElementById("admin-warn");
+      var btn = document.getElementById("grant-btn");
+      if (adminCheck.checked) {
+        warn.style.display = "block";
+        btn.disabled = false;
+        btn.classList.add("red");
+      } else {
+        warn.style.display = "none";
+        btn.disabled = true;
+        btn.classList.remove("red");
+      }
+    });
+  }
+})();
+</script>
+</body>
+</html>

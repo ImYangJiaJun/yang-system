@@ -3,7 +3,7 @@
 //! Catalog 是权限字符串的唯一事实来源；本模块把它投影为稳定排序的目录，
 //! 组合根在 `AppBuilder` 冻结后安装一次，之后运行期只读。
 
-use super::sensitive_permissions::is_admin_equivalent;
+use super::sensitive_permissions::{admin_equivalent_entry, is_admin_equivalent};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -26,14 +26,20 @@ pub(crate) const PERMISSION_MAX_LENGTH: usize = 128;
 /// 权限目录中的一个条目：权限字符串、声明它的操作 ID 列表，以及危害面标记。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub(crate) struct PermissionEntry {
-    permission: String,
-    declared_by: Vec<String>,
+    pub(crate) permission: String,
+    pub(crate) declared_by: Vec<String>,
     /// 该权限是否为「管理员等价权限」（G2）。
     ///
     /// 目录本身推不出这一点（它只记录「有哪些权限」），标记由代码侧的显式清单
     /// `sensitive_permissions` 给出。随条目一起序列化到目录读接口，前端据此把危害面
     /// 显示出来——「可配置的前提是每个权限的危害面可见」。
-    admin_equivalent: bool,
+    pub(crate) admin_equivalent: bool,
+    /// 管理员等价的理由（来自代码侧清单，G2）；非管理员等价权限为 `None`。
+    ///
+    /// 与 `admin_equivalent` 同源同构：清单内权限必有理由（`sensitive_permissions`
+    /// 的单测钉住「每条都带非空理由」），清单外恒为 `None`。序列化字段名 `reason`，
+    /// 可空——前端在展示危害面时把理由一并显示出来。
+    pub(crate) reason: Option<String>,
 }
 
 impl PermissionEntry {
@@ -49,6 +55,11 @@ impl PermissionEntry {
     #[cfg(test)]
     pub(crate) fn admin_equivalent(&self) -> bool {
         self.admin_equivalent
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
     }
 }
 
@@ -91,10 +102,12 @@ pub(crate) fn project_permissions(addons: &[AddonSpec]) -> Vec<PermissionEntry> 
             declared_by.sort();
             declared_by.dedup();
             let admin_equivalent = is_admin_equivalent(&permission);
+            let reason = admin_equivalent_entry(&permission).map(|entry| entry.reason.to_string());
             PermissionEntry {
                 permission,
                 declared_by,
                 admin_equivalent,
+                reason,
             }
         })
         .collect()
@@ -290,6 +303,22 @@ mod tests {
         };
         assert!(flag("account.users.reset_credentials"), "清单内必须标记");
         assert!(!flag("account.users.manage"), "清单外不得标记");
+
+        // reason 与 admin_equivalent 同源：清单内权限带清单理由，清单外恒为 None。
+        let reason = |permission: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.permission() == permission)
+                .unwrap_or_else(|| panic!("投影应包含 {permission}"))
+                .reason()
+        };
+        let listed_reason = reason("account.users.reset_credentials")
+            .unwrap_or_else(|| panic!("清单内权限必须带理由"));
+        assert!(
+            listed_reason.contains("重置凭证"),
+            "理由必须是清单里的中文危害面说明，实际: {listed_reason}"
+        );
+        assert_eq!(reason("account.users.manage"), None, "清单外权限不得带理由");
     }
 
     #[test]
@@ -306,6 +335,7 @@ mod tests {
                 permission: "access.grants.read".to_string(),
                 declared_by: vec!["access.grants.list_permissions".to_string()],
                 admin_equivalent: false,
+                reason: None,
             }])
             .unwrap_or_else(|error| panic!("首次安装应成功: {error}"));
         let entries = handle

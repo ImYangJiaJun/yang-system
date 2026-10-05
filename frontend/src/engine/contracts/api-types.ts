@@ -84,6 +84,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/access/grants/holders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 权限持有者列表
+         * @description 查询直接持有与经权限组持有某权限的全部主体
+         */
+        get: operations["access.grants.list_holders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/access/grants/revoke": {
         parameters: {
             query?: never;
@@ -1040,6 +1060,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/users/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 用户查找
+         * @description 按用户名或邮箱包含匹配分页查找用户（登录用户可用）
+         */
+        get: operations["account.user.lookup"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users/me": {
         parameters: {
             query?: never;
@@ -1412,6 +1452,34 @@ export interface components {
             /** Format: int64 */
             user_id: number;
         };
+        /** @description 一条直授持有事实的对外视图（审计口径：含过期行，带 expired 派生标记）。 */
+        DirectHolderView: {
+            /** @description 派生标记：是否已过期（与直授解析侧同一时钟同一判据）。 */
+            expired: boolean;
+            /**
+             * Format: int64
+             * @description Unix 秒；`None` = 永久有效。
+             */
+            expires_at?: number | null;
+            /** Format: int64 */
+            granted_by: number;
+            /** Format: int64 */
+            occurred_at: number;
+            /** Format: int64 */
+            user_id: number;
+        };
+        /** @description 一个持有该权限条目的权限组视图。 */
+        GroupHolderView: {
+            group_key: string;
+            /** Format: int64 */
+            id: number;
+            /**
+             * Format: int64
+             * @description 成员数（该组有多少人因此获得该权限，下钻展示用）。
+             */
+            member_count: number;
+            title: string;
+        };
         /** @description 权限目录中的一个条目：权限字符串、声明它的操作 ID 列表，以及危害面标记。 */
         PermissionEntry: {
             /**
@@ -1422,6 +1490,12 @@ export interface components {
             admin_equivalent: boolean;
             declared_by: string[];
             permission: string;
+            /**
+             * @description 管理员等价的理由（来自代码侧清单，G2）；非管理员等价权限为 `None`。
+             *
+             *     与 `admin_equivalent` 同源同构：清单内权限必有理由（`sensitive_permissions` 的单测钉住「每条都带非空理由」），清单外恒为 `None`。序列化字段名 `reason`， 可空——前端在展示危害面时把理由一并显示出来。
+             */
+            reason?: string | null;
         };
         /** @description 单条直授权限的对外视图（审计视图，过期行也展示）。 */
         GrantView: {
@@ -2282,6 +2356,14 @@ export interface components {
             updated_at: number;
             username: string;
         };
+        /** @description 查找结果里的一个用户：响应契约只暴露这四个字段，绝不包含 password_hash/totp/版本字段（投影来源 `USER_VIEW_FIELDS`）。 */
+        LookupUser: {
+            email?: string | null;
+            /** Format: int64 */
+            id: number;
+            status: components["schemas"]["UserStatus"];
+            username: string;
+        };
         CompleteStepUpCredentials: {
             /**
              * @description 账号启用 TOTP 时必填的第二因子一次性码（验收：不得降级为单因子）。
@@ -2644,6 +2726,75 @@ export interface operations {
                              * @description 实际删除的条目数。
                              */
                             succeeded: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "access.grants.list_holders": {
+        parameters: {
+            query: {
+                permission: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /** ListHoldersResult */
+                        data: {
+                            /** @description 直接持有者（直授行，含已过期的审计行）。 */
+                            direct: components["schemas"]["DirectHolderView"][];
+                            /** @description 经权限组持有者（每个组一条，成员数另计）。 */
+                            groups: components["schemas"]["GroupHolderView"][];
                         };
                         message: string;
                     };
@@ -8143,6 +8294,74 @@ export interface operations {
                              *     描述操作结果的文本信息
                              */
                             message: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description 请求参数错误 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    "account.user.lookup": {
+        parameters: {
+            query?: {
+                page?: number | null;
+                page_size?: number | null;
+                q?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        code: 0;
+                        /** LookupUsersResult */
+                        data: {
+                            users: components["schemas"]["LookupUser"][];
                         };
                         message: string;
                     };

@@ -121,6 +121,29 @@ impl GrantRepository {
         rows.iter().map(GrantRecord::try_from).collect()
     }
 
+    /// 读取持有目标权限的**全部**直授行（含过期行，权限下钻的审计口径），按主键稳定排序。
+    ///
+    /// 与 [`Self::list_all_by_user_in_tx`] 同为审计读端：过期行保留在表里只在解析侧
+    /// 失效，下钻视图要把它们连 `expired` 派生标记一起展示，不能像解析侧那样过滤掉。
+    /// 过滤下推到 `permission` 列，命中表声明里的反查索引 `idx_authz_grant_permission`。
+    pub(crate) async fn list_by_permission_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        permission: &str,
+    ) -> Result<Vec<GrantRecord>, BaseError> {
+        let rows = self
+            .trusted_query(ctx)?
+            .select_fields(GRANT_RECORD_FIELDS)?
+            .where_eq(
+                PERMISSION,
+                serde_json::Value::String(permission.to_string()),
+            )?
+            .all_in_tx(transaction)
+            .await?;
+        rows.iter().map(GrantRecord::try_from).collect()
+    }
+
     /// 读取一批用户的**全部**直授行（含过期行），批量授予/撤销的一次性判据读。
     ///
     /// 调用方必须已在同一事务按全局锁序锁住这批用户的 users 行（判据读晚于行锁），
@@ -383,6 +406,54 @@ mod tests {
         assert!(matches!(
             or_group[1],
             WhereCondition::Gt { ref field, .. } if field == EXPIRES_AT
+        ));
+    }
+
+    #[tokio::test]
+    async fn by_permission_query_targets_the_permission_column() {
+        // list_by_permission_in_tx 的过滤必须落在 permission 列上：命中反查索引
+        // `idx_authz_grant_permission`，而不是只靠 (user_id, permission) 复合键前缀。
+        let pool = MySqlPoolOptions::new()
+            .connect_lazy("mysql://root:test@127.0.0.1:3306/test")
+            .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
+        let definition = grants_table_spec()
+            .and_then(|spec| spec.table_definition())
+            .unwrap_or_else(|error| panic!("授权表定义应有效: {error}"));
+        let repository = GrantRepository::new(definition.clone());
+        let ctx = ActionContext::new(
+            Request::new(serde_json::json!({})),
+            Arc::new(
+                ToolsBuilder::new()
+                    .mysql(
+                        Database::from_pool(pool, DatabaseConfig::default())
+                            .unwrap_or_else(|error| panic!("测试 Database 应构建成功: {error}")),
+                    )
+                    .build()
+                    .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
+            ),
+        )
+        .with_table_definition(definition);
+
+        let query = repository
+            .trusted_query(&ctx)
+            .and_then(|query| query.select_fields(GRANT_RECORD_FIELDS))
+            .and_then(|query| {
+                query.where_eq(
+                    PERMISSION,
+                    serde_json::Value::String("access.grants.read".to_string()),
+                )
+            })
+            .unwrap_or_else(|error| panic!("按权限过滤查询应可构建: {error}"));
+
+        let conditions = &query.get_query_params().where_conditions;
+        assert_eq!(
+            conditions.len(),
+            1,
+            "只按 permission 等值过滤（不夹过期条件）"
+        );
+        assert!(matches!(
+            &conditions[0],
+            WhereCondition::Eq { field, value } if field == PERMISSION && value == &serde_json::json!("access.grants.read")
         ));
     }
 
