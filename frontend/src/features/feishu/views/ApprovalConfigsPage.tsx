@@ -45,6 +45,7 @@ import {
 } from "../api";
 import { ApprovalConfigDialog } from "../components/ApprovalConfigDialog";
 import { ApprovalConfigRowActions } from "../components/ApprovalConfigRowActions";
+import { ApprovalWorkflowGuide } from "../components/ApprovalWorkflowGuide";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { useDebouncedValue } from "../list-query";
@@ -228,6 +229,8 @@ export default function ApprovalConfigsPage() {
           管理飞书审批派发配置：选好多维表格坐标与审批定义后，表格记录会按映射装配成审批单。
         </p>
       </div>
+
+      <ApprovalWorkflowGuide />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative">

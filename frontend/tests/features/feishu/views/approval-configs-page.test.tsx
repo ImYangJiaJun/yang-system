@@ -64,6 +64,70 @@ function configRows() {
 }
 
 describe("审批派发配置页 · 列表", () => {
+  it("空列表也能展开工作流指引，提供真实接口、参数与单行/批量示例", async () => {
+    const calls = stubApprovalApi({ approvalWrite: false });
+    renderConfigs();
+    await screen.findByRole("heading", { name: "审批派发" });
+
+    const summary = screen.getByText("多维表格工作流配置指引");
+    const guide = summary.closest("details")!;
+    expect(guide).not.toHaveAttribute("open");
+    await userEvent.click(summary);
+    expect(guide).toHaveAttribute("open");
+
+    const content = within(guide);
+    expect(
+      content.getByText(
+        `${window.location.origin}/api/v1/feishu/approval/dispatch`,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      content.getByText(/Authorization: Bearer <管理 Token>/),
+    ).toBeInTheDocument();
+    expect(
+      content.getByText(/Content-Type: application\/json/),
+    ).toBeInTheDocument();
+    for (const name of [
+      "base_token",
+      "table_id",
+      "record_id",
+      "requested_by",
+      "approval_code",
+      "applicant_field",
+      "backfill_field",
+    ]) {
+      expect(
+        content.getByText(name, { selector: "dt code" }),
+      ).toBeInTheDocument();
+    }
+    const single = JSON.parse(
+      content.getByLabelText("单行派发请求体").textContent!,
+    );
+    const batch = JSON.parse(
+      content.getByLabelText("批量派发请求体").textContent!,
+    );
+    expect(single).toEqual({
+      base_token: "<多维表格 Token>",
+      table_id: "<数据表 ID>",
+      record_id: "<触发记录 ID>",
+      requested_by: "<触发人标识>",
+    });
+    expect(batch).toEqual({
+      base_token: single.base_token,
+      table_id: single.table_id,
+      requested_by: single.requested_by,
+    });
+    expect(content.getByText(/所有启用配置的待处理队列/)).toBeInTheDocument();
+    expect(
+      content.getByText(/feishu.management_api_token/),
+    ).toBeInTheDocument();
+    expect(content.getByText(/data.accepted/)).toBeInTheDocument();
+    expect(countCalls(calls, "/api/v1/feishu/approval/dispatch")).toBe(0);
+
+    await userEvent.click(summary);
+    expect(guide).not.toHaveAttribute("open");
+  });
+
   it("渲染列表投影：名称/坐标/Code/时区/启用/快照时间/更新时间", async () => {
     stubApprovalApi({
       configList: () => listPage(configRows()),
