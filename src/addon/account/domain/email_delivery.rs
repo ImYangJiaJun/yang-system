@@ -9,9 +9,10 @@
 //! [`PasswordResetLinkConfig`] 从 `Tools` config 槽注入。
 //! 本模块只保留强制 STARTTLS 的生产 SMTP 适配器，测试可注入内存实现。
 
-use crate::config::SmtpSettings;
+use super::email_templates::EmailTemplates;
+use crate::config::EmailSettings;
 use async_trait::async_trait;
-use lettre::message::{header::ContentType, Mailbox};
+use lettre::message::{Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use std::fmt;
@@ -145,15 +146,20 @@ impl PasswordResetLinkConfig {
     }
 }
 
-/// 强制 STARTTLS 的生产 SMTP 适配器，承载注册验证码与密码重置两类事务性邮件。
+/// 强制 STARTTLS 的生产 SMTP 适配器，统一发送可替换的 HTML 与纯文本模板。
 #[derive(Clone)]
 pub(crate) struct SmtpEmailSender {
     transport: AsyncSmtpTransport<Tokio1Executor>,
     from: Mailbox,
+    system_name: String,
+    templates: Arc<EmailTemplates>,
 }
 
 impl SmtpEmailSender {
-    pub(crate) fn new(settings: &SmtpSettings) -> anyhow::Result<Self> {
+    pub(crate) fn new(email: &EmailSettings, system_name: &str) -> anyhow::Result<Self> {
+        let templates =
+            EmailTemplates::load(email.template_dir.as_deref().map(std::path::Path::new))?;
+        let settings = &email.smtp;
         let from_address = settings
             .from_address
             .parse()
@@ -173,15 +179,21 @@ impl SmtpEmailSender {
         Ok(Self {
             transport: builder.build(),
             from,
+            system_name: system_name.trim().to_owned(),
+            templates: Arc::new(templates),
         })
     }
 
-    async fn deliver(
+    pub(crate) async fn deliver_template(
         &self,
         recipient: &str,
-        subject: &str,
-        body: String,
+        kind: &str,
+        values: &[(&str, &str)],
     ) -> Result<(), EmailDeliveryError> {
+        let (subject, plain, html) = self
+            .templates
+            .render(kind, &self.system_name, values)
+            .map_err(|_| EmailDeliveryError::InvalidMessage)?;
         let recipient = recipient
             .parse::<Mailbox>()
             .map_err(|_| EmailDeliveryError::InvalidMessage)?;
@@ -189,30 +201,17 @@ impl SmtpEmailSender {
             .from(self.from.clone())
             .to(recipient)
             .subject(subject)
-            .header(ContentType::TEXT_PLAIN)
-            .body(body)
+            .multipart(
+                MultiPart::alternative()
+                    .singlepart(SinglePart::plain(plain))
+                    .singlepart(SinglePart::html(html)),
+            )
             .map_err(|_| EmailDeliveryError::InvalidMessage)?;
         self.transport
             .send(message)
             .await
             .map_err(|_| EmailDeliveryError::Unavailable)?;
         Ok(())
-    }
-}
-
-impl SmtpEmailSender {
-    /// 投递一封**纯文本**邮件（收件人 + 主题 + 正文）。
-    ///
-    /// 给本模块之外的发送器复用同一条 STARTTLS 传输用（如飞书拉取失败的告警）。
-    /// `deliver` 是模块私有的，而那个适配器在另一个 addon 里；这里**只**放出
-    /// 「发一封纯文本」这一件事——传输句柄、from 地址与超时都留在本模块。
-    pub(crate) async fn deliver_text(
-        &self,
-        recipient: &str,
-        subject: &str,
-        body: String,
-    ) -> Result<(), EmailDeliveryError> {
-        self.deliver(recipient, subject, body).await
     }
 }
 
@@ -224,13 +223,11 @@ impl RegistrationEmailSender for SmtpEmailSender {
         code: &str,
         expires_in_seconds: u64,
     ) -> Result<(), EmailDeliveryError> {
-        let minutes = expires_in_seconds.div_ceil(60);
-        self.deliver(
+        let minutes = expires_in_seconds.div_ceil(60).to_string();
+        self.deliver_template(
             recipient,
-            "YANG System 注册邮箱验证码",
-            format!(
-                "你的注册验证码是：{code}\n\n验证码将在 {minutes} 分钟后失效，且只能使用一次。若非本人操作，请忽略本邮件。"
-            ),
+            "registration",
+            &[("code", code), ("minutes", &minutes)],
         )
         .await
     }
@@ -244,13 +241,11 @@ impl PasswordResetEmailSender for SmtpEmailSender {
         reset_url: &str,
         expires_in_seconds: u64,
     ) -> Result<(), EmailDeliveryError> {
-        let minutes = expires_in_seconds.div_ceil(60);
-        self.deliver(
+        let minutes = expires_in_seconds.div_ceil(60).to_string();
+        self.deliver_template(
             recipient,
-            "YANG System 密码重置",
-            format!(
-                "你收到本邮件是因为有人请求重置该账号的密码。\n\n请在 {minutes} 分钟内打开以下链接设置新密码（链接只能使用一次）：\n{reset_url}\n\n若非本人操作，请忽略本邮件，你的密码不会改变。"
-            ),
+            "password_reset",
+            &[("reset_url", reset_url), ("minutes", &minutes)],
         )
         .await
     }
@@ -263,24 +258,21 @@ impl NewDeviceEmailSender for SmtpEmailSender {
         recipient: &str,
         ip: &str,
         user_agent: &str,
-        _occurred_at_unix: i64,
+        occurred_at_unix: i64,
     ) -> Result<(), EmailDeliveryError> {
         let agent = if user_agent.trim().is_empty() {
             "未知设备".to_string()
         } else {
             user_agent.chars().take(120).collect()
         };
-        self.deliver(
+        self.deliver_template(
             recipient,
-            "YANG System 新设备登录提醒",
-            format!(
-                "你的账号刚刚从一台新设备成功登录。
-
-IP：{ip}
-设备：{agent}
-
-如果这是你本人的操作，可以忽略本邮件；如果不是，请立即修改密码并检查会话列表。"
-            ),
+            "new_device",
+            &[
+                ("ip", ip),
+                ("device", &agent),
+                ("occurred_at", &occurred_at_unix.to_string()),
+            ],
         )
         .await
     }
@@ -294,15 +286,9 @@ impl VerificationCodeSender for SmtpEmailSender {
         code: &str,
         expires_in_seconds: u64,
     ) -> Result<(), EmailDeliveryError> {
-        let minutes = expires_in_seconds.div_ceil(60);
-        self.deliver(
-            recipient,
-            "YANG System 登录验证码",
-            format!(
-                "你的登录验证码是：{code}\n\n你正在使用邮箱验证码完成双重验证登录。验证码将在 {minutes} 分钟后失效，且只能使用一次。若非本人操作，请立即修改密码并检查账号安全。"
-            ),
-        )
-        .await
+        let minutes = expires_in_seconds.div_ceil(60).to_string();
+        self.deliver_template(recipient, "mfa", &[("code", code), ("minutes", &minutes)])
+            .await
     }
 }
 
@@ -357,14 +343,36 @@ impl VerificationCodeSender for SmtpLoginEmailCodeSender {
         code: &str,
         expires_in_seconds: u64,
     ) -> Result<(), EmailDeliveryError> {
-        let minutes = expires_in_seconds.div_ceil(60);
+        let minutes = expires_in_seconds.div_ceil(60).to_string();
         self.inner
-            .deliver(
+            .deliver_template(recipient, "login", &[("code", code), ("minutes", &minutes)])
+            .await
+    }
+}
+
+/// 换绑验证码占用独立投递槽，保持文案与注册、登录验证码分离。
+#[derive(Clone, Debug)]
+pub struct ChangeEmailCodeSenderHandle(pub VerificationCodeSenderHandle);
+
+#[derive(Clone)]
+pub(crate) struct SmtpChangeEmailCodeSender(pub SmtpEmailSender);
+
+#[async_trait]
+impl VerificationCodeSender for SmtpChangeEmailCodeSender {
+    async fn send_verification_code(
+        &self,
+        recipient: &str,
+        code: &str,
+        expires_in_seconds: u64,
+    ) -> Result<(), EmailDeliveryError> {
+        self.0
+            .deliver_template(
                 recipient,
-                "YANG System 登录验证码",
-                format!(
-                    "你的登录验证码是：{code}\n\n你正在使用邮箱验证码登录账号。验证码将在 {minutes} 分钟后失效，且只能使用一次。若非本人操作，请立即修改密码并检查账号安全。"
-                ),
+                "change_email",
+                &[
+                    ("code", code),
+                    ("minutes", &expires_in_seconds.div_ceil(60).to_string()),
+                ],
             )
             .await
     }

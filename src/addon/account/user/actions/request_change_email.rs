@@ -1,5 +1,6 @@
 //! 请求向新邮箱发送换绑验证码（需登录 + Step-up）。
 
+use crate::addon::account::email_delivery::ChangeEmailCodeSenderHandle;
 use crate::addon::account::Account;
 use crate::config::ChangeEmailVerificationConfig;
 use schemars::JsonSchema;
@@ -44,7 +45,10 @@ pub(super) async fn handle(
         .engine_config();
     let email = normalize_email(&input.new_email)?;
     let verification = RegistrationEmailVerification::from_config(change_config)?;
-    let accepted = verification.request(&ctx, &email, true).await?;
+    let sender = ctx.tools().extension::<ChangeEmailCodeSenderHandle>()?;
+    let accepted = verification
+        .request_via(&ctx, &email, true, &sender.0)
+        .await?;
     Ok(ChangeEmailCodeAccepted {
         accepted: accepted.accepted,
         expires_in: accepted.expires_in,

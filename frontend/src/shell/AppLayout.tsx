@@ -50,6 +50,7 @@ import {
   visibleAccountIdentities,
 } from "@/engine/catalog/module-pages";
 import type { UiCatalog } from "@/engine/contracts/ui-catalog";
+import { canReadAccessWorkspace } from "./access-workspace-permission";
 import { cn } from "@/shared/lib/utils";
 import logoDarkUrl from "@/shared/assets/logo-dark.png";
 import logoLightUrl from "@/shared/assets/logo-light.png";
@@ -229,12 +230,8 @@ export default function AppLayout() {
     ),
   );
 
-  // 权限组入口的权限门控。
-  const canReadAccessGroups = Boolean(
-    catalog?.actions.some(
-      (action) => action.operation_id === "access.groups.list_groups",
-    ),
-  );
+  // 组列表权限不能单独作为工作台入口权限。
+  const canReadAccessWorkspaceEntry = canReadAccessWorkspace(catalog);
 
   // 审批派发控制台两入口的权限门控（设计 §5.3）：与数据源位独立——一个身份可能
   // 只有审批 read（看得见派发记录）而没有数据源位。「审批派发」与「派发记录」
@@ -351,7 +348,7 @@ export default function AppLayout() {
               </ul>
             </div>
           )}
-          {canReadAccessGroups && (
+          {canReadAccessWorkspaceEntry && (
             <div>
               <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
                 权限管理

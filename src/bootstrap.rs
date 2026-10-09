@@ -1,8 +1,9 @@
 use crate::addon::account::email_delivery::{
-    LoginEmailCodeSenderHandle, NewDeviceEmailSender, NewDeviceEmailSenderHandle,
-    PasswordResetEmailSender, PasswordResetEmailSenderHandle, RegistrationEmailSender,
-    RegistrationEmailSenderHandle, SmtpEmailSender, SmtpLoginEmailCodeSender,
-    VerificationCodeSender, VerificationCodeSenderHandle,
+    ChangeEmailCodeSenderHandle, LoginEmailCodeSenderHandle, NewDeviceEmailSender,
+    NewDeviceEmailSenderHandle, PasswordResetEmailSender, PasswordResetEmailSenderHandle,
+    RegistrationEmailSender, RegistrationEmailSenderHandle, SmtpChangeEmailCodeSender,
+    SmtpEmailSender, SmtpLoginEmailCodeSender, VerificationCodeSender,
+    VerificationCodeSenderHandle,
 };
 use crate::addon::feishu::domain::alert::{FeishuAlertSender, FeishuAlertSenderHandle};
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
@@ -91,13 +92,16 @@ async fn run_after_telemetry_initialized(
         AuthorizationVersionCache::new(cache.clone(), settings.authorization.deployment.clone())
             .context("构建授权版本缓存失败")?;
 
-    let email_sender: Arc<SmtpEmailSender> =
-        Arc::new(SmtpEmailSender::new(&settings.email.smtp).context("构建 SMTP 邮件投递器失败")?);
+    let email_sender: Arc<SmtpEmailSender> = Arc::new(
+        SmtpEmailSender::new(&settings.email, &settings.app.name)
+            .context("构建 SMTP 邮件投递器失败")?,
+    );
     let registration_sender: Arc<dyn RegistrationEmailSender> = email_sender.clone();
     let password_reset_sender: Arc<dyn PasswordResetEmailSender> = email_sender.clone();
     let verification_code_sender: Arc<dyn VerificationCodeSender> = email_sender.clone();
     // 免密登录验证码与 MFA 验证码共用 SMTP 传输但文案独立，占用独立 extension 槽。
     let login_email_code_sender = SmtpLoginEmailCodeSender::new(email_sender.as_ref().clone());
+    let change_email_code_sender = SmtpChangeEmailCodeSender(email_sender.as_ref().clone());
     // 飞书拉取失败的告警邮件复用同一条 SMTP 传输。**无条件注册**：收件人列表为空
     // （默认）时它一次也不会被调用，行为与未集成飞书时一致。
     let feishu_alert_sender: Arc<dyn FeishuAlertSender> = email_sender.clone();
@@ -135,6 +139,9 @@ async fn run_after_telemetry_initialized(
             verification_code_sender,
         ))
         .extension(LoginEmailCodeSenderHandle::new(login_email_code_sender))
+        .extension(ChangeEmailCodeSenderHandle(
+            VerificationCodeSenderHandle::new(change_email_code_sender),
+        ))
         .extension(NewDeviceEmailSenderHandle::from_arc(new_device_sender))
         // 飞书拉取失败的告警出口：与上面几个投递器共用 SMTP 传输，占用独立槽位。
         .extension(FeishuAlertSenderHandle::from_arc(feishu_alert_sender))

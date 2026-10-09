@@ -227,6 +227,12 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         "proof_ttl_seconds",
         Integer
     ),
+    environment_binding!(
+        "YANG_SYSTEM_EMAIL_TEMPLATE_DIR",
+        "email",
+        "template_dir",
+        Text
+    ),
     environment_binding!("YANG_SYSTEM_EMAIL_SMTP_RELAY", "email.smtp", "relay", Text),
     environment_binding!("YANG_SYSTEM_EMAIL_SMTP_PORT", "email.smtp", "port", Integer),
     environment_binding!(

@@ -84,46 +84,6 @@ pub(crate) fn should_alert(failures: i64, threshold: i64) -> bool {
     threshold > 0 && failures >= threshold
 }
 
-/// 告警邮件主题。
-///
-/// 表名来自控制台输入，压成一行再拼：主题里的一处换行等于让表名去改写邮件头。
-pub(crate) fn pull_failure_subject(datasource_title: &str) -> String {
-    format!(
-        "YANG System 飞书数据源拉取失败：{}",
-        single_line(datasource_title)
-    )
-}
-
-/// 告警邮件正文。
-///
-/// 三样东西缺一不可：**哪张表**、**连续几轮**、**最近一次错误原文**。错误原文是运维
-/// 唯一的线索（`1254302` 要去改文档权限、`1254024` 要去改列名，修法完全不同）。
-pub(crate) fn pull_failure_body(datasource_title: &str, last_error: &str, failures: i64) -> String {
-    format!(
-        "飞书数据源「{datasource_title}」已连续 {failures} 轮拉取失败：该表上所有字段的\
-         外部选项本轮都没有更新。\n\n\
-         最近一次错误：\n{last_error}\n\n\
-         请到控制台看该表的「体检」：坐标（Base / 数据表 / 视图）、勾选的字段、以及\
-         应用在多维表格里的文档权限。\n\n\
-         在恢复之前，每一轮拉取都会再发一次本邮件。"
-    )
-}
-
-/// 压成单行：控制字符一律换成空格，再掐掉首尾。
-fn single_line(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
 /// 表级拉取失败告警的投递边界。
 ///
 /// 形状照 `account::domain::email_delivery::PasswordResetEmailSender`：一个方法 +
@@ -154,10 +114,14 @@ impl FeishuAlertSender for SmtpEmailSender {
         last_error: &str,
         failures: i64,
     ) -> Result<(), EmailDeliveryError> {
-        self.deliver_text(
+        self.deliver_template(
             recipient,
-            &pull_failure_subject(datasource_title),
-            pull_failure_body(datasource_title, last_error, failures),
+            "feishu_pull_failure",
+            &[
+                ("datasource_title", datasource_title),
+                ("last_error", last_error),
+                ("failures", &failures.to_string()),
+            ],
         )
         .await
     }
@@ -339,25 +303,6 @@ mod tests {
                 "{address:?} 必须被拒"
             );
         }
-    }
-
-    #[test]
-    fn a_title_with_a_newline_cannot_split_the_subject_header() {
-        // 表名来自控制台输入，直接拼进主题会让它改写邮件头
-        let subject = pull_failure_subject("费用表\nBcc: attacker@example.com");
-        assert!(!subject.contains('\n'), "主题里不得残留换行: {subject:?}");
-        assert!(!subject.contains('\r'), "主题里不得残留换行: {subject:?}");
-    }
-
-    #[test]
-    fn the_message_names_the_table_the_count_and_the_last_error() {
-        let body = pull_failure_body("费用表", "1254302 Permission denied", 7);
-        assert!(body.contains("费用表"), "要点名是哪张表: {body}");
-        assert!(body.contains('7'), "要点名连续失败了几轮: {body}");
-        assert!(
-            body.contains("1254302 Permission denied"),
-            "要带上最近一次错误原文（运维唯一的线索）: {body}"
-        );
     }
 
     #[tokio::test]

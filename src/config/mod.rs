@@ -327,6 +327,9 @@ const fn default_proof_ttl_seconds() -> u64 {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmailSettings {
+    /// 可选模板覆盖目录，未配置时使用内置 B「深色安全中心」模板。
+    #[serde(default)]
+    pub template_dir: Option<String>,
     pub smtp: SmtpSettings,
     pub verification: EmailVerificationSettings,
     /// 邮箱换绑验证码的独立配置段：命名空间与密钥必须与注册验证码隔离。
@@ -429,6 +432,7 @@ impl std::fmt::Debug for EmailSettings {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("EmailSettings")
+            .field("template_dir", &self.template_dir)
             .field("smtp", &self.smtp)
             .field("verification", &self.verification)
             .field("change", &self.change)
@@ -1170,6 +1174,13 @@ impl EmailSettings {
         token: &TokenSettings,
         step_up: &StepUpSettings,
     ) -> anyhow::Result<()> {
+        if self
+            .template_dir
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            bail!("email.template_dir 不能为空");
+        }
         self.smtp.validate()?;
         self.verification.validate()?;
         self.password_reset.validate(environment)?;

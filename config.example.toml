@@ -36,6 +36,11 @@ active_key_id = "local-step-up-2026-07"
 active_secret = "replace-with-independent-step-up-secret"
 retiring_keys = []
 
+[email]
+# 默认使用内置 B「深色安全中心」；系统名称取 app.name。
+# 可选：按文件覆盖模板（UTF-8），缺少的文件回退内置版本；修改后需重启。
+# template_dir = "templates/email"
+
 [email.smtp]
 # 仅接受强制 STARTTLS 的 SMTP relay 主机名（默认端口 587）；
 # 不要填写 scheme 或把凭据写入 URL。

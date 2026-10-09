@@ -11,6 +11,7 @@ pub(crate) mod avatar;
 pub(crate) mod claims;
 pub(crate) mod context;
 pub mod email_delivery;
+pub(crate) mod email_templates;
 pub(crate) mod grants;
 pub(crate) mod login_event;
 pub(crate) mod mfa;

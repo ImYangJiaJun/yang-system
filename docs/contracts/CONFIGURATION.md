@@ -16,6 +16,8 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | TOML 字段 | 环境变量 |
 |---|---|
 | `app.environment` | `YANG_SYSTEM_APP_ENVIRONMENT` |
+| `app.name` | `YANG_SYSTEM_APP_NAME` |
+| `email.template_dir` | `YANG_SYSTEM_EMAIL_TEMPLATE_DIR` |
 | `http.max_concurrency` | `YANG_SYSTEM_HTTP_MAX_CONCURRENCY` |
 | `mysql.url` | `YANG_SYSTEM_MYSQL_URL` |
 | `email.password_reset.link_base_url` | `YANG_SYSTEM_EMAIL_PASSWORD_RESET_LINK_BASE_URL` |
@@ -66,6 +68,7 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `step_up.issuer` / `step_up.audience` | `yang-system-step-up` / `yang-system-sensitive-actions` |
 | `step_up.challenge_ttl_seconds` / `proof_ttl_seconds` | `120` / `300` |
 | `email.smtp.port` / `timeout_seconds` | `587`（强制 STARTTLS）/ `10` |
+| `email.template_dir` | 不配置，使用内置 B「深色安全中心」 |
 | `email.{verification,change,mfa}.namespace` | 继承 `authorization.deployment` |
 | `email.{verification,change,mfa}.ttl_seconds` / `resend_cooldown_seconds` / `max_attempts` | `600` / `60` / `5` |
 | `email.{verification,change,mfa}.send_window_seconds` | `3600` |
@@ -130,6 +133,28 @@ keyring 最多 8 把密钥，`key_id` 必须唯一。生产 Token 强制携带 `
 缺失或未知 `kid` 均失败关闭。首次从旧单密钥版本升级时，既有无 `kid`
 会话会失效并要求重新登录；系统不保留隐式逐密钥试签名的兼容回退链。
 
+## 邮件模板
+
+所有邮件使用 B「深色安全中心」作为默认样式，以 `multipart/alternative` 同时发送纯文本与 HTML。主题与正文中的系统名称统一读取 `app.name`，发件人显示名称仍由 `email.smtp.from_name` 控制。
+
+`[email].template_dir` 或 `YANG_SYSTEM_EMAIL_TEMPLATE_DIR` 可指定 UTF-8 模板覆盖目录；相对路径基于进程工作目录。建议从 `src/addon/account/domain/email_templates/` 复制内置文件后修改。容器部署时需将目录挂载到应用容器并配置容器内路径。目录必须存在，只覆盖需要修改的文件即可，其余文件回退内置模板。
+
+`layout.html` 是 HTML 共用外框，必须包含 `{{system_name}}` 和 `{{content}}`。每类邮件有 `<类型>.subject.txt`、`<类型>.txt`、`<类型>.html` 三个文件：
+
+| 类型 | 用途 | 正文必需变量 |
+|---|---|---|
+| `registration` | 注册验证码 | `code`、`minutes` |
+| `change_email` | 换绑邮箱验证码 | `code`、`minutes` |
+| `login` | 免密登录验证码 | `code`、`minutes` |
+| `mfa` | MFA 备用邮箱验证码 | `code`、`minutes` |
+| `password_reset` | 密码重置 | `reset_url`、`minutes` |
+| `new_device` | 新设备登录提醒 | `ip`、`device`、`occurred_at`（Unix 秒） |
+| `feishu_pull_failure` | 飞书数据源拉取失败告警 | `datasource_title`、`failures`、`last_error` |
+
+变量语法为 `{{变量名}}`，不支持表达式。所有主题必须包含 `{{system_name}}`；纯文本正文还必须包含 `{{system_name}}`，HTML 正文的系统名称可由共用外框提供。主题可以使用本类正文变量。HTML 动态值统一转义，主题控制字符替换为空格，变量值不会被再次作为模板解析。自定义模板文件是可信部署资源，只应由部署维护者修改。
+
+模板在 SMTP 投递器构建时加载一次，修改配置或文件后需重启。非 UTF-8、读取失败、空模板、未知变量、缺少必需变量或变量未闭合会使启动失败；运行期缺少变量时拒绝投递，不发送不完整邮件。
+
 ## 服务凭据轮换（MySQL / Redis / SMTP）
 
 Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
@@ -164,8 +189,8 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
 
 ### SMTP
 
-- `email.smtp` 凭据承载全部事务性邮件投递（注册验证码、密码重置链接、新设备登录提醒、
-  MFA 备用验证码、免密登录验证码）。先在 relay 侧添加新凭据，再按
+- `email.smtp` 凭据承载全部邮件投递（注册验证码、换绑邮箱验证码、密码重置链接、新设备登录提醒、
+  MFA 备用验证码、免密登录验证码、飞书数据源拉取失败告警）。先在 relay 侧添加新凭据，再按
   通用步骤滚动重启，最后吊销旧凭据。
 - 轮换失误（旧凭据提前失效）不会导致启动失败，但会让邮件投递失败；通过
   `yang_system_registration_email_total{result}` 指标观察 `error` 结果突增

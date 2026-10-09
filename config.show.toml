@@ -186,6 +186,12 @@ challenge_ttl_seconds = 120
 # 默认：300，允许 1..=600
 proof_ttl_seconds = 300
 
+[email]
+# 邮件主题、纯文本与 HTML 默认使用内置 B「深色安全中心」，系统名取 app.name。
+# 可选覆盖目录；相对路径基于进程工作目录，文件缺失时回退内置模板。
+# 默认：不配置。修改目录内容后需重启；环境变量 YANG_SYSTEM_EMAIL_TEMPLATE_DIR。
+# template_dir = "templates/email"
+
 [email.smtp]
 # SMTP relay 主机名：只允许裸主机名（无 scheme、端口、路径），
 # 传输强制 STARTTLS。凭据必须同时配置或同时留空。
