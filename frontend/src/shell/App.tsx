@@ -8,30 +8,16 @@ import { applyDensity, loadDensity } from "@/shell/density";
 import { createSessionResetHandler } from "@/shell/session-reset";
 import { createIdentityStore } from "@/features/auth/identity";
 import { IdentityStoreContext } from "@/features/auth/use-identity";
-import {
-  StepUpDialogHost,
-  type StepUpProofHandler,
-} from "@/features/auth/components/step-up-host";
 import { ToastProvider } from "@/shared/providers/toast-provider";
 import { Toaster } from "@/shared/ui/toaster";
 import { appRoutes } from "./routes";
 
 export default function App() {
-  // SessionController 在 React 树外创建；Step-up UI 通过 delegate ref 晚绑定，
-  // 宿主未挂载时 fail-loud 而不是静默吞掉 428。
-  const stepUpDelegate = useRef<StepUpProofHandler | undefined>(undefined);
   // 身份选择与 SessionController 同为外置 store；会话建立/清空时级联清空身份。
   const [identityStore] = useState(() => createIdentityStore());
   const identityResetRef = useRef<() => void>(() => undefined);
   const [controller] = useState(() =>
     createSessionController({
-      requestStepUpProof: (challenge, session) => {
-        const handler = stepUpDelegate.current;
-        if (!handler) {
-          return Promise.reject(new Error("Step-up 交互组件未就绪"));
-        }
-        return handler(challenge, session);
-      },
       onSessionReset: () => identityResetRef.current(),
     }),
   );
@@ -58,11 +44,6 @@ export default function App() {
         <QueryClientProvider client={queryClient}>
           <ToastProvider>
             <RouterProvider router={router} />
-            <StepUpDialogHost
-              onReady={(handler) => {
-                stepUpDelegate.current = handler;
-              }}
-            />
             <Toaster />
           </ToastProvider>
         </QueryClientProvider>

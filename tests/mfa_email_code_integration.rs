@@ -1,7 +1,7 @@
 //! 登录 MFA 备用邮箱验证码与 TOTP 停用的真实依赖集成测试。
 //!
 //! 覆盖对抗边界（等时密码校验防枚举、未激活账号不真实投递、邮箱码单次
-//! 消费）与停用链路（Step-up 重认证、恢复码作废、回到单因子登录）。
+//! 消费）与停用链路（恢复码作废、回到单因子登录）。
 //! 需要 `YANG_SYSTEM_TEST_DATABASE_URL`（库名以 `_test` 结尾）与
 //! `YANG_SYSTEM_TEST_REDIS_URL`（强制 DB 15）。
 
@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use yang_base::action::auth::TotpLiteVerifier;
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -147,17 +147,6 @@ fn token_manager() -> TokenManager {
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
 }
 
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "mfa-email-integration-step-up-secret-32",
-            "mfa-email-integration-step-up",
-            "mfa-email-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
-}
-
 async fn connect_database() -> anyhow::Result<Database> {
     let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
         .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
@@ -279,7 +268,6 @@ async fn build_mfa_app(
                 redis.clone(),
                 namespace.clone(),
             )?)
-            .extension(step_up_manager())
             .extension(RegistrationEmailSenderHandle::new(sender.clone()))
             .extension(VerificationCodeSenderHandle::new(sender.clone()))
             .config(
@@ -364,9 +352,6 @@ fn access_token(response: &ApiResponse) -> anyhow::Result<String> {
 }
 
 /// 为账号完成 TOTP 激活，返回（密钥，恢复码组）。
-///
-/// totp_setup 与 totp_activate 现均受 Step-up 保护（会话劫持者不得擅自绑定
-/// 认证器并夺走恢复码），因此每个调用前都要先触发 challenge 并完成密码重认证。
 async fn activate_totp(
     app: &BuiltApp,
     username: &str,
@@ -376,28 +361,11 @@ async fn activate_totp(
     let token = access_token(&login_response)?;
     let authorization = format!("Bearer {token}");
 
-    // totp_setup：先触发 challenge，完成密码重认证，携带 proof 重试。
-    let setup_challenge = match dispatch(
-        app,
-        "totp_setup",
-        json!({}),
-        &[("authorization", authorization.as_str())],
-        peer_port,
-    )
-    .await
-    {
-        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
-        other => anyhow::bail!("totp_setup 缺少 proof 必须返回 Step-up challenge，实际: {other:?}"),
-    };
-    let setup_proof = complete_step_up(app, username, peer_port, &setup_challenge).await?;
     let setup = dispatch(
         app,
         "totp_setup",
         json!({}),
-        &[
-            ("authorization", authorization.as_str()),
-            ("x-step-up-proof", setup_proof.as_str()),
-        ],
+        &[("authorization", authorization.as_str())],
         peer_port,
     )
     .await?;
@@ -411,30 +379,11 @@ async fn activate_totp(
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let code = TotpLiteVerifier::default().generate(&secret, now);
 
-    // totp_activate：同样先触发 challenge 再重认证。
-    let activate_challenge = match dispatch(
-        app,
-        "totp_activate",
-        json!({ "secret": secret, "code": code }),
-        &[("authorization", authorization.as_str())],
-        peer_port,
-    )
-    .await
-    {
-        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
-        other => {
-            anyhow::bail!("totp_activate 缺少 proof 必须返回 Step-up challenge，实际: {other:?}")
-        }
-    };
-    let activate_proof = complete_step_up(app, username, peer_port, &activate_challenge).await?;
     let activated = dispatch(
         app,
         "totp_activate",
         json!({ "secret": secret, "code": code }),
-        &[
-            ("authorization", authorization.as_str()),
-            ("x-step-up-proof", activate_proof.as_str()),
-        ],
+        &[("authorization", authorization.as_str())],
         peer_port,
     )
     .await?;
@@ -448,32 +397,6 @@ async fn activate_totp(
         .collect::<Vec<_>>();
     ensure!(!recovery_codes.is_empty(), "恢复码组不得为空");
     Ok((secret, recovery_codes))
-}
-
-/// 完成一次 Step-up（密码重认证），返回一次性 proof。
-async fn complete_step_up(
-    app: &BuiltApp,
-    username: &str,
-    peer_port: u16,
-    challenge: &str,
-) -> anyhow::Result<String> {
-    let completed = dispatch(
-        app,
-        "step_up_complete",
-        json!({
-            "challenge": challenge,
-            "credentials": { "username": username, "password": PASSWORD },
-        }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    completed
-        .data
-        .as_ref()
-        .and_then(|data| data["proof"].as_str())
-        .map(str::to_string)
-        .context("Step-up 完成响应缺少 proof")
 }
 
 fn now_seconds() -> anyhow::Result<u64> {
@@ -600,7 +523,7 @@ async fn mfa_email_code_is_bounded_non_enumerating_and_single_use() -> anyhow::R
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn totp_deactivate_requires_step_up_and_restores_single_factor() -> anyhow::Result<()> {
+async fn totp_deactivate_restores_single_factor() -> anyhow::Result<()> {
     let control = connect_database().await?;
     let redis = connect_redis().await?;
     reset_database(&control).await?;
@@ -615,59 +538,18 @@ async fn totp_deactivate_requires_step_up_and_restores_single_factor() -> anyhow
         // 激活会按秒粒度撤销既有 Token；跨过撤销水位线再登录，避免同秒新 Token 被误撤。
         tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
-        // 激活后旧会话已失效：用 TOTP 码重新登录拿到新 token。
+        // 激活后旧会话已失效：用当前 TOTP 动态码重新登录拿到新 token。
         let totp_code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
         let login_response = login(&app, "mfa_admin", Some(&totp_code), 44_101).await?;
         let token = access_token(&login_response)?;
         let authorization = format!("Bearer {token}");
 
-        // 无 proof 直接停用 → Step-up challenge。
-        let challenge = match dispatch(
-            &app,
-            "totp_deactivate",
-            json!({}),
-            &[("authorization", authorization.as_str())],
-            44_101,
-        )
-        .await
-        {
-            Err(BaseError::StepUpRequired(challenge)) => challenge,
-            other => anyhow::bail!("缺少 proof 必须返回 Step-up challenge，实际: {other:?}"),
-        };
-
-        // 完成重认证：密码 + 当前 TOTP 动态码（已激活账号 Step-up 必须双因子）。
-        let mfa_code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
-        let completed = dispatch(
-            &app,
-            "step_up_complete",
-            json!({
-                "challenge": challenge.challenge,
-                "credentials": {
-                    "username": "mfa_admin",
-                    "password": PASSWORD,
-                    "mfa_code": mfa_code,
-                },
-            }),
-            &[],
-            44_101,
-        )
-        .await?;
-        let proof = completed
-            .data
-            .as_ref()
-            .and_then(|data| data["proof"].as_str())
-            .map(str::to_string)
-            .context("Step-up 完成响应缺少 proof")?;
-
-        // 携带 proof 停用成功：响应确认关闭且要求重新登录。
+        // 停用 TOTP。
         let deactivated = dispatch(
             &app,
             "totp_deactivate",
             json!({}),
-            &[
-                ("authorization", authorization.as_str()),
-                ("x-step-up-proof", proof.as_str()),
-            ],
+            &[("authorization", authorization.as_str())],
             44_101,
         )
         .await?;

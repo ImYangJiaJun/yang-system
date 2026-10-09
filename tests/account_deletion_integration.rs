@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -42,7 +42,7 @@ fn redis_config() -> RedisConfig {
         .with_connect_timeout(10)
 }
 
-/// delete_account 依赖双版本失效传播，需开启凭据版本签发；同时进入 step_up_targets。
+/// delete_account 依赖双版本失效传播，需开启凭据版本签发。
 fn security_settings() -> Arc<SecuritySettings> {
     Arc::new(SecuritySettings {
         argon2_max_concurrency: 4,
@@ -68,17 +68,6 @@ fn token_manager() -> TokenManager {
         2_592_000,
     )
     .unwrap_or_else(|error| panic!("删除测试 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "account-deletion-step-up-secret-32-bytes",
-            "yang-system-account-deletion-step-up",
-            "yang-system-account-deletion-sensitive",
-        )
-        .unwrap_or_else(|error| panic!("删除测试 Step-up manager 应构建成功: {error}")),
-    )
 }
 
 async fn connect_test_database() -> anyhow::Result<Database> {
@@ -273,7 +262,6 @@ async fn delete_account_clears_credentials_sessions_and_login_events() -> anyhow
                 .cache(redis.clone())
                 .with_registration_email(format!("email-{deployment}"))
                 .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
-                .extension(step_up_manager())
                 .token(token_manager())
                 .build()?,
         );
@@ -308,49 +296,14 @@ async fn delete_account_clears_credentials_sessions_and_login_events() -> anyhow
                 .await?;
         ensure!(session_count_before >= 1, "删除前应存在会话行");
 
-        // delete_account 受 Step-up 保护：先触发 challenge。
+        // 直接调用 delete_account，无需 Step-up。
         let authorization = format!("Bearer {token}");
-        let challenge = match dispatch(
-            &runtime,
-            "account.user",
-            "delete_account",
-            json!({ "confirmation": "delete my account" }),
-            &[("authorization", authorization.as_str())],
-            42_101,
-        )
-        .await
-        {
-            Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
-            other => anyhow::bail!("缺少 proof 必须返回 Step-up challenge，实际: {other:?}"),
-        };
-        let completed = dispatch(
-            &runtime,
-            "account.user",
-            "step_up_complete",
-            json!({
-                "challenge": challenge,
-                "credentials": { "username": username, "password": PASSWORD },
-            }),
-            &[],
-            42_101,
-        )
-        .await?;
-        let proof = completed
-            .data
-            .as_ref()
-            .and_then(|data| data["proof"].as_str())
-            .map(str::to_string)
-            .context("Step-up 完成响应缺少 proof")?;
-
         let deleted = dispatch(
             &runtime,
             "account.user",
             "delete_account",
             json!({ "confirmation": "delete my account" }),
-            &[
-                ("authorization", authorization.as_str()),
-                ("x-step-up-proof", proof.as_str()),
-            ],
+            &[("authorization", authorization.as_str())],
             42_101,
         )
         .await?;

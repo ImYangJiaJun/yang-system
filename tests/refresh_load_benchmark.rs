@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -62,17 +62,6 @@ fn token_manager() -> TokenManager {
         2_592_000,
     )
     .unwrap_or_else(|error| panic!("Refresh 基准 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "refresh-benchmark-step-up-secret-32-bytes",
-            "yang-system-refresh-benchmark-step-up",
-            "yang-system-refresh-benchmark-sensitive",
-        )
-        .unwrap_or_else(|error| panic!("Refresh 基准 Step-up manager 应构建成功: {error}")),
-    )
 }
 
 async fn connect_test_database() -> anyhow::Result<Database> {
@@ -245,7 +234,6 @@ async fn refresh_rotation_load_has_zero_errors_and_reports_percentiles() -> anyh
                 .cache(redis.clone())
                 .with_registration_email(format!("email-{deployment}"))
                 .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
-                .extension(step_up_manager())
                 .token(token_manager())
                 .build()?,
         );

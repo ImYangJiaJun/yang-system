@@ -1,6 +1,5 @@
 import { ApiError, SecondFactorRequiredError } from "../http/errors";
 import { apiBase, parseJson } from "../http/http";
-import { stepUpRequiredError } from "./step-up-response";
 
 export type LoginResult = {
   accessToken: string;
@@ -153,28 +152,24 @@ export async function loginByEmailCode(
 export async function logout(
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<LogoutResult> {
   return requestAccountTermination(
     "/api/v1/users/logout",
     "revoked_all_sessions",
     accessToken,
     signal,
-    stepUpProof,
   );
 }
 
 export async function disableAccount(
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<DisableAccountResult> {
   return requestAccountTermination(
     "/api/v1/users/disable",
     "account_disabled",
     accessToken,
     signal,
-    stepUpProof,
   );
 }
 
@@ -183,7 +178,6 @@ async function requestAccountTermination(
   confirmationField: "revoked_all_sessions" | "account_disabled",
   accessToken: string | undefined,
   signal: AbortSignal | undefined,
-  stepUpProof: string | undefined,
 ): Promise<{ immediateConvergence: boolean }> {
   const response = await fetch(`${apiBase}${path}`, {
     method: "POST",
@@ -191,7 +185,6 @@ async function requestAccountTermination(
       Accept: "application/json",
       "Content-Type": "application/json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(stepUpProof ? { "x-step-up-proof": stepUpProof } : {}),
     },
     body: "{}",
     credentials: "include",
@@ -199,8 +192,6 @@ async function requestAccountTermination(
   });
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  const stepUpRequired = stepUpRequiredError(response, payload);
-  if (stepUpRequired) throw stepUpRequired;
   const data =
     payload?.data !== null &&
     typeof payload?.data === "object" &&

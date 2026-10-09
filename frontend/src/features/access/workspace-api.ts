@@ -9,7 +9,7 @@
  * `list_user_grants` 对着 `src/addon/access/grants/actions/list_user_grants.rs`
  * 核实过，`user_id` 在**路径**里）：
  *
- * 1. `account.users.lookup`：GET，`q`/`page`/`page_size` 都是 query 参数
+ * 1. `account.user.lookup`：GET，`q`/`page`/`page_size` 都是 query 参数
  *    （目录里声明了什么来源，引擎就放去哪里），响应 `{users:[{id,username,email,status}]}`；
  * 2. `access.grants.list_user_grants`：GET，`user_id` 走路径，响应
  *    `{user_id, grants:[{id,permission,granted_by,occurred_at,expires_at,expired}]}`，
@@ -25,7 +25,6 @@ import {
   hasOperation,
   invokeAction,
   useSessionCredentials,
-  useSessionController,
   useUiCatalog,
 } from "@/engine";
 import type { InvocationResult } from "@/engine";
@@ -37,7 +36,6 @@ import {
   asRecord,
   asString,
   requireGroupAction,
-  runProtected,
   usePermissionCatalog,
   type AccessInvokeDeps,
 } from "./api";
@@ -48,7 +46,7 @@ import { buildPermissionMeta, type PermissionMeta } from "./permission-meta";
 /// 静默：`hasOperation` 恒为 false，界面整块不渲染；grant/revoke 与
 /// `grants/actions/grant_permission.rs` / `revoke_permission.rs` 的注册核对过）。
 export const WORKSPACE_OPERATION_IDS = {
-  lookup: "account.users.lookup",
+  lookup: "account.user.lookup",
   listUserGrants: "access.grants.list_user_grants",
   listHolders: "access.grants.list_holders",
   grantPermission: "access.grants.grant_permission",
@@ -62,7 +60,7 @@ const MAX_USER_PAGES = 100;
 
 /* --------------------------------- 形状 ---------------------------------- */
 
-/// 用户查找结果里的一行（对齐钉住的 `account.users.lookup` 契约）。
+/// 用户查找结果里的一行（对齐钉住的 `account.user.lookup` 契约）。
 export type UserLookupEntry = {
   id: number;
   username: string;
@@ -219,14 +217,12 @@ async function invokeWorkspaceAction(
   operationId: string,
   values: Record<string, unknown>,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<InvocationResult> {
   return invokeAction(
     requireGroupAction(deps.catalog, operationId),
     values,
     deps.session,
     signal,
-    { stepUpProof },
   );
 }
 
@@ -325,7 +321,6 @@ export async function grantPermission(
   input: GrantPermissionInput,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<void> {
   await invokeWorkspaceAction(
     deps,
@@ -338,7 +333,6 @@ export async function grantPermission(
       expires_at: input.expiresAt ?? undefined,
     },
     signal,
-    stepUpProof,
   );
 }
 
@@ -348,14 +342,12 @@ export async function revokePermission(
   permission: string,
   deps: AccessInvokeDeps,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<void> {
   await invokeWorkspaceAction(
     deps,
     WORKSPACE_OPERATION_IDS.revokePermission,
     { user_id: userId, permission },
     signal,
-    stepUpProof,
   );
 }
 
@@ -447,9 +439,7 @@ export function usePermissionMeta(): {
   };
 }
 
-/// 工作台写侧入口：授予/撤销（与 `useGroupActions` 同一套 Step-up 外壳——
-/// `access.grants.write` 的写 Action 同样挂在 Step-up 中间件下，见
-/// `grants/mod.rs` 的 `step_up_targets`：428 时弹重认证并重放）。
+/// 工作台写侧入口：授予/撤销。
 ///
 /// 变更函数不缓存失效：写接口只回幂等标记，页面提交后回读，失效由调用方统一挂在
 /// `accessGroupQueryKeys.root()` 上。
@@ -462,35 +452,19 @@ export function useGrantActions(): GrantActions {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
-  const controller = useSessionController();
 
   const deps = useMemo<AccessInvokeDeps>(
     () => ({ catalog: catalogData, session }),
     [catalogData, session],
   );
 
-  const request = useMemo(
-    () =>
-      <T>(
-        fn: (proof: string | undefined) => Promise<T>,
-      ): Promise<T | undefined> =>
-        runProtected(fn, controller),
-    [controller],
-  );
-
   return useMemo(
     () => ({
-      grantPermission: async (input: GrantPermissionInput) => {
-        await request((proof) =>
-          grantPermission(input, deps, undefined, proof),
-        );
-      },
-      revokePermission: async (userId: number, permission: string) => {
-        await request((proof) =>
-          revokePermission(userId, permission, deps, undefined, proof),
-        );
-      },
+      grantPermission: async (input: GrantPermissionInput) =>
+        grantPermission(input, deps),
+      revokePermission: async (userId: number, permission: string) =>
+        revokePermission(userId, permission, deps),
     }),
-    [deps, request],
+    [deps],
   );
 }

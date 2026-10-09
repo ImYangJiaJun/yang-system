@@ -235,7 +235,9 @@ export function UserPermissionView() {
         aria-live="polite"
         className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
       >
-        {catalog.isPending ? "正在加载权限目录…" : "查看权限工作台需要先登录。"}
+        {catalog.isPending
+          ? "正在加载权限目录…"
+          : "当前身份没有权限工作台的访问权限。"}
       </p>
     );
   }

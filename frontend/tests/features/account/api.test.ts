@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, StepUpRequiredError } from "@/engine/http/errors";
+import { ApiError } from "@/engine/http/errors";
 import {
   activateTotp,
   changeEmail,
@@ -14,7 +14,7 @@ import {
   uploadAvatar,
 } from "@/features/account/api";
 
-/// account 账号中心 API 契约：路径、鉴权头、Step-up 428 重放、响应校验。
+/// account 账号中心 API 契约：路径、鉴权头、响应校验。
 
 function jsonResponse(
   payload: unknown,
@@ -145,7 +145,7 @@ describe("fetchCurrentUser", () => {
 });
 
 describe("changePassword", () => {
-  it("POST change-password 并透传 x-step-up-proof", async () => {
+  it("POST change-password 提交新旧密码", async () => {
     let captured: { url: string; init: RequestInit } | undefined;
     stubFetch((url, init) => {
       captured = { url, init };
@@ -157,49 +157,19 @@ describe("changePassword", () => {
       );
     });
 
-    const result = await changePassword(
-      "old",
-      "new-password-1",
-      "tok",
-      undefined,
-      "proof-x",
-    );
+    const result = await changePassword("old", "new-password-1", "tok");
     expect(captured?.url).toContain("/api/v1/users/change-password");
     expect(JSON.parse(String(captured?.init.body))).toEqual({
       old_password: "old",
       new_password: "new-password-1",
     });
-    expect(
-      (captured?.init.headers as Record<string, string>)["x-step-up-proof"],
-    ).toBe("proof-x");
     expect(result).toEqual({
       reloginRequired: true,
       immediateConvergence: true,
     });
   });
 
-  it("428 响应抛 StepUpRequiredError（携带 challenge）", async () => {
-    stubFetch(() =>
-      Promise.resolve(
-        jsonResponse(
-          {
-            code: 700010,
-            message: "敏感操作需要重新认证",
-            data: { challenge: "signed-challenge", expires_in: 120 },
-          },
-          428,
-        ),
-      ),
-    );
-    const error = await changePassword("old", "new-password-1", "tok").catch(
-      (cause) => cause,
-    );
-    expect(error).toBeInstanceOf(StepUpRequiredError);
-    expect((error as StepUpRequiredError).challenge).toBe("signed-challenge");
-    expect((error as StepUpRequiredError).expiresIn).toBe(120);
-  });
-
-  it("非 428 错误抛 ApiError", async () => {
+  it("错误响应抛 ApiError 并保留服务端消息", async () => {
     stubFetch(() =>
       Promise.resolve(
         jsonResponse({ code: 400001, message: "当前密码错误" }, 400),
@@ -258,7 +228,7 @@ describe("requestChangeEmail", () => {
 });
 
 describe("setupTotp", () => {
-  it("POST mfa/totp/setup 并透传 Step-up proof，返回密钥与 URI", async () => {
+  it("POST mfa/totp/setup，返回密钥与 URI", async () => {
     let captured: { url: string; init: RequestInit } | undefined;
     stubFetch((url, init) => {
       captured = { url, init };
@@ -277,11 +247,8 @@ describe("setupTotp", () => {
       );
     });
 
-    const result = await setupTotp("tok", undefined, "proof-x");
+    const result = await setupTotp("tok");
     expect(captured?.url).toContain("/api/v1/users/mfa/totp/setup");
-    expect(
-      (captured?.init.headers as Record<string, string>)["x-step-up-proof"],
-    ).toBe("proof-x");
     expect(result).toEqual({
       secret: "JBSWY3DPEHPK3PXP",
       otpauthUri: "otpauth://totp/yang-system:alice?secret=JBSWY3DPEHPK3PXP",
@@ -353,7 +320,7 @@ describe("activateTotp", () => {
 });
 
 describe("deactivateTotp", () => {
-  it("POST mfa/totp/deactivate 透传 Step-up proof，返回停用确认", async () => {
+  it("POST mfa/totp/deactivate，返回停用确认", async () => {
     let captured: { url: string; init: RequestInit } | undefined;
     stubFetch((url, init) => {
       captured = { url, init };
@@ -370,12 +337,9 @@ describe("deactivateTotp", () => {
       );
     });
 
-    const result = await deactivateTotp("tok", undefined, "proof-x");
+    const result = await deactivateTotp("tok");
     expect(captured?.url).toContain("/api/v1/users/mfa/totp/deactivate");
     expect(JSON.parse(String(captured?.init.body))).toEqual({});
-    expect(new Headers(captured?.init.headers).get("x-step-up-proof")).toBe(
-      "proof-x",
-    );
     expect(result).toEqual({
       reloginRequired: true,
       immediateConvergence: true,
@@ -396,7 +360,7 @@ describe("deactivateTotp", () => {
 });
 
 describe("changeEmail", () => {
-  it("POST change-email 提交新邮箱与验证码，透传 Step-up proof", async () => {
+  it("POST change-email 提交新邮箱与验证码", async () => {
     let captured: { url: string; init: RequestInit } | undefined;
     stubFetch((url, init) => {
       captured = { url, init };
@@ -412,21 +376,12 @@ describe("changeEmail", () => {
         }),
       );
     });
-    const result = await changeEmail(
-      "bob@example.com",
-      "123456",
-      "tok",
-      undefined,
-      "proof-x",
-    );
+    const result = await changeEmail("bob@example.com", "123456", "tok");
     expect(captured?.url).toContain("/api/v1/users/change-email");
     expect(JSON.parse(String(captured?.init.body))).toEqual({
       new_email: "bob@example.com",
       email_code: "123456",
     });
-    expect(
-      (captured?.init.headers as Record<string, string>)["x-step-up-proof"],
-    ).toBe("proof-x");
     expect(result).toEqual({
       reloginRequired: true,
       immediateConvergence: true,

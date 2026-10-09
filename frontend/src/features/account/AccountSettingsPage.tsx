@@ -31,7 +31,6 @@ import {
   useSessionController,
   useSessionSnapshot,
 } from "@/engine/session/use-session";
-import { StepUpRequiredError } from "@/engine/http/errors";
 import { copyText } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
@@ -39,10 +38,6 @@ import { Label } from "@/shared/ui/label";
 import { useToast } from "@/shared/lib/toast";
 
 /// 账号设置页：资料展示 + 修改密码 + 修改用户名 + 停用账号。
-///
-/// 受 Step-up 保护的动作（改密/改用户名/停用）在 428 时经
-/// SessionController.requestStepUpProof 弹重认证对话框，换到一次性
-/// proof 后重放原请求；用户取消则放弃本次操作。
 export default function AccountSettingsPage() {
   const controller = useSessionController();
   const session = useSessionSnapshot();
@@ -146,10 +141,7 @@ export default function AccountSettingsPage() {
     setErrorMessage("");
     setBusy(`kick-${sessionId}`);
     try {
-      const done = await runProtected((proof) =>
-        revokeSession(sessionId, token, undefined, proof),
-      );
-      if (done === undefined) return; // 用户取消 Step-up
+      await revokeSession(sessionId, token);
       toast.success("该设备已退出登录");
       void loadSessions();
     } catch (cause) {
@@ -158,23 +150,6 @@ export default function AccountSettingsPage() {
       setBusy(null);
     }
   };
-
-  /// 受 Step-up 保护动作的通用执行器：请求 → 428 换 proof 重放。
-  const runProtected = useCallback(
-    async <T,>(
-      request: (proof: string | undefined) => Promise<T>,
-    ): Promise<T | undefined> => {
-      try {
-        return await request(undefined);
-      } catch (cause) {
-        if (!(cause instanceof StepUpRequiredError)) throw cause;
-        const proof = await controller.requestStepUpProof(cause.challenge);
-        if (!proof) return undefined; // 用户取消重认证
-        return await request(proof);
-      }
-    },
-    [controller],
-  );
 
   const submitPassword = async (event: FormEvent) => {
     event.preventDefault();
@@ -190,10 +165,7 @@ export default function AccountSettingsPage() {
     }
     setBusy("password");
     try {
-      const result = await runProtected((proof) =>
-        changePassword(oldPassword, newPassword, token, undefined, proof),
-      );
-      if (result === undefined) return; // 用户取消
+      await changePassword(oldPassword, newPassword, token);
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
@@ -217,10 +189,7 @@ export default function AccountSettingsPage() {
     }
     setBusy("username");
     try {
-      const result = await runProtected((proof) =>
-        changeUsername(newUsername.trim(), token, undefined, proof),
-      );
-      if (result === undefined) return; // 用户取消
+      await changeUsername(newUsername.trim(), token);
       toast.info("用户名已修改，请使用新用户名重新登录");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
@@ -273,10 +242,7 @@ export default function AccountSettingsPage() {
     }
     setBusy("email");
     try {
-      const result = await runProtected((proof) =>
-        changeEmail(newEmail.trim(), emailCode.trim(), token, undefined, proof),
-      );
-      if (result === undefined) return; // 用户取消
+      await changeEmail(newEmail.trim(), emailCode.trim(), token);
       toast.info("邮箱已更换，请使用新邮箱重新登录");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });
@@ -293,10 +259,7 @@ export default function AccountSettingsPage() {
     setTotpError("");
     setBusy("totp-setup");
     try {
-      const setup = await runProtected((proof) =>
-        setupTotp(token, undefined, proof),
-      );
-      if (setup === undefined) return; // 用户取消 Step-up
+      const setup = await setupTotp(token);
       setTotpSetup(setup);
       setTotpRecoveryCodes(null);
       setTotpCodesCopied(false);
@@ -314,10 +277,7 @@ export default function AccountSettingsPage() {
     setTotpError("");
     setBusy("totp-activate");
     try {
-      const result = await runProtected((proof) =>
-        activateTotp(totpSetup.secret, code, token, undefined, proof),
-      );
-      if (result === undefined) return; // 用户取消 Step-up，保留弹窗
+      const result = await activateTotp(totpSetup.secret, code, token);
       // 激活成功：会话已失效，关闭弹窗，进入恢复码一次性回显。
       setTotpSetup(null);
       setTotpRecoveryCodes(result.recoveryCodes);
@@ -350,8 +310,7 @@ export default function AccountSettingsPage() {
     navigate("/login", { replace: true });
   };
 
-  /// 关闭双重验证：Step-up 重认证（已激活账号需同时出示第二因子）后停用，
-  /// 全部恢复码作废、会话失效，回到登录页。
+  /// 关闭双重验证：停用后全部恢复码作废、会话失效，回到登录页。
   const closeTotp = async () => {
     if (busy) return;
     setErrorMessage("");
@@ -364,10 +323,7 @@ export default function AccountSettingsPage() {
     }
     setBusy("totp-deactivate");
     try {
-      const result = await runProtected((proof) =>
-        deactivateTotp(token, undefined, proof),
-      );
-      if (result === undefined) return; // 用户取消 Step-up
+      await deactivateTotp(token);
       toast.info("双重验证已关闭，请重新登录");
       controller.clearSession("credentials-changed");
       navigate("/login", { replace: true });

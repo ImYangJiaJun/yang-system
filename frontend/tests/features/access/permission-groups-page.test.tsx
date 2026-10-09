@@ -139,7 +139,7 @@ const PERMISSION_ACTIONS = [
 /// 工作台用户查找（成员名映射与成员添加的 UserPicker 都靠它；
 /// 目录里有它才会发 lookup 请求，没有时名字回退「用户 #id」）。
 const LOOKUP_ACTIONS = [
-  action("account.users.lookup", "GET", LOOKUP_PATH, [
+  action("account.user.lookup", "GET", LOOKUP_PATH, [
     param("q", "query", false),
     param("page", "query", false),
     param("page_size", "query", false),
@@ -678,15 +678,15 @@ describe("权限组管理页", () => {
     expect(screen.queryByRole("button", { name: "新建权限组" })).toBeNull();
   });
 
-  it("没有读权限时不发列表请求，只提示登录", async () => {
+  it("没有读权限时不发列表请求，只提示无权限", async () => {
     const calls = stubAccessApi({ read: false });
 
     renderPage();
 
     // authenticated-only 后，登录用户的目录恒含 list_groups；这个分支是防御性的
-    // （未登录/目录未就绪），提示语不再提「开通权限」。
+    // （未登录/目录未就绪），提示语说明缺的是权限而非登录。
     expect(
-      await screen.findByText("查看权限组需要先登录。"),
+      await screen.findByText("当前身份没有权限工作台的访问权限。"),
     ).toBeInTheDocument();
     expect(calls.some((call) => call.url.endsWith(LIST_PATH))).toBe(false);
   });

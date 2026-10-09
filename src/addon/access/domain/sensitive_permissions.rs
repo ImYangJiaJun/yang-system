@@ -84,7 +84,6 @@ mod tests {
     use jsonwebtoken::Algorithm;
     use sqlx::mysql::MySqlPoolOptions;
     use std::sync::Arc;
-    use yang_base::action::StepUpManager;
     use yang_base::token::TokenManager;
     use yang_base::tools::{Tools, ToolsBuilder};
     use yang_db::{Database, DatabaseConfig};
@@ -177,14 +176,6 @@ mod tests {
                     )
                     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}")),
                 )
-                .extension(Arc::new(
-                    StepUpManager::new(
-                        "admin-equivalent-test-secret-0123456789abcdef",
-                        "test-step-up",
-                        "test-sensitive-actions",
-                    )
-                    .unwrap_or_else(|error| panic!("测试 Step-up manager 应有效: {error}")),
-                ))
                 .build()
                 .unwrap_or_else(|error| panic!("测试 Tools 应构建成功: {error}")),
         )

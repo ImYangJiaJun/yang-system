@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use yang_base::action::auth::TotpLiteVerifier;
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -158,17 +158,6 @@ fn token_manager() -> TokenManager {
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
 }
 
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "login-email-integration-step-up-secret-32",
-            "login-email-integration-step-up",
-            "login-email-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
-}
-
 async fn connect_database() -> anyhow::Result<Database> {
     let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")
         .context("缺少 YANG_SYSTEM_TEST_DATABASE_URL")?;
@@ -304,7 +293,6 @@ async fn build_login_app(
                 redis.clone(),
                 namespace.clone(),
             )?)
-            .extension(step_up_manager())
             .extension(RegistrationEmailSenderHandle::new(sender.clone()))
             .extension(LoginEmailCodeSenderHandle::new(sender.clone()))
             .extension(VerificationCodeSenderHandle::new(sender.clone()))
@@ -437,9 +425,6 @@ fn now_seconds() -> anyhow::Result<u64> {
 }
 
 /// 为账号完成 TOTP 激活，返回（密钥，恢复码组）。
-///
-/// totp_setup 与 totp_activate 现均受 Step-up 保护（会话劫持者不得擅自绑定
-/// 认证器并夺走恢复码），因此每个调用前都要先触发 challenge 并完成密码重认证。
 async fn activate_totp(
     app: &BuiltApp,
     username: &str,
@@ -449,28 +434,11 @@ async fn activate_totp(
     let token = access_token(&login_response)?;
     let authorization = format!("Bearer {token}");
 
-    // totp_setup：先触发 challenge，完成密码重认证，携带 proof 重试。
-    let setup_challenge = match dispatch(
-        app,
-        "totp_setup",
-        json!({}),
-        &[("authorization", authorization.as_str())],
-        peer_port,
-    )
-    .await
-    {
-        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
-        other => anyhow::bail!("totp_setup 缺少 proof 必须返回 Step-up challenge，实际: {other:?}"),
-    };
-    let setup_proof = complete_step_up(app, username, peer_port, &setup_challenge).await?;
     let setup = dispatch(
         app,
         "totp_setup",
         json!({}),
-        &[
-            ("authorization", authorization.as_str()),
-            ("x-step-up-proof", setup_proof.as_str()),
-        ],
+        &[("authorization", authorization.as_str())],
         peer_port,
     )
     .await?;
@@ -483,30 +451,11 @@ async fn activate_totp(
 
     let code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
 
-    // totp_activate：同样先触发 challenge 再重认证。
-    let activate_challenge = match dispatch(
-        app,
-        "totp_activate",
-        json!({ "secret": secret, "code": code }),
-        &[("authorization", authorization.as_str())],
-        peer_port,
-    )
-    .await
-    {
-        Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
-        other => {
-            anyhow::bail!("totp_activate 缺少 proof 必须返回 Step-up challenge，实际: {other:?}")
-        }
-    };
-    let activate_proof = complete_step_up(app, username, peer_port, &activate_challenge).await?;
     let activated = dispatch(
         app,
         "totp_activate",
         json!({ "secret": secret, "code": code }),
-        &[
-            ("authorization", authorization.as_str()),
-            ("x-step-up-proof", activate_proof.as_str()),
-        ],
+        &[("authorization", authorization.as_str())],
         peer_port,
     )
     .await?;
@@ -520,32 +469,6 @@ async fn activate_totp(
         .collect::<Vec<_>>();
     ensure!(!recovery_codes.is_empty(), "恢复码组不得为空");
     Ok((secret, recovery_codes))
-}
-
-/// 完成一次 Step-up（密码重认证），返回一次性 proof。
-async fn complete_step_up(
-    app: &BuiltApp,
-    username: &str,
-    peer_port: u16,
-    challenge: &str,
-) -> anyhow::Result<String> {
-    let completed = dispatch(
-        app,
-        "step_up_complete",
-        json!({
-            "challenge": challenge,
-            "credentials": { "username": username, "password": PASSWORD },
-        }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    completed
-        .data
-        .as_ref()
-        .and_then(|data| data["proof"].as_str())
-        .map(str::to_string)
-        .context("Step-up 完成响应缺少 proof")
 }
 
 /// 统计账号的登录事件行数（成功与失败合计）。
@@ -591,7 +514,7 @@ fn wrong_code(code: &str) -> &'static str {
     }
 }
 
-/// 直接把账号状态改为 disabled（绕过 admin Action 的权限与 Step-up 链路）。
+/// 直接把账号状态改为 disabled（绕过 admin Action 的权限链路）。
 async fn disable_user(database: &Database, username: &str) -> anyhow::Result<()> {
     let affected = sqlx::query("UPDATE users SET status = 'disabled' WHERE username = ?")
         .bind(username)

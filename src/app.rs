@@ -1,10 +1,8 @@
 use crate::addon::{access, account, demo, feishu};
-use crate::authorization::StepUpServices;
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
 use anyhow::Context;
 use std::sync::Arc;
-use yang_base::action::StepUpManager;
 use yang_base::definition::{AppBuilder, BuiltApp};
 use yang_base::tools::Tools;
 use yang_runtime::observability::{ActionLogMiddleware, LogIdentity, RuntimeMetricNames};
@@ -31,51 +29,28 @@ pub fn build_app(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
 ) -> anyhow::Result<Application> {
-    let step_up_manager = tools
-        .extension::<Arc<StepUpManager>>()
-        .context("运行应用缺少 StepUpManager 扩展")?
-        .clone();
-    let step_up = StepUpServices::production(step_up_manager, tools.cache()?.clone())
-        .context("构建生产 Step-up proof store 失败")?;
-    build_application(tools, security, Some(step_up))
+    build_application(tools, security)
 }
 
 pub(crate) fn build_schema_app(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
 ) -> anyhow::Result<Application> {
-    build_application(tools, security, None)
+    build_application(tools, security)
 }
 
 /// 构建仅用于元数据导出的应用（无 Redis 依赖），
 /// 供 `openapi-dump` 等开发期契约工具使用；目录内容与运行时同源。
-///
-/// Step-up 端点（`step_up_complete`）必须在导出中可见，因此本路径构造一个
-/// 独立占位密钥的 [`StepUpManager`] 并以内存 proof 存储装配
-/// [`StepUpServices::metadata`]——不连接 Redis，proof 单次消费语义由
-/// 进程内存储承担（本路径不处理真实请求，无跨实例问题）。
 pub fn build_metadata_app(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
 ) -> anyhow::Result<Application> {
-    // 占位密钥：元数据导出不签发/校验任何真实 challenge/proof，密钥只影响
-    // Catalog 的注册形态，不进入任何生产数据面。
-    let metadata_manager = Arc::new(
-        StepUpManager::new(
-            "openapi-metadata-placeholder-secret-0123456789abcdef",
-            "yang-system-metadata",
-            "yang-sensitive-actions",
-        )
-        .context("构建元数据导出 Step-up manager 失败")?,
-    );
-    let metadata_step_up = StepUpServices::metadata(metadata_manager);
-    build_application(tools, security, Some(metadata_step_up))
+    build_application(tools, security)
 }
 
 fn build_application(
     tools: Arc<Tools>,
     security: Arc<SecuritySettings>,
-    step_up: Option<StepUpServices>,
 ) -> anyhow::Result<Application> {
     let authorization_cache = match tools.cache() {
         Ok(_) => Some(
@@ -98,7 +73,6 @@ fn build_application(
     let permission_catalog = access::PermissionCatalogHandle::new();
     let access = access::build_addon(
         authorization_validator.clone(),
-        step_up.clone(),
         permission_catalog.clone(),
         authorization_port,
     )
@@ -137,7 +111,6 @@ fn build_application(
                 system_owner_claimer,
                 system_authorization,
                 authorization_validator,
-                step_up,
             )
             .context("构建 account Addon 失败")?
             .middleware(action_logging),
@@ -185,27 +158,17 @@ mod tests {
             .unwrap_or_else(|error| panic!("测试连接配置应有效: {error}"));
         let mysql = Database::from_pool(pool.clone(), DatabaseConfig::default())
             .unwrap_or_else(|error| panic!("测试 Database 应构建成功: {error}"));
-        let builder = ToolsBuilder::new()
-            .mysql(mysql)
-            .token(
-                TokenManager::new_symmetric(
-                    "01234567890123456789012345678901",
-                    Algorithm::HS256,
-                    "test".to_string(),
-                    "test-api".to_string(),
-                    60,
-                    120,
-                )
-                .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}")),
+        let builder = ToolsBuilder::new().mysql(mysql).token(
+            TokenManager::new_symmetric(
+                "01234567890123456789012345678901",
+                Algorithm::HS256,
+                "test".to_string(),
+                "test-api".to_string(),
+                60,
+                120,
             )
-            .extension(Arc::new(
-                StepUpManager::new(
-                    "independent-step-up-test-secret-0123456789abcdef",
-                    "test-step-up",
-                    "test-sensitive-actions",
-                )
-                .unwrap_or_else(|error| panic!("测试 Step-up manager 应有效: {error}")),
-            ));
+            .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}")),
+        );
         let builder = match feishu {
             Some(settings) => builder.config(Arc::new(settings)),
             None => builder,
@@ -255,7 +218,6 @@ mod tests {
                 approval_base_timezone: "Asia/Shanghai".to_string(),
             })),
             test_security(),
-            None,
         )
         .unwrap_or_else(|error| panic!("开启请求参数日志后应用仍应能构建: {error:#}"));
 
@@ -281,7 +243,7 @@ mod tests {
     /// account + access 骨架冒烟：应用必须可构建并产出两个 Addon 的 Catalog 与授权事实表。
     #[tokio::test]
     async fn enabled_feature_combination_builds_and_exposes_account_catalog() {
-        let app = build_application(test_tools(), test_security(), None)
+        let app = build_application(test_tools(), test_security())
             .unwrap_or_else(|error| panic!("当前 feature 组合的应用应构建成功: {error:#}"));
         let module = app
             .runtime
@@ -352,7 +314,7 @@ mod tests {
     async fn demo_addon_builds_and_projects_only_for_authorized_identities() {
         use yang_base::action::Request;
 
-        let app = build_application(test_tools(), test_security(), None)
+        let app = build_application(test_tools(), test_security())
             .unwrap_or_else(|error| panic!("当前 feature 组合的应用应构建成功: {error:#}"));
         let demo_module = app
             .runtime
@@ -423,7 +385,7 @@ mod tests {
     /// 且写操作携带非空输入 Schema。该契约是前端 openapi-typescript 轨道的前提。
     #[tokio::test]
     async fn openapi_projection_covers_all_catalog_actions() {
-        let app = build_application(test_tools(), test_security(), None)
+        let app = build_application(test_tools(), test_security())
             .unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
         let document = app
             .runtime
@@ -500,38 +462,6 @@ mod tests {
         assert!(
             write_with_input_schema >= 5,
             "应有足够写操作携带输入 Schema（实际 {write_with_input_schema}）"
-        );
-    }
-
-    /// OpenAPI 契约快照必须覆盖 step-up 端点（路线图 A-5）：
-    /// 元数据导出路径（build_metadata_app）现在以内存 proof 存储装配
-    /// StepUpServices，使 `POST /api/v1/users/step-up/complete` 进入 Catalog，
-    /// 否则前端已依赖的 step-up 契约会从快照中消失。
-    #[tokio::test]
-    async fn openapi_projection_includes_step_up_complete_endpoint() {
-        let app = build_metadata_app(test_tools(), test_security())
-            .unwrap_or_else(|error| panic!("元数据应用应构建成功: {error:#}"));
-        let document = app
-            .runtime
-            .catalog()
-            .to_openapi(yang_base::definition::OpenApiInfo::new(
-                "yang-system",
-                "0.1.0",
-            ))
-            .unwrap_or_else(|error| panic!("Catalog 应投影 OpenAPI 文档: {error}"));
-        let paths = document["paths"]
-            .as_object()
-            .unwrap_or_else(|| panic!("OpenAPI 文档应包含 paths 对象"));
-        let path_item = paths
-            .get("/api/v1/users/step-up/complete")
-            .unwrap_or_else(|| panic!("OpenAPI 应包含 /api/v1/users/step-up/complete 路径"));
-        let operation = path_item
-            .get("post")
-            .unwrap_or_else(|| panic!("step-up 路径应包含 POST 操作"));
-        assert_eq!(
-            operation["operationId"],
-            serde_json::json!("account.user.step_up_complete"),
-            "step-up operationId 应与 Catalog 一致"
         );
     }
 }

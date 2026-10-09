@@ -1,7 +1,7 @@
 //! `access.grants` Module（module 层）：授权管理模块装配。
 //!
-//! 本文件就是这个模块的"定义卡"：表、上下文、中间件、Action 注册表、
-//! Step-up 守卫与展示投影按分区顺序装配；业务用例全部在 `actions/` 的
+//! 本文件就是这个模块的"定义卡"：表、上下文、中间件、Action 注册表与
+//! 展示投影按分区顺序装配；业务用例全部在 `actions/` 的
 //! 自包含文件中。
 
 mod actions;
@@ -15,9 +15,7 @@ use super::domain::groups::GroupRepository;
 use super::domain::permission_catalog::PermissionCatalogHandle;
 use super::domain::repository::GrantRepository;
 use crate::addon::account::user_from_claims;
-use crate::authorization::{
-    AuthorizationPort, AuthorizationVersionValidator, RequestFingerprintResolver, StepUpServices,
-};
+use crate::authorization::{AuthorizationPort, AuthorizationVersionValidator};
 use std::sync::Arc;
 use yang_base::action::TokenAuthMiddleware;
 use yang_base::definition::{
@@ -26,12 +24,11 @@ use yang_base::definition::{
 };
 use yang_base::BaseError;
 
-/// 装配 `access.grants` Module：表 → 上下文 → 中间件 → Action 注册表 → Step-up → 展示投影。
+/// 装配 `access.grants` Module：表 → 上下文 → 中间件 → Action 注册表 → 展示投影。
 ///
 /// 共享上下文随模块一并返回：组合根用它装配账号域的 `GrantResolver` 端口。
 pub(super) fn build_module(
     authorization_validator: AuthorizationVersionValidator,
-    step_up: Option<StepUpServices>,
     permission_catalog: PermissionCatalogHandle,
     authorization: AuthorizationPort,
 ) -> Result<(ModuleSpec, Arc<Access>), BaseError> {
@@ -59,13 +56,6 @@ pub(super) fn build_module(
             .authenticate_public_actions(),
     );
     module = actions::register_all(module, Arc::clone(&access));
-    if let Some(step_up) = step_up {
-        for target in step_up_targets() {
-            module = module.middleware(
-                step_up.middleware(target, RequestFingerprintResolver::global("access-grants")),
-            );
-        }
-    }
     Ok((module.presentation(presentation()), access))
 }
 
@@ -83,32 +73,4 @@ fn presentation() -> ModulePresentationSpec {
             yang_base::action!("access.grants.revoke_permission"),
             ActionPresentationSpec::new(ActionPlacement::Toolbar, ActionInteraction::Form),
         )
-}
-
-/// 需要 Step-up 重认证的授权写操作。
-fn step_up_targets() -> Vec<yang_base::definition::ActionRef> {
-    vec![
-        yang_base::action!("access.grants.grant_permission"),
-        yang_base::action!("access.grants.revoke_permission"),
-        yang_base::action!("access.grants.batch_grant_permissions"),
-        yang_base::action!("access.grants.batch_revoke_permissions"),
-    ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_grant_mutation_is_explicitly_step_up_protected() {
-        assert_eq!(
-            step_up_targets(),
-            vec![
-                yang_base::action!("access.grants.grant_permission"),
-                yang_base::action!("access.grants.revoke_permission"),
-                yang_base::action!("access.grants.batch_grant_permissions"),
-                yang_base::action!("access.grants.batch_revoke_permissions"),
-            ]
-        );
-    }
 }

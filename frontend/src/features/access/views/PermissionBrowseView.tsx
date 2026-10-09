@@ -175,7 +175,9 @@ export function PermissionBrowseView() {
         aria-live="polite"
         className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
       >
-        {catalog.isPending ? "正在加载权限目录…" : "查看权限工作台需要先登录。"}
+        {catalog.isPending
+          ? "正在加载权限目录…"
+          : "当前身份没有权限工作台的访问权限。"}
       </p>
     );
   }
@@ -195,7 +197,7 @@ export function PermissionBrowseView() {
 
       <section
         aria-labelledby="workspace-permission-detail-heading"
-        className="space-y-4"
+        className="space-y-4 lg:sticky lg:top-4 lg:self-start"
       >
         <h2
           id="workspace-permission-detail-heading"
@@ -322,7 +324,7 @@ function CatalogPanel({
   return (
     <section
       aria-labelledby="workspace-catalog-heading"
-      className="space-y-2 self-start rounded-xl border border-border bg-card p-4"
+      className="space-y-2 self-start rounded-xl border border-border bg-card p-4 lg:max-h-[calc(100vh-15rem)] lg:overflow-y-auto"
     >
       <div className="flex items-baseline justify-between gap-2">
         <h3 id="workspace-catalog-heading" className="text-base font-medium">

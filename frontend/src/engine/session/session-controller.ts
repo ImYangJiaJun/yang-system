@@ -9,15 +9,13 @@ import {
   persistTokenPair,
   restoreSessionFromCookie,
 } from "./auth-session";
-import { StepUpRequiredError } from "../http/errors";
 import { publishSessionEnd } from "./session-coordination";
-import type { SessionContext } from "../http/types";
 
 /**
  * 会话协议控制器：纯 TS、框架无关（禁止 import react/vue）。
  *
  * 收编旧 Pinia `stores/session.ts` 与 `composables/useApplicationSession.ts` 的对外语义：
- * 内存 access token、Cookie 恢复状态机、并发恢复去重、logout/disable 的 Step-up 保护与
+ * 内存 access token、Cookie 恢复状态机、并发恢复去重、logout/disable 会话变更与
  * 多标签页结束广播。React 侧只通过 useSyncExternalStore 薄壳（api/use-session.ts）订阅。
  */
 
@@ -33,24 +31,10 @@ export interface SessionSnapshot {
   readonly sessionEndReason?: SessionEndReason;
 }
 
-/// Step-up proof 获取是 UI 交互（旧实现为 Quasar Dialog），以回调注入保持 core 纯净；
-/// 返回 undefined 表示用户取消。
-export type StepUpProofRequest = (
-  challenge: string,
-  context: SessionContext,
-) => Promise<string | undefined>;
-
 export interface SessionControllerOptions {
-  requestStepUpProof?: StepUpProofRequest;
   /// 会话建立/清空时级联重置其他 owner（身份、Catalog、导航等），由应用层注入。
   onSessionReset?: () => void;
 }
-
-type SessionMutation = (
-  accessToken: string | undefined,
-  signal?: AbortSignal,
-  stepUpProof?: string,
-) => Promise<unknown>;
 
 export class SessionController {
   private token = "";
@@ -118,49 +102,17 @@ export class SessionController {
     return this.activeRestore;
   }
 
-  /// 供 Action 执行层在 428 challenge 时索取 proof；未配置回调时 fail-loud。
-  async requestStepUpProof(challenge: string): Promise<string | undefined> {
-    if (!this.options.requestStepUpProof) {
-      throw new Error("未配置 Step-up 交互回调（requestStepUpProof）");
-    }
-    return this.options.requestStepUpProof(challenge, {
-      token: this.token || undefined,
-    });
-  }
-
   async endSession(): Promise<boolean> {
-    const completed = await this.runStepUpProtectedMutation(requestLogout);
-    if (!completed) return false;
+    await requestLogout(this.token || undefined);
     this.clearSession();
     publishSessionEnd("logout");
     return true;
   }
 
   async disableAccount(): Promise<boolean> {
-    const completed = await this.runStepUpProtectedMutation(
-      requestDisableAccount,
-    );
-    if (!completed) return false;
+    await requestDisableAccount(this.token || undefined);
     this.clearSession();
     publishSessionEnd("logout");
-    return true;
-  }
-
-  private async runStepUpProtectedMutation(
-    request: SessionMutation,
-  ): Promise<boolean> {
-    try {
-      await request(this.token || undefined);
-    } catch (error: unknown) {
-      if (!(error instanceof StepUpRequiredError)) throw error;
-      // 未注入 Step-up 交互回调时 fail-loud，而不是静默跳过受保护的会话变更。
-      if (!this.options.requestStepUpProof) throw error;
-      const proof = await this.options.requestStepUpProof(error.challenge, {
-        token: this.token || undefined,
-      });
-      if (!proof) return false;
-      await request(this.token || undefined, undefined, proof);
-    }
     return true;
   }
 

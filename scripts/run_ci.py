@@ -238,6 +238,32 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "直授持有者反向查询集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "grant_holders_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
+        "用户查找 authenticated-only 集成测试",
+        (
+            "cargo",
+            "test",
+            "--test",
+            "user_lookup_integration",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "首账号引导并发仲裁集成测试",
         (
             "cargo",

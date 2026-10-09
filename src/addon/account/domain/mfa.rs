@@ -2,7 +2,7 @@
 //!
 //! 只承载三类共享机制：
 //! - AEAD 加密/解密 `users.totp_secret`（独立密钥域 `security.totp.aead_key`，
-//!   启动校验保证不与 token/step-up/验证码密钥复用）；
+//!   启动校验保证不与 token/验证码密钥复用）；
 //! - TOTP 共享密钥与 `otpauth://` URI 的生成（RFC 6238 算法本体由
 //!   `yang_base::action::auth::TotpLiteVerifier` 提供，此处只做密钥与标签）；
 //! - 一次性恢复码的生成与摘要校验（摘要入库、单次消费由 Action 层保证）。

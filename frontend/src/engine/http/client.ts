@@ -13,7 +13,7 @@ import { ApiError } from "./errors";
 import { apiBase, contextHeaders, parseJson } from "./http";
 import type { InvocationResult, SessionContext } from "./types";
 
-export { ApiError, StepUpRequiredError } from "./errors";
+export { ApiError } from "./errors";
 export type { InvocationResult, SessionContext } from "./types";
 
 export async function fetchUiCatalog(
@@ -55,16 +55,10 @@ export async function invokeAction(
   values: Record<string, unknown>,
   context: SessionContext,
   signal?: AbortSignal,
-  options: { stepUpProof?: string } = {},
 ): Promise<InvocationResult> {
   const startedAt = performance.now();
   const response = await requestWithTokenRefresh(context.token, (token) => {
     const request = buildActionRequest(action, values, { ...context, token });
-    if (options.stepUpProof) {
-      const headers = new Headers(request.init.headers);
-      headers.set("x-step-up-proof", options.stepUpProof);
-      request.init.headers = headers;
-    }
     return fetch(request.url, { ...request.init, signal });
   });
   const durationMs = Math.round((performance.now() - startedAt) * 10) / 10;

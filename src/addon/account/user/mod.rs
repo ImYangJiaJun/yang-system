@@ -1,7 +1,7 @@
 //! `account.user` Module（module 层）：用户模块装配。
 //!
-//! 本文件就是这个模块的"定义卡"：表、上下文、中间件、Action 注册表、
-//! Step-up 守卫与展示投影按分区顺序装配；业务用例全部在 `actions/` 的
+//! 本文件就是这个模块的"定义卡"：表、上下文、中间件、Action 注册表与
+//! 展示投影按分区顺序装配；业务用例全部在 `actions/` 的
 //! 自包含文件中。
 
 mod actions;
@@ -13,8 +13,7 @@ use super::domain::login_event::LoginEventRepository;
 use super::domain::repository::UserRepository;
 use super::domain::session::SessionRepository;
 use super::{GrantResolver, SystemAuthorizationPort, SystemOwnerClaimer};
-use crate::authorization::StepUpServices;
-use crate::authorization::{AuthorizationVersionValidator, RequestFingerprintResolver};
+use crate::authorization::AuthorizationVersionValidator;
 use crate::config::SecuritySettings;
 use std::sync::Arc;
 use yang_base::action::{TokenAuthMiddleware, UiCatalogAction};
@@ -25,14 +24,13 @@ use yang_base::definition::{
 use yang_base::transport::client_ip::TrustedClientIpMiddleware;
 use yang_base::BaseError;
 
-/// 装配 `account.user` Module：表 → 上下文 → 中间件 → Action 注册表 → Step-up → 展示投影。
+/// 装配 `account.user` Module：表 → 上下文 → 中间件 → Action 注册表 → 展示投影。
 pub(super) fn build_module(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     system_authorization: Arc<dyn SystemAuthorizationPort>,
     authorization_validator: AuthorizationVersionValidator,
-    step_up: Option<StepUpServices>,
 ) -> Result<ModuleSpec, BaseError> {
     let table = table::user_table_spec()?;
     let session_repository = SessionRepository::new(crate::schema::user_session()?);
@@ -46,7 +44,6 @@ pub(super) fn build_module(
         grant_resolver,
         system_owner_claimer,
         system_authorization,
-        step_up.as_ref().map(StepUpServices::manager),
     )?);
 
     let mut module = ModuleSpec::new(
@@ -64,17 +61,6 @@ pub(super) fn build_module(
     )
     .native_action(UiCatalogAction);
     module = actions::register_all(module, Arc::clone(&account));
-    if let Some(step_up) = step_up {
-        for target in step_up_targets(
-            account.credential_mutations_enabled(),
-            account.totp_settings().is_some(),
-        ) {
-            module = module.middleware(step_up.middleware(
-                target,
-                RequestFingerprintResolver::global("account-session"),
-            ));
-        }
-    }
     Ok(module.presentation(presentation(account.credential_mutations_enabled())))
 }
 
@@ -109,91 +95,4 @@ fn presentation(credential_mutations_enabled: bool) -> ModulePresentationSpec {
             );
     }
     presentation
-}
-
-/// 需要 Step-up 重认证的账号安全 Action。
-///
-/// `totp_enabled` 对应 `security.totp` 配置段：TOTP Action 未注册时
-/// 不能为其挂 Step-up 中间件（构建期会校验 ActionRef 有效性）。
-fn step_up_targets(
-    credential_mutations_enabled: bool,
-    totp_enabled: bool,
-) -> Vec<yang_base::definition::ActionRef> {
-    // 管理写操作（D-1/D-2）与自助安全操作要求 Step-up；
-    // 退出登录（logout）是收敛性操作，不制造新的风险面，无需重认证。
-    let mut targets = vec![
-        yang_base::action!("account.user.admin_disable_user"),
-        yang_base::action!("account.user.admin_enable_user"),
-        yang_base::action!("account.user.admin_issue_password_reset"),
-        // 逐台撤销是安全操作（踢出某设备），且 jti 黑名单不依赖凭据版本签发，
-        // 无论凭据变更开关是否打开都必须重认证。
-        yang_base::action!("account.user.revoke_session"),
-    ];
-    // TOTP 停用是安全降级操作，不受凭据写开关影响；setup/activate 是认证器
-    // 生命周期变更（会话劫持者可借 setup→activate 把 TOTP 绑到自己并夺走恢复码，
-    // 进而锁定合法用户），三者都必须重认证；已激活账号的 Step-up 会同时要求
-    // 出示第二因子。
-    if totp_enabled {
-        targets.push(yang_base::action!("account.user.totp_setup"));
-        targets.push(yang_base::action!("account.user.totp_activate"));
-        targets.push(yang_base::action!("account.user.totp_deactivate"));
-    }
-    if credential_mutations_enabled {
-        targets.insert(0, yang_base::action!("account.user.delete_account"));
-        targets.insert(1, yang_base::action!("account.user.change_email"));
-        targets.insert(2, yang_base::action!("account.user.change_username"));
-        targets.insert(3, yang_base::action!("account.user.disable_self"));
-        // 改密是高价值凭据变更，须重认证；启用 TOTP 的账号还会被要求出示第二因子，
-        // 否则持有会话者可仅凭旧密码（单因子）改密并踢掉合法用户全部会话。
-        targets.insert(4, yang_base::action!("account.user.change_password"));
-    }
-    targets
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_account_security_mutation_is_explicitly_step_up_protected() {
-        assert_eq!(
-            step_up_targets(true, true),
-            vec![
-                yang_base::action!("account.user.delete_account"),
-                yang_base::action!("account.user.change_email"),
-                yang_base::action!("account.user.change_username"),
-                yang_base::action!("account.user.disable_self"),
-                yang_base::action!("account.user.change_password"),
-                yang_base::action!("account.user.admin_disable_user"),
-                yang_base::action!("account.user.admin_enable_user"),
-                yang_base::action!("account.user.admin_issue_password_reset"),
-                yang_base::action!("account.user.revoke_session"),
-                yang_base::action!("account.user.totp_setup"),
-                yang_base::action!("account.user.totp_activate"),
-                yang_base::action!("account.user.totp_deactivate"),
-            ]
-        );
-        assert_eq!(
-            step_up_targets(false, true),
-            vec![
-                yang_base::action!("account.user.admin_disable_user"),
-                yang_base::action!("account.user.admin_enable_user"),
-                yang_base::action!("account.user.admin_issue_password_reset"),
-                yang_base::action!("account.user.revoke_session"),
-                yang_base::action!("account.user.totp_setup"),
-                yang_base::action!("account.user.totp_activate"),
-                yang_base::action!("account.user.totp_deactivate"),
-            ]
-        );
-        // TOTP 配置段缺失时 deactivate 不注册，step-up 清单不得引用它。
-        assert_eq!(
-            step_up_targets(false, false),
-            vec![
-                yang_base::action!("account.user.admin_disable_user"),
-                yang_base::action!("account.user.admin_enable_user"),
-                yang_base::action!("account.user.admin_issue_password_reset"),
-                yang_base::action!("account.user.revoke_session"),
-            ]
-        );
-    }
 }

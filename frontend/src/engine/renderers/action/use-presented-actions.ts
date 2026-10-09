@@ -1,10 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 
-import { invokeAction, StepUpRequiredError } from "@/engine/http/client";
-import {
-  useSessionController,
-  useSessionCredentials,
-} from "@/engine/session/use-session";
+import { invokeAction } from "@/engine/http/client";
+import { useSessionCredentials } from "@/engine/session/use-session";
 import type {
   ActionDemoSchema,
   ActionPresentationSchema,
@@ -21,8 +18,8 @@ import {
 /**
  * Action 执行 hook（旧 usePresentedActions 的 React 版）：
  * presentation 分组（toolbar/row/bulk + primary/secondary/overflow）、
- * 确认对话框、Step-up proof 重试、成功通知与刷新。Quasar Dialog/Notify
- * 副作用替换为 React 状态（确认对话框）与 notice 回调位。
+ * 确认对话框、成功通知与刷新。Quasar Dialog/Notify 副作用替换为 React
+ * 状态（确认对话框）与 notice 回调位。
  */
 
 export type ActionNotice = {
@@ -54,7 +51,6 @@ interface UsePresentedActionsOptions {
 
 export function usePresentedActions(options: UsePresentedActionsOptions) {
   const session = useSessionCredentials();
-  const controller = useSessionController();
   const [dialog, setDialog] = useState<ActionDialogState | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<ActionNotice | null>(null);
@@ -159,23 +155,12 @@ export function usePresentedActions(options: UsePresentedActionsOptions) {
       if (presentation.confirmation && !(await askConfirmation(presentation))) {
         return;
       }
-      const invoke = (stepUpProof?: string) =>
-        invokeAction(
-          action,
-          values,
-          session,
-          requestController.signal,
-          stepUpProof ? { stepUpProof } : {},
-        );
-      let result;
-      try {
-        result = await invoke();
-      } catch (cause) {
-        if (!(cause instanceof StepUpRequiredError)) throw cause;
-        const proof = await controller.requestStepUpProof(cause.challenge);
-        if (!proof) return;
-        result = await invoke(proof);
-      }
+      const result = await invokeAction(
+        action,
+        values,
+        session,
+        requestController.signal,
+      );
       (options.handleAttachment ?? handleInvocationAttachment)(result);
       if (result.kind === "redirect" && result.location) {
         (options.redirect ?? ((location) => window.location.assign(location)))(

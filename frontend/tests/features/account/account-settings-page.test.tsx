@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
-import { createSessionController } from "@/engine/session/session-controller";
 import {
   restoreClipboard,
   stubExecCommand,
@@ -11,7 +10,7 @@ import {
 } from "@test/helpers/clipboard";
 import { renderTestApp } from "@test/helpers/render-app";
 
-/// 账号设置页：资料加载、修改密码/用户名表单、Step-up 428 重放、停用账号入口。
+/// 账号设置页：资料加载、修改密码/用户名表单、停用账号入口。
 
 // jsdom 无 canvas 实现：二维码生成替换为固定 data URL。
 // 命名导出与 default 导出同时给出，覆盖 vitest/rolldown 两种互操作形态。
@@ -49,22 +48,17 @@ function mePayload() {
 /// 默认 stub：me 成功；change-password/change-username 成功（relogin_required）。
 function stubAccountApi(
   options: {
-    changePassword428?: boolean;
-    changeUsername428?: boolean;
     totpActivateFailsOnce?: boolean;
     totpActivated?: boolean;
   } = {},
 ) {
-  const calls: Array<{ url: string; proof?: string }> = [];
+  const calls: Array<{ url: string }> = [];
   let activateAttempts = 0;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      const proof = (init?.headers as Record<string, string> | undefined)?.[
-        "x-step-up-proof"
-      ];
-      calls.push({ url, proof });
+      calls.push({ url });
       if (url.endsWith("/.well-known/yang/ui-catalog")) {
         return jsonResponse({
           code: 0,
@@ -87,32 +81,12 @@ function stubAccountApi(
         });
       }
       if (url.endsWith("/api/v1/users/change-password")) {
-        if (options.changePassword428 && !proof) {
-          return jsonResponse(
-            {
-              code: 700010,
-              message: "敏感操作需要重新认证",
-              data: { challenge: "challenge-1", expires_in: 120 },
-            },
-            428,
-          );
-        }
         return jsonResponse({
           code: 0,
           data: { relogin_required: true, immediate_convergence: true },
         });
       }
       if (url.endsWith("/api/v1/users/change-username")) {
-        if (options.changeUsername428 && !proof) {
-          return jsonResponse(
-            {
-              code: 700010,
-              message: "敏感操作需要重新认证",
-              data: { challenge: "challenge-2", expires_in: 120 },
-            },
-            428,
-          );
-        }
         return jsonResponse({
           code: 0,
           data: {
@@ -138,12 +112,6 @@ function stubAccountApi(
             immediate_convergence: true,
             relogin_required: true,
           },
-        });
-      }
-      if (url.endsWith("/api/v1/users/step-up/complete")) {
-        return jsonResponse({
-          code: 0,
-          data: { proof: "proof-ok", expires_in: 300 },
         });
       }
       if (url.endsWith("/api/v1/users/mfa/totp/setup")) {
@@ -248,36 +216,6 @@ describe("账号设置页", () => {
     await user.type(screen.getByLabelText("确认新密码"), "new-password-1");
     await user.click(screen.getByRole("button", { name: "修改密码" }));
 
-    await waitFor(() => {
-      expect(controller.getSnapshot().loggedIn).toBe(false);
-    });
-  });
-
-  it("修改密码 428 时经 requestStepUpProof 换 proof 后重放成功", async () => {
-    stubAccountApi({ changePassword428: true });
-    const requestStepUpProof = vi.fn(
-      async () => "proof-ok" as string | undefined,
-    );
-    const controller = createSessionController({ requestStepUpProof });
-    controller.beginSession({ accessToken: "test-access" });
-    renderTestApp({ path: "/account", authenticated: true, controller });
-
-    const user = userEvent.setup();
-    await waitFor(() => expect(screen.getByText("alice")).toBeInTheDocument());
-    await user.type(screen.getByLabelText("当前密码"), "old-pass");
-    await user.type(
-      screen.getByLabelText("新密码（至少 10 位）"),
-      "new-password-1",
-    );
-    await user.type(screen.getByLabelText("确认新密码"), "new-password-1");
-    await user.click(screen.getByRole("button", { name: "修改密码" }));
-
-    await waitFor(() => {
-      expect(requestStepUpProof).toHaveBeenCalledWith("challenge-1", {
-        token: "test-access",
-      });
-    });
-    // 重放后凭据变更 → 会话被清空。
     await waitFor(() => {
       expect(controller.getSnapshot().loggedIn).toBe(false);
     });
@@ -432,7 +370,7 @@ it("TOTP：已激活账号展示状态而非设置入口", async () => {
   ).toBeInTheDocument();
 });
 
-it("TOTP：关闭双重验证 → 确认后经 Step-up 通道停用，会话清空回到登录页", async () => {
+it("TOTP：关闭双重验证 → 确认后停用，会话清空回到登录页", async () => {
   const calls = stubAccountApi({ totpActivated: true });
   const { controller } = renderTestApp({
     path: "/account",

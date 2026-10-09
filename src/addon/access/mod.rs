@@ -9,7 +9,7 @@ mod grants;
 mod groups;
 
 use crate::addon::account::{GrantResolver, SystemAuthorizationPort, SystemOwnerClaimer};
-use crate::authorization::{AuthorizationPort, AuthorizationVersionValidator, StepUpServices};
+use crate::authorization::{AuthorizationPort, AuthorizationVersionValidator};
 use domain::context::Access;
 use domain::group_resolver::GroupGrantResolver;
 use domain::groups::AccessSystemOwnerClaimer;
@@ -59,19 +59,16 @@ impl AccessAddon {
 /// Addon 边界负责声明产品能力及其 Module；应用层不应直接拼装 `access.grants`。
 pub(crate) fn build_addon(
     authorization_validator: AuthorizationVersionValidator,
-    step_up: Option<StepUpServices>,
     permission_catalog: PermissionCatalogHandle,
     authorization: AuthorizationPort,
 ) -> Result<AccessAddon, BaseError> {
     let (module, access) = grants::build_module(
         authorization_validator.clone(),
-        step_up.clone(),
         permission_catalog.clone(),
         authorization.clone(),
     )?;
     let groups_module = groups::build_module(
         authorization_validator,
-        step_up,
         permission_catalog,
         authorization,
         Arc::clone(&access),

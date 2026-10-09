@@ -36,7 +36,7 @@ use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use yang_base::action::{ApiResponse, Request, RequestMeta, ResponseAttachment, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta, ResponseAttachment};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -182,17 +182,6 @@ fn token_manager() -> TokenManager {
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
 }
 
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "feishu-integration-step-up-secret-32byte",
-            "feishu-integration-step-up",
-            "feishu-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
-}
-
 /// 装配一个启用飞书集成的完整应用。
 async fn build_feishu_app(
     database: &Database,
@@ -211,7 +200,6 @@ async fn build_feishu_app(
                 redis.clone(),
                 "feishu-integration".to_string(),
             )?)
-            .extension(step_up_manager())
             .config(feishu_settings(encryption_key))
             .build()?,
     );

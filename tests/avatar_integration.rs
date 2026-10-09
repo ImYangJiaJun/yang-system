@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -116,17 +116,6 @@ fn token_manager() -> TokenManager {
         3600,
     )
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "avatar-integration-step-up-secret-32byte",
-            "avatar-integration-step-up",
-            "avatar-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
 }
 
 async fn connect_database() -> anyhow::Result<Database> {
@@ -263,7 +252,6 @@ async fn build_avatar_app(
                 redis.clone(),
                 namespace.clone(),
             )?)
-            .extension(step_up_manager())
             .extension(RegistrationEmailSenderHandle::new(sender.clone()))
             .config(email_settings(namespace).engine_config())
             .build()?,
@@ -646,46 +634,13 @@ async fn delete_account_removes_avatar_row() -> anyhow::Result<()> {
         .await?;
         ensure!(uploaded.code == 0, "上传必须成功");
 
-        // delete_account 需要 Step-up：先取 challenge，再完成重认证拿 proof。
+        // delete_account：直接调用，无需 Step-up。
         let authorization = format!("Bearer {owner_token}");
-        let delete_body = json!({ "confirmation": "delete my account" });
-        let challenge = match dispatch(
-            &app,
-            "delete_account",
-            delete_body.clone(),
-            &[("authorization", authorization.as_str())],
-            45_201,
-        )
-        .await
-        {
-            Err(BaseError::StepUpRequired(challenge)) => challenge,
-            other => anyhow::bail!("缺少 proof 必须返回 Step-up challenge，实际: {other:?}"),
-        };
-        let completed = dispatch(
-            &app,
-            "step_up_complete",
-            json!({
-                "challenge": challenge.challenge,
-                "credentials": { "username": "avatar_owner", "password": PASSWORD },
-            }),
-            &[],
-            45_201,
-        )
-        .await?;
-        let proof = completed
-            .data
-            .as_ref()
-            .and_then(|data| data["proof"].as_str())
-            .map(str::to_string)
-            .context("Step-up 完成响应缺少 proof")?;
         let deleted = dispatch(
             &app,
             "delete_account",
-            delete_body,
-            &[
-                ("authorization", authorization.as_str()),
-                ("x-step-up-proof", proof.as_str()),
-            ],
+            json!({ "confirmation": "delete my account" }),
+            &[("authorization", authorization.as_str())],
             45_201,
         )
         .await?;

@@ -3,7 +3,7 @@
  *
  * engine/ 是 Schema 驱动的通用解释引擎（与业务无关，可整体复用）：
  * - http/       Action 调用协议与 HTTP 基础设施；
- * - session/    浏览器会话协议（状态机、跨标签页协调、Step-up 协议、生命周期请求）；
+ * - session/    浏览器会话协议（状态机、跨标签页协调、生命周期请求）；
  * - catalog/    后端 Catalog 的导航投影与缓存；
  * - contracts/  zod + Ajv 白名单校验与 OpenAPI 生成类型；
  * - renderers/  TableView / JsonSchemaForm / ActionDialog 通用解释器。
@@ -14,7 +14,7 @@
 
 // http —— Action 调用协议
 export { invokeAction, fetchUiCatalog } from "./http/client";
-export { ApiError, StepUpRequiredError } from "./http/errors";
+export { ApiError } from "./http/errors";
 export type { InvocationResult, SessionContext } from "./http/types";
 
 // session —— 会话协议
@@ -41,7 +41,6 @@ export {
   type LogoutResult,
   type DisableAccountResult,
 } from "./session/lifecycle";
-export { completeStepUp, type StepUpProofResult } from "./session/step-up";
 export { SessionExpiredError } from "./session/auth-session";
 
 // catalog —— 导航投影

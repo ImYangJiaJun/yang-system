@@ -14,11 +14,7 @@ import {
   requestRegistrationEmail,
   resetPassword,
 } from "@/features/auth/api";
-import {
-  ApiError,
-  SecondFactorRequiredError,
-  StepUpRequiredError,
-} from "@/engine/http/errors";
+import { ApiError, SecondFactorRequiredError } from "@/engine/http/errors";
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -248,42 +244,10 @@ describe("refreshSession", () => {
 });
 
 describe("logout", () => {
-  it("把合法 428 固化为 StepUp challenge 且不泄露到 details", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              code: 700010,
-              message: "需要重认证",
-              data: { challenge: "signed-challenge", expires_in: 120 },
-            }),
-            {
-              status: 428,
-              headers: {
-                "content-type": "application/json",
-                "x-request-id": "logout-request",
-              },
-            },
-          ),
-      ),
-    );
-
-    const error = await logout("access-token").catch((cause: unknown) => cause);
-    expect(error).toBeInstanceOf(StepUpRequiredError);
-    expect(error).toMatchObject({
-      challenge: "signed-challenge",
-      expiresIn: 120,
-      details: undefined,
-    });
-  });
-
-  it("proof 只进入本次请求头并验证全量撤销响应", async () => {
+  it("携带鉴权头发送 POST 并验证全量撤销响应", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const headers = new Headers(init.headers);
       expect(headers.get("authorization")).toBe("Bearer access-token");
-      expect(headers.get("x-step-up-proof")).toBe("one-shot-proof");
       expect(init.body).toBe("{}");
       return new Response(
         JSON.stringify({
@@ -300,10 +264,10 @@ describe("logout", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(
-      logout("access-token", undefined, "one-shot-proof"),
-    ).resolves.toEqual({ immediateConvergence: true });
-    expect(sessionStorage.getItem("yang.step-up-proof")).toBeNull();
+    await expect(logout("access-token")).resolves.toEqual({
+      immediateConvergence: true,
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/users/logout");
   });
 
   it("拒绝缺少全量撤销语义的畸形成功响应", async () => {
@@ -323,12 +287,11 @@ describe("logout", () => {
 });
 
 describe("disableAccount", () => {
-  it("proof 仅进入停用请求头并要求服务端确认账号已停用", async () => {
+  it("发出停用请求并要求服务端确认账号已停用", async () => {
     const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe("/api/v1/users/disable");
       const headers = new Headers(init.headers);
       expect(headers.get("authorization")).toBe("Bearer access-token");
-      expect(headers.get("x-step-up-proof")).toBe("one-shot-proof");
       return new Response(
         JSON.stringify({
           code: 0,
@@ -343,9 +306,9 @@ describe("disableAccount", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(
-      disableAccount("access-token", undefined, "one-shot-proof"),
-    ).resolves.toEqual({ immediateConvergence: false });
+    await expect(disableAccount("access-token")).resolves.toEqual({
+      immediateConvergence: false,
+    });
   });
 
   it("拒绝未确认账号停用的畸形成功响应", async () => {

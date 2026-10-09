@@ -60,7 +60,7 @@ function action(
 
 /// 部署里真实存在/钉住的那一套：三个工作台 Action + 权限目录读接口。
 const DEPLOYED_ACTIONS: ActionDemoSchema[] = [
-  action("account.users.lookup", "GET", "/api/v1/users", [
+  action("account.user.lookup", "GET", "/api/v1/users", [
     param("q", "query"),
     param("page", "query"),
     param("page_size", "query"),
@@ -437,7 +437,7 @@ describe("accessWorkspaceQueryKeys", () => {
 
   it("常量与钉住的契约逐字一致", () => {
     expect(WORKSPACE_OPERATION_IDS).toEqual({
-      lookup: "account.users.lookup",
+      lookup: "account.user.lookup",
       listUserGrants: "access.grants.list_user_grants",
       listHolders: "access.grants.list_holders",
       grantPermission: "access.grants.grant_permission",

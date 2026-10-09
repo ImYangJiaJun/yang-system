@@ -20,7 +20,7 @@ mod harness {
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+    use yang_base::action::{ApiResponse, Request, RequestMeta};
     use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
     use yang_base::token::TokenManager;
     use yang_base::tools::ToolsBuilder;
@@ -78,17 +78,6 @@ mod harness {
             2_592_000,
         )
         .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
-    }
-
-    fn step_up_manager() -> Arc<StepUpManager> {
-        Arc::new(
-            StepUpManager::new(
-                "system-owner-bootstrap-step-up-secret-32-bytes",
-                "yang-system-system-owner-bootstrap-step-up",
-                "yang-system-system-owner-bootstrap-sensitive",
-            )
-            .unwrap_or_else(|error| panic!("测试 Step-up manager 应构建成功: {error}")),
-        )
     }
 
     async fn connect_test_database() -> Database {
@@ -153,7 +142,6 @@ mod harness {
                     AuthorizationVersionCache::new(redis, deployment)
                         .unwrap_or_else(|error| panic!("构建授权版本缓存失败: {error}")),
                 )
-                .extension(step_up_manager())
                 .token(token_manager())
                 .build()
                 .unwrap_or_else(|error| panic!("构建引导测试 Tools 失败: {error}")),

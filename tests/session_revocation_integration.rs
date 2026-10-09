@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -43,8 +43,7 @@ fn redis_config() -> RedisConfig {
         .with_connect_timeout(10)
 }
 
-/// revoke_session 现始终受 Step-up 保护（与凭据变更开关无关），测试须走
-/// challenge→proof 流程；开启凭据版本签发使 delete_account 等也进入 step_up_targets。
+/// 开启凭据版本签发。
 fn security_settings() -> Arc<SecuritySettings> {
     Arc::new(SecuritySettings {
         argon2_max_concurrency: 4,
@@ -70,17 +69,6 @@ fn token_manager() -> TokenManager {
         2_592_000,
     )
     .unwrap_or_else(|error| panic!("会话撤销 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "session-revoke-step-up-secret-32-bytes",
-            "yang-system-session-revoke-step-up",
-            "yang-system-session-revoke-sensitive",
-        )
-        .unwrap_or_else(|error| panic!("会话撤销 Step-up manager 应构建成功: {error}")),
-    )
 }
 
 async fn connect_test_database() -> anyhow::Result<Database> {
@@ -334,7 +322,6 @@ async fn revoking_a_session_rejects_its_refresh_token() -> anyhow::Result<()> {
                 .cache(redis.clone())
                 .with_registration_email(format!("email-{deployment}"))
                 .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
-                .extension(step_up_manager())
                 .token(token_manager())
                 .build()?,
         );
@@ -366,51 +353,14 @@ async fn revoking_a_session_rejects_its_refresh_token() -> anyhow::Result<()> {
         // 3. 取会话 ID（列表应仍只显示一台设备，说明 session_id 在轮换后未丢失）。
         let session_id = current_session_id(&runtime, &token, 42_001).await?;
 
-        // 4. 撤销该会话（revoke_session 始终受 Step-up 保护，先触发 challenge 再重认证）。
-        let username = format!("revoke_{suffix}");
+        // 4. 直接撤销该会话，无需 Step-up。
         let authorization = format!("Bearer {token}");
-        let challenge = match dispatch(
-            &runtime,
-            "account.user",
-            "revoke_session",
-            json!({ "session_id": session_id }),
-            &[("authorization", authorization.as_str())],
-            42_001,
-        )
-        .await
-        {
-            Err(BaseError::StepUpRequired(challenge)) => challenge.challenge,
-            other => {
-                anyhow::bail!("撤销会话缺少 proof 必须返回 Step-up challenge，实际: {other:?}")
-            }
-        };
-        let completed = dispatch(
-            &runtime,
-            "account.user",
-            "step_up_complete",
-            json!({
-                "challenge": challenge,
-                "credentials": { "username": username, "password": PASSWORD },
-            }),
-            &[],
-            42_001,
-        )
-        .await?;
-        let proof = completed
-            .data
-            .as_ref()
-            .and_then(|data| data["proof"].as_str())
-            .map(str::to_string)
-            .context("Step-up 完成响应缺少 proof")?;
         let revoked = dispatch(
             &runtime,
             "account.user",
             "revoke_session",
             json!({ "session_id": session_id }),
-            &[
-                ("authorization", authorization.as_str()),
-                ("x-step-up-proof", proof.as_str()),
-            ],
+            &[("authorization", authorization.as_str())],
             42_001,
         )
         .await?;

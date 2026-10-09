@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -96,17 +96,6 @@ fn token_manager() -> TokenManager {
         3600,
     )
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "user-lookup-step-up-secret-32-bytes",
-            "user-lookup-step-up",
-            "user-lookup-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
 }
 
 async fn connect_database() -> anyhow::Result<Database> {
@@ -324,7 +313,6 @@ async fn user_lookup_is_authenticated_only_and_filters_by_keyword() -> anyhow::R
                     redis.clone(),
                     namespace.clone(),
                 )?)
-                .extension(step_up_manager())
                 .extension(RegistrationEmailSenderHandle::new(sender.clone()))
                 .config(email_settings(namespace).engine_config())
                 .build()?,

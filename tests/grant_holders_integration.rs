@@ -12,9 +12,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{
-    ApiResponse, Request, RequestMeta, StepUpChallenge, StepUpManager, STEP_UP_PROOF_HEADER,
-};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -70,17 +68,6 @@ fn token_manager() -> TokenManager {
         2_592_000,
     )
     .unwrap_or_else(|error| panic!("持有者测试 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "grant-holders-step-up-secret-32-bytes",
-            "yang-system-grant-holders-step-up",
-            "yang-system-grant-holders-sensitive",
-        )
-        .unwrap_or_else(|error| panic!("持有者测试 Step-up manager 应构建成功: {error}")),
-    )
 }
 
 async fn connect_test_database() -> anyhow::Result<Database> {
@@ -242,79 +229,6 @@ async fn register_and_login(
     Ok((token, user_id, username))
 }
 
-/// 用操作者本人的密码完成一次 Step-up 重认证，返回一次性 proof。
-async fn complete_step_up(
-    app: &BuiltApp,
-    username: &str,
-    challenge: StepUpChallenge,
-    peer_port: u16,
-) -> anyhow::Result<String> {
-    let completed = dispatch_with_query(
-        app,
-        "account.user",
-        "step_up_complete",
-        json!({
-            "challenge": challenge.challenge,
-            "credentials": { "username": username, "password": PASSWORD },
-        }),
-        &[],
-        peer_port,
-        &[],
-    )
-    .await?;
-    completed
-        .data
-        .as_ref()
-        .and_then(|data| data["proof"].as_str())
-        .map(str::to_string)
-        .context("Step-up 完成响应缺少 proof")
-}
-
-/// 驱动受 Step-up 保护的授予：先无 proof 触发 challenge，用密码重认证换
-/// 一次性 proof，再带 proof 重试同一次调用（grant_permission 是模块装配的
-/// 写操作，恒受 Step-up 守卫保护）。
-async fn grant_permission_with_step_up(
-    app: &BuiltApp,
-    operator_token: &str,
-    operator_username: &str,
-    user_id: i64,
-    permission: &str,
-    peer_port: u16,
-) -> anyhow::Result<ApiResponse> {
-    let authorization = format!("Bearer {operator_token}");
-    let body = json!({ "user_id": user_id, "permission": permission });
-    match dispatch_with_query(
-        app,
-        "access.grants",
-        "grant_permission",
-        body.clone(),
-        &[("authorization", authorization.as_str())],
-        peer_port,
-        &[],
-    )
-    .await
-    {
-        Err(BaseError::StepUpRequired(challenge)) => {
-            let proof = complete_step_up(app, operator_username, challenge, peer_port).await?;
-            Ok(dispatch_with_query(
-                app,
-                "access.grants",
-                "grant_permission",
-                body,
-                &[
-                    ("authorization", authorization.as_str()),
-                    (STEP_UP_PROOF_HEADER, proof.as_str()),
-                ],
-                peer_port,
-                &[],
-            )
-            .await?)
-        }
-        Ok(response) => Ok(response),
-        Err(other) => Err(anyhow::Error::new(other)),
-    }
-}
-
 async fn login(app: &BuiltApp, username: &str, peer_port: u16) -> anyhow::Result<String> {
     let response = dispatch_with_query(
         app,
@@ -442,7 +356,6 @@ async fn build_application(control: &Database, redis: &RedisClient) -> anyhow::R
             .cache(redis.clone())
             .with_registration_email(format!("email-{deployment}"))
             .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
-            .extension(step_up_manager())
             .token(token_manager())
             .build()?,
     );
@@ -555,22 +468,23 @@ async fn holders_combine_direct_rows_and_groups() -> anyhow::Result<()> {
         let app = build_application(&control, &redis).await?;
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         // 首个注册账号被引导进全权组：用作操作者。
-        let (admin_token, admin_id, admin_username) =
+        let (admin_token, admin_id, _admin_username) =
             register_and_login(&app, &control, suffix - 1, 42_503).await?;
         // 第二/第三个账号是零权限普通用户（夹具直写它们的持有事实）。
         let (_, direct_user_id, _) = register_and_login(&app, &control, suffix, 42_504).await?;
         let (_, expired_user_id, _) =
             register_and_login(&app, &control, suffix + 1, 42_505).await?;
 
-        // 直授侧活跃行走真实授予链路（幂等 + 授权版本 + 审计）；授予是模块装配的
-        // 写操作，恒受 Step-up 守卫保护，夹具要带 proof 重试。
-        let granted = grant_permission_with_step_up(
+        // 直授侧活跃行走真实授予链路（幂等 + 授权版本 + 审计）。
+        let authorization = format!("Bearer {admin_token}");
+        let granted = dispatch_with_query(
             &app,
-            &admin_token,
-            &admin_username,
-            direct_user_id,
-            HOLD_PERMISSION,
+            "access.grants",
+            "grant_permission",
+            json!({ "user_id": direct_user_id, "permission": HOLD_PERMISSION }),
+            &[("authorization", authorization.as_str())],
             42_503,
+            &[],
         )
         .await?;
         ensure!(granted.code == 0, "授予必须成功: {}", granted.message);

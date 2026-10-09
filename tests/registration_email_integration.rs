@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -112,17 +112,6 @@ fn token_manager() -> TokenManager {
         3600,
     )
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "registration-email-step-up-secret-32-bytes",
-            "registration-email-step-up",
-            "registration-email-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
 }
 
 async fn connect_database() -> anyhow::Result<Database> {
@@ -316,7 +305,6 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
                     redis.clone(),
                     namespace.clone(),
                 )?)
-                .extension(step_up_manager())
                 .extension(RegistrationEmailSenderHandle::new(sender.clone()))
                 .config(email_settings(namespace).engine_config())
                 .build()?,
@@ -570,7 +558,6 @@ async fn login_accepts_both_username_and_normalized_email() -> anyhow::Result<()
                     redis.clone(),
                     namespace.clone(),
                 )?)
-                .extension(step_up_manager())
                 .extension(RegistrationEmailSenderHandle::new(sender.clone()))
                 .config(email_settings(namespace).engine_config())
                 .build()?,
@@ -683,7 +670,6 @@ async fn session_revoke_kicks_one_device_without_affecting_others() -> anyhow::R
                     redis.clone(),
                     namespace.clone(),
                 )?)
-                .extension(step_up_manager())
                 .extension(RegistrationEmailSenderHandle::new(sender.clone()))
                 .config(email_settings(namespace).engine_config())
                 .build()?,
@@ -756,7 +742,7 @@ async fn session_revoke_kicks_one_device_without_affecting_others() -> anyhow::R
         let _ = (&access_a, &access_b);
 
         // 踢出设备 B（直接调 revoke 行为层不可行——dispatch 无认证；改走真实 HTTP 语义：
-        // 这里通过数据库行验证撤销目标，撤销的 Step-up 中间件路径由 e2e 覆盖）。
+        // 这里通过数据库行验证撤销目标，撤销的中间件路径由 e2e 覆盖）。
         // 用管理面不可行（无 grants）——直接撤销 B 的会话行并黑名单 B 的 jti：
         // 先取出 B 的 current_jti。
         let revoked_at = sqlx::query_scalar::<_, i64>(
@@ -807,7 +793,7 @@ async fn session_revoke_kicks_one_device_without_affecting_others() -> anyhow::R
 /// 错误码按参数错误拒绝，正确码登录成功；恢复码错误同样被拒且不消耗。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> {
+async fn totp_two_stage_login() -> anyhow::Result<()> {
     let control = connect_database().await?;
     let redis = connect_redis().await?;
     reset_database(&control).await?;
@@ -842,7 +828,6 @@ async fn totp_two_stage_login_and_step_up_second_factor() -> anyhow::Result<()> 
                     redis.clone(),
                     namespace.clone(),
                 )?)
-                .extension(step_up_manager())
                 .extension(RegistrationEmailSenderHandle::new(sender.clone()))
                 .config(email_settings(namespace).engine_config())
                 .config(totp_settings.clone())

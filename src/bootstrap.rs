@@ -91,12 +91,6 @@ async fn run_after_telemetry_initialized(
         AuthorizationVersionCache::new(cache.clone(), settings.authorization.deployment.clone())
             .context("构建授权版本缓存失败")?;
 
-    let step_up_manager = Arc::new(
-        settings
-            .step_up
-            .build_manager()
-            .context("构建 Step-up manager 失败")?,
-    );
     let email_sender: Arc<SmtpEmailSender> =
         Arc::new(SmtpEmailSender::new(&settings.email.smtp).context("构建 SMTP 邮件投递器失败")?);
     let registration_sender: Arc<dyn RegistrationEmailSender> = email_sender.clone();
@@ -133,7 +127,6 @@ async fn run_after_telemetry_initialized(
         // 各自的超时由请求级 `RequestBuilder::timeout` 决定，量级差很大。
         .http(HttpClient::new(30)?)
         .extension(authorization_cache)
-        .extension(step_up_manager)
         .extension(RegistrationEmailSenderHandle::from_arc(registration_sender))
         .extension(PasswordResetEmailSenderHandle::from_arc(
             password_reset_sender,

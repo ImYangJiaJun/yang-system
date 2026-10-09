@@ -30,7 +30,6 @@ mod request_registration_email;
 mod reset_password;
 mod revoke_session;
 mod security_events;
-mod step_up;
 mod totp_activate;
 mod totp_deactivate;
 mod totp_setup;
@@ -73,7 +72,6 @@ const ACTIONS: &[Register] = action_registry![
     request_mfa_email_code,
     reset_password, // 发布开关：credential_mutations_enabled
     logout,
-    step_up, // 条件：组合根配置了 StepUpManager
     revoke_session,
     security_events,
     totp_setup,      // 条件：security.totp 配置段

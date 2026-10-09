@@ -126,7 +126,7 @@ const GROUP_WRITE_ACTIONS = [
 /// 工作台五个读/写 Action（lookup 在 account 模块，其余在 access.grants 模块）。
 const WORKSPACE_ACTIONS = [
   action(
-    "account.users.lookup",
+    "account.user.lookup",
     "GET",
     LOOKUP_PATH,
     [
@@ -182,7 +182,7 @@ const PERMISSIONS = [
   },
   {
     permission: "account.users.read",
-    declared_by: ["account.users.lookup"],
+    declared_by: ["account.user.lookup"],
     admin_equivalent: false,
   },
   {

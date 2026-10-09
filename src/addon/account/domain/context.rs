@@ -31,7 +31,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yang_base::action::auth::{AuthRateLimiter, BrowserSession, PasswordEngine, TokenPairClaims};
-use yang_base::action::{ActionContext, StepUpManager};
+use yang_base::action::ActionContext;
 use yang_base::token::TokenClaims;
 use yang_base::BaseError;
 use yang_db::Transaction;
@@ -76,7 +76,6 @@ pub(crate) struct Account {
     grant_resolver: Arc<dyn GrantResolver>,
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     system_authorization: Arc<dyn SystemAuthorizationPort>,
-    step_up_manager: Option<Arc<StepUpManager>>,
     issue_refresh_credential_version: bool,
     password_reset_ttl_seconds: u64,
     totp_settings: Option<TotpSettings>,
@@ -94,7 +93,6 @@ impl Account {
         grant_resolver: Arc<dyn GrantResolver>,
         system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
         system_authorization: Arc<dyn SystemAuthorizationPort>,
-        step_up_manager: Option<Arc<StepUpManager>>,
     ) -> Result<Self, BaseError> {
         Ok(Self {
             users: Arc::new(users),
@@ -106,7 +104,6 @@ impl Account {
             grant_resolver,
             system_owner_claimer,
             system_authorization,
-            step_up_manager,
             issue_refresh_credential_version: security.issue_refresh_credential_version,
             password_reset_ttl_seconds: security.password_reset_ttl_seconds,
             totp_settings: security.totp.clone(),
@@ -147,11 +144,6 @@ impl Account {
     /// 凭据变更类能力（改密/重置/停用/全量撤销）的发布开关。
     pub(crate) fn credential_mutations_enabled(&self) -> bool {
         self.issue_refresh_credential_version
-    }
-
-    /// 组合根配置的 Step-up manager；未配置时 step_up_complete 不注册。
-    pub(crate) fn step_up_manager(&self) -> Option<Arc<StepUpManager>> {
-        self.step_up_manager.as_ref().map(Arc::clone)
     }
 
     /// TOTP 配置域；未配置时 MFA Action 不注册。
@@ -240,7 +232,7 @@ impl Account {
     /// 用于第一因子已是邮箱验证码的登录——同类因子不构成双因子（多因子任选
     /// 登录方案 D-2）。
     ///
-    /// 恢复码消费是独立事务：与登录/Step-up 的签发路径无共享写，单次
+    /// 恢复码消费是独立事务：与登录的签发路径无共享写，单次
     /// 消费语义由事务内「摘要移除 + 回写」保证。
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn verify_second_factor(
@@ -259,8 +251,8 @@ impl Account {
             .is_ok()
         {
             // 防重放：按 (用户, 用途) 记录最近一次成功校验的 30 秒窗口步，步号不前进
-            // 即判为重放（TOTP 单次消费语义）。用途区分登录/Step-up/激活，避免
-            // 「登录后立即 Step-up」等不同用途复用同一码被误杀。
+            // 即判为重放（TOTP 单次消费语义）。用途区分登录/激活，避免
+            // 「登录后立即激活」等不同用途复用同一码被误杀。
             //
             // 比较与写入必须在 Redis 侧原子完成：此前的 GET-then-SETEX 是 check-then-act，
             // 并发提交同一窗口的同一个码时两个请求会同时通过。

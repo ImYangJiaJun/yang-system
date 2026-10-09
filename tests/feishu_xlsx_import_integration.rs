@@ -50,7 +50,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -200,17 +200,6 @@ fn token_manager() -> TokenManager {
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
 }
 
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "xlsx-import-integration-step-up-32byte",
-            "xlsx-import-integration-step-up",
-            "xlsx-import-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
-}
-
 /// 装配一个启用飞书集成的完整应用。
 ///
 /// 授权版本缓存用**每次运行唯一**的 namespace：复用固定 namespace 会让上一次运行留下的
@@ -232,7 +221,6 @@ async fn build_feishu_app(
             .cache(redis.clone())
             .token(token_manager())
             .extension(AuthorizationVersionCache::new(redis.clone(), namespace)?)
-            .extension(step_up_manager())
             .config(feishu_settings())
             .build()?,
     );

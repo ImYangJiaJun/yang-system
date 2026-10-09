@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -83,17 +83,6 @@ fn token_manager() -> TokenManager {
         2_592_000,
     )
     .unwrap_or_else(|error| panic!("权限组测试 TokenManager 应构建成功: {error}"))
-}
-
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "permission-groups-step-up-secret-32-bytes",
-            "yang-system-permission-groups-step-up",
-            "yang-system-permission-groups-sensitive",
-        )
-        .unwrap_or_else(|error| panic!("权限组测试 Step-up manager 应构建成功: {error}")),
-    )
 }
 
 async fn connect_test_database() -> anyhow::Result<Database> {
@@ -435,7 +424,6 @@ async fn build_application(control: &Database, redis: &RedisClient) -> anyhow::R
             .cache(redis.clone())
             .with_registration_email(format!("email-{deployment}"))
             .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
-            .extension(step_up_manager())
             .token(token_manager())
             .build()?,
     );
@@ -551,7 +539,7 @@ async fn system_admin_group_token_carries_the_whole_catalog() -> anyhow::Result<
 
 /// 组管理接口的测试夹具。
 ///
-/// 把「注册账号 → 登录取令牌 → 受 Step-up 保护的组写操作 → 直接观测数据库事实」
+/// 把「注册账号 → 登录取令牌 → 组写操作 → 直接观测数据库事实」
 /// 收敛在这里，用例只描述语义；后续任务（成员、条目、生命周期）在同一套夹具上追加。
 ///
 /// 两处取舍写在明处：
@@ -567,15 +555,15 @@ mod harness {
     };
     use anyhow::{ensure, Context};
     use serde_json::{json, Value};
-    use yang_base::action::{ApiResponse, STEP_UP_PROOF_HEADER};
+    use yang_base::action::ApiResponse;
     use yang_base::definition::BuiltApp;
     use yang_base::error::ErrorCategory;
     use yang_base::BaseError;
 
-    /// 夹具固定的对端端口：注册与重认证限流按 IP 计数，阈值已放大到用例不会触发。
+    /// 夹具固定的对端端口：注册限流按 IP 计数，阈值已放大到用例不会触发。
     const PEER_PORT: u16 = 52_400;
 
-    /// 管理员身份：令牌，以及重认证所需的用户名与用户 ID。
+    /// 管理员身份：用户名、用户 ID 与令牌。
     #[derive(Clone)]
     pub struct Admin {
         pub username: String,
@@ -660,9 +648,9 @@ mod harness {
         }
     }
 
-    /// 建组（受 Step-up 保护），返回新组 ID。
+    /// 建组并返回新组 ID。
     pub async fn create_group(app: &BuiltApp, admin: &Admin, group_key: &str, title: &str) -> i64 {
-        let response = step_up_dispatch(
+        let response = authed_dispatch(
             app,
             "access.groups",
             "create_group",
@@ -688,7 +676,7 @@ mod harness {
         group_key: &str,
         title: &str,
     ) -> (u16, String) {
-        match step_up_dispatch(
+        match authed_dispatch(
             app,
             "access.groups",
             "create_group",
@@ -751,7 +739,7 @@ mod harness {
 
     /// 删组并折算为 HTTP 状态码（成功为 200，其余由用例断言）。
     pub async fn delete_group_status(app: &BuiltApp, admin: &Admin, group_id: i64) -> u16 {
-        match step_up_dispatch(
+        match authed_dispatch(
             app,
             "access.groups",
             "delete_group",
@@ -886,7 +874,7 @@ mod harness {
         let user_id = register_with_code(app, username, &email)
             .await
             .unwrap_or_else(|error| panic!("注册 {username} 失败: {error}"));
-        step_up_dispatch(
+        authed_dispatch(
             app,
             "access.grants",
             "grant_permission",
@@ -903,13 +891,13 @@ mod harness {
         }
     }
 
-    /// 给已存在的账号补一条直授权限（受 Step-up 保护），不重新签发令牌。
+    /// 给已存在的账号补一条直授权限，不重新签发令牌。
     ///
     /// [`grant_only`] 只覆盖「恰好一条权限」的夹具；锁序用例需要操作者既持
     /// `access.groups.write`（否则调用不了组条目 Action），又持一条它准备写进组的
     /// 权限（否则会撞上 §8.1 的子集校验），因此需要这条补充授权的路径。
     pub async fn grant_permission(app: &BuiltApp, admin: &Admin, user_id: i64, permission: &str) {
-        step_up_dispatch(
+        authed_dispatch(
             app,
             "access.grants",
             "grant_permission",
@@ -930,7 +918,7 @@ mod harness {
         user_id: i64,
         permission: &str,
     ) -> u16 {
-        match step_up_dispatch(
+        match authed_dispatch(
             app,
             "access.grants",
             "grant_permission",
@@ -964,7 +952,7 @@ mod harness {
             }),
             None => json!({ "user_id": user_id, "permission": permission }),
         };
-        step_up_dispatch(app, "access.grants", "grant_permission", body, operator).await
+        authed_dispatch(app, "access.grants", "grant_permission", body, operator).await
     }
 
     /// 再引导一名系统管理员：注册后经真实成员 Action 加入内置全权组。
@@ -999,17 +987,12 @@ mod harness {
         }
     }
 
-    /// 组成员写 Action 的请求体（proof 的指纹绑定它，故取 proof 与真调用必须同源）。
+    /// 组成员写 Action 的请求体构造。
     fn member_body(group_id: i64, user_id: i64) -> Value {
         json!({ "group_id": group_id, "user_id": user_id })
     }
 
-    /// 驱动一个组成员写 Action：**完整**走 Step-up（无 proof 触发 challenge →
-    /// 密码重认证 → 带 proof 重试）。
-    ///
-    /// 成员加/移出与条目、组生命周期同属授权事实变更，都已在 `step_up_targets()` 登记，
-    /// 因此这里不能再用裸认证请求——若守卫真的缺失，[`step_up_dispatch`] 会把「无 proof
-    /// 也成功」折算成 `ConfigError`（500），用例立刻变红。
+    /// 驱动一个组成员写 Action，返回原始结果。
     async fn member_mutation(
         app: &BuiltApp,
         operator: &Admin,
@@ -1017,7 +1000,7 @@ mod harness {
         group_id: i64,
         user_id: i64,
     ) -> Result<ApiResponse, BaseError> {
-        step_up_dispatch(
+        authed_dispatch(
             app,
             "access.groups",
             action,
@@ -1027,91 +1010,21 @@ mod harness {
         .await
     }
 
-    /// 预先取得一次组成员写 Action 的 Step-up proof（并发用例专用）。
+    /// 驱动一个组成员写 Action，折算为（状态码, 消息）。
     ///
-    /// challenge 与请求指纹绑定（body + 路径 + 查询），因此取 proof 与随后携带它的
-    /// 调用必须用同一个 body——两者都经 [`member_body`] 构造。
-    pub async fn member_mutation_proof(
+    /// 并发用例直接经这条路径投出请求，Barrier 对齐请求起点，事务临界段的重叠
+    /// 由真库的独立连接与行锁保证。
+    pub async fn member_mutation_outcome(
         app: &BuiltApp,
         operator: &Admin,
         action: &str,
         group_id: i64,
         user_id: i64,
-    ) -> String {
-        step_up_proof_for_body(
-            app,
-            operator,
-            "access.groups",
-            action,
-            member_body(group_id, user_id),
-        )
-        .await
-    }
-
-    /// 携带**已取得的** proof 驱动组成员写 Action，折算为（状态码, 消息）。
-    ///
-    /// 并发用例必须这样调用：把 argon2 重认证的耗时从两次请求里剔除，两个请求才可能
-    /// 真的重叠。注意 Barrier 对齐的是**请求起点**（`barrier.wait()` 在整次 dispatch
-    /// 之前），不是「事务内读判据 → 写事实」那一段——那之前还有 JWT 鉴权、proof 验签与
-    /// Redis 单次消费，之后还有一条审计 INSERT。临界段的重叠靠真库的独立连接与行锁，
-    /// 不靠 Barrier 本身精确对齐。
-    pub async fn member_mutation_with_proof(
-        app: &BuiltApp,
-        operator: &Admin,
-        action: &str,
-        group_id: i64,
-        user_id: i64,
-        proof: &str,
     ) -> (u16, String) {
-        group_action_with_proof(app, operator, action, member_body(group_id, user_id), proof).await
-    }
-
-    /// 直接驱动一个组管理 Action 而**不**携带 Step-up proof，返回原始结果。
-    ///
-    /// 与 [`step_up_dispatch`] 的差别是本函数刻意不做自愈重试，因此「守卫缺失」
-    /// 会原样表现为成功——这正是守卫测试要钉死的那件事。
-    pub async fn group_action_without_step_up(
-        app: &BuiltApp,
-        operator: &Admin,
-        action: &str,
-        body: Value,
-    ) -> Result<ApiResponse, BaseError> {
-        let authorization = format!("Bearer {}", operator.token);
-        dispatch(
-            app,
-            "access.groups",
-            action,
-            body,
-            &[("authorization", authorization.as_str())],
-            PEER_PORT,
-        )
-        .await
-    }
-
-    /// 只读 Action 的显式名单（生产镜像）：授权判定下沉到 handler 内实现后，
-    /// `access.groups` 的 Action 不再声明权限键，Catalog 里推不出「只读」，
-    /// 与 `src/addon/access/groups/mod.rs` 的 `READ_ACTION_NAMES` 同源逐项点名。
-    const GROUP_READ_ACTIONS: &[&str] = &["list_groups", "get_group"];
-
-    /// 从冻结 Catalog 现场枚举 `access.groups` 的写 Action 名：Catalog 全部 Action
-    /// 减去只读名单（[`GROUP_READ_ACTIONS`]），其余一律按写操作 fail-closed 处理——
-    /// 新增 Action 不登记进名单就会被当写操作要求挂 Step-up，登记半边立刻变红。
-    pub fn groups_write_actions(app: &BuiltApp) -> Vec<String> {
-        let module = app
-            .catalog()
-            .addons()
-            .iter()
-            .flat_map(|addon| &addon.modules)
-            .find(|module| module.name.as_str() == "access.groups")
-            .unwrap_or_else(|| panic!("冻结 Catalog 必须包含 access.groups 模块"));
-        let mut actions: Vec<String> = module
-            .actions()
-            .iter()
-            .filter(|action| !GROUP_READ_ACTIONS.contains(&action.name.as_str()))
-            .map(|action| action.name.as_str().to_string())
-            .collect();
-        actions.sort();
-        actions
+        match member_mutation(app, operator, action, group_id, user_id).await {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
     }
 
     fn pool_of(app: &BuiltApp) -> &sqlx::MySqlPool {
@@ -1121,23 +1034,19 @@ mod harness {
             .pool()
     }
 
-    /// 驱动一个受 Step-up 保护的写 Action：先无 proof 触发 challenge，用密码重认证
-    /// 换一次性 proof，再带 proof 重试同一次调用。
-    ///
-    /// 第一次调用若直接成功，说明 Step-up 守卫根本没挂上——那是安全回归，必须让用例
-    /// 失败，因此这里把它折算成 `ConfigError`（500）而不是放行。
-    async fn step_up_dispatch(
+    /// 用登录令牌驱动一个写 Action，返回原始结果。
+    async fn authed_dispatch(
         app: &BuiltApp,
         module: &str,
         action: &str,
         body: Value,
         admin: &Admin,
     ) -> Result<ApiResponse, BaseError> {
-        step_up_dispatch_with_path(app, module, action, body, admin, &[]).await
+        authed_dispatch_with_path(app, module, action, body, admin, &[]).await
     }
 
-    /// 同 [`step_up_dispatch`]，额外携带路径参数（如 `/api/v1/users/{id}/disable`）。
-    async fn step_up_dispatch_with_path(
+    /// 同 [`authed_dispatch`]，额外携带路径参数（如 `/api/v1/users/{id}/disable`）。
+    async fn authed_dispatch_with_path(
         app: &BuiltApp,
         module: &str,
         action: &str,
@@ -1146,70 +1055,16 @@ mod harness {
         path_params: &[(&str, &str)],
     ) -> Result<ApiResponse, BaseError> {
         let authorization = format!("Bearer {}", admin.token);
-        match dispatch_with_path(
+        dispatch_with_path(
             app,
             module,
             action,
-            body.clone(),
+            body,
             &[("authorization", authorization.as_str())],
             PEER_PORT,
             path_params,
         )
         .await
-        {
-            Err(BaseError::StepUpRequired(challenge)) => {
-                let proof = complete_step_up(app, admin, challenge).await?;
-                dispatch_with_path(
-                    app,
-                    module,
-                    action,
-                    body,
-                    &[
-                        ("authorization", authorization.as_str()),
-                        (STEP_UP_PROOF_HEADER, proof.as_str()),
-                    ],
-                    PEER_PORT,
-                    path_params,
-                )
-                .await
-            }
-            Ok(response) => Err(BaseError::ConfigError(format!(
-                "{action} 未受 Step-up 保护：无 proof 也成功了（{}）",
-                response.message
-            ))),
-            Err(other) => Err(other),
-        }
-    }
-
-    /// 用操作者本人的密码完成一次 Step-up 重认证，返回一次性 proof。
-    ///
-    /// 与 [`step_up_dispatch_with_path`] 内部那两跳等价，单独抽出来是为了让并发用例
-    /// 把重认证的耗时从两次请求里剔除：先取好 proof，再用 Barrier 同时发起携 proof 的
-    /// 那一次调用。Barrier 对齐的是请求起点，不是事务临界段（见
-    /// [`member_mutation_with_proof`] 的说明）。
-    async fn complete_step_up(
-        app: &BuiltApp,
-        admin: &Admin,
-        challenge: yang_base::action::StepUpChallenge,
-    ) -> Result<String, BaseError> {
-        let completed = dispatch(
-            app,
-            "account.user",
-            "step_up_complete",
-            json!({
-                "challenge": challenge.challenge,
-                "credentials": { "username": admin.username, "password": PASSWORD },
-            }),
-            &[],
-            PEER_PORT,
-        )
-        .await?;
-        completed
-            .data
-            .as_ref()
-            .and_then(|data| data["proof"].as_str())
-            .map(str::to_string)
-            .ok_or_else(|| BaseError::ConfigError("Step-up 完成响应缺少 proof".to_string()))
     }
 
     /// 把 Action 错误折算为 HTTP 状态码。
@@ -1219,7 +1074,6 @@ mod harness {
     /// 直接表现为断言失败而不是被静默吞掉。
     fn http_status(error: &BaseError) -> u16 {
         match error {
-            BaseError::StepUpRequired(_) => 428,
             BaseError::PermissionDenied(_) | BaseError::FieldPermissionDenied(_, _, _) => 403,
             BaseError::Unauthorized(_) => 401,
             BaseError::RecordNotFound(_) | BaseError::UserNotFound(_) => 404,
@@ -1418,15 +1272,12 @@ mod harness {
         }
     }
 
-    /// 组条目写 Action 的请求体（proof 的指纹绑定它，故取 proof 与真调用必须同源）。
+    /// 组条目写 Action 的请求体构造。
     fn item_body(group_id: i64, permission: &str) -> Value {
         json!({ "group_id": group_id, "permission": permission })
     }
 
-    /// 驱动一个组条目写 Action：**完整**走 Step-up（与成员、组生命周期同例）。
-    ///
-    /// 条目加/移除直接改变授权事实，已在 `step_up_targets()` 登记；若守卫缺失，
-    /// [`step_up_dispatch`] 会把「无 proof 也成功」折算成 `ConfigError`（500）。
+    /// 驱动一个组条目写 Action，返回原始结果。
     async fn item_mutation(
         app: &BuiltApp,
         operator: &Admin,
@@ -1434,7 +1285,7 @@ mod harness {
         group_id: i64,
         permission: &str,
     ) -> Result<ApiResponse, BaseError> {
-        step_up_dispatch(
+        authed_dispatch(
             app,
             "access.groups",
             action,
@@ -1444,41 +1295,21 @@ mod harness {
         .await
     }
 
-    /// 预先取得一次组条目写 Action 的 Step-up proof（并发用例专用）。
-    pub async fn item_mutation_proof(
+    /// 驱动一个组条目写 Action，折算为（状态码, 消息）。
+    ///
+    /// 并发用例直接经这条路径投出请求，Barrier 对齐请求起点，事务临界段的重叠
+    /// 由真库的独立连接与行锁保证。
+    pub async fn item_mutation_outcome(
         app: &BuiltApp,
         operator: &Admin,
         action: &str,
         group_id: i64,
         permission: &str,
-    ) -> String {
-        step_up_proof_for_body(
-            app,
-            operator,
-            "access.groups",
-            action,
-            item_body(group_id, permission),
-        )
-        .await
-    }
-
-    /// 携带**已取得的** proof 驱动组条目写 Action，折算为（状态码, 消息）。
-    pub async fn item_mutation_with_proof(
-        app: &BuiltApp,
-        operator: &Admin,
-        action: &str,
-        group_id: i64,
-        permission: &str,
-        proof: &str,
     ) -> (u16, String) {
-        group_action_with_proof(
-            app,
-            operator,
-            action,
-            item_body(group_id, permission),
-            proof,
-        )
-        .await
+        match item_mutation(app, operator, action, group_id, permission).await {
+            Ok(response) => (200, response.message),
+            Err(error) => (http_status(&error), error.to_string()),
+        }
     }
 
     /// 向组追加一条权限；失败即 panic（调用方断言的是成功路径）。
@@ -1576,19 +1407,19 @@ mod harness {
 
     /// 尝试管理端停用目标账号并折算为 HTTP 状态码。
     ///
-    /// `admin_disable_user` 要求 `account.users.manage` 且受 Step-up 保护，因此操作者
+    /// `admin_disable_user` 要求 `account.users.manage`，因此操作者
     /// 身份由调用方给出——最后管理员用例刻意让一个**非系统管理员**来当操作者，
     /// 否则该 Action 既有的「不能停用自己」前置会先把用例挡在守卫之前。
     ///
     /// 目标用户是**路径参数**（`/api/v1/users/{id}/disable`），必须经
-    /// `step_up_dispatch_with_path` 传入 `request.path_params`。
+    /// `authed_dispatch_with_path` 传入 `request.path_params`。
     pub async fn admin_disable_status(
         app: &BuiltApp,
         operator: &Admin,
         target_user_id: i64,
     ) -> u16 {
         let target = target_user_id.to_string();
-        match step_up_dispatch_with_path(
+        match authed_dispatch_with_path(
             app,
             "account.user",
             "admin_disable_user",
@@ -1606,13 +1437,12 @@ mod harness {
     /// 尝试管理端启用目标账号并折算为 HTTP 状态码。
     ///
     /// 与 [`admin_disable_status`] 完全对称：`admin_enable_user` 同样要求
-    /// `account.users.manage` 且受 Step-up 保护，目标用户也是**路径参数**
-    /// （`/api/v1/users/{id}/enable`），必须经 `step_up_dispatch_with_path` 传入
-    /// `request.path_params`。运行期只校验 Step-up 是否挂上（无 proof 即成功会被
-    /// 折算成 `ConfigError`→500）。
+    /// `account.users.manage`，目标用户也是**路径参数**
+    /// （`/api/v1/users/{id}/enable`），必须经 `authed_dispatch_with_path` 传入
+    /// `request.path_params`。
     pub async fn admin_enable_status(app: &BuiltApp, operator: &Admin, target_user_id: i64) -> u16 {
         let target = target_user_id.to_string();
-        match step_up_dispatch_with_path(
+        match authed_dispatch_with_path(
             app,
             "account.user",
             "admin_enable_user",
@@ -1629,7 +1459,7 @@ mod harness {
 
     /// 尝试管理端签发密码重置凭证并折算为 HTTP 状态码。
     ///
-    /// `admin_issue_password_reset` 受 Step-up 保护，`input.id` 是**路径参数**
+    /// `admin_issue_password_reset` 的 `input.id` 是**路径参数**
     /// （`/api/v1/users/{id}/password-reset-tokens`）。这里只观测「调用是否被接受」，
     /// 刻意不读响应里的明文凭证——明文只回显一次，测试不需要它。
     pub async fn admin_issue_password_reset_status(
@@ -1638,7 +1468,7 @@ mod harness {
         target_user_id: i64,
     ) -> u16 {
         let target = target_user_id.to_string();
-        match step_up_dispatch_with_path(
+        match authed_dispatch_with_path(
             app,
             "account.user",
             "admin_issue_password_reset",
@@ -1655,7 +1485,7 @@ mod harness {
 
     /// 尝试自助停用当前账号并折算为 HTTP 状态码。
     pub async fn disable_self_status(app: &BuiltApp, actor: &Admin) -> u16 {
-        match step_up_dispatch(app, "account.user", "disable_self", json!({}), actor).await {
+        match authed_dispatch(app, "account.user", "disable_self", json!({}), actor).await {
             Ok(_) => 200,
             Err(error) => http_status(&error),
         }
@@ -1663,7 +1493,7 @@ mod harness {
 
     /// 尝试匿名化删除当前账号并折算为 HTTP 状态码。
     pub async fn delete_account_status(app: &BuiltApp, actor: &Admin) -> u16 {
-        match step_up_dispatch(
+        match authed_dispatch(
             app,
             "account.user",
             "delete_account",
@@ -1681,112 +1511,6 @@ mod harness {
     pub async fn delete_account(app: &BuiltApp, actor: &Admin) {
         let status = delete_account_status(app, actor).await;
         assert_eq!(status, 200, "删除账号必须成功");
-    }
-
-    /// 预先取得一次 Step-up 重认证的 proof。
-    ///
-    /// 并发用例必须把重认证的耗时从请求里剔除：`step_up_dispatch` 内部是「无 proof
-    /// 触发 challenge → 完成重认证 → 带 proof 重试」三跳，两个任务在这三跳上的
-    /// 抖动（含 argon2 校验耗时）会远超真正要观测的事务窗口，用例会退化成
-    /// 「串行两次调用」，根本压不到临界点。因此这里只负责取 proof，由用例自己在
-    /// 拿到两份 proof 之后用 Barrier 同时发起携带 proof 的那一次调用。即便如此，
-    /// Barrier 对齐的也只是请求起点；事务临界段的重叠由真库的独立连接与行锁保证。
-    ///
-    /// proof 与 Action 绑定（challenge 由该 Action 的无 proof 调用签发），
-    /// 所以 `action` 必须与随后携带它的那次调用完全一致。
-    pub async fn step_up_proof_for(app: &BuiltApp, admin: &Admin, action: &str) -> String {
-        step_up_proof_for_body(app, admin, "account.user", action, json!({})).await
-    }
-
-    /// 同 [`step_up_proof_for`]，但可指定 Module 与请求体——challenge 与请求指纹
-    /// （body + 路径 + 查询）绑定，故 `body` 必须与随后携带该 proof 的调用逐字节同源。
-    ///
-    /// 无 proof 的那一次若直接成功，说明 Step-up 守卫根本没挂上：那是安全回归，
-    /// 必须让用例失败而不是放行，因此这里 panic。
-    pub async fn step_up_proof_for_body(
-        app: &BuiltApp,
-        admin: &Admin,
-        module: &str,
-        action: &str,
-        body: Value,
-    ) -> String {
-        let authorization = format!("Bearer {}", admin.token);
-        let challenge = match dispatch(
-            app,
-            module,
-            action,
-            body,
-            &[("authorization", authorization.as_str())],
-            PEER_PORT,
-        )
-        .await
-        {
-            Err(BaseError::StepUpRequired(challenge)) => challenge,
-            Ok(response) => panic!(
-                "{module}.{action} 未受 Step-up 保护：无 proof 也成功了（{}）",
-                response.message
-            ),
-            Err(other) => panic!("{module}.{action} 触发 Step-up 失败: {other}"),
-        };
-        complete_step_up(app, admin, challenge)
-            .await
-            .unwrap_or_else(|error| panic!("Step-up 完成失败: {error}"))
-    }
-
-    /// 携带**已取得的** proof 驱动一个组管理 Action，折算为（状态码, 消息）。
-    ///
-    /// proof 是不可重放的：每个并发任务都必须持有自己那一份。
-    pub async fn group_action_with_proof(
-        app: &BuiltApp,
-        operator: &Admin,
-        action: &str,
-        body: Value,
-        proof: &str,
-    ) -> (u16, String) {
-        let authorization = format!("Bearer {}", operator.token);
-        match dispatch(
-            app,
-            "access.groups",
-            action,
-            body,
-            &[
-                ("authorization", authorization.as_str()),
-                (STEP_UP_PROOF_HEADER, proof),
-            ],
-            PEER_PORT,
-        )
-        .await
-        {
-            Ok(response) => (200, response.message),
-            Err(error) => (http_status(&error), error.to_string()),
-        }
-    }
-
-    /// 携带**已取得的** proof 自助停用，折算为 HTTP 状态码。
-    ///
-    /// 与 `disable_self_status` 的区别只在于 proof 由调用方先行取得，使两次请求不必
-    /// 各自等一次 argon2 重认证。这里**不**声称 Barrier 能对齐临界区：`barrier.wait()`
-    /// 在整次 dispatch **之前**，它之后还有 JWT 鉴权、proof 验签、Redis 单次消费，然后
-    /// 才进事务；临界段（开事务 → 读管理员计数 → 写停用）的重叠由两条独立连接与
-    /// `users` 行锁保证，Barrier 只负责让两次请求被同时投出。
-    pub async fn disable_self_with_proof(app: &BuiltApp, actor: &Admin, proof: &str) -> u16 {
-        let authorization = format!("Bearer {}", actor.token);
-        match dispatch(
-            app,
-            "account.user",
-            "disable_self",
-            json!({}),
-            &[
-                ("authorization", authorization.as_str()),
-                (STEP_UP_PROOF_HEADER, proof),
-            ],
-            PEER_PORT,
-        )
-        .await
-        {
-            Ok(_) => 200,
-            Err(error) => http_status(&error),
-        }
     }
 
     /// 一个组里当前处于**启用**状态（`users.status = 'active'`）的成员数。
@@ -1851,15 +1575,14 @@ mod harness {
 
     /// 尝试改组展示信息并折算为（HTTP 状态码, 消息）。
     ///
-    /// `update_group` 是受 Step-up 保护的写 Action（`step_up_targets()` 登记），
-    /// 因此与建/删组同走完整重认证；成功时消息是成功文案（用例只会在拒绝路径上读它）。
+    /// 成功时消息是成功文案（用例只会在拒绝路径上读它）。
     pub async fn update_group_outcome(
         app: &BuiltApp,
         operator: &Admin,
         group_id: i64,
         title: &str,
     ) -> (u16, String) {
-        match step_up_dispatch(
+        match authed_dispatch(
             app,
             "access.groups",
             "update_group",
@@ -1873,17 +1596,17 @@ mod harness {
         }
     }
 
-    /// 撤销直授权限（受 Step-up 保护），折算为（HTTP 状态码, 消息）。
+    /// 撤销直授权限，折算为（HTTP 状态码, 消息）。
     ///
     /// 与 [`grant_permission_status`] 同构，只是目标 Action 换成 `revoke_permission`——
-    /// 撤销路径同样要求重认证与 `access.grants.write`。
+    /// 撤销路径同样要求 `access.grants.write`。
     pub async fn revoke_permission_outcome(
         app: &BuiltApp,
         operator: &Admin,
         user_id: i64,
         permission: &str,
     ) -> (u16, String) {
-        match step_up_dispatch(
+        match authed_dispatch(
             app,
             "access.grants",
             "revoke_permission",
@@ -1899,7 +1622,7 @@ mod harness {
 
     /// 查询目标用户的直授权限（`GET /api/v1/access/users/{user_id}/grants`），返回原始结果。
     ///
-    /// 只读接口不经 Step-up；`user_id` 是路径参数，必须走 `path_params`（写进 body
+    /// `user_id` 是路径参数，必须走 `path_params`（写进 body
     /// 会被判为缺参，见 [`dispatch_with_path`] 的说明）。
     pub async fn list_user_grants(
         app: &BuiltApp,
@@ -1951,13 +1674,13 @@ mod harness {
         json!({ "user_id": user_id, "permission": permission })
     }
 
-    /// 驱动批量授予 Action：**完整**走 Step-up（已登记进 `step_up_targets`）。
+    /// 驱动批量授予 Action，返回原始结果。
     pub async fn batch_grant_permissions(
         app: &BuiltApp,
         operator: &Admin,
         items: &[Value],
     ) -> Result<ApiResponse, BaseError> {
-        step_up_dispatch(
+        authed_dispatch(
             app,
             "access.grants",
             "batch_grant_permissions",
@@ -1979,13 +1702,13 @@ mod harness {
         }
     }
 
-    /// 驱动批量撤销 Action：**完整**走 Step-up（已登记进 `step_up_targets`）。
+    /// 驱动批量撤销 Action，返回原始结果。
     pub async fn batch_revoke_permissions(
         app: &BuiltApp,
         operator: &Admin,
         items: &[Value],
     ) -> Result<ApiResponse, BaseError> {
-        step_up_dispatch(
+        authed_dispatch(
             app,
             "access.grants",
             "batch_revoke_permissions",
@@ -2714,7 +2437,7 @@ async fn deleting_an_account_leaves_no_orphan_authorization_rows() {
 /// spec §8.2：**无论并发如何交错**，系统都不得失去最后一名启用管理员。
 ///
 /// 两个管理员各自自助停用，用真库两条独立连接 + Barrier 让两次请求被同时投出。
-/// （Barrier 对齐的是请求起点：`wait()` 之后还有鉴权、proof 验签与 Redis 消费，才进事务；
+/// （Barrier 对齐的是请求起点：`wait()` 之后还有鉴权与授权检查，才进事务；
 /// 两次「读管理员计数 → 写停用」的重叠由独立连接与 `users` 行锁保证，不是 Barrier 的功劳。）
 /// 若计数是在事务外经连接池无锁读出的（缺陷形态），两边都会
 /// 读到「还有两名」，双双放行，system_admin 组被清零；只有把成员行在**调用方事务内**
@@ -2744,19 +2467,14 @@ async fn concurrent_self_disables_never_leave_zero_active_admins() {
             "第 {round} 轮夹具必须从两名启用管理员出发，否则并发窗口压不出来"
         );
 
-        // 重认证先行完成，两次请求的耗时差只剩「鉴权 → 验签 → 读计数 → 写停用」，
-        // 其中真正要撞在一起的是各自事务里的读计数与写停用。
-        let first_proof = harness::step_up_proof_for(&app, &first, "disable_self").await;
-        let second_proof = harness::step_up_proof_for(&app, &second, "disable_self").await;
-
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut handles = Vec::new();
-        for (actor, proof) in [(first.clone(), first_proof), (second.clone(), second_proof)] {
+        for actor in [first.clone(), second.clone()] {
             let app = app.clone();
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::disable_self_with_proof(&app, &actor, &proof).await
+                harness::disable_self_status(&app, &actor).await
             }));
         }
         let mut statuses = Vec::new();
@@ -2952,21 +2670,11 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
 
-        // 重认证先做完：两个任务各持一份一次性 proof。若让每个任务在 Barrier 之后
-        // 自己走「challenge → argon2 → 重试」三跳，两次真正插入会被 argon2 的耗时错开，
-        // 用例会退化成串行两次调用，压不到唯一键冲突那条路径。（Barrier 对齐请求起点，
-        // 两次插入是否真的撞在唯一键上由真库的独立连接与索引锁决定。）
-        let mut proofs = Vec::new();
-        for _ in 0..2 {
-            proofs.push(
-                harness::member_mutation_proof(&app, &admin, "add_group_member", group_id, target)
-                    .await,
-            );
-        }
-
+        // 并发先做完：两个任务各持一份请求。Barrier 对齐请求起点，
+        // 两次插入是否真的撞在唯一键上由真库的独立连接与索引锁决定。
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut handles = Vec::new();
-        for proof in proofs {
+        for _ in 0..2 {
             let app = app.clone();
             let admin = admin.clone();
             let barrier = Arc::clone(&barrier);
@@ -2974,15 +2682,8 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
                 barrier.wait().await;
                 // 用 outcome 而非 status：失败时要能读出真正的错误文案，
                 // 否则 5xx/404 只留下一串状态码，定位不到是哪条错误被折算出来的。
-                harness::member_mutation_with_proof(
-                    &app,
-                    &admin,
-                    "add_group_member",
-                    group_id,
-                    target,
-                    &proof,
-                )
-                .await
+                harness::member_mutation_outcome(&app, &admin, "add_group_member", group_id, target)
+                    .await
             }));
         }
         let mut outcomes = Vec::new();
@@ -3017,30 +2718,29 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
 // 收尾回合已把串行化点从「成员行」改为「目标组组行」，此处不复述，避免再次漂移。
 // ---------------------------------------------------------------------------
 
-/// 用 Barrier 同时驱动两条组成员写请求（各自携带先行取得的一次性 proof）。
+/// 用 Barrier 同时驱动两条组成员写请求。
 ///
 /// 两个任务的操作者**分别给出**：并发用例必须能用两个不同的账号发起请求，否则两次
 /// 请求会因为锁批里共有的操作者行而被串行化，从而压不出「两个并发请求各自读到同一份
 /// 陈旧快照」这个窗口。
 ///
-/// 把重认证的耗时剔出请求是既有并发用例的统一做法。要说准 Barrier 的作用：它对齐的是
-/// **请求起点**——`wait()` 之后还有 JWT 鉴权、proof 验签与 Redis 单次消费才进事务，
+/// Barrier 对齐的是**请求起点**——`wait()` 之后直接进入事务，
 /// 事务提交之后还有审计 INSERT——不是「开事务 → 读判据 → 写事实」那一段。它只是保证
 /// 两次请求被同时投出，临界段的重叠由独立连接与行锁负责。
 async fn concurrent_member_mutations(
     app: &BuiltApp,
     group_id: i64,
-    left: (harness::Admin, &'static str, i64, String),
-    right: (harness::Admin, &'static str, i64, String),
+    left: (harness::Admin, &'static str, i64),
+    right: (harness::Admin, &'static str, i64),
 ) -> Vec<u16> {
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut handles = Vec::new();
-    for (operator, action, user_id, proof) in [left, right] {
+    for (operator, action, user_id) in [left, right] {
         let app = app.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            harness::member_mutation_with_proof(&app, &operator, action, group_id, user_id, &proof)
+            harness::member_mutation_outcome(&app, &operator, action, group_id, user_id)
                 .await
                 .0
         }));
@@ -3063,9 +2763,8 @@ async fn concurrent_member_mutations(
 /// 完全串行化不了成员变更。两个并发的移出各自读到同一份陈旧名单 [A,B]、各自数出 2 名
 /// 启用管理员，双双放行，`system_admin` 组成员归零（spec §8.2 明称该状态不可达）。
 ///
-/// 真库 + 两条独立连接 + Barrier：两个任务先各自取好一次性 proof，Barrier 只对齐两次
-/// 请求的**起点**（它之后还有鉴权、验签与 Redis 消费），事务临界段的重叠由两条独立
-/// 连接与行锁负责。两个场景各跑三轮，避免调度偶然。
+/// 真库 + 两条独立连接 + Barrier：Barrier 只对齐两次请求的**起点**（它之后还有鉴权与
+/// 事务），事务临界段的重叠由两条独立连接与行锁负责。两个场景各跑三轮，避免调度偶然。
 ///
 /// 断言只钉住不安全的那件事——最终必须仍有至少一名启用管理员，且两个请求不得都成功。
 /// 败者是被守卫拦下（400/403）还是被授权版本水位线拦下（401）都无关紧要：三者都只是
@@ -3085,38 +2784,11 @@ async fn concurrent_admin_removals_never_leave_zero_active_admins() {
             "第 {round} 轮场景一必须从两名启用管理员出发，否则并发窗口压不出来"
         );
 
-        let remove_other = harness::member_mutation_proof(
-            &app,
-            &first,
-            "remove_group_member",
-            group_id,
-            second.user_id,
-        )
-        .await;
-        let remove_self = harness::member_mutation_proof(
-            &app,
-            &first,
-            "remove_group_member",
-            group_id,
-            first.user_id,
-        )
-        .await;
-
         let statuses = concurrent_member_mutations(
             &app,
             group_id,
-            (
-                first.clone(),
-                "remove_group_member",
-                second.user_id,
-                remove_other,
-            ),
-            (
-                first.clone(),
-                "remove_group_member",
-                first.user_id,
-                remove_self,
-            ),
+            (first.clone(), "remove_group_member", second.user_id),
+            (first.clone(), "remove_group_member", first.user_id),
         )
         .await;
 
@@ -3146,40 +2818,22 @@ async fn concurrent_admin_removals_never_leave_zero_active_admins() {
             "第 {round} 轮场景二必须从两名启用管理员出发"
         );
 
-        let first_removes_second = harness::member_mutation_proof(
-            &app,
-            &first,
-            "remove_group_member",
-            group_id,
-            second.user_id,
-        )
-        .await;
-        let second_removes_first = harness::member_mutation_proof(
-            &app,
-            &second,
-            "remove_group_member",
-            group_id,
-            first.user_id,
-        )
-        .await;
-
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut handles = Vec::new();
-        for (operator, target, proof) in [
-            (first.clone(), second.user_id, first_removes_second),
-            (second.clone(), first.user_id, second_removes_first),
+        for (operator, target) in [
+            (first.clone(), second.user_id),
+            (second.clone(), first.user_id),
         ] {
             let app = app.clone();
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::member_mutation_with_proof(
+                harness::member_mutation_outcome(
                     &app,
                     &operator,
                     "remove_group_member",
                     group_id,
                     target,
-                    &proof,
                 )
                 .await
                 .0
@@ -3244,28 +2898,11 @@ async fn concurrent_adds_cannot_exceed_the_member_limit() {
         let right_operator =
             harness::grant_only(&app, &admin, "limit_op_right", "access.groups.write").await;
 
-        let left_proof = harness::member_mutation_proof(
-            &app,
-            &left_operator,
-            "add_group_member",
-            group_id,
-            left,
-        )
-        .await;
-        let right_proof = harness::member_mutation_proof(
-            &app,
-            &right_operator,
-            "add_group_member",
-            group_id,
-            right,
-        )
-        .await;
-
         let statuses = concurrent_member_mutations(
             &app,
             group_id,
-            (left_operator, "add_group_member", left, left_proof),
-            (right_operator, "add_group_member", right, right_proof),
+            (left_operator, "add_group_member", left),
+            (right_operator, "add_group_member", right),
         )
         .await;
 
@@ -3321,28 +2958,11 @@ async fn concurrent_adds_of_different_members_do_not_deadlock() {
         let right_operator =
             harness::grant_only(&app, &admin, "race_op_right", "access.groups.write").await;
 
-        let left_proof = harness::member_mutation_proof(
-            &app,
-            &left_operator,
-            "add_group_member",
-            group_id,
-            left,
-        )
-        .await;
-        let right_proof = harness::member_mutation_proof(
-            &app,
-            &right_operator,
-            "add_group_member",
-            group_id,
-            right,
-        )
-        .await;
-
         let statuses = concurrent_member_mutations(
             &app,
             group_id,
-            (left_operator, "add_group_member", left, left_proof),
-            (right_operator, "add_group_member", right, right_proof),
+            (left_operator, "add_group_member", left),
+            (right_operator, "add_group_member", right),
         )
         .await;
 
@@ -3426,23 +3046,6 @@ async fn concurrent_member_removal_and_item_add_do_not_deadlock() {
         harness::add_member(&app, &admin, shared, second.user_id).await;
         harness::add_member(&app, &admin, shared, third.user_id).await;
 
-        let remove_proof = harness::member_mutation_proof(
-            &app,
-            &admin,
-            "remove_group_member",
-            admin_group,
-            third.user_id,
-        )
-        .await;
-        let item_proof = harness::item_mutation_proof(
-            &app,
-            &admin,
-            "add_group_item",
-            shared,
-            "account.users.read",
-        )
-        .await;
-
         let removed = third.user_id;
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut handles = Vec::new();
@@ -3452,13 +3055,12 @@ async fn concurrent_member_removal_and_item_add_do_not_deadlock() {
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::member_mutation_with_proof(
+                harness::member_mutation_outcome(
                     &app,
                     &operator,
                     "remove_group_member",
                     admin_group,
                     removed,
-                    &remove_proof,
                 )
                 .await
                 .0
@@ -3470,13 +3072,12 @@ async fn concurrent_member_removal_and_item_add_do_not_deadlock() {
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::item_mutation_with_proof(
+                harness::item_mutation_outcome(
                     &app,
                     &operator,
                     "add_group_item",
                     shared,
                     "account.users.read",
-                    &item_proof,
                 )
                 .await
                 .0
@@ -3547,23 +3148,8 @@ async fn concurrent_item_add_and_self_member_add_cannot_self_escalate() {
             "第 {round} 轮夹具必须从「组不持有该权限」出发"
         );
 
-        // 两条路径都是授权事实变更、都已在 Step-up 登记内，因此都要重认证。取 proof
-        // 的那一次调用只留在 Step-up 守卫里（连 Action 都没进），不会动上面刚断言的
-        // 前置事实；把重认证的耗时剔出请求后，两次请求才会被 Barrier 同时投出，各自的
-        // 事务也才有机会在「第一条普通读建立快照」那一刻重叠——这正是缺陷暴露的窗口。
-        // （Barrier 对齐的仍只是请求起点，不是快照建立本身；重叠是否发生由真库调度决定。）
-        let item_proof =
-            harness::item_mutation_proof(&app, &operator, "add_group_item", group_id, ESCALATED)
-                .await;
-        let member_proof = harness::member_mutation_proof(
-            &app,
-            &operator,
-            "add_group_member",
-            group_id,
-            operator.user_id,
-        )
-        .await;
-
+        // 两条路径都是授权事实变更。直接并发发出请求，Barrier 对齐请求起点，
+        // 两次事务的重叠由真库的独立连接与行锁决定。
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut handles = Vec::new();
         {
@@ -3572,13 +3158,12 @@ async fn concurrent_item_add_and_self_member_add_cannot_self_escalate() {
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::item_mutation_with_proof(
+                harness::item_mutation_outcome(
                     &app,
                     &operator,
                     "add_group_item",
                     group_id,
                     ESCALATED,
-                    &item_proof,
                 )
                 .await
                 .0
@@ -3590,13 +3175,12 @@ async fn concurrent_item_add_and_self_member_add_cannot_self_escalate() {
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::member_mutation_with_proof(
+                harness::member_mutation_outcome(
                     &app,
                     &operator,
                     "add_group_member",
                     group_id,
                     operator.user_id,
-                    &member_proof,
                 )
                 .await
                 .0
@@ -3669,26 +3253,7 @@ async fn concurrent_item_and_member_add_on_the_same_group_do_not_deadlock() {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
 
-        // 重认证必须先做完，否则 argon2 的耗时会错开两次真正的事务，「不同 Action 的
-        // 取锁顺序是否一致」就压不出来了。proof 与操作者主体绑定，因此两人各取各的。
-        // （Barrier 只对齐请求起点；两次事务的重叠由独立连接与行锁决定。）
-        let item_proof = harness::item_mutation_proof(
-            &app,
-            &item_operator,
-            "add_group_item",
-            group_id,
-            "access.grants.read",
-        )
-        .await;
-        let member_proof = harness::member_mutation_proof(
-            &app,
-            &member_operator,
-            "add_group_member",
-            group_id,
-            newcomer,
-        )
-        .await;
-
+        // 直接并发发出请求，Barrier 对齐请求起点，两次事务的重叠由真库的独立连接与行锁决定。
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut handles = Vec::new();
         {
@@ -3699,13 +3264,12 @@ async fn concurrent_item_and_member_add_on_the_same_group_do_not_deadlock() {
                 barrier.wait().await;
                 // 操作者已在组内且本来就持有这条权限，§8.1 子集校验放行——本用例测的是锁序，
                 // 不是提权判定。
-                harness::item_mutation_with_proof(
+                harness::item_mutation_outcome(
                     &app,
                     &operator,
                     "add_group_item",
                     group_id,
                     "access.grants.read",
-                    &item_proof,
                 )
                 .await
                 .0
@@ -3717,13 +3281,12 @@ async fn concurrent_item_and_member_add_on_the_same_group_do_not_deadlock() {
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::member_mutation_with_proof(
+                harness::member_mutation_outcome(
                     &app,
                     &operator,
                     "add_group_member",
                     group_id,
                     newcomer,
-                    &member_proof,
                 )
                 .await
                 .0
@@ -3771,43 +3334,23 @@ async fn concurrent_item_adds_by_two_member_operators_do_not_deadlock() {
         let first = harness::relogin(&app, &first).await;
         let second = harness::relogin(&app, &second).await;
 
-        // 重认证先做完（proof 与主体绑定，两人各取各的），Barrier 才能让两次请求被同时
-        // 投出，从而给「锁操作者行 + 按升序锁成员行」的两次事务一个真正重叠的机会。
-        // Barrier 对齐的是请求起点，两次事务是否重叠由真库的独立连接与行锁决定。
-        let first_proof = harness::item_mutation_proof(
-            &app,
-            &first,
-            "add_group_item",
-            group_id,
-            "access.grants.read",
-        )
-        .await;
-        let second_proof = harness::item_mutation_proof(
-            &app,
-            &second,
-            "add_group_item",
-            group_id,
-            "account.users.read",
-        )
-        .await;
-
+        // 直接并发发出请求，Barrier 对齐请求起点，两次事务的重叠由真库的独立连接与行锁决定。
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
         let mut handles = Vec::new();
-        for (operator, permission, proof) in [
-            (first.clone(), "access.grants.read", first_proof),
-            (second.clone(), "account.users.read", second_proof),
+        for (operator, permission) in [
+            (first.clone(), "access.grants.read"),
+            (second.clone(), "account.users.read"),
         ] {
             let app = app.clone();
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                harness::item_mutation_with_proof(
+                harness::item_mutation_outcome(
                     &app,
                     &operator,
                     "add_group_item",
                     group_id,
                     permission,
-                    &proof,
                 )
                 .await
                 .0
@@ -3826,152 +3369,6 @@ async fn concurrent_item_adds_by_two_member_operators_do_not_deadlock() {
             vec![200, 200],
             "第 {round} 轮两名成员操作者并发加权限不得死锁/超时，实际 {statuses:?}"
         );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// R4：Step-up 全覆盖——未完成重认证的调用不得触达任何一个组管理 Action。
-// ---------------------------------------------------------------------------
-
-/// spec §9.2 与计划 Global Constraints：**全部**组管理 Action 都必须挂 Step-up。
-///
-/// 缺陷形态：`step_up_targets()` 只登记建/改/删组三个，条目与成员那四条 Action
-/// （`add_group_item` / `remove_group_item` / `add_group_member` /
-/// `remove_group_member`）没有守卫——持有一条被盗令牌的攻击者不用重认证就能改变
-/// 授权事实。本用例逐个 Action 断言「不带 proof 的调用被拒」，是那条不变量在真实
-/// 装配路径上的投影：守卫一旦漏挂，这里就会读到成功响应。
-///
-/// 与 `access.groups` 单测的分工：单测从冻结 Catalog 枚举写 Action 与登记清单比对
-/// （防止漏登记），本用例证明登记真的被挂成了中间件、并且被折算成 428。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "需要真实 MySQL/Redis"]
-async fn group_mutations_without_step_up_are_rejected() {
-    let app = harness::build_test_app().await;
-    let admin = harness::bootstrap_admin(&app).await;
-    let group_id = harness::create_group(&app, &admin, "stepup", "重认证覆盖组").await;
-    let member = harness::register_with_code(&app, "stepup_member", "stepup_member@example.com")
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-
-    let cases = [
-        (
-            "add_group_item",
-            json!({ "group_id": group_id, "permission": "access.grants.read" }),
-        ),
-        (
-            "remove_group_item",
-            json!({ "group_id": group_id, "permission": "access.grants.read" }),
-        ),
-        (
-            "add_group_member",
-            json!({ "group_id": group_id, "user_id": member }),
-        ),
-        (
-            "remove_group_member",
-            json!({ "group_id": group_id, "user_id": member }),
-        ),
-    ];
-
-    for (action, body) in cases {
-        match harness::group_action_without_step_up(&app, &admin, action, body).await {
-            Err(BaseError::StepUpRequired(_)) => {}
-            Ok(response) => panic!(
-                "{action} 未完成 Step-up 也执行了（code={}，{}）——组管理 Action 必须全部挂重认证",
-                response.code, response.message
-            ),
-            Err(other) => panic!("{action} 必须返回 StepUpRequired（428 Step-up），实际 {other}"),
-        }
-    }
-
-    // 拒绝必须是「没进业务」的拒绝：上面四次被拒的调用不得留下任何写结果。
-    assert_eq!(
-        harness::item_rows_of_group(&app, group_id).await,
-        0,
-        "被拒的条目写入不得落库"
-    );
-    assert!(
-        !harness::is_member(&app, group_id, member).await,
-        "被拒的成员写入不得落库"
-    );
-}
-
-/// spec §9.2 修订 + 本回合 F3：`access.groups` 的**每个写 Action** 都必须真的挂上
-/// Step-up 中间件，两个只读 Action 不得挂。
-///
-/// 这条不变量有两个半边，缺一不可：
-/// 1. **登记半边**——`step_up_targets()` 必须等于冻结 Catalog 的写 Action 集合
-///    （`src/addon/access/groups/mod.rs` 的 `every_group_mutation_is_step_up_protected`）。
-/// 2. **挂载半边**——登记清单里的每个 Action 都真的挂了中间件。**框架不对外暴露可查询的
-///    中间件列表**（`ModuleSpec::middlewares()` 是 `pub(crate)`，本仓库读不到），因此只能
-///    从真实装配路径取证：现场枚举写 Action，逐个发**不带 Step-up proof** 的认证请求，
-///    断言全部被拒为 `StepUpRequired`(428)。中间件在 Action 输入解码之前短路，所以空
-///    body 也足以取证——挂载一旦漏掉，请求会落到 Handler（解码失败或直接成功），于是读到
-///    的不再是 428。
-///
-/// 为什么必须按 Catalog 枚举而不能照抄一份清单：`update_group` 此前在全仓 `tests/` 下零
-/// 调用，它的中间件漏挂没有任何用例能发现（本回合 R4 复核发现的缺口）。按 Catalog 枚举
-/// 天然把它纳入取证范围，今后新增写 Action 也自动进入。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "需要真实 MySQL/Redis"]
-async fn every_group_write_action_without_step_up_is_rejected() {
-    let app = harness::build_test_app().await;
-    let admin = harness::bootstrap_admin(&app).await;
-    // 只读反向对照需要一个真实存在的组，故先经完整 Step-up 建一个。
-    let group_id = harness::create_group(&app, &admin, "readonly", "只读对照组").await;
-
-    let write_actions = harness::groups_write_actions(&app);
-    assert!(
-        write_actions.len() >= 7,
-        "access.groups 的写 Action 至少应有 7 个（建/改/删组 + 加/移除条目 + 加/移出成员），实际 {write_actions:?}——Catalog 判据被削弱了"
-    );
-    assert!(
-        write_actions.iter().any(|action| action == "update_group"),
-        "覆盖缺口：update_group 是唯一零调用的写 Action，必须落在取证范围内，实际 {write_actions:?}"
-    );
-
-    for action in &write_actions {
-        match harness::group_action_without_step_up(&app, &admin, action, json!({})).await {
-            Err(BaseError::StepUpRequired(_)) => {}
-            Ok(response) => panic!(
-                "{action} 的 Step-up 中间件没有真的挂上：不带 proof 也执行了（code={}，{}）",
-                response.code, response.message
-            ),
-            Err(other) => panic!(
-                "{action} 必须被 Step-up 中间件拒为 StepUpRequired（428），实际 {other}——中间件漏挂时请求会落到 Handler，表现正是别的错误"
-            ),
-        }
-    }
-
-    // 反向对照（spec §9.2 修订）：只读 Action 不挂 Step-up，因此不携带 proof 也必须放行。
-    let authorization = format!("Bearer {}", admin.token);
-    let listed = dispatch_with_path(
-        &app,
-        "access.groups",
-        "list_groups",
-        json!({}),
-        &[("authorization", authorization.as_str())],
-        52_400,
-        &[],
-    )
-    .await;
-    match listed {
-        Ok(response) => assert_eq!(response.code, 0, "只读列表应直接成功：{}", response.message),
-        Err(other) => panic!("只读 list_groups 不该被 Step-up 拦截，实际 {other}"),
-    }
-    let group_id_param = group_id.to_string();
-    let detailed = dispatch_with_path(
-        &app,
-        "access.groups",
-        "get_group",
-        json!({}),
-        &[("authorization", authorization.as_str())],
-        52_400,
-        &[("group_id", group_id_param.as_str())],
-    )
-    .await;
-    match detailed {
-        Ok(response) => assert_eq!(response.code, 0, "只读详情应直接成功：{}", response.message),
-        Err(other) => panic!("只读 get_group 不该被 Step-up 拦截，实际 {other}"),
     }
 }
 
@@ -4631,7 +4028,7 @@ async fn revoke_permission_removes_the_grant_stales_the_token_and_stays_idempote
 /// `list_user_grants` 的端到端覆盖：返回目标用户的全部直授权限。
 ///
 /// 契约（AUTHZ_GRANTS.md 管理接口表）：`GET /api/v1/access/users/{user_id}/grants`
-/// 只需 `access.grants.read`、不经 Step-up。断言按权限名排序后整体比对，钉住
+/// 只需 `access.grants.read`。断言按权限名排序后整体比对，钉住
 /// 响应形态与字段名；零直授账号必须返回空数组而不是缺字段。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要真实 MySQL/Redis"]
@@ -4742,7 +4139,7 @@ async fn a_user_without_the_required_permission_is_rejected_with_403() {
     }
 
     // 写 Action 同一判据：持 access.groups.read 调需 access.grants.write 的
-    // grant_permission——完整走完 Step-up 后仍被权限中间件拒绝。
+    // grant_permission——仍被权限中间件拒绝。
     let target = harness::register_with_code(&app, "target", "target@example.com")
         .await
         .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));

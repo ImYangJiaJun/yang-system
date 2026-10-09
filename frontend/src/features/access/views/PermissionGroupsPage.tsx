@@ -110,8 +110,6 @@ export function GroupManagementContent() {
   }, [queryClient]);
 
   /// 所有写操作的共同外壳：清提示 → 执行 → 回读 → 落提示；失败就把服务端原文亮出来。
-  /// 428（Step-up）已由 `useGroupActions` 内置的 `request`/`runProtected` 透明处理，
-  /// 这里不需要再感知 `StepUpRequiredError`——只需执行、回读、落提示。
   function submit(action: () => Promise<void>, successMessage?: string) {
     setError(null);
     setPending(true);
@@ -160,7 +158,9 @@ export function GroupManagementContent() {
           aria-live="polite"
           className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
         >
-          {catalog.isPending ? "正在加载权限目录…" : "查看权限组需要先登录。"}
+          {catalog.isPending
+            ? "正在加载权限目录…"
+            : "当前身份没有权限工作台的访问权限。"}
         </p>
       ) : listQuery.isError ? (
         <div

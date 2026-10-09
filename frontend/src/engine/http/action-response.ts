@@ -2,7 +2,6 @@ import type { ActionDemoSchema } from "@/engine/contracts/ui-catalog";
 import { ApiError } from "./errors";
 import { parseJson } from "./http";
 import type { InvocationResult } from "./types";
-import { stepUpRequiredError } from "../session/step-up-response";
 
 function filenameFromDisposition(
   disposition: string | null,
@@ -65,8 +64,6 @@ export async function parseActionResponse(
   const payload = await parseJson(response);
   const envelope = payload as
     { code?: number; message?: string; data?: unknown } | undefined;
-  const stepUpRequired = stepUpRequiredError(response, envelope);
-  if (stepUpRequired) throw stepUpRequired;
   if (!response.ok || envelope?.code !== 0) {
     throw new ApiError(envelope?.message ?? `HTTP ${response.status}`, {
       status: response.status,

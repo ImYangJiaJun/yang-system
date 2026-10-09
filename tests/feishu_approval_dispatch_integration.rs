@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::{ApiResponse, Request, RequestMeta, StepUpManager};
+use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
@@ -166,17 +166,6 @@ fn token_manager() -> TokenManager {
     .unwrap_or_else(|error| panic!("测试 TokenManager 应构建成功: {error}"))
 }
 
-fn step_up_manager() -> Arc<StepUpManager> {
-    Arc::new(
-        StepUpManager::new(
-            "feishu-approval-integration-step-up-32byte",
-            "feishu-approval-integration-step-up",
-            "feishu-approval-sensitive-actions",
-        )
-        .unwrap_or_else(|error| panic!("集成测试 Step-up manager 应有效: {error}")),
-    )
-}
-
 /// 装配一个启用飞书集成的完整应用。
 ///
 /// `dispatch_handle` 为 `Some` 时把审批派发句柄注入 Tools（批量受理出口要它）；
@@ -199,7 +188,6 @@ async fn build_feishu_app(
         )?)
         .cache(redis.clone())
         .extension(AuthorizationVersionCache::new(redis.clone(), namespace)?)
-        .extension(step_up_manager())
         .token(token_manager())
         .config(settings);
     if let Some(handle) = dispatch_handle {

@@ -2,7 +2,6 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 
 import { ApiError } from "@/engine/http/errors";
 import { apiBase, parseJson } from "@/engine/http/http";
-import { stepUpRequiredError } from "@/engine/session/step-up-response";
 import { useSessionCredentials, useSessionSnapshot } from "@/engine";
 import { requestWithTokenRefresh } from "@/engine/session/auth-session";
 
@@ -10,9 +9,7 @@ import { requestWithTokenRefresh } from "@/engine/session/auth-session";
  * account 账号中心业务流程请求：当前用户资料、头像、修改密码、修改用户名、停用账号。
  *
  * 会话生命周期（login/refresh/logout/disable）属引擎会话协议，见 engine/session/lifecycle.ts；
- * 本文件只负责账号中心页面的受保护写操作。修改密码/用户名/停用均要求 Step-up
- * proof：后端返回 428 challenge 时抛 StepUpRequiredError，由页面层经
- * SessionController.requestStepUpProof 弹对话框换 proof 后重放。
+ * 本文件只负责账号中心页面的受保护写操作（修改密码/用户名/邮箱、TOTP、撤销会话）。
  */
 
 export type CurrentUser = {
@@ -49,7 +46,6 @@ async function postAuthenticated(
   body: unknown,
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<{ payload: ApiEnvelope; status: number; requestId?: string }> {
   const response = await fetch(`${apiBase}${path}`, {
     method: "POST",
@@ -57,7 +53,6 @@ async function postAuthenticated(
       Accept: "application/json",
       "Content-Type": "application/json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(stepUpProof ? { "x-step-up-proof": stepUpProof } : {}),
     },
     body: JSON.stringify(body),
     credentials: "include",
@@ -66,9 +61,6 @@ async function postAuthenticated(
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = (await parseJson(response)) as ApiEnvelope | undefined;
   if (!response.ok || payload?.code !== 0) {
-    // 428 携带 challenge，交由 SessionController 弹 Step-up 对话框。
-    const stepUpRequired = stepUpRequiredError(response, payload);
-    if (stepUpRequired) throw stepUpRequired;
     throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
       status: response.status,
       code: payload?.code,
@@ -223,14 +215,12 @@ export async function changePassword(
   newPassword: string,
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<CredentialMutationResult> {
   const result = await postAuthenticated(
     "/api/v1/users/change-password",
     { old_password: oldPassword, new_password: newPassword },
     accessToken,
     signal,
-    stepUpProof,
   );
   const data = recordData(result.payload.data);
   return {
@@ -243,14 +233,12 @@ export async function changeUsername(
   newUsername: string,
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<CredentialMutationResult> {
   const result = await postAuthenticated(
     "/api/v1/users/change-username",
     { new_username: newUsername },
     accessToken,
     signal,
-    stepUpProof,
   );
   const data = recordData(result.payload.data);
   return {
@@ -291,14 +279,12 @@ export async function changeEmail(
   emailCode: string,
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<CredentialMutationResult> {
   const result = await postAuthenticated(
     "/api/v1/users/change-email",
     { new_email: newEmail, email_code: emailCode },
     accessToken,
     signal,
-    stepUpProof,
   );
   const data = recordData(result.payload.data);
   return {
@@ -363,14 +349,12 @@ export async function revokeSession(
   sessionId: string,
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<void> {
   const result = await postAuthenticated(
     "/api/v1/users/sessions/revoke",
     { session_id: sessionId },
     accessToken,
     signal,
-    stepUpProof,
   );
   const data = recordData(result.payload.data);
   if (data?.session_revoked !== true) {
@@ -452,18 +436,16 @@ export type TotpSetupResult = {
   digits: number;
 };
 
-/// TOTP 配置初始化：生成共享密钥与 otpauth URI（未激活，需 Step-up）。
+/// TOTP 配置初始化：生成共享密钥与 otpauth URI（未激活）。
 export async function setupTotp(
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<TotpSetupResult> {
   const result = await postAuthenticated(
     "/api/v1/users/mfa/totp/setup",
     {},
     accessToken,
     signal,
-    stepUpProof,
   ).catch((cause: unknown) => {
     // 服务端未配置 [security.totp] 时 MFA Action 不注册（404），转为可操作的提示。
     if (cause instanceof ApiError && cause.status === 404) {
@@ -508,14 +490,12 @@ export async function activateTotp(
   code: string,
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<TotpActivateResult> {
   const result = await postAuthenticated(
     "/api/v1/users/mfa/totp/activate",
     { secret, code },
     accessToken,
     signal,
-    stepUpProof,
   );
   const data = recordData(result.payload.data);
   const recoveryCodes = Array.isArray(data?.recovery_codes)
@@ -541,19 +521,17 @@ export async function activateTotp(
   };
 }
 
-/// TOTP 停用：关闭第二因子并作废全部恢复码（需登录 + Step-up 重认证）。
+/// TOTP 停用：关闭第二因子并作废全部恢复码。
 /// 成功后既有会话全部失效，调用方必须引导重新登录。
 export async function deactivateTotp(
   accessToken: string | undefined,
   signal?: AbortSignal,
-  stepUpProof?: string,
 ): Promise<CredentialMutationResult> {
   const result = await postAuthenticated(
     "/api/v1/users/mfa/totp/deactivate",
     {},
     accessToken,
     signal,
-    stepUpProof,
   );
   const data = recordData(result.payload.data);
   if (data?.totp_activated !== false || data.relogin_required !== true) {
