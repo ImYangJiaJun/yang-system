@@ -2398,7 +2398,7 @@ async fn admin_issue_password_reset_declares_only_the_split_permission() {
 async fn deleting_an_account_leaves_no_orphan_authorization_rows() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    let user = harness::grant_only(&app, &admin, "victim", "demo.notes.read").await;
+    let user = harness::grant_only(&app, &admin, "victim", "feishu.datasource.read").await;
     let group_id = harness::create_group(&app, &admin, "temp", "临时").await;
     harness::add_member(&app, &admin, group_id, user.user_id).await;
 
@@ -3455,7 +3455,7 @@ async fn a_non_admin_cannot_grant_an_admin_equivalent_permission() {
     // 攻击者：只直授 `access.grants.write`（非管理员等价），完全不在全权组内。
     let outsider = harness::grant_only(&app, &admin, "outsider", "access.grants.write").await;
     // 目标：普通账号，此刻只直授了一条非管理员等价权限。
-    let target = harness::grant_only(&app, &admin, "target", "demo.notes.read").await;
+    let target = harness::grant_only(&app, &admin, "target", "feishu.datasource.read").await;
 
     let status = harness::grant_permission_status(
         &app,
@@ -3471,7 +3471,7 @@ async fn a_non_admin_cannot_grant_an_admin_equivalent_permission() {
     assert_eq!(
         harness::grant_rows_of_user(&app, target.user_id).await,
         1,
-        "被拒的授予不得落库（目标应仍只有夹具给的那一条 demo.notes.read）"
+        "被拒的授予不得落库（目标应仍只有夹具给的那一条 feishu.datasource.read）"
     );
 }
 
@@ -3519,7 +3519,7 @@ async fn a_non_admin_cannot_add_a_member_to_a_group_holding_admin_equivalent_per
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
     let outsider = harness::grant_only(&app, &admin, "outsider", "access.groups.write").await;
-    let target = harness::grant_only(&app, &admin, "target", "demo.notes.read").await;
+    let target = harness::grant_only(&app, &admin, "target", "feishu.datasource.read").await;
     // 前置：由全权组成员把管理员等价权限写进组（这条操作本身必须放行）。
     let group_id = harness::create_group(&app, &admin, "credential_ops", "凭据运营组").await;
     assert_eq!(
@@ -3550,7 +3550,7 @@ async fn a_non_admin_cannot_add_a_member_to_a_group_holding_admin_equivalent_per
 async fn a_system_admin_can_grant_admin_equivalent_permissions_and_membership() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    let target = harness::grant_only(&app, &admin, "target", "demo.notes.read").await;
+    let target = harness::grant_only(&app, &admin, "target", "feishu.datasource.read").await;
 
     // 路径一：直接授予。
     assert_eq!(
@@ -3581,7 +3581,7 @@ async fn a_system_admin_can_grant_admin_equivalent_permissions_and_membership() 
     assert!(harness::group_holds_item(&app, group_id, "account.users.reset_credentials").await);
 
     // 路径三：把成员加进已含管理员等价权限的组。
-    let other = harness::grant_only(&app, &admin, "other", "demo.notes.read").await;
+    let other = harness::grant_only(&app, &admin, "other", "feishu.datasource.read").await;
     assert_eq!(
         harness::add_member_status(&app, &admin, group_id, other.user_id).await,
         200,
@@ -3628,7 +3628,7 @@ async fn the_permission_catalog_marks_exactly_the_admin_equivalent_permissions()
         "access.grants.write",
         "access.groups.write",
         "account.users.manage",
-        "demo.notes.read",
+        "feishu.datasource.read",
     ] {
         assert_eq!(
             harness::catalog_flag_of(&app, &admin, permission).await,
@@ -4143,7 +4143,8 @@ async fn a_user_without_the_required_permission_is_rejected_with_403() {
     let target = harness::register_with_code(&app, "target", "target@example.com")
         .await
         .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));
-    let status = harness::grant_permission_status(&app, &outsider, target, "demo.notes.read").await;
+    let status =
+        harness::grant_permission_status(&app, &outsider, target, "feishu.datasource.read").await;
     assert_eq!(
         status, 403,
         "缺 access.grants.write 授予必须 403 PermissionDenied，实际 {status}"
@@ -4246,7 +4247,7 @@ async fn batch_grant_permissions_writes_every_item_and_repeats_idempotently() {
         harness::grant_item(alice, "access.grants.read"),
         harness::grant_item(alice, "access.grants.write"),
         harness::grant_item(bob, "access.groups.read"),
-        harness::grant_item(bob, "demo.notes.read"),
+        harness::grant_item(bob, "feishu.datasource.read"),
     ];
     let version_alice_before = harness::authz_version_of(&app, alice).await;
     let response = harness::batch_grant_permissions(&app, &admin, &items)
@@ -4301,7 +4302,7 @@ async fn batch_grant_permissions_writes_every_item_and_repeats_idempotently() {
     }
     let bob_permissions = token_permissions(&harness::login_as(&app, "bob").await)
         .unwrap_or_else(|error| panic!("校验 bob Token claims 失败: {error}"));
-    for permission in ["access.groups.read", "demo.notes.read"] {
+    for permission in ["access.groups.read", "feishu.datasource.read"] {
         assert!(
             bob_permissions.iter().any(|p| p == permission),
             "bob 的新令牌必须含 {permission}，实际 {bob_permissions:?}"
@@ -4527,7 +4528,7 @@ async fn a_batch_grant_containing_an_admin_equivalent_permission_is_rejected_who
     // 反向对照：同一操作者授予纯普通权限的批量必须成功——拒绝面过宽同样是故障。
     let items = [
         harness::grant_item(target, "access.grants.read"),
-        harness::grant_item(target, "demo.notes.read"),
+        harness::grant_item(target, "feishu.datasource.read"),
     ];
     let response = harness::batch_grant_permissions(&app, &outsider, &items)
         .await
@@ -4759,7 +4760,7 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
         &admin,
         &[harness::grant_item_with_expiry(
             holder,
-            "demo.notes.read",
+            "feishu.datasource.read",
             expires_at,
         )],
     )
@@ -4786,7 +4787,7 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
     let renewed = harness::batch_grant_permissions(
         &app,
         &admin,
-        &[harness::grant_item(holder, "demo.notes.read")],
+        &[harness::grant_item(holder, "feishu.datasource.read")],
     )
     .await
     .unwrap_or_else(|error| panic!("批量续期失败: {error}"));
@@ -4807,9 +4808,9 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
         version_before + 1,
         "批量续期必须恰好递增一次授权版本"
     );
-    let renewed_view = harness::grant_view_of(&app, &admin, holder, "demo.notes.read")
+    let renewed_view = harness::grant_view_of(&app, &admin, holder, "feishu.datasource.read")
         .await
-        .unwrap_or_else(|| panic!("审计视图缺少 demo.notes.read 条目"));
+        .unwrap_or_else(|| panic!("审计视图缺少 feishu.datasource.read 条目"));
     assert!(
         renewed_view["expires_at"].is_null(),
         "批量续期为永久必须清空 expires_at: {renewed_view}"
@@ -4822,7 +4823,7 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
     let refreshed = token_permissions(&harness::login_as(&app, "holder_renew").await)
         .unwrap_or_else(|error| panic!("校验批量续期后 Token claims 失败: {error}"));
     assert!(
-        refreshed.iter().any(|p| p == "demo.notes.read"),
+        refreshed.iter().any(|p| p == "feishu.datasource.read"),
         "批量续期为永久后刷新令牌必须仍含该权限，实际 {refreshed:?}"
     );
 }

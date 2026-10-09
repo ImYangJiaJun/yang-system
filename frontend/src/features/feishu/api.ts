@@ -1991,7 +1991,9 @@ export function useApprovalRequestList(
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
   return useQuery({
-    enabled: canReadApproval(catalogData) && options.enabled !== false,
+    enabled:
+      hasOperation(catalogData, APPROVAL_OPERATION_IDS.listRequests) &&
+      options.enabled !== false,
     queryKey: feishuQueryKeys.approvalRequestList(query),
     queryFn: ({ signal }) =>
       listApprovalRequests(query, { catalog: catalogData, session }, signal),
@@ -2010,7 +2012,7 @@ export function useApprovalTasks(
   const catalogData = catalog.data;
   return useQuery({
     enabled:
-      canReadApproval(catalogData) &&
+      hasOperation(catalogData, APPROVAL_OPERATION_IDS.listTasks) &&
       configId !== null &&
       options.enabled !== false,
     queryKey: [FEISHU_QUERY_ROOT, "approval-tasks", configId],

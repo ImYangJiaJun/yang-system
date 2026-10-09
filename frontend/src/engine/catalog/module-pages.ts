@@ -22,6 +22,7 @@ export interface ModulePageDefinition {
   description: string;
   icon: string;
   order: number;
+  link?: string;
   primaryAction?: ActionDemoSchema;
   actions: ActionDemoSchema[];
   actionPresentations: ActionPresentationSchema[];
@@ -37,6 +38,10 @@ const iconTokens: Readonly<Record<string, string>> = {
   organization_profile: "apartment",
   organizations: "domain",
   person: "account_circle",
+  access: "admin_panel_settings",
+  admin_panel_settings: "admin_panel_settings",
+  database: "database",
+  send: "send",
 };
 
 function iconFor(token: string): string {
@@ -72,6 +77,7 @@ export function buildAccountModulePages(
         description: module.description,
         icon: iconFor(module.icon),
         order: module.order,
+        link: module.app_route ?? undefined,
         primaryAction,
         actions: moduleActions,
         actionPresentations: module.action_presentations.filter(

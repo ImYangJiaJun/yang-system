@@ -44,6 +44,91 @@ describe("parseUiCatalog", () => {
     expect(catalog.actions[0]?.operation_id).toBe("demo.echo");
   });
 
+  it("接受 2.4 Module 路由并拒绝歧义路由", () => {
+    const catalog = parseUiCatalog(
+      envelope({
+        schema_version: "2.4",
+        modules: [
+          {
+            module_id: "account.user",
+            identity: {
+              id: "user",
+              title: "个人账户",
+              icon: "person",
+              order: 0,
+            },
+            title: "账号设置",
+            description: "",
+            icon: "account",
+            order: 0,
+            app_route: "/account",
+            primary_action: null,
+            actions: [],
+            action_presentations: [],
+            views: [],
+          },
+        ],
+      }),
+    );
+    expect(catalog.modules[0]?.app_route).toBe("/account");
+
+    for (const app_route of [
+      "",
+      "relative",
+      "//external",
+      "/has space",
+      "/has\\slash",
+      "/a\n",
+      "/a\u0085",
+      "/a\u009f",
+      `/${"界".repeat(512)}`,
+    ]) {
+      expect(() =>
+        parseUiCatalog(
+          envelope({
+            schema_version: "2.4",
+            modules: [
+              {
+                module_id: "account.user",
+                identity: {
+                  id: "user",
+                  title: "个人账户",
+                  icon: "person",
+                  order: 0,
+                },
+                title: "账号设置",
+                description: "",
+                icon: "account",
+                order: 0,
+                app_route,
+                primary_action: null,
+                actions: [],
+                action_presentations: [],
+                views: [],
+              },
+            ],
+          }),
+        ),
+      ).toThrow(ContractError);
+    }
+    for (const app_route of [
+      null,
+      undefined,
+      "/",
+      "/a\uFEFFb",
+      `/${"😀".repeat(511)}`,
+    ]) {
+      expect(
+        parseUiCatalog(
+          envelope({
+            schema_version: "2.4",
+            modules: [{ ...catalog.modules[0], app_route }],
+          }),
+        ).modules[0]?.app_route,
+      ).toBe(app_route);
+    }
+  });
+
   it("对未知响应枚举安全降级为 json", () => {
     const payload = envelope({
       actions: [{ ...action, response_kind: "future-stream" }],

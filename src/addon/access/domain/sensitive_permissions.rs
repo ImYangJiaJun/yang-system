@@ -103,7 +103,7 @@ mod tests {
             "access.grants.write",
             "access.groups.write",
             "account.users.manage",
-            "demo.notes.read",
+            "feishu.datasource.read",
             "feishu.datasource.read",
         ] {
             assert!(

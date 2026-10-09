@@ -27,6 +27,7 @@ type Handler = (body: Record<string, unknown>) => HandlerResult;
 export type ApprovalApiStubOptions = {
   /// 目录里有没有这四粒权限位（不给了就等于「这个身份没有」）。
   approvalRead?: boolean;
+  onlyRead?: "configs" | "requests";
   approvalWrite?: boolean;
   /// 向导的坐标/字段端点（list_bitable_*）归 `feishu.datasource.write`。
   datasourceWrite?: boolean;
@@ -77,7 +78,11 @@ function catalogFor(options: ApprovalApiStubOptions) {
     (options.approvalWrite ?? true) ? "1" : "0",
     (options.datasourceWrite ?? true) ? "1" : "0",
   ].join("");
-  const revision = `${flags}${"a".repeat(64)}`.slice(0, 64);
+  const revision =
+    `${flags}${options.onlyRead === "configs" ? "c" : options.onlyRead === "requests" ? "d" : "a"}${"a".repeat(64)}`.slice(
+      0,
+      64,
+    );
   const actions = [];
   if (options.approvalRead ?? true) {
     actions.push(
@@ -142,7 +147,12 @@ function catalogFor(options: ApprovalApiStubOptions) {
     data: {
       schema_version: "2.3",
       revision,
-      actions,
+      actions: actions.filter(
+        (a) =>
+          !options.onlyRead ||
+          a.operation_id !==
+            `feishu.approval.list_${options.onlyRead === "configs" ? "requests" : "configs"}`,
+      ),
       table_views: [],
       modules: [],
     },

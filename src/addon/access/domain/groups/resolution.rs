@@ -104,11 +104,11 @@ mod tests {
         // 内置组的条目由目录计算，即使表里意外有行也不参与。
         let resolved = resolve_group_permissions(
             SYSTEM_ADMIN_GROUP_KEY,
-            &["demo.notes.read".to_string()],
+            &["legacy.notes.read".to_string()],
             &catalog(),
         );
         assert_eq!(resolved, catalog());
-        assert!(!resolved.iter().any(|p| p == "demo.notes.read"));
+        assert!(!resolved.iter().any(|p| p == "legacy.notes.read"));
     }
 
     #[test]
@@ -133,11 +133,11 @@ mod tests {
     fn orphan_items_are_reported_but_never_resolved_into_permissions() {
         // Review Focus 5：目录收缩后组里的权限条目成为孤儿。
         let items = vec![
-            "demo.notes.read".to_string(),
+            "legacy.notes.read".to_string(),
             "access.grants.read".to_string(),
         ];
         let orphans = orphan_items(&items, &catalog());
-        assert_eq!(orphans, ["demo.notes.read"], "孤儿条目必须被标记出来");
+        assert_eq!(orphans, ["legacy.notes.read"], "孤儿条目必须被标记出来");
 
         // 关键：孤儿条目**不参与解析**，因此不会放大权限，也不会 panic。
         let resolved = resolve_group_permissions("ops", &items, &catalog());

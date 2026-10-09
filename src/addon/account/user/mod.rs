@@ -67,7 +67,8 @@ pub(super) fn build_module(
 /// 前端展示投影（用户中心导航）。
 fn presentation(credential_mutations_enabled: bool) -> ModulePresentationSpec {
     let mut presentation =
-        ModulePresentationSpec::new(crate::addon::user_identity(), "用户中心", "account")
+        ModulePresentationSpec::new(crate::addon::user_identity(), "账号设置", "account")
+            .app_route("/account")
             .description("查看当前登录账号与管理会话")
             .order(10)
             .primary_action(yang_base::action!("account.user.me"))

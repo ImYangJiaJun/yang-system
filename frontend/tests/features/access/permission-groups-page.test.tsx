@@ -251,12 +251,12 @@ function permissionWire(overrides: Record<string, unknown> = {}) {
 const PERMISSION_CATALOG = [
   permissionWire(),
   permissionWire({
-    permission: "demo.notes.read",
-    declared_by: ["demo.notes.list_notes"],
+    permission: "feishu.datasource.read",
+    declared_by: ["feishu.datasource.list_datasources"],
   }),
   permissionWire({
-    permission: "demo.notes.write",
-    declared_by: ["demo.notes.create_note"],
+    permission: "feishu.datasource.write",
+    declared_by: ["feishu.datasource.create_datasource"],
   }),
   permissionWire({
     permission: "account.users.reset_credentials",
@@ -525,7 +525,7 @@ describe("权限组管理页", () => {
         ...groupDetailWire({ id: 2 }),
         items: [
           { permission: "account.users.read", is_orphan: false },
-          { permission: "demo.notes.read", is_orphan: true },
+          { permission: "legacy.notes.read", is_orphan: true },
         ],
       }),
     });
@@ -533,7 +533,9 @@ describe("权限组管理页", () => {
     renderPage();
 
     const items = await screen.findByRole("list", { name: "组权限条目" });
-    const orphanRow = within(items).getByText("demo.notes.read").closest("li");
+    const orphanRow = within(items)
+      .getByText("legacy.notes.read")
+      .closest("li");
     const normalRow = within(items)
       .getByText("account.users.read")
       .closest("li");

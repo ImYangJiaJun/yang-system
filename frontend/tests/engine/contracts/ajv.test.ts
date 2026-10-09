@@ -9,7 +9,7 @@ import {
 
 describe("动态 Schema 关键词白名单", () => {
   it("合法子集（后端 input_schema 真实形态）编译通过并可校验", () => {
-    // 形态取自后端 demo.notes.query 的 input_schema：draft-07 方言标记 + 本地
+    // 通用查询 input_schema 形态：draft-07 方言标记 + 本地
     // definitions + allOf 包装 $ref + default 注解。
     const schema = {
       $schema: "http://json-schema.org/draft-07/schema#",

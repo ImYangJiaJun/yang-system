@@ -1,3 +1,4 @@
+import { Navigate } from "react-router";
 import AppLayout from "@/shell/AppLayout";
 import AccountSettingsPage from "@/features/account/AccountSettingsPage";
 import BusinessPage from "@/shell/pages/BusinessPage";
@@ -102,24 +103,23 @@ export const appRoutes = [
             hydrateFallbackElement: <RouteFallback />,
           },
           {
-            // 审批派发控制台：配置页。同样路由级 lazy + 兜底（硬导航约定见下）。
-            path: "feishu/approval/configs",
+            // 审批派发控制台：配置与记录 tabs，路由级 lazy + 兜底。
+            path: "feishu/approval",
             lazy: async () => ({
               Component: (
-                await import("@/features/feishu/views/ApprovalConfigsPage")
+                await import("@/features/feishu/views/ApprovalConsolePage")
               ).default,
             }),
             hydrateFallbackElement: <RouteFallback />,
           },
           {
-            // 审批派发控制台：派发记录页。
+            // 旧 URL 保留为可替换历史记录的重定向。
+            path: "feishu/approval/configs",
+            element: <Navigate to="/feishu/approval?tab=configs" replace />,
+          },
+          {
             path: "feishu/approval/requests",
-            lazy: async () => ({
-              Component: (
-                await import("@/features/feishu/views/ApprovalRequestsPage")
-              ).default,
-            }),
-            hydrateFallbackElement: <RouteFallback />,
+            element: <Navigate to="/feishu/approval?tab=requests" replace />,
           },
           {
             // 权限工作台：三视图（按用户/按功能/按组），同样路由级 lazy，

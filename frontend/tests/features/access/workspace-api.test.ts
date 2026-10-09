@@ -257,7 +257,7 @@ describe("listUserGrants 用户直授列表", () => {
         },
         // 缺 id：撤销定位不了，丢
         {
-          permission: "demo.notes.read",
+          permission: "access.grants.read",
           granted_by: 9,
           occurred_at: 0,
           expires_at: null,

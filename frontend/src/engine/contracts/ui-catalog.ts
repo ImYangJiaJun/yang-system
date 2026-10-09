@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const SUPPORTED_UI_SCHEMA_VERSIONS = ["2.2", "2.3"] as const;
+export const SUPPORTED_UI_SCHEMA_VERSIONS = ["2.2", "2.3", "2.4"] as const;
 type SupportedUiSchemaVersion = (typeof SUPPORTED_UI_SCHEMA_VERSIONS)[number];
 
 const jsonSchema = z.record(z.string(), z.unknown());
@@ -214,6 +214,23 @@ export const modulePresentationSchema = z.object({
   description: z.string(),
   icon: z.string().min(1),
   order: z.number().int(),
+  app_route: z
+    .string()
+    .refine(
+      (route) =>
+        route.startsWith("/") &&
+        !route.startsWith("//") &&
+        Array.from(route).length <= 512 &&
+        !Array.from(route).some(
+          (character) =>
+            /\p{White_Space}/u.test(character) ||
+            /\p{Cc}/u.test(character) ||
+            character === "\\",
+        ),
+      "必须是合法的站内路径",
+    )
+    .nullable()
+    .optional(),
   primary_action: z.string().min(1).nullable().optional(),
   actions: z.array(z.string().min(1)),
   action_presentations: z.array(actionPresentationSchema),

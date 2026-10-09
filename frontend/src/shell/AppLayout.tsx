@@ -4,7 +4,6 @@ import {
   Check,
   ChevronsUpDown,
   CircleUser,
-  ClipboardList,
   Database,
   Send,
   LogOut,
@@ -17,7 +16,7 @@ import {
 } from "lucide-react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 
-import { useUiCatalog } from "@/engine/catalog/use-catalog";
+import { useUiCatalog } from "@/engine";
 import { useSessionController } from "@/engine/session/use-session";
 import {
   applyDensity,
@@ -27,6 +26,7 @@ import {
   type Density,
 } from "@/shell/density";
 import { useIdentity } from "@/features/auth/use-identity";
+import { resolveIdentityLanding } from "@/features/auth/identity";
 import { useMe } from "@/features/account/api";
 import { UserAvatar } from "@/features/account/UserAvatar";
 import {
@@ -50,7 +50,6 @@ import {
   visibleAccountIdentities,
 } from "@/engine/catalog/module-pages";
 import type { UiCatalog } from "@/engine/contracts/ui-catalog";
-import { canReadAccessWorkspace } from "./access-workspace-permission";
 import { cn } from "@/shared/lib/utils";
 import logoDarkUrl from "@/shared/assets/logo-dark.png";
 import logoLightUrl from "@/shared/assets/logo-light.png";
@@ -59,6 +58,9 @@ export type ShellContext = { catalog: UiCatalog };
 
 /// 旧前端 Material Symbols 图标 token 到 lucide 组件的映射；未知 token 回退 Puzzle。
 const ICONS: Record<string, ComponentType<{ className?: string }>> = {
+  access: ShieldCheck,
+  database: Database,
+  send: Send,
   account: CircleUser,
   account_circle: CircleUser,
   admin_panel_settings: ShieldCheck,
@@ -91,7 +93,7 @@ function AccountSwitcher({ catalog }: { catalog: UiCatalog | undefined }) {
     const first = modulePages.find((module) => module.identity === next);
     if (!first) return;
     select(next);
-    navigate(`/m/${first.id}`);
+    navigate(first.link ?? `/m/${first.id}`);
   };
 
   return (
@@ -109,13 +111,13 @@ function AccountSwitcher({ catalog }: { catalog: UiCatalog | undefined }) {
             alt="当前用户头像"
           />
           <span className="min-w-0 flex-1 truncate text-left">
-            {active?.title ?? "未选择角色"}
+            {active?.title ?? "未选择功能域"}
           </span>
           <ChevronsUpDown className="size-3.5 text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel>切换角色</DropdownMenuLabel>
+        <DropdownMenuLabel>切换功能域</DropdownMenuLabel>
         {identities.map((candidate) => (
           <DropdownMenuItem
             key={candidate.id}
@@ -129,7 +131,7 @@ function AccountSwitcher({ catalog }: { catalog: UiCatalog | undefined }) {
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => navigate("/select-identity")}>
-              查看全部角色
+              查看全部功能域
             </DropdownMenuItem>
           </>
         )}
@@ -206,7 +208,20 @@ export default function AppLayout() {
   const [dark, setDark] = useState(false);
   const catalogQuery = useUiCatalog();
   const catalog = catalogQuery.data;
-  const { identity } = useIdentity();
+  const { identity, select, clear } = useIdentity();
+
+  useEffect(() => {
+    if (!catalog) return;
+    const landing = resolveIdentityLanding(
+      visibleAccountIdentities(buildAccountModulePages(catalog), catalog),
+      identity,
+    );
+    if (landing.kind === "direct") {
+      if (identity !== landing.identity) select(landing.identity);
+    } else if (identity) {
+      clear();
+    }
+  }, [catalog, identity, select, clear]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -220,32 +235,6 @@ export default function AppLayout() {
       page.identity === identity,
   );
   const groups = groupNavigationPages(pages, catalog);
-
-  // 飞书数据源入口的权限门控（设计 §5.2）：目录本身已按身份投影，这里直接问
-  // 「当前身份拿不拿得到 list_datasources 这个 Action」。三个权限位相互独立，
-  // 存在连读权限都没有的身份——那种身份不该看见入口（否则点进去是整页 403）。
-  const canReadFeishuDatasources = Boolean(
-    catalog?.actions.some(
-      (action) => action.operation_id === "feishu.datasource.list_datasources",
-    ),
-  );
-
-  // 组列表权限不能单独作为工作台入口权限。
-  const canReadAccessWorkspaceEntry = canReadAccessWorkspace(catalog);
-
-  // 审批派发控制台两入口的权限门控（设计 §5.3）：与数据源位独立——一个身份可能
-  // 只有审批 read（看得见派发记录）而没有数据源位。「审批派发」与「派发记录」
-  // 是同一对 read 权限位下的两条路，分开问。
-  const canReadFeishuApprovalConfigs = Boolean(
-    catalog?.actions.some(
-      (action) => action.operation_id === "feishu.approval.list_configs",
-    ),
-  );
-  const canReadFeishuApprovalRequests = Boolean(
-    catalog?.actions.some(
-      (action) => action.operation_id === "feishu.approval.list_requests",
-    ),
-  );
 
   return (
     <div className="flex h-svh overflow-hidden bg-background text-foreground">
@@ -264,114 +253,6 @@ export default function AppLayout() {
           <AccountSwitcher catalog={catalog} />
         </div>
         <nav className="flex-1 space-y-4 overflow-y-auto p-3">
-          <div>
-            <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
-              个人
-            </p>
-            <ul className="space-y-0.5">
-              <li>
-                <NavLink
-                  to="/account"
-                  className={({ isActive }) =>
-                    cn(
-                      "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                      isActive &&
-                        "bg-accent font-medium text-accent-foreground",
-                    )
-                  }
-                >
-                  <CircleUser className="size-4 shrink-0" />
-                  账号设置
-                </NavLink>
-              </li>
-            </ul>
-          </div>
-          {(canReadFeishuDatasources ||
-            canReadFeishuApprovalConfigs ||
-            canReadFeishuApprovalRequests) && (
-            <div>
-              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
-                飞书集成
-              </p>
-              <ul className="space-y-0.5">
-                {canReadFeishuDatasources && (
-                  <li>
-                    <NavLink
-                      to="/feishu/datasources"
-                      className={({ isActive }) =>
-                        cn(
-                          "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                          isActive &&
-                            "bg-accent font-medium text-accent-foreground",
-                        )
-                      }
-                    >
-                      <Database className="size-4 shrink-0" />
-                      飞书数据源
-                    </NavLink>
-                  </li>
-                )}
-                {canReadFeishuApprovalConfigs && (
-                  <li>
-                    <NavLink
-                      to="/feishu/approval/configs"
-                      className={({ isActive }) =>
-                        cn(
-                          "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                          isActive &&
-                            "bg-accent font-medium text-accent-foreground",
-                        )
-                      }
-                    >
-                      <Send className="size-4 shrink-0" />
-                      审批派发
-                    </NavLink>
-                  </li>
-                )}
-                {canReadFeishuApprovalRequests && (
-                  <li>
-                    <NavLink
-                      to="/feishu/approval/requests"
-                      className={({ isActive }) =>
-                        cn(
-                          "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                          isActive &&
-                            "bg-accent font-medium text-accent-foreground",
-                        )
-                      }
-                    >
-                      <ClipboardList className="size-4 shrink-0" />
-                      派发记录
-                    </NavLink>
-                  </li>
-                )}
-              </ul>
-            </div>
-          )}
-          {canReadAccessWorkspaceEntry && (
-            <div>
-              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
-                权限管理
-              </p>
-              <ul className="space-y-0.5">
-                <li>
-                  <NavLink
-                    to="/access/workspace"
-                    className={({ isActive }) =>
-                      cn(
-                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
-                        isActive &&
-                          "bg-accent font-medium text-accent-foreground",
-                      )
-                    }
-                  >
-                    <ShieldCheck className="size-4 shrink-0" />
-                    权限工作台
-                  </NavLink>
-                </li>
-              </ul>
-            </div>
-          )}
           {groups.map((group) => (
             <div key={group.identity}>
               <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
@@ -381,7 +262,7 @@ export default function AppLayout() {
                 {group.pages.map((page) => (
                   <li key={page.id}>
                     <NavLink
-                      to={`/m/${page.id}`}
+                      to={page.link ?? `/m/${page.id}`}
                       className={({ isActive }) =>
                         cn(
                           "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground",

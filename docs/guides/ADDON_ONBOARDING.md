@@ -5,6 +5,8 @@
 业务 Addon"的完整步骤清单、权限与所有权设计、运维授权方式、前端零代码条件与
 门禁命令。阅读前请先读 `AGENTS.md` 与 `docs/contracts/AUTHZ_GRANTS.md`。
 
+> 2026-10-09：生产便签已退役，下文 P7 案例与度量仅作历史记录。当前表/Action 范式参考 `src/addon/feishu/datasource/`；生产导航由 Catalog 单源投影，不手写业务菜单。
+
 ## 验证结论（P7）
 
 - 一个最小但真实的 CRUD 业务（便签：创建/更新/删除/分页列表，所有权隔离 +
@@ -48,7 +50,7 @@ src/addon/<addon>/
   校验与 TableView 投影；为高频过滤字段加 `.index_named(...)`。
 - Schema 由 `src/infrastructure/schema.rs` 启动期增量同步，**禁止新增 SQL
   迁移文件**（`migrations/` 为空是有意的）。
-- 参考：`src/addon/demo/notes/table.rs`（含 schema 单测范式）。
+- 当前参考：`src/addon/feishu/datasource/table.rs`；历史便签代码可在 Git 历史查看。
 
 ### 3. 机制 `domain/`
 
@@ -97,8 +99,9 @@ src/addon/<addon>/
 `AuthorizationVersionValidator`，`.authenticate_public_actions()`）→
 `actions::register_all` → `.presentation(...)` + `.view(...)`。
 
-- `ModulePresentationSpec`：身份（`crate::addon::user_identity()`）、标题、
-  图标 token、order、primary_action——前端导航据此生成模块页。
+- `ModulePresentationSpec`：功能域（`user_identity()` / `admin_identity()`）、标题、图标和 order。功能域只是导航镜头，不授予权限。
+- 专用控制台用 `.app_route("/站内路由")`；缺省回退 `/m/{module_id}`。单入口使用受保护 `primary_action` 门控；多个子页面显式 `present_action` 各读操作，由 Registry 权限剪枝，不使用 public 机器接口门控。
+- 专用控制台不声明通用 View；内部默认视图没有 data_action，不会下发原始表。前端路由必须与 app_route 一致并由实际匹配测试守护。
 - `ViewSpec`（前端零代码的关键）：`data_action`（标准分页 Action）+
   `field(...)` 列 + `present_action(...)`（Toolbar/Form 创建、Row/Form 编辑
   `.record_parameter("id")`、Row/Invoke 删除 `.confirmation(...)`）+

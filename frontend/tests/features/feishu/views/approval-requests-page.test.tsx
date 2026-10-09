@@ -232,7 +232,7 @@ describe("派发记录页 · 权限门控", () => {
     renderRequests();
 
     expect(
-      await screen.findByText(/当前身份没有查看派发记录的权限/),
+      await screen.findByText(/当前功能域没有审批控制台的读取权限/),
     ).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "派发记录" })).toBeNull();
     expect(countCalls(calls, REQUEST_LIST_PATH)).toBe(0);

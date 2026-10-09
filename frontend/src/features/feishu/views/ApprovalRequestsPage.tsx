@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { hasOperation, useUiCatalog } from "@/engine";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
@@ -33,7 +34,7 @@ import {
 } from "@/shared/ui/table";
 
 import {
-  useApprovalActions,
+  APPROVAL_OPERATION_IDS,
   useApprovalRequestList,
   useApprovalTasks,
 } from "../api";
@@ -101,7 +102,7 @@ export default function ApprovalRequestsPage() {
     [page, pageSize, debouncedBaseToken, debouncedTableId, outcome],
   );
 
-  const actions = useApprovalActions();
+  const { data: catalog } = useUiCatalog();
   const listQuery = useApprovalRequestList(query);
   // 「查看任务」下钻：只在展开行是批量受理（configId 非空）时才发请求。
   const tasksQuery = useApprovalTasks(expanded?.configId ?? null);
@@ -131,7 +132,7 @@ export default function ApprovalRequestsPage() {
     );
   }
 
-  if (!actions.canRead) {
+  if (!hasOperation(catalog, APPROVAL_OPERATION_IDS.listRequests)) {
     return (
       <div className="space-y-4 p-6">
         <h1 className="text-lg font-semibold">派发记录</h1>

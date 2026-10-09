@@ -2,21 +2,8 @@
 //!
 //! 本文件是模块的"定义卡"：表与 Action 注册表。
 //!
-//! # 为什么刻意不声明 `presentation()` 与 `view()`
-//!
-//! 控制台的入口是**自建页面**（`frontend/src/features/feishu/`），不是引擎投影的
-//! 通用 TableView。所以本模块不向 Catalog 投影任何界面。这两个必须**成对省略**：
-//!
-//! - 只省 `view()`：框架会给 `views` 为空的模块**自动合成**一个含全表列的
-//!   `feishu.datasource.default` 视图（`builder/compile.rs` 的 `module.views.is_empty()`
-//!   分支），只因它 `data_action` 为 `None` 才暂时没被投影出来——将来给模块加一个
-//!   可用作数据源的 primary action，整张表就会静默复现。
-//! - 只省 `presentation()`：模块离开 `catalog.modules`，但 view 仍在
-//!   `catalog.table_views`，前端 `navigation.ts` 的 `unassignedViews` 会把表格
-//!   挂到「工作台」分组下重新出现。
-//!
-//! 代价：原先在 `view()` 上声明的删除二次确认文案不再随 Catalog 下发，改由前端持有
-//! 同一份文案。见 `docs/architecture/feishu-datasource-console.md` §4.2 与 §5.3-1。
+//! 控制台由 presentation 的 app_route 声明入口，不声明通用 View。
+//! 框架内部默认视图没有 data_action，因而不会投影原始数据表。
 
 pub(crate) mod actions;
 pub(crate) mod domain;
@@ -27,7 +14,7 @@ use std::sync::Arc;
 use crate::addon::account::user_from_claims;
 use crate::authorization::AuthorizationVersionValidator;
 use yang_base::action::TokenAuthMiddleware;
-use yang_base::definition::{ModuleName, ModuleSpec};
+use yang_base::definition::{ModuleName, ModulePresentationSpec, ModuleSpec};
 use yang_base::BaseError;
 
 use super::domain::context::FeishuContext;
@@ -42,7 +29,12 @@ pub(crate) fn build_module(
 ) -> Result<ModuleSpec, BaseError> {
     let spec = ModuleSpec::new(module_name()?).table(table::table_spec()?);
     let spec = with_authentication(spec, authorization_validator);
-    Ok(actions::register_all(spec, context))
+    Ok(actions::register_all(spec, context).presentation(
+        ModulePresentationSpec::new(crate::addon::admin_identity(), "飞书数据源", "database")
+            .app_route("/feishu/datasources")
+            .order(30)
+            .primary_action(yang_base::action!("feishu.datasource.list_datasources")),
+    ))
 }
 
 /// 本 module 的第二个 Module：只有字段绑定表，没有 Action。
@@ -61,7 +53,7 @@ pub(crate) fn build_module(
 ///
 /// # 成对省略 `view()` 与 `presentation()`
 ///
-/// 与主表同一条纪律，理由见本文件开头的模块文档：只省一个会让表静默出现在前端。
+/// 绑定表无独立控制台入口，也没有可投影的数据 Action。
 pub(crate) fn build_field_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(field_module_name()?).table(domain::field_table::table_spec()?))
 }

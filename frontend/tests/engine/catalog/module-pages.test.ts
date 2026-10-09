@@ -100,6 +100,7 @@ function module(
     description: "",
     icon: "account",
     order: 10,
+    app_route: null,
     actions: [],
     action_presentations: [],
     views: [],
@@ -146,6 +147,18 @@ describe("module pages", () => {
       identity: "admin",
       title: "平台账号",
     });
+  });
+
+  it("把 Module 的 app_route 映射为导航 link，旧目录回退为通用页面", () => {
+    const source = catalog();
+    source.modules = [
+      module("account.user", "user", { app_route: "/account" }),
+      module("admin.user", "admin"),
+    ];
+    expect(buildAccountModulePages(source).map((page) => page.link)).toEqual([
+      "/account",
+      undefined,
+    ]);
   });
 
   it("模块 Action 只接受模块显式授权的引用，并合并到当前 View", () => {

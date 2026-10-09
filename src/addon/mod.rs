@@ -5,11 +5,14 @@
 
 pub(crate) mod access;
 pub mod account;
-pub(crate) mod demo;
 pub(crate) mod feishu;
 
 use yang_base::definition::AccountIdentitySpec;
 
 pub(crate) fn user_identity() -> AccountIdentitySpec {
     AccountIdentitySpec::new("user", "个人账户", "person").order(10)
+}
+
+pub(crate) fn admin_identity() -> AccountIdentitySpec {
+    AccountIdentitySpec::new("admin", "系统管理", "admin_panel_settings").order(20)
 }

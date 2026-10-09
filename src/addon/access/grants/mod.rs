@@ -61,7 +61,8 @@ pub(super) fn build_module(
 
 /// 前端展示投影（权限管理导航）。
 fn presentation() -> ModulePresentationSpec {
-    ModulePresentationSpec::new(crate::addon::user_identity(), "权限管理", "access")
+    ModulePresentationSpec::new(crate::addon::admin_identity(), "权限管理", "access")
+        .app_route("/access/workspace")
         .description("管理用户直授权限与权限目录")
         .order(20)
         .primary_action(yang_base::action!("access.grants.list_user_grants"))

@@ -172,9 +172,9 @@ describe("审批派发配置页 · 权限门控", () => {
     renderConfigs();
 
     expect(
-      await screen.findByText(/当前身份没有查看审批派发配置的权限/),
+      await screen.findByText(/当前功能域没有审批控制台的读取权限/),
     ).toBeInTheDocument();
-    // 侧边栏入口不渲染（门控照 canReadFeishuDatasources 模式）
+    // 无 Catalog Module 就不会生成导航入口。
     expect(screen.queryByRole("link", { name: "审批派发" })).toBeNull();
     // 不发那次注定 403 的请求
     expect(countCalls(calls, CONFIG_LIST_PATH)).toBe(0);

@@ -23,7 +23,7 @@ const CATALOG_PATH = "/.well-known/yang/ui-catalog";
 const PERMISSIONS_PATH = "/api/v1/access/permissions";
 const GRANT_PATH = "/api/v1/access/grants";
 const USER_GRANTS_PATH = "/api/v1/access/users/";
-const NOTES_PATH = "/api/v1/demo/notes/query";
+const DATASOURCE_PATH = "/api/v1/feishu/datasources/query";
 
 type CapturedRequest = { url: string; method: string; body: unknown };
 
@@ -158,12 +158,12 @@ function accessGrantsModule() {
 }
 
 /// 无必填参数主 Action 的普通模块（防回归：自动加载路径不能被查询条件条改坏）。
-function listNotesModule() {
+function listDatasourceModule() {
   const actions = [
     action(
-      "demo.notes.list_notes",
+      "feishu.datasource.list_datasources",
       "POST",
-      NOTES_PATH,
+      DATASOURCE_PATH,
       [param("page", "query"), param("limit", "query")],
       {
         type: "object",
@@ -196,14 +196,14 @@ function listNotesModule() {
     table_views: [],
     modules: [
       {
-        module_id: "demo.notes",
+        module_id: "feishu.datasource",
         identity: { id: "user", title: "用户", icon: "person", order: 1 },
-        title: "笔记",
+        title: "飞书数据源",
         description: "",
-        icon: "notes",
+        icon: "database",
         order: 10,
-        primary_action: "demo.notes.list_notes",
-        actions: ["demo.notes.list_notes"],
+        primary_action: "feishu.datasource.list_datasources",
+        actions: ["feishu.datasource.list_datasources"],
         action_presentations: [],
         views: [],
       },
@@ -225,14 +225,14 @@ function installFetchMock(catalog: () => unknown) {
       if (url.includes(PERMISSIONS_PATH)) {
         return envelope({ permissions: [] });
       }
-      if (url.includes(NOTES_PATH)) {
+      if (url.includes(DATASOURCE_PATH)) {
         captured.push({
           url,
           method: init?.method ?? "GET",
           body: init?.body ? JSON.parse(String(init.body)) : undefined,
         });
         return envelope({
-          items: [{ id: 1, title: "第一条笔记" }],
+          items: [{ id: 1, title: "第一个数据源" }],
           page: 1,
           page_size: 20,
           total: 1,
@@ -350,11 +350,13 @@ describe("access.grants 模块页（主 Action 带必填参数）", () => {
 
 describe("无必填参数主 Action 的模块", () => {
   it("进页照旧自动加载并渲染表格", async () => {
-    const { captured } = installFetchMock(listNotesModule);
-    renderTestApp({ path: "/m/demo.notes", authenticated: true });
+    const { captured } = installFetchMock(listDatasourceModule);
+    renderTestApp({ path: "/m/feishu.datasource", authenticated: true });
 
-    expect(await screen.findByText("第一条笔记")).toBeInTheDocument();
-    expect(captured.some((call) => call.url.includes(NOTES_PATH))).toBe(true);
+    expect(await screen.findByText("第一个数据源")).toBeInTheDocument();
+    expect(captured.some((call) => call.url.includes(DATASOURCE_PATH))).toBe(
+      true,
+    );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

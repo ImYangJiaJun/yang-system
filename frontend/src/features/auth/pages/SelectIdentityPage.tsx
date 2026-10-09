@@ -12,7 +12,7 @@ import {
   visibleAccountIdentities,
 } from "@/engine/catalog/module-pages";
 
-/// 工作身份选择页（旧 RoleSelectionPage.vue 语义）：多身份账号登录后的入口。
+/// 功能域选择页（旧 RoleSelectionPage.vue 语义）：多身份账号登录后的入口。
 export default function SelectIdentityPage() {
   const controller = useSessionController();
   const navigate = useNavigate();
@@ -28,7 +28,7 @@ export default function SelectIdentityPage() {
     const first = modulePages.find((module) => module.identity === identity);
     if (!first) return;
     select(identity);
-    navigate(`/m/${first.id}`, { replace: true });
+    navigate(first.link ?? `/m/${first.id}`, { replace: true });
   };
 
   const logout = async () => {
@@ -65,21 +65,21 @@ export default function SelectIdentityPage() {
         <div className="mb-8 space-y-2">
           <p className="text-sm text-muted-foreground">工作身份</p>
           <h1 className="text-2xl font-bold tracking-tight">
-            选择本次使用的角色
+            选择本次使用的功能域
           </h1>
           <p className="text-sm text-muted-foreground">
-            角色决定本次会话可进入的业务模块，之后仍可从账号菜单切换。
+            功能域仅筛选已授权的模块，切换不会授予权限；之后可从账号菜单切换。
           </p>
         </div>
 
         {catalogQuery.isPending ? (
-          <div className="grid gap-4 sm:grid-cols-2" aria-label="角色加载中">
+          <div className="grid gap-4 sm:grid-cols-2" aria-label="功能域加载中">
             <Skeleton className="h-36" />
             <Skeleton className="h-36" />
           </div>
         ) : catalogQuery.isError ? (
           <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4">
-            <p className="font-medium text-destructive">角色目录加载失败</p>
+            <p className="font-medium text-destructive">功能域目录加载失败</p>
             <p className="mt-1 text-sm text-muted-foreground">
               {catalogQuery.error instanceof Error
                 ? catalogQuery.error.message
@@ -113,7 +113,7 @@ export default function SelectIdentityPage() {
                 </p>
                 <Button
                   className="mt-4 w-full"
-                  aria-label={`选择${identity.title}角色`}
+                  aria-label={`选择${identity.title}功能域`}
                   onClick={() => selectIdentity(identity.id)}
                 >
                   以{identity.title}进入
@@ -125,9 +125,9 @@ export default function SelectIdentityPage() {
         ) : (
           <div className="flex flex-col items-center gap-3 py-12 text-center">
             <UserRoundX className="size-10 text-muted-foreground" />
-            <p className="font-medium">当前账号没有可用角色</p>
+            <p className="font-medium">当前账号没有可用功能域</p>
             <p className="text-sm text-muted-foreground">
-              请联系管理员配置角色与模块权限。
+              请联系管理员配置功能域与模块权限。
             </p>
           </div>
         )}

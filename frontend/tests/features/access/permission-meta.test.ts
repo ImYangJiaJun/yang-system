@@ -75,7 +75,7 @@ function catalogWith(modules: UiCatalog["modules"]): UiCatalog {
 
 const CATALOG = catalogWith([
   modulePresentation("access.grants", "权限管理"),
-  modulePresentation("demo.notes", "便签"),
+  modulePresentation("feishu.datasource", "飞书数据源"),
   modulePresentation("account.user", "个人账户"),
 ]);
 
@@ -105,8 +105,8 @@ const ENTRIES: PermissionCatalogEntry[] = [
     reason: null,
   },
   {
-    permission: "demo.notes.read",
-    declaredBy: ["demo.notes.list_notes"],
+    permission: "feishu.datasource.read",
+    declaredBy: ["feishu.datasource.list_datasources"],
     adminEquivalent: false,
     reason: null,
   },
@@ -142,9 +142,9 @@ describe("buildPermissionMeta 条目映射", () => {
     expect(write?.reason).toBe("授予后可以修改任何用户的权限");
 
     // declaredBy 有值但目录里不存在：同样回退
-    const notes = meta.get("demo.notes.read");
-    expect(notes?.title).toBe("demo.notes.read");
-    expect(notes?.moduleTitle).toBe("便签");
+    const datasource = meta.get("feishu.datasource.read");
+    expect(datasource?.title).toBe("feishu.datasource.read");
+    expect(datasource?.moduleTitle).toBe("飞书数据源");
   });
 
   it("模块前缀命不中 module_id 时回退 identity.title，都命不中则为 undefined", () => {
@@ -175,7 +175,7 @@ describe("buildPermissionMeta 条目映射", () => {
       "access.grants.read",
       "access.grants.write",
       "account.users.read",
-      "demo.notes.read",
+      "feishu.datasource.read",
     ]);
   });
 
@@ -193,7 +193,7 @@ describe("groupPermissionMeta 分组", () => {
     expect(groups.map((group) => group.title)).toEqual([
       "权限管理",
       "account.users",
-      "便签",
+      "飞书数据源",
     ]);
     expect(groups[0].permissions.map((item) => item.permission)).toEqual([
       "access.grants.read",

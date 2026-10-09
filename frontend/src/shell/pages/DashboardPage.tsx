@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Search } from "lucide-react";
 import { Link, Navigate, useOutletContext } from "react-router";
 
@@ -16,18 +16,11 @@ import { productLowerCase } from "@/shared/lib/product-locale";
 /// 应用中心（旧 DashboardPage.vue 语义）：身份过滤后的模块卡片 + 未分配视图入口。
 export default function DashboardPage() {
   const { catalog } = useOutletContext<ShellContext>();
-  const { identity, select } = useIdentity();
+  const { identity } = useIdentity();
   const [query, setQuery] = useState("");
 
   const modulePages = buildAccountModulePages(catalog);
   const identities = visibleAccountIdentities(modulePages, catalog);
-
-  // 单身份账号直接进入（旧语义：/roles 手动选择；M3 起单身份免选）。
-  useEffect(() => {
-    if (!identity && identities.length === 1 && identities[0]) {
-      select(identities[0].id);
-    }
-  }, [identity, identities, select]);
 
   // 多身份且未选择（或所选身份已不可见）→ 选择页。
   if (
@@ -85,7 +78,7 @@ export default function DashboardPage() {
         {modules.map((module) => (
           <Link
             key={module.id}
-            to={`/m/${module.id}`}
+            to={module.link ?? `/m/${module.id}`}
             data-testid={`module-card-${module.id}`}
             className="rounded-lg border border-border bg-card p-5 transition-colors hover:border-primary/50"
           >

@@ -1,4 +1,4 @@
-use crate::addon::{access, account, demo, feishu};
+use crate::addon::{access, account, feishu};
 use crate::authorization::{AuthorizationVersionCache, AuthorizationVersionValidator};
 use crate::config::SecuritySettings;
 use anyhow::Context;
@@ -83,8 +83,6 @@ fn build_application(
     // 引导声明器与账号生命周期守卫都由 access 域实现：它是唯一持有组事实受信 writer 的域。
     let system_owner_claimer = access.system_owner_claimer();
     let system_authorization = access.system_authorization_port();
-    let demo =
-        demo::build_addon(authorization_validator.clone()).context("构建 demo Addon 失败")?;
     // 飞书 Addon 需要 MySQL（两张表的 Repository 绑定连接池）。缺 MySQL 时不装配——
     // 与上面 `RedisNotInitialized => None` 同一个惯例：运行态缺失不是错误，
     // 只有真实故障才向上冒泡。
@@ -119,8 +117,7 @@ fn build_application(
             access
                 .into_spec()
                 .middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))),
-        )
-        .addon(demo.middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))));
+        );
     if let Some(feishu) = feishu {
         builder = builder
             .addon(feishu.middleware(ActionLogMiddleware::new(LogIdentity::from_tools(&tools))));
@@ -191,6 +188,89 @@ mod tests {
             trusted_proxy_cidrs: Vec::new(),
             totp: None,
         })
+    }
+
+    /// 导航落点必须随真实 Module 声明，原始数据表不得成为隐式侧边栏入口。
+    #[tokio::test]
+    async fn navigation_catalog_has_four_console_landings_without_demo() {
+        let app = build_application(test_tools(), test_security())
+            .unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
+        let modules: Vec<_> = app
+            .runtime
+            .catalog()
+            .addons()
+            .iter()
+            .flat_map(|addon| &addon.modules)
+            .collect();
+        let mut landings: Vec<_> = modules
+            .iter()
+            .filter_map(|module| {
+                module.presentation.as_ref().map(|p| {
+                    (
+                        module.name.as_str(),
+                        p.app_route.as_deref(),
+                        p.identity.id.as_str(),
+                    )
+                })
+            })
+            .collect();
+        landings.sort();
+        assert_eq!(
+            landings,
+            vec![
+                ("access.grants", Some("/access/workspace"), "admin"),
+                ("account.user", Some("/account"), "user"),
+                ("feishu.approval", Some("/feishu/approval"), "admin"),
+                ("feishu.datasource", Some("/feishu/datasources"), "admin"),
+            ]
+        );
+        assert!(!modules.iter().any(|m| m.name.as_str().starts_with("demo.")));
+        let permissions = access::project_permissions(app.runtime.catalog().addons());
+        assert!(!permissions
+            .iter()
+            .any(|p| p.permission().starts_with("demo.")));
+        for name in ["feishu.datasource", "feishu.approval"] {
+            let module = modules
+                .iter()
+                .find(|m| m.name.as_str() == name)
+                .unwrap_or_else(|| panic!("缺少控制台模块 {name}"));
+            assert!(module.views.is_empty());
+            assert!(app
+                .runtime
+                .compiled_views()
+                .iter()
+                .filter(|v| v.module().as_str() == name)
+                .all(|v| v.data_action().is_none()));
+        }
+        let approval = modules
+            .iter()
+            .find(|m| m.name.as_str() == "feishu.approval")
+            .unwrap_or_else(|| panic!("缺少审批模块"));
+        let presentation = approval
+            .presentation
+            .as_ref()
+            .unwrap_or_else(|| panic!("缺少审批入口"));
+        assert!(presentation.primary_action.is_none());
+        let mut actions: Vec<_> = presentation
+            .action_presentations
+            .keys()
+            .map(|r| r.action().as_str())
+            .collect();
+        actions.sort();
+        assert_eq!(actions, ["list_configs", "list_requests"]);
+        for (name, action) in [
+            ("account.user", "me"),
+            ("access.grants", "list_user_grants"),
+            ("feishu.datasource", "list_datasources"),
+        ] {
+            let primary = modules
+                .iter()
+                .find(|m| m.name.as_str() == name)
+                .and_then(|m| m.presentation.as_ref())
+                .and_then(|p| p.primary_action.as_ref())
+                .unwrap_or_else(|| panic!("缺少主 Action 门控 {name}"));
+            assert_eq!(primary.action().as_str(), action);
+        }
     }
 
     /// 打开 `[feishu].log_inbound_requests` 后应用仍必须能构建。
@@ -307,77 +387,6 @@ mod tests {
         let projected: Vec<&str> = entries.iter().map(|entry| entry.permission()).collect();
         assert!(projected.contains(&"access.grants.read"));
         assert!(projected.contains(&"access.grants.write"));
-    }
-
-    /// P7 演示 addon 冒烟：demo.notes 全流程接入（Catalog、表、权限目录、投影边界）。
-    #[tokio::test]
-    async fn demo_addon_builds_and_projects_only_for_authorized_identities() {
-        use yang_base::action::Request;
-
-        let app = build_application(test_tools(), test_security())
-            .unwrap_or_else(|error| panic!("当前 feature 组合的应用应构建成功: {error:#}"));
-        let demo_module = app
-            .runtime
-            .catalog()
-            .addons()
-            .iter()
-            .flat_map(|addon| &addon.modules)
-            .find(|module| module.name.as_str() == "demo.notes")
-            .unwrap_or_else(|| panic!("应存在 demo.notes 模块"));
-        assert!(app
-            .runtime
-            .table_definitions()
-            .iter()
-            .any(|definition| definition.name() == "demo_note"));
-        for action_name in ["create_note", "update_note", "delete_note", "list_notes"] {
-            assert!(
-                demo_module
-                    .actions()
-                    .iter()
-                    .any(|action| action.name.as_str() == action_name),
-                "demo.notes 应注册 {action_name}"
-            );
-        }
-        // 权限目录投影必须包含演示 Action 声明的权限（access 管线对新业务生效）。
-        let entries = access::project_permissions(app.runtime.catalog().addons());
-        let projected: Vec<&str> = entries.iter().map(|entry| entry.permission()).collect();
-        assert!(projected.contains(&"demo.notes.read"));
-        assert!(projected.contains(&"demo.notes.write"));
-
-        // 投影边界：匿名请求的 UI Catalog 不得出现任何 demo.notes 内容；
-        // 持有 demo.notes.* 权限的请求由同一投影逻辑放行（授权身份只能经
-        // TokenAuthMiddleware 注入，应用单测无法伪造，授权路径由框架投影测试覆盖）。
-        let anonymous = app
-            .runtime
-            .ui_catalog(&app.runtime.context(Request::new(serde_json::json!({}))))
-            .unwrap_or_else(|error| panic!("匿名 UI Catalog 应可计算: {error}"));
-        assert!(anonymous
-            .modules
-            .iter()
-            .all(|module| module.module_id != "demo.notes"));
-        assert!(anonymous
-            .table_views
-            .iter()
-            .all(|view| !view.view_id.starts_with("demo.notes")));
-        assert!(anonymous
-            .actions
-            .iter()
-            .all(|action| !action.operation_id.starts_with("demo.notes.")));
-
-        // 冻结 Catalog 中 demo.notes 声明了一个通用 TableView（前端零代码的载体）。
-        assert_eq!(
-            demo_module.views.len(),
-            1,
-            "demo.notes 应声明一个主 TableView"
-        );
-        let view = &demo_module.views[0];
-        assert_eq!(
-            view.data_action
-                .as_ref()
-                .map(|action| action.action().as_str()),
-            Some("list_notes")
-        );
-        assert_eq!(view.fields.len(), 5);
     }
 
     /// OpenAPI spike（前端重构 ADR-4 检查点 0）：Catalog 投影的 OpenAPI 3.1 文档

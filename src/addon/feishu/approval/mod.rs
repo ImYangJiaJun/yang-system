@@ -28,17 +28,17 @@
 //! `cutover` 先 `stop_pair` 停线上再起新的，两实例不重叠。因此**不做跨实例单飞、
 //! 不做表级互斥锁**；后台只有一个单线程循环，手动触发只往它的通道投信号。
 //!
-//! # 成对省略 `view()` 与 `presentation()`
-//!
-//! 控制台入口是自建页面（`frontend/src/features/feishu/`），不是引擎投影的通用
-//! TableView。只省一个会让表静默出现在前端——理由与 `feishu.datasource` 同
-//! （见 `datasource/mod.rs:5-19`）。
+//! 控制台由 app_route 声明入口，两个受保护读 Action 显式参与导航剪枝。
+//! 不声明通用 View，也不以 public 机器派发接口作为导航门控。
 
 pub(crate) mod actions;
 pub(crate) mod domain;
 pub(crate) mod table;
 
-use yang_base::definition::{ModuleName, ModuleSpec};
+use yang_base::definition::{
+    ActionInteraction, ActionPlacement, ActionPresentationSpec, ModuleName, ModulePresentationSpec,
+    ModuleSpec,
+};
 use yang_base::BaseError;
 
 use crate::authorization::AuthorizationVersionValidator;
@@ -64,7 +64,27 @@ pub(crate) fn build_module(
     // 因此管理 Token 的 `Authorization` 头不会被抢（见
     // `datasource::with_authentication` 的说明，别加 `authenticate_public_actions()`）。
     let spec = with_authentication(spec, authorization_validator);
-    actions::register_all(spec, context, settings)
+    Ok(
+        actions::register_all(spec, context, settings)?.presentation(
+            ModulePresentationSpec::new(crate::addon::admin_identity(), "审批派发", "send")
+                .app_route("/feishu/approval")
+                .order(40)
+                .present_action(
+                    yang_base::action!("feishu.approval.list_configs"),
+                    ActionPresentationSpec::new(
+                        ActionPlacement::Toolbar,
+                        ActionInteraction::Invoke,
+                    ),
+                )
+                .present_action(
+                    yang_base::action!("feishu.approval.list_requests"),
+                    ActionPresentationSpec::new(
+                        ActionPlacement::Toolbar,
+                        ActionInteraction::Invoke,
+                    ),
+                ),
+        ),
+    )
 }
 
 /// 字段映射表所在的 Module：只有表，没有 Action。
