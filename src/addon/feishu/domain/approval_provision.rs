@@ -38,7 +38,6 @@ use super::approval_match::{
 use super::bitable::{list_all_fields, BitableCoordinates};
 use super::context::FeishuContext;
 use super::outbound::{OutboundTransport, Sleeper};
-use super::repository::all_pages;
 use super::tenant_token::TenantTokenProvider;
 
 /// 自动建配置的入参。三个坐标由工作流在 `raw_body` 里写死——它们是**只有调用方
@@ -221,9 +220,10 @@ pub(crate) async fn build_plan(
             .ok_or_else(|| ProvisionError::Invalid(vec!["审批定义没有返回表单".to_string()]))?,
     )?;
 
-    // 链接本系统外部数据源的控件：先解析它们的 `source_key`，再把选项拉出来——
+    // 链接本系统外部数据源的控件只保存绑定，派发时按选中文案解析。
     // 这一步必须在匹配**之前**，因为匹配本身不碰库。
-    let external_options = load_external_options(context, &form).await?;
+    let external_options =
+        super::approval_option_binding::load_bindings(context, &form, &columns).await?;
 
     let plan = plan(
         input,
@@ -242,7 +242,7 @@ fn plan(
     approval_name: &str,
     form: &[FormWidget],
     columns: &[Column],
-    external_options: &BTreeMap<String, BTreeMap<String, String>>,
+    external_options: &BTreeMap<String, super::approval_option_binding::ExternalBinding>,
     form_snapshot: &str,
 ) -> Result<ProvisionPlan, ProvisionError> {
     let mut reasons: Vec<String> = Vec::new();
@@ -296,7 +296,7 @@ fn plan(
     // ---- 链接型控件补选项 ----
     //
     // `match_by_name` 对链接态**不报**「派生不出」（它只判固定选项），把这一段
-    // 留到这里——因为选项在本系统的库里而不在飞书响应里。
+    // 留到这里——绑定在本系统的库里而不在飞书响应里。
     let by_widget_id: BTreeMap<&str, &FormWidget> = form
         .iter()
         .flat_map(|widget| widget.walk())
@@ -316,8 +316,8 @@ fn plan(
             Some(column) => column,
             None => continue,
         };
-        match external_options.get(column.field_name.as_str()) {
-            Some(map) => widget.option_map = map.clone(),
+        match external_options.get(column.field_name.trim()) {
+            Some(binding) => widget.external_binding = Some(binding.clone()),
             None => reasons.push(format!(
                 "控件「{}」链接了外部选项数据源，但本系统没有该列的绑定",
                 source.name
@@ -425,6 +425,14 @@ pub(crate) async fn insert_plan(
                 serde_json::to_string(&widget.option_map).unwrap_or_else(|_| "{}".to_string())
             ),
         );
+        map_row.insert(
+            "external_binding",
+            match &widget.external_binding {
+                Some(binding) => serde_json::json!(serde_json::to_string(binding)
+                    .map_err(|e| BaseError::ConfigError(e.to_string()))?),
+                None => Value::Null,
+            },
+        );
         context
             .approval_field_maps()
             .query()
@@ -434,193 +442,6 @@ pub(crate) async fn insert_plan(
 
     Ok(config_id as i64)
 }
-
-// ---------------------------------------------------------------------------
-// 外部选项（链接态控件的 option_map 来源）
-// ---------------------------------------------------------------------------
-
-/// 解析链接到本系统外部数据源的控件 → 每列的 `label → option_id`。
-///
-/// # 为什么按**列名**查而不是按 `field_id`
-///
-/// 外部选项的绑定登记在**台账表**（`feishu_datasource_field`），而派发用的是**另一张
-/// 表**——两边的 `field_id` 毫无关系，只有**列名**是共同语言（使用方正是按名严格对应
-/// 才走到这一层）。所以拿派发侧的 `field_id` 去查绑定必然查空。
-async fn load_external_options(
-    context: &FeishuContext,
-    form: &[FormWidget],
-) -> Result<BTreeMap<String, BTreeMap<String, String>>, ProvisionError> {
-    let linked: Vec<String> = form
-        .iter()
-        .flat_map(|widget| widget.walk())
-        .filter(|widget| widget.links_to_our_options())
-        .map(|widget| widget.name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .collect();
-    if linked.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    // `feishu_datasource_field.field_name` 是**缓存列**、不是 `filterable`，
-    // 所以这里不能把 WHERE 下推到库（会吃 FieldPermissionDenied）——扫全表后在内存里
-    // 按名配对。这张表是「字段绑定」，行数量级在百级（每数据源几列）。
-    let bindings = all_pages(
-        context.datasource_fields().query().select_fields(&[
-            "field_name",
-            "source_key",
-            "enabled",
-        ])?,
-        MAX_BINDING_PAGES,
-    )
-    .await
-    .map_err(|error| ProvisionError::Store(error.to_string()))?;
-
-    // 名字 → source_key。**重名即歧义**：两张表都有「公司名称/Company name」时，
-    // 取哪一个都是猜——猜错的后果是把选项映射建到别的数据源上，而症状是提交时
-    // 「选项没有配置映射」或更糟：映射成功但 id 对不上。
-    // 收集到 `String` 而不是借用绑定行：`binding` 是每轮循环里的临时 `Record`，
-    // 借用它的字段会让歧义列表的存活短于自身（E0597）。
-    let mut name_to_source: BTreeMap<String, String> = BTreeMap::new();
-    let mut ambiguous: Vec<String> = Vec::new();
-    for binding in &bindings {
-        let enabled: bool = binding.optional("enabled")?.unwrap_or(false);
-        if !enabled {
-            continue;
-        }
-        // 名字为空/缺失：这条绑定无从参与按名匹配，跳过——但**必须留痕**（见下）。
-        let Some(name) = binding_display_name(binding)? else {
-            // 「跳过」是兜底，不是常态：走到这里说明上游有绑定漏写了名字
-            // （`create_datasource_table` / `update_datasource_table` 都该写上），
-            // 那是个要修的 bug。静默 `continue` 会让它永远不被发现，而它的后果
-            // （某个控件少一个候选列）又很难归因——所以这里明确 warn 并带上
-            // 能定位的 `source_key`。
-            tracing::warn!(
-                source_key = %binding.optional::<String>("source_key")?.unwrap_or_default(),
-                "字段绑定的 field_name 为空，跳过它——列名是身份，没有名字就无法按名匹配"
-            );
-            continue;
-        };
-        let source: String = binding.require("source_key")?;
-        match name_to_source.get(&name) {
-            Some(existing) if *existing != source && !ambiguous.contains(&name) => {
-                ambiguous.push(name.clone());
-            }
-            Some(_) => {}
-            None => {
-                name_to_source.insert(name, source);
-            }
-        }
-    }
-    if !ambiguous.is_empty() {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "以下控件的列名在多个外部选项数据源里都出现，无法判定用哪一个：{}",
-            ambiguous.join("、")
-        )]));
-    }
-
-    let mut out = BTreeMap::new();
-    let mut missing: Vec<&str> = Vec::new();
-    for name in &linked {
-        let Some(source) = name_to_source.get(name) else {
-            missing.push(name.as_str());
-            continue;
-        };
-        out.insert(name.clone(), load_options(context, source).await?);
-    }
-    if !missing.is_empty() {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "以下控件链接了外部选项数据源，但本系统没有该列的绑定：{}",
-            missing.join("、")
-        )]));
-    }
-    Ok(out)
-}
-
-/// 取一条绑定的展示名。**缺失或空白一律返回 `None`（跳过），不报错。**
-///
-/// 为什么不能 `require`：这个函数扫的是**全表**的启用绑定，任何一条名字为空的
-/// 绑定（历史数据、或建源时漏写了 `field_name` 的 xlsx 绑定）都会让
-/// 「首次派发自动建配置」整批失败。跳过它只是少一个候选列，
-/// 而整批失败是功能不可用——两者代价差一个量级。
-///
-/// 调用方**必须**为这个 `None` 留一条带 `source_key` 的告警：空名不是常态，
-/// 它是上游漏写的症状。
-fn binding_display_name(binding: &Record) -> Result<Option<String>, BaseError> {
-    let Some(name) = binding.optional::<String>("field_name")? else {
-        return Ok(None);
-    };
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(name))
-}
-
-/// 某个 `source_key` 下**启用中**的 `label → option_id`。
-///
-/// # label 在一个 source 内必须唯一
-///
-/// `option_id = hash(source_key, parent_key, label)`（级联时把父键哈了进去），
-/// 所以**同一个文案挂在不同父下会有不同 id**。此时静态映射就是错的——一个
-/// 文案对应两个 id，随便取一个会让提交的 id 属于另一个父。
-///
-/// 实测里 9 个数据源有 8 个 source 存在同名 label，所以这条**不是理论风险**。
-/// 撞上就报错，让使用方改文案或改配手动映射。
-async fn load_options(
-    context: &FeishuContext,
-    source_key: &str,
-) -> Result<BTreeMap<String, String>, ProvisionError> {
-    let rows = all_pages(
-        context
-            .options()
-            .query()
-            .select_fields(&["option_id", "label"])?
-            .where_eq("source_key", serde_json::json!(source_key))?
-            .where_eq("enabled", serde_json::json!(true))?,
-        MAX_OPTION_PAGES,
-    )
-    .await
-    .map_err(|error| ProvisionError::Store(error.to_string()))?;
-
-    if rows.is_empty() {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "外部选项数据源「{source_key}」里没有启用中的选项"
-        )]));
-    }
-
-    let mut map: BTreeMap<String, String> = BTreeMap::new();
-    let mut conflicts: Vec<String> = Vec::new();
-    for row in &rows {
-        let label: String = row.require("label")?;
-        let option_id: String = row.require("option_id")?;
-        let label = label.trim().to_string();
-        match map.get(&label) {
-            Some(existing) if *existing != option_id => {
-                if !conflicts.contains(&label) {
-                    conflicts.push(label);
-                }
-            }
-            Some(_) => {}
-            None => {
-                map.insert(label, option_id);
-            }
-        }
-    }
-    if !conflicts.is_empty() {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "数据源「{source_key}」里同一个文案对应多个选项 id（级联时常见）：{}",
-            conflicts.join("、")
-        )]));
-    }
-    Ok(map)
-}
-
-/// 扫字段绑定表时的页数上界。绑定行数量级在百级（每数据源几列），给足余量。
-const MAX_BINDING_PAGES: usize = 20;
-
-/// 读单个数据源选项时的页数上界。实测最大的一个源有 226 条选项（3 页），
-/// 给到 50 页是留量而不是预期。
-const MAX_OPTION_PAGES: usize = 50;
 
 /// 标题截断到列上限（100），避免插入期才报「字符串超长」。
 fn truncate_title(approval_name: &str, table_id: &str) -> String {
@@ -797,9 +618,15 @@ mod tests {
         let mut external = BTreeMap::new();
         external.insert(
             "公司名称/Company name".to_string(),
-            [("华为".to_string(), "fldq7lcb6y:abc".to_string())]
-                .into_iter()
-                .collect::<BTreeMap<String, String>>(),
+            super::super::approval_option_binding::ExternalBinding {
+                datasource_id: 7,
+                levels: vec![super::super::approval_option_binding::BindingLevel {
+                    binding_id: 8,
+                    source_key: "company".into(),
+                    field_id: "ledger_company".into(),
+                    bitable_field: "fldQ".into(),
+                }],
+            },
         );
         let plan = plan(
             &input("fldP", "fldB"),
@@ -816,10 +643,13 @@ mod tests {
         .unwrap_or_else(|error| panic!("{error}"));
 
         assert_eq!(plan.widgets.len(), 1);
+        assert!(
+            plan.widgets[0].option_map.is_empty(),
+            "外部选项配置只保存绑定，不能保存全量映射"
+        );
         assert_eq!(
-            plan.widgets[0].option_map.get("华为").map(String::as_str),
-            Some("fldq7lcb6y:abc"),
-            "链接态控件的选项要从绑定补进来"
+            plan.widgets[0].external_binding,
+            external.get("公司名称/Company name").cloned()
         );
     }
 
@@ -900,7 +730,8 @@ mod tests {
         row.insert("source_key", serde_json::json!("orphan"));
         row.insert("enabled", serde_json::json!(true));
         assert_eq!(
-            binding_display_name(&row).unwrap_or_else(|error| panic!("{error}")),
+            super::super::approval_option_binding::binding_display_name(&row)
+                .unwrap_or_else(|error| panic!("{error}")),
             None,
             "名字为空或缺失的绑定应被跳过"
         );
@@ -917,7 +748,8 @@ mod tests {
             row.insert("field_name", serde_json::json!(value));
             row.insert("source_key", serde_json::json!("orphan"));
             assert_eq!(
-                binding_display_name(&row).unwrap_or_else(|error| panic!("{error}")),
+                super::super::approval_option_binding::binding_display_name(&row)
+                    .unwrap_or_else(|error| panic!("{error}")),
                 None,
                 "空串/纯空白（{value:?}）也要跳过——拿空名去按名匹配等于没名字"
             );
@@ -926,7 +758,8 @@ mod tests {
         // 键整个缺失（老行没这一列）同理。
         let row = Record::new();
         assert_eq!(
-            binding_display_name(&row).unwrap_or_else(|error| panic!("{error}")),
+            super::super::approval_option_binding::binding_display_name(&row)
+                .unwrap_or_else(|error| panic!("{error}")),
             None,
             "没有 field_name 这一列时也要跳过"
         );

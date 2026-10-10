@@ -103,6 +103,16 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             created_at => Timestamp::new().created_at().title("创建时间"),
             updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
         })
+        // 派发按文案和父级定位选中项，避免拉全量选项。
+        .index_named(
+            "idx_feishu_option_label",
+            [
+                field_ref(&table_name, "source_key")?,
+                field_ref(&table_name, "enabled")?,
+                field_ref(&table_name, "label")?,
+                field_ref(&table_name, "parent_key")?,
+            ],
+        )
         // 出站端点的复合索引。前两个等值前缀（source_key, enabled）之后，
         // 索引序恰好是 ORDER BY 的 (sort_order, option_id)，filesort 因此消失。
         // 设计 §5.10：实测端点 375–556 ms → 126–278 ms。**不是硬前提**，

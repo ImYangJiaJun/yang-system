@@ -475,6 +475,7 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
             bitable_field: column.field_id.clone(),
             converter: converter_for(&widget.r#type),
             option_map,
+            external_binding: None,
             currency: None,
         });
     }

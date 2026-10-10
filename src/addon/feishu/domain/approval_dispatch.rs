@@ -29,6 +29,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::approval::{create_instance, get_instance, CreateOutcome, GetOutcome, InstanceDetail};
@@ -180,14 +181,6 @@ pub(crate) async fn dispatch_one(
     backfill: &dyn Backfill,
     input: &DispatchInput<'_>,
 ) -> DispatchResult {
-    // ---- 1. uuid ----
-    let uuid = derive_uuid(
-        &input.coordinates.app_token,
-        &input.coordinates.table_id,
-        input.approval_code,
-        input.record_id,
-    );
-
     // ---- 2. 申请人 ----
     let open_id = match applicant_open_id(input.cells, input.applicant_field) {
         Some(open_id) => open_id,
@@ -225,6 +218,242 @@ pub(crate) async fn dispatch_one(
         }
     };
 
+    dispatch_prepared(
+        transport,
+        sleeper,
+        tokens,
+        backfill,
+        input,
+        &PreparedPayload { open_id, form },
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedPayload {
+    pub(crate) open_id: String,
+    pub(crate) form: String,
+}
+
+/// 即时入口和 worker 都先固化同一份提交内容，再执行飞书幂等创建。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_persisted(
+    context: &super::context::FeishuContext,
+    config_id: i64,
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    backfill: &dyn Backfill,
+    input: &DispatchInput<'_>,
+) -> DispatchResult {
+    let result = match prepare_persisted(context, config_id, input).await {
+        Ok(payload) => {
+            dispatch_prepared(transport, sleeper, tokens, backfill, input, &payload).await
+        }
+        Err(result) => {
+            if let DispatchResult::Terminal { message } = &result {
+                let message = sanitize_terminal_message(message, 0);
+                let _ = backfill
+                    .write(input.record_id, input.backfill_field_name, &message)
+                    .await;
+            }
+            result
+        }
+    };
+    // worker 已认领的 creating 行由其 record_outcome 收尾；即时入口只推进未认领行。
+    if let Err(error) = record_pending_outcome(context, config_id, input, &result).await {
+        tracing::warn!(error = %error, "写回即时审批任务状态失败");
+    }
+    result
+}
+
+async fn record_pending_outcome(
+    context: &super::context::FeishuContext,
+    config_id: i64,
+    input: &DispatchInput<'_>,
+    result: &DispatchResult,
+) -> Result<(), yang_base::BaseError> {
+    let (state, reason) = match result {
+        DispatchResult::Backfilled { .. } => ("backfilled", None),
+        DispatchResult::Terminal { message } => ("terminal", Some(message)),
+        DispatchResult::Retryable { message } => ("pending", Some(message)),
+        DispatchResult::Waiting { reason } => ("pending", Some(reason)),
+    };
+    let mut row = yang_base::table::Record::new();
+    row.insert("state", serde_json::json!(state));
+    row.insert("last_error", serde_json::json!(reason));
+    let uuid = derive_uuid(
+        &input.coordinates.app_token,
+        &input.coordinates.table_id,
+        input.approval_code,
+        input.record_id,
+    );
+    context
+        .approval_tasks()
+        .query()
+        .where_eq("uuid", serde_json::json!(uuid))?
+        .where_eq("config_id", serde_json::json!(config_id))?
+        .where_eq("state", serde_json::json!("pending"))?
+        .update(row)
+        .await?;
+    Ok(())
+}
+
+/// 即时派发和后台播种允许同一任务并发插入，但不吞掉其他归属或数据库错误。
+pub(crate) async fn insert_task(
+    context: &super::context::FeishuContext,
+    row: yang_base::table::Record,
+) -> Result<(), yang_base::BaseError> {
+    let uuid: String = row.require("uuid")?;
+    let config_id: i64 = row.require("config_id")?;
+    let record_id: String = row.require("record_id")?;
+    if let Err(error) = context.approval_tasks().query().insert(row).await {
+        let existing = context
+            .approval_tasks()
+            .query()
+            .where_eq("uuid", serde_json::json!(uuid))?
+            .where_eq("config_id", serde_json::json!(config_id))?
+            .where_eq("record_id", serde_json::json!(record_id))?
+            .optional()
+            .await?;
+        if existing.is_none() {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn prepare_persisted(
+    context: &super::context::FeishuContext,
+    config_id: i64,
+    input: &DispatchInput<'_>,
+) -> Result<PreparedPayload, DispatchResult> {
+    use yang_base::{table::Record, BaseError};
+    let retry = |e: BaseError| DispatchResult::Retryable {
+        message: e.to_string(),
+    };
+    let terminal = |s: String| DispatchResult::Terminal { message: s };
+    let uuid = derive_uuid(
+        &input.coordinates.app_token,
+        &input.coordinates.table_id,
+        input.approval_code,
+        input.record_id,
+    );
+    let query = context
+        .approval_tasks()
+        .query()
+        .where_eq("uuid", serde_json::json!(uuid))
+        .map_err(retry)?;
+    let mut task = query.clone().optional().await.map_err(retry)?;
+    if task.is_none() {
+        let mut row = Record::new();
+        row.insert("config_id", serde_json::json!(config_id));
+        row.insert("record_id", serde_json::json!(input.record_id));
+        row.insert("uuid", serde_json::json!(&uuid));
+        row.insert("state", serde_json::json!("pending"));
+        if let Err(e) = insert_task(context, row).await {
+            let occupied = context
+                .approval_tasks()
+                .query()
+                .where_eq("record_id", serde_json::json!(input.record_id))
+                .map_err(retry)?
+                .optional()
+                .await
+                .map_err(retry)?;
+            if occupied.is_some() {
+                return Err(terminal("任务记录 ID 已被其他配置占用".into()));
+            }
+            return Err(retry(e));
+        }
+        task = query.clone().optional().await.map_err(retry)?;
+    }
+    let task = task.ok_or_else(|| terminal("任务记录 ID 已被其他配置占用".into()))?;
+    if task.require::<i64>("config_id").map_err(retry)? != config_id
+        || task.require::<String>("record_id").map_err(retry)? != input.record_id
+    {
+        return Err(terminal("任务归属不匹配".into()));
+    }
+    if let Some(raw) = task.optional::<String>("prepared_payload").map_err(retry)? {
+        return parse_payload(&raw).map_err(terminal);
+    }
+    let open_id = applicant_open_id(input.cells, input.applicant_field).ok_or_else(|| {
+        DispatchResult::Waiting {
+            reason: "缺少「申请人」".into(),
+        }
+    })?;
+    let mut widgets = input.widgets.to_vec();
+    if let Err(e) =
+        super::approval_option_binding::resolve_options(context, &mut widgets, input.cells).await
+    {
+        return Err(match e {
+            BaseError::ParamInvalid(_, reason) => terminal(reason),
+            other => retry(other),
+        });
+    }
+    let form = build_form(&FormInput {
+        widgets: &widgets,
+        cells: input.cells,
+        timezone_offset: input.timezone_offset,
+    })
+    .map_err(|e| {
+        if is_data_problem(&e) {
+            DispatchResult::Waiting {
+                reason: e.to_string(),
+            }
+        } else {
+            terminal(e.to_string())
+        }
+    })?;
+    let raw = serde_json::to_string(&PreparedPayload { open_id, form })
+        .map_err(|e| terminal(e.to_string()))?;
+    let mut row = Record::new();
+    row.insert("prepared_payload", serde_json::json!(raw));
+    context
+        .approval_tasks()
+        .query()
+        .where_primary_key_eq(serde_json::json!(task
+            .require::<i64>("id")
+            .map_err(retry)?))
+        .map_err(retry)?
+        .where_null("prepared_payload")
+        .map_err(retry)?
+        .update(row)
+        .await
+        .map_err(retry)?;
+    // 并发准备只采用第一次落库的赢家；写入失败或行消失时绝不发起审批。
+    let winner = query.one().await.map_err(retry)?;
+    let raw = winner
+        .require::<String>("prepared_payload")
+        .map_err(retry)?;
+    parse_payload(&raw).map_err(terminal)
+}
+
+fn parse_payload(raw: &str) -> Result<PreparedPayload, String> {
+    let payload: PreparedPayload =
+        serde_json::from_str(raw).map_err(|_| "提交内容快照损坏".to_string())?;
+    let _: Vec<Value> =
+        serde_json::from_str(&payload.form).map_err(|_| "提交表单快照损坏".to_string())?;
+    if payload.open_id.trim().is_empty() {
+        return Err("提交内容快照为空".into());
+    }
+    Ok(payload)
+}
+
+pub(crate) async fn dispatch_prepared(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    backfill: &dyn Backfill,
+    input: &DispatchInput<'_>,
+    prepared: &PreparedPayload,
+) -> DispatchResult {
+    let uuid = derive_uuid(
+        &input.coordinates.app_token,
+        &input.coordinates.table_id,
+        input.approval_code,
+        input.record_id,
+    );
     // ---- 4. 创建 ----
     //
     // 回捞成功时，那次 `get_instance` 已经同时拿回了 `instance_code` 与
@@ -236,8 +465,8 @@ pub(crate) async fn dispatch_one(
         sleeper,
         tokens,
         input.approval_code,
-        &form,
-        &open_id,
+        &prepared.form,
+        &prepared.open_id,
         &uuid,
     )
     .await
@@ -357,7 +586,7 @@ async fn classify_failure(
 /// - 数据问题（等待态）：必填缺失、值形态不对——补齐数据就能过。
 /// - 配置问题（终态）：不支持的控件、转换器不匹配、选项没配映射——不补数据的话
 ///   反复重扫永远好不了，必须让用户看见并改配置。
-fn is_data_problem(error: &super::approval_convert::ConvertError) -> bool {
+pub(crate) fn is_data_problem(error: &super::approval_convert::ConvertError) -> bool {
     use super::approval_convert::ConvertError;
     matches!(
         error,
@@ -388,7 +617,10 @@ fn sanitize_terminal_message(raw: &str, code: i32) -> String {
 ///
 /// 多维表格的人员字段是对象数组（`[{"id": "ou_…"}]`）。取第一个——审批实例只能
 /// 有一个发起人，而人员字段若配成多选，多出来的人没有对应的语义。
-fn applicant_open_id(cells: &serde_json::Map<String, Value>, field_id: &str) -> Option<String> {
+pub(crate) fn applicant_open_id(
+    cells: &serde_json::Map<String, Value>,
+    field_id: &str,
+) -> Option<String> {
     let cell = cells.get(field_id)?;
     let first = match cell {
         Value::Array(items) => items.first()?,
@@ -429,7 +661,13 @@ pub(crate) fn widget_maps_from_rows(
             .and_then(Value::as_str)
             .and_then(|text| serde_json::from_str::<BTreeMap<String, String>>(text).ok())
             .unwrap_or_default();
+        let external_binding = match row.get("external_binding") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(raw)) => Some(serde_json::from_str(raw).ok()?),
+            _ => return None,
+        };
         widgets.push(WidgetMap {
+            external_binding,
             currency: currency_of(&widget_id),
             widget_id,
             widget_type,
@@ -516,6 +754,10 @@ async fn write_chunk(
 }
 
 #[cfg(test)]
+#[path = "approval_binding_tests.rs"]
+mod binding_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::addon::feishu::domain::outbound::OutboundResponse;
@@ -541,6 +783,7 @@ mod tests {
             bitable_field: "fld_title".to_string(),
             converter: Converter::Direct,
             option_map: BTreeMap::new(),
+            external_binding: None,
             currency: None,
         }
     }
@@ -553,13 +796,14 @@ mod tests {
     }
 
     /// 记录每个请求的脚本化传输 + 记录回写的假 backfill。
-    struct ScriptedTransport {
+    pub(super) struct ScriptedTransport {
         responses: Mutex<Vec<OutboundResponse>>,
         requests: Mutex<Vec<String>>,
+        pub(super) bodies: Mutex<Vec<Value>>,
     }
 
     impl ScriptedTransport {
-        fn new(bodies: Vec<(u16, &str)>) -> Self {
+        pub(super) fn new(bodies: Vec<(u16, &str)>) -> Self {
             Self {
                 responses: Mutex::new(
                     bodies
@@ -572,10 +816,11 @@ mod tests {
                         .collect(),
                 ),
                 requests: Mutex::new(Vec::new()),
+                bodies: Mutex::new(Vec::new()),
             }
         }
 
-        fn requests(&self) -> Vec<String> {
+        pub(super) fn requests(&self) -> Vec<String> {
             self.requests
                 .lock()
                 .map(|guard| guard.clone())
@@ -589,6 +834,9 @@ mod tests {
             &self,
             request: super::super::outbound::OutboundRequest,
         ) -> Result<OutboundResponse, yang_base::BaseError> {
+            if let (Some(body), Ok(mut bodies)) = (&request.json_body, self.bodies.lock()) {
+                bodies.push(body.clone());
+            }
             if let Ok(mut requests) = self.requests.lock() {
                 requests.push(format!("{:?} {}", request.method, request.url));
             }
@@ -603,7 +851,7 @@ mod tests {
         }
     }
 
-    struct NoSleep;
+    pub(super) struct NoSleep;
     #[async_trait::async_trait]
     impl Sleeper for NoSleep {
         async fn sleep(&self, _duration: std::time::Duration) {}
@@ -635,7 +883,7 @@ mod tests {
         }
     }
 
-    fn fake_tokens() -> TenantTokenProvider {
+    pub(super) fn fake_tokens() -> TenantTokenProvider {
         TenantTokenProvider::new(
             Arc::new(FakeCache),
             Arc::new(NullTransport),
@@ -666,7 +914,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingBackfill {
+    pub(super) struct RecordingBackfill {
         writes: Mutex<Vec<(String, String, String)>>,
         fail: bool,
         /// 毒记录名单：这批里出现任一即让整批失败（复刻全有全无语义）。
@@ -690,7 +938,7 @@ mod tests {
             }
         }
 
-        fn writes(&self) -> Vec<(String, String, String)> {
+        pub(super) fn writes(&self) -> Vec<(String, String, String)> {
             self.writes
                 .lock()
                 .map(|guard| guard.clone())

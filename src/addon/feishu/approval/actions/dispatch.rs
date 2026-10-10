@@ -38,7 +38,7 @@ use crate::addon::feishu::approval::domain::request_log_writer::{
 };
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
-    dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
+    dispatch_persisted, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
 };
 use crate::addon::feishu::domain::approval_provision::{
     build_plan, insert_plan, ProvisionError, ProvisionInput, ProvisionPlan,
@@ -732,7 +732,9 @@ async fn dispatch_single(
         tokens: &outbound.tokens,
         coordinates: &coordinates,
     };
-    let result = dispatch_one(
+    let result = dispatch_persisted(
+        context,
+        config_id,
         outbound.transport(),
         outbound.sleeper(),
         &outbound.tokens,
@@ -787,6 +789,7 @@ fn response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addon::feishu::domain::approval_dispatch::dispatch_one;
 
     /// 已配好配置的请求：三件套**全不给**（那是首次建配置才用的）。
     fn valid_input() -> DispatchInput {

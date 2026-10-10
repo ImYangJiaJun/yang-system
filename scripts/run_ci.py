@@ -108,6 +108,10 @@ FULL = (
 
 INTEGRATION = (
     Command(
+        "审批外部选项按需解析与提交快照集成测试",
+        ("cargo", "test", "--lib", "--locked", "real_binding_large_options_and_persisted_retry", "--", "--ignored", "--test-threads=1"),
+    ),
+    Command(
         "Authorization Redis monotonic cache integration",
         (
             "cargo",

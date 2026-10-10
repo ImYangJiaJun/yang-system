@@ -41,6 +41,7 @@ pub(crate) struct WidgetMap {
     pub(crate) converter: Converter,
     /// 单选/多选的选项映射：多维表格文案 → 审批控件 option value。
     pub(crate) option_map: BTreeMap<String, String>,
+    pub(crate) external_binding: Option<super::approval_option_binding::ExternalBinding>,
     /// 金额控件的币种（`amount` 专用）。
     pub(crate) currency: Option<String>,
 }
@@ -463,7 +464,7 @@ fn open_ids_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Vec<String>, C
 }
 
 /// 从单元格里取出选项文案列表。
-fn labels_from_cell(cell: &Value) -> Vec<String> {
+pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
     match cell {
         Value::Array(items) => items
             .iter()
@@ -506,7 +507,7 @@ fn text_from_cell(cell: &Value) -> String {
 
 /// 空值判定。多维表格的「空」有多种形态：null、空串、空数组、
 /// 以及只有空文本的多态单元格（`[{"text": ""}]`）。
-fn is_empty(value: &Value) -> bool {
+pub(crate) fn is_empty(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::String(text) => text.trim().is_empty(),
@@ -624,6 +625,7 @@ mod tests {
             // 专门测「不匹配」的用例再显式覆盖它。
             converter: expected_converter(kind),
             option_map: BTreeMap::new(),
+            external_binding: None,
             currency: None,
         }
     }

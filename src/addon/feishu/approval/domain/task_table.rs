@@ -54,14 +54,17 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .title("多维表格记录 ID")
                 .require(true)
                 .unique(true)
-                .max_length(128),
+                .max_length(128)
+                .filterable(true),
             // 派生的幂等键。**必须持久化**：响应丢失时 instance_code 根本不存在，
             // 它是唯一还能拿回来的对账键。
             uuid => Str::new()
                 .title("幂等键")
                 .require(true)
                 .unique(true)
-                .max_length(64),
+                .max_length(64)
+                .filterable(true),
+            prepared_payload => Text::new().title("提交内容快照").filterable(true),
             state => Radio::<String>::new()
                 .title("状态")
                 .require(true)

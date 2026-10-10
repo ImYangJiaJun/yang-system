@@ -49,7 +49,7 @@ use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval_convert::{FixedOffset, WidgetMap};
 use crate::addon::feishu::domain::approval_dispatch::{
-    backfill_in_chunks, dispatch_one, widget_maps_from_rows, BitableBackfill,
+    backfill_in_chunks, dispatch_persisted, widget_maps_from_rows, BitableBackfill,
     DispatchInput as OrchestrationInput, DispatchResult,
 };
 use crate::addon::feishu::domain::approval_rate_limit::acquire_create_slot;
@@ -550,9 +550,10 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
                 let mut row = Record::new();
                 row.insert("config_id", serde_json::json!(config_id));
                 row.insert("record_id", serde_json::json!(&record.record_id));
-                row.insert("uuid", serde_json::json!(uuid));
+                row.insert("uuid", serde_json::json!(&uuid));
                 row.insert("state", serde_json::json!("pending"));
-                runner.context.approval_tasks().query().insert(row).await?;
+                crate::addon::feishu::domain::approval_dispatch::insert_task(&runner.context, row)
+                    .await?;
                 seeded += 1;
             }
         }
@@ -781,7 +782,9 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         tokens: &runner.tokens,
         coordinates: &coordinates,
     };
-    dispatch_one(
+    dispatch_persisted(
+        &runner.context,
+        task.config_id,
         runner.transport(),
         runner.sleeper.as_ref(),
         &runner.tokens,

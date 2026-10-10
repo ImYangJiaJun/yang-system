@@ -71,6 +71,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 // 两者不一定同名（例如飞书侧的 value 是数字 id），所以必须显式配。
                 // JSON 文本：{"<多维表格文案>":"<审批控件 value>"}。
                 // DSL 没有 Json builder，落 Text 列。
+                external_binding => Text::new().title("外部选项绑定"),
                 option_map => Text::new().title("选项映射"),
                 created_at => Timestamp::new().created_at().title("创建时间"),
                 updated_at => Timestamp::new().updated_at().title("更新时间"),
