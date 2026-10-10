@@ -981,7 +981,7 @@ async fn totp_account_email_code_login_requires_second_factor() -> anyhow::Resul
         );
 
         // 第一段只验不消费：TTL 内同一验证码可完成第二段（TOTP 动态码）。
-        let totp_code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
+        let totp_code = TotpLiteVerifier::default().generate(&secret, now_seconds()? + 30);
         let logged_in = login_by_email_code_2fa(
             &app,
             "mfa.code@example.com",

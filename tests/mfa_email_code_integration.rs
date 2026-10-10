@@ -538,8 +538,8 @@ async fn totp_deactivate_restores_single_factor() -> anyhow::Result<()> {
         // 激活会按秒粒度撤销既有 Token；跨过撤销水位线再登录，避免同秒新 Token 被误撤。
         tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
-        // 激活后旧会话已失效：用当前 TOTP 动态码重新登录拿到新 token。
-        let totp_code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
+        // 激活已消费当前码，使用容差内下一时间步的新码登录。
+        let totp_code = TotpLiteVerifier::default().generate(&secret, now_seconds()? + 30);
         let login_response = login(&app, "mfa_admin", Some(&totp_code), 44_101).await?;
         let token = access_token(&login_response)?;
         let authorization = format!("Bearer {token}");
@@ -610,7 +610,7 @@ async fn totp_code_cannot_be_replayed_within_same_window() -> anyhow::Result<()>
         // 激活会按秒粒度撤销既有 Token；跨过撤销水位线再登录。
         tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
 
-        let code = TotpLiteVerifier::default().generate(&secret, now_seconds()?);
+        let code = TotpLiteVerifier::default().generate(&secret, now_seconds()? + 30);
         // 首次登录成功。
         let first = login(&app, "totp_replay_user", Some(&code), 44_201).await?;
         ensure!(first.code == 0, "首次 TOTP 登录必须成功: {}", first.message);

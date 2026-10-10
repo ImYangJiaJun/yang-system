@@ -71,9 +71,14 @@ pub(super) async fn handle(
     // 校验一次性码：直接复用框架 TOTP 校验器（当前时间窗口 ±1）。
     let verifier = yang_base::action::auth::TotpLiteVerifier::default();
     verifier
-        .verify(&secret, &input.code)
+        .verify(&ctx, &user_id.to_string(), &secret, &input.code)
         .await
-        .map_err(|_| BaseError::ParamInvalid("code".to_string(), "一次性验证码无效".to_string()))?;
+        .map_err(|error| match error {
+            BaseError::Unauthorized(_) => {
+                BaseError::ParamInvalid("code".to_string(), "一次性验证码无效".to_string())
+            }
+            error => error,
+        })?;
 
     // 加密入库并签发恢复码。
     let encrypted = cipher.encrypt(secret.as_bytes())?;
