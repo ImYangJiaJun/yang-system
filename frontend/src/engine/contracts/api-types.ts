@@ -399,7 +399,7 @@ export interface paths {
         put?: never;
         /**
          * 更新审批派发配置
-         * @description 更新配置名、启用开关或 Base 时区；坐标与审批三件套不可改
+         * @description 更新配置名、启用开关、Base 时区或逐项字段映射；坐标与审批三件套不可改
          */
         post: operations["feishu.approval.update_config"];
         delete?: never;
@@ -1413,6 +1413,11 @@ export interface components {
             /** Format: int64 */
             occurred_at: number;
             permission: string;
+        };
+        /** @description 显式映射省略时保留旧的按名匹配；传入时以控件和列 ID 为准。 */
+        FieldMapping: {
+            bitable_field: string;
+            widget_id: string;
         };
         /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */
         OrderByItem: {
@@ -3843,6 +3848,8 @@ export interface operations {
                     base_timezone: string;
                     /** @description 多维表格 token。 */
                     base_token: string;
+                    /** @description 显式控件到列的映射；省略时按名称自动匹配。 */
+                    maps?: components["schemas"]["FieldMapping"][] | null;
                     /** @description 数据表 id。 */
                     table_id: string;
                 };
@@ -4217,6 +4224,8 @@ export interface operations {
                      * @default null
                      */
                     enabled?: boolean | null;
+                    /** @description 全量替换字段映射；省略即不改。 */
+                    maps?: components["schemas"]["FieldMapping"][] | null;
                     /**
                      * @description 展示名；省略即不改。
                      * @default null

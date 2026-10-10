@@ -33,7 +33,8 @@ use yang_db::Transaction;
 use super::approval::get_approval_definition;
 use super::approval_convert::{Converter, WidgetMap};
 use super::approval_match::{
-    columns_from_fields, match_by_name, resolve_field_coord, Column, FormWidget, MatchOutcome,
+    columns_from_fields, match_fields, resolve_field_coord, Column, FieldMapping, FormWidget,
+    MatchOutcome,
 };
 use super::bitable::{list_all_fields, BitableCoordinates};
 use super::context::FeishuContext;
@@ -52,6 +53,7 @@ pub(crate) struct ProvisionInput<'a> {
     /// 回填列：同上。
     pub(crate) backfill_field: &'a str,
     pub(crate) base_timezone: &'a str,
+    pub(crate) maps: Option<&'a [FieldMapping]>,
 }
 
 /// 建配置失败。
@@ -223,7 +225,12 @@ pub(crate) async fn build_plan(
 
     // 链接本系统外部数据源的控件：先解析它们的 `source_key`，再把选项拉出来——
     // 这一步必须在匹配**之前**，因为匹配本身不碰库。
-    let external_options = load_external_options(context, &form).await?;
+    let mapped_ids = input.maps.map(|maps| {
+        maps.iter()
+            .map(|map| map.widget_id.as_str())
+            .collect::<Vec<_>>()
+    });
+    let external_options = load_external_options(context, &form, mapped_ids.as_deref()).await?;
 
     let plan = plan(
         input,
@@ -278,8 +285,8 @@ fn plan(
         )]));
     }
 
-    // ---- 按名匹配 ----
-    let mut widgets = match match_by_name(form, columns) {
+    // ---- 默认按名匹配，控制台可显式指定映射 ----
+    let mut widgets = match match_fields(form, columns, input.maps) {
         MatchOutcome::Matched(widgets) => widgets,
         MatchOutcome::Invalid(errors) => {
             return Err(ProvisionError::Invalid(
@@ -288,9 +295,12 @@ fn plan(
         }
     };
     if widgets.is_empty() {
-        return Err(ProvisionError::Invalid(vec![
-            "审批定义的控件与多维表格的列没有任何一条同名".to_string(),
-        ]));
+        return Err(ProvisionError::Invalid(vec![if input.maps.is_some() {
+            "审批定义至少需要配置一条有效字段映射"
+        } else {
+            "审批控件和多维表格列没有任何一条同名，无法自动装配字段映射"
+        }
+        .to_string()]));
     }
 
     // ---- 链接型控件补选项 ----
@@ -309,14 +319,7 @@ fn plan(
         if !source.links_to_our_options() {
             continue;
         }
-        let column = match columns
-            .iter()
-            .find(|column| column.field_id == widget.bitable_field)
-        {
-            Some(column) => column,
-            None => continue,
-        };
-        match external_options.get(column.field_name.as_str()) {
+        match external_options.get(source.name.trim()) {
             Some(map) => widget.option_map = map.clone(),
             None => reasons.push(format!(
                 "控件「{}」链接了外部选项数据源，但本系统没有该列的绑定",
@@ -398,6 +401,16 @@ pub(crate) async fn insert_plan(
         ));
     }
 
+    insert_maps(context, transaction, config_id as i64, plan).await?;
+    Ok(config_id as i64)
+}
+
+pub(crate) async fn insert_maps(
+    context: &FeishuContext,
+    transaction: &mut Transaction,
+    config_id: i64,
+    plan: &ProvisionPlan,
+) -> Result<(), BaseError> {
     for widget in &plan.widgets {
         // `bitable_field_name` 是**展示**用的：对齐仍靠 `bitable_field`（id），
         // 名字可被用户改、id 不会。
@@ -432,7 +445,7 @@ pub(crate) async fn insert_plan(
             .await?;
     }
 
-    Ok(config_id as i64)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -444,19 +457,57 @@ pub(crate) async fn insert_plan(
 /// # 为什么按**列名**查而不是按 `field_id`
 ///
 /// 外部选项的绑定登记在**台账表**（`feishu_datasource_field`），而派发用的是**另一张
-/// 表**——两边的 `field_id` 毫无关系，只有**列名**是共同语言（使用方正是按名严格对应
-/// 才走到这一层）。所以拿派发侧的 `field_id` 去查绑定必然查空。
+/// 表**——两边的 `field_id` 毫无关系。以审批控件名定位台账绑定，手动更换派发列
+/// 不改变选项来源。
 async fn load_external_options(
     context: &FeishuContext,
     form: &[FormWidget],
+    mapped_ids: Option<&[&str]>,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, ProvisionError> {
-    let linked: Vec<String> = form
-        .iter()
+    let sources = load_option_sources(context, form, mapped_ids).await?;
+    let mut out = BTreeMap::new();
+    for (name, source) in sources {
+        let rows = context
+            .options()
+            .query()
+            .select_fields(&["option_id"])?
+            .where_eq("source_key", serde_json::json!(source))?
+            .where_eq("enabled", serde_json::json!(true))?
+            .page(1, 1)?
+            .all()
+            .await
+            .map_err(|e| ProvisionError::Store(e.to_string()))?;
+        if rows.is_empty() {
+            return Err(ProvisionError::Invalid(vec![format!(
+                "外部选项数据源「{source}」里没有启用中的选项"
+            )]));
+        }
+        // 仅验证来源；按记录文案查询，避免全量加载十几万条银行选项。
+        out.insert(name, BTreeMap::new());
+    }
+    Ok(out)
+}
+
+fn linked_widget_names(form: &[FormWidget], mapped_ids: Option<&[&str]>) -> Vec<String> {
+    form.iter()
         .flat_map(|widget| widget.walk())
         .filter(|widget| widget.links_to_our_options())
+        .filter(|widget| mapped_ids.map_or(true, |ids| ids.contains(&widget.id.as_str())))
         .map(|widget| widget.name.trim().to_string())
-        .filter(|name| !name.is_empty())
-        .collect();
+        .collect()
+}
+
+async fn load_option_sources(
+    context: &FeishuContext,
+    form: &[FormWidget],
+    mapped_ids: Option<&[&str]>,
+) -> Result<BTreeMap<String, String>, ProvisionError> {
+    let linked = linked_widget_names(form, mapped_ids);
+    if linked.iter().any(|name| name.is_empty()) {
+        return Err(ProvisionError::Invalid(vec![
+            "外部选项控件缺少名称，无法定位数据源绑定".to_string(),
+        ]));
+    }
     if linked.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -500,6 +551,9 @@ async fn load_external_options(
             );
             continue;
         };
+        if !linked.contains(&name) {
+            continue;
+        }
         let source: String = binding.require("source_key")?;
         match name_to_source.get(&name) {
             Some(existing) if *existing != source && !ambiguous.contains(&name) => {
@@ -525,7 +579,7 @@ async fn load_external_options(
             missing.push(name.as_str());
             continue;
         };
-        out.insert(name.clone(), load_options(context, source).await?);
+        out.insert(name.clone(), source.clone());
     }
     if !missing.is_empty() {
         return Err(ProvisionError::Invalid(vec![format!(
@@ -556,71 +610,70 @@ fn binding_display_name(binding: &Record) -> Result<Option<String>, BaseError> {
     Ok(Some(name))
 }
 
-/// 某个 `source_key` 下**启用中**的 `label → option_id`。
-///
-/// # label 在一个 source 内必须唯一
-///
-/// `option_id = hash(source_key, parent_key, label)`（级联时把父键哈了进去），
-/// 所以**同一个文案挂在不同父下会有不同 id**。此时静态映射就是错的——一个
-/// 文案对应两个 id，随便取一个会让提交的 id 属于另一个父。
-///
-/// 实测里 9 个数据源有 8 个 source 存在同名 label，所以这条**不是理论风险**。
-/// 撞上就报错，让使用方改文案或改配手动映射。
-async fn load_options(
+/// 查询当前记录用到的文案，仍严格拒绝同名歧义，不猜级联选项 id。
+pub(crate) async fn resolve_external_options(
     context: &FeishuContext,
-    source_key: &str,
-) -> Result<BTreeMap<String, String>, ProvisionError> {
-    let rows = all_pages(
-        context
-            .options()
-            .query()
-            .select_fields(&["option_id", "label"])?
-            .where_eq("source_key", serde_json::json!(source_key))?
-            .where_eq("enabled", serde_json::json!(true))?,
-        MAX_OPTION_PAGES,
-    )
-    .await
-    .map_err(|error| ProvisionError::Store(error.to_string()))?;
-
-    if rows.is_empty() {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "外部选项数据源「{source_key}」里没有启用中的选项"
-        )]));
-    }
-
-    let mut map: BTreeMap<String, String> = BTreeMap::new();
-    let mut conflicts: Vec<String> = Vec::new();
-    for row in &rows {
-        let label: String = row.require("label")?;
-        let option_id: String = row.require("option_id")?;
-        let label = label.trim().to_string();
-        match map.get(&label) {
-            Some(existing) if *existing != option_id => {
-                if !conflicts.contains(&label) {
-                    conflicts.push(label);
-                }
-            }
-            Some(_) => {}
-            None => {
-                map.insert(label, option_id);
-            }
+    snapshot: &str,
+    widgets: &mut [WidgetMap],
+    cells: &serde_json::Map<String, Value>,
+) -> Result<(), ProvisionError> {
+    let form = parse_form(&Value::String(snapshot.to_string()))?;
+    let mapped_ids: Vec<&str> = widgets
+        .iter()
+        .map(|widget| widget.widget_id.as_str())
+        .collect();
+    let sources = load_option_sources(context, &form, Some(&mapped_ids)).await?;
+    for definition in form
+        .iter()
+        .flat_map(|w| w.walk())
+        .filter(|w| w.links_to_our_options())
+    {
+        let Some(widget) = widgets.iter_mut().find(|w| w.widget_id == definition.id) else {
+            continue;
+        };
+        let Some(cell) = cells.get(&widget.bitable_field) else {
+            continue;
+        };
+        let source = sources.get(definition.name.trim()).ok_or_else(|| {
+            ProvisionError::Invalid(vec![format!(
+                "外部选项控件「{}」缺少数据源绑定",
+                definition.name
+            )])
+        })?;
+        widget.option_map.clear();
+        for label in super::approval_convert::labels_from_cell(cell)
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
+        {
+            let rows = context
+                .options()
+                .query()
+                .select_fields(&["option_id", "label"])?
+                .where_eq("source_key", serde_json::json!(source))?
+                .where_eq("enabled", serde_json::json!(true))?
+                .where_eq("label", serde_json::json!(label))?
+                .page(1, 2)?
+                .all()
+                .await
+                .map_err(|e| ProvisionError::Store(e.to_string()))?;
+            let option_id = unique_option(&rows, source, &label)?;
+            widget.option_map.insert(label, option_id);
         }
     }
-    if !conflicts.is_empty() {
+    Ok(())
+}
+
+fn unique_option(rows: &[Record], source: &str, label: &str) -> Result<String, ProvisionError> {
+    if rows.len() != 1 || rows[0].require::<String>("label")? != label {
         return Err(ProvisionError::Invalid(vec![format!(
-            "数据源「{source_key}」里同一个文案对应多个选项 id（级联时常见）：{}",
-            conflicts.join("、")
+            "数据源「{source}」的文案「{label}」没有唯一且完全匹配的启用选项"
         )]));
     }
-    Ok(map)
+    Ok(rows[0].require("option_id")?)
 }
 
 /// 扫字段绑定表时的页数上界。绑定行数量级在百级（每数据源几列），给足余量。
 const MAX_BINDING_PAGES: usize = 20;
-
-/// 读单个数据源选项时的页数上界。实测最大的一个源有 226 条选项（3 页），
-/// 给到 50 页是留量而不是预期。
-const MAX_OPTION_PAGES: usize = 50;
 
 /// 标题截断到列上限（100），避免插入期才报「字符串超长」。
 fn truncate_title(approval_name: &str, table_id: &str) -> String {
@@ -633,7 +686,7 @@ fn truncate_title(approval_name: &str, table_id: &str) -> String {
     source.chars().take(100).collect()
 }
 
-fn now_unix_secs() -> i64 {
+pub(crate) fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
@@ -653,6 +706,18 @@ fn converter_key(converter: Converter) -> &'static str {
 mod tests {
     use super::super::approval_match::{FormWidget, WidgetOptions};
     use super::*;
+
+    #[test]
+    fn selected_option_requires_one_exact_match() {
+        let row = |label: &str| Record::new().set("label", label).set("option_id", "id1");
+        assert_eq!(
+            unique_option(&[row("银行")], "source", "银行").unwrap_or_else(|e| panic!("{e}")),
+            "id1"
+        );
+        assert!(unique_option(&[], "source", "银行").is_err());
+        assert!(unique_option(&[row("银行"), row("银行")], "source", "银行").is_err());
+        assert!(unique_option(&[row("银行 ")], "source", "银行").is_err());
+    }
 
     /// 取出失败值。不用 `unwrap_err()`：clippy 的 `unwrap_used` 是 deny，
     /// 且它把「取错误值」的变体一并归入——`#[cfg(test)]` 也不例外。
@@ -679,6 +744,7 @@ mod tests {
             applicant_field: applicant,
             backfill_field: backfill,
             base_timezone: "Asia/Shanghai",
+            maps: None,
         }
     }
 
@@ -686,6 +752,46 @@ mod tests {
     const FORM_STRING: &str = r#"[{"id":"w1","name":"SWIFT Address","type":"input","required":true},
         {"id":"w2","name":"收款方类型/Type of payee","type":"radioV2","required":true,
          "option":[{"value":"mpuvnw0h-1","text":"个人"}]}]"#;
+
+    #[test]
+    fn explicit_mapping_only_loads_selected_external_sources() {
+        let form = parse_form(&serde_json::json!([
+            {"id":"plain","name":"备注","type":"input"},
+            {"id":"detail","name":"明细","type":"fieldList","children":[
+                {"id":"linked","name":" 公司 ","type":"radioV2",
+                 "externalData":{"externalDataLinkage":true}},
+                {"id":"omitted","name":"银行","type":"radioV2",
+                 "externalData":{"externalDataLinkage":true}}
+            ]}
+        ]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(linked_widget_names(&form, None), ["公司", "银行"]);
+        assert_eq!(
+            linked_widget_names(&form, Some(&["plain", "linked"])),
+            ["公司"]
+        );
+        assert!(linked_widget_names(&form, Some(&[])).is_empty());
+    }
+
+    #[test]
+    fn explicitly_empty_mapping_is_rejected() {
+        let form = parse_form(&serde_json::json!([
+            {"id":"optional","name":"备注","type":"input"}
+        ]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let error = expect_invalid(plan(
+            &ProvisionInput {
+                maps: Some(&[]),
+                ..input("fldP", "fldB")
+            },
+            "测试",
+            &form,
+            &[column("fldP", "申请人", &[]), column("fldB", "编号", &[])],
+            &BTreeMap::new(),
+            "[]",
+        ));
+        assert!(error.to_string().contains("至少需要配置一条有效字段映射"));
+    }
 
     #[test]
     fn form_as_json_string_parses() {
@@ -724,6 +830,7 @@ mod tests {
                 required: false,
                 option: None,
                 external_data: None,
+                value: serde_json::Value::Null,
                 children: Vec::new(),
             }],
             &[
@@ -792,6 +899,7 @@ mod tests {
             external_data: Some(serde_json::json!({
                 "externalDataLinkage": true, "key": ""
             })),
+            value: serde_json::Value::Null,
             children: Vec::new(),
         };
         let mut external = BTreeMap::new();
@@ -824,6 +932,33 @@ mod tests {
     }
 
     #[test]
+    fn detail_prefixed_column_uses_child_name_for_external_binding() {
+        let form = parse_form(&serde_json::json!([{"id":"parent","name":"明细","type":"fieldList","children":[{"id":"child","name":"类别","type":"radioV2","required":true,"option":[],"externalData":{"externalDataLinkage":false,"externalUrl":"https://example.test/api/v1/feishu/approval/options/source"}}]}])).unwrap_or_else(|e| panic!("{e}"));
+        let external = BTreeMap::from([(
+            "类别".to_string(),
+            BTreeMap::from([("费用".to_string(), "option".to_string())]),
+        )]);
+        let result = plan(
+            &input("applicant", "backfill"),
+            "test",
+            &form,
+            &[
+                column("applicant", "申请人", &[]),
+                column("backfill", "编号", &[]),
+                column("field", "明细_类别", &[]),
+            ],
+            &external,
+            "[]",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(result.widgets[0].bitable_field, "field");
+        assert_eq!(
+            result.widgets[0].option_map.get("费用").map(String::as_str),
+            Some("option")
+        );
+    }
+
+    #[test]
     fn linked_widget_without_binding_is_reported() {
         let linked = FormWidget {
             id: "w1".to_string(),
@@ -832,6 +967,7 @@ mod tests {
             required: true,
             option: Some(WidgetOptions::Fixed(vec![])),
             external_data: Some(serde_json::json!({ "externalDataLinkage": true })),
+            value: serde_json::Value::Null,
             children: Vec::new(),
         };
         let error = expect_invalid(plan(
@@ -863,6 +999,7 @@ mod tests {
                 required: false,
                 option: None,
                 external_data: None,
+                value: serde_json::Value::Null,
                 children: Vec::new(),
             }],
             &[

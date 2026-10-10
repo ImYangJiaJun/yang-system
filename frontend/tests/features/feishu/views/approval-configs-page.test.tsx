@@ -52,6 +52,7 @@ function configRows() {
       maps: [
         {
           widget_id: "widget-1",
+          widget_name: "付款明细_金额",
           widget_type: "input",
           bitable_field: "fldA",
           bitable_field_name: "金额",
@@ -193,6 +194,12 @@ describe("审批派发配置页 · 权限门控", () => {
     expect(screen.queryByRole("button", { name: "启用" })).toBeNull();
     // 行尾给「只读」标注
     expect(screen.getAllByText("只读").length).toBe(2);
+    const user = userEvent.setup();
+    await user.click(screen.getAllByRole("button", { name: "映射明细" })[1]!);
+    const detail = within(screen.getByTestId("maps-of-2"));
+    expect(detail.getByText("付款明细_金额")).toBeInTheDocument();
+    expect(detail.getByText("金额")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑映射" })).toBeNull();
   });
 
   it("有读有写：入口与行操作都在", async () => {
@@ -212,6 +219,55 @@ describe("审批派发配置页 · 权限门控", () => {
 });
 
 describe("审批派发配置页 · 行操作", () => {
+  it("编辑保存逐项映射：预览保留原选择，请求使用控件和列 ID", async () => {
+    const user = userEvent.setup();
+    const calls = stubApprovalApi({
+      configList: () => listPage(configRows()),
+      widgets: () => ({
+        widgets: [
+          {
+            id: "widget-1",
+            name: "金额",
+            qualified_name: "付款明细_金额",
+            type: "input",
+            required: true,
+          },
+        ],
+      }),
+      bitableFields: () => ({
+        fields: [
+          { field_id: "fldA", field_name: "金额", type: 1 },
+          { field_id: "fldB", field_name: "实际付款", type: 1 },
+        ],
+      }),
+    });
+    renderConfigs();
+    await screen.findByText("费用报销");
+    await user.click(screen.getAllByRole("button", { name: "编辑映射" })[1]!);
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    const pick = await screen.findByRole("combobox", {
+      name: "付款明细_金额对应的多维表格列",
+    });
+    expect(pick).toHaveTextContent("金额");
+    await user.click(pick);
+    await user.click(await screen.findByRole("option", { name: /实际付款/ }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    expect(screen.getByText("付款明细_金额 → 实际付款")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() =>
+      expect(bodiesOf(calls, CONFIG_UPDATE_PATH)).toEqual([
+        {
+          config_id: 2,
+          base_timezone: "Asia/Shanghai",
+          maps: [{ widget_id: "widget-1", bitable_field: "fldB" }],
+        },
+      ]),
+    );
+    await waitFor(() =>
+      expect(countCalls(calls, CONFIG_LIST_PATH)).toBeGreaterThan(1),
+    );
+  });
   it("启停：调用 update_config 翻转 enabled，成功后回读列表", async () => {
     const calls = stubApprovalApi({
       configList: () => listPage(configRows()),

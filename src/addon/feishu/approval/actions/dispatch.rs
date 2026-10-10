@@ -453,6 +453,7 @@ async fn provision(
             // 部署默认时区。多维表格日期是不带时区的毫秒时间戳，而审批 `date` 控件要
             // 带偏移量——猜错会让审批里的时间整体偏移，所以必须由配置给定。
             base_timezone: &settings.approval_base_timezone,
+            maps: None,
         },
     )
     .await?;
@@ -520,11 +521,26 @@ async fn backfill_provision_failure(
         table_id: input.table_id.trim().to_string(),
         view_id: None,
     };
+    let fields = match bitable::list_all_fields(
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        &coordinates,
+    )
+    .await
+    {
+        Ok(fields) => fields,
+        Err(error) => {
+            tracing::warn!(error = %error, "读取回填列类型失败");
+            return;
+        }
+    };
     let writer = BitableBackfill {
         transport: outbound.transport(),
         sleeper: outbound.sleeper(),
         tokens: &outbound.tokens,
         coordinates: &coordinates,
+        fields: &fields,
     };
 
     if let Err(error) = write_config_failure(&writer, record_id, backfill_field, failure).await {
@@ -556,7 +572,11 @@ async fn write_config_failure(
     failure: &ProvisionError,
 ) -> Result<(), crate::addon::feishu::domain::outbound::OutboundFailure> {
     backfill
-        .write(record_id, backfill_field, &format!("[配置] {failure}"))
+        .write(
+            record_id,
+            backfill_field,
+            &serde_json::json!(format!("[配置] {failure}")),
+        )
         .await
 }
 
@@ -731,6 +751,7 @@ async fn dispatch_single(
         sleeper: outbound.sleeper(),
         tokens: &outbound.tokens,
         coordinates: &coordinates,
+        fields: &fields,
     };
     let result = dispatch_one(
         outbound.transport(),
@@ -738,6 +759,7 @@ async fn dispatch_single(
         &outbound.tokens,
         &backfill,
         &OrchestrationInput {
+            context: Some(context),
             coordinates: &coordinates,
             record_id,
             cells: &cells,
@@ -745,6 +767,7 @@ async fn dispatch_single(
             backfill_field_name: &backfill_field_name,
             approval_code: &approval_code,
             widgets: &widgets,
+            form_snapshot: config_row.optional("form_snapshot")?.unwrap_or_default(),
             timezone_offset,
         },
     )
@@ -1124,6 +1147,7 @@ mod tests {
             Ok(OutboundResponse {
                 status,
                 body,
+                bytes: None,
                 headers: std::collections::BTreeMap::new(),
             })
         }
@@ -1192,13 +1216,17 @@ mod tests {
     ///
     /// `connect_lazy` 不建立任何连接，但它要求一个 Tokio 上下文。
     fn e2e_context() -> FeishuContext {
-        use crate::addon::feishu::domain::repository::Repository;
-        use yang_base::definition::TableSpec;
-
         let pool = Arc::new(
             sqlx::MySqlPool::connect_lazy("mysql://user:pass@localhost:3306/yang")
                 .unwrap_or_else(|error| panic!("惰性连接池应可构造: {error}")),
         );
+        e2e_context_with_pool(pool)
+    }
+
+    fn e2e_context_with_pool(pool: Arc<sqlx::MySqlPool>) -> FeishuContext {
+        use crate::addon::feishu::domain::repository::Repository;
+        use yang_base::definition::TableSpec;
+
         let definition = |spec: Result<TableSpec, _>| {
             spec.unwrap_or_else(|error| panic!("{error}"))
                 .table_definition()
@@ -1224,6 +1252,117 @@ mod tests {
             table_id: E2E_TABLE_ID.to_string(),
             view_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn unnamed_linked_widget_returns_invalid_without_querying_database() {
+        let snapshot =
+            json!([{"id":"w","type":"radioV2","externalData":{"externalDataLinkage":true}}])
+                .to_string();
+        let mut widgets = vec![crate::addon::feishu::domain::approval_convert::WidgetMap {
+            widget_id: "w".to_string(),
+            widget_type: "radioV2".to_string(),
+            bitable_field: "fldTest".to_string(),
+            required: false,
+            converter: crate::addon::feishu::domain::approval_convert::Converter::Option,
+            option_map: Default::default(),
+            currency: None,
+        }];
+        let error = crate::addon::feishu::domain::approval_provision::resolve_external_options(
+            &e2e_context(),
+            &snapshot,
+            &mut widgets,
+            &serde_json::Map::new(),
+        )
+        .await;
+        assert!(
+            matches!(error, Err(ProvisionError::Invalid(_))),
+            "{error:?}"
+        );
+        let omitted = crate::addon::feishu::domain::approval_provision::resolve_external_options(
+            &e2e_context(),
+            &snapshot,
+            &mut [],
+            &serde_json::Map::new(),
+        )
+        .await;
+        assert!(omitted.is_ok(), "未映射的可选外部控件不应查库: {omitted:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "需要真实 MySQL 测试库"]
+    async fn real_mysql_resolves_detail_options_and_waits_on_ambiguous_labels() -> anyhow::Result<()>
+    {
+        use crate::addon::feishu::domain::approval_convert::WidgetMap;
+        use crate::addon::feishu::domain::approval_dispatch::DispatchInput;
+        use crate::addon::feishu::domain::approval_provision::resolve_external_options;
+        let database =
+            yang_db::Database::connect(&std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "拒绝在非测试库运行");
+        crate::schema::sync_with_database(
+            database,
+            yang_db::DatabaseConfig::default(),
+            Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let pool = Arc::new(
+            sqlx::MySqlPool::connect(&std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?).await?,
+        );
+        let context = e2e_context_with_pool(pool.clone());
+        let source = format!("att_{}", uuid::Uuid::new_v4().simple());
+        let name = format!("附件验证选项_{source}");
+        let binding = yang_base::table::Record::new()
+            .set("datasource_id", 1_i64)
+            .set("field_id", "fldRegression")
+            .set("field_name", name.clone())
+            .set("source_key", source.clone())
+            .set("token_hash", source.clone());
+        context.datasource_fields().query().insert(binding).await?;
+        let outcome: anyhow::Result<()> = async {
+            for (suffix, row_source, label, enabled) in [
+                ("good", source.clone(), "正确", true),
+                ("disabled", source.clone(), "正确", false),
+                ("other", format!("{source}_other"), "正确", true),
+                ("different", source.clone(), "别的文案", true),
+                ("dup1", source.clone(), "重名", true),
+                ("dup2", source.clone(), "重名", true),
+                ("dup3", source.clone(), "重名", true),
+            ] {
+                context.options().query().insert(yang_base::table::Record::new().set("option_id", format!("{source}_{suffix}")).set("source_key", row_source).set("label", label).set("enabled", enabled)).await?;
+            }
+            let snapshot = json!([{"id":"detail","type":"fieldList","children":[{"id":"linked","name":name,"type":"radioV2","externalData":{"externalDataLinkage":true}}]}]).to_string();
+            let mut widgets = vec![WidgetMap { widget_id: "linked".into(), widget_type: "radioV2".into(), bitable_field: "fldRegression".into(), required: true, converter: Converter::Option, option_map: Default::default(), currency: None }];
+            let mut cells = serde_json::Map::from_iter([("fldRegression".into(), json!("正确")), ("fldApplicant".into(), json!([{"id":E2E_APPLICANT_OPEN_ID}]))]);
+            resolve_external_options(&context, &snapshot, &mut widgets, &cells).await?;
+            assert_eq!(widgets[0].option_map, std::collections::BTreeMap::from([("正确".into(), format!("{source}_good"))]));
+            let coordinates = e2e_coordinates();
+            for label in ["重名", "不存在"] {
+                cells.insert("fldRegression".into(), json!(label));
+                let transport = ReplayTransport::new(vec![]);
+                let tokens = e2e_tokens();
+                let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &[] };
+                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", backfill_field_name: "审批编号", approval_code: E2E_APPROVAL_CODE, form_snapshot: snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
+                let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
+                assert!(matches!(result, DispatchResult::Waiting { .. }), "{result:?}");
+                assert!(transport.seen().is_empty(), "等待态不得创建或回填");
+            }
+            Ok(())
+        }.await;
+        // tenant-boundary: raw-sql attachment-option-regression-cleanup
+        sqlx::query("DELETE FROM feishu_option WHERE source_key IN (?, ?)")
+            .bind(&source)
+            .bind(format!("{source}_other"))
+            .execute(pool.as_ref())
+            .await?;
+        // tenant-boundary: raw-sql attachment-binding-regression-cleanup
+        sqlx::query("DELETE FROM feishu_datasource_field WHERE source_key = ?")
+            .bind(&source)
+            .execute(pool.as_ref())
+            .await?;
+        outcome
     }
 
     /// 合成审批定义：6 个控件，覆盖「无 `option` 键 / `option: null` / 固定选项数组 /
@@ -1365,6 +1504,7 @@ mod tests {
                 applicant_field: "申请人",
                 backfill_field: "审批编号",
                 base_timezone: "Asia/Shanghai",
+                maps: None,
             },
         )
         .await
@@ -1447,6 +1587,7 @@ mod tests {
             sleeper: &sleeper,
             tokens: &tokens,
             coordinates: &coordinates,
+            fields: &fields,
         };
         let result = dispatch_one(
             transport.as_ref(),
@@ -1454,6 +1595,7 @@ mod tests {
             &tokens,
             &backfill,
             &OrchestrationInput {
+                context: Some(&context),
                 coordinates: &coordinates,
                 record_id: E2E_RECORD_ID,
                 cells: &cells,
@@ -1461,6 +1603,7 @@ mod tests {
                 backfill_field_name: &backfill_field_name,
                 approval_code: E2E_APPROVAL_CODE,
                 widgets: &plan.widgets,
+                form_snapshot: plan.form_snapshot.clone(),
                 timezone_offset: FixedOffset::from_iana("Asia/Shanghai")
                     .unwrap_or_else(|error| panic!("{error}")),
             },
@@ -1590,6 +1733,7 @@ mod tests {
                 applicant_field: "申请人",
                 backfill_field: "审批编号",
                 base_timezone: "Asia/Shanghai",
+                maps: None,
             },
         )
         .await
@@ -1606,11 +1750,17 @@ mod tests {
 
         // 写回回填列——走的是生产代码里 `backfill_provision_failure` 调用的同一个函数。
         let coordinates = e2e_coordinates();
+        let fields = e2e_fields_body();
+        let fields: Value = serde_json::from_str(&fields).unwrap_or_else(|e| panic!("{e}"));
+        let fields: Vec<bitable::FieldItem> =
+            serde_json::from_value(fields["data"]["items"].clone())
+                .unwrap_or_else(|e| panic!("{e}"));
         let backfill = BitableBackfill {
             transport: transport.as_ref(),
             sleeper: &sleeper,
             tokens: &tokens,
             coordinates: &coordinates,
+            fields: &fields,
         };
         write_config_failure(&backfill, E2E_RECORD_ID, "审批编号", &failure)
             .await

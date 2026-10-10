@@ -57,6 +57,14 @@ pub(crate) fn instance_detail_url(instance_id: &str) -> anyhow::Result<String> {
     ))
 }
 
+/// 官方审批 AppLink：PC/手机路径分别编码，实例 Code 与数字 ID 都受支持。
+pub(crate) fn instance_applink(instance_code: &str) -> anyhow::Result<String> {
+    super::bitable::validate_path_segment("instance_code", instance_code)?;
+    Ok(format!(
+        "https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path_pc=pc%2Fpages%2Fin-process%2Findex%3FinstanceId%3D{instance_code}%26source%3Dbitable&path=pages%2Fdetail%2Findex%3FinstanceId%3D{instance_code}%26source%3Dbitable"
+    ))
+}
+
 /// 审批定义详情的 URL。
 pub(crate) fn approval_definition_url(approval_code: &str) -> anyhow::Result<String> {
     validate_path_segment("approval_code", approval_code)?;
@@ -125,6 +133,8 @@ pub(crate) async fn create_instance(
         query: Vec::new(),
         bearer_token: None, // 下面逐次取 token 后填入
         json_body: Some(body),
+        raw_body: None,
+        binary_limit: None,
         timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
         // **必须为 true**：唯一依据是 uuid 的服务端幂等（官方明文「同一个 uuid
         // 只能用于创建一个审批实例，如果冲突则创建失败并返回错误码 60012」）。
@@ -169,6 +179,7 @@ struct CreateInstanceData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InstanceDetail {
     pub(crate) instance_code: String,
+    pub(crate) approval_code: Option<String>,
     /// 审批单编号。**可能为空**——文档未承诺创建后立即可查，所以用 `Option`
     /// 而不是报错。
     pub(crate) serial_number: Option<String>,
@@ -206,6 +217,8 @@ pub(crate) async fn get_instance(
         query: detail_query(),
         bearer_token: None,
         json_body: None,
+        raw_body: None,
+        binary_limit: None,
         timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
         idempotent: true, // 只读
     };
@@ -219,6 +232,7 @@ pub(crate) async fn get_instance(
                 })?;
             Ok(GetOutcome::Found(InstanceDetail {
                 instance_code: data.instance_code,
+                approval_code: data.approval_code,
                 serial_number: data.serial_number.filter(|value| !value.is_empty()),
                 status: data.status,
             }))
@@ -232,6 +246,8 @@ pub(crate) async fn get_instance(
 #[derive(Debug, Deserialize)]
 struct InstanceDetailData {
     instance_code: String,
+    #[serde(default)]
+    approval_code: Option<String>,
     #[serde(default)]
     serial_number: Option<String>,
     #[serde(default)]
@@ -270,6 +286,8 @@ pub(crate) async fn get_approval_definition(
         query: Vec::new(),
         bearer_token: None,
         json_body: None,
+        raw_body: None,
+        binary_limit: None,
         timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
         idempotent: true, // 只读
     };
@@ -456,6 +474,7 @@ mod tests {
         // 直接用 `Some("")` 会让多维度表格被回填成一个空单元格。
         let detail = GetOutcome::Found(InstanceDetail {
             instance_code: "abc".to_string(),
+            approval_code: None,
             serial_number: Some(String::new()).filter(|value| !value.is_empty()),
             status: None,
         });

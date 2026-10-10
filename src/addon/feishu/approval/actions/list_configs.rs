@@ -11,13 +11,15 @@ use yang_base::definition::{HttpMethod, ModuleSpec};
 use yang_base::table::{Record, SortOrder};
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::approval_match::mapping_widgets;
+use crate::addon::feishu::domain::approval_provision::parse_form;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::list_input::ListInput;
+use crate::addon::feishu::domain::repository::all_pages;
 
 /// 配置行投影列。
 ///
-/// **`form_snapshot` 不在其中**：它是审批定义的控件结构快照大字段，列表页用不到
-/// （快照时间足够），显式排除避免每行搬运整段 JSON。
+/// `form_snapshot` 仅在内部用于解析控件名称，不投影到响应。
 pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "id",
     "title",
@@ -49,6 +51,8 @@ pub(super) const MAP_ITEM_COLUMNS: &[&str] = &[
 pub(super) struct FieldMapItem {
     /// 审批控件 id。
     widget_id: String,
+    /// 明细子控件名称包含父控件前缀；旧快照不可用时为空。
+    widget_name: Option<String>,
     /// 审批控件类型（`input` / `radioV2` / …）。
     widget_type: String,
     /// 多维表格字段 ID。对齐靠它（id 不随改名变）。
@@ -71,6 +75,7 @@ pub(super) fn group_maps(rows: &[Record]) -> Result<HashMap<i64, Vec<FieldMapIte
         let config_id: i64 = row.require("config_id")?;
         groups.entry(config_id).or_default().push(FieldMapItem {
             widget_id: row.require("widget_id")?,
+            widget_name: None,
             widget_type: row.require("widget_type")?,
             bitable_field: row.require("bitable_field")?,
             bitable_field_name: row.optional("bitable_field_name")?,
@@ -136,7 +141,7 @@ pub(super) async fn handle(
     let mut query = context
         .approval_configs()
         .query()
-        .select_fields(CONFIG_ITEM_COLUMNS)?
+        .select_fields(&[CONFIG_ITEM_COLUMNS, &["form_snapshot"]].concat())?
         .search(input.search.as_deref())?;
 
     if let Some(tree) = input.where_clause {
@@ -169,19 +174,33 @@ pub(super) async fn handle(
     let mut groups = if ids.is_empty() {
         HashMap::new()
     } else {
-        let map_rows = context
-            .approval_field_maps()
-            .query()
-            .select_fields(MAP_ITEM_COLUMNS)?
-            .where_in("config_id", ids)?
-            .all()
-            .await?;
+        let map_rows = all_pages(
+            context
+                .approval_field_maps()
+                .query()
+                .select_fields(MAP_ITEM_COLUMNS)?
+                .where_in("config_id", ids)?,
+            100,
+        )
+        .await?;
         group_maps(&map_rows)?
     };
 
     let mut items = Vec::with_capacity(rows.len());
     for record in rows.iter() {
         let id: i64 = record.require("id")?;
+        let mut maps = groups.remove(&id).unwrap_or_default();
+        if let Some(snapshot) = record.optional::<String>("form_snapshot")? {
+            if let Ok(form) = parse_form(&serde_json::Value::String(snapshot)) {
+                let names = mapping_widgets(&form);
+                for map in &mut maps {
+                    map.widget_name = names
+                        .iter()
+                        .find(|(w, _)| w.id == map.widget_id)
+                        .map(|(_, name)| name.clone());
+                }
+            }
+        }
         items.push(ConfigItem {
             id,
             title: record.require("title")?,
@@ -195,7 +214,7 @@ pub(super) async fn handle(
             form_snapshot_at: record.optional("form_snapshot_at")?,
             updated_at: record.require("updated_at")?,
             // 没配映射的配置得到空数组，不是缺键——前端不必到处补 `?? []`
-            maps: groups.remove(&id).unwrap_or_default(),
+            maps,
         });
     }
 

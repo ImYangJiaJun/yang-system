@@ -14,8 +14,8 @@
 //! 2. **选项值 ↔ 列里的选项**：只在控件 `option` 是**数组**（固定选项）时派生，
 //!    按 `option[].text` ↔ 列选项名对上后取 `option[].value`。
 //!
-//! `externalData.externalDataLinkage = true` 的控件走**本系统自己**的外部选项
-//! 数据源（`feishu_option`），由调用方把 `option_map` 补进 `WidgetMap`——那一段
+//! 级联链接态或使用本系统选项接口路径的控件，从本地外部选项
+//! 数据源（`feishu_option`）取值，由调用方把 `option_map` 补进 `WidgetMap`——那一段
 //! 不在本模块内，因为它读的是数据库而不是飞书响应。
 //!
 //! # `option` 是多态字段（实测）
@@ -97,14 +97,16 @@ pub(crate) struct FormWidget {
     /// 是否必填。判定「配置期报错」的依据。
     #[serde(default)]
     pub(crate) required: bool,
+    /// 关联审批允许的定义 Code；其他控件的 value 保持原始形态。
+    #[serde(default)]
+    pub(crate) value: serde_json::Value,
     /// 多态选项；`None` 表示「无选项」（键缺失或值为 `null`）。
     #[serde(default)]
     pub(crate) option: Option<WidgetOptions>,
     /// 外部数据源链接。
     ///
     /// 声明成 `serde_json::Value` 是**为了能识别出这个键存在**——实测里
-    /// `externalDataLinkage` 为 `true` 的控件要走本系统自己的外部选项数据源，
-    /// 而不是从这里读取值。
+    /// 识别级联链接态与非级联选项接口；实际选项由调用方查本地绑定。
     ///
     /// **`rename` 不能省**：JSON 键是驼峰的 `externalData`，Rust 字段是
     /// snake_case。没有这一行，字段恒为 `None`，而症状是「链接态被当成非链接」
@@ -117,6 +119,57 @@ pub(crate) struct FormWidget {
 }
 
 impl FormWidget {
+    /// 返回关联审批允许的定义 Code；`None` 表示定义明确声明不限制范围。
+    pub(crate) fn connect_definition_codes(&self) -> Result<Option<Vec<String>>, String> {
+        if self.r#type != "connect" {
+            return Ok(None);
+        }
+        if let Some(WidgetOptions::Config(option)) = self.option.as_ref() {
+            if option
+                .get("notLimitScope")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                return Ok(None);
+            }
+        }
+        if let Some(values) = self.value.as_array() {
+            let codes = values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            return if codes.is_empty() {
+                Err("关联审批控件没有有效的审批定义 Code".to_string())
+            } else {
+                Ok(Some(codes))
+            };
+        }
+        let Some(WidgetOptions::Config(option)) = self.option.as_ref() else {
+            return Err("关联审批控件缺少关联范围配置".to_string());
+        };
+        let codes = option
+            .get("definitionIds")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|code| !code.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if codes.is_empty() {
+            Err("关联审批控件没有有效的审批定义 Code，也未声明不限制范围".to_string())
+        } else {
+            Ok(Some(codes))
+        }
+    }
+
     /// 收集自己与全部后代——子控件也参与按名匹配。
     ///
     /// 返回 `Vec` 而不是 `impl Iterator`：递归返回的匿名类型无法在 trait 方法里
@@ -129,15 +182,38 @@ impl FormWidget {
         out
     }
 
-    /// 该控件的选项是否链接到**本系统**的外部数据源。
+    /// 该控件是否需要由调用方补齐本地外部选项。
     ///
-    /// 判据取 `externalData.externalDataLinkage`。链接的是谁由 `key` 与
-    /// `linkageConfigs[].key` 表达，**但实测里 `externalData.key` 是空字符串**——
-    /// 所以这里只判「是不是链接态」，实际数据源由调用方按配置查。
+    /// 有 URL 时只识别本系统接口的路径形状，不判定主机归属或访问该 URL；
+    /// 无 URL 时回退到级联标志，实际数据源身份由调用方验证本地绑定。
     pub(crate) fn links_to_our_options(&self) -> bool {
         let Some(external) = &self.external_data else {
             return false;
         };
+        if let Some(url) = external
+            .get("externalUrl")
+            .and_then(serde_json::Value::as_str)
+            .filter(|u| !u.is_empty())
+        {
+            return url.split_once("://").is_some_and(|(scheme, rest)| {
+                matches!(scheme, "http" | "https")
+                    && rest.split_once('/').is_some_and(|(host, path)| {
+                        !host.is_empty()
+                            && !host.chars().any(char::is_whitespace)
+                            && format!("/{path}")
+                                .split(['?', '#'])
+                                .next()
+                                .unwrap_or_default()
+                                .strip_prefix("/api/v1/feishu/approval/options/")
+                                .is_some_and(|key| {
+                                    !key.is_empty()
+                                        && key.bytes().all(|c| {
+                                            c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')
+                                        })
+                                })
+                    })
+            });
+        }
         external
             .get("externalDataLinkage")
             .and_then(serde_json::Value::as_bool)
@@ -237,8 +313,12 @@ pub(crate) fn resolve_key_coords<'a>(
 /// 所以文案要指向**可行动的修复**，不能只是「匹配失败」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MatchError {
+    InvalidMapping(String),
     /// 必填控件在多维表格里没有同名列。
-    MissingRequiredColumn { widget: String, widget_type: String },
+    MissingRequiredColumn {
+        widget: String,
+        widget_type: String,
+    },
     /// 列名与控件名匹配上了，但类型对不上（例如列是单选而控件是数字）。
     TypeMismatch {
         widget: String,
@@ -253,11 +333,20 @@ pub(crate) enum MatchError {
         count: usize,
     },
     /// 必填控件的选项**无法从列里派生**（`option` 不是数组）。
-    UnresolvableOptions { widget: String, widget_type: String },
+    UnresolvableOptions {
+        widget: String,
+        widget_type: String,
+    },
     /// 该控件类型不支持通过 API 提单（官方不支持清单）。
-    UnsupportedWidget { widget: String, widget_type: String },
-    /// 需要人工准备值的控件（附件 / 地址 / 关联审批），配置期直接拒绝。
-    ManualValueWidget { widget: String, widget_type: String },
+    UnsupportedWidget {
+        widget: String,
+        widget_type: String,
+    },
+    /// 需要人工准备值的控件（旧附件 / 图片 / 地址），配置期直接拒绝。
+    ManualValueWidget {
+        widget: String,
+        widget_type: String,
+    },
     /// 两个不同的控件名落在同一列上。
     ColumnReused {
         column: String,
@@ -269,12 +358,13 @@ pub(crate) enum MatchError {
 impl std::fmt::Display for MatchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidMapping(message) => formatter.write_str(message),
             Self::MissingRequiredColumn {
                 widget,
                 widget_type,
             } => write!(
                 formatter,
-                "必填控件「{widget}」（{widget_type}）在多维表格里没有同名列"
+                "必填控件「{widget}」（{widget_type}）没有配置有效的多维表格列（自动匹配时需同名列）"
             ),
             Self::TypeMismatch {
                 widget,
@@ -306,7 +396,7 @@ impl std::fmt::Display for MatchError {
             ),
             Self::ManualValueWidget { widget, widget_type } => write!(
                 formatter,
-                "控件「{widget}」（{widget_type}）需要人工准备值（附件 / 地址 / 关联审批），不参与自动派发"
+                "控件「{widget}」（{widget_type}）需要人工准备值（旧附件控件 / 图片 / 文档 / 地址），不参与自动派发"
             ),
             Self::ColumnReused {
                 column,
@@ -355,41 +445,91 @@ const UNSUPPORTED_TYPES: &[&str] = &[
 ];
 
 /// 需要人工准备值的控件类型：它们的值不是多维表格能给的（file code / 地理库 id /
-/// 已存在的 instance_code），配置期就拦下，免得配完之后每一条记录都失败。
-const MANUAL_VALUE_TYPES: &[&str] = &[
-    "address",
-    "connect",
-    "attachment",
-    "attachmentV2",
-    "image",
-    "imageV2",
-    "document",
-];
+/// 地理库 id），配置期就拦下，免得配完之后每一条记录都失败。
+const MANUAL_VALUE_TYPES: &[&str] = &["address", "attachment", "image", "imageV2", "document"];
 
 /// 由审批定义与列定义按名匹配出一张映射表。
 ///
 /// **全量校验**：一次返回**所有**不成立的控件，而不是遇到第一个就停——
 /// 使用方要「配置期就报错」，而配置期一次改完比改一条看一条快得多。
 pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOutcome {
+    match_fields(form, columns, None)
+}
+
+/// 显式映射省略时保留旧的按名匹配；传入时以控件和列 ID 为准。
+#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FieldMapping {
+    pub(crate) widget_id: String,
+    pub(crate) bitable_field: String,
+}
+
+pub(crate) fn mapping_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)> {
+    preview_widgets(form)
+        .into_iter()
+        .filter(|(widget, _)| widget.r#type != "fieldList")
+        .collect()
+}
+
+/// 预览保留明细父级与定义顺序；父级仅展示，不参与列映射。
+pub(crate) fn preview_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)> {
+    fn collect<'a>(form: &'a [FormWidget], parent: &str, flat: &mut Vec<(&'a FormWidget, String)>) {
+        for widget in form {
+            let name = if parent.is_empty() {
+                widget.name.trim().to_string()
+            } else {
+                format!("{parent}_{}", widget.name.trim())
+            };
+            flat.push((widget, name.clone()));
+            collect(&widget.children, &name, flat);
+        }
+    }
+    let mut flat = Vec::new();
+    collect(form, "", &mut flat);
+    flat
+}
+
+pub(crate) fn match_fields(
+    form: &[FormWidget],
+    columns: &[Column],
+    maps: Option<&[FieldMapping]>,
+) -> MatchOutcome {
     let mut errors: Vec<MatchError> = Vec::new();
     let mut widgets: Vec<WidgetMap> = Vec::new();
     let mut column_owner: BTreeMap<String, String> = BTreeMap::new();
 
-    // 递归铺平：明细（fieldList）的子控件也参与匹配，但**明细本身**不落映射——
-    // 它的子控件是 `widget1.widget2` 这类复合 id，走嵌套提交路径。
-    let mut flat: Vec<&FormWidget> = Vec::new();
-    for widget in form {
-        for node in widget.walk() {
-            if node.r#type == "fieldList" {
-                continue;
-            }
-            flat.push(node);
+    let flat = mapping_widgets(form);
+    let mut selected = BTreeMap::new();
+    for map in maps.into_iter().flatten() {
+        if !flat.iter().any(|(widget, _)| widget.id == map.widget_id) {
+            errors.push(MatchError::InvalidMapping(format!(
+                "审批控件「{}」不存在",
+                map.widget_id
+            )));
+        }
+        if !columns
+            .iter()
+            .any(|column| column.field_id == map.bitable_field)
+        {
+            errors.push(MatchError::InvalidMapping(format!(
+                "多维表格列「{}」不存在",
+                map.bitable_field
+            )));
+        }
+        if selected
+            .insert(map.widget_id.as_str(), map.bitable_field.as_str())
+            .is_some()
+        {
+            errors.push(MatchError::InvalidMapping(format!(
+                "控件「{}」重复配置",
+                map.widget_id
+            )));
         }
     }
 
-    for widget in flat {
+    for (widget, qualified_name) in flat {
         if UNSUPPORTED_TYPES.contains(&widget.r#type.as_str()) {
-            if widget.required {
+            if widget.required || selected.contains_key(widget.id.as_str()) {
                 errors.push(MatchError::UnsupportedWidget {
                     widget: widget.name.clone(),
                     widget_type: widget.r#type.clone(),
@@ -400,7 +540,7 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
         if MANUAL_VALUE_TYPES.contains(&widget.r#type.as_str()) {
             // **可选**的人工值控件不拦（留空提交是合法的，官方允许不传必填控件
             // 之外的任何控件）；**必填**的拦下来——留空会让审批单缺核心内容。
-            if widget.required {
+            if widget.required || selected.contains_key(widget.id.as_str()) {
                 errors.push(MatchError::ManualValueWidget {
                     widget: widget.name.clone(),
                     widget_type: widget.r#type.clone(),
@@ -409,7 +549,23 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
             continue;
         }
 
-        let Some(column) = find_column(columns, &widget.name, &mut errors) else {
+        // 有前缀列时只匹配它，歧义不能退回裸列名绕过。
+        let name = if columns
+            .iter()
+            .any(|c| c.field_name.trim() == qualified_name)
+        {
+            qualified_name.as_str()
+        } else {
+            widget.name.as_str()
+        };
+        let column = if maps.is_some() {
+            selected
+                .get(widget.id.as_str())
+                .and_then(|id| columns.iter().find(|c| c.field_id == *id))
+        } else {
+            find_column(columns, name, &mut errors)
+        };
+        let Some(column) = column else {
             if widget.required {
                 errors.push(MatchError::MissingRequiredColumn {
                     widget: widget.name.clone(),
@@ -418,6 +574,16 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
             }
             continue;
         };
+        if let Err(reason) = widget.connect_definition_codes() {
+            errors.push(MatchError::InvalidMapping(format!(
+                "关联审批控件「{}」（{}）配置无效：{reason}",
+                widget.name, widget.id
+            )));
+            continue;
+        }
+        if maps.is_some() && find_column(columns, &column.field_name, &mut errors).is_none() {
+            continue;
+        }
 
         // 一列只能服务一个控件：**键是 `field_id`**。
         //
@@ -438,7 +604,7 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
         if let Err(error) = check_type_compatibility(widget, column) {
             // 类型不匹配只在**必填**时报错：可选控件对不上可以留空，
             // 让它进映射反而会在提交时被 1390001 拒掉整单。
-            if widget.required {
+            if widget.required || maps.is_some() {
                 errors.push(error);
             }
             continue;
@@ -453,7 +619,7 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
             // 缺失 / null / 对象：都没有可派生的固定选项。
             _ => BTreeMap::new(),
         };
-        if widget.required
+        if (widget.required || maps.is_some())
             && !widget.links_to_our_options()
             && option_map.is_empty()
             && matches!(
@@ -608,6 +774,7 @@ mod tests {
                 },
             ])),
             external_data: None,
+            value: serde_json::Value::Null,
             children: Vec::new(),
         }
     }
@@ -622,6 +789,7 @@ mod tests {
             // 两种都要解析成「无选项」。
             option: None,
             external_data: None,
+            value: serde_json::Value::Null,
             children: Vec::new(),
         }
     }
@@ -638,6 +806,7 @@ mod tests {
                 "key": "",
                 "linkageConfigs": [{"linkageWidgetID": "widgetX", "value": "成都", "key": "fldeysrdna"}]
             })),
+            value: serde_json::Value::Null,
             children: Vec::new(),
         }
     }
@@ -652,6 +821,7 @@ mod tests {
                 serde_json::json!({"input_type": "LIST"}),
             )),
             external_data: None,
+            value: serde_json::Value::Null,
             children: vec![
                 input("费用明细/Expense details", "child1", true),
                 FormWidget {
@@ -663,6 +833,7 @@ mod tests {
                         serde_json::json!({"maxValue": "", "minValue": ""}),
                     )),
                     external_data: None,
+                    value: serde_json::Value::Null,
                     children: Vec::new(),
                 },
             ],
@@ -675,6 +846,200 @@ mod tests {
             field_name: name.to_string(),
             options: options.iter().map(|value| (*value).to_string()).collect(),
         }
+    }
+
+    fn mapping(widget: &str, field: &str) -> FieldMapping {
+        FieldMapping {
+            widget_id: widget.to_string(),
+            bitable_field: field.to_string(),
+        }
+    }
+
+    #[test]
+    fn connect_scope_and_mapping_accept_official_and_live_definition_shapes() {
+        for (config, expected) in [
+            (
+                serde_json::json!({"value":[" DEF-A ","DEF-B"]}),
+                Some(vec!["DEF-A", "DEF-B"]),
+            ),
+            (
+                serde_json::json!({"option":{"definitionIds":["DEF-A"],"notLimitScope":false}}),
+                Some(vec!["DEF-A"]),
+            ),
+            (
+                serde_json::json!({"value":[],"option":{"definitionIds":[],"notLimitScope":true}}),
+                None,
+            ),
+        ] {
+            let mut value =
+                serde_json::json!({"id":"w","name":"关联审批","type":"connect","required":true});
+            value
+                .as_object_mut()
+                .unwrap_or_else(|| panic!("缺对象"))
+                .extend(
+                    config
+                        .as_object()
+                        .unwrap_or_else(|| panic!("缺配置"))
+                        .clone(),
+                );
+            let widget: FormWidget =
+                serde_json::from_value(value).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                widget
+                    .connect_definition_codes()
+                    .unwrap_or_else(|e| panic!("{e}")),
+                expected.map(|codes| codes.into_iter().map(str::to_string).collect())
+            );
+            let result = match_by_name(&[widget], &[column("关联审批", "f", &[])]);
+            assert!(
+                matches!(result, MatchOutcome::Matched(maps) if maps[0].converter == Converter::Direct)
+            );
+        }
+    }
+
+    #[test]
+    fn connect_missing_scope_is_rejected_when_mapped() {
+        for config in [
+            serde_json::json!({}),
+            serde_json::json!({"value":[]}),
+            serde_json::json!({"option":{"definitionIds":[],"notLimitScope":false}}),
+        ] {
+            let mut value = serde_json::json!({"id":"w","name":"关联审批","type":"connect"});
+            value
+                .as_object_mut()
+                .unwrap_or_else(|| panic!("缺对象"))
+                .extend(
+                    config
+                        .as_object()
+                        .unwrap_or_else(|| panic!("缺配置"))
+                        .clone(),
+                );
+            let widget: FormWidget =
+                serde_json::from_value(value).unwrap_or_else(|e| panic!("{e}"));
+            assert!(widget.connect_definition_codes().is_err());
+            assert!(matches!(
+                match_fields(
+                    &[widget],
+                    &[column("关联审批", "f", &[])],
+                    Some(&[mapping("w", "f")])
+                ),
+                MatchOutcome::Invalid(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn explicit_maps_override_names_and_keep_optional_widgets_unmapped() {
+        let form = vec![input("金额", "w1", true), input("备注", "w2", false)];
+        let columns = vec![
+            column("金额", "same", &[]),
+            column("实际付款", "chosen", &[]),
+            column("备注", "note", &[]),
+        ];
+        let result = match_fields(&form, &columns, Some(&[mapping("w1", "chosen")]));
+        let MatchOutcome::Matched(maps) = result else {
+            panic!("显式选择应通过: {result:?}")
+        };
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].bitable_field, "chosen");
+    }
+
+    #[test]
+    fn explicit_maps_reject_unknown_duplicate_missing_and_reused_ids() {
+        let form = vec![input("金额", "w1", true), input("备注", "w2", false)];
+        let columns = vec![column("付款", "f1", &[])];
+        for maps in [
+            vec![],
+            vec![mapping("w1", "f1"), mapping("unknown", "f1")],
+            vec![mapping("w1", "f1"), mapping("w2", "missing")],
+            vec![mapping("w1", "f1"), mapping("w1", "f1")],
+            vec![mapping("w1", "f1"), mapping("w2", "f1")],
+        ] {
+            assert!(
+                matches!(
+                    match_fields(&form, &columns, Some(&maps)),
+                    MatchOutcome::Invalid(_)
+                ),
+                "非法映射不得静默保存: {maps:?}"
+            );
+        }
+        assert!(matches!(
+            match_fields(
+                &form,
+                &[column("付款", "f1", &[]), column("付款", "f2", &[])],
+                Some(&[mapping("w1", "f1")])
+            ),
+            MatchOutcome::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn explicit_optional_invalid_types_and_options_are_rejected() {
+        for kind in ["formula", "image", "number", "radioV2"] {
+            let mut widget = input("可选", "w", false);
+            widget.r#type = kind.to_string();
+            assert!(
+                matches!(
+                    match_fields(
+                        &[widget],
+                        &[column("列", "f", &["个人"])],
+                        Some(&[mapping("w", "f")])
+                    ),
+                    MatchOutcome::Invalid(_)
+                ),
+                "显式选择 {kind} 不得被跳过"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_detail_and_attachment_mappings_preserve_child_ids() {
+        let mut attachment = input("凭证", "file", true);
+        attachment.r#type = "attachmentV2".to_string();
+        let form = vec![detail("付款明细", "parent"), attachment];
+        let columns = vec![
+            column("描述", "f1", &[]),
+            column("实际金额", "f2", &[]),
+            column("附件", "f3", &[]),
+        ];
+        let names = mapping_widgets(&form);
+        assert_eq!(names[0].1, "付款明细_费用明细/Expense details");
+        assert!(!names.iter().any(|(widget, _)| widget.id == "parent"));
+        let result = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                mapping("child1", "f1"),
+                mapping("child2", "f2"),
+                mapping("file", "f3"),
+            ]),
+        );
+        let MatchOutcome::Matched(maps) = result else {
+            panic!("明细和附件应通过: {result:?}")
+        };
+        assert_eq!(maps.len(), 3);
+        assert_eq!(maps[2].widget_type, "attachmentV2");
+    }
+
+    #[test]
+    fn preview_preserves_detail_groups_but_mapping_excludes_them() {
+        let mut outer = detail("付款明细", "parent");
+        outer.children.push(detail("子明细", "nested"));
+        let form = vec![outer];
+        let preview = preview_widgets(&form);
+        assert_eq!(preview.len(), 6);
+        assert_eq!(preview[0].0.id, "parent");
+        assert_eq!(preview[0].1, "付款明细");
+        assert!(preview[0].0.required);
+        assert_eq!(preview[1].1, "付款明细_费用明细/Expense details");
+        assert_eq!(preview[3].0.id, "nested");
+        assert_eq!(preview[3].1, "付款明细_子明细");
+        assert_eq!(preview[4].1, "付款明细_子明细_费用明细/Expense details");
+        let mappings = mapping_widgets(&form);
+        assert_eq!(mappings.len(), 4);
+        assert!(mappings
+            .iter()
+            .all(|(widget, _)| widget.r#type != "fieldList"));
     }
 
     /// 从**真实响应的字节**解析，钉住多态形态——这条是本模块存在的理由。
@@ -864,8 +1229,8 @@ mod tests {
     }
 
     #[test]
-    fn required_attachment_is_rejected_but_optional_is_ignored() {
-        // 必填的人工值控件拦下来；可选的留空提交是合法的。
+    fn required_attachment_is_mapped_and_optional_connect_is_ignored() {
+        // 附件自动搬运，可选关联没有映射列时留空提交。
         let required_attach = FormWidget {
             id: "w1".to_string(),
             name: "附件attachment".to_string(),
@@ -873,11 +1238,19 @@ mod tests {
             required: true,
             option: None,
             external_data: None,
+            value: serde_json::Value::Null,
             children: Vec::new(),
         };
-        match match_by_name(&[required_attach], &[]) {
-            MatchOutcome::Matched(_) => panic!("必填附件应被拒"),
-            MatchOutcome::Invalid(errors) => assert!(errors[0].to_string().contains("人工准备值")),
+        match match_by_name(
+            &[required_attach],
+            &[column("附件attachment", "fldFile", &[])],
+        ) {
+            MatchOutcome::Matched(maps) => {
+                assert_eq!(maps.len(), 1);
+                assert_eq!(maps[0].bitable_field, "fldFile");
+                assert_eq!(maps[0].converter, Converter::Direct);
+            }
+            MatchOutcome::Invalid(errors) => panic!("附件应自动搬运：{errors:?}"),
         }
 
         let optional_connect = FormWidget {
@@ -892,8 +1265,56 @@ mod tests {
     }
 
     #[test]
+    fn detail_prefixed_columns_take_priority_and_reject_ambiguity() {
+        let form = vec![detail("明细", "parent")];
+        let columns = vec![
+            column("明细_费用明细/Expense details", "prefixed", &[]),
+            column("费用明细/Expense details", "bare", &[]),
+            column("明细_付款金额/Payment Amount", "amount", &[]),
+        ];
+        let MatchOutcome::Matched(maps) = match_by_name(&form, &columns) else {
+            panic!("前缀列应匹配")
+        };
+        assert_eq!(maps[0].bitable_field, "prefixed");
+        assert_eq!(maps[1].bitable_field, "amount");
+        let mut duplicate = columns.clone();
+        duplicate.push(column("明细_费用明细/Expense details", "duplicate", &[]));
+        assert!(
+            matches!(match_by_name(&form, &duplicate), MatchOutcome::Invalid(errors) if errors.iter().any(|e| matches!(e, MatchError::AmbiguousColumn { .. })))
+        );
+    }
+
+    #[test]
+    fn non_cascading_system_options_are_recognized_but_third_party_urls_are_not() {
+        let mut widget = linked_radio("选项", "w");
+        for url in [
+            "https://example.test/api/v1/feishu/approval/options/col_3",
+            "http://localhost:8080/api/v1/feishu/approval/options/fld_x-1",
+        ] {
+            widget.external_data =
+                Some(serde_json::json!({"externalDataLinkage": false, "externalUrl": url}));
+            assert!(widget.links_to_our_options());
+            assert!(matches!(
+                match_by_name(&[widget.clone()], &[column("选项", "f", &[])]),
+                MatchOutcome::Matched(_)
+            ));
+        }
+        for url in [
+            "https://third.test/options/x",
+            "invalid",
+            "https://example.test/api/v1/feishu/approval/options/",
+            "https://example.test/api/v1/feishu/approval/options/a/b",
+            "ftp://example.test/api/v1/feishu/approval/options/x",
+        ] {
+            widget.external_data =
+                Some(serde_json::json!({"externalDataLinkage": true, "externalUrl": url}));
+            assert!(!widget.links_to_our_options(), "{url}");
+        }
+    }
+
+    #[test]
     fn nested_detail_children_are_matched_by_name() {
-        // 明细本身不落映射（复合 id 走嵌套提交），但**子控件**按名字对得上。
+        // 明细本身不落映射，由定义快照恢复结构；子控件按名字匹配。
         let form = vec![detail("付款明细/Payment Details", "w_detail")];
         let columns = vec![
             column("付款金额/Payment Amount", "fldAmt", &[]),
@@ -986,6 +1407,7 @@ mod tests {
             required: true,
             option: Some(WidgetOptions::Fixed(vec![])),
             external_data: Some(serde_json::json!({"externalDataLinkage": false, "key": ""})),
+            value: serde_json::Value::Null,
             children: Vec::new(),
         }];
         let columns = vec![column(
@@ -1025,6 +1447,7 @@ mod tests {
             required: true,
             option: None,
             external_data: None,
+            value: serde_json::Value::Null,
             children: Vec::new(),
         }];
         match match_by_name(&form, &[]) {

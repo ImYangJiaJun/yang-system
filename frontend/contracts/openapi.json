@@ -2479,6 +2479,25 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
+                "definitions": {
+                  "FieldMapping": {
+                    "additionalProperties": false,
+                    "description": "显式映射省略时保留旧的按名匹配；传入时以控件和列 ID 为准。",
+                    "properties": {
+                      "bitable_field": {
+                        "type": "string"
+                      },
+                      "widget_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "bitable_field",
+                      "widget_id"
+                    ],
+                    "type": "object"
+                  }
+                },
                 "description": "创建配置的输入契约：六件套全部必填。",
                 "properties": {
                   "applicant_field": {
@@ -2500,6 +2519,16 @@
                   "base_token": {
                     "description": "多维表格 token。",
                     "type": "string"
+                  },
+                  "maps": {
+                    "description": "显式控件到列的映射；省略时按名称自动匹配。",
+                    "items": {
+                      "$ref": "#/definitions/FieldMapping"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
                   },
                   "table_id": {
                     "description": "数据表 id。",
@@ -3326,7 +3355,7 @@
     },
     "/api/v1/feishu/approval/configs/update": {
       "post": {
-        "description": "更新配置名、启用开关或 Base 时区；坐标与审批三件套不可改",
+        "description": "更新配置名、启用开关、Base 时区或逐项字段映射；坐标与审批三件套不可改",
         "operationId": "feishu.approval.update_config",
         "parameters": [],
         "requestBody": {
@@ -3335,7 +3364,26 @@
               "schema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "additionalProperties": false,
-                "description": "更新配置的输入契约：三个可更新字段全可省、至少给一个。",
+                "definitions": {
+                  "FieldMapping": {
+                    "additionalProperties": false,
+                    "description": "显式映射省略时保留旧的按名匹配；传入时以控件和列 ID 为准。",
+                    "properties": {
+                      "bitable_field": {
+                        "type": "string"
+                      },
+                      "widget_id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "bitable_field",
+                      "widget_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "description": "可更新字段均可省略，至少给一个。",
                 "properties": {
                   "base_timezone": {
                     "default": null,
@@ -3355,6 +3403,16 @@
                     "description": "启用开关；省略即不改。",
                     "type": [
                       "boolean",
+                      "null"
+                    ]
+                  },
+                  "maps": {
+                    "description": "全量替换字段映射；省略即不改。",
+                    "items": {
+                      "$ref": "#/definitions/FieldMapping"
+                    },
+                    "type": [
+                      "array",
                       "null"
                     ]
                   },

@@ -1722,6 +1722,7 @@ function parseApprovalConfigMap(
   if (widgetId === "") return null;
   return {
     widgetId,
+    widgetName: asNullableString(raw.widget_name),
     widgetType: asString(raw.widget_type),
     bitableField: asString(raw.bitable_field),
     bitableFieldName: asNullableString(raw.bitable_field_name),
@@ -1768,6 +1769,7 @@ function parseApprovalWidget(
     : {
         id,
         name: asString(raw.name),
+        qualifiedName: asString(raw.qualified_name, asString(raw.name)),
         type: asString(raw.type),
         required: raw.required === true,
       };
@@ -1838,6 +1840,7 @@ export type CreateApprovalConfigInput = {
   applicantField: string;
   backfillField: string;
   baseTimezone: string;
+  maps?: Array<{ widgetId: string; bitableField: string }>;
 };
 
 export async function createApprovalConfig(
@@ -1855,6 +1858,14 @@ export async function createApprovalConfig(
       applicant_field: input.applicantField.trim(),
       backfill_field: input.backfillField.trim(),
       base_timezone: input.baseTimezone.trim(),
+      ...(input.maps === undefined
+        ? {}
+        : {
+            maps: input.maps.map((map) => ({
+              widget_id: map.widgetId,
+              bitable_field: map.bitableField,
+            })),
+          }),
     },
     signal,
   );
@@ -1862,12 +1873,13 @@ export async function createApprovalConfig(
   return asNumber(data?.config_id, 0);
 }
 
-/// 更新配置（`feishu.approval.update_config`）：仅 title/enabled/base_timezone 三项，
+/// 更新配置（`feishu.approval.update_config`）：展示名、启用、时区与全量字段映射，
 /// 全可省、至少给一个；省略的键不出现（`deny_unknown_fields` 下「留空 = 不改」）。
 export type UpdateApprovalConfigPatch = {
   title?: string;
   enabled?: boolean;
   baseTimezone?: string;
+  maps?: CreateApprovalConfigInput["maps"];
 };
 
 export async function updateApprovalConfig(
@@ -1880,6 +1892,11 @@ export async function updateApprovalConfig(
   if (patch.title !== undefined) body.title = patch.title;
   if (patch.enabled !== undefined) body.enabled = patch.enabled;
   if (patch.baseTimezone !== undefined) body.base_timezone = patch.baseTimezone;
+  if (patch.maps !== undefined)
+    body.maps = patch.maps.map((map) => ({
+      widget_id: map.widgetId,
+      bitable_field: map.bitableField,
+    }));
   await invokeFeishuAction(
     deps,
     APPROVAL_OPERATION_IDS.updateConfig,
@@ -2076,6 +2093,10 @@ export type ApprovalWizardClient = {
   listFields: (appToken: string, tableId: string) => Promise<BitableField[]>;
   listWidgets: (approvalCode: string) => Promise<ApprovalWidget[]>;
   createConfig: (input: CreateApprovalConfigInput) => Promise<number>;
+  updateConfig: (
+    configId: number,
+    patch: UpdateApprovalConfigPatch,
+  ) => Promise<void>;
 };
 
 export function useApprovalWizardClient(): ApprovalWizardClient {
@@ -2099,6 +2120,8 @@ export function useApprovalWizardClient(): ApprovalWizardClient {
         listApprovalWidgets(approvalCode, deps),
       createConfig: (input: CreateApprovalConfigInput) =>
         createApprovalConfig(input, deps),
+      updateConfig: (configId: number, patch: UpdateApprovalConfigPatch) =>
+        updateApprovalConfig(configId, patch, deps),
     }),
     [deps],
   );

@@ -665,6 +665,16 @@ async fn console_crud_loop_on_a_seeded_config() {
         let config_id = seed_config(&database, "appCrud", "tblCrud", true).await?;
         seed_field_map(&database, config_id, "w1", "fldCompany", true).await?;
         seed_field_map(&database, config_id, "w2", "fldAmount", false).await?;
+        let snapshot = json!([
+            {"id":"w1","name":"公司名称","type":"input","required":true},
+            {"id":"detail","name":"付款明细","type":"fieldList","children":[
+                {"id":"w2","name":"金额","type":"input"}
+            ]}
+        ]).to_string();
+        sqlx::query("UPDATE `feishu_approval_config` SET `form_snapshot` = ? WHERE `id` = ?")
+            .bind(snapshot).bind(config_id).execute(database.pool()).await?;
+        sqlx::query("UPDATE `feishu_approval_field_map` SET `bitable_field_name` = '实际付款金额' WHERE `config_id` = ? AND `widget_id` = 'w2'")
+            .bind(config_id).execute(database.pool()).await?;
 
         // ---- list_configs：映射分组 + 不投影 form_snapshot ----
         let listed = dispatch_as_operator(
@@ -684,6 +694,12 @@ async fn console_crud_loop_on_a_seeded_config() {
         ensure!(item["id"] == json!(config_id), "id 必须对得上");
         ensure!(item["title"] == json!("夹具配置"));
         ensure!(item["maps"].as_array().map(Vec::len) == Some(2), "两条映射都要带出");
+        let maps = item["maps"].as_array().context("maps 必须是数组")?;
+        let company = maps.iter().find(|map| map["widget_id"] == "w1").context("公司映射必须存在")?;
+        let amount = maps.iter().find(|map| map["widget_id"] == "w2").context("金额映射必须存在")?;
+        ensure!(company["widget_name"] == "公司名称", "必须返回控件名称: {company}");
+        ensure!(amount["widget_name"] == "付款明细_金额", "明细控件必须带父控件名称: {amount}");
+        ensure!(amount["bitable_field_name"] == "实际付款金额", "必须返回列名: {amount}");
         ensure!(
             !item.to_string().contains("\"form_snapshot\""),
             "列表项不得投影 form_snapshot 大字段"

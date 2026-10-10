@@ -119,10 +119,12 @@ const ROUND_WORST_CASE_SECONDS: i64 = 300;
 struct ResumeCursor(i64);
 
 impl ResumeCursor {
-    /// 一批里**最后一个**已处理记录的 id；空批不动游标。
+    /// 一批里最后一个已处理记录的 id；扫描结束后从头重试 pending 任务。
     fn advance(&mut self, rows: &[ClaimedTask]) {
         if let Some(last) = rows.last() {
             self.0 = self.0.max(last.id);
+        } else {
+            self.0 = 0;
         }
     }
 }
@@ -344,6 +346,7 @@ async fn run_round(runner: &RoundRunner, cursor: &mut ResumeCursor) {
     // 说明一批被处理掉了但还有——积压本身由 `idled` 分支的 gauge 兜底。
     metrics::gauge!("feishu_approval_pending").set(claimed.len() as f64);
     if claimed.is_empty() {
+        cursor.advance(&claimed);
         return;
     }
     tracing::info!(count = claimed.len(), "审批派发认领到任务");
@@ -415,6 +418,7 @@ struct ClaimedTask {
     backfill_field: String,
     timezone_offset: FixedOffset,
     widgets: Vec<WidgetMap>,
+    form_snapshot: String,
 }
 
 /// 播种：把「回填列为空」的多维表格记录变成待处理任务。
@@ -699,6 +703,7 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         backfill_field: config.require("backfill_field")?,
         timezone_offset,
         widgets,
+        form_snapshot: config.optional("form_snapshot")?.unwrap_or_default(),
     }))
 }
 
@@ -780,6 +785,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         sleeper: runner.sleeper.as_ref(),
         tokens: &runner.tokens,
         coordinates: &coordinates,
+        fields: &fields,
     };
     dispatch_one(
         runner.transport(),
@@ -787,6 +793,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         &runner.tokens,
         &backfill,
         &OrchestrationInput {
+            context: Some(&runner.context),
             coordinates: &coordinates,
             record_id: &task.record_id,
             cells: &cells,
@@ -794,6 +801,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
             backfill_field_name: &backfill_field_name,
             approval_code: &task.approval_code,
             widgets: &task.widgets,
+            form_snapshot: task.form_snapshot.clone(),
             timezone_offset: task.timezone_offset,
         },
     )
@@ -916,13 +924,21 @@ async fn flush_backfill(
     runner: &RoundRunner,
     coordinates: &BitableCoordinates,
     field_id: &str,
-    rows: &[(String, String)],
+    rows: &[(String, serde_json::Value)],
 ) -> anyhow::Result<()> {
+    let fields = bitable::list_all_fields(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        coordinates,
+    )
+    .await?;
     let backfill = BitableBackfill {
         transport: runner.transport(),
         sleeper: runner.sleeper.as_ref(),
         tokens: &runner.tokens,
         coordinates,
+        fields: &fields,
     };
     let report = backfill_in_chunks(&backfill, field_id, rows).await;
     if !report.failed.is_empty() {
@@ -942,6 +958,13 @@ fn _assert_widget_map_type(_: &WidgetMap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_cursor_revisits_pending_tasks() {
+        let mut cursor = ResumeCursor(42);
+        cursor.advance(&[]);
+        assert_eq!(cursor.0, 0, "扫描结束后旧 pending 任务必须能重新认领");
+    }
 
     #[test]
     fn lease_covers_a_full_claim_batch_at_the_rate_limit() {

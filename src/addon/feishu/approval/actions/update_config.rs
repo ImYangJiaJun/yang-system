@@ -1,8 +1,6 @@
 //! 更新审批派发配置（前端控制台）。
 //!
-//! # 只改三件套
-//!
-//! 仅 `title` / `enabled` / `base_timezone` 三项可更新。坐标（base_token/table_id）
+//! 可更新 `title` / `enabled` / `base_timezone` 与全量字段映射。坐标（base_token/table_id）
 //! 与三件套（approval_code/applicant_field/backfill_field）**不可改**——改了等于删了
 //! 重建（见设计 §7：删配置重建有 uuid 幂等 + 60012 回捞兜底）。`deny_unknown_fields`
 //! 会在反序列化层把多余键显式拒掉（400），不静默忽略。
@@ -15,11 +13,15 @@ use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::table::Record;
 use yang_base::BaseError;
+use yang_db::{field, table, CompareOp, QueryBuilder};
 
+use crate::addon::feishu::domain::approval_match::FieldMapping;
+use crate::addon::feishu::domain::approval_provision::{build_plan, insert_maps, ProvisionInput};
 use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::outbound_setup;
 use crate::infrastructure::audit;
 
-/// 更新配置的输入契约：三个可更新字段全可省、至少给一个。
+/// 可更新字段均可省略，至少给一个。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UpdateConfigInput {
@@ -34,6 +36,9 @@ pub(super) struct UpdateConfigInput {
     /// Base 时区（IANA 名）；省略即不改。
     #[serde(default)]
     pub(super) base_timezone: Option<String>,
+    /// 全量替换字段映射；省略即不改。
+    #[serde(default)]
+    pub(super) maps: Option<Vec<FieldMapping>>,
 }
 
 impl ParamInput for UpdateConfigInput {
@@ -50,9 +55,13 @@ impl UpdateConfigInput {
                 "必须是正整数".to_string(),
             ));
         }
-        if self.title.is_none() && self.enabled.is_none() && self.base_timezone.is_none() {
+        if self.title.is_none()
+            && self.enabled.is_none()
+            && self.base_timezone.is_none()
+            && self.maps.is_none()
+        {
             return Err(BaseError::ParamInvalid(
-                "title/enabled/base_timezone".to_string(),
+                "title/enabled/base_timezone/maps".to_string(),
                 "至少提供一个要更新的字段".to_string(),
             ));
         }
@@ -85,7 +94,7 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         )
         .route(HttpMethod::Post, "/api/v1/feishu/approval/configs/update")
         .display_name("更新审批派发配置")
-        .description("更新配置名、启用开关或 Base 时区；坐标与审批三件套不可改")
+        .description("更新配置名、启用开关、Base 时区或逐项字段映射；坐标与审批三件套不可改")
         .permissions(["feishu.approval.write"])
         .register()
 }
@@ -97,16 +106,60 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
 
-    // 变更前快照与变更同事务提交：审计的 before/after 必须与库里的实际值一一对应。
-    let mut transaction = ctx.begin_transaction().await?;
-    let result: Result<serde_json::Value, BaseError> = async {
-        let before = context
+    // 飞书元数据校验在事务外完成，避免网络请求占用数据库事务。
+    let plan = if let Some(maps) = input.maps.as_deref() {
+        let coordinates = context
             .approval_configs()
             .query()
-            .select_fields(&["title", "enabled", "base_timezone"])?
             .where_eq("id", serde_json::json!(input.config_id))?
             .optional()
             .await?
+            .ok_or_else(|| BaseError::RecordNotFound("审批派发配置不存在".to_string()))?;
+        let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
+            return Ok(ApiResponse::fail(50301, "飞书出站凭证未配置"));
+        };
+        let outbound = outbound_setup::build(&ctx, settings)?;
+        Some(
+            build_plan(
+                outbound.transport(),
+                outbound.sleeper(),
+                &outbound.tokens,
+                &context,
+                &ProvisionInput {
+                    base_token: &coordinates.require::<String>("base_token")?,
+                    table_id: &coordinates.require::<String>("table_id")?,
+                    approval_code: &coordinates.require::<String>("approval_code")?,
+                    applicant_field: &coordinates.require::<String>("applicant_field")?,
+                    backfill_field: &coordinates.require::<String>("backfill_field")?,
+                    base_timezone: input
+                        .base_timezone
+                        .as_deref()
+                        .unwrap_or(&coordinates.require::<String>("base_timezone")?),
+                    maps: Some(maps),
+                },
+            )
+            .await
+            .map_err(|failure| BaseError::ParamInvalid("maps".to_string(), failure.to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    // 变更前快照与变更同事务提交：审计的 before/after 必须与库里的实际值一一对应。
+    let mut transaction = ctx.begin_transaction().await?;
+    let result: Result<serde_json::Value, BaseError> = async {
+        let before = transaction
+            .select_for_update::<Record>(
+                QueryBuilder::from_pool(
+                    ctx.tools().mysql()?.pool(),
+                    table!("feishu_approval_config"),
+                )
+                .fields(&[field!("title"), field!("enabled"), field!("base_timezone")])
+                .where_and(field!("id"), CompareOp::Eq, input.config_id)?,
+            )
+            .await?
+            .into_iter()
+            .next()
             .ok_or_else(|| BaseError::RecordNotFound("审批派发配置不存在".to_string()))?;
         let old_title: String = before.require("title")?;
         let old_enabled: bool = before.require("enabled")?;
@@ -130,6 +183,15 @@ pub(super) async fn handle(
             record.insert("base_timezone", serde_json::json!(timezone));
             after_timezone = timezone.to_string();
         }
+        if let Some(plan) = &plan {
+            record.insert("form_snapshot", serde_json::json!(plan.form_snapshot));
+            record.insert(
+                "form_snapshot_at",
+                serde_json::json!(
+                    crate::addon::feishu::domain::approval_provision::now_unix_secs()
+                ),
+            );
+        }
 
         let affected = context
             .approval_configs()
@@ -138,8 +200,30 @@ pub(super) async fn handle(
             .update_in_tx(&mut transaction, record)
             .await?;
         if affected == 0 {
-            // 事务内的 `optional` 与 UPDATE 之间配置被并发删除：明确失败而不是静默成功。
+            // 行已锁定；写入仍须命中目标配置。
             return Err(BaseError::RecordNotFound("审批派发配置不存在".to_string()));
+        }
+
+        let old_maps_count = if plan.is_some() {
+            let maps = context
+                .approval_field_maps()
+                .query()
+                .select_fields(&["widget_id", "bitable_field"])?
+                .where_eq("config_id", serde_json::json!(input.config_id))?
+                .all_in_tx(&mut transaction)
+                .await?;
+            context
+                .approval_field_maps()
+                .query()
+                .where_eq("config_id", serde_json::json!(input.config_id))?
+                .delete_in_tx(&mut transaction)
+                .await?;
+            Some(maps.len())
+        } else {
+            None
+        };
+        if let Some(plan) = &plan {
+            insert_maps(&context, &mut transaction, input.config_id, plan).await?;
         }
 
         let event = audit::succeeded_event(
@@ -147,16 +231,18 @@ pub(super) async fn handle(
             None,
             None,
             audit::entity("feishu_approval_config", input.config_id.to_string())?,
-            Some(audit::summary([
-                ("title", serde_json::json!(old_title)),
-                ("enabled", serde_json::json!(old_enabled)),
-                ("base_timezone", serde_json::json!(old_timezone)),
-            ])?),
-            Some(audit::summary([
-                ("title", serde_json::json!(after_title)),
-                ("enabled", serde_json::json!(after_enabled)),
-                ("base_timezone", serde_json::json!(after_timezone)),
-            ])?),
+            Some(config_audit_summary(
+                &old_title,
+                old_enabled,
+                &old_timezone,
+                old_maps_count,
+            )?),
+            Some(config_audit_summary(
+                &after_title,
+                after_enabled,
+                &after_timezone,
+                plan.as_ref().map(|p| p.widgets.len()),
+            )?),
         )?;
         audit::append_in_tx(&mut transaction, &event).await?;
 
@@ -168,9 +254,41 @@ pub(super) async fn handle(
     ApiResponse::success(value, "配置已更新")
 }
 
+fn config_audit_summary(
+    title: &str,
+    enabled: bool,
+    base_timezone: &str,
+    maps_count: Option<usize>,
+) -> Result<audit::AuditSummary, BaseError> {
+    // 审计摘要禁止嵌套对象；映射明细仍由配置表保存，审计记录数量即可。
+    audit::summary([
+        ("title", serde_json::json!(title)),
+        ("enabled", serde_json::json!(enabled)),
+        ("base_timezone", serde_json::json!(base_timezone)),
+        ("maps_count", serde_json::json!(maps_count)),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapping_updates_have_valid_audit_summaries() -> Result<(), BaseError> {
+        for count in [None, Some(0), Some(13), Some(1000)] {
+            let summary = config_audit_summary("技术测试专用", true, "Asia/Shanghai", count)?;
+            assert_eq!(
+                summary.as_json(),
+                serde_json::json!({
+                    "title": "技术测试专用",
+                    "enabled": true,
+                    "base_timezone": "Asia/Shanghai",
+                    "maps_count": count,
+                })
+            );
+        }
+        Ok(())
+    }
 
     fn input() -> UpdateConfigInput {
         UpdateConfigInput {
@@ -178,12 +296,13 @@ mod tests {
             title: None,
             enabled: None,
             base_timezone: None,
+            maps: None,
         }
     }
 
     #[test]
     fn at_least_one_field_is_required() {
-        assert!(input().validate().is_err(), "三件套全不给必须被拒");
+        assert!(input().validate().is_err(), "没有更新字段必须被拒");
     }
 
     #[test]
@@ -199,6 +318,10 @@ mod tests {
             },
             UpdateConfigInput {
                 base_timezone: Some("UTC".to_string()),
+                ..input()
+            },
+            UpdateConfigInput {
+                maps: Some(vec![]),
                 ..input()
             },
         ] {

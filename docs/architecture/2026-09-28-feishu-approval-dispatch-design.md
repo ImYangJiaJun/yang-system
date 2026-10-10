@@ -13,8 +13,8 @@
 三条使用方约束：
 
 1. **不新建飞书审批定义的表单控件** —— 使用方的审批定义只包含创建实例 API 支持的控件（见 §6.1）。
-2. **回填的是 `serial_number`（审批单编号）**，不是 `instance_code`。
-3. **失败信息写回同一个回填字段**，由人工清空即可重试。
+2. **回填显示的是 `serial_number`（审批单编号）**。链接字段写入 `{text,link}`，链接用 `instance_code` 定位审批实例；文本字段写编号字符串。
+3. **文本字段的失败信息写回同一个回填字段**，清空重试受 §7.6 限制；链接字段的失败原因保存在任务/请求日志，保持单元格空白（当前 worker 的重试边界见 §6.1 实测记录）。
 
 ## 二、非目标
 
@@ -309,13 +309,30 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 
 #### 6.1.2 三项校验与「一次报全」
 
+控制台新建配置在首次预览时按控件名与列名预选，明细子控件优先匹配带父控件名
+前缀的列（例如 `付款明细_金额`），随后允许逐控件手动选列。重复预览同一张表和
+同一审批定义保留手动选择；更换坐标或定义后重新匹配。确认页及保存后的映射明细
+均展示控件名与列名，ID 用于稳定定位。只读身份可以查看映射。
+
+控件预览与确认页保留 `fieldList` 明细父级作为分组展示，父级无需选列，也不参与
+自动匹配、必填选列校验或提交的 `maps`；只为明细子控件配置列映射。
+
+`create_config` / `update_config` 可接受 `maps: [{widget_id, bitable_field}]`。
+显式 `maps` 是完整映射，可选控件未列入即不映射；必填控件必须有映射，且至少有
+一条有效映射。未知 ID、重复控件、复用同列、歧义列名、类型与选项不兼容均拒绝。
+未传 `maps` 的新建与首次派发继续按名自动匹配。已有配置可编辑映射，保存前重新
+读取飞书元数据校验，在同一事务内更新表单快照、替换映射并记录审计；坐标、审批
+定义、申请人列与回填列不能改变。
+
 1. **三方定义**：`approvals get` **不返回 `is_external`**（实测，该字段只在
    `approvals/search` 里）。判据改为「**`approvals get` 拿不到 `form`**」——三方定义
    走 `external_approvals` 另一个资源，取不到表单。
 2. **不含 API 不支持的控件**：`text`、`mutableGroup`、`serialNumber`、各类
    `*Group`（见 `lark-approval-instance-form-control-parameters.md:14-30`）。
-3. **不含需人工准备值的控件**：`address`（地理库 id）、`connect`（已存在的
-   `instance_code`）、`attachment*` / `image*` / `document`（file code）。
+3. **不含需人工准备值的控件**：`address`（地理库 id）、旧 `attachment` /
+   `image*` / `document`（file code）。
+   `attachmentV2` 从同名多维表格附件列自动下载并上传，允许必填映射。
+   `connect` 从超链接或文本列解析审批实例 Code，派发前校验实例与关联范围。
    **必填的拦下、可选的放行**——留空提交对可选控件是合法的。
 
 **失败原因一次返回全部**，不是遇到第一个就停：改一条跑一轮会让使用方来回多轮。
@@ -343,6 +360,8 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 | 联系人 | `contact` | `{value: [...], open_ids: [...]}`，推荐只写 `open_ids` |
 | 部门 | `department` | 对象数组，元素字段名 `open_id`，值为 `open_department_id` |
 | 明细 | `fieldList` | 二维数组，子项按各自控件类型组装 |
+
+请求组装按配置的 `form_snapshot` 恢复明细父子结构，子控件保留定义中的原始 id；一条多维表格记录在每个明细控件中形成一行。旧配置快照为空时，创建前补取审批定义；损坏或与映射不一致的快照阻止创建。联系人 `open_ids` 与 `value` 同级。附件需审批文件上传接口返回的 file code，不能使用多维表格 file_token 或实例读回的下载 URL；当前 `attachmentV2` 自动搬运附件，普通控件和明细子控件共用同一流程。
 | 电话 | `telephone` | `{countryCode, nationalNumber}` |
 | 地址 | `address` | 对象数组，至少含地理库 `id` |
 | 关联审批 | `connect` | `instance_code` 数组 |
@@ -375,10 +394,41 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 
 #### 6.2.2 需要人工准备值的控件
 
-`address`、`connect`、`attachmentV2`/`image` 这几类需要用户直接提供 token/id
+`address`、旧 `attachment`、`image`/`imageV2`、`document` 这几类需要用户直接提供 token/id
 （`lark-approval-instance-value-sourcing.md:88-97`），本设计**不自动准备**——配置期就
 明确报错而非静默传空（静默传空会让飞书收到一个看似合法的空控件，错误信息指向飞书
 而不是指向配置）。
+
+#### 关联审批（2026-10-11 实现）
+
+多维表格对应列推荐使用超链接，保存系统回填的飞书审批 AppLink；显示文本可以是申请编号，转换时仅从 `link` 解析实例 Code。文本列可直接保存实例 Code，多个 Code 可用逗号、分号或换行分隔；不支持仅填申请编号、审批定义 Code 或多维表格关联记录 ID。普通控件与明细子控件均提交 `{"id":"控件ID","type":"connect","value":["实例Code"]}`。
+
+链接仅在本地解析，不访问单元格 URL；校验 HTTPS、飞书 AppLink 域名、审批应用 ID、页面路径及实例 Code。配置保存时保留并检查定义的 `value` / `option.definitionIds`，明确设置 `option.notLimitScope=true` 表示不限范围。派发前查询实例详情，校验 Code 与所属审批定义，同一实例只查询一次但逐控件检查范围。不存在或范围不符进入等待态，权限/网络/响应异常进入重试态，均不创建审批、不写回填字段。已创建实例优先按 uuid 恢复回填，不因关联源数据改变而重复创建。
+
+2026-10-11 真实只读预检使用当前 Rust 的 `get_records_by_ids` → `build_form` → `validate_connections`，从测试表读取两条已有审批的超链接并成功解析、查询实例及校验所属定义；预检使用本地合成关联控件。证据保存在 `target/approval-connect-research/live-system-preflight.json` 与 `live-rust-preflight-result.json`。
+
+用户随后发布「关联审批」控件 `widget17916526278010001`（不限关联范围），已将配置 id=3 映射到文本列 `fld4te6uRa`「关联审批/Related Approval Form」。通过当前 Rust 系统的派发接口，记录 `recvxFxnNlsctk` 创建实例 `99650CF6-FAE5-46E5-AD29-C38B104021B4`，编号 `202610110002`，关联此前系统创建的 `202610110001`（实例 `99C975BB-38E9-4E99-AD48-C2ED97001551`）。真实回读确认 `connect.value` 为目标实例 Code 数组、普通字段及一行六项明细与源数据一致、129 字节附件 SHA-256 一致、链接「申请编号」显示新编号并指向新实例、请求日志为 succeeded。此轮真实创建使用文本 Code；超链接来源完成真实只读预检，明细内关联控件及有限关联范围未做真实创建测试。完整证据为 `target/approval-connect-research/connect-live-verification.json`。
+
+实测同时修复了更新字段映射时报 500 的审计格式问题：审计摘要不允许数组包含对象，改为 before/after 记录 `maps_count`，映射明细仍保存在配置表中。真实配置更新审计 id=2560 记录 12→13 项；生产摘要路径的回归测试及恢复嵌套对象的变异测试验证该错误不会静默通过。实测服务使用本地独立端口，未部署云端。
+
+#### 附件搬运（2026-10-10 实现）
+
+真实验证使用「技术测试专用」定义 D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E：记录 recvxx5WwbjyiI 创建编号 202610100097（明细一行、附件一个），记录 recvxCCwxthflm 创建编号 202610100098（明细一行、附件三个）。系统应用身份完成下载、审批上传、创建及编号回填，附件内容 SHA-256 一致。首次文本回填原「申请编号」链接字段被飞书以 1254068 URLFieldConvFail 拒绝，曾临时使用文本字段「系统审批编号验证」（fld31Ycysg）。后续通过当前 Rust `dispatch_one → finish_backfill → BitableBackfill` 复用两条已有实例，已将原链接字段 fldnNUwM35 写为 `{"text":"审批编号","link":"审批 AppLink"}` 并真实读回核对一致，没有新增实例；本地配置 id=1 已恢复指向原字段。证据为 target/approval-link-live-result.json 和 target/approval-link-config-result.json。
+
+回填按字段元数据适配：链接字段（type=15）使用上述对象，文本字段（type=1 或历史缺失类型）保留编号字符串；写入键使用当前列名，配置仍保存稳定字段 ID。AppLink 按官方规范分别编码 PC/移动端路径，并使用实例详情返回的 instance_code。链接列不写错误文字或伪造链接，原因留在任务/请求日志；已创建实例的回填失败保持可重试。当前 worker 以回填列为空进行播种，因此链接列为空的失败记录在后续扫描中会再次尝试。客户端点击跳转未实测。
+
+「往来」数据源的附件字段 fldP6ThDLp 经用户授权直接配置，随后由正常拉取 worker 入库；这不代表已测试受保护配置接口。两条本地任务曾残留旧选项匹配错误，核对远端 UUID、实例及实际回填后已事务修复为 backfilled，因此该状态不能作为自动 worker 持久化通过的证据。实测证据保存在 target/attachment-system-verification.json 和 target/attachment-task-reconciliation-*.json；本地服务停止，未部署云端。
+
+`attachmentV2` 的源值是多维表格附件数组，包含 `file_token`、`name`、`size`。配置按控件名（明细子控件用父名_子名）匹配附件列，存字段 ID。
+
+1. 有附件映射时先按稳定 UUID 查询已创建实例；存在则恢复编号回填，源附件或申请人已删除也不阻断恢复。
+2. 校验全部附件元数据与完整表单；必填缺失或非法数据返回等待态，可选空附件不提交控件。预检失败不下载或上传。
+3. 用应用 `tenant_access_token` 调官方下载接口，并带 `bitablePerm` 的表、字段、记录、file_token 坐标。忽略单元格内 `url`/`tmp_url`。
+4. 逐文件串行下载，要求 HTTP 200、实际字节数与源 size 一致，上限 50 MiB；拒绝部分响应。下载幂等可退避，文件间隔 200ms，跨请求限流由飞书 429 退避兜底。
+5. 调审批文件上传接口，multipart 字段为 `name`、`type=attachment`、`content`；只接受外层 `code=0` 且内层 `data.code` 非空。
+6. 将上传 codes 作为 `attachmentV2.value` 字符串数组，按定义快照恢复明细结构后创建审批，成功沿用既有编号回填。
+
+按钮派发和后台 worker 均调用共享 `dispatch_one`。下载/上传失败保持可重试且不写终态编号；上传非幂等，不自动退避重发，明确 token 失效只刷新重发一次。下一轮可能重新上传未被实例引用的文件，审批实例由稳定 UUID 去重。当前逐文件在内存中搬运，没有磁盘缓存或上传 code 持久化。旧实测记录描述的是当时能力，不代表新链路真实验证结果。
 
 #### 6.2.3 空值与「不传」
 

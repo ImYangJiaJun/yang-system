@@ -739,6 +739,8 @@ async fn send_json<T: for<'de> Deserialize<'de>>(
             query: query.clone(),
             bearer_token: Some(token),
             json_body: body.clone(),
+            raw_body: None,
+            binary_limit: None,
             timeout_secs: Some(timeout_secs),
             // 幂等：审批派发路径上的写是同值覆盖（回写同一记录的同一编号），
             // search 是只读。真正的幂等保证在创建审批实例那一步（uuid），
@@ -1136,15 +1138,6 @@ pub(crate) async fn batch_update_records(
     Ok(())
 }
 
-/// 回写单元格的取值形态。
-///
-/// 多维表格的写入类型与读取不同：**文本字段直接写字符串**，不是读回来时的
-/// `[{"text": …}]` 形态。这条差异是静默的——写错形态不会报错，只是单元格内容
-/// 变成字面的 JSON 文本。
-pub(crate) fn backfill_cell(value: &str) -> serde_json::Value {
-    serde_json::Value::String(value.to_string())
-}
-
 /// 查询记录的 `data`。
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SearchRecordsData {
@@ -1285,7 +1278,7 @@ pub(crate) async fn get_records_by_ids(
     ensure_ids(record_ids)?;
 
     let url = format!(
-        "{}/records/batch_get",
+        "{}/batch_get",
         records_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
             OutboundFailure {
                 kind: FailureKind::Fatal { code: 0 },
@@ -1463,14 +1456,6 @@ mod tests {
             size /= 2;
         }
         assert_eq!(size, 1, "折半必须能收敛到单条");
-    }
-
-    #[test]
-    fn backfill_cell_writes_a_plain_string_not_a_polymorphic_object() {
-        // 写入形态与读取形态不同：读回来是 [{"text": …}]，写进去是裸字符串。
-        // 写错是静默的——单元格内容会变成字面的 JSON 文本。
-        assert_eq!(backfill_cell("202609280001"), json!("202609280001"));
-        assert!(backfill_cell("x").is_string());
     }
 
     // ---- 列出数据表 ----

@@ -96,19 +96,20 @@ pub(super) async fn handle(
     let widgets = parse_form(form)
         .map_err(|error| BaseError::ParamInvalid("approval_code".to_string(), error.to_string()))?;
 
-    // `walk()` 把明细控件（fieldList）的子控件一并展开——向导要看到全部可配控件。
-    let items: Vec<serde_json::Value> = widgets
-        .iter()
-        .flat_map(|widget| widget.walk())
-        .map(|widget| {
-            serde_json::json!({
-                "id": widget.id,
-                "name": widget.name,
-                "type": widget.r#type,
-                "required": widget.required,
+    // 明细父级也返回供分组展示，只有子控件参与列映射。
+    let items: Vec<serde_json::Value> =
+        crate::addon::feishu::domain::approval_match::preview_widgets(&widgets)
+            .into_iter()
+            .map(|(widget, qualified_name)| {
+                serde_json::json!({
+                    "id": widget.id,
+                    "name": widget.name,
+                    "qualified_name": qualified_name,
+                    "type": widget.r#type,
+                    "required": widget.required,
+                })
             })
-        })
-        .collect();
+            .collect();
 
     ApiResponse::success(serde_json::json!({ "widgets": items }), "查询成功")
 }

@@ -14,6 +14,7 @@ use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::approval_match::FieldMapping;
 use crate::addon::feishu::domain::approval_provision::{build_plan, insert_plan, ProvisionInput};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
@@ -39,6 +40,9 @@ pub(super) struct CreateConfigInput {
     /// Base 时区（IANA 名）。多维表格日期是不带时区的毫秒时间戳，而审批 `date`
     /// 控件要带偏移量——猜错会让审批里的时间整体偏移，所以必须显式给定。
     pub(super) base_timezone: String,
+    /// 显式控件到列的映射；省略时按名称自动匹配。
+    #[serde(default)]
+    pub(super) maps: Option<Vec<FieldMapping>>,
 }
 
 impl ParamInput for CreateConfigInput {
@@ -122,6 +126,7 @@ pub(super) async fn handle(
             applicant_field: input.applicant_field.trim(),
             backfill_field: input.backfill_field.trim(),
             base_timezone: input.base_timezone.trim(),
+            maps: input.maps.as_deref(),
         },
     )
     .await
@@ -178,7 +183,19 @@ mod tests {
             applicant_field: "申请人".to_string(),
             backfill_field: "审批编号".to_string(),
             base_timezone: "Asia/Shanghai".to_string(),
+            maps: None,
         }
+    }
+
+    #[test]
+    fn explicit_mapping_input_is_accepted() {
+        let parsed = serde_json::from_value::<CreateConfigInput>(serde_json::json!({
+            "base_token": "appX", "table_id": "tblX", "approval_code": "CODE",
+            "applicant_field": "申请人", "backfill_field": "审批编号",
+            "base_timezone": "Asia/Shanghai",
+            "maps": [{"widget_id": "w1", "bitable_field": "fldA"}]
+        }));
+        assert!(parsed.is_ok(), "显式字段映射应接受: {parsed:?}");
     }
 
     #[test]

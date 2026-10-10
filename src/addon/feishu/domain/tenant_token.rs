@@ -388,6 +388,8 @@ impl TenantTokenProvider {
                 "app_id": self.credentials.app_id,
                 "app_secret": self.credentials.app_secret,
             })),
+            raw_body: None,
+            binary_limit: None,
             timeout_secs: Some(TOKEN_REQUEST_TIMEOUT_SECS),
             // 幂等：飞书换 token 时新旧并存，重发不会破坏任何状态。
             idempotent: true,
@@ -565,6 +567,7 @@ mod tests {
             body: format!(
                 r#"{{"code":0,"msg":"ok","tenant_access_token":"{token}","expire":{expire}}}"#
             ),
+            bytes: None,
             headers: BTreeMap::new(),
         }
     }
@@ -904,6 +907,7 @@ mod tests {
         let transport = Arc::new(ScriptedTransport::new(vec![Ok(OutboundResponse {
             status: 200,
             body: r#"{"code":10003,"msg":"invalid app_secret"}"#.to_string(),
+            bytes: None,
             headers: BTreeMap::new(),
         })]));
         let sleeper = Arc::new(CountingSleeper::new());

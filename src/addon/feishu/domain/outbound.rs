@@ -135,6 +135,9 @@ pub(crate) struct OutboundRequest {
     /// 不带 `Authorization` 头。
     pub(crate) bearer_token: Option<String>,
     pub(crate) json_body: Option<serde_json::Value>,
+    pub(crate) raw_body: Option<(String, Vec<u8>)>,
+    /// 二进制下载上限；JSON 调用沿用客户端默认值。
+    pub(crate) binary_limit: Option<usize>,
     /// 请求级超时（秒）。为 `None` 时用客户端默认值。
     pub(crate) timeout_secs: Option<u64>,
     /// 失败后能否安全重发。取 token 与取记录都是幂等的：飞书换 token 时新旧并存，
@@ -147,6 +150,7 @@ pub(crate) struct OutboundRequest {
 pub(crate) struct OutboundResponse {
     pub(crate) status: u16,
     pub(crate) body: String,
+    pub(crate) bytes: Option<Vec<u8>>,
     /// 键一律小写。本模块只消费 `x-ogw-ratelimit-reset`。
     pub(crate) headers: BTreeMap<String, String>,
 }
@@ -197,6 +201,12 @@ impl OutboundTransport for HttpClientTransport {
             // 这类「网关按字节比头」的差异一旦出问题极难排查。
             builder = builder.content_type("application/json; charset=utf-8");
         }
+        if let Some((content_type, body)) = request.raw_body {
+            builder = builder.body(body).content_type(&content_type);
+        }
+        if let Some(limit) = request.binary_limit {
+            builder = builder.max_response_bytes(limit);
+        }
         if let Some(timeout_secs) = request.timeout_secs {
             builder = builder.timeout(timeout_secs);
         }
@@ -217,11 +227,23 @@ impl OutboundTransport for HttpClientTransport {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
             })
             .collect();
-        let body = response.text().await?;
+        // 下载失败也可能是 HTTP 200 + JSON 业务码，必须保留 token/权限分类。
+        let json_response = !response.headers().contains_key("content-disposition")
+            && response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.to_ascii_lowercase().contains("application/json"));
+        let (body, bytes) = if request.binary_limit.is_some() && status == 200 && !json_response {
+            (String::new(), Some(response.bytes().await?))
+        } else {
+            (response.text().await?, None)
+        };
 
         Ok(OutboundResponse {
             status,
             body,
+            bytes,
             headers,
         })
     }
@@ -603,6 +625,117 @@ mod tests {
         format!(r#"{{"code":{code},"msg":"x"}}"#)
     }
 
+    #[tokio::test]
+    async fn attachment_http_transport_preserves_bytes_multipart_and_json_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let address = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+        let server = tokio::spawn(async move {
+            for (content_type, disposition, body) in [
+                ("application/octet-stream", "", vec![0, 255, 3]),
+                ("application/json", "", br#"{"code":99991663}"#.to_vec()),
+                (
+                    "application/json",
+                    "Content-Disposition: attachment; filename=a.json\r\n",
+                    br#"{"code":123}"#.to_vec(),
+                ),
+                ("application/json", "", br#"{"code":0}"#.to_vec()),
+                ("application/octet-stream", "", vec![0, 1, 2, 3]),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap_or_else(|e| panic!("{e}"));
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let byte = socket.read_u8().await.unwrap_or_else(|e| panic!("{e}"));
+                    request.push(byte);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break request.len();
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(0);
+                request.resize(header_end + length, 0);
+                socket
+                    .read_exact(&mut request[header_end..])
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"));
+                if headers.starts_with("post ") {
+                    assert!(headers.contains("content-type: multipart/form-data; boundary=test"));
+                    assert_eq!(&request[header_end..], b"--test\r\n\0\xff\r\n--test--\r\n");
+                }
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{disposition}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                socket
+                    .write_all(header.as_bytes())
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"));
+                socket
+                    .write_all(&body)
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"));
+            }
+        });
+        let transport =
+            HttpClientTransport::new(HttpClient::new(5).unwrap_or_else(|e| panic!("{e}")));
+        let request = OutboundRequest {
+            method: OutboundMethod::Get,
+            url: format!("http://{address}/download"),
+            query: Vec::new(),
+            bearer_token: None,
+            json_body: None,
+            raw_body: None,
+            binary_limit: Some(100),
+            timeout_secs: Some(5),
+            idempotent: true,
+        };
+        let binary = transport
+            .send(request.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(binary.bytes, Some(vec![0, 255, 3]));
+        let error = transport
+            .send(request.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            classify(error.status, &error.headers, &error.body),
+            Some(FailureKind::TokenExpired)
+        );
+        let json_file = transport
+            .send(request.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            json_file.bytes.as_deref(),
+            Some(br#"{"code":123}"#.as_slice())
+        );
+        let upload = transport
+            .send(OutboundRequest {
+                method: OutboundMethod::Post,
+                binary_limit: None,
+                raw_body: Some((
+                    "multipart/form-data; boundary=test".to_string(),
+                    b"--test\r\n\0\xff\r\n--test--\r\n".to_vec(),
+                )),
+                ..request.clone()
+            })
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(upload.body, r#"{"code":0}"#);
+        assert!(transport
+            .send(OutboundRequest {
+                binary_limit: Some(3),
+                ..request
+            })
+            .await
+            .is_err());
+        server.await.unwrap_or_else(|e| panic!("{e}"));
+    }
+
     // ---- classify ----
 
     #[test]
@@ -967,6 +1100,7 @@ mod tests {
         OutboundResponse {
             status,
             body: body.to_string(),
+            bytes: None,
             headers: BTreeMap::new(),
         }
     }
@@ -978,6 +1112,8 @@ mod tests {
             query: Vec::new(),
             bearer_token: None,
             json_body: None,
+            raw_body: None,
+            binary_limit: None,
             timeout_secs: None,
             idempotent: true,
         }

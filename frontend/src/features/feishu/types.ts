@@ -973,6 +973,7 @@ export function buildLinkageMapping(value: LinkageFormValue | null): string {
 /// 一条字段映射（`list_configs` 的 `maps[]`）。对齐靠 `bitableField`（id 不随改名变）。
 export type ApprovalConfigMap = {
   widgetId: string;
+  widgetName?: string | null;
   widgetType: string;
   bitableField: string;
   bitableFieldName: string | null;
@@ -1003,6 +1004,7 @@ export type ApprovalConfigItem = {
 export type ApprovalWidget = {
   id: string;
   name: string;
+  qualifiedName?: string;
   type: string;
   required: boolean;
 };

@@ -31,10 +31,14 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::approval::{create_instance, get_instance, CreateOutcome, GetOutcome, InstanceDetail};
+use super::approval::{
+    create_instance, get_approval_definition, get_instance, CreateOutcome, GetOutcome,
+    InstanceDetail,
+};
+use super::approval_attachment;
 use super::approval_convert::{build_form, Converter, FixedOffset, FormInput, WidgetMap};
 use super::approval_uuid::derive_uuid;
-use super::bitable::{backfill_cell, BitableCoordinates};
+use super::bitable::{BitableCoordinates, FieldItem};
 use super::outbound::{FailureKind, OutboundFailure, OutboundTransport, Sleeper};
 use super::tenant_token::TenantTokenProvider;
 
@@ -48,7 +52,7 @@ pub(crate) enum DispatchResult {
     /// **不写任何多维表格字段**——用户先填业务字段、后填「申请人」的那一轮若被
     /// 写成终态错误，该行会因字段非空而永久不再被扫到。详见设计 §6.3。
     Waiting { reason: String },
-    /// 终态失败，原因已写进回填字段。
+    /// 终态失败；文本列写原因，链接列仅由任务/请求日志保存。
     Terminal { message: String },
     /// 可重试失败，未写任何字段，等下一轮或退避后再来。
     Retryable { message: String },
@@ -63,7 +67,7 @@ impl DispatchResult {
     /// - `Waiting` → **也报成功**。它的含义是「本轮数据还没填完，没做任何事」——
     ///   报失败会让工作流把它当异常（甚至触发重试），而这是使用者的正常中间状态。
     ///   真正的信号在 message 里。
-    /// - `Terminal` → 失败。原因已写进表格字段，工作流无需再写。
+    /// - `Terminal` → 失败。原因由日志保存，文本列同时回填原因。
     /// - `Retryable` → 失败，但**可重试**：没写任何字段，再点一次按钮就会重来。
     pub(crate) fn response_parts(&self) -> (bool, String, Option<String>) {
         match self {
@@ -81,6 +85,7 @@ impl DispatchResult {
 
 /// 一条记录的处理输入。
 pub(crate) struct DispatchInput<'a> {
+    pub(crate) context: Option<&'a super::context::FeishuContext>,
     pub(crate) coordinates: &'a BitableCoordinates,
     pub(crate) record_id: &'a str,
     /// 该记录的原始单元格（键是字段 id）。
@@ -98,6 +103,8 @@ pub(crate) struct DispatchInput<'a> {
     pub(crate) backfill_field_name: &'a str,
     pub(crate) approval_code: &'a str,
     pub(crate) widgets: &'a [WidgetMap],
+    /// 定义快照；旧配置留空时，在创建实例前补取定义。
+    pub(crate) form_snapshot: String,
     pub(crate) timezone_offset: FixedOffset,
 }
 
@@ -107,12 +114,12 @@ pub(crate) struct DispatchInput<'a> {
 /// 编排的正确性全在这些分支的**顺序与归属**上，而那正是最该被测的部分。
 #[async_trait::async_trait]
 pub(crate) trait Backfill: Send + Sync {
-    /// 把文本写进指定记录的指定字段。
+    /// 成功传 text/link 对象，错误传文本；真实写入层按目标字段类型处理。
     async fn write(
         &self,
         record_id: &str,
         field_id: &str,
-        text: &str,
+        value: &Value,
     ) -> Result<(), OutboundFailure>;
 
     /// 一次写多条（同一字段）。**全有全无**：任一记录失败即整批零条落库。
@@ -121,7 +128,7 @@ pub(crate) trait Backfill: Send + Sync {
     async fn write_many(
         &self,
         field_id: &str,
-        rows: &[(String, String)],
+        rows: &[(String, Value)],
     ) -> Result<(), OutboundFailure>;
 }
 
@@ -131,6 +138,7 @@ pub(crate) struct BitableBackfill<'a> {
     pub(crate) sleeper: &'a dyn Sleeper,
     pub(crate) tokens: &'a TenantTokenProvider,
     pub(crate) coordinates: &'a BitableCoordinates,
+    pub(crate) fields: &'a [FieldItem],
 }
 
 #[async_trait::async_trait]
@@ -139,25 +147,54 @@ impl Backfill for BitableBackfill<'_> {
         &self,
         record_id: &str,
         field_id: &str,
-        text: &str,
+        value: &Value,
     ) -> Result<(), OutboundFailure> {
-        let rows = vec![(record_id.to_string(), text.to_string())];
+        let rows = vec![(record_id.to_string(), value.clone())];
         self.write_many(field_id, &rows).await
     }
 
     async fn write_many(
         &self,
         field_id: &str,
-        rows: &[(String, String)],
+        rows: &[(String, Value)],
     ) -> Result<(), OutboundFailure> {
-        let records: Vec<crate::addon::feishu::domain::bitable::BackfillRow> = rows
+        let field = self
+            .fields
             .iter()
-            .map(|(record_id, text)| {
-                let mut fields = BTreeMap::new();
-                fields.insert(field_id.to_string(), backfill_cell(text));
-                (record_id.clone(), fields)
-            })
-            .collect();
+            .find(|field| field.field_id == field_id || field.field_name == field_id)
+            .ok_or_else(|| OutboundFailure {
+                kind: FailureKind::Fatal { code: 0 },
+                message: format!("找不到回填列：{field_id}"),
+            })?;
+        let field_name =
+            super::bitable::resolve_field_name(self.fields, &field.field_id).map_err(|error| {
+                OutboundFailure {
+                    kind: FailureKind::Fatal { code: 0 },
+                    message: error.to_string(),
+                }
+            })?;
+        let mut records = Vec::with_capacity(rows.len());
+        for (record_id, value) in rows {
+            let cell = match field.field_type {
+                Some(15) if value.is_object() => value.clone(),
+                // 错误信息没有审批实例；链接列保持空白，原因由任务/请求日志保存。
+                Some(15) => continue,
+                Some(1) | None => value.get("text").unwrap_or(value).clone(),
+                _ => {
+                    return Err(OutboundFailure {
+                        kind: FailureKind::Fatal { code: 0 },
+                        message: "回填列必须是文本或链接字段".to_string(),
+                    })
+                }
+            };
+            records.push((
+                record_id.clone(),
+                BTreeMap::from([(field_name.clone(), cell)]),
+            ));
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
         super::bitable::batch_update_records(
             self.transport,
             self.sleeper,
@@ -188,6 +225,25 @@ pub(crate) async fn dispatch_one(
         input.record_id,
     );
 
+    // 先恢复已创建实例；源附件或关联审批权限变化也不能阻断编号回填。
+    if input
+        .widgets
+        .iter()
+        .any(|w| matches!(w.widget_type.as_str(), "attachmentV2" | "connect"))
+    {
+        match get_instance(transport, sleeper, tokens, &uuid).await {
+            Ok(GetOutcome::Found(detail)) => {
+                return finish_backfill(backfill, input, &uuid, detail).await;
+            }
+            Ok(GetOutcome::NotFound) => {}
+            Err(failure) => {
+                return DispatchResult::Retryable {
+                    message: failure.to_string(),
+                }
+            }
+        }
+    }
+
     // ---- 2. 申请人 ----
     let open_id = match applicant_open_id(input.cells, input.applicant_field) {
         Some(open_id) => open_id,
@@ -199,10 +255,48 @@ pub(crate) async fn dispatch_one(
     };
 
     // ---- 3. 组装 form ----
-    let form = match build_form(&FormInput {
-        widgets: input.widgets,
-        cells: input.cells,
-        timezone_offset: input.timezone_offset,
+    let form_snapshot = if input.form_snapshot.trim().is_empty() {
+        match get_approval_definition(transport, sleeper, tokens, input.approval_code).await {
+            Ok(definition) => match definition.form {
+                Some(Value::String(form)) => form,
+                form => form.unwrap_or(Value::Null).to_string(),
+            },
+            Err(failure) => return classify_failure(failure, input, backfill, uuid.as_str()).await,
+        }
+    } else {
+        input.form_snapshot.clone()
+    };
+    let mut widgets = input.widgets.to_vec();
+    if let Some(context) = input.context {
+        if let Err(error) = super::approval_provision::resolve_external_options(
+            context,
+            &form_snapshot,
+            &mut widgets,
+            input.cells,
+        )
+        .await
+        {
+            return match error {
+                super::approval_provision::ProvisionError::Invalid(reasons) => {
+                    DispatchResult::Waiting {
+                        reason: reasons.join("；"),
+                    }
+                }
+                error => DispatchResult::Retryable {
+                    message: error.to_string(),
+                },
+            };
+        }
+    }
+    let preflight = approval_attachment::preflight(&widgets, input.cells);
+    let form = match preflight.and_then(|codes| {
+        build_form(&FormInput {
+            widgets: &widgets,
+            form_snapshot: &form_snapshot,
+            cells: input.cells,
+            attachment_codes: &codes,
+            timezone_offset: input.timezone_offset,
+        })
     }) {
         Ok(form) => form,
         // 组装失败分两类：**数据不完整**（必填缺失、值形态不对）是等待态，
@@ -218,11 +312,62 @@ pub(crate) async fn dispatch_one(
                 // 该行每轮都被重新捞出、每轮都失败一次，用户却看不到任何线索。
                 let message = sanitize_terminal_message(&message, 0);
                 let _ = backfill
-                    .write(input.record_id, input.backfill_field_name, &message)
+                    .write(
+                        input.record_id,
+                        input.backfill_field_name,
+                        &Value::String(message.clone()),
+                    )
                     .await;
                 DispatchResult::Terminal { message }
             };
         }
+    };
+
+    if let Err(result) =
+        validate_connections(transport, sleeper, tokens, &form_snapshot, &form).await
+    {
+        return result;
+    }
+
+    let form = if input
+        .widgets
+        .iter()
+        .any(|w| w.widget_type == "attachmentV2")
+    {
+        let codes = match approval_attachment::transfer(
+            transport,
+            sleeper,
+            tokens,
+            input.coordinates,
+            input.record_id,
+            &widgets,
+            input.cells,
+        )
+        .await
+        {
+            Ok(codes) => codes,
+            Err(failure) => {
+                return DispatchResult::Retryable {
+                    message: failure.to_string(),
+                }
+            }
+        };
+        match build_form(&FormInput {
+            widgets: &widgets,
+            form_snapshot: &form_snapshot,
+            cells: input.cells,
+            attachment_codes: &codes,
+            timezone_offset: input.timezone_offset,
+        }) {
+            Ok(form) => form,
+            Err(error) => {
+                return DispatchResult::Retryable {
+                    message: error.to_string(),
+                }
+            }
+        }
+    } else {
+        form
     };
 
     // ---- 4. 创建 ----
@@ -287,20 +432,149 @@ pub(crate) async fn dispatch_one(
         },
     };
 
+    finish_backfill(backfill, input, &uuid, detail).await
+}
+
+/// 在上传附件和创建审批之前校验关联实例；同一实例在一单中只查询一次。
+async fn validate_connections(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    snapshot: &str,
+    form: &str,
+) -> Result<(), DispatchResult> {
+    fn collect<'a>(nodes: &'a [Value], out: &mut Vec<&'a Value>) {
+        for node in nodes {
+            if node["type"] == "connect" {
+                out.push(node);
+            } else if node["type"] == "fieldList" {
+                for row in node["value"].as_array().into_iter().flatten() {
+                    if let Some(children) = row.as_array() {
+                        collect(children, out);
+                    }
+                }
+            }
+        }
+    }
+    let definition: Vec<super::approval_match::FormWidget> = serde_json::from_str(snapshot)
+        .map_err(|_| DispatchResult::Retryable {
+            message: "关联审批定义快照解析失败".into(),
+        })?;
+    let form: Vec<Value> = serde_json::from_str(form).map_err(|_| DispatchResult::Retryable {
+        message: "关联审批表单解析失败".into(),
+    })?;
+    let mut connections = Vec::new();
+    collect(&form, &mut connections);
+    let nodes: Vec<_> = definition.iter().flat_map(|node| node.walk()).collect();
+    let mut checked = BTreeMap::new();
+    for connection in connections {
+        let node = nodes
+            .iter()
+            .find(|node| connection["id"] == node.id)
+            .ok_or_else(|| DispatchResult::Retryable {
+                message: "关联控件不在定义快照中".into(),
+            })?;
+        let allowed =
+            node.connect_definition_codes()
+                .map_err(|reason| DispatchResult::Retryable {
+                    message: format!(
+                        "关联审批控件「{}」（{}）配置无效：{reason}",
+                        node.name, node.id
+                    ),
+                })?;
+        for code in connection["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !checked.contains_key(code) {
+                let detail = match get_instance(transport, sleeper, tokens, code).await {
+                    Ok(GetOutcome::Found(detail)) => detail,
+                    Ok(GetOutcome::NotFound) => {
+                        return Err(DispatchResult::Waiting {
+                            reason: format!(
+                                "关联审批控件「{}」（{}）：实例 {code} 不存在",
+                                node.name, node.id
+                            ),
+                        })
+                    }
+                    Err(failure) => {
+                        return Err(DispatchResult::Retryable {
+                            message: format!(
+                                "关联审批控件「{}」（{}）查询失败：{}",
+                                node.name, node.id, failure
+                            ),
+                        })
+                    }
+                };
+                if !detail.instance_code.eq_ignore_ascii_case(code)
+                    || detail
+                        .approval_code
+                        .as_deref()
+                        .map_or(true, |code| code.trim().is_empty())
+                {
+                    return Err(DispatchResult::Retryable {
+                        message: "关联审批详情缺少定义 Code 或实例 Code 不一致".into(),
+                    });
+                }
+                checked.insert(code.to_string(), detail.approval_code.unwrap_or_default());
+            }
+            let approval_code = &checked[code];
+            if allowed.as_ref().is_some_and(|allowed| {
+                !allowed
+                    .iter()
+                    .any(|code| code.eq_ignore_ascii_case(approval_code))
+            }) {
+                return Err(DispatchResult::Waiting {
+                    reason: format!(
+                        "关联审批控件「{}」（{}）：实例 {code} 不属于允许关联的审批定义",
+                        node.name, node.id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn finish_backfill(
+    backfill: &dyn Backfill,
+    input: &DispatchInput<'_>,
+    uuid: &str,
+    detail: InstanceDetail,
+) -> DispatchResult {
     let Some(serial_number) = serial_number_of(&detail) else {
         // 实例存在但编号还没生成：同样是可重试，不是失败。
         return DispatchResult::Retryable {
-            message: format!("实例 {instance_code} 已创建但编号尚未生成，稍后重试"),
+            message: format!(
+                "实例 {} 已创建但编号尚未生成，稍后重试",
+                detail.instance_code
+            ),
         };
     };
 
+    let link = match super::approval::instance_applink(&detail.instance_code) {
+        Ok(link) => link,
+        Err(error) => {
+            return DispatchResult::Retryable {
+                message: error.to_string(),
+            }
+        }
+    };
+    let value = serde_json::json!({"text": serial_number, "link": link});
     // ---- 6. 回写 ----
     match backfill
-        .write(input.record_id, input.backfill_field_name, &serial_number)
+        .write(input.record_id, input.backfill_field_name, &value)
         .await
     {
         Ok(()) => DispatchResult::Backfilled { serial_number },
-        Err(failure) => classify_failure(failure, input, backfill, uuid.as_str()).await,
+        Err(failure) => DispatchResult::Retryable {
+            message: format!(
+                "实例 {} 已创建，回填失败：{}（uuid={uuid}）",
+                detail.instance_code, failure.message
+            ),
+        },
     }
 }
 
@@ -345,7 +619,11 @@ async fn classify_failure(
             // 回写失败也不改变结论：终态的判据是「这个记录本身有问题」，
             // 而错误文案写不进去只是让用户少了一个排查线索。
             let _ = backfill
-                .write(input.record_id, input.backfill_field_name, &message)
+                .write(
+                    input.record_id,
+                    input.backfill_field_name,
+                    &Value::String(message.clone()),
+                )
                 .await;
             DispatchResult::Terminal { message }
         }
@@ -475,7 +753,7 @@ pub(crate) struct BackfillReport {
 pub(crate) async fn backfill_in_chunks(
     backfill: &dyn Backfill,
     field_id: &str,
-    rows: &[(String, String)],
+    rows: &[(String, Value)],
 ) -> BackfillReport {
     let mut report = BackfillReport::default();
     for chunk in rows.chunks(super::bitable::BACKFILL_CHUNK) {
@@ -488,7 +766,7 @@ pub(crate) async fn backfill_in_chunks(
 async fn write_chunk(
     backfill: &dyn Backfill,
     field_id: &str,
-    chunk: &[(String, String)],
+    chunk: &[(String, Value)],
     report: &mut BackfillReport,
 ) {
     match backfill.write_many(field_id, chunk).await {
@@ -556,6 +834,8 @@ mod tests {
     struct ScriptedTransport {
         responses: Mutex<Vec<OutboundResponse>>,
         requests: Mutex<Vec<String>>,
+        bodies: Mutex<Vec<Option<Value>>>,
+        full_requests: Mutex<Vec<super::super::outbound::OutboundRequest>>,
     }
 
     impl ScriptedTransport {
@@ -567,11 +847,14 @@ mod tests {
                         .map(|(status, body)| OutboundResponse {
                             status,
                             body: body.to_string(),
+                            bytes: None,
                             headers: BTreeMap::new(),
                         })
                         .collect(),
                 ),
                 requests: Mutex::new(Vec::new()),
+                bodies: Mutex::new(Vec::new()),
+                full_requests: Mutex::new(Vec::new()),
             }
         }
 
@@ -591,6 +874,12 @@ mod tests {
         ) -> Result<OutboundResponse, yang_base::BaseError> {
             if let Ok(mut requests) = self.requests.lock() {
                 requests.push(format!("{:?} {}", request.method, request.url));
+            }
+            if let Ok(mut bodies) = self.bodies.lock() {
+                bodies.push(request.json_body.clone());
+            }
+            if let Ok(mut requests) = self.full_requests.lock() {
+                requests.push(request.clone());
             }
             let mut responses = self
                 .responses
@@ -649,6 +938,186 @@ mod tests {
         .unwrap_or_else(|error| panic!("应可构造 token provider: {error}"))
     }
 
+    #[test]
+    fn approval_link_encodes_both_paths_and_rejects_query_injection() {
+        let link =
+            super::super::approval::instance_applink("INST-A").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(link, "https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108&mode=appCenter&path_pc=pc%2Fpages%2Fin-process%2Findex%3FinstanceId%3DINST-A%26source%3Dbitable&path=pages%2Fdetail%2Findex%3FinstanceId%3DINST-A%26source%3Dbitable");
+        for invalid in ["", "x&injected=y", "bad/id", "a%26b", "中文"] {
+            assert!(super::super::approval::instance_applink(invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_link_native_cells_and_text_compatibility() {
+        for kind in [Some(15), Some(1), None, Some(2)] {
+            for coord in ["fldResult", "改名后的申请编号"] {
+                let transport = ScriptedTransport::new(vec![(200, r#"{"code":0,"data":{}}"#)]);
+                let fields = [FieldItem {
+                    field_id: "fldResult".into(),
+                    field_name: "改名后的申请编号".into(),
+                    field_type: kind,
+                    ui_type: None,
+                    property: None,
+                }];
+                let coords = coordinates();
+                let tokens = fake_tokens();
+                let writer = BitableBackfill {
+                    transport: &transport,
+                    sleeper: &NoSleep,
+                    tokens: &tokens,
+                    coordinates: &coords,
+                    fields: &fields,
+                };
+                let value = json!({"text":"SERIAL","link":"https://example.com"});
+                let result = writer
+                    .write_many(
+                        coord,
+                        &[
+                            ("recOne".into(), value.clone()),
+                            ("recTwo".into(), value.clone()),
+                        ],
+                    )
+                    .await;
+                assert_eq!(result.is_ok(), kind != Some(2));
+                if kind == Some(2) {
+                    assert!(transport.requests().is_empty());
+                    continue;
+                }
+                let expected = if kind == Some(15) {
+                    value
+                } else {
+                    json!("SERIAL")
+                };
+                let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
+                assert_eq!(
+                    bodies[0].as_ref().map(|v| v["records"].clone()),
+                    Some(
+                        json!([{"record_id":"recOne","fields":{"改名后的申请编号":expected}},{"record_id":"recTwo","fields":{"改名后的申请编号":expected}}])
+                    )
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_link_errors_keep_the_cell_empty_and_missing_columns_fail() {
+        let transport = ScriptedTransport::new(vec![]);
+        let fields = [FieldItem {
+            field_id: "fldResult".into(),
+            field_name: "申请编号".into(),
+            field_type: Some(15),
+            ui_type: None,
+            property: None,
+        }];
+        let coords = coordinates();
+        let tokens = fake_tokens();
+        let writer = BitableBackfill {
+            transport: &transport,
+            sleeper: &NoSleep,
+            tokens: &tokens,
+            coordinates: &coords,
+            fields: &fields,
+        };
+        assert!(writer
+            .write("recOne", "fldResult", &json!("错误信息"))
+            .await
+            .is_ok());
+        assert!(writer
+            .write("recOne", "missing", &json!("x"))
+            .await
+            .is_err());
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approval_link_finish_preserves_instance_code_and_retries_failed_write() {
+        let fields = [FieldItem {
+            field_id: "fldResult".into(),
+            field_name: "审批编号".into(),
+            field_type: Some(15),
+            ui_type: None,
+            property: None,
+        }];
+        let cells = cells(&[]);
+        let input = input(&cells, &[]);
+        let tokens = fake_tokens();
+        for (code, serial, response, write, success) in [
+            (
+                "INST-A",
+                Some(" SERIAL "),
+                (200, r#"{"code":0,"data":{}}"#),
+                true,
+                true,
+            ),
+            (
+                "INST-A",
+                Some("SERIAL"),
+                (200, r#"{"code":1254068,"msg":"bad url"}"#),
+                true,
+                false,
+            ),
+            ("bad&id=x", Some("SERIAL"), (200, ""), false, false),
+            ("INST-A", None, (200, ""), false, false),
+        ] {
+            let transport = ScriptedTransport::new(vec![response]);
+            let writer = BitableBackfill {
+                transport: &transport,
+                sleeper: &NoSleep,
+                tokens: &tokens,
+                coordinates: input.coordinates,
+                fields: &fields,
+            };
+            let result = finish_backfill(
+                &writer,
+                &input,
+                "source-uuid",
+                InstanceDetail {
+                    instance_code: code.into(),
+                    approval_code: None,
+                    serial_number: serial.map(str::to_string),
+                    status: None,
+                },
+            )
+            .await;
+            assert_eq!(matches!(result, DispatchResult::Backfilled { .. }), success);
+            if !success {
+                assert!(matches!(result, DispatchResult::Retryable { .. }));
+            }
+            assert_eq!(!transport.requests().is_empty(), write);
+            if write {
+                let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
+                let value = &bodies[0].as_ref().unwrap_or_else(|| panic!("body missing"))
+                    ["records"][0]["fields"]["审批编号"];
+                assert_eq!(value["text"], "SERIAL");
+                assert_eq!(
+                    value["link"],
+                    super::super::approval::instance_applink(code)
+                        .unwrap_or_else(|e| panic!("{e}"))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_get_records_uses_the_official_endpoint() {
+        let transport = ScriptedTransport::new(vec![(200, r#"{"code":0,"data":{"records":[]}}"#)]);
+        super::super::bitable::get_records_by_ids(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &BitableCoordinates {
+                app_token: "appTest".to_string(),
+                table_id: "tblTest".to_string(),
+                view_id: None,
+            },
+            &["recTest".to_string()],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("应可读取记录: {error}"));
+        assert_eq!(transport.requests(), vec!["Post https://open.feishu.cn/open-apis/bitable/v1/apps/appTest/tables/tblTest/records/batch_get"]);
+    }
+
     /// token provider 只会在缓存未命中时用它，而 `FakeCache` 恒命中，
     /// 所以这个传输永远不会被调用。
     struct NullTransport;
@@ -704,20 +1173,29 @@ mod tests {
             &self,
             record_id: &str,
             field_id: &str,
-            text: &str,
+            value: &Value,
         ) -> Result<(), OutboundFailure> {
-            self.write_many(field_id, &[(record_id.to_string(), text.to_string())])
+            self.write_many(field_id, &[(record_id.to_string(), value.clone())])
                 .await
         }
 
         async fn write_many(
             &self,
             field_id: &str,
-            rows: &[(String, String)],
+            rows: &[(String, Value)],
         ) -> Result<(), OutboundFailure> {
             if let Ok(mut writes) = self.writes.lock() {
-                for (record_id, text) in rows {
-                    writes.push((record_id.clone(), field_id.to_string(), text.clone()));
+                for (record_id, value) in rows {
+                    writes.push((
+                        record_id.clone(),
+                        field_id.to_string(),
+                        value
+                            .get("text")
+                            .unwrap_or(value)
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    ));
                 }
             }
             if self.fail {
@@ -746,6 +1224,7 @@ mod tests {
         widgets: &'a [WidgetMap],
     ) -> DispatchInput<'a> {
         DispatchInput {
+            context: None,
             coordinates: &COORDINATES,
             record_id: "rec001",
             cells,
@@ -753,6 +1232,17 @@ mod tests {
             backfill_field_name: "审批编号",
             approval_code: "4202AD96-9EC1",
             widgets,
+            form_snapshot: serde_json::to_string(
+                &widgets
+                    .iter()
+                    .map(|w| {
+                        json!({
+                            "id": w.widget_id, "type": w.widget_type, "required": w.required
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
             timezone_offset: FixedOffset::from_seconds(8 * 3600)
                 .unwrap_or_else(|error| panic!("{error}")),
         }
@@ -774,6 +1264,595 @@ mod tests {
 
     fn uuid_conflict() -> String {
         r#"{"code":60012,"msg":"uuid conflict"}"#.to_string()
+    }
+
+    #[tokio::test]
+    async fn connect_dispatch_validates_then_submits_official_array_including_details() {
+        let code = "19EAC829-F1CB-527F-BE2A-1330422E60C0";
+        for detail in [false, true] {
+            let node = json!({"id":"w1","name":"关联审批","type":"connect","value":["DEF-A"]});
+            let snapshot = if detail {
+                json!([{"id":"detail","type":"fieldList","children":[node]}])
+            } else {
+                json!([node])
+            }
+            .to_string();
+            let linked =
+                json!({"code":0,"data":{"instance_code":code,"approval_code":"def-a"}}).to_string();
+            let transport = ScriptedTransport::new(vec![
+                (400, r#"{"code":1390003}"#),
+                (200, &linked),
+                (200, &ok_create("CREATED")),
+                (200, &ok_detail("CREATED", "SERIAL")),
+            ]);
+            let widgets = [widget("w1", "connect")];
+            let cell_map = cells(&[
+                ("fld_applicant", json!([{"id":"ou_test"}])),
+                (
+                    "fld_title",
+                    json!({"link":super::super::approval::instance_applink(code).unwrap_or_else(|e| panic!("{e}")),"text":"申请编号"}),
+                ),
+            ]);
+            let mut request = input(&cell_map, &widgets);
+            request.form_snapshot = snapshot;
+            let backfill = RecordingBackfill::default();
+            assert!(matches!(
+                dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await,
+                DispatchResult::Backfilled { .. }
+            ));
+            let requests = transport
+                .full_requests
+                .lock()
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(requests.len(), 4);
+            assert!(requests[1].url.ends_with(code));
+            let body = requests[2]
+                .json_body
+                .as_ref()
+                .unwrap_or_else(|| panic!("缺创建请求"));
+            let form: Value = serde_json::from_str(body["form"].as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("{e}"));
+            let connection = if detail {
+                &form[0]["value"][0][0]
+            } else {
+                &form[0]
+            };
+            assert_eq!(
+                connection,
+                &json!({"id":"w1","type":"connect","value":[code]})
+            );
+            assert_eq!(backfill.writes().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_invalid_instances_never_create_or_write_and_existing_uuid_recovers() {
+        let code = "19EAC829-F1CB-527F-BE2A-1330422E60C0";
+        for (status, response, retryable) in [
+            (400, json!({"code":1390003}), false),
+            (
+                403,
+                json!({"code":99991672,"msg":"permission denied"}),
+                true,
+            ),
+            (
+                200,
+                json!({"code":0,"data":{"instance_code":code,"approval_code":"DEF-B"}}),
+                false,
+            ),
+            (
+                200,
+                json!({"code":0,"data":{"instance_code":"OTHER","approval_code":"DEF-A"}}),
+                true,
+            ),
+            (200, json!({"code":0,"data":{"instance_code":code}}), true),
+        ] {
+            let response = response.to_string();
+            let transport =
+                ScriptedTransport::new(vec![(400, r#"{"code":1390003}"#), (status, &response)]);
+            let widgets = [widget("w1", "connect")];
+            let cell_map = cells(&[
+                ("fld_applicant", json!([{"id":"ou_test"}])),
+                ("fld_title", json!(code)),
+            ]);
+            let mut request = input(&cell_map, &widgets);
+            request.form_snapshot = r#"[{"id":"w1","name":"关联审批","type":"connect","option":{"definitionIds":["DEF-A"],"notLimitScope":false}}]"#.to_string();
+            let backfill = RecordingBackfill::default();
+            let result =
+                dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await;
+            assert!(
+                if retryable {
+                    matches!(result, DispatchResult::Retryable { .. })
+                } else {
+                    matches!(result, DispatchResult::Waiting { .. })
+                },
+                "{result:?}"
+            );
+            assert_eq!(transport.requests().len(), 2);
+            assert!(backfill.writes().is_empty());
+        }
+        let transport = ScriptedTransport::new(vec![(200, &ok_detail("EXISTING", "SERIAL"))]);
+        let widgets = [widget("w1", "connect")];
+        let backfill = RecordingBackfill::default();
+        assert!(matches!(
+            dispatch_one(
+                &transport,
+                &NoSleep,
+                &fake_tokens(),
+                &backfill,
+                &input(&cells(&[]), &widgets)
+            )
+            .await,
+            DispatchResult::Backfilled { .. }
+        ));
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(backfill.writes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn connect_unlimited_scope_and_dedup_still_enforce_each_detail_widget_scope() {
+        let code = "19EAC829-F1CB-527F-BE2A-1330422E60C0";
+        let response =
+            json!({"code":0,"data":{"instance_code":code,"approval_code":"DEF-A"}}).to_string();
+        for allowed in ["DEF-A", "DEF-B"] {
+            let snapshot = json!([
+                {"id":"top","type":"connect","option":{"notLimitScope":true}},
+                {"id":"detail","type":"fieldList","children":[{"id":"child","type":"connect","value":[allowed]}]}
+            ]).to_string();
+            let form = json!([
+                {"id":"top","type":"connect","value":[code]},
+                {"id":"detail","type":"fieldList","value":[[{"id":"child","type":"connect","value":[code]}]]}
+            ]).to_string();
+            let transport = ScriptedTransport::new(vec![(200, &response)]);
+            let result =
+                validate_connections(&transport, &NoSleep, &fake_tokens(), &snapshot, &form).await;
+            if allowed == "DEF-A" {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert!(matches!(result, Err(DispatchResult::Waiting { .. })));
+            }
+            assert_eq!(transport.requests().len(), 1, "同一实例只查询一次");
+        }
+    }
+
+    fn attachment_cells() -> serde_json::Map<String, Value> {
+        cells(&[
+            ("fld_applicant", json!([{"id":"ou_test"}])),
+            (
+                "fld_src",
+                json!([
+                    {"file_token":"TokenA", "name":"凭证.png", "size":3, "url":"https://untrusted.invalid"},
+                    {"file_token":"TokenB", "name":"凭证2.pdf", "size":3}
+                ]),
+            ),
+        ])
+    }
+
+    fn attachment_widget() -> WidgetMap {
+        WidgetMap {
+            bitable_field: "fld_src".to_string(),
+            required: true,
+            ..widget("w1", "attachmentV2")
+        }
+    }
+
+    fn attachment_transport() -> ScriptedTransport {
+        let transport = ScriptedTransport::new(vec![
+            (400, r#"{"code":1390003}"#),
+            (200, ""),
+            (200, r#"{"code":0,"data":{"code":"CODE-A"}}"#),
+            (200, ""),
+            (200, r#"{"code":0,"data":{"code":"CODE-B"}}"#),
+            (200, &ok_create("INST-A")),
+            (200, &ok_detail("INST-A", "SERIAL-A")),
+        ]);
+        let mut responses = transport.responses.lock().unwrap_or_else(|e| panic!("{e}"));
+        responses[1].bytes = Some(vec![0, 255, 3]);
+        responses[3].bytes = Some(vec![0, 255, 3]);
+        drop(responses);
+        transport
+    }
+
+    #[tokio::test]
+    async fn attachment_transfer_reaches_plain_and_detail_create_requests() {
+        for detail in [false, true] {
+            let transport = attachment_transport();
+            let backfill = RecordingBackfill::default();
+            let widgets = [attachment_widget()];
+            let cells = attachment_cells();
+            let mut input = input(&cells, &widgets);
+            if detail {
+                input.form_snapshot = r#"[{"id":"detail","type":"fieldList","children":[{"id":"w1","type":"attachmentV2","required":true}]}]"#.to_string();
+            }
+            assert_eq!(
+                dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &input).await,
+                DispatchResult::Backfilled {
+                    serial_number: "SERIAL-A".to_string()
+                }
+            );
+            let requests = transport
+                .full_requests
+                .lock()
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(requests.len(), 7);
+            assert!(requests[1].url.ends_with("/medias/TokenA/download"));
+            let extra: Value =
+                serde_json::from_str(&requests[1].query[0].1).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                extra,
+                json!({"bitablePerm":{"tableId":COORDINATES.table_id,"attachments":{"fld_src":{"rec001":["TokenA"]}}}})
+            );
+            for i in [2, 4] {
+                assert_eq!(
+                    requests[i].url,
+                    "https://www.feishu.cn/approval/openapi/v2/file/upload"
+                );
+                assert!(!requests[i].idempotent);
+                assert_eq!(requests[i].bearer_token.as_deref(), Some("t-fake"));
+                let (content_type, body) = requests[i]
+                    .raw_body
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("缺 multipart"));
+                let boundary = content_type
+                    .strip_prefix("multipart/form-data; boundary=")
+                    .unwrap_or_else(|| panic!("缺 boundary"));
+                assert!(body.starts_with(format!("--{boundary}\r\n").as_bytes()));
+                assert!(body.windows(3).any(|b| b == [0, 255, 3]));
+                let text = String::from_utf8_lossy(body);
+                assert!(text.contains("name=\"type\"\r\n\r\nattachment"));
+                assert!(text.contains("name=\"content\"; filename=\"凭证"));
+            }
+            let body = requests[5]
+                .json_body
+                .as_ref()
+                .unwrap_or_else(|| panic!("缺创建请求"));
+            let form: Value = serde_json::from_str(
+                body["form"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("form 必须是字符串")),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+            let attachment = if detail {
+                &form[0]["value"][0][0]
+            } else {
+                &form[0]
+            };
+            assert_eq!(
+                attachment,
+                &json!({"id":"w1","type":"attachmentV2","value":["CODE-A","CODE-B"]})
+            );
+            assert!(!body["form"].as_str().unwrap_or_default().contains("TokenA"));
+            assert_eq!(backfill.writes().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_existing_uuid_backfills_even_after_source_was_removed() {
+        let transport = ScriptedTransport::new(vec![(200, &ok_detail("EXISTING", "SERIAL"))]);
+        let backfill = RecordingBackfill::default();
+        let widgets = [attachment_widget()];
+        assert_eq!(
+            dispatch_one(
+                &transport,
+                &NoSleep,
+                &fake_tokens(),
+                &backfill,
+                &input(&cells(&[]), &widgets)
+            )
+            .await,
+            DispatchResult::Backfilled {
+                serial_number: "SERIAL".to_string()
+            }
+        );
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(backfill.writes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_download_rate_limit_retries_then_creates_once() {
+        let transport = attachment_transport();
+        transport
+            .responses
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .insert(
+                1,
+                OutboundResponse {
+                    status: 429,
+                    body: String::new(),
+                    bytes: None,
+                    headers: BTreeMap::from([(
+                        "x-ogw-ratelimit-reset".to_string(),
+                        "1".to_string(),
+                    )]),
+                },
+            );
+        let widgets = [attachment_widget()];
+        assert!(matches!(
+            dispatch_one(
+                &transport,
+                &NoSleep,
+                &fake_tokens(),
+                &RecordingBackfill::default(),
+                &input(&attachment_cells(), &widgets)
+            )
+            .await,
+            DispatchResult::Backfilled { .. }
+        ));
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 8);
+        assert_eq!(requests[1], requests[2]);
+    }
+
+    #[tokio::test]
+    async fn attachment_expired_token_refreshes_once_and_uses_returned_token() {
+        let refresh = Arc::new(ScriptedTransport::new(vec![(
+            200,
+            r#"{"code":0,"tenant_access_token":"t-fresh","expire":7200}"#,
+        )]));
+        let tokens = TenantTokenProvider::new(
+            Arc::new(FakeCache),
+            refresh.clone(),
+            Arc::new(NoSleep),
+            FeishuCredentials {
+                app_id: "cli_fake".to_string(),
+                app_secret: "secret".to_string(),
+            },
+            "test",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        for repeated in [false, true] {
+            let transport = attachment_transport();
+            {
+                let mut responses = transport.responses.lock().unwrap_or_else(|e| panic!("{e}"));
+                responses.insert(
+                    1,
+                    OutboundResponse {
+                        status: 400,
+                        body: r#"{"code":99991663}"#.to_string(),
+                        bytes: None,
+                        headers: BTreeMap::new(),
+                    },
+                );
+                if repeated {
+                    responses.insert(
+                        2,
+                        OutboundResponse {
+                            status: 400,
+                            body: r#"{"code":99991663}"#.to_string(),
+                            bytes: None,
+                            headers: BTreeMap::new(),
+                        },
+                    );
+                }
+            }
+            // FakeCache 保留旧 token，证明重发直接使用 refresh 的返回值。
+            if repeated {
+                refresh
+                    .responses
+                    .lock()
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .push(OutboundResponse {
+                        status: 200,
+                        body: r#"{"code":0,"tenant_access_token":"t-fresh","expire":7200}"#
+                            .to_string(),
+                        bytes: None,
+                        headers: BTreeMap::new(),
+                    });
+            }
+            let widgets = [attachment_widget()];
+            let backfill = RecordingBackfill::default();
+            let result = dispatch_one(
+                &transport,
+                &NoSleep,
+                &tokens,
+                &backfill,
+                &input(&attachment_cells(), &widgets),
+            )
+            .await;
+            assert!(if repeated {
+                matches!(result, DispatchResult::Retryable { .. })
+            } else {
+                matches!(result, DispatchResult::Backfilled { .. })
+            });
+            assert_eq!(
+                transport
+                    .full_requests
+                    .lock()
+                    .unwrap_or_else(|e| panic!("{e}"))[2]
+                    .bearer_token
+                    .as_deref(),
+                Some("t-fresh")
+            );
+        }
+        assert_eq!(refresh.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn attachment_failure_never_creates_or_writes_terminal_marker() {
+        for (index, status, body, bytes) in [
+            (0, 403, "denied", None),
+            (1, 403, "denied", None),
+            (1, 206, "", Some(vec![0, 255, 3])),
+            (1, 200, "", Some(vec![0])),
+            (2, 200, r#"{"code":0,"data":{"url":"unusable"}}"#, None),
+            (2, 200, r#"{"data":{"code":"CODE-A"}}"#, None),
+            (2, 200, r#"{"code":0,"data":{"code":" "}}"#, None),
+            (2, 403, "denied", None),
+            (4, 503, "upload failed", None),
+        ] {
+            let transport = attachment_transport();
+            {
+                let mut responses = transport.responses.lock().unwrap_or_else(|e| panic!("{e}"));
+                responses[index] = OutboundResponse {
+                    status,
+                    body: body.to_string(),
+                    bytes,
+                    headers: BTreeMap::new(),
+                };
+            }
+            let backfill = RecordingBackfill::default();
+            let widgets = [attachment_widget()];
+            assert!(matches!(
+                dispatch_one(
+                    &transport,
+                    &NoSleep,
+                    &fake_tokens(),
+                    &backfill,
+                    &input(&attachment_cells(), &widgets)
+                )
+                .await,
+                DispatchResult::Retryable { .. }
+            ));
+            assert_eq!(transport.requests().len(), index + 1);
+            assert!(backfill.writes().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_validation_precedes_download_and_empty_optional_is_omitted() {
+        for value in [
+            Value::Null,
+            json!([]),
+            json!("raw-token"),
+            json!([{"file_token":"TokenA","name":"ok.png","size":0}]),
+        ] {
+            let transport = ScriptedTransport::new(vec![(400, r#"{"code":1390003}"#)]);
+            let backfill = RecordingBackfill::default();
+            let widgets = [attachment_widget()];
+            let mut cells = attachment_cells();
+            cells.insert("fld_src".to_string(), value);
+            assert!(matches!(
+                dispatch_one(
+                    &transport,
+                    &NoSleep,
+                    &fake_tokens(),
+                    &backfill,
+                    &input(&cells, &widgets)
+                )
+                .await,
+                DispatchResult::Waiting { .. }
+            ));
+            assert_eq!(transport.requests().len(), 1);
+            assert!(backfill.writes().is_empty());
+        }
+        let transport = ScriptedTransport::new(vec![
+            (400, r#"{"code":1390003}"#),
+            (200, &ok_create("INST")),
+            (200, &ok_detail("INST", "SERIAL")),
+        ]);
+        let mut widgets = [attachment_widget()];
+        widgets[0].required = false;
+        let cells = cells(&[("fld_applicant", json!([{"id":"ou_test"}]))]);
+        assert!(approval_attachment::transfer(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &COORDINATES,
+            "rec001",
+            &widgets,
+            &cells
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
+        .is_empty());
+        assert!(matches!(
+            dispatch_one(
+                &transport,
+                &NoSleep,
+                &fake_tokens(),
+                &RecordingBackfill::default(),
+                &input(&cells, &widgets)
+            )
+            .await,
+            DispatchResult::Backfilled { .. }
+        ));
+        let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            bodies[1].as_ref().unwrap_or_else(|| panic!("缺请求"))["form"],
+            "[]"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_snapshot_reaches_the_create_request_and_legacy_config_fetches_it() {
+        let snapshot = r#"[{"id":"detail","type":"fieldList","required":true,"children":[{"id":"w1","type":"input","required":true}]}]"#;
+        // 历史快照可空，定义 API 的 form 可为字符串或数组；三条路都不能扁平提交。
+        for remote_form in [
+            None,
+            Some(json!(snapshot)),
+            Some(serde_json::from_str::<Value>(snapshot).unwrap_or_else(|e| panic!("{e}"))),
+        ] {
+            let definition =
+                json!({"code":0,"data":{"approval_name":"测试","form":remote_form}}).to_string();
+            let mut responses = vec![
+                (200, ok_create("INST-D")),
+                (200, ok_detail("INST-D", "202610090001")),
+            ];
+            if remote_form.is_some() {
+                responses.insert(0, (200, definition));
+            }
+            let transport = ScriptedTransport::new(
+                responses
+                    .iter()
+                    .map(|(status, body)| (*status, body.as_str()))
+                    .collect(),
+            );
+            let backfill = RecordingBackfill::default();
+            let widgets = [widget("w1", "input")];
+            let cells = cells(&[
+                ("fld_applicant", json!([{"id":"ou_abc"}])),
+                ("fld_title", json!("明细内容")),
+            ]);
+            let mut request = input(&cells, &widgets);
+            request.form_snapshot = if remote_form.is_some() {
+                String::new()
+            } else {
+                snapshot.to_string()
+            };
+            let result =
+                dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await;
+            assert!(
+                matches!(result, DispatchResult::Backfilled { .. }),
+                "{result:?}"
+            );
+            let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
+            let body = bodies[usize::from(remote_form.is_some())]
+                .as_ref()
+                .unwrap_or_else(|| panic!("创建请求缺少 body"));
+            let form: Value = serde_json::from_str(
+                body["form"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("form 必须为字符串")),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                form,
+                json!([{"id":"detail","type":"fieldList","value":[[{"id":"w1","type":"input","value":"明细内容"}]]}])
+            );
+            assert_eq!(body["open_id"], json!("ou_abc"));
+            assert!(body["uuid"].as_str().is_some_and(|uuid| !uuid.is_empty()));
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_snapshot_is_terminal_without_creating_an_instance() {
+        let transport = ScriptedTransport::new(vec![]);
+        let backfill = RecordingBackfill::default();
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[
+            ("fld_applicant", json!([{"id":"ou_abc"}])),
+            ("fld_title", json!("测试")),
+        ]);
+        let mut request = input(&cells, &widgets);
+        request.form_snapshot = "broken".to_string();
+        let result = dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await;
+        assert!(
+            matches!(result, DispatchResult::Terminal { .. }),
+            "{result:?}"
+        );
+        assert!(transport.requests().is_empty());
+        assert_eq!(backfill.writes().len(), 1);
     }
 
     #[tokio::test]
@@ -1209,9 +2288,9 @@ mod tests {
 
     // ---- 分批回写与毒记录隔离（Task 8） ----
 
-    fn rows(count: usize) -> Vec<(String, String)> {
+    fn rows(count: usize) -> Vec<(String, Value)> {
         (0..count)
-            .map(|index| (format!("rec{index:04}"), format!("SN{index:04}")))
+            .map(|index| (format!("rec{index:04}"), json!(format!("SN{index:04}"))))
             .collect()
     }
 

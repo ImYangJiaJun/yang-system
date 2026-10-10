@@ -3,8 +3,7 @@
  *
  * 页面接线四件事：
  * 1. **列表**：配置名 / 坐标 / 审批 Code / 时区 / 启用 / 快照时间 / 更新时间；
- *    行操作（启停 / 删除 / 映射明细）由 `ApprovalConfigRowActions` 渲染，门控
- *    `feishu.approval.write`——无写权限时整组不出现（只读行）；
+ *    映射明细供只读身份查看，编辑 / 启停 / 删除需 `feishu.approval.write`；
  * 2. **启停**：`update_config` 的 `enabled` 翻转，可逆操作不弹确认；
  * 3. **删除**：ConfirmDialog 形态二次确认，成功 toast（连同被清掉的 pending 任务数）；
  * 4. **新建**：`ApprovalConfigDialog` 四步向导（坐标 → Code+控件预览 → 列+时区 → 提交）。
@@ -69,7 +68,7 @@ function MapDetailRow({ item }: { item: ApprovalConfigItem }) {
       <TableCell colSpan={8} className="bg-muted/30 py-2">
         {item.maps.length === 0 ? (
           <p className="px-4 text-xs text-muted-foreground">
-            这个配置还没有字段映射——它由首次派发自动装配，或回到向导重建。
+            这个配置还没有字段映射，可通过编辑映射补齐。
           </p>
         ) : (
           <div className="px-4">
@@ -89,15 +88,18 @@ function MapDetailRow({ item }: { item: ApprovalConfigItem }) {
               <tbody>
                 {item.maps.map((map) => (
                   <tr key={map.widgetId} className="border-t border-border/60">
-                    <td className="py-1 pr-4 font-mono">{map.widgetId}</td>
+                    <td className="py-1 pr-4">
+                      {map.widgetName ?? "控件名称未缓存"}
+                      <span className="block font-mono text-muted-foreground">
+                        {map.widgetId}
+                      </span>
+                    </td>
                     <td className="py-1 pr-4">{map.widgetType}</td>
                     <td className="py-1 pr-4">
-                      <span className="font-mono">{map.bitableField}</span>
-                      {map.bitableFieldName ? (
-                        <span className="ml-1 text-muted-foreground">
-                          {map.bitableFieldName}
-                        </span>
-                      ) : null}
+                      <span>{map.bitableFieldName ?? "列名未缓存"}</span>
+                      <span className="block font-mono text-muted-foreground">
+                        {map.bitableField}
+                      </span>
                     </td>
                     <td className="py-1 pr-4">
                       {map.required ? "必填" : "可选"}
@@ -132,6 +134,9 @@ export default function ApprovalConfigsPage() {
   );
   const [deletePending, setDeletePending] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<
+    ApprovalConfigItem | undefined
+  >();
 
   const listQuery = useApprovalConfigList({
     page,
@@ -203,7 +208,7 @@ export default function ApprovalConfigsPage() {
     setWizardOpen(false);
     void (async () => {
       await refreshList();
-      toast.success("配置创建成功");
+      toast.success(editTarget ? "配置更新成功" : "配置创建成功");
     })();
   }
 
@@ -254,7 +259,10 @@ export default function ApprovalConfigsPage() {
           <Button
             size="sm"
             className="ml-auto"
-            onClick={() => setWizardOpen(true)}
+            onClick={() => {
+              setEditTarget(undefined);
+              setWizardOpen(true);
+            }}
           >
             <Plus aria-hidden="true" />
             新建配置
@@ -300,6 +308,10 @@ export default function ApprovalConfigsPage() {
                     )
                   }
                   onToggleEnabled={toggleEnabled}
+                  onEdit={(target) => {
+                    setEditTarget(target);
+                    setWizardOpen(true);
+                  }}
                   onRequestDelete={(target) => {
                     setConfirmTarget({
                       configId: target.id,
@@ -324,12 +336,15 @@ export default function ApprovalConfigsPage() {
         </div>
       )}
 
-      <ApprovalConfigDialog
-        open={wizardOpen}
-        client={wizardClient}
-        onCancel={() => setWizardOpen(false)}
-        onSubmitted={submitWizard}
-      />
+      {wizardOpen ? (
+        <ApprovalConfigDialog
+          open={wizardOpen}
+          client={wizardClient}
+          initialConfig={editTarget}
+          onCancel={() => setWizardOpen(false)}
+          onSubmitted={submitWizard}
+        />
+      ) : null}
 
       <Dialog
         open={confirmTarget !== null}
@@ -383,6 +398,7 @@ function FragmentRow({
   onToggleExpanded,
   onToggleEnabled,
   onRequestDelete,
+  onEdit,
 }: {
   item: ApprovalConfigItem;
   expanded: boolean;
@@ -391,6 +407,7 @@ function FragmentRow({
   onToggleExpanded: () => void;
   onToggleEnabled: (item: ApprovalConfigItem) => void;
   onRequestDelete: (item: ApprovalConfigItem) => void;
+  onEdit: (item: ApprovalConfigItem) => void;
 }) {
   return (
     <>
@@ -423,6 +440,7 @@ function FragmentRow({
             onToggleExpanded={onToggleExpanded}
             onToggleEnabled={onToggleEnabled}
             onRequestDelete={onRequestDelete}
+            onEdit={onEdit}
           />
         </TableCell>
       </TableRow>

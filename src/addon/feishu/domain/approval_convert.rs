@@ -13,18 +13,19 @@
 //!
 //! # 不自动准备的值
 //!
-//! 三类值需要人工提供凭据，本模块**明确报错**而不静默传空（静默传空会让飞书侧
+//! 以下值需要人工提供凭据，本模块**明确报错**而不静默传空（静默传空会让飞书侧
 //! 收到一个看似合法的空控件，错误信息指向飞书而不是指向配置）：
 //!
 //! - `address` 的地理库 `id`；
-//! - `connect` 的关联审批 `instance_code`；
-//! - `attachmentV2` / `image` / `imageV2` 的 file code。
+//! - `image` / `imageV2` 的 file code；附件由派发链路下载上传后提供 code。
 
 #![allow(dead_code)] // 转换器先落地并自带测试；消费者（派发编排）在后续任务接入。
 
 use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
+
+use super::approval_match::FormWidget;
 
 /// 一个审批控件在库里的映射快照。
 #[derive(Debug, Clone)]
@@ -75,6 +76,8 @@ impl Converter {
 /// 处置是把原因写回多维表格——那张表的读者是业务人员，不是本服务的运维。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConvertError {
+    /// 定义快照与映射不一致，不能安全生成请求。
+    InvalidDefinition(String),
     /// 库里存了未知的转换器标识。
     UnknownConverter(String),
     /// 必填控件在多维表格里取不到值。
@@ -103,6 +106,7 @@ pub(crate) enum ConvertError {
 impl std::fmt::Display for ConvertError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidDefinition(reason) => write!(formatter, "审批定义或映射不可用：{reason}"),
             Self::UnknownConverter(value) => {
                 write!(formatter, "未知的值转换器「{value}」")
             }
@@ -140,8 +144,12 @@ impl std::error::Error for ConvertError {}
 /// 组装 `form` 所需的全部输入。
 pub(crate) struct FormInput<'a> {
     pub(crate) widgets: &'a [WidgetMap],
+    /// 审批定义的原始表单快照，用于恢复明细的父子结构。
+    pub(crate) form_snapshot: &'a str,
     /// 多维表格记录的单元格值，键是字段 id。
     pub(crate) cells: &'a Map<String, Value>,
+    /// 只接受审批上传接口返回的 code，不把源 file_token 当作审批值。
+    pub(crate) attachment_codes: &'a BTreeMap<String, Vec<String>>,
     /// 多维表格的时区（IANA 名），供 `Date` 转换器用。
     ///
     /// 多维表格的日期是**不带时区**的毫秒时间戳，而审批 `date` 控件要带偏移量的
@@ -199,24 +207,96 @@ impl FixedOffset {
 ///
 /// 返回的是**压缩后的 JSON 数组字符串**（`instance/create.md:30`）。
 pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> {
-    let mut widgets = Vec::with_capacity(input.widgets.len());
-    for widget in input.widgets {
-        match assemble_widget(widget, input)? {
-            // `None` 表示该控件在本记录上没有值。**必填的已经在 assemble 里报错**，
-            // 所以到这里还能是 `None` 的只有可选控件——整个控件 JSON 都不传。
-            //
-            // 这是官方要求（`approval-related-faqs.md:86-89`）：不传必填控件时
-            // 「该控件的完整 JSON 参数均不能传入」；一旦传入控件 JSON，就必须设
-            // `value`，否则接口报错。
-            None => {}
-            Some(value) => widgets.push(value),
+    let definition: Vec<FormWidget> = serde_json::from_str(input.form_snapshot)
+        .map_err(|_| ConvertError::InvalidDefinition("表单快照不是有效的控件数组".to_string()))?;
+    if definition.is_empty() {
+        return Err(ConvertError::InvalidDefinition("表单快照为空".to_string()));
+    }
+    let mut nodes = BTreeMap::new();
+    for node in definition.iter().flat_map(FormWidget::walk) {
+        if node.id.is_empty()
+            || node.r#type.is_empty()
+            || (node.r#type != "fieldList" && !node.children.is_empty())
+            || nodes.insert(&node.id, node).is_some()
+        {
+            return Err(ConvertError::InvalidDefinition(format!(
+                "控件「{}」结构非法、缺少 id/type 或 id 重复",
+                node.id
+            )));
         }
     }
+    let mut mappings = BTreeMap::new();
+    for mapping in input.widgets {
+        let node = nodes.get(&mapping.widget_id).ok_or_else(|| {
+            ConvertError::InvalidDefinition(format!(
+                "映射控件「{}」已不在定义中",
+                mapping.widget_id
+            ))
+        })?;
+        if node.r#type != mapping.widget_type
+            || node.r#type == "fieldList"
+            || mappings
+                .insert(mapping.widget_id.as_str(), mapping)
+                .is_some()
+        {
+            return Err(ConvertError::InvalidDefinition(format!(
+                "控件「{}」类型不匹配或映射重复",
+                mapping.widget_id
+            )));
+        }
+    }
+    let widgets = assemble_definition(&definition, &mappings, input)?;
 
     serde_json::to_string(&Value::Array(widgets)).map_err(|error| ConvertError::BadValue {
         widget_id: String::new(),
         reason: format!("form 序列化失败：{error}"),
     })
+}
+
+/// 一条记录在每个明细控件中形成一行，子控件保持定义中的原始 id。
+fn assemble_definition(
+    definition: &[FormWidget],
+    mappings: &BTreeMap<&str, &WidgetMap>,
+    input: &FormInput<'_>,
+) -> Result<Vec<Value>, ConvertError> {
+    let mut values = Vec::new();
+    for node in definition {
+        if node.r#type == "fieldList" {
+            let has_value = node.walk().iter().any(|child| {
+                mappings
+                    .get(child.id.as_str())
+                    .and_then(|mapping| input.cells.get(&mapping.bitable_field))
+                    .is_some_and(|cell| !is_empty(cell))
+            });
+            if !has_value {
+                if node.required {
+                    return Err(ConvertError::MissingRequired {
+                        widget_id: node.id.clone(),
+                    });
+                }
+                continue;
+            }
+            let row = assemble_definition(&node.children, mappings, input)?;
+            values.push(json!({"id": node.id, "type": "fieldList", "value": [row]}));
+        } else if let Some(mapping) = mappings.get(node.id.as_str()) {
+            let mut mapping = (*mapping).clone();
+            mapping.required |= node.required;
+            if let Some(value) = assemble_widget(&mapping, input)? {
+                if let Err(reason) = node.connect_definition_codes() {
+                    return Err(ConvertError::InvalidDefinition(format!(
+                        "关联审批控件「{}」配置无效：{reason}，请刷新配置",
+                        node.id,
+                    )));
+                }
+                values.push(value);
+            }
+        } else if node.required {
+            return Err(ConvertError::MissingRequired {
+                widget_id: node.id.clone(),
+            });
+        }
+    }
+    Ok(values)
 }
 
 /// 组装单个控件；无值且非必填时返回 `Ok(None)`。
@@ -247,10 +327,22 @@ fn assemble_widget(
 
     check_converter_matches(widget)?;
 
-    let value = match widget.converter {
-        Converter::Direct => assemble_direct(widget, cell)?,
-        Converter::Date => assemble_date(widget, cell, input.timezone_offset)?,
-        Converter::Option => assemble_option(widget, cell)?,
+    let value = if widget.widget_type == "attachmentV2" {
+        let codes = input
+            .attachment_codes
+            .get(&widget.widget_id)
+            .filter(|codes| !codes.is_empty() && codes.iter().all(|code| !code.trim().is_empty()))
+            .ok_or_else(|| ConvertError::BadValue {
+                widget_id: widget.widget_id.clone(),
+                reason: "附件尚未搬运到审批系统".to_string(),
+            })?;
+        json!(codes)
+    } else {
+        match widget.converter {
+            Converter::Direct => assemble_direct(widget, cell)?,
+            Converter::Date => assemble_date(widget, cell, input.timezone_offset)?,
+            Converter::Option => assemble_option(widget, cell)?,
+        }
     };
 
     let mut object = Map::new();
@@ -259,7 +351,12 @@ fn assemble_widget(
         "type".to_string(),
         Value::String(widget.widget_type.clone()),
     );
-    object.insert("value".to_string(), value);
+    if widget.widget_type == "contact" {
+        object.insert("open_ids".to_string(), value);
+        object.insert("value".to_string(), json!([]));
+    } else {
+        object.insert("value".to_string(), value);
+    }
     // 金额控件的币种是 `value` 的**兄弟**字段，不在 value 里。
     if let Some(currency) = &widget.currency {
         object.insert("currency".to_string(), Value::String(currency.clone()));
@@ -299,8 +396,14 @@ fn assemble_direct(widget: &WidgetMap, cell: &Value) -> Result<Value, ConvertErr
         "number" | "amount" => number_from_cell(widget, cell),
         // 电话：多维表格存成文本，拆出区号与号码。
         "telephone" => assemble_telephone(widget, cell),
+        "connect" => connection_codes(cell)
+            .map(|codes| json!(codes))
+            .map_err(|reason| ConvertError::BadValue {
+                widget_id: widget.widget_id.clone(),
+                reason,
+            }),
         // 联系人与部门：多维表格的人员字段给 open_id 数组。
-        "contact" => Ok(json!({ "open_ids": open_ids_from_cell(widget, cell)? })),
+        "contact" => Ok(json!(open_ids_from_cell(widget, cell)?)),
         "department" => Ok(Value::Array(
             open_ids_from_cell(widget, cell)?
                 .into_iter()
@@ -310,6 +413,114 @@ fn assemble_direct(widget: &WidgetMap, cell: &Value) -> Result<Value, ConvertErr
         // 其余文本类（input / textarea）直取字符串。
         _ => Ok(Value::String(text_from_cell(cell))),
     }
+}
+
+/// 只解析数据，不访问单元格里的 URL；链接须来自审批应用，编号不能代替实例 Code。
+fn connection_codes(cell: &Value) -> Result<Vec<String>, String> {
+    fn query_pairs(query: &str) -> Result<Vec<(String, String)>, String> {
+        fn decode(raw: &str) -> Result<String, String> {
+            let mut decoded = Vec::new();
+            let mut bytes = raw.bytes();
+            while let Some(byte) = bytes.next() {
+                decoded.push(match byte {
+                    b'%' => {
+                        let high = bytes.next().and_then(|b| (b as char).to_digit(16));
+                        let low = bytes.next().and_then(|b| (b as char).to_digit(16));
+                        match (high, low) {
+                            (Some(high), Some(low)) => (high * 16 + low) as u8,
+                            _ => return Err("审批链接的百分号编码非法".into()),
+                        }
+                    }
+                    b'+' => b' ',
+                    other => other,
+                });
+            }
+            String::from_utf8(decoded).map_err(|_| "审批链接编码非法".into())
+        }
+        query
+            .split('&')
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                Ok((decode(key)?, decode(value)?))
+            })
+            .collect()
+    }
+    fn code(raw: &str) -> Result<String, String> {
+        let raw = raw.trim();
+        if raw.len() == 36 && uuid::Uuid::parse_str(raw).is_ok() {
+            return Ok(raw.to_ascii_uppercase());
+        }
+        let query = raw
+            .strip_prefix("https://applink.feishu.cn/client/mini_program/open?")
+            .ok_or_else(|| "请填写飞书审批 AppLink 或实例 Code，不能仅填申请编号".to_string())?;
+        let params = query_pairs(query.split('#').next().unwrap_or_default())?;
+        let apps: Vec<_> = params.iter().filter(|(key, _)| key == "appId").collect();
+        if apps.len() != 1 || apps[0].1 != "cli_9cb844403dbb9108" {
+            return Err("链接不是飞书审批应用".to_string());
+        }
+        let mut codes = Vec::new();
+        for (_, path) in params
+            .iter()
+            .filter(|(key, _)| key == "path" || key == "path_pc")
+        {
+            let (page, query) = path
+                .split_once('?')
+                .ok_or_else(|| "审批链接路径缺少实例 Code".to_string())?;
+            if !matches!(page, "pages/detail/index" | "pc/pages/in-process/index") {
+                return Err("审批链接路径非法".to_string());
+            }
+            let ids: Vec<_> = query_pairs(query)?
+                .into_iter()
+                .filter(|(key, _)| key == "instanceId")
+                .collect();
+            if ids.len() != 1 || ids[0].1.len() != 36 || uuid::Uuid::parse_str(&ids[0].1).is_err() {
+                return Err("审批链接缺少有效的实例 Code".to_string());
+            }
+            codes.push(ids[0].1.to_ascii_uppercase());
+        }
+        if codes.is_empty() || codes.iter().any(|id| id != &codes[0]) {
+            return Err("审批链接的实例 Code 缺失或不一致".to_string());
+        }
+        Ok(codes.remove(0))
+    }
+    fn collect(cell: &Value, codes: &mut Vec<String>) -> Result<(), String> {
+        match cell {
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, codes)?;
+                }
+            }
+            Value::Object(map) => {
+                let raw = map
+                    .get("link")
+                    .or_else(|| map.get("text"))
+                    .ok_or_else(|| "关联审批单元格需要 link 或 text".to_string())?;
+                collect(raw, codes)?;
+            }
+            Value::String(text) => {
+                // 完整 URL 中的逗号不当分隔符；文本 Code 支持逗号或换行分隔。
+                let values: Vec<_> = if text.trim().starts_with("https://") {
+                    vec![text.as_str()]
+                } else {
+                    text.split([',', '，', ';', '；', '\n']).collect()
+                };
+                for raw in values.into_iter().filter(|raw| !raw.trim().is_empty()) {
+                    let id = code(raw)?;
+                    if !codes.contains(&id) {
+                        codes.push(id);
+                    }
+                }
+            }
+            _ => return Err("关联审批需要超链接或实例 Code 文本".to_string()),
+        }
+        Ok(())
+    }
+    let mut codes = Vec::new();
+    collect(cell, &mut codes)?;
+    if codes.is_empty() {
+        return Err("关联审批没有实例 Code".to_string());
+    }
+    Ok(codes)
 }
 
 /// 日期：毫秒时间戳 → 带偏移量的 RFC3339。
@@ -463,7 +674,7 @@ fn open_ids_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Vec<String>, C
 }
 
 /// 从单元格里取出选项文案列表。
-fn labels_from_cell(cell: &Value) -> Vec<String> {
+pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
     match cell {
         Value::Array(items) => items
             .iter()
@@ -602,7 +813,7 @@ pub(crate) fn is_unsupported_widget_type(widget_type: &str) -> bool {
 pub(crate) fn needs_manual_value(widget_type: &str) -> bool {
     matches!(
         widget_type,
-        "address" | "connect" | "attachmentV2" | "attachment" | "image" | "imageV2" | "document"
+        "address" | "attachment" | "image" | "imageV2" | "document"
     )
 }
 
@@ -645,9 +856,12 @@ mod tests {
     }
 
     fn render(widgets: &[WidgetMap], cell_map: &Map<String, Value>) -> Result<Vec<Value>, String> {
+        let snapshot = flat_snapshot(widgets);
         let input = FormInput {
             widgets,
+            form_snapshot: &snapshot,
             cells: cell_map,
+            attachment_codes: &BTreeMap::new(),
             timezone_offset: shanghai(),
         };
         let form = build_form(&input).map_err(|error| error.to_string())?;
@@ -656,6 +870,249 @@ mod tests {
             .as_array()
             .cloned()
             .ok_or_else(|| "form 必须是数组".to_string())
+    }
+
+    fn flat_snapshot(widgets: &[WidgetMap]) -> String {
+        serde_json::to_string(
+            &widgets
+                .iter()
+                .map(|w| {
+                    json!({
+                        "id": w.widget_id, "type": w.widget_type, "required": w.required
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn attachment_raw_tokens_and_missing_codes_cannot_be_submitted() {
+        let widgets = [widget("w1", "attachmentV2")];
+        let snapshot = flat_snapshot(&widgets);
+        let cells = cells(&[(
+            "fld_src",
+            json!([{"file_token":"source", "name":"a.pdf", "size":1}]),
+        )]);
+        for codes in [
+            BTreeMap::new(),
+            BTreeMap::from([("w1".to_string(), vec![])]),
+            BTreeMap::from([("w1".to_string(), vec![" ".to_string()])]),
+        ] {
+            assert!(matches!(
+                build_form(&FormInput {
+                    widgets: &widgets,
+                    form_snapshot: &snapshot,
+                    cells: &cells,
+                    attachment_codes: &codes,
+                    timezone_offset: shanghai()
+                }),
+                Err(ConvertError::BadValue { .. })
+            ));
+        }
+    }
+
+    fn render_definition(
+        snapshot: &str,
+        widgets: &[WidgetMap],
+        cells: &Map<String, Value>,
+    ) -> Result<Value, ConvertError> {
+        let form = build_form(&FormInput {
+            widgets,
+            form_snapshot: snapshot,
+            cells,
+            attachment_codes: &BTreeMap::new(),
+            timezone_offset: shanghai(),
+        })?;
+        Ok(serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}")))
+    }
+
+    #[test]
+    fn connect_cells_become_instance_code_arrays_in_plain_and_detail_forms() {
+        let code = "19EAC829-F1CB-527F-BE2A-1330422E60C0";
+        let other = "29EAC829-F1CB-527F-BE2A-1330422E60C0";
+        let link = super::super::approval::instance_applink(code).unwrap_or_else(|e| panic!("{e}"));
+        for cell in [
+            json!(code.to_lowercase()),
+            json!({"link":link,"text":"申请编号"}),
+            json!([{"link":link,"text":"申请编号"}]),
+            json!([{"text":code}]),
+        ] {
+            assert_eq!(
+                connection_codes(&cell).unwrap_or_else(|e| panic!("{e}")),
+                [code]
+            );
+            for detail in [false, true] {
+                let node = json!({"id":"w1","type":"connect","option":{"notLimitScope":true}});
+                let snapshot = if detail {
+                    json!([{"id":"detail","type":"fieldList","children":[node]}])
+                } else {
+                    json!([node])
+                }
+                .to_string();
+                let form = render_definition(
+                    &snapshot,
+                    &[widget("w1", "connect")],
+                    &cells(&[("fld_src", cell.clone())]),
+                )
+                .unwrap_or_else(|e| panic!("{e}"));
+                let connection = if detail {
+                    &form[0]["value"][0][0]
+                } else {
+                    &form[0]
+                };
+                assert_eq!(
+                    connection,
+                    &json!({"id":"w1","type":"connect","value":[code]})
+                );
+            }
+        }
+        assert_eq!(
+            connection_codes(&json!(format!("{code}, {other}；{code}\n，;")))
+                .unwrap_or_else(|e| panic!("{e}")),
+            [code, other]
+        );
+    }
+
+    #[test]
+    fn connect_rejects_serial_numbers_invalid_links_and_cell_shapes() {
+        let code = "19EAC829-F1CB-527F-BE2A-1330422E60C0";
+        let link = super::super::approval::instance_applink(code).unwrap_or_else(|e| panic!("{e}"));
+        for invalid in [
+            json!("202610110001"), json!(42), json!({"name":code}), json!([]), json!(",；\n"),
+            json!(link.replace("applink.feishu.cn", "evil.test")),
+            json!(link.replace("https://", "http://")),
+            json!(link.replace("cli_9cb844403dbb9108", "cli_other")),
+            json!(format!("{link}&appId=cli_9cb844403dbb9108")),
+            json!(link.replace("pages%2Fdetail", "pages%2Fother")),
+            json!(link.replace("instanceId", "wrongId")),
+            json!(link.replace("%3F", "%ZZ")),
+            json!(link.replace("%3D", "%FF")),
+            json!(link.replace(code, "202610110001")),
+            json!(format!("{link}&path=pages%2Fdetail%2Findex%3FinstanceId%3D29EAC829-F1CB-527F-BE2A-1330422E60C0")),
+            json!("https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108"),
+        ] {
+            assert!(connection_codes(&invalid).is_err(), "非法关联审批不能提交：{invalid}");
+        }
+        assert!(matches!(
+            render_definition(
+                r#"[{"id":"w1","type":"connect"}]"#,
+                &[widget("w1", "connect")],
+                &cells(&[("fld_src", json!(code))])
+            ),
+            Err(ConvertError::InvalidDefinition(_))
+        ));
+    }
+
+    #[test]
+    fn detail_children_are_nested_in_one_row_in_definition_order() {
+        let snapshot = r#"[{"id":"top","type":"input"},{"id":"detail","type":"fieldList","required":true,"children":[{"id":"choice","type":"checkboxV2","required":true},{"id":"description","type":"textarea","required":true}]},{"id":"other","type":"fieldList","children":[{"id":"amount","type":"amount"}]}]"#;
+        let mut choice = widget("choice", "checkboxV2");
+        choice.bitable_field = "fld_choice".to_string();
+        choice.option_map = BTreeMap::from([
+            ("申请单".to_string(), "opt1".to_string()),
+            ("协议".to_string(), "opt2".to_string()),
+        ]);
+        let mut amount = widget("amount", "amount");
+        amount.bitable_field = "fld_amount".to_string();
+        amount.currency = Some("CNY".to_string());
+        let widgets = [
+            widget("description", "textarea"),
+            amount,
+            choice,
+            widget("top", "input"),
+        ];
+        let actual = render_definition(
+            snapshot,
+            &widgets,
+            &cells(&[
+                ("fld_src", json!("测试")),
+                ("fld_choice", json!(["申请单", "协议"])),
+                ("fld_amount", json!(12.5)),
+            ]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([
+                {"id":"top","type":"input","value":"测试"},
+                {"id":"detail","type":"fieldList","value":[[
+                    {"id":"choice","type":"checkboxV2","value":["opt1","opt2"]},
+                    {"id":"description","type":"textarea","value":"测试"}
+                ]]},
+                {"id":"other","type":"fieldList","value":[[{"id":"amount","type":"amount","value":12.5,"currency":"CNY"}]]}
+            ])
+        );
+    }
+
+    #[test]
+    fn empty_optional_detail_is_omitted_and_required_detail_waits() {
+        let widgets = [widget("child", "input")];
+        let optional =
+            r#"[{"id":"detail","type":"fieldList","children":[{"id":"child","type":"input"}]}]"#;
+        assert_eq!(
+            render_definition(optional, &widgets, &cells(&[])).unwrap_or_else(|e| panic!("{e}")),
+            json!([])
+        );
+        let required = r#"[{"id":"detail","type":"fieldList","required":true,"children":[{"id":"child","type":"input"}]}]"#;
+        assert!(
+            matches!(render_definition(required, &widgets, &cells(&[])), Err(ConvertError::MissingRequired { widget_id }) if widget_id == "detail")
+        );
+    }
+
+    #[test]
+    fn stale_mapping_and_broken_definition_do_not_emit_a_flat_form() {
+        for snapshot in ["[]", r#"[{"type":"input"}]"#, r#"[{"id":"child"}]"#] {
+            assert!(render_definition(snapshot, &[], &cells(&[])).is_err());
+        }
+        let widgets = [widget("child", "input")];
+        for snapshot in [
+            "broken",
+            "[]",
+            r#"[{"id":"different","type":"input"}]"#,
+            r#"[{"id":"child","type":"number"}]"#,
+            r#"[{"id":"child"}]"#,
+            r#"[{"type":"input"}]"#,
+            r#"[{"id":"child","type":"input"},{"id":"child","type":"input"}]"#,
+            r#"[{"id":"parent","type":"input","children":[{"id":"child","type":"input"}]}]"#,
+        ] {
+            assert!(
+                render_definition(snapshot, &widgets, &cells(&[("fld_src", json!("测试"))]))
+                    .is_err(),
+                "快照 {snapshot} 不应被放行"
+            );
+        }
+        let snapshot = r#"[{"id":"child","type":"input"}]"#;
+        assert!(render_definition(
+            snapshot,
+            &[widgets[0].clone(), widgets[0].clone()],
+            &cells(&[])
+        )
+        .is_err());
+        assert!(render_definition(
+            r#"[{"id":"child","type":"fieldList"}]"#,
+            &[widget("child", "fieldList")],
+            &cells(&[])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn required_children_are_checked_only_when_a_detail_row_exists() {
+        let snapshot = r#"[{"id":"detail","type":"fieldList","children":[{"id":"child","type":"input","required":true},{"id":"other","type":"input"}]}]"#;
+        let mut other = widget("other", "input");
+        other.bitable_field = "fld_other".to_string();
+        let widgets = [widget("child", "input"), other];
+        assert_eq!(
+            render_definition(snapshot, &widgets, &cells(&[])).unwrap_or_else(|e| panic!("{e}")),
+            json!([])
+        );
+        assert!(
+            matches!(render_definition(snapshot, &widgets, &cells(&[("fld_other", json!("已开始填写"))])), Err(ConvertError::MissingRequired { widget_id }) if widget_id == "child")
+        );
+        assert!(
+            matches!(render_definition(snapshot, &widgets[1..], &cells(&[("fld_other", json!("已开始填写"))])), Err(ConvertError::MissingRequired { widget_id }) if widget_id == "child")
+        );
     }
 
     /// 取出组装失败的原因文案。
@@ -675,7 +1132,9 @@ mod tests {
         let widgets = [widget("w1", "input")];
         let input = FormInput {
             widgets: &widgets,
+            form_snapshot: r#"[{"id":"w1","type":"input"}]"#,
             cells: &cells(&[("fld_src", json!("hello"))]),
+            attachment_codes: &BTreeMap::new(),
             timezone_offset: shanghai(),
         };
         let form = build_form(&input).unwrap_or_else(|e| panic!("{e}"));
@@ -751,7 +1210,9 @@ mod tests {
         // 同一个瞬时 1790524800000 ms 在 -05:00 下是前一天 11:00。
         let input = FormInput {
             widgets: &[widget("w1", "date")],
+            form_snapshot: r#"[{"id":"w1","type":"date"}]"#,
             cells: &cells(&[("fld_src", json!(1_790_524_800_000_i64))]),
+            attachment_codes: &BTreeMap::new(),
             timezone_offset: FixedOffset::from_seconds(-5 * 3600).unwrap_or_else(|e| panic!("{e}")),
         };
         let form = build_form(&input).unwrap_or_else(|e| panic!("{e}"));
@@ -873,7 +1334,10 @@ mod tests {
             &cells(&[("fld_src", json!([{"id": "ou_abc"}]))]),
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(rendered[0]["value"], json!({ "open_ids": ["ou_abc"] }));
+        assert_eq!(
+            rendered[0],
+            json!({"id":"w1","type":"contact","value":[],"open_ids":["ou_abc"]})
+        );
     }
 
     #[test]

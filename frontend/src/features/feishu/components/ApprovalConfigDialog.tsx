@@ -5,7 +5,7 @@
  *    `table_id`。`list_bitable_*` 声明 `feishu.datasource.write`，所以本向导实际
  *    需要**同时**持有 `feishu.approval.write` 与 `feishu.datasource.write`
  *    （或系统管理员）——工具提示在第一步说明。
- * ② 审批 Code + 控件预览（`list_widgets`，展示 id / 名称 / 类型 / 必填）。
+ * ② 审批 Code + 逐控件选列：首次按名称预选，重复预览保留手动映射。
  * ③ 申请人列 / 回填列（从 `list_bitable_fields` 选，列表为空时手填 field_id
  *    或列名——后端两者都接受）+ Base 时区（默认 Asia/Shanghai）。
  * ④ 提交（`create_config`）：失败时服务端校验原因一次报全，展示在最后一步。
@@ -44,7 +44,7 @@ import {
 } from "@/shared/ui/table";
 
 import type { ApprovalWizardClient, CreateApprovalConfigInput } from "../api";
-import type { BitableField, BitableTable } from "../types";
+import type { ApprovalConfigItem, BitableField, BitableTable } from "../types";
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -62,6 +62,7 @@ export type ApprovalConfigDialogProps = {
   onCancel: () => void;
   onSubmitted?: () => void;
   open?: boolean;
+  initialConfig?: ApprovalConfigItem;
 };
 
 export function ApprovalConfigDialog({
@@ -69,33 +70,48 @@ export function ApprovalConfigDialog({
   onCancel,
   onSubmitted,
   open = true,
+  initialConfig,
 }: ApprovalConfigDialogProps) {
-  const [step, setStep] = useState<Step>(1);
+  const [step, setStep] = useState<Step>(initialConfig ? 2 : 1);
 
   // ① 坐标
-  const [baseToken, setBaseToken] = useState("");
+  const [baseToken, setBaseToken] = useState(initialConfig?.baseToken ?? "");
   const [tables, setTables] = useState<BitableTable[]>([]);
   const [tablesPending, setTablesPending] = useState(false);
-  const [tableId, setTableId] = useState("");
+  const [tablesMessage, setTablesMessage] = useState<string | null>(null);
+  const [tableId, setTableId] = useState(initialConfig?.tableId ?? "");
   const [tableManual, setTableManual] = useState(false);
 
-  // ① 字段（第三步的候选列；表选定后一次拉回）
+  // ② 预览同时拉取控件和列，供映射和第三步使用。
   const [fields, setFields] = useState<BitableField[]>([]);
-  const [fieldsPending, setFieldsPending] = useState(false);
 
   // ② 审批 Code + 控件预览
-  const [approvalCode, setApprovalCode] = useState("");
+  const [approvalCode, setApprovalCode] = useState(
+    initialConfig?.approvalCode ?? "",
+  );
+  const [mappingKey, setMappingKey] = useState<string | null>(null);
+  const [maps, setMaps] = useState<Record<string, string>>(
+    Object.fromEntries(
+      initialConfig?.maps.map((map) => [map.widgetId, map.bitableField]) ?? [],
+    ),
+  );
   const [widgets, setWidgets] = useState<Awaited<
     ReturnType<ApprovalWizardClient["listWidgets"]>
   > | null>(null);
   const [widgetsPending, setWidgetsPending] = useState(false);
 
   // ③ 列 + 时区
-  const [applicantField, setApplicantField] = useState("");
+  const [applicantField, setApplicantField] = useState(
+    initialConfig?.applicantField ?? "",
+  );
   const [applicantManual, setApplicantManual] = useState(false);
-  const [backfillField, setBackfillField] = useState("");
+  const [backfillField, setBackfillField] = useState(
+    initialConfig?.backfillField ?? "",
+  );
   const [backfillManual, setBackfillManual] = useState(false);
-  const [timezone, setTimezone] = useState(DEFAULT_TIMEZONE);
+  const [timezone, setTimezone] = useState(
+    initialConfig?.baseTimezone ?? DEFAULT_TIMEZONE,
+  );
 
   // ④ 提交
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -105,7 +121,26 @@ export function ApprovalConfigDialog({
   const [stepOneError, setStepOneError] = useState<string | null>(null);
 
   const step1Ready = baseToken.trim() !== "" && tableId.trim() !== "";
-  const step2Ready = approvalCode.trim() !== "";
+  const currentKey = JSON.stringify([
+    baseToken.trim(),
+    tableId.trim(),
+    approvalCode.trim(),
+  ]);
+  const mappingWidgets =
+    widgets?.filter((widget) => widget.type !== "fieldList") ?? [];
+  const step2Ready =
+    mappingKey === currentKey &&
+    widgets !== null &&
+    Object.values(maps).some(Boolean) &&
+    mappingWidgets.every(
+      (widget) => !widget.required || Boolean(maps[widget.id]),
+    ) &&
+    Object.entries(maps).every(
+      ([id, field]) =>
+        !field ||
+        (mappingWidgets.some((w) => w.id === id) &&
+          fields.some((f) => f.fieldId === field)),
+    );
   const step3Ready =
     applicantField.trim() !== "" &&
     backfillField.trim() !== "" &&
@@ -113,12 +148,19 @@ export function ApprovalConfigDialog({
 
   async function loadTables() {
     setTablesPending(true);
+    setTablesMessage(null);
+    setStepOneError(null);
     try {
       const loaded = await client.listTables(baseToken.trim());
       setTables(loaded);
       setTableId("");
       // 表列表为空时允许手填（坐标是自由文本，不该被拉取结果卡死）。
       setTableManual(loaded.length === 0);
+      setTablesMessage(
+        loaded.length === 0
+          ? "未查询到可用的数据表，可手填数据表 ID。"
+          : `已拉取 ${loaded.length} 张数据表，请在下方选择。`,
+      );
     } catch (cause) {
       // 拉取失败（典型场景=身份缺 feishu.datasource.write，目录里没有该端点）
       // 同样切手填并保留可见错误——只报错不切模式会让向导卡死在第一步。
@@ -130,25 +172,48 @@ export function ApprovalConfigDialog({
     }
   }
 
-  async function loadFields(table: string) {
-    setFieldsPending(true);
-    try {
-      const loaded = await client.listFields(baseToken.trim(), table);
-      setFields(loaded);
-    } catch {
-      // 字段拉取失败不阻塞向导：第三步允许手填 field_id/列名。
-      setFields([]);
-    } finally {
-      setFieldsPending(false);
-    }
-  }
-
   async function loadWidgets() {
     setWidgetsPending(true);
     setSubmitError(null);
     try {
-      setWidgets(await client.listWidgets(approvalCode.trim()));
+      const [loadedWidgets, loadedFields] = await Promise.all([
+        client.listWidgets(approvalCode.trim()),
+        client.listFields(baseToken.trim(), tableId.trim()),
+      ]);
+      if (loadedFields.length === 0)
+        throw new Error("多维表格没有可用列，请确认表和读取权限后重试。");
+      setFields(loadedFields);
+      setWidgets(loadedWidgets);
+      if (mappingKey !== currentKey) {
+        if (!initialConfig) {
+          const owned = new Set<string>();
+          setMaps(
+            Object.fromEntries(
+              loadedWidgets
+                .filter((widget) => widget.type !== "fieldList")
+                .map((widget) => {
+                  const qualified = widget.qualifiedName ?? widget.name;
+                  let candidates = loadedFields.filter(
+                    (field) => field.fieldName.trim() === qualified.trim(),
+                  );
+                  if (candidates.length === 0)
+                    candidates = loadedFields.filter(
+                      (field) => field.fieldName.trim() === widget.name.trim(),
+                    );
+                  const column =
+                    candidates.length === 1 && !owned.has(candidates[0].fieldId)
+                      ? candidates[0].fieldId
+                      : "";
+                  if (column) owned.add(column);
+                  return [widget.id, column];
+                }),
+            ),
+          );
+        }
+        setMappingKey(currentKey);
+      }
     } catch (cause) {
+      setWidgets(null);
       setSubmitError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setWidgetsPending(false);
@@ -165,9 +230,19 @@ export function ApprovalConfigDialog({
       applicantField,
       backfillField,
       baseTimezone: timezone,
+      maps: Object.entries(maps)
+        .filter(([, field]) => field !== "")
+        .map(([widgetId, bitableField]) => ({ widgetId, bitableField })),
     };
     try {
-      await client.createConfig(input);
+      if (initialConfig) {
+        await client.updateConfig(initialConfig.id, {
+          maps: input.maps,
+          baseTimezone: timezone,
+        });
+      } else {
+        await client.createConfig(input);
+      }
       onSubmitted?.();
     } catch (cause) {
       // 服务端一次报全校验原因（含唯一冲突「该多维表格已配置」），原样展示。
@@ -187,7 +262,9 @@ export function ApprovalConfigDialog({
     >
       <DialogContent className="sm:max-w-3xl" showCloseButton={!submitting}>
         <DialogHeader>
-          <DialogTitle>新建审批派发配置 · 第 {step} / 4 步</DialogTitle>
+          <DialogTitle>
+            {initialConfig ? "编辑" : "新建"}审批派发配置 · 第 {step} / 4 步
+          </DialogTitle>
           <DialogDescription>
             {step === 1
               ? PERMISSION_NOTE
@@ -204,6 +281,7 @@ export function ApprovalConfigDialog({
               <Input
                 id="approval-base-token"
                 value={baseToken}
+                disabled={Boolean(initialConfig) || tablesPending}
                 onChange={(event) => setBaseToken(event.target.value)}
                 placeholder="appbcbWCzen6…"
                 autoComplete="off"
@@ -216,6 +294,11 @@ export function ApprovalConfigDialog({
             >
               {tablesPending ? "拉取中…" : "拉取数据表"}
             </Button>
+            {tablesMessage !== null ? (
+              <p role="status" className="text-xs text-muted-foreground">
+                {tablesMessage}
+              </p>
+            ) : null}
             {tableManual ? (
               <div className="space-y-1.5">
                 <Label htmlFor="approval-table-id">数据表 ID（手填）</Label>
@@ -241,10 +324,8 @@ export function ApprovalConfigDialog({
                 <Label>数据表</Label>
                 <Select
                   value={tableId}
-                  onValueChange={(value) => {
-                    setTableId(value);
-                    void loadFields(value);
-                  }}
+                  disabled={tablesPending || tables.length === 0}
+                  onValueChange={setTableId}
                 >
                   <SelectTrigger aria-label="数据表" className="w-full">
                     <SelectValue
@@ -261,9 +342,6 @@ export function ApprovalConfigDialog({
                 </Select>
               </div>
             )}
-            {fieldsPending ? (
-              <p className="text-xs text-muted-foreground">正在拉取字段列表…</p>
-            ) : null}
           </div>
         ) : null}
 
@@ -274,6 +352,7 @@ export function ApprovalConfigDialog({
               <Input
                 id="approval-code"
                 value={approvalCode}
+                disabled={Boolean(initialConfig) || widgetsPending}
                 onChange={(event) => setApprovalCode(event.target.value)}
                 placeholder="approval code（审批后台「审批定义」里复制）"
                 autoComplete="off"
@@ -286,39 +365,145 @@ export function ApprovalConfigDialog({
             >
               {widgetsPending ? "拉取中…" : "预览控件"}
             </Button>
+            <p className="text-xs text-muted-foreground">
+              首次预览按列名和控件名预选；明细子控件优先匹配“明细名称_子控件名称”，没有对应列时再匹配子控件名称。可逐项修改，重新预览保留手动选择；明细父级仅展示分组，必填子控件必须选列。
+            </p>
+            {submitError !== null ? (
+              <p role="alert" className="text-sm text-destructive">
+                {submitError}
+              </p>
+            ) : null}
+            {widgets !== null
+              ? Object.entries(maps)
+                  .filter(
+                    ([id, field]) =>
+                      field && !mappingWidgets.some((w) => w.id === id),
+                  )
+                  .map(([id]) => (
+                    <p
+                      key={id}
+                      role="alert"
+                      className="text-sm text-destructive"
+                    >
+                      控件{" "}
+                      {initialConfig?.maps.find((m) => m.widgetId === id)
+                        ?.widgetName ?? id}{" "}
+                      已不在可映射控件中。
+                      <Button
+                        variant="link"
+                        onClick={() =>
+                          setMaps((previous) => ({ ...previous, [id]: "" }))
+                        }
+                      >
+                        清除旧映射
+                      </Button>
+                    </p>
+                  ))
+              : null}
             {widgets !== null ? (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>控件 ID</TableHead>
-                    <TableHead>名称</TableHead>
-                    <TableHead>类型</TableHead>
-                    <TableHead>必填</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {widgets.length === 0 ? (
+              <div className="max-h-[45vh] overflow-auto">
+                <Table>
+                  <TableHeader>
                     <TableRow>
-                      <TableCell colSpan={4} className="text-muted-foreground">
-                        这个审批定义没有可配控件。
-                      </TableCell>
+                      <TableHead>控件 ID</TableHead>
+                      <TableHead>名称</TableHead>
+                      <TableHead>类型</TableHead>
+                      <TableHead>必填</TableHead>
+                      <TableHead>多维表格列</TableHead>
                     </TableRow>
-                  ) : (
-                    widgets.map((widget) => (
-                      <TableRow key={widget.id}>
-                        <TableCell className="font-mono text-xs">
-                          {widget.id}
-                        </TableCell>
-                        <TableCell>{widget.name}</TableCell>
-                        <TableCell>{widget.type}</TableCell>
-                        <TableCell>
-                          {widget.required ? "必填" : "可选"}
+                  </TableHeader>
+                  <TableBody>
+                    {widgets.length === 0 ? (
+                      <TableRow>
+                        <TableCell
+                          colSpan={5}
+                          className="text-muted-foreground"
+                        >
+                          这个审批定义没有可配控件。
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+                    ) : (
+                      widgets.map((widget) =>
+                        widget.type === "fieldList" ? (
+                          <TableRow key={widget.id} className="bg-muted/50">
+                            <TableCell className="font-mono text-xs">
+                              {widget.id}
+                            </TableCell>
+                            <TableCell colSpan={3} className="font-medium">
+                              {widget.qualifiedName ?? widget.name}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground">
+                              明细分组，无需选列
+                            </TableCell>
+                          </TableRow>
+                        ) : (
+                          <TableRow key={widget.id}>
+                            <TableCell className="font-mono text-xs">
+                              {widget.id}
+                            </TableCell>
+                            <TableCell>
+                              {widget.qualifiedName ?? widget.name}
+                            </TableCell>
+                            <TableCell>{widget.type}</TableCell>
+                            <TableCell>
+                              {widget.required ? "必填" : "可选"}
+                            </TableCell>
+                            <TableCell>
+                              <Select
+                                value={maps[widget.id] || "__none__"}
+                                disabled={widgetsPending}
+                                onValueChange={(value) =>
+                                  setMaps((previous) => ({
+                                    ...previous,
+                                    [widget.id]:
+                                      value === "__none__" ? "" : value,
+                                  }))
+                                }
+                              >
+                                <SelectTrigger
+                                  aria-label={`${widget.qualifiedName ?? widget.name}对应的多维表格列`}
+                                  className="min-w-48 w-full"
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__none__">
+                                    {widget.required
+                                      ? "请选择列（必填）"
+                                      : "不映射"}
+                                  </SelectItem>
+                                  {maps[widget.id] &&
+                                  !fields.some(
+                                    (f) => f.fieldId === maps[widget.id],
+                                  ) ? (
+                                    <SelectItem value={maps[widget.id]}>
+                                      列已删除（{maps[widget.id]}）
+                                    </SelectItem>
+                                  ) : null}
+                                  {fields.map((field) => (
+                                    <SelectItem
+                                      key={field.fieldId}
+                                      value={field.fieldId}
+                                    >
+                                      {field.fieldName}（{field.fieldId}）
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              {widget.type === "connect" ? (
+                                <p className="text-muted-foreground mt-1 text-xs">
+                                  关联审批：选择超链接列或实例 Code
+                                  文本列，不能仅填申请编号。
+                                </p>
+                              ) : null}
+                            </TableCell>
+                          </TableRow>
+                        ),
+                      )
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -333,6 +518,7 @@ export function ApprovalConfigDialog({
               manual={applicantManual}
               onManualChange={setApplicantManual}
               onChange={setApplicantField}
+              disabled={Boolean(initialConfig)}
             />
             <FieldPick
               label="回填字段"
@@ -342,6 +528,7 @@ export function ApprovalConfigDialog({
               manual={backfillManual}
               onManualChange={setBackfillManual}
               onChange={setBackfillField}
+              disabled={Boolean(initialConfig)}
             />
             <div className="space-y-1.5">
               <Label htmlFor="approval-timezone">Base 时区（IANA 名）</Label>
@@ -364,10 +551,37 @@ export function ApprovalConfigDialog({
               <SummaryRow label="Base Token" value={baseToken} />
               <SummaryRow label="数据表" value={tableId} />
               <SummaryRow label="审批 Code" value={approvalCode} />
-              <SummaryRow label="申请人员字段" value={applicantField} />
-              <SummaryRow label="回填字段" value={backfillField} />
+              <SummaryRow
+                label="申请人员字段"
+                value={
+                  fields.find((f) => f.fieldId === applicantField)?.fieldName ??
+                  applicantField
+                }
+              />
+              <SummaryRow
+                label="回填字段"
+                value={
+                  fields.find((f) => f.fieldId === backfillField)?.fieldName ??
+                  backfillField
+                }
+              />
               <SummaryRow label="时区" value={timezone} />
             </dl>
+            <div className="max-h-60 overflow-auto space-y-2 text-sm">
+              {widgets?.map((widget) => (
+                <p
+                  key={widget.id}
+                  className={
+                    widget.type === "fieldList" ? "font-medium" : undefined
+                  }
+                >
+                  {widget.qualifiedName ?? widget.name}
+                  {widget.type === "fieldList"
+                    ? "（明细分组）"
+                    : ` → ${fields.find((f) => f.fieldId === maps[widget.id])?.fieldName ?? "不映射"}`}
+                </p>
+              ))}
+            </div>
             {submitError !== null ? (
               <div
                 role="alert"
@@ -387,7 +601,7 @@ export function ApprovalConfigDialog({
           ) : (
             <Button
               variant="ghost"
-              disabled={submitting}
+              disabled={submitting || (Boolean(initialConfig) && step === 2)}
               onClick={() => setStep((current) => (current - 1) as Step)}
             >
               上一步
@@ -412,8 +626,11 @@ export function ApprovalConfigDialog({
               下一步
             </Button>
           ) : (
-            <Button disabled={submitting} onClick={() => void submit()}>
-              {submitting ? "提交中…" : "创建配置"}
+            <Button
+              disabled={submitting || !step2Ready}
+              onClick={() => void submit()}
+            >
+              {submitting ? "提交中…" : initialConfig ? "保存配置" : "创建配置"}
             </Button>
           )}
         </DialogFooter>
@@ -441,6 +658,7 @@ function FieldPick({
   manual,
   onManualChange,
   onChange,
+  disabled = false,
 }: {
   label: string;
   description: string;
@@ -449,6 +667,7 @@ function FieldPick({
   manual: boolean;
   onManualChange: (manual: boolean) => void;
   onChange: (value: string) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-1.5">
@@ -456,6 +675,7 @@ function FieldPick({
       {!manual && fields.length > 0 ? (
         <Select
           value={value}
+          disabled={disabled}
           onValueChange={(next) => {
             if (next === MANUAL) {
               onManualChange(true);
@@ -479,6 +699,7 @@ function FieldPick({
       ) : (
         <Input
           value={value}
+          disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
           placeholder="field_id 或列名"
           autoComplete="off"
@@ -491,6 +712,7 @@ function FieldPick({
           size="sm"
           className="h-auto p-0 text-xs"
           onClick={() => onManualChange(!manual)}
+          disabled={disabled}
         >
           {manual ? "回到下拉选择" : "列表没有想要的列？手填"}
         </Button>
