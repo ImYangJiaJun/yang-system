@@ -480,8 +480,18 @@ pub(crate) fn preview_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)>
             } else {
                 format!("{parent}_{}", widget.name.trim())
             };
-            flat.push((widget, name.clone()));
-            collect(&widget.children, &name, flat);
+            // 说明、公式和飞书自动生成的分组不能通过 instances.create 传值，
+            // 因而不应出现在配置向导；明细父级仍保留作分组展示，子控件继续展开。
+            let supported = widget.r#type == "fieldList"
+                || !UNSUPPORTED_TYPES.contains(&widget.r#type.as_str());
+            if supported {
+                flat.push((widget, name.clone()));
+            }
+            collect(
+                &widget.children,
+                if supported { name.as_str() } else { parent },
+                flat,
+            );
         }
     }
     let mut flat = Vec::new();
@@ -1042,6 +1052,63 @@ mod tests {
             .all(|(widget, _)| widget.r#type != "fieldList"));
     }
 
+    #[test]
+    fn preview_hides_non_submittable_controls_but_keeps_detail_children() {
+        let mut copy = input("-副本", "text-copy", true);
+        copy.r#type = "text".to_string();
+        let mut note = input("说明 1", "text-note", true);
+        note.r#type = "text".to_string();
+        let form = vec![
+            copy,
+            note,
+            FormWidget {
+                id: "formula".to_string(),
+                name: "合计".to_string(),
+                r#type: "formula".to_string(),
+                required: true,
+                option: None,
+                external_data: None,
+                value: serde_json::Value::Null,
+                children: Vec::new(),
+            },
+            FormWidget {
+                id: "mutable-group".to_string(),
+                name: "引用多维表格".to_string(),
+                r#type: "mutableGroup".to_string(),
+                required: true,
+                option: None,
+                external_data: None,
+                value: serde_json::Value::Null,
+                children: vec![input("交易类型/Transaction Type", "group-child", true)],
+            },
+            detail("付款明细", "detail"),
+            input("备注", "note", false),
+        ];
+
+        let preview = preview_widgets(&form);
+        assert_eq!(
+            preview
+                .iter()
+                .map(|(widget, _)| widget.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["group-child", "detail", "child1", "child2", "note"]
+        );
+        assert_eq!(preview[0].1, "交易类型/Transaction Type");
+        assert!(matches!(
+            match_fields(
+                &form,
+                &[
+                    column("交易类型/Transaction Type", "f0", &[]),
+                    column("付款明细_费用明细/Expense details", "f1", &[]),
+                    column("付款明细_付款金额/Payment Amount", "f2", &[]),
+                    column("备注", "f3", &[]),
+                ],
+                None,
+            ),
+            MatchOutcome::Matched(_)
+        ));
+    }
+
     /// 从**真实响应的字节**解析，钉住多态形态——这条是本模块存在的理由。
     #[test]
     fn real_form_shape_parses_with_all_four_option_kinds() {
@@ -1439,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_required_widget_is_rejected() {
+    fn non_submittable_required_widget_is_ignored() {
         let form = vec![FormWidget {
             id: "w1".to_string(),
             name: "流水号".to_string(),
@@ -1450,12 +1517,9 @@ mod tests {
             value: serde_json::Value::Null,
             children: Vec::new(),
         }];
-        match match_by_name(&form, &[]) {
-            MatchOutcome::Matched(_) => panic!("不支持的控件应失败"),
-            MatchOutcome::Invalid(errors) => {
-                assert!(errors[0].to_string().contains("不支持通过 API 提单"))
-            }
-        }
+        assert!(
+            matches!(match_by_name(&form, &[]), MatchOutcome::Matched(maps) if maps.is_empty())
+        );
     }
 
     #[test]
