@@ -7,7 +7,7 @@
  * 钉住的事：
  * - 第一步工具提示说明双权限要求（feishu.approval.write + feishu.datasource.write）；
  * - 表列表为空时允许手填 table_id；
- * - 第二步控件预览展示 id/名称/类型/必填；
+ * - 第二步控件映射紧凑展示名称与字段，技术信息按需展开；
  * - 第三步字段下拉 + 手填切换、时区默认 Asia/Shanghai；
  * - 第四步提交六件套；失败原因展示在最后一步。
  */
@@ -238,12 +238,12 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     await user.click(screen.getByRole("button", { name: "预览控件" }));
     expect(
       await screen.findByRole("combobox", {
-        name: "付款明细_金额对应的多维表格列",
+        name: "付款明细_金额对应的多维表格字段",
       }),
     ).toHaveTextContent("付款明细_金额");
     expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
     await user.click(
-      screen.getByRole("combobox", { name: "出差原因对应的多维表格列" }),
+      screen.getByRole("combobox", { name: "出差原因对应的多维表格字段" }),
     );
     await user.click(await screen.findByRole("option", { name: /费用金额/ }));
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
@@ -271,7 +271,7 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
       await screen.findByText(/关联审批：选择超链接列或实例 Code 文本列/),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("combobox", { name: "原申请对应的多维表格列" }),
+      screen.getByRole("combobox", { name: "原申请对应的多维表格字段" }),
     ).toHaveTextContent("原申请");
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
   });
@@ -288,7 +288,7 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("没有读取权限");
     expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "预览控件" }));
-    await screen.findByRole("combobox", { name: "费用金额对应的多维表格列" });
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
     await user.type(screen.getByLabelText("审批定义 Code"), "-NEW");
@@ -314,7 +314,7 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
     await user.click(screen.getByRole("button", { name: "预览控件" }));
     const pick = await screen.findByRole("combobox", {
-      name: "费用金额对应的多维表格列",
+      name: "费用金额对应的多维表格字段",
     });
     expect(pick).toHaveTextContent("费用金额");
     await user.click(pick);
@@ -323,7 +323,9 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     );
     await user.click(screen.getByRole("button", { name: "预览控件" }));
     expect(
-      await screen.findByRole("combobox", { name: "费用金额对应的多维表格列" }),
+      await screen.findByRole("combobox", {
+        name: "费用金额对应的多维表格字段",
+      }),
     ).toHaveTextContent("实际付款金额");
     await user.click(screen.getByRole("button", { name: "下一步" }));
     await user.click(screen.getByRole("combobox", { name: "申请人员字段" }));
@@ -342,7 +344,7 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     );
   }, 15000);
 
-  it("预览展示 id/名称/类型/必填", async () => {
+  it("紧凑展示控件与字段映射，技术信息默认隐藏且可展开", async () => {
     const user = userEvent.setup();
     const client = stubClient();
     await driveToStep2(user, client);
@@ -350,13 +352,19 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
     await user.click(screen.getByRole("button", { name: "预览控件" }));
 
-    expect(await screen.findByText("widget-1")).toBeInTheDocument();
+    expect(await screen.findByText("审批控件")).toBeInTheDocument();
+    expect(screen.getByText("对应多维表格字段")).toBeInTheDocument();
     expect(screen.getAllByText(/费用金额/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("widget-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("input")).not.toBeInTheDocument();
+    expect(screen.queryByText("textarea")).not.toBeInTheDocument();
+    // 必填/可选状态现在与控件名称同行展示，不再占用独立列。
+    expect(screen.getAllByText("必填").length).toBe(1);
+    expect(screen.getByText("可选")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "显示技术信息" }));
+    expect(screen.getByText("widget-1")).toBeInTheDocument();
     expect(screen.getByText("input")).toBeInTheDocument();
     expect(screen.getByText("textarea")).toBeInTheDocument();
-    // 表头「必填」+ widget-1 的行值各一处；widget-2 是「可选」
-    expect(screen.getAllByText("必填").length).toBe(2);
-    expect(screen.getByText("可选")).toBeInTheDocument();
   });
 });
 
@@ -397,12 +405,16 @@ describe("编辑字段映射", () => {
       await driveToStep2(user, client);
       await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
       await user.click(screen.getByRole("button", { name: "预览控件" }));
-      const parent = (await screen.findByText("detail")).closest("tr");
+      const parent = (await screen.findByText("明细", { exact: true })).closest(
+        "tr",
+      );
       expect(parent).toHaveTextContent("明细");
       expect(parent).toHaveTextContent("明细分组，无需选列");
       expect(parent?.querySelector('[role="combobox"]')).toBeNull();
       expect(
-        screen.getByRole("combobox", { name: "明细_费用金额对应的多维表格列" }),
+        screen.getByRole("combobox", {
+          name: "明细_费用金额对应的多维表格字段",
+        }),
       ).toHaveTextContent(columnName);
       expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
       await user.click(screen.getByRole("button", { name: "下一步" }));
@@ -446,7 +458,9 @@ describe("编辑字段映射", () => {
     );
     await user.click(screen.getByRole("button", { name: "预览控件" }));
     expect(
-      await screen.findByRole("combobox", { name: "出差原因对应的多维表格列" }),
+      await screen.findByRole("combobox", {
+        name: "出差原因对应的多维表格字段",
+      }),
     ).toHaveTextContent("不映射");
     await user.click(screen.getByRole("button", { name: "下一步" }));
     await user.click(screen.getByRole("button", { name: "下一步" }));
@@ -487,16 +501,18 @@ describe("编辑字段映射", () => {
         />,
       );
       await user.click(screen.getByRole("button", { name: "预览控件" }));
-      await screen.findByRole("combobox", { name: "费用金额对应的多维表格列" });
+      await screen.findByRole("combobox", {
+        name: "费用金额对应的多维表格字段",
+      });
       expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
       if (kind === "removed-widget") {
         expect(screen.getByRole("alert")).toHaveTextContent("旧备注");
         await user.click(screen.getByRole("button", { name: "清除旧映射" }));
       } else {
         const pick = screen.getByRole("combobox", {
-          name: "出差原因对应的多维表格列",
+          name: "出差原因对应的多维表格字段",
         });
-        expect(pick).toHaveTextContent("列已删除");
+        expect(pick).toHaveTextContent("字段已删除");
         await user.click(pick);
         await user.click(await screen.findByRole("option", { name: "不映射" }));
       }
@@ -512,7 +528,7 @@ describe("建配置向导 · 第三步（列 + 时区）", () => {
     await driveToStep2(user, client);
     await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
     await user.click(screen.getByRole("button", { name: "预览控件" }));
-    await screen.findByRole("combobox", { name: "费用金额对应的多维表格列" });
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
     await user.click(screen.getByRole("button", { name: "下一步" }));
 
     const applicant = await screen.findByRole("combobox", {
@@ -550,7 +566,7 @@ describe("建配置向导 · 第四步（提交）", () => {
     await driveToStep2(user, client, { onSubmitted });
     await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
     await user.click(screen.getByRole("button", { name: "预览控件" }));
-    await screen.findByRole("combobox", { name: "费用金额对应的多维表格列" });
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
     await user.click(screen.getByRole("button", { name: "下一步" }));
 
     const applicant = await screen.findByRole("combobox", {
@@ -591,7 +607,7 @@ describe("建配置向导 · 第四步（提交）", () => {
     await driveToStep2(user, client, { onCancel });
     await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
     await user.click(screen.getByRole("button", { name: "预览控件" }));
-    await screen.findByRole("combobox", { name: "费用金额对应的多维表格列" });
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
     await user.click(screen.getByRole("button", { name: "下一步" }));
     await user.click(
       await screen.findByRole("combobox", { name: "申请人员字段" }),

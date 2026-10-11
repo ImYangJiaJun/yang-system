@@ -99,6 +99,7 @@ export function ApprovalConfigDialog({
     ReturnType<ApprovalWizardClient["listWidgets"]>
   > | null>(null);
   const [widgetsPending, setWidgetsPending] = useState(false);
+  const [showTechnicalInfo, setShowTechnicalInfo] = useState(false);
 
   // ③ 列 + 时区
   const [applicantField, setApplicantField] = useState(
@@ -368,6 +369,13 @@ export function ApprovalConfigDialog({
             <p className="text-xs text-muted-foreground">
               首次预览按列名和控件名预选；明细子控件优先匹配“明细名称_子控件名称”，没有对应列时再匹配子控件名称。可逐项修改，重新预览保留手动选择；明细父级仅展示分组，必填子控件必须选列。
             </p>
+            <Button
+              variant="link"
+              className="h-auto p-0 text-xs text-muted-foreground"
+              onClick={() => setShowTechnicalInfo((visible) => !visible)}
+            >
+              {showTechnicalInfo ? "隐藏技术信息" : "显示技术信息"}
+            </Button>
             {submitError !== null ? (
               <p role="alert" className="text-sm text-destructive">
                 {submitError}
@@ -405,18 +413,15 @@ export function ApprovalConfigDialog({
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>控件 ID</TableHead>
-                      <TableHead>名称</TableHead>
-                      <TableHead>类型</TableHead>
-                      <TableHead>必填</TableHead>
-                      <TableHead>多维表格列</TableHead>
+                      <TableHead>审批控件</TableHead>
+                      <TableHead>对应多维表格字段</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {widgets.length === 0 ? (
                       <TableRow>
                         <TableCell
-                          colSpan={5}
+                          colSpan={2}
                           className="text-muted-foreground"
                         >
                           这个审批定义没有可配控件。
@@ -426,29 +431,65 @@ export function ApprovalConfigDialog({
                       widgets.map((widget) =>
                         widget.type === "fieldList" ? (
                           <TableRow key={widget.id} className="bg-muted/50">
-                            <TableCell className="font-mono text-xs">
-                              {widget.id}
-                            </TableCell>
-                            <TableCell colSpan={3} className="font-medium">
-                              {widget.qualifiedName ?? widget.name}
-                            </TableCell>
-                            <TableCell className="text-muted-foreground">
-                              明细分组，无需选列
+                            <TableCell colSpan={2} className="py-2">
+                              <div className="flex items-center gap-2 text-sm font-medium">
+                                <span>{widget.name}</span>
+                                <span className="text-xs font-normal text-muted-foreground">
+                                  明细分组，无需选列
+                                </span>
+                              </div>
+                              {showTechnicalInfo ? (
+                                <div className="mt-1 flex gap-3 font-mono text-xs text-muted-foreground">
+                                  <span>
+                                    控件 ID：<span>{widget.id}</span>
+                                  </span>
+                                  <span>
+                                    类型：<span>{widget.type}</span>
+                                  </span>
+                                </div>
+                              ) : null}
                             </TableCell>
                           </TableRow>
                         ) : (
                           <TableRow key={widget.id}>
-                            <TableCell className="font-mono text-xs">
-                              {widget.id}
+                            <TableCell className="align-top">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium">
+                                  {widget.name}
+                                </span>
+                                <span
+                                  className={
+                                    widget.required
+                                      ? "rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive"
+                                      : "rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+                                  }
+                                >
+                                  {widget.required ? "必填" : "可选"}
+                                </span>
+                                {widget.type === "connect" ? (
+                                  <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700">
+                                    关联审批
+                                  </span>
+                                ) : null}
+                              </div>
+                              {widget.qualifiedName &&
+                              widget.qualifiedName !== widget.name ? (
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  明细路径：{widget.qualifiedName}
+                                </p>
+                              ) : null}
+                              {showTechnicalInfo ? (
+                                <div className="mt-1 flex gap-3 font-mono text-xs text-muted-foreground">
+                                  <span>
+                                    控件 ID：<span>{widget.id}</span>
+                                  </span>
+                                  <span>
+                                    类型：<span>{widget.type}</span>
+                                  </span>
+                                </div>
+                              ) : null}
                             </TableCell>
-                            <TableCell>
-                              {widget.qualifiedName ?? widget.name}
-                            </TableCell>
-                            <TableCell>{widget.type}</TableCell>
-                            <TableCell>
-                              {widget.required ? "必填" : "可选"}
-                            </TableCell>
-                            <TableCell>
+                            <TableCell className="align-top">
                               <Select
                                 value={maps[widget.id] || "__none__"}
                                 disabled={widgetsPending}
@@ -461,15 +502,15 @@ export function ApprovalConfigDialog({
                                 }
                               >
                                 <SelectTrigger
-                                  aria-label={`${widget.qualifiedName ?? widget.name}对应的多维表格列`}
-                                  className="min-w-48 w-full"
+                                  aria-label={`${widget.qualifiedName ?? widget.name}对应的多维表格字段`}
+                                  className="w-full min-w-48"
                                 >
                                   <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
                                   <SelectItem value="__none__">
                                     {widget.required
-                                      ? "请选择列（必填）"
+                                      ? "请选择字段（必填）"
                                       : "不映射"}
                                   </SelectItem>
                                   {maps[widget.id] &&
@@ -477,7 +518,7 @@ export function ApprovalConfigDialog({
                                     (f) => f.fieldId === maps[widget.id],
                                   ) ? (
                                     <SelectItem value={maps[widget.id]}>
-                                      列已删除（{maps[widget.id]}）
+                                      字段已删除（{maps[widget.id]}）
                                     </SelectItem>
                                   ) : null}
                                   {fields.map((field) => (

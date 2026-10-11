@@ -219,7 +219,7 @@ describe("审批派发配置页 · 权限门控", () => {
 });
 
 describe("审批派发配置页 · 行操作", () => {
-  it("编辑保存逐项映射：预览保留原选择，请求使用控件和列 ID", async () => {
+  it("编辑保存逐项映射：预览保留原选择，请求使用控件和字段 ID", async () => {
     const user = userEvent.setup();
     const calls = stubApprovalApi({
       configList: () => listPage(configRows()),
@@ -246,7 +246,7 @@ describe("审批派发配置页 · 行操作", () => {
     await user.click(screen.getAllByRole("button", { name: "编辑映射" })[1]!);
     await user.click(screen.getByRole("button", { name: "预览控件" }));
     const pick = await screen.findByRole("combobox", {
-      name: "付款明细_金额对应的多维表格列",
+      name: "付款明细_金额对应的多维表格字段",
     });
     expect(pick).toHaveTextContent("金额");
     await user.click(pick);
