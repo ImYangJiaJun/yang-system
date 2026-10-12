@@ -43,7 +43,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
 use crate::addon::feishu::domain::approval_provision::{
     build_plan, insert_plan, ProvisionError, ProvisionInput, ProvisionPlan,
 };
-use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
+use crate::addon::feishu::domain::bitable::{self, resolve_bitable_link, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
 use crate::config::FeishuSettings;
@@ -60,8 +60,9 @@ use crate::addon::feishu::domain::approval_dispatch::Backfill;
 pub(super) struct DispatchInput {
     /// 多维表格 token。
     pub(super) base_token: String,
-    /// 数据表 id。
-    pub(super) table_id: String,
+    /// 数据表 id；完整多维表格链接包含 `table` 参数时可省略。
+    #[serde(default)]
+    pub(super) table_id: Option<String>,
     /// 单条处理时的记录 id；省略表示处理全表待处理记录。
     #[serde(default)]
     pub(super) record_id: Option<String>,
@@ -91,18 +92,40 @@ impl ParamInput for DispatchInput {
 }
 
 impl DispatchInput {
+    fn resolved_coordinates(
+        &self,
+    ) -> Result<crate::addon::feishu::domain::bitable::ParsedBitableLink, BaseError> {
+        resolve_bitable_link(&self.base_token, self.table_id.as_deref(), None)
+            .map_err(|error| BaseError::ParamInvalid("base_token".to_string(), error.to_string()))
+    }
+
+    fn normalize_coordinates(&mut self) -> Result<(), BaseError> {
+        let coordinates = self.resolved_coordinates()?;
+        let Some(table_id) = coordinates.table_id else {
+            return Err(BaseError::ParamInvalid(
+                "table_id".to_string(),
+                "不能为空，或在完整多维表格链接中提供 table 参数".to_string(),
+            ));
+        };
+        self.base_token = coordinates.app_token;
+        self.table_id = Some(table_id);
+        Ok(())
+    }
+
     /// 进入处理前的入参校验。
     fn validate(&self) -> Result<(), BaseError> {
-        for (name, value) in [
-            ("base_token", &self.base_token),
-            ("table_id", &self.table_id),
-        ] {
-            if value.trim().is_empty() {
-                return Err(BaseError::ParamInvalid(
-                    name.to_string(),
-                    "不能为空".to_string(),
-                ));
-            }
+        let coordinates = self.resolved_coordinates()?;
+        if coordinates.app_token.trim().is_empty() {
+            return Err(BaseError::ParamInvalid(
+                "base_token".to_string(),
+                "不能为空".to_string(),
+            ));
+        }
+        if coordinates.table_id.is_none() {
+            return Err(BaseError::ParamInvalid(
+                "table_id".to_string(),
+                "不能为空，或在完整多维表格链接中提供 table 参数".to_string(),
+            ));
         }
         if let Some(record_id) = &self.record_id {
             if record_id.trim().is_empty() {
@@ -264,10 +287,14 @@ pub(super) async fn handle(
     // （含 `validate()` 失败——它也要落一条 failed 记录，且要落在还能拿到
     // `request_body` 的位置）都收敛成一条可落库的记录事实。落库用独立连接
     // （`TableQuery::insert` 不经事务自动提交），写失败只降级日志。
-    let outcome = match handle_dispatch(&ctx, &input, &context).await {
-        Ok(outcome) => outcome,
-        // 白名单查询这类「连 config_id 都拿不到」的内部错误：折算成失败记录。
+    let mut input = input;
+    let outcome = match input.normalize_coordinates() {
         Err(error) => DispatchOutcome::internal(None, error),
+        Ok(()) => match handle_dispatch(&ctx, &input, &context).await {
+            Ok(outcome) => outcome,
+            // 白名单查询这类「连 config_id 都拿不到」的内部错误：折算成失败记录。
+            Err(error) => DispatchOutcome::internal(None, error),
+        },
     };
     write_request_log(&context, &input, &outcome).await;
     outcome.response
@@ -296,7 +323,10 @@ async fn handle_dispatch(
         .approval_configs()
         .query()
         .where_eq("base_token", serde_json::json!(input.base_token.trim()))?
-        .where_eq("table_id", serde_json::json!(input.table_id.trim()))?
+        .where_eq(
+            "table_id",
+            serde_json::json!(input.table_id.as_deref().unwrap_or_default().trim()),
+        )?
         .where_eq("enabled", serde_json::json!(true))?
         .optional()
         .await?;
@@ -394,7 +424,12 @@ async fn write_request_log(
     let log = RequestLog {
         requested_by: normalized_requested_by(input.requested_by.as_deref()),
         base_token: input.base_token.trim().to_string(),
-        table_id: input.table_id.trim().to_string(),
+        table_id: input
+            .table_id
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         config_id: outcome.config_id,
         record_id: input
             .record_id
@@ -446,7 +481,7 @@ async fn provision(
         context,
         &ProvisionInput {
             base_token: input.base_token.trim(),
-            table_id: input.table_id.trim(),
+            table_id: input.table_id.as_deref().unwrap_or_default().trim(),
             approval_code: input.approval_code.as_deref().unwrap_or_default().trim(),
             applicant_field: input.applicant_field.as_deref().unwrap_or_default(),
             backfill_field: input.backfill_field.as_deref().unwrap_or_default(),
@@ -480,7 +515,7 @@ async fn provision(
     tracing::info!(
         config_id,
         base_token = %input.base_token.trim(),
-        table_id = %input.table_id.trim(),
+        table_id = %input.table_id.as_deref().unwrap_or_default().trim(),
         approval_code = %input.approval_code.as_deref().unwrap_or_default().trim(),
         "审批派发配置已自动创建"
     );
@@ -518,7 +553,12 @@ async fn backfill_provision_failure(
     };
     let coordinates = BitableCoordinates {
         app_token: input.base_token.trim().to_string(),
-        table_id: input.table_id.trim().to_string(),
+        table_id: input
+            .table_id
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         view_id: None,
     };
     let fields = match bitable::list_all_fields(
@@ -815,7 +855,7 @@ mod tests {
     fn valid_input() -> DispatchInput {
         DispatchInput {
             base_token: "appbcbWCzen6".to_string(),
-            table_id: "tblsRc9GRRX".to_string(),
+            table_id: Some("tblsRc9GRRX".to_string()),
             record_id: Some("rec001".to_string()),
             requested_by: Some("测试触发人".to_string()),
             approval_code: None,
@@ -841,7 +881,7 @@ mod tests {
         assert!(input.validate().is_err());
 
         let mut input = valid_input();
-        input.table_id = String::new();
+        input.table_id = Some(String::new());
         assert!(input.validate().is_err());
     }
 
@@ -861,6 +901,20 @@ mod tests {
     #[test]
     fn valid_input_passes() {
         assert!(valid_input().validate().is_ok());
+    }
+
+    #[test]
+    fn complete_bitable_link_can_replace_the_separate_coordinates() {
+        let mut input = valid_input();
+        input.base_token =
+            "https://another-host/base/appbcbWCzen6?table=tblsRc9GRRX&view=vewA".to_string();
+        input.table_id = Some(String::new());
+        assert!(input.validate().is_ok());
+        input
+            .normalize_coordinates()
+            .unwrap_or_else(|error| panic!("完整链接应解析成功: {error}"));
+        assert_eq!(input.base_token, "appbcbWCzen6");
+        assert_eq!(input.table_id.as_deref(), Some("tblsRc9GRRX"));
     }
 
     #[test]

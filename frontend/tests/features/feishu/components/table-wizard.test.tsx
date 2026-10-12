@@ -87,6 +87,27 @@ async function driveToFields(
 }
 
 describe("配置向导 · 视图选择器", () => {
+  it("粘贴完整链接后自动拆出 Base、table 和 view", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    render(
+      <DatasourceTableWizard
+        client={client}
+        onCancel={vi.fn()}
+        onSubmitted={vi.fn()}
+      />,
+    );
+    await user.type(screen.getByLabelText(/名称/), "公司往来付款");
+    await user.type(
+      screen.getByLabelText(/Base Token/),
+      `https://other.example/base/${APP_TOKEN}?table=${TABLE_ID}&view=${VIEW_ID}`,
+    );
+    await user.click(screen.getByRole("button", { name: "拉取数据表" }));
+    expect(client.listTables).toHaveBeenCalledWith(APP_TOKEN);
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    expect(client.listViews).toHaveBeenCalledWith(APP_TOKEN, TABLE_ID);
+  });
+
   it("视图选择器说明它只决定拉取哪些行，不决定能勾哪些字段", async () => {
     // 实测：列出字段的 view_id 参数不生效。UI 若把两件事讲成一件事，
     // 运维会以为换视图能换出一批字段。

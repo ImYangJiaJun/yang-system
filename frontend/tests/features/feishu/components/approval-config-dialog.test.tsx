@@ -107,6 +107,19 @@ async function driveToStep2(
 }
 
 describe("建配置向导 · 第一步（坐标）", () => {
+  it("粘贴完整链接后用解析出的 Base 和 table 拉取", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    renderDialog(client);
+    await user.type(
+      screen.getByLabelText("多维表格 Base Token"),
+      `https://other.example/base/${BASE_TOKEN}?table=${TABLE_ID}&view=vewA`,
+    );
+    await user.click(screen.getByRole("button", { name: "拉取数据表" }));
+    expect(client.listTables).toHaveBeenCalledWith(BASE_TOKEN);
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+  });
+
   it("拉取期间禁用空下拉，成功显示数量并保留两张表供选择", async () => {
     const user = userEvent.setup();
     let resolveTables!: (tables: BitableTable[]) => void;

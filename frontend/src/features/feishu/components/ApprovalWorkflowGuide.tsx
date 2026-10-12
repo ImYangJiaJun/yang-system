@@ -66,11 +66,18 @@ export function ApprovalWorkflowGuide() {
             <dt>
               <code>base_token</code>
             </dt>
-            <dd>必填。目标多维表格 Token，从本页配置的坐标中复制。</dd>
+            <dd>
+              必填。可填纯 Base
+              Token，也可直接粘贴完整多维表格链接；完整链接会按
+              <code>/base/…?table=…&view=…</code> 自动定位。
+            </dd>
             <dt>
               <code>table_id</code>
             </dt>
-            <dd>必填。目标数据表 ID，从同一配置的坐标中复制。</dd>
+            <dd>
+              可选。使用完整链接且包含 table 参数时可省略，否则填写目标数据表
+              ID。
+            </dd>
             <dt>
               <code>record_id</code>
             </dt>
@@ -114,8 +121,8 @@ export function ApprovalWorkflowGuide() {
                 <code>
                   {JSON.stringify(
                     {
-                      base_token: "<多维表格 Token>",
-                      table_id: "<数据表 ID>",
+                      base_token:
+                        "https://tenant.example/base/<Base Token>?table=<数据表 ID>&view=<视图 ID>",
                       record_id: "<触发记录 ID>",
                       requested_by: "<触发人标识>",
                     },
@@ -134,8 +141,8 @@ export function ApprovalWorkflowGuide() {
                 <code>
                   {JSON.stringify(
                     {
-                      base_token: "<多维表格 Token>",
-                      table_id: "<数据表 ID>",
+                      base_token:
+                        "https://tenant.example/base/<Base Token>?table=<数据表 ID>",
                       requested_by: "<触发人标识>",
                     },
                     null,

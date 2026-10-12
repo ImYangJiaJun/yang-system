@@ -19,7 +19,7 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::table::Record;
 use yang_base::BaseError;
 
-use crate::addon::feishu::domain::bitable::validate_path_segment;
+use crate::addon::feishu::domain::bitable::{resolve_bitable_link, validate_path_segment};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::crypto::{generate_token, seal};
 use crate::addon::feishu::domain::field_binding::{validate_fields, FieldBindingInput};
@@ -115,6 +115,28 @@ impl ParamInput for UpdateTableInput {
 }
 
 impl UpdateTableInput {
+    fn resolved_coordinates(
+        &self,
+    ) -> Result<Option<crate::addon::feishu::domain::bitable::ParsedBitableLink>, BaseError> {
+        match self
+            .bitable_base_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(base_token) => resolve_bitable_link(
+                base_token,
+                self.bitable_table_id.as_deref(),
+                self.bitable_view_id.as_deref(),
+            )
+            .map(Some)
+            .map_err(|error| {
+                BaseError::ParamInvalid("bitable_base_token".to_string(), error.to_string())
+            }),
+            None => Ok(None),
+        }
+    }
+
     fn validate(&self) -> Result<(), BaseError> {
         if self.datasource_id <= 0 {
             return Err(BaseError::ParamInvalid(
@@ -138,15 +160,17 @@ impl UpdateTableInput {
                 ));
             }
         }
-        for (name, value) in [
-            ("bitable_base_token", self.bitable_base_token.as_deref()),
-            ("bitable_table_id", self.bitable_table_id.as_deref()),
-            ("bitable_view_id", self.bitable_view_id.as_deref()),
-        ] {
-            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
-                validate_path_segment(name, value).map_err(|error| {
-                    BaseError::ParamInvalid(name.to_string(), error.to_string())
-                })?;
+        let resolved = self.resolved_coordinates()?;
+        if resolved.is_none() {
+            for (name, value) in [
+                ("bitable_table_id", self.bitable_table_id.as_deref()),
+                ("bitable_view_id", self.bitable_view_id.as_deref()),
+            ] {
+                if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                    validate_path_segment(name, value).map_err(|error| {
+                        BaseError::ParamInvalid(name.to_string(), error.to_string())
+                    })?;
+                }
             }
         }
         // 与创建路径同一套规则：漂移只在运行期暴露。
@@ -174,6 +198,7 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
+    let resolved = input.resolved_coordinates()?;
 
     // 新增的绑定要新凭据，所以这里同样得有封装密钥。
     let wrapping_key = context.encryption_key().ok_or_else(|| {
@@ -222,9 +247,27 @@ pub(super) async fn handle(
         for (column, value) in [
             ("title", input.title.as_deref()),
             ("ingest_mode", input.ingest_mode.as_deref()),
-            ("bitable_base_token", input.bitable_base_token.as_deref()),
-            ("bitable_table_id", input.bitable_table_id.as_deref()),
-            ("bitable_view_id", input.bitable_view_id.as_deref()),
+            (
+                "bitable_base_token",
+                resolved
+                    .as_ref()
+                    .map(|coordinates| coordinates.app_token.as_str())
+                    .or_else(|| input.bitable_base_token.as_deref()),
+            ),
+            (
+                "bitable_table_id",
+                resolved
+                    .as_ref()
+                    .and_then(|coordinates| coordinates.table_id.as_deref())
+                    .or_else(|| input.bitable_table_id.as_deref()),
+            ),
+            (
+                "bitable_view_id",
+                resolved
+                    .as_ref()
+                    .and_then(|coordinates| coordinates.view_id.as_deref())
+                    .or_else(|| input.bitable_view_id.as_deref()),
+            ),
         ] {
             if let Some(value) = value {
                 row.insert(column, serde_json::json!(value.trim()));
@@ -373,6 +416,14 @@ mod tests {
             bitable_view_id: None,
             fields,
         }
+    }
+
+    #[test]
+    fn update_accepts_a_complete_bitable_link_without_duplicate_fields() {
+        let mut input = input_with(vec![field("fldA", "a", None)]);
+        input.bitable_base_token =
+            Some("https://tenant.example/base/appToken?table=tblA&view=vewA".to_string());
+        assert!(input.validate().is_ok());
     }
 
     /// 库里已有的某条绑定。

@@ -3850,8 +3850,11 @@ export interface operations {
                     base_token: string;
                     /** @description 显式控件到列的映射；省略时按名称自动匹配。 */
                     maps?: components["schemas"]["FieldMapping"][] | null;
-                    /** @description 数据表 id。 */
-                    table_id: string;
+                    /**
+                     * @description 数据表 id；完整多维表格链接包含 `table` 参数时可省略。
+                     * @default
+                     */
+                    table_id?: string;
                 };
             };
         };

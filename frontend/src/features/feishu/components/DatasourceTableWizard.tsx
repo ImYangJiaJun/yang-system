@@ -60,6 +60,7 @@ import type { BitableField, BitableTable, BitableView } from "../types";
 import {
   fieldTypeLabel,
   isValidSourceKey,
+  parseBitableLink,
   sourceKeyFromFieldId,
 } from "../types";
 import { FieldPickerTable } from "./FieldPickerTable";
@@ -209,9 +210,17 @@ export function DatasourceTableWizard({
     setTablesPending(true);
     setLoadError(null);
     try {
-      const loaded = await client.listTables(appToken.trim());
+      const rawToken = appToken.trim();
+      const parsed = parseBitableLink(rawToken);
+      const token = parsed?.baseToken ?? rawToken;
+      if (parsed && rawToken.includes("://")) {
+        setAppToken(parsed.baseToken);
+        setTableId(parsed.tableId);
+        setViewId(parsed.viewId || WHOLE_TABLE_VIEW);
+      }
+      const loaded = await client.listTables(token);
       setTables(loaded);
-      setTableId("");
+      setTableId((current) => current.trim());
       if (loaded.length === 0) {
         setLoadError(
           "这个 App 下没有数据表。核对一下 Base Token 是不是另一张表。",
