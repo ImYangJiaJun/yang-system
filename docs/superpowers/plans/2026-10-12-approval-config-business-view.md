@@ -62,7 +62,9 @@
 - Modify: generated OpenAPI/TypeScript contract files only through repository generators if API changes require them.
 - Test: frontend targeted Vitest, Rust lib tests, architecture checks.
 
-- [ ] Run focused frontend tests and typecheck.
-- [ ] Run Rust formatter and targeted list-config tests.
-- [ ] Run architecture checks and inspect diff/status for scope.
-- [ ] Record limitations: no live Feishu workflow or cloud deployment verification.
+- [x] Run focused frontend tests and typecheck.
+- [x] Run Rust formatter and targeted list-config tests.
+- [x] Run architecture checks and inspect diff/status for scope.
+- [x] Record limitations: no live Feishu workflow or cloud deployment verification.
+
+实施及验收证据见[实现验收记录](../../architecture/approval-config-business-view/implementation.md)。最终 `run_ci.py full` 通过；审批派发真实库集成 9/9，名称刷新真实库集成 1/1。最终审查的名称刷新覆盖缺口已补齐并完成摘除变异验证。

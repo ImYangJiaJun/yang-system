@@ -152,6 +152,10 @@ test("业务列表、独立详情、关联分页与浏览器返回", async ({ pa
   await expect(
     page.getByText("按表格时区转换日期", { exact: true }),
   ).toBeVisible();
+  await page.screenshot({
+    path: "output/playwright/approval-business-detail.png",
+    fullPage: true,
+  });
   await page.getByRole("button", { name: "查看关联配置" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("共 24 个 · 第 1 / 3 页")).toBeVisible();
@@ -168,6 +172,7 @@ test("业务列表、独立详情、关联分页与浏览器返回", async ({ pa
   await expect
     .poll(() => main.evaluate((element) => element.scrollTop))
     .toBeGreaterThanOrEqual(scroll - 3);
+  await main.evaluate((element) => element.scrollTo(0, 0));
   await page.screenshot({
     path: "output/playwright/approval-business-list.png",
     fullPage: true,
@@ -223,6 +228,7 @@ test("窄屏无整页横向溢出，字段和排查标签可用键盘切换", as
       ),
     )
     .toBeLessThanOrEqual(1);
+  await page.locator("main").evaluate((element) => element.scrollTo(0, 0));
   await page.screenshot({
     path: "output/playwright/approval-business-mobile.png",
     fullPage: true,
