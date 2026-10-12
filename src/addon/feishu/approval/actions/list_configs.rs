@@ -44,6 +44,7 @@ pub(super) const MAP_ITEM_COLUMNS: &[&str] = &[
     "bitable_field_name",
     "required",
     "converter",
+    "option_source_key",
 ];
 
 /// 一条字段映射的对外视图。
@@ -63,6 +64,8 @@ pub(super) struct FieldMapItem {
     required: bool,
     /// 值转换器：`direct` / `date` / `option`。
     converter: String,
+    /// 外部选项来源；旧配置可能为空。
+    option_source_key: Option<String>,
 }
 
 /// 把映射行按 `config_id` 分组。
@@ -79,6 +82,7 @@ pub(super) fn group_maps(rows: &[Record]) -> Result<HashMap<i64, Vec<FieldMapIte
             widget_type: row.require("widget_type")?,
             bitable_field: row.require("bitable_field")?,
             bitable_field_name: row.optional("bitable_field_name")?,
+            option_source_key: row.optional("option_source_key")?,
             required: row.optional("required")?.unwrap_or(false),
             converter: row
                 .optional("converter")?
@@ -257,6 +261,14 @@ mod tests {
         assert_eq!(groups.get(&2).map(Vec::len), Some(1));
         assert_eq!(groups.get(&1).map(|v| v[0].widget_id.as_str()), Some("w1"));
         assert!(!groups.get(&1).map(|v| v[1].required).unwrap_or(true));
+    }
+
+    #[test]
+    fn grouped_maps_return_saved_option_source() {
+        let rows = [map_row(1, "w1", "fldA", true).set("option_source_key", "fldq7lcb6y")];
+        let groups = group_maps(&rows).unwrap_or_else(|error| panic!("{error}"));
+        let item = serde_json::to_value(&groups[&1][0]).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(item["option_source_key"], "fldq7lcb6y");
     }
 
     #[test]

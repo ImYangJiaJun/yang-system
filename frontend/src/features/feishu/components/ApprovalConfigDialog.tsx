@@ -100,6 +100,14 @@ export function ApprovalConfigDialog({
       initialConfig?.maps.map((map) => [map.widgetId, map.bitableField]) ?? [],
     ),
   );
+  const [optionSources, setOptionSources] = useState<Record<string, string>>(
+    Object.fromEntries(
+      initialConfig?.maps.map((map) => [
+        map.widgetId,
+        map.optionSourceKey ?? "",
+      ]) ?? [],
+    ),
+  );
   const [widgets, setWidgets] = useState<Awaited<
     ReturnType<ApprovalWizardClient["listWidgets"]>
   > | null>(null);
@@ -140,6 +148,14 @@ export function ApprovalConfigDialog({
     Object.values(maps).some(Boolean) &&
     mappingWidgets.every(
       (widget) => !widget.required || Boolean(maps[widget.id]),
+    ) &&
+    mappingWidgets.every(
+      (widget) =>
+        !maps[widget.id] ||
+        !widget.usesExternalOptions ||
+        widget.optionSources?.some(
+          (source) => source.sourceKey === optionSources[widget.id],
+        ),
     ) &&
     Object.entries(maps).every(
       ([id, field]) =>
@@ -198,6 +214,24 @@ export function ApprovalConfigDialog({
       setFields(loadedFields);
       setWidgets(loadedWidgets);
       if (mappingKey !== currentKey) {
+        const keepSavedSources = Boolean(initialConfig) && mappingKey === null;
+        setOptionSources((previous) =>
+          Object.fromEntries(
+            loadedWidgets
+              .filter((widget) => widget.usesExternalOptions)
+              .map((widget) => {
+                const candidates =
+                  widget.optionSources?.filter(
+                    (source) => source.fieldName.trim() === widget.name.trim(),
+                  ) ?? [];
+                return [
+                  widget.id,
+                  (keepSavedSources && previous[widget.id]) ||
+                    (candidates.length === 1 ? candidates[0].sourceKey : ""),
+                ];
+              }),
+          ),
+        );
         if (!initialConfig) {
           const owned = new Set<string>();
           setMaps(
@@ -245,7 +279,14 @@ export function ApprovalConfigDialog({
       baseTimezone: timezone,
       maps: Object.entries(maps)
         .filter(([, field]) => field !== "")
-        .map(([widgetId, bitableField]) => ({ widgetId, bitableField })),
+        .map(([widgetId, bitableField]) => ({
+          widgetId,
+          bitableField,
+          ...(mappingWidgets.find((widget) => widget.id === widgetId)
+            ?.usesExternalOptions && optionSources[widgetId]
+            ? { optionSourceKey: optionSources[widgetId] }
+            : {}),
+        })),
     };
     try {
       if (initialConfig) {
@@ -543,6 +584,68 @@ export function ApprovalConfigDialog({
                                   ))}
                                 </SelectContent>
                               </Select>
+                              {widget.usesExternalOptions ? (
+                                <div className="mt-2 space-y-1">
+                                  <p className="text-xs text-muted-foreground">
+                                    外部选项来源
+                                  </p>
+                                  <Select
+                                    value={
+                                      optionSources[widget.id] || "__none__"
+                                    }
+                                    disabled={
+                                      widgetsPending || !maps[widget.id]
+                                    }
+                                    onValueChange={(value) =>
+                                      setOptionSources((previous) => ({
+                                        ...previous,
+                                        [widget.id]:
+                                          value === "__none__" ? "" : value,
+                                      }))
+                                    }
+                                  >
+                                    <SelectTrigger
+                                      aria-label={`${widget.qualifiedName ?? widget.name}的外部选项来源`}
+                                      className="w-full min-w-48"
+                                    >
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="__none__">
+                                        请选择选项来源
+                                      </SelectItem>
+                                      {optionSources[widget.id] &&
+                                      !widget.optionSources?.some(
+                                        (source) =>
+                                          source.sourceKey ===
+                                          optionSources[widget.id],
+                                      ) ? (
+                                        <SelectItem
+                                          value={optionSources[widget.id]}
+                                        >
+                                          来源已失效（{optionSources[widget.id]}
+                                          ）
+                                        </SelectItem>
+                                      ) : null}
+                                      {widget.optionSources?.map((source) => (
+                                        <SelectItem
+                                          key={source.sourceKey}
+                                          value={source.sourceKey}
+                                        >
+                                          {source.datasourceTitle} ·{" "}
+                                          {source.fieldName || source.sourceKey}
+                                          （{source.sourceKey}）
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                  {widget.optionSources?.length === 0 ? (
+                                    <p className="text-xs text-destructive">
+                                      没有可用的外部选项来源，请检查数据源及字段绑定是否启用。
+                                    </p>
+                                  ) : null}
+                                </div>
+                              ) : null}
                               {widget.type === "connect" ? (
                                 <p className="text-muted-foreground mt-1 text-xs">
                                   关联审批：选择超链接列或实例 Code
@@ -632,6 +735,22 @@ export function ApprovalConfigDialog({
                   {widget.type === "fieldList"
                     ? "（明细分组）"
                     : ` → ${fields.find((f) => f.fieldId === maps[widget.id])?.fieldName ?? "不映射"}`}
+                  {maps[widget.id] && widget.usesExternalOptions ? (
+                    <span className="block text-xs text-muted-foreground">
+                      外部选项：
+                      {
+                        widget.optionSources?.find(
+                          (source) =>
+                            source.sourceKey === optionSources[widget.id],
+                        )?.datasourceTitle
+                      }{" "}
+                      ·{" "}
+                      {widget.optionSources?.find(
+                        (source) =>
+                          source.sourceKey === optionSources[widget.id],
+                      )?.fieldName || optionSources[widget.id]}
+                    </span>
+                  ) : null}
                 </p>
               ))}
             </div>

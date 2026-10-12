@@ -357,6 +357,77 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     );
   }, 15000);
 
+  it("名称不同时手选外部来源，重复预览和提交保留绑定", async () => {
+    const user = userEvent.setup();
+    const client = stubClient({
+      listWidgets: vi.fn().mockResolvedValue([
+        {
+          id: "company",
+          name: "付款公司名称/Company name",
+          type: "radioV2",
+          required: true,
+          usesExternalOptions: true,
+          optionSources: [
+            {
+              sourceKey: "fldq7lcb6y",
+              fieldName: "付款公司名称/Payer Company name",
+              datasourceTitle: "财税费用付款",
+            },
+          ],
+        },
+      ]),
+    });
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await user.click(
+      await screen.findByRole("combobox", {
+        name: "付款公司名称/Company name对应的多维表格字段",
+      }),
+    );
+    await user.click(await screen.findByRole("option", { name: /费用金额/ }));
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+    await user.click(
+      screen.getByRole("combobox", {
+        name: "付款公司名称/Company name的外部选项来源",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("option", {
+        name: /财税费用付款.*Payer Company name/,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    expect(
+      await screen.findByRole("combobox", {
+        name: "付款公司名称/Company name的外部选项来源",
+      }),
+    ).toHaveTextContent("Payer Company name");
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("combobox", { name: "申请人员字段" }));
+    await user.click(await screen.findByRole("option", { name: /申请人/ }));
+    await user.click(screen.getByRole("combobox", { name: "回填字段" }));
+    await user.click(await screen.findByRole("option", { name: /审批编号/ }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    expect(
+      screen.getByText(/外部选项：财税费用付款.*Payer Company name/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "创建配置" }));
+    await waitFor(() =>
+      expect(client.createConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maps: [
+            {
+              widgetId: "company",
+              bitableField: "fldAmount",
+              optionSourceKey: "fldq7lcb6y",
+            },
+          ],
+        }),
+      ),
+    );
+  }, 15000);
+
   it("紧凑展示控件与字段映射，技术信息默认隐藏且可展开", async () => {
     const user = userEvent.setup();
     const client = stubClient();
@@ -382,6 +453,127 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
 });
 
 describe("编辑字段映射", () => {
+  it.each(["manual", "missing", null])(
+    "编辑时回显来源 %s，旧配置自动补选，失效来源需手动修复",
+    async (savedSource) => {
+      const user = userEvent.setup();
+      const client = stubClient({
+        listWidgets: vi.fn().mockResolvedValue([
+          {
+            id: "widget-1",
+            name: "费用金额",
+            type: "radioV2",
+            required: true,
+            usesExternalOptions: true,
+            optionSources: [
+              {
+                sourceKey: "same",
+                fieldName: "费用金额",
+                datasourceTitle: "同名来源",
+              },
+              {
+                sourceKey: "manual",
+                fieldName: "手动关联的公司列",
+                datasourceTitle: "手选来源",
+              },
+            ],
+          },
+        ]),
+      });
+      render(
+        <ApprovalConfigDialog
+          client={client}
+          onCancel={vi.fn()}
+          initialConfig={{
+            ...SAVED_CONFIG,
+            maps: [{ ...SAVED_CONFIG.maps[0], optionSourceKey: savedSource }],
+          }}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "预览控件" }));
+      const source = await screen.findByRole("combobox", {
+        name: "费用金额的外部选项来源",
+      });
+      expect(source).toHaveTextContent(
+        savedSource === "manual"
+          ? "手动关联的公司列"
+          : savedSource === "missing"
+            ? "来源已失效"
+            : "同名来源",
+      );
+      if (savedSource === "missing")
+        expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+      await user.click(source);
+      await user.click(await screen.findByRole("option", { name: /同名来源/ }));
+      await user.click(screen.getByRole("button", { name: "下一步" }));
+      await user.click(screen.getByRole("button", { name: "下一步" }));
+      await user.click(screen.getByRole("button", { name: "保存配置" }));
+      await waitFor(() =>
+        expect(client.updateConfig).toHaveBeenCalledWith(7, {
+          maps: [
+            {
+              widgetId: "widget-1",
+              bitableField: "fldAmount",
+              optionSourceKey: "same",
+            },
+          ],
+          baseTimezone: "Asia/Shanghai",
+        }),
+      );
+    },
+    15000,
+  );
+
+  it("同名外部来源有多个时等待手选，可选未映射控件无需来源", async () => {
+    const user = userEvent.setup();
+    const client = stubClient({
+      listWidgets: vi.fn().mockResolvedValue([
+        {
+          id: "widget-1",
+          name: "费用金额",
+          type: "radioV2",
+          required: true,
+          usesExternalOptions: true,
+          optionSources: [
+            {
+              sourceKey: "first",
+              fieldName: "费用金额",
+              datasourceTitle: "来源一",
+            },
+            {
+              sourceKey: "second",
+              fieldName: "费用金额",
+              datasourceTitle: "来源二",
+            },
+          ],
+        },
+        {
+          id: "optional",
+          name: "可选银行",
+          type: "radioV2",
+          required: false,
+          usesExternalOptions: true,
+          optionSources: [],
+        },
+      ]),
+    });
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    const source = await screen.findByRole("combobox", {
+      name: "费用金额的外部选项来源",
+    });
+    expect(source).toHaveTextContent("请选择选项来源");
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+    expect(screen.getByText(/没有可用的外部选项来源/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "可选银行的外部选项来源" }),
+    ).toBeDisabled();
+    await user.click(source);
+    await user.click(await screen.findByRole("option", { name: /来源二/ }));
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+  }, 15000);
+
   it.each([
     ["费用金额", false],
     ["费用金额", true],

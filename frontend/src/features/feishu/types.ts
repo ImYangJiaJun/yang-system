@@ -1018,6 +1018,7 @@ export type ApprovalConfigMap = {
   required: boolean;
   /// 值转换器：`direct` / `date` / `option`。
   converter: string;
+  optionSourceKey?: string | null;
 };
 
 /// 审批派发配置行（`list_configs` 的 `items[]`）。
@@ -1045,6 +1046,14 @@ export type ApprovalWidget = {
   qualifiedName?: string;
   type: string;
   required: boolean;
+  usesExternalOptions?: boolean;
+  optionSources?: ApprovalOptionSource[];
+};
+
+export type ApprovalOptionSource = {
+  sourceKey: string;
+  fieldName: string;
+  datasourceTitle: string;
 };
 
 /// 派发请求结果四桶（`feishu_approval_request_log.outcome`）。

@@ -715,6 +715,10 @@ pub(crate) fn widget_maps_from_rows(
             bitable_field,
             converter,
             option_map,
+            option_source_key: row
+                .get("option_source_key")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         });
     }
     Some(widgets)
@@ -819,6 +823,7 @@ mod tests {
             bitable_field: "fld_title".to_string(),
             converter: Converter::Direct,
             option_map: BTreeMap::new(),
+            option_source_key: None,
             currency: None,
         }
     }
@@ -2278,6 +2283,12 @@ mod tests {
             ("option_map".to_string(), json!(r#"{"已批准":"va"}"#)),
         ])];
         let widgets = widget_maps_from_rows(&rows, |_| None).unwrap_or_else(|| panic!("应可解析"));
+        assert!(widgets[0].option_source_key.is_none(), "旧行保持兼容");
+        let mut saved_rows = rows.clone();
+        saved_rows[0].insert("option_source_key".into(), json!("fldq7lcb6y"));
+        let saved =
+            widget_maps_from_rows(&saved_rows, |_| None).unwrap_or_else(|| panic!("应可解析"));
+        assert_eq!(saved[0].option_source_key.as_deref(), Some("fldq7lcb6y"));
         assert_eq!(widgets.len(), 1);
         assert!(widgets[0].required);
         assert_eq!(

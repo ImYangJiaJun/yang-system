@@ -12,7 +12,7 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval::get_approval_definition;
-use crate::addon::feishu::domain::approval_provision::parse_form;
+use crate::addon::feishu::domain::approval_provision::{list_option_sources, parse_form};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
 
@@ -107,11 +107,26 @@ pub(super) async fn handle(
                     "qualified_name": qualified_name,
                     "type": widget.r#type,
                     "required": widget.required,
+                    "uses_external_options": widget.links_to_our_options(),
                 })
             })
             .collect();
 
-    ApiResponse::success(serde_json::json!({ "widgets": items }), "查询成功")
+    let option_sources = if widgets
+        .iter()
+        .flat_map(|widget| widget.walk())
+        .any(|widget| widget.links_to_our_options())
+    {
+        list_option_sources(&context)
+            .await
+            .map_err(|error| BaseError::ParamInvalid("feishu".to_string(), error.to_string()))?
+    } else {
+        Vec::new()
+    };
+    ApiResponse::success(
+        serde_json::json!({ "widgets": items, "option_sources": option_sources }),
+        "查询成功",
+    )
 }
 
 #[cfg(test)]

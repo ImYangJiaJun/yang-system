@@ -1,10 +1,10 @@
-//! 自动建配置（默认链路）：坐标 + 审批定义 + 多维表格列 → config 行 + field_map 行。
+//! 审批派发配置：坐标 + 审批定义 + 多维表格列 → config 行 + field_map 行。
 //!
 //! # 为什么要有这一层
 //!
-//! 使用方的多维表格列名与审批控件名**严格对应**，因此不该要求人工逐条配
-//! `feishu_approval_field_map`。派发端点在**配置不存在**时走这条路径：取定义、
-//! 取列、按名匹配、校验，全过才落库。
+//! 默认按名称匹配控件、派发表列与外部选项来源；控制台也可分别手选列与来源，
+//! 无需修改飞书侧名称。派发端点在**配置不存在**时取定义、取列、自动匹配、
+//! 校验，全过才落库。新建与编辑复用同一条校验链。
 //!
 //! # 两条铁律
 //!
@@ -223,14 +223,28 @@ pub(crate) async fn build_plan(
             .ok_or_else(|| ProvisionError::Invalid(vec!["审批定义没有返回表单".to_string()]))?,
     )?;
 
-    // 链接本系统外部数据源的控件：先解析它们的 `source_key`，再把选项拉出来——
-    // 这一步必须在匹配**之前**，因为匹配本身不碰库。
+    if let MatchOutcome::Invalid(errors) = match_fields(&form, &columns, input.maps) {
+        return Err(ProvisionError::Invalid(
+            errors.into_iter().map(|error| error.to_string()).collect(),
+        ));
+    }
     let mapped_ids = input.maps.map(|maps| {
         maps.iter()
             .map(|map| map.widget_id.as_str())
             .collect::<Vec<_>>()
     });
-    let external_options = load_external_options(context, &form, mapped_ids.as_deref()).await?;
+    let explicit_sources = input
+        .maps
+        .into_iter()
+        .flatten()
+        .filter_map(|map| {
+            map.option_source_key
+                .as_ref()
+                .map(|source| (map.widget_id.clone(), source.clone()))
+        })
+        .collect();
+    let external_options =
+        load_external_options(context, &form, mapped_ids.as_deref(), &explicit_sources).await?;
 
     let plan = plan(
         input,
@@ -249,7 +263,7 @@ fn plan(
     approval_name: &str,
     form: &[FormWidget],
     columns: &[Column],
-    external_options: &BTreeMap<String, BTreeMap<String, String>>,
+    external_options: &BTreeMap<String, String>,
     form_snapshot: &str,
 ) -> Result<ProvisionPlan, ProvisionError> {
     let mut reasons: Vec<String> = Vec::new();
@@ -319,8 +333,11 @@ fn plan(
         if !source.links_to_our_options() {
             continue;
         }
-        match external_options.get(source.name.trim()) {
-            Some(map) => widget.option_map = map.clone(),
+        match external_options.get(&source.id) {
+            Some(key) => {
+                widget.option_source_key = Some(key.clone());
+                widget.option_map.clear();
+            }
             None => reasons.push(format!(
                 "控件「{}」链接了外部选项数据源，但本系统没有该列的绑定",
                 source.name
@@ -429,6 +446,10 @@ pub(crate) async fn insert_maps(
         map_row.insert("bitable_field", serde_json::json!(&widget.bitable_field));
         map_row.insert("bitable_field_name", serde_json::json!(column_name));
         map_row.insert(
+            "option_source_key",
+            serde_json::json!(&widget.option_source_key),
+        );
+        map_row.insert(
             "converter",
             serde_json::json!(converter_key(widget.converter)),
         );
@@ -452,21 +473,15 @@ pub(crate) async fn insert_maps(
 // 外部选项（链接态控件的 option_map 来源）
 // ---------------------------------------------------------------------------
 
-/// 解析链接到本系统外部数据源的控件 → 每列的 `label → option_id`。
-///
-/// # 为什么按**列名**查而不是按 `field_id`
-///
-/// 外部选项的绑定登记在**台账表**（`feishu_datasource_field`），而派发用的是**另一张
-/// 表**——两边的 `field_id` 毫无关系。以审批控件名定位台账绑定，手动更换派发列
-/// 不改变选项来源。
+/// 验证来源非空，返回控件 ID → source_key；派发表与选项台账的字段 ID 无关。
 async fn load_external_options(
     context: &FeishuContext,
     form: &[FormWidget],
     mapped_ids: Option<&[&str]>,
-) -> Result<BTreeMap<String, BTreeMap<String, String>>, ProvisionError> {
-    let sources = load_option_sources(context, form, mapped_ids).await?;
-    let mut out = BTreeMap::new();
-    for (name, source) in sources {
+    explicit_sources: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ProvisionError> {
+    let sources = load_option_sources(context, form, mapped_ids, explicit_sources).await?;
+    for source in sources.values().collect::<std::collections::BTreeSet<_>>() {
         let rows = context
             .options()
             .query()
@@ -482,18 +497,15 @@ async fn load_external_options(
                 "外部选项数据源「{source}」里没有启用中的选项"
             )]));
         }
-        // 仅验证来源；按记录文案查询，避免全量加载十几万条银行选项。
-        out.insert(name, BTreeMap::new());
     }
-    Ok(out)
+    Ok(sources)
 }
 
-fn linked_widget_names(form: &[FormWidget], mapped_ids: Option<&[&str]>) -> Vec<String> {
+fn linked_widgets<'a>(form: &'a [FormWidget], mapped_ids: Option<&[&str]>) -> Vec<&'a FormWidget> {
     form.iter()
         .flat_map(|widget| widget.walk())
         .filter(|widget| widget.links_to_our_options())
         .filter(|widget| mapped_ids.map_or(true, |ids| ids.contains(&widget.id.as_str())))
-        .map(|widget| widget.name.trim().to_string())
         .collect()
 }
 
@@ -501,9 +513,13 @@ async fn load_option_sources(
     context: &FeishuContext,
     form: &[FormWidget],
     mapped_ids: Option<&[&str]>,
+    explicit_sources: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, ProvisionError> {
-    let linked = linked_widget_names(form, mapped_ids);
-    if linked.iter().any(|name| name.is_empty()) {
+    let linked = linked_widgets(form, mapped_ids);
+    if linked
+        .iter()
+        .any(|widget| widget.name.trim().is_empty() && !explicit_sources.contains_key(&widget.id))
+    {
         return Err(ProvisionError::Invalid(vec![
             "外部选项控件缺少名称，无法定位数据源绑定".to_string(),
         ]));
@@ -512,90 +528,110 @@ async fn load_option_sources(
         return Ok(BTreeMap::new());
     }
 
-    // `feishu_datasource_field.field_name` 是**缓存列**、不是 `filterable`，
-    // 所以这里不能把 WHERE 下推到库（会吃 FieldPermissionDenied）——扫全表后在内存里
-    // 按名配对。这张表是「字段绑定」，行数量级在百级（每数据源几列）。
+    let sources = list_option_sources(context).await?;
+    select_option_sources(&linked, explicit_sources, &sources)
+}
+
+/// 向导与保存/派发共用的启用来源候选，不返回 Token 或其他凭据。
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ApprovalOptionSource {
+    pub(crate) source_key: String,
+    pub(crate) field_name: String,
+    pub(crate) datasource_title: String,
+}
+
+pub(crate) async fn list_option_sources(
+    context: &FeishuContext,
+) -> Result<Vec<ApprovalOptionSource>, ProvisionError> {
+    let titles: BTreeMap<i64, String> = all_pages(
+        context
+            .datasources()
+            .query()
+            .select_fields(&["id", "title"])?
+            .where_eq("status", serde_json::json!("active"))?,
+        MAX_BINDING_PAGES,
+    )
+    .await
+    .map_err(|error| ProvisionError::Store(error.to_string()))?
+    .iter()
+    .map(|row| Ok((row.require("id")?, row.require("title")?)))
+    .collect::<Result<_, BaseError>>()?;
     let bindings = all_pages(
-        context.datasource_fields().query().select_fields(&[
-            "field_name",
-            "source_key",
-            "enabled",
-        ])?,
+        context
+            .datasource_fields()
+            .query()
+            .select_fields(&["datasource_id", "field_name", "source_key"])?
+            .where_eq("enabled", serde_json::json!(true))?,
         MAX_BINDING_PAGES,
     )
     .await
     .map_err(|error| ProvisionError::Store(error.to_string()))?;
 
-    // 名字 → source_key。**重名即歧义**：两张表都有「公司名称/Company name」时，
-    // 取哪一个都是猜——猜错的后果是把选项映射建到别的数据源上，而症状是提交时
-    // 「选项没有配置映射」或更糟：映射成功但 id 对不上。
-    // 收集到 `String` 而不是借用绑定行：`binding` 是每轮循环里的临时 `Record`，
-    // 借用它的字段会让歧义列表的存活短于自身（E0597）。
-    let mut name_to_source: BTreeMap<String, String> = BTreeMap::new();
-    let mut ambiguous: Vec<String> = Vec::new();
+    let mut out = Vec::new();
     for binding in &bindings {
-        let enabled: bool = binding.optional("enabled")?.unwrap_or(false);
-        if !enabled {
+        let Some(title) = titles.get(&binding.require::<i64>("datasource_id")?) else {
             continue;
-        }
-        // 名字为空/缺失：这条绑定无从参与按名匹配，跳过——但**必须留痕**（见下）。
-        let Some(name) = binding_display_name(binding)? else {
-            // 「跳过」是兜底，不是常态：走到这里说明上游有绑定漏写了名字
-            // （`create_datasource_table` / `update_datasource_table` 都该写上），
-            // 那是个要修的 bug。静默 `continue` 会让它永远不被发现，而它的后果
-            // （某个控件少一个候选列）又很难归因——所以这里明确 warn 并带上
-            // 能定位的 `source_key`。
+        };
+        let name = binding_display_name(binding)?;
+        if name.is_none() {
             tracing::warn!(
                 source_key = %binding.optional::<String>("source_key")?.unwrap_or_default(),
-                "字段绑定的 field_name 为空，跳过它——列名是身份，没有名字就无法按名匹配"
+                "字段绑定的 field_name 为空，仅支持按 source_key 手动关联"
             );
-            continue;
-        };
-        if !linked.contains(&name) {
-            continue;
         }
-        let source: String = binding.require("source_key")?;
-        match name_to_source.get(&name) {
-            Some(existing) if *existing != source && !ambiguous.contains(&name) => {
-                ambiguous.push(name.clone());
-            }
-            Some(_) => {}
-            None => {
-                name_to_source.insert(name, source);
-            }
-        }
-    }
-    if !ambiguous.is_empty() {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "以下控件的列名在多个外部选项数据源里都出现，无法判定用哪一个：{}",
-            ambiguous.join("、")
-        )]));
-    }
-
-    let mut out = BTreeMap::new();
-    let mut missing: Vec<&str> = Vec::new();
-    for name in &linked {
-        let Some(source) = name_to_source.get(name) else {
-            missing.push(name.as_str());
-            continue;
-        };
-        out.insert(name.clone(), source.clone());
-    }
-    if !missing.is_empty() {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "以下控件链接了外部选项数据源，但本系统没有该列的绑定：{}",
-            missing.join("、")
-        )]));
+        out.push(ApprovalOptionSource {
+            source_key: binding.require("source_key")?,
+            field_name: name.unwrap_or_default(),
+            datasource_title: title.clone(),
+        });
     }
     Ok(out)
 }
 
-/// 取一条绑定的展示名。**缺失或空白一律返回 `None`（跳过），不报错。**
-///
-/// 为什么不能 `require`：这个函数扫的是**全表**的启用绑定，任何一条名字为空的
-/// 绑定（历史数据、或建源时漏写了 `field_name` 的 xlsx 绑定）都会让
-/// 「首次派发自动建配置」整批失败。跳过它只是少一个候选列，
-/// 而整批失败是功能不可用——两者代价差一个量级。
+fn select_option_sources(
+    linked: &[&FormWidget],
+    explicit_sources: &BTreeMap<String, String>,
+    sources: &[ApprovalOptionSource],
+) -> Result<BTreeMap<String, String>, ProvisionError> {
+    let mut out = BTreeMap::new();
+    let mut reasons = Vec::new();
+    for widget in linked {
+        if let Some(key) = explicit_sources.get(&widget.id) {
+            if sources.iter().any(|source| source.source_key == *key) {
+                out.insert(widget.id.clone(), key.clone());
+            } else {
+                reasons.push(format!(
+                    "控件「{}」指定的外部选项来源「{key}」不存在或已停用，请重新选择",
+                    widget.name
+                ));
+            }
+            continue;
+        }
+        let candidates: Vec<_> = sources
+            .iter()
+            .filter(|source| source.field_name == widget.name.trim())
+            .collect();
+        match candidates.as_slice() {
+            [source] => {
+                out.insert(widget.id.clone(), source.source_key.clone());
+            }
+            [] => reasons.push(format!(
+                "控件「{}」链接了外部选项数据源，但本系统没有该列的绑定，请手动选择外部选项来源",
+                widget.name
+            )),
+            _ => reasons.push(format!(
+                "控件「{}」在多个外部选项数据源中同名，请手动选择外部选项来源",
+                widget.name
+            )),
+        }
+    }
+    if !reasons.is_empty() {
+        return Err(ProvisionError::Invalid(reasons));
+    }
+    Ok(out)
+}
+
+/// 缺失或空白名称返回 `None`，保留按 source_key 手选的能力，不阻断其他绑定。
 ///
 /// 调用方**必须**为这个 `None` 留一条带 `source_key` 的告警：空名不是常态，
 /// 它是上游漏写的症状。
@@ -622,7 +658,16 @@ pub(crate) async fn resolve_external_options(
         .iter()
         .map(|widget| widget.widget_id.as_str())
         .collect();
-    let sources = load_option_sources(context, &form, Some(&mapped_ids)).await?;
+    let explicit_sources = widgets
+        .iter()
+        .filter_map(|widget| {
+            widget
+                .option_source_key
+                .as_ref()
+                .map(|source| (widget.widget_id.clone(), source.clone()))
+        })
+        .collect();
+    let sources = load_option_sources(context, &form, Some(&mapped_ids), &explicit_sources).await?;
     for definition in form
         .iter()
         .flat_map(|w| w.walk())
@@ -634,7 +679,7 @@ pub(crate) async fn resolve_external_options(
         let Some(cell) = cells.get(&widget.bitable_field) else {
             continue;
         };
-        let source = sources.get(definition.name.trim()).ok_or_else(|| {
+        let source = sources.get(&definition.id).ok_or_else(|| {
             ProvisionError::Invalid(vec![format!(
                 "外部选项控件「{}」缺少数据源绑定",
                 definition.name
@@ -765,12 +810,137 @@ mod tests {
             ]}
         ]))
         .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(linked_widget_names(&form, None), ["公司", "银行"]);
         assert_eq!(
-            linked_widget_names(&form, Some(&["plain", "linked"])),
-            ["公司"]
+            linked_widgets(&form, None)
+                .iter()
+                .map(|widget| widget.id.as_str())
+                .collect::<Vec<_>>(),
+            ["linked", "omitted"]
         );
-        assert!(linked_widget_names(&form, Some(&[])).is_empty());
+        assert_eq!(
+            linked_widgets(&form, Some(&["plain", "linked"]))
+                .iter()
+                .map(|widget| widget.id.as_str())
+                .collect::<Vec<_>>(),
+            ["linked"]
+        );
+        assert!(linked_widgets(&form, Some(&[])).is_empty());
+    }
+
+    #[test]
+    fn manual_external_source_accepts_different_widget_and_source_names() {
+        let maps: Vec<FieldMapping> = serde_json::from_value(serde_json::json!([{
+            "widget_id": "company", "bitable_field": "fldCompany",
+            "option_source_key": "fldq7lcb6y"
+        }]))
+        .unwrap_or_else(|error| panic!("手动来源应能被接收: {error}"));
+        let form = parse_form(&serde_json::json!([{
+            "id": "company", "name": "付款公司名称/Company name", "type": "radioV2",
+            "required": true, "option": [], "externalData": {"externalDataLinkage": true}
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let result = match_fields(
+            &form,
+            &[column("fldCompany", "实际付款公司", &[])],
+            Some(&maps),
+        );
+        let MatchOutcome::Matched(widgets) = result else {
+            panic!("显式映射应允许名称不同: {result:?}");
+        };
+        assert_eq!(widgets[0].bitable_field, "fldCompany");
+        let sources = vec![ApprovalOptionSource {
+            source_key: "fldq7lcb6y".into(),
+            field_name: "付款公司名称/Payer Company name".into(),
+            datasource_title: "财税费用付款".into(),
+        }];
+        let external = select_option_sources(
+            &linked_widgets(&form, None),
+            &BTreeMap::from([("company".into(), "fldq7lcb6y".into())]),
+            &sources,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let result = plan(
+            &ProvisionInput {
+                maps: Some(&maps),
+                ..input("fldP", "fldB")
+            },
+            "t",
+            &form,
+            &[
+                column("fldCompany", "实际付款公司", &[]),
+                column("fldP", "申请人", &[]),
+                column("fldB", "审批编号", &[]),
+            ],
+            &external,
+            "[]",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            result.widgets[0].option_source_key.as_deref(),
+            Some("fldq7lcb6y")
+        );
+        assert!(result.widgets[0].option_map.is_empty());
+    }
+
+    #[test]
+    fn explicit_source_disambiguates_names_without_falling_back() {
+        let form = parse_form(&serde_json::json!([
+            {"id":"a","name":"公司","type":"radioV2","externalData":{"externalDataLinkage":true}},
+            {"id":"detail","type":"fieldList","children":[
+                {"id":"b","name":"公司","type":"radioV2","externalData":{"externalDataLinkage":true}}
+            ]}
+        ])).unwrap_or_else(|error| panic!("{error}"));
+        let sources: Vec<_> = ["first", "second"]
+            .iter()
+            .map(|key| ApprovalOptionSource {
+                source_key: (*key).into(),
+                field_name: "公司".into(),
+                datasource_title: (*key).into(),
+            })
+            .collect();
+        let linked = linked_widgets(&form, None);
+        assert!(select_option_sources(&linked, &BTreeMap::new(), &sources).is_err());
+        let explicit =
+            BTreeMap::from([("a".into(), "first".into()), ("b".into(), "second".into())]);
+        assert_eq!(
+            select_option_sources(&linked, &explicit, &sources)
+                .unwrap_or_else(|error| panic!("{error}")),
+            explicit
+        );
+        assert!(select_option_sources(
+            &linked,
+            &BTreeMap::from([("a".into(), "missing".into())]),
+            &sources[..1]
+        )
+        .is_err());
+        assert_eq!(
+            select_option_sources(&linked, &BTreeMap::new(), &sources[..1])
+                .unwrap_or_else(|error| panic!("{error}")),
+            BTreeMap::from([("a".into(), "first".into()), ("b".into(), "first".into())])
+        );
+    }
+
+    #[test]
+    fn external_source_is_rejected_for_plain_widgets_and_invalid_keys() {
+        let plain = parse_form(&serde_json::json!([{"id":"plain","name":"备注","type":"input"}]))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let linked = parse_form(&serde_json::json!([{"id":"plain","name":"备注","type":"radioV2","externalData":{"externalDataLinkage":true}}]))
+            .unwrap_or_else(|error| panic!("{error}"));
+        for (form, source) in [
+            (&plain, "source".to_string()),
+            (&linked, " ".to_string()),
+            (&linked, "x".repeat(65)),
+        ] {
+            let maps = [FieldMapping {
+                widget_id: "plain".into(),
+                bitable_field: "field".into(),
+                option_source_key: Some(source),
+            }];
+            assert!(matches!(
+                match_fields(form, &[column("field", "备注", &[])], Some(&maps)),
+                MatchOutcome::Invalid(_)
+            ));
+        }
     }
 
     #[test]
@@ -903,12 +1073,7 @@ mod tests {
             children: Vec::new(),
         };
         let mut external = BTreeMap::new();
-        external.insert(
-            "公司名称/Company name".to_string(),
-            [("华为".to_string(), "fldq7lcb6y:abc".to_string())]
-                .into_iter()
-                .collect::<BTreeMap<String, String>>(),
-        );
+        external.insert("w1".to_string(), "fldq7lcb6y".to_string());
         let plan = plan(
             &input("fldP", "fldB"),
             "t",
@@ -925,19 +1090,16 @@ mod tests {
 
         assert_eq!(plan.widgets.len(), 1);
         assert_eq!(
-            plan.widgets[0].option_map.get("华为").map(String::as_str),
-            Some("fldq7lcb6y:abc"),
-            "链接态控件的选项要从绑定补进来"
+            plan.widgets[0].option_source_key.as_deref(),
+            Some("fldq7lcb6y"),
+            "链接态控件应保存稳定来源"
         );
     }
 
     #[test]
     fn detail_prefixed_column_uses_child_name_for_external_binding() {
         let form = parse_form(&serde_json::json!([{"id":"parent","name":"明细","type":"fieldList","children":[{"id":"child","name":"类别","type":"radioV2","required":true,"option":[],"externalData":{"externalDataLinkage":false,"externalUrl":"https://example.test/api/v1/feishu/approval/options/source"}}]}])).unwrap_or_else(|e| panic!("{e}"));
-        let external = BTreeMap::from([(
-            "类别".to_string(),
-            BTreeMap::from([("费用".to_string(), "option".to_string())]),
-        )]);
+        let external = BTreeMap::from([("child".to_string(), "source".to_string())]);
         let result = plan(
             &input("applicant", "backfill"),
             "test",
@@ -953,8 +1115,8 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(result.widgets[0].bitable_field, "field");
         assert_eq!(
-            result.widgets[0].option_map.get("费用").map(String::as_str),
-            Some("option")
+            result.widgets[0].option_source_key.as_deref(),
+            Some("source")
         );
     }
 

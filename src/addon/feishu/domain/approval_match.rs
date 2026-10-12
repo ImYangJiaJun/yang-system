@@ -462,6 +462,9 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
 pub(crate) struct FieldMapping {
     pub(crate) widget_id: String,
     pub(crate) bitable_field: String,
+    /// 外部选项来源的稳定标识；省略时按控件名称自动识别。
+    #[serde(default)]
+    pub(crate) option_source_key: Option<String>,
 }
 
 pub(crate) fn mapping_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)> {
@@ -511,6 +514,23 @@ pub(crate) fn match_fields(
     let flat = mapping_widgets(form);
     let mut selected = BTreeMap::new();
     for map in maps.into_iter().flatten() {
+        if let Some(source) = &map.option_source_key {
+            if source.trim().is_empty() || source.len() > 64 {
+                errors.push(MatchError::InvalidMapping(format!(
+                    "控件「{}」的外部选项来源必须是 1 至 64 字符的 source_key",
+                    map.widget_id
+                )));
+            }
+            if !flat
+                .iter()
+                .any(|(widget, _)| widget.id == map.widget_id && widget.links_to_our_options())
+            {
+                errors.push(MatchError::InvalidMapping(format!(
+                    "控件「{}」没有使用本系统外部选项，不能指定选项来源",
+                    map.widget_id
+                )));
+            }
+        }
         if !flat.iter().any(|(widget, _)| widget.id == map.widget_id) {
             errors.push(MatchError::InvalidMapping(format!(
                 "审批控件「{}」不存在",
@@ -651,6 +671,7 @@ pub(crate) fn match_fields(
             bitable_field: column.field_id.clone(),
             converter: converter_for(&widget.r#type),
             option_map,
+            option_source_key: None,
             currency: None,
         });
     }
@@ -862,6 +883,7 @@ mod tests {
         FieldMapping {
             widget_id: widget.to_string(),
             bitable_field: field.to_string(),
+            option_source_key: None,
         }
     }
 

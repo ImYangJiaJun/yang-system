@@ -42,6 +42,8 @@ pub(crate) struct WidgetMap {
     pub(crate) converter: Converter,
     /// 单选/多选的选项映射：多维表格文案 → 审批控件 option value。
     pub(crate) option_map: BTreeMap<String, String>,
+    /// 外部选项来源；旧配置为空时保留按名称识别。
+    pub(crate) option_source_key: Option<String>,
     /// 金额控件的币种（`amount` 专用）。
     pub(crate) currency: Option<String>,
 }
@@ -835,6 +837,7 @@ mod tests {
             // 专门测「不匹配」的用例再显式覆盖它。
             converter: expected_converter(kind),
             option_map: BTreeMap::new(),
+            option_source_key: None,
             currency: None,
         }
     }

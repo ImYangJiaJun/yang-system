@@ -214,6 +214,7 @@ mod tests {
             required: true,
             converter: Converter::Direct,
             option_map: BTreeMap::new(),
+            option_source_key: None,
             currency: None,
         };
         let valid = json!({"file_token":"Token1", "name":"凭证.pdf", "size":1});

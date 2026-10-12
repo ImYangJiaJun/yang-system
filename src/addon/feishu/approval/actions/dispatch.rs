@@ -1309,6 +1309,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_manual_source_is_rejected_before_loading_bindings() -> anyhow::Result<()> {
+        let form = json!([{"id":"company","name":"公司名称","type":"radioV2","externalData":{"externalDataLinkage":true}}]);
+        let maps: Vec<crate::addon::feishu::domain::approval_match::FieldMapping> =
+            serde_json::from_value(json!([
+                {"widget_id":"company","bitable_field":"fldCompany","option_source_key":" "}
+            ]))?;
+        let transport = ReplayTransport::new(vec![
+            (200, e2e_fields_body()),
+            (200, e2e_definition_body(&form)),
+        ]);
+        let result = build_plan(
+            &transport,
+            &NoSleep,
+            &e2e_tokens(),
+            &e2e_context(),
+            &ProvisionInput {
+                base_token: E2E_BASE_TOKEN,
+                table_id: E2E_TABLE_ID,
+                approval_code: E2E_APPROVAL_CODE,
+                applicant_field: "fldApplicant",
+                backfill_field: "fldSerial",
+                base_timezone: "Asia/Shanghai",
+                maps: Some(&maps),
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ProvisionError::Invalid(_))),
+            "{result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unnamed_linked_widget_returns_invalid_without_querying_database() {
         let snapshot =
             json!([{"id":"w","type":"radioV2","externalData":{"externalDataLinkage":true}}])
@@ -1320,6 +1354,7 @@ mod tests {
             required: false,
             converter: crate::addon::feishu::domain::approval_convert::Converter::Option,
             option_map: Default::default(),
+            option_source_key: None,
             currency: None,
         }];
         let error = crate::addon::feishu::domain::approval_provision::resolve_external_options(
@@ -1362,19 +1397,30 @@ mod tests {
             Arc::new(crate::config::SecuritySettings::default()),
         )
         .await?;
-        let pool = Arc::new(
-            sqlx::MySqlPool::connect(&std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?).await?,
-        );
+        let database =
+            yang_db::Database::connect(&std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?).await?;
+        let pool = Arc::new(database.pool().clone());
         let context = e2e_context_with_pool(pool.clone());
         let source = format!("att_{}", uuid::Uuid::new_v4().simple());
         let name = format!("附件验证选项_{source}");
+        let mut transaction = database.transaction().await?;
+        let (_, datasource_id) = context
+            .datasources()
+            .query()
+            .insert_returning_id_in_tx(
+                &mut transaction,
+                yang_base::table::Record::new().set("title", name.clone()),
+            )
+            .await?;
+        transaction.commit().await?;
         let binding = yang_base::table::Record::new()
-            .set("datasource_id", 1_i64)
+            .set("datasource_id", datasource_id as i64)
             .set("field_id", "fldRegression")
             .set("field_name", name.clone())
             .set("source_key", source.clone())
             .set("token_hash", source.clone());
         context.datasource_fields().query().insert(binding).await?;
+        let mut saved_config_id = None;
         let outcome: anyhow::Result<()> = async {
             for (suffix, row_source, label, enabled) in [
                 ("good", source.clone(), "正确", true),
@@ -1388,21 +1434,73 @@ mod tests {
                 context.options().query().insert(yang_base::table::Record::new().set("option_id", format!("{source}_{suffix}")).set("source_key", row_source).set("label", label).set("enabled", enabled)).await?;
             }
             let snapshot = json!([{"id":"detail","type":"fieldList","children":[{"id":"linked","name":name,"type":"radioV2","externalData":{"externalDataLinkage":true}}]}]).to_string();
-            let mut widgets = vec![WidgetMap { widget_id: "linked".into(), widget_type: "radioV2".into(), bitable_field: "fldRegression".into(), required: true, converter: Converter::Option, option_map: Default::default(), currency: None }];
+            let mut widgets = vec![WidgetMap { widget_id: "linked".into(), widget_type: "radioV2".into(), bitable_field: "fldRegression".into(), required: true, converter: Converter::Option, option_map: Default::default(), option_source_key: None, currency: None }];
             let mut cells = serde_json::Map::from_iter([("fldRegression".into(), json!("正确")), ("fldApplicant".into(), json!([{"id":E2E_APPLICANT_OPEN_ID}]))]);
             resolve_external_options(&context, &snapshot, &mut widgets, &cells).await?;
             assert_eq!(widgets[0].option_map, std::collections::BTreeMap::from([("正确".into(), format!("{source}_good"))]));
+
+            // 三处名称都不同，手选来源必须贯穿建计划、真实落库与派发读取。
+            let form = json!([{"id":"detail","name":"明细","type":"fieldList","children":[{"id":"linked","name":"付款公司名称/Company name","type":"radioV2","required":true,"externalData":{"externalDataLinkage":true}}]}]);
+            let maps = serde_json::from_value::<Vec<crate::addon::feishu::domain::approval_match::FieldMapping>>(json!([
+                {"widget_id":"linked","bitable_field":"fldCompany","option_source_key":source}
+            ]))?;
+            let transport = ReplayTransport::new(vec![(200, e2e_fields_body()), (200, e2e_definition_body(&form))]);
+            let tokens = e2e_tokens();
+            let plan = build_plan(&transport, &NoSleep, &tokens, &context, &ProvisionInput {
+                base_token: &source, table_id: E2E_TABLE_ID, approval_code: E2E_APPROVAL_CODE,
+                applicant_field: "fldApplicant", backfill_field: "fldSerial", base_timezone: "Asia/Shanghai", maps: Some(&maps),
+            }).await?;
+            let mut transaction = database.transaction().await?;
+            let config_id = insert_plan(&context, &mut transaction, &plan).await?;
+            transaction.commit().await?;
+            saved_config_id = Some(config_id);
+            let rows = context.approval_field_maps().query().where_eq("config_id", json!(config_id))?.all().await?;
+            let rows: Vec<_> = rows.into_iter().map(yang_base::table::Record::into_map).collect();
+            widgets = widget_maps_from_rows(&rows, |_| None).ok_or_else(|| anyhow::anyhow!("保存的映射无法恢复"))?;
+            assert_eq!(widgets[0].option_source_key.as_deref(), Some(source.as_str()));
+            context.datasource_fields().query().where_eq("source_key", json!(source))?
+                .update(yang_base::table::Record::new().set("field_name", "")).await?;
+            cells.insert("fldCompany".into(), json!("正确"));
+            resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells).await?;
+            assert_eq!(widgets[0].option_map.get("正确"), Some(&format!("{source}_good")));
+            let mut unnamed = form.clone();
+            unnamed[0]["children"][0]["name"] = json!("");
+            resolve_external_options(&context, &unnamed.to_string(), &mut widgets, &cells).await?;
             let coordinates = e2e_coordinates();
-            for label in ["重名", "不存在"] {
-                cells.insert("fldRegression".into(), json!(label));
-                let transport = ReplayTransport::new(vec![]);
+            let fields: Value = serde_json::from_str(&e2e_fields_body())?;
+            let fields: Vec<bitable::FieldItem> =
+                serde_json::from_value(fields["data"]["items"].clone())?;
+            for label in ["正确", "重名", "不存在"] {
+                cells.insert("fldCompany".into(), json!(label));
+                let transport = ReplayTransport::new(if label == "正确" { vec![
+                    (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL"}))),
+                    (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL","serial_number":"MANUAL-001","status":"PENDING"}))),
+                    (200, e2e_ok_body(json!({}))),
+                ] } else { vec![] });
                 let tokens = e2e_tokens();
-                let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &[] };
-                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", backfill_field_name: "审批编号", approval_code: E2E_APPROVAL_CODE, form_snapshot: snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
+                let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &fields };
+                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", backfill_field_name: "审批编号", approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
                 let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
-                assert!(matches!(result, DispatchResult::Waiting { .. }), "{result:?}");
-                assert!(transport.seen().is_empty(), "等待态不得创建或回填");
+                if label == "正确" {
+                    assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into() });
+                    let create = transport.took("Post", &crate::addon::feishu::domain::approval::create_instance_url());
+                    let body = create.body.ok_or_else(|| anyhow::anyhow!("缺少提单请求体"))?;
+                    let sent: Value = serde_json::from_str(body["form"].as_str().ok_or_else(|| anyhow::anyhow!("缺少表单"))?)?;
+                    assert_eq!(sent[0]["value"][0][0]["value"], json!(format!("{source}_good")));
+                } else {
+                    assert!(matches!(result, DispatchResult::Waiting { .. }), "{result:?}");
+                    assert!(transport.seen().is_empty(), "等待态不得创建或回填");
+                }
             }
+            cells.insert("fldCompany".into(), json!("正确"));
+            context.datasource_fields().query().where_eq("source_key", json!(source))?
+                .update(yang_base::table::Record::new().set("enabled", false)).await?;
+            assert!(resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells).await.is_err());
+            context.datasource_fields().query().where_eq("source_key", json!(source))?
+                .update(yang_base::table::Record::new().set("enabled", true)).await?;
+            context.datasources().query().where_eq("id", json!(datasource_id))?
+                .update(yang_base::table::Record::new().set("status", "disabled")).await?;
+            assert!(resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells).await.is_err());
             Ok(())
         }.await;
         // tenant-boundary: raw-sql attachment-option-regression-cleanup
@@ -1416,6 +1514,23 @@ mod tests {
             .bind(&source)
             .execute(pool.as_ref())
             .await?;
+        // tenant-boundary: raw-sql manual-option-datasource-cleanup
+        sqlx::query("DELETE FROM feishu_datasource WHERE id = ?")
+            .bind(datasource_id)
+            .execute(pool.as_ref())
+            .await?;
+        if let Some(config_id) = saved_config_id {
+            // tenant-boundary: raw-sql manual-option-maps-cleanup
+            sqlx::query("DELETE FROM feishu_approval_field_map WHERE config_id = ?")
+                .bind(config_id)
+                .execute(pool.as_ref())
+                .await?;
+            // tenant-boundary: raw-sql manual-option-config-cleanup
+            sqlx::query("DELETE FROM feishu_approval_config WHERE id = ?")
+                .bind(config_id)
+                .execute(pool.as_ref())
+                .await?;
+        }
         outcome
     }
 

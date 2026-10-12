@@ -2487,6 +2487,14 @@
                       "bitable_field": {
                         "type": "string"
                       },
+                      "option_source_key": {
+                        "default": null,
+                        "description": "外部选项来源的稳定标识；省略时按控件名称自动识别。",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
                       "widget_id": {
                         "type": "string"
                       }
@@ -3371,6 +3379,14 @@
                     "properties": {
                       "bitable_field": {
                         "type": "string"
+                      },
+                      "option_source_key": {
+                        "default": null,
+                        "description": "外部选项来源的稳定标识；省略时按控件名称自动识别。",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       },
                       "widget_id": {
                         "type": "string"

@@ -37,6 +37,7 @@ import { withStableOrder } from "./list-query";
 import type {
   ApprovalConfigItem,
   ApprovalConfigMap,
+  ApprovalOptionSource,
   ApprovalRequestItem,
   ApprovalRequestsQuery,
   ApprovalTaskItem,
@@ -622,10 +623,8 @@ export async function listOptions(
 /// 一条字段绑定在**写**方向的形状（后端 `FieldBindingInput`）。
 export type FieldBindingInput = {
   fieldId: string;
-  /// 列名。**审批外部选项装配按它配对**——名字为空的绑定会被
-  /// `approval_provision` 跳过（只 warn），于是某个控件静默少一个候选列。
-  /// 拿不到时为 `null`（xlsx 导入的绑定与多维表格的字段都有名字，但投影是
-  /// `Option`，缺了不能编）。
+  /// 列名用于展示与同名自动匹配；为空时仍可按 source_key 手选来源。
+  /// 拿不到时为 `null`。
   fieldName: string | null;
   sourceKey: string;
   parentFieldId: string | null;
@@ -675,10 +674,8 @@ export async function updateDatasourceTable(
         source_key: field.sourceKey,
         parent_field_id: field.parentFieldId,
       };
-      // **新增**绑定时后端才写这个列（已有绑定刻意不动它——列名与 `source_key`、
-      // 凭据同属身份信息，改了要重走配置），而留空会让审批装配跳过这条绑定。
-      // 与建源那条路同一个理由（见 `createDatasourceTable`）。后端是「非空才写」，
-      // 所以拿不到名字时**整个键不出现**（空串与缺键同义，但缺键更清楚）。
+      // 新增绑定记录展示列名；缺失时只能手选 source_key，无法同名预选。
+      // 后端只写非空值，拿不到名字时省略整个键。
       const name = field.fieldName?.trim() ?? "";
       if (name !== "") entry.field_name = name;
       return entry;
@@ -858,12 +855,9 @@ export async function createDatasourceTable(
     ingest_mode: input.ingestMode ?? "pull",
     fields: input.fields.map((field) => ({
       field_id: field.fieldId,
-      // xlsx 绑定必须带列名：列名就是这条绑定的身份（`field_id` = `field_name` = 列名），
-      // 而绑定行上的 `field_name` 是**展示名**——审批外部选项装配按它给出候选列。
-      // 留空（或只有空白）时服务端**宽容跳过**这条绑定（`binding_display_name` 返回
-      // `None` + 告警，不报错），代价是那个控件**少一个候选列**；范围不是全表，
-      // 也不会让整批装配失败。（这条注释曾经说反了：Task 8 之前确实是 `require`。）
-      // 多维表格那条路给了也无害——`pull` 每轮会按解析结果回写覆盖它。
+      // xlsx 用列名作为 field_id；field_name 供展示与同名预选。
+      // 空名仍可按 source_key 手选，并由服务端记录告警。
+      // pull 每轮按解析结果回写列名。
       field_name: field.fieldName,
       source_key: field.sourceKey,
       // 显式 `null`（后端 `#[serde(default)] Option<String>`，两者同义，但写出来更清楚）
@@ -1728,6 +1722,7 @@ function parseApprovalConfigMap(
     bitableFieldName: asNullableString(raw.bitable_field_name),
     required: raw.required === true,
     converter: asString(raw.converter, "direct"),
+    optionSourceKey: asNullableString(raw.option_source_key),
   };
 }
 
@@ -1772,6 +1767,7 @@ function parseApprovalWidget(
         qualifiedName: asString(raw.qualified_name, asString(raw.name)),
         type: asString(raw.type),
         required: raw.required === true,
+        usesExternalOptions: raw.uses_external_options === true,
       };
 }
 
@@ -1840,7 +1836,11 @@ export type CreateApprovalConfigInput = {
   applicantField: string;
   backfillField: string;
   baseTimezone: string;
-  maps?: Array<{ widgetId: string; bitableField: string }>;
+  maps?: Array<{
+    widgetId: string;
+    bitableField: string;
+    optionSourceKey?: string;
+  }>;
 };
 
 export async function createApprovalConfig(
@@ -1864,6 +1864,9 @@ export async function createApprovalConfig(
             maps: input.maps.map((map) => ({
               widget_id: map.widgetId,
               bitable_field: map.bitableField,
+              ...(map.optionSourceKey === undefined
+                ? {}
+                : { option_source_key: map.optionSourceKey }),
             })),
           }),
     },
@@ -1896,6 +1899,9 @@ export async function updateApprovalConfig(
     body.maps = patch.maps.map((map) => ({
       widget_id: map.widgetId,
       bitable_field: map.bitableField,
+      ...(map.optionSourceKey === undefined
+        ? {}
+        : { option_source_key: map.optionSourceKey }),
     }));
   await invokeFeishuAction(
     deps,
@@ -1938,7 +1944,24 @@ export async function listApprovalWidgets(
     { approval_code: approvalCode.trim() },
     signal,
   );
-  return listOf(result.data, "widgets", parseApprovalWidget);
+  const sources = listOf<ApprovalOptionSource>(
+    result.data,
+    "option_sources",
+    (raw) => {
+      const sourceKey = asString(raw.source_key);
+      return sourceKey === ""
+        ? null
+        : {
+            sourceKey,
+            fieldName: asString(raw.field_name),
+            datasourceTitle: asString(raw.datasource_title),
+          };
+    },
+  );
+  return listOf(result.data, "widgets", parseApprovalWidget).map((widget) => ({
+    ...widget,
+    optionSources: widget.usesExternalOptions ? sources : undefined,
+  }));
 }
 
 /// 派发记录（`feishu.approval.list_requests`）。请求体/返回体原文随行返回，本地展开。

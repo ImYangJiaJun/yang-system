@@ -1417,6 +1417,11 @@ export interface components {
         /** @description 显式映射省略时保留旧的按名匹配；传入时以控件和列 ID 为准。 */
         FieldMapping: {
             bitable_field: string;
+            /**
+             * @description 外部选项来源的稳定标识；省略时按控件名称自动识别。
+             * @default null
+             */
+            option_source_key: string | null;
             widget_id: string;
         };
         /** @description 排序条目（JSON 形态：`{"field": "id", "direction": "desc"}`）。 */

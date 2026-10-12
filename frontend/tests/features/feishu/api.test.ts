@@ -32,6 +32,10 @@ import {
   revealFieldToken,
   rotateFieldToken,
   updateDatasourceTable,
+  createApprovalConfig,
+  updateApprovalConfig,
+  listApprovalWidgets,
+  listApprovalConfigs,
   pullNow,
   type FeishuInvokeDeps,
 } from "@/features/feishu/api";
@@ -212,6 +216,117 @@ function stubFetch(payload: unknown, status = 200) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("审批配置外部选项绑定", () => {
+  const approvalDeps: FeishuInvokeDeps = {
+    session: deps.session,
+    catalog: catalogWith(
+      ["create_config", "update_config", "list_widgets", "list_configs"].map(
+        (action) => ({
+          ...DATASOURCE_LIST_ACTION,
+          operation_id: `feishu.approval.${action}`,
+          path: `/api/v1/feishu/approval/${action}`,
+        }),
+      ),
+    ),
+  };
+
+  it("创建和编辑都发送手选来源标识", async () => {
+    const calls = stubFetch({ code: 0, message: "ok", data: { config_id: 7 } });
+    const maps = [
+      {
+        widgetId: "company",
+        bitableField: "fldCompany",
+        optionSourceKey: "fldq7lcb6y",
+      },
+    ];
+    await createApprovalConfig(
+      {
+        baseToken: "app",
+        tableId: "table",
+        approvalCode: "code",
+        applicantField: "person",
+        backfillField: "serial",
+        baseTimezone: "Asia/Shanghai",
+        maps,
+      },
+      approvalDeps,
+    );
+    await updateApprovalConfig(7, { maps }, approvalDeps);
+    for (const call of calls)
+      expect(call.body).toMatchObject({
+        maps: [
+          {
+            widget_id: "company",
+            bitable_field: "fldCompany",
+            option_source_key: "fldq7lcb6y",
+          },
+        ],
+      });
+  });
+
+  it("预览提供来源候选，列表读取保存的绑定", async () => {
+    stubFetch({
+      code: 0,
+      message: "ok",
+      data: {
+        widgets: [
+          {
+            id: "company",
+            name: "付款公司名称/Company name",
+            type: "radioV2",
+            required: true,
+            uses_external_options: true,
+          },
+        ],
+        option_sources: [
+          {
+            source_key: "fldq7lcb6y",
+            field_name: "付款公司名称/Payer Company name",
+            datasource_title: "财税费用付款",
+          },
+        ],
+      },
+    });
+    const widgets = await listApprovalWidgets("code", approvalDeps);
+    expect(widgets[0]).toMatchObject({
+      usesExternalOptions: true,
+      optionSources: [
+        {
+          sourceKey: "fldq7lcb6y",
+          fieldName: "付款公司名称/Payer Company name",
+          datasourceTitle: "财税费用付款",
+        },
+      ],
+    });
+    stubFetch({
+      code: 0,
+      message: "ok",
+      data: {
+        items: [
+          {
+            id: 7,
+            maps: [
+              {
+                widget_id: "company",
+                bitable_field: "fldCompany",
+                option_source_key: "fldq7lcb6y",
+              },
+            ],
+          },
+        ],
+        page: 1,
+        page_size: 10,
+        total: 1,
+      },
+    });
+    const configs = await listApprovalConfigs(
+      { page: 1, pageSize: 10, search: "" },
+      approvalDeps,
+    );
+    expect(configs.items[0].maps[0].optionSourceKey).toBe("fldq7lcb6y");
+  });
 });
 
 describe("query key 工厂", () => {
