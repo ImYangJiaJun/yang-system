@@ -801,6 +801,36 @@ describe("建配置向导 · 第四步（提交）", () => {
     await waitFor(() => expect(onSubmitted).toHaveBeenCalled());
   });
 
+  it("填了可选回填扩展列才随 create_config 一起发送", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    await user.click(
+      await screen.findByRole("combobox", { name: "申请人员字段" }),
+    );
+    await user.click(await screen.findByRole("option", { name: /申请人/ }));
+    await user.click(screen.getByRole("combobox", { name: "回填字段" }));
+    await user.click(await screen.findByRole("option", { name: /审批编号/ }));
+    // 只填一个可选扩展列，其余留空
+    await user.click(screen.getByRole("combobox", { name: "申请状态回填列" }));
+    await user.click(await screen.findByRole("option", { name: /费用金额/ }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(await screen.findByRole("button", { name: "创建配置" }));
+
+    await waitFor(() =>
+      expect(client.createConfig).toHaveBeenCalledWith(
+        expect.objectContaining({ statusField: "fldAmount" }),
+      ),
+    );
+    const arg = vi.mocked(client.createConfig).mock.calls[0]?.[0];
+    expect(arg).not.toHaveProperty("flowField");
+  });
+
   it("提交失败：服务端原因展示在最后一步，向导不关", async () => {
     const user = userEvent.setup();
     const onCancel = vi.fn();

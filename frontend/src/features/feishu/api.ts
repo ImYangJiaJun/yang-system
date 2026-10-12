@@ -1773,6 +1773,12 @@ function parseApprovalConfigItem(
     approvalCode: asString(raw.approval_code),
     applicantField: asString(raw.applicant_field),
     backfillField: asString(raw.backfill_field),
+    statusField: asNullableString(raw.status_field),
+    flowField: asNullableString(raw.flow_field),
+    startTimeField: asNullableString(raw.start_time_field),
+    endTimeField: asNullableString(raw.end_time_field),
+    departmentField: asNullableString(raw.department_field),
+    handlerField: asNullableString(raw.handler_field),
     baseTimezone: asString(raw.base_timezone),
     enabled: raw.enabled === true,
     formSnapshotAt: asNullableNumber(raw.form_snapshot_at),
@@ -1861,6 +1867,13 @@ export type CreateApprovalConfigInput = {
   approvalCode: string;
   applicantField: string;
   backfillField: string;
+  /// 六个可选回填扩展列（field_id 或列名）；留空 = 不回填该列。
+  statusField?: string;
+  flowField?: string;
+  startTimeField?: string;
+  endTimeField?: string;
+  departmentField?: string;
+  handlerField?: string;
   baseTimezone: string;
   maps?: Array<{
     widgetId: string;
@@ -1868,6 +1881,32 @@ export type CreateApprovalConfigInput = {
     optionSourceKey?: string;
   }>;
 };
+
+/// 六个可选回填扩展列的线上键名（`feishu_approval_config` 同名列）。
+/// 空串 / 未给一律不发（与后端「空串 = 不回填」口径一致）。
+function extendedBackfillFields(input: {
+  statusField?: string;
+  flowField?: string;
+  startTimeField?: string;
+  endTimeField?: string;
+  departmentField?: string;
+  handlerField?: string;
+}): Record<string, string> {
+  const wire: Record<string, string> = {};
+  const pairs: Array<[string, string | undefined]> = [
+    ["status_field", input.statusField],
+    ["flow_field", input.flowField],
+    ["start_time_field", input.startTimeField],
+    ["end_time_field", input.endTimeField],
+    ["department_field", input.departmentField],
+    ["handler_field", input.handlerField],
+  ];
+  for (const [key, value] of pairs) {
+    const trimmed = value?.trim();
+    if (trimmed) wire[key] = trimmed;
+  }
+  return wire;
+}
 
 export async function createApprovalConfig(
   input: CreateApprovalConfigInput,
@@ -1884,6 +1923,7 @@ export async function createApprovalConfig(
       applicant_field: input.applicantField.trim(),
       backfill_field: input.backfillField.trim(),
       base_timezone: input.baseTimezone.trim(),
+      ...extendedBackfillFields(input),
       ...(input.maps === undefined
         ? {}
         : {
@@ -1908,6 +1948,13 @@ export type UpdateApprovalConfigPatch = {
   title?: string;
   enabled?: boolean;
   baseTimezone?: string;
+  /// 六个可选回填扩展列；未给 = 不改（空串同样不改）。
+  statusField?: string;
+  flowField?: string;
+  startTimeField?: string;
+  endTimeField?: string;
+  departmentField?: string;
+  handlerField?: string;
   maps?: CreateApprovalConfigInput["maps"];
 };
 
@@ -1921,6 +1968,7 @@ export async function updateApprovalConfig(
   if (patch.title !== undefined) body.title = patch.title;
   if (patch.enabled !== undefined) body.enabled = patch.enabled;
   if (patch.baseTimezone !== undefined) body.base_timezone = patch.baseTimezone;
+  Object.assign(body, extendedBackfillFields(patch));
   if (patch.maps !== undefined)
     body.maps = patch.maps.map((map) => ({
       widget_id: map.widgetId,

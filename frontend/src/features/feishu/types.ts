@@ -1036,6 +1036,14 @@ export type ApprovalConfigItem = {
   approvalCode: string;
   applicantField: string;
   backfillField: string;
+  /// 六个可选回填扩展列（设计 §5.1）：存目标列 `field_id`，空 = 不回填该列。
+  /// 后端 `list_configs` 尚未投影这六列时为 null，等其落地自然填充。
+  statusField?: string | null;
+  flowField?: string | null;
+  startTimeField?: string | null;
+  endTimeField?: string | null;
+  departmentField?: string | null;
+  handlerField?: string | null;
   baseTimezone: string;
   enabled: boolean;
   /// 控件结构快照时间（unix 秒）；建配置时快照拉取失败则为 null。

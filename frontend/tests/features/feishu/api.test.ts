@@ -2014,3 +2014,62 @@ describe("precheckApprovalOptions", () => {
     expect(result.status).toBe("ok");
   });
 });
+
+describe("审批配置可选回填扩展列（设计 §5.1）", () => {
+  const approvalDeps: FeishuInvokeDeps = {
+    session: deps.session,
+    catalog: catalogWith(
+      ["create_config", "update_config"].map((action) => ({
+        ...DATASOURCE_LIST_ACTION,
+        operation_id: `feishu.approval.${action}`,
+        path: `/api/v1/feishu/approval/${action}`,
+      })),
+    ),
+  };
+
+  it("创建：有值才带、空串归 None", async () => {
+    const calls = stubFetch({ code: 0, message: "ok", data: { config_id: 7 } });
+    await createApprovalConfig(
+      {
+        baseToken: "app",
+        tableId: "table",
+        approvalCode: "code",
+        applicantField: "person",
+        backfillField: "serial",
+        baseTimezone: "Asia/Shanghai",
+        statusField: "fldStatus",
+        handlerField: "fldHandler",
+        departmentField: "   ", // trim 后为空 → 不发送
+      },
+      approvalDeps,
+    );
+    const body = calls[0]?.body as Record<string, unknown>;
+    expect(body).toMatchObject({
+      status_field: "fldStatus",
+      handler_field: "fldHandler",
+    });
+    for (const key of [
+      "flow_field",
+      "start_time_field",
+      "end_time_field",
+      "department_field",
+    ])
+      expect(body).not.toHaveProperty(key);
+  });
+
+  it("更新：补丁同样只在有值时带扩展列", async () => {
+    const calls = stubFetch({ code: 0, message: "ok", data: null });
+    await updateApprovalConfig(
+      7,
+      { enabled: true, endTimeField: "fldEnd" },
+      approvalDeps,
+    );
+    const body = calls[0]?.body as Record<string, unknown>;
+    expect(body).toMatchObject({
+      config_id: 7,
+      enabled: true,
+      end_time_field: "fldEnd",
+    });
+    expect(body).not.toHaveProperty("status_field");
+  });
+});
