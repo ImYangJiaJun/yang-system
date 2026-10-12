@@ -1,21 +1,7 @@
-/**
- * 审批派发配置页（路由 `/feishu/approval/configs`，路由级 lazy → 必须 default 导出）。
- *
- * 页面接线四件事：
- * 1. **列表**：配置名 / 坐标 / 审批 Code / 时区 / 启用 / 快照时间 / 更新时间；
- *    映射明细供只读身份查看，编辑 / 启停 / 删除需 `feishu.approval.write`；
- * 2. **启停**：`update_config` 的 `enabled` 翻转，可逆操作不弹确认；
- * 3. **删除**：ConfirmDialog 形态二次确认，成功 toast（连同被清掉的 pending 任务数）；
- * 4. **新建**：`ApprovalConfigDialog` 四步向导（坐标 → Code+控件预览 → 列+时区 → 提交）。
- *
- * 提交后一律**回读列表**（`update` / `delete` 的回执不包含最新记录，回读是必需的）。
- * 空态判定同数据源页：「total 为 0」才有资格说没有配置，当前页为空是页码越界。
- */
-
-import { useEffect, useMemo, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
+import { Plus } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import {
@@ -35,7 +21,6 @@ import {
   TableRow,
 } from "@/shared/ui/table";
 import { useToast } from "@/shared/lib/toast";
-
 import {
   feishuQueryKeys,
   useApprovalActions,
@@ -43,408 +28,478 @@ import {
   useApprovalWizardClient,
 } from "../api";
 import { ApprovalConfigDialog } from "../components/ApprovalConfigDialog";
-import { ApprovalConfigRowActions } from "../components/ApprovalConfigRowActions";
+import { ApprovalConfigDetails } from "../components/ApprovalConfigDetails";
 import { ApprovalWorkflowGuide } from "../components/ApprovalWorkflowGuide";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
-import { useDebouncedValue } from "../list-query";
-import type { ApprovalConfigItem } from "../types";
-import { formatUnixSeconds } from "../types";
+import { PAGE_SIZE_OPTIONS, useDebouncedValue } from "../list-query";
+import type { ApprovalConfigItem, ApprovalConfigQuery } from "../types";
 
-/// 删除确认的目标：主键 + 展示名（正文之外那行指认对象）。
-type ConfirmTarget = {
-  configId: number;
-  title: string;
-};
-
-function messageOf(cause: unknown): string {
+function messageOf(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/// 映射明细展开行：widget_id / 类型 / 列名 / 必填 / 转换器。
-function MapDetailRow({ item }: { item: ApprovalConfigItem }) {
-  return (
-    <TableRow data-testid={`maps-of-${item.id}`}>
-      <TableCell colSpan={8} className="bg-muted/30 py-2">
-        {item.maps.length === 0 ? (
-          <p className="px-4 text-xs text-muted-foreground">
-            这个配置还没有字段映射，可通过编辑映射补齐。
-          </p>
-        ) : (
-          <div className="px-4">
-            <p className="pb-1 text-xs font-medium text-muted-foreground">
-              字段映射（{item.maps.length} 条）
-            </p>
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-muted-foreground">
-                  <th className="pb-1 pr-4 font-medium">控件</th>
-                  <th className="pb-1 pr-4 font-medium">控件类型</th>
-                  <th className="pb-1 pr-4 font-medium">多维表格列</th>
-                  <th className="pb-1 pr-4 font-medium">必填</th>
-                  <th className="pb-1 font-medium">转换器</th>
-                </tr>
-              </thead>
-              <tbody>
-                {item.maps.map((map) => (
-                  <tr key={map.widgetId} className="border-t border-border/60">
-                    <td className="py-1 pr-4">
-                      {map.widgetName ?? "控件名称未缓存"}
-                      <span className="block font-mono text-muted-foreground">
-                        {map.widgetId}
-                      </span>
-                    </td>
-                    <td className="py-1 pr-4">{map.widgetType}</td>
-                    <td className="py-1 pr-4">
-                      <span>{map.bitableFieldName ?? "列名未缓存"}</span>
-                      <span className="block font-mono text-muted-foreground">
-                        {map.bitableField}
-                      </span>
-                    </td>
-                    <td className="py-1 pr-4">
-                      {map.required ? "必填" : "可选"}
-                    </td>
-                    <td className="py-1">{map.converter}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </TableCell>
-    </TableRow>
-  );
-}
-
 export default function ApprovalConfigsPage() {
+  const [params, setParams] = useSearchParams();
   const queryClient = useQueryClient();
   const toast = useToast();
   const actions = useApprovalActions();
   const wizardClient = useApprovalWizardClient();
-
-  const [search, setSearch] = useState("");
+  const container = useRef<HTMLDivElement>(null);
+  const listScroll = useRef(0);
+  const restoreScroll = useRef(false);
+  const rawId = params.get("config");
+  const configId = rawId === null ? undefined : Number(rawId);
+  const validId =
+    configId !== undefined && Number.isSafeInteger(configId) && configId > 0;
+  const pageValue = Number(params.get("page") ?? 1);
+  const page = Number.isSafeInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const sizeValue = Number(params.get("pageSize") ?? 10);
+  const pageSize = PAGE_SIZE_OPTIONS.some((size) => size === sizeValue)
+    ? sizeValue
+    : 10;
+  const search = params.get("search") ?? "";
   const debouncedSearch = useDebouncedValue(search, 300);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [mutatingId, setMutatingId] = useState<number | null>(null);
-  const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(
-    null,
-  );
-  const [deletePending, setDeletePending] = useState(false);
+  const status: ApprovalConfigQuery["status"] =
+    params.get("status") === "enabled"
+      ? "enabled"
+      : params.get("status") === "disabled"
+        ? "disabled"
+        : "all";
   const [wizardOpen, setWizardOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<
-    ApprovalConfigItem | undefined
-  >();
+  const [editTarget, setEditTarget] = useState<ApprovalConfigItem>();
+  const [confirm, setConfirm] = useState<{
+    item: ApprovalConfigItem;
+    kind: "delete" | "toggle";
+  } | null>(null);
+  const [pending, setPending] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const listQuery = useApprovalConfigList({
-    page,
-    pageSize,
-    search: debouncedSearch,
-  });
-
-  const items = useMemo(() => listQuery.data?.items ?? [], [listQuery.data]);
+  const listQuery = useApprovalConfigList(
+    { page, pageSize, search: debouncedSearch, status },
+    { enabled: rawId === null },
+  );
+  const detailQuery = useApprovalConfigList(
+    { page: 1, pageSize: 1, search: "", configId: validId ? configId : 0 },
+    { enabled: validId },
+  );
+  const detail = detailQuery.data?.items.find((item) => item.id === configId);
+  const items = listQuery.data?.items ?? [];
   const total = listQuery.data?.total ?? null;
   const lastPage =
     total === null ? null : Math.max(1, Math.ceil(total / pageSize));
-  const settled =
-    !listQuery.isPending && !listQuery.isError && !listQuery.isPlaceholderData;
-  const emptyPage = settled && items.length === 0;
-  const pageOutOfRange = emptyPage && lastPage !== null && page > lastPage;
-
+  function changeParams(patch: Record<string, string | null>, replace = false) {
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === null) next.delete(key);
+          else next.set(key, value);
+        }
+        return next;
+      },
+      { replace },
+    );
+  }
   useEffect(() => {
-    if (pageOutOfRange && lastPage !== null) setPage(lastPage);
-  }, [pageOutOfRange, lastPage, setPage]);
-
+    if (
+      rawId === null &&
+      !listQuery.isPending &&
+      !listQuery.isError &&
+      !listQuery.isPlaceholderData &&
+      lastPage !== null &&
+      page > lastPage
+    ) {
+      setParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.set("page", String(lastPage));
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [
+    rawId,
+    listQuery.isPending,
+    listQuery.isError,
+    listQuery.isPlaceholderData,
+    lastPage,
+    page,
+    setParams,
+  ]);
+  useEffect(() => {
+    if (rawId === null && restoreScroll.current && !listQuery.isPending) {
+      const main = container.current?.closest("main");
+      if (main) main.scrollTop = listScroll.current;
+      restoreScroll.current = false;
+    }
+  }, [rawId, listQuery.isPending]);
+  function openDetail(id: number) {
+    if (rawId === null) {
+      listScroll.current = container.current?.closest("main")?.scrollTop ?? 0;
+      restoreScroll.current = true;
+    }
+    changeParams({ config: String(id) });
+    const main = container.current?.closest("main");
+    if (main) main.scrollTop = 0;
+  }
+  function back() {
+    restoreScroll.current = true;
+    changeParams({ config: null });
+  }
   async function refreshList() {
     await queryClient.invalidateQueries({
       queryKey: feishuQueryKeys.approvalConfigs(),
     });
   }
-
-  /// 启停：`enabled` 翻转。可逆操作，不弹确认；失败回显后端原文。
-  function toggleEnabled(item: ApprovalConfigItem) {
-    setMutatingId(item.id);
-    void (async () => {
-      try {
+  async function confirmAction() {
+    if (!confirm) return;
+    setPending(true);
+    try {
+      const { item, kind } = confirm;
+      if (kind === "delete") {
+        const result = await actions.deleteConfig(item.id);
+        toast.success(
+          `已删除「${item.title}」${result.deletedPendingTasks > 0 ? `，并清掉 ${result.deletedPendingTasks} 条待处理任务` : ""}`,
+        );
+        back();
+      } else {
         await actions.updateConfig(item.id, { enabled: !item.enabled });
         toast.success(item.enabled ? "已停用" : "已启用");
-        await refreshList();
-      } catch (cause) {
-        toast.error(messageOf(cause));
-      } finally {
-        setMutatingId(null);
       }
-    })();
+      setConfirm(null);
+      await refreshList();
+    } catch (cause) {
+      toast.error(messageOf(cause));
+    } finally {
+      setPending(false);
+    }
   }
-
-  function confirmDelete() {
-    if (confirmTarget === null) return;
-    const { configId, title } = confirmTarget;
-    setDeletePending(true);
-    void (async () => {
-      try {
-        const result = await actions.deleteConfig(configId);
-        setConfirmTarget(null);
-        toast.success(
-          `已删除「${title}」${
-            result.deletedPendingTasks > 0
-              ? `，并清掉 ${result.deletedPendingTasks} 条待处理任务`
-              : ""
-          }`,
+  async function refreshNames(ids: number[]) {
+    setRefreshing(true);
+    try {
+      let incomplete = 0;
+      for (let offset = 0; offset < ids.length; offset += 10)
+        incomplete += (
+          await actions.refreshNames(ids.slice(offset, offset + 10))
+        ).length;
+      if (incomplete)
+        toast.error(
+          `${incomplete} 条配置的名称未补充完整，已有名称保留；请核对飞书访问权限。`,
         );
-        await refreshList();
-      } catch (cause) {
-        toast.error(messageOf(cause));
-      } finally {
-        setDeletePending(false);
-      }
-    })();
+      else toast.success("名称已补充；展示名称不代表工作流已接通。");
+    } catch (cause) {
+      toast.error(messageOf(cause));
+    } finally {
+      await refreshList();
+      setRefreshing(false);
+    }
   }
-
-  /// 向导提交成功：关向导、回读列表、toast。
   function submitWizard() {
     setWizardOpen(false);
-    void (async () => {
-      await refreshList();
-      toast.success(editTarget ? "配置更新成功" : "配置创建成功");
-    })();
+    toast.success(editTarget ? "配置更新成功" : "配置创建成功");
+    void refreshList();
   }
-
-  if (!actions.canRead) {
+  const filtered = search.trim() !== "" || status !== "all";
+  if (!actions.canRead)
     return (
-      <div className="space-y-4 p-6">
-        <h1 className="text-lg font-semibold">审批派发</h1>
-        <p
-          aria-live="polite"
-          className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm"
-        >
-          当前身份没有查看审批派发配置的权限，请联系运维管理员开通。
-        </p>
-      </div>
+      <p className="p-6">当前身份没有查看审批派发配置的权限，请联系管理员。</p>
     );
-  }
 
   return (
-    <div className="space-y-4 p-6">
-      <div>
-        <h1 className="text-lg font-semibold">审批派发</h1>
-        <p className="text-sm text-muted-foreground">
-          管理飞书审批派发配置：选好多维表格坐标与审批定义后，表格记录会按映射装配成审批单。
-        </p>
-      </div>
-
-      <ApprovalWorkflowGuide />
-
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative">
-          <Search
-            className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <Input
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setPage(1);
-            }}
-            placeholder="搜索配置名"
-            aria-label="搜索配置"
-            className="h-8 w-56 pl-7"
-            autoComplete="off"
-          />
-        </div>
-        {actions.canWrite ? (
-          <Button
-            size="sm"
-            className="ml-auto"
-            onClick={() => {
-              setEditTarget(undefined);
-              setWizardOpen(true);
-            }}
-          >
-            <Plus aria-hidden="true" />
-            新建配置
+    <div
+      ref={container}
+      className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8"
+    >
+      {rawId !== null ? (
+        <>
+          <Button variant="ghost" onClick={back}>
+            <span aria-hidden="true">←</span> 返回配置列表
           </Button>
-        ) : null}
-      </div>
-
-      {listQuery.isPending && !settled ? (
-        <p className="text-sm text-muted-foreground">加载中…</p>
-      ) : listQuery.isError ? (
-        <p className="text-sm text-destructive">{messageOf(listQuery.error)}</p>
-      ) : items.length === 0 && total === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          还没有审批派发配置。点「新建配置」走向导：选多维表格坐标 → 填审批 Code
-          → 选申请人/回填列 + 时区 → 提交。
-        </p>
+          {!validId ? (
+            <p>无法找到这条配置</p>
+          ) : detailQuery.isPending ? (
+            <p role="status">正在读取配置…</p>
+          ) : detailQuery.isError ? (
+            <div role="alert">
+              <p>暂时无法读取配置：{messageOf(detailQuery.error)}</p>
+              <Button
+                variant="outline"
+                onClick={() => void detailQuery.refetch()}
+              >
+                重新加载
+              </Button>
+            </div>
+          ) : !detail ? (
+            <p>无法找到这条配置</p>
+          ) : (
+            <ApprovalConfigDetails
+              key={detail.id}
+              item={detail}
+              canWrite={actions.canWrite}
+              pending={pending || refreshing}
+              onEdit={() => {
+                setEditTarget(detail);
+                setWizardOpen(true);
+              }}
+              onToggle={() => setConfirm({ item: detail, kind: "toggle" })}
+              onDelete={() => setConfirm({ item: detail, kind: "delete" })}
+              onRefreshNames={() => void refreshNames([detail.id])}
+              onOpenConfig={openDetail}
+              onRequests={() => changeParams({ tab: "requests" })}
+            />
+          )}
+        </>
       ) : (
-        <div className="space-y-3">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>配置名</TableHead>
-                <TableHead>坐标</TableHead>
-                <TableHead>审批 Code</TableHead>
-                <TableHead>时区</TableHead>
-                <TableHead>启用</TableHead>
-                <TableHead>快照时间</TableHead>
-                <TableHead>更新时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((item) => (
-                <FragmentRow
-                  key={item.id}
-                  item={item}
-                  expanded={expandedId === item.id}
-                  pending={mutatingId === item.id}
-                  canWrite={actions.canWrite}
-                  onToggleExpanded={() =>
-                    setExpandedId((current) =>
-                      current === item.id ? null : item.id,
+        <>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                审批配置
+              </h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                看清每张表发起什么审批，以及数据如何填写。
+              </p>
+            </div>
+            {actions.canWrite && (
+              <Button
+                onClick={() => {
+                  setEditTarget(undefined);
+                  setWizardOpen(true);
+                }}
+              >
+                <Plus aria-hidden="true" />
+                新建配置
+              </Button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex gap-1" aria-label="配置状态筛选">
+              {(
+                [
+                  { value: "all", label: "全部" },
+                  { value: "enabled", label: "已启用" },
+                  { value: "disabled", label: "已停用" },
+                ] as const
+              ).map((option) => (
+                <Button
+                  key={option.value}
+                  size="sm"
+                  variant={status === option.value ? "default" : "ghost"}
+                  aria-pressed={status === option.value}
+                  onClick={() =>
+                    changeParams(
+                      {
+                        status: option.value === "all" ? null : option.value,
+                        page: "1",
+                      },
+                      true,
                     )
                   }
-                  onToggleEnabled={toggleEnabled}
-                  onEdit={(target) => {
-                    setEditTarget(target);
-                    setWizardOpen(true);
-                  }}
-                  onRequestDelete={(target) => {
-                    setConfirmTarget({
-                      configId: target.id,
-                      title: target.title,
-                    });
-                  }}
-                />
+                >
+                  {option.label}
+                </Button>
               ))}
-            </TableBody>
-          </Table>
-          <ListPagination
-            page={page}
-            pageSize={pageSize}
-            total={total}
-            pending={listQuery.isPending}
-            onPageChange={setPage}
-            onPageSizeChange={(next) => {
-              setPageSize(next);
-              setPage(1);
-            }}
-          />
-        </div>
+            </div>
+            <Input
+              className="w-full sm:ml-auto sm:w-72"
+              aria-label="搜索配置"
+              placeholder="搜索配置、数据表或审批"
+              value={search}
+              onChange={(event) =>
+                changeParams(
+                  { search: event.target.value || null, page: "1" },
+                  true,
+                )
+              }
+            />
+            {actions.canWrite && items.length > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={refreshing || listQuery.isFetching}
+                onClick={() => void refreshNames(items.map((item) => item.id))}
+              >
+                {refreshing ? "名称补充中…" : "补充本页名称"}
+              </Button>
+            )}
+          </div>
+          {listQuery.isPending ? (
+            <p role="status">正在读取配置…</p>
+          ) : listQuery.isError ? (
+            <div role="alert">
+              <p>暂时无法读取配置：{messageOf(listQuery.error)}</p>
+              <Button
+                variant="outline"
+                onClick={() => void listQuery.refetch()}
+              >
+                重新加载
+              </Button>
+            </div>
+          ) : items.length === 0 && total === 0 ? (
+            <div className="rounded-lg border p-8 text-center">
+              <p className="font-medium">
+                {filtered ? "没有符合条件的配置" : "还没有审批配置"}
+              </p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {filtered
+                  ? "尝试更换关键词或清除筛选。"
+                  : "新建配置：选择来源数据表和审批，再设置申请人、编号写回列和字段对应。"}
+              </p>
+              {filtered && (
+                <Button
+                  className="mt-4"
+                  variant="outline"
+                  onClick={() =>
+                    changeParams(
+                      { search: null, status: null, page: "1" },
+                      true,
+                    )
+                  }
+                >
+                  清除筛选
+                </Button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="overflow-hidden rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>配置名称</TableHead>
+                      <TableHead>来源数据表</TableHead>
+                      <TableHead>发起的审批</TableHead>
+                      <TableHead>配置状态</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {items.map((item) => (
+                      <TableRow key={item.id}>
+                        <TableCell>
+                          <button
+                            className="text-left font-medium underline-offset-4 hover:underline focus-visible:outline-ring"
+                            onClick={() => openDetail(item.id)}
+                          >
+                            {item.title}
+                          </button>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {item.maps.length} 项字段对应
+                          </p>
+                        </TableCell>
+                        <TableCell className="whitespace-normal">
+                          <p>{item.baseName?.trim() || "表格名称待补充"}</p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {item.tableName?.trim() || "数据表名称待补充"}
+                          </p>
+                        </TableCell>
+                        <TableCell className="whitespace-normal">
+                          {item.approvalName?.trim() || "审批名称待补充"}
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge
+                            tone={item.enabled ? "positive" : "neutral"}
+                          >
+                            {item.enabled ? "已启用" : "已停用"}
+                          </StatusBadge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => openDetail(item.id)}
+                          >
+                            查看配置
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <ListPagination
+                page={page}
+                pageSize={pageSize}
+                total={total}
+                pending={listQuery.isFetching}
+                onPageChange={(value) => changeParams({ page: String(value) })}
+                onPageSizeChange={(value) =>
+                  changeParams({ pageSize: String(value), page: "1" })
+                }
+              />
+            </div>
+          )}
+          <p className="text-xs text-muted-foreground">
+            已启用仅表示可受理派发请求；工作流设置和运行结果请在飞书及派发记录中核对。
+          </p>
+          <ApprovalWorkflowGuide />
+        </>
       )}
-
-      {wizardOpen ? (
+      {wizardOpen && (
         <ApprovalConfigDialog
-          open={wizardOpen}
+          open
           client={wizardClient}
           initialConfig={editTarget}
           onCancel={() => setWizardOpen(false)}
           onSubmitted={submitWizard}
         />
-      ) : null}
-
+      )}
       <Dialog
-        open={confirmTarget !== null}
-        onOpenChange={(next) => {
-          if (!next && !deletePending) setConfirmTarget(null);
+        open={confirm !== null}
+        onOpenChange={(open) => {
+          if (!open && !pending) setConfirm(null);
         }}
       >
-        <DialogContent showCloseButton={!deletePending}>
+        <DialogContent showCloseButton={!pending}>
           <DialogHeader>
-            <DialogTitle>删除配置</DialogTitle>
+            <DialogTitle>
+              {confirm?.kind === "delete"
+                ? "删除配置"
+                : confirm?.item.enabled
+                  ? "停用配置"
+                  : "启用配置"}
+            </DialogTitle>
             <DialogDescription>
               <span className="block">
-                删除后该配置的字段映射与待处理任务会一并清除；已完结的审批单流水保留。
-                删除不可恢复。
+                {confirm?.kind === "delete"
+                  ? "删除后该配置的字段映射与待处理任务会一并清除；已完结的审批单流水保留。删除不可恢复。"
+                  : confirm?.item.enabled
+                    ? "停用后，新的派发请求将不再通过此配置受理。"
+                    : "启用后，此配置可受理新的派发请求；仍需飞书工作流触发。"}
               </span>
-              {confirmTarget ? (
-                <span className="mt-2 block font-mono text-xs">
-                  {confirmTarget.title}（#{confirmTarget.configId}）
+              {confirm && (
+                <span className="mt-2 block">
+                  {confirm.item.title}（#{confirm.item.id}）
                 </span>
-              ) : null}
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
               variant="ghost"
-              onClick={() => setConfirmTarget(null)}
-              disabled={deletePending}
+              disabled={pending}
+              onClick={() => setConfirm(null)}
             >
               取消
             </Button>
             <Button
-              variant="destructive"
-              onClick={confirmDelete}
-              disabled={deletePending}
+              variant={confirm?.kind === "delete" ? "destructive" : "default"}
+              disabled={pending}
+              onClick={() => void confirmAction()}
             >
-              {deletePending ? "删除中…" : "删除"}
+              {pending
+                ? "处理中…"
+                : confirm?.kind === "delete"
+                  ? "删除"
+                  : confirm?.item.enabled
+                    ? "确认停用"
+                    : "确认启用"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
-  );
-}
-
-/// 一行 + 可选的映射展开行。抽成组件避免列表 map 里铺两行。
-function FragmentRow({
-  item,
-  expanded,
-  pending,
-  canWrite,
-  onToggleExpanded,
-  onToggleEnabled,
-  onRequestDelete,
-  onEdit,
-}: {
-  item: ApprovalConfigItem;
-  expanded: boolean;
-  pending: boolean;
-  canWrite: boolean;
-  onToggleExpanded: () => void;
-  onToggleEnabled: (item: ApprovalConfigItem) => void;
-  onRequestDelete: (item: ApprovalConfigItem) => void;
-  onEdit: (item: ApprovalConfigItem) => void;
-}) {
-  return (
-    <>
-      <TableRow>
-        <TableCell className="font-medium">{item.title}</TableCell>
-        <TableCell className="font-mono text-xs">
-          {item.baseToken} / {item.tableId}
-        </TableCell>
-        <TableCell className="font-mono text-xs">{item.approvalCode}</TableCell>
-        <TableCell>{item.baseTimezone}</TableCell>
-        <TableCell>
-          {item.enabled ? (
-            <StatusBadge tone="positive">启用</StatusBadge>
-          ) : (
-            <StatusBadge tone="neutral">已停用</StatusBadge>
-          )}
-        </TableCell>
-        <TableCell className="tabular-nums">
-          {formatUnixSeconds(item.formSnapshotAt ?? 0)}
-        </TableCell>
-        <TableCell className="tabular-nums">
-          {formatUnixSeconds(item.updatedAt)}
-        </TableCell>
-        <TableCell>
-          <ApprovalConfigRowActions
-            item={item}
-            canWrite={canWrite}
-            pending={pending}
-            expanded={expanded}
-            onToggleExpanded={onToggleExpanded}
-            onToggleEnabled={onToggleEnabled}
-            onRequestDelete={onRequestDelete}
-            onEdit={onEdit}
-          />
-        </TableCell>
-      </TableRow>
-      {expanded ? <MapDetailRow item={item} /> : null}
-    </>
   );
 }

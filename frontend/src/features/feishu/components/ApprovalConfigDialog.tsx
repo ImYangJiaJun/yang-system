@@ -127,6 +127,8 @@ export function ApprovalConfigDialog({
     initialConfig?.baseTimezone ?? DEFAULT_TIMEZONE,
   );
 
+  const [title, setTitle] = useState(initialConfig?.title ?? "");
+
   // ④ 提交
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -293,6 +295,7 @@ export function ApprovalConfigDialog({
         await client.updateConfig(initialConfig.id, {
           maps: input.maps,
           baseTimezone: timezone,
+          ...(title !== initialConfig.title ? { title } : {}),
         });
       } else {
         await client.createConfig(input);
@@ -703,6 +706,17 @@ export function ApprovalConfigDialog({
 
         {step === 4 ? (
           <div className="space-y-4">
+            {initialConfig && (
+              <div className="space-y-2">
+                <Label htmlFor="approval-config-title">配置名称</Label>
+                <Input
+                  id="approval-config-title"
+                  value={title}
+                  maxLength={100}
+                  onChange={(event) => setTitle(event.target.value)}
+                />
+              </div>
+            )}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <SummaryRow label="Base Token" value={baseToken} />
               <SummaryRow label="数据表" value={tableId} />

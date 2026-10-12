@@ -36,6 +36,7 @@ export type ApprovalApiStubOptions = {
   createConfig?: Handler;
   updateConfig?: Handler;
   deleteConfig?: Handler;
+  refreshNames?: Handler;
   widgets?: Handler;
   requestList?: Handler;
   taskList?: Handler;
@@ -127,6 +128,14 @@ function catalogFor(options: ApprovalApiStubOptions) {
       ),
     );
   }
+  if (options.approvalWrite ?? true)
+    actions.push(
+      action(
+        "feishu.approval.refresh_names",
+        "POST",
+        "/api/v1/feishu/approval/configs/refresh-names",
+      ),
+    );
   if (options.datasourceWrite ?? true) {
     actions.push(
       action(
@@ -296,6 +305,9 @@ export function stubApprovalApi(
       }
       if (url.endsWith("/api/v1/feishu/approval/configs/update")) {
         return respond(options.updateConfig, payload, { config_id: 1 });
+      }
+      if (url.endsWith("/api/v1/feishu/approval/configs/refresh-names")) {
+        return respond(options.refreshNames, payload, { incomplete_ids: [] });
       }
       if (url.endsWith("/api/v1/feishu/approval/configs/delete")) {
         return respond(options.deleteConfig, payload, {

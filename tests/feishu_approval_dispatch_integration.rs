@@ -1,4 +1,4 @@
-//! 审批派发控制台（Task C 的 7 个 Action）与派发落记录的端到端集成测试。
+//! 审批派发控制台与派发落记录的端到端集成测试。
 //!
 //! # 覆盖什么
 //!
@@ -329,6 +329,63 @@ async fn latest_request_log(
 }
 
 // ---------------------------------------------------------------- 数据播种
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn business_names_search_related_pagination_and_refresh_boundaries() {
+    let outcome: anyhow::Result<()> = async {
+        let (database, app, token) = prepare_app(None, None).await?;
+        let mut ids = Vec::new();
+        for index in 0..14 {
+            ids.push(seed_config(&database, "appBusiness", &format!("tbl{index}"), index % 2 == 0).await?);
+        }
+        let listed = dispatch_as_operator(&app, "list_configs", &token, json!({"page_size":10,"count_total":true})).await?;
+        let data = response_data(&listed)?;
+        ensure!(data["total"] == 14 && data["items"].as_array().map(Vec::len) == Some(10));
+        ensure!(data["items"][0]["base_name"].is_null(), "旧配置名称可空");
+        sqlx::query("UPDATE `feishu_approval_config` SET `base_name`='财务协作', `table_name`='差旅表', `approval_name`='报销审批', `applicant_field_name`='报销人', `backfill_field_name`='审批编号' WHERE `id`=?")
+            .bind(ids[12]).execute(database.pool()).await?;
+        for keyword in ["财务协作", "差旅表", "报销审批"] {
+            let listed = dispatch_as_operator(&app, "list_configs", &token, json!({"search":keyword,"count_total":true})).await?;
+            let data = response_data(&listed)?;
+            ensure!(data["total"] == 1 && data["items"][0]["id"] == ids[12], "名称搜索应覆盖当前页以外: {data}");
+        }
+        let listed = dispatch_as_operator(&app, "list_configs", &token, json!({"page":2,"page_size":10,"count_total":true,"where":{"type":"eq","field":"approval_code","value":"CODE-FIXTURE"}})).await?;
+        let data = response_data(&listed)?;
+        ensure!(data["total"] == 14 && data["items"].as_array().map(Vec::len) == Some(4), "共用审批应真实分页: {data}");
+        let listed = dispatch_as_operator(&app, "list_configs", &token, json!({"count_total":true,"where":{"type":"and","conditions":[{"type":"eq","field":"enabled","value":true},{"type":"eq","field":"id","value":ids[12]}]}})).await?;
+        let data = response_data(&listed)?;
+        ensure!(data["total"] == 1 && data["items"][0]["applicant_field_name"] == "报销人");
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let source_key = format!("business{unique}");
+        let source = sqlx::query("INSERT INTO `feishu_datasource` (`title`,`status`,`ingest_mode`,`created_at`,`updated_at`) VALUES ('公司选项来源','active','push',NOW(),NOW())")
+            .execute(database.pool()).await?.last_insert_id();
+        sqlx::query("INSERT INTO `feishu_datasource_field` (`datasource_id`,`field_id`,`field_name`,`source_key`,`token_hash`,`encrypt_enabled`,`default_locale`,`enabled`,`created_at`,`updated_at`) VALUES (?,'fldCompany','公司名称',?,?,false,'zh_cn',true,NOW(),NOW())")
+            .bind(source).bind(&source_key).bind(format!("{unique:064x}")).execute(database.pool()).await?;
+        seed_field_map(&database, ids[12], "wCompany", "fldCompany", false).await?;
+        sqlx::query("UPDATE `feishu_approval_field_map` SET `option_source_key`=? WHERE `config_id`=?")
+            .bind(&source_key).bind(ids[12]).execute(database.pool()).await?;
+        let listed = dispatch_as_operator(&app, "list_configs", &token, json!({"where":{"type":"eq","field":"id","value":ids[12]}})).await?;
+        let data = response_data(&listed)?;
+        ensure!(data["items"][0]["maps"][0]["option_source_name"] == "公司选项来源 · 公司名称", "外部选项必须展示真实来源名称: {data}");
+        sqlx::query("DELETE FROM `feishu_datasource_field` WHERE `source_key`=?").bind(&source_key).execute(database.pool()).await?;
+        sqlx::query("DELETE FROM `feishu_datasource` WHERE `id`=?").bind(source).execute(database.pool()).await?;
+        let listed = dispatch_as_operator(&app, "list_configs", &token, json!({"where":{"type":"eq","field":"id","value":ids[12]}})).await?;
+        ensure!(response_data(&listed)?["items"][0]["maps"][0]["option_source_name"].is_null(), "来源删除后明确缺名称");
+        let operator = format!("Bearer {token}");
+        for invalid in [json!([]), json!([0]), json!(vec![1; 11])] {
+            ensure!(dispatch(&app,"feishu.approval","refresh_names",json!({"config_ids":invalid}),&[("authorization",operator.as_str())]).await.is_err());
+        }
+        let refresh = dispatch_as_operator(&app, "refresh_names", &token, json!({"config_ids":[ids[12]]})).await?;
+        ensure!(refresh.code == 50301, "没有凭证应明确失败");
+        let saved: Option<String> = sqlx::query_scalar("SELECT `base_name` FROM `feishu_approval_config` WHERE `id`=?").bind(ids[12]).fetch_one(database.pool()).await?;
+        ensure!(saved.as_deref() == Some("财务协作"), "补充失败必须保留名称");
+        Ok(())
+    }.await;
+    if let Err(error) = outcome {
+        panic!("业务配置查询集成失败: {error:#}");
+    }
+}
 
 /// 播种一条启用中的配置行，返回 `config_id`。
 async fn seed_config(

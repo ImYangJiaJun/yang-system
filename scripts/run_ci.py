@@ -108,6 +108,10 @@ FULL = (
 
 INTEGRATION = (
     Command(
+        "审批配置名称刷新与保旧审计集成测试",
+        ("cargo", "test", "--lib", "--locked", "real_mysql_refresh_names_saves_deduplicates_preserves_and_audits", "--", "--ignored", "--test-threads=1"),
+    ),
+    Command(
         "审批明细外部选项精确查询集成测试",
         ("cargo", "test", "--lib", "--locked", "real_mysql_resolves_detail_options_and_waits_on_ambiguous_labels", "--", "--ignored", "--test-threads=1"),
     ),

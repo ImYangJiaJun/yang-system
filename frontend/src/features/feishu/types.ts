@@ -1019,12 +1019,18 @@ export type ApprovalConfigMap = {
   /// 值转换器：`direct` / `date` / `option`。
   converter: string;
   optionSourceKey?: string | null;
+  optionSourceName?: string | null;
 };
 
 /// 审批派发配置行（`list_configs` 的 `items[]`）。
 export type ApprovalConfigItem = {
   id: number;
   title: string;
+  baseName?: string | null;
+  tableName?: string | null;
+  approvalName?: string | null;
+  applicantFieldName?: string | null;
+  backfillFieldName?: string | null;
   baseToken: string;
   tableId: string;
   approvalCode: string;
@@ -1037,6 +1043,15 @@ export type ApprovalConfigItem = {
   updatedAt: number;
   /// 空数组表示该配置没有映射。
   maps: ApprovalConfigMap[];
+};
+
+export type ApprovalConfigQuery = {
+  page: number;
+  pageSize: number;
+  search: string;
+  status?: "all" | "enabled" | "disabled";
+  configId?: number;
+  approvalCode?: string;
 };
 
 /// 审批定义控件（`list_widgets` 的 `widgets[]`）。

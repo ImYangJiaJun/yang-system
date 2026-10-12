@@ -108,6 +108,10 @@ impl std::error::Error for ProvisionError {}
 pub(crate) struct ProvisionPlan {
     /// 审批定义名，用来做配置标题（比 `table_id` 好读，控制台按它筛）。
     pub(crate) approval_name: String,
+    pub(crate) base_name: Option<String>,
+    pub(crate) table_name: Option<String>,
+    pub(crate) applicant_field_name: String,
+    pub(crate) backfill_field_name: String,
     pub(crate) base_token: String,
     pub(crate) table_id: String,
     pub(crate) approval_code: String,
@@ -257,6 +261,28 @@ pub(crate) async fn build_plan(
     Ok(plan)
 }
 
+/// 展示名称补充失败不改变校验结果，也不清空已有快照。
+pub(crate) async fn fill_table_names(
+    plan: &mut ProvisionPlan,
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+) {
+    match super::bitable::get_base_name(transport, sleeper, tokens, &plan.base_token).await {
+        Ok(name) => plan.base_name = name,
+        Err(error) => tracing::warn!(%error, "审批配置多维表名称暂未取得"),
+    }
+    match super::bitable::list_all_tables(transport, sleeper, tokens, &plan.base_token).await {
+        Ok(tables) => {
+            plan.table_name = tables
+                .into_iter()
+                .find(|table| table.table_id == plan.table_id)
+                .map(|table| table.name)
+        }
+        Err(error) => tracing::warn!(%error, "审批配置数据表名称暂未取得"),
+    }
+}
+
 /// 纯校验 + 组装。全部失败原因一次性返回。
 fn plan(
     input: &ProvisionInput<'_>,
@@ -350,6 +376,10 @@ fn plan(
     }
 
     Ok(ProvisionPlan {
+        base_name: None,
+        table_name: None,
+        applicant_field_name: applicant.field_name.clone(),
+        backfill_field_name: backfill.field_name.clone(),
         base_token: input.base_token.trim().to_string(),
         table_id: input.table_id.trim().to_string(),
         approval_code: input.approval_code.trim().to_string(),
@@ -389,6 +419,26 @@ pub(crate) async fn insert_plan(
     config_row.insert(
         "title",
         serde_json::json!(truncate_title(&plan.approval_name, &plan.table_id)),
+    );
+    config_row.insert(
+        "base_name",
+        serde_json::json!(display_name(plan.base_name.as_deref())),
+    );
+    config_row.insert(
+        "table_name",
+        serde_json::json!(display_name(plan.table_name.as_deref())),
+    );
+    config_row.insert(
+        "approval_name",
+        serde_json::json!(display_name(Some(&plan.approval_name))),
+    );
+    config_row.insert(
+        "applicant_field_name",
+        serde_json::json!(display_name(Some(&plan.applicant_field_name))),
+    );
+    config_row.insert(
+        "backfill_field_name",
+        serde_json::json!(display_name(Some(&plan.backfill_field_name))),
     );
     config_row.insert("base_token", serde_json::json!(&plan.base_token));
     config_row.insert("table_id", serde_json::json!(&plan.table_id));
@@ -721,6 +771,12 @@ fn unique_option(rows: &[Record], source: &str, label: &str) -> Result<String, P
 const MAX_BINDING_PAGES: usize = 20;
 
 /// 标题截断到列上限（100），避免插入期才报「字符串超长」。
+/// 展示元数据无效时留空，不阻断配置保存或覆盖已有名称。
+pub(crate) fn display_name(name: Option<&str>) -> Option<&str> {
+    name.map(str::trim)
+        .filter(|name| !name.is_empty() && name.chars().count() <= 512)
+}
+
 fn truncate_title(approval_name: &str, table_id: &str) -> String {
     let source = approval_name.trim();
     let source = if source.is_empty() {
@@ -771,6 +827,20 @@ mod tests {
             Ok(_) => panic!("期望校验失败，实际通过了"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn display_names_reject_invalid_metadata_without_blocking_config() {
+        assert_eq!(display_name(Some("  申请人  ")), Some("申请人"));
+        assert_eq!(display_name(None), None);
+        assert_eq!(display_name(Some("  ")), None);
+        assert_eq!(display_name(Some(&"名".repeat(513))), None);
+        assert_eq!(
+            display_name(Some(&"名".repeat(512)))
+                .map(str::chars)
+                .map(Iterator::count),
+            Some(512)
+        );
     }
 
     fn column(id: &str, name: &str, options: &[&str]) -> Column {
@@ -1018,6 +1088,8 @@ mod tests {
         // 「校验阶段选对了什么」。
         assert_eq!(plan.applicant_field_id, "fldP", "存 id 不存列名");
         assert_eq!(plan.backfill_field_id, "fldB");
+        assert_eq!(plan.applicant_field_name, "申请人");
+        assert_eq!(plan.backfill_field_name, "审批编号");
         assert_eq!(plan.approval_name, "往来付款类型");
         // 快照存的是**审批定义的原文**（本用例传 "[]"），不是 `FormWidget` 序列化
         // 回去的结果——后者只保留本服务要读的字段，会丢掉 `printable` /

@@ -1265,6 +1265,47 @@ mod tests {
         .unwrap_or_else(|error| panic!("应可构造 token provider: {error}"))
     }
 
+    #[tokio::test]
+    async fn base_display_name_uses_the_envelope_and_rejects_unsafe_coordinates() {
+        use crate::addon::feishu::domain::bitable::get_base_name;
+        for (envelope, expected) in [
+            (
+                json!({"code":0,"data":{"app":{"name":"财务协作"}}}),
+                Some("财务协作"),
+            ),
+            (json!({"code":0,"data":{"app":{}}}), None),
+            (json!({"code":0,"data":{"app":{"name":"  "}}}), None),
+        ] {
+            let transport = ReplayTransport::new(vec![(200, envelope.to_string())]);
+            let name = get_base_name(&transport, &NoSleep, &e2e_tokens(), "appDisplay")
+                .await
+                .unwrap_or_else(|error| panic!("读取名称失败: {error:?}"));
+            assert_eq!(name.as_deref(), expected);
+            transport.took(
+                "Get",
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/appDisplay",
+            );
+        }
+        let transport = ReplayTransport::new(vec![(
+            200,
+            json!({"code":99991672,"msg":"permission denied"}).to_string(),
+        )]);
+        assert!(
+            get_base_name(&transport, &NoSleep, &e2e_tokens(), "appDisplay")
+                .await
+                .is_err()
+        );
+        let transport = ReplayTransport::new(vec![]);
+        for coordinate in ["", "bad/token", "bad?query=1"] {
+            assert!(
+                get_base_name(&transport, &NoSleep, &e2e_tokens(), coordinate)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(transport.seen().is_empty());
+    }
+
     /// 惰性连接池的上下文。这些用例**不查库**——`load_external_options` 在没有
     /// 链接型控件时会短路返回空表，所以不需要真的数据库。
     ///
