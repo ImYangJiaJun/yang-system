@@ -508,9 +508,135 @@ fn detail_query() -> Vec<(String, String)> {
     vec![("user_id_type".to_string(), "open_id".to_string())]
 }
 
+// ---------------------------------------------------------------------------
+// 姓名 → open_id 解析（通讯录搜索）
+// ---------------------------------------------------------------------------
+
+/// 搜索用户的 URL。
+///
+/// `POST /open-apis/contact/v3/users/search`（lark-cli `contact +search-user`
+/// dry-run 实测的路径与请求体 `{"query": …}`）。**不要**与另一条也叫「搜索用户」
+/// 的 `GET /open-apis/search/v1/user` 混用——两者路径、响应列表键与姓名键都不同，
+/// 见下方结构体的容错说明。
+pub(crate) fn applicant_search_url() -> String {
+    format!("{FEISHU_OPEN_BASE}/open-apis/contact/v3/users/search")
+}
+
+/// 姓名 → open_id 的解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ApplicantResolution {
+    /// 唯一命中。
+    Resolved { open_id: String },
+    /// 无命中；或模糊命中多于一个、不足以定人。
+    NotFound,
+    /// 多个同名命中，需人工消歧。`candidates` 为「姓名(open_id)」描述串。
+    Ambiguous { candidates: Vec<String> },
+}
+
+/// 按姓名解析 open_id。
+///
+/// 只查第一页（`page_size=20`）：姓名精确匹配场景候选极少，翻页只会多打接口。
+/// `ponytail:` 若同名者多到超过一页、且真正的同名命中落在第二页，本函数会漏判；
+/// 届时再补分页遍历。
+pub(crate) async fn resolve_applicant(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    name: &str,
+) -> Result<ApplicantResolution, OutboundFailure> {
+    let name = name.trim();
+    // 空姓名不打接口：搜索接口对空 query 无意义，且会白烧一次出站配额。
+    if name.is_empty() {
+        return Ok(ApplicantResolution::NotFound);
+    }
+
+    let request = OutboundRequest {
+        method: OutboundMethod::Post,
+        url: applicant_search_url(),
+        query: vec![("page_size".to_string(), "20".to_string())],
+        bearer_token: None,
+        json_body: Some(serde_json::json!({ "query": name })),
+        raw_body: None,
+        binary_limit: None,
+        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        idempotent: true, // 只读
+    };
+
+    let response = send_approval(transport, sleeper, tokens, request).await?;
+    let data: ApplicantSearchData =
+        serde_json::from_str(&response).map_err(|error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: format!("搜索用户响应解析失败: {error}"),
+        })?;
+    Ok(classify_applicants(name, &data.items))
+}
+
+/// 搜索接口 `data` 部分的解析。
+///
+/// **列表键两种形态都收**：本仓库核对到的两条「搜索用户」接口返回的列表键不同
+/// ——`contact/v3/users/search` 与同族的 `contact/v3/departments/search` 用
+/// `items`，而 `search/v1/user` 用 `users`。用 `alias` 同时接受，避免上游换接口时
+/// 静默解析成空列表（那会把「有这人」误判成 NotFound）。
+#[derive(Debug, Deserialize)]
+struct ApplicantSearchData {
+    #[serde(default, alias = "users")]
+    items: Vec<SearchUser>,
+}
+
+/// 搜索命中的单个用户，只取解析所需的两字段。
+///
+/// 姓名键同样两种形态都收：`name`（`search/v1/user` / `departments/search` 用）
+/// 与 `localized_name`（lark-cli `searchUserAPIItem` 的展示名字段）。
+#[derive(Debug, Deserialize)]
+struct SearchUser {
+    #[serde(default)]
+    open_id: String,
+    #[serde(default, alias = "localized_name")]
+    name: String,
+}
+
+/// 命中收敛规则（纯函数，便于单测）。
+///
+/// 1. 精确等值（trim 后 ==）恰 1 个 → `Resolved`；
+/// 2. 精确等值 > 1 个 → `Ambiguous`（重名，需消歧）；
+/// 3. 无精确命中但整页恰 1 个模糊命中 → `Resolved`；
+/// 4. 其余（完全无命中 / 模糊命中多于一个）→ `NotFound`。
+fn classify_applicants(name: &str, users: &[SearchUser]) -> ApplicantResolution {
+    let exact: Vec<&SearchUser> = users
+        .iter()
+        .filter(|user| user.name.trim() == name)
+        .collect();
+    match exact.as_slice() {
+        [only] => ApplicantResolution::Resolved {
+            open_id: only.open_id.clone(),
+        },
+        [] => match users {
+            [only] => ApplicantResolution::Resolved {
+                open_id: only.open_id.clone(),
+            },
+            _ => ApplicantResolution::NotFound,
+        },
+        many => ApplicantResolution::Ambiguous {
+            candidates: many
+                .iter()
+                .map(|user| format!("{}({})", user.name.trim(), user.open_id))
+                .collect(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use yang_base::BaseError;
+
+    use super::super::outbound::OutboundResponse;
+    use super::super::tenant_token::{FeishuCredentials, TenantTokenCache};
 
     #[test]
     fn create_url_is_the_official_path() {
@@ -783,5 +909,204 @@ mod tests {
             Ok(data) => panic!("缺 data 应失败，实际 {data}"),
             Err(failure) => assert!(failure.message.contains("没有 data"), "{failure:?}"),
         }
+    }
+
+    // ---- 姓名 → open_id 解析 ----
+
+    /// 按脚本依次返回结果的假传输，并记录每次收到的请求。
+    struct ScriptedTransport {
+        responses: Mutex<VecDeque<Result<OutboundResponse, BaseError>>>,
+        seen: Mutex<Vec<OutboundRequest>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: Vec<Result<OutboundResponse, BaseError>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.seen.lock().map(|seen| seen.len()).unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundTransport for ScriptedTransport {
+        async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(request);
+            }
+            let mut responses = self
+                .responses
+                .lock()
+                .map_err(|_| BaseError::ParamInvalid("test".to_string(), "锁中毒".to_string()))?;
+            responses.pop_front().unwrap_or_else(|| {
+                Err(BaseError::ParamInvalid(
+                    "test".to_string(),
+                    "脚本已耗尽".to_string(),
+                ))
+            })
+        }
+    }
+
+    /// 只记录不真等。
+    struct NoopSleeper;
+
+    #[async_trait::async_trait]
+    impl Sleeper for NoopSleeper {
+        async fn sleep(&self, _duration: Duration) {}
+    }
+
+    /// 恒命中 token 的缓存：token 换取不落网络，出站只走被测的搜索请求。
+    struct StaticTokenCache;
+
+    #[async_trait::async_trait]
+    impl TenantTokenCache for StaticTokenCache {
+        async fn get(&self) -> anyhow::Result<Option<String>> {
+            Ok(Some("t-test".to_string()))
+        }
+        async fn put(&self, _token: &str, _ttl_seconds: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn invalidate(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn acquire_lock(&self, _owner: &str, _ttl_seconds: i64) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn release_lock(&self, _owner: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn token_provider() -> TenantTokenProvider {
+        TenantTokenProvider::new(
+            Arc::new(StaticTokenCache),
+            Arc::new(ScriptedTransport::new(Vec::new())),
+            Arc::new(NoopSleeper),
+            FeishuCredentials {
+                app_id: "cli_test".to_string(),
+                app_secret: "secret".to_string(),
+            },
+            "test-dep",
+        )
+        .unwrap_or_else(|error| panic!("provider 应可构建: {error}"))
+    }
+
+    /// 搜索成功信封（`items` 列表形态）。
+    fn envelope(items: &str) -> OutboundResponse {
+        OutboundResponse {
+            status: 200,
+            body: format!(r#"{{"code":0,"msg":"ok","data":{{"items":[{items}]}}}}"#),
+            bytes: None,
+            headers: BTreeMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_applicant_matches_a_unique_exact_name() {
+        let transport = ScriptedTransport::new(vec![Ok(envelope(
+            r#"{"open_id":"ou_1","name":"杨佳俊"}"#,
+        ))]);
+        let provider = token_provider();
+
+        let result = resolve_applicant(&transport, &NoopSleeper, &provider, " 杨佳俊 ")
+            .await
+            .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+
+        assert_eq!(
+            result,
+            ApplicantResolution::Resolved {
+                open_id: "ou_1".to_string()
+            }
+        );
+        assert_eq!(transport.call_count(), 1, "应恰发一次搜索请求");
+    }
+
+    #[tokio::test]
+    async fn resolve_applicant_returns_not_found_when_nothing_matches() {
+        let transport = ScriptedTransport::new(vec![Ok(envelope(""))]);
+        let provider = token_provider();
+
+        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "查无此人")
+            .await
+            .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+
+        assert_eq!(result, ApplicantResolution::NotFound);
+    }
+
+    #[tokio::test]
+    async fn resolve_applicant_reports_ambiguous_on_duplicate_names() {
+        let transport = ScriptedTransport::new(vec![Ok(envelope(
+            r#"{"open_id":"ou_a","name":"张三"},{"open_id":"ou_b","name":"张三"}"#,
+        ))]);
+        let provider = token_provider();
+
+        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "张三")
+            .await
+            .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+
+        assert_eq!(
+            result,
+            ApplicantResolution::Ambiguous {
+                candidates: vec!["张三(ou_a)".to_string(), "张三(ou_b)".to_string()]
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_applicant_accepts_a_single_fuzzy_hit() {
+        // 无精确等值但整页恰一个候选：认它（如姓名带后缀/空格差异）。
+        let transport = ScriptedTransport::new(vec![Ok(envelope(
+            r#"{"open_id":"ou_1","name":"杨佳俊（成都）"}"#,
+        ))]);
+        let provider = token_provider();
+
+        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "杨佳俊")
+            .await
+            .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+
+        assert_eq!(
+            result,
+            ApplicantResolution::Resolved {
+                open_id: "ou_1".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_applicant_maps_missing_scope_to_fatal() {
+        // scope 未开通：99991672 是配置问题，不重试，落 Fatal。
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":99991672,"msg":"no scope"}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let provider = token_provider();
+
+        let failure = resolve_applicant(&transport, &NoopSleeper, &provider, "杨佳俊")
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("缺 scope 必须失败"));
+
+        assert_eq!(failure.kind, FailureKind::Fatal { code: 99991672 });
+        assert_eq!(transport.call_count(), 1, "Fatal 不重试");
+    }
+
+    #[tokio::test]
+    async fn resolve_applicant_skips_the_request_for_a_blank_name() {
+        // 空脚本：若真发请求，脚本会耗尽并报错——用来钉住「空姓名不打接口」。
+        let transport = ScriptedTransport::new(Vec::new());
+        let provider = token_provider();
+
+        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "   ")
+            .await
+            .unwrap_or_else(|error| panic!("空姓名应直接返回 NotFound: {error}"));
+
+        assert_eq!(result, ApplicantResolution::NotFound);
+        assert_eq!(transport.call_count(), 0, "空姓名不得发出站请求");
     }
 }
