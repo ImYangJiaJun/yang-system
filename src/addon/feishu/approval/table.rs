@@ -36,6 +36,11 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(100)
                 .searchable(true)
                 .sortable(true),
+            base_name => Str::new().title("多维表名称").max_length(512).searchable(true),
+            table_name => Str::new().title("数据表名称").max_length(512).searchable(true),
+            approval_name => Str::new().title("审批名称").max_length(512).searchable(true),
+            applicant_field_name => Str::new().title("申请人列名称").max_length(512),
+            backfill_field_name => Str::new().title("回填列名称").max_length(512),
             // --- 多维表格坐标 ---
             //
             // 两列都必填：扫描与回写都直接打这两个路径段，缺一个就无法定位表格。
@@ -57,7 +62,8 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .title("审批定义 Code")
                 .require(true)
                 .max_length(128)
-                .searchable(true),
+                .searchable(true)
+                .filterable(true),
             // --- 两个关键字段的坐标 ---
             //
             // 存 **field_id** 而不是字段名：用户在多维表格里改列名会静默失配，
@@ -124,6 +130,30 @@ fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn business_names_are_optional_searchable_and_approval_is_filterable() {
+        let definition = definition();
+        for name in [
+            "base_name",
+            "table_name",
+            "approval_name",
+            "applicant_field_name",
+            "backfill_field_name",
+        ] {
+            let field = definition
+                .field(name)
+                .unwrap_or_else(|| panic!("缺少 {name}"));
+            assert!(!field.is_required());
+            if matches!(name, "base_name" | "table_name" | "approval_name") {
+                assert!(field.is_searchable());
+            }
+        }
+        assert!(definition
+            .field("approval_code")
+            .unwrap_or_else(|| panic!("缺少审批标识"))
+            .is_filterable());
+    }
 
     fn definition() -> yang_base::table::TableDefinition {
         table_spec()

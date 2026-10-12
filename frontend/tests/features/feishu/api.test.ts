@@ -327,6 +327,91 @@ describe("审批配置外部选项绑定", () => {
     );
     expect(configs.items[0].maps[0].optionSourceKey).toBe("fldq7lcb6y");
   });
+  it("旧列表兼容可空名称，新列表保留业务来源名称", async () => {
+    stubFetch({
+      code: 0,
+      message: "成功",
+      data: {
+        items: [
+          {
+            id: 1,
+            maps: [
+              { widget_id: "w", widget_type: "future", bitable_field: "fldX" },
+            ],
+          },
+          {
+            id: 2,
+            base_name: "业务表格",
+            table_name: null,
+            approval_name: "费用审批",
+            applicant_field_name: "申请人",
+            backfill_field_name: "审批编号",
+            maps: [
+              { widget_id: "w", option_source_name: "公司目录 · 公司名称" },
+            ],
+          },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 10,
+      },
+    });
+    const result = await listApprovalConfigs(
+      { page: 1, pageSize: 10, search: "" },
+      approvalDeps,
+    );
+    expect(result.items[0]).toMatchObject({
+      baseName: null,
+      tableName: null,
+      approvalName: null,
+    });
+    expect(result.items[0].maps[0].converter).toBe("");
+    expect(result.items[1]).toMatchObject({
+      baseName: "业务表格",
+      tableName: null,
+      approvalName: "费用审批",
+      applicantFieldName: "申请人",
+      backfillFieldName: "审批编号",
+    });
+    expect(result.items[1].maps[0].optionSourceName).toBe(
+      "公司目录 · 公司名称",
+    );
+  });
+  it("组合筛选按服务端标准过滤树查询，缓存隔离详情和关联页", async () => {
+    const calls = stubFetch({
+      code: 0,
+      message: "成功",
+      data: { items: [], total: 0, page: 2, page_size: 10 },
+    });
+    const query = {
+      page: 2,
+      pageSize: 10,
+      search: "  员工  ",
+      status: "disabled" as const,
+      configId: 9,
+      approvalCode: "CODE-X",
+    };
+    await listApprovalConfigs(query, approvalDeps);
+    expect(calls[0]?.body).toMatchObject({
+      page: 2,
+      search: "员工",
+      count_total: true,
+      where: {
+        type: "and",
+        conditions: [
+          { type: "eq", field: "enabled", value: false },
+          { type: "eq", field: "id", value: 9 },
+          { type: "eq", field: "approval_code", value: "CODE-X" },
+        ],
+      },
+    });
+    expect(feishuQueryKeys.approvalConfigList(query)).not.toEqual(
+      feishuQueryKeys.approvalConfigList({ ...query, configId: 10 }),
+    );
+    expect(feishuQueryKeys.approvalConfigList(query)).not.toEqual(
+      feishuQueryKeys.approvalConfigList({ ...query, approvalCode: "CODE-Y" }),
+    );
+  });
 });
 
 describe("query key 工厂", () => {

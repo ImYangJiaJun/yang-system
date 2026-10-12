@@ -2,10 +2,10 @@
  * 审批派发配置页（`/feishu/approval/configs`，走真实路由含 lazy 的 `.default` 约定）。
  *
  * 钉住四件事：
- * - 列表投影（名称/坐标/Code/时区/启用/快照/更新）；
+ * - 列表业务名称与详情排查信息；
  * - 权限门控：无 list_configs 时侧边栏入口不渲染、页面给权限说明；
- * - 无写权限：行操作整组不渲染（只读行），「新建配置」不出现；
- * - 行操作：启停翻转 enabled、删除确认（成功 toast + 回读）、映射明细展开。
+ * - 无写权限：详情写操作不渲染，「新建配置」不出现；
+ * - 详情操作：启停确认后翻转 enabled、删除确认（成功 toast + 回读）、独立详情字段对应。
  */
 
 import { screen, waitFor, within } from "@testing-library/react";
@@ -68,7 +68,7 @@ describe("审批派发配置页 · 列表", () => {
   it("空列表也能展开工作流指引，提供真实接口、参数与单行/批量示例", async () => {
     const calls = stubApprovalApi({ approvalWrite: false });
     renderConfigs();
-    await screen.findByRole("heading", { name: "审批派发" });
+    await screen.findByRole("heading", { name: "审批配置" });
 
     const summary = screen.getByText("多维表格工作流配置指引");
     const guide = summary.closest("details")!;
@@ -128,7 +128,7 @@ describe("审批派发配置页 · 列表", () => {
     expect(guide).not.toHaveAttribute("open");
   });
 
-  it("渲染列表投影：名称/坐标/Code/时区/启用/快照时间/更新时间", async () => {
+  it("列表展示配置名称和状态，隐藏技术标识", async () => {
     stubApprovalApi({
       configList: () => listPage(configRows()),
     });
@@ -136,17 +136,11 @@ describe("审批派发配置页 · 列表", () => {
 
     expect(await screen.findByText("差旅报销")).toBeInTheDocument();
     expect(await screen.findByText("费用报销")).toBeInTheDocument();
-    // 坐标：base_token / table_id 同一格
-    expect(screen.getAllByText(/appbcbWCzen6 \/ tblsRc9GRRX/).length).toBe(2);
-    // Code 与时区
-    expect(screen.getByText("CODE-TRAVEL")).toBeInTheDocument();
-    expect(screen.getByText("CODE-EXPENSE")).toBeInTheDocument();
-    expect(screen.getAllByText("Asia/Shanghai").length).toBe(2);
-    // 启用徽标（「启用」同时是停用行的行操作按钮名，用 getAll 取徽标）
-    expect(screen.getAllByText("启用").length).toBeGreaterThan(0);
-    expect(screen.getByText("已停用")).toBeInTheDocument();
-    // 快照/更新时间（unix 秒 → 本地文本）
-    expect(screen.getAllByText(/2025/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("CODE-TRAVEL")).toBeNull();
+    expect(screen.queryByText("Asia/Shanghai")).toBeNull();
+    const table = within(screen.getByRole("table"));
+    expect(table.getByText("已启用")).toBeInTheDocument();
+    expect(table.getByText("已停用")).toBeInTheDocument();
   });
 
   it("列表请求恒带确定性排序（updated_at Desc + id Asc 收尾）", async () => {
@@ -191,14 +185,14 @@ describe("审批派发配置页 · 权限门控", () => {
     expect(screen.queryByRole("button", { name: "新建配置" })).toBeNull();
     expect(screen.queryByRole("button", { name: "删除" })).toBeNull();
     expect(screen.queryByRole("button", { name: "启用" })).toBeNull();
-    // 行尾给「只读」标注
-    expect(screen.getAllByText("只读").length).toBe(2);
     const user = userEvent.setup();
-    await user.click(screen.getAllByRole("button", { name: "映射明细" })[1]!);
-    const detail = within(screen.getByTestId("maps-of-2"));
+    await user.click(screen.getAllByRole("button", { name: "查看配置" })[1]!);
+    const detail = within(
+      screen.getByRole("tabpanel", { name: "字段对应（1）" }),
+    );
     expect(detail.getByText("付款明细_金额")).toBeInTheDocument();
     expect(detail.getByText("金额")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "编辑映射" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "编辑配置" })).toBeNull();
   });
 
   it("有读有写：入口与行操作都在", async () => {
@@ -211,9 +205,14 @@ describe("审批派发配置页 · 权限门控", () => {
       await screen.findByRole("button", { name: "新建配置" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("费用报销")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "启用" }).length).toBe(1);
-    expect(screen.getAllByRole("button", { name: "停用" }).length).toBe(1);
-    expect(screen.getAllByRole("button", { name: "删除" }).length).toBe(2);
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[1]!,
+    );
+    expect(
+      await screen.findByRole("button", { name: "编辑配置" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启用" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
   });
 });
 
@@ -242,7 +241,8 @@ describe("审批派发配置页 · 行操作", () => {
     });
     renderConfigs();
     await screen.findByText("费用报销");
-    await user.click(screen.getAllByRole("button", { name: "编辑映射" })[1]!);
+    await user.click(screen.getAllByRole("button", { name: "查看配置" })[1]!);
+    await user.click(await screen.findByRole("button", { name: "编辑配置" }));
     await user.click(screen.getByRole("button", { name: "预览控件" }));
     const pick = await screen.findByRole("combobox", {
       name: "付款明细_金额对应的多维表格字段",
@@ -275,8 +275,15 @@ describe("审批派发配置页 · 行操作", () => {
     await screen.findByText("差旅报销");
 
     // 差旅报销当前启用 → 停用
-    const stopButtons = screen.getAllByRole("button", { name: "停用" });
-    await userEvent.click(stopButtons[0]!);
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[0]!,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "停用" }));
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "确认停用",
+      }),
+    );
 
     await waitFor(() => {
       const bodies = bodiesOf(calls, CONFIG_UPDATE_PATH);
@@ -296,7 +303,10 @@ describe("审批派发配置页 · 行操作", () => {
     renderConfigs();
     await screen.findByText("费用报销");
 
-    await userEvent.click(screen.getAllByRole("button", { name: "删除" })[1]!);
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[1]!,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "删除" }));
     // 确认对话框指认对象
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(/费用报销（#2）/)).toBeInTheDocument();
@@ -329,7 +339,10 @@ describe("审批派发配置页 · 行操作", () => {
     renderConfigs();
     await screen.findByText("费用报销");
 
-    await userEvent.click(screen.getAllByRole("button", { name: "删除" })[1]!);
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[1]!,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("dialog");
     await screen.findByText(/费用报销（#2）/);
     await userEvent.click(within(dialog).getByRole("button", { name: "删除" }));
@@ -345,14 +358,13 @@ describe("审批派发配置页 · 行操作", () => {
     await screen.findByText("费用报销");
 
     await userEvent.click(
-      screen.getAllByRole("button", { name: "映射明细" })[1]!,
+      screen.getAllByRole("button", { name: "查看配置" })[1]!,
     );
-    const detail = await screen.findByTestId("maps-of-2");
-    expect(within(detail).getByText("widget-1")).toBeInTheDocument();
-    expect(within(detail).getByText("input")).toBeInTheDocument();
-    expect(within(detail).getByText("fldA")).toBeInTheDocument();
-    // 明细表头「必填」+ 该映射行值各一处
-    expect(within(detail).getAllByText("必填").length).toBe(2);
-    expect(within(detail).getByText("direct")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("tab", { name: "排查信息" }));
+    await userEvent.click(screen.getByText("原始字段对应"));
+    expect(screen.getByText("widget-1")).toBeInTheDocument();
+    expect(screen.getByText("input")).toBeInTheDocument();
+    expect(screen.getByText("fldA")).toBeInTheDocument();
+    expect(screen.getByText("direct")).toBeInTheDocument();
   });
 });

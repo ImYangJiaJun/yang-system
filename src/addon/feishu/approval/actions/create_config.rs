@@ -15,7 +15,9 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval_match::FieldMapping;
-use crate::addon::feishu::domain::approval_provision::{build_plan, insert_plan, ProvisionInput};
+use crate::addon::feishu::domain::approval_provision::{
+    build_plan, fill_table_names, insert_plan, ProvisionInput,
+};
 use crate::addon::feishu::domain::bitable::resolve_bitable_link;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
@@ -130,7 +132,7 @@ pub(super) async fn handle(
     };
 
     let outbound = outbound_setup::build(&ctx, settings)?;
-    let plan = build_plan(
+    let mut plan = build_plan(
         outbound.transport(),
         outbound.sleeper(),
         &outbound.tokens,
@@ -147,6 +149,14 @@ pub(super) async fn handle(
     )
     .await
     .map_err(|failure| BaseError::ParamInvalid("feishu".to_string(), failure.to_string()))?;
+
+    fill_table_names(
+        &mut plan,
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+    )
+    .await;
 
     // 配置与映射同一事务，审计同事务追加（AUDIT.md 契约：审计失败整体回滚）。
     let mut transaction = ctx.begin_transaction().await?;

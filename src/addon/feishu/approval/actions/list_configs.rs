@@ -1,6 +1,6 @@
 //! 审批派发配置列表（前端控制台）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -23,6 +23,11 @@ use crate::addon::feishu::domain::repository::all_pages;
 pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "id",
     "title",
+    "base_name",
+    "table_name",
+    "approval_name",
+    "applicant_field_name",
+    "backfill_field_name",
     "base_token",
     "table_id",
     "approval_code",
@@ -66,6 +71,7 @@ pub(super) struct FieldMapItem {
     converter: String,
     /// 外部选项来源；旧配置可能为空。
     option_source_key: Option<String>,
+    option_source_name: Option<String>,
 }
 
 /// 把映射行按 `config_id` 分组。
@@ -79,14 +85,13 @@ pub(super) fn group_maps(rows: &[Record]) -> Result<HashMap<i64, Vec<FieldMapIte
         groups.entry(config_id).or_default().push(FieldMapItem {
             widget_id: row.require("widget_id")?,
             widget_name: None,
+            option_source_name: None,
             widget_type: row.require("widget_type")?,
             bitable_field: row.require("bitable_field")?,
             bitable_field_name: row.optional("bitable_field_name")?,
             option_source_key: row.optional("option_source_key")?,
             required: row.optional("required")?.unwrap_or(false),
-            converter: row
-                .optional("converter")?
-                .unwrap_or_else(|| "direct".to_string()),
+            converter: row.optional("converter")?.unwrap_or_default(),
         });
     }
     Ok(groups)
@@ -99,6 +104,11 @@ pub(super) struct ConfigItem {
     id: i64,
     /// 展示名（建配置时由审批定义名自动生成）。
     title: String,
+    base_name: Option<String>,
+    table_name: Option<String>,
+    approval_name: Option<String>,
+    applicant_field_name: Option<String>,
+    backfill_field_name: Option<String>,
     /// 多维表格 token。
     base_token: String,
     /// 数据表 id。
@@ -190,6 +200,70 @@ pub(super) async fn handle(
         group_maps(&map_rows)?
     };
 
+    let source_keys: HashSet<String> = groups
+        .values()
+        .flatten()
+        .filter_map(|map| map.option_source_key.clone())
+        .collect();
+    if !source_keys.is_empty() {
+        let bindings = all_pages(
+            context
+                .datasource_fields()
+                .query()
+                .select_fields(&["source_key", "datasource_id", "field_name"])?
+                .where_in(
+                    "source_key",
+                    source_keys
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                )?,
+            100,
+        )
+        .await?;
+        let datasource_ids = bindings
+            .iter()
+            .map(|row| row.require::<i64>("datasource_id"))
+            .collect::<Result<HashSet<_>, _>>()?;
+        let sources = if datasource_ids.is_empty() {
+            Vec::new()
+        } else {
+            all_pages(
+                context
+                    .datasources()
+                    .query()
+                    .select_fields(&["id", "title"])?
+                    .where_in(
+                        "id",
+                        datasource_ids
+                            .into_iter()
+                            .map(|id| serde_json::json!(id))
+                            .collect(),
+                    )?,
+                100,
+            )
+            .await?
+        };
+        for map in groups.values_mut().flatten() {
+            if let Some(binding) = bindings.iter().find(|row| {
+                row.optional::<String>("source_key").ok().flatten().as_ref()
+                    == map.option_source_key.as_ref()
+            }) {
+                let source_id: i64 = binding.require("datasource_id")?;
+                if let Some(source) = sources
+                    .iter()
+                    .find(|row| row.optional::<i64>("id").ok().flatten() == Some(source_id))
+                {
+                    let title: String = source.require("title")?;
+                    map.option_source_name =
+                        Some(match binding.optional::<String>("field_name")? {
+                            Some(name) => format!("{title} · {name}"),
+                            None => title,
+                        });
+                }
+            }
+        }
+    }
     let mut items = Vec::with_capacity(rows.len());
     for record in rows.iter() {
         let id: i64 = record.require("id")?;
@@ -208,6 +282,11 @@ pub(super) async fn handle(
         items.push(ConfigItem {
             id,
             title: record.require("title")?,
+            base_name: record.optional("base_name")?,
+            table_name: record.optional("table_name")?,
+            approval_name: record.optional("approval_name")?,
+            applicant_field_name: record.optional("applicant_field_name")?,
+            backfill_field_name: record.optional("backfill_field_name")?,
             base_token: record.require("base_token")?,
             table_id: record.require("table_id")?,
             approval_code: record.require("approval_code")?,
@@ -272,6 +351,13 @@ mod tests {
     }
 
     #[test]
+    fn missing_converter_is_not_misrepresented_as_direct() {
+        let groups =
+            group_maps(&[map_row(1, "w1", "fldA", true)]).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(groups[&1][0].converter, "");
+    }
+
+    #[test]
     fn empty_map_set_yields_no_groups() {
         assert!(group_maps(&[])
             .unwrap_or_else(|error| panic!("应可分组: {error}"))
@@ -284,6 +370,11 @@ mod tests {
         let item = ConfigItem {
             id: 1,
             title: "测试配置".to_string(),
+            base_name: None,
+            table_name: None,
+            approval_name: None,
+            applicant_field_name: None,
+            backfill_field_name: None,
             base_token: "appTest".to_string(),
             table_id: "tblTest".to_string(),
             approval_code: "CODE-TEST".to_string(),

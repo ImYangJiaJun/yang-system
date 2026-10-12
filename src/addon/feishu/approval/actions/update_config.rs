@@ -16,7 +16,9 @@ use yang_base::BaseError;
 use yang_db::{field, table, CompareOp, QueryBuilder};
 
 use crate::addon::feishu::domain::approval_match::FieldMapping;
-use crate::addon::feishu::domain::approval_provision::{build_plan, insert_maps, ProvisionInput};
+use crate::addon::feishu::domain::approval_provision::{
+    build_plan, display_name, fill_table_names, insert_maps, ProvisionInput,
+};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
 use crate::infrastructure::audit;
@@ -119,28 +121,34 @@ pub(super) async fn handle(
             return Ok(ApiResponse::fail(50301, "飞书出站凭证未配置"));
         };
         let outbound = outbound_setup::build(&ctx, settings)?;
-        Some(
-            build_plan(
-                outbound.transport(),
-                outbound.sleeper(),
-                &outbound.tokens,
-                &context,
-                &ProvisionInput {
-                    base_token: &coordinates.require::<String>("base_token")?,
-                    table_id: &coordinates.require::<String>("table_id")?,
-                    approval_code: &coordinates.require::<String>("approval_code")?,
-                    applicant_field: &coordinates.require::<String>("applicant_field")?,
-                    backfill_field: &coordinates.require::<String>("backfill_field")?,
-                    base_timezone: input
-                        .base_timezone
-                        .as_deref()
-                        .unwrap_or(&coordinates.require::<String>("base_timezone")?),
-                    maps: Some(maps),
-                },
-            )
-            .await
-            .map_err(|failure| BaseError::ParamInvalid("maps".to_string(), failure.to_string()))?,
+        let mut plan = build_plan(
+            outbound.transport(),
+            outbound.sleeper(),
+            &outbound.tokens,
+            &context,
+            &ProvisionInput {
+                base_token: &coordinates.require::<String>("base_token")?,
+                table_id: &coordinates.require::<String>("table_id")?,
+                approval_code: &coordinates.require::<String>("approval_code")?,
+                applicant_field: &coordinates.require::<String>("applicant_field")?,
+                backfill_field: &coordinates.require::<String>("backfill_field")?,
+                base_timezone: input
+                    .base_timezone
+                    .as_deref()
+                    .unwrap_or(&coordinates.require::<String>("base_timezone")?),
+                maps: Some(maps),
+            },
         )
+        .await
+        .map_err(|failure| BaseError::ParamInvalid("maps".to_string(), failure.to_string()))?;
+        fill_table_names(
+            &mut plan,
+            outbound.transport(),
+            outbound.sleeper(),
+            &outbound.tokens,
+        )
+        .await;
+        Some(plan)
     } else {
         None
     };
@@ -184,6 +192,23 @@ pub(super) async fn handle(
             after_timezone = timezone.to_string();
         }
         if let Some(plan) = &plan {
+            for (key, name) in [
+                ("base_name", plan.base_name.as_deref()),
+                ("table_name", plan.table_name.as_deref()),
+                ("approval_name", Some(plan.approval_name.as_str())),
+                (
+                    "applicant_field_name",
+                    Some(plan.applicant_field_name.as_str()),
+                ),
+                (
+                    "backfill_field_name",
+                    Some(plan.backfill_field_name.as_str()),
+                ),
+            ] {
+                if let Some(name) = display_name(name) {
+                    record.insert(key, serde_json::json!(name));
+                }
+            }
             record.insert("form_snapshot", serde_json::json!(plan.form_snapshot));
             record.insert(
                 "form_snapshot_at",

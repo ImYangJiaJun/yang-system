@@ -37,6 +37,7 @@ import { withStableOrder } from "./list-query";
 import type {
   ApprovalConfigItem,
   ApprovalConfigMap,
+  ApprovalConfigQuery,
   ApprovalOptionSource,
   ApprovalRequestItem,
   ApprovalRequestsQuery,
@@ -88,11 +89,11 @@ export const OPTION_OPERATION_IDS = {
   approvalOptions: "feishu.option.approval_options",
 } as const;
 
-/// 审批派发控制台的 7 个 Action。
+/// 审批派发控制台的 8 个 Action。
 ///
 /// **每一粒都必须是服务端真实注册过的 `operation_id`**（逐个对着
 /// `src/addon/feishu/approval/actions/*.rs` 的 `action_name!(...)` 核过）。
-/// 服务端 `action_name!` 的展开形态是「模块名 + 点 + 动作名」，七个动作的模块名
+/// 服务端 `action_name!` 的展开形态是「模块名 + 点 + 动作名」，八个动作的模块名
 /// 都是 `feishu.approval`（注册在 `approval/mod.rs` 的 `build_module`）。
 /// 与数据源 Action 不同，它们**无条件注册**（不挂 `can_pull()` 门禁）：控制台
 /// 不依赖飞书凭证存在，`create_config` / `list_widgets` 运行时按其自身逻辑校验。
@@ -101,6 +102,7 @@ export const APPROVAL_OPERATION_IDS = {
   createConfig: "feishu.approval.create_config",
   updateConfig: "feishu.approval.update_config",
   deleteConfig: "feishu.approval.delete_config",
+  refreshNames: "feishu.approval.refresh_names",
   listWidgets: "feishu.approval.list_widgets",
   listRequests: "feishu.approval.list_requests",
   listTasks: "feishu.approval.list_tasks",
@@ -236,11 +238,7 @@ export const feishuQueryKeys = {
       },
     ] as const,
   approvalConfigs: () => [FEISHU_QUERY_ROOT, "approval-configs"] as const,
-  approvalConfigList: (query: {
-    page: number;
-    pageSize: number;
-    search: string;
-  }) =>
+  approvalConfigList: (query: ApprovalConfigQuery) =>
     [
       ...feishuQueryKeys.approvalConfigs(),
       // 入参必须进 key：漏掉 search，react-query 15s staleTime 内搜索只改闭包
@@ -249,6 +247,9 @@ export const feishuQueryKeys = {
         page: query.page,
         pageSize: query.pageSize,
         search: query.search.trim(),
+        status: query.status ?? "all",
+        configId: query.configId ?? null,
+        approvalCode: query.approvalCode ?? null,
       },
     ] as const,
   approvalRequests: () => [FEISHU_QUERY_ROOT, "approval-requests"] as const,
@@ -1658,18 +1659,37 @@ export function useFeishuActions(): FeishuActions {
 
 /* --------------------------- 审批派发控制台 --------------------------- */
 
-/// 配置列表的请求体。坐标列不可搜（`searchable` 只覆盖 `title`），
+/// 配置列表的请求体。业务名称由服务端搜索，详情和关联配置复用标准过滤树，
 /// 缺省键一律用 `undefined` 省略。
-function buildApprovalConfigListBody(query: {
-  page: number;
-  pageSize: number;
-  search: string;
-}): Record<string, unknown> {
+function buildApprovalConfigListBody(
+  query: ApprovalConfigQuery,
+): Record<string, unknown> {
   const search = query.search.trim();
+  const conditions: Record<string, unknown>[] = [];
+  if (query.status && query.status !== "all")
+    conditions.push({
+      type: "eq",
+      field: "enabled",
+      value: query.status === "enabled",
+    });
+  if (query.configId !== undefined)
+    conditions.push({ type: "eq", field: "id", value: query.configId });
+  if (query.approvalCode !== undefined)
+    conditions.push({
+      type: "eq",
+      field: "approval_code",
+      value: query.approvalCode,
+    });
   return {
     page: query.page,
     page_size: query.pageSize,
     search: search === "" ? undefined : search,
+    where:
+      conditions.length === 0
+        ? undefined
+        : conditions.length === 1
+          ? conditions[0]
+          : { type: "and", conditions },
     // 恒非空：分页要有确定性全序，否则翻页会漏行或重复（后端兜底也是同一对键）。
     order_by: [
       { field: "updated_at", direction: "Desc" },
@@ -1721,8 +1741,9 @@ function parseApprovalConfigMap(
     bitableField: asString(raw.bitable_field),
     bitableFieldName: asNullableString(raw.bitable_field_name),
     required: raw.required === true,
-    converter: asString(raw.converter, "direct"),
+    converter: asString(raw.converter),
     optionSourceKey: asNullableString(raw.option_source_key),
+    optionSourceName: asNullableString(raw.option_source_name),
   };
 }
 
@@ -1742,6 +1763,11 @@ function parseApprovalConfigItem(
   return {
     id,
     title: asString(raw.title),
+    baseName: asNullableString(raw.base_name),
+    tableName: asNullableString(raw.table_name),
+    approvalName: asNullableString(raw.approval_name),
+    applicantFieldName: asNullableString(raw.applicant_field_name),
+    backfillFieldName: asNullableString(raw.backfill_field_name),
     baseToken: asString(raw.base_token),
     tableId: asString(raw.table_id),
     approvalCode: asString(raw.approval_code),
@@ -1813,7 +1839,7 @@ function parseApprovalTaskItem(
 
 /// 配置列表（`feishu.approval.list_configs`）。
 export async function listApprovalConfigs(
-  query: { page: number; pageSize: number; search: string },
+  query: ApprovalConfigQuery,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
 ): Promise<ListPage<ApprovalConfigItem>> {
@@ -2006,7 +2032,7 @@ export async function listApprovalTasks(
 /// 配置列表页的查询 hook。搜索词去抖由页面自己做（照 `useListQuery` 的
 /// `useDebouncedValue`），这里只接分页。
 export function useApprovalConfigList(
-  query: { page: number; pageSize: number; search: string },
+  query: ApprovalConfigQuery,
   options: { enabled?: boolean } = {},
 ): UseQueryResult<ListPage<ApprovalConfigItem>> {
   const session = useSessionCredentials();
@@ -2017,7 +2043,8 @@ export function useApprovalConfigList(
     queryKey: feishuQueryKeys.approvalConfigList(query),
     queryFn: ({ signal }) =>
       listApprovalConfigs(query, { catalog: catalogData, session }, signal),
-    placeholderData: keepPreviousData,
+    placeholderData:
+      query.configId === undefined ? keepPreviousData : undefined,
     staleTime: 15_000,
   });
 }
@@ -2070,6 +2097,7 @@ export function useApprovalTasks(
 export type ApprovalActions = {
   canRead: boolean;
   canWrite: boolean;
+  refreshNames: (configIds: number[]) => Promise<number[]>;
   updateConfig: (
     configId: number,
     patch: UpdateApprovalConfigPatch,
@@ -2102,6 +2130,19 @@ export function useApprovalActions(): ApprovalActions {
   return {
     canRead: canReadApproval(catalogData),
     canWrite: canWriteApproval(catalogData),
+    refreshNames: async (configIds: number[]) => {
+      const result = await invokeFeishuAction(
+        deps,
+        APPROVAL_OPERATION_IDS.refreshNames,
+        { config_ids: configIds },
+      );
+      const data = asRecord(result.data);
+      return Array.isArray(data?.incomplete_ids)
+        ? data.incomplete_ids.filter(
+            (id): id is number => typeof id === "number",
+          )
+        : [];
+    },
     updateConfig,
     deleteConfig,
   };

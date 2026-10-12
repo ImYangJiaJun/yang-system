@@ -705,6 +705,27 @@ async fn fetch_page<T: for<'de> Deserialize<'de>>(
     .await
 }
 
+/// 读取展示名称，不读取记录内容。
+pub(crate) async fn get_base_name(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    app_token: &str,
+) -> Result<Option<String>, OutboundFailure> {
+    validate_path_segment("bitable_base_token", app_token).map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: -1 },
+        message: error.to_string(),
+    })?;
+    let url = format!("{FEISHU_OPEN_BASE}/open-apis/bitable/v1/apps/{app_token}");
+    let data: serde_json::Value = fetch_page(transport, sleeper, tokens, &url, Vec::new()).await?;
+    Ok(data
+        .get("app")
+        .and_then(|app| app.get("name"))
+        .and_then(|name| name.as_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string))
+}
+
 /// 带 JSON body 的出站请求 + 信封解码。
 ///
 /// 与 `fetch_page` 共用「token 失效 → 清缓存强制刷新 → 重试本页」的补救，
