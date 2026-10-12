@@ -729,6 +729,22 @@ async fn write_extended(
             write(backfill, input.record_id, field, Value::String(flow)).await;
         }
     }
+    // 发起人列写回（§6.4）：传参路径把 open_id 写回 `applicant_field` 目标列。
+    // 仅在传参路径（D2）写——回退读表格列时该列本就有值，不回写。
+    // 这里没有「写失败不改结论」的余地：`finish_backfill` 已定 `Backfilled`，
+    // 与扩展字段同一条 warn 路径。
+    if input.applicant.is_some() && !input.applicant_field.trim().is_empty() {
+        let applicant = input.applicant.as_deref().unwrap_or_default().trim();
+        if !applicant.is_empty() {
+            write(
+                backfill,
+                input.record_id,
+                input.applicant_field,
+                Value::Array(vec![serde_json::json!({"id": applicant})]),
+            )
+            .await;
+        }
+    }
     // 发起人部门：一期只写 `department_id` **原值**到文本列——部门名解析（contact
     // 接口 + scope）在上层做（设计 §4.3 缺口 1：bot 形态的 id 格式能否直喂部门接口
     // 尚未验证，且当前应用无 contact scope）。
@@ -2752,6 +2768,18 @@ mod tests {
                 Some(json!("ou_from_param"))
             );
         }
+        // §6.4：传参路径把发起人写回 applicant_field 列（回退路径不写）。
+        {
+            let writes = backfill.raw_writes();
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|(_, field, _)| field == "fld_applicant")
+                    .map(|(_, _, value)| value.clone()),
+                Some(json!([{"id": "ou_from_param"}])),
+                "传参路径必须回写发起人列"
+            );
+        }
 
         // 空白串等同未传参 → 回退读表格列；表格也缺 → Waiting（不写字段、不打接口）。
         let transport = ScriptedTransport::new(vec![]);
@@ -2774,21 +2802,23 @@ mod tests {
         let cell_map = cells(&[("fld_applicant", json!([{"id":"ou_cell"}]))]);
         let mut request = input(&cell_map, &widgets);
         request.applicant = Some(String::new());
+        let recording = RecordingBackfill::default();
         assert!(matches!(
-            dispatch_one(
-                &transport,
-                &NoSleep,
-                &fake_tokens(),
-                &RecordingBackfill::default(),
-                &request
-            )
-            .await,
+            dispatch_one(&transport, &NoSleep, &fake_tokens(), &recording, &request).await,
             DispatchResult::Backfilled { .. }
         ));
         let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             bodies[0].as_ref().map(|body| body["open_id"].clone()),
             Some(json!("ou_cell"))
+        );
+        // 回退路径不回写发起人列（该列本就有值，D2 行为零变化）。
+        assert!(
+            !recording
+                .raw_writes()
+                .iter()
+                .any(|(_, field, _)| field == "fld_applicant"),
+            "回退路径不得回写发起人列"
         );
     }
 
