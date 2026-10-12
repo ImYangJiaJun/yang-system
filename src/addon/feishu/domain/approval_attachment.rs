@@ -77,78 +77,6 @@ pub(crate) fn preflight(
     Ok(codes)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::super::approval_convert::Converter;
-    use super::*;
-
-    #[test]
-    fn attachment_metadata_rejects_invalid_tokens_names_sizes_and_shapes() {
-        let widget = WidgetMap {
-            widget_id: "a".to_string(),
-            widget_type: "attachmentV2".to_string(),
-            bitable_field: "f".to_string(),
-            required: true,
-            converter: Converter::Direct,
-            option_map: BTreeMap::new(),
-            currency: None,
-        };
-        let valid = json!({"file_token":"Token1", "name":"凭证.pdf", "size":1});
-        for (key, value) in [
-            ("file_token", json!("")),
-            ("file_token", json!("a/../b")),
-            ("file_token", json!("a".repeat(129))),
-            ("file_token", json!("中文")),
-            ("name", json!("plain")),
-            ("name", json!(".pdf")),
-            ("name", json!("a.")),
-            ("name", json!("a\r\nx.pdf")),
-            ("name", json!("a\".pdf")),
-            ("name", json!("a/b.pdf")),
-            ("name", json!("a\\b.pdf")),
-            ("name", json!(format!("{}.pdf", "a".repeat(1024)))),
-            ("size", json!(0)),
-            ("size", json!(MAX_ATTACHMENT_BYTES + 1)),
-        ] {
-            let mut file = valid.clone();
-            file[key] = value;
-            assert!(
-                attachments(&widget, &Map::from_iter([("f".to_string(), json!([file]))])).is_err(),
-                "{key}"
-            );
-        }
-        for value in [json!("Token1"), json!({"file_token":"Token1"}), json!([{}])] {
-            assert!(attachments(&widget, &Map::from_iter([("f".to_string(), value)])).is_err());
-        }
-        for size in [1, MAX_ATTACHMENT_BYTES] {
-            let mut file = valid.clone();
-            file["size"] = json!(size);
-            assert_eq!(
-                attachments(&widget, &Map::from_iter([("f".to_string(), json!([file]))]))
-                    .unwrap_or_else(|e| panic!("{e}"))
-                    .len(),
-                1
-            );
-        }
-        assert!(attachments(&widget, &Map::new())
-            .unwrap_or_else(|e| panic!("{e}"))
-            .is_empty());
-        assert!(
-            attachments(&widget, &Map::from_iter([("f".to_string(), Value::Null)]))
-                .unwrap_or_else(|e| panic!("{e}"))
-                .is_empty()
-        );
-        for value in [Value::Null, json!([])] {
-            assert!(preflight(
-                std::slice::from_ref(&widget),
-                &Map::from_iter([("f".to_string(), value)])
-            )
-            .unwrap_or_else(|e| panic!("{e}"))
-            .is_empty());
-        }
-    }
-}
-
 fn multipart(name: &str, bytes: &[u8]) -> (String, Vec<u8>) {
     let boundary = format!("feishu-{}", uuid::Uuid::new_v4());
     let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{name}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"type\"\r\n\r\nattachment\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"content\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
@@ -270,4 +198,76 @@ pub(crate) async fn transfer(
         }
     }
     Ok(codes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::approval_convert::Converter;
+    use super::*;
+
+    #[test]
+    fn attachment_metadata_rejects_invalid_tokens_names_sizes_and_shapes() {
+        let widget = WidgetMap {
+            widget_id: "a".to_string(),
+            widget_type: "attachmentV2".to_string(),
+            bitable_field: "f".to_string(),
+            required: true,
+            converter: Converter::Direct,
+            option_map: BTreeMap::new(),
+            currency: None,
+        };
+        let valid = json!({"file_token":"Token1", "name":"凭证.pdf", "size":1});
+        for (key, value) in [
+            ("file_token", json!("")),
+            ("file_token", json!("a/../b")),
+            ("file_token", json!("a".repeat(129))),
+            ("file_token", json!("中文")),
+            ("name", json!("plain")),
+            ("name", json!(".pdf")),
+            ("name", json!("a.")),
+            ("name", json!("a\r\nx.pdf")),
+            ("name", json!("a\".pdf")),
+            ("name", json!("a/b.pdf")),
+            ("name", json!("a\\b.pdf")),
+            ("name", json!(format!("{}.pdf", "a".repeat(1024)))),
+            ("size", json!(0)),
+            ("size", json!(MAX_ATTACHMENT_BYTES + 1)),
+        ] {
+            let mut file = valid.clone();
+            file[key] = value;
+            assert!(
+                attachments(&widget, &Map::from_iter([("f".to_string(), json!([file]))])).is_err(),
+                "{key}"
+            );
+        }
+        for value in [json!("Token1"), json!({"file_token":"Token1"}), json!([{}])] {
+            assert!(attachments(&widget, &Map::from_iter([("f".to_string(), value)])).is_err());
+        }
+        for size in [1, MAX_ATTACHMENT_BYTES] {
+            let mut file = valid.clone();
+            file["size"] = json!(size);
+            assert_eq!(
+                attachments(&widget, &Map::from_iter([("f".to_string(), json!([file]))]))
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .len(),
+                1
+            );
+        }
+        assert!(attachments(&widget, &Map::new())
+            .unwrap_or_else(|e| panic!("{e}"))
+            .is_empty());
+        assert!(
+            attachments(&widget, &Map::from_iter([("f".to_string(), Value::Null)]))
+                .unwrap_or_else(|e| panic!("{e}"))
+                .is_empty()
+        );
+        for value in [Value::Null, json!([])] {
+            assert!(preflight(
+                std::slice::from_ref(&widget),
+                &Map::from_iter([("f".to_string(), value)])
+            )
+            .unwrap_or_else(|e| panic!("{e}"))
+            .is_empty());
+        }
+    }
 }
