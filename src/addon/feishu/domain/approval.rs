@@ -176,6 +176,23 @@ struct CreateInstanceData {
 // ---------------------------------------------------------------------------
 
 /// 审批实例详情里本模块关心的字段。
+///
+/// # 两形态并存（bot / user）
+///
+/// 生产（tenant token / bot）与 lark-cli（user token）走**同一个**
+/// `GET /approval/v4/instances/:instance_id`，却返回**两套并存的字段形态**
+/// （真机已核，设计文档 `2026-10-12-feishu-approval-backfill-initiator-tracking-design.md`
+/// §4.1）。**bot 形态是生产实际在用的，本结构体以 bot 形态为准**：
+///
+/// - bot：`approval_code` / `approval_name` / `task_list[]` / `timeline[]` /
+///   `uuid` / `user_id`（工号）/ 独立 `open_id` / `department_id`（**非 `od-`
+///   前缀**）……；**无** `current_nodes` / `tasks` / `operation_records` /
+///   `definition_code`。
+/// - user：`definition_code` / `tasks[]` / `current_nodes[]` /
+///   `operation_records[]` / `department_id`（`od-` 前缀）……。
+///
+/// 两套形态里属于另一套的键在解析时缺省为 `None`（`serde(default)`），
+/// 互不干扰——即「两形态都能解析不炸」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InstanceDetail {
     pub(crate) instance_code: String,
@@ -186,6 +203,72 @@ pub(crate) struct InstanceDetail {
     /// 审批实例状态（`PENDING` / `APPROVED` / …）。当前不回流多维表格，
     /// 但落库留痕便于将来加回流时不必回补历史。
     pub(crate) status: Option<String>,
+    /// 发起时间：**字符串**毫秒时间戳（如 `"1790750409857"`）。两形态同形。
+    pub(crate) start_time: Option<String>,
+    /// 完成时间：未完成是字符串 `"0"`（不是 null、不是缺字段、不是数字 0）。
+    /// 回填时须按 `!= "0"` 判空——直接写 0 会在日期列显示 1970。
+    pub(crate) end_time: Option<String>,
+    /// 发起人 open_id（bot 形态的独立 `open_id` 字段）。
+    pub(crate) open_id: Option<String>,
+    /// 发起人工号（bot 形态）。**注意**：user 形态此键也是 `user_id`，但值是
+    /// `ou_` 前缀 open_id，语义与 bot 形态不同。
+    pub(crate) user_id: Option<String>,
+    /// 发起人部门 ID。**格式两形态不一致**：bot 形态**非** `od-` 前缀
+    /// （实测 `"db59a45c851464gf"`），user 形态是 `od-` 前缀。能否直接喂
+    /// contact 部门接口未验证（设计 §4.3）。
+    pub(crate) department_id: Option<String>,
+    /// 创建时传入的幂等键 `uuid`（bot 形态回显）。
+    pub(crate) uuid: Option<String>,
+    /// 退回标记（独立布尔；撤回走 `status="CANCELED"`，不是 `reverted`）。
+    pub(crate) reverted: Option<bool>,
+    /// 任务/节点列表（bot 形态键名 `task_list`）。`status=PENDING` 即当前卡点。
+    pub(crate) task_list: Option<Vec<TaskNode>>,
+    /// 流程动态（bot 形态键名 `timeline`）。
+    pub(crate) timeline: Option<Vec<TimelineRecord>>,
+}
+
+/// `task_list[]` 的一个节点/任务（bot 形态）。
+///
+/// 字段名对应 JSON 键；`type` 是 Rust 关键字，用 `r#type`（serde 自动映射回
+/// `"type"`）。全部 `Option`：两形态字段集不同，缺省即 `None`，不让解析失败。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct TaskNode {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) node_id: Option<String>,
+    #[serde(default)]
+    pub(crate) node_name: Option<String>,
+    #[serde(default)]
+    pub(crate) user_id: Option<String>,
+    #[serde(default)]
+    pub(crate) open_id: Option<String>,
+    /// 节点级状态枚举比实例级宽（实测见 `DONE`）。
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) r#type: Option<String>,
+    #[serde(default)]
+    pub(crate) start_time: Option<String>,
+    #[serde(default)]
+    pub(crate) end_time: Option<String>,
+}
+
+/// `timeline[]` 的一条流程动态（bot 形态）。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct TimelineRecord {
+    /// 事件类型（`START` / `CANCEL` / …）。
+    #[serde(default)]
+    pub(crate) r#type: Option<String>,
+    #[serde(default)]
+    pub(crate) create_time: Option<String>,
+    #[serde(default)]
+    pub(crate) user_id: Option<String>,
+    #[serde(default)]
+    pub(crate) open_id: Option<String>,
+    /// 扩展信息（各事件类型不同，统一按原始字符串收）。
+    #[serde(default)]
+    pub(crate) ext: Option<String>,
 }
 
 /// 按 `instance_code` **或 `uuid`** 取实例详情的结果。
@@ -230,11 +313,21 @@ pub(crate) async fn get_instance(
                     kind: FailureKind::Fatal { code: 0 },
                     message: format!("审批实例详情响应解析失败: {error}"),
                 })?;
+            // 新字段全部来自这一份响应，**零额外 API 调用**。
             Ok(GetOutcome::Found(InstanceDetail {
                 instance_code: data.instance_code,
                 approval_code: data.approval_code,
                 serial_number: data.serial_number.filter(|value| !value.is_empty()),
                 status: data.status,
+                start_time: data.start_time,
+                end_time: data.end_time,
+                open_id: data.open_id,
+                user_id: data.user_id,
+                department_id: data.department_id,
+                uuid: data.uuid,
+                reverted: data.reverted,
+                task_list: data.task_list,
+                timeline: data.timeline,
             }))
         }
         // 实例不存在：调用方据此决定「回到 create 重试」还是「退避」。
@@ -246,12 +339,33 @@ pub(crate) async fn get_instance(
 #[derive(Debug, Deserialize)]
 struct InstanceDetailData {
     instance_code: String,
+    // `approval_code` / `serial_number` / `status` 在 bot 形态里都有值，保留；
+    // user 形态缺省即 `None`。
     #[serde(default)]
     approval_code: Option<String>,
     #[serde(default)]
     serial_number: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    // 以下均为 bot 形态字段，两形态中另一套的键缺省为 None。
+    #[serde(default)]
+    start_time: Option<String>,
+    #[serde(default)]
+    end_time: Option<String>,
+    #[serde(default)]
+    open_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    department_id: Option<String>,
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
+    reverted: Option<bool>,
+    #[serde(default)]
+    task_list: Option<Vec<TaskNode>>,
+    #[serde(default)]
+    timeline: Option<Vec<TimelineRecord>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +583,137 @@ mod tests {
     }
 
     #[test]
+    fn instance_detail_parses_bot_shape_task_list_and_timeline() {
+        // 合成 bot（tenant token）形态响应：生产实际在用的形态，字段以它为准。
+        // task_list 两个节点（DONE / PENDING），timeline 一条 START 一条 CANCEL，
+        // end_time 是毫秒串（区别于未完成的 "0"）。
+        let json = r#"{
+            "instance_code": "9B0F4A3E-DC7F-4CF5-BE87-75EFD3D7DA67",
+            "approval_code": "D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E",
+            "approval_name": "技术测试专用",
+            "serial_number": "202609300082",
+            "status": "PENDING",
+            "uuid": "7C468A54-8745-2245-9675-08B7C63E7A87",
+            "user_id": "eabadgcg",
+            "open_id": "ou_aad06cf4f5c2c081cf273829cb9d080d",
+            "department_id": "db59a45c851464gf",
+            "start_time": "1790750409857",
+            "end_time": "1790751000000",
+            "reverted": false,
+            "task_list": [
+                {
+                    "id": "1", "node_id": "n1", "node_name": "审批",
+                    "user_id": "eabadgcg", "open_id": "ou_a", "status": "DONE",
+                    "type": "AND", "start_time": "1790750410128", "end_time": "1790750500000"
+                },
+                {
+                    "id": "2", "node_id": "n2", "node_name": "复核",
+                    "user_id": "eabadgcg", "open_id": "ou_b", "status": "PENDING",
+                    "type": "AND", "start_time": "1790750500000", "end_time": "0"
+                }
+            ],
+            "timeline": [
+                { "type": "START", "create_time": "1790750409857", "user_id": "eabadgcg", "open_id": "ou_a", "ext": "" },
+                { "type": "CANCEL", "create_time": "1790751000000", "user_id": "eabadgcg", "open_id": "ou_a", "ext": "" }
+            ]
+        }"#;
+        let data: InstanceDetailData =
+            serde_json::from_str(json).unwrap_or_else(|error| panic!("应可解析: {error}"));
+
+        assert_eq!(data.instance_code, "9B0F4A3E-DC7F-4CF5-BE87-75EFD3D7DA67");
+        assert_eq!(
+            data.approval_code.as_deref(),
+            Some("D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E")
+        );
+        assert_eq!(data.serial_number.as_deref(), Some("202609300082"));
+        assert_eq!(data.status.as_deref(), Some("PENDING"));
+        assert_eq!(data.start_time.as_deref(), Some("1790750409857"));
+        assert_eq!(data.end_time.as_deref(), Some("1790751000000"));
+        assert_eq!(
+            data.open_id.as_deref(),
+            Some("ou_aad06cf4f5c2c081cf273829cb9d080d")
+        );
+        assert_eq!(data.user_id.as_deref(), Some("eabadgcg"));
+        assert_eq!(data.department_id.as_deref(), Some("db59a45c851464gf"));
+        assert_eq!(
+            data.uuid.as_deref(),
+            Some("7C468A54-8745-2245-9675-08B7C63E7A87")
+        );
+        assert_eq!(data.reverted, Some(false));
+
+        let tasks = data.task_list.as_deref().unwrap_or_else(|| panic!("应有 task_list"));
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].node_name.as_deref(), Some("审批"));
+        assert_eq!(tasks[0].r#type.as_deref(), Some("AND"));
+        assert_eq!(tasks[0].status.as_deref(), Some("DONE"));
+        assert_eq!(tasks[0].end_time.as_deref(), Some("1790750500000"));
+        assert_eq!(tasks[1].status.as_deref(), Some("PENDING"));
+        assert_eq!(tasks[1].end_time.as_deref(), Some("0"));
+
+        let timeline = data.timeline.as_deref().unwrap_or_else(|| panic!("应有 timeline"));
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(timeline[0].r#type.as_deref(), Some("START"));
+        assert_eq!(timeline[0].create_time.as_deref(), Some("1790750409857"));
+        assert_eq!(timeline[1].r#type.as_deref(), Some("CANCEL"));
+    }
+
+    #[test]
+    fn instance_detail_parses_user_shape_without_bot_keys() {
+        // user（lark-cli）形态：键是 definition_code / tasks / current_nodes /
+        // operation_records，department_id 带 `od-` 前缀。这些 bot 专属键
+        // （approval_code / task_list / timeline / uuid / open_id）应落 None，
+        // 而两形态共有的键照常解析——钉住「两形态都能解析不炸」。
+        let json = r#"{
+            "instance_code": "9B0F4A3E-DC7F-4CF5-BE87-75EFD3D7DA67",
+            "definition_code": "D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E",
+            "definition_name": "技术测试专用",
+            "serial_number": "202609300082",
+            "status": "PENDING",
+            "start_time": "1790750409857",
+            "end_time": "0",
+            "reverted": false,
+            "department_id": "od-e2ebe89e1e313c2a3bf5fc064bfa6f4c",
+            "user_id": "ou_aad06cf4f5c2c081cf273829cb9d080d",
+            "current_nodes": [
+                { "node_id": "n1", "node_name": "审批", "type": "AND",
+                  "approvers": [{ "task_id": "1", "user_id": "ou_a" }] }
+            ],
+            "tasks": [
+                { "id": "1", "node_id": "n1", "node_name": "审批", "user_id": "ou_a",
+                  "status": "PENDING", "type": "AND", "start_time": "1790750410128", "end_time": "0" }
+            ],
+            "operation_records": [
+                { "type": "START", "create_time": "1790750409857", "user_id": "ou_a" }
+            ],
+            "comments": []
+        }"#;
+        let data: InstanceDetailData =
+            serde_json::from_str(json).unwrap_or_else(|error| panic!("应可解析: {error}"));
+
+        // bot 专属键在 user 形态下不存在 → None。
+        assert_eq!(data.approval_code, None);
+        assert_eq!(data.task_list, None);
+        assert_eq!(data.timeline, None);
+        assert_eq!(data.uuid, None);
+        assert_eq!(data.open_id, None);
+        // 两形态共有的键照常解析（user 形态 department_id 带 od- 前缀）。
+        assert_eq!(data.instance_code, "9B0F4A3E-DC7F-4CF5-BE87-75EFD3D7DA67");
+        assert_eq!(data.serial_number.as_deref(), Some("202609300082"));
+        assert_eq!(data.status.as_deref(), Some("PENDING"));
+        assert_eq!(data.start_time.as_deref(), Some("1790750409857"));
+        assert_eq!(data.end_time.as_deref(), Some("0"));
+        assert_eq!(data.reverted, Some(false));
+        assert_eq!(
+            data.department_id.as_deref(),
+            Some("od-e2ebe89e1e313c2a3bf5fc064bfa6f4c")
+        );
+        assert_eq!(
+            data.user_id.as_deref(),
+            Some("ou_aad06cf4f5c2c081cf273829cb9d080d")
+        );
+    }
+
+    #[test]
     fn empty_serial_number_is_normalised_to_none() {
         // 空串与缺失是同一件事：都表示「现在还没有编号」。
         // 直接用 `Some("")` 会让多维度表格被回填成一个空单元格。
@@ -477,6 +722,15 @@ mod tests {
             approval_code: None,
             serial_number: Some(String::new()).filter(|value| !value.is_empty()),
             status: None,
+            start_time: None,
+            end_time: None,
+            open_id: None,
+            user_id: None,
+            department_id: None,
+            uuid: None,
+            reverted: None,
+            task_list: None,
+            timeline: None,
         });
         match detail {
             GetOutcome::Found(detail) => assert_eq!(detail.serial_number, None),

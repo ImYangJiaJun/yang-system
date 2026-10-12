@@ -77,6 +77,29 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .title("回填字段 ID")
                 .require(true)
                 .max_length(128),
+            // --- 可选回填扩展（设计 §5.1）---
+            //
+            // 下面 6 列存**目标列 field_id**，与 `backfill_field` 同一形态，但全部可空：
+            // 空即「不配置该扩展」，创建审批时就不回填对应列。本表这几列没有查询需求，
+            // 不开 filterable/sortable/searchable。
+            status_field => Str::new()
+                .title("申请状态回填列 ID")
+                .max_length(128),
+            flow_field => Str::new()
+                .title("审批流程回填列 ID")
+                .max_length(128),
+            start_time_field => Str::new()
+                .title("发起时间回填列 ID")
+                .max_length(128),
+            end_time_field => Str::new()
+                .title("完成时间回填列 ID")
+                .max_length(128),
+            department_field => Str::new()
+                .title("发起人部门回填列 ID")
+                .max_length(128),
+            handler_field => Str::new()
+                .title("当前处理人回填列 ID")
+                .max_length(128),
             // 多维表格日期的时区。多维表格给毫秒时间戳（不含时区），而审批 date 控件
             // 要带偏移量的 RFC3339，所以必须显式指定，不能猜。
             base_timezone => Str::new()
@@ -232,6 +255,25 @@ mod tests {
         // 首次扫描前会补拉。所以两列可空。
         let definition = definition();
         for name in ["form_snapshot", "form_snapshot_at"] {
+            let field = definition
+                .field(name)
+                .unwrap_or_else(|| panic!("{name} 字段必须存在"));
+            assert!(!field.is_required(), "{name} 可空");
+        }
+    }
+
+    #[test]
+    fn optional_backfill_columns_are_optional() {
+        // 这 6 列是可选回填扩展：空即「不配置」，创建审批时不回填对应列。
+        let definition = definition();
+        for name in [
+            "status_field",
+            "flow_field",
+            "start_time_field",
+            "end_time_field",
+            "department_field",
+            "handler_field",
+        ] {
             let field = definition
                 .field(name)
                 .unwrap_or_else(|| panic!("{name} 字段必须存在"));

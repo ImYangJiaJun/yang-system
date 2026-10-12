@@ -415,7 +415,17 @@ struct ClaimedTask {
     table_id: String,
     approval_code: String,
     applicant_field: String,
+    /// 发起人 open_id：全表异步受理时 Action 解析后落 `feishu_approval_task_applicant`，
+    /// 这里按 task_id 取（设计 §6.3）。`Some` 时替代表格列读取。
+    applicant_open_id: Option<String>,
     backfill_field: String,
+    /// 六个可选回填目标（配置里的 `field_id`；`None` = 不回填）。
+    status_field: Option<String>,
+    flow_field: Option<String>,
+    start_time_field: Option<String>,
+    end_time_field: Option<String>,
+    department_field: Option<String>,
+    handler_field: Option<String>,
     timezone_offset: FixedOffset,
     widgets: Vec<WidgetMap>,
     form_snapshot: String,
@@ -644,6 +654,7 @@ async fn mark_terminal(runner: &RoundRunner, id: i64, reason: &str) {
 /// 读一条任务的配置与字段映射。
 async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<ClaimedTask>> {
     let config_id: i64 = row.require("config_id")?;
+    let task_id: i64 = row.require("id")?;
 
     let config = runner
         .context
@@ -655,6 +666,20 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         .await?;
     let Some(config) = config else {
         return Ok(None);
+    };
+
+    // 发起人是**后续查询**，不是认领批的列（认领投影只有 id/record_id/config_id）：
+    // 全表异步受理拿不到发起人，Action 解析后落在属性扩展表里（设计 §6.3）。
+    let applicant = runner
+        .context
+        .approval_task_applicants()
+        .query()
+        .where_eq("task_id", serde_json::json!(task_id))?
+        .optional()
+        .await?;
+    let applicant_open_id = match applicant {
+        Some(applicant) => applicant.optional::<String>("open_id")?,
+        None => None,
     };
 
     let map_rows = runner
@@ -693,14 +718,35 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
     };
 
     Ok(Some(ClaimedTask {
-        id: row.require("id")?,
+        id: task_id,
         config_id,
         record_id: row.require("record_id")?,
         base_token: config.require("base_token")?,
         table_id: config.require("table_id")?,
         approval_code: config.require("approval_code")?,
         applicant_field: config.require("applicant_field")?,
+        applicant_open_id,
         backfill_field: config.require("backfill_field")?,
+        // 空串与 NULL 同义（设计 §5.1）：两条读路径（Action 与 worker）口径一致，
+        // 各做一次归一化，不依赖配置写入路径把空串存成 NULL。
+        status_field: config
+            .optional::<String>("status_field")?
+            .filter(|v| !v.trim().is_empty()),
+        flow_field: config
+            .optional::<String>("flow_field")?
+            .filter(|v| !v.trim().is_empty()),
+        start_time_field: config
+            .optional::<String>("start_time_field")?
+            .filter(|v| !v.trim().is_empty()),
+        end_time_field: config
+            .optional::<String>("end_time_field")?
+            .filter(|v| !v.trim().is_empty()),
+        department_field: config
+            .optional::<String>("department_field")?
+            .filter(|v| !v.trim().is_empty()),
+        handler_field: config
+            .optional::<String>("handler_field")?
+            .filter(|v| !v.trim().is_empty()),
         timezone_offset,
         widgets,
         form_snapshot: config.optional("form_snapshot")?.unwrap_or_default(),
@@ -798,6 +844,13 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
             record_id: &task.record_id,
             cells: &cells,
             applicant_field: &task.applicant_field,
+            applicant: task.applicant_open_id.clone(),
+            status_field: task.status_field.as_deref(),
+            flow_field: task.flow_field.as_deref(),
+            start_time_field: task.start_time_field.as_deref(),
+            end_time_field: task.end_time_field.as_deref(),
+            department_field: task.department_field.as_deref(),
+            handler_field: task.handler_field.as_deref(),
             backfill_field_name: &backfill_field_name,
             approval_code: &task.approval_code,
             widgets: &task.widgets,
@@ -837,6 +890,17 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
     // 清租约：状态已经是稳定状态，不需要再让租约复活它。
     row.insert("lease_until", serde_json::Value::Null);
 
+    // 创建成功时把实例坐标一并落库：`instance_code` / `serial_number` 两列早已存在
+    // 却一直是 NULL（设计 §12 缺口 10），事件订阅与 60012 对账都拿不到实例坐标。
+    if let DispatchResult::Backfilled {
+        serial_number,
+        instance_code,
+    } = outcome
+    {
+        row.insert("instance_code", serde_json::json!(instance_code));
+        row.insert("serial_number", serde_json::json!(serial_number));
+    }
+
     let result = match runner
         .context
         .approval_tasks()
@@ -872,7 +936,7 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
     // 各有出处。
     //
     // 摘要键避开 `token`/`hash` 等敏感词（`validate_summary_key` 会拒收）。
-    if let DispatchResult::Backfilled { serial_number } = outcome {
+    if let DispatchResult::Backfilled { serial_number, .. } = outcome {
         // 本函数不返回 `Result`（状态写失败只记日志，不该中断「报告刚发生的事」），
         // 所以构造链里的 `?` 全部改成显式 `match` + 日志。
         let constructed: Result<_, BaseError> = (|| {

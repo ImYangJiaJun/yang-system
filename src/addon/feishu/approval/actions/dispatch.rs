@@ -70,6 +70,11 @@ pub(super) struct DispatchInput {
     /// 未带或 trim 后为空时落库统一记 `feishu-workflow`。仅记录用，不影响派发。
     #[serde(default)]
     pub(super) requested_by: Option<String>,
+    /// 发起人（工作流触发人）。真机 `$.step_btn.user` 渲染成**姓名**（设计 M11 定论），
+    /// 一期先原样透传；姓名→open_id 的 contact 解析依赖 scope 开通（§11 验证项 6），
+    /// 属 E 阶段接线。传了才走新路径并回写 applicant_field 列（D2 缺省回退旧行为）。
+    #[serde(default)]
+    pub(super) applicant: Option<String>,
     /// 目标审批定义。**配置不存在时**由它建配置（首次调用）。
     ///
     /// 只有三条配置信息是「只有调用方知道」的——要提哪个定义、谁当发起人、
@@ -366,7 +371,7 @@ async fn handle_dispatch(
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
-        Some(record_id) => match dispatch_single(ctx, context, config_id, record_id).await {
+        Some(record_id) => match dispatch_single(ctx, context, config_id, record_id, input.applicant.clone()).await {
             Ok(outcome) => Ok(outcome),
             // 单条内部的 `?` 出口：config_id 在调用点已知，失败记录带上它。
             Err(error) => Ok(DispatchOutcome::internal(Some(config_id), error)),
@@ -632,6 +637,7 @@ async fn dispatch_single(
     context: &FeishuContext,
     config_id: i64,
     record_id: &str,
+    applicant: Option<String>,
 ) -> Result<DispatchOutcome, BaseError> {
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
         return Ok(DispatchOutcome::fail(
@@ -804,11 +810,20 @@ async fn dispatch_single(
             record_id,
             cells: &cells,
             applicant_field: &applicant_field,
+            // 传参路径的姓名→open_id contact 解析是 E 阶段（依赖 scope 开通）接线，
+            // 一期先把请求里的 applicant 原样透传（若调用方直接给了 open_id 即生效）。
+            applicant,
             backfill_field_name: &backfill_field_name,
             approval_code: &approval_code,
             widgets: &widgets,
             form_snapshot: config_row.optional("form_snapshot")?.unwrap_or_default(),
             timezone_offset,
+            status_field: config_row.optional::<String>("status_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            flow_field: config_row.optional::<String>("flow_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            start_time_field: config_row.optional::<String>("start_time_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            end_time_field: config_row.optional::<String>("end_time_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            department_field: config_row.optional::<String>("department_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            handler_field: config_row.optional::<String>("handler_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
         },
     )
     .await;
@@ -858,6 +873,7 @@ mod tests {
             table_id: Some("tblsRc9GRRX".to_string()),
             record_id: Some("rec001".to_string()),
             requested_by: Some("测试触发人".to_string()),
+            applicant: None,
             approval_code: None,
             applicant_field: None,
             backfill_field: None,
@@ -1337,6 +1353,7 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::field_map_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
             None,
         )
     }
@@ -1520,10 +1537,10 @@ mod tests {
                 ] } else { vec![] });
                 let tokens = e2e_tokens();
                 let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &fields };
-                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", backfill_field_name: "审批编号", approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
+                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: None, backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
                 let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
                 if label == "正确" {
-                    assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into() });
+                    assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into(), instance_code: "INST-MANUAL".into() });
                     let create = transport.took("Post", &crate::addon::feishu::domain::approval::create_instance_url());
                     let body = create.body.ok_or_else(|| anyhow::anyhow!("缺少提单请求体"))?;
                     let sent: Value = serde_json::from_str(body["form"].as_str().ok_or_else(|| anyhow::anyhow!("缺少表单"))?)?;
@@ -1810,10 +1827,17 @@ mod tests {
                 record_id: E2E_RECORD_ID,
                 cells: &cells,
                 applicant_field: &plan.applicant_field_id,
+                applicant: None,
                 backfill_field_name: &backfill_field_name,
                 approval_code: E2E_APPROVAL_CODE,
                 widgets: &plan.widgets,
                 form_snapshot: plan.form_snapshot.clone(),
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
                 timezone_offset: FixedOffset::from_iana("Asia/Shanghai")
                     .unwrap_or_else(|error| panic!("{error}")),
             },
@@ -1822,7 +1846,8 @@ mod tests {
         assert_eq!(
             result,
             DispatchResult::Backfilled {
-                serial_number: "202609280001".to_string()
+                serial_number: "202609280001".to_string(),
+                instance_code: "INST-E2E-001".to_string(),
             },
             "整条链应跑通并回填编号"
         );
