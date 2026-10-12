@@ -494,6 +494,13 @@ async fn provision(
             // 带偏移量——猜错会让审批里的时间整体偏移，所以必须由配置给定。
             base_timezone: &settings.approval_base_timezone,
             maps: None,
+            // 首调自动建配置不带六个可选回填列（设计 §5.1）——那六列只有控制台才配。
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
         },
     )
     .await?;
@@ -1390,6 +1397,12 @@ mod tests {
                 backfill_field: "fldSerial",
                 base_timezone: "Asia/Shanghai",
                 maps: Some(&maps),
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
             },
         )
         .await;
@@ -1507,6 +1520,7 @@ mod tests {
             let plan = build_plan(&transport, &NoSleep, &tokens, &context, &ProvisionInput {
                 base_token: &source, table_id: E2E_TABLE_ID, approval_code: E2E_APPROVAL_CODE,
                 applicant_field: "fldApplicant", backfill_field: "fldSerial", base_timezone: "Asia/Shanghai", maps: Some(&maps),
+                status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None,
             }).await?;
             let mut transaction = database.transaction().await?;
             let config_id = insert_plan(&context, &mut transaction, &plan).await?;
@@ -1732,6 +1746,12 @@ mod tests {
                 backfill_field: "审批编号",
                 base_timezone: "Asia/Shanghai",
                 maps: None,
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
             },
         )
         .await
@@ -1969,6 +1989,12 @@ mod tests {
                 backfill_field: "审批编号",
                 base_timezone: "Asia/Shanghai",
                 maps: None,
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
             },
         )
         .await

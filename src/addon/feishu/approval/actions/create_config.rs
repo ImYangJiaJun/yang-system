@@ -47,6 +47,20 @@ pub(super) struct CreateConfigInput {
     /// 显式控件到列的映射；省略时按名称自动匹配。
     #[serde(default)]
     pub(super) maps: Option<Vec<FieldMapping>>,
+    /// 六个可选回填目标列（设计 §5.1）。`field_id` **或**列名都接受，落库统一存 id；
+    /// 空 = 不启用该回填。给了就在 `build_plan` 里校验目标列存在且类型匹配。
+    #[serde(default)]
+    pub(super) status_field: Option<String>,
+    #[serde(default)]
+    pub(super) flow_field: Option<String>,
+    #[serde(default)]
+    pub(super) start_time_field: Option<String>,
+    #[serde(default)]
+    pub(super) end_time_field: Option<String>,
+    #[serde(default)]
+    pub(super) department_field: Option<String>,
+    #[serde(default)]
+    pub(super) handler_field: Option<String>,
 }
 
 impl ParamInput for CreateConfigInput {
@@ -145,6 +159,12 @@ pub(super) async fn handle(
             backfill_field: input.backfill_field.trim(),
             base_timezone: input.base_timezone.trim(),
             maps: input.maps.as_deref(),
+            status_field: input.status_field.as_deref(),
+            flow_field: input.flow_field.as_deref(),
+            start_time_field: input.start_time_field.as_deref(),
+            end_time_field: input.end_time_field.as_deref(),
+            department_field: input.department_field.as_deref(),
+            handler_field: input.handler_field.as_deref(),
         },
     )
     .await
@@ -210,6 +230,12 @@ mod tests {
             backfill_field: "审批编号".to_string(),
             base_timezone: "Asia/Shanghai".to_string(),
             maps: None,
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
         }
     }
 
@@ -222,6 +248,30 @@ mod tests {
             "maps": [{"widget_id": "w1", "bitable_field": "fldA"}]
         }));
         assert!(parsed.is_ok(), "显式字段映射应接受: {parsed:?}");
+    }
+
+    #[test]
+    fn optional_backfill_fields_are_accepted_and_absent_by_default() {
+        let parsed = serde_json::from_value::<CreateConfigInput>(serde_json::json!({
+            "base_token": "appX", "table_id": "tblX", "approval_code": "CODE",
+            "applicant_field": "申请人", "backfill_field": "审批编号",
+            "base_timezone": "Asia/Shanghai",
+            "status_field": "申请状态", "handler_field": "fldHandler"
+        }))
+        .unwrap_or_else(|error| panic!("可选回填列应接受: {error}"));
+        assert_eq!(parsed.status_field.as_deref(), Some("申请状态"));
+        assert_eq!(parsed.handler_field.as_deref(), Some("fldHandler"));
+        assert!(parsed.flow_field.is_none(), "未给的回填列落 None");
+        assert!(parsed.validate().is_ok());
+
+        // 老请求体不带这六个键 → 全部 None，行为与现状一致。
+        let legacy = serde_json::from_value::<CreateConfigInput>(serde_json::json!({
+            "base_token": "appX", "table_id": "tblX", "approval_code": "CODE",
+            "applicant_field": "申请人", "backfill_field": "审批编号",
+            "base_timezone": "Asia/Shanghai"
+        }))
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(legacy.status_field.is_none() && legacy.handler_field.is_none());
     }
 
     #[test]

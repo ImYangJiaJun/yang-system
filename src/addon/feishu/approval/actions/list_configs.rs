@@ -33,6 +33,12 @@ pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "approval_code",
     "applicant_field",
     "backfill_field",
+    "status_field",
+    "flow_field",
+    "start_time_field",
+    "end_time_field",
+    "department_field",
+    "handler_field",
     "base_timezone",
     "enabled",
     "form_snapshot_at",
@@ -119,6 +125,13 @@ pub(super) struct ConfigItem {
     applicant_field: String,
     /// 回填字段 ID。
     backfill_field: String,
+    /// 六个可选回填目标列的 field_id（设计 §5.1）。`None` = 未配置该列回填。
+    status_field: Option<String>,
+    flow_field: Option<String>,
+    start_time_field: Option<String>,
+    end_time_field: Option<String>,
+    department_field: Option<String>,
+    handler_field: Option<String>,
     /// Base 时区（IANA 名）。
     base_timezone: String,
     /// 是否启用。
@@ -292,6 +305,12 @@ pub(super) async fn handle(
             approval_code: record.require("approval_code")?,
             applicant_field: record.require("applicant_field")?,
             backfill_field: record.require("backfill_field")?,
+            status_field: record.optional("status_field")?,
+            flow_field: record.optional("flow_field")?,
+            start_time_field: record.optional("start_time_field")?,
+            end_time_field: record.optional("end_time_field")?,
+            department_field: record.optional("department_field")?,
+            handler_field: record.optional("handler_field")?,
             base_timezone: record.require("base_timezone")?,
             enabled: record.require("enabled")?,
             form_snapshot_at: record.optional("form_snapshot_at")?,
@@ -380,6 +399,12 @@ mod tests {
             approval_code: "CODE-TEST".to_string(),
             applicant_field: "fldP".to_string(),
             backfill_field: "fldB".to_string(),
+            status_field: Some("fldStatus".to_string()),
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: Some("fldHandler".to_string()),
             base_timezone: "Asia/Shanghai".to_string(),
             enabled: true,
             form_snapshot_at: Some(1_700_000_000),
@@ -396,5 +421,9 @@ mod tests {
             "列表项不得携带 form_snapshot 大字段"
         );
         assert_eq!(value.get("maps"), Some(&serde_json::json!([])));
+        // 六个回填列按 `Option` 形态返回（未配置的列是 null，不是缺键）。
+        assert_eq!(value.get("status_field"), Some(&serde_json::json!("fldStatus")));
+        assert_eq!(value.get("handler_field"), Some(&serde_json::json!("fldHandler")));
+        assert_eq!(value.get("flow_field"), Some(&serde_json::json!(null)));
     }
 }
