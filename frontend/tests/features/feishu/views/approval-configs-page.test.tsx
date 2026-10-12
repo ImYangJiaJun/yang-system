@@ -108,14 +108,13 @@ describe("审批派发配置页 · 列表", () => {
       content.getByLabelText("批量派发请求体").textContent!,
     );
     expect(single).toEqual({
-      base_token: "<多维表格 Token>",
-      table_id: "<数据表 ID>",
+      base_token:
+        "https://tenant.example/base/<Base Token>?table=<数据表 ID>&view=<视图 ID>",
       record_id: "<触发记录 ID>",
       requested_by: "<触发人标识>",
     });
     expect(batch).toEqual({
-      base_token: single.base_token,
-      table_id: single.table_id,
+      base_token: "https://tenant.example/base/<Base Token>?table=<数据表 ID>",
       requested_by: single.requested_by,
     });
     expect(content.getByText(/所有启用配置的待处理队列/)).toBeInTheDocument();

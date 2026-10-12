@@ -16,6 +16,7 @@ use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval_match::FieldMapping;
 use crate::addon::feishu::domain::approval_provision::{build_plan, insert_plan, ProvisionInput};
+use crate::addon::feishu::domain::bitable::resolve_bitable_link;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound_setup;
 use crate::infrastructure::audit;
@@ -23,13 +24,14 @@ use crate::infrastructure::audit;
 /// 同坐标重复建配置（唯一冲突）时返回的可行动文案。
 const CONFIG_ALREADY_EXISTS: &str = "该多维表格已配置，请先查询或删除后重建";
 
-/// 创建配置的输入契约：六件套全部必填。
+/// 创建配置的输入契约：审批信息必填，完整链接包含 table 参数时可省略 `table_id`。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateConfigInput {
     /// 多维表格 token。
     pub(super) base_token: String,
-    /// 数据表 id。
+    /// 数据表 id；完整多维表格链接包含 `table` 参数时可省略。
+    #[serde(default)]
     pub(super) table_id: String,
     /// 审批定义 code。
     pub(super) approval_code: String,
@@ -52,10 +54,16 @@ impl ParamInput for CreateConfigInput {
 }
 
 impl CreateConfigInput {
+    fn resolved_coordinates(
+        &self,
+    ) -> Result<crate::addon::feishu::domain::bitable::ParsedBitableLink, BaseError> {
+        resolve_bitable_link(&self.base_token, Some(&self.table_id), None)
+            .map_err(|error| BaseError::ParamInvalid("base_token".to_string(), error.to_string()))
+    }
+
     fn validate(&self) -> Result<(), BaseError> {
         for (name, value) in [
             ("base_token", &self.base_token),
-            ("table_id", &self.table_id),
             ("approval_code", &self.approval_code),
             ("applicant_field", &self.applicant_field),
             ("backfill_field", &self.backfill_field),
@@ -67,6 +75,13 @@ impl CreateConfigInput {
                     "不能为空".to_string(),
                 ));
             }
+        }
+        let coordinates = self.resolved_coordinates()?;
+        if coordinates.table_id.is_none() {
+            return Err(BaseError::ParamInvalid(
+                "table_id".to_string(),
+                "不能为空，或在完整多维表格链接中提供 table 参数".to_string(),
+            ));
         }
         Ok(())
     }
@@ -107,6 +122,7 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
+    let coordinates = input.resolved_coordinates()?;
 
     // 建配置要在飞书与本库两端取数，凭证缺了根本走不下去（照 dispatch provision 的处置）。
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
@@ -120,8 +136,8 @@ pub(super) async fn handle(
         &outbound.tokens,
         &context,
         &ProvisionInput {
-            base_token: input.base_token.trim(),
-            table_id: input.table_id.trim(),
+            base_token: &coordinates.app_token,
+            table_id: coordinates.table_id.as_deref().unwrap_or_default(),
             approval_code: input.approval_code.trim(),
             applicant_field: input.applicant_field.trim(),
             backfill_field: input.backfill_field.trim(),
@@ -157,8 +173,8 @@ pub(super) async fn handle(
 
     tracing::info!(
         config_id,
-        base_token = %input.base_token.trim(),
-        table_id = %input.table_id.trim(),
+        base_token = %coordinates.app_token,
+        table_id = %coordinates.table_id.as_deref().unwrap_or_default(),
         approval_code = %input.approval_code.trim(),
         "审批派发配置已手动创建"
     );
@@ -212,6 +228,33 @@ mod tests {
     #[test]
     fn valid_input_passes() {
         assert!(input().validate().is_ok());
+    }
+
+    #[test]
+    fn complete_bitable_link_supplies_the_table_coordinate() {
+        let mut value = input();
+        value.base_token =
+            "https://tenant.example/base/appbcbWCzen6?table=tblsRc9GRRX&view=vewA".to_string();
+        value.table_id.clear();
+        assert!(value.validate().is_ok());
+        let coordinates = value
+            .resolved_coordinates()
+            .unwrap_or_else(|error| panic!("完整链接应解析成功: {error}"));
+        assert_eq!(coordinates.app_token, "appbcbWCzen6");
+        assert_eq!(coordinates.table_id.as_deref(), Some("tblsRc9GRRX"));
+    }
+
+    #[test]
+    fn complete_link_payload_can_omit_table_id() {
+        let parsed = serde_json::from_value::<CreateConfigInput>(serde_json::json!({
+            "base_token": "https://tenant.example/base/appbcbWCzen6?table=tblsRc9GRRX",
+            "approval_code": "CODE-TEST",
+            "applicant_field": "申请人",
+            "backfill_field": "审批编号",
+            "base_timezone": "Asia/Shanghai"
+        }))
+        .unwrap_or_else(|error| panic!("完整链接请求体应接受省略 table_id: {error}"));
+        assert!(parsed.validate().is_ok());
     }
 
     /// 坐标与三件套以外的键（如 `title`）必须被拒——deny_unknown_fields 挡在反序列化层。

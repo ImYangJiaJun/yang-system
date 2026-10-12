@@ -789,6 +789,44 @@ export type BitableTable = {
   name: string;
 };
 
+/// 解析多维表格完整链接；host 不参与判断，纯 Base Token 继续按旧格式返回。
+export function parseBitableLink(value: string): {
+  baseToken: string;
+  tableId: string;
+  viewId: string;
+} | null {
+  const raw = value.trim();
+  if (raw === "") return null;
+  if (!raw.includes("://")) {
+    return { baseToken: raw, tableId: "", viewId: "" };
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (segments.length !== 2 || segments[0].toLowerCase() !== "base")
+    return null;
+  const baseToken = segments[1];
+  const tableValues = url.searchParams.getAll("table");
+  const viewValues = url.searchParams.getAll("view");
+  if (tableValues.length > 1 || viewValues.length > 1) return null;
+  const tableId = tableValues[0] ?? "";
+  const viewId = viewValues[0] ?? "";
+  const valid = (part: string) => /^[A-Za-z0-9_-]{1,128}$/.test(part);
+  if (!valid(baseToken)) return null;
+  if (
+    (tableId !== "" && !valid(tableId)) ||
+    (viewId !== "" && !valid(viewId))
+  ) {
+    return null;
+  }
+  return { baseToken, tableId, viewId };
+}
+
 /// 多维表格视图（`list_bitable_views` 的一项）。
 export type BitableView = {
   viewId: string;

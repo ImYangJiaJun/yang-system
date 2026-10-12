@@ -44,7 +44,12 @@ import {
 } from "@/shared/ui/table";
 
 import type { ApprovalWizardClient, CreateApprovalConfigInput } from "../api";
-import type { ApprovalConfigItem, BitableField, BitableTable } from "../types";
+import {
+  parseBitableLink,
+  type ApprovalConfigItem,
+  type BitableField,
+  type BitableTable,
+} from "../types";
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -152,9 +157,16 @@ export function ApprovalConfigDialog({
     setTablesMessage(null);
     setStepOneError(null);
     try {
-      const loaded = await client.listTables(baseToken.trim());
+      const rawToken = baseToken.trim();
+      const parsed = parseBitableLink(rawToken);
+      const token = parsed?.baseToken ?? rawToken;
+      if (parsed && rawToken.includes("://")) {
+        setBaseToken(parsed.baseToken);
+        setTableId(parsed.tableId);
+      }
+      const loaded = await client.listTables(token);
       setTables(loaded);
-      setTableId("");
+      setTableId((current) => current.trim());
       // 表列表为空时允许手填（坐标是自由文本，不该被拉取结果卡死）。
       setTableManual(loaded.length === 0);
       setTablesMessage(

@@ -20,7 +20,7 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::table::Record;
 use yang_base::BaseError;
 
-use crate::addon::feishu::domain::bitable::validate_path_segment;
+use crate::addon::feishu::domain::bitable::{resolve_bitable_link, validate_path_segment};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::crypto::issue_token;
 use crate::addon::feishu::domain::field_binding::{validate_fields, FieldBindingInput};
@@ -104,6 +104,28 @@ impl ParamInput for CreateTableInput {
 }
 
 impl CreateTableInput {
+    fn resolved_coordinates(
+        &self,
+    ) -> Result<Option<crate::addon::feishu::domain::bitable::ParsedBitableLink>, BaseError> {
+        match self
+            .bitable_base_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(base_token) => resolve_bitable_link(
+                base_token,
+                self.bitable_table_id.as_deref(),
+                self.bitable_view_id.as_deref(),
+            )
+            .map(Some)
+            .map_err(|error| {
+                BaseError::ParamInvalid("bitable_base_token".to_string(), error.to_string())
+            }),
+            None => Ok(None),
+        }
+    }
+
     /// 进入事务前的入参校验。
     ///
     /// 顺序有讲究：先查便宜的形状，再查需要建索引的集合关系，最后才做要拼 URL 的
@@ -130,33 +152,30 @@ impl CreateTableInput {
         }
         validate_fields(&self.fields)?;
 
-        for (name, value) in [
-            ("bitable_base_token", self.bitable_base_token.as_deref()),
-            ("bitable_table_id", self.bitable_table_id.as_deref()),
-            ("bitable_view_id", self.bitable_view_id.as_deref()),
-        ] {
-            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
-                validate_path_segment(name, value).map_err(|error| {
-                    BaseError::ParamInvalid(name.to_string(), error.to_string())
-                })?;
+        let resolved = self.resolved_coordinates()?;
+        if resolved.is_none() {
+            for (name, value) in [
+                ("bitable_table_id", self.bitable_table_id.as_deref()),
+                ("bitable_view_id", self.bitable_view_id.as_deref()),
+            ] {
+                if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                    validate_path_segment(name, value).map_err(|error| {
+                        BaseError::ParamInvalid(name.to_string(), error.to_string())
+                    })?;
+                }
             }
         }
         if self.ingest_mode.as_deref() == Some("pull") {
             // view 可空（表示取全表）；base_token 与 table_id 缺一不可。
-            for (name, value) in [
-                ("bitable_base_token", self.bitable_base_token.as_deref()),
-                ("bitable_table_id", self.bitable_table_id.as_deref()),
-            ] {
-                if value
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .is_none()
-                {
-                    return Err(BaseError::ParamInvalid(
-                        name.to_string(),
-                        "取数方式为 pull 时必填".to_string(),
-                    ));
-                }
+            if resolved
+                .as_ref()
+                .and_then(|coordinates| coordinates.table_id.as_ref())
+                .is_none()
+            {
+                return Err(BaseError::ParamInvalid(
+                    "bitable_table_id".to_string(),
+                    "取数方式为 pull 时必填".to_string(),
+                ));
             }
         }
         Ok(())
@@ -183,6 +202,7 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
+    let resolved = input.resolved_coordinates()?;
     ensure_source_keys_available(&context, &input.fields).await?;
 
     // 系统生成的凭据要靠这把密钥封存；没有它就做不了「可回显」这件事。
@@ -200,9 +220,24 @@ pub(super) async fn handle(
         row.insert("title", serde_json::json!(input.title.trim()));
         for (column, value) in [
             ("ingest_mode", input.ingest_mode.as_deref()),
-            ("bitable_base_token", input.bitable_base_token.as_deref()),
-            ("bitable_table_id", input.bitable_table_id.as_deref()),
-            ("bitable_view_id", input.bitable_view_id.as_deref()),
+            (
+                "bitable_base_token",
+                resolved
+                    .as_ref()
+                    .map(|coordinates| coordinates.app_token.as_str()),
+            ),
+            (
+                "bitable_table_id",
+                resolved
+                    .as_ref()
+                    .and_then(|coordinates| coordinates.table_id.as_deref()),
+            ),
+            (
+                "bitable_view_id",
+                resolved
+                    .as_ref()
+                    .and_then(|coordinates| coordinates.view_id.as_deref()),
+            ),
         ] {
             if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
                 row.insert(column, serde_json::json!(value));
@@ -445,6 +480,18 @@ mod tests {
 
         input.bitable_table_id = None;
         assert!(input.validate().is_err(), "pull 缺 table_id 必须失败");
+    }
+
+    #[test]
+    fn pull_accepts_a_complete_bitable_link() {
+        let mut input = two_level();
+        input.bitable_base_token = Some(
+            "https://tenant.example/base/ZoCWb82JQaCCiAspCqbcUvlsnwg?table=tblauuOafa4acvT3&view=vewAEKSbvO"
+                .to_string(),
+        );
+        input.bitable_table_id = None;
+        input.bitable_view_id = None;
+        assert!(input.validate().is_ok());
     }
 
     #[test]

@@ -2498,7 +2498,7 @@
                     "type": "object"
                   }
                 },
-                "description": "创建配置的输入契约：六件套全部必填。",
+                "description": "创建配置的输入契约：审批信息必填，完整链接包含 table 参数时可省略 `table_id`。",
                 "properties": {
                   "applicant_field": {
                     "description": "申请人员字段（`field_id` **或**列名都接受，落库统一存 id）。",
@@ -2531,7 +2531,8 @@
                     ]
                   },
                   "table_id": {
-                    "description": "数据表 id。",
+                    "default": "",
+                    "description": "数据表 id；完整多维表格链接包含 `table` 参数时可省略。",
                     "type": "string"
                   }
                 },
@@ -2540,8 +2541,7 @@
                   "approval_code",
                   "backfill_field",
                   "base_timezone",
-                  "base_token",
-                  "table_id"
+                  "base_token"
                 ],
                 "title": "CreateConfigInput",
                 "type": "object"

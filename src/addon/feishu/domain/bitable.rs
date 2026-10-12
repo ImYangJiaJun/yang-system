@@ -809,6 +809,145 @@ pub(crate) struct BitableCoordinates {
     pub(crate) view_id: Option<String>,
 }
 
+/// 从多维表格链接提取坐标。链接的 host 不参与判断：飞书不同租户、私有化入口
+/// 只要保留 `/base/<token>?table=<table>&view=<view>` 形状就可以解析。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedBitableLink {
+    pub(crate) app_token: String,
+    pub(crate) table_id: Option<String>,
+    pub(crate) view_id: Option<String>,
+}
+
+/// 解析完整链接或兼容旧的纯 Base Token。
+pub(crate) fn parse_bitable_link(raw: &str) -> anyhow::Result<ParsedBitableLink> {
+    let raw = raw.trim();
+    ensure!(!raw.is_empty(), "多维表格链接或 Base Token 不能为空");
+
+    // 旧输入是纯 token，继续按原有路径段规则处理。
+    let Some((scheme, remainder)) = raw.split_once("://") else {
+        validate_path_segment("bitable_base_token", raw)?;
+        return Ok(ParsedBitableLink {
+            app_token: raw.to_string(),
+            table_id: None,
+            view_id: None,
+        });
+    };
+    ensure!(
+        matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https"),
+        "多维表格链接协议必须是 http 或 https"
+    );
+    let slash = remainder
+        .find('/')
+        .context("多维表格链接缺少 /base/ 路径")?;
+    let path_and_query = &remainder[slash..];
+    let (path, query_and_fragment) = path_and_query
+        .split_once('?')
+        .map_or((path_and_query, ""), |(path, query)| (path, query));
+    let path = path.split('#').next().unwrap_or_default();
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    ensure!(
+        segments.len() == 2 && segments[0].eq_ignore_ascii_case("base"),
+        "多维表格链接路径必须是 /base/<token>"
+    );
+    let app_token = segments[1].to_string();
+    validate_path_segment("bitable_base_token", &app_token)?;
+
+    let query = query_and_fragment.split('#').next().unwrap_or_default();
+    let mut table_id = None;
+    let mut view_id = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = value.trim();
+        let target = match key {
+            "table" => &mut table_id,
+            "view" => &mut view_id,
+            _ => continue,
+        };
+        ensure!(target.is_none(), "多维表格链接中的 {key} 参数重复");
+        ensure!(!value.is_empty(), "多维表格链接中的 {key} 参数不能为空");
+        validate_path_segment(
+            if key == "table" {
+                "bitable_table_id"
+            } else {
+                "bitable_view_id"
+            },
+            value,
+        )?;
+        *target = Some(value.to_string());
+    }
+
+    Ok(ParsedBitableLink {
+        app_token,
+        table_id,
+        view_id,
+    })
+}
+
+/// 合并完整链接与旧的分字段输入；同时拒绝两种来源指向不同坐标。
+pub(crate) fn resolve_bitable_link(
+    base_token: &str,
+    table_id: Option<&str>,
+    view_id: Option<&str>,
+) -> anyhow::Result<ParsedBitableLink> {
+    let mut parsed = parse_bitable_link(base_token)?;
+    let merge = |name: &str, explicit: Option<&str>, embedded: Option<String>| {
+        let explicit = explicit.map(str::trim).filter(|value| !value.is_empty());
+        if let (Some(explicit), Some(embedded)) = (explicit, embedded.as_deref()) {
+            ensure!(explicit == embedded, "完整链接中的 {name} 与单独字段不一致");
+        }
+        Ok::<_, anyhow::Error>(explicit.map(str::to_string).or(embedded))
+    };
+    parsed.table_id = merge("bitable_table_id", table_id, parsed.table_id.take())?;
+    parsed.view_id = merge("bitable_view_id", view_id, parsed.view_id.take())?;
+    if let Some(value) = parsed.table_id.as_deref() {
+        validate_path_segment("bitable_table_id", value)?;
+    }
+    if let Some(value) = parsed.view_id.as_deref() {
+        validate_path_segment("bitable_view_id", value)?;
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn parses_bitable_link_coordinates_without_relying_on_host() {
+        let parsed = parse_bitable_link(
+            "https://any-tenant.example/base/ZoCWb82JQaCCiAspCqbcUvlsnwg?table=tblfFjlSuIQeMCJF&view=vewAEKSbvO",
+        )
+        .unwrap_or_else(|error| panic!("完整多维表格链接应可解析: {error}"));
+
+        assert_eq!(parsed.app_token, "ZoCWb82JQaCCiAspCqbcUvlsnwg");
+        assert_eq!(parsed.table_id.as_deref(), Some("tblfFjlSuIQeMCJF"));
+        assert_eq!(parsed.view_id.as_deref(), Some("vewAEKSbvO"));
+    }
+
+    #[test]
+    fn keeps_the_nearest_coordinate_when_table_or_view_is_missing() {
+        let parsed = parse_bitable_link("https://tenant/base/appToken")
+            .unwrap_or_else(|error| panic!("只有 Base 的完整链接也应可解析: {error}"));
+        assert_eq!(parsed.app_token, "appToken");
+        assert_eq!(parsed.table_id, None);
+        assert_eq!(parsed.view_id, None);
+
+        let parsed = parse_bitable_link("https://tenant/base/appToken?table=tblA")
+            .unwrap_or_else(|error| panic!("缺 view 时应保留 table: {error}"));
+        assert_eq!(parsed.table_id.as_deref(), Some("tblA"));
+        assert_eq!(parsed.view_id, None);
+    }
+
+    #[test]
+    fn rejects_a_non_bitable_path_or_invalid_coordinate() {
+        assert!(parse_bitable_link("https://tenant/wiki/appToken?table=tblA").is_err());
+        assert!(parse_bitable_link("https://tenant/base/appToken?table=../evil").is_err());
+    }
+}
+
 /// 只取**第一页**记录，不做收敛断言。
 ///
 /// 给诊断路径用：它要回答的是「凭证能不能注入、列名能不能解析、值长什么样」，
