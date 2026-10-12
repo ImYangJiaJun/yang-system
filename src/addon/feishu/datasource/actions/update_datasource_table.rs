@@ -252,21 +252,21 @@ pub(super) async fn handle(
                 resolved
                     .as_ref()
                     .map(|coordinates| coordinates.app_token.as_str())
-                    .or_else(|| input.bitable_base_token.as_deref()),
+                    .or(input.bitable_base_token.as_deref()),
             ),
             (
                 "bitable_table_id",
                 resolved
                     .as_ref()
                     .and_then(|coordinates| coordinates.table_id.as_deref())
-                    .or_else(|| input.bitable_table_id.as_deref()),
+                    .or(input.bitable_table_id.as_deref()),
             ),
             (
                 "bitable_view_id",
                 resolved
                     .as_ref()
                     .and_then(|coordinates| coordinates.view_id.as_deref())
-                    .or_else(|| input.bitable_view_id.as_deref()),
+                    .or(input.bitable_view_id.as_deref()),
             ),
         ] {
             if let Some(value) = value {
