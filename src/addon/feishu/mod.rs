@@ -7,6 +7,7 @@
 pub(crate) mod approval;
 pub(crate) mod datasource;
 pub(crate) mod domain;
+pub(crate) mod event;
 pub(crate) mod option;
 pub(crate) mod portal;
 
@@ -66,6 +67,8 @@ pub(crate) fn build_addon(
         authorization_validator.clone(),
     )?)
     .module(portal::build_log_module()?)
+    // 事件订阅：无表，只有 challenge 应答端点（public + verification_token 自校验）。
+    .module(event::build_module(settings.as_deref())?)
     .module(option::build_module(
         context,
         settings.as_deref(),

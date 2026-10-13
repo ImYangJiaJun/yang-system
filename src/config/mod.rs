@@ -677,6 +677,12 @@ pub struct FeishuSettings {
     /// 单配置级的 `base_timezone` 覆盖此处的默认值；这里只给一个部署初值。
     #[serde(default = "default_approval_base_timezone")]
     pub approval_base_timezone: String,
+    /// 事件订阅的 Verification Token。
+    ///
+    /// 飞书开发者后台「事件与回调 → 加密策略」中生成。challenge 应答时用它校验请求来源，
+    /// 不匹配则拒绝。未配置时 challenge 端点不注册。
+    #[serde(default)]
+    pub event_verification_token: Option<String>,
 }
 
 /// 出站拉取间隔下限：低于 1 分钟会让飞书侧频控（bitable 列出记录 20 次/秒，
