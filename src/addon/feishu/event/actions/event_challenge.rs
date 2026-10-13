@@ -5,18 +5,18 @@
 //!
 //! 响应不走框架包络：飞书要求 plain `{"challenge": "..."}`。
 //!
-//! # 为什么用 `serde_json::Value` 而不是 typed struct
+//! # 加密支持
 //!
-//! 飞书的 challenge 请求格式不完全可预测：可能带 `encrypt` 字段（加密传输）、
-//! 可能字段名大小写不同、可能带额外字段。typed struct 的反序列化会在框架层
-//! 直接返回 400（handler 根本收不到请求），无法诊断。用 `Value` 接收后手动
-//! 提取字段，保证所有请求都能到达 handler，并在日志中留下原始 body。
+//! 飞书配置了 Encrypt Key 后，所有推送（包括 challenge）都走 `{"encrypt":"..."}` 格式。
+//! 本端点先用 `event_encrypt_key` 做 AES-256-CBC 解密，再从解密后的 JSON 提取字段。
+//! 解密失败时返回错误响应（飞书会重试）。
 
 use serde_json::Value;
 use yang_base::action::{ActionContext, ResponseBody};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::crypto;
 use crate::config::FeishuSettings;
 
 /// challenge 请求体——用 `Value` 接收任意 JSON，避免反序列化失败。
@@ -34,11 +34,12 @@ pub(super) fn register(module: ModuleSpec, settings: &FeishuSettings) -> ModuleS
     let Some(token) = settings.event_verification_token.as_deref() else {
         return module;
     };
-    let token = token.to_string();
+    let verification_token = token.to_string();
+    let encrypt_key = settings.event_encrypt_key.clone();
     module
         .action_fn(
             yang_base::action_name!("event_challenge"),
-            move |ctx, input| handle(ctx, input, token.clone()),
+            move |ctx, input| handle(ctx, input, verification_token.clone(), encrypt_key.clone()),
         )
         .route(HttpMethod::Post, "/api/v1/feishu/event/challenge")
         .display_name("飞书事件 challenge")
@@ -55,9 +56,40 @@ pub(super) async fn handle(
     _ctx: ActionContext,
     input: ChallengeRequest,
     verification_token: String,
+    encrypt_key: Option<String>,
 ) -> Result<ResponseBody, BaseError> {
-    let body = &input.0;
-    tracing::info!(body = %body, "飞书 challenge 请求到达");
+    let raw_body = &input.0;
+    tracing::info!(body = %raw_body, "飞书 challenge 请求到达");
+
+    // 解密或直接用明文
+    let body = match raw_body.get("encrypt").and_then(Value::as_str) {
+        Some(encrypted) => {
+            let Some(key_raw) = encrypt_key.as_deref() else {
+                tracing::error!("飞书发送了加密请求，但 event_encrypt_key 未配置");
+                return raw_json(serde_json::json!({"error": "encrypt key not configured"}));
+            };
+            let key = crypto::derive_key(key_raw);
+            match crypto::decrypt_bytes(encrypted, &key) {
+                Ok(decrypted) => {
+                    match serde_json::from_slice::<Value>(&decrypted) {
+                        Ok(parsed) => {
+                            tracing::info!(decrypted = %parsed, "飞书 challenge 解密成功");
+                            parsed
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "飞书 challenge 解密后不是合法 JSON");
+                            return raw_json(serde_json::json!({"error": "decrypt produced invalid json"}));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "飞书 challenge 解密失败");
+                    return raw_json(serde_json::json!({"error": "decrypt failed"}));
+                }
+            }
+        }
+        None => raw_body.clone(),
+    };
 
     // 从 body 提取字段
     let r#type = body.get("type").and_then(Value::as_str).unwrap_or("");
@@ -73,7 +105,6 @@ pub(super) async fn handle(
     // 类型校验
     if r#type != "url_verification" {
         tracing::warn!(body = %body, r#type = %r#type, "飞书 challenge 请求 type 不是 url_verification");
-        // 仍然返回 challenge——飞书可能在不同阶段发不同类型
     }
 
     // verification_token 校验（仅日志，不阻断）

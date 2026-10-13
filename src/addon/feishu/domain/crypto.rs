@@ -83,9 +83,9 @@ pub(crate) fn encrypt_json(value: &serde_json::Value, key: &[u8; 32]) -> Result<
 
 /// 解密 `base64(IV ‖ 密文)`，剥除 PKCS#7 填充。
 ///
-/// 与 [`encrypt_bytes`] 严格对称：IV 前置、PKCS#7。**只用于解本服务自己封存的凭据**，
-/// 不用于解任何外部输入（飞书来文是明文）。
-fn decrypt_bytes(encoded: &str, key: &[u8; 32]) -> Result<Vec<u8>, BaseError> {
+/// 与 [`encrypt_bytes`] 严格对称：IV 前置、PKCS#7。
+/// 消费者：凭据回显端点（`unseal` / `unseal_verified`）和事件订阅解密。
+pub(crate) fn decrypt_bytes(encoded: &str, key: &[u8; 32]) -> Result<Vec<u8>, BaseError> {
     let raw = BASE64
         .decode(encoded)
         .map_err(|_| BaseError::ConfigError("凭据密文不是合法 base64".to_string()))?;
@@ -479,5 +479,30 @@ mod tests {
         let raw = decode(&cipher);
         assert!(raw.len() > 16);
         assert_eq!((raw.len() - 16) % 16, 0);
+    }
+
+    #[test]
+    fn real_feishu_encrypted_challenge_decrypts_correctly() {
+        // 真实飞书加密 challenge（从生产日志截取），验证 derive_key + decrypt_bytes 能正确解密
+        let encrypted = "g5WeVm+6OTIExpFo1ehQ2ozmsitaJREgGeDIL42AF88EbNyjfzinwAxZKZduMagHYh1estowsQuSh1lzB55dy7mtHonNXEXnTtN557cIiRJy0YIhA3GUmJyxHalKDRtRN7u9F1zCaGITXjVxG4mP4QNtRQ/1n8mcVknfI/Uxb/SaAJLW1u7T8nEfvvpg8Apm";
+        let key_raw = "VnYJZQdbXOg5TMPOE57FJcwIwnS4mLyl";
+        let key = derive_key(key_raw);
+        let decrypted = decrypt_bytes(encrypted, &key).expect("decrypt should succeed");
+        let json: serde_json::Value =
+            serde_json::from_slice(&decrypted).expect("should be valid JSON");
+
+        // 验证解密后包含 challenge 必需字段
+        assert!(
+            json.get("challenge").is_some(),
+            "decrypted JSON must have 'challenge' field"
+        );
+        assert!(
+            json.get("type").is_some(),
+            "decrypted JSON must have 'type' field"
+        );
+        assert!(
+            json.get("token").is_some(),
+            "decrypted JSON must have 'token' field"
+        );
     }
 }
