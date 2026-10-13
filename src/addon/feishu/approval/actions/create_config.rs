@@ -5,6 +5,13 @@
 //! 手动建与 dispatch 首次调用自动建必须给**同一套保证**（设计 §5.1）：本 Action
 //! 不新写任何校验逻辑，整条复用 `approval_provision::build_plan + insert_plan`——
 //! 取定义、取列、按名匹配、校验，全过才落库；配置与映射同一事务。
+//!
+//! # 建好即签发访问 Token（2026-10-13 起）
+//!
+//! 配置行的 `config_key` / `token_hash` / `token_cipher` / `token_rotated_at` 在
+//! 同一事务里生成——否则「建好了却没签发」会让工作流请求进来时落在 40402
+//! 「尚未签发访问 Token」，而控制台又看不到任何提示。生成一次、返回一次明文，
+//! 与 `rotate_token`（datasource 侧）同一套 `issue_token` 语义。
 
 use std::sync::Arc;
 
@@ -12,6 +19,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
+use yang_base::table::Record;
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::approval_match::FieldMapping;
@@ -20,6 +28,7 @@ use crate::addon::feishu::domain::approval_provision::{
 };
 use crate::addon::feishu::domain::bitable::resolve_bitable_link;
 use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::crypto::issue_token;
 use crate::addon::feishu::domain::outbound_setup;
 use crate::infrastructure::audit;
 
@@ -178,12 +187,38 @@ pub(super) async fn handle(
     )
     .await;
 
+    // 同时备好访问 Token：与 `rotate_config_token`（datasource 的 `rotate_token`）
+    // 共用 `issue_token`——`config_key` 是普通随机串（进 URL 路径段），Token 是
+    // 封存的（摘要校验 + 可逆密文，供后续「回显复制」路径解开）。
+    let config_key = crate::addon::feishu::domain::crypto::generate_token();
+    let wrapping_key = context.encryption_key().ok_or_else(|| {
+        BaseError::ConfigError(
+            "未配置 feishu.encryption_key：审批派发配置的访问 Token 需要它封存".to_string(),
+        )
+    })?;
+    let issued = issue_token(&wrapping_key)?;
+
     // 配置与映射同一事务，审计同事务追加（AUDIT.md 契约：审计失败整体回滚）。
     let mut transaction = ctx.begin_transaction().await?;
     let result: Result<i64, BaseError> = async {
         let config_id = insert_plan(&context, &mut transaction, &plan)
             .await
             .map_err(map_insert_error)?;
+        let issued_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or_default();
+        let mut columns = Record::new();
+        columns.insert("config_key", serde_json::json!(&config_key));
+        columns.insert("token_hash", serde_json::json!(&issued.hash));
+        columns.insert("token_cipher", serde_json::json!(&issued.cipher));
+        columns.insert("token_rotated_at", serde_json::json!(issued_at));
+        context
+            .approval_configs()
+            .query()
+            .where_eq("id", serde_json::json!(config_id))?
+            .update_in_tx(&mut transaction, columns)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,
@@ -209,7 +244,11 @@ pub(super) async fn handle(
         "审批派发配置已手动创建"
     );
     ApiResponse::success(
-        serde_json::json!({ "config_id": config_id }),
+        serde_json::json!({
+            "config_id": config_id,
+            "config_key": config_key,
+            "token": issued.plaintext,
+        }),
         "配置创建成功",
     )
 }

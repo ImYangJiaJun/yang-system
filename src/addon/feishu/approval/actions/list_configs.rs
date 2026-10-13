@@ -41,6 +41,8 @@ pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "handler_field",
     "base_timezone",
     "enabled",
+    "config_key",
+    "token_rotated_at",
     "form_snapshot_at",
     "updated_at",
 ];
@@ -136,6 +138,14 @@ pub(super) struct ConfigItem {
     base_timezone: String,
     /// 是否启用。
     enabled: bool,
+    /// 工作流接入用的配置标识（进派发 URL 路径段）；未签发过则为 `None`。
+    config_key: Option<String>,
+    /// 最近一次轮换/签发访问 Token 的时间（unix 秒）；从未签发过则为 `None`。
+    ///
+    /// 刻意**不投影** `token_hash` / `token_cipher`：那是凭据本体，前端只需要
+    /// 「这条配置签发过没有 / 啥时候签发的」这两位元数据（与 `list_datasources`
+    /// 不投影 `token_hash` 同一条纪律，见 `list_datasources.rs` 同名注释）。
+    token_rotated_at: Option<i64>,
     /// 控件结构快照时间（unix 秒）；建配置时快照拉取失败则为 `None`。
     form_snapshot_at: Option<i64>,
     /// 该行最后一次被写入的时间（unix 秒）。
@@ -313,6 +323,8 @@ pub(super) async fn handle(
             handler_field: record.optional("handler_field")?,
             base_timezone: record.require("base_timezone")?,
             enabled: record.require("enabled")?,
+            config_key: record.optional("config_key")?,
+            token_rotated_at: record.optional("token_rotated_at")?,
             form_snapshot_at: record.optional("form_snapshot_at")?,
             updated_at: record.require("updated_at")?,
             // 没配映射的配置得到空数组，不是缺键——前端不必到处补 `?? []`
@@ -407,6 +419,8 @@ mod tests {
             handler_field: Some("fldHandler".to_string()),
             base_timezone: "Asia/Shanghai".to_string(),
             enabled: true,
+            config_key: Some("cfgkeytest".to_string()),
+            token_rotated_at: Some(1_700_000_002),
             form_snapshot_at: Some(1_700_000_000),
             updated_at: 1_700_000_001,
             maps: Vec::new(),

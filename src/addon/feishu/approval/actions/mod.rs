@@ -5,23 +5,23 @@
 //!
 //! # 两组端点，两条注册纪律
 //!
-//! - **控制台（10 个 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
+//! - **控制台（11 个 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
 //!   （`create_config` / `list_widgets` 运行时按其自身逻辑校验凭证并返回 50301），
 //!   所以注册在 `can_pull()` 门禁**之前**。
 //! - **派发端点只在集成可用时注册**：与 `option` module 的机器入口同一条纪律——
 //!   派发端点打飞书开放平台，需要 `app_id`/`app_secret` 齐备（`FeishuSettings::can_pull()`
 //!   判定）。凭证缺失时注册出来只会返回「凭证未配置」，让人误以为端点可用；不注册则
-//!   路由直接 404，语义更准。dispatch 及其 `ManagementTokenMiddleware`、以及
-//!   用户身份授权回调（同样要打飞书）保持门禁之后。
+//!   路由直接 404，语义更准。dispatch 与用户身份授权回调（同样要打飞书）保持门禁之后。
 //!
-//! # 鉴权：管理 Token 中间件 + 坐标白名单
+//! # 鉴权：按配置签发的访问 Token（2026-10-13 起）
 //!
-//! dispatch Action 保持 `public`（飞书工作流没有 JWT），由 `ManagementTokenMiddleware`
-//! 校验静态 Bearer。中间件**必须注册**——Action 是 public 的，漏挂就裸奔。
-//!
-//! 光有 Token 还不够：管理 Token 是全局单值、不按数据源绑定（既有决策 A8），
-//! 所以 handler 里还强制校验 `base_token`/`table_id` 落在已配置的启用行内
-//! （见 `dispatch.rs`）。两道合起来才把可利用面收到「已配置的表格」。
+//! dispatch Action 保持 `public`（飞书工作流没有 JWT），鉴权在 handler 内完成：
+//! 路由带 `{config_key}` 路径参数，按它查配置行、用请求体 `token` 的摘要比对
+//! `token_hash`（`verify_token`，与外部数据源同一套）。Token **按配置隔离**，
+//! 取代了旧的「全局单值 `management_api_token` + 请求体 `(base_token, table_id)`
+//! 白名单」两道分散防线（设计 §9.1/§9.3 记录的决策，本端点执行之）。
+//! Token 由 `create_config`（建配置时顺带签发）与 `rotate_config_token`（按需轮换）
+//! 产出，明文只在响应里出现一次。
 
 pub(super) mod create_config;
 pub(super) mod delete_config;
@@ -34,15 +34,15 @@ pub(super) mod oauth_authorize_url;
 pub(super) mod oauth_callback;
 pub(super) mod oauth_status;
 pub(super) mod refresh_names;
+pub(super) mod rotate_config_token;
 pub(super) mod update_config;
 
 use std::sync::Arc;
 
-use yang_base::definition::{ActionName, ActionRef, ModuleName, ModuleSpec};
+use yang_base::definition::{ModuleName, ModuleSpec};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
-use crate::addon::feishu::domain::middleware::ManagementTokenMiddleware;
 use crate::config::FeishuSettings;
 
 /// 注册本 module 的全部 Action。
@@ -65,31 +65,18 @@ pub(super) fn register_all(
     // （授权链接在缺配置时按业务码 50302 失败，而不是让按钮凭空消失）。
     let module = oauth_status::register(module, Arc::clone(&context));
     let module = oauth_authorize_url::register(module, Arc::clone(&context));
+    let module = rotate_config_token::register(module, Arc::clone(&context));
 
     let Some(settings) = settings.filter(|value| value.can_pull()) else {
         return Ok(module);
     };
+    // 门禁只判断 `can_pull()`，具体值本身不再被后续使用（中间件已移除）。
+    let _ = settings;
 
     // 授权回调要打飞书的令牌端点，与派发端点同一条门禁。
     let module = oauth_callback::register(module, Arc::clone(&context));
-    let mut module = dispatch::register(module, context);
-    module = module.middleware(ManagementTokenMiddleware::new(
-        &settings.management_api_token,
-        action_ref("dispatch_approval")?,
-    ));
+    let module = dispatch::register(module, context);
     Ok(module)
-}
-
-/// 构造本 module 内某个 Action 的引用，供中间件的 `target_action()` 限定。
-///
-/// 精确限定而不是 `AllActions`：同 module 的只读 Action 不该被这把静态 Token 保护
-/// （那会让控制台的 JWT 调用被拒）。
-fn action_ref(name: &str) -> Result<ActionRef, BaseError> {
-    let module = ModuleName::new("feishu.approval")
-        .map_err(|error| BaseError::ConfigError(error.to_string()))?;
-    let action =
-        ActionName::new(name).map_err(|error| BaseError::ConfigError(error.to_string()))?;
-    Ok(ActionRef::new(module, action))
 }
 
 #[cfg(test)]
@@ -100,7 +87,7 @@ mod tests {
 
     use crate::addon::feishu::domain::repository::Repository;
 
-    /// 10 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
+    /// 11 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
     const CONSOLE_ROUTES: &[(&str, &str)] = &[
         ("list_configs", "/api/v1/feishu/approval/configs/query"),
         ("create_config", "/api/v1/feishu/approval/configs/create"),
@@ -109,6 +96,10 @@ mod tests {
         (
             "refresh_names",
             "/api/v1/feishu/approval/configs/refresh-names",
+        ),
+        (
+            "rotate_config_token",
+            "/api/v1/feishu/approval/configs/rotate-token",
         ),
         (
             "list_widgets",
@@ -190,15 +181,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn action_ref_points_at_this_module() {
-        let reference =
-            action_ref("dispatch_approval").unwrap_or_else(|error| panic!("应有效: {error}"));
-        assert_eq!(reference.module().as_str(), "feishu.approval");
-        assert_eq!(reference.action().as_str(), "dispatch_approval");
-    }
-
-    /// 10 个控制台路由在**有凭证**时全部注册。
+    /// 11 个控制台路由在**有凭证**时全部注册。
     #[tokio::test]
     async fn console_routes_are_registered_with_credentials() {
         let module = registered_module(true);
@@ -211,7 +194,7 @@ mod tests {
         }
     }
 
-    /// 10 个控制台路由在**无凭证**时也全部注册（控制台不依赖出站凭证存在）。
+    /// 11 个控制台路由在**无凭证**时也全部注册（控制台不依赖出站凭证存在）。
     #[tokio::test]
     async fn console_routes_are_registered_without_credentials() {
         let module = registered_module(false);
@@ -230,7 +213,7 @@ mod tests {
         assert!(
             routes(&module).contains(&(
                 HttpMethod::Post,
-                "/api/v1/feishu/approval/dispatch".to_string()
+                "/api/v1/feishu/approval/dispatch/{config_key}".to_string()
             )),
             "带凭证时派发路由必须注册：{:?}",
             routes(&module)
@@ -245,7 +228,7 @@ mod tests {
         assert!(
             !routes(&module).contains(&(
                 HttpMethod::Post,
-                "/api/v1/feishu/approval/dispatch".to_string()
+                "/api/v1/feishu/approval/dispatch/{config_key}".to_string()
             )),
             "无凭证时不得注册派发路由"
         );
@@ -273,19 +256,13 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_action_is_public_for_the_machine_caller() {
-        // 飞书多维表格工作流没有 JWT，所以 Action 必须是 public，靠
-        // `ManagementTokenMiddleware` 校验静态 Token。
-        //
-        // **这条断言的意义在于：public 与「挂了中间件」必须成对**——Action 是
-        // public 的，中间件一旦漏挂就完全裸奔（`domain/middleware.rs` 顶部注释）。
-        // 中间件的挂载无法从外部内省（`ModuleSpec::middlewares()` 是 crate 私有），
-        // 所以这里钉住 public 这一半；另一半由 `register_all` 的实现保证：
-        // 注册 Action 的同一段代码紧接着挂中间件，没有第二条路径。
+        // 飞书多维表格工作流没有 JWT，所以 Action 必须是 public，靠 handler 内
+        // 按 `config_key` 校验的访问 Token 做鉴权。
         let module = registered_module(true);
         let spec = module
             .actions()
             .iter()
-            .find(|spec| spec.route.path == "/api/v1/feishu/approval/dispatch")
+            .find(|spec| spec.route.path == "/api/v1/feishu/approval/dispatch/{config_key}")
             .unwrap_or_else(|| panic!("派发路由必须存在"));
         assert!(spec.is_public, "派发 Action 必须 public（工作流无 JWT）");
     }

@@ -111,6 +111,8 @@ export const APPROVAL_OPERATION_IDS = {
   oauthStatus: "feishu.approval.oauth_status",
   /// 取授权链接。**写权限**：它会签发一个一次性的 state（CSRF 防护）。
   oauthAuthorizeUrl: "feishu.approval.oauth_authorize_url",
+  /// 轮换访问 Token。**写权限**：重新签发一条配置的工作流访问 Token（旧值立即失效）。
+  rotateConfigToken: "feishu.approval.rotate_config_token",
 } as const;
 
 /// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。
@@ -2160,6 +2162,8 @@ export type ApprovalActions = {
   deleteConfig: (
     configId: number,
   ) => Promise<{ deletedMaps: number; deletedPendingTasks: number }>;
+  /// 重新签发一条配置的工作流访问 Token；返回新明文（旧值立即失效，工作流需粘新值）。
+  rotateConfigToken: (configId: number) => Promise<string>;
 };
 
 export function useApprovalActions(): ApprovalActions {
@@ -2181,6 +2185,18 @@ export function useApprovalActions(): ApprovalActions {
     (configId: number) => deleteApprovalConfig(configId, deps),
     [deps],
   );
+  const rotateConfigToken = useCallback(
+    async (configId: number) => {
+      const result = await invokeFeishuAction(
+        deps,
+        APPROVAL_OPERATION_IDS.rotateConfigToken,
+        { config_id: configId },
+      );
+      const data = asRecord(result.data);
+      return asString(data?.token);
+    },
+    [deps],
+  );
 
   return {
     canRead: canReadApproval(catalogData),
@@ -2200,6 +2216,7 @@ export function useApprovalActions(): ApprovalActions {
     },
     updateConfig,
     deleteConfig,
+    rotateConfigToken,
   };
 }
 

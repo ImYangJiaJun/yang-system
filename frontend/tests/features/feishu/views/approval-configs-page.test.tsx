@@ -79,25 +79,16 @@ describe("审批派发配置页 · 列表", () => {
     const content = within(guide);
     expect(
       content.getByText(
-        `${window.location.origin}/api/v1/feishu/approval/dispatch`,
+        `${window.location.origin}/api/v1/feishu/approval/dispatch/<配置标识>`,
       ),
     ).toBeInTheDocument();
+    expect(content.getByText(/工作流访问/)).toBeInTheDocument();
     expect(
-      content.getByText(/Authorization: Bearer <管理 Token>/),
+      content.getByText(/Content-Type: application\/json/, {
+        selector: "ol li",
+      }),
     ).toBeInTheDocument();
-    expect(
-      content.getByText(/Content-Type: application\/json/),
-    ).toBeInTheDocument();
-    for (const name of [
-      "base_token",
-      "table_id",
-      "record_id",
-      "applicant",
-      "requested_by",
-      "approval_code",
-      "applicant_field",
-      "backfill_field",
-    ]) {
+    for (const name of ["token", "record_id", "applicant", "requested_by"]) {
       expect(
         content.getByText(name, { selector: "dt code" }),
       ).toBeInTheDocument();
@@ -109,21 +100,18 @@ describe("审批派发配置页 · 列表", () => {
       content.getByLabelText("批量派发请求体").textContent!,
     );
     expect(single).toEqual({
-      base_token:
-        "https://tenant.example/base/<Base Token>?table=<数据表 ID>&view=<视图 ID>",
+      token: "<访问 Token>",
       record_id: "<触发记录 ID>",
       applicant: "<发起人姓名>",
       requested_by: "<触发人标识>",
     });
     expect(batch).toEqual({
-      base_token: "https://tenant.example/base/<Base Token>?table=<数据表 ID>",
+      token: single.token,
       applicant: single.applicant,
       requested_by: single.requested_by,
     });
     expect(content.getByText(/所有启用配置的待处理队列/)).toBeInTheDocument();
-    expect(
-      content.getByText(/feishu.management_api_token/),
-    ).toBeInTheDocument();
+    expect(content.getByText(/工作流访问 Token/)).toBeInTheDocument();
     expect(content.getByText(/data.accepted/)).toBeInTheDocument();
     expect(countCalls(calls, "/api/v1/feishu/approval/dispatch")).toBe(0);
 

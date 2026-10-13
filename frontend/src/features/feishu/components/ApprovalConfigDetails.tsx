@@ -11,7 +11,7 @@ import {
 } from "@/shared/ui/dialog";
 import { copyText } from "@/shared/lib/clipboard";
 import { useToast } from "@/shared/lib/toast";
-import { useApprovalConfigList } from "../api";
+import { useApprovalActions, useApprovalConfigList } from "../api";
 import { ListPagination } from "./ListPagination";
 import { StatusBadge } from "./StatusBadge";
 import { formatUnixSeconds, type ApprovalConfigItem } from "../types";
@@ -68,8 +68,10 @@ export function ApprovalConfigDetails({
   const [relatedOpen, setRelatedOpen] = useState(false);
   const [relatedPage, setRelatedPage] = useState(1);
   const [relatedSize, setRelatedSize] = useState(10);
+  const [rotatingToken, setRotatingToken] = useState(false);
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const toast = useToast();
+  const actions = useApprovalActions();
   const related = useApprovalConfigList(
     {
       page: relatedPage,
@@ -103,6 +105,36 @@ export function ApprovalConfigDetails({
     if (outcome === "copied") toast.success(`${label}已复制`);
     else toast.error("无法自动复制，请选中文字手动复制。");
   }
+  const dispatchUrl = item.configKey
+    ? `${window.location.origin}/api/v1/feishu/approval/dispatch/${item.configKey}`
+    : undefined;
+  async function rotateToken() {
+    setRotatingToken(true);
+    try {
+      const token = await actions.rotateConfigToken(item.id);
+      if (!token) {
+        toast.error("轮换失败：服务端没有返回新的访问 Token。");
+        return;
+      }
+      // 与 datasource 的「复制即取回」同一条纪律：明文只在这里出现一次，
+      // 刷新即失，绝不进本地长期状态或日志。
+      const outcome = await copyText(token);
+      if (outcome === "copied") {
+        toast.success(
+          "已轮换并复制新 Token；旧 Token 立即失效，请把新值粘回飞书工作流。",
+        );
+      } else {
+        toast.error(
+          "已轮换，但无法自动复制。新 Token 只出现这一次，请联系管理员重新轮换。",
+        );
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      toast.error(`轮换访问 Token 失败：${message}`);
+    } finally {
+      setRotatingToken(false);
+    }
+  }
   return (
     <>
       <header className="flex flex-wrap justify-between gap-4">
@@ -132,6 +164,15 @@ export function ApprovalConfigDetails({
             <Button variant="outline" disabled={pending} onClick={onEdit}>
               编辑配置
             </Button>
+            {item.configKey ? (
+              <Button
+                variant="outline"
+                disabled={pending || rotatingToken}
+                onClick={() => void rotateToken()}
+              >
+                {rotatingToken ? "轮换中…" : "轮换访问 Token"}
+              </Button>
+            ) : null}
             <Button variant="outline" disabled={pending} onClick={onToggle}>
               {item.enabled ? "停用" : "启用"}
             </Button>
@@ -236,6 +277,45 @@ export function ApprovalConfigDetails({
           ? "已启用仅表示可受理新的派发请求，仍需飞书工作流触发。"
           : "已停用：新的派发请求不会通过此配置受理。"}
       </p>
+      {dispatchUrl ? (
+        <div className="rounded-xl border bg-card p-5 sm:p-6">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            工作流接入
+          </p>
+          <p className="mb-4 text-xs text-muted-foreground">
+            飞书工作流向这个地址发 POST 请求即可触发派发；鉴权靠请求体里的访问
+            Token，每条配置各自一份，按需轮换（旧值立即失效）。
+          </p>
+          <dl className="grid gap-4 sm:grid-cols-2">
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">派发链接</dt>
+              <dd className="mt-1 flex items-start gap-2">
+                <code className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-xs break-all select-all">
+                  {dispatchUrl}
+                </code>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="复制派发链接"
+                  onClick={() => void copy("派发链接", dispatchUrl)}
+                >
+                  复制
+                </Button>
+              </dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-xs text-muted-foreground">
+                最近签发/轮换 Token
+              </dt>
+              <dd className="mt-1 font-mono text-sm break-all">
+                {item.tokenRotatedAt
+                  ? formatUnixSeconds(item.tokenRotatedAt)
+                  : "从未签发"}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      ) : null}
       <div
         role="tablist"
         aria-label="配置详情"

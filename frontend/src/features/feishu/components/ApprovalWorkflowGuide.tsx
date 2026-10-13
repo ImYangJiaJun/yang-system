@@ -14,7 +14,9 @@ export function ApprovalWorkflowGuide() {
             Code、申请人员列和审批编号回填列，确认配置已启用。表格列与审批控件的映射可在「映射明细」中查看。
           </p>
           <p className="text-muted-foreground">
-            飞书应用需具有读取表格、更新记录和创建审批的权限，且能访问目标多维表格与审批定义。申请人取自记录中的人员列；触发按钮的人只记入派发记录。
+            建配置时系统会自动签发一份**工作流访问
+            Token**：详情页的「工作流接入」区可以复制派发链接与访问
+            Token。这两样是飞书工作流向本服务发起派发请求的凭据，按配置隔离（每条配置各自一份）。
           </p>
         </section>
 
@@ -27,7 +29,8 @@ export function ApprovalWorkflowGuide() {
             </li>
             <li>
               添加「发送 HTTP 请求」操作，请求方法选择 POST，请求体选择原始
-              JSON，填写下方地址、请求头与请求体。
+              JSON，请求地址填入详情页的「派发链接」（地址里已带配置标识，不需要再拼），请求头填
+              Content-Type: application/json。
             </li>
             <li>
               单行请求的 record_id 从触发节点选择「记录
@@ -40,23 +43,16 @@ export function ApprovalWorkflowGuide() {
         <section className="space-y-2">
           <h2 className="font-medium">3. 请求地址与鉴权</h2>
           <CopyField
-            label="请求地址（POST）"
-            value={`${window.location.origin}/api/v1/feishu/approval/dispatch`}
-            copyLabel="复制请求地址"
-            hint="地址按当前控制台域名生成；飞书服务器必须能够访问。如果当前是 localhost、内网或开发代理地址，请替换为实际部署的公网 API 地址，并保留接口路径。"
+            label="派发链接（POST）"
+            value={`${window.location.origin}/api/v1/feishu/approval/dispatch/<配置标识>`}
+            copyLabel="复制派发链接"
+            hint="把 <配置标识> 替换为详情页「工作流接入」区展示的配置标识（一段随机串）。地址按当前控制台域名生成；飞书服务器必须能够访问。"
           />
-          <pre className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs select-all">
-            <code>
-              {
-                "Content-Type: application/json\nAuthorization: Bearer <管理 Token>"
-              }
-            </code>
-          </pre>
           <p className="text-muted-foreground">
-            管理 Token 由运维提供，对应服务端
-            feishu.management_api_token；不能用登录 Token、飞书
-            tenant_access_token 或外部选项的数据源 Token
-            替代。页面仅展示占位符，请在工作流请求头中填入真实值。
+            请求地址里已经包含配置标识（服务端据此定位这条配置），请求体里只需要带上访问
+            Token ——Token
+            由服务端建配置时签发，通过详情页「工作流接入」区查看/轮换。旧版「管理
+            Token + 请求体里填坐标」的鉴权方式已废弃，不再支持。
           </p>
         </section>
 
@@ -64,19 +60,11 @@ export function ApprovalWorkflowGuide() {
           <h2 className="font-medium">4. 请求参数</h2>
           <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-[max-content_1fr]">
             <dt>
-              <code>base_token</code>
+              <code>token</code>
             </dt>
             <dd>
-              必填。可填纯 Base
-              Token，也可直接粘贴完整多维表格链接；完整链接会按
-              <code>/base/…?table=…&view=…</code> 自动定位。
-            </dd>
-            <dt>
-              <code>table_id</code>
-            </dt>
-            <dd>
-              可选。使用完整链接且包含 table 参数时可省略，否则填写目标数据表
-              ID。
+              必填。这条配置的访问
+              Token（详情页「工作流接入」区查看/复制；轮换后必须把新值粘回工作流）。
             </dd>
             <dt>
               <code>record_id</code>
@@ -89,8 +77,8 @@ export function ApprovalWorkflowGuide() {
               <code>applicant</code>
             </dt>
             <dd>
-              发起人**姓名**（不是
-              open_id）。传了它，系统会用飞书用户身份去通讯录 解析出 open_id
+              可选。发起人**姓名**（不是
+              open_id）。传了它，系统会用飞书用户身份去通讯录解析出 open_id
               再提单；解析失败会直接报错，不会停在等待态。
               <strong>不传</strong>
               则回退读表格里的申请人员列——两种都缺时记录停在 「缺少申请人」。
@@ -102,48 +90,12 @@ export function ApprovalWorkflowGuide() {
               可选。触发人标识，**仅用于派发记录**（落「派发记录」页），不参与提单；
               最多 128 个字符，省略时记录为 feishu-workflow。
             </dd>
-            <dt>
-              <code>approval_code</code>
-            </dt>
-            <dd>
-              首次调用自动建配置时填写目标审批定义
-              Code；已在本页建好配置时省略。
-            </dd>
-            <dt>
-              <code>applicant_field</code>
-            </dt>
-            <dd>首次建配置时填写申请人员列的字段 ID 或列名。</dd>
-            <dt>
-              <code>backfill_field</code>
-            </dt>
-            <dd>首次建配置时填写审批编号回填列的字段 ID 或列名。</dd>
-            <dt>
-              <code>status_field</code>
-            </dt>
-            <dd>可选。申请状态回填列的字段 ID 或列名；留空则不回填该列。</dd>
-            <dt>
-              <code>flow_field</code>
-            </dt>
-            <dd>可选。审批流程回填列的字段 ID 或列名；留空则不回填该列。</dd>
-            <dt>
-              <code>start_time_field</code>
-            </dt>
-            <dd>可选。发起时间回填列的字段 ID 或列名；留空则不回填该列。</dd>
-            <dt>
-              <code>end_time_field</code>
-            </dt>
-            <dd>可选。完成时间回填列的字段 ID 或列名；留空则不回填该列。</dd>
-            <dt>
-              <code>department_field</code>
-            </dt>
-            <dd>可选。发起人部门回填列的字段 ID 或列名；留空则不回填该列。</dd>
-            <dt>
-              <code>handler_field</code>
-            </dt>
-            <dd>可选。当前处理人回填列的字段 ID 或列名；留空则不回填该列。</dd>
           </dl>
           <p className="text-muted-foreground">
-            首次自动建配置的后三个参数必须同时提供；已有配置时这些值会被忽略。建议先在本页完成配置，再使用下面的最小请求体。
+            派发地址里的配置标识与请求体里的访问 Token
+            是这套鉴权的全部——不再需要请求体里填任何多维表格坐标（base_token /
+            table_id）或审批配置字段（approval_code
+            等），那些在控制台建配置时已经配好了。
           </p>
           <div className="grid gap-3 lg:grid-cols-2">
             <div className="min-w-0 space-y-2">
@@ -155,8 +107,7 @@ export function ApprovalWorkflowGuide() {
                 <code>
                   {JSON.stringify(
                     {
-                      base_token:
-                        "https://tenant.example/base/<Base Token>?table=<数据表 ID>&view=<视图 ID>",
+                      token: "<访问 Token>",
                       record_id: "<触发记录 ID>",
                       applicant: "<发起人姓名>",
                       requested_by: "<触发人标识>",
@@ -176,8 +127,7 @@ export function ApprovalWorkflowGuide() {
                 <code>
                   {JSON.stringify(
                     {
-                      base_token:
-                        "https://tenant.example/base/<Base Token>?table=<数据表 ID>",
+                      token: "<访问 Token>",
                       applicant: "<发起人姓名>",
                       requested_by: "<触发人标识>",
                     },
@@ -217,8 +167,10 @@ export function ApprovalWorkflowGuide() {
             200 或工作流节点显示成功也不代表派发成功。
           </p>
           <p className="text-muted-foreground">
-            若没有派发记录，先检查地址是否能被飞书访问、管理 Token
-            和工作流执行日志；若提示未配置，检查坐标和启用状态；若处于等待态，补齐申请人及审批必填字段后再查看处理结果。
+            若提示「配置不存在」，检查派发链接里的配置标识是否正确；若提示「Token
+            无效」，说明轮换过 Token
+            而工作流里还是旧值，去详情页重新复制；若提示「尚未签发访问
+            Token」，说明这条配置建好后还没签发过凭据（异常状态），联系管理员；若处于等待态，补齐申请人及审批必填字段后再查看处理结果。
           </p>
         </section>
       </div>

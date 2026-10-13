@@ -7,6 +7,8 @@ use yang_base::definition::{
 };
 use yang_base::BaseError;
 
+use super::super::domain::repository::SYSTEM_ROLE;
+
 /// 声明审批派发配置表。
 ///
 /// # 为什么是独立表而不是复用 `feishu_datasource`
@@ -107,6 +109,41 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .require(true)
                 .max_length(64)
                 .default("Asia/Shanghai"),
+            // --- 工作流访问凭证（2026-10-13 起：先在控制台配好，工作流凭 key+Token 调用）---
+            //
+            // 派发端点改形前，鉴权是全局单值 `management_api_token` + 请求体
+            // `(base_token, table_id)` 白名单（设计 §9.1）。现在改成与外部数据源
+            // 同一套：**每条配置一个可进 URL 的 key + 一个专属 Token**，key 本身
+            // 就是路由与白名单，Token 由 handler 内摘要比对校验（datasource 的
+            // `verify_source` 同一形态）。
+            //
+            // 四列全部**可空**：框架 schema 同步对「已有数据的表加无默认值必填列」
+            // 直接拒绝启动（`schema_sync/plan.rs`），而生产已有存量配置行。
+            // 「未签发」由应用层判定（`token_hash` 为 NULL → 派发报可行动文案，
+            // 控制台点「签发 Token」补上），不靠列的必填性。
+            config_key => Str::new()
+                .title("工作流访问 Key")
+                .max_length(64)
+                .unique(true)
+                .searchable(true)
+                .filterable(true)
+                .sortable(true),
+            // 只存摘要、校验用；校验路径不需要解密。唯一挡「两个配置共用一个 Token」
+            // ——与 `feishu_datasource_field.token_hash` 同一处置。
+            token_hash => Str::new()
+                .title("访问 Token 摘要")
+                .max_length(64)
+                .unique(true)
+                .secret(true)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+            // 可逆密文，**只在回显/轮换响应这一条路径上取值**（轮换响应即新明文）。
+            token_cipher => Text::new()
+                .title("访问 Token 密文")
+                .secret(true)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+            token_rotated_at => Timestamp::new().title("Token 最近轮换时间"),
             // --- 启用开关 ---
             enabled => Switch::new()
                 .title("启用")

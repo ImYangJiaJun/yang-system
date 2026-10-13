@@ -1049,6 +1049,10 @@ export type ApprovalConfigItem = {
   /// 控件结构快照时间（unix 秒）；建配置时快照拉取失败则为 null。
   formSnapshotAt: number | null;
   updatedAt: number;
+  /// 工作流接入用的配置标识（进派发 URL 路径段）；未签发过则为 null。
+  configKey?: string | null;
+  /// 最近一次轮换/签发访问 Token 的时间（unix 秒）；从未签发过则为 null。
+  tokenRotatedAt?: number | null;
   /// 空数组表示该配置没有映射。
   maps: ApprovalConfigMap[];
 };

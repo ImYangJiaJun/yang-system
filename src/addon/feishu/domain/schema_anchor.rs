@@ -884,6 +884,14 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // 都在 `user_token_table` 的声明上，缺口由该表声明的单测钉住（必填列与
         // secret 列逐项断言）。
         "domain/user_token.rs",
+        // 新增（2026-10-13，按配置签发的访问 Token）：`check_config_auth` /
+        // `rotate_config_token` 收的 `row: &Record` 由调用方查好再传进来，
+        // 静态解析不到仓库接收者——与 `option_write.rs` / `user_token.rs` 同形。
+        // 用到的列（id / base_token / table_id / token_hash / enabled / token_cipher
+        // / token_rotated_at）都在 `feishu_approval_config` 的声明上，缺口由该表
+        // 声明的单测钉住。
+        "approval/actions/dispatch.rs",
+        "approval/actions/rotate_config_token.rs",
     ]
     .into_iter()
     .collect();
