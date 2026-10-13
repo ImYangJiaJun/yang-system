@@ -5,6 +5,7 @@ import { useNavigate, useSearchParams, Link } from "react-router";
 import { login } from "@/engine/session/lifecycle";
 import { loginByEmailCode } from "@/engine";
 import { SecondFactorRequiredError } from "@/engine/http/errors";
+import { safeRedirectTarget } from "@/features/auth/redirect";
 import {
   useSessionController,
   useSessionSnapshot,
@@ -37,6 +38,8 @@ export default function LoginPage() {
   const [searchParams] = useSearchParams();
   const snapshot = useSessionSnapshot();
   const toast = useToast();
+  // 公开门户（access_mode=login）等页面用 ?redirect= 带回来路，登录后回跳。
+  const redirectTarget = safeRedirectTarget(searchParams.get("redirect"));
   const [mode, setMode] = useState<LoginMode>("password");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -69,7 +72,7 @@ export default function LoginPage() {
     try {
       const result = await login(username.trim(), password, mfaCode);
       controller.beginSession(result);
-      navigate("/", { replace: true });
+      navigate(redirectTarget, { replace: true });
     } catch (cause) {
       if (cause instanceof SecondFactorRequiredError) {
         // 密码已通过：进入第二因子阶段。
@@ -166,7 +169,7 @@ export default function LoginPage() {
         mfaCode,
       );
       controller.beginSession(result);
-      navigate("/", { replace: true });
+      navigate(redirectTarget, { replace: true });
     } catch (cause) {
       if (cause instanceof SecondFactorRequiredError) {
         // 验证码已通过（服务端只验不消费）：进入第二因子阶段。

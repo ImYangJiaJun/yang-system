@@ -17,10 +17,10 @@ function jsonResponse(payload: unknown, status = 200) {
   });
 }
 
-function renderLogin() {
+function renderLogin(path = "/login") {
   const controller = createSessionController();
   const { router } = renderTestApp({
-    path: "/login",
+    path,
     authenticated: false,
     controller,
   });
@@ -658,5 +658,73 @@ describe("LoginPage 验证码登录模式", () => {
       });
     });
     expect(loginCalls).toBe(2);
+  });
+});
+
+describe("LoginPage 登录后回跳（?redirect=）", () => {
+  /// 登录成功 + 落地页（首页）所需的目录与演示数据。
+  function stubLoginSuccess() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/v1/users/login")) {
+          return jsonResponse({
+            code: 0,
+            message: "成功",
+            data: { access_token: "access-token" },
+          });
+        }
+        if (url.includes("/.well-known/yang/ui-catalog")) {
+          return jsonResponse(catalogFixture);
+        }
+        if (url.includes("/api/v1/demo/items/query")) {
+          return jsonResponse({
+            code: 0,
+            message: "成功",
+            data: { items: [], page: 1, page_size: 10, total: 0 },
+          });
+        }
+        throw new Error(`测试未覆盖的请求：${url}`);
+      }),
+    );
+  }
+
+  /// 从给定登录 URL 走完一次密码登录，返回最终落地的 pathname。
+  async function loginAndGetPath(loginPath: string) {
+    stubRefreshFailure();
+    const { router } = renderLogin(loginPath);
+    await screen.findByRole("heading", { name: "用户登录" });
+    stubLoginSuccess();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("帐号"), "alice");
+    await user.type(screen.getByLabelText("密码"), "correct-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    await waitFor(() => {
+      expect(router.state.location.pathname).not.toBe("/login");
+    });
+    return router.state.location.pathname;
+  }
+
+  it("合法同源路径 ?redirect=/portal/abc 登录后回跳门户页", async () => {
+    const loginPath = `/login?redirect=${encodeURIComponent("/portal/abc")}`;
+    expect(await loginAndGetPath(loginPath)).toBe("/portal/abc");
+  });
+
+  it.each([
+    ["协议相对 URL", "//evil.com"],
+    ["绝对 URL", "http://evil.com"],
+    ["反斜杠", "\\evil.com"],
+    ["斜杠+反斜杠", "/\\evil.com"],
+    ["制表符绕过", "/\t/evil.com"],
+  ])("%s ?redirect=%s 被拒，落到首页 /", async (_label, evil) => {
+    const loginPath = `/login?redirect=${encodeURIComponent(evil)}`;
+    expect(await loginAndGetPath(loginPath)).toBe("/");
+  });
+
+  it("无 ?redirect= 时保持原行为：落到首页 /", async () => {
+    expect(await loginAndGetPath("/login")).toBe("/");
   });
 });
