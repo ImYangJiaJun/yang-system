@@ -275,6 +275,23 @@ describe("公开查询端点", () => {
     expect(result.columns[0]?.label).toBe("额度");
     expect(result.rows[0]?.values.fld_limit).toBe(50000);
   });
+
+  it("有会话就带 Bearer（login 模式靠它判权），匿名时不带", async () => {
+    const sent: Array<HeadersInit | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sent.push(init?.headers);
+        return envelope({ found: false, columns: [], rows: [] });
+      }),
+    );
+
+    await queryPortal("bank", "6222", undefined, { token: "tok-1" });
+    expect(new Headers(sent[0]).get("authorization")).toBe("Bearer tok-1");
+
+    await queryPortal("bank", "6222");
+    expect(new Headers(sent[1]).get("authorization")).toBeNull();
+  });
 });
 
 describe("公开端点的失败分类（按信封 code，不按 HTTP 状态）", () => {

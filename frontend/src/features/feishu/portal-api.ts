@@ -31,7 +31,9 @@ import {
   useUiCatalog,
 } from "@/engine";
 import type { UiCatalog } from "@/engine";
+import type { SessionContext } from "@/engine";
 import { apiBase, parseJson } from "@/engine/http/http";
+import { requestWithTokenRefresh } from "@/engine/session/auth-session";
 
 import { feishuQueryKeys, invokeFeishuAction } from "./api";
 import type { FeishuInvokeDeps } from "./api";
@@ -334,17 +336,43 @@ export async function getPortalAccessLog(
 
 type ApiEnvelope = { code?: number; message?: string; data?: unknown };
 
-/// 公开端点的信封解析。**不带 Authorization、不带 cookie**：这是匿名访客的请求。
+/// 公开端点的信封解析。
+///
+/// # 为什么要带上 Bearer（而不是纯匿名）
+///
+/// `access_mode = login` 的门户靠后端 `ctx.authenticated_user()` 判权，而那个判据
+/// 只在**带 Bearer** 的请求上才有值——一个不带头的请求永远是匿名的，于是 login 模式
+/// 变成「登录了也进不去」的死循环。所以：**有会话就带上，没有就不带**（匿名访客
+/// 照旧匿名，public / passphrase 不受影响）。
+///
+/// 走 `requestWithTokenRefresh` 而不是裸 fetch：access token 过期时透明续期；
+/// 续期也失败才把会话标记失效（SessionBridge 会把人送去登录页），而不是让公开页
+/// 卡在一句 `HTTP 401`。
+///
+/// **cookie 一律不发**（`credentials: "omit"`）：公开端点不用 cookie 鉴权，少一个
+/// 跨站请求面。
+///
+/// # 失败为什么按信封 `code` 分类
 ///
 /// 业务失败（门户不存在 / 口令不对 / 需登录）在**信封 code** 上，HTTP 状态仍是 200
 /// （后端 `ApiResponse::fail` 不带 http_status）——所以调用方必须看 `ApiError.code`，
 /// 不能看 `status`。只有限速是真的 `Err`，那一个才是 429。
-async function publicJson(path: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(`${apiBase}${path}`, {
-    ...init,
-    headers: { Accept: "application/json", ...init.headers },
-    credentials: "omit",
-  });
+async function publicJson(
+  path: string,
+  init: RequestInit,
+  token?: string,
+): Promise<unknown> {
+  const response = await requestWithTokenRefresh(token, (current) =>
+    fetch(`${apiBase}${path}`, {
+      ...init,
+      headers: {
+        Accept: "application/json",
+        ...(current ? { Authorization: `Bearer ${current}` } : {}),
+        ...init.headers,
+      },
+      credentials: "omit",
+    }),
+  );
   const requestId = response.headers.get("x-request-id") ?? undefined;
   const payload = (await parseJson(response)) as ApiEnvelope | undefined;
   if (!response.ok || payload?.code !== 0) {
@@ -409,10 +437,14 @@ export function portalFailureView(cause: unknown): PortalFailureView {
 }
 
 /// 执行一次门户查询（精确匹配）。
+///
+/// `session` 只为 `access_mode = login` 而存在：带上会话里的 Bearer，后端才认得出
+/// 「这个访客已登录」；匿名时它是 `undefined`，请求就是纯匿名的。
 export async function queryPortal(
   slug: string,
   value: string,
   passphrase?: string,
+  session?: SessionContext,
   signal?: AbortSignal,
 ): Promise<PortalQueryResponse> {
   const body: Record<string, unknown> = { value };
@@ -427,6 +459,7 @@ export async function queryPortal(
         body: JSON.stringify(body),
         signal,
       },
+      session?.token,
     ),
   );
   const columns = (Array.isArray(data?.columns) ? data.columns : [])

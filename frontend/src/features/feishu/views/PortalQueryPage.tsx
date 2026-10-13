@@ -23,6 +23,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Navigate, useParams } from "react-router";
 
+import { useSessionCredentials } from "@/engine";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
@@ -51,13 +52,16 @@ function cellText(value: unknown): string {
 
 export default function PortalQueryPage() {
   const { slug = "" } = useParams<{ slug: string }>();
+  // `access_mode = login` 的门户要靠这个 Bearer 才能通过后端判权；匿名时它是空的。
+  const session = useSessionCredentials();
   const [value, setValue] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [passphraseRevealed, setPassphraseRevealed] = useState(false);
   const [loginRequired, setLoginRequired] = useState(false);
 
   const query = useMutation({
-    mutationFn: () => queryPortal(slug, value.trim(), passphrase || undefined),
+    mutationFn: () =>
+      queryPortal(slug, value.trim(), passphrase || undefined, session),
     onError: (cause) => {
       const failure = portalFailureView(cause);
       if (failure.revealPassphrase) setPassphraseRevealed(true);
