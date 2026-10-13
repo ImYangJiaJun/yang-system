@@ -92,6 +92,7 @@ describe("审批派发配置页 · 列表", () => {
       "base_token",
       "table_id",
       "record_id",
+      "applicant",
       "requested_by",
       "approval_code",
       "applicant_field",
@@ -111,10 +112,12 @@ describe("审批派发配置页 · 列表", () => {
       base_token:
         "https://tenant.example/base/<Base Token>?table=<数据表 ID>&view=<视图 ID>",
       record_id: "<触发记录 ID>",
+      applicant: "<发起人姓名>",
       requested_by: "<触发人标识>",
     });
     expect(batch).toEqual({
       base_token: "https://tenant.example/base/<Base Token>?table=<数据表 ID>",
+      applicant: single.applicant,
       requested_by: single.requested_by,
     });
     expect(content.getByText(/所有启用配置的待处理队列/)).toBeInTheDocument();

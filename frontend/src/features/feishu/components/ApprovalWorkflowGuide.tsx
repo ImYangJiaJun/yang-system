@@ -86,11 +86,21 @@ export function ApprovalWorkflowGuide() {
               ID；批量派发完全省略此键，不要填写空字符串。
             </dd>
             <dt>
+              <code>applicant</code>
+            </dt>
+            <dd>
+              发起人**姓名**（不是
+              open_id）。传了它，系统会用飞书用户身份去通讯录 解析出 open_id
+              再提单；解析失败会直接报错，不会停在等待态。
+              <strong>不传</strong>
+              则回退读表格里的申请人员列——两种都缺时记录停在 「缺少申请人」。
+            </dd>
+            <dt>
               <code>requested_by</code>
             </dt>
             <dd>
-              可选。触发人标识，仅用于派发记录，最多 128 个字符；省略时记录为
-              feishu-workflow。
+              可选。触发人标识，**仅用于派发记录**（落「派发记录」页），不参与提单；
+              最多 128 个字符，省略时记录为 feishu-workflow。
             </dd>
             <dt>
               <code>approval_code</code>
@@ -148,6 +158,7 @@ export function ApprovalWorkflowGuide() {
                       base_token:
                         "https://tenant.example/base/<Base Token>?table=<数据表 ID>&view=<视图 ID>",
                       record_id: "<触发记录 ID>",
+                      applicant: "<发起人姓名>",
                       requested_by: "<触发人标识>",
                     },
                     null,
@@ -167,6 +178,7 @@ export function ApprovalWorkflowGuide() {
                     {
                       base_token:
                         "https://tenant.example/base/<Base Token>?table=<数据表 ID>",
+                      applicant: "<发起人姓名>",
                       requested_by: "<触发人标识>",
                     },
                     null,
@@ -177,11 +189,13 @@ export function ApprovalWorkflowGuide() {
             </div>
           </div>
           <p className="text-muted-foreground">
-            替换所有占位符。记录 ID
-            和触发人请插入工作流动态变量，不要把占位文字作为实际值发送。使用工作流
-            JSON 模板时，对应引用为 $.step_btn.recordId 与
-            $.step_btn.user（step_btn 为触发节点 ID）；requested_by
-            需要字符串标识，不使用对象，可直接省略。
+            替换所有占位符。记录
+            ID、发起人与触发人请插入工作流动态变量，不要把占位
+            文字作为实际值发送。使用工作流 JSON 模板时，对应引用为
+            $.step_btn.recordId、$.step_btn.user（step_btn 为触发节点 ID）。
+            <strong>applicant 与 requested_by 都要用 $.step_btn.user</strong>
+            ——该变量渲染出的是<strong>姓名</strong>（真机核实），正合 applicant
+            所需； 两个字段都需要字符串，不要传对象。
           </p>
           <p className="rounded-md border border-border bg-muted/50 p-3">
             省略 record_id
