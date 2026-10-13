@@ -39,7 +39,7 @@ pub(super) mod update_config;
 
 use std::sync::Arc;
 
-use yang_base::definition::{ModuleName, ModuleSpec};
+use yang_base::definition::ModuleSpec;
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -83,7 +83,7 @@ pub(super) fn register_all(
 mod tests {
     use super::*;
 
-    use yang_base::definition::{HttpMethod, TableSpec};
+    use yang_base::definition::{HttpMethod, ModuleName, TableSpec};
 
     use crate::addon::feishu::domain::repository::Repository;
 

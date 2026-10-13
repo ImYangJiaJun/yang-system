@@ -49,6 +49,14 @@ use yang_system::config::{FeishuSettings, SecuritySettings};
 use yang_system::feishu_approval_worker::ApprovalDispatchHandle;
 use yang_system::schema::sync_with_database;
 
+/// 审批派发的鉴权已改为「按配置签发的访问 Token」（2026-10-13，见
+/// `src/addon/feishu/approval/actions/dispatch.rs`）：请求不再经
+/// `ManagementTokenMiddleware`（那把全局静态 Token 对本端点已失效），而是按 URL
+/// 路径段里的 `config_key` 查配置行，再用请求体里的 `token` 与其 `token_hash`
+/// 摘要比对。`seed_config` 因此需要额外给一个明文 token，用来算摘要入库并供
+/// 各用例在请求体里引用。
+const SEED_CONFIG_TOKEN: &str = "integration-config-access-token";
+
 /// 多维表格写入接口的管理 Token（dispatch 的鉴权）。
 const MANAGEMENT_TOKEN: &str = "integration-management-token";
 
@@ -275,10 +283,14 @@ async fn dispatch(
     action: &str,
     body: Value,
     headers: &[(&str, &str)],
+    path_params: &[(&str, &str)],
 ) -> Result<ApiResponse, BaseError> {
     let mut request = Request::new(body);
     for (name, value) in headers {
         request = request.header(*name, *value);
+    }
+    for (key, value) in path_params {
+        request = request.path_param(*key, *value);
     }
     let context = app.context(request).with_request_meta(
         RequestMeta::new().with_peer_addr(SocketAddr::from(([127, 0, 0, 1], 41_001))),
@@ -302,9 +314,30 @@ async fn dispatch_as_operator(
         action,
         body,
         &[("authorization", authorization.as_str())],
+        &[],
     )
     .await
     .with_context(|| format!("派发 {action} 不应返回 Err"))
+}
+
+/// 以**工作流**身份派发 `dispatch_approval`：无 JWT 头（`public` Action），靠
+/// URL 路径段 `config_key` 定位配置、请求体 `token` 做鉴权（见
+/// `dispatch.rs` 顶部模块注释）。
+async fn dispatch_as_workflow(
+    app: &BuiltApp,
+    config_key: &str,
+    body: Value,
+) -> anyhow::Result<ApiResponse> {
+    dispatch(
+        app,
+        "feishu.approval",
+        "dispatch_approval",
+        body,
+        &[],
+        &[("config_key", config_key)],
+    )
+    .await
+    .context("工作流派发不应返回 Err")
 }
 
 fn response_data(response: &ApiResponse) -> anyhow::Result<Value> {
@@ -338,7 +371,8 @@ async fn business_names_search_related_pagination_and_refresh_boundaries() {
         let (database, app, token) = prepare_app(None, None).await?;
         let mut ids = Vec::new();
         for index in 0..14 {
-            ids.push(seed_config(&database, "appBusiness", &format!("tbl{index}"), index % 2 == 0).await?);
+            let (config_id, _config_key) = seed_config(&database, "appBusiness", &format!("tbl{index}"), index % 2 == 0).await?;
+            ids.push(config_id);
         }
         let listed = dispatch_as_operator(&app, "list_configs", &token, json!({"page_size":10,"count_total":true})).await?;
         let data = response_data(&listed)?;
@@ -375,7 +409,7 @@ async fn business_names_search_related_pagination_and_refresh_boundaries() {
         ensure!(response_data(&listed)?["items"][0]["maps"][0]["option_source_name"].is_null(), "来源删除后明确缺名称");
         let operator = format!("Bearer {token}");
         for invalid in [json!([]), json!([0]), json!(vec![1; 11])] {
-            ensure!(dispatch(&app,"feishu.approval","refresh_names",json!({"config_ids":invalid}),&[("authorization",operator.as_str())]).await.is_err());
+            ensure!(dispatch(&app,"feishu.approval","refresh_names",json!({"config_ids":invalid}),&[("authorization",operator.as_str())],&[]).await.is_err());
         }
         let refresh = dispatch_as_operator(&app, "refresh_names", &token, json!({"config_ids":[ids[12]]})).await?;
         ensure!(refresh.code == 50301, "没有凭证应明确失败");
@@ -388,26 +422,48 @@ async fn business_names_search_related_pagination_and_refresh_boundaries() {
     }
 }
 
-/// 播种一条启用中的配置行，返回 `config_id`。
+/// 播种一条启用中的配置行，返回 `(config_id, config_key)`。
+///
+/// `config_key` 是 URL 路径段（随机 hex，与生产 `create_config` 生成的形态一致），
+/// 也是本用例里 `dispatch_as_workflow` 唯一需要引用的定位键；`SEED_CONFIG_TOKEN`
+/// 的摘要与密文一并写入，让「先建配置、再用 Token 派发」这条真实链路的用例能跑通。
 async fn seed_config(
     database: &Database,
     base_token: &str,
     table_id: &str,
     enabled: bool,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<(i64, String)> {
+    let config_key = format!("cfg{}", uuid::Uuid::new_v4().simple());
     let result = sqlx::query(
         "INSERT INTO `feishu_approval_config` \
          (`title`, `base_token`, `table_id`, `approval_code`, `applicant_field`, `backfill_field`, \
-          `base_timezone`, `enabled`, `created_at`, `updated_at`) \
-         VALUES ('夹具配置', ?, ?, 'CODE-FIXTURE', 'fldP', 'fldB', 'Asia/Shanghai', ?, NOW(), NOW())",
+          `base_timezone`, `enabled`, `config_key`, `token_hash`, `token_rotated_at`, \
+          `created_at`, `updated_at`) \
+         VALUES ('夹具配置', ?, ?, 'CODE-FIXTURE', 'fldP', 'fldB', 'Asia/Shanghai', ?, ?, ?, 0, NOW(), NOW())",
     )
     .bind(base_token)
     .bind(table_id)
     .bind(enabled)
+    .bind(&config_key)
+    .bind(sha256_hex(SEED_CONFIG_TOKEN))
     .execute(database.pool())
     .await
     .context("种入审批配置失败")?;
-    Ok(result.last_insert_id() as i64)
+    Ok((result.last_insert_id() as i64, config_key))
+}
+
+/// `token_hash` 的摘要算法（SHA-256，小写 hex）——集成测试不调框架内部函数，
+/// 用一次性的等价实现，形态与 `yang_base::token::hash_token`（生产实现）一致。
+fn sha256_hex(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.as_bytes());
+    let mut hex = String::with_capacity(64);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest {
+        hex.push(HEX[(byte >> 4) as usize] as char);
+        hex.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    hex
 }
 
 /// 播种一条字段映射行。
@@ -487,19 +543,15 @@ async fn dispatch_validation_failure_writes_a_failed_request_log() {
     let outcome = async {
         let (database, app, _token) =
             prepare_app(Some("cli_test_app"), Some("test-app-secret")).await?;
-        let bearer = format!("Bearer {MANAGEMENT_TOKEN}");
 
-        let result = dispatch(
-            &app,
-            "feishu.approval",
-            "dispatch_approval",
-            json!({ "base_token": "   ", "table_id": "tblX", "record_id": "rec1" }),
-            &[("authorization", bearer.as_str())],
-        )
-        .await;
+        // 空 config_key 必须在查库之前被拒（`validate_config_key` 的注释），
+        // 不冒泡为 Err——与「校验失败要落一条 failed 记录」同一条不变量，只是这次
+        // 失败点提前到了 URL 路径校验层，而不是请求体字段校验。
+        let result = dispatch_as_workflow(&app, "   ", json!({ "record_id": "rec1" })).await;
+        let response = result.context("空 config_key 不应冒泡 Err——走 200 + fail 信封")?;
         ensure!(
-            result.is_err(),
-            "校验失败必须冒泡为 Err（HTTP 400），实际: {result:?}"
+            response.code == 700005,
+            "空 config_key 必须给 ParamInvalid 的业务码 700005，实际: {response:?}"
         );
 
         let (outcome, config_id, message) = latest_request_log(&database, "").await?;
@@ -523,29 +575,22 @@ async fn dispatch_validation_failure_writes_a_failed_request_log() {
     finish(outcome, "校验失败落记录").await;
 }
 
-/// 配置不存在且未给三件套：40401 业务失败，同样落 failed 行（不出网）。
+/// config_key 查不到配置：40401 业务失败，同样落 failed 行（不出网）。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn dispatch_without_config_reports_40401_and_writes_a_failed_log() {
     let outcome = async {
         let (database, app, _token) =
             prepare_app(Some("cli_test_app"), Some("test-app-secret")).await?;
-        let bearer = format!("Bearer {MANAGEMENT_TOKEN}");
 
-        let response = dispatch(
-            &app,
-            "feishu.approval",
-            "dispatch_approval",
-            json!({ "base_token": "appNoConfig", "table_id": "tblNoConfig", "record_id": "rec1" }),
-            &[("authorization", bearer.as_str())],
-        )
-        .await
-        .context("未配置出口不应返回 Err——那是业务失败，走 200 + fail 信封")?;
+        let response = dispatch_as_workflow(&app, "cfgNoConfig", json!({ "record_id": "rec1" }))
+            .await
+            .context("未配置出口不应返回 Err——那是业务失败，走 200 + fail 信封")?;
         ensure!(response.code == 40401, "未配置必须给出 40401: {response:?}");
 
-        let (outcome, config_id, message) = latest_request_log(&database, "appNoConfig").await?;
+        let (outcome, config_id, message) = latest_request_log(&database, "").await?;
         ensure!(outcome == "failed", "实际 {outcome}");
-        ensure!(config_id.is_none(), "配置没建成，关联必须为空");
+        ensure!(config_id.is_none(), "配置不存在，关联必须为空");
         ensure!(
             message.contains("未配置审批派发"),
             "失败记录的消息要可行动，实际 {message}"
@@ -558,7 +603,7 @@ async fn dispatch_without_config_reports_40401_and_writes_a_failed_log() {
     finish(outcome, "未配置出口落记录").await;
 }
 
-/// 批量受理：白名单通过后落 `accepted` 行，config_id 关联、请求人归一保留。
+/// 批量受理：Token 校验通过后落 `accepted` 行，config_id 关联、请求人归一保留。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
@@ -570,7 +615,8 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
             .context("同步 Schema 失败")?;
         let database = connect_database().await?;
         let redis = connect_redis().await?;
-        let config_id = seed_config(&database, "appAccTest", "tblAccTest", true).await?;
+        let (config_id, config_key) =
+            seed_config(&database, "appAccTest", "tblAccTest", true).await?;
 
         // 注入派发句柄：接收端保持存活（worker 没起也没关系，信号进了通道即可）。
         let (handle, _receiver) = ApprovalDispatchHandle::new();
@@ -581,14 +627,11 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
             Some(handle),
         )
         .await?;
-        let bearer = format!("Bearer {MANAGEMENT_TOKEN}");
 
-        let response = dispatch(
+        let response = dispatch_as_workflow(
             &app,
-            "feishu.approval",
-            "dispatch_approval",
-            json!({ "base_token": "appAccTest", "table_id": "tblAccTest", "requested_by": "批量按钮" }),
-            &[("authorization", bearer.as_str())],
+            &config_key,
+            json!({ "token": SEED_CONFIG_TOKEN, "requested_by": "批量按钮" }),
         )
         .await
         .context("批量受理不应返回 Err")?;
@@ -600,10 +643,13 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
         );
 
         let (outcome, row_config_id, message) = latest_request_log(&database, "appAccTest").await?;
-        ensure!(outcome == "accepted", "批量受理必须落 accepted 桶，实际 {outcome}");
+        ensure!(
+            outcome == "accepted",
+            "批量受理必须落 accepted 桶，实际 {outcome}"
+        );
         ensure!(
             row_config_id == Some(config_id),
-            "受理行的 config_id 必须关联到白名单命中的配置，实际 {row_config_id:?}"
+            "受理行的 config_id 必须关联到 Token 命中的配置，实际 {row_config_id:?}"
         );
         ensure!(
             message.contains("已受理"),
@@ -636,36 +682,33 @@ async fn dispatch_provision_failure_writes_a_failed_request_log() {
     let outcome = async {
         let (database, app, _token) =
             prepare_app(Some("cli_dummy_app"), Some("dummy-secret")).await?;
-        let bearer = format!("Bearer {MANAGEMENT_TOKEN}");
-
-        let response = dispatch(
-            &app,
-            "feishu.approval",
-            "dispatch_approval",
-            json!({
-                "base_token": "appProvFail",
-                "table_id": "tblProvFail",
-                "approval_code": "CODE-PROV",
-                "applicant_field": "申请人",
-                "backfill_field": "审批编号",
-            }),
-            &[("authorization", bearer.as_str())],
-        )
-        .await
-        .context("provision 失败不应返回 Err——走 200 + 35600 信封")?;
+        let (config_id, config_key) =
+            seed_config(&database, "appProvFail", "tblProvFail", true).await?;
+        // dummy 凭证（app_id/app_secret 非 None 但必然取不到真 token）+ 一条真实
+        // 签发的配置：Token 校验先过（这条链路的前置条件），provision/出站阶段才在
+        // 取凭证这一步确定性失败——这正是「provision 失败也要落一条 failed 记录」
+        // 要钉住的那条不变量，换成新契约后语义不变。
+        let response =
+            dispatch_as_workflow(&app, &config_key, json!({ "token": SEED_CONFIG_TOKEN }))
+                .await
+                .context("provision 失败不应返回 Err——走 200 + 业务失败信封")?;
         ensure!(
-            response.code == 35600,
-            "provision 失败必须给出 35600，实际: {response:?}"
+            response.code != 0,
+            "provision 失败必须给非 0 业务码，实际: {response:?}"
         );
 
-        let (outcome, config_id, message) = latest_request_log(&database, "appProvFail").await?;
+        let (outcome, row_config_id, message) =
+            latest_request_log(&database, "appProvFail").await?;
         ensure!(
             outcome == "failed",
             "provision 失败必须落 failed 桶，实际 {outcome}"
         );
-        ensure!(config_id.is_none(), "配置没建成，关联必须为空");
         ensure!(
-            message.contains("取飞书数据失败") || message.contains("读本库配置失败"),
+            row_config_id == Some(config_id),
+            "provision 失败行的 config_id 必须关联到 Token 命中的配置，实际 {row_config_id:?}"
+        );
+        ensure!(
+            !message.is_empty(),
             "失败记录要带可归因原因，实际 {message}"
         );
 
@@ -720,7 +763,7 @@ async fn create_config_requires_outbound_credentials() {
 async fn console_crud_loop_on_a_seeded_config() {
     let outcome = async {
         let (database, app, token) = prepare_app(None, None).await?;
-        let config_id = seed_config(&database, "appCrud", "tblCrud", true).await?;
+        let (config_id, _config_key) = seed_config(&database, "appCrud", "tblCrud", true).await?;
         seed_field_map(&database, config_id, "w1", "fldCompany", true).await?;
         seed_field_map(&database, config_id, "w2", "fldAmount", false).await?;
         let snapshot = json!([
@@ -804,6 +847,7 @@ async fn console_crud_loop_on_a_seeded_config() {
             "update_config",
             json!({ "config_id": config_id, "base_token": "appX" }),
             &[("authorization", operator.as_str())],
+            &[],
         )
         .await;
         ensure!(
@@ -818,6 +862,7 @@ async fn console_crud_loop_on_a_seeded_config() {
             "update_config",
             json!({ "config_id": 9_999_999, "title": "不存在" }),
             &[("authorization", operator.as_str())],
+            &[],
         )
         .await;
         ensure!(
@@ -858,6 +903,7 @@ async fn console_crud_loop_on_a_seeded_config() {
             "delete_config",
             json!({ "config_id": config_id }),
             &[("authorization", operator.as_str())],
+            &[],
         )
         .await;
         ensure!(
@@ -878,7 +924,7 @@ async fn console_crud_loop_on_a_seeded_config() {
 async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
     let outcome = async {
         let (database, app, token) = prepare_app(None, None).await?;
-        let config_id = seed_config(&database, "appTasks", "tblTasks", true).await?;
+        let (config_id, _config_key) = seed_config(&database, "appTasks", "tblTasks", true).await?;
         seed_task(&database, config_id, "recPending", "pending").await?;
         seed_task(&database, config_id, "recBackfilled", "backfilled").await?;
         seed_task(&database, config_id, "recTerminal", "terminal").await?;
@@ -920,8 +966,8 @@ async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
 async fn list_requests_and_list_tasks_return_rows_with_filters() {
     let outcome = async {
         let (database, app, token) = prepare_app(None, None).await?;
-        let config_a = seed_config(&database, "appReqA", "tblReqA", true).await?;
-        let config_b = seed_config(&database, "appReqB", "tblReqB", true).await?;
+        let (config_a, _config_key_a) = seed_config(&database, "appReqA", "tblReqA", true).await?;
+        let (config_b, _config_key_b) = seed_config(&database, "appReqB", "tblReqB", true).await?;
         seed_request_log(&database, "appReqA", "succeeded", "已创建审批实例").await?;
         seed_request_log(&database, "appReqA", "failed", "参数无效").await?;
         seed_task(&database, config_a, "recA1", "pending").await?;

@@ -47,9 +47,9 @@ use crate::addon::feishu::domain::approval_dispatch::{
     dispatch_one, widget_maps_from_rows, Backfill, BitableBackfill,
     DispatchInput as OrchestrationInput,
 };
-use crate::addon::feishu::domain::approval_provision::{
-    build_plan, insert_plan, ProvisionError, ProvisionInput,
-};
+use crate::addon::feishu::domain::approval_provision::ProvisionError;
+#[cfg(test)]
+use crate::addon::feishu::domain::approval_provision::{build_plan, insert_plan, ProvisionInput};
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
