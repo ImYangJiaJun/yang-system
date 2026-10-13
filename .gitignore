@@ -4,6 +4,10 @@
 /config.toml
 /config.local.toml
 .codex/
+.claude/
+.design-review
+.evolver
+.sqlcheck
 __pycache__/
 
 # 部署产物：deploy/ 目录本身要入库（前端部署合同门禁会读 deploy-blue-green.sh），
