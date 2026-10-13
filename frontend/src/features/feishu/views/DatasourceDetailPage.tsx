@@ -71,11 +71,13 @@ import {
   useXlsxImportClient,
 } from "../api";
 import type { XlsxImportReport } from "../api";
+import { canReadPortals } from "../portal-api";
 import { CredentialChecklist } from "../components/CredentialChecklist";
 import { FieldBindingsTable } from "../components/FieldBindingsTable";
 import { DatasourceHealthPanel } from "../components/DatasourceHealthPanel";
 import { StatusBadge } from "../components/StatusBadge";
 import { XlsxReimportDialog } from "../components/XlsxReimportDialog";
+import PortalConfigPanel from "./PortalConfigPanel";
 import type {
   DatasourceGap,
   DatasourceItem,
@@ -400,9 +402,9 @@ export default function DatasourceDetailPage() {
   const [selectedSourceKey, setSelectedSourceKey] = useState<string | null>(
     null,
   );
-  // C4：上下文面板 Tab 状态（选项数据 / 凭据配置 / 同步状态 / 体检结果）
+  // C4：上下文面板 Tab 状态（选项数据 / 凭据配置 / 同步状态 / 体检结果 / 查询门户）
   const [contextTab, setContextTab] = useState<
-    "options" | "credentials" | "sync" | "health"
+    "options" | "credentials" | "sync" | "health" | "portal"
   >("options");
   const bindings = datasource?.fields ?? [];
   // 默认按**展示序**取第一条启用中的绑定，而不是数组里的第一条：上面的字段表就是
@@ -736,6 +738,21 @@ export default function DatasourceDetailPage() {
                   体检结果
                 </button>
               ) : null}
+              {/* 查询门户：目录里没有 `feishu.portal.read` 时不渲染——只读身份
+                  不该看到一个点开就是空的面板。 */}
+              {canReadPortals(catalog.data) ? (
+                <button
+                  type="button"
+                  className={`px-4 py-2 text-sm transition-colors ${
+                    contextTab === "portal"
+                      ? "border-b-2 border-blue-500 font-semibold text-blue-600"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  onClick={() => setContextTab("portal")}
+                >
+                  查询门户
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -932,6 +949,16 @@ export default function DatasourceDetailPage() {
                 </p>
                 <HealthSection datasource={datasource} />
               </section>
+            )}
+
+          {/* Tab 内容：查询门户 */}
+          {contextTab === "portal" &&
+            gap === null &&
+            datasource !== null &&
+            datasourceId !== null && (
+              <div className="rounded-lg border border-border bg-card p-6">
+                <PortalConfigPanel datasourceId={datasourceId} />
+              </div>
             )}
         </div>
       </div>
