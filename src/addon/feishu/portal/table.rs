@@ -16,7 +16,13 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             // 定位门户——`portal_query` 的 slug 查询、`update_portal` / `delete_portal` /
             // `toggle_portal` 的门户定位。漏了它，这些路径会在运行期吃
             // `FieldPermissionDenied`（不是启动期报错）。仓库惯例见 `datasource/table.rs:86`。
-            id => Key::new().title("ID").filterable(true),
+            //
+            // `sortable` **同样必须打开**，这条是**本表对仓库惯例的刻意偏离**：
+            // 门户列表是台账，要靠唯一列收尾才能有确定性全序——`title` 会重名，
+            // `id` 是这张表上唯一的唯一列。`list_portals` 的兜底分支恒按 `id` 升序，
+            // 而 `validate_order_field` 对不可排序的字段先于角色权限直接拒绝，
+            // 映射到 HTTP 就是 403——列表页不是「排序不生效」，是整个请求恒失败。
+            id => Key::new().title("ID").filterable(true).sortable(true),
             // 指向表级数据源。DSL 没有外键 builder，故用 `Int` + 索引，一致性由应用层
             // 在事务内保证（创建门户时校验数据源存在且 active）。
             datasource_id => Int::new()

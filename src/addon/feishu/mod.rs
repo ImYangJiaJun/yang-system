@@ -57,8 +57,12 @@ pub(crate) fn build_addon(
     // 飞书用户身份（OAuth user_access_token）单例行：同样只有表，
     // 读写由派发的姓名解析路径与提醒 worker 经 `FeishuContext` 完成。
     .module(approval::build_user_token_module()?)
-    // 查询门户：两张表 = 两个 module（框架硬形状）。Action 在后续批次接入。
-    .module(portal::build_module()?)
+    // 查询门户：两张表 = 两个 module（框架硬形状）。
+    // 主模块挂 Action + presentation，日志模块只挂表。
+    .module(portal::build_module(
+        Arc::clone(&context),
+        authorization_validator.clone(),
+    )?)
     .module(portal::build_log_module()?)
     .module(option::build_module(
         context,

@@ -60,6 +60,10 @@ pub(crate) const ADMIN_EQUIVALENT_PERMISSIONS: &[AdminEquivalentPermission] = &[
         permission: "feishu.datasource.write",
         reason: "创建与轮换数据源都会把新凭据的明文返回给调用者（create_datasource_table / rotate_token），签发即持有，与直接读取凭据等价",
     },
+    AdminEquivalentPermission {
+        permission: "feishu.portal.write",
+        reason: "创建门户会把数据源的敏感数据暴露到公开 URL，攻击者拿到 URL 即可绕过认证查询数据，等价于把数据源的内容对外发布",
+    },
 ];
 
 /// 查清单里的完整条目（含中文理由）；不是管理员等价时返回 `None`。
