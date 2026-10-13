@@ -1407,7 +1407,7 @@ mod tests {
         assert!(
             transport.seen().iter().any(|request| request.url
                 == crate::addon::feishu::domain::approval::applicant_search_url()),
-            "必须走 contact/v3/users/search：{:#?}",
+            "必须走 GET /open-apis/search/v1/user：{:#?}",
             transport.seen()
         );
     }

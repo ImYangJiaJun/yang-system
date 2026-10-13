@@ -617,7 +617,7 @@ pub struct FeishuSettings {
     ///
     /// **省略 = 未启用用户身份授权**：授权入口与回调都不工作，姓名 → open_id
     /// 解析直接给出可行动的错误，而不是退回到必然失败的 tenant token 路径
-    /// （`contact/v3/users/search` 只接受 user_access_token）。
+    /// （`GET /open-apis/search/v1/user` 只接受 user_access_token）。
     ///
     /// 刻意不从请求 Host 头推导——Host 可被伪造，与
     /// `email.password_reset.link_base_url` 同一条纪律。

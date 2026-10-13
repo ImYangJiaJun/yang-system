@@ -1,6 +1,6 @@
 //! `feishu_user_token` 表声明：系统持有的**飞书用户身份**（OAuth `user_access_token`）。
 //!
-//! 为什么需要这张表：姓名 → open_id 走的 `contact/v3/users/search` **只接受**
+//! 为什么需要这张表：姓名 → open_id 走的 `GET /open-apis/search/v1/user` **只接受**
 //! `user_access_token`，用 `tenant_access_token` 调必报 99991663（真机实测）。
 //! 用户身份只能由管理员在控制台完成一次 OAuth 授权取得，token 对与授权时间落在这里，
 //! 由 `domain::user_token` 维护（access 过期按需刷新；refresh 由提醒 worker 每日保活）。

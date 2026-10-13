@@ -2,12 +2,15 @@
 # =============================================================================
 # 飞书用户身份（OAuth）真机验收 —— 只读探针（在服务器上跑）
 #
-# 用途：确认「发起人姓名 → open_id」这条路径**真的能走通**，即系统持有的
-#       user_access_token 调得动 `POST /open-apis/contact/v3/users/search`。
+# 用途：确认「发起人姓名 → open_id」这条路径**真的能走通**。分两步：
+#       1) 系统持有的 user_access_token 有没有通讯录搜索权限；
+#       2) 两个候选接口各返回什么形状——代码解析的字段必须与真实响应对得上。
 #
-# 为什么需要它：授权回调成功、控制台显示「已授权」只证明**凭证落库了**，
-#       不证明这份凭证有通讯录权限。两者的差别正是这个功能唯一的真机风险
-#       （应用级缺 scope 报 99991672、用户凭证缺 scope 报 99991679）。
+# 为什么第 2 步必要：仓库文档《搜索用户》写的是 `GET /open-apis/search/v1/user`
+#       返回 `data.users[].{name,open_id}`，而代码打的是
+#       `POST /open-apis/contact/v3/users/search`；2026-10-13 真机取到的响应是
+#       `data.items[].{id,display_info,meta_data}` —— 既没有 `open_id` 也没有 `name`。
+#       两条路都要看真报文才能定改哪边。
 #
 # 全程只读：只 SELECT `feishu_user_token`（不改任何数据）；只调飞书的**搜索**
 #       接口（不创建审批实例、不写多维表格）；凭证本体不落 stdout。
@@ -84,45 +87,62 @@ NAME="${1:-}"
 echo
 echo "  搜索姓名：${NAME}"
 
+code_of() {
+  printf '%s' "$1" | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*\(-\?[0-9]*\).*/\1/p' | head -1
+}
+verdict() {
+  case "$1" in
+    0) echo "code=0（接口通）" ;;
+    99991672) echo "99991672 应用级缺 scope（后台没开通或审核中）" ;;
+    99991679) echo "99991679 用户凭证缺 scope（授权时没要够）" ;;
+    99991663) echo "99991663 凭证类型不对（不是 user_access_token）" ;;
+    99991668|99991671) echo "$1 凭证形态非法（多半是过期的裸探针）" ;;
+    20005|20037|99991677) echo "$1 凭证已失效/过期（应用下次用到会自动刷新）" ;;
+    "") echo "没解析出 code" ;;
+    *) echo "code=$1" ;;
+  esac
+}
+
 echo
 echo "----------------------------------------------------------"
-echo "3) 决定性一步：用该凭证调 contact/v3/users/search"
+echo "3a) 代码当前用的：POST /open-apis/contact/v3/users/search"
 echo "----------------------------------------------------------"
-RESP="$(curl -s --noproxy '*' -X POST \
-  'https://open.feishu.cn/open-apis/contact/v3/users/search?page_size=5' \
+A="$(curl -s --noproxy '*' -X POST \
+  'https://open.feishu.cn/open-apis/contact/v3/users/search?page_size=20' \
   -H "Authorization: Bearer ${TOKEN}" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d "{\"query\":\"${NAME}\"}")"
-
-echo "$RESP" | head -c 2000
+echo "$A" | head -c 1600
 echo
-echo
+echo "  => $(verdict "$(code_of "$A")")"
+echo "     响应含 \"open_id\"? $(printf '%s' "$A" | grep -c '"open_id"')   含 \"name\"? $(printf '%s' "$A" | grep -c '"name"')"
 
-CODE="$(printf '%s' "$RESP" | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*\(-\?[0-9]*\).*/\1/p' | head -1)"
-case "$CODE" in
-  0)
-    echo "  [OK] code=0 —— 用户凭证能调通讯录搜索，**发起人参数化可用**。"
-    echo "       下一步：从飞书工作流发一条带 applicant=<姓名> 的派发，确认解析出 open_id。"
-    ;;
-  99991672)
-    echo "  [X] 99991672 应用级缺 scope：开发者后台「权限管理」没开通通讯录权限，或还在审核。"
-    ;;
-  99991679)
-    echo "  [X] 99991679 用户凭证缺 scope：授权时没要够权限。去控制台点「重新授权」并勾选通讯录权限。"
-    ;;
-  99991663)
-    echo "  [X] 99991663 凭证类型不对：库里存的不是 user_access_token（应不会发生）。"
-    ;;
-  99991668|99991671)
-    echo "  [X] 凭证形态非法：多半是过期的裸探针。先触发一次派发让应用刷新，再重跑。"
-    ;;
-  20005|20037|99991677)
-    echo "  [!] 凭证已失效/过期（code=$CODE）。应用会在下次用到时自动刷新 —— 先触发一次派发再重跑。"
-    ;;
-  "")
-    echo "  [!] 没解析出 code，原始响应见上。"
-    ;;
-  *)
-    echo "  [X] code=$CODE，原始响应见上。对照 docs/architecture/2026-10-13-feishu-user-identity-oauth-design.md 第 7 节的失败文案表。"
-    ;;
-esac
+echo
+echo "----------------------------------------------------------"
+echo "3b) 文档《搜索用户》描述的：GET /open-apis/search/v1/user"
+echo "----------------------------------------------------------"
+B="$(curl -s --noproxy '*' -G 'https://open.feishu.cn/open-apis/search/v1/user' \
+  --data-urlencode "query=${NAME}" \
+  --data-urlencode 'page_size=20' \
+  -H "Authorization: Bearer ${TOKEN}")"
+echo "$B" | head -c 1600
+echo
+echo "  => $(verdict "$(code_of "$B")")"
+echo "     响应含 \"open_id\"? $(printf '%s' "$B" | grep -c '"open_id"')   含 \"name\"? $(printf '%s' "$B" | grep -c '"name"')"
+
+echo
+echo "----------------------------------------------------------"
+echo "判读"
+echo "----------------------------------------------------------"
+CA="$(code_of "$A")"
+CB="$(code_of "$B")"
+if [ "$CB" = "0" ] && printf '%s' "$B" | grep -q '"open_id"'; then
+  echo "  [OK] 文档那条（search/v1/user）返回 name + open_id —— 代码应改打这个接口。"
+elif [ "$CA" = "0" ] && printf '%s' "$A" | grep -q '"open_id"'; then
+  echo "  [OK] 当前接口就返回 open_id —— 解析侧按真实字段名对齐即可。"
+elif [ "$CA" = "0" ] || [ "$CB" = "0" ]; then
+  echo "  [!] 至少一条通了，但返回字段与代码解析的 (open_id/name) 对不上 ——"
+  echo "      把上面两份真报文发出来，按真实字段名改解析。"
+else
+  echo "  [X] 两条都没通，见上面的错误码。"
+fi

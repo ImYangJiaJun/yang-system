@@ -15,7 +15,7 @@ function messageOf(cause: unknown) {
 /**
  * 飞书用户身份（OAuth）授权卡片。
  *
- * 为什么要有这张卡片：审批派发的「发起人姓名」要经 `contact/v3/users/search` 解析，
+ * 为什么要有这张卡片：审批派发的「发起人姓名」要经 `GET /open-apis/search/v1/user` 解析，
  * 而该接口**只接受 user_access_token**。没授权时带发起人的派发必然失败，且失败发生在
  * 工作流那一侧、控制台看不见——把「有没有授权」摆到台面上是这张卡片唯一的职责。
  *

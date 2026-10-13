@@ -516,14 +516,22 @@ fn detail_query() -> Vec<(String, String)> {
 // 姓名 → open_id 解析（通讯录搜索）
 // ---------------------------------------------------------------------------
 
-/// 搜索用户的 URL。
+/// 搜索用户的 URL：`GET /open-apis/search/v1/user`（query 参数，无请求体）。
 ///
-/// `POST /open-apis/contact/v3/users/search`（lark-cli `contact +search-user`
-/// dry-run 实测的路径与请求体 `{"query": …}`）。**不要**与另一条也叫「搜索用户」
-/// 的 `GET /open-apis/search/v1/user` 混用——两者路径、响应列表键与姓名键都不同，
-/// 见下方结构体的容错说明。
+/// 2026-10-13 真机把两个同名接口都打了一遍（`deploy/verify-feishu-user-identity.sh`
+/// 的 3a/3b 两段），结论是**只有这条**返回本模块解析的形状：
+///
+/// - `GET /open-apis/search/v1/user` → `data.users[].{name, open_id, user_id, …}`；
+/// - `POST /open-apis/contact/v3/users/search` → `data.items[].{id, display_info,
+///   meta_data}`：**既没有 `open_id` 也没有 `name`**，姓名埋在 `display_info` 的
+///   HTML 里（`<h>杨佳俊</h>` 后跟部门名）。
+///
+/// 后者曾是本函数的实现（lark-cli `contact +search-user` dry-run 测出的路径）。
+/// 危险之处在于它**不会报错**：`SearchUser` 的两个字段都带 `#[serde(default)]`，
+/// 字段名对不上就静默解析成空串，最后收敛成「未找到某人」——把「接口选错了」
+/// 伪装成「名字写错了」。两条路要的权限一样（`contact:user:search`）。
 pub(crate) fn applicant_search_url() -> String {
-    format!("{FEISHU_OPEN_BASE}/open-apis/contact/v3/users/search")
+    format!("{FEISHU_OPEN_BASE}/open-apis/search/v1/user")
 }
 
 /// 姓名 → open_id 的解析结果。
@@ -562,11 +570,16 @@ pub(crate) async fn resolve_applicant(
     }
 
     let request = OutboundRequest {
-        method: OutboundMethod::Post,
+        method: OutboundMethod::Get,
         url: applicant_search_url(),
-        query: vec![("page_size".to_string(), "20".to_string())],
+        // `query` 走键值对而不是 JSON 体：这条接口是 GET。中文姓名由真传输
+        // 百分号编码（见 `OutboundRequest::query` 的说明），这里不手写编码。
+        query: vec![
+            ("query".to_string(), name.to_string()),
+            ("page_size".to_string(), "20".to_string()),
+        ],
         bearer_token: Some(bearer_token.to_string()),
-        json_body: Some(serde_json::json!({ "query": name })),
+        json_body: None,
         raw_body: None,
         binary_limit: None,
         timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
@@ -585,10 +598,13 @@ pub(crate) async fn resolve_applicant(
 
 /// 搜索接口 `data` 部分的解析。
 ///
-/// **列表键两种形态都收**：本仓库核对到的两条「搜索用户」接口返回的列表键不同
-/// ——`contact/v3/users/search` 与同族的 `contact/v3/departments/search` 用
-/// `items`，而 `search/v1/user` 用 `users`。用 `alias` 同时接受，避免上游换接口时
-/// 静默解析成空列表（那会把「有这人」误判成 NotFound）。
+/// **列表键两种形态都收**：`search/v1/user` 用 `users`（本函数实际打的接口），
+/// 同族的 `contact/v3/departments/search` 用 `items`。用 `alias` 同时接受，
+/// 避免上游换接口时静默解析成空列表（那会把「有这人」误判成 NotFound）。
+///
+/// ⚠️ 但 `alias` 只兜得住**列表键**：2026-10-13 真机踩到的恰恰是元素字段名不对
+/// （`id`/`display_info` vs `open_id`/`name`），`#[serde(default)]` 把整条命中
+/// 解析成空串，一路静默到「未找到」。换接口时必须连**元素字段**一起核对。
 #[derive(Debug, Deserialize)]
 struct ApplicantSearchData {
     #[serde(default, alias = "users")]
@@ -947,6 +963,12 @@ mod tests {
         fn call_count(&self) -> usize {
             self.seen.lock().map(|seen| seen.len()).unwrap_or_default()
         }
+
+        /// 最后一次出站的请求。断言**请求形状**用——只断言解析结果抓不住
+        /// 「接口选错但静默通过」那类 bug（响应是我们自己喂的）。
+        fn last_request(&self) -> Option<OutboundRequest> {
+            self.seen.lock().ok().and_then(|seen| seen.last().cloned())
+        }
     }
 
     #[async_trait::async_trait]
@@ -1001,6 +1023,64 @@ mod tests {
             }
         );
         assert_eq!(transport.call_count(), 1, "应恰发一次搜索请求");
+    }
+
+    /// 钉住请求形状：**GET `/open-apis/search/v1/user` + query 参数 + 无请求体**。
+    ///
+    /// 2026-10-13 真机踩到的是「接口选错但静默通过」：旧实现打
+    /// `POST /open-apis/contact/v3/users/search`，而那条接口的响应里既没有
+    /// `open_id` 也没有 `name`（姓名在 `display_info` 的 HTML 里），两个字段都带
+    /// `#[serde(default)]`，于是每条命中解析成空串、一路收敛到「未找到某人」——
+    /// 把「接口选错了」伪装成「名字写错了」。
+    ///
+    /// 只断言「解析出了 open_id」是抓不住的（脚本响应是测试自己喂的），所以这里
+    /// 直接断言发出去的请求。
+    #[tokio::test]
+    async fn resolve_applicant_calls_the_documented_search_endpoint() {
+        let transport = ScriptedTransport::new(vec![Ok(envelope(
+            r#"{"users":[{"open_id":"ou_1","name":"杨佳俊"}]}"#,
+        ))]);
+        resolve_applicant(&transport, &NoopSleeper, "u-test", "杨佳俊")
+            .await
+            .unwrap_or_else(|error| panic!("应解析成功: {error}"));
+
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出一次搜索请求"));
+        assert_eq!(
+            request.method,
+            OutboundMethod::Get,
+            "`search/v1/user` 是 GET；POST 打的是另一条同名接口"
+        );
+        assert!(
+            request.url.ends_with("/open-apis/search/v1/user"),
+            "接口路径变了：{}",
+            request.url
+        );
+        assert!(
+            request
+                .query
+                .contains(&("query".to_string(), "杨佳俊".to_string())),
+            "姓名必须走 query 参数（GET 没有请求体）：{:?}",
+            request.query
+        );
+        assert!(
+            request
+                .query
+                .contains(&("page_size".to_string(), "20".to_string())),
+            "分页参数缺失：{:?}",
+            request.query
+        );
+        assert!(
+            request.json_body.is_none(),
+            "GET 不该带请求体：{:?}",
+            request.json_body
+        );
+        assert_eq!(
+            request.bearer_token.as_deref(),
+            Some("u-test"),
+            "必须带调用方给的 user_access_token"
+        );
     }
 
     #[tokio::test]

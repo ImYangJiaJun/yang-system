@@ -2,7 +2,7 @@
 //!
 //! # 为什么需要用户身份
 //!
-//! 姓名 → open_id 走的 `contact/v3/users/search` **只接受** `user_access_token`
+//! 姓名 → open_id 走的 `GET /open-apis/search/v1/user` **只接受** `user_access_token`
 //! ——用 `tenant_access_token` 调必报 99991663（真机实测）。用户身份只能由管理员
 //! 在控制台完成一次 OAuth 授权取得，凭证落在 `feishu_user_token`（单例行）。
 //!
@@ -56,7 +56,7 @@ const TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
 /// 授权页请求的 scope（空格分隔）。**每一个都必须在开发者后台「权限管理」里已开通**，
 /// 否则授权页直接报 20027（拼了未开通的 scope）。
 ///
-/// - `contact:user:search`：`contact/v3/users/search` 要的**就是它**。
+/// - `contact:user:search`：`GET /open-apis/search/v1/user` 要的**就是它**。
 ///   2026-10-13 真机取到：只授权 `contact:contact.base:readonly` 时该接口报 99991679，
 ///   `permission_violations` 点名 `{"type":"action_privilege_required",
 ///   "subject":"contact:user:search"}` —— 「通讯录基础信息只读」与「搜索用户」在飞书是

@@ -6,7 +6,7 @@
 ## 1. 目标与非目标
 
 **目标**：让审批派发的 `applicant=姓名` 参数真正可用——姓名 → open_id 走的
-`contact/v3/users/search` **只接受 `user_access_token`**，而本系统此前只有 tenant 身份。
+`GET /open-apis/search/v1/user` **只接受 `user_access_token`**，而本系统此前只有 tenant 身份。
 为此集成飞书 OAuth：管理员本人授权一次，系统持有并自动续期用户凭证；授权满 350 天后
 每天给系统管理员发提醒，直到重新授权。
 
@@ -20,7 +20,9 @@
 
 | 事实 | 出处 |
 |---|---|
-| `contact/v3/users/search` 对 tenant token 返回 **99991663**（token 类型不支持） | 真机实测 |
+| `GET /open-apis/search/v1/user` 对 tenant token 返回 **99991663**（token 类型不支持） | 真机实测 |
+| 该接口要的权限是 **`contact:user:search`**，与 `contact:contact.base:readonly` 是**两个独立权限** | 2026-10-13 真机 99991679 的 `permission_violations` 点名 |
+| `contact/v3/users/search` 是**另一条同名接口**（POST、无请求体参数以外的 query），响应是 `items[].{id,display_info,meta_data}`，**没有 `open_id`/`name`** | 2026-10-13 真机 3a/3b 对照实测 |
 | 授权页 `accounts.feishu.cn/open-apis/authen/v1/authorize`；令牌端点 `accounts.feishu.cn/oauth/v3/token`（RFC 6749，`client_id`/`client_secret` 在请求体） | 官方文档 |
 | `offline_access` **必须**出现在授权链接的 scope 里，否则令牌响应没有 `refresh_token` | 官方文档 |
 | `refresh_token` **一次性**：刷新即换新，旧值立即失效；`access_token` 约 2 小时且 `expires_in` **非固定值** | 官方文档 |
@@ -126,7 +128,7 @@
 ## 10. 验收
 
 真机探针：`deploy/verify-feishu-user-identity.ps1`（本地 PowerShell 入口，只读；
-在服务器上跑同目录的 `.sh`）。它用库里那份凭证直接调 `contact/v3/users/search`，
+在服务器上跑同目录的 `.sh`）。它用库里那份凭证把两条同名搜索接口各打一遍，
 按返回码给结论——**这是「授权成功」与「凭证真能调通」之间的那道验证**。
 
 - 控制台显示「已授权：<姓名> · <时间>」；未授权时卡片给出提示与入口；
