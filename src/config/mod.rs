@@ -683,6 +683,13 @@ pub struct FeishuSettings {
     /// 不匹配则拒绝。未配置时 challenge 端点不注册。
     #[serde(default)]
     pub event_verification_token: Option<String>,
+    /// 事件订阅的 Encrypt Key（AES-256-CBC 解密用）。
+    ///
+    /// 飞书开发者后台「事件与回调 → 加密策略」中生成。配了它，飞书推送事件时走密文，
+    /// 本端用 `sha256(key)` 做 AES 密钥解密。未配置时按明文接收。
+    /// challenge 端点同时支持明文和加密两种 challenge 验证。
+    #[serde(default)]
+    pub event_encrypt_key: Option<String>,
 }
 
 /// 出站拉取间隔下限：低于 1 分钟会让飞书侧频控（bitable 列出记录 20 次/秒，
