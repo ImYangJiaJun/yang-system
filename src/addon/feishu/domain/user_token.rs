@@ -488,7 +488,25 @@ pub(crate) struct UserTokenRow {
 /// 不按主键取值：这张表的不变式是「**至多一行**」（见 `user_token_table` 的模块文档），
 /// 按「第一行」读写就不必依赖「插入时能显式指定自增主键」这一 DSL 行为。
 pub(crate) async fn load_single(tokens: &Repository) -> Result<Option<UserTokenRow>, BaseError> {
-    let rows = tokens.query().page(1, 1)?.all().await?;
+    // 两个凭证列是 `secret`（`hidden = true`），**不进默认投影**：不显式点名就查不出来，
+    // 报「字段未找到 [表: record]: access_token」。`select_fields` 只校验字段存在与角色
+    // 读权限、不看 `hidden`，所以这里是读 secret 列的唯一入口（同 `reveal_token` 读
+    // `token_cipher`；见 yang-base/src/table/table_query/validation.rs:34 `default_read_fields`）。
+    let rows = tokens
+        .query()
+        .select_fields(&[
+            "id",
+            "open_id",
+            "user_name",
+            "access_token",
+            "access_token_expires_at",
+            "refresh_token",
+            "refresh_token_expires_at",
+            "authorized_at",
+        ])?
+        .page(1, 1)?
+        .all()
+        .await?;
     let Some(row) = rows.first() else {
         return Ok(None);
     };
@@ -956,5 +974,122 @@ mod tests {
             UserTokenError::from(hint).message().contains("开关"),
             "20074 必须点名后台开关"
         );
+    }
+
+    /// 造一个凭证对；`n` 只用来让各次取值互不相同。
+    fn bundle(access: &str, refresh: &str, n: i64) -> TokenBundle {
+        TokenBundle {
+            access_token: access.to_owned(),
+            access_token_expires_at: n,
+            refresh_token: refresh.to_owned(),
+            refresh_token_expires_at: n + 10_000,
+            scope: Some("contact:contact.base:readonly offline_access".to_owned()),
+        }
+    }
+
+    /// 读唯一一行；读不到就以 `why` 报错（仓库 deny `expect_used`，测试里不 panic）。
+    async fn expect_row(tokens: &Repository, why: &str) -> anyhow::Result<UserTokenRow> {
+        match load_single(tokens).await? {
+            Some(row) => Ok(row),
+            None => anyhow::bail!("{why}"),
+        }
+    }
+
+    /// 全表行数（单例行不变式的探针）。
+    async fn row_count(tokens: &Repository) -> anyhow::Result<usize> {
+        let rows = tokens
+            .query()
+            .select_fields(&["id"])?
+            .page(1, yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE)?
+            .all()
+            .await?;
+        Ok(rows.len())
+    }
+
+    /// 真实 MySQL：授权落库 → 读回，**两个 secret 列必须原样回来**。
+    ///
+    /// 钉住一个真机踩到的坑：`access_token` / `refresh_token` 标了 `secret`（即
+    /// `hidden`），而框架的默认投影会**剔除 hidden 字段**
+    /// （`yang-base/src/table/table_query/validation.rs:34` 的 `default_read_fields`）。
+    /// 于是 `load_single` 用裸 `.query()` 时写入成功、读回必败，报
+    /// 「字段未找到 [表: record]: access_token」——只有显式 `select_fields` 点名才读得到。
+    /// 这条测试就是那道防线：把 `load_single` 的字段列表删掉，它会立刻红。
+    #[tokio::test]
+    #[ignore = "需要真实 MySQL 测试库"]
+    async fn real_mysql_round_trips_secret_token_columns() -> anyhow::Result<()> {
+        use yang_db::{Database, DatabaseConfig};
+
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "拒绝在非测试库运行");
+        crate::schema::sync_with_database(
+            database,
+            DatabaseConfig::default(),
+            std::sync::Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let database = Database::connect(&url).await?;
+        let context = crate::addon::feishu::build_context(
+            std::sync::Arc::new(database.pool().clone()),
+            None,
+        )?;
+        let tokens = context.user_tokens();
+
+        // 清成空表，保证下面先走**插入**分支（单例行表，全表至多一行）。
+        while let Some(existing) = load_single(tokens).await? {
+            tokens
+                .query()
+                .where_eq("id", json!(existing.id))?
+                .delete()
+                .await?;
+        }
+        assert!(load_single(tokens).await?.is_none(), "清表后应读不到行");
+
+        // ---- 插入分支 ----
+        let first = bundle("access-first", "refresh-first", 100);
+        store_authorization(tokens, "ou_first", Some("张三"), &first, 1_700_000_000).await?;
+        let loaded = expect_row(tokens, "刚存进去的行应能读回").await?;
+        assert_eq!(loaded.open_id, "ou_first");
+        assert_eq!(loaded.user_name.as_deref(), Some("张三"));
+        assert_eq!(loaded.access_token, first.access_token);
+        assert_eq!(loaded.refresh_token, first.refresh_token);
+        assert_eq!(
+            loaded.access_token_expires_at,
+            first.access_token_expires_at
+        );
+        assert_eq!(
+            loaded.refresh_token_expires_at,
+            first.refresh_token_expires_at
+        );
+        assert_eq!(loaded.authorized_at, 1_700_000_000);
+        assert_eq!(row_count(tokens).await?, 1);
+        // 自增计数器不随删表归零，所以这里记下实际主键，用它验「替换而非新增」。
+        let first_id = loaded.id;
+
+        // ---- 重授权 = 更新分支：整体替换，且 `authorized_at` 必须重置 ----
+        let second = bundle("access-second", "refresh-second", 200);
+        store_authorization(tokens, "ou_second", Some("李四"), &second, 1_800_000_000).await?;
+        let loaded = expect_row(tokens, "重授权后应仍有一行").await?;
+        assert_eq!(loaded.access_token, second.access_token);
+        assert_eq!(loaded.refresh_token, second.refresh_token);
+        assert_eq!(
+            loaded.authorized_at, 1_800_000_000,
+            "重授权必须重置 350 天时钟"
+        );
+        assert_eq!(loaded.id, first_id, "重授权是替换而不是新增（主键不变）");
+        assert_eq!(row_count(tokens).await?, 1, "单例行不变式：全表只有一行");
+
+        // ---- 刷新分支：只换凭证，**不碰** `authorized_at` ----
+        let third = bundle("access-third", "refresh-third", 300);
+        update_tokens(tokens, loaded.id, &third).await?;
+        let loaded = expect_row(tokens, "刷新后应仍有一行").await?;
+        assert_eq!(loaded.access_token, third.access_token);
+        assert_eq!(loaded.refresh_token, third.refresh_token);
+        assert_eq!(loaded.authorized_at, 1_800_000_000, "刷新不得重置授权时钟");
+
+        Ok(())
     }
 }

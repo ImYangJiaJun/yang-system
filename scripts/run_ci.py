@@ -116,6 +116,10 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "real_mysql_resolves_detail_options_and_waits_on_ambiguous_labels", "--", "--ignored", "--test-threads=1"),
     ),
     Command(
+        "飞书用户身份凭证读写往返集成测试",
+        ("cargo", "test", "--lib", "--locked", "real_mysql_round_trips_secret_token_columns", "--", "--ignored", "--test-threads=1"),
+    ),
+    Command(
         "Authorization Redis monotonic cache integration",
         (
             "cargo",
