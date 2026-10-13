@@ -8,3 +8,4 @@ pub(crate) mod request_log_table;
 pub(crate) mod request_log_writer;
 pub(crate) mod task_applicant_table;
 pub(crate) mod task_table;
+pub(crate) mod user_token_table;

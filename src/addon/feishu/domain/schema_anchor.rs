@@ -112,6 +112,14 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             ),
             "approval_task_applicants()",
         ),
+        (
+            "feishu_user_token",
+            spec(
+                crate::addon::feishu::approval::domain::user_token_table::table_spec(),
+                "飞书用户身份",
+            ),
+            "user_tokens()",
+        ),
     ]
 }
 

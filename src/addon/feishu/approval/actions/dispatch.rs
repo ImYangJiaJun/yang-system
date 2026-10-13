@@ -1687,6 +1687,7 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::task_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::user_token_table::table_spec()),
             None,
         )
     }
