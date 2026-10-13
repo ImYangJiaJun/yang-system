@@ -40,6 +40,12 @@ pub(crate) struct FeishuContext {
     /// 飞书用户身份表（OAuth user_access_token 的单例行）。
     #[allow(dead_code)]
     user_token: Repository,
+    /// 查询门户表。
+    #[allow(dead_code)]
+    portal: Repository,
+    /// 查询门户访问日志表。
+    #[allow(dead_code)]
+    portal_log: Repository,
     settings: Option<Arc<FeishuSettings>>,
 }
 
@@ -56,6 +62,8 @@ impl FeishuContext {
         approval_request_log: Repository,
         approval_task_applicant: Repository,
         user_token: Repository,
+        portal: Repository,
+        portal_log: Repository,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
         Self {
@@ -68,6 +76,8 @@ impl FeishuContext {
             approval_request_log,
             approval_task_applicant,
             user_token,
+            portal,
+            portal_log,
             settings,
         }
     }
@@ -129,6 +139,18 @@ impl FeishuContext {
     #[allow(dead_code)]
     pub(crate) fn user_tokens(&self) -> &Repository {
         &self.user_token
+    }
+
+    /// 查询门户表。消费者（门户 Action）在后续批次接入。
+    #[allow(dead_code)]
+    pub(crate) fn portals(&self) -> &Repository {
+        &self.portal
+    }
+
+    /// 查询门户访问日志表。消费者同上。
+    #[allow(dead_code)]
+    pub(crate) fn portal_logs(&self) -> &Repository {
+        &self.portal_log
     }
 
     /// 集成配置；`None` 表示 `[feishu]` 段缺席。

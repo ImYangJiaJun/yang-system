@@ -178,6 +178,20 @@ mod tests {
                 ),
                 Arc::clone(&pool),
             ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::portal::table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::portal::log_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
             // `settings: None` → `can_pull()` 为假，三个出站端点不会注册。本用例
             // 断言的两条路由都在无条件注册的那一批里。
             None,
