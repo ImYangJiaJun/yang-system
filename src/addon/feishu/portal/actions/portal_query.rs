@@ -243,11 +243,13 @@ pub(super) async fn handle(
 
     let columns = load_exposed_columns(&context, datasource_id, &exposed, &labels).await?;
 
-    // 精确匹配：永远只有 `source_key = ? AND label = ?`，不生成 LIKE / BETWEEN / IN。
+    // 第一步：精确匹配命中行（`source_key = ? AND label = ?`，不生成 LIKE / BETWEEN）。
+    // 查询键是根级字段（`parent_field_id` 为空），它的 `option_id` 就是同一记录里
+    // 各开放列子行的 `parent_key`——这是 `domain::derive` 构造性保证的不变式。
     let matched = context
         .options()
         .query()
-        .select_fields(&["source_key", "label"])?
+        .select_fields(&["option_id", "source_key", "label"])?
         .where_eq("source_key", serde_json::json!(&query_source_key))?
         .where_eq("label", serde_json::json!(input.value.trim()))?
         .where_eq("enabled", serde_json::json!(true))?
@@ -255,7 +257,9 @@ pub(super) async fn handle(
         .all()
         .await?;
 
-    let rows = project_rows(&matched, &columns)?;
+    // 第二步：按命中行的 `option_id` 反查开放列子行，合并成多列结果。
+    let children = load_child_values(&context, &matched, &columns).await?;
+    let rows = project_rows(&matched, &children, &columns)?;
     let status = if rows.is_empty() { "miss" } else { "hit" };
     write_log(
         &context,
@@ -294,7 +298,10 @@ pub(super) async fn handle(
 }
 
 /// 按 slug 或自定义短链定位门户。
-async fn find_portal(context: &FeishuContext, slug: &str) -> Result<Option<Record>, BaseError> {
+pub(super) async fn find_portal(
+    context: &FeishuContext,
+    slug: &str,
+) -> Result<Option<Record>, BaseError> {
     let by_slug = context
         .portals()
         .query()
@@ -419,32 +426,86 @@ async fn load_exposed_columns(
         .collect())
 }
 
-/// 把匹配到的选项行投影成结果行。
+/// 一次取回的开放列数据行数上限（= 查询层每页硬上限 `MAX_TABLE_QUERY_PAGE_SIZE`）。
 ///
-/// # 已知天花板
+/// 开放列数据是「命中行 × 开放列」的展开，精确匹配下命中行通常 0 或 1 行，远够用。
+const CHILD_LIMIT: usize = 100;
+
+/// 取命中行在开放列上的数据，按父选项分组。
 ///
-/// 一次查询只落在**查询键那一个 `source_key`** 上（设计 §4.2 的精确匹配），
-/// 而 `feishu_option` 一行 = 一个字段的一个取值，所以一行只能填上
-/// `source_key` 与它相同的那个开放列。
+/// 返回 `命中行 option_id -> (开放列 source_key -> 文案)`。`feishu_option` 一行 = 一个
+/// 字段的一个取值，同一记录的其他字段靠 `parent_key`（= 父选项的 `option_id`）串起来。
+async fn load_child_values(
+    context: &FeishuContext,
+    matched: &[Record],
+    columns: &[ExposedColumn],
+) -> Result<HashMap<String, HashMap<String, String>>, BaseError> {
+    if matched.is_empty() || columns.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let option_ids = matched
+        .iter()
+        .map(|record| record.require::<String>("option_id"))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|option_id| serde_json::json!(option_id))
+        .collect();
+    let source_keys = columns
+        .iter()
+        .map(|column| serde_json::json!(&column.source_key))
+        .collect::<Vec<_>>();
+
+    let rows = context
+        .options()
+        .query()
+        .select_fields(&["parent_key", "source_key", "label"])?
+        .where_in("parent_key", option_ids)?
+        .where_in("source_key", source_keys)?
+        .where_eq("enabled", serde_json::json!(true))?
+        .page(1, CHILD_LIMIT)?
+        .all()
+        .await?;
+
+    let mut by_parent: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for record in &rows {
+        let parent_key = record.optional::<String>("parent_key")?.unwrap_or_default();
+        // 根级行的父键是空串，永远不该挂到某个命中行上。
+        if parent_key.is_empty() {
+            continue;
+        }
+        by_parent
+            .entry(parent_key)
+            .or_default()
+            .insert(record.require("source_key")?, record.require("label")?);
+    }
+    Ok(by_parent)
+}
+
+/// 把命中行投影成结果行。
 ///
-/// ponytail: 一个记录里「卡号 → 店铺 / 额度 / 到期日」这种多列结果，要靠
-/// `feishu_option.parent_key` 把同一记录的各字段串起来（子字段的绑定
-/// `parent_field_id` 指向查询键，拉取时 `derive` 就会把 `parent_key` 写成父选项的
-/// `option_id`）。真要做多列，就在拿到命中行的 `option_id` 后按
-/// `parent_key IN (...) AND source_key IN (开放列的 source_key)` 再查一轮并合并。
-/// 当前按任务书的单查询形态实现。
+/// 每行 = 命中行自身的取值（只有查询键也被勾进开放列时才有）+ 它名下所有开放列数据。
+/// 子列按 `parent_key` 归并到对应命中行：`feishu_option.parent_key` 存的是父选项的
+/// `option_id`，由 `domain::derive` 在拉取时写入。
 fn project_rows(
     matched: &[Record],
+    children: &HashMap<String, HashMap<String, String>>,
     columns: &[ExposedColumn],
 ) -> Result<Vec<serde_json::Value>, BaseError> {
     let mut rows = Vec::with_capacity(matched.len());
     for record in matched {
+        let option_id: String = record.require("option_id")?;
         let row_source_key: String = record.require("source_key")?;
         let label: String = record.require("label")?;
         let mut values = serde_json::Map::new();
         for column in columns {
             if column.source_key == row_source_key {
                 values.insert(column.column.field_id.clone(), serde_json::json!(label));
+            }
+            if let Some(value) = children
+                .get(&option_id)
+                .and_then(|by_source| by_source.get(&column.source_key))
+            {
+                values.insert(column.column.field_id.clone(), serde_json::json!(value));
             }
         }
         rows.push(serde_json::json!({ "values": values }));
@@ -561,10 +622,8 @@ mod tests {
         assert_eq!(truncate("短", UA_MAX), "短");
     }
 
-    #[test]
-    fn a_row_only_fills_the_columns_whose_source_key_it_belongs_to() {
-        // 天花板已记录在 `project_rows` 的文档注释里：一行 = 一个字段的一个取值。
-        let columns = vec![
+    fn exposed_columns() -> Vec<ExposedColumn> {
+        vec![
             ExposedColumn {
                 column: PortalColumn {
                     field_id: "fldShop".to_string(),
@@ -581,15 +640,61 @@ mod tests {
                 },
                 source_key: "card".to_string(),
             },
-        ];
-        let mut record = Record::new();
-        record.insert("source_key", serde_json::json!("shop"));
-        record.insert("label", serde_json::json!("XX 旗舰店"));
+        ]
+    }
 
-        let rows = project_rows(&[record], &columns).unwrap_or_else(|e| panic!("投影应成功: {e}"));
+    fn matched_card(option_id: &str, label: &str) -> Record {
+        let mut record = Record::new();
+        record.insert("option_id", serde_json::json!(option_id));
+        record.insert("source_key", serde_json::json!("card"));
+        record.insert("label", serde_json::json!(label));
+        record
+    }
+
+    #[test]
+    fn a_matched_row_merges_its_child_columns() {
+        // 链式合并：命中行只带查询键的取值，其他开放列靠 `parent_key` 挂回来。
+        let columns = exposed_columns();
+        let mut children: HashMap<String, HashMap<String, String>> = HashMap::new();
+        children
+            .entry("card:abc".to_string())
+            .or_default()
+            .insert("shop".to_string(), "XX 旗舰店".to_string());
+
+        let rows = project_rows(&[matched_card("card:abc", "6222")], &children, &columns)
+            .unwrap_or_else(|e| panic!("投影应成功: {e}"));
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["values"]["fldCard"], serde_json::json!("6222"));
         assert_eq!(rows[0]["values"]["fldShop"], serde_json::json!("XX 旗舰店"));
-        assert!(rows[0]["values"].get("fldCard").is_none());
+    }
+
+    #[test]
+    fn another_rows_children_do_not_leak_in() {
+        // 子行按 `option_id` 归并，别的命中行的数据不得串进来。
+        let columns = exposed_columns();
+        let mut children: HashMap<String, HashMap<String, String>> = HashMap::new();
+        children
+            .entry("card:other".to_string())
+            .or_default()
+            .insert("shop".to_string(), "不该出现".to_string());
+
+        let rows = project_rows(&[matched_card("card:abc", "6222")], &children, &columns)
+            .unwrap_or_else(|e| panic!("投影应成功: {e}"));
+        assert_eq!(rows[0]["values"]["fldCard"], serde_json::json!("6222"));
+        assert!(rows[0]["values"].get("fldShop").is_none());
+    }
+
+    #[test]
+    fn a_matched_row_without_children_keeps_only_the_query_key() {
+        let rows = project_rows(
+            &[matched_card("card:abc", "6222")],
+            &HashMap::new(),
+            &exposed_columns(),
+        )
+        .unwrap_or_else(|e| panic!("投影应成功: {e}"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["values"]["fldCard"], serde_json::json!("6222"));
+        assert!(rows[0]["values"].get("fldShop").is_none());
     }
 
     #[test]
