@@ -64,6 +64,20 @@ export const appRoutes = [
         ),
       },
       {
+        // 公开查询门户：**项目里第一个不在 `RequireAuth` 门控内、也不走 AppLayout
+        // 的业务页面**（匿名访客没有会话，也就不该看到侧边栏与导航）。
+        // 它必须挂在根路由下、与 `/login` 平级——挂进 `/` 那条 RequireAuth 路由的
+        // children 里会被门控拦下，公开就无从谈起。
+        // 路由级 lazy + 兜底，与其它页面同一约定（见 RouteFallback.tsx 与
+        // tests/shell/routes.test.tsx 的逐条钉住）。
+        path: "/portal/:slug",
+        lazy: async () => ({
+          Component: (await import("@/features/feishu/views/PortalQueryPage"))
+            .default,
+        }),
+        hydrateFallbackElement: <RouteFallback />,
+      },
+      {
         path: "/",
         element: (
           <RequireAuth>
