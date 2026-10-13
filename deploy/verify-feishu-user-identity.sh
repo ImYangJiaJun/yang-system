@@ -136,12 +136,15 @@ echo "判读"
 echo "----------------------------------------------------------"
 CA="$(code_of "$A")"
 CB="$(code_of "$B")"
+# 代码打的是 3b 那条（`applicant_search_url`，2026-10-13 按这两段实测定的）。
 if [ "$CB" = "0" ] && printf '%s' "$B" | grep -q '"open_id"'; then
-  echo "  [OK] 文档那条（search/v1/user）返回 name + open_id —— 代码应改打这个接口。"
+  echo "  [OK] 代码打的 search/v1/user 通，且返回 name + open_id ——"
+  echo "       发起人参数化可用。接着从飞书工作流发一条带 applicant=<姓名> 的派发。"
 elif [ "$CA" = "0" ] && printf '%s' "$A" | grep -q '"open_id"'; then
-  echo "  [OK] 当前接口就返回 open_id —— 解析侧按真实字段名对齐即可。"
+  echo "  [!] 只有 contact/v3/users/search 返回 open_id，而代码打的是 search/v1/user ——"
+  echo "      说明上游换了形态，把两份真报文发出来重新对齐。"
 elif [ "$CA" = "0" ] || [ "$CB" = "0" ]; then
-  echo "  [!] 至少一条通了，但返回字段与代码解析的 (open_id/name) 对不上 ——"
+  echo "  [!] 至少一条通了，但都不返回 open_id/name ——"
   echo "      把上面两份真报文发出来，按真实字段名改解析。"
 else
   echo "  [X] 两条都没通，见上面的错误码。"
