@@ -50,6 +50,7 @@ import type {
   DatasourceItem,
   DatasourceListQuery,
   DatasourceStatusFilter,
+  FeishuOAuthStatus,
   HealthReport,
   IngestMode,
   ListPage,
@@ -106,6 +107,10 @@ export const APPROVAL_OPERATION_IDS = {
   listWidgets: "feishu.approval.list_widgets",
   listRequests: "feishu.approval.list_requests",
   listTasks: "feishu.approval.list_tasks",
+  /// 飞书用户身份（OAuth）授权状态。读权限。
+  oauthStatus: "feishu.approval.oauth_status",
+  /// 取授权链接。**写权限**：它会签发一个一次性的 state（CSRF 防护）。
+  oauthAuthorizeUrl: "feishu.approval.oauth_authorize_url",
 } as const;
 
 /// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。
@@ -227,6 +232,8 @@ export const feishuQueryKeys = {
     [FEISHU_QUERY_ROOT, "options", sourceKey] as const,
   /// 排程是**全局**的，所以 key 里没有 sourceKey。
   pullSchedule: () => [FEISHU_QUERY_ROOT, "pull-schedule"] as const,
+  /// 飞书用户身份授权状态（全局单例）。
+  oauthStatus: () => [FEISHU_QUERY_ROOT, "oauth-status"] as const,
   optionList: (query: OptionListQuery) =>
     [
       ...feishuQueryKeys.options(query.sourceKey),
@@ -2237,4 +2244,73 @@ export function useApprovalWizardClient(): ApprovalWizardClient {
     }),
     [deps],
   );
+}
+
+/* --------------------------- 飞书用户身份（OAuth） --------------------------- */
+
+/// 读授权状态。
+export async function fetchFeishuOAuthStatus(
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<FeishuOAuthStatus> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.oauthStatus,
+    {},
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    authorized: data?.authorized === true,
+    name: typeof data?.name === "string" ? data.name : null,
+    authorizedAt:
+      typeof data?.authorized_at === "number" ? data.authorized_at : null,
+    reauthDue: data?.reauth_due === true,
+  };
+}
+
+/// 取授权链接（服务端签发 state，10 分钟有效、一次性）。
+export async function fetchFeishuAuthorizeUrl(
+  deps: FeishuInvokeDeps,
+): Promise<string> {
+  const result = await invokeFeishuAction(
+    deps,
+    APPROVAL_OPERATION_IDS.oauthAuthorizeUrl,
+    {},
+  );
+  const data = asRecord(result.data);
+  const url = typeof data?.authorize_url === "string" ? data.authorize_url : "";
+  if (url === "") throw new Error("服务端未返回授权链接");
+  return url;
+}
+
+/// 授权卡片要的一组入口。
+///
+/// 取链接是**写**权限、看状态是**读**权限：只读身份看得见「未授权」，但按钮不渲染
+/// （服务端也会拒）——两个方向都要知道，否则只读身份会点到一个必然 403 的按钮。
+export function useFeishuOAuth() {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  const status = useQuery({
+    enabled: canReadApproval(catalogData),
+    queryKey: feishuQueryKeys.oauthStatus(),
+    queryFn: ({ signal }) => fetchFeishuOAuthStatus(deps, signal),
+    staleTime: 15_000,
+  });
+
+  const authorizeUrl = useCallback(() => fetchFeishuAuthorizeUrl(deps), [deps]);
+
+  return {
+    canRead: canReadApproval(catalogData),
+    canWrite: canWriteApproval(catalogData),
+    status,
+    authorizeUrl,
+  };
 }

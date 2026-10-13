@@ -1145,3 +1145,15 @@ export type ApprovalRequestsQuery = {
   outcome: ApprovalOutcome | "all";
   orderBy: OrderByClause[];
 };
+
+/// 飞书用户身份（OAuth）授权状态。
+///
+/// `reauthDue` 与提醒 worker 用同一个判据（授权满 350 天）：页面说「该重新授权」时，
+/// 提醒邮件一定也在发。
+export type FeishuOAuthStatus = {
+  authorized: boolean;
+  name: string | null;
+  /// 最近一次**完整授权**的时间（unix 秒）；刷新不重置它。
+  authorizedAt: number | null;
+  reauthDue: boolean;
+};
