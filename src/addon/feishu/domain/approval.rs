@@ -771,7 +771,10 @@ mod tests {
         );
         assert_eq!(data.reverted, Some(false));
 
-        let tasks = data.task_list.as_deref().unwrap_or_else(|| panic!("应有 task_list"));
+        let tasks = data
+            .task_list
+            .as_deref()
+            .unwrap_or_else(|| panic!("应有 task_list"));
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].node_name.as_deref(), Some("审批"));
         assert_eq!(tasks[0].r#type.as_deref(), Some("AND"));
@@ -780,7 +783,10 @@ mod tests {
         assert_eq!(tasks[1].status.as_deref(), Some("PENDING"));
         assert_eq!(tasks[1].end_time.as_deref(), Some("0"));
 
-        let timeline = data.timeline.as_deref().unwrap_or_else(|| panic!("应有 timeline"));
+        let timeline = data
+            .timeline
+            .as_deref()
+            .unwrap_or_else(|| panic!("应有 timeline"));
         assert_eq!(timeline.len(), 2);
         assert_eq!(timeline[0].r#type.as_deref(), Some("START"));
         assert_eq!(timeline[0].create_time.as_deref(), Some("1790750409857"));
@@ -1011,9 +1017,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_applicant_matches_a_unique_exact_name() {
-        let transport = ScriptedTransport::new(vec![Ok(envelope(
-            r#"{"open_id":"ou_1","name":"杨佳俊"}"#,
-        ))]);
+        let transport =
+            ScriptedTransport::new(vec![Ok(envelope(r#"{"open_id":"ou_1","name":"杨佳俊"}"#))]);
         let provider = token_provider();
 
         let result = resolve_applicant(&transport, &NoopSleeper, &provider, " 杨佳俊 ")

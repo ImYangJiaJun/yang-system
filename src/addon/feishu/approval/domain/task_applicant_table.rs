@@ -15,24 +15,24 @@ use yang_base::BaseError;
 
 /// 申请人解析结果表。
 pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
-    Ok(TableSpec::new(yang_base::table!(
-        "feishu_approval_task_applicant"
-    ))
-    .title("飞书审批任务申请人")
-    .fields(yang_base::fields! {
-        // 与 `task_table` 同一形态：`sortable`/`filterable` 是 fail-closed 的，
-        // 漏了只在运行期报 FieldPermissionDenied，启动与单测都发现不了。
-        id => Key::new().title("ID").filterable(true).sortable(true),
-        task_id => Int::new()
-            .title("任务 ID")
-            .require(true)
-            .indexed(true)
-            .filterable(true),
-        open_id => Str::new()
-            .title("发起人 Open ID")
-            .require(true)
-            .max_length(64),
-    }))
+    Ok(
+        TableSpec::new(yang_base::table!("feishu_approval_task_applicant"))
+            .title("飞书审批任务申请人")
+            .fields(yang_base::fields! {
+                // 与 `task_table` 同一形态：`sortable`/`filterable` 是 fail-closed 的，
+                // 漏了只在运行期报 FieldPermissionDenied，启动与单测都发现不了。
+                id => Key::new().title("ID").filterable(true).sortable(true),
+                task_id => Int::new()
+                    .title("任务 ID")
+                    .require(true)
+                    .indexed(true)
+                    .filterable(true),
+                open_id => Str::new()
+                    .title("发起人 Open ID")
+                    .require(true)
+                    .max_length(64),
+            }),
+    )
 }
 
 #[cfg(test)]

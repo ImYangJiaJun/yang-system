@@ -422,8 +422,14 @@ mod tests {
         );
         assert_eq!(value.get("maps"), Some(&serde_json::json!([])));
         // 六个回填列按 `Option` 形态返回（未配置的列是 null，不是缺键）。
-        assert_eq!(value.get("status_field"), Some(&serde_json::json!("fldStatus")));
-        assert_eq!(value.get("handler_field"), Some(&serde_json::json!("fldHandler")));
+        assert_eq!(
+            value.get("status_field"),
+            Some(&serde_json::json!("fldStatus"))
+        );
+        assert_eq!(
+            value.get("handler_field"),
+            Some(&serde_json::json!("fldHandler"))
+        );
         assert_eq!(value.get("flow_field"), Some(&serde_json::json!(null)));
     }
 }

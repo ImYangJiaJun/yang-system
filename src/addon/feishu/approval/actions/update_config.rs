@@ -124,7 +124,9 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         )
         .route(HttpMethod::Post, "/api/v1/feishu/approval/configs/update")
         .display_name("更新审批派发配置")
-        .description("更新配置名、启用开关、Base 时区、逐项字段映射或六个可选回填列；坐标与审批三件套不可改")
+        .description(
+            "更新配置名、启用开关、Base 时区、逐项字段映射或六个可选回填列；坐标与审批三件套不可改",
+        )
         .permissions(["feishu.approval.write"])
         .register()
 }
@@ -178,9 +180,7 @@ pub(super) async fn handle(
                 },
             )
             .await
-            .map_err(|failure| {
-                BaseError::ParamInvalid("maps".to_string(), failure.to_string())
-            })?;
+            .map_err(|failure| BaseError::ParamInvalid("maps".to_string(), failure.to_string()))?;
             fill_table_names(
                 &mut plan,
                 outbound.transport(),
@@ -207,9 +207,7 @@ pub(super) async fn handle(
                 &field_coordinates,
             )
             .await
-            .map_err(|failure| {
-                BaseError::ParamInvalid("回填列".to_string(), failure.message)
-            })?;
+            .map_err(|failure| BaseError::ParamInvalid("回填列".to_string(), failure.message))?;
             let columns = columns_from_fields(&fields);
             let reasons = check_backfill_targets(
                 &columns,
