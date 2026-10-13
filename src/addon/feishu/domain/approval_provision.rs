@@ -475,12 +475,17 @@ pub(crate) fn check_backfill_targets(
             continue;
         };
         let Some(column) = resolve_field_coord(columns, given) else {
-            reasons.push(format!("{label}回填列在多维表格里没有对应列（给定「{given}」）"));
+            reasons.push(format!(
+                "{label}回填列在多维表格里没有对应列（给定「{given}」）"
+            ));
             continue;
         };
         // 列由 `columns_from_fields(fields)` 派生，取不到字段或类型码缺失都不拦——照
         // `check_coordinate_field` 的既有纪律：拿不到元数据就不拒绝本来可用的配置。
-        let Some(field) = fields.iter().find(|field| field.field_id == column.field_id) else {
+        let Some(field) = fields
+            .iter()
+            .find(|field| field.field_id == column.field_id)
+        else {
             continue;
         };
         let Some(field_type) = field.field_type else {
@@ -574,10 +579,7 @@ pub(crate) async fn insert_plan(
         "start_time_field",
         serde_json::json!(&plan.start_time_field_id),
     );
-    config_row.insert(
-        "end_time_field",
-        serde_json::json!(&plan.end_time_field_id),
-    );
+    config_row.insert("end_time_field", serde_json::json!(&plan.end_time_field_id));
     config_row.insert(
         "department_field",
         serde_json::json!(&plan.department_field_id),
@@ -863,6 +865,8 @@ pub(crate) async fn resolve_external_options(
         let Some(cell) = cells.get(&widget.bitable_field) else {
             continue;
         };
+        tracing::debug!(stage = "external_options", widget_id = %widget.widget_id,
+            bitable_field = %widget.bitable_field, "解析外部选项控件的当前选择");
         let source = sources.get(&definition.id).ok_or_else(|| {
             ProvisionError::Invalid(vec![format!(
                 "外部选项控件「{}」缺少数据源绑定",
@@ -885,7 +889,12 @@ pub(crate) async fn resolve_external_options(
                 .all()
                 .await
                 .map_err(|e| ProvisionError::Store(e.to_string()))?;
-            let option_id = unique_option(&rows, source, &label)?;
+            let option_id = unique_option(&rows, source, &label).inspect_err(|_| {
+                tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
+                    bitable_field = %widget.bitable_field, source_key = source,
+                    match_count = rows.len(), reason = "当前文案没有唯一且完全匹配的启用选项",
+                    "审批外部选项匹配失败");
+            })?;
             widget.option_map.insert(label, option_id);
         }
     }
@@ -1495,8 +1504,16 @@ mod tests {
         )
         .is_empty());
         // 数字(2) 不是。
-        let reasons =
-            check_backfill_targets(&columns, &fields, Some("fldNum"), None, None, None, None, None);
+        let reasons = check_backfill_targets(
+            &columns,
+            &fields,
+            Some("fldNum"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(reasons.len(), 1, "{reasons:?}");
         assert!(
             reasons[0].contains("申请状态") && reasons[0].contains("文本或单选"),

@@ -41,14 +41,16 @@ use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
     dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
 };
-use crate::addon::feishu::domain::outbound::{FailureKind, OutboundFailure, OutboundTransport, Sleeper};
-use crate::addon::feishu::domain::tenant_token::TenantTokenProvider;
 use crate::addon::feishu::domain::approval_provision::{
     build_plan, insert_plan, ProvisionError, ProvisionInput, ProvisionPlan,
 };
 use crate::addon::feishu::domain::bitable::{self, resolve_bitable_link, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::outbound::{
+    FailureKind, OutboundFailure, OutboundTransport, Sleeper,
+};
 use crate::addon::feishu::domain::outbound_setup;
+use crate::addon::feishu::domain::tenant_token::TenantTokenProvider;
 use crate::config::FeishuSettings;
 use crate::feishu_approval_worker::ApprovalDispatchHandle;
 
@@ -298,11 +300,21 @@ impl DispatchOutcome {
 }
 
 /// 处理派发请求。
+#[tracing::instrument(name = "approval_request", skip_all, fields(
+    table_id = tracing::field::Empty, record_id = tracing::field::Empty
+))]
 pub(super) async fn handle(
     ctx: ActionContext,
     input: DispatchInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
+    let started = std::time::Instant::now();
+    let mode = if input.record_id.is_some() {
+        "single"
+    } else {
+        "all"
+    };
+    tracing::info!(stage = "request", mode, "收到审批派发请求");
     // 业务主体抽成内部函数、返回结构化结果而不是直接 return：每个出口
     // （含 `validate()` 失败——它也要落一条 failed 记录，且要落在还能拿到
     // `request_body` 的位置）都收敛成一条可落库的记录事实。落库用独立连接
@@ -310,13 +322,31 @@ pub(super) async fn handle(
     let mut input = input;
     let outcome = match input.normalize_coordinates() {
         Err(error) => DispatchOutcome::internal(None, error),
-        Ok(()) => match handle_dispatch(&ctx, &input, &context).await {
-            Ok(outcome) => outcome,
-            // 白名单查询这类「连 config_id 都拿不到」的内部错误：折算成失败记录。
-            Err(error) => DispatchOutcome::internal(None, error),
-        },
+        Ok(()) => {
+            tracing::Span::current()
+                .record("table_id", input.table_id.as_deref().unwrap_or_default());
+            tracing::Span::current()
+                .record("record_id", input.record_id.as_deref().unwrap_or_default());
+            match handle_dispatch(&ctx, &input, &context).await {
+                Ok(outcome) => outcome,
+                // 白名单查询这类「连 config_id 都拿不到」的内部错误：折算成失败记录。
+                Err(error) => DispatchOutcome::internal(None, error),
+            }
+        }
     };
     write_request_log(&context, &input, &outcome).await;
+    tracing::info!(
+        stage = "response",
+        config_id = outcome.config_id,
+        mode,
+        outcome = outcome.outcome.as_str(),
+        error_code = outcome
+            .response
+            .as_ref()
+            .map_or_else(|error| error.code(), |response| response.code),
+        duration_ms = started.elapsed().as_millis() as u64,
+        "审批派发请求处理结束"
+    );
     outcome.response
 }
 
@@ -332,6 +362,7 @@ async fn handle_dispatch(
 ) -> Result<DispatchOutcome, BaseError> {
     // 校验失败**不冒泡**——它同样要落记录，这里兜住再折算成失败出口。
     if let Err(error) = input.validate() {
+        tracing::warn!(stage = "validate", "审批派发请求参数校验失败");
         return Ok(DispatchOutcome::internal(None, error));
     }
 
@@ -357,9 +388,17 @@ async fn handle_dispatch(
     // 落在多维表格里才有人看见——HTTP 响应对页面按钮无用，见 `response_value` 的
     // 字段限制）。所以**回填列必须由调用方给**：配置还没建成时本服务不知道写哪一列。
     let config_id: i64 = match config {
-        Some(row) => row.require("id")?,
+        Some(row) => {
+            let id: i64 = row.require("id")?;
+            tracing::info!(stage = "config", config_id = id, "审批派发已匹配启用配置");
+            id
+        }
         None => {
             if !input.has_provision_fields() {
+                tracing::warn!(
+                    stage = "config",
+                    "审批派发未匹配启用配置，且未提供首次配置参数"
+                );
                 return Ok(DispatchOutcome::fail(
                     40401,
                     None,
@@ -368,12 +407,15 @@ async fn handle_dispatch(
             }
             // 建配置要在飞书与本库两端取数，凭证缺了根本走不下去。
             let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
+                tracing::warn!(stage = "config", "审批派发无法建配置：飞书出站凭证未配置");
                 return Ok(DispatchOutcome::fail(50301, None, "飞书出站凭证未配置"));
             };
 
+            tracing::info!(stage = "provision", "审批派发开始自动创建配置");
             match provision(ctx, context, settings, input).await {
                 Ok(id) => id,
                 Err(failure) => {
+                    tracing::warn!(stage = "provision", "审批派发自动配置失败，详情见派发记录");
                     // 报错要**同时**回填与返回：回填让表格里的人看见，返回让工作流
                     // 的日志里也有原文。回填失败只降级为「只返回」——配置根本没建成，
                     // 也不该因为回填这一下而把真实原因盖掉。
@@ -386,11 +428,14 @@ async fn handle_dispatch(
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
-        Some(record_id) => match dispatch_single(ctx, context, config_id, record_id, input.applicant.clone()).await {
-            Ok(outcome) => Ok(outcome),
-            // 单条内部的 `?` 出口：config_id 在调用点已知，失败记录带上它。
-            Err(error) => Ok(DispatchOutcome::internal(Some(config_id), error)),
-        },
+        Some(record_id) => {
+            match dispatch_single(ctx, context, config_id, record_id, input.applicant.clone()).await
+            {
+                Ok(outcome) => Ok(outcome),
+                // 单条内部的 `?` 出口：config_id 在调用点已知，失败记录带上它。
+                Err(error) => Ok(DispatchOutcome::internal(Some(config_id), error)),
+            }
+        }
         // ---- 全表：异步受理 ----
         //
         // 受理**必须在白名单校验之后**：把 Token 当成「可以指任意表格」的通行证
@@ -406,7 +451,11 @@ async fn handle_dispatch(
                 .is_some()
             {
                 let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
-                    return Ok(DispatchOutcome::fail(50301, Some(config_id), "飞书出站凭证未配置"));
+                    return Ok(DispatchOutcome::fail(
+                        50301,
+                        Some(config_id),
+                        "飞书出站凭证未配置",
+                    ));
                 };
                 let outbound = match outbound_setup::build(ctx, settings) {
                     Ok(outbound) => outbound,
@@ -442,6 +491,12 @@ async fn handle_dispatch(
             if let Err(error) = handle.request_dispatch(config_id, resolved) {
                 return Ok(DispatchOutcome::internal(Some(config_id), error));
             }
+            tracing::info!(
+                stage = "enqueue",
+                config_id,
+                scope = "all_enabled_configs",
+                "审批派发已发送 Worker 唤醒信号"
+            );
 
             // 语义是「跑一轮全队列」，**不是**只跑本表。
             //
@@ -514,6 +569,13 @@ async fn write_request_log(
         .await
     {
         tracing::error!(error = %error, "审批派发请求记录写入失败");
+    } else {
+        tracing::info!(
+            stage = "persist_request",
+            config_id = outcome.config_id,
+            outcome = outcome.outcome.as_str(),
+            "审批派发请求记录写入成功"
+        );
     }
 }
 
@@ -744,7 +806,17 @@ async fn dispatch_single(
     record_id: &str,
     applicant: Option<String>,
 ) -> Result<DispatchOutcome, BaseError> {
+    tracing::info!(
+        stage = "config",
+        config_id,
+        record_id,
+        "审批派发开始同步处理单条记录"
+    );
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
+        tracing::warn!(
+            stage = "config",
+            "审批派发无法处理单条记录：飞书出站凭证未配置"
+        );
         return Ok(DispatchOutcome::fail(
             50301,
             Some(config_id),
@@ -780,6 +852,7 @@ async fn dispatch_single(
         .map(|record| record.into_map())
         .collect();
     let Some(widgets) = widget_maps_from_rows(&map_maps, |_| None) else {
+        tracing::warn!(stage = "config", "审批字段映射配置损坏，转换器标识非法");
         return Ok(DispatchOutcome::fail(
             50001,
             Some(config_id),
@@ -787,6 +860,7 @@ async fn dispatch_single(
         ));
     };
     if widgets.is_empty() {
+        tracing::warn!(stage = "config", "审批配置没有字段映射");
         return Ok(DispatchOutcome::fail(
             50002,
             Some(config_id),
@@ -796,11 +870,12 @@ async fn dispatch_single(
     let timezone_offset = match FixedOffset::from_iana(base_timezone.trim()) {
         Ok(offset) => offset,
         Err(error) => {
+            tracing::warn!(stage = "config", "审批配置的 Base 时区不可用");
             return Ok(DispatchOutcome::fail(
                 50003,
                 Some(config_id),
                 format!("Base 时区不可用：{error}"),
-            ))
+            ));
         }
     };
 
@@ -849,13 +924,22 @@ async fn dispatch_single(
     )
     .await
     {
-        Ok(fields) => fields,
+        Ok(fields) => {
+            tracing::info!(stage = "fields", config_id, applicant_field = %applicant_field, backfill_field = %backfill_field, widget_count = widgets.len(), "审批派发开始读取多维表格结构");
+            tracing::info!(
+                stage = "record",
+                field_count = fields.len(),
+                "审批派发开始读取源记录"
+            );
+            fields
+        }
         Err(failure) => {
+            tracing::warn!(stage = "fields", kind = ?failure.kind, "审批派发读取表结构失败");
             return Ok(DispatchOutcome::fail(
                 50201,
                 Some(config_id),
                 format!("读取表结构失败：{}", failure.message),
-            ))
+            ));
         }
     };
 
@@ -872,11 +956,12 @@ async fn dispatch_single(
     let backfill_field_name = match bitable::resolve_field_name(&fields, &backfill_field) {
         Ok(name) => name,
         Err(error) => {
+            tracing::warn!(stage = "fields", backfill_field = %backfill_field, "审批派发回填列不可用");
             return Ok(DispatchOutcome::fail(
                 50004,
                 Some(config_id),
                 format!("回填列不可用：{error}"),
-            ))
+            ));
         }
     };
 
@@ -895,29 +980,39 @@ async fn dispatch_single(
     let cells = match found {
         Ok(items) => match items.into_iter().next() {
             Some(record) => match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
-                Ok(cells) => cells,
+                Ok(cells) => {
+                    tracing::info!(
+                        stage = "record",
+                        cell_count = cells.len(),
+                        "审批派发源记录字段映射完成"
+                    );
+                    cells
+                }
                 Err(error) => {
+                    tracing::warn!(stage = "record", "审批派发解析记录字段失败，详情见派发记录");
                     return Ok(DispatchOutcome::fail(
                         50201,
                         Some(config_id),
                         format!("解析记录字段失败：{error}"),
-                    ))
+                    ));
                 }
             },
             None => {
+                tracing::warn!(stage = "record", "多维表格里找不到审批源记录");
                 return Ok(DispatchOutcome::fail(
                     40402,
                     Some(config_id),
                     "多维表格里找不到该记录",
-                ))
+                ));
             }
         },
         Err(failure) => {
+            tracing::warn!(stage = "record", kind = ?failure.kind, "审批派发读取源记录失败");
             return Ok(DispatchOutcome::fail(
                 50201,
                 Some(config_id),
                 format!("读取记录失败：{}", failure.message),
-            ))
+            ));
         }
     };
 
@@ -947,12 +1042,30 @@ async fn dispatch_single(
             widgets: &widgets,
             form_snapshot: config_row.optional("form_snapshot")?.unwrap_or_default(),
             timezone_offset,
-            status_field: config_row.optional::<String>("status_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
-            flow_field: config_row.optional::<String>("flow_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
-            start_time_field: config_row.optional::<String>("start_time_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
-            end_time_field: config_row.optional::<String>("end_time_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
-            department_field: config_row.optional::<String>("department_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
-            handler_field: config_row.optional::<String>("handler_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            status_field: config_row
+                .optional::<String>("status_field")?
+                .filter(|v| !v.trim().is_empty())
+                .as_deref(),
+            flow_field: config_row
+                .optional::<String>("flow_field")?
+                .filter(|v| !v.trim().is_empty())
+                .as_deref(),
+            start_time_field: config_row
+                .optional::<String>("start_time_field")?
+                .filter(|v| !v.trim().is_empty())
+                .as_deref(),
+            end_time_field: config_row
+                .optional::<String>("end_time_field")?
+                .filter(|v| !v.trim().is_empty())
+                .as_deref(),
+            department_field: config_row
+                .optional::<String>("department_field")?
+                .filter(|v| !v.trim().is_empty())
+                .as_deref(),
+            handler_field: config_row
+                .optional::<String>("handler_field")?
+                .filter(|v| !v.trim().is_empty())
+                .as_deref(),
         },
     )
     .await;
@@ -1251,12 +1364,13 @@ mod tests {
     #[tokio::test]
     async fn applicant_param_reports_not_found_with_an_actionable_message() {
         let transport = ReplayTransport::new(vec![(200, search_body(""))]);
-        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("查无此人"))
-            .await
-        {
-            Err(message) => message,
-            Ok(_) => panic!("未命中必须失败"),
-        };
+        let message =
+            match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("查无此人"))
+                .await
+            {
+                Err(message) => message,
+                Ok(_) => panic!("未命中必须失败"),
+            };
         assert!(message.contains("未找到"), "{message}");
         assert!(message.contains("请检查工作流变量"), "{message}");
     }
@@ -1267,12 +1381,12 @@ mod tests {
             200,
             search_body(r#"{"open_id":"ou_a","name":"张三"},{"open_id":"ou_b","name":"张三"}"#),
         )]);
-        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("张三"))
-            .await
-        {
-            Err(message) => message,
-            Ok(_) => panic!("重名必须失败"),
-        };
+        let message =
+            match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("张三")).await
+            {
+                Err(message) => message,
+                Ok(_) => panic!("重名必须失败"),
+            };
         assert!(message.contains("存在多个同名"), "{message}");
         assert!(message.contains("ou_a"), "{message}");
     }
@@ -1284,8 +1398,13 @@ mod tests {
             200,
             r#"{"code":99991672,"msg":"no scope"}"#.to_string(),
         )]);
-        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("杨佳俊"))
-            .await
+        let message = match resolve_applicant_param(
+            &transport,
+            &NoSleep,
+            &e2e_tokens(),
+            Some("杨佳俊"),
+        )
+        .await
         {
             Err(message) => message,
             Ok(_) => panic!("缺 scope 必须失败"),

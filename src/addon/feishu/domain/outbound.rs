@@ -562,14 +562,40 @@ pub(crate) async fn send_with_retry(
     request: &OutboundRequest,
     policy: RetryPolicy,
 ) -> Result<OutboundResponse, OutboundFailure> {
+    // 只打印固定接口名；完整 URL 可能携带资源 Token 或下载凭证。
+    let endpoint = match request.url.split('?').next().unwrap_or_default() {
+        url if url.contains("/approval/v4/instances") => "approval.instances",
+        url if url.contains("/approval/v4/approvals/") => "approval.definition",
+        url if url.ends_with("/fields") => "bitable.fields",
+        url if url.ends_with("/records/search") => "bitable.records.search",
+        url if url.ends_with("/records/batch_get") => "bitable.records.batch_get",
+        url if url.ends_with("/records/batch_update") => "bitable.records.batch_update",
+        url if url.contains("/auth/v3/tenant_access_token/") => "auth.tenant_access_token",
+        url if url.ends_with("/download") => "drive.media.download",
+        url if url.ends_with("/upload") => "approval.attachment.upload",
+        _ => "other",
+    };
+    let started = std::time::Instant::now();
     let mut attempt: u64 = 0;
     loop {
         attempt += 1;
+        tracing::debug!(endpoint, method = ?request.method, attempt, "飞书出站调用开始");
+        let mut http_status = None;
+        let mut code = None;
         let (kind, message) = match transport.send(request.clone()).await {
-            Ok(response) => match classify(response.status, &response.headers, &response.body) {
-                None => return Ok(response),
-                Some(kind) => (kind, summarize(response.status, &response.body)),
-            },
+            Ok(response) => {
+                http_status = Some(response.status);
+                code = business_code(&response.body);
+                match classify(response.status, &response.headers, &response.body) {
+                    None => {
+                        tracing::debug!(endpoint, method = ?request.method, attempt, http_status,
+                            business_code = code, duration_ms = started.elapsed().as_millis() as u64,
+                            "飞书出站调用成功");
+                        return Ok(response);
+                    }
+                    Some(kind) => (kind, summarize(response.status, &response.body)),
+                }
+            }
             Err(error) => {
                 // 传输层错误按框架自己的可重试性分类：`HttpTimeout`(300004) 与
                 // `HttpRequestFailed`(300002) 是 Transient，其余（如 URL 非法）是 Client。
@@ -587,15 +613,25 @@ pub(crate) async fn send_with_retry(
         match disposition(kind, attempt, request.idempotent, policy) {
             Disposition::RetryAfter(wait_ms) => {
                 tracing::warn!(
+                    endpoint,
+                    method = ?request.method,
+                    http_status,
+                    business_code = code,
                     attempt,
                     max_attempts = policy.max_attempts,
                     wait_ms,
                     ?kind,
+                    duration_ms = started.elapsed().as_millis() as u64,
                     "飞书出站调用失败，退避后重试"
                 );
                 sleeper.sleep(Duration::from_millis(wait_ms)).await;
             }
             Disposition::Give => {
+                tracing::warn!(endpoint, method = ?request.method, http_status, business_code = code,
+                    attempt, max_attempts = policy.max_attempts, ?kind,
+                    hint = fatal_hint(code.unwrap_or_default()).unwrap_or_default(),
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "飞书出站调用结束，失败交给上层处理");
                 metrics::counter!("feishu_outbound_request_total", "result" => "failed")
                     .increment(1);
                 return Err(OutboundFailure { kind, message });

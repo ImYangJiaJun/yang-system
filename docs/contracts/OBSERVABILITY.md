@@ -49,6 +49,28 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 `ResponseBody::raw`，整条响应都不走框架包络，只看 `data` 会得到空串）。
 请求与响应分行是刻意的：被管理 Token 拒掉的请求走不到响应那一行，而它必须留痕。
 
+### 审批派发诊断日志
+
+审批派发在 `INFO` 级别记录请求模式、配置匹配、Worker 唤醒、全队列扫描和播种、
+认领与限速、字段读取与映射、申请人/表单/外部选项/关联审批校验、附件搬运、实例
+创建或按 uuid 恢复、编号回填和本地状态写入。每轮汇总 `backfilled`、`waiting`、
+`retryable`、`terminal` 数量、是否中断、下一游标和耗时；`trigger=manual|poll`
+区分按钮唤醒与定时轮询。不带 `record_id` 的请求会唤醒所有启用配置的队列。
+
+按 span 中的 `task_id`、`config_id`、`table_id`、`record_id`、`uuid` 关联处理过程，
+再看事件的 `stage`、控件 ID、字段 ID、失败类别和安全原因。`waiting` 和 `retryable`
+都会保留 `pending`，所以后续轮次仍会认领；带业务数据的完整原因只保留在既有任务
+`last_error` 或派发记录中。实例创建成功与编号回填成功分别记录，避免把已创建但
+未回填误判为整条成功。HTTP 请求仍沿用框架的 `request_id`；后台轮次以任务 ID 和
+记录 ID 对照入口，不伪造继承已结束请求的关联标识。
+
+出站重试和最终失败在 `WARN` 级别记录固定接口名、HTTP 状态、飞书业务码、尝试
+次数、退避时间、失败类别、已登记的错误码提示和耗时，成功调用细节为 `DEBUG`。
+新增诊断日志不记录原始 URL、请求/响应体、Token、人员 ID 或单元格值；只记录审批实例 Code
+和编号用于与飞书对照。转换错误只保留控件/字段定位和类别，不打印其中的原始值。
+需要查看每次成功出站调用时，在现有 `logging.filter` 中追加
+`yang_system::addon::feishu::domain::outbound=debug`，完成排查后恢复。
+
 ## Prometheus 指标
 
 `observability.metrics_enabled=true` 时，进程在独立的

@@ -43,6 +43,7 @@ use std::time::Duration;
 use anyhow::Context;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 use yang_base::table::{Record, SortOrder};
 use yang_base::tools::Tools;
 use yang_base::BaseError;
@@ -312,10 +313,10 @@ async fn run_loop(
             // 手动触发：投一个信号即跑一轮，与自动轮询走**完全同一条路径**；
             // 携带的受理发起人（已解析成 open_id）随本轮落到待处理任务行。
             Some((config_id, applicant)) = requests.recv() => {
-                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id))).await;
+                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id)), "manual").await;
             }
             _ = ticker.tick() => {
-                run_round(&runner, &mut cursor, None).await;
+                run_round(&runner, &mut cursor, None, "poll").await;
             }
         }
     }
@@ -338,12 +339,16 @@ async fn run_loop(
 /// 没有播种的话它们**永远**不会被再认领。播种把「回填列为空」当成唯一判据，
 /// 于是 `creating`（崩溃遗留）、`terminal`（人工清空字段要重试）、`backfilled`
 /// （清空字段要重发）都会被拉回 `pending`。
+#[tracing::instrument(name = "approval_round", skip_all, fields(trigger, cursor_start = cursor.0))]
 async fn run_round(
     runner: &RoundRunner,
     cursor: &mut ResumeCursor,
     applicant: Option<(i64, String)>,
+    trigger: &str,
 ) {
     let started = std::time::Instant::now();
+    tracing::Span::current().record("trigger", trigger);
+    tracing::info!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
     match seed_tasks(runner).await {
         Ok(0) => {}
         Ok(seeded) => tracing::info!(seeded, "审批派发播种了新任务"),
@@ -368,10 +373,17 @@ async fn run_round(
     metrics::gauge!("feishu_approval_pending").set(claimed.len() as f64);
     if claimed.is_empty() {
         cursor.advance(&claimed);
+        tracing::info!(
+            stage = "claim",
+            cursor_next = cursor.0,
+            duration_ms = started.elapsed().as_millis() as u64,
+            "审批派发本轮没有可认领任务，游标已重置"
+        );
         return;
     }
     tracing::info!(count = claimed.len(), "审批派发认领到任务");
 
+    let mut counts = [0usize; 4];
     let mut idled = false;
     for task in &claimed {
         if idled {
@@ -391,6 +403,8 @@ async fn run_round(
             idled = true;
             break;
         };
+        tracing::info!(stage = "rate_limit", task_id = task.id, config_id = task.config_id, record_id = %task.record_id, "审批任务等待创建名额");
+        let slot_started = std::time::Instant::now();
         if let Err(failure) =
             acquire_create_slot(redis, &runner.deployment, runner.rate_per_minute).await
         {
@@ -405,8 +419,32 @@ async fn run_round(
             break;
         }
 
-        let outcome = process_one(runner, task).await;
-        record_outcome(runner, task, &outcome).await;
+        let outcome = async {
+            let task_started = std::time::Instant::now();
+            tracing::info!(
+                stage = "rate_limit",
+                wait_ms = slot_started.elapsed().as_millis() as u64,
+                "审批任务取得创建名额，开始处理"
+            );
+            let outcome = process_one(runner, task).await;
+            record_outcome(runner, task, &outcome).await;
+            tracing::info!(
+                duration_ms = task_started.elapsed().as_millis() as u64,
+                "审批任务本轮处理结束"
+            );
+            outcome
+        }
+        .instrument(
+            tracing::info_span!("approval_task", task_id = task.id, config_id = task.config_id,
+            table_id = %task.table_id, record_id = %task.record_id),
+        )
+        .await;
+        counts[match outcome {
+            DispatchResult::Backfilled { .. } => 0,
+            DispatchResult::Waiting { .. } => 1,
+            DispatchResult::Retryable { .. } => 2,
+            DispatchResult::Terminal { .. } => 3,
+        }] += 1;
     }
     // 全部走完才推进游标：中途 `idled` 中断时**不推进**，否则会跳过未处理的记录。
     if !idled {
@@ -425,6 +463,17 @@ async fn run_round(
             "审批派发单轮超出预算；认领批或限速配置需要复核"
         );
     }
+    tracing::info!(
+        claimed = claimed.len(),
+        backfilled = counts[0],
+        waiting = counts[1],
+        retryable = counts[2],
+        terminal = counts[3],
+        interrupted = idled,
+        cursor_next = cursor.0,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "审批派发轮次结束"
+    );
 }
 
 /// 一条已认领的任务及其全部配置（一次查全，避免处理时再查库）。
@@ -483,6 +532,11 @@ async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
         ])?
         .where_eq("enabled", serde_json::json!(true))?;
     let configs = all_pages(configs, SEED_MAX_CONFIG_PAGES).await?;
+    tracing::info!(
+        stage = "seed",
+        config_count = configs.len(),
+        "审批派发读取启用配置完成"
+    );
 
     let mut seeded = 0usize;
     for config in configs {
@@ -500,11 +554,13 @@ async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
 
 /// 单条配置的播种。
 async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<usize> {
+    let started = std::time::Instant::now();
     let config_id: i64 = config.require("id")?;
     let base_token: String = config.require("base_token")?;
     let table_id: String = config.require("table_id")?;
     let approval_code: String = config.require("approval_code")?;
     let backfill_field_id: String = config.require("backfill_field")?;
+    tracing::info!(stage = "seed", config_id, table_id = %table_id, backfill_field = %backfill_field_id, "审批派发开始扫描回填列为空的记录");
 
     let coordinates = BitableCoordinates {
         app_token: base_token.clone(),
@@ -533,6 +589,7 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
     )
     .await
     .map_err(|failure| anyhow::anyhow!("筛选待处理记录失败：{}", failure.message))?;
+    tracing::info!(stage = "seed", config_id, table_id = %table_id, field_count = fields.len(), pending_records = pending_records.len(), "审批派发待处理记录扫描完成");
     if pending_records.is_empty() {
         return Ok(0);
     }
@@ -557,6 +614,7 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
     }
 
     let mut seeded = 0usize;
+    let mut restored = 0usize;
     for record in &pending_records {
         if record.record_id.is_empty() {
             continue;
@@ -576,7 +634,8 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
                     .where_primary_key_eq(serde_json::json!(task_id))?
                     .update(row)
                     .await?;
-                tracing::debug!(record_id = %record.record_id, from = %state, "审批任务被拉回待处理");
+                restored += 1;
+                tracing::info!(stage = "seed", config_id, task_id, record_id = %record.record_id, from = %state, "审批任务被拉回待处理");
             }
             None => {
                 // 幂等键与派发路径**同源**：同一个 record 只有一条任务行，
@@ -592,6 +651,14 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
             }
         }
     }
+    tracing::info!(
+        stage = "seed",
+        config_id,
+        seeded,
+        restored,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "审批配置播种完成"
+    );
     Ok(seeded)
 }
 
@@ -767,6 +834,13 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         .optional()
         .await?;
     let Some(config) = config else {
+        tracing::warn!(
+            stage = "claim",
+            task_id,
+            config_id,
+            reason = "所属配置不存在或已停用",
+            "审批任务无法加载配置"
+        );
         return Ok(None);
     };
 
@@ -795,11 +869,25 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         map_rows.iter().map(|row| row.clone().into_map()).collect();
 
     let Some(widgets) = widget_maps_from_rows(&maps, |_| None) else {
+        tracing::warn!(
+            stage = "claim",
+            task_id,
+            config_id,
+            reason = "字段映射损坏或转换器非法",
+            "审批任务无法加载配置"
+        );
         return Ok(None);
     };
     // 没有映射的任务提不出去，但那多半是「配置还在建」而不是坏掉——
     // 走**等待态**（回 pending）比置终态更合适，等映射配好后自然重扫。
     if widgets.is_empty() {
+        tracing::warn!(
+            stage = "claim",
+            task_id,
+            config_id,
+            reason = "配置没有字段映射",
+            "审批任务无法加载配置"
+        );
         return Ok(None);
     }
 
@@ -863,6 +951,8 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         view_id: None,
     };
 
+    tracing::info!(stage = "fields", applicant_field = %task.applicant_field, backfill_field = %task.backfill_field, widget_count = task.widgets.len(), "审批任务开始读取多维表格结构");
+
     // 表结构要先拿：官方《批量获取记录》的 `fields` **按字段名**作键，而域里按
     // `field_id` 取值（配置存 id）。不重映射的话按 id 永远查不到，每条记录都判成
     // 「缺少申请人」——不报错，只是永远停在等待态。
@@ -877,11 +967,18 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         Ok(fields) => fields,
         // 表结构拿不到多半是凭证/网络抖动，判可重试。
         Err(failure) => {
+            tracing::warn!(stage = "fields", kind = ?failure.kind, "审批任务读取表结构失败");
             return DispatchResult::Retryable {
                 message: format!("读取表结构失败：{}", failure.message),
-            }
+            };
         }
     };
+
+    tracing::info!(
+        stage = "record",
+        field_count = fields.len(),
+        "审批任务开始读取源记录"
+    );
 
     // 不投影：官方 `records/batch_get` 的请求体没有 `field_names` 参数。
     let found = bitable::get_records_by_ids(
@@ -897,21 +994,24 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
             Some(record) => match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
                 Ok(cells) => cells,
                 Err(error) => {
+                    tracing::warn!(stage = "record", "审批任务解析记录字段失败，详情见任务记录");
                     return DispatchResult::Terminal {
                         message: format!("解析记录字段失败：{error}"),
-                    }
+                    };
                 }
             },
             None => {
+                tracing::warn!(stage = "record", "多维表格里已找不到审批源记录");
                 return DispatchResult::Terminal {
                     message: "多维表格里已找不到该记录".to_string(),
-                }
+                };
             }
         },
         Err(failure) => {
+            tracing::warn!(stage = "record", kind = ?failure.kind, "审批任务读取源记录失败");
             return DispatchResult::Retryable {
                 message: format!("读取记录失败：{}", failure.message),
-            }
+            };
         }
     };
 
@@ -922,11 +1022,18 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         Ok(name) => name,
         // 列被删了/改名后重名：重试好不了，判终态（回填列本身写不进去，只能留日志）。
         Err(error) => {
+            tracing::warn!(stage = "fields", backfill_field = %task.backfill_field, "审批任务回填列不可用，详情见任务记录");
             return DispatchResult::Terminal {
                 message: format!("回填列不可用：{error}"),
-            }
+            };
         }
     };
+
+    tracing::info!(
+        stage = "record",
+        cell_count = cells.len(),
+        "审批源记录字段映射完成"
+    );
 
     let backfill = BitableBackfill {
         transport: runner.transport(),
@@ -980,6 +1087,18 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
         DispatchResult::Retryable { message } => ("pending", Some(message.clone())),
         DispatchResult::Terminal { message } => ("terminal", Some(message.clone())),
     };
+    let outcome_name = match outcome {
+        DispatchResult::Backfilled { .. } => "backfilled",
+        DispatchResult::Waiting { .. } => "waiting",
+        DispatchResult::Retryable { .. } => "retryable",
+        DispatchResult::Terminal { .. } => "terminal",
+    };
+    tracing::info!(
+        stage = "persist",
+        outcome = outcome_name,
+        state,
+        "审批任务处理结论，等待和可重试任务保留 pending；具体原因见阶段日志和任务 last_error"
+    );
 
     let mut row = Record::new();
     row.insert("state", serde_json::json!(state));
@@ -1014,6 +1133,8 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
     };
     if let Err(error) = result {
         tracing::warn!(error = %error, task_id = task.id, "写回审批任务状态失败");
+    } else {
+        tracing::info!(stage = "persist", state, "审批任务状态写回成功");
     }
 
     // 指标：按结论分桶。`terminal` 与 `waiting` 分开是关键——前者要人动，
