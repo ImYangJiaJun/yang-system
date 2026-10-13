@@ -1251,9 +1251,12 @@ mod tests {
     #[tokio::test]
     async fn applicant_param_reports_not_found_with_an_actionable_message() {
         let transport = ReplayTransport::new(vec![(200, search_body(""))]);
-        let message = resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("查无此人"))
+        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("查无此人"))
             .await
-            .expect_err("未命中必须失败");
+        {
+            Err(message) => message,
+            Ok(_) => panic!("未命中必须失败"),
+        };
         assert!(message.contains("未找到"), "{message}");
         assert!(message.contains("请检查工作流变量"), "{message}");
     }
@@ -1264,9 +1267,12 @@ mod tests {
             200,
             search_body(r#"{"open_id":"ou_a","name":"张三"},{"open_id":"ou_b","name":"张三"}"#),
         )]);
-        let message = resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("张三"))
+        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("张三"))
             .await
-            .expect_err("重名必须失败");
+        {
+            Err(message) => message,
+            Ok(_) => panic!("重名必须失败"),
+        };
         assert!(message.contains("存在多个同名"), "{message}");
         assert!(message.contains("ou_a"), "{message}");
     }
@@ -1278,9 +1284,12 @@ mod tests {
             200,
             r#"{"code":99991672,"msg":"no scope"}"#.to_string(),
         )]);
-        let message = resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("杨佳俊"))
+        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("杨佳俊"))
             .await
-            .expect_err("缺 scope 必须失败");
+        {
+            Err(message) => message,
+            Ok(_) => panic!("缺 scope 必须失败"),
+        };
         assert!(message.contains("通讯录权限未开通，等待审核"), "{message}");
         assert!(message.contains("99991672"), "{message}");
     }

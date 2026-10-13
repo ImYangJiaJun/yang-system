@@ -274,7 +274,11 @@ pub(crate) struct TimelineRecord {
 /// 按 `instance_code` **或 `uuid`** 取实例详情的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GetOutcome {
-    Found(InstanceDetail),
+    // `Box` 装箱：`InstanceDetail` 含两个 `Vec<TaskNode/TimelineRecord>` 与
+    // 十余 `Option<String>`，与 `NotFound` 单元变体体量差超 clippy
+    // `large_enum_variant` 阈值（本仓库 deny 告警）。装箱后调用点统一
+    // `*detail` 解引用，语义不变。
+    Found(Box<InstanceDetail>),
     /// 实例不存在（`1390003`）。调用方据此区分「并发窗口，实例还没建好」
     /// 与「实例已建但查询失败」——这两者的处置相反。
     NotFound,
@@ -314,7 +318,7 @@ pub(crate) async fn get_instance(
                     message: format!("审批实例详情响应解析失败: {error}"),
                 })?;
             // 新字段全部来自这一份响应，**零额外 API 调用**。
-            Ok(GetOutcome::Found(InstanceDetail {
+            Ok(GetOutcome::Found(Box::new(InstanceDetail {
                 instance_code: data.instance_code,
                 approval_code: data.approval_code,
                 serial_number: data.serial_number.filter(|value| !value.is_empty()),
@@ -328,7 +332,7 @@ pub(crate) async fn get_instance(
                 reverted: data.reverted,
                 task_list: data.task_list,
                 timeline: data.timeline,
-            }))
+            })))
         }
         // 实例不存在：调用方据此决定「回到 create 重试」还是「退避」。
         Err(failure) if failure.kind == FailureKind::InstanceNotFound => Ok(GetOutcome::NotFound),
@@ -843,7 +847,7 @@ mod tests {
     fn empty_serial_number_is_normalised_to_none() {
         // 空串与缺失是同一件事：都表示「现在还没有编号」。
         // 直接用 `Some("")` 会让多维度表格被回填成一个空单元格。
-        let detail = GetOutcome::Found(InstanceDetail {
+        let detail = GetOutcome::Found(Box::new(InstanceDetail {
             instance_code: "abc".to_string(),
             approval_code: None,
             serial_number: Some(String::new()).filter(|value| !value.is_empty()),
@@ -857,7 +861,7 @@ mod tests {
             reverted: None,
             task_list: None,
             timeline: None,
-        });
+        }));
         match detail {
             GetOutcome::Found(detail) => assert_eq!(detail.serial_number, None),
             GetOutcome::NotFound => panic!("不应是 NotFound"),

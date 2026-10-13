@@ -302,7 +302,7 @@ pub(crate) async fn dispatch_one(
     {
         match get_instance(transport, sleeper, tokens, &uuid).await {
             Ok(GetOutcome::Found(detail)) => {
-                return finish_backfill(backfill, input, &uuid, detail).await;
+                return finish_backfill(backfill, input, &uuid, *detail).await;
             }
             Ok(GetOutcome::NotFound) => {}
             Err(failure) => {
@@ -480,7 +480,7 @@ pub(crate) async fn dispatch_one(
             match get_instance(transport, sleeper, tokens, &uuid).await {
                 Ok(GetOutcome::Found(detail)) => {
                     let code = detail.instance_code.clone();
-                    reclaimed = Some(detail);
+                    reclaimed = Some(*detail);
                     code
                 }
                 // 实例不存在：并发窗口（冲突成立但实例还没可见）或前一次其实没建成。
@@ -504,7 +504,7 @@ pub(crate) async fn dispatch_one(
     let detail = match reclaimed {
         Some(detail) => detail,
         None => match get_instance(transport, sleeper, tokens, &instance_code).await {
-            Ok(GetOutcome::Found(detail)) => detail,
+            Ok(GetOutcome::Found(detail)) => *detail,
             // 刚创建的实例查不到：判**可重试**，绝不写终态——否则刚建成的实例会被
             // 写成「找不到」，反而制造第二条不可恢复路径。
             Ok(GetOutcome::NotFound) => {
@@ -574,7 +574,7 @@ async fn validate_connections(
         {
             if !checked.contains_key(code) {
                 let detail = match get_instance(transport, sleeper, tokens, code).await {
-                    Ok(GetOutcome::Found(detail)) => detail,
+                    Ok(GetOutcome::Found(detail)) => *detail,
                     Ok(GetOutcome::NotFound) => {
                         return Err(DispatchResult::Waiting {
                             reason: format!(
