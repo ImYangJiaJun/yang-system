@@ -52,6 +52,18 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .require(true)
                 .max_length(64)
                 .filterable(true),
+            // 多查询键（AND 组合）。JSON 数组：field_id 列表。
+            // 为空时使用单键 `query_field_id`；非空时多键 AND 查询。
+            // 用 Text 存 JSON 而非关联表：键数少（通常 <5）、总是整组读写、不需要按键查询。
+            query_field_ids => Text::new().title("多查询键"),
+            // 自定义短链。可选，为空时使用 UUID `slug`。
+            // **唯一**：自定义短链也是公开 URL 的一部分，重复会让路由分派歧义。
+            // ≤64 字符，允许小写字母/数字/连字符/下划线（URL 友好）。
+            custom_slug => Str::new()
+                .title("自定义短链")
+                .unique(true)
+                .max_length(64)
+                .filterable(true),
             // 访问模式。public（任何人）/ passphrase（口令）/ login（系统登录）。
             // 默认 public 让门户创建后立即可用（无口令门槛）；管理员可后续切换到其他模式。
             access_mode => Radio::<String>::new()
@@ -71,6 +83,9 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .title("口令哈希")
                 .max_length(255)
                 .secret(true),
+            // 口令有效期。`access_mode = passphrase` 且需要过期时使用。
+            // 为空时口令永不过期；非空时超过该时间后口令失效。
+            passphrase_expires_at => Timestamp::new().title("口令有效期"),
             // 开放列。JSON 数组：开放列的 field_id 列表。
             // 用 Text 存 JSON 而非关联表：列数少（通常 <20）、总是整组读写、不需要按列查询。
             exposed_columns => Text::new().title("开放列").require(true),
@@ -218,8 +233,11 @@ mod tests {
         let definition = definition();
         for name in [
             "passphrase_hash",
+            "passphrase_expires_at",
             "result_labels",
             "empty_message",
+            "query_field_ids",
+            "custom_slug",
         ] {
             let field = definition
                 .field(name)
@@ -234,5 +252,32 @@ mod tests {
             Some(&serde_json::json!(30)),
             "rate_limit_per_min 应默认 30"
         );
+    }
+
+    #[test]
+    fn custom_slug_is_unique_when_present() {
+        // 自定义短链是公开 URL 的一部分，必须唯一且可筛。
+        // **唯一性走 DSL 层读**：`table_definition()` 不暴露索引，只断言 filterable
+        // 的话，测试名声称的那一位其实没验。
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let declared = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "custom_slug")
+            .unwrap_or_else(|| panic!("custom_slug 必须在 DSL 声明里"));
+        assert!(
+            declared.storage.unique,
+            "custom_slug 必须建唯一索引：它是公开 URL 的一部分，重复会让路由分派歧义"
+        );
+    }
+
+    #[test]
+    fn query_field_ids_stores_json_for_multi_key_support() {
+        // 多查询键（AND 组合）用 Text 存 JSON 数组。
+        let definition = definition();
+        let ids = definition
+            .field("query_field_ids")
+            .unwrap_or_else(|| panic!("query_field_ids 必须存在"));
+        assert!(!ids.is_required(), "query_field_ids 必须可空（单键场景）");
     }
 }
