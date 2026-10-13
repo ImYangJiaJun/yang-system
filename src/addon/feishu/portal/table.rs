@@ -3,6 +3,8 @@
 use yang_base::definition::{Int, Key, Radio, Str, Switch, TableSpec, Text, Timestamp};
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::repository::SYSTEM_ROLE;
+
 /// 声明门户表。
 ///
 /// 一条 = 一个可对外暴露的查询端点，绑定一个数据源 + 一个查询键 + 一组开放列。
@@ -86,10 +88,17 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     .filterable(true),
                 // 口令哈希。`access_mode = passphrase` 时必填（argon2）；其他模式为空。
                 // **secret**：口令本身不落库，只存哈希。
+                // `.secret(true)` 会把 readable/writable 一并设成 `Nobody`，必须紧跟
+                // `readable_by` / `writable_by` 把它放回受信角色——`Repository::query()`
+                // 恒以 system 发起，漏了这两条则**连 system 也读不到**，所有走
+                // `select_fields` / 写入的门户路径在运行期吃 `FieldPermissionDenied`。
+                // 与 `user_token_table.rs` / `field_table.rs` 的 secret 列同一处置。
                 passphrase_hash => Str::new()
                     .title("口令哈希")
                     .max_length(255)
-                    .secret(true),
+                    .secret(true)
+                    .readable_by([SYSTEM_ROLE])
+                    .writable_by([SYSTEM_ROLE]),
                 // 口令有效期。`access_mode = passphrase` 且需要过期时使用。
                 // 为空时口令永不过期；非空时超过该时间后口令失效。
                 passphrase_expires_at => Timestamp::new().title("口令有效期"),
@@ -159,6 +168,32 @@ mod tests {
         assert!(
             declared.storage.unique,
             "slug 必须建唯一索引：它是公开 URL 的一部分，重复会让路由分派歧义"
+        );
+    }
+
+    #[test]
+    fn passphrase_hash_is_readable_and_writable_by_the_trusted_system_role() {
+        // `.secret(true)` 把 readable / writable 一并设成 `Nobody`，仓库里每个 secret 列
+        // 都必须再补 `readable_by([SYSTEM_ROLE])` / `writable_by([SYSTEM_ROLE])`，
+        // 否则**连受信角色也读不到**——`Repository::query()` 恒以 system 发起，
+        // `select_fields` 于是在运行期吃 `FieldPermissionDenied`（启动期不报）。
+        // 漏掉这一条的后果是整条门户链路 500：`portal_query` / `portal_metadata` 走
+        // `find_portal` 的 PORTAL_COLUMNS、`update_portal` 直选、`set_passphrase` 直写，
+        // 而单测全绿（都不碰真实 TableQuery）。参照 `user_token_table.rs` / `field_table.rs`。
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let declared = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "passphrase_hash")
+            .unwrap_or_else(|| panic!("passphrase_hash 必须在 DSL 声明里"));
+        let system = yang_base::definition::AccessRule::Roles(vec![SYSTEM_ROLE.to_string()]);
+        assert_eq!(
+            declared.access.readable, system,
+            "passphrase_hash 必须对 system 可读，否则门户查询/元信息端点全挂"
+        );
+        assert_eq!(
+            declared.access.writable, system,
+            "passphrase_hash 必须对 system 可写，否则 set_passphrase 写不进去"
         );
     }
 
