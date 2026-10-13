@@ -14,10 +14,11 @@ pub(crate) mod table;
 
 use std::sync::Arc;
 
+use yang_base::action::TokenAuthMiddleware;
 use yang_base::definition::{ModuleName, ModulePresentationSpec, ModuleSpec};
 use yang_base::BaseError;
 
-use crate::addon::feishu::datasource::with_authentication;
+use crate::addon::account::user_from_claims;
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::authorization::AuthorizationVersionValidator;
 
@@ -35,7 +36,27 @@ pub(crate) fn build_module(
     // 所以门户表与日志表必须是两个 module（与 `datasource` + `datasource_field` 同一模式）。
     // 这里只挂主表，日志表由 `build_log_module()` 单独挂。
     let spec = ModuleSpec::new(module_name()?).table(table::table_spec()?);
-    let spec = with_authentication(spec, authorization_validator);
+
+    // # 为什么这里**要**加 `authenticate_public_actions()`（与 `datasource` 相反）
+    //
+    // `portal_query` 是 public，而 `access_mode = login` 靠
+    // `ctx.authenticated_user()` 判权。默认的 `ProtectedActions` scope 会把 public
+    // Action **整个跳过**，于是那个判据恒为 `None`——login 模式永远 403，是一条
+    // 谁也走不通的配置。抬到 `AllActions` 后：带 Bearer 的请求会注入身份，
+    // **完全没有** `Authorization` 头的请求仍然匿名放行（public / passphrase 不受影响）。
+    //
+    // `datasource::with_authentication` 文档里那条「不要加」的禁令针对的是**同一个
+    // module 里还有管理 Token 入口**的情形——两个中间件抢同一个 `Authorization` 头。
+    // 本 module 没有管理 Token 入口，不存在这个冲突。
+    //
+    // 代价（已知并接受）：带着**过期或无效** Bearer 头的请求会得到 401，而不是退回
+    // 匿名。公开门户页因此不应附带 `Authorization` 头——它本来就是给匿名访客用的。
+    let spec = spec.middleware(
+        TokenAuthMiddleware::new(user_from_claims)
+            .with_claims_validator(authorization_validator)
+            .authenticate_public_actions(),
+    );
+
     Ok(actions::register_all(spec, context).presentation(
         ModulePresentationSpec::new(crate::addon::admin_identity(), "飞书查询门户", "search")
             .app_route("/feishu/portals")
