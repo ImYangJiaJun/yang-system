@@ -878,6 +878,12 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // `record_keys_are_declared_on_the_request_log_table` 单测原地补上
         // （键 ⊆ 表声明的列 + 必填列齐全），不依赖本扫描。
         "approval/domain/request_log_writer.rs",
+        // 共享 helper：读写函数收 `tokens: &Repository`（表由调用方传 `user_tokens()`），
+        // 与 `option_write.rs` 同形，静态解析不到。用到的列（open_id / user_name /
+        // access_token / *_expires_at / refresh_token / scope / authorized_at / id）
+        // 都在 `user_token_table` 的声明上，缺口由该表声明的单测钉住（必填列与
+        // secret 列逐项断言）。
+        "domain/user_token.rs",
     ]
     .into_iter()
     .collect();

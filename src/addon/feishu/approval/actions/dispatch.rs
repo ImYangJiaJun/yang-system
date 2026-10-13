@@ -50,7 +50,8 @@ use crate::addon::feishu::domain::outbound::{
     FailureKind, OutboundFailure, OutboundTransport, Sleeper,
 };
 use crate::addon::feishu::domain::outbound_setup;
-use crate::addon::feishu::domain::tenant_token::TenantTokenProvider;
+use crate::addon::feishu::domain::tenant_token::FeishuCredentials;
+use crate::addon::feishu::domain::user_token::user_access_token;
 use crate::config::FeishuSettings;
 use crate::feishu_approval_worker::ApprovalDispatchHandle;
 
@@ -60,6 +61,15 @@ use crate::addon::feishu::domain::approval_dispatch::Backfill;
 ///
 /// 与 `option/actions/approval_options.rs` 的 `codes` 模块同域不重号。
 const APPLICANT_UNRESOLVED: i32 = 40005;
+
+/// 用户凭证缺通讯录权限（飞书对 `user_access_token` 的权限不足码 99991679）。
+///
+/// 与 99991672（应用级缺 scope）分开：那一条是「后台还没开通」，这一条是
+/// 「用户授权时没给」，处置是让管理员**重新授权**而不是等审核。
+const CODE_USER_TOKEN_SCOPE_MISSING: i32 = 99991679;
+
+/// 用户凭证形态非法（请求里没带 / 类型错），重新授权才能修。
+const CODES_USER_TOKEN_MALFORMED: &[i32] = &[99991668, 99991671];
 
 /// 通讯录 scope 未开通的错误码（真机实测 99991672）。
 ///
@@ -461,10 +471,10 @@ async fn handle_dispatch(
                     Ok(outbound) => outbound,
                     Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
                 };
-                match resolve_applicant_param(
-                    outbound.transport(),
-                    outbound.sleeper(),
-                    &outbound.tokens,
+                match resolve_optional_applicant(
+                    context,
+                    settings,
+                    &outbound,
                     input.applicant.as_deref(),
                 )
                 .await
@@ -754,17 +764,51 @@ async fn write_config_failure(
 /// 抽成独立函数是为了能被单测直接驱动：`dispatch_single` 本身要 `ActionContext`
 /// 才能读配置行，而这条解析链路的三个出口（命中/未命中/空白回退）正是本期新增、
 /// 最需要钉住的部分。两条路径（单条同步、全表受理）共用它，口径不会漂。
+async fn resolve_optional_applicant(
+    context: &FeishuContext,
+    settings: &FeishuSettings,
+    outbound: &outbound_setup::Outbound,
+    applicant: Option<&str>,
+) -> Result<Option<String>, String> {
+    // 未传 / trim 后为空 → 返回 None（编排层回退读表格列），且**不打任何请求**：
+    // 这是「不传 applicant 就零行为变化」那条承诺的落点，也顺带避免了为一次
+    // 用不上的解析去取用户凭证（未授权时那会变成一条莫名其妙的失败）。
+    let Some(name) = trimmed_applicant(applicant) else {
+        return Ok(None);
+    };
+    let credentials = FeishuCredentials {
+        app_id: settings.app_id.clone().unwrap_or_default(),
+        app_secret: settings.app_secret.clone().unwrap_or_default(),
+    };
+    let bearer = user_access_token(
+        context.user_tokens(),
+        outbound.transport(),
+        outbound.sleeper(),
+        &credentials,
+    )
+    .await
+    .map_err(|error| format!("发起人姓名解析失败：{}", error.message()))?;
+    resolve_applicant_param(outbound.transport(), outbound.sleeper(), &bearer, name)
+        .await
+        .map(Some)
+}
+
+/// 归一姓名：未传 / trim 后为空 → `None`。
+///
+/// 单独成函数是为了让「空白姓名不打任何请求」这条承诺可离线钉住（见测试）。
+fn trimmed_applicant(applicant: Option<&str>) -> Option<&str> {
+    applicant.map(str::trim).filter(|name| !name.is_empty())
+}
+
+/// 姓名 → open_id（凭证已取好）。可行动文案的**唯一**落点。
 async fn resolve_applicant_param(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
-    tokens: &TenantTokenProvider,
-    applicant: Option<&str>,
-) -> Result<Option<String>, String> {
-    let Some(name) = applicant.map(str::trim).filter(|name| !name.is_empty()) else {
-        return Ok(None);
-    };
-    match resolve_applicant(transport, sleeper, tokens, name).await {
-        Ok(ApplicantResolution::Resolved { open_id }) => Ok(Some(open_id)),
+    bearer_token: &str,
+    name: &str,
+) -> Result<String, String> {
+    match resolve_applicant(transport, sleeper, bearer_token, name).await {
+        Ok(ApplicantResolution::Resolved { open_id }) => Ok(open_id),
         Ok(ApplicantResolution::NotFound) => Err(format!(
             "发起人姓名解析失败：未找到「{name}」，请检查工作流变量或改用唯一姓名"
         )),
@@ -784,6 +828,14 @@ fn applicant_failure_message(failure: &OutboundFailure) -> String {
     match failure.kind {
         FailureKind::Fatal { code } if code == CODE_CONTACT_SCOPE_MISSING => {
             format!("发起人姓名解析失败：通讯录权限未开通，等待审核（错误码 {code}）")
+        }
+        FailureKind::Fatal { code } if code == CODE_USER_TOKEN_SCOPE_MISSING => {
+            format!(
+                "发起人姓名解析失败：用户授权缺少通讯录权限，请重新授权并在授权页补充权限（错误码 {code}）"
+            )
+        }
+        FailureKind::Fatal { code } if CODES_USER_TOKEN_MALFORMED.contains(&code) => {
+            format!("发起人姓名解析失败：飞书用户凭证无效，请在「飞书审批配置」页重新授权（错误码 {code}）")
         }
         FailureKind::Fatal { code } => {
             format!("发起人姓名解析失败（错误码 {code}）：{}", failure.message)
@@ -887,10 +939,10 @@ async fn dispatch_single(
     // 要经通讯录搜索解析成 open_id 才能提单。未传/空白 → 完全走现状（读表格列），
     // 零行为变化；解析失败一律 fail 并可行动文案——**不落等待态**，因为要改的是
     // 工作流变量，而不是等用户往表格里补数据。
-    let resolved_applicant = match resolve_applicant_param(
-        outbound.transport(),
-        outbound.sleeper(),
-        &outbound.tokens,
+    let resolved_applicant = match resolve_optional_applicant(
+        context,
+        settings,
+        &outbound,
         applicant.as_deref(),
     )
     .await
@@ -1350,9 +1402,8 @@ mod tests {
             200,
             search_body(r#"{"open_id":"ou_resolved","name":"杨佳俊"}"#),
         )]);
-        let result =
-            resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some(" 杨佳俊 ")).await;
-        assert_eq!(result, Ok(Some("ou_resolved".to_string())));
+        let result = resolve_applicant_param(&transport, &NoSleep, "u-test", " 杨佳俊 ").await;
+        assert_eq!(result, Ok("ou_resolved".to_string()));
         assert!(
             transport.seen().iter().any(|request| request.url
                 == crate::addon::feishu::domain::approval::applicant_search_url()),
@@ -1365,9 +1416,7 @@ mod tests {
     async fn applicant_param_reports_not_found_with_an_actionable_message() {
         let transport = ReplayTransport::new(vec![(200, search_body(""))]);
         let message =
-            match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("查无此人"))
-                .await
-            {
+            match resolve_applicant_param(&transport, &NoSleep, "u-test", "查无此人").await {
                 Err(message) => message,
                 Ok(_) => panic!("未命中必须失败"),
             };
@@ -1381,12 +1430,11 @@ mod tests {
             200,
             search_body(r#"{"open_id":"ou_a","name":"张三"},{"open_id":"ou_b","name":"张三"}"#),
         )]);
-        let message =
-            match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("张三")).await
-            {
-                Err(message) => message,
-                Ok(_) => panic!("重名必须失败"),
-            };
+        let message = match resolve_applicant_param(&transport, &NoSleep, "u-test", "张三").await
+        {
+            Err(message) => message,
+            Ok(_) => panic!("重名必须失败"),
+        };
         assert!(message.contains("存在多个同名"), "{message}");
         assert!(message.contains("ou_a"), "{message}");
     }
@@ -1398,13 +1446,7 @@ mod tests {
             200,
             r#"{"code":99991672,"msg":"no scope"}"#.to_string(),
         )]);
-        let message = match resolve_applicant_param(
-            &transport,
-            &NoSleep,
-            &e2e_tokens(),
-            Some("杨佳俊"),
-        )
-        .await
+        let message = match resolve_applicant_param(&transport, &NoSleep, "u-test", "杨佳俊").await
         {
             Err(message) => message,
             Ok(_) => panic!("缺 scope 必须失败"),
@@ -1413,16 +1455,14 @@ mod tests {
         assert!(message.contains("99991672"), "{message}");
     }
 
-    #[tokio::test]
-    async fn applicant_param_blank_or_absent_falls_back_without_a_request() {
-        // 未传 / trim 后为空 → 返回 None（编排层回退读表格列），且**不打出站请求**。
-        for applicant in [None, Some("   ")] {
-            let transport = ReplayTransport::new(vec![]);
-            let result =
-                resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), applicant).await;
-            assert_eq!(result, Ok(None), "applicant={applicant:?}");
-            assert!(transport.seen().is_empty(), "空白/未传不得打出站请求");
-        }
+    #[test]
+    fn blank_or_absent_applicant_is_normalized_away() {
+        // 未传 / trim 后为空 → None（编排层回退读表格列）。这是「空白姓名不打任何
+        // 请求」的落点：`resolve_optional_applicant` 在这一步就返回，取凭证与出站
+        // 都到不了。
+        assert_eq!(trimmed_applicant(None), None);
+        assert_eq!(trimmed_applicant(Some("   ")), None);
+        assert_eq!(trimmed_applicant(Some(" 杨佳俊 ")), Some("杨佳俊"));
     }
 
     // -----------------------------------------------------------------------
