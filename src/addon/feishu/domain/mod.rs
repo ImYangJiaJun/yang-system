@@ -25,6 +25,7 @@ pub(crate) mod pagination;
 pub(crate) mod projection_contract;
 pub(crate) mod protocol;
 pub(crate) mod pull;
+pub(crate) mod rate_limit;
 pub(crate) mod repository;
 pub(crate) mod request_log;
 pub(crate) mod schema_anchor;

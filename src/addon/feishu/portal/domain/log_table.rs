@@ -9,49 +9,58 @@ use yang_base::BaseError;
 /// 走 `TableSpec` + `fields!` 是刻意的取舍：这条路径让表进入 Catalog / 权限目录，
 /// 代价是拿不到 DSL 的能力（见 `datasource/table.rs` 的说明）。
 pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
-    Ok(TableSpec::new(yang_base::table!("feishu_datasource_portal_log"))
-        .title("飞书门户访问日志")
-        .fields(yang_base::fields! {
-            id => Key::new().title("ID").filterable(true),
-            // 指向门户。DSL 没有外键 builder，故用 `Int` + 索引，一致性由应用层保证。
-            portal_id => Int::new()
-                .title("所属门户")
-                .require(true)
-                .indexed(true)
-                .filterable(true),
-            // 查询值的 SHA-256。不存明文（信用卡号等高敏感值不落日志明文）。
-            query_value_hash => Str::new()
-                .title("查询值哈希")
-                .require(true)
-                .max_length(64)
-                .filterable(true),
-            // 返回行数。
-            result_count => Int::new()
-                .title("返回行数")
-                .require(true)
-                .default(0),
-            // 来源 IP（IPv6 兼容，VARCHAR(45)）。
-            ip_address => Str::new()
-                .title("来源 IP")
-                .max_length(45),
-            // 浏览器 User-Agent。
-            user_agent => Str::new()
-                .title("User-Agent")
-                .max_length(500),
-            // 本次用的访问模式（public / passphrase / login）。
-            access_mode_used => Str::new()
-                .title("访问模式")
-                .require(true)
-                .max_length(16)
-                .filterable(true),
-            // 查询状态：hit / miss / rate_limited / forbidden。
-            status => Str::new()
-                .title("状态")
-                .require(true)
-                .max_length(16)
-                .filterable(true),
-            created_at => Timestamp::new().created_at().title("创建时间"),
-        }))
+    Ok(
+        TableSpec::new(yang_base::table!("feishu_datasource_portal_log"))
+            .title("飞书门户访问日志")
+            .fields(yang_base::fields! {
+                // `sortable` 与 `filterable` 同样必开：日志页的兜底排序是
+                // `created_at DESC, id DESC`——同一秒内会有很多行，只按 `created_at`
+                // 排没有确定性全序，翻页会漏行或重复。不可排序的字段在
+                // `validate_order_field` 处被直接拒绝（HTTP 403）。
+                id => Key::new().title("ID").filterable(true).sortable(true),
+                // 指向门户。DSL 没有外键 builder，故用 `Int` + 索引，一致性由应用层保证。
+                portal_id => Int::new()
+                    .title("所属门户")
+                    .require(true)
+                    .indexed(true)
+                    .filterable(true),
+                // 查询值的 SHA-256。不存明文（信用卡号等高敏感值不落日志明文）。
+                query_value_hash => Str::new()
+                    .title("查询值哈希")
+                    .require(true)
+                    .max_length(64)
+                    .filterable(true),
+                // 返回行数。
+                result_count => Int::new()
+                    .title("返回行数")
+                    .require(true)
+                    .default(0),
+                // 来源 IP（IPv6 兼容，VARCHAR(45)）。
+                ip_address => Str::new()
+                    .title("来源 IP")
+                    .max_length(45),
+                // 浏览器 User-Agent。
+                user_agent => Str::new()
+                    .title("User-Agent")
+                    .max_length(500),
+                // 本次用的访问模式（public / passphrase / login）。
+                access_mode_used => Str::new()
+                    .title("访问模式")
+                    .require(true)
+                    .max_length(16)
+                    .filterable(true),
+                // 查询状态：hit / miss / rate_limited / forbidden。
+                status => Str::new()
+                    .title("状态")
+                    .require(true)
+                    .max_length(16)
+                    .filterable(true),
+                // `sortable` 必须显式打开（DSL 是 fail-closed）：日志页恒按时间倒序，
+                // 而 `validate_order_field` 对不可排序的字段**先于角色权限**直接拒绝，
+                // 映射到 HTTP 就是 403——日志页不是「排序不生效」，是整个请求恒失败。
+                created_at => Timestamp::new().created_at().title("创建时间").sortable(true),
+            }),
+    )
 }
 
 #[cfg(test)]

@@ -129,7 +129,7 @@ pub(crate) fn build_context(
             Arc::clone(&pool),
         ),
         Repository::new(
-            portal::log_table::table_spec()?.table_definition()?,
+            portal::domain::log_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         password_engine,

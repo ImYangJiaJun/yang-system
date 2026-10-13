@@ -9,7 +9,7 @@
 //! 不是引擎投影的通用 TableView。省 `view()` 避免框架自动合成一个含全表列的视图。
 
 pub(crate) mod actions;
-pub(crate) mod log_table;
+pub(crate) mod domain;
 pub(crate) mod table;
 
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub(crate) fn build_module(
 /// 同 `datasource::build_field_module()` 的说明：框架硬形状决定一张表 = 一个 module。
 /// 日志表无独立控制台入口，也没有可投影的数据 Action。
 pub(crate) fn build_log_module() -> Result<ModuleSpec, BaseError> {
-    Ok(ModuleSpec::new(log_module_name()?).table(log_table::table_spec()?))
+    Ok(ModuleSpec::new(log_module_name()?).table(domain::log_table::table_spec()?))
 }
 
 /// 日志表所在 Module 的名字。
@@ -79,8 +79,7 @@ mod tests {
 
     #[test]
     fn log_module_name_is_the_stable_qualified_identifier() {
-        let name =
-            log_module_name().unwrap_or_else(|error| panic!("模块名应有效: {error}"));
+        let name = log_module_name().unwrap_or_else(|error| panic!("模块名应有效: {error}"));
         assert_eq!(name.as_str(), "feishu.portal_log");
     }
 
@@ -97,7 +96,7 @@ mod tests {
     #[test]
     fn log_table_spec_is_declared() {
         let spec =
-            log_table::table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+            domain::log_table::table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
         let definition = spec
             .table_definition()
             .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));
@@ -106,8 +105,7 @@ mod tests {
 
     #[test]
     fn the_log_module_projects_nothing_to_the_frontend() {
-        let spec =
-            build_log_module().unwrap_or_else(|error| panic!("模块应可装配: {error}"));
+        let spec = build_log_module().unwrap_or_else(|error| panic!("模块应可装配: {error}"));
         assert!(spec.views.is_empty(), "不得声明视图");
         assert!(spec.presentation.is_none(), "不得声明呈现");
     }

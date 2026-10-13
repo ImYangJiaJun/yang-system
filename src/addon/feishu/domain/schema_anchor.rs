@@ -120,6 +120,26 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             ),
             "user_tokens()",
         ),
+        // 查询门户的两张表。登记进来后门户 Action 的站点进入**严格档**：列必须存在
+        // 且能力位开着。这里最容易漏的正是能力位——`slug` / `custom_slug` 的按值
+        // 定位要 `filterable`，日志页的 `created_at DESC, id DESC` 要 `sortable`，
+        // 漏一位就是运行期 403（fail-closed），而端点会整个不可用。
+        (
+            "feishu_datasource_portal",
+            spec(
+                crate::addon::feishu::portal::table::table_spec(),
+                "查询门户",
+            ),
+            "portals()",
+        ),
+        (
+            "feishu_datasource_portal_log",
+            spec(
+                crate::addon::feishu::portal::domain::log_table::table_spec(),
+                "门户访问日志",
+            ),
+            "portal_logs()",
+        ),
     ]
 }
 
@@ -892,6 +912,12 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // 声明的单测钉住。
         "approval/actions/dispatch.rs",
         "approval/actions/rotate_config_token.rs",
+        // 纯组装逻辑，不碰仓库：`project_rows` 收 `&[Record]`（调用方在 handler 里
+        // 刚查出来的选项行），没有查询/写调用可锚——与 `request_log_writer` 同形。
+        // 它读的两列（`source_key` / `label`）都在 `feishu_option` 的声明上，缺口由
+        // 该模块的 `a_row_only_fills_the_columns_whose_source_key_it_belongs_to`
+        // 单测原地补上（用真的 `Record` 走一遍投影）。
+        "portal/actions/portal_query.rs",
     ]
     .into_iter()
     .collect();

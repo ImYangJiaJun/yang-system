@@ -149,7 +149,9 @@ fn record_to_item(record: &Record) -> Result<PortalItem, BaseError> {
         query_field_id: record.require("query_field_id")?,
         query_field_source_key: record.require("query_field_source_key")?,
         query_field_ids: record.optional("query_field_ids")?,
-        access_mode: record.optional("access_mode")?.unwrap_or_else(|| "public".to_string()),
+        access_mode: record
+            .optional("access_mode")?
+            .unwrap_or_else(|| "public".to_string()),
         exposed_columns: record.require("exposed_columns")?,
         result_labels: record.optional("result_labels")?,
         empty_message: record.optional("empty_message")?,
