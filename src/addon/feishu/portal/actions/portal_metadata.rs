@@ -94,12 +94,8 @@ pub(super) async fn handle(
     }
 
     let query_field_id: String = portal.require("query_field_id")?;
-    let query_field_label = load_field_label(
-        &context,
-        portal.require("datasource_id")?,
-        &query_field_id,
-    )
-    .await?;
+    let query_field_label =
+        load_field_label(&context, portal.require("datasource_id")?, &query_field_id).await?;
 
     ApiResponse::success(
         PortalMetadataOutput {
@@ -108,7 +104,9 @@ pub(super) async fn handle(
             access_mode: portal
                 .optional::<String>("access_mode")?
                 .unwrap_or_else(|| "public".to_string()),
-            empty_message: portal.optional::<String>("empty_message")?.unwrap_or_default(),
+            empty_message: portal
+                .optional::<String>("empty_message")?
+                .unwrap_or_default(),
         },
         "门户元信息",
     )
