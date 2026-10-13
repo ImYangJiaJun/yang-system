@@ -1161,3 +1161,227 @@ export type FeishuOAuthStatus = {
   authorizedAt: number | null;
   reauthDue: boolean;
 };
+
+/* --------------------------- 飞书查询门户 --------------------------- */
+
+/// 门户访问模式。三种取值由后端 `access_mode` 列决定，界面按它决定要不要口令框
+/// 与要不要登录门控。
+export type PortalAccessMode = "public" | "passphrase" | "login";
+
+/// 一条门户；与 `list_portals` 的 `items[]` 一一对应。
+///
+/// 键名**保持后端的 snake_case**：它是投影的直投，前端不再另起一层 camelCase 映射
+/// （`exposed_columns` / `result_labels` 是 JSON 字符串，见下面的解析函数）。
+export type Portal = {
+  id: number;
+  datasource_id: number;
+  title: string;
+  /// UUID slug（公开 URL 的默认标识）。
+  slug: string;
+  /// 自定义短链（可选）。有它时公开 URL 用它，否则用 `slug`。
+  custom_slug: string | null;
+  /// 查询键 field_id。
+  query_field_id: string;
+  /// 查询键 source_key（冗余，用于展示）。
+  query_field_source_key: string;
+  /// 多查询键（JSON 数组，可选）。Phase 1 单键，保留投影。
+  query_field_ids: string | null;
+  access_mode: PortalAccessMode;
+  /// 开放列 field_id 的 JSON 数组。
+  exposed_columns: string;
+  /// 展示名映射 field_id → 展示名（JSON 对象，可选）。
+  result_labels: string | null;
+  /// 查无结果时的提示（可选）。
+  empty_message: string | null;
+  rate_limit_per_min: number;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+};
+
+/// `list_portals` 的分页信封。
+export type PortalListResponse = {
+  items: Portal[];
+  page: number;
+  page_size: number;
+  total: number | null;
+};
+
+/// 公开查询返回的一列（后端 `PortalColumn`）。
+export type PortalColumn = {
+  field_id: string;
+  /// 展示名：管理员配置的 `result_labels` 或字段默认名。
+  label: string;
+  field_type: string;
+};
+
+/// 公开查询返回的一行（后端 `PortalRow`）。`values` 的键是开放列的 `field_id`。
+export type PortalRow = { values: Record<string, unknown> };
+
+/// 公开查询的响应（后端 `portal_query` 的 `data`）。
+///
+/// **不含标题 / 访问模式**：后端没有门户元信息端点（`portal_query` 只回结果），
+/// 所以公开页在拿到第一次响应之前无从知道这些——口令框与登录跳转都只能**按错误码
+/// 反应式展开**，见 `PortalQueryPage` 与下面的 `PORTAL_ERROR_CODES`。
+export type PortalQueryResponse = {
+  found: boolean;
+  columns: PortalColumn[];
+  rows: PortalRow[];
+  /// 查无结果或截断时的提示。
+  message?: string;
+};
+
+/// 公开端点的**业务失败码**。
+///
+/// 匿名端点的业务拒绝走 `ApiResponse::fail(code, ..)`：HTTP 状态是 **200**，
+/// 判据只在信封的 `code` 上。所以前端不能按 HTTP 状态分话术——那会把「门户不存在」
+/// 显示成成功，或把「口令不正确」当成网络错误。
+export const PORTAL_ERROR_CODES = {
+  /// 门户不存在 / 已停用（后端刻意同码，不泄露「存在但被停用」）。
+  notFound: 40401,
+  /// 口令错误 / 口令过期 / 需要登录。
+  forbidden: 40301,
+} as const;
+
+/// 创建门户的输入（后端 `CreatePortalInput`）。
+///
+/// `custom_slug` 为空时**必须省略**：后端对 `Some("")` 走形状校验（长度 1..=64），
+/// 空串会被判 `ParamInvalid`。
+export type CreatePortalInput = {
+  datasource_id: number;
+  title: string;
+  query_field_id: string;
+  exposed_columns: string[];
+  access_mode: PortalAccessMode;
+  /// `access_mode = passphrase` 时必填，≥8 字符。
+  passphrase?: string;
+  /// 展示名映射 field_id → 展示名。
+  result_labels?: Record<string, string>;
+  empty_message?: string;
+  /// 每分钟限速，1..=120，缺省 30。
+  rate_limit_per_min?: number;
+  /// 自定义短链；为空时**省略该键**。
+  custom_slug?: string;
+};
+
+/// 更新门户的输入（后端 `UpdatePortalInput`）。字段缺省 = 不改。
+///
+/// **没有 `passphrase`**：换口令是独立端点 `set_passphrase`（后端如此拆分），
+/// 编辑对话框在改访问模式时按需再调一次它。
+export type UpdatePortalInput = {
+  /// 目标门户主键（后端键名就是 `portal_id`，不是 `id`）。
+  portal_id: number;
+  title?: string;
+  /// 查询键 `field_id`；改它会同时刷新冗余的 `query_field_source_key`。
+  query_field_id?: string;
+  exposed_columns?: string[];
+  access_mode?: PortalAccessMode;
+  result_labels?: Record<string, string>;
+  empty_message?: string;
+  rate_limit_per_min?: number;
+  /// 显式给空串表示**清空**短链（回落到 UUID slug）。
+  custom_slug?: string;
+};
+
+/// `create_portal` 的回执（只回这两个键）。
+export type CreatedPortal = { portalId: number; slug: string };
+
+/// `toggle_portal` 的回执。
+export type ToggledPortal = { portalId: number; enabled: boolean };
+
+/// 一条访问日志；与 `portal_access_log` 的 `items[]` 一一对应。
+export type AccessLogEntry = {
+  id: number;
+  portal_id: number;
+  /// 查询值的 SHA-256（**不落明文**）。
+  query_value_hash: string;
+  result_count: number;
+  ip_address: string | null;
+  user_agent: string | null;
+  access_mode_used: string;
+  status: "hit" | "miss" | "rate_limited" | "forbidden";
+  created_at: number;
+};
+
+/// `portal_access_log` 的分页信封。
+export type AccessLogListResponse = {
+  items: AccessLogEntry[];
+  page: number;
+  page_size: number;
+  total: number | null;
+};
+
+/// 访问模式的中文名。
+export function portalAccessModeLabel(mode: PortalAccessMode): string {
+  switch (mode) {
+    case "public":
+      return "公开";
+    case "passphrase":
+      return "口令";
+    case "login":
+      return "需登录";
+  }
+}
+
+/// 访问日志状态的中文名。
+export function accessLogStatusLabel(status: AccessLogEntry["status"]): string {
+  switch (status) {
+    case "hit":
+      return "命中";
+    case "miss":
+      return "未命中";
+    case "rate_limited":
+      return "限速";
+    case "forbidden":
+      return "口令错误";
+  }
+}
+
+/// 解析门户上 JSON 字符串形式的数组列。形状认不出时回空数组——
+/// 界面据此不画列，而不是把一段 JSON 原文画成字段名。
+export function parsePortalColumns(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/// 解析门户上 JSON 字符串形式的展示名映射。
+export function parsePortalLabels(
+  raw: string | null | undefined,
+): Record<string, string> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return {};
+    }
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (typeof value === "string") out[key] = value;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/// 自定义短链的形状校验：小写字母/数字/连字符/下划线，1..=64。
+export const CUSTOM_SLUG_PATTERN = /^[a-z0-9_-]{1,64}$/;
+
+/// 门户的公开 URL 标识：优先自定义短链，否则 UUID slug。
+export function portalPathSlug(portal: Portal): string {
+  const custom = portal.custom_slug?.trim();
+  return custom && custom !== "" ? custom : portal.slug;
+}

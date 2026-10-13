@@ -274,6 +274,12 @@ export const feishuQueryKeys = {
         orderBy: withStableOrder(query.orderBy),
       },
     ] as const,
+  /// 某条数据源下的门户列表（管理面板）。
+  portals: (datasourceId: number) =>
+    [FEISHU_QUERY_ROOT, "portals", datasourceId] as const,
+  /// 某个门户的访问日志（分页入参必须进 key，否则翻页命中旧缓存）。
+  portalAccessLog: (portalId: number, page: number, pageSize: number) =>
+    [FEISHU_QUERY_ROOT, "portal-access-log", portalId, page, pageSize] as const,
 };
 
 /* ------------------------------- Action 调用 ------------------------------ */
