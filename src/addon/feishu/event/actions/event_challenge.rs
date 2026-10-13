@@ -34,10 +34,7 @@ impl ParamInput for ChallengeRequest {
 }
 
 /// 注册 challenge 应答端点。
-pub(super) fn register(
-    module: ModuleSpec,
-    settings: &FeishuSettings,
-) -> ModuleSpec {
+pub(super) fn register(module: ModuleSpec, settings: &FeishuSettings) -> ModuleSpec {
     let Some(token) = settings.event_verification_token.as_deref() else {
         return module;
     };
@@ -77,7 +74,7 @@ pub(super) async fn handle(
 
 /// 构造 raw JSON 响应（不套框架包络）。
 fn raw_json(value: serde_json::Value) -> Result<ResponseBody, BaseError> {
-    let body = serde_json::to_string(&value)
-        .map_err(|e| BaseError::JsonSerializeFailed(e.to_string()))?;
+    let body =
+        serde_json::to_string(&value).map_err(|e| BaseError::JsonSerializeFailed(e.to_string()))?;
     ResponseBody::raw(body, "application/json")
 }

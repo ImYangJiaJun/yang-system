@@ -15,9 +15,7 @@ const MODULE: &str = "feishu.event";
 /// 装配 `feishu.event` Module。
 ///
 /// 无表、无认证中间件：challenge 端点是 public 且自校验（verification_token）。
-pub(crate) fn build_module(
-    settings: Option<&FeishuSettings>,
-) -> Result<ModuleSpec, BaseError> {
+pub(crate) fn build_module(settings: Option<&FeishuSettings>) -> Result<ModuleSpec, BaseError> {
     let spec = ModuleSpec::new(module_name()?);
     let Some(settings) = settings else {
         return Ok(spec);
