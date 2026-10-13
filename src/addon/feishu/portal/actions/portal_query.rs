@@ -37,6 +37,7 @@ const PORTAL_COLUMNS: &[&str] = &[
     "id",
     "datasource_id",
     "query_field_source_key",
+    "query_field_id",
     "access_mode",
     "passphrase_hash",
     "passphrase_expires_at",
