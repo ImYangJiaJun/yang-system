@@ -542,10 +542,17 @@ pub(crate) enum ApplicantResolution {
 /// 只查第一页（`page_size=20`）：姓名精确匹配场景候选极少，翻页只会多打接口。
 /// `ponytail:` 若同名者多到超过一页、且真正的同名命中落在第二页，本函数会漏判；
 /// 届时再补分页遍历。
+///
+/// # 只接受 user_access_token
+///
+/// 该接口对 tenant token 返回 99991663（**只接受用户身份**，真机实测），所以
+/// `bearer_token` 由调用方从用户身份门面（`user_token::user_access_token`）取好。
+/// 这里**不做** tenant token 那套「失效即清缓存重换」的循环：用户凭证的补救是
+/// 重新授权，重发请求只会把「没授权」掩盖成一次多余的出站。
 pub(crate) async fn resolve_applicant(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
-    tokens: &TenantTokenProvider,
+    bearer_token: &str,
     name: &str,
 ) -> Result<ApplicantResolution, OutboundFailure> {
     let name = name.trim();
@@ -558,7 +565,7 @@ pub(crate) async fn resolve_applicant(
         method: OutboundMethod::Post,
         url: applicant_search_url(),
         query: vec![("page_size".to_string(), "20".to_string())],
-        bearer_token: None,
+        bearer_token: Some(bearer_token.to_string()),
         json_body: Some(serde_json::json!({ "query": name })),
         raw_body: None,
         binary_limit: None,
@@ -566,9 +573,10 @@ pub(crate) async fn resolve_applicant(
         idempotent: true, // 只读
     };
 
-    let response = send_approval(transport, sleeper, tokens, request).await?;
+    let response = send_with_retry(transport, sleeper, &request, PULL_RETRY).await?;
+    let payload = decode_data(&response.body)?;
     let data: ApplicantSearchData =
-        serde_json::from_str(&response).map_err(|error| OutboundFailure {
+        serde_json::from_str(&payload).map_err(|error| OutboundFailure {
             kind: FailureKind::Fatal { code: 0 },
             message: format!("搜索用户响应解析失败: {error}"),
         })?;
@@ -634,13 +642,12 @@ mod tests {
     use super::*;
 
     use std::collections::{BTreeMap, VecDeque};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use yang_base::BaseError;
 
     use super::super::outbound::OutboundResponse;
-    use super::super::tenant_token::{FeishuCredentials, TenantTokenCache};
 
     #[test]
     fn create_url_is_the_official_path() {
@@ -969,42 +976,6 @@ mod tests {
         async fn sleep(&self, _duration: Duration) {}
     }
 
-    /// 恒命中 token 的缓存：token 换取不落网络，出站只走被测的搜索请求。
-    struct StaticTokenCache;
-
-    #[async_trait::async_trait]
-    impl TenantTokenCache for StaticTokenCache {
-        async fn get(&self) -> anyhow::Result<Option<String>> {
-            Ok(Some("t-test".to_string()))
-        }
-        async fn put(&self, _token: &str, _ttl_seconds: i64) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn invalidate(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn acquire_lock(&self, _owner: &str, _ttl_seconds: i64) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        async fn release_lock(&self, _owner: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn token_provider() -> TenantTokenProvider {
-        TenantTokenProvider::new(
-            Arc::new(StaticTokenCache),
-            Arc::new(ScriptedTransport::new(Vec::new())),
-            Arc::new(NoopSleeper),
-            FeishuCredentials {
-                app_id: "cli_test".to_string(),
-                app_secret: "secret".to_string(),
-            },
-            "test-dep",
-        )
-        .unwrap_or_else(|error| panic!("provider 应可构建: {error}"))
-    }
-
     /// 搜索成功信封（`items` 列表形态）。
     fn envelope(items: &str) -> OutboundResponse {
         OutboundResponse {
@@ -1019,9 +990,7 @@ mod tests {
     async fn resolve_applicant_matches_a_unique_exact_name() {
         let transport =
             ScriptedTransport::new(vec![Ok(envelope(r#"{"open_id":"ou_1","name":"杨佳俊"}"#))]);
-        let provider = token_provider();
-
-        let result = resolve_applicant(&transport, &NoopSleeper, &provider, " 杨佳俊 ")
+        let result = resolve_applicant(&transport, &NoopSleeper, "u-test", " 杨佳俊 ")
             .await
             .unwrap_or_else(|error| panic!("应解析成功: {error}"));
 
@@ -1037,9 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_applicant_returns_not_found_when_nothing_matches() {
         let transport = ScriptedTransport::new(vec![Ok(envelope(""))]);
-        let provider = token_provider();
-
-        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "查无此人")
+        let result = resolve_applicant(&transport, &NoopSleeper, "u-test", "查无此人")
             .await
             .unwrap_or_else(|error| panic!("应解析成功: {error}"));
 
@@ -1051,9 +1018,7 @@ mod tests {
         let transport = ScriptedTransport::new(vec![Ok(envelope(
             r#"{"open_id":"ou_a","name":"张三"},{"open_id":"ou_b","name":"张三"}"#,
         ))]);
-        let provider = token_provider();
-
-        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "张三")
+        let result = resolve_applicant(&transport, &NoopSleeper, "u-test", "张三")
             .await
             .unwrap_or_else(|error| panic!("应解析成功: {error}"));
 
@@ -1071,9 +1036,7 @@ mod tests {
         let transport = ScriptedTransport::new(vec![Ok(envelope(
             r#"{"open_id":"ou_1","name":"杨佳俊（成都）"}"#,
         ))]);
-        let provider = token_provider();
-
-        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "杨佳俊")
+        let result = resolve_applicant(&transport, &NoopSleeper, "u-test", "杨佳俊")
             .await
             .unwrap_or_else(|error| panic!("应解析成功: {error}"));
 
@@ -1094,9 +1057,7 @@ mod tests {
             bytes: None,
             headers: BTreeMap::new(),
         })]);
-        let provider = token_provider();
-
-        let failure = resolve_applicant(&transport, &NoopSleeper, &provider, "杨佳俊")
+        let failure = resolve_applicant(&transport, &NoopSleeper, "u-test", "杨佳俊")
             .await
             .err()
             .unwrap_or_else(|| panic!("缺 scope 必须失败"));
@@ -1109,9 +1070,7 @@ mod tests {
     async fn resolve_applicant_skips_the_request_for_a_blank_name() {
         // 空脚本：若真发请求，脚本会耗尽并报错——用来钉住「空姓名不打接口」。
         let transport = ScriptedTransport::new(Vec::new());
-        let provider = token_provider();
-
-        let result = resolve_applicant(&transport, &NoopSleeper, &provider, "   ")
+        let result = resolve_applicant(&transport, &NoopSleeper, "u-test", "   ")
             .await
             .unwrap_or_else(|error| panic!("空姓名应直接返回 NotFound: {error}"));
 

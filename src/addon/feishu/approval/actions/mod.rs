@@ -5,13 +5,14 @@
 //!
 //! # 两组端点，两条注册纪律
 //!
-//! - **控制台（8 个新 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
+//! - **控制台（10 个 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
 //!   （`create_config` / `list_widgets` 运行时按其自身逻辑校验凭证并返回 50301），
 //!   所以注册在 `can_pull()` 门禁**之前**。
 //! - **派发端点只在集成可用时注册**：与 `option` module 的机器入口同一条纪律——
 //!   派发端点打飞书开放平台，需要 `app_id`/`app_secret` 齐备（`FeishuSettings::can_pull()`
 //!   判定）。凭证缺失时注册出来只会返回「凭证未配置」，让人误以为端点可用；不注册则
-//!   路由直接 404，语义更准。dispatch 及其 `ManagementTokenMiddleware` 保持门禁之后。
+//!   路由直接 404，语义更准。dispatch 及其 `ManagementTokenMiddleware`、以及
+//!   用户身份授权回调（同样要打飞书）保持门禁之后。
 //!
 //! # 鉴权：管理 Token 中间件 + 坐标白名单
 //!
@@ -29,6 +30,9 @@ pub(super) mod list_configs;
 pub(super) mod list_requests;
 pub(super) mod list_tasks;
 pub(super) mod list_widgets;
+pub(super) mod oauth_authorize_url;
+pub(super) mod oauth_callback;
+pub(super) mod oauth_status;
 pub(super) mod refresh_names;
 pub(super) mod update_config;
 
@@ -57,11 +61,17 @@ pub(super) fn register_all(
     let module = list_widgets::register(module, Arc::clone(&context));
     let module = list_requests::register(module, Arc::clone(&context));
     let module = list_tasks::register(module, Arc::clone(&context));
+    // 飞书用户身份（OAuth）：状态与授权链接是控制台 Action，无条件注册
+    // （授权链接在缺配置时按业务码 50302 失败，而不是让按钮凭空消失）。
+    let module = oauth_status::register(module, Arc::clone(&context));
+    let module = oauth_authorize_url::register(module, Arc::clone(&context));
 
     let Some(settings) = settings.filter(|value| value.can_pull()) else {
         return Ok(module);
     };
 
+    // 授权回调要打飞书的令牌端点，与派发端点同一条门禁。
+    let module = oauth_callback::register(module, Arc::clone(&context));
     let mut module = dispatch::register(module, context);
     module = module.middleware(ManagementTokenMiddleware::new(
         &settings.management_api_token,
@@ -90,7 +100,7 @@ mod tests {
 
     use crate::addon::feishu::domain::repository::Repository;
 
-    /// 8 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
+    /// 10 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
     const CONSOLE_ROUTES: &[(&str, &str)] = &[
         ("list_configs", "/api/v1/feishu/approval/configs/query"),
         ("create_config", "/api/v1/feishu/approval/configs/create"),
@@ -106,6 +116,8 @@ mod tests {
         ),
         ("list_requests", "/api/v1/feishu/approval/requests/query"),
         ("list_tasks", "/api/v1/feishu/approval/tasks/query"),
+        ("oauth_status", "/api/v1/feishu/oauth/status"),
+        ("oauth_authorize_url", "/api/v1/feishu/oauth/authorize-url"),
     ];
 
     /// 装配好的 module（带一个可用的 `FeishuSettings`）。
@@ -135,6 +147,7 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::task_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::user_token_table::table_spec()),
             None,
         ));
 
@@ -145,6 +158,7 @@ mod tests {
                 encryption_key: None,
                 app_id: Some("cli_real_app_id".to_string()),
                 app_secret: Some("real-app-secret-value".to_string()),
+                oauth_redirect_uri: None,
                 pull_interval_seconds: 900,
                 alert_recipients: Vec::new(),
                 alert_failure_threshold: 3,
@@ -184,7 +198,7 @@ mod tests {
         assert_eq!(reference.action().as_str(), "dispatch_approval");
     }
 
-    /// 8 个控制台路由在**有凭证**时全部注册。
+    /// 10 个控制台路由在**有凭证**时全部注册。
     #[tokio::test]
     async fn console_routes_are_registered_with_credentials() {
         let module = registered_module(true);
@@ -197,7 +211,7 @@ mod tests {
         }
     }
 
-    /// 8 个控制台路由在**无凭证**时也全部注册（控制台不依赖出站凭证存在）。
+    /// 10 个控制台路由在**无凭证**时也全部注册（控制台不依赖出站凭证存在）。
     #[tokio::test]
     async fn console_routes_are_registered_without_credentials() {
         let module = registered_module(false);
@@ -234,6 +248,26 @@ mod tests {
                 "/api/v1/feishu/approval/dispatch".to_string()
             )),
             "无凭证时不得注册派发路由"
+        );
+    }
+
+    /// 授权回调与派发端点同门禁：要打飞书令牌端点，缺凭证时 404 比「注册出来
+    /// 永远失败」语义更准。
+    #[tokio::test]
+    async fn oauth_callback_follows_the_outbound_gate() {
+        let with_credentials = registered_module(true);
+        assert!(
+            routes(&with_credentials)
+                .contains(&(HttpMethod::Get, "/api/v1/feishu/oauth/callback".to_string())),
+            "带凭证时授权回调必须注册：{:?}",
+            routes(&with_credentials)
+        );
+
+        let without_credentials = registered_module(false);
+        assert!(
+            !routes(&without_credentials)
+                .contains(&(HttpMethod::Get, "/api/v1/feishu/oauth/callback".to_string())),
+            "无凭证时不得注册授权回调"
         );
     }
 

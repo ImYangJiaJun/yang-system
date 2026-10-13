@@ -98,6 +98,18 @@ pub(crate) trait FeishuAlertSender: Send + Sync + 'static {
         last_error: &str,
         failures: i64,
     ) -> Result<(), EmailDeliveryError>;
+
+    /// 投递一封「飞书用户授权即将到期，请重新授权」提醒。
+    ///
+    /// 与拉取失败告警共用同一条 SMTP 传输与同一套模板机制；区别只在收件人：
+    /// 这一封固定发给**系统第一个账号**（默认系统管理员），不走
+    /// `feishu.alert_recipients`——那是运维告警的地址，而重新授权只有管理员能做。
+    async fn send_oauth_expiry_reminder(
+        &self,
+        recipient: &str,
+        user_name: &str,
+        days_since_authorized: i64,
+    ) -> Result<(), EmailDeliveryError>;
 }
 
 /// SMTP 适配器：告警走的是与验证码 / 重置链接**同一条** STARTTLS 传输。
@@ -125,6 +137,23 @@ impl FeishuAlertSender for SmtpEmailSender {
         )
         .await
     }
+
+    async fn send_oauth_expiry_reminder(
+        &self,
+        recipient: &str,
+        user_name: &str,
+        days_since_authorized: i64,
+    ) -> Result<(), EmailDeliveryError> {
+        self.deliver_template(
+            recipient,
+            "feishu_oauth_expiry",
+            &[
+                ("user_name", user_name),
+                ("days_since_authorized", &days_since_authorized.to_string()),
+            ],
+        )
+        .await
+    }
 }
 
 /// 可放入 `Tools` 扩展槽的类型擦除投递句柄。
@@ -147,6 +176,18 @@ impl FeishuAlertSenderHandle {
     ) -> Result<(), EmailDeliveryError> {
         self.0
             .send_pull_failure(recipient, datasource_title, last_error, failures)
+            .await
+    }
+
+    /// 投递一封「飞书用户授权即将到期」提醒。
+    pub(crate) async fn send_oauth_expiry_reminder(
+        &self,
+        recipient: &str,
+        user_name: &str,
+        days_since_authorized: i64,
+    ) -> Result<(), EmailDeliveryError> {
+        self.0
+            .send_oauth_expiry_reminder(recipient, user_name, days_since_authorized)
             .await
     }
 }
@@ -212,11 +253,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingSender {
         sent: Mutex<Vec<(String, String, i64)>>,
+        reminders: Mutex<Vec<(String, String, i64)>>,
     }
 
     impl RecordingSender {
         fn sent(&self) -> Vec<(String, String, i64)> {
             self.sent
+                .lock()
+                .map(|sent| sent.clone())
+                .unwrap_or_default()
+        }
+
+        fn reminders(&self) -> Vec<(String, String, i64)> {
+            self.reminders
                 .lock()
                 .map(|sent| sent.clone())
                 .unwrap_or_default()
@@ -237,6 +286,22 @@ mod tests {
                     recipient.to_string(),
                     format!("{datasource_title}|{last_error}"),
                     failures,
+                ));
+            }
+            Ok(())
+        }
+
+        async fn send_oauth_expiry_reminder(
+            &self,
+            recipient: &str,
+            user_name: &str,
+            days_since_authorized: i64,
+        ) -> Result<(), EmailDeliveryError> {
+            if let Ok(mut reminders) = self.reminders.lock() {
+                reminders.push((
+                    recipient.to_string(),
+                    user_name.to_string(),
+                    days_since_authorized,
                 ));
             }
             Ok(())
@@ -319,6 +384,26 @@ mod tests {
 
         assert_eq!(delivered, 2, "阈值到达时**每个**收件人都要收到");
         assert_eq!(recorder.sent().len(), 2, "漏发一个收件人等于有人永远不知情");
+    }
+
+    #[tokio::test]
+    async fn the_reminder_is_delegated_with_its_own_fields() {
+        // 提醒只有**一个**收件人（系统第一个账号），没有 fan-out，也不看阈值：
+        // 它由提醒 worker 按天调用，这里只钉「句柄把三个字段原样传下去」。
+        let recorder = Arc::new(RecordingSender::default());
+        let sender: Arc<dyn FeishuAlertSender> = recorder.clone();
+        let handle = FeishuAlertSenderHandle::from_arc(sender);
+
+        handle
+            .send_oauth_expiry_reminder("admin@example.com", "杨佳俊", 352)
+            .await
+            .unwrap_or_else(|error| panic!("提醒应投递成功: {error}"));
+
+        assert_eq!(
+            recorder.reminders(),
+            vec![("admin@example.com".to_string(), "杨佳俊".to_string(), 352)]
+        );
+        assert!(recorder.sent().is_empty(), "提醒不该走拉取告警那条通道");
     }
 
     #[tokio::test]

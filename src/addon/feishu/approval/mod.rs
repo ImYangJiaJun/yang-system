@@ -115,6 +115,14 @@ pub(crate) fn build_task_applicant_module() -> Result<ModuleSpec, BaseError> {
         .table(domain::task_applicant_table::table_spec()?))
 }
 
+/// 飞书用户身份表所在的 Module：同上，只有表。
+///
+/// 表里只有一行（管理员本人的 OAuth 授权），读写由姓名解析路径与提醒 worker 经
+/// `FeishuContext` 完成，本 module 不挂 Action。
+pub(crate) fn build_user_token_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(user_token_module_name()?).table(domain::user_token_table::table_spec()?))
+}
+
 fn module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new(MODULE).map_err(config_error)
 }
@@ -133,6 +141,10 @@ fn request_log_module_name() -> Result<ModuleName, BaseError> {
 
 fn task_applicant_module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new("feishu.approval_task_applicant").map_err(config_error)
+}
+
+fn user_token_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.user_token").map_err(config_error)
 }
 
 fn config_error(error: impl std::fmt::Display) -> BaseError {

@@ -30,6 +30,7 @@ import {
 import { ApprovalConfigDialog } from "../components/ApprovalConfigDialog";
 import { ApprovalConfigDetails } from "../components/ApprovalConfigDetails";
 import { ApprovalWorkflowGuide } from "../components/ApprovalWorkflowGuide";
+import { FeishuOAuthCard } from "../components/FeishuOAuthCard";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
 import { PAGE_SIZE_OPTIONS, useDebouncedValue } from "../list-query";
@@ -274,6 +275,7 @@ export default function ApprovalConfigsPage() {
               </Button>
             )}
           </div>
+          <FeishuOAuthCard />
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex gap-1" aria-label="配置状态筛选">
               {(

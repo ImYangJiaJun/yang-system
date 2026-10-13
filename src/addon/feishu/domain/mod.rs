@@ -32,4 +32,5 @@ pub(crate) mod source_key;
 pub(crate) mod tenant_token;
 pub(crate) mod token;
 pub(crate) mod uploaded_files;
+pub(crate) mod user_token;
 pub(crate) mod xlsx;

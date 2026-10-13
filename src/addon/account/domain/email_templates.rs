@@ -25,6 +25,7 @@ const MAILS: &[(&str, &str, &str, &str, &[&str])] = &[
         "failures",
         "last_error"
     ),
+    mail!("feishu_oauth_expiry", "user_name", "days_since_authorized"),
 ];
 
 #[derive(Clone)]
@@ -214,6 +215,16 @@ mod tests {
         assert!(text.contains("费用表") && text.contains("7") && text.contains("1254302"));
         assert!(html.contains("&lt;Permission denied&gt;") && html.contains("体检"));
         assert!(!html.contains("非本人"));
+        let (_, text, html) = templates.render(
+            "feishu_oauth_expiry",
+            "测试平台",
+            &[("user_name", "杨佳俊"), ("days_since_authorized", "352")],
+        )?;
+        assert!(text.contains("杨佳俊") && text.contains("352"), "{text}");
+        assert!(
+            html.contains("杨佳俊") && html.contains("重新授权"),
+            "{html}"
+        );
         Ok(())
     }
 

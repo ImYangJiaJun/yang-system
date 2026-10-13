@@ -11,7 +11,7 @@ use super::repository::Repository;
 
 /// addon 级共享上下文。
 ///
-/// 八张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
+/// 九张表的 Repository 都在这里持有——`Registry::dispatch` 只向 Action 注入**所在
 /// module 的主表**，所以跨表访问（选项 module 读数据源表、审批派发读五张审批表）
 /// 必须经这个上下文。
 #[derive(Clone)]
@@ -37,6 +37,9 @@ pub(crate) struct FeishuContext {
     /// 审批任务发起人表（第二张 task 族表，存解析后的 open_id）。
     #[allow(dead_code)]
     approval_task_applicant: Repository,
+    /// 飞书用户身份表（OAuth user_access_token 的单例行）。
+    #[allow(dead_code)]
+    user_token: Repository,
     settings: Option<Arc<FeishuSettings>>,
 }
 
@@ -52,6 +55,7 @@ impl FeishuContext {
         approval_task: Repository,
         approval_request_log: Repository,
         approval_task_applicant: Repository,
+        user_token: Repository,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
         Self {
@@ -63,6 +67,7 @@ impl FeishuContext {
             approval_task,
             approval_request_log,
             approval_task_applicant,
+            user_token,
             settings,
         }
     }
@@ -118,6 +123,12 @@ impl FeishuContext {
     #[allow(dead_code)]
     pub(crate) fn approval_task_applicants(&self) -> &Repository {
         &self.approval_task_applicant
+    }
+
+    /// 飞书用户身份表（OAuth 单例行）。消费者：派发姓名解析、提醒 worker。
+    #[allow(dead_code)]
+    pub(crate) fn user_tokens(&self) -> &Repository {
+        &self.user_token
     }
 
     /// 集成配置；`None` 表示 `[feishu]` 段缺席。

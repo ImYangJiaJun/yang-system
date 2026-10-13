@@ -157,6 +157,7 @@ fn feishu_settings(encryption_key: Option<&str>) -> Arc<FeishuSettings> {
         // 因此出站凭证保持未配置：`can_pull()` 为假，出站路径整条不参与。
         app_id: None,
         app_secret: None,
+        oauth_redirect_uri: None,
         pull_interval_seconds: 900,
         // 告警收件人留空 = 不告警（默认值）；本测试不出站，告警路径不参与。
         alert_recipients: Vec::new(),
