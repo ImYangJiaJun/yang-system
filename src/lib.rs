@@ -6,4 +6,6 @@ pub mod bootstrap;
 pub mod config;
 mod infrastructure;
 
-pub use infrastructure::{audit, authorization, feishu_approval_worker, feishu_pull, schema};
+pub use infrastructure::{
+    audit, authorization, feishu_approval_worker, feishu_oauth_reminder, feishu_pull, schema,
+};

@@ -10,6 +10,7 @@ use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
 use crate::feishu_approval_worker::{ApprovalDispatchHandle, ApprovalDispatchWorker};
+use crate::feishu_oauth_reminder::FeishuOauthReminderWorker;
 use crate::feishu_pull::{FeishuPullHandle, FeishuPullWorker};
 use anyhow::Context;
 use std::future::Future;
@@ -31,6 +32,7 @@ const PHASE_HTTP_DRAIN: &str = "http_drain";
 const PHASE_AUTHORIZATION_OUTBOX_WORKER: &str = "authorization_outbox_worker";
 const PHASE_FEISHU_PULL_WORKER: &str = "feishu_pull_worker";
 const PHASE_FEISHU_APPROVAL_WORKER: &str = "feishu_approval_worker";
+const PHASE_FEISHU_OAUTH_REMINDER_WORKER: &str = "feishu_oauth_reminder_worker";
 const PHASE_TOOLS_CLOSE: &str = "tools_close";
 const PHASE_OBSERVABILITY: &str = "observability";
 
@@ -313,6 +315,22 @@ async fn run_after_tools_created(
         }
         None => None,
     };
+    // 飞书用户身份授权的到期提醒：同一条准入（`can_pull()`）。独立起停而不是挂进
+    // 拉取 worker——它按**天**跑（保活 + 350 天后的每日催办），与拉取间隔无关。
+    let oauth_reminder_worker = match settings.feishu.as_ref().filter(|feishu| feishu.can_pull()) {
+        Some(feishu) => {
+            let feishu_context = crate::addon::feishu::build_context(
+                Arc::new(tools.mysql()?.pool().clone()),
+                Some(Arc::new(feishu.clone())),
+            )
+            .context("构建飞书用户身份上下文失败")?;
+            Some(
+                FeishuOauthReminderWorker::start(Arc::clone(&tools), feishu, feishu_context)
+                    .context("启动飞书用户授权提醒 Worker 失败")?,
+            )
+        }
+        None => None,
+    };
     let runtime = Arc::new(application.runtime);
     let signal_budget = shutdown_budget.clone();
     let signal_readiness = readiness_gate.clone();
@@ -370,8 +388,19 @@ async fn run_after_tools_created(
             .map_err(anyhow::Error::from),
         None => Ok(()),
     };
-    // `and` 保留第一个错误：三者都失败时先看到的是更早那个阶段的问题。
-    let shutdown_result = outbox_shutdown.and(feishu_shutdown).and(approval_shutdown);
+    // 提醒 worker 与派发同批收口：它也用出站与数据库。
+    let oauth_reminder_shutdown = match oauth_reminder_worker {
+        Some(worker) => shutdown_budget
+            .run_phase(PHASE_FEISHU_OAUTH_REMINDER_WORKER, worker.shutdown())
+            .await
+            .map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    // `and` 保留第一个错误：四者都失败时先看到的是更早那个阶段的问题。
+    let shutdown_result = outbox_shutdown
+        .and(feishu_shutdown)
+        .and(approval_shutdown)
+        .and(oauth_reminder_shutdown);
     match (serve_result, shutdown_result) {
         (Err(serve_error), Err(worker_error)) => {
             tracing::error!(

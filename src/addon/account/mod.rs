@@ -21,6 +21,11 @@ pub(crate) use domain::system_owner::{SystemAuthorizationPort, SystemOwnerClaime
 // 外围授权域（access）使用的账号端口：授权快照类型与可信用户投影。
 pub(crate) use domain::claims::user_from_claims;
 
+// 基础设施使用的账号端口：飞书用户授权提醒要按表 DSL 读 `users`（取「第一个账号」
+// 的邮箱），它没有 ActionContext、走不了 `Account` 的用例入口，但表声明是唯一事实
+// 源，不该在别处复制一份。只导出**声明**，读写仍由调用方按自己的场景组装。
+pub(crate) use user::table::user_table_spec;
+
 // module 层（装配与 Action 文件）的统一入口：模块上下文与少量共享类型。
 pub(crate) use domain::authz_version::LockedUserCredential;
 pub(crate) use domain::context::Account;

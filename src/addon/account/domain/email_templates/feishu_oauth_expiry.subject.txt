@@ -1,0 +1,1 @@
+{{system_name}} 飞书用户授权已满 {{days_since_authorized}} 天：请重新授权
