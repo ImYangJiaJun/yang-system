@@ -62,6 +62,17 @@ const PERMISSION_NOTE =
 
 const DEFAULT_TIMEZONE = "Asia/Shanghai";
 
+/// 第三步六个可选回填扩展列（设计 §5.1）：与 `CreateApprovalConfigInput` 同键名，
+/// 空 = 不回填该列。键名同时用作表单与提交 payload 的字段名。
+const EXTENDED_BACKFILL_FIELDS = [
+  { key: "statusField", label: "申请状态回填列" },
+  { key: "flowField", label: "审批流程回填列" },
+  { key: "startTimeField", label: "发起时间回填列" },
+  { key: "endTimeField", label: "完成时间回填列" },
+  { key: "departmentField", label: "发起人部门回填列" },
+  { key: "handlerField", label: "当前处理人回填列" },
+] as const;
+
 export type ApprovalConfigDialogProps = {
   client: ApprovalWizardClient;
   onCancel: () => void;
@@ -123,6 +134,20 @@ export function ApprovalConfigDialog({
     initialConfig?.backfillField ?? "",
   );
   const [backfillManual, setBackfillManual] = useState(false);
+  // 六个可选回填扩展列：空串 = 不回填。
+  const [extendedFields, setExtendedFields] = useState<Record<string, string>>(
+    () => ({
+      statusField: initialConfig?.statusField ?? "",
+      flowField: initialConfig?.flowField ?? "",
+      startTimeField: initialConfig?.startTimeField ?? "",
+      endTimeField: initialConfig?.endTimeField ?? "",
+      departmentField: initialConfig?.departmentField ?? "",
+      handlerField: initialConfig?.handlerField ?? "",
+    }),
+  );
+  const [extendedManual, setExtendedManual] = useState<Record<string, boolean>>(
+    {},
+  );
   const [timezone, setTimezone] = useState(
     initialConfig?.baseTimezone ?? DEFAULT_TIMEZONE,
   );
@@ -272,6 +297,12 @@ export function ApprovalConfigDialog({
   async function submit() {
     setSubmitting(true);
     setSubmitError(null);
+    // 有值才带、空串归 None（与后端「空串 = 不回填」口径一致）。
+    const extended: Partial<CreateApprovalConfigInput> = {};
+    for (const { key } of EXTENDED_BACKFILL_FIELDS) {
+      const value = extendedFields[key]?.trim();
+      if (value) extended[key] = value;
+    }
     const input: CreateApprovalConfigInput = {
       baseToken,
       tableId,
@@ -279,6 +310,7 @@ export function ApprovalConfigDialog({
       applicantField,
       backfillField,
       baseTimezone: timezone,
+      ...extended,
       maps: Object.entries(maps)
         .filter(([, field]) => field !== "")
         .map(([widgetId, bitableField]) => ({
@@ -296,6 +328,7 @@ export function ApprovalConfigDialog({
           maps: input.maps,
           baseTimezone: timezone,
           ...(title !== initialConfig.title ? { title } : {}),
+          ...extended,
         });
       } else {
         await client.createConfig(input);
@@ -689,6 +722,28 @@ export function ApprovalConfigDialog({
               onChange={setBackfillField}
               disabled={Boolean(initialConfig)}
             />
+            {EXTENDED_BACKFILL_FIELDS.map((field) => (
+              <FieldPick
+                key={field.key}
+                label={field.label}
+                description="留空则不回填该列。"
+                fields={fields}
+                value={extendedFields[field.key] ?? ""}
+                manual={extendedManual[field.key] ?? false}
+                onManualChange={(manual) =>
+                  setExtendedManual((current) => ({
+                    ...current,
+                    [field.key]: manual,
+                  }))
+                }
+                onChange={(value) =>
+                  setExtendedFields((current) => ({
+                    ...current,
+                    [field.key]: value,
+                  }))
+                }
+              />
+            ))}
             <div className="space-y-1.5">
               <Label htmlFor="approval-timezone">Base 时区（IANA 名）</Label>
               <Input
@@ -735,6 +790,19 @@ export function ApprovalConfigDialog({
                   backfillField
                 }
               />
+              {EXTENDED_BACKFILL_FIELDS.map((field) => {
+                const value = extendedFields[field.key] ?? "";
+                return value.trim() ? (
+                  <SummaryRow
+                    key={field.key}
+                    label={field.label}
+                    value={
+                      fields.find((f) => f.fieldId === value)?.fieldName ??
+                      value
+                    }
+                  />
+                ) : null;
+              })}
               <SummaryRow label="时区" value={timezone} />
             </dl>
             <div className="max-h-60 overflow-auto space-y-2 text-sm">

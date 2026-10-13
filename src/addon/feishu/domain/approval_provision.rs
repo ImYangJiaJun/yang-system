@@ -36,7 +36,7 @@ use super::approval_match::{
     columns_from_fields, match_fields, resolve_field_coord, Column, FieldMapping, FormWidget,
     MatchOutcome,
 };
-use super::bitable::{list_all_fields, BitableCoordinates};
+use super::bitable::{list_all_fields, BitableCoordinates, FieldItem};
 use super::context::FeishuContext;
 use super::outbound::{OutboundTransport, Sleeper};
 use super::repository::all_pages;
@@ -54,6 +54,14 @@ pub(crate) struct ProvisionInput<'a> {
     pub(crate) backfill_field: &'a str,
     pub(crate) base_timezone: &'a str,
     pub(crate) maps: Option<&'a [FieldMapping]>,
+    /// 六个可选回填目标列（设计 §5.1）。`field_id` **或**列名都接受；
+    /// `None`/空串 = 不回填该列。给了就在建配置时校验目标列存在且类型匹配。
+    pub(crate) status_field: Option<&'a str>,
+    pub(crate) flow_field: Option<&'a str>,
+    pub(crate) start_time_field: Option<&'a str>,
+    pub(crate) end_time_field: Option<&'a str>,
+    pub(crate) department_field: Option<&'a str>,
+    pub(crate) handler_field: Option<&'a str>,
 }
 
 /// 建配置失败。
@@ -117,6 +125,13 @@ pub(crate) struct ProvisionPlan {
     pub(crate) approval_code: String,
     pub(crate) applicant_field_id: String,
     pub(crate) backfill_field_id: String,
+    /// 六个可选回填目标列的 `field_id`（设计 §5.1）。`None` = 该列不回填。
+    pub(crate) status_field_id: Option<String>,
+    pub(crate) flow_field_id: Option<String>,
+    pub(crate) start_time_field_id: Option<String>,
+    pub(crate) end_time_field_id: Option<String>,
+    pub(crate) department_field_id: Option<String>,
+    pub(crate) handler_field_id: Option<String>,
     pub(crate) base_timezone: String,
     /// 审批定义的 `form` 原文快照。
     ///
@@ -209,6 +224,22 @@ pub(crate) async fn build_plan(
         ]));
     }
     let columns = columns_from_fields(&fields);
+
+    // 六个可选回填目标列：给了就校验存在且类型匹配（设计 §5.1），全部原因一次性返回。
+    // 放在取定义之前——列不对时省掉一次飞书往返。
+    let reasons = check_backfill_targets(
+        &columns,
+        &fields,
+        input.status_field,
+        input.flow_field,
+        input.start_time_field,
+        input.end_time_field,
+        input.department_field,
+        input.handler_field,
+    );
+    if !reasons.is_empty() {
+        return Err(ProvisionError::Invalid(reasons));
+    }
 
     let definition = get_approval_definition(transport, sleeper, tokens, input.approval_code)
         .await
@@ -386,12 +417,99 @@ fn plan(
         // **存 id**：改列名不会让配置失效。
         applicant_field_id: applicant.field_id.clone(),
         backfill_field_id: backfill.field_id.clone(),
+        // 六个可选回填列：坐标解析成 id（`None`/空/未命中都落 `None`）。类型与存在性
+        // 已在 `build_plan` 的 `check_backfill_targets` 里查过，这里只管存 id。
+        status_field_id: resolve_optional_id(columns, input.status_field),
+        flow_field_id: resolve_optional_id(columns, input.flow_field),
+        start_time_field_id: resolve_optional_id(columns, input.start_time_field),
+        end_time_field_id: resolve_optional_id(columns, input.end_time_field),
+        department_field_id: resolve_optional_id(columns, input.department_field),
+        handler_field_id: resolve_optional_id(columns, input.handler_field),
         base_timezone: input.base_timezone.trim().to_string(),
         approval_name: approval_name.trim().to_string(),
         form_snapshot: form_snapshot.to_string(),
         columns: columns.to_vec(),
         widgets,
     })
+}
+
+/// 把「`field_id` 或列名」的可选坐标解析成 `field_id`：`None`/空/未命中都返回 `None`。
+///
+/// 与 [`resolve_field_coord`] 同一套解析（优先 id、退到列名），只是把「没给」也算
+/// 成 `None`——六个可选回填列都用它。
+pub(crate) fn resolve_optional_id(columns: &[Column], given: Option<&str>) -> Option<String> {
+    given
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| resolve_field_coord(columns, value))
+        .map(|column| column.field_id.clone())
+}
+
+/// 校验六个可选回填目标列：列存在且类型匹配（设计 §5.1）。未给（`None`/空）跳过。
+///
+/// 全部原因一次性返回——照本模块「配置期报全」的纪律，改一条看一条要多跑几轮。
+/// 供 `build_plan` 与 `update_config` 共用。
+#[allow(clippy::too_many_arguments)] // 8 个参数：六列各一个 Option 坐标，收成结构体会改动更大的接口面（照 bootstrap.rs 同款处置）。
+pub(crate) fn check_backfill_targets(
+    columns: &[Column],
+    fields: &[FieldItem],
+    status_field: Option<&str>,
+    flow_field: Option<&str>,
+    start_time_field: Option<&str>,
+    end_time_field: Option<&str>,
+    department_field: Option<&str>,
+    handler_field: Option<&str>,
+) -> Vec<String> {
+    // (中文名, 输入坐标, 允许的目标列类型码)。顺序与 `ProvisionInput` 的六字段一致。
+    let targets: [(&str, Option<&str>, &[i32]); 6] = [
+        ("申请状态", status_field, &[1, 3]),
+        ("审批流程", flow_field, &[1]),
+        ("发起时间", start_time_field, &[5]),
+        ("完成时间", end_time_field, &[5]),
+        ("发起人部门", department_field, &[1]),
+        ("当前处理人", handler_field, &[11]),
+    ];
+    let mut reasons = Vec::new();
+    for (label, given, allowed) in targets {
+        let Some(given) = given.map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let Some(column) = resolve_field_coord(columns, given) else {
+            reasons.push(format!("{label}回填列在多维表格里没有对应列（给定「{given}」）"));
+            continue;
+        };
+        // 列由 `columns_from_fields(fields)` 派生，取不到字段或类型码缺失都不拦——照
+        // `check_coordinate_field` 的既有纪律：拿不到元数据就不拒绝本来可用的配置。
+        let Some(field) = fields.iter().find(|field| field.field_id == column.field_id) else {
+            continue;
+        };
+        let Some(field_type) = field.field_type else {
+            continue;
+        };
+        if !allowed.contains(&field_type) {
+            let type_label = field
+                .ui_type
+                .clone()
+                .unwrap_or_else(|| format!("type={field_type}"));
+            reasons.push(format!(
+                "{label}回填列「{}」的类型是 {type_label}（type={field_type}），应为{}",
+                column.field_name,
+                expected_label(allowed),
+            ));
+        }
+    }
+    reasons
+}
+
+/// 目标列类型约束的可读名（设计 §5.1 的表）。
+fn expected_label(allowed: &[i32]) -> &'static str {
+    match allowed {
+        [1, 3] => "文本或单选",
+        [1] => "文本",
+        [5] => "日期",
+        [11] => "人员",
+        _ => "未知类型",
+    }
 }
 
 /// 把计划落进调用方的事务：**配置与映射同一事务**，缺一不可。
@@ -449,6 +567,22 @@ pub(crate) async fn insert_plan(
         serde_json::json!(&plan.applicant_field_id),
     );
     config_row.insert("backfill_field", serde_json::json!(&plan.backfill_field_id));
+    // 六个可选回填列（设计 §5.1）：`None` 落 `NULL`，与 `option_source_key` 同一写法。
+    config_row.insert("status_field", serde_json::json!(&plan.status_field_id));
+    config_row.insert("flow_field", serde_json::json!(&plan.flow_field_id));
+    config_row.insert(
+        "start_time_field",
+        serde_json::json!(&plan.start_time_field_id),
+    );
+    config_row.insert(
+        "end_time_field",
+        serde_json::json!(&plan.end_time_field_id),
+    );
+    config_row.insert(
+        "department_field",
+        serde_json::json!(&plan.department_field_id),
+    );
+    config_row.insert("handler_field", serde_json::json!(&plan.handler_field_id));
     config_row.insert("base_timezone", serde_json::json!(&plan.base_timezone));
     config_row.insert("enabled", serde_json::json!(true));
     // 定义原文快照。存原文而不是 `FormWidget` 序列化回去的结果——后者只保留本服务
@@ -860,6 +994,23 @@ mod tests {
             backfill_field: backfill,
             base_timezone: "Asia/Shanghai",
             maps: None,
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
+        }
+    }
+
+    /// 一个字段的最小 `FieldItem`：只给类型校验要用的两样。
+    fn field(id: &str, name: &str, field_type: i32) -> FieldItem {
+        FieldItem {
+            field_id: id.to_string(),
+            field_name: name.to_string(),
+            field_type: Some(field_type),
+            ui_type: None,
+            property: None,
         }
     }
 
@@ -1301,5 +1452,143 @@ mod tests {
             None,
             "没有 field_name 这一列时也要跳过"
         );
+    }
+
+    #[test]
+    fn backfill_targets_accept_matching_types() {
+        let fields = [
+            field("fldStatus", "申请状态", 1),
+            field("fldFlow", "审批流程", 1),
+            field("fldStart", "发起时间", 5),
+            field("fldEnd", "完成时间", 5),
+            field("fldDept", "发起人部门", 1),
+            field("fldHandler", "当前处理人", 11),
+        ];
+        let columns = columns_from_fields(&fields);
+        let reasons = check_backfill_targets(
+            &columns,
+            &fields,
+            Some("fldStatus"),
+            Some("fldFlow"),
+            Some("fldStart"),
+            Some("fldEnd"),
+            Some("fldDept"),
+            Some("fldHandler"),
+        );
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn status_accepts_single_select_but_rejects_other_types() {
+        let fields = [field("fldSel", "状态", 3), field("fldNum", "状态数", 2)];
+        let columns = columns_from_fields(&fields);
+        // 单选(3) 是允许的（设计 §5.1：申请状态 = 文本(1) 或 单选(3)）。
+        assert!(check_backfill_targets(
+            &columns,
+            &fields,
+            Some("fldSel"),
+            None,
+            None,
+            None,
+            None,
+            None
+        )
+        .is_empty());
+        // 数字(2) 不是。
+        let reasons =
+            check_backfill_targets(&columns, &fields, Some("fldNum"), None, None, None, None, None);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].contains("申请状态") && reasons[0].contains("文本或单选"),
+            "{}",
+            reasons[0]
+        );
+    }
+
+    #[test]
+    fn every_backfill_mismatch_is_reported_at_once() {
+        // 六列全错（或不存在）→ 六条原因一次报全，不遇到第一条就停。
+        let fields = [field("fldNum", "数字列", 2), field("fldMulti", "多选列", 4)];
+        let columns = columns_from_fields(&fields);
+        let reasons = check_backfill_targets(
+            &columns,
+            &fields,
+            Some("fldNum"),   // 申请状态：要 1/3，给了 2
+            Some("没有的列"), // 审批流程：不存在
+            Some("fldMulti"), // 发起时间：要 5，给了 4
+            Some("也没有"),   // 完成时间：不存在
+            Some("fldNum"),   // 发起人部门：要 1，给了 2
+            Some("fldMulti"), // 当前处理人：要 11，给了 4
+        );
+        assert_eq!(reasons.len(), 6, "六列都要报出来: {reasons:?}");
+        assert!(reasons[0].contains("申请状态"), "{}", reasons[0]);
+        assert!(
+            reasons[1].contains("审批流程") && reasons[1].contains("没有对应列"),
+            "{}",
+            reasons[1]
+        );
+        assert!(
+            reasons[5].contains("当前处理人") && reasons[5].contains("人员"),
+            "{}",
+            reasons[5]
+        );
+    }
+
+    #[test]
+    fn absent_or_blank_backfill_targets_are_skipped() {
+        let fields = [field("fldNum", "数字列", 2)];
+        let columns = columns_from_fields(&fields);
+        // 全 `None`，或给了空串/纯空白：一条都不查，不报错。
+        assert!(check_backfill_targets(
+            &columns,
+            &fields,
+            None,
+            None,
+            Some(""),
+            Some("  "),
+            None,
+            None
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn plan_resolves_backfill_targets_to_field_ids() {
+        let plan = plan(
+            &ProvisionInput {
+                // 给列名，要解析成 id；给 id，直接用。
+                status_field: Some("申请状态"),
+                handler_field: Some("fldHandler"),
+                ..input("fldP", "fldB")
+            },
+            "t",
+            &[FormWidget {
+                id: "w1".to_string(),
+                name: "SWIFT Address".to_string(),
+                r#type: "input".to_string(),
+                required: false,
+                option: None,
+                external_data: None,
+                value: serde_json::Value::Null,
+                children: Vec::new(),
+            }],
+            &[
+                column("fldP", "申请人", &[]),
+                column("fldB", "审批编号", &[]),
+                column("fldStatus", "申请状态", &[]),
+                column("fldHandler", "当前处理人", &[]),
+                column("fldC", "SWIFT Address", &[]),
+            ],
+            &BTreeMap::new(),
+            "[]",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            plan.status_field_id.as_deref(),
+            Some("fldStatus"),
+            "存 id 不存列名"
+        );
+        assert_eq!(plan.handler_field_id.as_deref(), Some("fldHandler"));
+        assert_eq!(plan.flow_field_id, None, "未给的列落 None");
     }
 }

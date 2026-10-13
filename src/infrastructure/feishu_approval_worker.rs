@@ -138,24 +138,31 @@ impl ResumeCursor {
 /// 生产装配仍只有 `bootstrap.rs` 一处调用 [`ApprovalDispatchHandle::new`]。
 #[derive(Clone)]
 pub struct ApprovalDispatchHandle {
-    trigger: mpsc::UnboundedSender<()>,
+    trigger: mpsc::UnboundedSender<(i64, Option<String>)>,
 }
 
 impl ApprovalDispatchHandle {
     /// 建一对：句柄给 Action，接收端给 worker。
     ///
     /// 无界通道：触发是低频动作，没有一个值得让 HTTP 请求等它的背压。
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<()>) {
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<(i64, Option<String>)>) {
         let (trigger, requests) = mpsc::unbounded_channel();
         (Self { trigger }, requests)
     }
 
-    /// 请求立刻跑一轮全表。
+    /// 请求立刻跑一轮全表，并把该配置的受理发起人（已解析成 open_id）先落库。
+    ///
+    /// `config_id` 标识本次受理命中的配置；`applicant` 为 `None` 时语义与旧行为
+    /// 完全一致（只跑一轮，不落发起人）。
     ///
     /// 接收端已消失（worker 没起或正在退出）时返回错误——静默丢弃会让按钮
     /// 显示「已受理」而实际什么都没发生。
-    pub(crate) fn request_dispatch(&self) -> Result<(), BaseError> {
-        self.trigger.send(()).map_err(|_| {
+    pub(crate) fn request_dispatch(
+        &self,
+        config_id: i64,
+        applicant: Option<String>,
+    ) -> Result<(), BaseError> {
+        self.trigger.send((config_id, applicant)).map_err(|_| {
             BaseError::ConfigError("审批派发 Worker 未在运行，无法受理全表派发".to_string())
         })
     }
@@ -176,7 +183,7 @@ impl ApprovalDispatchWorker {
         tools: Arc<Tools>,
         settings: &FeishuSettings,
         context: Arc<FeishuContext>,
-        requests: mpsc::UnboundedReceiver<()>,
+        requests: mpsc::UnboundedReceiver<(i64, Option<String>)>,
     ) -> anyhow::Result<Self> {
         let deployment = deployment_namespace(&tools)?;
         let cache = Arc::new(RedisTenantTokenCache::new(
@@ -286,7 +293,7 @@ impl RoundRunner {
 async fn run_loop(
     runner: RoundRunner,
     idle_poll: Duration,
-    mut requests: mpsc::UnboundedReceiver<()>,
+    mut requests: mpsc::UnboundedReceiver<(i64, Option<String>)>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     // 启动后**立即**跑第一轮（`interval` 的首个 tick 是立刻可用的），兼作
@@ -302,18 +309,22 @@ async fn run_loop(
                     return;
                 }
             }
-            // 手动触发：投一个信号即跑一轮，与自动轮询走**完全同一条路径**。
-            Some(()) = requests.recv() => {
-                run_round(&runner, &mut cursor).await;
+            // 手动触发：投一个信号即跑一轮，与自动轮询走**完全同一条路径**；
+            // 携带的受理发起人（已解析成 open_id）随本轮落到待处理任务行。
+            Some((config_id, applicant)) = requests.recv() => {
+                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id))).await;
             }
             _ = ticker.tick() => {
-                run_round(&runner, &mut cursor).await;
+                run_round(&runner, &mut cursor, None).await;
             }
         }
     }
 }
 
-/// 跑一轮：播种 → 认领 → 逐条处理 → 写回结果。
+/// 跑一轮：播种 → （受理发起人落库）→ 认领 → 逐条处理 → 写回结果。
+///
+/// `applicant` 是手动受理请求携带的发起人（已解析成 open_id）；`None` 表示本轮
+/// 由自动轮询触发，不落发起人。
 ///
 /// # 播种是这条链路的地基
 ///
@@ -327,13 +338,23 @@ async fn run_loop(
 /// 没有播种的话它们**永远**不会被再认领。播种把「回填列为空」当成唯一判据，
 /// 于是 `creating`（崩溃遗留）、`terminal`（人工清空字段要重试）、`backfilled`
 /// （清空字段要重发）都会被拉回 `pending`。
-async fn run_round(runner: &RoundRunner, cursor: &mut ResumeCursor) {
+async fn run_round(
+    runner: &RoundRunner,
+    cursor: &mut ResumeCursor,
+    applicant: Option<(i64, String)>,
+) {
     let started = std::time::Instant::now();
     match seed_tasks(runner).await {
         Ok(0) => {}
         Ok(seeded) => tracing::info!(seeded, "审批派发播种了新任务"),
         // 播种失败不中断整轮：已有的待处理任务仍然值得跑，而播种下一轮还会再来。
         Err(error) => tracing::warn!(error = %error, "审批派发播种失败"),
+    }
+    // 受理请求携带的发起人：**播种之后**落库，本轮新播种的行此刻已是 `pending`，
+    // 与既有待处理行一起被写入。放在播种前会漏掉本轮新行——首点会静默回退到表格列
+    // （可能是错的或空的），要再点一次才对（见 [`persist_applicant`]）。
+    if let Some((config_id, open_id)) = applicant {
+        persist_applicant(runner, config_id, &open_id).await;
     }
     let claimed = match claim(runner, cursor).await {
         Ok(claimed) => claimed,
@@ -415,7 +436,17 @@ struct ClaimedTask {
     table_id: String,
     approval_code: String,
     applicant_field: String,
+    /// 发起人 open_id：全表异步受理时 Action 解析后落 `feishu_approval_task_applicant`，
+    /// 这里按 task_id 取（设计 §6.3）。`Some` 时替代表格列读取。
+    applicant_open_id: Option<String>,
     backfill_field: String,
+    /// 六个可选回填目标（配置里的 `field_id`；`None` = 不回填）。
+    status_field: Option<String>,
+    flow_field: Option<String>,
+    start_time_field: Option<String>,
+    end_time_field: Option<String>,
+    department_field: Option<String>,
+    handler_field: Option<String>,
     timezone_offset: FixedOffset,
     widgets: Vec<WidgetMap>,
     form_snapshot: String,
@@ -564,6 +595,87 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
     Ok(seeded)
 }
 
+/// 把受理请求携带的发起人 open_id 落到该配置下的待处理任务行（设计 §6.3）。
+///
+/// # 为什么在播种之后
+///
+/// 按钮受理的语义是「本轮把这些行按受理发起人提单」。新行的任务行由 [`seed_tasks`]
+/// 在本轮播种出来，播种前写会**漏掉本轮新行**——首点会静默回退到表格列（可能是错的
+/// 或空的），要再点一次才对。所以写在播种之后、认领之前。
+///
+/// # 失败只 warn
+///
+/// 落库失败不该中断整轮：受理发起人只是**增强**，任务照旧处理（回退表格列），
+/// 下一轮按钮或轮询还会再写。
+async fn persist_applicant(runner: &RoundRunner, config_id: i64, open_id: &str) {
+    let built = runner
+        .context
+        .approval_tasks()
+        .query()
+        .select_fields(&["id"])
+        .and_then(|query| query.where_eq("config_id", serde_json::json!(config_id)))
+        .and_then(|query| query.where_eq("state", serde_json::json!("pending")));
+    let rows = match built {
+        Ok(query) => match all_pages(query, SEED_MAX_TASK_PAGES).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, config_id, "读取待处理任务行失败，受理发起人未落库");
+                return;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, config_id, "构造待处理任务查询失败，受理发起人未落库");
+            return;
+        }
+    };
+
+    for row in rows {
+        let task_id: i64 = match row.require("id") {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(error = %error, "任务行缺少 id，跳过受理发起人落库");
+                continue;
+            }
+        };
+        if let Err(error) = upsert_applicant(runner, task_id, open_id).await {
+            tracing::warn!(error = %error, task_id, "受理发起人落库失败");
+        }
+    }
+}
+
+/// 按 task_id upsert 一行受理发起人：已有则更新 `open_id`，没有则插入。
+async fn upsert_applicant(runner: &RoundRunner, task_id: i64, open_id: &str) -> anyhow::Result<()> {
+    let existing = runner
+        .context
+        .approval_task_applicants()
+        .query()
+        .where_eq("task_id", serde_json::json!(task_id))?
+        .optional()
+        .await?;
+    if existing.is_some() {
+        let mut row = Record::new();
+        row.insert("open_id", serde_json::json!(open_id));
+        runner
+            .context
+            .approval_task_applicants()
+            .query()
+            .where_eq("task_id", serde_json::json!(task_id))?
+            .update(row)
+            .await?;
+    } else {
+        let mut row = Record::new();
+        row.insert("task_id", serde_json::json!(task_id));
+        row.insert("open_id", serde_json::json!(open_id));
+        runner
+            .context
+            .approval_task_applicants()
+            .query()
+            .insert(row)
+            .await?;
+    }
+    Ok(())
+}
+
 /// 认领待处理任务。
 ///
 /// 判据是 `feishu_approval_task` 的状态，**不是**多维表格的回填字段是否为空
@@ -644,6 +756,7 @@ async fn mark_terminal(runner: &RoundRunner, id: i64, reason: &str) {
 /// 读一条任务的配置与字段映射。
 async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<ClaimedTask>> {
     let config_id: i64 = row.require("config_id")?;
+    let task_id: i64 = row.require("id")?;
 
     let config = runner
         .context
@@ -655,6 +768,20 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         .await?;
     let Some(config) = config else {
         return Ok(None);
+    };
+
+    // 发起人是**后续查询**，不是认领批的列（认领投影只有 id/record_id/config_id）：
+    // 全表异步受理拿不到发起人，Action 解析后落在属性扩展表里（设计 §6.3）。
+    let applicant = runner
+        .context
+        .approval_task_applicants()
+        .query()
+        .where_eq("task_id", serde_json::json!(task_id))?
+        .optional()
+        .await?;
+    let applicant_open_id = match applicant {
+        Some(applicant) => applicant.optional::<String>("open_id")?,
+        None => None,
     };
 
     let map_rows = runner
@@ -693,14 +820,35 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
     };
 
     Ok(Some(ClaimedTask {
-        id: row.require("id")?,
+        id: task_id,
         config_id,
         record_id: row.require("record_id")?,
         base_token: config.require("base_token")?,
         table_id: config.require("table_id")?,
         approval_code: config.require("approval_code")?,
         applicant_field: config.require("applicant_field")?,
+        applicant_open_id,
         backfill_field: config.require("backfill_field")?,
+        // 空串与 NULL 同义（设计 §5.1）：两条读路径（Action 与 worker）口径一致，
+        // 各做一次归一化，不依赖配置写入路径把空串存成 NULL。
+        status_field: config
+            .optional::<String>("status_field")?
+            .filter(|v| !v.trim().is_empty()),
+        flow_field: config
+            .optional::<String>("flow_field")?
+            .filter(|v| !v.trim().is_empty()),
+        start_time_field: config
+            .optional::<String>("start_time_field")?
+            .filter(|v| !v.trim().is_empty()),
+        end_time_field: config
+            .optional::<String>("end_time_field")?
+            .filter(|v| !v.trim().is_empty()),
+        department_field: config
+            .optional::<String>("department_field")?
+            .filter(|v| !v.trim().is_empty()),
+        handler_field: config
+            .optional::<String>("handler_field")?
+            .filter(|v| !v.trim().is_empty()),
         timezone_offset,
         widgets,
         form_snapshot: config.optional("form_snapshot")?.unwrap_or_default(),
@@ -798,6 +946,13 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
             record_id: &task.record_id,
             cells: &cells,
             applicant_field: &task.applicant_field,
+            applicant: task.applicant_open_id.clone(),
+            status_field: task.status_field.as_deref(),
+            flow_field: task.flow_field.as_deref(),
+            start_time_field: task.start_time_field.as_deref(),
+            end_time_field: task.end_time_field.as_deref(),
+            department_field: task.department_field.as_deref(),
+            handler_field: task.handler_field.as_deref(),
             backfill_field_name: &backfill_field_name,
             approval_code: &task.approval_code,
             widgets: &task.widgets,
@@ -837,6 +992,17 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
     // 清租约：状态已经是稳定状态，不需要再让租约复活它。
     row.insert("lease_until", serde_json::Value::Null);
 
+    // 创建成功时把实例坐标一并落库：`instance_code` / `serial_number` 两列早已存在
+    // 却一直是 NULL（设计 §12 缺口 10），事件订阅与 60012 对账都拿不到实例坐标。
+    if let DispatchResult::Backfilled {
+        serial_number,
+        instance_code,
+    } = outcome
+    {
+        row.insert("instance_code", serde_json::json!(instance_code));
+        row.insert("serial_number", serde_json::json!(serial_number));
+    }
+
     let result = match runner
         .context
         .approval_tasks()
@@ -872,7 +1038,7 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
     // 各有出处。
     //
     // 摘要键避开 `token`/`hash` 等敏感词（`validate_summary_key` 会拒收）。
-    if let DispatchResult::Backfilled { serial_number } = outcome {
+    if let DispatchResult::Backfilled { serial_number, .. } = outcome {
         // 本函数不返回 `Result`（状态写失败只记日志，不该中断「报告刚发生的事」），
         // 所以构造链里的 `?` 全部改成显式 `match` + 日志。
         let constructed: Result<_, BaseError> = (|| {

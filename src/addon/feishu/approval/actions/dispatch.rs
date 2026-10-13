@@ -36,10 +36,13 @@ use yang_base::BaseError;
 use crate::addon::feishu::approval::domain::request_log_writer::{
     normalized_requested_by, outcome_for, Outcome, RequestLog,
 };
+use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
     dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
 };
+use crate::addon::feishu::domain::outbound::{FailureKind, OutboundFailure, OutboundTransport, Sleeper};
+use crate::addon::feishu::domain::tenant_token::TenantTokenProvider;
 use crate::addon::feishu::domain::approval_provision::{
     build_plan, insert_plan, ProvisionError, ProvisionInput, ProvisionPlan,
 };
@@ -50,6 +53,17 @@ use crate::config::FeishuSettings;
 use crate::feishu_approval_worker::ApprovalDispatchHandle;
 
 use crate::addon::feishu::domain::approval_dispatch::Backfill;
+
+/// 发起人姓名解析失败（未命中 / 重名多命中 / 通讯录出站失败）的业务码。
+///
+/// 与 `option/actions/approval_options.rs` 的 `codes` 模块同域不重号。
+const APPLICANT_UNRESOLVED: i32 = 40005;
+
+/// 通讯录 scope 未开通的错误码（真机实测 99991672）。
+///
+/// `outbound::fatal_hint` 未收录它（那是共享文件的错误码登记点，本批不改），
+/// 而这是本期最可能的真实失败——scope 正在等审核，所以在这里点名。
+const CODE_CONTACT_SCOPE_MISSING: i32 = 99991672;
 
 /// 派发端点的输入契约。
 ///
@@ -70,6 +84,12 @@ pub(super) struct DispatchInput {
     /// 未带或 trim 后为空时落库统一记 `feishu-workflow`。仅记录用，不影响派发。
     #[serde(default)]
     pub(super) requested_by: Option<String>,
+    /// 发起人（工作流触发人）。真机 `$.step_btn.user` 渲染成**姓名**（设计 M11 定论），
+    /// 所以这里是**姓名**，由本端点经 contact 搜索解析成 open_id 后使用（§6.2）；
+    /// 解析失败一律 fail（可行动文案），不落等待态。传了才走新路径并回写
+    /// applicant_field 列（D2 缺省回退旧行为）。
+    #[serde(default)]
+    pub(super) applicant: Option<String>,
     /// 目标审批定义。**配置不存在时**由它建配置（首次调用）。
     ///
     /// 只有三条配置信息是「只有调用方知道」的——要提哪个定义、谁当发起人、
@@ -366,7 +386,7 @@ async fn handle_dispatch(
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
-        Some(record_id) => match dispatch_single(ctx, context, config_id, record_id).await {
+        Some(record_id) => match dispatch_single(ctx, context, config_id, record_id, input.applicant.clone()).await {
             Ok(outcome) => Ok(outcome),
             // 单条内部的 `?` 出口：config_id 在调用点已知，失败记录带上它。
             Err(error) => Ok(DispatchOutcome::internal(Some(config_id), error)),
@@ -376,13 +396,50 @@ async fn handle_dispatch(
         // 受理**必须在白名单校验之后**：把 Token 当成「可以指任意表格」的通行证
         // 是本端点最大的越权面。上面那句 `config` 查询就是白名单，通过了才放行。
         None => {
+            // 受理前先解析发起人（若有）：值形态是**姓名**（M11），要解析成 open_id
+            // 才能随信号交给 worker 落库（设计 §6.3）。未传/空白 → 现状，不建出站栈。
+            let resolved = if input
+                .applicant
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .is_some()
+            {
+                let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
+                    return Ok(DispatchOutcome::fail(50301, Some(config_id), "飞书出站凭证未配置"));
+                };
+                let outbound = match outbound_setup::build(ctx, settings) {
+                    Ok(outbound) => outbound,
+                    Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
+                };
+                match resolve_applicant_param(
+                    outbound.transport(),
+                    outbound.sleeper(),
+                    &outbound.tokens,
+                    input.applicant.as_deref(),
+                )
+                .await
+                {
+                    Ok(open_id) => open_id,
+                    Err(message) => {
+                        return Ok(DispatchOutcome::fail(
+                            APPLICANT_UNRESOLVED,
+                            Some(config_id),
+                            message,
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+
             // 拿不到句柄说明 worker 没起（凭证缺失）。**不返回 accepted**——
             // 那会让工作流显示成功而实际什么都没发生。
             let handle = match ctx.tools().extension::<ApprovalDispatchHandle>() {
                 Ok(handle) => handle,
                 Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
             };
-            if let Err(error) = handle.request_dispatch() {
+            if let Err(error) = handle.request_dispatch(config_id, resolved) {
                 return Ok(DispatchOutcome::internal(Some(config_id), error));
             }
 
@@ -489,6 +546,13 @@ async fn provision(
             // 带偏移量——猜错会让审批里的时间整体偏移，所以必须由配置给定。
             base_timezone: &settings.approval_base_timezone,
             maps: None,
+            // 首调自动建配置不带六个可选回填列（设计 §5.1）——那六列只有控制台才配。
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
         },
     )
     .await?;
@@ -620,6 +684,52 @@ async fn write_config_failure(
         .await
 }
 
+/// 请求里的 `applicant`（**姓名**）→ 供编排使用的 open_id。
+///
+/// 返回 `Ok(Some(open_id))`（唯一命中）/ `Ok(None)`（未传或 trim 后为空——完全走
+/// 现状读表格列）/ `Err(可行动文案)`（未命中、重名多命中、或通讯录出站失败）。
+///
+/// 抽成独立函数是为了能被单测直接驱动：`dispatch_single` 本身要 `ActionContext`
+/// 才能读配置行，而这条解析链路的三个出口（命中/未命中/空白回退）正是本期新增、
+/// 最需要钉住的部分。两条路径（单条同步、全表受理）共用它，口径不会漂。
+async fn resolve_applicant_param(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    applicant: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(name) = applicant.map(str::trim).filter(|name| !name.is_empty()) else {
+        return Ok(None);
+    };
+    match resolve_applicant(transport, sleeper, tokens, name).await {
+        Ok(ApplicantResolution::Resolved { open_id }) => Ok(Some(open_id)),
+        Ok(ApplicantResolution::NotFound) => Err(format!(
+            "发起人姓名解析失败：未找到「{name}」，请检查工作流变量或改用唯一姓名"
+        )),
+        Ok(ApplicantResolution::Ambiguous { candidates }) => Err(format!(
+            "发起人姓名解析失败：存在多个同名「{name}」（{}），请检查工作流变量或改用唯一姓名",
+            candidates.join("、")
+        )),
+        Err(failure) => Err(applicant_failure_message(&failure)),
+    }
+}
+
+/// 姓名解析的**出站失败** → 可行动文案（含错误码）。
+///
+/// scope 未开通（99991672）单列：它不是「名字写错了」，而是「应用没这个权限」，
+/// 处置是去开发者后台开通并等审核，与改工作流变量是两回事。
+fn applicant_failure_message(failure: &OutboundFailure) -> String {
+    match failure.kind {
+        FailureKind::Fatal { code } if code == CODE_CONTACT_SCOPE_MISSING => {
+            format!("发起人姓名解析失败：通讯录权限未开通，等待审核（错误码 {code}）")
+        }
+        FailureKind::Fatal { code } => {
+            format!("发起人姓名解析失败（错误码 {code}）：{}", failure.message)
+        }
+        _ => format!("发起人姓名解析失败：{}", failure.message),
+    }
+}
+
 /// 同步处理一条记录。
 ///
 /// 编排逻辑在 `domain::approval_dispatch`；这里负责取配置、读记录、装配出站栈、
@@ -632,6 +742,7 @@ async fn dispatch_single(
     context: &FeishuContext,
     config_id: i64,
     record_id: &str,
+    applicant: Option<String>,
 ) -> Result<DispatchOutcome, BaseError> {
     let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
         return Ok(DispatchOutcome::fail(
@@ -694,6 +805,31 @@ async fn dispatch_single(
     };
 
     let outbound = outbound_setup::build(ctx, settings)?;
+
+    // ---- 发起人姓名解析（§6.2）----
+    //
+    // 请求里的 applicant 是**姓名**（真机 M11：`$.step_btn.user` 渲染成 name），
+    // 要经通讯录搜索解析成 open_id 才能提单。未传/空白 → 完全走现状（读表格列），
+    // 零行为变化；解析失败一律 fail 并可行动文案——**不落等待态**，因为要改的是
+    // 工作流变量，而不是等用户往表格里补数据。
+    let resolved_applicant = match resolve_applicant_param(
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        applicant.as_deref(),
+    )
+    .await
+    {
+        Ok(open_id) => open_id,
+        Err(message) => {
+            return Ok(DispatchOutcome::fail(
+                APPLICANT_UNRESOLVED,
+                Some(config_id),
+                message,
+            ))
+        }
+    };
+
     let coordinates = BitableCoordinates {
         app_token: base_token,
         table_id,
@@ -804,11 +940,19 @@ async fn dispatch_single(
             record_id,
             cells: &cells,
             applicant_field: &applicant_field,
+            // 已在上面解析成 open_id（空/未传时为 None → 编排层回退读表格列）。
+            applicant: resolved_applicant,
             backfill_field_name: &backfill_field_name,
             approval_code: &approval_code,
             widgets: &widgets,
             form_snapshot: config_row.optional("form_snapshot")?.unwrap_or_default(),
             timezone_offset,
+            status_field: config_row.optional::<String>("status_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            flow_field: config_row.optional::<String>("flow_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            start_time_field: config_row.optional::<String>("start_time_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            end_time_field: config_row.optional::<String>("end_time_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            department_field: config_row.optional::<String>("department_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
+            handler_field: config_row.optional::<String>("handler_field")?.filter(|v| !v.trim().is_empty()).as_deref(),
         },
     )
     .await;
@@ -858,6 +1002,7 @@ mod tests {
             table_id: Some("tblsRc9GRRX".to_string()),
             record_id: Some("rec001".to_string()),
             requested_by: Some("测试触发人".to_string()),
+            applicant: None,
             approval_code: None,
             applicant_field: None,
             backfill_field: None,
@@ -1074,6 +1219,91 @@ mod tests {
             serde_json::json!(false),
             "DispatchOutcome::success 必须透传 accepted=false"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 发起人姓名 → open_id 解析（§6.2）
+    // -----------------------------------------------------------------------
+
+    /// 合成一次通讯录搜索响应（`items` 是逗号分隔的命中对象）。
+    fn search_body(items: &str) -> String {
+        format!(r#"{{"code":0,"msg":"ok","data":{{"items":[{items}]}}}}"#)
+    }
+
+    #[tokio::test]
+    async fn applicant_param_resolves_a_unique_name_to_open_id() {
+        // 请求里的 applicant 是**姓名**，解析成 open_id 才交给编排层（进 create 体）。
+        let transport = ReplayTransport::new(vec![(
+            200,
+            search_body(r#"{"open_id":"ou_resolved","name":"杨佳俊"}"#),
+        )]);
+        let result =
+            resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some(" 杨佳俊 ")).await;
+        assert_eq!(result, Ok(Some("ou_resolved".to_string())));
+        assert!(
+            transport.seen().iter().any(|request| request.url
+                == crate::addon::feishu::domain::approval::applicant_search_url()),
+            "必须走 contact/v3/users/search：{:#?}",
+            transport.seen()
+        );
+    }
+
+    #[tokio::test]
+    async fn applicant_param_reports_not_found_with_an_actionable_message() {
+        let transport = ReplayTransport::new(vec![(200, search_body(""))]);
+        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("查无此人"))
+            .await
+        {
+            Err(message) => message,
+            Ok(_) => panic!("未命中必须失败"),
+        };
+        assert!(message.contains("未找到"), "{message}");
+        assert!(message.contains("请检查工作流变量"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn applicant_param_reports_ambiguous_names_with_candidates() {
+        let transport = ReplayTransport::new(vec![(
+            200,
+            search_body(r#"{"open_id":"ou_a","name":"张三"},{"open_id":"ou_b","name":"张三"}"#),
+        )]);
+        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("张三"))
+            .await
+        {
+            Err(message) => message,
+            Ok(_) => panic!("重名必须失败"),
+        };
+        assert!(message.contains("存在多个同名"), "{message}");
+        assert!(message.contains("ou_a"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn applicant_param_maps_missing_scope_to_a_named_hint() {
+        // scope 未开通（等审核）：文案要点名原因与错误码，而不是甩一坨裸响应。
+        let transport = ReplayTransport::new(vec![(
+            200,
+            r#"{"code":99991672,"msg":"no scope"}"#.to_string(),
+        )]);
+        let message = match resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), Some("杨佳俊"))
+            .await
+        {
+            Err(message) => message,
+            Ok(_) => panic!("缺 scope 必须失败"),
+        };
+        assert!(message.contains("通讯录权限未开通，等待审核"), "{message}");
+        assert!(message.contains("99991672"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn applicant_param_blank_or_absent_falls_back_without_a_request() {
+        // 未传 / trim 后为空 → 返回 None（编排层回退读表格列），且**不打出站请求**。
+        for applicant in [None, Some("   ")] {
+            let transport = ReplayTransport::new(vec![]);
+            let result =
+                resolve_applicant_param(&transport, &NoSleep, &e2e_tokens(), applicant).await;
+            assert_eq!(result, Ok(None), "applicant={applicant:?}");
+            assert!(transport.seen().is_empty(), "空白/未传不得打出站请求");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1337,6 +1567,7 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::field_map_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
             None,
         )
     }
@@ -1373,6 +1604,12 @@ mod tests {
                 backfill_field: "fldSerial",
                 base_timezone: "Asia/Shanghai",
                 maps: Some(&maps),
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
             },
         )
         .await;
@@ -1490,6 +1727,7 @@ mod tests {
             let plan = build_plan(&transport, &NoSleep, &tokens, &context, &ProvisionInput {
                 base_token: &source, table_id: E2E_TABLE_ID, approval_code: E2E_APPROVAL_CODE,
                 applicant_field: "fldApplicant", backfill_field: "fldSerial", base_timezone: "Asia/Shanghai", maps: Some(&maps),
+                status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None,
             }).await?;
             let mut transaction = database.transaction().await?;
             let config_id = insert_plan(&context, &mut transaction, &plan).await?;
@@ -1520,10 +1758,10 @@ mod tests {
                 ] } else { vec![] });
                 let tokens = e2e_tokens();
                 let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &fields };
-                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", backfill_field_name: "审批编号", approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
+                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: None, backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
                 let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
                 if label == "正确" {
-                    assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into() });
+                    assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into(), instance_code: "INST-MANUAL".into() });
                     let create = transport.took("Post", &crate::addon::feishu::domain::approval::create_instance_url());
                     let body = create.body.ok_or_else(|| anyhow::anyhow!("缺少提单请求体"))?;
                     let sent: Value = serde_json::from_str(body["form"].as_str().ok_or_else(|| anyhow::anyhow!("缺少表单"))?)?;
@@ -1715,6 +1953,12 @@ mod tests {
                 backfill_field: "审批编号",
                 base_timezone: "Asia/Shanghai",
                 maps: None,
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
             },
         )
         .await
@@ -1810,10 +2054,17 @@ mod tests {
                 record_id: E2E_RECORD_ID,
                 cells: &cells,
                 applicant_field: &plan.applicant_field_id,
+                applicant: None,
                 backfill_field_name: &backfill_field_name,
                 approval_code: E2E_APPROVAL_CODE,
                 widgets: &plan.widgets,
                 form_snapshot: plan.form_snapshot.clone(),
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
                 timezone_offset: FixedOffset::from_iana("Asia/Shanghai")
                     .unwrap_or_else(|error| panic!("{error}")),
             },
@@ -1822,7 +2073,8 @@ mod tests {
         assert_eq!(
             result,
             DispatchResult::Backfilled {
-                serial_number: "202609280001".to_string()
+                serial_number: "202609280001".to_string(),
+                instance_code: "INST-E2E-001".to_string(),
             },
             "整条链应跑通并回填编号"
         );
@@ -1944,6 +2196,12 @@ mod tests {
                 backfill_field: "审批编号",
                 base_timezone: "Asia/Shanghai",
                 maps: None,
+                status_field: None,
+                flow_field: None,
+                start_time_field: None,
+                end_time_field: None,
+                department_field: None,
+                handler_field: None,
             },
         )
         .await

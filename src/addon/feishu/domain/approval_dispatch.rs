@@ -46,7 +46,12 @@ use super::tenant_token::TenantTokenProvider;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DispatchResult {
     /// 创建并回填成功。
-    Backfilled { serial_number: String },
+    Backfilled {
+        serial_number: String,
+        /// 实例 code。worker 用它落 `feishu_approval_task.instance_code`（§12 缺口 10），
+        /// 二期事件追踪也靠它反查回填行。
+        instance_code: String,
+    },
     /// 数据不完整，本轮跳过。
     ///
     /// **不写任何多维表格字段**——用户先填业务字段、后填「申请人」的那一轮若被
@@ -71,7 +76,10 @@ impl DispatchResult {
     /// - `Retryable` → 失败，但**可重试**：没写任何字段，再点一次按钮就会重来。
     pub(crate) fn response_parts(&self) -> (bool, String, Option<String>) {
         match self {
-            Self::Backfilled { serial_number } => (
+            Self::Backfilled {
+                serial_number,
+                instance_code: _,
+            } => (
                 true,
                 format!("已创建审批实例，编号 {serial_number}"),
                 Some(serial_number.clone()),
@@ -92,6 +100,15 @@ pub(crate) struct DispatchInput<'a> {
     pub(crate) cells: &'a serde_json::Map<String, Value>,
     /// 申请人的人员字段 id。
     pub(crate) applicant_field: &'a str,
+    /// 请求传入的发起人（工作流触发人）**open_id**。
+    ///
+    /// # 上层契约（别在这里做姓名解析）
+    ///
+    /// 真机 `$.step_btn.user` 渲染出来的是**姓名**（设计 M11 定论），所以
+    /// 「姓名 → open_id」的 contact 解析是**调用方**（dispatch Action / worker）的
+    /// 职责；本字段拿到的**已是 open_id**。`Some` 时替代表格列读取（设计 §6.2 D2），
+    /// 未传参的存量工作流行为零变化。
+    pub(crate) applicant: Option<String>,
     /// 回填字段 id。
     /// 回填列的**当前列名**（不是 `field_id`）。
     ///
@@ -101,6 +118,16 @@ pub(crate) struct DispatchInput<'a> {
     /// 在拿到表结构后现场补上，与读侧的 `rekey_cells_by_field_id` 是同一件事的两个
     /// 方向。这里收列名而不是 id，正是为了让「写到哪一列」在调用处一眼可见。
     pub(crate) backfill_field_name: &'a str,
+    /// 六个可选回填目标（配置里存的 `field_id`；`None` = 不回填，现状不变）。
+    ///
+    /// 这里收 `field_id` 而不是列名：写时由 `BitableBackfill` 现场解析列名
+    /// （与 `backfill_field_name` 是同一条轴的两个方向，设计 §5.1/§5.2）。
+    pub(crate) status_field: Option<&'a str>,
+    pub(crate) flow_field: Option<&'a str>,
+    pub(crate) start_time_field: Option<&'a str>,
+    pub(crate) end_time_field: Option<&'a str>,
+    pub(crate) department_field: Option<&'a str>,
+    pub(crate) handler_field: Option<&'a str>,
     pub(crate) approval_code: &'a str,
     pub(crate) widgets: &'a [WidgetMap],
     /// 定义快照；旧配置留空时，在创建实例前补取定义。
@@ -179,11 +206,53 @@ impl Backfill for BitableBackfill<'_> {
                 Some(15) if value.is_object() => value.clone(),
                 // 错误信息没有审批实例；链接列保持空白，原因由任务/请求日志保存。
                 Some(15) => continue,
+                // 单选：**裸字符串**（真机探针定论——数组形态被 1254062
+                // `SingleSelectFieldConvFail` 拒，响应明文「must be a string」；
+                // 选项不存在时自动创建）。`{"text": …}` 对象也收，取其 text。
+                Some(3) => {
+                    let text = value.get("text").unwrap_or(value);
+                    match text.as_str() {
+                        Some(text) => Value::String(text.to_string()),
+                        None => {
+                            return Err(OutboundFailure {
+                                kind: FailureKind::Fatal { code: 0 },
+                                message: "单选字段的值必须是字符串".to_string(),
+                            })
+                        }
+                    }
+                }
+                // 日期：number 毫秒；字符串数字先转换（详情接口的 start_time 是字符串）。
+                Some(5) => match value {
+                    Value::Number(_) => value.clone(),
+                    Value::String(text) => match text.trim().parse::<i64>() {
+                        Ok(millis) => Value::from(millis),
+                        Err(_) => {
+                            return Err(OutboundFailure {
+                                kind: FailureKind::Fatal { code: 0 },
+                                message: format!("日期字段的值不是毫秒时间戳：{text}"),
+                            })
+                        }
+                    },
+                    _ => {
+                        return Err(OutboundFailure {
+                            kind: FailureKind::Fatal { code: 0 },
+                            message: "日期字段的值必须是毫秒时间戳".to_string(),
+                        })
+                    }
+                },
+                // 人员：`[{"id":"ou_.."}]`（官方：记录写接口仅支持传入 id）。
+                Some(11) if value.is_array() => value.clone(),
+                Some(11) => {
+                    return Err(OutboundFailure {
+                        kind: FailureKind::Fatal { code: 0 },
+                        message: "人员字段的值必须是 [{\"id\":\"ou_..\"}] 数组".to_string(),
+                    })
+                }
                 Some(1) | None => value.get("text").unwrap_or(value).clone(),
                 _ => {
                     return Err(OutboundFailure {
                         kind: FailureKind::Fatal { code: 0 },
-                        message: "回填列必须是文本或链接字段".to_string(),
+                        message: "回填列必须是文本/链接/单选/日期/人员字段".to_string(),
                     })
                 }
             };
@@ -233,7 +302,7 @@ pub(crate) async fn dispatch_one(
     {
         match get_instance(transport, sleeper, tokens, &uuid).await {
             Ok(GetOutcome::Found(detail)) => {
-                return finish_backfill(backfill, input, &uuid, detail).await;
+                return finish_backfill(backfill, input, &uuid, *detail).await;
             }
             Ok(GetOutcome::NotFound) => {}
             Err(failure) => {
@@ -245,13 +314,28 @@ pub(crate) async fn dispatch_one(
     }
 
     // ---- 2. 申请人 ----
-    let open_id = match applicant_open_id(input.cells, input.applicant_field) {
-        Some(open_id) => open_id,
-        None => {
-            return DispatchResult::Waiting {
-                reason: "缺少「申请人」".to_string(),
+    //
+    // D2 回退语义（设计 §6.2）：请求传了 `applicant`（上层已把触发人姓名解析成
+    // open_id）就**直接用它**，跳过表格列读取；没传则回退读表格列——存量工作流
+    // 行为零变化。`Waiting` 判据因此从「表格缺申请人」变为「请求缺 applicant
+    // 且表格也缺」。传参路径下 `applicant_field` 的语义翻转为**写目标**；设计
+    // §6.4 的写回（`[{"id": applicant}]` → `applicant_field` 列）不在本次改动
+    // 清单内，尚未实现——回退路径的现状行为因此完全不变。
+    let open_id = match input
+        .applicant
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(applicant) => applicant.to_string(),
+        None => match applicant_open_id(input.cells, input.applicant_field) {
+            Some(open_id) => open_id,
+            None => {
+                return DispatchResult::Waiting {
+                    reason: "缺少「申请人」".to_string(),
+                }
             }
-        }
+        },
     };
 
     // ---- 3. 组装 form ----
@@ -396,7 +480,7 @@ pub(crate) async fn dispatch_one(
             match get_instance(transport, sleeper, tokens, &uuid).await {
                 Ok(GetOutcome::Found(detail)) => {
                     let code = detail.instance_code.clone();
-                    reclaimed = Some(detail);
+                    reclaimed = Some(*detail);
                     code
                 }
                 // 实例不存在：并发窗口（冲突成立但实例还没可见）或前一次其实没建成。
@@ -420,7 +504,7 @@ pub(crate) async fn dispatch_one(
     let detail = match reclaimed {
         Some(detail) => detail,
         None => match get_instance(transport, sleeper, tokens, &instance_code).await {
-            Ok(GetOutcome::Found(detail)) => detail,
+            Ok(GetOutcome::Found(detail)) => *detail,
             // 刚创建的实例查不到：判**可重试**，绝不写终态——否则刚建成的实例会被
             // 写成「找不到」，反而制造第二条不可恢复路径。
             Ok(GetOutcome::NotFound) => {
@@ -490,7 +574,7 @@ async fn validate_connections(
         {
             if !checked.contains_key(code) {
                 let detail = match get_instance(transport, sleeper, tokens, code).await {
-                    Ok(GetOutcome::Found(detail)) => detail,
+                    Ok(GetOutcome::Found(detail)) => *detail,
                     Ok(GetOutcome::NotFound) => {
                         return Err(DispatchResult::Waiting {
                             reason: format!(
@@ -568,7 +652,15 @@ async fn finish_backfill(
         .write(input.record_id, input.backfill_field_name, &value)
         .await
     {
-        Ok(()) => DispatchResult::Backfilled { serial_number },
+        Ok(()) => {
+            // 编号已落库 = 主产物达成，`Backfilled` 结论已定；扩展字段是附带，
+            // 写失败只 warn，**不改结论**（设计 §5.3）。
+            write_extended(backfill, input, &detail).await;
+            DispatchResult::Backfilled {
+                serial_number,
+                instance_code: detail.instance_code.clone(),
+            }
+        }
         Err(failure) => DispatchResult::Retryable {
             message: format!(
                 "实例 {} 已创建，回填失败：{}（uuid={uuid}）",
@@ -576,6 +668,169 @@ async fn finish_backfill(
             ),
         },
     }
+}
+
+/// 编号回填成功后的可选扩展字段（设计 §5.2）。
+///
+/// 每个字段只在 `input` 有对应目标列时写；**任一写失败只 `tracing::warn`**——
+/// 编号是主产物，扩展字段是附带（与既有「回填失败不吞事实」原则一致）。
+/// 值全部取自**已经拿到的**那一份详情，零额外 API 调用。
+async fn write_extended(
+    backfill: &dyn Backfill,
+    input: &DispatchInput<'_>,
+    detail: &InstanceDetail,
+) {
+    /// 写一格；失败只记日志，绝不改调用方的结论。
+    async fn write(backfill: &dyn Backfill, record_id: &str, field: &str, value: Value) {
+        if let Err(failure) = backfill.write(record_id, field, &value).await {
+            tracing::warn!(
+                field,
+                error = %failure.message,
+                "扩展字段回填失败（不影响编号回填结论）"
+            );
+        }
+    }
+
+    // 发起时间 / 完成时间：字符串毫秒 → number（`"0"` 与缺失同义，不写，
+    // 否则日期列会显示 1970，设计 D6）。
+    if let Some(field) = input.start_time_field {
+        if let Some(millis) = millis_of(detail.start_time.as_deref()) {
+            write(backfill, input.record_id, field, Value::from(millis)).await;
+        }
+    }
+    if let Some(field) = input.end_time_field {
+        if let Some(millis) = millis_of(detail.end_time.as_deref()) {
+            write(backfill, input.record_id, field, Value::from(millis)).await;
+        }
+    }
+    // 申请状态：中文映射 + 「(已退回)」后缀。文本列收字符串，单选列也收裸字符串
+    // （`write_many` 的 `Some(3)` 臂）。
+    if let Some(field) = input.status_field {
+        if let Some(status) = status_text(detail) {
+            write(backfill, input.record_id, field, Value::String(status)).await;
+        }
+    }
+    // 当前处理人：`task_list` 里 `status == "PENDING"` 的 open_id 去重；
+    // 已终态（无 PENDING）时写空数组清列（设计 §5.2）。
+    if let Some(field) = input.handler_field {
+        if let Some(task_list) = detail.task_list.as_ref() {
+            write(
+                backfill,
+                input.record_id,
+                field,
+                Value::Array(pending_handlers(task_list)),
+            )
+            .await;
+        }
+    }
+    // 审批流程：已到达节点的 `node_name✓/✗/⏳` 序列（设计 §5.2）。
+    if let Some(field) = input.flow_field {
+        if let Some(flow) = flow_text(detail) {
+            write(backfill, input.record_id, field, Value::String(flow)).await;
+        }
+    }
+    // 发起人列写回（§6.4）：传参路径把 open_id 写回 `applicant_field` 目标列。
+    // 仅在传参路径（D2）写——回退读表格列时该列本就有值，不回写。
+    // 这里没有「写失败不改结论」的余地：`finish_backfill` 已定 `Backfilled`，
+    // 与扩展字段同一条 warn 路径。
+    if input.applicant.is_some() && !input.applicant_field.trim().is_empty() {
+        let applicant = input.applicant.as_deref().unwrap_or_default().trim();
+        if !applicant.is_empty() {
+            write(
+                backfill,
+                input.record_id,
+                input.applicant_field,
+                Value::Array(vec![serde_json::json!({"id": applicant})]),
+            )
+            .await;
+        }
+    }
+    // 发起人部门：一期只写 `department_id` **原值**到文本列——部门名解析（contact
+    // 接口 + scope）在上层做（设计 §4.3 缺口 1：bot 形态的 id 格式能否直喂部门接口
+    // 尚未验证，且当前应用无 contact scope）。
+    if let Some(field) = input.department_field {
+        if let Some(department) = detail
+            .department_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            write(
+                backfill,
+                input.record_id,
+                field,
+                Value::String(department.to_string()),
+            )
+            .await;
+        }
+    }
+}
+
+/// 字符串毫秒时间戳 → `i64`。`"0"`（未完成）、空串、缺失、非数字一律 `None`。
+fn millis_of(raw: Option<&str>) -> Option<i64> {
+    let millis = raw?.trim().parse::<i64>().ok()?;
+    (millis != 0).then_some(millis)
+}
+
+/// 实例状态 → 中文。未知枚举返回 `None`（不写，不猜）。`reverted` 加「(已退回)」。
+fn status_text(detail: &InstanceDetail) -> Option<String> {
+    let text = match detail.status.as_deref()?.trim() {
+        "PENDING" => "审批中",
+        "APPROVED" => "已通过",
+        "REJECTED" => "已拒绝",
+        "CANCELED" => "已取消",
+        "DELETED" => "已删除",
+        _ => return None,
+    };
+    Some(if detail.reverted == Some(true) {
+        format!("{text}(已退回)")
+    } else {
+        text.to_string()
+    })
+}
+
+/// 当前处理人：`status == "PENDING"` 的节点的 `open_id`，按出现序去重。
+fn pending_handlers(task_list: &[super::approval::TaskNode]) -> Vec<Value> {
+    let mut seen = Vec::new();
+    let mut handlers = Vec::new();
+    for node in task_list {
+        if node.status.as_deref() != Some("PENDING") {
+            continue;
+        }
+        let Some(open_id) = node.open_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        if seen.iter().any(|seen| seen == open_id) {
+            continue;
+        }
+        seen.push(open_id.to_string());
+        handlers.push(serde_json::json!({"id": open_id}));
+    }
+    handlers
+}
+
+/// 审批流程概要：已到达节点按 `task_list` 顺序拼 `node_name✓/✗/⏳`
+/// （`DONE` → ✓、`PENDING` → ⏳、其余 → ✗），如「部门审批✓ → 财务审批⏳」。
+/// 没有可拼的节点时返回 `None`（不写，不覆盖已有内容）。
+fn flow_text(detail: &InstanceDetail) -> Option<String> {
+    let parts: Vec<String> = detail
+        .task_list
+        .as_deref()?
+        .iter()
+        .filter_map(|node| {
+            let name = node.node_name.as_deref()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let mark = match node.status.as_deref() {
+                Some("DONE") => "✓",
+                Some("PENDING") => "⏳",
+                _ => "✗",
+            };
+            Some(format!("{name}{mark}"))
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" → "))
 }
 
 /// 从实例详情里取编号。空串与缺失同义。
@@ -1082,6 +1337,15 @@ mod tests {
                     approval_code: None,
                     serial_number: serial.map(str::to_string),
                     status: None,
+                    start_time: None,
+                    end_time: None,
+                    open_id: None,
+                    user_id: None,
+                    department_id: None,
+                    uuid: None,
+                    reverted: None,
+                    task_list: None,
+                    timeline: None,
                 },
             )
             .await;
@@ -1141,7 +1405,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingBackfill {
-        writes: Mutex<Vec<(String, String, String)>>,
+        writes: Mutex<Vec<(String, String, Value)>>,
         fail: bool,
         /// 毒记录名单：这批里出现任一即让整批失败（复刻全有全无语义）。
         poison: Mutex<Vec<String>>,
@@ -1164,11 +1428,31 @@ mod tests {
             }
         }
 
-        fn writes(&self) -> Vec<(String, String, String)> {
+        /// 写入调用原文（记录 id、字段、**原值**）。
+        fn raw_writes(&self) -> Vec<(String, String, Value)> {
             self.writes
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or_default()
+        }
+
+        /// 写入调用折成文本（`{"text": …}` 取 text，其余原样 `as_str`）。
+        fn writes(&self) -> Vec<(String, String, String)> {
+            self.raw_writes()
+                .into_iter()
+                .map(|(record_id, field, value)| {
+                    (
+                        record_id,
+                        field,
+                        value
+                            .get("text")
+                            .unwrap_or(&value)
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                })
+                .collect()
         }
     }
 
@@ -1191,16 +1475,7 @@ mod tests {
         ) -> Result<(), OutboundFailure> {
             if let Ok(mut writes) = self.writes.lock() {
                 for (record_id, value) in rows {
-                    writes.push((
-                        record_id.clone(),
-                        field_id.to_string(),
-                        value
-                            .get("text")
-                            .unwrap_or(value)
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_string(),
-                    ));
+                    writes.push((record_id.clone(), field_id.to_string(), value.clone()));
                 }
             }
             if self.fail {
@@ -1234,7 +1509,14 @@ mod tests {
             record_id: "rec001",
             cells,
             applicant_field: "fld_applicant",
+            applicant: None,
             backfill_field_name: "审批编号",
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
             approval_code: "4202AD96-9EC1",
             widgets,
             form_snapshot: serde_json::to_string(
@@ -1472,7 +1754,8 @@ mod tests {
             assert_eq!(
                 dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &input).await,
                 DispatchResult::Backfilled {
-                    serial_number: "SERIAL-A".to_string()
+                    serial_number: "SERIAL-A".to_string(),
+                    instance_code: "INST-A".to_string()
                 }
             );
             let requests = transport
@@ -1546,7 +1829,8 @@ mod tests {
             )
             .await,
             DispatchResult::Backfilled {
-                serial_number: "SERIAL".to_string()
+                serial_number: "SERIAL".to_string(),
+                    instance_code: "EXISTING".to_string()
             }
         );
         assert_eq!(transport.requests().len(), 1);
@@ -1886,7 +2170,8 @@ mod tests {
         assert_eq!(
             result,
             DispatchResult::Backfilled {
-                serial_number: "202609280001".to_string()
+                serial_number: "202609280001".to_string(),
+                    instance_code: "INST-1".to_string()
             }
         );
         assert_eq!(
@@ -1929,7 +2214,8 @@ mod tests {
         assert_eq!(
             result,
             DispatchResult::Backfilled {
-                serial_number: "202609280042".to_string()
+                serial_number: "202609280042".to_string(),
+                    instance_code: "INST-RECOVERED".to_string()
             },
             "60012 必须走回捞成功，而不是终态"
         );
@@ -2295,6 +2581,278 @@ mod tests {
             widgets[0].option_map.get("已批准").map(String::as_str),
             Some("va")
         );
+    }
+
+    // ---- 可选回填扩展（设计 §5） ----
+
+    /// 单选 / 日期 / 人员三臂的写入形态（真机探针与文档定论）。
+    #[tokio::test]
+    async fn select_date_and_person_arms_write_native_shapes() {
+        for (kind, value, expected) in [
+            // 单选：**裸字符串**（真机探针定论：数组被 1254062 拒，字符串可且选项
+            // 自动创建）。`{"text": …}` 对象取 text。
+            (3, json!({"text":"审批中"}), json!("审批中")),
+            (3, json!("审批中"), json!("审批中")),
+            // 日期：number 毫秒；详情接口的 start_time 是**字符串**，先转换。
+            (5, json!("1790750409857"), json!(1790750409857i64)),
+            (5, json!(1790750409857i64), json!(1790750409857i64)),
+            // 人员：`[{"id":"ou_.."}]` 数组原样。
+            (11, json!([{"id":"ou_x"}]), json!([{"id":"ou_x"}])),
+        ] {
+            let transport = ScriptedTransport::new(vec![(200, r#"{"code":0,"data":{}}"#)]);
+            let fields = [FieldItem {
+                field_id: "fldT".into(),
+                field_name: "回填列".into(),
+                field_type: Some(kind),
+                ui_type: None,
+                property: None,
+            }];
+            let coords = coordinates();
+            let tokens = fake_tokens();
+            let writer = BitableBackfill {
+                transport: &transport,
+                sleeper: &NoSleep,
+                tokens: &tokens,
+                coordinates: &coords,
+                fields: &fields,
+            };
+            assert!(
+                writer.write("recOne", "fldT", &value).await.is_ok(),
+                "kind={kind} value={value}"
+            );
+            let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                bodies[0]
+                    .as_ref()
+                    .map(|body| body["records"][0]["fields"]["回填列"].clone()),
+                Some(expected),
+                "kind={kind} value={value}"
+            );
+        }
+        // 形态不符 → 终态错误，且**不发请求**（别把坏值送出去）。
+        for (kind, bad) in [
+            (3, json!(123)),
+            (5, json!("不是数字")),
+            (5, json!(null)),
+            (11, json!("ou_x")),
+            // 其余类型（如数字列 2）一律拒绝。
+            (2, json!("x")),
+        ] {
+            let transport = ScriptedTransport::new(vec![]);
+            let fields = [FieldItem {
+                field_id: "fldT".into(),
+                field_name: "回填列".into(),
+                field_type: Some(kind),
+                ui_type: None,
+                property: None,
+            }];
+            let coords = coordinates();
+            let tokens = fake_tokens();
+            let writer = BitableBackfill {
+                transport: &transport,
+                sleeper: &NoSleep,
+                tokens: &tokens,
+                coordinates: &coords,
+                fields: &fields,
+            };
+            assert!(
+                writer.write("recOne", "fldT", &bad).await.is_err(),
+                "kind={kind} value={bad}"
+            );
+            assert!(transport.requests().is_empty(), "kind={kind}");
+        }
+    }
+
+    /// 详情 → 扩展字段的取值与写入（顺序、跳过规则、清列）。
+    #[tokio::test]
+    async fn finish_backfill_writes_extended_fields_after_the_serial_number() {
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[("fld_applicant", json!([{"id":"ou_abc"}]))]);
+        let mut request = input(&cells, &widgets);
+        request.start_time_field = Some("fld_start");
+        request.end_time_field = Some("fld_end");
+        request.status_field = Some("fld_status");
+        request.handler_field = Some("fld_handler");
+        request.flow_field = Some("fld_flow");
+        request.department_field = Some("fld_department");
+        let detail = InstanceDetail {
+            status: Some("PENDING".to_string()),
+            reverted: Some(true),
+            start_time: Some("1790750409857".to_string()),
+            // 未完成 = 字符串 "0"：**不写**（否则日期列显示 1970）。
+            end_time: Some("0".to_string()),
+            department_id: Some("db59a45c851464gf".to_string()),
+            task_list: Some(vec![
+                task("部门审批", "DONE", "ou_a"),
+                task("财务审批", "PENDING", "ou_b"),
+                // 同一处理人重复出现 → 去重；流程按节点逐条拼。
+                task("法务", "PENDING", "ou_b"),
+            ]),
+            ..base_detail("INST-A", Some("SERIAL"))
+        };
+        let backfill = RecordingBackfill::default();
+        assert_eq!(
+            finish_backfill(&backfill, &request, "source-uuid", detail).await,
+            DispatchResult::Backfilled {
+                serial_number: "SERIAL".to_string(),
+                    instance_code: "INST-A".to_string()
+            }
+        );
+        let writes = backfill.raw_writes();
+        let fields: Vec<&str> = writes.iter().map(|(_, field, _)| field.as_str()).collect();
+        assert_eq!(
+            fields,
+            vec![
+                "审批编号",
+                "fld_start",
+                "fld_status",
+                "fld_handler",
+                "fld_flow",
+                "fld_department",
+            ],
+            "完成时间 \"0\" 必须跳过：{writes:?}"
+        );
+        assert_eq!(writes[1].2, json!(1790750409857i64));
+        assert_eq!(writes[2].2, json!("审批中(已退回)"));
+        assert_eq!(writes[3].2, json!([{"id":"ou_b"}]));
+        assert_eq!(writes[4].2, json!("部门审批✓ → 财务审批⏳ → 法务⏳"));
+        assert_eq!(writes[5].2, json!("db59a45c851464gf"));
+
+        // 已终态（无 PENDING）→ 处理人写空数组**清列**；未配的列一律不写。
+        let mut request = input(&cells, &widgets);
+        request.handler_field = Some("fld_handler");
+        let detail = InstanceDetail {
+            status: Some("APPROVED".to_string()),
+            task_list: Some(vec![task("部门审批", "DONE", "ou_a")]),
+            ..base_detail("INST-A", Some("SERIAL"))
+        };
+        let backfill = RecordingBackfill::default();
+        assert!(matches!(
+            finish_backfill(&backfill, &request, "source-uuid", detail).await,
+            DispatchResult::Backfilled { .. }
+        ));
+        assert_eq!(
+            backfill.raw_writes(),
+            vec![
+                ("rec001".to_string(), "审批编号".to_string(), json!({"text":"SERIAL","link":super::super::approval::instance_applink("INST-A").unwrap_or_else(|e| panic!("{e}"))})),
+                ("rec001".to_string(), "fld_handler".to_string(), json!([])),
+            ]
+        );
+    }
+
+    /// 传参路径：`applicant` 替代表格列读取（D2），空白串回退读列。
+    #[tokio::test]
+    async fn applicant_param_replaces_the_cell_read_and_blank_falls_back() {
+        let widgets = [widget("w1", "input")];
+        // 传参：cells 里**没有**申请人也能创建，create 请求体的 open_id 是传参值
+        // （trim 后）。上层已把姓名解析成 open_id，这里不该再做任何解析。
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-P")),
+            (200, &ok_detail("INST-P", "SERIAL-P")),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let cell_map = cells(&[("fld_title", json!("报销"))]);
+        let mut request = input(&cell_map, &widgets);
+        request.applicant = Some("  ou_from_param  ".to_string());
+        assert_eq!(
+            dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await,
+            DispatchResult::Backfilled {
+                serial_number: "SERIAL-P".to_string(),
+                    instance_code: "INST-P".to_string()
+            }
+        );
+        {
+            let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                bodies[0].as_ref().map(|body| body["open_id"].clone()),
+                Some(json!("ou_from_param"))
+            );
+        }
+        // §6.4：传参路径把发起人写回 applicant_field 列（回退路径不写）。
+        {
+            let writes = backfill.raw_writes();
+            assert_eq!(
+                writes
+                    .iter()
+                    .find(|(_, field, _)| field == "fld_applicant")
+                    .map(|(_, _, value)| value.clone()),
+                Some(json!([{"id": "ou_from_param"}])),
+                "传参路径必须回写发起人列"
+            );
+        }
+
+        // 空白串等同未传参 → 回退读表格列；表格也缺 → Waiting（不写字段、不打接口）。
+        let transport = ScriptedTransport::new(vec![]);
+        let backfill = RecordingBackfill::default();
+        let empty = cells(&[]);
+        let mut request = input(&empty, &widgets);
+        request.applicant = Some("   ".to_string());
+        assert!(matches!(
+            dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await,
+            DispatchResult::Waiting { .. }
+        ));
+        assert!(transport.requests().is_empty());
+        assert!(backfill.writes().is_empty());
+
+        // 空白串 + 表格列有值 → 回退读列成功（存量工作流行为零变化）。
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-F")),
+            (200, &ok_detail("INST-F", "SERIAL-F")),
+        ]);
+        let cell_map = cells(&[("fld_applicant", json!([{"id":"ou_cell"}]))]);
+        let mut request = input(&cell_map, &widgets);
+        request.applicant = Some(String::new());
+        let recording = RecordingBackfill::default();
+        assert!(matches!(
+            dispatch_one(&transport, &NoSleep, &fake_tokens(), &recording, &request).await,
+            DispatchResult::Backfilled { .. }
+        ));
+        let bodies = transport.bodies.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            bodies[0].as_ref().map(|body| body["open_id"].clone()),
+            Some(json!("ou_cell"))
+        );
+        // 回退路径不回写发起人列（该列本就有值，D2 行为零变化）。
+        assert!(
+            !recording
+                .raw_writes()
+                .iter()
+                .any(|(_, field, _)| field == "fld_applicant"),
+            "回退路径不得回写发起人列"
+        );
+    }
+
+    /// 最小可用详情；扩展字段按需用结构体更新语法覆盖。
+    fn base_detail(instance_code: &str, serial: Option<&str>) -> InstanceDetail {
+        InstanceDetail {
+            instance_code: instance_code.to_string(),
+            approval_code: None,
+            serial_number: serial.map(str::to_string),
+            status: None,
+            start_time: None,
+            end_time: None,
+            open_id: None,
+            user_id: None,
+            department_id: None,
+            uuid: None,
+            reverted: None,
+            task_list: None,
+            timeline: None,
+        }
+    }
+
+    fn task(node_name: &str, status: &str, open_id: &str) -> super::super::approval::TaskNode {
+        super::super::approval::TaskNode {
+            id: None,
+            node_id: None,
+            node_name: Some(node_name.to_string()),
+            user_id: None,
+            open_id: Some(open_id.to_string()),
+            status: Some(status.to_string()),
+            r#type: None,
+            start_time: None,
+            end_time: None,
+        }
     }
 
     // ---- 分批回写与毒记录隔离（Task 8） ----

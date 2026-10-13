@@ -68,9 +68,9 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             spec(crate::addon::feishu::option::table::table_spec(), "选项"),
             "options()",
         ),
-        // 审批派发的四张表。把它们登记进来，新写的站点就进入**严格档**
+        // 审批派的五张表。把它们登记进来，新写的站点就进入**严格档**
         // ——列必须存在且能力位（filterable / sortable）开着，而不是落到
-        // 「七张表之一有就行」的宽松档。派发端点正是最需要这层保护的地方：
+        // 「八张表之一有就行」的宽松档。派发端点正是最需要这层保护的地方：
         // 它按 (base_token, table_id) 做白名单反查，写错列名会让白名单静默失效。
         (
             "feishu_approval_config",
@@ -103,6 +103,14 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
                 "派发请求记录",
             ),
             "approval_request_logs()",
+        ),
+        (
+            "feishu_approval_task_applicant",
+            spec(
+                crate::addon::feishu::approval::domain::task_applicant_table::table_spec(),
+                "审批任务发起人",
+            ),
+            "approval_task_applicants()",
         ),
     ]
 }

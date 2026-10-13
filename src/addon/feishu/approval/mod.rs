@@ -109,6 +109,12 @@ pub(crate) fn build_request_log_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(request_log_module_name()?).table(domain::request_log_table::table_spec()?))
 }
 
+/// 申请人解析结果表所在的 Module：同上，只有表。
+pub(crate) fn build_task_applicant_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(task_applicant_module_name()?)
+        .table(domain::task_applicant_table::table_spec()?))
+}
+
 fn module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new(MODULE).map_err(config_error)
 }
@@ -123,6 +129,10 @@ fn task_module_name() -> Result<ModuleName, BaseError> {
 
 fn request_log_module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new("feishu.approval_request_log").map_err(config_error)
+}
+
+fn task_applicant_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_task_applicant").map_err(config_error)
 }
 
 fn config_error(error: impl std::fmt::Display) -> BaseError {

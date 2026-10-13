@@ -118,6 +118,7 @@ mod tests {
             (
                 DispatchResult::Backfilled {
                     serial_number: "202609280001".to_string(),
+                    instance_code: "INST-TEST".to_string(),
                 },
                 Outcome::Succeeded,
                 "succeeded",

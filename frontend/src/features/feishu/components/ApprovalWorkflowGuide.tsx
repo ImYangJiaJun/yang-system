@@ -107,6 +107,30 @@ export function ApprovalWorkflowGuide() {
               <code>backfill_field</code>
             </dt>
             <dd>首次建配置时填写审批编号回填列的字段 ID 或列名。</dd>
+            <dt>
+              <code>status_field</code>
+            </dt>
+            <dd>可选。申请状态回填列的字段 ID 或列名；留空则不回填该列。</dd>
+            <dt>
+              <code>flow_field</code>
+            </dt>
+            <dd>可选。审批流程回填列的字段 ID 或列名；留空则不回填该列。</dd>
+            <dt>
+              <code>start_time_field</code>
+            </dt>
+            <dd>可选。发起时间回填列的字段 ID 或列名；留空则不回填该列。</dd>
+            <dt>
+              <code>end_time_field</code>
+            </dt>
+            <dd>可选。完成时间回填列的字段 ID 或列名；留空则不回填该列。</dd>
+            <dt>
+              <code>department_field</code>
+            </dt>
+            <dd>可选。发起人部门回填列的字段 ID 或列名；留空则不回填该列。</dd>
+            <dt>
+              <code>handler_field</code>
+            </dt>
+            <dd>可选。当前处理人回填列的字段 ID 或列名；留空则不回填该列。</dd>
           </dl>
           <p className="text-muted-foreground">
             首次自动建配置的后三个参数必须同时提供；已有配置时这些值会被忽略。建议先在本页完成配置，再使用下面的最小请求体。
