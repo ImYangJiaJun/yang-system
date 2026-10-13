@@ -463,7 +463,7 @@ pub(crate) fn check_backfill_targets(
     // (中文名, 输入坐标, 允许的目标列类型码)。顺序与 `ProvisionInput` 的六字段一致。
     let targets: [(&str, Option<&str>, &[i32]); 6] = [
         ("申请状态", status_field, &[1, 3]),
-        ("审批流程", flow_field, &[1]),
+        ("审批流程", flow_field, &[1, 3]),
         ("发起时间", start_time_field, &[5]),
         ("完成时间", end_time_field, &[5]),
         ("发起人部门", department_field, &[1]),
@@ -1520,6 +1520,33 @@ mod tests {
             "{}",
             reasons[0]
         );
+    }
+
+    #[test]
+    fn flow_accepts_single_select_as_well_as_text() {
+        // 真机表格里「审批流程」建成了单选（设计 §11 生产快照），写形态与申请状态同路
+        // （`write_many` 的 `Some(3)` 臂写裸字符串）。
+        let fields = [
+            field("fldFlow", "审批流程", 3),
+            field("fldText", "流程文本", 1),
+        ];
+        let columns = columns_from_fields(&fields);
+        for given in ["fldFlow", "fldText"] {
+            assert!(
+                check_backfill_targets(
+                    &columns,
+                    &fields,
+                    None,
+                    Some(given),
+                    None,
+                    None,
+                    None,
+                    None
+                )
+                .is_empty(),
+                "{given}"
+            );
+        }
     }
 
     #[test]
