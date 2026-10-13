@@ -146,6 +146,7 @@ mod tests {
                 encryption_key: None,
                 app_id: Some("cli_real_app_id".to_string()),
                 app_secret: Some("real-app-secret-value".to_string()),
+                oauth_redirect_uri: None,
                 pull_interval_seconds: 900,
                 alert_recipients: Vec::new(),
                 alert_failure_threshold: 3,

@@ -144,6 +144,7 @@ fn feishu_settings(app_id: Option<&str>, app_secret: Option<&str>) -> Arc<Feishu
         encryption_key: None,
         app_id: app_id.map(str::to_string),
         app_secret: app_secret.map(str::to_string),
+        oauth_redirect_uri: None,
         pull_interval_seconds: 900,
         alert_recipients: Vec::new(),
         alert_failure_threshold: 3,

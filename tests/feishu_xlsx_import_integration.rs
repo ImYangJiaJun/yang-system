@@ -178,6 +178,7 @@ fn feishu_settings() -> Arc<FeishuSettings> {
         encryption_key: Some("xlsx-import-encryption-key".to_string()),
         app_id: Some("cli_xlsx_import_app".to_string()),
         app_secret: Some("xlsx-import-app-secret".to_string()),
+        oauth_redirect_uri: None,
         pull_interval_seconds: 900,
         alert_recipients: Vec::new(),
         alert_failure_threshold: 3,

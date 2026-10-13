@@ -609,6 +609,20 @@ pub struct FeishuSettings {
     /// **租户级**凭证，拿到它能读该应用可见的全部协作多维表格。
     #[serde(default)]
     pub app_secret: Option<String>,
+    /// OAuth 回调地址（用户身份授权的重定向 URL）。
+    ///
+    /// 必须与飞书开发者后台 **安全设置 > 重定向 URL** 里注册的值**逐字一致**
+    /// （scheme、host、端口、路径全都要对上），否则授权完成后飞书会以
+    /// `20071` 拒绝换取 token。
+    ///
+    /// **省略 = 未启用用户身份授权**：授权入口与回调都不工作，姓名 → open_id
+    /// 解析直接给出可行动的错误，而不是退回到必然失败的 tenant token 路径
+    /// （`contact/v3/users/search` 只接受 user_access_token）。
+    ///
+    /// 刻意不从请求 Host 头推导——Host 可被伪造，与
+    /// `email.password_reset.link_base_url` 同一条纪律。
+    #[serde(default)]
+    pub oauth_redirect_uri: Option<String>,
     /// 出站拉取轮询间隔（秒）。
     ///
     /// 契约是「最大可见延迟 = 一个轮询间隔」，因此本值就是新鲜度承诺。默认 900 秒。
@@ -1034,6 +1048,24 @@ impl Settings {
             // 一个空白项或拼错的地址在投递那一刻只会静默失败，运维却以为告警在跑。
             crate::addon::feishu::domain::alert::validate_recipients(&feishu.alert_recipients)
                 .map_err(|error| anyhow::anyhow!("feishu.alert_recipients 无效：{error}"))?;
+            // OAuth 回调地址：只校验「像个绝对 URL」。与后台注册值是否逐字一致
+            // 由飞书在授权时判（不一致报 20071），这里拦的是「漏了 scheme」这类
+            // 一眼可辨的错——那种错要到管理员点「去授权」时才在浏览器里暴露。
+            //
+            // **刻意不要求 https**（与 `email.password_reset.link_base_url` 不同）：
+            // 本部署是裸 IP + 端口，回调只能是 http，套那条规则会把唯一可用的
+            // 形态判非法。
+            if let Some(redirect_uri) = feishu.oauth_redirect_uri.as_deref() {
+                let value = redirect_uri.trim();
+                let usable = value.split_once("://").is_some_and(|(scheme, rest)| {
+                    matches!(scheme, "http" | "https") && !rest.is_empty()
+                });
+                if !usable {
+                    bail!(
+                        "feishu.oauth_redirect_uri 必须是 http(s):// 开头的绝对地址（须与开发者后台注册的重定向 URL 逐字一致）"
+                    );
+                }
+            }
             if feishu.can_pull() {
                 let app_secret = feishu.app_secret.as_deref().unwrap_or_default();
                 // **刻意不用 validate_token_secret**：那条规则（≥32 字节、非重复字符）
@@ -3118,6 +3150,74 @@ link_base_url = "http://localhost:5273"
             "默认不配收件人 = 不告警"
         );
         assert_eq!(feishu.alert_failure_threshold, 3);
+    }
+
+    /// OAuth 回调地址缺省为 None = 未启用用户身份授权。
+    #[test]
+    fn feishu_oauth_redirect_uri_is_absent_by_default() {
+        let settings = Settings::parse(
+            &(valid_config().to_string()
+                + "
+[feishu]
+enabled = true
+management_api_token = \"a-real-management-token-value-1234\"
+"),
+        )
+        .unwrap_or_else(|error| panic!("配置应解析成功: {error:#}"));
+        let feishu = settings
+            .feishu
+            .unwrap_or_else(|| panic!("[feishu] 段应被解析出来"));
+        assert!(feishu.oauth_redirect_uri.is_none());
+    }
+
+    /// OAuth 回调地址必须是 http(s) 绝对地址。
+    ///
+    /// **刻意允许 http**：本部署是裸 IP + 端口（`http://<ip>:18654/...`），
+    /// 套用密码重置链接那条「生产强制 https」会把唯一可用的形态判非法。
+    #[test]
+    fn feishu_validates_oauth_redirect_uri_shape() {
+        let with_redirect = |value: &str| {
+            valid_config().to_string()
+                + &format!(
+                    "
+[feishu]
+enabled = true
+                     management_api_token = \"a-real-management-token-value-1234\"
+                     oauth_redirect_uri = \"{value}\"
+"
+                )
+        };
+
+        for bad in [
+            "console.example.com/api/v1/feishu/oauth/callback",
+            "://x",
+            "ftp://console.example.com/cb",
+            "http://",
+        ] {
+            let error = match Settings::parse(&with_redirect(bad)) {
+                Ok(_) => panic!("{bad:?} 必须被拒绝"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("oauth_redirect_uri"),
+                "报错必须定位到该字段: {error:#}"
+            );
+        }
+
+        for good in [
+            "http://47.109.148.207:18654/api/v1/feishu/oauth/callback",
+            "https://console.example.com/api/v1/feishu/oauth/callback",
+        ] {
+            let settings = Settings::parse(&with_redirect(good))
+                .unwrap_or_else(|error| panic!("{good:?} 应通过: {error:#}"));
+            assert_eq!(
+                settings
+                    .feishu
+                    .and_then(|feishu| feishu.oauth_redirect_uri)
+                    .as_deref(),
+                Some(good)
+            );
+        }
     }
 
     /// 收件人逐项校验：空串与非法地址必须在**启动期**被拒。

@@ -289,6 +289,7 @@ mod tests {
                 encryption_key: None,
                 app_id: None,
                 app_secret: None,
+                oauth_redirect_uri: None,
                 pull_interval_seconds: 900,
                 alert_recipients: Vec::new(),
                 alert_failure_threshold: 3,
