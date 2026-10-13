@@ -43,7 +43,7 @@
 | D8 | 提醒 worker **独立成文件**（86400s），不加 `last_reminder_at` 冷却列 | 独立 worker 天然一天一封；与 `alert.rs` 明确的「不冷却、持续提醒」哲学一致（没收到邮件会被读成「已经好了」） |
 | D9 | 提醒邮件**不含链接**，正文给出操作路径 | 不新增配置项，也不复用密码重置专用的 `email.password_reset.link_base_url` |
 | D10 | 未配置 OAuth 时**不回退** tenant 路径，直接给可行动错误 | 回退必然失败且掩盖配置缺口 |
-| D11 | 授权 `scope` 用常量 `contact:contact.base:readonly offline_access` | 两者都必须在开发者后台开通；真机若报 20027 / 99991672 按返回的 `permission_violations` 校正 |
+| D11 | 授权 `scope` 常量含 **`contact:user:search`** + `contact:contact.base:readonly` + `offline_access` | 2026-10-13 真机校正：`users/search` 只认 `contact:user:search`，「通讯录基础信息只读」**不蕴含**它（详见 §8）。每个 scope 都必须在开发者后台「权限管理」开通，否则授权页 20027 |
 | D12 | 回调返回 **JSON 信封**而不是漂亮的 HTML 页 | 框架刻意把 `ResponseBody::Raw` 限死为 JSON，不绕；文案改成「飞书授权成功，可关闭本页」 |
 | D13 | 收件人走**表 DSL** 读 `users`，不用原生 SQL | `users.email` 标了 `readable_by([SYSTEM_ROLE])` 而 `Repository` 正以该角色查询；原生 SQL 在本仓是要登记的逃生口，读有表声明的表够不上那个门槛 |
 
@@ -105,7 +105,7 @@
 | 风险 | 处置 |
 |---|---|
 | 后台拒绝 IP 形式的 redirect URI | 备选：nginx 反代 + 域名；或先用 `http://localhost:18654/...` 联调 |
-| `users/search` 实际所需 scope 与常量不符 | 按 20027 / 99991672 返回的 `permission_violations` 校正 `OAUTH_SCOPES` |
+| ~~`users/search` 实际所需 scope 与常量不符~~ **已兑现（2026-10-13）** | 首次授权只给了 `contact:contact.base:readonly`，探针调 `users/search` 报 **99991679**，`permission_violations` 点名 `contact:user:search` —— 两者在飞书是**独立权限**。已把常量补上并加进单测；**改 scope 后必须重新授权**（旧 `user_access_token` 不含新权限） |
 | 刷新成功但写库失败 → 凭证链断裂 | 记 error 日志；下次派发/提醒暴露为可行动文案，引导重新授权（无更好的幂等手段） |
 | 进程重启丢掉未消费的 state | 失败闭合：重新点一次「去授权」 |
 | 多实例部署 | 当前单实例假设（与仓库 worker 一致）；多实例需把 D4/D5 换成 Redis 锁与 Redis state |
@@ -114,13 +114,20 @@
 ## 9. 人工操作清单（部署方）
 
 1. 开发者后台 → 安全设置 → 添加重定向 URL（须与 `feishu.oauth_redirect_uri` **逐字一致**）；
-2. 权限管理 → 开通 `offline_access` 与 `contact:contact.base:readonly`；
+2. 权限管理 → 开通 **`contact:user:search`**（`users/search` 要的就是它）、
+   `contact:contact.base:readonly` 与 `offline_access`；
+   ⚠️ 三个都要开。少开任何一个，授权页报 20027；开了后台但授权链接没请求，
+   接口报 99991679。**改动 scope 常量后必须重新授权**——旧凭证不含新权限。
 3. 确认「安全设置 → 刷新 user_access_token」开关开启（默认开，改动需发版生效）；
 4. 配置 `[feishu] oauth_redirect_uri = "http://<host>:<port>/api/v1/feishu/oauth/callback"`
    （不是密钥，只走配置文件：**不登记** secret 文件与环境变量入口）；
 5. 部署后在「飞书审批配置」页点「去授权」完成首次授权。
 
 ## 10. 验收
+
+真机探针：`deploy/verify-feishu-user-identity.ps1`（本地 PowerShell 入口，只读；
+在服务器上跑同目录的 `.sh`）。它用库里那份凭证直接调 `contact/v3/users/search`，
+按返回码给结论——**这是「授权成功」与「凭证真能调通」之间的那道验证**。
 
 - 控制台显示「已授权：<姓名> · <时间>」；未授权时卡片给出提示与入口；
 - 派发带 `applicant=姓名` 的请求能解析出 open_id（此前必然失败）；

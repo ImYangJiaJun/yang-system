@@ -53,18 +53,22 @@ const AUTHORIZE_URL: &str = "https://accounts.feishu.cn/open-apis/authen/v1/auth
 /// 换 `code` 与刷 `refresh_token` 走**同一个** URL，只有 `grant_type` 不同。
 const TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
 
-/// 授权页请求的 scope（空格分隔）。
+/// 授权页请求的 scope（空格分隔）。**每一个都必须在开发者后台「权限管理」里已开通**，
+/// 否则授权页直接报 20027（拼了未开通的 scope）。
 ///
-/// - `contact:contact.base:readonly`：姓名 → open_id 搜索所需的通讯录接口级权限
-///   （见 `docs/architecture/2026-10-12-feishu-approval-backfill-initiator-tracking-design.md`
-///   的验证项 6）；
+/// - `contact:user:search`：`contact/v3/users/search` 要的**就是它**。
+///   2026-10-13 真机取到：只授权 `contact:contact.base:readonly` 时该接口报 99991679，
+///   `permission_violations` 点名 `{"type":"action_privilege_required",
+///   "subject":"contact:user:search"}` —— 「通讯录基础信息只读」与「搜索用户」在飞书是
+///   **两个独立权限**，前者不蕴含后者。
+/// - `contact:contact.base:readonly`：保留。回调里 `authen/v1/user_info` 与后续可能用到的
+///   通讯录基础读取走它，且它已在后台开通、已验证可授权，去掉只会平白多一次真机试错。
 /// - `offline_access`：**不带上它，令牌响应里没有 `refresh_token`**，365 天内的
 ///   自动续期就无从谈起。
 ///
-/// 两者都必须在开发者后台「权限管理」里已开通，否则授权页直接报 20027
-/// （拼了未开通的 scope）。真机若报 99991672（接口级缺 scope），按返回的
-/// `permission_violations` 在这里补。
-pub(crate) const OAUTH_SCOPES: &str = "contact:contact.base:readonly offline_access";
+/// 再报缺 scope 时，照 99991679 / 99991672 返回的 `permission_violations` 在这里补。
+pub(crate) const OAUTH_SCOPES: &str =
+    "contact:user:search contact:contact.base:readonly offline_access";
 
 /// state 的有效期（秒）。授权码本身 5 分钟有效，state 略长即可。
 const STATE_TTL_SECONDS: i64 = 600;
@@ -778,9 +782,20 @@ mod tests {
         assert!(url.starts_with(AUTHORIZE_URL), "{url}");
         assert!(url.contains("client_id=cli_a5d611352af9d00b"), "{url}");
         assert!(url.contains("response_type=code"), "{url}");
+        // 逐个点名而不是比整串：以后补 scope 时这条测试该继续有效，
+        // 而漏掉任何一个都会红。`contact:user:search` 是 2026-10-13 真机 99991679
+        // 点名的那个——`users/search` 只认它，`contact.base:readonly` 不蕴含它。
         assert!(
-            url.contains("scope=contact%3Acontact.base%3Areadonly%20offline_access"),
-            "scope 必须以 %20 分隔并含 offline_access：{url}"
+            url.contains("scope=contact%3Auser%3Asearch%20"),
+            "缺 contact:user:search：{url}"
+        );
+        assert!(
+            url.contains("%20contact%3Acontact.base%3Areadonly%20"),
+            "缺 contact:contact.base:readonly：{url}"
+        );
+        assert!(
+            url.contains("%20offline_access"),
+            "缺 offline_access：{url}"
         );
         assert!(
             url.contains(
