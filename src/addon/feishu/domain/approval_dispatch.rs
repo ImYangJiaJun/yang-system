@@ -1,9 +1,6 @@
 //! 审批实例派发的单条编排。
 //!
 //! 把「一条多维表格记录」变成「一个审批实例 + 回填的编号」的全过程。
-
-#![allow(dead_code)]
-// 编排先落地并自带测试；消费者（dispatch Action 与 worker）在后续任务接入。
 //!
 //! # 落库时序（不可省，见设计 §5.2）
 //!
@@ -337,9 +334,8 @@ pub(crate) async fn dispatch_one(
     // D2 回退语义（设计 §6.2）：请求传了 `applicant`（上层已把触发人姓名解析成
     // open_id）就**直接用它**，跳过表格列读取；没传则回退读表格列——存量工作流
     // 行为零变化。`Waiting` 判据因此从「表格缺申请人」变为「请求缺 applicant
-    // 且表格也缺」。传参路径下 `applicant_field` 的语义翻转为**写目标**；设计
-    // §6.4 的写回（`[{"id": applicant}]` → `applicant_field` 列）不在本次改动
-    // 清单内，尚未实现——回退路径的现状行为因此完全不变。
+    // 且表格也缺」。传参路径下 `applicant_field` 的语义翻转为**写目标**：回填
+    // 成功时把 open_id 写回该列（设计 §6.4，见 `write_extended`），回退路径不写。
     let open_id = match input
         .applicant
         .as_deref()
