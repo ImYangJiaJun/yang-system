@@ -94,6 +94,7 @@ fn build_application(
                     .config::<Arc<crate::config::FeishuSettings>>()
                     .ok()
                     .cloned(),
+                Arc::clone(&security),
                 authorization_validator.clone(),
             )
             .context("构建 feishu Addon 失败")?,

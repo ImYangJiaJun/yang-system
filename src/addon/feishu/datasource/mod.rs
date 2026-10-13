@@ -192,6 +192,10 @@ mod tests {
                 ),
                 Arc::clone(&pool),
             ),
+            Arc::new(
+                yang_base::action::auth::PasswordEngine::new(1)
+                    .unwrap_or_else(|e| panic!("PasswordEngine 应可构造: {e}")),
+            ),
             // `settings: None` → `can_pull()` 为假，三个出站端点不会注册。本用例
             // 断言的两条路由都在无条件注册的那一批里。
             None,

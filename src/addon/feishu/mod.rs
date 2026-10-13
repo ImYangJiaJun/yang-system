@@ -13,11 +13,12 @@ pub(crate) mod portal;
 use std::sync::Arc;
 
 use sqlx::MySqlPool;
+use yang_base::action::auth::PasswordEngine;
 use yang_base::definition::{AddonName, AddonSpec};
 use yang_base::BaseError;
 
 use crate::authorization::AuthorizationVersionValidator;
-use crate::config::FeishuSettings;
+use crate::config::{FeishuSettings, SecuritySettings};
 
 use self::domain::context::FeishuContext;
 use self::domain::repository::Repository;
@@ -29,9 +30,10 @@ use self::domain::repository::Repository;
 pub(crate) fn build_addon(
     pool: Arc<MySqlPool>,
     settings: Option<Arc<FeishuSettings>>,
+    security: Arc<SecuritySettings>,
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<AddonSpec, BaseError> {
-    let context = build_context(Arc::clone(&pool), settings.clone())?;
+    let context = build_context(Arc::clone(&pool), security, settings.clone())?;
 
     Ok(AddonSpec::new(
         AddonName::new("feishu").map_err(|error| BaseError::ConfigError(error.to_string()))?,
@@ -81,8 +83,10 @@ pub(crate) fn build_addon(
 /// 事务由调用方按需从 `Database` 取（worker 走 `tools.mysql()?.transaction()`）。
 pub(crate) fn build_context(
     pool: Arc<MySqlPool>,
+    security: Arc<SecuritySettings>,
     settings: Option<Arc<FeishuSettings>>,
 ) -> Result<Arc<FeishuContext>, BaseError> {
+    let password_engine = Arc::new(PasswordEngine::new(security.argon2_max_concurrency)?);
     Ok(Arc::new(FeishuContext::new(
         Repository::new(
             datasource::table::table_spec()?.table_definition()?,
@@ -128,6 +132,7 @@ pub(crate) fn build_context(
             portal::log_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
+        password_engine,
         settings,
     )))
 }

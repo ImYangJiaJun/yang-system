@@ -277,6 +277,7 @@ async fn run_after_tools_created(
         Some(feishu) => {
             let feishu_context = crate::addon::feishu::build_context(
                 Arc::new(tools.mysql()?.pool().clone()),
+                Arc::new(settings.security.clone()),
                 Some(Arc::new(feishu.clone())),
             )
             .context("构建飞书出站上下文的上下文失败")?;
@@ -300,6 +301,7 @@ async fn run_after_tools_created(
         Some(feishu) => {
             let feishu_context = crate::addon::feishu::build_context(
                 Arc::new(tools.mysql()?.pool().clone()),
+                Arc::new(settings.security.clone()),
                 Some(Arc::new(feishu.clone())),
             )
             .context("构建审批派发上下文失败")?;
@@ -321,6 +323,7 @@ async fn run_after_tools_created(
         Some(feishu) => {
             let feishu_context = crate::addon::feishu::build_context(
                 Arc::new(tools.mysql()?.pool().clone()),
+                Arc::new(settings.security.clone()),
                 Some(Arc::new(feishu.clone())),
             )
             .context("构建飞书用户身份上下文失败")?;

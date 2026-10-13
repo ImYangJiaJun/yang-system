@@ -1046,9 +1046,11 @@ mod tests {
             std::sync::Arc::new(crate::config::SecuritySettings::default()),
         )
         .await?;
+        let security = std::sync::Arc::new(crate::config::SecuritySettings::default());
         let database = Database::connect(&url).await?;
         let context = crate::addon::feishu::build_context(
             std::sync::Arc::new(database.pool().clone()),
+            security,
             None,
         )?;
         let tokens = context.user_tokens();

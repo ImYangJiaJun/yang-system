@@ -366,9 +366,11 @@ mod tests {
             Arc::new(crate::config::SecuritySettings::default()),
         )
         .await?;
+        let security = Arc::new(crate::config::SecuritySettings::default());
         let database = Database::connect(&url).await?;
         let redis = RedisClient::connect(&redis_url).await?;
-        let context = crate::addon::feishu::build_context(Arc::new(database.pool().clone()), None)?;
+        let context =
+            crate::addon::feishu::build_context(Arc::new(database.pool().clone()), security, None)?;
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let mut ids = Vec::new();
         for (base, table, code) in [
