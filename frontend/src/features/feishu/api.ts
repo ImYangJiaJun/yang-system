@@ -280,6 +280,9 @@ export const feishuQueryKeys = {
   /// 某个门户的访问日志（分页入参必须进 key，否则翻页命中旧缓存）。
   portalAccessLog: (portalId: number, page: number, pageSize: number) =>
     [FEISHU_QUERY_ROOT, "portal-access-log", portalId, page, pageSize] as const,
+  /// 公开页要的门户元信息。按 slug 分条：`/portal/a` 与 `/portal/b` 是两份配置。
+  portalMetadata: (slug: string) =>
+    [FEISHU_QUERY_ROOT, "portal-metadata", slug] as const,
 };
 
 /* ------------------------------- Action 调用 ------------------------------ */

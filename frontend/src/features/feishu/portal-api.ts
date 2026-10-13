@@ -409,7 +409,8 @@ export function portalFailureView(cause: unknown): PortalFailureView {
     }
     if (cause.code === PORTAL_ERROR_CODES.notFound) {
       return {
-        message: "门户不存在",
+        // 后端把「停用」也归到这一码（不泄露存在性），所以文案两说。
+        message: "门户不存在或已停用",
         revealPassphrase: false,
         loginRequired: false,
       };
@@ -433,6 +434,44 @@ export function portalFailureView(cause: unknown): PortalFailureView {
     message: cause instanceof Error ? cause.message : String(cause),
     revealPassphrase: false,
     loginRequired: false,
+  };
+}
+
+/// 公开页渲染所需的门户元信息（后端 `GET /api/v1/feishu/portal/{slug}`）。
+///
+/// 与查询响应**刻意分开**：标题、查询键提示、访问模式是配置，页面在第一次查询
+/// 之前就要用；把它们并进查询响应意味着「先查一次才知道该填什么」。
+export interface PortalMetadata {
+  title: string;
+  /// 查询键的展示名，直接当输入框 placeholder。
+  query_field_label: string;
+  access_mode: PortalAccessMode;
+  /// 查无结果时的提示；门户未配置时后端回空串，这里折成 `undefined`。
+  empty_message?: string;
+}
+
+/// 取门户元信息。公开端点，停用与不存在同回 `40401`（不泄露存在性）。
+///
+/// 与 [`queryPortal`] 共用 [`publicJson`]：一样按信封 `code` 分类失败，所以 40401
+/// 会变成带 `code` 的 [`ApiError`]，页面据此显示「门户不存在或已停用」。
+export async function getPortalMetadata(
+  slug: string,
+  session?: SessionContext,
+  signal?: AbortSignal,
+): Promise<PortalMetadata> {
+  const data = asRecord(
+    await publicJson(
+      `/api/v1/feishu/portal/${encodeURIComponent(slug)}`,
+      { method: "GET", signal },
+      session?.token,
+    ),
+  );
+  return {
+    title: typeof data?.title === "string" ? data.title : "",
+    query_field_label:
+      typeof data?.query_field_label === "string" ? data.query_field_label : "",
+    access_mode: asAccessMode(data?.access_mode),
+    empty_message: asNullableString(data?.empty_message) ?? undefined,
   };
 }
 
@@ -484,6 +523,23 @@ export async function queryPortal(
 }
 
 /* ------------------------------ React 接线 ------------------------------ */
+
+/// 公开页 mount 时取的门户元信息。
+///
+/// `retry: false`：门户不存在 / 已停用是**确定性**结果，react-query 默认的 3 次
+/// 退避重试会让骨架多转好几秒才显示「门户不存在或已停用」。
+export function usePortalMetadata(
+  slug: string,
+): UseQueryResult<PortalMetadata> {
+  const session = useSessionCredentials();
+  return useQuery({
+    enabled: slug !== "",
+    queryKey: feishuQueryKeys.portalMetadata(slug),
+    queryFn: ({ signal }) => getPortalMetadata(slug, session, signal),
+    staleTime: 60_000,
+    retry: false,
+  });
+}
 
 /// 某个数据源下的门户列表（管理面板用）。
 export function usePortalList(

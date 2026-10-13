@@ -13,6 +13,7 @@ import type { UiCatalog } from "@/engine";
 
 import {
   createPortal,
+  getPortalMetadata,
   listPortals,
   portalFailureView,
   queryPortal,
@@ -294,14 +295,66 @@ describe("公开查询端点", () => {
   });
 });
 
+describe("公开元信息端点", () => {
+  it("GET 到 /portal/{slug}（不带 /query），按信封 data 解析出四个字段", async () => {
+    const calls = recordFetch(() =>
+      envelope({
+        title: "信用卡查询",
+        query_field_label: "完整卡号",
+        access_mode: "passphrase",
+        empty_message: "未找到该卡号的记录",
+      }),
+    );
+
+    const metadata = await getPortalMetadata("bank");
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/portal/bank");
+    expect(calls[0]?.body).toEqual({});
+    expect(metadata).toEqual({
+      title: "信用卡查询",
+      query_field_label: "完整卡号",
+      access_mode: "passphrase",
+      empty_message: "未找到该卡号的记录",
+    });
+  });
+
+  it("未配置空结果提示（后端回空串）→ 折成 undefined，页面才走中性兜底", async () => {
+    recordFetch(() =>
+      envelope({
+        title: "卡号查询",
+        query_field_label: "卡号",
+        access_mode: "public",
+        empty_message: "",
+      }),
+    );
+
+    const metadata = await getPortalMetadata("bank");
+
+    expect(metadata.empty_message).toBeUndefined();
+  });
+
+  it("40401 变成带 code 的 ApiError（HTTP 仍是 200），页面据此判「不存在或已停用」", async () => {
+    recordFetch(() =>
+      jsonResponse({
+        code: PORTAL_ERROR_CODES.notFound,
+        message: "门户不存在",
+      }),
+    );
+
+    await expect(getPortalMetadata("bank")).rejects.toMatchObject({
+      code: PORTAL_ERROR_CODES.notFound,
+    });
+  });
+});
+
 describe("公开端点的失败分类（按信封 code，不按 HTTP 状态）", () => {
-  it("40401 → 门户不存在（HTTP 仍是 200）", () => {
+  it("40401 → 门户不存在或已停用（HTTP 仍是 200）", () => {
     const error = new ApiError("门户不存在", {
       status: 200,
       code: PORTAL_ERROR_CODES.notFound,
     });
     expect(portalFailureView(error)).toEqual({
-      message: "门户不存在",
+      message: "门户不存在或已停用",
       revealPassphrase: false,
       loginRequired: false,
     });
