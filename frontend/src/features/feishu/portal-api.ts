@@ -540,8 +540,12 @@ export type PortalActions = {
   updatePortal: (input: UpdatePortalInput) => Promise<void>;
   deletePortal: (portalId: number) => Promise<void>;
   togglePortal: (portalId: number, enabled: boolean) => Promise<ToggledPortal>;
-  /// 换口令（独立端点：`update_portal` 不收 passphrase）。
-  setPassphrase: (portalId: number, passphrase: string) => Promise<void>;
+  /// 换口令（独立端点：`update_portal` 不收 passphrase）。`expiresAt` 是 unix 秒。
+  setPassphrase: (
+    portalId: number,
+    passphrase: string,
+    expiresAt?: number,
+  ) => Promise<void>;
 };
 
 export function usePortalActions(): PortalActions {
@@ -559,8 +563,11 @@ export function usePortalActions(): PortalActions {
       deletePortal: (portalId: number) => deletePortal(portalId, deps),
       togglePortal: (portalId: number, enabled: boolean) =>
         togglePortal(portalId, enabled, deps),
-      setPassphrase: (portalId: number, passphrase: string) =>
-        setPassphrase(portalId, passphrase, deps),
+      setPassphrase: (
+        portalId: number,
+        passphrase: string,
+        expiresAt?: number,
+      ) => setPassphrase(portalId, passphrase, deps, expiresAt),
     }),
     [deps],
   );

@@ -60,7 +60,16 @@ type PortalFormValues = {
   empty_message: string;
   rate_limit_per_min: number;
   result_labels: Record<string, string>;
+  /// 口令有效期（天）。空 = 不过期。只在设置了口令时才有意义。
+  passphrase_expires_days: string;
 };
+
+/// 有效天数 → unix 秒；空/非法回 `undefined`（= 不过期）。
+function parseExpiryDays(raw: string): number | undefined {
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days <= 0) return undefined;
+  return Math.floor(Date.now() / 1000) + days * 86_400;
+}
 
 const ACCESS_MODE_OPTIONS: Array<{
   value: PortalAccessMode;
@@ -89,6 +98,7 @@ function buildSchema(isEdit: boolean) {
         .min(1, "限速最小 1")
         .max(120, "限速最大 120"),
       result_labels: z.record(z.string(), z.string()),
+      passphrase_expires_days: z.string(),
     })
     .superRefine((values, ctx) => {
       if (values.exposed_columns.includes(values.query_field_id)) {
@@ -97,6 +107,16 @@ function buildSchema(isEdit: boolean) {
           path: ["exposed_columns"],
           message: "查询键不能出现在开放列中（查询键只用来查，不展示）",
         });
+      }
+      if (values.passphrase_expires_days !== "") {
+        const days = Number(values.passphrase_expires_days);
+        if (!Number.isInteger(days) || days <= 0) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["passphrase_expires_days"],
+            message: "有效期必须是正整数天",
+          });
+        }
       }
       if (values.access_mode === "passphrase") {
         const required = !isEdit;
@@ -156,6 +176,7 @@ function defaultValuesFor(portal: Portal | undefined): PortalFormValues {
       empty_message: "",
       rate_limit_per_min: 30,
       result_labels: {},
+      passphrase_expires_days: "",
     };
   }
   return {
@@ -168,6 +189,7 @@ function defaultValuesFor(portal: Portal | undefined): PortalFormValues {
     empty_message: portal.empty_message ?? "",
     rate_limit_per_min: portal.rate_limit_per_min,
     result_labels: parsePortalLabels(portal.result_labels),
+    passphrase_expires_days: "",
   };
 }
 
@@ -227,6 +249,7 @@ export default function PortalEditDialog({
     try {
       const emptyMessage = values.empty_message.trim();
       const customSlug = values.custom_slug.trim();
+      const expiresAt = parseExpiryDays(values.passphrase_expires_days);
       if (portal) {
         await actions.updatePortal({
           portal_id: portal.id,
@@ -240,12 +263,12 @@ export default function PortalEditDialog({
           custom_slug: customSlug,
         });
         // 口令是**独立端点**（`update_portal` 不收它）：只在填了的时候换一次，
-        // 留空表示不动现有口令。
+        // 留空表示不动现有口令。有效期也只有换口令时才有意义。
         if (values.access_mode === "passphrase" && values.passphrase !== "") {
-          await actions.setPassphrase(portal.id, values.passphrase);
+          await actions.setPassphrase(portal.id, values.passphrase, expiresAt);
         }
       } else {
-        await actions.createPortal({
+        const created = await actions.createPortal({
           datasource_id: datasourceId,
           title: values.title.trim(),
           query_field_id: values.query_field_id,
@@ -258,6 +281,15 @@ export default function PortalEditDialog({
           rate_limit_per_min: values.rate_limit_per_min,
           custom_slug: customSlug,
         });
+        // 有效期不在 `create_portal` 的入参里（后端只给了 `set_passphrase`），
+        // 所以创建时填了有效期就补一次独立调用。
+        if (values.access_mode === "passphrase" && expiresAt !== undefined) {
+          await actions.setPassphrase(
+            created.portalId,
+            values.passphrase,
+            expiresAt,
+          );
+        }
       }
       onSaved();
       onOpenChange(false);
@@ -386,6 +418,26 @@ export default function PortalEditDialog({
               {errors.passphrase ? (
                 <p className="text-sm text-destructive">
                   {errors.passphrase.message}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {accessMode === "passphrase" ? (
+            <div className="space-y-2">
+              <Label htmlFor="portal-passphrase-expires">
+                口令有效期（天，可选）
+              </Label>
+              <Input
+                id="portal-passphrase-expires"
+                type="number"
+                min={1}
+                placeholder="留空表示不过期"
+                {...register("passphrase_expires_days")}
+              />
+              {errors.passphrase_expires_days ? (
+                <p className="text-sm text-destructive">
+                  {errors.passphrase_expires_days.message}
                 </p>
               ) : null}
             </div>
