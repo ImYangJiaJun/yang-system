@@ -1267,6 +1267,36 @@ async fn send_worker_notification(
     outcome: &DispatchResult,
     open_id: &str,
 ) {
+    // 去重：检查 HTTP Action 是否已经处理并通知过（避免重复发消息）
+    let request_log_check = async {
+        let query = runner.context.approval_request_logs().query();
+        let query = query.where_eq("record_id", serde_json::json!(task.record_id))?;
+        let query = query.where_eq("config_id", serde_json::json!(task.config_id))?;
+        let query = query.where_eq("outcome", serde_json::json!("succeeded"))?;
+        query.all().await
+    };
+    match request_log_check.await {
+        Ok(rows) if !rows.is_empty() => {
+            tracing::info!(
+                task_id = task.id,
+                config_id = task.config_id,
+                record_id = %task.record_id,
+                "Worker 通知：HTTP Action 已处理并通知，跳过重复通知"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                task_id = task.id,
+                config_id = task.config_id,
+                "Worker 通知：查询请求日志失败，跳过通知"
+            );
+            return;
+        }
+        _ => {}
+    }
+
     // 读配置行取展示名（2s 预算，与 HTTP Action 的 complete_feedback 一致）
     let config_lookup = async {
         runner
