@@ -219,7 +219,8 @@ pub(crate) struct InstanceDetail {
     pub(crate) department_id: Option<String>,
     /// 创建时传入的幂等键 `uuid`（bot 形态回显）。
     pub(crate) uuid: Option<String>,
-    /// 退回标记（独立布尔；撤回走 `status="CANCELED"`，不是 `reverted`）。
+    /// 撤销标记（官方语义「单据是否被撤销」；撤回走 `status="CANCELED"`，
+    /// 「已退回」是 task 级 `ROLLBACK`，三者互不相同）。
     pub(crate) reverted: Option<bool>,
     /// 任务/节点列表（bot 形态键名 `task_list`）。`status=PENDING` 即当前卡点。
     pub(crate) task_list: Option<Vec<TaskNode>>,

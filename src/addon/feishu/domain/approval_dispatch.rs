@@ -838,7 +838,7 @@ pub(crate) async fn write_extended(
             write(backfill, input.record_id, field, Value::from(millis)).await;
         }
     }
-    // 申请状态：中文映射 + 「(已退回)」后缀。文本列收字符串，单选列也收裸字符串
+    // 申请状态：中文映射 + 「(已撤销)」后缀。文本列收字符串，单选列也收裸字符串
     // （`write_many` 的 `Some(3)` 臂）。
     if let Some(field) = input.status_field {
         if let Some(status) = status_text(detail) {
@@ -907,7 +907,13 @@ fn millis_of(raw: Option<&str>) -> Option<i64> {
     (millis != 0).then_some(millis)
 }
 
-/// 实例状态 → 中文。未知枚举返回 `None`（不写，不猜）。`reverted` 加「(已退回)」。
+/// 实例状态 → 中文。未知枚举返回 `None`（不写，不猜）并记 warn。
+///
+/// `reverted` 加「(已撤销)」后缀——官方语义是「单据是否被撤销」；「已退回」
+/// 在飞书是 task 级 `ROLLBACK` 状态，与此无关，不要混用。
+///
+/// 事件文档还列有 `REVERTED` / `OVERTIME_CLOSE` / `OVERTIME_RECOVER` 三个
+/// 实例状态（get 接口文档的 5 值枚举里没有）——遇到时记 warn 不猜，靠日志发现。
 fn status_text(detail: &InstanceDetail) -> Option<String> {
     let text = match detail.status.as_deref()?.trim() {
         "PENDING" => "审批中",
@@ -915,10 +921,13 @@ fn status_text(detail: &InstanceDetail) -> Option<String> {
         "REJECTED" => "已拒绝",
         "CANCELED" => "已取消",
         "DELETED" => "已删除",
-        _ => return None,
+        other => {
+            tracing::warn!(status = other, "未知的审批实例状态枚举，跳过状态列回填");
+            return None;
+        }
     };
     Some(if detail.reverted == Some(true) {
-        format!("{text}(已退回)")
+        format!("{text}(已撤销)")
     } else {
         text.to_string()
     })
@@ -950,7 +959,7 @@ fn pending_handlers(task_list: &[super::approval::TaskNode]) -> Vec<Value> {
 }
 
 /// 审批流程概要：已到达节点按 `task_list` 顺序拼 `node_name✓/✗/⏳`
-/// （`DONE` → ✓、`PENDING` → ⏳、其余 → ✗），如「部门审批✓ → 财务审批⏳」。
+/// （`DONE`/`APPROVED` → ✓、`PENDING` → ⏳、其余 → ✗），如「部门审批✓ → 财务审批⏳」。
 /// 没有可拼的节点时返回 `None`（不写，不覆盖已有内容）。
 fn flow_text(detail: &InstanceDetail) -> Option<String> {
     let parts: Vec<String> = detail
@@ -962,8 +971,11 @@ fn flow_text(detail: &InstanceDetail) -> Option<String> {
             if name.is_empty() {
                 return None;
             }
+            // task 级状态：get 接口文档明写 task_list[].status 可为 APPROVED
+            // （通过）与 DONE（完成）——不把 APPROVED 映射成 ✓ 会把已通过的
+            // 节点渲染成 ✗。
             let mark = match node.status.as_deref() {
-                Some("DONE") => "✓",
+                Some("DONE") | Some("APPROVED") => "✓",
                 Some("PENDING") => "⏳",
                 _ => "✗",
             };
@@ -3051,7 +3063,7 @@ mod tests {
             "完成时间 \"0\" 必须跳过：{writes:?}"
         );
         assert_eq!(writes[1].2, json!(1790750409857i64));
-        assert_eq!(writes[2].2, json!("审批中(已退回)"));
+        assert_eq!(writes[2].2, json!("审批中(已撤销)"));
         assert_eq!(writes[3].2, json!([{"id":"ou_b"}]));
         assert_eq!(writes[4].2, json!("部门审批✓ → 财务审批⏳ → 法务⏳"));
         assert_eq!(writes[5].2, json!("db59a45c851464gf"));
@@ -3079,6 +3091,23 @@ mod tests {
                 ),
                 ("rec001".to_string(), "fld_handler".to_string(), json!([])),
             ]
+        );
+    }
+
+    #[test]
+    fn flow_text_renders_approved_task_as_done() {
+        // get 接口文档明写 task_list[].status 可为 APPROVED（通过）——它必须
+        // 渲染成 ✓，否则「已通过的任务」会显示成 ✗（2026-10-14 文档核对发现）。
+        let detail = InstanceDetail {
+            task_list: Some(vec![
+                task("部门审批", "APPROVED", "ou_a"),
+                task("财务审批", "PENDING", "ou_b"),
+            ]),
+            ..base_detail("INST-FLOW", None)
+        };
+        assert_eq!(
+            flow_text(&detail).as_deref(),
+            Some("部门审批✓ → 财务审批⏳")
         );
     }
 

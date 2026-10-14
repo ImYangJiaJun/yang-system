@@ -84,13 +84,20 @@ pub(crate) async fn handle(
         "=== 飞书审批事件到达 ==="
     );
 
-    // 解密或直接用明文
+    // 解密或直接用明文。
+    //
+    // 失败一律返回 `Err`（框架映射 5xx）而不是 200 + error body：HTTP 200 是
+    // 飞书判定推送成功的**唯一**信号（响应体它不看），返回 200 会让这条事件
+    // 永久丢失；5xx 触发飞书按 15s/5min/1h/6h 重推（最多 4 次、约 7.1 小时
+    // 窗口），这是解密类故障唯一的自愈机会。
     let event_body = match raw_body.get("encrypt").and_then(Value::as_str) {
         Some(encrypted) => {
             tracing::info!("检测到加密事件，开始解密");
             let Some(key_raw) = encrypt_key.as_deref() else {
                 tracing::error!("飞书发送了加密事件，但 event_encrypt_key 未配置");
-                return raw_json(serde_json::json!({"error": "encrypt key not configured"}));
+                return Err(BaseError::ConfigError(
+                    "飞书发送了加密事件，但 event_encrypt_key 未配置".into(),
+                ));
             };
             let key = crypto::derive_key(key_raw);
             match crypto::decrypt_bytes(encrypted, &key) {
@@ -109,14 +116,17 @@ pub(crate) async fn handle(
                             decrypted_preview = %String::from_utf8_lossy(&decrypted[..decrypted.len().min(200)]),
                             "飞书事件解密后不是合法 JSON"
                         );
-                        return raw_json(
-                            serde_json::json!({"error": "decrypt produced invalid json"}),
-                        );
+                        return Err(BaseError::ValidationFailed(
+                            "decrypted_body".into(),
+                            "飞书事件解密后不是合法 JSON".into(),
+                        ));
                     }
                 },
                 Err(e) => {
                     tracing::error!(error = %e, "飞书事件解密失败");
-                    return raw_json(serde_json::json!({"error": "decrypt failed"}));
+                    return Err(BaseError::ConfigError(format!(
+                        "飞书事件解密失败（Encrypt Key 不匹配或密文损坏）：{e}"
+                    )));
                 }
             }
         }
@@ -145,6 +155,10 @@ pub(crate) async fn handle(
 
     // 提取事件字段（飞书推送结构：顶层有 type/event_callback/uuid/token，
     // 业务字段在 event 嵌套层里）
+    //
+    // 事件 id 取**顶层** `uuid`。注意：`approval_instance` 事件的 `event.uuid`
+    // 是**实例 uuid**（创建实例时传入的那个），与事件 id 同名不同义——
+    // 不要"顺手"改成 `event.uuid`，那会静默破坏幂等去重。
     let event = event_body.get("event").and_then(Value::as_object);
     let event_id = event_body
         .get("uuid")
@@ -159,9 +173,16 @@ pub(crate) async fn handle(
     let status = event
         .and_then(|e| e.get("status").and_then(Value::as_str))
         .unwrap_or("");
+    // operate_time 官方字段表标注为毫秒级时间戳，但 REVERTED 等场景实际发的是
+    // int64 而非字符串——两种形态都收，只认字符串会把撤销事件的时间静默丢成 NULL。
     let operate_time = event
-        .and_then(|e| e.get("operate_time").and_then(Value::as_str))
-        .unwrap_or("");
+        .and_then(|e| e.get("operate_time"))
+        .and_then(|value| match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
 
     tracing::info!(
         event_id = %event_id,
@@ -218,27 +239,32 @@ pub(crate) async fn handle(
             raw_json(serde_json::json!({"success": true}))
         }
         Err(e) => {
-            // 唯一索引冲突 = 重复投递，不算错误；其余为真实落库失败。
-            let err_str = e.to_string();
-            let duplicate = err_str.contains("Duplicate") || err_str.contains("1062");
-            // 插入失败：事务里没有变更，显式回滚（finish_transaction 的 Err 臂）。
-            let _ = FeishuContext::finish_transaction::<()>(transaction, Err(BaseError::from(e)))
-                .await;
-            if duplicate {
+            let error = BaseError::from(e);
+            let err_str = error.to_string();
+            // 唯一索引冲突 = 重复投递：不算错误。回滚空事务后返回 200，
+            // 让飞书停止重推（这正是重复投递该有的应答）。
+            if err_str.contains("Duplicate") || err_str.contains("1062") {
+                let _ = FeishuContext::finish_transaction::<()>(transaction, Err(error)).await;
                 tracing::info!(
                     event_id = %event_id,
                     instance_code = %instance_code,
                     "飞书事件重复投递（event_id 唯一索引冲突），已忽略"
                 );
-                raw_json(serde_json::json!({"success": true, "duplicate": true}))
-            } else {
-                tracing::error!(
-                    error = %err_str,
-                    event_id = %event_id,
-                    "飞书事件落地失败"
-                );
-                raw_json(serde_json::json!({"error": "insert failed"}))
+                return raw_json(serde_json::json!({"success": true, "duplicate": true}));
             }
+            // 真实落库失败：**不能返回 200**——HTTP 200 是飞书判定推送成功的
+            // 唯一信号（响应体它不看），返回 200 会让这条事件永久丢失。回滚后
+            // 把错误抛给框架（DbError 归因映射 500/503），飞书按
+            // 15s/5min/1h/6h 重推，最多 4 次、约 7.1 小时窗口。
+            tracing::error!(
+                error = %err_str,
+                event_id = %event_id,
+                "飞书事件落地失败，返回 5xx 等待飞书重推"
+            );
+            if let Err(rollback_error) = transaction.rollback().await {
+                tracing::error!(error = %rollback_error, "飞书事件事务回滚失败");
+            }
+            Err(error)
         }
     }
 }
