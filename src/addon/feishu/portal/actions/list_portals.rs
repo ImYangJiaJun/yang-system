@@ -182,7 +182,7 @@ mod tests {
             .table_definition()
             .unwrap_or_else(|error| panic!("应可编译为表定义: {error}"));
         let mut query = definition.bind(pool).query(["system"]);
-        for field in ["title", "id"] {
+        for field in ["title", "id", "created_at"] {
             query = query
                 .order_by(field, SortOrder::Asc)
                 .unwrap_or_else(|error| {

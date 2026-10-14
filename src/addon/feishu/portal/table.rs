@@ -123,7 +123,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     .require(true)
                     .default(true)
                     .filterable(true),
-                created_at => Timestamp::new().created_at().title("创建时间"),
+                created_at => Timestamp::new().created_at().title("创建时间").sortable(true),
                 updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
             }),
     )
