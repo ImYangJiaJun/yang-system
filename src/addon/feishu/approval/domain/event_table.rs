@@ -12,7 +12,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     Ok(TableSpec::new(table_name.clone())
         .title("飞书审批事件")
         .fields(yang_base::fields! {
-            id => Key::new().title("ID"),
+            id => Key::new().title("ID").filterable(true).sortable(true),
             // 飞书事件的唯一标识，用于幂等去重。
             event_id => Str::new()
                 .title("事件 ID")
@@ -123,6 +123,19 @@ mod tests {
             processed_at.is_filterable(),
             "按处理状态筛选依赖该位"
         );
+    }
+
+    #[test]
+    fn id_is_filterable_and_sortable() {
+        // 认领查询按 id 升序取批 + 分页（`claim_events` L259 的 `order_by("id", ..)`
+        // 与 `page(1, EVENT_BATCH)`），DSL 的 sortable/filterable 都是 fail-closed，
+        // 漏了只在运行期报 FieldPermissionDenied——本轮生产事故复现过的。
+        let definition = definition();
+        let id = definition
+            .field("id")
+            .unwrap_or_else(|| panic!("id 字段必须存在"));
+        assert!(id.is_filterable(), "id 必须可筛选（分页游标依赖）");
+        assert!(id.is_sortable(), "id 必须可排序（认领升序取批依赖）");
     }
 
     #[test]
