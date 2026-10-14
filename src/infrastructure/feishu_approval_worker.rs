@@ -1265,6 +1265,27 @@ async fn record_outcome(
     }
 }
 
+/// 请求日志行是否表示「HTTP 路径**确实发出过**通知」。
+///
+/// 判据是响应体里 `notification.status == "sent"`，**不是** `outcome=succeeded`
+/// ——「HTTP 处理成功但没发通知」是常态：工作流未传 `notification_recipient`
+/// 时 HTTP 路径按设计不发（not_requested）。2026-10-14 的「没发消息」事故
+/// 就是把「处理过」当成了「通知过」，两层都跳过导致一条都不发。
+fn http_path_notified(row: &Record) -> bool {
+    row.optional::<String>("response_body")
+        .ok()
+        .flatten()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .and_then(|value| {
+            value
+                .get("notification")
+                .and_then(|notification| notification.get("status"))
+                .and_then(|status| status.as_str())
+                .map(|status| status == "sent")
+        })
+        .unwrap_or(false)
+}
+
 /// Worker 路径的 IM 通知：向触发人发送审批派发结果。
 ///
 /// 失败只 warn，不冒泡。通知是附加价值，不该影响审批结论或重试逻辑。
@@ -1274,7 +1295,11 @@ async fn send_worker_notification(
     outcome: &DispatchResult,
     open_id: &str,
 ) {
-    // 去重：检查 HTTP Action 是否已经处理并通知过（避免重复发消息）
+    // 去重：只有 HTTP Action **确实发出过通知**才跳过。
+    //
+    // HTTP 路径通知「显式指定的接收人」（notification_recipient），本 worker
+    // 通知「申请人」——两者互补：HTTP 没发时（未指定接收人是常态）由这里兜底，
+    // HTTP 发过时才避免重复。
     let request_log_check = async {
         let query = runner.context.approval_request_logs().query();
         let query = query.where_eq("record_id", serde_json::json!(task.record_id))?;
@@ -1283,14 +1308,16 @@ async fn send_worker_notification(
         query.all().await
     };
     match request_log_check.await {
-        Ok(rows) if !rows.is_empty() => {
-            tracing::info!(
-                task_id = task.id,
-                config_id = task.config_id,
-                record_id = %task.record_id,
-                "Worker 通知：HTTP Action 已处理并通知，跳过重复通知"
-            );
-            return;
+        Ok(rows) => {
+            if rows.iter().any(http_path_notified) {
+                tracing::info!(
+                    task_id = task.id,
+                    config_id = task.config_id,
+                    record_id = %task.record_id,
+                    "Worker 通知：HTTP Action 已发送过通知，跳过重复通知"
+                );
+                return;
+            }
         }
         Err(error) => {
             tracing::warn!(
@@ -1301,7 +1328,6 @@ async fn send_worker_notification(
             );
             return;
         }
-        _ => {}
     }
 
     // 读配置行取展示名（2s 预算，与 HTTP Action 的 complete_feedback 一致）
@@ -1537,6 +1563,43 @@ mod tests {
         let mut cursor = ResumeCursor(42);
         cursor.advance(&[]);
         assert_eq!(cursor.0, 0, "扫描结束后旧 pending 任务必须能重新认领");
+    }
+
+    #[test]
+    fn http_notification_detection_reads_the_actual_notification_status() {
+        // 只有 notification.status == "sent" 才算「HTTP 已通知」——判据必须是
+        // 通知结果本身，不是 outcome=succeeded（2026-10-14「没发消息」事故根因）。
+        let mut sent = Record::new();
+        sent.insert(
+            "response_body",
+            serde_json::json!(r#"{"notification":{"status":"sent","message_id":"om_1"}}"#),
+        );
+        assert!(http_path_notified(&sent));
+
+        let mut not_requested = Record::new();
+        not_requested.insert(
+            "response_body",
+            serde_json::json!(r#"{"notification":{"status":"not_requested"}}"#),
+        );
+        assert!(!http_path_notified(&not_requested), "未指定接收人不算已通知");
+
+        let mut failed = Record::new();
+        failed.insert(
+            "response_body",
+            serde_json::json!(r#"{"notification":{"status":"failed","message":"超时"}}"#),
+        );
+        assert!(!http_path_notified(&failed), "发送失败不算已通知");
+
+        // response_body 为空（失败出口）与不含 notification 的响应体：都不算已通知。
+        let mut empty = Record::new();
+        empty.insert("response_body", serde_json::Value::Null);
+        assert!(!http_path_notified(&empty));
+        let mut legacy = Record::new();
+        legacy.insert(
+            "response_body",
+            serde_json::json!(r#"{"serial_number":"202610150001"}"#),
+        );
+        assert!(!http_path_notified(&legacy));
     }
 
     #[test]
