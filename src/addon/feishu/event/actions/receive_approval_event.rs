@@ -143,26 +143,24 @@ pub(crate) async fn handle(
         }
     }
 
-    // 提取事件字段
+    // 提取事件字段（飞书推送结构：顶层有 type/event_callback/uuid/token，
+    // 业务字段在 event 嵌套层里）
+    let event = event_body.get("event").and_then(Value::as_object);
     let event_id = event_body
-        .get("event_id")
+        .get("uuid")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let event_type = event_body
-        .get("type")
-        .and_then(Value::as_str)
+    let event_type = event
+        .and_then(|e| e.get("type").and_then(Value::as_str))
         .unwrap_or("unknown");
-    let instance_code = event_body
-        .get("instance_code")
-        .and_then(Value::as_str)
+    let instance_code = event
+        .and_then(|e| e.get("instance_code").and_then(Value::as_str))
         .unwrap_or("");
-    let status = event_body
-        .get("status")
-        .and_then(Value::as_str)
+    let status = event
+        .and_then(|e| e.get("status").and_then(Value::as_str))
         .unwrap_or("");
-    let operate_time = event_body
-        .get("operate_time")
-        .and_then(Value::as_str)
+    let operate_time = event
+        .and_then(|e| e.get("operate_time").and_then(Value::as_str))
         .unwrap_or("");
 
     tracing::info!(
@@ -175,17 +173,21 @@ pub(crate) async fn handle(
     );
 
     // 落事件落地表
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let mut record = yang_base::table::Record::new();
     record.insert("event_id", serde_json::json!(event_id));
     record.insert("event_type", serde_json::json!(event_type));
     record.insert("instance_code", serde_json::json!(instance_code));
     record.insert("status", serde_json::json!(status));
+    record.insert("received_at", serde_json::json!(now));
     if !operate_time.is_empty() {
         if let Ok(ts) = operate_time.parse::<i64>() {
             record.insert("operate_time", serde_json::json!(ts / 1000)); // 毫秒 → 秒
         }
     }
-    // received_at 由框架 created_at 自动填充
     record.insert("raw_payload", serde_json::json!(event_body.to_string()));
 
     tracing::info!("开始插入事件落地表");
