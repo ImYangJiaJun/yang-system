@@ -51,8 +51,8 @@ use yang_base::BaseError;
 use crate::addon::feishu::domain::approval::instance_applink;
 use crate::addon::feishu::domain::approval_convert::{FixedOffset, WidgetMap};
 use crate::addon::feishu::domain::approval_dispatch::{
-    backfill_in_chunks, dispatch_one, widget_maps_from_rows, BitableBackfill,
-    DispatchInput as OrchestrationInput, DispatchResult,
+    applicant_open_id as extract_applicant_open_id, backfill_in_chunks, dispatch_one,
+    widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput, DispatchResult,
 };
 use crate::addon::feishu::domain::approval_feedback;
 use crate::addon::feishu::domain::approval_notification::{
@@ -431,8 +431,8 @@ async fn run_round(
                 wait_ms = slot_started.elapsed().as_millis() as u64,
                 "审批任务取得创建名额，开始处理"
             );
-            let outcome = process_one(runner, task).await;
-            record_outcome(runner, task, &outcome).await;
+            let (outcome, applicant_open_id) = process_one(runner, task).await;
+            record_outcome(runner, task, &outcome, applicant_open_id.as_deref()).await;
             tracing::info!(
                 duration_ms = task_started.elapsed().as_millis() as u64,
                 "审批任务本轮处理结束"
@@ -949,7 +949,7 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
 }
 
 /// 处理一条记录。
-async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult {
+async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResult, Option<String>) {
     let coordinates = BitableCoordinates {
         app_token: task.base_token.clone(),
         table_id: task.table_id.clone(),
@@ -973,9 +973,9 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         // 表结构拿不到多半是凭证/网络抖动，判可重试。
         Err(failure) => {
             tracing::warn!(stage = "fields", kind = ?failure.kind, "审批任务读取表结构失败");
-            return DispatchResult::Retryable {
+            return (DispatchResult::Retryable {
                 message: format!("读取表结构失败：{}", failure.message),
-            };
+            }, None);
         }
     };
 
@@ -1000,23 +1000,23 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
                 Ok(cells) => cells,
                 Err(error) => {
                     tracing::warn!(stage = "record", "审批任务解析记录字段失败，详情见任务记录");
-                    return DispatchResult::Terminal {
+                    return (DispatchResult::Terminal {
                         message: format!("解析记录字段失败：{error}"),
-                    };
+                    }, None);
                 }
             },
             None => {
                 tracing::warn!(stage = "record", "多维表格里已找不到审批源记录");
-                return DispatchResult::Terminal {
+                return (DispatchResult::Terminal {
                     message: "多维表格里已找不到该记录".to_string(),
-                };
+                }, None);
             }
         },
         Err(failure) => {
             tracing::warn!(stage = "record", kind = ?failure.kind, "审批任务读取源记录失败");
-            return DispatchResult::Retryable {
+            return (DispatchResult::Retryable {
                 message: format!("读取记录失败：{}", failure.message),
-            };
+            }, None);
         }
     };
 
@@ -1028,9 +1028,9 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         // 列被删了/改名后重名：重试好不了，判终态（回填列本身写不进去，只能留日志）。
         Err(error) => {
             tracing::warn!(stage = "fields", backfill_field = %task.backfill_field, "审批任务回填列不可用，详情见任务记录");
-            return DispatchResult::Terminal {
+            return (DispatchResult::Terminal {
                 message: format!("回填列不可用：{error}"),
-            };
+            }, None);
         }
     };
 
@@ -1047,7 +1047,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         coordinates: &coordinates,
         fields: &fields,
     };
-    dispatch_one(
+    let result = dispatch_one(
         runner.transport(),
         runner.sleeper.as_ref(),
         &runner.tokens,
@@ -1073,7 +1073,13 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
             timezone_offset: task.timezone_offset,
         },
     )
-    .await
+    .await;
+
+    // 从表格 cells 提取申请人 open_id（poll 触发时 task.applicant_open_id 为空，回退到表格）
+    let open_id = task.applicant_open_id.clone()
+        .or_else(|| extract_applicant_open_id(&cells, &task.applicant_field));
+
+    (result, open_id)
 }
 
 /// 组装持久化事实，已确认实例在回填失败时也必须保留。
@@ -1133,7 +1139,12 @@ fn outcome_record(outcome: &DispatchResult) -> Record {
 }
 
 /// 把处理结论落库。
-async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &DispatchResult) {
+async fn record_outcome(
+    runner: &RoundRunner,
+    task: &ClaimedTask,
+    outcome: &DispatchResult,
+    applicant_open_id: Option<&str>,
+) {
     let row = outcome_record(outcome);
     let state = row
         .get("state")
@@ -1239,7 +1250,9 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
         DispatchResult::Backfilled { .. } | DispatchResult::Terminal { .. }
     );
     if should_notify {
-        if let Some(open_id) = &task.applicant_open_id {
+        // 优先用 task.applicant_open_id（手动按钮触发时已落库），否则用传入的（poll 触发时从表格提取）
+        let open_id = task.applicant_open_id.as_deref().or(applicant_open_id);
+        if let Some(open_id) = open_id {
             send_worker_notification(runner, task, outcome, open_id).await;
         }
     }
