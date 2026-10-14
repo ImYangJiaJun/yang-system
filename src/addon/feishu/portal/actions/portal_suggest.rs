@@ -102,9 +102,17 @@ pub(super) async fn handle(
 
     let query_source_key: String = portal.require("query_field_source_key")?;
     let Some(like_key) = fuzzy_like_key(&query_stripped, fuzzy_min_digits) else {
+        tracing::debug!(query_stripped, fuzzy_min_digits, "fuzzy_like_key returned None");
         return empty_response();
     };
     let input_digits = extract_digits(&query_stripped);
+
+    tracing::debug!(
+        query_source_key,
+        like_key,
+        input_digits,
+        "suggest: querying options"
+    );
 
     // 粗筛 + 精筛：与 portal_query 的 fuzzy_match 同一逻辑，但只取 label。
     let candidates = context
@@ -118,7 +126,17 @@ pub(super) async fn handle(
         .all()
         .await?;
 
+    tracing::debug!(
+        candidate_count = candidates.len(),
+        "suggest: DB query returned candidates"
+    );
+
     let matched = fuzzy_filter_candidates(&candidates, &input_digits);
+
+    tracing::debug!(
+        matched_count = matched.len(),
+        "suggest: after Rust-side filter"
+    );
     let suggestions: Vec<String> = matched
         .iter()
         .filter_map(|record| record.optional::<String>("label").ok().flatten())

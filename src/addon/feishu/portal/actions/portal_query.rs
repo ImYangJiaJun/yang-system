@@ -260,22 +260,8 @@ pub(super) async fn handle(
         .all()
         .await?;
 
-    // 精确匹配落空时退一步做模糊匹配：用户敲入 ≥min_digits 位连续数字就当成在找卡号。
-    // 命中的行要明说是模糊结果，否则用户会把「前几位相同」误当成精确命中。
-    let fuzzy_enabled = portal.optional::<bool>("fuzzy_enabled")?.unwrap_or(true);
-    let fuzzy_min_digits = portal.optional::<i64>("fuzzy_min_digits")?.unwrap_or(4) as usize;
-    let (matched, fuzzy_message) = if matched.is_empty() && fuzzy_enabled {
-        let fuzzy =
-            fuzzy_match(&context, &query_source_key, &input.value, fuzzy_min_digits).await?;
-        if fuzzy.is_empty() {
-            (fuzzy, String::new())
-        } else {
-            let count = fuzzy.len();
-            (fuzzy, format!("模糊匹配到 {count} 条结果"))
-        }
-    } else {
-        (matched, String::new())
-    };
+    // 模糊匹配已移至独立的 suggest 端点（portal_suggest.rs），供前端自动补全使用。
+    // 精确匹配落空时直接返回空结果，由前端引导用户使用自动补全选择完整值。
 
     // 第二步：按命中行的 `option_id` 反查开放列子行，合并成多列结果。
     let children = load_child_values(&context, &matched, &columns).await?;
@@ -299,11 +285,11 @@ pub(super) async fn handle(
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_EMPTY_MESSAGE.to_string())
     } else if rows.len() == MATCH_LIMIT {
-        // 匹配返回满页只可能是查询值本身不唯一（如同一卡号多行）或模糊粗筛被截断，
+        // 匹配返回满页只可能是查询值本身不唯一（如同一卡号多行），
         // 这时必须明说被截断了，否则用户会以为看到的就是全部。
         format!("匹配结果超过 {MATCH_LIMIT} 条，仅显示前 {MATCH_LIMIT} 条")
     } else {
-        fuzzy_message
+        String::new()
     };
 
     Ok(ApiResponse::success_value(
@@ -589,34 +575,6 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// 模糊匹配：输入含 ≥`min_digits` 位连续数字时，用前 `min_digits` 位数字做 LIKE 粗筛，
-/// 再在 Rust 里精筛。
-///
-/// 返回命中的行；输入凑不出 ≥`min_digits` 位连续数字（不够像卡号）时返回空，不触发模糊。
-async fn fuzzy_match(
-    context: &FeishuContext,
-    query_source_key: &str,
-    value: &str,
-    min_digits: usize,
-) -> Result<Vec<Record>, BaseError> {
-    let Some(like_key) = fuzzy_like_key(value, min_digits) else {
-        return Ok(Vec::new());
-    };
-    let input_digits = extract_digits(value);
-
-    let candidates = context
-        .options()
-        .query()
-        .select_fields(&["option_id", "source_key", "label"])?
-        .where_eq("source_key", serde_json::json!(query_source_key))?
-        .where_contains("label", &like_key)?
-        .where_eq("enabled", serde_json::json!(true))?
-        .page(1, MATCH_LIMIT)?
-        .all()
-        .await?;
-    Ok(fuzzy_filter_candidates(&candidates, &input_digits))
 }
 
 /// 提取字符串里的全部 ASCII 数字，按出现顺序拼接。
