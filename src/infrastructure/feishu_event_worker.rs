@@ -19,10 +19,10 @@ use yang_base::table::{Record, SortOrder};
 use yang_base::tools::Tools;
 
 use crate::addon::feishu::domain::approval::{get_instance, GetOutcome};
+use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
     write_extended, BitableBackfill, DispatchInput,
 };
-use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
@@ -150,11 +150,7 @@ impl RoundRunner {
 }
 
 /// 主循环：等信号或到点，然后跑一轮。
-async fn run_loop(
-    runner: RoundRunner,
-    idle_poll: Duration,
-    mut shutdown: watch::Receiver<bool>,
-) {
+async fn run_loop(runner: RoundRunner, idle_poll: Duration, mut shutdown: watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(idle_poll);
     loop {
         tokio::select! {
@@ -218,15 +214,11 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
                 failed += 1;
                 let new_count = event.retry_count + 1;
                 if new_count >= MAX_RETRY_COUNT {
-                    if let Err(error) =
-                        mark_terminal_event(runner, event.id, &message).await
-                    {
+                    if let Err(error) = mark_terminal_event(runner, event.id, &message).await {
                         tracing::warn!(error = %error, event_id = event.id, "置事件终态失败");
                     }
                     terminal += 1;
-                } else if let Err(error) =
-                    mark_retry(runner, event.id, new_count, &message).await
-                {
+                } else if let Err(error) = mark_retry(runner, event.id, new_count, &message).await {
                     tracing::warn!(error = %error, event_id = event.id, "更新事件重试信息失败");
                 }
             }
@@ -289,15 +281,12 @@ async fn process_event(runner: &RoundRunner, event: &PendingEvent) -> EventOutco
         event_id = event.id,
         instance_code = %event.instance_code
     );
-    async {
-        process_event_inner(runner, event).await
-    }
-    .instrument(span)
-    .await
+    async { process_event_inner(runner, event).await }
+        .instrument(span)
+        .await
 }
 
 async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> EventOutcome {
-
     tracing::info!(
         event_id = event.id,
         instance_code = %event.instance_code,
@@ -313,21 +302,21 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         .query()
         .where_eq("instance_code", serde_json::json!(&event.instance_code));
     let task_rows = match task_query_result {
-        Ok(query) => match query
-            .select_fields(&["id", "record_id", "config_id", "instance_status"])
-        {
-            Ok(query) => match query.all().await {
-                Ok(rows) => rows,
+        Ok(query) => {
+            match query.select_fields(&["id", "record_id", "config_id", "instance_status"]) {
+                Ok(query) => match query.all().await {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        tracing::error!(error = %error, "查询 task 表失败");
+                        return EventOutcome::Failed(format!("查询 task 表失败: {error}"));
+                    }
+                },
                 Err(error) => {
-                    tracing::error!(error = %error, "查询 task 表失败");
-                    return EventOutcome::Failed(format!("查询 task 表失败: {error}"));
+                    tracing::error!(error = %error, "投影字段失败");
+                    return EventOutcome::Failed(format!("投影字段失败: {error}"));
                 }
-            },
-            Err(error) => {
-                tracing::error!(error = %error, "投影字段失败");
-                return EventOutcome::Failed(format!("投影字段失败: {error}"));
             }
-        },
+        }
         Err(error) => {
             tracing::error!(error = %error, "构造 task 查询失败");
             return EventOutcome::Failed(format!("构造 task 查询失败: {error}"));

@@ -119,10 +119,7 @@ mod tests {
             !processed_at.is_required(),
             "processed_at 可空（NULL = 待处理）"
         );
-        assert!(
-            processed_at.is_filterable(),
-            "按处理状态筛选依赖该位"
-        );
+        assert!(processed_at.is_filterable(), "按处理状态筛选依赖该位");
     }
 
     #[test]

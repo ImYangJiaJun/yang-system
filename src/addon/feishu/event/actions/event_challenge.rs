@@ -70,18 +70,18 @@ pub(super) async fn handle(
             };
             let key = crypto::derive_key(key_raw);
             match crypto::decrypt_bytes(encrypted, &key) {
-                Ok(decrypted) => {
-                    match serde_json::from_slice::<Value>(&decrypted) {
-                        Ok(parsed) => {
-                            tracing::info!(decrypted = %parsed, "飞书 challenge 解密成功");
-                            parsed
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "飞书 challenge 解密后不是合法 JSON");
-                            return raw_json(serde_json::json!({"error": "decrypt produced invalid json"}));
-                        }
+                Ok(decrypted) => match serde_json::from_slice::<Value>(&decrypted) {
+                    Ok(parsed) => {
+                        tracing::info!(decrypted = %parsed, "飞书 challenge 解密成功");
+                        parsed
                     }
-                }
+                    Err(e) => {
+                        tracing::error!(error = %e, "飞书 challenge 解密后不是合法 JSON");
+                        return raw_json(
+                            serde_json::json!({"error": "decrypt produced invalid json"}),
+                        );
+                    }
+                },
                 Err(e) => {
                     tracing::error!(error = %e, "飞书 challenge 解密失败");
                     return raw_json(serde_json::json!({"error": "decrypt failed"}));

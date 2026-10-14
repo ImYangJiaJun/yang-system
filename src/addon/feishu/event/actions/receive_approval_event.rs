@@ -43,7 +43,15 @@ pub(super) fn register(
     module
         .action_fn(
             yang_base::action_name!("receive_approval_event"),
-            move |ctx, input| handle(ctx, input, context.clone(), verification_token.clone(), encrypt_key.clone()),
+            move |ctx, input| {
+                handle(
+                    ctx,
+                    input,
+                    context.clone(),
+                    verification_token.clone(),
+                    encrypt_key.clone(),
+                )
+            },
         )
         .route(HttpMethod::Post, "/api/v1/feishu/approval/event")
         .display_name("飞书审批事件接收")
@@ -84,26 +92,26 @@ pub(super) async fn handle(
             };
             let key = crypto::derive_key(key_raw);
             match crypto::decrypt_bytes(encrypted, &key) {
-                Ok(decrypted) => {
-                    match serde_json::from_slice::<Value>(&decrypted) {
-                        Ok(parsed) => {
-                            tracing::info!(
-                                decrypted = %parsed,
-                                decrypted_size = decrypted.len(),
-                                "飞书事件解密成功"
-                            );
-                            parsed
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                decrypted_preview = %String::from_utf8_lossy(&decrypted[..decrypted.len().min(200)]),
-                                "飞书事件解密后不是合法 JSON"
-                            );
-                            return raw_json(serde_json::json!({"error": "decrypt produced invalid json"}));
-                        }
+                Ok(decrypted) => match serde_json::from_slice::<Value>(&decrypted) {
+                    Ok(parsed) => {
+                        tracing::info!(
+                            decrypted = %parsed,
+                            decrypted_size = decrypted.len(),
+                            "飞书事件解密成功"
+                        );
+                        parsed
                     }
-                }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            decrypted_preview = %String::from_utf8_lossy(&decrypted[..decrypted.len().min(200)]),
+                            "飞书事件解密后不是合法 JSON"
+                        );
+                        return raw_json(
+                            serde_json::json!({"error": "decrypt produced invalid json"}),
+                        );
+                    }
+                },
                 Err(e) => {
                     tracing::error!(error = %e, "飞书事件解密失败");
                     return raw_json(serde_json::json!({"error": "decrypt failed"}));
@@ -134,11 +142,26 @@ pub(super) async fn handle(
     }
 
     // 提取事件字段
-    let event_id = event_body.get("event_id").and_then(Value::as_str).unwrap_or("");
-    let event_type = event_body.get("type").and_then(Value::as_str).unwrap_or("unknown");
-    let instance_code = event_body.get("instance_code").and_then(Value::as_str).unwrap_or("");
-    let status = event_body.get("status").and_then(Value::as_str).unwrap_or("");
-    let operate_time = event_body.get("operate_time").and_then(Value::as_str).unwrap_or("");
+    let event_id = event_body
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let event_type = event_body
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let instance_code = event_body
+        .get("instance_code")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let status = event_body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let operate_time = event_body
+        .get("operate_time")
+        .and_then(Value::as_str)
+        .unwrap_or("");
 
     tracing::info!(
         event_id = %event_id,

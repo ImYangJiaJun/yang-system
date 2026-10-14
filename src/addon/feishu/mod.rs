@@ -70,7 +70,10 @@ pub(crate) fn build_addon(
     )?)
     .module(portal::build_log_module()?)
     // 事件订阅：challenge 应答端点 + 事件接收端点（public + verification_token 自校验）。
-    .module(event::build_module(Arc::clone(&context), settings.as_deref())?)
+    .module(event::build_module(
+        Arc::clone(&context),
+        settings.as_deref(),
+    )?)
     .module(option::build_module(
         context,
         settings.as_deref(),
