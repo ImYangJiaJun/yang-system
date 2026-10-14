@@ -236,7 +236,7 @@ async fn run_once(runner: &ReminderRunner) {
 async fn admin_recipient(users: &Repository) -> Result<Option<String>, BaseError> {
     let rows = users
         .query()
-        .select_fields(&["id", "email"])?
+        .select_fields(&["id", "email"])? // schema-anchor: cross-addon（查 account 的 users 表，非 feishu 表）
         .page(1, PAGE_SIZE)?
         .all()
         .await?;

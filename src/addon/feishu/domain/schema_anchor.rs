@@ -633,6 +633,36 @@ fn write_bindings(
     out
 }
 
+/// 跨 addon 查询的行级豁免标记。
+///
+/// 扫描器只认 feishu 的已登记表；worker 里查询**其他 addon 的表**（如 account 的
+/// `users`）时，字段名不在扫描器的管辖范围。在站点所在行（或其上一行）写下本标记，
+/// 该行上的站点跳过扫描——按行豁免比按站点记账更抗行号漂移。
+const CROSS_ADDON_MARKER: &str = "schema-anchor: cross-addon";
+
+/// 站点所在行（或上一行）是否带跨 addon 豁免标记。按**原文**检查（掩码里注释是空格）。
+fn cross_addon_exempt(masked: &Masked, site: usize) -> bool {
+    let line_start = masked.text[..site]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = masked.text[site..]
+        .find('\n')
+        .map(|index| site + index)
+        .unwrap_or(masked.text.len());
+    if masked.text[line_start..line_end].contains(CROSS_ADDON_MARKER) {
+        return true;
+    }
+    if line_start == 0 {
+        return false;
+    }
+    let prev_start = masked.text[..line_start - 1]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    masked.text[prev_start..line_start].contains(CROSS_ADDON_MARKER)
+}
+
 /// 扫一段源码里所有会做字段校验的站点。
 ///
 /// 收源码而不是收路径，是为了让**正对照**（喂一段故意写错的源码，断言它被抓到）
@@ -699,6 +729,11 @@ fn scan_source(
             offset = close + 1;
             continue;
         }
+        if cross_addon_exempt(&masked, dot) {
+            // 显式豁免：查询的是非 feishu 表（标记理由写在源码里）。
+            offset = close + 1;
+            continue;
+        }
         let owner = resolve_owner(&masked, &spans, &bindings, dot, Some(&receiver), tables);
         let line = masked.line_of(dot);
         for field in fields {
@@ -747,6 +782,38 @@ fn addon_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/addon/feishu")
 }
 
+/// 扫描范围：`addon/feishu` 全目录 + `infrastructure` 下的飞书 worker 文件。
+///
+/// worker（派发 / 事件 / 拉取）在 `src/infrastructure/` 下，不在 addon 目录里，
+/// 但同样用 DSL 查询飞书表。2026-10-14 连续三次生产事故（`instance_code`、
+/// `record_id`、`config_id` 缺 filterable 导致运行期 403）全部从这个盲区漏出——
+/// 扩到 worker 后，同类缺口由扫描器在 CI 抓住，而不是等运行期日志。
+fn scan_files() -> Vec<(String, PathBuf)> {
+    let addon = addon_root();
+    let mut out: Vec<(String, PathBuf)> = rust_files(&addon)
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(&addon)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (relative, path)
+        })
+        .collect();
+    let infrastructure = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/infrastructure");
+    for path in rust_files(&infrastructure) {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("feishu_") {
+            out.push((format!("infrastructure/{name}"), path));
+        }
+    }
+    out.sort();
+    out
+}
+
 /// **轴二：枚举取值域。** 契约里 `enforced_by: backend` 的取值域与表声明逐字一致。
 ///
 /// 与主断言的分工：主断言管**列名与能力位**（能不能用），这一条管**取值**（值合不合法）。
@@ -766,18 +833,12 @@ fn the_enum_domains_in_the_contract_match_the_table_declarations() {
 /// 这一条跨三个文件都不需要数据库——DSL 的校验本来就是急切离线的。
 #[test]
 fn every_field_used_on_a_table_is_declared_there_with_the_required_capability() {
-    let root = addon_root();
     let tables = tables();
     let mut violations = Vec::new();
     let mut weak = BTreeSet::new();
     let mut checked = 0usize;
 
-    for path in rust_files(&root) {
-        let relative = path
-            .strip_prefix(&root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
+    for (relative, path) in scan_files() {
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("应可读 {}: {error}", path.display()));
         for site in scan_source(&relative, &source, &tables) {
@@ -862,15 +923,9 @@ fn every_field_used_on_a_table_is_declared_there_with_the_required_capability() 
 /// 键是 `文件:动词:字段`（不含行号：行号会随无关改动漂移，那会让这条断言变成噪音）。
 #[test]
 fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
-    let root = addon_root();
     let tables = tables();
     let mut weak = BTreeSet::new();
-    for path in rust_files(&root) {
-        let relative = path
-            .strip_prefix(&root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
+    for (relative, path) in scan_files() {
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("应可读 {}: {error}", path.display()));
         for site in scan_source(&relative, &source, &tables) {
@@ -927,6 +982,14 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // 该模块的 `a_row_only_fills_the_columns_whose_source_key_it_belongs_to`
         // 单测原地补上（用真的 `Record` 走一遍投影）。
         "portal/actions/portal_query.rs",
+        // 两个 infrastructure worker（2026-10-14 扩展扫描范围时登记）：链式
+        // `runner.context.xxx()` 的重赋值查询与跨函数传递的 `Record` 静态解析不出
+        // 归属，退宽松档——**存在性检查仍生效**（列名拼错会抓），但能力位缺口
+        // （如 `instance_code` 缺 filterable 的 403 事故）不在覆盖内，那类缺口
+        // 目前靠运行期日志 + 表声明的单测兜底。若再发生，考虑给解析器加
+        // 「重赋值链变量回溯」。
+        "infrastructure/feishu_approval_worker.rs",
+        "infrastructure/feishu_event_worker.rs",
     ]
     .into_iter()
     .collect();
