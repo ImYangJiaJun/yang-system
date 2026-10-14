@@ -169,6 +169,7 @@ fn feishu_settings(encryption_key: Option<&str>) -> Arc<FeishuSettings> {
         approval_scan_interval_seconds: 30,
         approval_base_timezone: "Asia/Shanghai".to_string(),
         event_verification_token: None,
+        event_encrypt_key: None,
     })
 }
 
