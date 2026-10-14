@@ -10,6 +10,8 @@
 //!
 //! - 单条 = 创建 + 取详情两次调用，秒级完成，远在飞书 HTTP 节点 **60 秒上限**之内，
 //!   所以能同步——而且同步才有价值：工作流可以据此发消息或写日志。
+//!   单条完成后结果会回写 `feishu_approval_task`（与 worker 同口径）——
+//!   worker 因此不再把同一条记录完整重跑一遍（见 `record_dispatch_task`）。
 //! - 全表可能有几十到几百条，受创建接口 **100 次/分钟** 限制，同步必然超时。
 //!
 //! **两种 button_type 的输出能力不同**：`buttonField` 能引用记录的字段与属性
@@ -36,6 +38,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
+use yang_base::table::Record;
 use yang_base::BaseError;
 
 use crate::addon::feishu::approval::domain::request_log_writer::{
@@ -52,6 +55,7 @@ use crate::addon::feishu::domain::approval_notification::{
     self, FeedbackReference, NotificationRecipient, NotificationResult, NotificationStatus,
     ReceiveIdType,
 };
+use crate::addon::feishu::domain::approval_uuid::derive_uuid;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
@@ -501,6 +505,21 @@ pub(super) async fn handle(
         )
         .await;
     }
+    // 单条派发的结果回写认领队列：worker 不再把同一条记录完整重跑一遍
+    // （只为到达通知步骤）。放在 `complete_feedback` 之后是因为
+    // `outcome.message` 此刻已渲染定稿——last_error 与请求记录同源。
+    if let Some(record_id) = input.record_id.as_deref() {
+        if let (Some(config_id), Some(base_token), Some(table_id)) = (
+            outcome.config_id,
+            outcome.base_token.as_deref(),
+            outcome.table_id.as_deref(),
+        ) {
+            record_dispatch_task(
+                &context, config_id, base_token, table_id, record_id, &outcome,
+            )
+            .await;
+        }
+    }
     write_request_log(&context, &input, &outcome).await;
     tracing::info!(
         stage = "response",
@@ -659,6 +678,181 @@ async fn handle_dispatch(
                 "已受理，处理结果稍后回填至表格".to_string(),
                 None,
             ))
+        }
+    }
+}
+
+/// 把 HTTP 单条派发的结果回写认领队列（`feishu_approval_task`）。
+///
+/// 与 worker 的 `record_outcome` **同口径**（状态映射逐项对齐）：
+/// - `Succeeded` → `backfilled` + instance_code + serial_number
+/// - `Failed` → `terminal` + last_error
+/// - `Waiting` / `Retryable` / `CreatedPendingBackfill` → `pending` + last_error
+///   （worker 兜底重试；CreatedPendingBackfill 同时落 instance_code）
+/// - `Accepted`（全表受理）→ 不写：不是单条结果，worker 处理每条时自行落状态。
+///
+/// # 为什么 HTTP 路径也要写
+///
+/// 不写的话 task 行停在 `pending`，worker 会把同一条记录**完整重跑一遍**
+/// （读表结构/读记录/重填 8 个字段）只为到达通知步骤——实测整链路约 40 秒
+/// 且白耗飞书配额。写了之后 `backfilled`/`terminal` 的行不再被认领；
+/// `pending` 的行由 worker 兜底（与「清空回填字段重试」同一条通道）。
+///
+/// # upsert
+///
+/// 行通常已由 worker 的 seed 建立（→ update），也可能不存在——记录在 worker
+/// 首扫前就被派发（→ insert，uuid 与派发路径**同源**派生，顺带修掉「事件订阅
+/// 反查不到 task 行」的缺口）。并发下查询与插入之间 seed 建行会撞 record_id
+/// 唯一索引（1062），捕获后转为 update。
+///
+/// `last_error` 用 `outcome.message`（此刻已由 `complete_feedback` 渲染定稿，
+/// 含配置/表名定位）——比 worker 的简短原因长，但排查信息更全，与请求记录同源。
+///
+/// 写失败只 `warn`，绝不改变派发结果（与 [`write_request_log`] 同纪律）。
+async fn record_dispatch_task(
+    context: &FeishuContext,
+    config_id: i64,
+    base_token: &str,
+    table_id: &str,
+    record_id: &str,
+    outcome: &DispatchOutcome,
+) {
+    let (state, reason) = match outcome.status {
+        FeedbackStatus::Succeeded => ("backfilled", None),
+        FeedbackStatus::Failed => ("terminal", Some(outcome.message.as_str())),
+        FeedbackStatus::Waiting
+        | FeedbackStatus::Retryable
+        | FeedbackStatus::CreatedPendingBackfill => ("pending", Some(outcome.message.as_str())),
+        FeedbackStatus::Accepted => return,
+    };
+
+    let mut row = Record::new();
+    row.insert("state", serde_json::json!(state));
+    row.insert(
+        "last_error",
+        reason.map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
+    );
+    // 清租约：状态已是稳定状态（与 worker 的 `outcome_record` 同口径）。
+    row.insert("lease_until", serde_json::Value::Null);
+    if let Some(instance_code) = outcome.instance_code.as_deref() {
+        row.insert("instance_code", serde_json::json!(instance_code));
+    }
+    if let Some(serial_number) = outcome.serial_number.as_deref() {
+        row.insert("serial_number", serde_json::json!(serial_number));
+    }
+
+    // 已有行（seed 建过的常见路径）：按主键 update。
+    let existing = match context
+        .approval_tasks()
+        .query()
+        .select_fields(&["id"])
+        .and_then(|query| query.where_eq("record_id", serde_json::json!(record_id)))
+    {
+        Ok(query) => match query.optional().await {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(error = %error, record_id, "派发结果回写：查询任务行失败");
+                return;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, record_id, "派发结果回写：构造查询失败");
+            return;
+        }
+    };
+    if let Some(existing_row) = existing {
+        let id: i64 = match existing_row.require("id") {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(error = %error, record_id, "派发结果回写：任务行缺 id");
+                return;
+            }
+        };
+        let updated = match context
+            .approval_tasks()
+            .query()
+            .where_primary_key_eq(serde_json::json!(id))
+        {
+            Ok(query) => query.update(row).await,
+            Err(error) => Err(error),
+        };
+        match updated {
+            Ok(_) => tracing::info!(task_id = id, state, record_id, "派发结果已回写任务行"),
+            Err(error) => {
+                tracing::warn!(error = %error, task_id = id, "派发结果回写任务行失败");
+            }
+        }
+        return;
+    }
+
+    // 行不存在（记录在 worker 首扫前被派发）：insert。
+    // uuid 与派发路径**同源**派生（seed 同款）：60012 对账与事件订阅都靠它。
+    let approval_code: String = match context
+        .approval_configs()
+        .query()
+        .select_fields(&["approval_code"])
+        .and_then(|query| query.where_primary_key_eq(serde_json::json!(config_id)))
+    {
+        Ok(query) => match query.optional().await {
+            Ok(Some(config)) => match config.require("approval_code") {
+                Ok(code) => code,
+                Err(error) => {
+                    tracing::warn!(error = %error, config_id, "派发结果回写：配置缺 approval_code");
+                    return;
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(config_id, "派发结果回写：配置不存在");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, config_id, "派发结果回写：读配置失败");
+                return;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, config_id, "派发结果回写：构造配置查询失败");
+            return;
+        }
+    };
+    let uuid = derive_uuid(base_token, table_id, &approval_code, record_id);
+    let mut insert_row = row.clone();
+    insert_row.insert("config_id", serde_json::json!(config_id));
+    insert_row.insert("record_id", serde_json::json!(record_id));
+    insert_row.insert("uuid", serde_json::json!(uuid));
+    match context.approval_tasks().query().insert(insert_row).await {
+        Ok(_) => tracing::info!(record_id, state, "派发结果已建任务行"),
+        Err(error) => {
+            let text = error.to_string();
+            if text.contains("Duplicate") || text.contains("1062") {
+                // 并发竞态：查询与插入之间 seed 建了行 → 转为按 record_id update。
+                let raced = match context
+                    .approval_tasks()
+                    .query()
+                    .where_eq("record_id", serde_json::json!(record_id))
+                {
+                    Ok(query) => query.update(row).await,
+                    Err(error) => Err(error),
+                };
+                match raced {
+                    Ok(_) => {
+                        tracing::info!(
+                            record_id,
+                            state,
+                            "派发结果已回写任务行（并发建行后转 update）"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            record_id,
+                            "派发结果回写任务行失败（竞态转 update 亦失败）"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(error = %error, record_id, "派发结果建任务行失败");
+            }
         }
     }
 }
@@ -1113,7 +1307,12 @@ async fn dispatch_single(
     let status = result.feedback_status();
     let (accepted, message, serial_number) = result.response_parts();
     let instance_code = match &result {
-        OrchestrationResult::Backfilled { instance_code, .. } => Some(instance_code.clone()),
+        // CreatedPendingBackfill 也带实例坐标（实例已创建、编号/回填未完成）——
+        // 与 worker 的 `record_outcome` 同口径落 task 行，并让通知里的审批链接可用。
+        OrchestrationResult::Backfilled { instance_code, .. }
+        | OrchestrationResult::CreatedPendingBackfill { instance_code, .. } => {
+            Some(instance_code.clone())
+        }
         _ => None,
     };
     let record_summary = approval_feedback::record_summary(&fields, &cells);
