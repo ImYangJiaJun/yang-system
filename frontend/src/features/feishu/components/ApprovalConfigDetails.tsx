@@ -164,15 +164,13 @@ export function ApprovalConfigDetails({
             <Button variant="outline" disabled={pending} onClick={onEdit}>
               编辑配置
             </Button>
-            {item.configKey ? (
-              <Button
-                variant="outline"
-                disabled={pending || rotatingToken}
-                onClick={() => void rotateToken()}
-              >
-                {rotatingToken ? "轮换中…" : "轮换访问 Token"}
-              </Button>
-            ) : null}
+            <Button
+              variant="outline"
+              disabled={pending || rotatingToken}
+              onClick={() => void rotateToken()}
+            >
+              {rotatingToken ? "轮换中…" : "轮换访问 Token"}
+            </Button>
             <Button variant="outline" disabled={pending} onClick={onToggle}>
               {item.enabled ? "停用" : "启用"}
             </Button>
