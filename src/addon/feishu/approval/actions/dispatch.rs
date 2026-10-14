@@ -50,6 +50,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
 use crate::addon::feishu::domain::approval_feedback::{self, FeedbackStatus};
 use crate::addon::feishu::domain::approval_notification::{
     self, FeedbackReference, NotificationRecipient, NotificationResult, NotificationStatus,
+    ReceiveIdType,
 };
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -1213,7 +1214,24 @@ async fn complete_feedback(
         base_token,
         table_id,
     );
-    let notification = match &input.notification_recipient {
+    // 接收人优先级：显式 `notification_recipient` > 申请人兜底。
+    //
+    // 兜底只在「创建完成」的终态（成功/失败）生效——等待与可重试是中间态，
+    // 由 worker 重试到终态后再通知（与 worker 的通知条件同口径）。
+    // 「没传接收人就零通知」是 2026-10-14 事故的另一半（HTTP 与 worker 两层
+    // 都跳过）；这里补上 HTTP 层兜底，消息不再依赖 worker 的轮询延迟。
+    let fallback_recipient = match outcome.status {
+        FeedbackStatus::Succeeded | FeedbackStatus::Failed => outcome
+            .applicant_open_id
+            .as_deref()
+            .map(|open_id| NotificationRecipient {
+                receive_id_type: ReceiveIdType::OpenId,
+                receive_id: open_id.to_string(),
+            }),
+        _ => None,
+    };
+    let recipient = input.notification_recipient.clone().or(fallback_recipient);
+    let notification = match &recipient {
         None => NotificationResult::not_requested(),
         Some(_) if config.is_none() => NotificationResult::skipped(),
         Some(recipient) => match context.settings().filter(|settings| settings.can_pull()) {
@@ -1263,7 +1281,7 @@ async fn complete_feedback(
         ),
         NotificationStatus::NotRequested => tracing::info!(
             config_id,
-            "HTTP 派发通知：请求未指定接收人（notification_recipient），跳过通知"
+            "HTTP 派发通知：无接收人（未指定 notification_recipient 且无申请人兜底），跳过通知"
         ),
         _ => tracing::warn!(
             config_id,
