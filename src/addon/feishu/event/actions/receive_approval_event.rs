@@ -193,7 +193,11 @@ pub(crate) async fn handle(
 
     tracing::info!("开始插入事件落地表");
 
-    // 幂等插入：event_id 唯一索引，重复投递天然去重
+    // 幂等插入：event_id 唯一索引，重复投递天然去重。
+    //
+    // **必须显式提交事务**（finish_transaction）：只 `insert_in_tx` 不 commit 的话，
+    // `transaction` 离开作用域时回滚，事件永远进不了落地表——生产上表现为
+    // 「已落地」日志与 worker 端 `raw_row_count: 0` 并存（2026-10-14 事故根因）。
     let mut transaction = ctx.begin_transaction().await?;
     let result = context
         .approval_events()
@@ -203,6 +207,7 @@ pub(crate) async fn handle(
 
     match result {
         Ok(_) => {
+            FeishuContext::finish_transaction(transaction, Ok(())).await?;
             tracing::info!(
                 event_id = %event_id,
                 event_type = %event_type,
@@ -213,9 +218,13 @@ pub(crate) async fn handle(
             raw_json(serde_json::json!({"success": true}))
         }
         Err(e) => {
-            // 唯一索引冲突 = 重复投递，不算错误
+            // 唯一索引冲突 = 重复投递，不算错误；其余为真实落库失败。
             let err_str = e.to_string();
-            if err_str.contains("Duplicate") || err_str.contains("1062") {
+            let duplicate = err_str.contains("Duplicate") || err_str.contains("1062");
+            // 插入失败：事务里没有变更，显式回滚（finish_transaction 的 Err 臂）。
+            let _ = FeishuContext::finish_transaction::<()>(transaction, Err(BaseError::from(e)))
+                .await;
+            if duplicate {
                 tracing::info!(
                     event_id = %event_id,
                     instance_code = %instance_code,
@@ -224,7 +233,7 @@ pub(crate) async fn handle(
                 raw_json(serde_json::json!({"success": true, "duplicate": true}))
             } else {
                 tracing::error!(
-                    error = %e,
+                    error = %err_str,
                     event_id = %event_id,
                     "飞书事件落地失败"
                 );
