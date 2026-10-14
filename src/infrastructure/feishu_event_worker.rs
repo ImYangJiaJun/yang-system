@@ -243,16 +243,20 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
 /// 取未处理事件（`processed_at IS NULL`），按 id 升序，限制 `EVENT_BATCH` 条。
 async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>> {
     tracing::debug!("开始查询未处理事件（processed_at IS NULL）");
-    let rows = runner
+    let query = runner
         .context
         .approval_events()
         .query()
         .where_null("processed_at")?
         .order_by("id", SortOrder::Asc)?
         .page(1, EVENT_BATCH)?
-        .select_fields(&["id", "instance_code", "retry_count"])?
-        .all()
-        .await?;
+        .select_fields(&["id", "instance_code", "retry_count"])?;
+    let rows = query.all().await?;
+
+    tracing::info!(
+        raw_row_count = rows.len(),
+        "事件认领查询返回原始行数"
+    );
 
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
