@@ -3,7 +3,7 @@
 //! store-then-process 架构：飞书推送事件 → 验签解密 → 落表 → 异步富化处理。
 //! `processed_at IS NULL` 即待处理队列；`event_id` 唯一索引天然幂等。
 
-use yang_base::definition::{Int, Key, Str, TableName, TableSpec, Text, Timestamp};
+use yang_base::definition::{Int, Key, Str, TableSpec, Text, Timestamp};
 use yang_base::BaseError;
 
 /// 声明事件落地表。

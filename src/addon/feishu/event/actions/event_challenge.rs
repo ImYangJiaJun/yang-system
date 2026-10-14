@@ -16,6 +16,7 @@ use yang_base::action::{ActionContext, ResponseBody};
 use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::crypto;
 use crate::config::FeishuSettings;
 
@@ -30,7 +31,11 @@ impl ParamInput for ChallengeRequest {
 }
 
 /// 注册 challenge 应答端点。
-pub(super) fn register(module: ModuleSpec, settings: &FeishuSettings) -> ModuleSpec {
+pub(super) fn register(
+    module: ModuleSpec,
+    context: FeishuContext,
+    settings: &FeishuSettings,
+) -> ModuleSpec {
     let Some(token) = settings.event_verification_token.as_deref() else {
         return module;
     };
@@ -39,7 +44,15 @@ pub(super) fn register(module: ModuleSpec, settings: &FeishuSettings) -> ModuleS
     module
         .action_fn(
             yang_base::action_name!("event_challenge"),
-            move |ctx, input| handle(ctx, input, verification_token.clone(), encrypt_key.clone()),
+            move |ctx, input| {
+                handle(
+                    ctx,
+                    input,
+                    context.clone(),
+                    verification_token.clone(),
+                    encrypt_key.clone(),
+                )
+            },
         )
         .route(HttpMethod::Post, "/api/v1/feishu/event/challenge")
         .display_name("飞书事件 challenge")
@@ -52,9 +65,16 @@ pub(super) fn register(module: ModuleSpec, settings: &FeishuSettings) -> ModuleS
 ///
 /// 任何失败都返回 `Ok(ResponseBody::raw(...))`，不用 `Err`：匿名端点的 `Err`
 /// 会消耗全站可用性预算（与 `approval_options` 同一纪律。
+///
+/// # 事件回调兼容
+///
+/// 飞书开放平台的事件订阅 URL 只能配一个。当 challenge 端点和事件接收端点
+/// 共用同一个 URL 时，飞书的 `event_callback` 推送也会打到本端点。
+/// 检测到 `type == "event_callback"` 时，委托给事件接收 handler 处理。
 pub(super) async fn handle(
-    _ctx: ActionContext,
+    ctx: ActionContext,
     input: ChallengeRequest,
+    context: FeishuContext,
     verification_token: String,
     encrypt_key: Option<String>,
 ) -> Result<ResponseBody, BaseError> {
@@ -95,6 +115,19 @@ pub(super) async fn handle(
     let r#type = body.get("type").and_then(Value::as_str).unwrap_or("");
     let challenge = body.get("challenge").and_then(Value::as_str).unwrap_or("");
     let token = body.get("token").and_then(Value::as_str).unwrap_or("");
+
+    // 事件回调委托：飞书把 event_callback 推到了 challenge URL，转交事件接收处理。
+    if r#type == "event_callback" {
+        tracing::info!("检测到 event_callback 类型，委托给事件接收处理");
+        return super::receive_approval_event::handle(
+            ctx,
+            super::receive_approval_event::EventRequest(body),
+            context,
+            Some(verification_token),
+            encrypt_key,
+        )
+        .await;
+    }
 
     // 缺少 challenge 字段 → 无法应答
     if challenge.is_empty() {

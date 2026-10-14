@@ -48,10 +48,15 @@ use yang_base::table::{Record, SortOrder};
 use yang_base::tools::Tools;
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::approval::instance_applink;
 use crate::addon::feishu::domain::approval_convert::{FixedOffset, WidgetMap};
 use crate::addon::feishu::domain::approval_dispatch::{
     backfill_in_chunks, dispatch_one, widget_maps_from_rows, BitableBackfill,
     DispatchInput as OrchestrationInput, DispatchResult,
+};
+use crate::addon::feishu::domain::approval_feedback;
+use crate::addon::feishu::domain::approval_notification::{
+    FeedbackReference, NotificationRecipient, ReceiveIdType,
 };
 use crate::addon::feishu::domain::approval_rate_limit::acquire_create_slot;
 use crate::addon::feishu::domain::approval_uuid::derive_uuid;
@@ -1224,6 +1229,153 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
                     tracing::error!(error = %error, task_id = task.id, "审批派发审计取库失败");
                 }
             }
+        }
+    }
+
+    // 通知：终态（成功/失败）时向触发人发 IM 消息。
+    // 失败只 warn，不影响审批结论（与 HTTP Action 的 complete_feedback 同一纪律）。
+    let should_notify = matches!(
+        outcome,
+        DispatchResult::Backfilled { .. } | DispatchResult::Terminal { .. }
+    );
+    if should_notify {
+        if let Some(open_id) = &task.applicant_open_id {
+            send_worker_notification(runner, task, outcome, open_id).await;
+        }
+    }
+}
+
+/// Worker 路径的 IM 通知：向触发人发送审批派发结果。
+///
+/// 失败只 warn，不冒泡。通知是附加价值，不该影响审批结论或重试逻辑。
+async fn send_worker_notification(
+    runner: &RoundRunner,
+    task: &ClaimedTask,
+    outcome: &DispatchResult,
+    open_id: &str,
+) {
+    // 读配置行取展示名（2s 预算，与 HTTP Action 的 complete_feedback 一致）
+    let config_lookup = async {
+        runner
+            .context
+            .approval_configs()
+            .query()
+            .where_primary_key_eq(serde_json::json!(task.config_id))?
+            .optional()
+            .await
+    };
+    let config = match tokio::time::timeout(std::time::Duration::from_secs(2), config_lookup).await
+    {
+        Ok(Ok(row)) => row,
+        _ => {
+            tracing::warn!(task.config_id, task_id = task.id, "Worker 通知：配置展示名称读取失败，跳过通知");
+            return;
+        }
+    };
+
+    let name = |field: &str| {
+        let value = config
+            .as_ref()
+            .and_then(|row| row.optional::<String>(field).ok().flatten());
+        approval_feedback::display_name(value.as_deref())
+    };
+    let names = format!(
+        "配置：{}\n多维表：{}\n数据表：{}\n审批：{}",
+        name("title"),
+        name("base_name"),
+        name("table_name"),
+        name("approval_name")
+    );
+
+    // 渲染消息正文
+    let status = outcome.feedback_status();
+    let (accepted, reason, _serial) = outcome.response_parts();
+    let _ = accepted; // 通知不关心 HTTP 语义的 accepted
+    let message = approval_feedback::render(
+        status,
+        &reason,
+        &names,
+        None, // Worker 路径不取记录摘要，省一次 API 调用
+        Some(&task.record_id),
+        &task.base_token,
+        &task.table_id,
+    );
+
+    // 构造 references（审批实例链接 + 多维表格链接）
+    let table_url = (|| -> anyhow::Result<String> {
+        bitable::validate_path_segment("base_token", &task.base_token)?;
+        bitable::validate_path_segment("table_id", &task.table_id)?;
+        Ok(format!(
+            "https://www.feishu.cn/base/{}?table={}",
+            task.base_token, task.table_id
+        ))
+    })()
+    .ok();
+
+    let mut references = vec![FeedbackReference {
+        label: "多维表",
+        text: format!("{} / {}", name("base_name"), name("table_name")),
+        href: table_url,
+    }];
+
+    // 成功时加审批实例链接
+    if let DispatchResult::Backfilled {
+        instance_code,
+        serial_number,
+    } = outcome
+    {
+        let approval_text = format!(
+            "{} / {}",
+            name("approval_name"),
+            serial_number.as_str()
+        );
+        let approval_href = instance_applink(instance_code).ok();
+        references.push(FeedbackReference {
+            label: "审批",
+            text: approval_text,
+            href: approval_href,
+        });
+    }
+
+    let recipient = NotificationRecipient {
+        receive_id_type: ReceiveIdType::OpenId,
+        receive_id: open_id.to_string(),
+    };
+
+    tracing::info!(
+        task_id = task.id,
+        config_id = task.config_id,
+        open_id,
+        "Worker 通知：开始发送 IM 消息"
+    );
+
+    let result = crate::addon::feishu::domain::approval_notification::send_feedback(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &recipient,
+        &message,
+        &references,
+    )
+    .await;
+
+    match result.status {
+        crate::addon::feishu::domain::approval_notification::NotificationStatus::Sent => {
+            tracing::info!(
+                task_id = task.id,
+                config_id = task.config_id,
+                message_id = ?result.message_id,
+                "Worker 通知：IM 消息发送成功"
+            );
+        }
+        _ => {
+            tracing::warn!(
+                task_id = task.id,
+                config_id = task.config_id,
+                status = ?result.status,
+                message = %result.message,
+                "Worker 通知：IM 消息发送失败（不影响审批结论）"
+            );
         }
     }
 }

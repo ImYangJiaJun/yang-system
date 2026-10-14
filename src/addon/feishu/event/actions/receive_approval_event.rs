@@ -24,7 +24,7 @@ use crate::config::FeishuSettings;
 /// 飞书推送的加密请求是 `{"encrypt":"..."}`，明文请求是完整事件 JSON。
 /// 两种格式都由本 handler 处理。
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(super) struct EventRequest(Value);
+pub(crate) struct EventRequest(pub(crate) Value);
 
 impl ParamInput for EventRequest {
     fn params() -> Params {
@@ -68,7 +68,9 @@ pub(super) fn register(
 /// 3. 提取事件字段（event_id, event_type, instance_code, status, operate_time）
 /// 4. 落事件落地表（幂等：event_id 唯一索引天然去重）
 /// 5. 3 秒内返回 200
-pub(super) async fn handle(
+///
+/// 可见性 `pub(crate)`：challenge 端点在检测到非 challenge 请求时也会委托给本函数。
+pub(crate) async fn handle(
     ctx: ActionContext,
     input: EventRequest,
     context: FeishuContext,

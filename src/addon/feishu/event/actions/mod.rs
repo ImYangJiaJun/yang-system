@@ -15,7 +15,7 @@ pub(super) fn register_all(
     context: Arc<FeishuContext>,
     settings: &FeishuSettings,
 ) -> ModuleSpec {
-    let module = event_challenge::register(module, settings);
+    let module = event_challenge::register(module, (*context).clone(), settings);
     receive_approval_event::register(
         module,
         Arc::try_unwrap(context).unwrap_or_else(|arc| (*arc).clone()),
