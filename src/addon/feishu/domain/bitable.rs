@@ -291,6 +291,9 @@ pub(crate) struct ListFieldsData {
 /// 一个字段的标识信息。
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct FieldItem {
+    /// 官方主字段标识；摘要不能把第一列猜成主字段。
+    #[serde(default)]
+    pub(crate) is_primary: bool,
     #[serde(default)]
     pub(crate) field_id: String,
     #[serde(default)]
@@ -724,6 +727,69 @@ pub(crate) async fn get_base_name(
         .and_then(|name| name.as_str())
         .filter(|name| !name.trim().is_empty())
         .map(str::to_string))
+}
+
+/// 展示链接只接受飞书/Lark HTTPS 地址；不把返回的任意协议或站点变成消息链接。
+pub(crate) fn is_document_link(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return false;
+    };
+    let Some((host, _)) = rest.split_once('/') else {
+        return false;
+    };
+    value.len() <= 4096
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        && (host.ends_with(".feishu.cn") || host.ends_with(".larksuite.com"))
+}
+
+/// 只为消息补充原记录入口；不修改记录、分享设置或业务取数路径。
+/// 批量获取接口的 record_url 文档存在矛盾，采用明确支持 with_shared_url 的单条接口。
+pub(crate) async fn get_record_shared_url(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    record_id: &str,
+) -> Result<Option<String>, OutboundFailure> {
+    let url = (|| -> anyhow::Result<String> {
+        validate_path_segment("record_id", record_id)?;
+        Ok(format!(
+            "{}/{}",
+            records_url(&coordinates.app_token, &coordinates.table_id)?,
+            record_id
+        ))
+    })()
+    .map_err(|_| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: "原记录链接坐标无效".into(),
+    })?;
+    let data: serde_json::Value = send_json(
+        transport,
+        sleeper,
+        tokens,
+        OutboundMethod::Get,
+        &url,
+        vec![
+            ("with_shared_url".into(), "true".into()),
+            ("automatic_fields".into(), "false".into()),
+        ],
+        None,
+        2,
+    )
+    .await?;
+    let record = &data["record"];
+    if record["record_id"].as_str() != Some(record_id) {
+        return Ok(None);
+    }
+    Ok(record["record_url"]
+        .as_str()
+        .filter(|url| is_document_link(url))
+        .map(str::to_owned))
 }
 
 /// 带 JSON body 的出站请求 + 信封解码。
@@ -1581,6 +1647,36 @@ pub(crate) struct BatchGetRecordsData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feedback_document_links_reject_untrusted_urls() {
+        for url in [
+            "https://tenant.feishu.cn/record/id",
+            "https://tenant.larksuite.com/base/app?table=tbl",
+        ] {
+            assert!(is_document_link(url), "{url}");
+        }
+        for url in [
+            "http://tenant.feishu.cn/record/id",
+            "javascript:alert(1)",
+            "https://tenant.feishu.cn",
+            "https://evil.example/record/id",
+            "https://tenant.feishu.cn.evil.example/record/id",
+            "https://tenant.feishu.cn@evil.example/record/id",
+            "https://evil@tenant.feishu.cn/record/id",
+            "https://tenant.feishu.cn\\evil/record/id",
+            "https://tenant.feishu.cn/record\\id",
+            "https://tenant.feishu.cn/record/id\n",
+            "https://tenant.feishu.cn/record/ id",
+            "https://tenant.feishu.cn/record/\u{7f}",
+        ] {
+            assert!(!is_document_link(url), "{url}");
+        }
+        assert!(!is_document_link(&format!(
+            "https://tenant.feishu.cn/record/{}",
+            "x".repeat(4096)
+        )));
+    }
     use serde_json::json;
 
     // ---- 审批派发：写路径 ----
@@ -1659,6 +1755,7 @@ mod tests {
 
     fn remote(field_id: &str, field_name: &str) -> FieldItem {
         FieldItem {
+            is_primary: false,
             field_id: field_id.to_string(),
             field_name: field_name.to_string(),
             field_type: Some(3),
@@ -1901,6 +1998,7 @@ mod tests {
     /// 造一个字段项。默认 `type: 3`（单选）——名字解析类的用例不关心类型。
     fn field(field_id: &str, field_name: &str) -> FieldItem {
         FieldItem {
+            is_primary: false,
             field_id: field_id.to_string(),
             field_name: field_name.to_string(),
             field_type: Some(3),
@@ -1953,6 +2051,7 @@ mod tests {
 
     fn field_of_type(field_type: i32, ui_type: Option<&str>) -> FieldItem {
         FieldItem {
+            is_primary: false,
             field_id: "fldX".to_string(),
             field_name: "取数列".to_string(),
             field_type: Some(field_type),
@@ -1998,6 +2097,7 @@ mod tests {
     fn missing_field_type_does_not_block_the_configuration() {
         // 拿不到元数据时宁可放行：让真实拉取去暴露问题，比在这里猜更准
         let unknown = FieldItem {
+            is_primary: false,
             field_id: "fldX".to_string(),
             field_name: "取数列".to_string(),
             field_type: None,

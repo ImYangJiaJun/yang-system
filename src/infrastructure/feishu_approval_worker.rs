@@ -442,7 +442,7 @@ async fn run_round(
         counts[match outcome {
             DispatchResult::Backfilled { .. } => 0,
             DispatchResult::Waiting { .. } => 1,
-            DispatchResult::Retryable { .. } => 2,
+            DispatchResult::Retryable { .. } | DispatchResult::CreatedPendingBackfill { .. } => 2,
             DispatchResult::Terminal { .. } => 3,
         }] += 1;
     }
@@ -1048,6 +1048,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
         &runner.tokens,
         &backfill,
         &OrchestrationInput {
+            fields: &fields,
             context: Some(&runner.context),
             coordinates: &coordinates,
             record_id: &task.record_id,
@@ -1070,8 +1071,8 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> DispatchResult
     .await
 }
 
-/// 把处理结论落库。
-async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &DispatchResult) {
+/// 组装持久化事实，已确认实例在回填失败时也必须保留。
+fn outcome_record(outcome: &DispatchResult) -> Record {
     // 结论 → 状态 + 原因：
     //
     // - `backfilled`：编号已写进多维表格，任务完成（**终态**，不再认领）。
@@ -1084,22 +1085,12 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
     let (state, reason) = match outcome {
         DispatchResult::Backfilled { .. } => ("backfilled", None),
         DispatchResult::Waiting { reason } => ("pending", Some(reason.clone())),
-        DispatchResult::Retryable { message } => ("pending", Some(message.clone())),
+        DispatchResult::Retryable { message }
+        | DispatchResult::CreatedPendingBackfill { message, .. } => {
+            ("pending", Some(message.clone()))
+        }
         DispatchResult::Terminal { message } => ("terminal", Some(message.clone())),
     };
-    let outcome_name = match outcome {
-        DispatchResult::Backfilled { .. } => "backfilled",
-        DispatchResult::Waiting { .. } => "waiting",
-        DispatchResult::Retryable { .. } => "retryable",
-        DispatchResult::Terminal { .. } => "terminal",
-    };
-    tracing::info!(
-        stage = "persist",
-        outcome = outcome_name,
-        state,
-        "审批任务处理结论，等待和可重试任务保留 pending；具体原因见阶段日志和任务 last_error"
-    );
-
     let mut row = Record::new();
     row.insert("state", serde_json::json!(state));
     row.insert(
@@ -1122,6 +1113,41 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
         row.insert("serial_number", serde_json::json!(serial_number));
     }
 
+    if let DispatchResult::CreatedPendingBackfill {
+        instance_code,
+        serial_number,
+        ..
+    } = outcome
+    {
+        row.insert("instance_code", serde_json::json!(instance_code));
+        if let Some(number) = serial_number {
+            row.insert("serial_number", serde_json::json!(number));
+        }
+    }
+    row
+}
+
+/// 把处理结论落库。
+async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &DispatchResult) {
+    let row = outcome_record(outcome);
+    let state = row
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let outcome_name = match outcome {
+        DispatchResult::Backfilled { .. } => "backfilled",
+        DispatchResult::Waiting { .. } => "waiting",
+        DispatchResult::Retryable { .. } => "retryable",
+        DispatchResult::CreatedPendingBackfill { .. } => "created_pending_backfill",
+        DispatchResult::Terminal { .. } => "terminal",
+    };
+    tracing::info!(
+        stage = "persist",
+        outcome = outcome_name,
+        state,
+        "审批任务处理结论，等待和可重试任务保留 pending；具体原因见阶段日志和任务 last_error"
+    );
     let result = match runner
         .context
         .approval_tasks()
@@ -1144,7 +1170,7 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, outcome: &Disp
         "outcome" => match outcome {
             DispatchResult::Backfilled { .. } => "backfilled",
             DispatchResult::Waiting { .. } => "waiting",
-            DispatchResult::Retryable { .. } => "retryable",
+            DispatchResult::Retryable { .. } | DispatchResult::CreatedPendingBackfill { .. } => "retryable",
             DispatchResult::Terminal { .. } => "terminal",
         }
     )
@@ -1245,6 +1271,64 @@ fn _assert_widget_map_type(_: &WidgetMap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn created_pending_backfill_keeps_instance_and_known_serial_number() {
+        for number in [None, Some("SN-001".to_string())] {
+            let outcome = DispatchResult::CreatedPendingBackfill {
+                message: "编号回填失败".into(),
+                instance_code: "INST-001".into(),
+                serial_number: number.clone(),
+            };
+            let row = outcome_record(&outcome);
+            assert_eq!(row.get("state"), Some(&serde_json::json!("pending")));
+            assert_eq!(
+                row.get("last_error"),
+                Some(&serde_json::json!("编号回填失败"))
+            );
+            assert_eq!(row.get("lease_until"), Some(&serde_json::Value::Null));
+            assert_eq!(
+                row.get("instance_code"),
+                Some(&serde_json::json!("INST-001"))
+            );
+            assert_eq!(
+                row.get("serial_number"),
+                number.as_ref().map(|v| serde_json::json!(v)).as_ref()
+            );
+        }
+        for (outcome, state) in [
+            (
+                DispatchResult::Backfilled {
+                    instance_code: "INST".into(),
+                    serial_number: "SN".into(),
+                },
+                "backfilled",
+            ),
+            (
+                DispatchResult::Waiting {
+                    reason: "补齐数据".into(),
+                },
+                "pending",
+            ),
+            (
+                DispatchResult::Retryable {
+                    message: "服务不可用".into(),
+                },
+                "pending",
+            ),
+            (
+                DispatchResult::Terminal {
+                    message: "配置错误".into(),
+                },
+                "terminal",
+            ),
+        ] {
+            assert_eq!(
+                outcome_record(&outcome).get("state"),
+                Some(&serde_json::json!(state))
+            );
+        }
+    }
 
     #[test]
     fn exhausted_cursor_revisits_pending_tasks() {

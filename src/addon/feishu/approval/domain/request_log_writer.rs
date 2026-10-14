@@ -53,7 +53,9 @@ pub(crate) fn outcome_for(result: &DispatchResult) -> Outcome {
     match result {
         DispatchResult::Backfilled { .. } => Outcome::Succeeded,
         DispatchResult::Waiting { .. } => Outcome::Waiting,
-        DispatchResult::Terminal { .. } | DispatchResult::Retryable { .. } => Outcome::Failed,
+        DispatchResult::Terminal { .. }
+        | DispatchResult::Retryable { .. }
+        | DispatchResult::CreatedPendingBackfill { .. } => Outcome::Failed,
     }
 }
 
@@ -94,7 +96,13 @@ impl RequestLog {
         }
         row.insert("request_body", serde_json::json!(self.request_body));
         row.insert("outcome", serde_json::json!(self.outcome.as_str()));
-        row.insert("message", serde_json::json!(self.message));
+        row.insert(
+            "message",
+            serde_json::json!(crate::addon::feishu::domain::approval_feedback::truncate(
+                &self.message,
+                255
+            )),
+        );
         if let Some(serial_number) = self.serial_number {
             row.insert("serial_number", serde_json::json!(serial_number));
         }
@@ -144,11 +152,41 @@ mod tests {
                 Outcome::Failed,
                 "failed",
             ),
+            (
+                DispatchResult::CreatedPendingBackfill {
+                    message: "待回填".into(),
+                    instance_code: "INST".into(),
+                    serial_number: Some("SN".into()),
+                },
+                Outcome::Failed,
+                "failed",
+            ),
         ];
         for (result, expected, text) in cases {
             assert_eq!(outcome_for(&result), expected);
             assert_eq!(expected.as_str(), text);
         }
+    }
+
+    #[test]
+    fn long_readable_message_keeps_full_response_and_bounds_summary() {
+        let message = "企业😀".repeat(300);
+        let row = RequestLog {
+            requested_by: "张三".into(),
+            base_token: "base".into(),
+            table_id: "table".into(),
+            config_id: Some(1),
+            record_id: Some("rec".into()),
+            request_body: "{}".into(),
+            outcome: Outcome::Waiting,
+            message: message.clone(),
+            serial_number: None,
+            response_body: Some(message.clone()),
+        }
+        .into_record()
+        .into_map();
+        assert!(row["message"].as_str().unwrap_or_default().chars().count() <= 255);
+        assert_eq!(row["response_body"], message);
     }
 
     /// 空 requested_by（未带 / 空白 / trim 后空）一律落 `feishu-workflow`。

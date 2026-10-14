@@ -56,11 +56,28 @@ pub(crate) enum DispatchResult {
     Waiting { reason: String },
     /// 终态失败；文本列写原因，链接列仅由任务/请求日志保存。
     Terminal { message: String },
+    /// 实例已确认存在，编号或回填尚未完成；保留事实与重试资格。
+    CreatedPendingBackfill {
+        message: String,
+        instance_code: String,
+        serial_number: Option<String>,
+    },
     /// 可重试失败，未写任何字段，等下一轮或退避后再来。
     Retryable { message: String },
 }
 
 impl DispatchResult {
+    pub(crate) fn feedback_status(&self) -> super::approval_feedback::FeedbackStatus {
+        use super::approval_feedback::FeedbackStatus;
+        match self {
+            Self::Backfilled { .. } => FeedbackStatus::Succeeded,
+            Self::Waiting { .. } => FeedbackStatus::Waiting,
+            Self::CreatedPendingBackfill { .. } => FeedbackStatus::CreatedPendingBackfill,
+            Self::Retryable { .. } => FeedbackStatus::Retryable,
+            Self::Terminal { .. } => FeedbackStatus::Failed,
+        }
+    }
+
     /// 折算成给工作流的响应。
     ///
     /// # 语义映射（不要随手改）
@@ -84,12 +101,14 @@ impl DispatchResult {
             Self::Waiting { reason } => (true, format!("本轮未处理：{reason}"), None),
             Self::Terminal { message } => (false, message.clone(), None),
             Self::Retryable { message } => (false, format!("暂时失败，可重试：{message}"), None),
+            Self::CreatedPendingBackfill { message, .. } => (false, message.clone(), None),
         }
     }
 }
 
 /// 一条记录的处理输入。
 pub(crate) struct DispatchInput<'a> {
+    pub(crate) fields: &'a [FieldItem],
     pub(crate) context: Option<&'a super::context::FeishuContext>,
     pub(crate) coordinates: &'a BitableCoordinates,
     pub(crate) record_id: &'a str,
@@ -323,7 +342,7 @@ pub(crate) async fn dispatch_one(
             Err(failure) => {
                 tracing::warn!(stage = "recover", kind = ?failure.kind, "查询已有审批实例失败，等待下一轮重试");
                 return DispatchResult::Retryable {
-                    message: failure.to_string(),
+                    message: super::approval_feedback::outbound_reason(&failure),
                 };
             }
         }
@@ -355,7 +374,11 @@ pub(crate) async fn dispatch_one(
                     "审批派发等待补齐数据"
                 );
                 return DispatchResult::Waiting {
-                    reason: "缺少「申请人」".to_string(),
+                    reason: format!(
+                        "申请人字段「{}」缺少有效人员 ID，请填写该人员列（字段定位：{}）。",
+                        super::approval_feedback::field_name(input.fields, input.applicant_field),
+                        input.applicant_field
+                    ),
                 };
             }
         },
@@ -388,6 +411,7 @@ pub(crate) async fn dispatch_one(
             &form_snapshot,
             &mut widgets,
             input.cells,
+            input.fields,
         )
         .await
         {
@@ -404,14 +428,14 @@ pub(crate) async fn dispatch_one(
                         reason: reasons.join("；"),
                     }
                 }
-                error => {
+                _error => {
                     tracing::warn!(
                         stage = "external_options",
                         outcome = "retryable",
                         "审批外部选项解析失败，等待下一轮重试"
                     );
                     DispatchResult::Retryable {
-                        message: error.to_string(),
+                        message: "读取外部选项绑定失败，请管理员查看派发记录。".into(),
                     }
                 }
             };
@@ -438,7 +462,12 @@ pub(crate) async fn dispatch_one(
         // 后者不补齐字段就能过，反复重扫永远好不了。
         Err(error) => {
             log_conversion_error(&error, &widgets);
-            let message = error.to_string();
+            let message = super::approval_feedback::conversion_reason(
+                &error,
+                &form_snapshot,
+                &widgets,
+                input.fields,
+            );
             return if is_data_problem(&error) {
                 DispatchResult::Waiting { reason: message }
             } else {
@@ -494,7 +523,7 @@ pub(crate) async fn dispatch_one(
             Err(failure) => {
                 tracing::warn!(stage = "attachments", kind = ?failure.kind, "审批附件搬运失败，等待下一轮重试");
                 return DispatchResult::Retryable {
-                    message: failure.to_string(),
+                    message: super::approval_feedback::outbound_reason(&failure),
                 };
             }
         };
@@ -514,7 +543,12 @@ pub(crate) async fn dispatch_one(
             Err(error) => {
                 log_conversion_error(&error, &widgets);
                 return DispatchResult::Retryable {
-                    message: error.to_string(),
+                    message: super::approval_feedback::conversion_reason(
+                        &error,
+                        &form_snapshot,
+                        &widgets,
+                        input.fields,
+                    ),
                 };
             }
         }
@@ -584,12 +618,18 @@ pub(crate) async fn dispatch_one(
                 // 写成「找不到」，反而制造第二条不可恢复路径。
                 Ok(GetOutcome::NotFound) => {
                     tracing::warn!(stage = "detail", instance_code = %instance_code, "刚创建的审批实例详情尚不可见，等待下一轮重试");
-                    return DispatchResult::Retryable {
-                        message: format!("实例 {instance_code} 刚创建但查不到详情，稍后重试"),
+                    return DispatchResult::CreatedPendingBackfill {
+                        message: "审批实例已确认，详情暂不可见，请稍后重试。".into(),
+                        instance_code,
+                        serial_number: None,
                     };
                 }
                 Err(failure) => {
-                    return classify_failure(failure, input, backfill, uuid.as_str()).await
+                    return DispatchResult::CreatedPendingBackfill {
+                        message: super::approval_feedback::outbound_reason(&failure),
+                        instance_code,
+                        serial_number: None,
+                    };
                 }
             }
         }
@@ -667,8 +707,10 @@ async fn validate_connections(
                         tracing::warn!(stage = "connections", widget_id = %node.id, instance_code = code, kind = ?failure.kind, "关联审批实例查询失败");
                         return Err(DispatchResult::Retryable {
                             message: format!(
-                                "关联审批控件「{}」（{}）查询失败：{}",
-                                node.name, node.id, failure
+                                "关联审批控件「{}」查询失败：{}（控件定位：{}）",
+                                node.name,
+                                super::approval_feedback::outbound_reason(&failure),
+                                node.id
                             ),
                         });
                     }
@@ -708,17 +750,16 @@ async fn validate_connections(
 async fn finish_backfill(
     backfill: &dyn Backfill,
     input: &DispatchInput<'_>,
-    uuid: &str,
+    _uuid: &str,
     detail: InstanceDetail,
 ) -> DispatchResult {
     let Some(serial_number) = serial_number_of(&detail) else {
         // 实例存在但编号还没生成：同样是可重试，不是失败。
         tracing::info!(stage = "detail", instance_code = %detail.instance_code, "审批实例已创建但编号尚未生成，等待下一轮重试");
-        return DispatchResult::Retryable {
-            message: format!(
-                "实例 {} 已创建但编号尚未生成，稍后重试",
-                detail.instance_code
-            ),
+        return DispatchResult::CreatedPendingBackfill {
+            message: "审批实例已确认，编号尚未生成，请稍后重试。".into(),
+            instance_code: detail.instance_code.clone(),
+            serial_number: None,
         };
     };
 
@@ -726,8 +767,10 @@ async fn finish_backfill(
         Ok(link) => link,
         Err(error) => {
             tracing::warn!(stage = "backfill", "审批实例链接生成失败，等待下一轮重试");
-            return DispatchResult::Retryable {
-                message: error.to_string(),
+            return DispatchResult::CreatedPendingBackfill {
+                message: format!("审批编号：{serial_number}；实例链接暂不可用：{error}"),
+                instance_code: detail.instance_code.clone(),
+                serial_number: Some(serial_number),
             };
         }
     };
@@ -750,11 +793,13 @@ async fn finish_backfill(
         }
         Err(failure) => {
             tracing::warn!(stage = "backfill", instance_code = %detail.instance_code, kind = ?failure.kind, "审批实例已存在，编号回填失败");
-            DispatchResult::Retryable {
+            DispatchResult::CreatedPendingBackfill {
                 message: format!(
-                    "实例 {} 已创建，回填失败：{}（uuid={uuid}）",
-                    detail.instance_code, failure.message
+                    "审批编号：{serial_number}；编号回填失败：{}",
+                    super::approval_feedback::outbound_reason(&failure)
                 ),
+                instance_code: detail.instance_code.clone(),
+                serial_number: Some(serial_number),
             }
         }
     }
@@ -949,24 +994,23 @@ async fn classify_failure(
     uuid: &str,
 ) -> DispatchResult {
     tracing::warn!(kind = ?failure.kind, "审批出站失败，按错误类别决定重试或终止");
+    let reason = super::approval_feedback::outbound_reason(&failure);
     match failure.kind {
         // 可重试：不写字段。
-        FailureKind::Retry { .. } | FailureKind::TokenExpired => DispatchResult::Retryable {
-            message: failure.message,
-        },
+        FailureKind::Retry { .. } | FailureKind::TokenExpired => {
+            DispatchResult::Retryable { message: reason }
+        }
         // uuid 冲突出现在这里说明它来自取值阶段（创建之后），此时按 uuid 反查
         // 才是正解；但调用点已经在创建分支处理过冲突，走到这里只能是别处冒出来的
         // 冲突——一律判可重试，把决定权交给下一轮的创建分支。
         FailureKind::UuidConflict => DispatchResult::Retryable {
-            message: format!("uuid 冲突需反查实例（uuid={uuid}）：{}", failure.message),
+            message: format!("uuid 冲突需反查实例（uuid={uuid}）：{reason}"),
         },
-        FailureKind::InstanceNotFound => DispatchResult::Retryable {
-            message: failure.message,
-        },
+        FailureKind::InstanceNotFound => DispatchResult::Retryable { message: reason },
         // 终态：写回填字段。文案要**裁剪**——多维表格的读者范围远大于运维，
         // 原样回灌可能含内部 request_id、租户信息。
         FailureKind::Fatal { code } => {
-            let message = sanitize_terminal_message(&failure.message, code);
+            let message = sanitize_terminal_message(&reason, code);
             // 回写失败也不改变结论：终态的判据是「这个记录本身有问题」，
             // 而错误文案写不进去只是让用户少了一个排查线索。
             if let Err(failure) = backfill
@@ -1032,9 +1076,9 @@ fn sanitize_terminal_message(raw: &str, code: i32) -> String {
     let hint = super::outbound::fatal_hint(code);
     let head = match hint {
         Some(hint) => hint.to_string(),
-        // 没有登记文案的码：保留码本身与原文（原文已由 outbound 的 summarize
-        // 截断过），至少给出可搜索的定位信息。
-        None => raw.chars().take(200).collect(),
+        // code=0 仅用于本地安全说明；未知飞书码不回灌响应原文。
+        None if code == 0 => super::approval_feedback::truncate(raw, 950),
+        None => "飞书拒绝本次请求，请管理员核对配置和权限。".into(),
     };
     if code == 0 {
         head
@@ -1194,6 +1238,62 @@ async fn write_chunk(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feedback_status_and_legacy_response_preserve_each_outcome() {
+        use super::super::approval_feedback::FeedbackStatus;
+        for (result, status, accepted, number) in [
+            (
+                DispatchResult::Backfilled {
+                    instance_code: "INST".into(),
+                    serial_number: "SN".into(),
+                },
+                FeedbackStatus::Succeeded,
+                true,
+                Some("SN"),
+            ),
+            (
+                DispatchResult::Waiting {
+                    reason: "补齐数据".into(),
+                },
+                FeedbackStatus::Waiting,
+                true,
+                None,
+            ),
+            (
+                DispatchResult::CreatedPendingBackfill {
+                    message: "审批编号：SN；待回填".into(),
+                    instance_code: "INST".into(),
+                    serial_number: Some("SN".into()),
+                },
+                FeedbackStatus::CreatedPendingBackfill,
+                false,
+                None,
+            ),
+            (
+                DispatchResult::Retryable {
+                    message: "稍后重试".into(),
+                },
+                FeedbackStatus::Retryable,
+                false,
+                None,
+            ),
+            (
+                DispatchResult::Terminal {
+                    message: "配置错误".into(),
+                },
+                FeedbackStatus::Failed,
+                false,
+                None,
+            ),
+        ] {
+            assert_eq!(result.feedback_status(), status);
+            let (actual, message, serial) = result.response_parts();
+            assert_eq!(actual, accepted);
+            assert_eq!(serial.as_deref(), number, "serial_number 只表示编号已回填");
+            assert!(!message.is_empty());
+        }
+    }
+
     use super::*;
     use crate::addon::feishu::domain::outbound::OutboundResponse;
     use crate::addon::feishu::domain::tenant_token::{
@@ -1354,6 +1454,7 @@ mod tests {
             for coord in ["fldResult", "改名后的申请编号"] {
                 let transport = ScriptedTransport::new(vec![(200, r#"{"code":0,"data":{}}"#)]);
                 let fields = [FieldItem {
+                    is_primary: false,
                     field_id: "fldResult".into(),
                     field_name: "改名后的申请编号".into(),
                     field_type: kind,
@@ -1404,6 +1505,7 @@ mod tests {
     async fn approval_link_errors_keep_the_cell_empty_and_missing_columns_fail() {
         let transport = ScriptedTransport::new(vec![]);
         let fields = [FieldItem {
+            is_primary: false,
             field_id: "fldResult".into(),
             field_name: "申请编号".into(),
             field_type: Some(15),
@@ -1433,6 +1535,7 @@ mod tests {
     #[tokio::test]
     async fn approval_link_finish_preserves_instance_code_and_retries_failed_write() {
         let fields = [FieldItem {
+            is_primary: false,
             field_id: "fldResult".into(),
             field_name: "审批编号".into(),
             field_type: Some(15),
@@ -1491,7 +1594,10 @@ mod tests {
             .await;
             assert_eq!(matches!(result, DispatchResult::Backfilled { .. }), success);
             if !success {
-                assert!(matches!(result, DispatchResult::Retryable { .. }));
+                assert!(
+                    matches!(&result, DispatchResult::CreatedPendingBackfill { instance_code, serial_number, .. }
+                    if instance_code == code && serial_number.as_deref() == serial)
+                );
             }
             assert_eq!(!transport.requests().is_empty(), write);
             if write {
@@ -1644,6 +1750,7 @@ mod tests {
         widgets: &'a [WidgetMap],
     ) -> DispatchInput<'a> {
         DispatchInput {
+            fields: &[],
             context: None,
             coordinates: &COORDINATES,
             record_id: "rec001",
@@ -2491,7 +2598,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serial_number_missing_after_create_is_retryable() {
+    async fn serial_number_missing_after_create_preserves_created_fact() {
         // 文档未承诺创建后编号立即可查。判可重试，绝不写终态——否则刚建成的
         // 实例会被写成「找不到」。
         let transport = ScriptedTransport::new(vec![
@@ -2519,14 +2626,14 @@ mod tests {
         .await;
 
         assert!(
-            matches!(result, DispatchResult::Retryable { .. }),
+            matches!(&result, DispatchResult::CreatedPendingBackfill { instance_code, serial_number: None, .. } if instance_code == "INST-2"),
             "{result:?}"
         );
         assert!(backfill.writes().is_empty(), "可重试不得写字段");
     }
 
     #[tokio::test]
-    async fn instance_not_found_right_after_create_is_retryable() {
+    async fn instance_not_found_right_after_create_preserves_created_fact() {
         let transport = ScriptedTransport::new(vec![
             (200, &ok_create("INST-3")),
             (400, r#"{"code":1390003,"msg":"instance code not found"}"#),
@@ -2549,10 +2656,99 @@ mod tests {
         .await;
 
         assert!(
-            matches!(result, DispatchResult::Retryable { .. }),
+            matches!(&result, DispatchResult::CreatedPendingBackfill { instance_code, serial_number: None, .. } if instance_code == "INST-3"),
             "{result:?}"
         );
         assert!(backfill.writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn detail_failure_after_create_preserves_instance_without_terminal_write() {
+        for (status, error, attempts) in [
+            (400, r#"{"code":999999,"msg":"private-detail-error"}"#, 1),
+            (503, r#"{"code":1395001,"msg":"private-detail-error"}"#, 3),
+        ] {
+            let create = ok_create("INST-4");
+            let mut responses = vec![(200, create.as_str())];
+            responses.extend(std::iter::repeat((status, error)).take(attempts));
+            let transport = ScriptedTransport::new(responses);
+            let backfill = RecordingBackfill::default();
+            let widgets = [widget("w1", "input")];
+            let cells = cells(&[
+                ("fld_applicant", json!([{"id":"ou_abc"}])),
+                ("fld_title", json!("付款")),
+            ]);
+            let result = dispatch_one(
+                &transport,
+                &NoSleep,
+                &fake_tokens(),
+                &backfill,
+                &input(&cells, &widgets),
+            )
+            .await;
+            assert!(
+                matches!(&result,
+                DispatchResult::CreatedPendingBackfill { instance_code, serial_number: None, .. }
+                if instance_code == "INST-4"),
+                "{result:?}"
+            );
+            assert!(
+                backfill.writes().is_empty(),
+                "确认实例后不得把详情错误写成终态"
+            );
+            assert_eq!(transport.requests().len(), attempts + 1);
+            assert!(!result.response_parts().1.contains("private-detail-error"));
+        }
+    }
+
+    #[tokio::test]
+    async fn classified_failures_mask_raw_body_and_keep_retry_semantics() {
+        let cells = cells(&[]);
+        let input = input(&cells, &[]);
+        let raw =
+            r#"{"msg":"private-outbound","request_id":"req_secret","access_token":"token-secret"}"#;
+        for (kind, hint, terminal) in [
+            (
+                FailureKind::Retry {
+                    retry_after_seconds: None,
+                },
+                "稍后重试",
+                false,
+            ),
+            (FailureKind::TokenExpired, "凭证", false),
+            (FailureKind::UuidConflict, "UUID", false),
+            (FailureKind::InstanceNotFound, "审批详情", false),
+            (FailureKind::Fatal { code: 1390001 }, "1390001", true),
+            (FailureKind::Fatal { code: 999999 }, "999999", true),
+            (FailureKind::Fatal { code: 0 }, "飞书", true),
+        ] {
+            let backfill = RecordingBackfill::default();
+            let result = classify_failure(
+                OutboundFailure {
+                    kind,
+                    message: raw.into(),
+                },
+                &input,
+                &backfill,
+                "source-uuid",
+            )
+            .await;
+            assert_eq!(matches!(&result, DispatchResult::Terminal { .. }), terminal);
+            assert_eq!(
+                matches!(&result, DispatchResult::Retryable { .. }),
+                !terminal
+            );
+            let message = result.response_parts().1;
+            assert!(message.contains(hint), "{kind:?}: {message}");
+            for marker in ["private-outbound", "req_secret", "token-secret", "{", "}"] {
+                assert!(!message.contains(marker), "{kind:?}: {message}");
+            }
+            let writes = backfill.writes();
+            assert_eq!(writes.len(), usize::from(terminal));
+            if terminal {
+                assert_eq!(writes[0].2, message);
+            }
+        }
     }
 
     #[tokio::test]
@@ -2741,6 +2937,7 @@ mod tests {
         ] {
             let transport = ScriptedTransport::new(vec![(200, r#"{"code":0,"data":{}}"#)]);
             let fields = [FieldItem {
+                is_primary: false,
                 field_id: "fldT".into(),
                 field_name: "回填列".into(),
                 field_type: Some(kind),
@@ -2780,6 +2977,7 @@ mod tests {
         ] {
             let transport = ScriptedTransport::new(vec![]);
             let fields = [FieldItem {
+                is_primary: false,
                 field_id: "fldT".into(),
                 field_name: "回填列".into(),
                 field_type: Some(kind),

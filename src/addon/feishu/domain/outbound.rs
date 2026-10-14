@@ -43,6 +43,8 @@ use yang_base::BaseError;
 pub(crate) const CODE_RATE_LIMITED: i32 = 99991400;
 /// 多维表格自身的频控：`1254290 TooManyRequest`「请求过快，稍后重试」，**HTTP 200**。
 pub(crate) const CODE_TOO_MANY_REQUEST: i32 = 1254290;
+/// IM 频控可返回 HTTP 400，仍需按业务码退避。
+pub(crate) const CODE_MESSAGE_RATE_LIMITED: i32 = 230020;
 /// 响应体过大（HTTP 200）。**确定性失败**：同一请求重试必然同样过大，只会白烧频控配额。
 pub(crate) const CODE_TOO_LARGE_RESPONSE: i32 = 1254030;
 
@@ -326,6 +328,7 @@ pub(crate) fn classify(
             return Some(FailureKind::Fatal { code });
         } else if code == CODE_RATE_LIMITED
             || code == CODE_TOO_MANY_REQUEST
+            || code == CODE_MESSAGE_RATE_LIMITED
             || CODES_RETRYABLE.contains(&code)
             || CODES_RETRYABLE_APPROVAL.contains(&code)
         {

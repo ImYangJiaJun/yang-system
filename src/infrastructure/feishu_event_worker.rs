@@ -541,6 +541,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     };
 
     let input = DispatchInput {
+        fields: &fields,
         context: Some(&runner.context),
         coordinates: &coordinates,
         record_id: &record_id,
