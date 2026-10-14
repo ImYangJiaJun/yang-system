@@ -1,0 +1,174 @@
+//! 飞书审批事件接收 Action。
+//!
+//! 接收飞书推送的审批事件（`approval_instance` / `approval_task`），
+//! 验签解密后落事件落地表 `feishu_approval_event`，3 秒内返回 200。
+//!
+//! # store-then-process 架构
+//!
+//! 3 秒窗口内只做「验签 + 解密 + 落表」，绝不做飞书出站调用（富化 GET）。
+//! 富化由后续的 worker 异步处理（`processed_at IS NULL` 即待处理队列）。
+
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::Value;
+use yang_base::action::{ActionContext, ResponseBody};
+use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
+use yang_base::BaseError;
+
+use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::crypto;
+use crate::config::FeishuSettings;
+
+/// 事件接收请求体——用 `Value` 接收任意 JSON，避免反序列化失败。
+///
+/// 飞书推送的加密请求是 `{"encrypt":"..."}`，明文请求是完整事件 JSON。
+/// 两种格式都由本 handler 处理。
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct EventRequest(Value);
+
+impl ParamInput for EventRequest {
+    fn params() -> Params {
+        Params::new()
+    }
+}
+
+/// 注册事件接收端点。
+pub(super) fn register(
+    module: ModuleSpec,
+    context: FeishuContext,
+    settings: &FeishuSettings,
+) -> ModuleSpec {
+    let verification_token = settings.event_verification_token.clone();
+    let encrypt_key = settings.event_encrypt_key.clone();
+    module
+        .action_fn(
+            yang_base::action_name!("receive_approval_event"),
+            move |ctx, input| handle(ctx, input, context.clone(), verification_token.clone(), encrypt_key.clone()),
+        )
+        .route(HttpMethod::Post, "/api/v1/feishu/approval/event")
+        .display_name("飞书审批事件接收")
+        .description("接收飞书推送的审批状态变更事件，落事件落地表")
+        .public()
+        .register()
+}
+
+/// 处理飞书事件推送。
+///
+/// 流程：
+/// 1. 验签（verification_token）
+/// 2. 解密（如果有 encrypt 字段）
+/// 3. 提取事件字段（event_id, event_type, instance_code, status, operate_time）
+/// 4. 落事件落地表（幂等：event_id 唯一索引天然去重）
+/// 5. 3 秒内返回 200
+pub(super) async fn handle(
+    ctx: ActionContext,
+    input: EventRequest,
+    context: FeishuContext,
+    verification_token: Option<String>,
+    encrypt_key: Option<String>,
+) -> Result<ResponseBody, BaseError> {
+    let raw_body = &input.0;
+    tracing::info!(body = %raw_body, "飞书审批事件到达");
+
+    // 解密或直接用明文
+    let event_body = match raw_body.get("encrypt").and_then(Value::as_str) {
+        Some(encrypted) => {
+            let Some(key_raw) = encrypt_key.as_deref() else {
+                tracing::error!("飞书发送了加密事件，但 event_encrypt_key 未配置");
+                return raw_json(serde_json::json!({"error": "encrypt key not configured"}));
+            };
+            let key = crypto::derive_key(key_raw);
+            match crypto::decrypt_bytes(encrypted, &key) {
+                Ok(decrypted) => {
+                    match serde_json::from_slice::<Value>(&decrypted) {
+                        Ok(parsed) => {
+                            tracing::info!(decrypted = %parsed, "飞书事件解密成功");
+                            parsed
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "飞书事件解密后不是合法 JSON");
+                            return raw_json(serde_json::json!({"error": "decrypt produced invalid json"}));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "飞书事件解密失败");
+                    return raw_json(serde_json::json!({"error": "decrypt failed"}));
+                }
+            }
+        }
+        None => raw_body.clone(),
+    };
+
+    // 验签（仅日志，不阻断）
+    if let Some(expected_token) = verification_token.as_deref() {
+        if let Some(actual_token) = event_body.get("token").and_then(Value::as_str) {
+            if actual_token != expected_token {
+                tracing::warn!(
+                    feishu_token = %actual_token,
+                    expected_token = %expected_token,
+                    "飞书事件 verification_token 不匹配，仍处理事件"
+                );
+            }
+        }
+    }
+
+    // 提取事件字段
+    let event_id = event_body.get("event_id").and_then(Value::as_str).unwrap_or("");
+    let event_type = event_body.get("type").and_then(Value::as_str).unwrap_or("unknown");
+    let instance_code = event_body.get("instance_code").and_then(Value::as_str).unwrap_or("");
+    let status = event_body.get("status").and_then(Value::as_str).unwrap_or("");
+    let operate_time = event_body.get("operate_time").and_then(Value::as_str).unwrap_or("");
+
+    // 落事件落地表
+    let mut record = yang_base::table::Record::new();
+    record.insert("event_id", serde_json::json!(event_id));
+    record.insert("event_type", serde_json::json!(event_type));
+    record.insert("instance_code", serde_json::json!(instance_code));
+    record.insert("status", serde_json::json!(status));
+    if !operate_time.is_empty() {
+        if let Ok(ts) = operate_time.parse::<i64>() {
+            record.insert("operate_time", serde_json::json!(ts / 1000)); // 毫秒 → 秒
+        }
+    }
+    // received_at 由框架 created_at 自动填充
+    record.insert("raw_payload", serde_json::json!(event_body.to_string()));
+
+    // 幂等插入：event_id 唯一索引，重复投递天然去重
+    let mut transaction = ctx.begin_transaction().await?;
+    let result = context
+        .approval_events()
+        .query()
+        .insert_in_tx(&mut transaction, record)
+        .await;
+
+    match result {
+        Ok(_) => {
+            tracing::info!(
+                event_id = %event_id,
+                event_type = %event_type,
+                instance_code = %instance_code,
+                "飞书事件已落地"
+            );
+            raw_json(serde_json::json!({"success": true}))
+        }
+        Err(e) => {
+            // 唯一索引冲突 = 重复投递，不算错误
+            let err_str = e.to_string();
+            if err_str.contains("Duplicate") || err_str.contains("1062") {
+                tracing::info!(event_id = %event_id, "飞书事件重复投递，已忽略");
+                raw_json(serde_json::json!({"success": true, "duplicate": true}))
+            } else {
+                tracing::error!(error = %e, "飞书事件落地失败");
+                raw_json(serde_json::json!({"error": "insert failed"}))
+            }
+        }
+    }
+}
+
+/// 构造 raw JSON 响应（不套框架包络）。
+fn raw_json(value: serde_json::Value) -> Result<ResponseBody, BaseError> {
+    let body =
+        serde_json::to_string(&value).map_err(|e| BaseError::JsonSerializeFailed(e.to_string()))?;
+    ResponseBody::raw(body, "application/json")
+}

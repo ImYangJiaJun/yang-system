@@ -140,6 +140,15 @@ fn tables() -> Vec<(&'static str, TableSpec, &'static str)> {
             ),
             "portal_logs()",
         ),
+        // 审批事件落地表。登记后事件接收 Action 进入严格档：字段必须存在。
+        (
+            "feishu_approval_event",
+            spec(
+                crate::addon::feishu::approval::domain::event_table::table_spec(),
+                "审批事件落地",
+            ),
+            "approval_events()",
+        ),
     ]
 }
 
