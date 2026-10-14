@@ -15,6 +15,7 @@
 import {
   keepPreviousData,
   useQuery,
+  useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
@@ -113,6 +114,8 @@ export const APPROVAL_OPERATION_IDS = {
   oauthAuthorizeUrl: "feishu.approval.oauth_authorize_url",
   /// 轮换访问 Token。**写权限**：重新签发一条配置的工作流访问 Token（旧值立即失效）。
   rotateConfigToken: "feishu.approval.rotate_config_token",
+  /// 回显访问 Token。**纯读**：解密取出封存的明文，不改变任何状态（可反复复制）。
+  revealConfigToken: "feishu.approval.reveal_config_token",
 } as const;
 
 /// 表级配置（T3/T4/T5）与凭据生命周期（T11/T12）的 Action。
@@ -1799,6 +1802,11 @@ function parseApprovalConfigItem(
     handlerField: asNullableString(raw.handler_field),
     baseTimezone: asString(raw.base_timezone),
     enabled: raw.enabled === true,
+    // 工作流接入凭据的两位元数据（`list_configs` 投影 config_key / token_rotated_at，
+    // 刻意不投影 token_hash / token_cipher）。漏了这两行，「接入数据」tab 会永远
+    // 画成「从未签发」——**即使库里已经签发过**，因为前端拿到的 configKey 是 undefined。
+    configKey: asNullableString(raw.config_key),
+    tokenRotatedAt: asNullableNumber(raw.token_rotated_at),
     formSnapshotAt: asNullableNumber(raw.form_snapshot_at),
     updatedAt: asNumber(raw.updated_at, 0),
     maps,
@@ -2173,12 +2181,15 @@ export type ApprovalActions = {
   ) => Promise<{ deletedMaps: number; deletedPendingTasks: number }>;
   /// 重新签发一条配置的工作流访问 Token；返回新明文（旧值立即失效，工作流需粘新值）。
   rotateConfigToken: (configId: number) => Promise<string>;
+  /// 取出这条配置**当前**的访问 Token 明文（纯读，可反复调用）。
+  revealConfigToken: (configId: number) => Promise<string>;
 };
 
 export function useApprovalActions(): ApprovalActions {
   const session = useSessionCredentials();
   const catalog = useUiCatalog();
   const catalogData = catalog.data;
+  const queryClient = useQueryClient();
 
   const deps = useMemo<FeishuInvokeDeps>(
     () => ({ catalog: catalogData, session }),
@@ -2194,6 +2205,18 @@ export function useApprovalActions(): ApprovalActions {
     (configId: number) => deleteApprovalConfig(configId, deps),
     [deps],
   );
+  const revealConfigToken = useCallback(
+    async (configId: number) => {
+      const result = await invokeFeishuAction(
+        deps,
+        APPROVAL_OPERATION_IDS.revealConfigToken,
+        { config_id: configId },
+      );
+      const data = asRecord(result.data);
+      return asString(data?.token);
+    },
+    [deps],
+  );
   const rotateConfigToken = useCallback(
     async (configId: number) => {
       const result = await invokeFeishuAction(
@@ -2202,9 +2225,15 @@ export function useApprovalActions(): ApprovalActions {
         { config_id: configId },
       );
       const data = asRecord(result.data);
+      // 轮换会写入 config_key（首次签发时正是它让「接入数据」tab 从「未签发」
+      // 变成可复制的派发链接），所以必须回读列表——否则用户签发了却看不到结果，
+      // 只能手动刷新页面。
+      await queryClient.invalidateQueries({
+        queryKey: feishuQueryKeys.approvalConfigs(),
+      });
       return asString(data?.token);
     },
-    [deps],
+    [deps, queryClient],
   );
 
   return {
@@ -2226,6 +2255,7 @@ export function useApprovalActions(): ApprovalActions {
     updateConfig,
     deleteConfig,
     rotateConfigToken,
+    revealConfigToken,
   };
 }
 

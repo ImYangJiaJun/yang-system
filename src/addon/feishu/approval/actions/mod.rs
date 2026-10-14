@@ -5,7 +5,7 @@
 //!
 //! # 两组端点，两条注册纪律
 //!
-//! - **控制台（11 个 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
+//! - **控制台（12 个 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
 //!   （`create_config` / `list_widgets` 运行时按其自身逻辑校验凭证并返回 50301），
 //!   所以注册在 `can_pull()` 门禁**之前**。
 //! - **派发端点只在集成可用时注册**：与 `option` module 的机器入口同一条纪律——
@@ -34,6 +34,7 @@ pub(super) mod oauth_authorize_url;
 pub(super) mod oauth_callback;
 pub(super) mod oauth_status;
 pub(super) mod refresh_names;
+pub(super) mod reveal_config_token;
 pub(super) mod rotate_config_token;
 pub(super) mod update_config;
 
@@ -66,6 +67,7 @@ pub(super) fn register_all(
     let module = oauth_status::register(module, Arc::clone(&context));
     let module = oauth_authorize_url::register(module, Arc::clone(&context));
     let module = rotate_config_token::register(module, Arc::clone(&context));
+    let module = reveal_config_token::register(module, Arc::clone(&context));
 
     let Some(settings) = settings.filter(|value| value.can_pull()) else {
         return Ok(module);
@@ -87,7 +89,7 @@ mod tests {
 
     use crate::addon::feishu::domain::repository::Repository;
 
-    /// 11 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
+    /// 12 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
     const CONSOLE_ROUTES: &[(&str, &str)] = &[
         ("list_configs", "/api/v1/feishu/approval/configs/query"),
         ("create_config", "/api/v1/feishu/approval/configs/create"),
@@ -100,6 +102,10 @@ mod tests {
         (
             "rotate_config_token",
             "/api/v1/feishu/approval/configs/rotate-token",
+        ),
+        (
+            "reveal_config_token",
+            "/api/v1/feishu/approval/configs/reveal-token",
         ),
         (
             "list_widgets",

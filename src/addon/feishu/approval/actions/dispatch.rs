@@ -44,12 +44,16 @@ use crate::addon::feishu::approval::domain::request_log_writer::{
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
-    dispatch_one, widget_maps_from_rows, Backfill, BitableBackfill,
-    DispatchInput as OrchestrationInput,
+    dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
 };
-use crate::addon::feishu::domain::approval_provision::ProvisionError;
+// `Backfill` / `ProvisionError` 只被 `write_config_failure` 与测试用到，而那个函数
+// 现在是 `#[cfg(test)]`（生产调用点随自动建配置一起删了）。
 #[cfg(test)]
-use crate::addon::feishu::domain::approval_provision::{build_plan, insert_plan, ProvisionInput};
+use crate::addon::feishu::domain::approval_dispatch::Backfill;
+#[cfg(test)]
+use crate::addon::feishu::domain::approval_provision::{
+    build_plan, insert_plan, ProvisionError, ProvisionInput,
+};
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
@@ -205,6 +209,10 @@ fn resolve_config_key(ctx: &ActionContext) -> Result<String, BaseError> {
 /// 抽成纯函数是为了能被单测直接驱动——四类出口（未签发 / Token 不符 / 停用 /
 /// 通过）的**顺序**必须钉住：先验 Token 再报停用，与 datasource 的
 /// `verify_source` 同一条不变量。
+// `DispatchOutcome` 载着整个 `Result<ApiResponse, BaseError>`，装箱只是为一个
+// perf lint 把 7 处构造点全改成 `Box::new`；本函数每次请求只调一次，收益为零。
+// 照 `bootstrap.rs` 对 `too_many_arguments` 的同款处置。
+#[allow(clippy::result_large_err)]
 fn check_config_auth(
     row: &yang_base::table::Record,
     presented_token: &str,
@@ -271,6 +279,7 @@ fn check_config_auth(
 /// （设计 §5.1：手动建与自动建必须给同一套保证）。建配置失败时把原因写回回填列
 /// 的这个落点，正是那条链路的唯一用户可见出口——所以这个函数与它的端到端测试
 /// 必须留着，只是**调用方从 dispatch 的自动建配置换成了 create_config 的手动建**。
+#[cfg(test)]
 async fn write_config_failure(
     backfill: &dyn Backfill,
     record_id: &str,
@@ -1125,6 +1134,17 @@ mod tests {
         assert!(valid_input().validate().is_ok());
     }
 
+    /// `check_config_auth` 的失败出口。仓库 deny `unwrap_used`/`unwrap_err`，
+    /// 所以这里自己匹配——成功即测试失败。
+    fn expect_auth_failure(
+        outcome: Result<(i64, String, String), DispatchOutcome>,
+    ) -> DispatchOutcome {
+        match outcome {
+            Err(outcome) => outcome,
+            Ok(_) => panic!("应当失败"),
+        }
+    }
+
     /// 鉴权四类出口：未签发 / Token 不符 / 停用 / 通过。
     ///
     /// 这是本次契约改形的**核心不变量**——「先验 Token，再报停用」必须钉住：
@@ -1135,7 +1155,7 @@ mod tests {
         // (1) 未签发（token_hash 空 / NULL）：必须在 Token 校验**之前**判，
         //     报「还没签发」而不是「Token 错了」。
         let unissued = config_row(7, true);
-        let outcome = check_config_auth(&unissued, "any-token").unwrap_err();
+        let outcome = expect_auth_failure(check_config_auth(&unissued, "any-token"));
         assert!(
             matches!(outcome.response, Ok(ref r) if r.code == TOKEN_NOT_ISSUED),
             "未签发应报 TOKEN_NOT_ISSUED: {outcome:?}"
@@ -1144,7 +1164,7 @@ mod tests {
         // (2) Token 不符：停用位为假，但**必须先**返回 TOKEN_MISMATCH 而不是
         //     CONFIG_DISABLED——这就是「先验 Token 再报停用」的落点。
         let wrong_token = issued_config_row("correct-token");
-        let outcome = check_config_auth(&wrong_token, "wrong-token").unwrap_err();
+        let outcome = expect_auth_failure(check_config_auth(&wrong_token, "wrong-token"));
         assert!(
             matches!(outcome.response, Ok(ref r) if r.code == TOKEN_MISMATCH),
             "Token 不符应报 TOKEN_MISMATCH（即使已停用）: {outcome:?}"
@@ -1154,7 +1174,7 @@ mod tests {
         let disabled = issued_config_row("correct-token");
         let mut disabled = disabled;
         disabled.insert("enabled", serde_json::json!(false));
-        let outcome = check_config_auth(&disabled, "correct-token").unwrap_err();
+        let outcome = expect_auth_failure(check_config_auth(&disabled, "correct-token"));
         assert!(
             matches!(outcome.response, Ok(ref r) if r.code == CONFIG_DISABLED),
             "Token 对但已停用应报 CONFIG_DISABLED: {outcome:?}"

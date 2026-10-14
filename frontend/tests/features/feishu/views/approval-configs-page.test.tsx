@@ -49,6 +49,8 @@ function configRows() {
       title: "费用报销",
       approval_code: "CODE-EXPENSE",
       enabled: false,
+      config_key: "cfg-2",
+      token_rotated_at: 1_700_000_000,
       maps: [
         {
           widget_id: "widget-1",
@@ -65,34 +67,34 @@ function configRows() {
 }
 
 describe("审批派发配置页 · 列表", () => {
-  it("空列表也能展开工作流指引，提供真实接口、参数与单行/批量示例", async () => {
-    const calls = stubApprovalApi({ approvalWrite: false });
+  it("接入数据 tab：派发链接、签发时间与单行/批量请求体模板均可复制", async () => {
+    stubApprovalApi({
+      approvalWrite: false,
+      configList: () =>
+        listPage([
+          approvalConfigWire({
+            config_key: "cfg-issued",
+            token_rotated_at: 1_700_000_000,
+          }),
+        ]),
+    });
     renderConfigs();
-    await screen.findByRole("heading", { name: "审批配置" });
+    await screen.findByText("差旅报销");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[0]!,
+    );
 
-    const summary = screen.getByText("多维表格工作流配置指引");
-    const guide = summary.closest("details")!;
-    expect(guide).not.toHaveAttribute("open");
-    await userEvent.click(summary);
-    expect(guide).toHaveAttribute("open");
+    await userEvent.click(await screen.findByRole("tab", { name: "接入数据" }));
+    const content = within(screen.getByRole("tabpanel", { name: "接入数据" }));
 
-    const content = within(guide);
     expect(
       content.getByText(
-        `${window.location.origin}/api/v1/feishu/approval/dispatch/<配置标识>`,
+        `${window.location.origin}/api/v1/feishu/approval/dispatch/cfg-issued`,
       ),
     ).toBeInTheDocument();
-    expect(content.getByText(/工作流访问/)).toBeInTheDocument();
-    expect(
-      content.getByText(/Content-Type: application\/json/, {
-        selector: "ol li",
-      }),
-    ).toBeInTheDocument();
-    for (const name of ["token", "record_id", "applicant", "requested_by"]) {
-      expect(
-        content.getByText(name, { selector: "dt code" }),
-      ).toBeInTheDocument();
-    }
+    // 已签发：不再显示「从未签发」引导语。
+    expect(content.queryByText(/还没有工作流接入凭据/)).toBeNull();
+
     const single = JSON.parse(
       content.getByLabelText("单行派发请求体").textContent!,
     );
@@ -110,13 +112,72 @@ describe("审批派发配置页 · 列表", () => {
       applicant: single.applicant,
       requested_by: single.requested_by,
     });
+    expect(content.getByText(/Content-Type/)).toBeInTheDocument();
     expect(content.getByText(/所有启用配置的待处理队列/)).toBeInTheDocument();
-    expect(content.getByText(/工作流访问 Token/)).toBeInTheDocument();
-    expect(content.getByText(/data.accepted/)).toBeInTheDocument();
-    expect(countCalls(calls, "/api/v1/feishu/approval/dispatch")).toBe(0);
 
-    await userEvent.click(summary);
-    expect(guide).not.toHaveAttribute("open");
+    // jsdom 不实现 navigator.clipboard（见 @test/helpers/clipboard 的说明），
+    // 不装桩就只会走到「无法自动复制」那条分支。
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    await userEvent.click(
+      content.getByRole("button", { name: "复制派发链接" }),
+    );
+    expect(await screen.findByText(/派发链接已复制/)).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith(
+      `${window.location.origin}/api/v1/feishu/approval/dispatch/cfg-issued`,
+    );
+  });
+
+  it("已签发的配置：可以回显当前 Token（纯读，不必轮换）", async () => {
+    const calls = stubApprovalApi({
+      configList: () =>
+        listPage([
+          approvalConfigWire({
+            config_key: "cfg-issued",
+            token_rotated_at: 1_700_000_000,
+          }),
+        ]),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[0]!,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: "接入数据" }));
+    const content = within(screen.getByRole("tabpanel", { name: "接入数据" }));
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    await userEvent.click(content.getByRole("button", { name: "复制 Token" }));
+
+    expect(await screen.findByText(/已复制当前访问 Token/)).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith("stub-current-token");
+    // 纯读：打的是回显端点，不是轮换端点。
+    expect(
+      calls.filter((call) => call.url.endsWith("/configs/reveal-token")).length,
+    ).toBe(1);
+    expect(
+      calls.filter((call) => call.url.endsWith("/configs/rotate-token")).length,
+    ).toBe(0);
+  });
+
+  it("从未签发过的配置：接入数据 tab 引导去签发，不渲染无效的派发链接", async () => {
+    stubApprovalApi({
+      approvalWrite: false,
+      configList: () => listPage([approvalConfigWire()]),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "查看配置" })[0]!,
+    );
+
+    await userEvent.click(await screen.findByRole("tab", { name: "接入数据" }));
+    const content = within(screen.getByRole("tabpanel", { name: "接入数据" }));
+    expect(content.getByText(/还没有工作流接入凭据/)).toBeInTheDocument();
+    // 没有 config_key 就不该给出可复制的派发链接。
+    // （不能断言「页面上没有 dispatch 路径」——那条说明性提示里本来就有这个路径。）
+    expect(content.queryByRole("button", { name: "复制派发链接" })).toBeNull();
   });
 
   it("列表展示配置名称和状态，隐藏技术标识", async () => {

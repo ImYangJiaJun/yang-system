@@ -42,6 +42,21 @@ const RULE_LABELS: Record<string, string> = {
 const nameOf = (name: string | null | undefined, fallback: string) =>
   name?.trim() || fallback;
 
+/// 「接入数据」tab 里的两份请求体模板：`token` 占位符会被真实访问 Token 替换
+/// （若已签发），其余占位符需在飞书工作流里换成动态变量。`aria-label` 与
+/// `tests/.../approval-configs-page.test.tsx` 的断言同源。
+const SINGLE_TEMPLATE = {
+  token: "<访问 Token>",
+  record_id: "<触发记录 ID>",
+  applicant: "<发起人姓名>",
+  requested_by: "<触发人标识>",
+} as const;
+const BATCH_TEMPLATE = {
+  token: "<访问 Token>",
+  applicant: "<发起人姓名>",
+  requested_by: "<触发人标识>",
+} as const;
+
 export function ApprovalConfigDetails({
   item,
   canWrite,
@@ -69,6 +84,7 @@ export function ApprovalConfigDetails({
   const [relatedPage, setRelatedPage] = useState(1);
   const [relatedSize, setRelatedSize] = useState(10);
   const [rotatingToken, setRotatingToken] = useState(false);
+  const [revealingToken, setRevealingToken] = useState(false);
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const toast = useToast();
   const actions = useApprovalActions();
@@ -89,6 +105,7 @@ export function ApprovalConfigDetails({
   );
   const tabs = [
     { id: "maps", label: `字段对应（${item.maps.length}）` },
+    { id: "access", label: "接入数据" },
     { id: "usage", label: "使用说明" },
     { id: "debug", label: "排查信息" },
   ];
@@ -100,14 +117,16 @@ export function ApprovalConfigDetails({
   const approvalUrl = validCoordinate(item.approvalCode)
     ? `https://www.feishu.cn/approval/admin/createApproval?definitionCode=${encodeURIComponent(item.approvalCode)}`
     : undefined;
+  const dispatchUrl = item.configKey
+    ? `${window.location.origin}/api/v1/feishu/approval/dispatch/${item.configKey}`
+    : undefined;
+  const singleBody = JSON.stringify(SINGLE_TEMPLATE, null, 2);
+  const batchBody = JSON.stringify(BATCH_TEMPLATE, null, 2);
   async function copy(label: string, value: string) {
     const outcome = await copyText(value);
     if (outcome === "copied") toast.success(`${label}已复制`);
     else toast.error("无法自动复制，请选中文字手动复制。");
   }
-  const dispatchUrl = item.configKey
-    ? `${window.location.origin}/api/v1/feishu/approval/dispatch/${item.configKey}`
-    : undefined;
   async function rotateToken() {
     setRotatingToken(true);
     try {
@@ -133,6 +152,29 @@ export function ApprovalConfigDetails({
       toast.error(`轮换访问 Token 失败：${message}`);
     } finally {
       setRotatingToken(false);
+    }
+  }
+  /// 回显**当前**访问 Token（纯读，可反复调用）。与轮换分开：轮换是破坏性的，
+  /// 不该被当成「看一眼 Token」的入口。
+  async function revealToken() {
+    setRevealingToken(true);
+    try {
+      const token = await actions.revealConfigToken(item.id);
+      if (!token) {
+        toast.error("回显失败：服务端没有返回访问 Token。");
+        return;
+      }
+      const outcome = await copyText(token);
+      if (outcome === "copied") {
+        toast.success("已复制当前访问 Token。");
+      } else {
+        toast.error("无法自动复制，请选中文字手动复制。");
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      toast.error(`回显访问 Token 失败：${message}`);
+    } finally {
+      setRevealingToken(false);
     }
   }
   return (
@@ -275,45 +317,6 @@ export function ApprovalConfigDetails({
           ? "已启用仅表示可受理新的派发请求，仍需飞书工作流触发。"
           : "已停用：新的派发请求不会通过此配置受理。"}
       </p>
-      {dispatchUrl ? (
-        <div className="rounded-xl border bg-card p-5 sm:p-6">
-          <p className="mb-1 text-xs font-medium text-muted-foreground">
-            工作流接入
-          </p>
-          <p className="mb-4 text-xs text-muted-foreground">
-            飞书工作流向这个地址发 POST 请求即可触发派发；鉴权靠请求体里的访问
-            Token，每条配置各自一份，按需轮换（旧值立即失效）。
-          </p>
-          <dl className="grid gap-4 sm:grid-cols-2">
-            <div className="min-w-0">
-              <dt className="text-xs text-muted-foreground">派发链接</dt>
-              <dd className="mt-1 flex items-start gap-2">
-                <code className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-xs break-all select-all">
-                  {dispatchUrl}
-                </code>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  aria-label="复制派发链接"
-                  onClick={() => void copy("派发链接", dispatchUrl)}
-                >
-                  复制
-                </Button>
-              </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-xs text-muted-foreground">
-                最近签发/轮换 Token
-              </dt>
-              <dd className="mt-1 font-mono text-sm break-all">
-                {item.tokenRotatedAt
-                  ? formatUnixSeconds(item.tokenRotatedAt)
-                  : "从未签发"}
-              </dd>
-            </div>
-          </dl>
-        </div>
-      ) : null}
       <div
         role="tablist"
         aria-label="配置详情"
@@ -437,6 +440,127 @@ export function ApprovalConfigDetails({
               </div>
             )}
           </>
+        ) : tab === "access" ? (
+          <div className="space-y-5">
+            <div>
+              <h2 className="font-semibold">接入数据</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                飞书工作流向这个地址发 POST
+                请求即可触发派发；鉴权靠请求体里的访问
+                Token，每条配置各自一份，按需轮换（旧值立即失效）。
+              </p>
+              <p className="mt-2 rounded-md border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
+                地址按**当前控制台域名**生成。若你现在是
+                localhost、内网或开发代理地址，
+                飞书服务器访问不到它——请替换为实际部署的公网 API 地址（保留
+                <code>/api/v1/feishu/approval/dispatch/&lt;配置标识&gt;</code>
+                这一段路径与末尾的配置标识）。
+              </p>
+            </div>
+            <dl className="grid gap-4 sm:grid-cols-2">
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">派发链接</dt>
+                <dd className="mt-1 flex items-start gap-2">
+                  {dispatchUrl ? (
+                    <>
+                      <code className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-xs break-all select-all">
+                        {dispatchUrl}
+                      </code>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label="复制派发链接"
+                        onClick={() => void copy("派发链接", dispatchUrl)}
+                      >
+                        复制
+                      </Button>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      该配置还没有工作流接入凭据（configKey 为空）——上方点一次
+                      「轮换访问
+                      Token」即可签发，签发后这里会出现可复制的派发链接。
+                    </p>
+                  )}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">
+                  最近签发/轮换 Token
+                </dt>
+                <dd className="mt-1 flex flex-wrap items-center gap-2 font-mono text-sm break-all">
+                  {item.tokenRotatedAt
+                    ? formatUnixSeconds(item.tokenRotatedAt)
+                    : "从未签发"}
+                  {item.tokenRotatedAt && canWrite ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={revealingToken}
+                      onClick={() => void revealToken()}
+                    >
+                      {revealingToken ? "读取中…" : "复制 Token"}
+                    </Button>
+                  ) : null}
+                </dd>
+              </div>
+            </dl>
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className="min-w-0 space-y-2">
+                <h3 className="font-medium">单行按钮：派发当前记录</h3>
+                <pre
+                  aria-label="单行派发请求体"
+                  className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs select-all"
+                >
+                  <code>{singleBody}</code>
+                </pre>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void copy("单行派发请求体", singleBody)}
+                >
+                  复制单行模板
+                </Button>
+              </div>
+              <div className="min-w-0 space-y-2">
+                <h3 className="font-medium">页面按钮：受理批量派发</h3>
+                <pre
+                  aria-label="批量派发请求体"
+                  className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs select-all"
+                >
+                  <code>{batchBody}</code>
+                </pre>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void copy("批量派发请求体", batchBody)}
+                >
+                  复制批量模板
+                </Button>
+              </div>
+            </div>
+            <p className="rounded-md border border-border bg-muted/50 p-3 text-sm">
+              替换所有占位符。记录
+              ID、发起人与触发人请插入工作流动态变量，不要把占位
+              文字作为实际值发送。使用工作流 JSON 模板时，对应引用为
+              $.step_btn.recordId、$.step_btn.user（step_btn 为触发节点 ID）。
+              <strong>applicant 与 requested_by 都要用 $.step_btn.user</strong>
+              ——该变量渲染出的是<strong>姓名</strong>（真机核实），正合
+              applicant 所需；两个字段都需要字符串，不要传对象。Content-Type
+              请求头填 application/json。
+            </p>
+            <p className="rounded-md border border-border bg-muted/50 p-3 text-sm">
+              省略 record_id
+              会唤醒所有启用配置的待处理队列，并非只处理请求中指定的数据表；后台处理回填列为空的记录。批量按钮请仅在需要处理整个队列时使用。
+            </p>
+            <p className="text-xs text-muted-foreground">
+              若提示「配置不存在」，检查派发链接里的配置标识是否正确；若提示「Token
+              无效」，说明轮换过 Token
+              而工作流里还是旧值，回本页重新复制；若提示「尚未签发访问
+              Token」，说明这条配置还没签发过凭据，点上方「轮换访问
+              Token」；若处于等待态，补齐申请人及审批必填字段后再查看处理结果。
+            </p>
+          </div>
         ) : tab === "usage" ? (
           <div className="space-y-5">
             <h2 className="font-semibold">在飞书多维表中使用</h2>

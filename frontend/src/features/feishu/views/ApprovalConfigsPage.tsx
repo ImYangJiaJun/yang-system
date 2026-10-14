@@ -29,7 +29,6 @@ import {
 } from "../api";
 import { ApprovalConfigDialog } from "../components/ApprovalConfigDialog";
 import { ApprovalConfigDetails } from "../components/ApprovalConfigDetails";
-import { ApprovalWorkflowGuide } from "../components/ApprovalWorkflowGuide";
 import { FeishuOAuthCard } from "../components/FeishuOAuthCard";
 import { ListPagination } from "../components/ListPagination";
 import { StatusBadge } from "../components/StatusBadge";
@@ -436,7 +435,6 @@ export default function ApprovalConfigsPage() {
           <p className="text-xs text-muted-foreground">
             已启用仅表示可受理派发请求；工作流设置和运行结果请在飞书及派发记录中核对。
           </p>
-          <ApprovalWorkflowGuide />
         </>
       )}
       {wizardOpen && (

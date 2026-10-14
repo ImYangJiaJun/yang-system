@@ -36,6 +36,8 @@ export type ApprovalApiStubOptions = {
   createConfig?: Handler;
   updateConfig?: Handler;
   deleteConfig?: Handler;
+  rotateConfigToken?: Handler;
+  revealConfigToken?: Handler;
   refreshNames?: Handler;
   widgets?: Handler;
   requestList?: Handler;
@@ -135,6 +137,16 @@ function catalogFor(options: ApprovalApiStubOptions) {
         "POST",
         "/api/v1/feishu/approval/configs/refresh-names",
       ),
+      action(
+        "feishu.approval.rotate_config_token",
+        "POST",
+        "/api/v1/feishu/approval/configs/rotate-token",
+      ),
+      action(
+        "feishu.approval.reveal_config_token",
+        "POST",
+        "/api/v1/feishu/approval/configs/reveal-token",
+      ),
     );
   if (options.datasourceWrite ?? true) {
     actions.push(
@@ -208,6 +220,8 @@ export function approvalConfigWire(
     backfill_field: "fldBack",
     base_timezone: "Asia/Shanghai",
     enabled: true,
+    config_key: null,
+    token_rotated_at: null,
     form_snapshot_at: 1758000000,
     updated_at: 1758000000,
     maps: [],
@@ -308,6 +322,16 @@ export function stubApprovalApi(
       }
       if (url.endsWith("/api/v1/feishu/approval/configs/refresh-names")) {
         return respond(options.refreshNames, payload, { incomplete_ids: [] });
+      }
+      if (url.endsWith("/api/v1/feishu/approval/configs/rotate-token")) {
+        return respond(options.rotateConfigToken, payload, {
+          token: "stub-rotated-token",
+        });
+      }
+      if (url.endsWith("/api/v1/feishu/approval/configs/reveal-token")) {
+        return respond(options.revealConfigToken, payload, {
+          token: "stub-current-token",
+        });
       }
       if (url.endsWith("/api/v1/feishu/approval/configs/delete")) {
         return respond(options.deleteConfig, payload, {
