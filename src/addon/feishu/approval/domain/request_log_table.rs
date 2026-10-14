@@ -40,7 +40,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     .filterable(true)
                     .max_length(128),
                 // 配置存在时关联；首调失败时为空。无外键（理由见文件顶部）。
-                config_id => Int::new().title("所属配置").indexed(true),
+                config_id => Int::new().title("所属配置").indexed(true).filterable(true),
                 record_id => Str::new().title("多维表格记录 ID").max_length(128).filterable(true),
                 // 请求数据：`DispatchInput` 序列化（坐标/三件套/请求人）。
                 request_body => Text::new().title("请求数据").require(true),

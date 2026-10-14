@@ -183,6 +183,7 @@ pub(crate) async fn handle(
     record.insert("instance_code", serde_json::json!(instance_code));
     record.insert("status", serde_json::json!(status));
     record.insert("received_at", serde_json::json!(now));
+    record.insert("processed_at", serde_json::Value::Null); // 显式设置为 NULL，确保 where_null 能查到
     if !operate_time.is_empty() {
         if let Ok(ts) = operate_time.parse::<i64>() {
             record.insert("operate_time", serde_json::json!(ts / 1000)); // 毫秒 → 秒
