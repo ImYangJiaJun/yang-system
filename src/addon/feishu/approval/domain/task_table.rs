@@ -78,6 +78,13 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             // 创建成功后**立即**落库，不要等回写成功——那时响应已经丢了。
             instance_code => Str::new().title("审批实例 Code").max_length(128),
             serial_number => Str::new().title("审批单编号").max_length(64),
+            // 事件订阅回写的实例状态（设计 §八 二期列）。
+            instance_status => Str::new()
+                .title("实例状态")
+                .max_length(32)
+                .filterable(true),
+            // 事件订阅最近一次同步时间。
+            last_synced_at => Timestamp::new().title("最近同步时间"),
             attempts => Int::new().title("已尝试次数").require(true).default(0),
             // 可重试退避的下次可认领时间。显式写入而非自动时间戳——
             // 退避由业务决定，不是「写入时刻」。

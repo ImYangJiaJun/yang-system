@@ -765,7 +765,7 @@ async fn finish_backfill(
 /// 每个字段只在 `input` 有对应目标列时写；**任一写失败只 `tracing::warn`**——
 /// 编号是主产物，扩展字段是附带（与既有「回填失败不吞事实」原则一致）。
 /// 值全部取自**已经拿到的**那一份详情，零额外 API 调用。
-async fn write_extended(
+pub(crate) async fn write_extended(
     backfill: &dyn Backfill,
     input: &DispatchInput<'_>,
     detail: &InstanceDetail,

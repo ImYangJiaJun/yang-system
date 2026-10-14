@@ -10,6 +10,7 @@ use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
 use crate::feishu_approval_worker::{ApprovalDispatchHandle, ApprovalDispatchWorker};
+use crate::feishu_event_worker::FeishuEventWorker;
 use crate::feishu_oauth_reminder::FeishuOauthReminderWorker;
 use crate::feishu_pull::{FeishuPullHandle, FeishuPullWorker};
 use anyhow::Context;
@@ -32,6 +33,7 @@ const PHASE_HTTP_DRAIN: &str = "http_drain";
 const PHASE_AUTHORIZATION_OUTBOX_WORKER: &str = "authorization_outbox_worker";
 const PHASE_FEISHU_PULL_WORKER: &str = "feishu_pull_worker";
 const PHASE_FEISHU_APPROVAL_WORKER: &str = "feishu_approval_worker";
+const PHASE_FEISHU_EVENT_WORKER: &str = "feishu_event_worker";
 const PHASE_FEISHU_OAUTH_REMINDER_WORKER: &str = "feishu_oauth_reminder_worker";
 const PHASE_TOOLS_CLOSE: &str = "tools_close";
 const PHASE_OBSERVABILITY: &str = "observability";
@@ -334,6 +336,22 @@ async fn run_after_tools_created(
         }
         None => None,
     };
+    // 事件处理 worker：与审批派发同一条准入（`can_pull()`），共用同一份出站与数据库。
+    let event_worker = match settings.feishu.as_ref().filter(|feishu| feishu.can_pull()) {
+        Some(feishu) => {
+            let feishu_context = crate::addon::feishu::build_context(
+                Arc::new(tools.mysql()?.pool().clone()),
+                Arc::new(settings.security.clone()),
+                Some(Arc::new(feishu.clone())),
+            )
+            .context("构建事件处理上下文失败")?;
+            Some(
+                FeishuEventWorker::start(Arc::clone(&tools), feishu, feishu_context)
+                    .context("启动事件处理 Worker 失败")?,
+            )
+        }
+        None => None,
+    };
     let runtime = Arc::new(application.runtime);
     let signal_budget = shutdown_budget.clone();
     let signal_readiness = readiness_gate.clone();
@@ -391,6 +409,14 @@ async fn run_after_tools_created(
             .map_err(anyhow::Error::from),
         None => Ok(()),
     };
+    // 事件处理 worker 关闭。
+    let event_shutdown = match event_worker {
+        Some(worker) => shutdown_budget
+            .run_phase(PHASE_FEISHU_EVENT_WORKER, worker.shutdown())
+            .await
+            .map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
     // 提醒 worker 与派发同批收口：它也用出站与数据库。
     let oauth_reminder_shutdown = match oauth_reminder_worker {
         Some(worker) => shutdown_budget
@@ -403,6 +429,7 @@ async fn run_after_tools_created(
     let shutdown_result = outbox_shutdown
         .and(feishu_shutdown)
         .and(approval_shutdown)
+        .and(event_shutdown)
         .and(oauth_reminder_shutdown);
     match (serve_result, shutdown_result) {
         (Err(serve_error), Err(worker_error)) => {
