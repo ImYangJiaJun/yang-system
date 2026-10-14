@@ -822,7 +822,12 @@ mod tests {
         // 整段粘贴（无空格）应命中带空格的库值。
         let hits = fuzzy_filter_candidates(&candidates, "4514617593174990");
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].require::<String>("option_id").unwrap_or_else(|error| panic!("option_id must be present: {error}")), "card:a");
+        assert_eq!(
+            hits[0]
+                .require::<String>("option_id")
+                .unwrap_or_else(|error| panic!("option_id must be present: {error}")),
+            "card:a"
+        );
 
         // 只给中间一段，去掉非数字后包含即可命中。
         assert_eq!(fuzzy_filter_candidates(&candidates, "61759317").len(), 1);

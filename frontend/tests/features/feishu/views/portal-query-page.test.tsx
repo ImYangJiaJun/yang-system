@@ -14,11 +14,12 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
-import { PORTAL_ERROR_CODES } from "@/features/feishu/types";
+import { formatCardNumber, PORTAL_ERROR_CODES } from "@/features/feishu/types";
 import { renderTestApp } from "@test/helpers/render-app";
 
 const QUERY_PATH = "/api/v1/feishu/portal/bank/query";
 const METADATA_PATH = "/api/v1/feishu/portal/bank";
+const SUGGEST_PATH = "/api/v1/feishu/portal/bank/suggest";
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -41,6 +42,8 @@ type PortalMetadataBody = {
   query_field_label: string;
   access_mode: "public" | "passphrase" | "login";
   empty_message: string;
+  fuzzy_enabled: boolean;
+  fuzzy_min_digits: number;
 };
 
 /// 后端元信息端点的默认回执（`GET /api/v1/feishu/portal/{slug}`）。
@@ -50,25 +53,32 @@ function metadataBody(overrides: Partial<PortalMetadataBody> = {}) {
     query_field_label: "完整卡号",
     access_mode: "public",
     empty_message: "未找到该卡号的记录",
+    fuzzy_enabled: true,
+    fuzzy_min_digits: 4,
     ...overrides,
   };
 }
 
-/// 元信息与查询两个端点各自独立可编排：元信息默认成功，查询默认未命中。
+/// 元信息 / 查询 / 建议三个端点各自独立可编排：元信息默认成功，查询默认未命中，
+/// 建议默认空列表。
 function stubPortal(
   options: {
     metadata?: () => Response;
     query?: () => Response;
+    suggest?: () => Response;
   } = {},
 ) {
   const metadata = options.metadata ?? (() => envelope(metadataBody()));
   const query =
     options.query ?? (() => envelope({ found: false, columns: [], rows: [] }));
+  const suggest = options.suggest ?? (() => envelope({ suggestions: [] }));
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      // 先判查询：它的路径是元信息路径多一段 `/query`。
+      // 先判建议：它的路径是元信息路径多一段 `/suggest?query=…`。
+      if (url.includes(SUGGEST_PATH)) return suggest();
+      // 再判查询：它的路径是元信息路径多一段 `/query`。
       if (url.endsWith(QUERY_PATH)) return query();
       if (url.endsWith(METADATA_PATH)) return metadata();
       // 会话恢复的 refresh 端点：一律 401（终端失败 → 匿名）。
@@ -286,5 +296,70 @@ describe("公开门户查询页", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "查询过于频繁，请稍后再试",
     );
+  });
+
+  it("输入卡号片段：去抖后出下拉建议，选中填入完整卡号（带空格）", async () => {
+    stubPortal({
+      suggest: () =>
+        envelope({
+          suggestions: ["4514 6175 9317 4990", "4514 6175 6142 8030"],
+        }),
+    });
+    renderPortal();
+
+    const input = await screen.findByLabelText("查询");
+    await userEvent.type(input, "45146175");
+
+    // 输入过程中每 4 位自动分组：光标处的值应是 "4514 6175"。
+    expect(input).toHaveValue("4514 6175");
+
+    // 去抖 300ms 后出下拉（建议是库里的标准形态，带空格）。
+    const first = await screen.findByText("4514 6175 9317 4990");
+    await userEvent.click(first);
+
+    expect(input).toHaveValue("4514 6175 9317 4990");
+  });
+
+  it("输入不足最少连续数字时不请求建议（门槛取门户配置）", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes(SUGGEST_PATH)) return envelope({ suggestions: [] });
+      if (url.endsWith(METADATA_PATH)) return envelope(metadataBody());
+      return jsonResponse({ code: 401, message: "no session" }, 401);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    renderPortal();
+
+    const input = await screen.findByLabelText("查询");
+    await userEvent.type(input, "123");
+    // 等超过去抖窗口，确认 suggest 端点从未被调用。
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const suggestCalls = fetchSpy.mock.calls.filter(([url]) =>
+      String(url).includes(SUGGEST_PATH),
+    );
+    expect(suggestCalls).toHaveLength(0);
+  });
+});
+
+describe("formatCardNumber", () => {
+  it("无空格卡号按 4 位分组补空格", () => {
+    expect(formatCardNumber("4514617593174990")).toBe("4514 6175 9317 4990");
+  });
+
+  it("已是标准形态的输入保持不变（多了的空格被删）", () => {
+    expect(formatCardNumber("4514 6175 9317 4990")).toBe("4514 6175 9317 4990");
+    expect(formatCardNumber("4514  6175")).toBe("4514 6175");
+  });
+
+  it("不足一组或末尾不足一组时正确分组", () => {
+    expect(formatCardNumber("451461")).toBe("4514 61");
+    expect(formatCardNumber("4514")).toBe("4514");
+    expect(formatCardNumber("")).toBe("");
+  });
+
+  it("含数字与空格之外字符的输入原样返回（门户查询键不一定是卡号）", () => {
+    expect(formatCardNumber("abc1234")).toBe("abc1234");
+    expect(formatCardNumber("4514-6175")).toBe("4514-6175");
+    expect(formatCardNumber("卡号4514")).toBe("卡号4514");
   });
 });

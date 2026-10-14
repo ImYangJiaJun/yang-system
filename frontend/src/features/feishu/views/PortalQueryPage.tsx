@@ -43,6 +43,7 @@ import {
   suggestPortal,
   usePortalMetadata,
 } from "../portal-api";
+import { formatCardNumber } from "../types";
 
 const ERROR_BAR =
   "rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive";
@@ -76,10 +77,12 @@ export default function PortalQueryPage() {
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 去抖调 suggest 端点：输入变化后 300ms 触发，去掉空格后检查是否 ≥4 位连续数字。
+  // 去抖调 suggest 端点：输入变化后 300ms 触发。触发门槛与后端同一语义——
+  // 「去空格后含 ≥fuzzy_min_digits 位连续数字」，阈值取门户配置（元信息已带回）。
+  const minDigits = metadata.data?.fuzzy_min_digits ?? 4;
   useEffect(() => {
     const stripped = value.replace(/\s/g, "");
-    if (stripped.length < 4) {
+    if (!new RegExp(`\\d{${minDigits}}`).test(stripped)) {
       setSuggestions([]);
       setShowDropdown(false);
       return;
@@ -93,7 +96,7 @@ export default function PortalQueryPage() {
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [value, slug, session]);
+  }, [value, slug, session, minDigits]);
 
   const query = useMutation({
     mutationFn: () =>
@@ -191,7 +194,9 @@ export default function PortalQueryPage() {
               id="portal-value"
               value={value}
               placeholder={meta.query_field_label || FALLBACK_PLACEHOLDER}
-              onChange={(event) => setValue(event.target.value)}
+              onChange={(event) =>
+                setValue(formatCardNumber(event.target.value))
+              }
               onFocus={() => {
                 if (suggestions.length > 0) setShowDropdown(true);
               }}

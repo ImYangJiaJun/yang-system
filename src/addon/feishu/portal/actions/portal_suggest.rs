@@ -34,14 +34,18 @@ const PORTAL_NOT_FOUND: i32 = 40401;
 /// 建议结果最多返回的候选数。
 const SUGGEST_LIMIT: usize = 20;
 
-/// 建议端点的查询参数。
+/// 建议端点的输入。
+///
+/// # 为什么是空结构体（这里踩过坑）
+///
+/// 框架的 Action 输入**只从请求体反序列化**（`ActionContext::extract_input_owned`），
+/// URL query 参数被存在 `ctx.request` 的 query map 里、从不进 input 结构体。本端点
+/// 上线首日声明了 `query: Option<String>` 字段，于是 `?query=4514` 恒反序列化成
+/// `None`，对任何输入都回空建议——端点「注册成功、响应 200、永远空」。`query` 值
+/// 只能经 `ctx.request.get_query("query")` 读取（与 `portal_metadata` 读 slug 同一模式）。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PortalSuggestInput {
-    /// 查询关键词（URL 参数 `?query=xxx`）。
-    #[serde(default)]
-    pub(super) query: Option<String>,
-}
+pub(super) struct PortalSuggestInput {}
 
 impl ParamInput for PortalSuggestInput {
     fn params() -> Params {
@@ -66,7 +70,7 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
 
 pub(super) async fn handle(
     ctx: ActionContext,
-    input: PortalSuggestInput,
+    _input: PortalSuggestInput,
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     let slug = ctx
@@ -78,6 +82,12 @@ pub(super) async fn handle(
     if slug.is_empty() {
         return empty_response();
     }
+    // URL query 参数不走 Action 输入（见 PortalSuggestInput 的说明）。
+    let query = ctx
+        .request
+        .get_query("query")
+        .unwrap_or_default()
+        .to_string();
 
     let Some(portal) = find_portal(&context, &slug).await? else {
         // 不泄露存在性：不存在的门户与没有建议的门户同回空列表。
@@ -91,7 +101,6 @@ pub(super) async fn handle(
     let fuzzy_enabled = portal.optional::<bool>("fuzzy_enabled")?.unwrap_or(true);
     let fuzzy_min_digits = portal.optional::<i64>("fuzzy_min_digits")?.unwrap_or(4) as usize;
 
-    let query = input.query.unwrap_or_default();
     let query_stripped: String = query.chars().filter(|c| !c.is_whitespace()).collect();
 
     // 输入太短或模糊被禁用：不触发建议，返回空列表。
@@ -102,7 +111,11 @@ pub(super) async fn handle(
 
     let query_source_key: String = portal.require("query_field_source_key")?;
     let Some(like_key) = fuzzy_like_key(&query_stripped, fuzzy_min_digits) else {
-        tracing::info!(query_stripped, fuzzy_min_digits, "suggest: fuzzy_like_key returned None");
+        tracing::info!(
+            query_stripped,
+            fuzzy_min_digits,
+            "suggest: fuzzy_like_key returned None"
+        );
         return empty_response();
     };
     let input_digits = extract_digits(&query_stripped);
@@ -178,10 +191,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_parses_with_default_none() {
-        let input = serde_json::from_value::<PortalSuggestInput>(serde_json::json!({}))
+    fn empty_input_parses_the_empty_body_the_framework_sends_for_get() {
+        // GET 请求无请求体时框架把 body 折成 `{}`；空结构体必须能解析它，
+        // 否则端点会在反序列化阶段 400（而不是走到 handler）。
+        serde_json::from_value::<PortalSuggestInput>(serde_json::json!({}))
             .unwrap_or_else(|error| panic!("空对象应可解析: {error}"));
-        assert!(input.query.is_none());
     }
 
     #[test]
@@ -193,5 +207,18 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_query_value_is_read_from_the_url_query_string_not_the_body() {
+        // 本端点上线首日返回恒空建议的根因回归测试：query 值必须能从 URL query
+        // string 读到。框架的 Action 输入只从请求体反序列化，query string 参数
+        // 只能经 `Request::get_query` 读取——handler 读的就是这个入口。
+        let request =
+            yang_base::action::Request::new(serde_json::json!({})).query("query", "4514 6176");
+        assert_eq!(request.get_query("query"), Some("4514 6176"));
+        // 空白键与缺失键都回 None（不 panic）。
+        assert_eq!(request.get_query(""), None);
+        assert_eq!(request.get_query("missing"), None);
     }
 }

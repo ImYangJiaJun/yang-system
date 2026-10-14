@@ -1392,6 +1392,15 @@ export function parsePortalLabels(
 /// 自定义短链的形状校验：小写字母/数字/连字符/下划线，1..=64。
 export const CUSTOM_SLUG_PATTERN = /^[a-z0-9_-]{1,64}$/;
 
+/// 卡号空格归一化：纯数字（允许夹杂空格）的输入按 4 位一组重新分组，
+/// 「没有空格就加、多了就删」。含数字与空格之外字符的输入原样返回——
+/// 门户的查询键不一定是卡号，别的值不该被改写。
+export function formatCardNumber(raw: string): string {
+  const digits = raw.replace(/\s/g, "");
+  if (digits === "" || !/^\d+$/.test(digits)) return raw;
+  return digits.replace(/(\d{4})(?=\d)/g, "$1 ");
+}
+
 /// 门户的公开 URL 标识：优先自定义短链，否则 UUID slug。
 export function portalPathSlug(portal: Portal): string {
   const custom = portal.custom_slug?.trim();
