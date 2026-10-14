@@ -250,6 +250,7 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
 
 /// 取未处理事件（`processed_at IS NULL`），按 id 升序，限制 `EVENT_BATCH` 条。
 async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>> {
+    tracing::debug!("开始查询未处理事件（processed_at IS NULL）");
     let rows = runner
         .context
         .approval_events()
@@ -269,6 +270,7 @@ async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>>
             retry_count: row.optional("retry_count")?.unwrap_or(0i64),
         });
     }
+    tracing::info!(claimed = events.len(), "认领到未处理事件");
     Ok(events)
 }
 
@@ -296,7 +298,15 @@ async fn process_event(runner: &RoundRunner, event: &PendingEvent) -> EventOutco
 
 async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> EventOutcome {
 
+    tracing::info!(
+        event_id = event.id,
+        instance_code = %event.instance_code,
+        retry_count = event.retry_count,
+        "=== 开始处理事件 ==="
+    );
+
     // 1. 用 instance_code 反查 task 表，取 record_id + config_id
+    tracing::debug!(instance_code = %event.instance_code, "步骤 1: 反查 task 表");
     let task_query_result = runner
         .context
         .approval_tasks()
@@ -308,39 +318,71 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         {
             Ok(query) => match query.all().await {
                 Ok(rows) => rows,
-                Err(error) => return EventOutcome::Failed(format!("查询 task 表失败: {error}")),
+                Err(error) => {
+                    tracing::error!(error = %error, "查询 task 表失败");
+                    return EventOutcome::Failed(format!("查询 task 表失败: {error}"));
+                }
             },
-            Err(error) => return EventOutcome::Failed(format!("投影字段失败: {error}")),
+            Err(error) => {
+                tracing::error!(error = %error, "投影字段失败");
+                return EventOutcome::Failed(format!("投影字段失败: {error}"));
+            }
         },
-        Err(error) => return EventOutcome::Failed(format!("构造 task 查询失败: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, "构造 task 查询失败");
+            return EventOutcome::Failed(format!("构造 task 查询失败: {error}"));
+        }
     };
 
     let task_row = match task_rows.first() {
         Some(row) => row,
         None => {
-            tracing::warn!("事件对应的审批任务不存在，可能尚未派发");
+            tracing::warn!(
+                instance_code = %event.instance_code,
+                "事件对应的审批任务不存在，可能尚未派发"
+            );
             return EventOutcome::Failed("task 行不存在".to_string());
         }
     };
 
     let task_id: i64 = match task_row.require("id") {
         Ok(id) => id,
-        Err(error) => return EventOutcome::Failed(format!("task 行缺 id: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, "task 行缺 id");
+            return EventOutcome::Failed(format!("task 行缺 id: {error}"));
+        }
     };
     let record_id: String = match task_row.require("record_id") {
         Ok(id) => id,
-        Err(error) => return EventOutcome::Failed(format!("task 行缺 record_id: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, task_id, "task 行缺 record_id");
+            return EventOutcome::Failed(format!("task 行缺 record_id: {error}"));
+        }
     };
     let config_id: i64 = match task_row.require("config_id") {
         Ok(id) => id,
-        Err(error) => return EventOutcome::Failed(format!("task 行缺 config_id: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, task_id, "task 行缺 config_id");
+            return EventOutcome::Failed(format!("task 行缺 config_id: {error}"));
+        }
     };
+
+    tracing::info!(
+        task_id,
+        record_id = %record_id,
+        config_id,
+        "找到对应的派发任务"
+    );
 
     // 终态收敛：task 行已是终态，后续事件幂等跳过。
     if let Ok(Some(status)) = task_row.optional::<String>("instance_status") {
         match status.as_str() {
             "APPROVED" | "REJECTED" | "CANCELED" | "DELETED" => {
-                tracing::info!(task_status = %status, "任务已终态，事件幂等跳过");
+                tracing::info!(
+                    task_id,
+                    task_status = %status,
+                    "任务已终态，事件幂等跳过"
+                );
                 return EventOutcome::Skipped;
             }
             _ => {}
@@ -348,6 +390,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     }
 
     // 2. 加载 config
+    tracing::debug!(config_id, "步骤 2: 加载审批配置");
     let config = match runner
         .context
         .approval_configs()
@@ -356,33 +399,57 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     {
         Ok(query) => match query.optional().await {
             Ok(Some(config)) => config,
-            Ok(None) => return EventOutcome::Failed(format!("config_id={config_id} 不存在")),
-            Err(error) => return EventOutcome::Failed(format!("加载 config 失败: {error}")),
+            Ok(None) => {
+                tracing::error!(config_id, "config 不存在");
+                return EventOutcome::Failed(format!("config_id={config_id} 不存在"));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, config_id, "加载 config 失败");
+                return EventOutcome::Failed(format!("加载 config 失败: {error}"));
+            }
         },
-        Err(error) => return EventOutcome::Failed(format!("构造 config 查询失败: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "构造 config 查询失败");
+            return EventOutcome::Failed(format!("构造 config 查询失败: {error}"));
+        }
     };
 
     let base_token: String = match config.require("base_token") {
         Ok(v) => v,
-        Err(error) => return EventOutcome::Failed(format!("config 缺 base_token: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 base_token");
+            return EventOutcome::Failed(format!("config 缺 base_token: {error}"));
+        }
     };
     let table_id: String = match config.require("table_id") {
         Ok(v) => v,
-        Err(error) => return EventOutcome::Failed(format!("config 缺 table_id: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 table_id");
+            return EventOutcome::Failed(format!("config 缺 table_id: {error}"));
+        }
     };
     let approval_code: String = match config.require("approval_code") {
         Ok(v) => v,
-        Err(error) => return EventOutcome::Failed(format!("config 缺 approval_code: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 approval_code");
+            return EventOutcome::Failed(format!("config 缺 approval_code: {error}"));
+        }
     };
     let applicant_field: String = match config.optional::<String>("applicant_field") {
         Ok(Some(v)) => v,
         Ok(None) => String::new(),
-        Err(error) => return EventOutcome::Failed(format!("config 缺 applicant_field: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 applicant_field");
+            return EventOutcome::Failed(format!("config 缺 applicant_field: {error}"));
+        }
     };
     let backfill_field: String = match config.optional::<String>("backfill_field") {
         Ok(Some(v)) => v,
         Ok(None) => String::new(),
-        Err(error) => return EventOutcome::Failed(format!("config 缺 backfill_field: {error}")),
+        Err(error) => {
+            tracing::error!(error = %error, config_id, "config 缺 backfill_field");
+            return EventOutcome::Failed(format!("config 缺 backfill_field: {error}"));
+        }
     };
     let status_field = optional_nonempty(&config, "status_field");
     let flow_field = optional_nonempty(&config, "flow_field");
@@ -391,7 +458,22 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     let department_field = optional_nonempty(&config, "department_field");
     let handler_field = optional_nonempty(&config, "handler_field");
 
+    tracing::info!(
+        config_id,
+        base_token = %base_token,
+        table_id = %table_id,
+        approval_code = %approval_code,
+        status_field = ?status_field,
+        flow_field = ?flow_field,
+        start_time_field = ?start_time_field,
+        end_time_field = ?end_time_field,
+        department_field = ?department_field,
+        handler_field = ?handler_field,
+        "加载配置完成"
+    );
+
     // 3. 调 get_instance 获取实例详情
+    tracing::debug!(instance_code = %event.instance_code, "步骤 3: 调用 get_instance 获取审批详情");
     let detail = match get_instance(
         runner.transport(),
         runner.sleeper.as_ref(),
@@ -400,17 +482,35 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     )
     .await
     {
-        Ok(GetOutcome::Found(detail)) => *detail,
+        Ok(GetOutcome::Found(detail)) => {
+            tracing::info!(
+                instance_code = %event.instance_code,
+                status = ?detail.status,
+                start_time = ?detail.start_time,
+                end_time = ?detail.end_time,
+                "获取审批实例详情成功"
+            );
+            *detail
+        }
         Ok(GetOutcome::NotFound) => {
-            tracing::warn!("审批实例不存在，可能已被删除");
+            tracing::warn!(
+                instance_code = %event.instance_code,
+                "审批实例不存在，可能已被删除"
+            );
             return EventOutcome::Failed("实例不存在".to_string());
         }
         Err(failure) => {
+            tracing::error!(
+                error = %failure.message,
+                instance_code = %event.instance_code,
+                "获取实例详情失败"
+            );
             return EventOutcome::Failed(format!("获取实例详情失败: {}", failure.message));
         }
     };
 
     // 4. 构造 BitableBackfill
+    tracing::debug!("步骤 4: 构造 BitableBackfill");
     let coordinates = BitableCoordinates {
         app_token: base_token.clone(),
         table_id: table_id.clone(),
@@ -424,8 +524,12 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     )
     .await
     {
-        Ok(fields) => fields,
+        Ok(fields) => {
+            tracing::debug!(field_count = fields.len(), "读取表结构成功");
+            fields
+        }
         Err(failure) => {
+            tracing::error!(error = %failure.message, "读取表结构失败");
             return EventOutcome::Failed(format!("读取表结构失败: {}", failure.message));
         }
     };
@@ -438,9 +542,11 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     };
 
     // 5. 构造 DispatchInput
+    tracing::debug!("步骤 5: 构造 DispatchInput");
     let backfill_field_name = match bitable::resolve_field_name(&fields, &backfill_field) {
         Ok(name) => name,
         Err(error) => {
+            tracing::error!(error = %error, backfill_field = %backfill_field, "回填列不可用");
             return EventOutcome::Failed(format!("回填列不可用: {error}"));
         }
     };
@@ -466,10 +572,16 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     };
 
     // 6. 调 write_extended 回写多维表格
+    tracing::info!(
+        record_id = %record_id,
+        "步骤 6: 调用 write_extended 回写多维表格"
+    );
     write_extended(&backfill, &input, &detail).await;
+    tracing::info!("多维表格回写完成");
 
     // 7. 更新 task 行的 instance_status
     if let Some(status) = detail.status.as_deref() {
+        tracing::debug!(task_id, status = %status, "步骤 7: 更新 task 的 instance_status");
         let mut row = Record::new();
         row.insert("instance_status", serde_json::json!(status));
         let result = runner
@@ -481,6 +593,8 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
             Ok(query) => {
                 if let Err(error) = query.update(row).await {
                     tracing::warn!(error = %error, task_id, "更新 task instance_status 失败");
+                } else {
+                    tracing::info!(task_id, status = %status, "task instance_status 更新成功");
                 }
             }
             Err(error) => {
@@ -489,6 +603,11 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         }
     }
 
+    tracing::info!(
+        event_id = event.id,
+        instance_code = %event.instance_code,
+        "=== 事件处理完成 ==="
+    );
     EventOutcome::Processed
 }
 

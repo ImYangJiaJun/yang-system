@@ -68,11 +68,16 @@ pub(super) async fn handle(
     encrypt_key: Option<String>,
 ) -> Result<ResponseBody, BaseError> {
     let raw_body = &input.0;
-    tracing::info!(body = %raw_body, "飞书审批事件到达");
+    tracing::info!(
+        body = %raw_body,
+        body_size = raw_body.to_string().len(),
+        "=== 飞书审批事件到达 ==="
+    );
 
     // 解密或直接用明文
     let event_body = match raw_body.get("encrypt").and_then(Value::as_str) {
         Some(encrypted) => {
+            tracing::info!("检测到加密事件，开始解密");
             let Some(key_raw) = encrypt_key.as_deref() else {
                 tracing::error!("飞书发送了加密事件，但 event_encrypt_key 未配置");
                 return raw_json(serde_json::json!({"error": "encrypt key not configured"}));
@@ -82,11 +87,19 @@ pub(super) async fn handle(
                 Ok(decrypted) => {
                     match serde_json::from_slice::<Value>(&decrypted) {
                         Ok(parsed) => {
-                            tracing::info!(decrypted = %parsed, "飞书事件解密成功");
+                            tracing::info!(
+                                decrypted = %parsed,
+                                decrypted_size = decrypted.len(),
+                                "飞书事件解密成功"
+                            );
                             parsed
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "飞书事件解密后不是合法 JSON");
+                            tracing::error!(
+                                error = %e,
+                                decrypted_preview = %String::from_utf8_lossy(&decrypted[..decrypted.len().min(200)]),
+                                "飞书事件解密后不是合法 JSON"
+                            );
                             return raw_json(serde_json::json!({"error": "decrypt produced invalid json"}));
                         }
                     }
@@ -97,7 +110,10 @@ pub(super) async fn handle(
                 }
             }
         }
-        None => raw_body.clone(),
+        None => {
+            tracing::info!("明文事件，无需解密");
+            raw_body.clone()
+        }
     };
 
     // 验签（仅日志，不阻断）
@@ -109,7 +125,11 @@ pub(super) async fn handle(
                     expected_token = %expected_token,
                     "飞书事件 verification_token 不匹配，仍处理事件"
                 );
+            } else {
+                tracing::info!("verification_token 校验通过");
             }
+        } else {
+            tracing::warn!("事件中缺少 token 字段");
         }
     }
 
@@ -119,6 +139,15 @@ pub(super) async fn handle(
     let instance_code = event_body.get("instance_code").and_then(Value::as_str).unwrap_or("");
     let status = event_body.get("status").and_then(Value::as_str).unwrap_or("");
     let operate_time = event_body.get("operate_time").and_then(Value::as_str).unwrap_or("");
+
+    tracing::info!(
+        event_id = %event_id,
+        event_type = %event_type,
+        instance_code = %instance_code,
+        status = %status,
+        operate_time = %operate_time,
+        "提取的事件字段"
+    );
 
     // 落事件落地表
     let mut record = yang_base::table::Record::new();
@@ -134,6 +163,8 @@ pub(super) async fn handle(
     // received_at 由框架 created_at 自动填充
     record.insert("raw_payload", serde_json::json!(event_body.to_string()));
 
+    tracing::info!("开始插入事件落地表");
+
     // 幂等插入：event_id 唯一索引，重复投递天然去重
     let mut transaction = ctx.begin_transaction().await?;
     let result = context
@@ -148,7 +179,8 @@ pub(super) async fn handle(
                 event_id = %event_id,
                 event_type = %event_type,
                 instance_code = %instance_code,
-                "飞书事件已落地"
+                status = %status,
+                "=== 飞书事件已落地，等待 worker 处理 ==="
             );
             raw_json(serde_json::json!({"success": true}))
         }
@@ -156,10 +188,18 @@ pub(super) async fn handle(
             // 唯一索引冲突 = 重复投递，不算错误
             let err_str = e.to_string();
             if err_str.contains("Duplicate") || err_str.contains("1062") {
-                tracing::info!(event_id = %event_id, "飞书事件重复投递，已忽略");
+                tracing::info!(
+                    event_id = %event_id,
+                    instance_code = %instance_code,
+                    "飞书事件重复投递（event_id 唯一索引冲突），已忽略"
+                );
                 raw_json(serde_json::json!({"success": true, "duplicate": true}))
             } else {
-                tracing::error!(error = %e, "飞书事件落地失败");
+                tracing::error!(
+                    error = %e,
+                    event_id = %event_id,
+                    "飞书事件落地失败"
+                );
                 raw_json(serde_json::json!({"error": "insert failed"}))
             }
         }
