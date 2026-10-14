@@ -49,7 +49,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
 };
 use crate::addon::feishu::domain::approval_feedback::{self, FeedbackStatus};
 use crate::addon::feishu::domain::approval_notification::{
-    self, FeedbackReference, NotificationRecipient, NotificationResult,
+    self, FeedbackReference, NotificationRecipient, NotificationResult, NotificationStatus,
 };
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -1234,6 +1234,25 @@ async fn complete_feedback(
             None => NotificationResult::unavailable(),
         },
     };
+    // 通知结果落日志流：response_body 里虽有记录，但那要按行查库才能看到——
+    // 通知是外部副作用，日志里必须有痕迹（与 worker 路径同一口径）。
+    match &notification.status {
+        NotificationStatus::Sent => tracing::info!(
+            config_id,
+            message_id = ?notification.message_id,
+            "HTTP 派发通知：IM 消息发送成功"
+        ),
+        NotificationStatus::NotRequested => tracing::info!(
+            config_id,
+            "HTTP 派发通知：请求未指定接收人（notification_recipient），跳过通知"
+        ),
+        _ => tracing::warn!(
+            config_id,
+            status = ?notification.status,
+            message = %notification.message,
+            "HTTP 派发通知：消息未发送"
+        ),
+    }
     outcome.notification = serde_json::to_value(&notification)
         .unwrap_or_else(|_| serde_json::json!({"status":"failed","message":"通知结果序列化失败"}));
     // 同步更新 response 里的 data（工作流读这里）

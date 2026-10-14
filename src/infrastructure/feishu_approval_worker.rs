@@ -1252,8 +1252,15 @@ async fn record_outcome(
     if should_notify {
         // 优先用 task.applicant_open_id（手动按钮触发时已落库），否则用传入的（poll 触发时从表格提取）
         let open_id = task.applicant_open_id.as_deref().or(applicant_open_id);
-        if let Some(open_id) = open_id {
-            send_worker_notification(runner, task, outcome, open_id).await;
+        match open_id {
+            Some(open_id) => send_worker_notification(runner, task, outcome, open_id).await,
+            // 派发成功 ⇒ 申请人必然可提取，理论不可达；但「通知静默丢失」不可接受，
+            // 留一条 warn 让「消息没发」在任何情况下都有日志可查。
+            None => tracing::warn!(
+                task_id = task.id,
+                config_id = task.config_id,
+                "Worker 通知：申请人 open_id 不可用（任务表与表格字段均为空），跳过通知"
+            ),
         }
     }
 }
