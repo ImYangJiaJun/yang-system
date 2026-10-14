@@ -50,11 +50,14 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .filterable(true),
             // 多维表格记录 id。**在一个多维表格内**唯一（全局不一定），
             // 所以 uuid 的派生键里必须带上表坐标。
+            // filterable 必开：HTTP 单条派发的结果回写按 record_id 定位行
+            // （`record_dispatch_task` 的 upsert），fail-closed 漏了只在运行期报错。
             record_id => Str::new()
                 .title("多维表格记录 ID")
                 .require(true)
                 .unique(true)
-                .max_length(128),
+                .max_length(128)
+                .filterable(true),
             // 派生的幂等键。**必须持久化**：响应丢失时 instance_code 根本不存在，
             // 它是唯一还能拿回来的对账键。
             uuid => Str::new()
@@ -134,6 +137,17 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} 字段必须存在"));
             assert!(field.is_required(), "{name} 必填");
         }
+    }
+
+    #[test]
+    fn record_id_is_filterable_for_http_upsert() {
+        // HTTP 单条派发的结果回写按 record_id 定位行（`record_dispatch_task`），
+        // DSL 的 filterable 是 fail-closed——漏了只在运行期报 FieldPermissionDenied。
+        let definition = definition();
+        let record_id = definition
+            .field("record_id")
+            .unwrap_or_else(|| panic!("record_id 字段必须存在"));
+        assert!(record_id.is_filterable(), "HTTP 结果回写的 upsert 依赖该位");
     }
 
     #[test]
