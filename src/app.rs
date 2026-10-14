@@ -193,7 +193,7 @@ mod tests {
 
     /// 导航落点必须随真实 Module 声明，原始数据表不得成为隐式侧边栏入口。
     #[tokio::test]
-    async fn navigation_catalog_has_five_console_landings_without_demo() {
+    async fn navigation_catalog_has_four_console_landings_without_demo() {
         let app = build_application(test_tools(), test_security())
             .unwrap_or_else(|error| panic!("应用应构建成功: {error:#}"));
         let modules: Vec<_> = app
@@ -223,7 +223,6 @@ mod tests {
                 ("account.user", Some("/account"), "user"),
                 ("feishu.approval", Some("/feishu/approval"), "admin"),
                 ("feishu.datasource", Some("/feishu/datasources"), "admin"),
-                ("feishu.portal", Some("/feishu/portals"), "admin"),
             ]
         );
         assert!(!modules.iter().any(|m| m.name.as_str().starts_with("demo.")));
@@ -264,7 +263,6 @@ mod tests {
             ("account.user", "me"),
             ("access.grants", "list_user_grants"),
             ("feishu.datasource", "list_datasources"),
-            ("feishu.portal", "list_portals"),
         ] {
             let primary = modules
                 .iter()

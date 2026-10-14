@@ -15,7 +15,7 @@ pub(crate) mod table;
 use std::sync::Arc;
 
 use yang_base::action::TokenAuthMiddleware;
-use yang_base::definition::{ModuleName, ModulePresentationSpec, ModuleSpec};
+use yang_base::definition::{ModuleName, ModuleSpec};
 use yang_base::BaseError;
 
 use crate::addon::account::user_from_claims;
@@ -27,7 +27,7 @@ const MODULE: &str = "feishu.portal";
 
 /// 装配 `feishu.portal` Module。
 ///
-/// 挂 Action 注册表 + presentation + 认证中间件。
+/// 挂 Action 注册表 + 认证中间件。
 pub(crate) fn build_module(
     context: Arc<FeishuContext>,
     authorization_validator: AuthorizationVersionValidator,
@@ -57,12 +57,7 @@ pub(crate) fn build_module(
             .authenticate_public_actions(),
     );
 
-    Ok(actions::register_all(spec, context).presentation(
-        ModulePresentationSpec::new(crate::addon::admin_identity(), "飞书查询门户", "search")
-            .app_route("/feishu/portals")
-            .order(35)
-            .primary_action(yang_base::action!("feishu.portal.list_portals")),
-    ))
+    Ok(actions::register_all(spec, context))
 }
 
 /// 本 module 的第二个 Module：只有日志表，没有 Action。
