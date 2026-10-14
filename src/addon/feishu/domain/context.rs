@@ -47,6 +47,9 @@ pub(crate) struct FeishuContext {
     /// 查询门户访问日志表。
     #[allow(dead_code)]
     portal_log: Repository,
+    /// 审批事件落地表（store-then-process 缓冲）。
+    #[allow(dead_code)]
+    approval_event: Repository,
     /// 密码哈希引擎（门户口令用）。
     #[allow(dead_code)]
     password_engine: Arc<PasswordEngine>,
@@ -68,6 +71,7 @@ impl FeishuContext {
         user_token: Repository,
         portal: Repository,
         portal_log: Repository,
+        approval_event: Repository,
         password_engine: Arc<PasswordEngine>,
         settings: Option<Arc<FeishuSettings>>,
     ) -> Self {
@@ -83,6 +87,7 @@ impl FeishuContext {
             user_token,
             portal,
             portal_log,
+            approval_event,
             password_engine,
             settings,
         }
@@ -157,6 +162,12 @@ impl FeishuContext {
     #[allow(dead_code)]
     pub(crate) fn portal_logs(&self) -> &Repository {
         &self.portal_log
+    }
+
+    /// 审批事件落地表。消费者（事件处理器）在后续批次接入。
+    #[allow(dead_code)]
+    pub(crate) fn approval_events(&self) -> &Repository {
+        &self.approval_event
     }
 
     /// 密码哈希引擎（门户口令用）。消费者（门户 Action）在后续批次接入。

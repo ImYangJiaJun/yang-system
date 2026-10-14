@@ -141,6 +141,7 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::user_token_table::table_spec()),
             repository(crate::addon::feishu::portal::table::table_spec()),
             repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
+            repository(crate::addon::feishu::approval::domain::event_table::table_spec()),
             Arc::new(
                 yang_base::action::auth::PasswordEngine::new(1)
                     .unwrap_or_else(|e| panic!("PasswordEngine 应可构造: {e}")),

@@ -192,6 +192,13 @@ mod tests {
                 ),
                 Arc::clone(&pool),
             ),
+            Repository::new(
+                definition(
+                    crate::addon::feishu::approval::domain::event_table::table_spec()
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                Arc::clone(&pool),
+            ),
             Arc::new(
                 yang_base::action::auth::PasswordEngine::new(1)
                     .unwrap_or_else(|e| panic!("PasswordEngine 应可构造: {e}")),

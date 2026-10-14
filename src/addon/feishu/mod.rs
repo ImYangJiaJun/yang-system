@@ -57,6 +57,8 @@ pub(crate) fn build_addon(
     .module(approval::build_task_module()?)
     .module(approval::build_request_log_module()?)
     .module(approval::build_task_applicant_module()?)
+    // 审批事件落地表（store-then-process 缓冲）。
+    .module(approval::build_event_module()?)
     // 飞书用户身份（OAuth user_access_token）单例行：同样只有表，
     // 读写由派发的姓名解析路径与提醒 worker 经 `FeishuContext` 完成。
     .module(approval::build_user_token_module()?)
@@ -133,6 +135,10 @@ pub(crate) fn build_context(
         ),
         Repository::new(
             portal::domain::log_table::table_spec()?.table_definition()?,
+            Arc::clone(&pool),
+        ),
+        Repository::new(
+            approval::domain::event_table::table_spec()?.table_definition()?,
             Arc::clone(&pool),
         ),
         password_engine,

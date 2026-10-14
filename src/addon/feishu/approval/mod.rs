@@ -123,6 +123,13 @@ pub(crate) fn build_user_token_module() -> Result<ModuleSpec, BaseError> {
     Ok(ModuleSpec::new(user_token_module_name()?).table(domain::user_token_table::table_spec()?))
 }
 
+/// 审批事件落地表所在的 Module：同上，只有表。
+///
+/// store-then-process 架构：飞书推送事件 → 验签解密 → 落表 → 异步富化处理。
+pub(crate) fn build_event_module() -> Result<ModuleSpec, BaseError> {
+    Ok(ModuleSpec::new(event_module_name()?).table(domain::event_table::table_spec()?))
+}
+
 fn module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new(MODULE).map_err(config_error)
 }
@@ -145,6 +152,10 @@ fn task_applicant_module_name() -> Result<ModuleName, BaseError> {
 
 fn user_token_module_name() -> Result<ModuleName, BaseError> {
     ModuleName::new("feishu.user_token").map_err(config_error)
+}
+
+fn event_module_name() -> Result<ModuleName, BaseError> {
+    ModuleName::new("feishu.approval_event").map_err(config_error)
 }
 
 fn config_error(error: impl std::fmt::Display) -> BaseError {
