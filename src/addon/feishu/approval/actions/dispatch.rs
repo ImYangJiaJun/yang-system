@@ -44,8 +44,8 @@ use crate::addon::feishu::approval::domain::request_log_writer::{
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
-    dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
-    DispatchResult as OrchestrationResult,
+    applicant_open_id, dispatch_one, widget_maps_from_rows, BitableBackfill,
+    DispatchInput as OrchestrationInput, DispatchResult as OrchestrationResult,
 };
 use crate::addon::feishu::domain::approval_feedback::{self, FeedbackStatus};
 use crate::addon::feishu::domain::approval_notification::{
@@ -370,6 +370,10 @@ struct DispatchOutcome {
     table_id: Option<String>,
     /// 记录摘要（用于通知展示）。
     record_summary: Option<String>,
+    /// 通知的兜底接收人：派发时解析出的申请人 open_id（传参优先、回退表格列，
+    /// 与 `dispatch_one` 内部的判定同源）。`complete_feedback` 在请求未显式
+    /// 指定 `notification_recipient` 时用它兜底——「创建完成就通知触发人」的落点。
+    applicant_open_id: Option<String>,
     /// 通知结果（默认 `{"status":"not_requested"}`）。
     notification: serde_json::Value,
     /// 原本要返回给工作流的结果。落记录绝不改变它——写失败只降级日志，
@@ -391,6 +395,7 @@ impl DispatchOutcome {
             base_token: None,
             table_id: None,
             record_summary: None,
+            applicant_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Ok(ApiResponse::fail(code, message)),
         }
@@ -408,6 +413,7 @@ impl DispatchOutcome {
             base_token: None,
             table_id: None,
             record_summary: None,
+            applicant_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Err(error),
         }
@@ -437,6 +443,7 @@ impl DispatchOutcome {
             base_token,
             table_id,
             record_summary: None,
+            applicant_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: response(accepted, status, message, serial_number),
         }
@@ -1042,6 +1049,17 @@ async fn dispatch_single(
         coordinates: &coordinates,
         fields: &fields,
     };
+    // 通知兜底接收人：与 `dispatch_one` 内部同一判定（传参优先、回退表格列，
+    // 两处必须同源，否则会出现「派发用了 A 的 open_id、通知却发给 B」）。
+    // 在 cells / resolved_applicant 还在手的这里算好，随 outcome 带到
+    // complete_feedback——请求未显式指定 notification_recipient 时用它兜底。
+    let notify_open_id = resolved_applicant
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| applicant_open_id(&cells, &applicant_field));
+
     let result = dispatch_one(
         outbound.transport(),
         outbound.sleeper(),
@@ -1109,6 +1127,7 @@ async fn dispatch_single(
     );
     outcome.instance_code = instance_code;
     outcome.record_summary = record_summary;
+    outcome.applicant_open_id = notify_open_id;
     Ok(outcome)
 }
 
