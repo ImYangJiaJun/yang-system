@@ -253,10 +253,7 @@ async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>>
         .select_fields(&["id", "instance_code", "retry_count"])?;
     let rows = query.all().await?;
 
-    tracing::info!(
-        raw_row_count = rows.len(),
-        "事件认领查询返回原始行数"
-    );
+    tracing::info!(raw_row_count = rows.len(), "事件认领查询返回原始行数");
 
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
@@ -685,11 +682,13 @@ mod tests {
 
     #[test]
     fn event_batch_stays_within_framework_limit() {
-        assert!(EVENT_BATCH <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE);
+        // 常量断言用 const block 让编译器检查（clippy::assertions_on_constants），
+        // 与模块顶部的 `const _` 编译期守护互为镜像。
+        const { assert!(EVENT_BATCH <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE) };
     }
 
     #[test]
     fn max_retry_count_is_positive() {
-        assert!(MAX_RETRY_COUNT > 0);
+        const { assert!(MAX_RETRY_COUNT > 0) };
     }
 }

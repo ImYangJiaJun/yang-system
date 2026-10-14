@@ -160,10 +160,7 @@ pub(crate) async fn handle(
     // 是**实例 uuid**（创建实例时传入的那个），与事件 id 同名不同义——
     // 不要"顺手"改成 `event.uuid`，那会静默破坏幂等去重。
     let event = event_body.get("event").and_then(Value::as_object);
-    let event_id = event_body
-        .get("uuid")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let event_id = event_body.get("uuid").and_then(Value::as_str).unwrap_or("");
     let event_type = event
         .and_then(|e| e.get("type").and_then(Value::as_str))
         .unwrap_or("unknown");
@@ -238,8 +235,7 @@ pub(crate) async fn handle(
             );
             raw_json(serde_json::json!({"success": true}))
         }
-        Err(e) => {
-            let error = BaseError::from(e);
+        Err(error) => {
             let err_str = error.to_string();
             // 唯一索引冲突 = 重复投递：不算错误。回滚空事务后返回 200，
             // 让飞书停止重推（这正是重复投递该有的应答）。

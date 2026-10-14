@@ -487,9 +487,10 @@ mod tests {
         let encrypted = "g5WeVm+6OTIExpFo1ehQ2ozmsitaJREgGeDIL42AF88EbNyjfzinwAxZKZduMagHYh1estowsQuSh1lzB55dy7mtHonNXEXnTtN557cIiRJy0YIhA3GUmJyxHalKDRtRN7u9F1zCaGITXjVxG4mP4QNtRQ/1n8mcVknfI/Uxb/SaAJLW1u7T8nEfvvpg8Apm";
         let key_raw = "VnYJZQdbXOg5TMPOE57FJcwIwnS4mLyl";
         let key = derive_key(key_raw);
-        let decrypted = decrypt_bytes(encrypted, &key).unwrap_or_else(|error| panic!("decrypt should succeed: {error}"));
-        let json: serde_json::Value =
-            serde_json::from_slice(&decrypted).unwrap_or_else(|error| panic!("should be valid JSON: {error}"));
+        let decrypted = decrypt_bytes(encrypted, &key)
+            .unwrap_or_else(|error| panic!("decrypt should succeed: {error}"));
+        let json: serde_json::Value = serde_json::from_slice(&decrypted)
+            .unwrap_or_else(|error| panic!("should be valid JSON: {error}"));
 
         // 验证解密后包含 challenge 必需字段
         assert!(

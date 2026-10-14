@@ -973,9 +973,12 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
         // 表结构拿不到多半是凭证/网络抖动，判可重试。
         Err(failure) => {
             tracing::warn!(stage = "fields", kind = ?failure.kind, "审批任务读取表结构失败");
-            return (DispatchResult::Retryable {
-                message: format!("读取表结构失败：{}", failure.message),
-            }, None);
+            return (
+                DispatchResult::Retryable {
+                    message: format!("读取表结构失败：{}", failure.message),
+                },
+                None,
+            );
         }
     };
 
@@ -1000,23 +1003,32 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
                 Ok(cells) => cells,
                 Err(error) => {
                     tracing::warn!(stage = "record", "审批任务解析记录字段失败，详情见任务记录");
-                    return (DispatchResult::Terminal {
-                        message: format!("解析记录字段失败：{error}"),
-                    }, None);
+                    return (
+                        DispatchResult::Terminal {
+                            message: format!("解析记录字段失败：{error}"),
+                        },
+                        None,
+                    );
                 }
             },
             None => {
                 tracing::warn!(stage = "record", "多维表格里已找不到审批源记录");
-                return (DispatchResult::Terminal {
-                    message: "多维表格里已找不到该记录".to_string(),
-                }, None);
+                return (
+                    DispatchResult::Terminal {
+                        message: "多维表格里已找不到该记录".to_string(),
+                    },
+                    None,
+                );
             }
         },
         Err(failure) => {
             tracing::warn!(stage = "record", kind = ?failure.kind, "审批任务读取源记录失败");
-            return (DispatchResult::Retryable {
-                message: format!("读取记录失败：{}", failure.message),
-            }, None);
+            return (
+                DispatchResult::Retryable {
+                    message: format!("读取记录失败：{}", failure.message),
+                },
+                None,
+            );
         }
     };
 
@@ -1028,9 +1040,12 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
         // 列被删了/改名后重名：重试好不了，判终态（回填列本身写不进去，只能留日志）。
         Err(error) => {
             tracing::warn!(stage = "fields", backfill_field = %task.backfill_field, "审批任务回填列不可用，详情见任务记录");
-            return (DispatchResult::Terminal {
-                message: format!("回填列不可用：{error}"),
-            }, None);
+            return (
+                DispatchResult::Terminal {
+                    message: format!("回填列不可用：{error}"),
+                },
+                None,
+            );
         }
     };
 
@@ -1076,7 +1091,9 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
     .await;
 
     // 从表格 cells 提取申请人 open_id（poll 触发时 task.applicant_open_id 为空，回退到表格）
-    let open_id = task.applicant_open_id.clone()
+    let open_id = task
+        .applicant_open_id
+        .clone()
         .or_else(|| extract_applicant_open_id(&cells, &task.applicant_field));
 
     (result, open_id)
@@ -1344,7 +1361,11 @@ async fn send_worker_notification(
     {
         Ok(Ok(row)) => row,
         _ => {
-            tracing::warn!(task.config_id, task_id = task.id, "Worker 通知：配置展示名称读取失败，跳过通知");
+            tracing::warn!(
+                task.config_id,
+                task_id = task.id,
+                "Worker 通知：配置展示名称读取失败，跳过通知"
+            );
             return;
         }
     };
@@ -1400,11 +1421,7 @@ async fn send_worker_notification(
         serial_number,
     } = outcome
     {
-        let approval_text = format!(
-            "{} / {}",
-            name("approval_name"),
-            serial_number.as_str()
-        );
+        let approval_text = format!("{} / {}", name("approval_name"), serial_number.as_str());
         let approval_href = instance_applink(instance_code).ok();
         references.push(FeedbackReference {
             label: "审批",
@@ -1581,7 +1598,10 @@ mod tests {
             "response_body",
             serde_json::json!(r#"{"notification":{"status":"not_requested"}}"#),
         );
-        assert!(!http_path_notified(&not_requested), "未指定接收人不算已通知");
+        assert!(
+            !http_path_notified(&not_requested),
+            "未指定接收人不算已通知"
+        );
 
         let mut failed = Record::new();
         failed.insert(

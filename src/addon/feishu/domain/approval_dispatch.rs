@@ -1103,7 +1103,10 @@ fn sanitize_terminal_message(raw: &str, code: i32) -> String {
 ///
 /// 多维表格的人员字段是对象数组（`[{"id": "ou_…"}]`）。取第一个——审批实例只能
 /// 有一个发起人，而人员字段若配成多选，多出来的人没有对应的语义。
-pub(crate) fn applicant_open_id(cells: &serde_json::Map<String, Value>, field_id: &str) -> Option<String> {
+pub(crate) fn applicant_open_id(
+    cells: &serde_json::Map<String, Value>,
+    field_id: &str,
+) -> Option<String> {
     let cell = cells.get(field_id)?;
     let first = match cell {
         Value::Array(items) => items.first()?,

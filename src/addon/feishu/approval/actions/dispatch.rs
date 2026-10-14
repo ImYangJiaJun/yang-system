@@ -424,6 +424,7 @@ impl DispatchOutcome {
     ///
     /// 坐标（`base_token` / `table_id`）由调用方从已鉴权的配置行带上——日志表
     /// 这两列必填，改形后请求体不再携带它们。
+    #[allow(clippy::too_many_arguments)] // 8 个参数：结果字段逐个平铺，31 个调用点全走它，收结构体只是把字段挪个位置。
     fn success(
         outcome: Outcome,
         config_id: Option<i64>,
@@ -1165,6 +1166,7 @@ fn response(
 ///
 /// 通知失败**不影响**审批结论——`outcome.response` 不变，只有 `outcome.message` 和
 /// `outcome.notification` 被更新。名称补充和通知均发生在派发之后，不重跑审批。
+#[allow(clippy::too_many_arguments)] // 8 个参数：handler 级上下文逐个传入，收结构体无实质收益。
 async fn complete_feedback(
     ctx: &ActionContext,
     context: &FeishuContext,
@@ -1304,6 +1306,7 @@ async fn complete_feedback(
 }
 
 /// 消息末尾的业务定位链接；URL 来自已核对的坐标、记录接口或已确认的审批实例。
+#[allow(clippy::too_many_arguments)] // 8 个参数：定位链接的各坐标来源逐个平铺，收结构体无实质收益。
 fn feedback_references(
     record_id: Option<&str>,
     outcome: &DispatchOutcome,
