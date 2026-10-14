@@ -1206,6 +1206,7 @@ mod tests {
         // 选项在 `property.options` 里——没有这一步，单选控件一个值都派生不出。
         let fields = vec![
             FieldItem {
+                is_primary: false,
                 field_id: "fldA".to_string(),
                 field_name: "  收款方类型/Type of payee  ".to_string(),
                 field_type: Some(3),
@@ -1222,6 +1223,7 @@ mod tests {
                 }),
             },
             FieldItem {
+                is_primary: false,
                 field_id: "fldB".to_string(),
                 field_name: "SWIFT Address".to_string(),
                 field_type: Some(1),

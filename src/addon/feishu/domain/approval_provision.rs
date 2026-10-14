@@ -679,8 +679,9 @@ async fn load_external_options(
             .await
             .map_err(|e| ProvisionError::Store(e.to_string()))?;
         if rows.is_empty() {
+            let name = option_source_name(context, source).await;
             return Err(ProvisionError::Invalid(vec![format!(
-                "外部选项数据源「{source}」里没有启用中的选项"
+                "外部选项来源「{name}」没有启用选项，请管理员启用或同步选项（source_key={source}）。"
             )]));
         }
     }
@@ -715,7 +716,19 @@ async fn load_option_sources(
     }
 
     let sources = list_option_sources(context).await?;
-    select_option_sources(&linked, explicit_sources, &sources)
+    let lookup = async {
+        let mut names = BTreeMap::new();
+        for key in explicit_sources.values() {
+            if !sources.iter().any(|source| source.source_key == *key) {
+                names.insert(key.clone(), option_source_name(context, key).await);
+            }
+        }
+        names
+    };
+    let unavailable_names = tokio::time::timeout(std::time::Duration::from_secs(2), lookup)
+        .await
+        .unwrap_or_default();
+    select_option_sources(&linked, explicit_sources, &sources, &unavailable_names)
 }
 
 /// 向导与保存/派发共用的启用来源候选，不返回 Token 或其他凭据。
@@ -778,6 +791,7 @@ fn select_option_sources(
     linked: &[&FormWidget],
     explicit_sources: &BTreeMap<String, String>,
     sources: &[ApprovalOptionSource],
+    unavailable_names: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, ProvisionError> {
     let mut out = BTreeMap::new();
     let mut reasons = Vec::new();
@@ -787,8 +801,9 @@ fn select_option_sources(
                 out.insert(widget.id.clone(), key.clone());
             } else {
                 reasons.push(format!(
-                    "控件「{}」指定的外部选项来源「{key}」不存在或已停用，请重新选择",
-                    widget.name
+                    "控件「{}」指定的外部选项来源「{}」不可用或已停用，请检查来源状态或重新选择（source_key={key}）",
+                    widget.name,
+                    unavailable_names.get(key).map(String::as_str).unwrap_or("名称暂不可用")
                 ));
             }
             continue;
@@ -838,6 +853,7 @@ pub(crate) async fn resolve_external_options(
     snapshot: &str,
     widgets: &mut [WidgetMap],
     cells: &serde_json::Map<String, Value>,
+    fields: &[FieldItem],
 ) -> Result<(), ProvisionError> {
     let form = parse_form(&Value::String(snapshot.to_string()))?;
     let mapped_ids: Vec<&str> = widgets
@@ -889,16 +905,83 @@ pub(crate) async fn resolve_external_options(
                 .all()
                 .await
                 .map_err(|e| ProvisionError::Store(e.to_string()))?;
-            let option_id = unique_option(&rows, source, &label).inspect_err(|_| {
-                tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
+            let option_id = match unique_option(&rows, source, &label) {
+                Ok(id) => id,
+                Err(ProvisionError::Invalid(_)) => {
+                    tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
                     bitable_field = %widget.bitable_field, source_key = source,
                     match_count = rows.len(), reason = "当前文案没有唯一且完全匹配的启用选项",
                     "审批外部选项匹配失败");
-            })?;
+                    let source_name = option_source_name(context, source).await;
+                    return Err(ProvisionError::Invalid(vec![option_match_feedback(
+                        &form,
+                        widget,
+                        fields,
+                        &source_name,
+                        source,
+                        &label,
+                    )]));
+                }
+                Err(error) => return Err(error),
+            };
             widget.option_map.insert(label, option_id);
         }
     }
     Ok(())
+}
+
+/// 展示查询不筛掉停用项；查不到名称不影响选项启用和唯一匹配纪律。
+async fn option_source_name(context: &FeishuContext, source: &str) -> String {
+    let lookup = async {
+        let Some(binding) = context
+            .datasource_fields()
+            .query()
+            .where_eq("source_key", serde_json::json!(source))?
+            .optional()
+            .await?
+        else {
+            return Ok(None);
+        };
+        let name: Option<String> = binding.optional("field_name")?;
+        let datasource_id: i64 = binding.require("datasource_id")?;
+        let datasource = context
+            .datasources()
+            .query()
+            .where_primary_key_eq(serde_json::json!(datasource_id))?
+            .optional()
+            .await?;
+        let title = datasource
+            .as_ref()
+            .map(|row| row.optional::<String>("title"))
+            .transpose()?
+            .flatten();
+        Ok(Some(format!(
+            "{} / {}",
+            super::approval_feedback::display_name(title.as_deref()),
+            super::approval_feedback::display_name(name.as_deref())
+        )))
+    };
+    let names: Result<Result<Option<String>, BaseError>, _> =
+        tokio::time::timeout(std::time::Duration::from_secs(2), lookup).await;
+    names
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .unwrap_or_else(|| "名称暂不可用".into())
+}
+
+fn option_match_feedback(
+    form: &[FormWidget],
+    widget: &WidgetMap,
+    fields: &[FieldItem],
+    source_name: &str,
+    source: &str,
+    label: &str,
+) -> String {
+    use super::approval_feedback::{field_name, one_line, widget_name};
+    format!("审批控件：{}\n来源字段：{}\n选项来源：{}\n当前值：{}\n原因：没有唯一且完全匹配的启用选项\n处理：检查选项是否启用、文案是否完全一致，清理同名重复项。\n技术定位：控件={}；字段={}；source_key={}",
+        widget_name(form, &widget.widget_id), field_name(fields, &widget.bitable_field), one_line(source_name, 200),
+        one_line(label, 160), one_line(&widget.widget_id, 100), one_line(&widget.bitable_field, 100), one_line(source, 100))
 }
 
 fn unique_option(rows: &[Record], source: &str, label: &str) -> Result<String, ProvisionError> {
@@ -948,6 +1031,52 @@ fn converter_key(converter: Converter) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn option_match_feedback_names_the_control_field_and_source_before_ids() {
+        let form: Vec<FormWidget> =
+            serde_json::from_value(serde_json::json!([{"id":"w","name":"付款公司"}]))
+                .unwrap_or_else(|e| panic!("{e}"));
+        let fields: Vec<FieldItem> = serde_json::from_value(
+            serde_json::json!([{"field_id":"fldCompany","field_name":"公司名称"}]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let widget = WidgetMap {
+            widget_id: "w".into(),
+            widget_type: "radioV2".into(),
+            bitable_field: "fldCompany".into(),
+            required: true,
+            converter: Converter::Option,
+            option_map: Default::default(),
+            option_source_key: Some("fldq7lcb6y".into()),
+            currency: None,
+        };
+        let body = option_match_feedback(
+            &form,
+            &widget,
+            &fields,
+            "合作企业 / 企业名称",
+            "fldq7lcb6y",
+            "成都市易威行科技有限公司",
+        );
+        for value in [
+            "付款公司",
+            "公司名称",
+            "合作企业 / 企业名称",
+            "成都市易威行科技有限公司",
+            "检查选项是否启用",
+            "source_key=fldq7lcb6y",
+        ] {
+            assert!(body.contains(value), "{body}");
+        }
+        assert!(
+            body.find("合作企业").unwrap_or(usize::MAX)
+                < body.find("fldq7lcb6y").unwrap_or_default()
+        );
+        assert!(
+            option_match_feedback(&[], &widget, &[], "名称暂不可用", "key", "值")
+                .contains("名称暂不可用")
+        );
+    }
     use super::super::approval_match::{FormWidget, WidgetOptions};
     use super::*;
 
@@ -1015,6 +1144,7 @@ mod tests {
     /// 一个字段的最小 `FieldItem`：只给类型校验要用的两样。
     fn field(id: &str, name: &str, field_type: i32) -> FieldItem {
         FieldItem {
+            is_primary: false,
             field_id: id.to_string(),
             field_name: name.to_string(),
             field_type: Some(field_type),
@@ -1087,6 +1217,7 @@ mod tests {
             &linked_widgets(&form, None),
             &BTreeMap::from([("company".into(), "fldq7lcb6y".into())]),
             &sources,
+            &BTreeMap::new(),
         )
         .unwrap_or_else(|error| panic!("{error}"));
         let result = plan(
@@ -1129,22 +1260,25 @@ mod tests {
             })
             .collect();
         let linked = linked_widgets(&form, None);
-        assert!(select_option_sources(&linked, &BTreeMap::new(), &sources).is_err());
+        assert!(
+            select_option_sources(&linked, &BTreeMap::new(), &sources, &BTreeMap::new()).is_err()
+        );
         let explicit =
             BTreeMap::from([("a".into(), "first".into()), ("b".into(), "second".into())]);
         assert_eq!(
-            select_option_sources(&linked, &explicit, &sources)
+            select_option_sources(&linked, &explicit, &sources, &BTreeMap::new())
                 .unwrap_or_else(|error| panic!("{error}")),
             explicit
         );
         assert!(select_option_sources(
             &linked,
             &BTreeMap::from([("a".into(), "missing".into())]),
-            &sources[..1]
+            &sources[..1],
+            &BTreeMap::new()
         )
         .is_err());
         assert_eq!(
-            select_option_sources(&linked, &BTreeMap::new(), &sources[..1])
+            select_option_sources(&linked, &BTreeMap::new(), &sources[..1], &BTreeMap::new())
                 .unwrap_or_else(|error| panic!("{error}")),
             BTreeMap::from([("a".into(), "first".into()), ("b".into(), "first".into())])
         );

@@ -366,6 +366,7 @@ mod tests {
 
     fn remote_field(field_id: &str, field_name: &str) -> FieldItem {
         FieldItem {
+            is_primary: false,
             field_id: field_id.to_string(),
             field_name: field_name.to_string(),
             field_type: Some(3),

@@ -8,8 +8,7 @@
 //!
 //! 为什么粒度决定同步/异步：
 //!
-//! - 单条 = 创建 + 取详情两次调用，秒级完成，远在飞书 HTTP 节点 **60 秒上限**之内，
-//!   所以能同步——而且同步才有价值：工作流可以据此发消息或写日志。
+//! - 单条同步返回本轮结论；出站重试和通知会增加耗时，不能承诺始终低于工作流超时。
 //! - 全表可能有几十到几百条，受创建接口 **100 次/分钟** 限制，同步必然超时。
 //!
 //! **两种 button_type 的输出能力不同**：`buttonField` 能引用记录的字段与属性
@@ -18,17 +17,12 @@
 //!
 //! # 鉴权
 //!
-//! **每条配置一个 key + 一个专属 Token**（与外部数据源同一套，2026-10-13 起）：
-//! 路由是 `POST /api/v1/feishu/approval/dispatch/{config_key}`，Action `public`
-//! （飞书工作流没有 JWT），handler 内按 `config_key` 查配置行、用请求体 `token`
-//! 的 sha256 摘要比对 `token_hash`（`verify_token` 常数时间比较），**先验 Token
-//! 再报停用**——与 datasource 的 `verify_source` 同一条不变量。
+//! 复用 `ManagementTokenMiddleware`（与多维表格写入端点同一把静态 Token），
+//! Action 保持 `public`。中间件在 `actions/mod.rs` 里按 ActionRef 精确挂载。
 //!
-//! 旧形态（全局单值 `management_api_token` + 请求体 `(base_token, table_id)`
-//! 白名单 + 三件套自动建配置）已废弃：管理 Token 是全局单值、不按配置绑定，
-//! 复用它等于把「以任意用户身份创建审批实例」开放给所有持 Token 者（设计 §9.3
-//! 记录的决策，本端点执行之）。`config_key` 本身就是路由与白名单，Token 是凭据，
-//! 两者合一取代了那两道分散的防线。
+//! **此外还必须校验 `base_token`/`table_id` 落在已配置的启用行内**：光靠 Token 保密
+//! 不够——持 Token 者可以传任意表格坐标，那等于把「以任意用户身份创建审批实例」
+//! 这个能力开放到所有协作表格上。这是本端点最重要的一道防线。
 
 use std::sync::Arc;
 
@@ -44,46 +38,33 @@ use crate::addon::feishu::approval::domain::request_log_writer::{
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
-    dispatch_one, widget_maps_from_rows, Backfill, BitableBackfill,
-    DispatchInput as OrchestrationInput,
+    dispatch_one, widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput,
+    DispatchResult as OrchestrationResult,
 };
-use crate::addon::feishu::domain::approval_provision::ProvisionError;
-#[cfg(test)]
-use crate::addon::feishu::domain::approval_provision::{build_plan, insert_plan, ProvisionInput};
-use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
+use crate::addon::feishu::domain::approval_feedback::{self, FeedbackStatus};
+use crate::addon::feishu::domain::approval_notification::{
+    self, FeedbackReference, NotificationRecipient, NotificationResult,
+};
+use crate::addon::feishu::domain::approval_provision::{
+    build_plan, insert_plan, ProvisionError, ProvisionInput, ProvisionPlan,
+};
+use crate::addon::feishu::domain::bitable::{self, resolve_bitable_link, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
     FailureKind, OutboundFailure, OutboundTransport, Sleeper,
 };
 use crate::addon::feishu::domain::outbound_setup;
 use crate::addon::feishu::domain::tenant_token::FeishuCredentials;
-use crate::addon::feishu::domain::token::verify_token;
-use crate::addon::feishu::domain::user_token::user_access_token;
+use crate::addon::feishu::domain::user_token::{user_access_token, UserTokenError};
 use crate::config::FeishuSettings;
 use crate::feishu_approval_worker::ApprovalDispatchHandle;
+
+use crate::addon::feishu::domain::approval_dispatch::Backfill;
 
 /// 发起人姓名解析失败（未命中 / 重名多命中 / 通讯录出站失败）的业务码。
 ///
 /// 与 `option/actions/approval_options.rs` 的 `codes` 模块同域不重号。
 const APPLICANT_UNRESOLVED: i32 = 40005;
-
-/// 配置不存在：`config_key` 没有对应的已启用配置行（40401）。
-///
-/// key 本身就是白名单——没命中即不存在，不存在即拒绝；不再有「请求体带坐标」的
-/// 第二种定位方式（旧形态废弃，见模块文档）。
-const CONFIG_NOT_FOUND: i32 = 40401;
-
-/// 该配置尚未签发访问 Token（`token_hash` 为空；40402）。
-///
-/// 存量行在升级后处于这个状态：四列是新增的可空列（框架对「已有数据的表加必填列」
-/// 拒绝启动），签发在控制台做，这里只负责可行动地拒。
-const TOKEN_NOT_ISSUED: i32 = 40402;
-
-/// 访问 Token 校验失败：请求体 `token` 与该配置的摘要不符（40301）。
-const TOKEN_MISMATCH: i32 = 40301;
-
-/// 该配置已停用（`enabled=false`；40302）。
-const CONFIG_DISABLED: i32 = 40302;
 
 /// 用户凭证缺通讯录权限（飞书对 `user_access_token` 的权限不足码 99991679）。
 ///
@@ -104,18 +85,14 @@ const CODE_CONTACT_SCOPE_MISSING: i32 = 99991672;
 ///
 /// `Serialize` 是请求记录落库需要的：`request_body` 列存的就是本结构的序列化
 /// 原文（见 `domain/request_log_writer.rs`）。
-///
-/// # 为什么没有 `base_token` / `table_id` / `approval_code` 等配置字段
-///
-/// 配置只在控制台建（`create_config` 向导）。请求体只带运行时参数：`token`（鉴权）、
-/// `record_id`（可选）、`applicant`（可选）、`requested_by`（可选）。工作流不再
-/// 携带任何配置数据——那是本次契约改形的核心（见模块文档）。
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DispatchInput {
-    /// 访问 Token：与 URL 里 `config_key` 那行配置的 `token_hash` 摘要比对。
-    /// 由控制台「签发/轮换 Token」产出，工作流 `raw_body` 里填。
-    pub(super) token: String,
+    /// 多维表格 token。
+    pub(super) base_token: String,
+    /// 数据表 id；完整多维表格链接包含 `table` 参数时可省略。
+    #[serde(default)]
+    pub(super) table_id: Option<String>,
     /// 单条处理时的记录 id；省略表示处理全表待处理记录。
     #[serde(default)]
     pub(super) record_id: Option<String>,
@@ -123,12 +100,28 @@ pub(super) struct DispatchInput {
     /// 未带或 trim 后为空时落库统一记 `feishu-workflow`。仅记录用，不影响派发。
     #[serde(default)]
     pub(super) requested_by: Option<String>,
+    /// 明确指定通知接收人的 ID 类型与 ID/邮箱；不从姓名或申请人推断。
+    #[serde(default)]
+    pub(super) notification_recipient: Option<NotificationRecipient>,
     /// 发起人（工作流触发人）。真机 `$.step_btn.user` 渲染成**姓名**（设计 M11 定论），
     /// 所以这里是**姓名**，由本端点经 contact 搜索解析成 open_id 后使用（§6.2）；
     /// 解析失败一律 fail（可行动文案），不落等待态。传了才走新路径并回写
     /// applicant_field 列（D2 缺省回退旧行为）。
     #[serde(default)]
     pub(super) applicant: Option<String>,
+    /// 目标审批定义。**配置不存在时**由它建配置（首次调用）。
+    ///
+    /// 只有三条配置信息是「只有调用方知道」的——要提哪个定义、谁当发起人、
+    /// 编号写回哪列，它们都写在工作流的 `raw_body` 里。已配好时本字段与另两条
+    /// 被忽略，改配置要**删掉配置行**再调一次。
+    #[serde(default)]
+    pub(super) approval_code: Option<String>,
+    /// 申请人员列（`field_id` **或**列名都接受）。仅首次建配置时消费。
+    #[serde(default)]
+    pub(super) applicant_field: Option<String>,
+    /// 回填列（同上）。仅首次建配置时消费。
+    #[serde(default)]
+    pub(super) backfill_field: Option<String>,
 }
 
 impl ParamInput for DispatchInput {
@@ -138,15 +131,42 @@ impl ParamInput for DispatchInput {
 }
 
 impl DispatchInput {
-    /// 进入处理前的入参校验。
-    ///
-    /// 只剩三件运行时参数：`token` 必填（鉴权），`record_id` 传了必须非空，
-    /// `requested_by` 长度受控（列上限 128 字符）。
-    fn validate(&self) -> Result<(), BaseError> {
-        if self.token.trim().is_empty() {
+    fn resolved_coordinates(
+        &self,
+    ) -> Result<crate::addon::feishu::domain::bitable::ParsedBitableLink, BaseError> {
+        resolve_bitable_link(&self.base_token, self.table_id.as_deref(), None)
+            .map_err(|error| BaseError::ParamInvalid("base_token".to_string(), error.to_string()))
+    }
+
+    fn normalize_coordinates(&mut self) -> Result<(), BaseError> {
+        let coordinates = self.resolved_coordinates()?;
+        let Some(table_id) = coordinates.table_id else {
             return Err(BaseError::ParamInvalid(
-                "token".to_string(),
+                "table_id".to_string(),
+                "不能为空，或在完整多维表格链接中提供 table 参数".to_string(),
+            ));
+        };
+        self.base_token = coordinates.app_token;
+        self.table_id = Some(table_id);
+        Ok(())
+    }
+
+    /// 进入处理前的入参校验。
+    fn validate(&self) -> Result<(), BaseError> {
+        if let Some(recipient) = &self.notification_recipient {
+            recipient.validate()?;
+        }
+        let coordinates = self.resolved_coordinates()?;
+        if coordinates.app_token.trim().is_empty() {
+            return Err(BaseError::ParamInvalid(
+                "base_token".to_string(),
                 "不能为空".to_string(),
+            ));
+        }
+        if coordinates.table_id.is_none() {
+            return Err(BaseError::ParamInvalid(
+                "table_id".to_string(),
+                "不能为空，或在完整多维表格链接中提供 table 参数".to_string(),
             ));
         }
         if let Some(record_id) = &self.record_id {
@@ -167,181 +187,96 @@ impl DispatchInput {
                 ));
             }
         }
+        // 配置三件套**要么全给、要么全不给**。半套的后果是：建了配置但没有回填列，
+        // 而「没有回填列」意味着校验失败也报不进多维表格——那条错误只能回到 HTTP
+        // 响应里，而页面按钮拿不到它（工作流的 response_value 只有那几个字段）。
+        let given = [
+            self.approval_code.is_some(),
+            self.applicant_field.is_some(),
+            self.backfill_field.is_some(),
+        ];
+        let count = given.iter().filter(|value| **value).count();
+        if count != 0 && count != 3 {
+            return Err(BaseError::ParamInvalid(
+                "approval_code".to_string(),
+                "首次建配置时 approval_code / applicant_field / backfill_field 必须同时给出（缺任一条时校验失败也报不进多维表格）"
+                    .to_string(),
+            ));
+        }
+        if let (Some(code), Some(applicant), Some(backfill)) = (
+            self.approval_code.as_deref(),
+            self.applicant_field.as_deref(),
+            self.backfill_field.as_deref(),
+        ) {
+            for (name, value) in [
+                ("approval_code", code),
+                ("applicant_field", applicant),
+                ("backfill_field", backfill),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(BaseError::ParamInvalid(
+                        name.to_string(),
+                        "不能为空".to_string(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
-}
 
-/// URL 路径参数 `config_key` 的校验：进 `where_eq` 前 trim；空值直接拒。
-///
-/// 抽成纯函数是为了让「空 key 必须在查库之前被拒」可离线钉住。
-fn validate_config_key(raw: &str) -> Result<String, BaseError> {
-    let key = raw.trim().to_string();
-    if key.is_empty() {
-        return Err(BaseError::ParamInvalid(
-            "config_key".to_string(),
-            "不能为空".to_string(),
-        ));
+    /// 是否给出了建配置所需的三件套。
+    fn has_provision_fields(&self) -> bool {
+        self.approval_code.is_some()
+            && self.applicant_field.is_some()
+            && self.backfill_field.is_some()
     }
-    Ok(key)
-}
-
-/// 从路径参数取 `config_key`。
-///
-/// 取不到（路由没带参数）按内部错误折算成失败记录——空值也会被
-/// `validate_config_key` 在查库前拒掉，这里只负责「有没有给」。
-fn resolve_config_key(ctx: &ActionContext) -> Result<String, BaseError> {
-    ctx.request
-        .get_path_param("config_key")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            BaseError::ParamInvalid("config_key".to_string(), "缺少派发配置标识".to_string())
-        })
-}
-
-/// 鉴权判定（纯函数）：按已读出的配置行校验访问 Token 与启用位。
-///
-/// 抽成纯函数是为了能被单测直接驱动——四类出口（未签发 / Token 不符 / 停用 /
-/// 通过）的**顺序**必须钉住：先验 Token 再报停用，与 datasource 的
-/// `verify_source` 同一条不变量。
-fn check_config_auth(
-    row: &yang_base::table::Record,
-    presented_token: &str,
-) -> Result<(i64, String, String), DispatchOutcome> {
-    let config_id: i64 = row.require("id").map_err(|error| {
-        DispatchOutcome::internal(None, BaseError::ConfigError(error.to_string()))
-    })?;
-    // `token_hash` 可空（存量行在升级后处于「未签发」状态）。**必须在 Token
-    // 校验之前**判：没有摘要时 `verify_token` 会把任何出示都拒掉，那条消息
-    // 会把「还没签发」误导成「Token 错了」。
-    let stored_hash: Option<String> = row.optional("token_hash").map_err(|error| {
-        DispatchOutcome::internal(Some(config_id), BaseError::ConfigError(error.to_string()))
-    })?;
-    let Some(stored_hash) = stored_hash
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return Err(DispatchOutcome::fail(
-            TOKEN_NOT_ISSUED,
-            Some(config_id),
-            "该配置尚未签发访问 Token，请在控制台「审批配置」页签发后再调用派发",
-        ));
-    };
-    if !verify_token(presented_token.trim(), &stored_hash) {
-        return Err(DispatchOutcome::fail(
-            TOKEN_MISMATCH,
-            Some(config_id),
-            "访问 Token 无效，请在控制台重新签发后更新工作流",
-        ));
-    }
-    let enabled: bool = row
-        .optional("enabled")
-        .map_err(|error| {
-            DispatchOutcome::internal(Some(config_id), BaseError::ConfigError(error.to_string()))
-        })?
-        .unwrap_or(false);
-    if !enabled {
-        return Err(DispatchOutcome::fail(
-            CONFIG_DISABLED,
-            Some(config_id),
-            "该审批派发配置已停用，请在控制台启用后再调用",
-        ));
-    }
-    let base_token: String = row.require("base_token").map_err(|error| {
-        DispatchOutcome::internal(Some(config_id), BaseError::ConfigError(error.to_string()))
-    })?;
-    let table_id: String = row.require("table_id").map_err(|error| {
-        DispatchOutcome::internal(Some(config_id), BaseError::ConfigError(error.to_string()))
-    })?;
-    Ok((config_id, base_token, table_id))
-}
-
-/// 把「配置校验不过」写进回填列。
-///
-/// # 为什么单独抽出来
-///
-/// 这是「配置期报错」**唯一的用户可见出口**：HTTP 响应只有工作流日志看得到，而
-/// 点按钮的人在多维表格里。整条链路——文案前缀、写哪一列、单元格形态——都只有在
-/// 真的写一次之后才知道对不对，所以它必须能被端到端用例直接驱动。
-///
-/// # 为什么保留（尽管 dispatch 的自动建配置入口已删）
-///
-/// `create_config`（控制台建配置）仍复用同一条 `build_plan`/`insert_plan` 校验链路
-/// （设计 §5.1：手动建与自动建必须给同一套保证）。建配置失败时把原因写回回填列
-/// 的这个落点，正是那条链路的唯一用户可见出口——所以这个函数与它的端到端测试
-/// 必须留着，只是**调用方从 dispatch 的自动建配置换成了 create_config 的手动建**。
-async fn write_config_failure(
-    backfill: &dyn Backfill,
-    record_id: &str,
-    backfill_field: &str,
-    failure: &ProvisionError,
-) -> Result<(), crate::addon::feishu::domain::outbound::OutboundFailure> {
-    backfill
-        .write(
-            record_id,
-            backfill_field,
-            &serde_json::json!(format!("[配置] {failure}")),
-        )
-        .await
 }
 
 /// 派发结果。
 ///
-/// **响应体必须扁平**：工作流的 `HTTPClientAction` 在 `response_type=json` 时
-/// **只能引用 `response_value` 中声明过的字段**，嵌套结构取不到。
+/// 保留原有标量字段，通知结果独立于审批状态。
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct DispatchResultBody {
     /// 是否成功（单条）或是否受理（全表）。
     accepted: bool,
+    status: FeedbackStatus,
     /// 结果说明。单条失败时是**可行动的原因**，不是原始响应体。
     message: String,
-    /// 单条成功时的审批单编号。
+    /// 单条已确认实例的已知编号；HTTP 仍只在编号回填成功后返回该字段。
     #[serde(skip_serializing_if = "Option::is_none")]
     serial_number: Option<String>,
+    notification: NotificationResult,
 }
 
 /// 注册派发端点。
-///
-/// 路由带 `{config_key}` 路径参数（与外部数据源的 `{source_key}` 同一形态）。
-/// **不挂** `ManagementTokenMiddleware`：鉴权在 handler 内按 `config_key` 查到的
-/// 那一行的 `token_hash` 做摘要比对（见 `authenticate_config`），Token 从此按配置
-/// 隔离而不是全局单值。
 pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> ModuleSpec {
     module
         .action_fn(
             yang_base::action_name!("dispatch_approval"),
             move |ctx, input| handle(ctx, input, Arc::clone(&context)),
         )
-        .route(
-            HttpMethod::Post,
-            "/api/v1/feishu/approval/dispatch/{config_key}",
-        )
+        .route(HttpMethod::Post, "/api/v1/feishu/approval/dispatch")
         .display_name("创建飞书审批实例")
-        .description("多维表格按钮入口：按 config_key 定位配置并校验访问 Token，单条同步创建或受理全表待处理记录")
-        // public：飞书工作流直连，不经框架 JWT；按配置签发的访问 Token 在 handler 内校验。
+        .description("多维表格按钮入口：单条同步创建，或受理全表待处理记录")
         .public()
         .register()
 }
 
 /// 一次派发请求的结果记录事实：所有出口（含 `validate()` 失败）都收敛成它，
 /// 外层**唯一一处**组装响应并落库——散落的出口各写一遍必漏。
-///
-/// `Debug` 是测试断言需要的（`{outcome:?}` 在鉴权不变量测试里用它打印诊断）。
-#[derive(Debug)]
 struct DispatchOutcome {
     /// 结果四桶。
     outcome: Outcome,
+    status: FeedbackStatus,
+    record_summary: Option<String>,
     /// 结果说明（复用响应 message；失败时为可行动原因）。
     message: String,
     /// 单条成功时的审批单编号。
     serial_number: Option<String>,
-    /// 鉴权通过后关联；鉴权前失败的请求为空。
+    /// 仅在创建或按原 UUID 恢复实例得到确认后提供，不能使用审批定义 code 代替。
+    instance_code: Option<String>,
+    /// 配置存在或建成后关联；校验失败与配置未建成（40401/35600）的请求为空。
     config_id: Option<i64>,
-    /// 配置行里的多维表格坐标（鉴权通过后才有）；日志表 `base_token`/`table_id`
-    /// 必填列的取值来源。旧形态从请求体拿，改形后请求体不再携带配置数据。
-    base_token: Option<String>,
-    table_id: Option<String>,
     /// 原本要返回给工作流的结果。落记录绝不改变它——写失败只降级日志，
     /// 派发已提交到 task 表与飞书，不能被日志拖死。
     response: Result<ApiResponse, BaseError>,
@@ -353,56 +288,103 @@ impl DispatchOutcome {
         let message = message.into();
         Self {
             outcome: Outcome::Failed,
+            status: FeedbackStatus::Failed,
+            record_summary: None,
             message: message.clone(),
             serial_number: None,
+            instance_code: None,
             config_id,
-            base_token: None,
-            table_id: None,
-            response: Ok(ApiResponse::fail(code, message)),
+            response: response(false, FeedbackStatus::Failed, message, None).map(|mut response| {
+                response.code = code;
+                response
+            }),
         }
     }
 
-    /// 内部错误冒泡出口：`Err(BaseError)` 原样保留，文案用错误的 Display。
+    /// 保留框架的 HTTP/业务码纪律；服务端错误只返回固定说明。
     fn internal(config_id: Option<i64>, error: BaseError) -> Self {
-        Self {
-            outcome: Outcome::Failed,
-            message: error.to_string(),
-            serial_number: None,
-            config_id,
-            base_token: None,
-            table_id: None,
-            response: Err(error),
-        }
+        use yang_base::error::ErrorCategory;
+        let http_status = match &error {
+            BaseError::PermissionDenied(_) | BaseError::FieldPermissionDenied(_, _, _) => 403,
+            BaseError::RateLimitExceeded { .. } => 429,
+            _ => match error.category() {
+                ErrorCategory::Client => 400,
+                ErrorCategory::Auth => 401,
+                ErrorCategory::NotFound => 404,
+                ErrorCategory::Conflict => 409,
+                ErrorCategory::Transient => 503,
+                _ => 500,
+            },
+        };
+        let message = match http_status {
+            503 => "服务暂时不可用".to_string(),
+            500 => "服务器内部错误".to_string(),
+            _ => error.to_string(),
+        };
+        tracing::error!(%error, "审批派发发生内部错误");
+        let mut outcome = Self::fail(error.code(), config_id, message);
+        outcome.response = outcome
+            .response
+            .and_then(|response| response.with_http_status(http_status));
+        outcome
     }
 
     /// 成功 / 等待 / 受理出口（响应走 `success` 通道）。
-    ///
-    /// 坐标（`base_token` / `table_id`）由调用方从已鉴权的配置行带上——日志表
-    /// 这两列必填，改形后请求体不再携带它们。
     fn success(
         outcome: Outcome,
         config_id: Option<i64>,
-        base_token: Option<String>,
-        table_id: Option<String>,
         accepted: bool,
+        status: FeedbackStatus,
         message: String,
         serial_number: Option<String>,
     ) -> Self {
         Self {
             outcome,
+            status,
+            record_summary: None,
             message: message.clone(),
             serial_number: serial_number.clone(),
+            instance_code: None,
             config_id,
-            base_token,
-            table_id,
-            response: response(accepted, message, serial_number),
+            response: response(accepted, status, message, serial_number),
         }
+    }
+
+    fn from_single_result(
+        config_id: i64,
+        result: OrchestrationResult,
+        record_summary: Option<String>,
+    ) -> Self {
+        let (accepted, message, serial_number) = result.response_parts();
+        let (instance_code, known_serial) = match &result {
+            OrchestrationResult::Backfilled { instance_code, .. } => {
+                (Some(instance_code.clone()), None)
+            }
+            OrchestrationResult::CreatedPendingBackfill {
+                instance_code,
+                serial_number,
+                ..
+            } => (Some(instance_code.clone()), serial_number.clone()),
+            _ => (None, None),
+        };
+        let mut outcome = Self::success(
+            outcome_for(&result),
+            Some(config_id),
+            accepted,
+            result.feedback_status(),
+            message,
+            serial_number,
+        );
+        outcome.serial_number = outcome.serial_number.or(known_serial);
+        outcome.instance_code = instance_code;
+        outcome.record_summary = record_summary;
+        outcome
     }
 }
 
 /// 处理派发请求。
 #[tracing::instrument(name = "approval_request", skip_all, fields(
-    config_key = tracing::field::Empty, record_id = tracing::field::Empty
+    table_id = tracing::field::Empty, record_id = tracing::field::Empty
 ))]
 pub(super) async fn handle(
     ctx: ActionContext,
@@ -420,20 +402,22 @@ pub(super) async fn handle(
     // （含 `validate()` 失败——它也要落一条 failed 记录，且要落在还能拿到
     // `request_body` 的位置）都收敛成一条可落库的记录事实。落库用独立连接
     // （`TableQuery::insert` 不经事务自动提交），写失败只降级日志。
-    let outcome = match resolve_config_key(&ctx) {
+    let mut input = input;
+    let mut outcome = match input.normalize_coordinates() {
         Err(error) => DispatchOutcome::internal(None, error),
-        Ok(config_key) => {
-            tracing::Span::current().record("config_key", config_key.as_str());
+        Ok(()) => {
+            tracing::Span::current()
+                .record("table_id", input.table_id.as_deref().unwrap_or_default());
             tracing::Span::current()
                 .record("record_id", input.record_id.as_deref().unwrap_or_default());
-            match handle_dispatch(&ctx, &input, &context, &config_key).await {
+            match handle_dispatch(&ctx, &input, &context).await {
                 Ok(outcome) => outcome,
-                // 「连 config_id 都拿不到」的内部错误（config_key 缺失、白名单查询
-                // 出错）：折算成失败记录。
+                // 白名单查询这类「连 config_id 都拿不到」的内部错误：折算成失败记录。
                 Err(error) => DispatchOutcome::internal(None, error),
             }
         }
     };
+    complete_feedback(&ctx, &context, &input, &mut outcome).await;
     write_request_log(&context, &input, &outcome).await;
     tracing::info!(
         stage = "response",
@@ -452,63 +436,88 @@ pub(super) async fn handle(
 
 /// 派发业务主体。
 ///
-/// 返回 `Err` 的只有 `config_key` 校验与配置查询这类「连 config_id 都拿不到」的
-/// 内部错误；已知 `config_id` 的鉴权/单条/受理出口都在内部折算成
+/// 返回 `Err` 的只有白名单查询这类「连 config_id 都拿不到」的内部错误；
+/// 已知 `config_id` 的单条/受理/建配置出口都在内部折算成
 /// [`DispatchOutcome`]（见各分支）。
 async fn handle_dispatch(
     ctx: &ActionContext,
     input: &DispatchInput,
     context: &FeishuContext,
-    config_key: &str,
 ) -> Result<DispatchOutcome, BaseError> {
     // 校验失败**不冒泡**——它同样要落记录，这里兜住再折算成失败出口。
     if let Err(error) = input.validate() {
         tracing::warn!(stage = "validate", "审批派发请求参数校验失败");
         return Ok(DispatchOutcome::internal(None, error));
     }
-    // 空 key 必须在查库之前被拒（`validate_config_key` 的注释）。
-    let config_key = validate_config_key(config_key)?;
 
-    // ---- 鉴权：按 config_key 查配置行，校验访问 Token ----
+    // ---- 白名单校验：坐标必须在已配置且启用的行内 ----
     //
-    // 查询**不带 `enabled` 条件**——停用要返回「已停用」而不是「不存在」，
-    // 且顺序固定为「先验 Token 再报停用」（与 datasource 的 `verify_source`
-    // 同一不变量：`token_is_checked_before_status`，由 `check_config_auth` 的
-    // 单测钉住）。
+    // 这是本端点最重要的防线。管理 Token 是全局单值、不按数据源绑定
+    // （既有决策 A8），所以光靠 Token 保密不足以限制可利用面。
     let config = context
         .approval_configs()
         .query()
-        .select_fields(&["id", "base_token", "table_id", "token_hash", "enabled"])?
-        .where_eq("config_key", serde_json::json!(&config_key))?
+        .where_eq("base_token", serde_json::json!(input.base_token.trim()))?
+        .where_eq(
+            "table_id",
+            serde_json::json!(input.table_id.as_deref().unwrap_or_default().trim()),
+        )?
+        .where_eq("enabled", serde_json::json!(true))?
         .optional()
         .await?;
-    let Some(config) = config else {
-        tracing::warn!(stage = "auth", "审批派发未匹配任何配置");
-        return Ok(DispatchOutcome::fail(
-            CONFIG_NOT_FOUND,
-            None,
-            "该派发链接未配置审批派发，请先在控制台「审批配置」页创建配置",
-        ));
+
+    // ---- 没有配置行 → 首次调用，自动建配置 ----
+    //
+    // 校验不过就报错并**回填到回填列**（使用方要的就是「配置期报错」，而报错必须
+    // 落在多维表格里才有人看见——HTTP 响应对页面按钮无用，见 `response_value` 的
+    // 字段限制）。所以**回填列必须由调用方给**：配置还没建成时本服务不知道写哪一列。
+    let config_id: i64 = match config {
+        Some(row) => {
+            let id: i64 = row.require("id")?;
+            tracing::info!(stage = "config", config_id = id, "审批派发已匹配启用配置");
+            id
+        }
+        None => {
+            if !input.has_provision_fields() {
+                tracing::warn!(
+                    stage = "config",
+                    "审批派发未匹配启用配置，且未提供首次配置参数"
+                );
+                return Ok(DispatchOutcome::fail(
+                    40401,
+                    None,
+                    "该多维表格未配置审批派发。首次调用请同时给出 approval_code / applicant_field / backfill_field",
+                ));
+            }
+            // 建配置要在飞书与本库两端取数，凭证缺了根本走不下去。
+            let Some(settings) = context.settings().filter(|value| value.can_pull()) else {
+                tracing::warn!(stage = "config", "审批派发无法建配置：飞书出站凭证未配置");
+                return Ok(DispatchOutcome::fail(50301, None, "飞书出站凭证未配置"));
+            };
+
+            tracing::info!(stage = "provision", "审批派发开始自动创建配置");
+            match provision(ctx, context, settings, input).await {
+                Ok(id) => id,
+                Err(failure) => {
+                    tracing::warn!(stage = "provision", error = %failure, "审批派发自动配置失败");
+                    // 报错要**同时**回填与返回：回填让表格里的人看见，返回让工作流
+                    // 的日志里也有原文。回填失败只降级为「只返回」——配置根本没建成，
+                    // 也不该因为回填这一下而把真实原因盖掉。
+                    backfill_provision_failure(ctx, settings, input, &failure).await;
+                    return Ok(DispatchOutcome::fail(
+                        35600,
+                        None,
+                        provision_failure_message(&failure),
+                    ));
+                }
+            }
+        }
     };
-    let (config_id, base_token, table_id) = match check_config_auth(&config, &input.token) {
-        Ok(verified) => verified,
-        Err(outcome) => return Ok(outcome),
-    };
-    tracing::info!(stage = "config", config_id, "审批派发已匹配启用配置");
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
         Some(record_id) => {
-            match dispatch_single(
-                ctx,
-                context,
-                config_id,
-                &base_token,
-                &table_id,
-                record_id,
-                input.applicant.clone(),
-            )
-            .await
+            match dispatch_single(ctx, context, config_id, record_id, input.applicant.clone()).await
             {
                 Ok(outcome) => Ok(outcome),
                 // 单条内部的 `?` 出口：config_id 在调用点已知，失败记录带上它。
@@ -517,7 +526,8 @@ async fn handle_dispatch(
         }
         // ---- 全表：异步受理 ----
         //
-        // 受理**必须在鉴权通过之后**：Token 校验失败一律不出站、不入队。
+        // 受理**必须在白名单校验之后**：把 Token 当成「可以指任意表格」的通行证
+        // 是本端点最大的越权面。上面那句 `config` 查询就是白名单，通过了才放行。
         None => {
             // 受理前先解析发起人（若有）：值形态是**姓名**（M11），要解析成 open_id
             // 才能随信号交给 worker 落库（设计 §6.3）。未传/空白 → 现状，不建出站栈。
@@ -579,15 +589,14 @@ async fn handle_dispatch(
             // 语义是「跑一轮全队列」，**不是**只跑本表。
             //
             // 用方原意就是「处理所有没有审批编号的数据」，而这三张表是按
-            // `config_key` 定位的；按表分流会让同一队列出现「点了 A 的
+            // `(base_token, table_id)` 配置的；按表分流会让同一队列出现「点了 A 的
             // 按钮却不处理 B 的数据」这种反直觉行为。多表并发时谁先点谁先跑整批，
             // 结果仍是一致的（uuid 幂等兜底）。
             Ok(DispatchOutcome::success(
                 Outcome::Accepted,
                 Some(config_id),
-                Some(base_token),
-                Some(table_id),
                 true,
+                FeedbackStatus::Accepted,
                 "已受理，处理结果稍后回填至表格".to_string(),
                 None,
             ))
@@ -615,14 +624,13 @@ async fn write_request_log(
     };
     let log = RequestLog {
         requested_by: normalized_requested_by(input.requested_by.as_deref()),
-        // 坐标来自配置行（`config_key` 定位），不再取自请求体。取不到（鉴权前的
-        // 失败出口）落空串——`base_token`/`table_id` 是日志表的必填列，不能 NULL。
-        base_token: outcome
-            .base_token
+        base_token: input.base_token.trim().to_string(),
+        table_id: input
+            .table_id
             .as_deref()
             .unwrap_or_default()
+            .trim()
             .to_string(),
-        table_id: outcome.table_id.as_deref().unwrap_or_default().to_string(),
         config_id: outcome.config_id,
         record_id: input
             .record_id
@@ -634,8 +642,7 @@ async fn write_request_log(
         outcome: outcome.outcome,
         message: outcome.message.clone(),
         serial_number: outcome.serial_number.clone(),
-        // 返回信封的 `data` JSON 原文；失败出口（`Err` 冒泡或 `ApiResponse::fail`）
-        // 没有 data，落 NULL。
+        // 返回信封的完整 data，包含业务失败反馈和独立通知回执。
         response_body: outcome
             .response
             .as_ref()
@@ -657,6 +664,358 @@ async fn write_request_log(
             outcome = outcome.outcome.as_str(),
             "审批派发请求记录写入成功"
         );
+    }
+}
+
+/// 消息末尾的业务定位；URL 来自已核对的坐标、记录接口或已确认的审批实例。
+fn feedback_references(
+    input: &DispatchInput,
+    outcome: &DispatchOutcome,
+    base_name: &str,
+    table_name: &str,
+    approval_name: &str,
+    record_url: Option<String>,
+) -> Vec<FeedbackReference> {
+    let table_url = (|| -> anyhow::Result<String> {
+        bitable::validate_path_segment("base_token", &input.base_token)?;
+        let table = input.table_id.as_deref().unwrap_or_default();
+        bitable::validate_path_segment("table_id", table)?;
+        Ok(format!(
+            "https://www.feishu.cn/base/{}?table={table}",
+            input.base_token
+        ))
+    })()
+    .ok();
+    let mut references = vec![FeedbackReference {
+        label: "多维表",
+        text: format!("{base_name} / {table_name}"),
+        href: table_url,
+    }];
+    if input.record_id.is_some() {
+        references.push(FeedbackReference {
+            label: "原记录",
+            text: outcome
+                .record_summary
+                .clone()
+                .unwrap_or_else(|| "本次触发的记录（摘要暂不可用）".into()),
+            href: record_url,
+        });
+    }
+    let (text, href) = match outcome.instance_code.as_deref() {
+        Some(code) => (
+            format!(
+                "{approval_name} / {}",
+                outcome.serial_number.as_deref().unwrap_or("编号待生成")
+            ),
+            crate::addon::feishu::domain::approval::instance_applink(code).ok(),
+        ),
+        None => (approval_name.to_string(), None),
+    };
+    references.push(FeedbackReference {
+        label: "审批",
+        text,
+        href,
+    });
+    references
+}
+
+/// 可选的链接补充总预算两秒；缺权限、超时或链接缺失均不改变审批结果。
+async fn feedback_record_url(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &crate::addon::feishu::domain::tenant_token::TenantTokenProvider,
+    input: &DispatchInput,
+) -> Option<String> {
+    let record_id = input.record_id.as_deref()?;
+    let coordinates = BitableCoordinates {
+        app_token: input.base_token.clone(),
+        table_id: input.table_id.clone().unwrap_or_default(),
+        view_id: None,
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        bitable::get_record_shared_url(transport, sleeper, tokens, &coordinates, record_id),
+    )
+    .await
+    .ok()?
+    .ok()
+    .flatten()
+}
+
+/// 名称补充和通知均发生在派发之后，不重跑审批。
+async fn complete_feedback(
+    ctx: &ActionContext,
+    context: &FeishuContext,
+    input: &DispatchInput,
+    outcome: &mut DispatchOutcome,
+) {
+    let config = match outcome.config_id {
+        Some(id) => {
+            let lookup = async {
+                context
+                    .approval_configs()
+                    .query()
+                    .where_primary_key_eq(serde_json::json!(id))?
+                    .where_eq("base_token", serde_json::json!(input.base_token.trim()))?
+                    .where_eq(
+                        "table_id",
+                        serde_json::json!(input.table_id.as_deref().unwrap_or_default().trim()),
+                    )?
+                    .where_eq("enabled", serde_json::json!(true))?
+                    .optional()
+                    .await
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(2), lookup).await {
+                Ok(Ok(row)) => row,
+                _ => {
+                    tracing::warn!(config_id = id, "反馈展示名称读取失败，跳过直接通知");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let name = |field: &str| {
+        let value = config
+            .as_ref()
+            .and_then(|row| row.optional::<String>(field).ok().flatten());
+        approval_feedback::display_name(value.as_deref())
+    };
+    let names = format!(
+        "配置：{}\n多维表：{}\n数据表：{}\n审批：{}",
+        name("title"),
+        name("base_name"),
+        name("table_name"),
+        name("approval_name")
+    );
+    outcome.message = approval_feedback::render(
+        outcome.status,
+        &outcome.message,
+        &names,
+        outcome.record_summary.as_deref(),
+        input.record_id.as_deref(),
+        &input.base_token,
+        input.table_id.as_deref().unwrap_or_default(),
+    );
+    let notification = match &input.notification_recipient {
+        None => NotificationResult::not_requested(),
+        Some(_) if config.is_none() => NotificationResult::skipped(),
+        Some(recipient) => match context.settings().filter(|settings| settings.can_pull()) {
+            Some(settings) => match outbound_setup::build(ctx, settings) {
+                Ok(outbound) => {
+                    let record_url = feedback_record_url(
+                        outbound.transport(),
+                        outbound.sleeper(),
+                        &outbound.tokens,
+                        input,
+                    )
+                    .await;
+                    let references = feedback_references(
+                        input,
+                        outcome,
+                        &name("base_name"),
+                        &name("table_name"),
+                        &name("approval_name"),
+                        record_url,
+                    );
+                    approval_notification::send_feedback(
+                        outbound.transport(),
+                        outbound.sleeper(),
+                        &outbound.tokens,
+                        recipient,
+                        &outcome.message,
+                        &references,
+                    )
+                    .await
+                }
+                Err(_) => NotificationResult::unavailable(),
+            },
+            None => NotificationResult::unavailable(),
+        },
+    };
+    if let Ok(response) = &mut outcome.response {
+        response.message.clone_from(&outcome.message);
+        if let Some(data) = response.data.as_mut() {
+            data["message"] = serde_json::json!(outcome.message);
+            data["notification"] = serde_json::json!(notification);
+        }
+    }
+}
+
+/// 首次调用：取定义、取列、按名匹配、校验，全过才把配置与映射**同一事务**落库。
+///
+/// 落库前的一切失败都是**可修**的（列没建、名字不对、绑定没配），所以这里不写任何
+/// 东西——半套配置（有配置没映射）比不建更坏，它会让之后每一次派发都卡在
+/// 「该配置没有字段映射」而配置行看着是好的。
+async fn provision(
+    ctx: &ActionContext,
+    context: &FeishuContext,
+    settings: &FeishuSettings,
+    input: &DispatchInput,
+) -> Result<i64, ProvisionError> {
+    let outbound = outbound_setup::build(ctx, settings)
+        .map_err(|error| ProvisionError::Fetch(error.to_string()))?;
+
+    let plan: ProvisionPlan = build_plan(
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        context,
+        &ProvisionInput {
+            base_token: input.base_token.trim(),
+            table_id: input.table_id.as_deref().unwrap_or_default().trim(),
+            approval_code: input.approval_code.as_deref().unwrap_or_default().trim(),
+            applicant_field: input.applicant_field.as_deref().unwrap_or_default(),
+            backfill_field: input.backfill_field.as_deref().unwrap_or_default(),
+            // 部署默认时区。多维表格日期是不带时区的毫秒时间戳，而审批 `date` 控件要
+            // 带偏移量——猜错会让审批里的时间整体偏移，所以必须由配置给定。
+            base_timezone: &settings.approval_base_timezone,
+            maps: None,
+            // 首调自动建配置不带六个可选回填列（设计 §5.1）——那六列只有控制台才配。
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
+        },
+    )
+    .await?;
+
+    let mut transaction = ctx
+        .begin_transaction()
+        .await
+        .map_err(|error| ProvisionError::Store(error.to_string()))?;
+    let result = insert_plan(context, &mut transaction, &plan).await;
+    let config_id = match result {
+        Ok(id) => id,
+        Err(error) => {
+            if let Err(rollback) = transaction.rollback().await {
+                tracing::error!(error = %rollback, "审批配置回滚失败");
+            }
+            return Err(ProvisionError::Store(error.to_string()));
+        }
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ProvisionError::Store(error.to_string()))?;
+
+    tracing::info!(
+        config_id,
+        base_token = %input.base_token.trim(),
+        table_id = %input.table_id.as_deref().unwrap_or_default().trim(),
+        approval_code = %input.approval_code.as_deref().unwrap_or_default().trim(),
+        "审批派发配置已自动创建"
+    );
+    Ok(config_id)
+}
+
+/// 建配置失败时，把原因**写回回填列**，再返回原始错误。
+///
+/// 这是「配置期就报错」的落点：报错只留在 HTTP 响应里，页面按钮的人看不到
+/// （工作流的 `response_value` 只声明了 `accepted` / `message` / `serial_number`）。
+///
+/// 只在**首次**（调用方给了三件套）时写：老配置坏掉时回填列可能已被当成输出位占用，
+/// 再写一句校验错误会盖掉真正的编号。老配置的错误走日志。
+async fn backfill_provision_failure(
+    ctx: &ActionContext,
+    settings: &FeishuSettings,
+    input: &DispatchInput,
+    failure: &ProvisionError,
+) {
+    if !input.has_provision_fields() {
+        return;
+    }
+    let Some(record_id) = input.record_id.as_deref().filter(|id| !id.is_empty()) else {
+        // 全表受理时没有具体记录可写——那一句只有 queue 才有意义，
+        // 而队列根本没建起来。让它退回日志。
+        tracing::warn!(error = %failure, "审批配置校验失败（全表受理，无记录可回填）");
+        return;
+    };
+    let Some(backfill_field) = input.backfill_field.as_deref() else {
+        return;
+    };
+
+    let Ok(outbound) = outbound_setup::build(ctx, settings) else {
+        return;
+    };
+    let coordinates = BitableCoordinates {
+        app_token: input.base_token.trim().to_string(),
+        table_id: input
+            .table_id
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        view_id: None,
+    };
+    let fields = match bitable::list_all_fields(
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        &coordinates,
+    )
+    .await
+    {
+        Ok(fields) => fields,
+        Err(error) => {
+            tracing::warn!(error = %error, "读取回填列类型失败");
+            return;
+        }
+    };
+    let writer = BitableBackfill {
+        transport: outbound.transport(),
+        sleeper: outbound.sleeper(),
+        tokens: &outbound.tokens,
+        coordinates: &coordinates,
+        fields: &fields,
+    };
+
+    if let Err(error) = write_config_failure(&writer, record_id, backfill_field, failure).await {
+        // 回填失败不改变结论——错误已经返回给工作流了。这里降级为日志：
+        // 真正的原因（配置没建好）比「报错没写进表格」更值得留下。
+        tracing::warn!(error = %error.message, "配置校验失败的回填写入失败");
+    }
+}
+
+/// 把「配置校验不过」写进回填列。
+///
+/// # 为什么单独抽出来
+///
+/// 这是「配置期报错」**唯一的用户可见出口**：HTTP 响应只有工作流日志看得到，而
+/// 点按钮的人在多维表格里。整条链路——文案前缀、写哪一列、单元格形态——都只有在
+/// 真的写一次之后才知道对不对，所以它必须能被端到端用例直接驱动。
+/// `backfill_provision_failure` 里那层 `ActionContext`/凭证构造与本函数无关，
+/// 不该成为它的测试门槛（`Backfill` trait 当初也是为同一个理由抽的）。
+///
+/// # 前缀 `[配置]` 不能省
+///
+/// 同一个回填列里会同时出现两类文本：**数据问题**（「缺必填列」，由
+/// `classify_failure` 写入）与**配置问题**（本函数）。没有前缀，表格里的人分不开
+/// 「去补这一行的数据」和「去改配置」——而这两件事的处置完全不同。
+async fn write_config_failure(
+    backfill: &dyn Backfill,
+    record_id: &str,
+    backfill_field: &str,
+    failure: &ProvisionError,
+) -> Result<(), crate::addon::feishu::domain::outbound::OutboundFailure> {
+    backfill
+        .write(
+            record_id,
+            backfill_field,
+            &serde_json::json!(format!("[配置] {}", provision_failure_message(failure))),
+        )
+        .await
+}
+
+fn provision_failure_message(failure: &ProvisionError) -> String {
+    match failure {
+        ProvisionError::Invalid(_) => approval_feedback::truncate(&failure.to_string(), 950),
+        ProvisionError::Fetch(_) => {
+            "取飞书数据失败：请管理员检查应用权限、审批定义和多维表格授权。".into()
+        }
+        ProvisionError::Store(_) => "读本库配置失败：请管理员检查服务状态，稍后重试。".into(),
     }
 }
 
@@ -691,7 +1050,7 @@ async fn resolve_optional_applicant(
         &credentials,
     )
     .await
-    .map_err(|error| format!("发起人姓名解析失败：{}", error.message()))?;
+    .map_err(|error| applicant_token_failure_message(&error))?;
     resolve_applicant_param(outbound.transport(), outbound.sleeper(), &bearer, name)
         .await
         .map(Some)
@@ -702,6 +1061,19 @@ async fn resolve_optional_applicant(
 /// 单独成函数是为了让「空白姓名不打任何请求」这条承诺可离线钉住（见测试）。
 fn trimmed_applicant(applicant: Option<&str>) -> Option<&str> {
     applicant.map(str::trim).filter(|name| !name.is_empty())
+}
+
+fn applicant_token_failure_message(error: &UserTokenError) -> String {
+    let reason = match error {
+        UserTokenError::NotAuthorized => error.message(),
+        UserTokenError::ReauthRequired { code, .. } => {
+            format!("飞书用户授权已失效（错误码 {code}），请在「飞书审批配置」页重新授权。")
+        }
+        UserTokenError::Failed { .. } => {
+            "飞书用户凭证暂不可用，请管理员检查授权与服务状态，稍后重试。".into()
+        }
+    };
+    format!("发起人姓名解析失败：{reason}")
 }
 
 /// 姓名 → open_id（凭证已取好）。可行动文案的**唯一**落点。
@@ -741,10 +1113,10 @@ fn applicant_failure_message(failure: &OutboundFailure) -> String {
         FailureKind::Fatal { code } if CODES_USER_TOKEN_MALFORMED.contains(&code) => {
             format!("发起人姓名解析失败：飞书用户凭证无效，请在「飞书审批配置」页重新授权（错误码 {code}）")
         }
-        FailureKind::Fatal { code } => {
-            format!("发起人姓名解析失败（错误码 {code}）：{}", failure.message)
-        }
-        _ => format!("发起人姓名解析失败：{}", failure.message),
+        _ => format!(
+            "发起人姓名解析失败：{}",
+            approval_feedback::outbound_reason(failure)
+        ),
     }
 }
 
@@ -759,8 +1131,6 @@ async fn dispatch_single(
     ctx: &ActionContext,
     context: &FeishuContext,
     config_id: i64,
-    base_token: &str,
-    table_id: &str,
     record_id: &str,
     applicant: Option<String>,
 ) -> Result<DispatchOutcome, BaseError> {
@@ -782,7 +1152,7 @@ async fn dispatch_single(
         ));
     };
 
-    // ---- 配置（坐标由调用方 `handle_dispatch` 已鉴权读出，这里只读审批定义那几列）----
+    // ---- 配置 ----
     let config_row = context
         .approval_configs()
         .query()
@@ -791,13 +1161,12 @@ async fn dispatch_single(
         .await?
         .ok_or_else(|| BaseError::ConfigError("审批配置在读取前被删除".to_string()))?;
 
+    let base_token: String = config_row.require("base_token")?;
+    let table_id: String = config_row.require("table_id")?;
     let approval_code: String = config_row.require("approval_code")?;
     let applicant_field: String = config_row.require("applicant_field")?;
     let backfill_field: String = config_row.require("backfill_field")?;
     let base_timezone: String = config_row.require("base_timezone")?;
-    // 先留一份给日志/回执用（`BitableCoordinates` 会在下面把它们 move 走）。
-    let base_token = base_token.to_string();
-    let table_id = table_id.to_string();
 
     // ---- 字段映射 ----
     let map_rows = context
@@ -865,8 +1234,8 @@ async fn dispatch_single(
     };
 
     let coordinates = BitableCoordinates {
-        app_token: base_token.clone(),
-        table_id: table_id.clone(),
+        app_token: base_token,
+        table_id,
         view_id: None,
     };
 
@@ -897,7 +1266,10 @@ async fn dispatch_single(
             return Ok(DispatchOutcome::fail(
                 50201,
                 Some(config_id),
-                format!("读取表结构失败：{}", failure.message),
+                format!(
+                    "读取表结构失败：{}",
+                    approval_feedback::outbound_reason(&failure)
+                ),
             ));
         }
     };
@@ -970,7 +1342,10 @@ async fn dispatch_single(
             return Ok(DispatchOutcome::fail(
                 50201,
                 Some(config_id),
-                format!("读取记录失败：{}", failure.message),
+                format!(
+                    "读取记录失败：{}",
+                    approval_feedback::outbound_reason(&failure)
+                ),
             ));
         }
     };
@@ -989,6 +1364,7 @@ async fn dispatch_single(
         &outbound.tokens,
         &backfill,
         &OrchestrationInput {
+            fields: &fields,
             context: Some(context),
             coordinates: &coordinates,
             record_id,
@@ -1029,39 +1405,32 @@ async fn dispatch_single(
     )
     .await;
 
-    let outcome = outcome_for(&result);
-    let (accepted, message, serial_number) = result.response_parts();
-    Ok(DispatchOutcome::success(
-        outcome,
-        Some(config_id),
-        Some(base_token),
-        Some(table_id),
-        accepted,
-        message,
-        serial_number,
+    Ok(DispatchOutcome::from_single_result(
+        config_id,
+        result,
+        approval_feedback::record_summary(&fields, &cells),
     ))
 }
 
-/// 组一个扁平响应体。
-///
-/// 用 `ApiResponse::success` 的 `data` 通道而不是把结果塞进 `message`：工作流的
-/// `response_value` 只能引用**声明过的字段**，所以结果要落成具名字段（`accepted`
-/// / `serial_number`）才好引用，扁平结构最好声明。
+/// 顶层和 data 的正文同源，兼容旧字段。
 ///
 /// 失败（`accepted = false`）仍走 `success` 通道：这是**业务结果**不是接口错误，
 /// 工作流要能同时读到成败与原因。接口级错误（鉴权失败、坐标未配置）才用 `fail`。
 fn response(
     accepted: bool,
+    status: FeedbackStatus,
     message: String,
     serial_number: Option<String>,
 ) -> Result<ApiResponse, BaseError> {
     ApiResponse::success(
         DispatchResultBody {
             accepted,
-            message,
+            status,
+            message: message.clone(),
             serial_number,
+            notification: NotificationResult::not_requested(),
         },
-        "ok",
+        message,
     )
 }
 
@@ -1069,42 +1438,301 @@ fn response(
 mod tests {
     use super::*;
 
-    use crate::addon::feishu::domain::token::hash_token;
-    use yang_base::table::Record;
-
-    /// 构造一行带 `id` / `enabled` 的配置行（供 `check_config_auth` 用）。
-    fn config_row(id: i64, enabled: bool) -> Record {
-        let mut row = Record::new();
-        row.insert("id", serde_json::json!(id));
-        row.insert("base_token", serde_json::json!("appTestBase"));
-        row.insert("table_id", serde_json::json!("tblTest"));
-        row.insert("enabled", serde_json::json!(enabled));
-        row
-    }
-
-    /// 已签发 + 已启用的配置行（Token 正确）。
-    fn issued_config_row(plaintext_token: &str) -> Record {
-        let mut row = config_row(7, true);
-        row.insert("token_hash", serde_json::json!(hash_token(plaintext_token)));
-        row
-    }
-
-    /// 正常请求：`token` 必填（鉴权），其余可选。
-    fn valid_input() -> DispatchInput {
-        DispatchInput {
-            token: "issued-access-token".to_string(),
-            record_id: Some("rec001".to_string()),
-            requested_by: Some("测试触发人".to_string()),
-            applicant: None,
+    #[test]
+    fn feedback_links_preserve_confirmed_instance_and_named_locations() {
+        let input = valid_input();
+        for (result, instance, serial, status) in [
+            (
+                OrchestrationResult::Backfilled {
+                    instance_code: "INST-1".into(),
+                    serial_number: "SN-001".into(),
+                },
+                Some("INST-1"),
+                Some("SN-001"),
+                FeedbackStatus::Succeeded,
+            ),
+            (
+                OrchestrationResult::CreatedPendingBackfill {
+                    message: "回填失败".into(),
+                    instance_code: "INST-2".into(),
+                    serial_number: Some("SN-002".into()),
+                },
+                Some("INST-2"),
+                Some("SN-002"),
+                FeedbackStatus::CreatedPendingBackfill,
+            ),
+            (
+                OrchestrationResult::CreatedPendingBackfill {
+                    message: "编号待查".into(),
+                    instance_code: "INST-3".into(),
+                    serial_number: None,
+                },
+                Some("INST-3"),
+                None,
+                FeedbackStatus::CreatedPendingBackfill,
+            ),
+            (
+                OrchestrationResult::Waiting {
+                    reason: "请修正选项".into(),
+                },
+                None,
+                None,
+                FeedbackStatus::Waiting,
+            ),
+            (
+                OrchestrationResult::Terminal {
+                    message: "权限不足".into(),
+                },
+                None,
+                None,
+                FeedbackStatus::Failed,
+            ),
+            (
+                OrchestrationResult::Retryable {
+                    message: "详情未确认".into(),
+                },
+                None,
+                None,
+                FeedbackStatus::Retryable,
+            ),
+        ] {
+            let outcome = DispatchOutcome::from_single_result(7, result, Some("公司 A".into()));
+            assert_eq!(outcome.status, status);
+            assert_eq!(outcome.instance_code.as_deref(), instance);
+            assert_eq!(outcome.serial_number.as_deref(), serial);
+            assert_eq!(outcome.config_id, Some(7));
+            let references = feedback_references(
+                &input,
+                &outcome,
+                "财务协作",
+                "付款申请表",
+                "付款审批",
+                Some("https://tenant.feishu.cn/record/shared".into()),
+            );
+            assert_eq!(references.len(), 3);
+            assert_eq!(references[0].label, "多维表");
+            assert_eq!(references[0].text, "财务协作 / 付款申请表");
+            assert_eq!(
+                references[0].href.as_deref(),
+                Some("https://www.feishu.cn/base/appbcbWCzen6?table=tblsRc9GRRX")
+            );
+            assert_eq!(references[1].label, "原记录");
+            assert_eq!(references[1].text, "公司 A");
+            assert_eq!(
+                references[1].href.as_deref(),
+                Some("https://tenant.feishu.cn/record/shared")
+            );
+            assert_eq!(references[2].label, "审批");
+            if let Some(instance) = instance {
+                assert_eq!(
+                    references[2].text,
+                    format!("付款审批 / {}", serial.unwrap_or("编号待生成"))
+                );
+                let url = references[2]
+                    .href
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("已确认实例应有跳转"));
+                assert!(url.contains(&format!("instanceId%3D{instance}%26")));
+                assert!(url.contains("path_pc=") && url.contains("&path="));
+            } else {
+                assert_eq!(references[2].text, "付款审批");
+                assert!(
+                    references[2].href.is_none(),
+                    "未确认实例不能拿审批定义或 UUID 拼链接"
+                );
+            }
+            let data = outcome
+                .response
+                .unwrap_or_else(|e| panic!("{e}"))
+                .data
+                .unwrap_or_default();
+            let http_serial = if status == FeedbackStatus::Succeeded {
+                serial
+            } else {
+                None
+            };
+            assert_eq!(data["serial_number"].as_str(), http_serial);
+            assert_eq!(data.get("serial_number").is_some(), http_serial.is_some());
         }
     }
 
     #[test]
-    fn blank_token_is_rejected() {
-        // `token` 是**唯一**必填字段（鉴权凭据）；空串与「没给」一样必须被拒。
+    fn feedback_links_batch_and_unavailable_links_keep_readable_names() {
+        let outcome = DispatchOutcome::success(
+            Outcome::Accepted,
+            Some(7),
+            true,
+            FeedbackStatus::Accepted,
+            "已受理".into(),
+            None,
+        );
         let mut input = valid_input();
-        input.token = "   ".to_string();
-        assert!(input.validate().is_err(), "空 token 应被拒");
+        input.record_id = None;
+        let references =
+            feedback_references(&input, &outcome, "财务协作", "付款申请表", "付款审批", None);
+        assert_eq!(
+            references.len(),
+            2,
+            "批量只有触发表格及审批名称，没有单条实例"
+        );
+        assert_eq!(references[1].label, "审批");
+        assert_eq!(references[1].text, "付款审批");
+        assert!(references[1].href.is_none());
+        input.record_id = Some("rec001".into());
+        let references =
+            feedback_references(&input, &outcome, "财务协作", "付款申请表", "付款审批", None);
+        assert_eq!(references[1].text, "本次触发的记录（摘要暂不可用）");
+        assert!(references[1].href.is_none());
+        for (base, table) in [("../bad", "tblOk"), ("appOk", "bad?x=1"), ("appOk", "")] {
+            input.base_token = base.into();
+            input.table_id = Some(table.into());
+            assert!(feedback_references(
+                &input,
+                &outcome,
+                "财务协作",
+                "付款申请表",
+                "付款审批",
+                None
+            )[0]
+            .href
+            .is_none());
+        }
+        let mut outcome = outcome;
+        outcome.instance_code = Some("bad?redirect=evil".into());
+        assert!(
+            feedback_references(&input, &outcome, "财务协作", "付款申请表", "付款审批", None)[2]
+                .href
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn feedback_links_record_lookup_contract_and_degradation() {
+        let input = valid_input();
+        let url = "https://tenant.feishu.cn/record/shared?from=message";
+        for (record, expected) in [
+            (json!({"record_id":"rec001","record_url":url}), Some(url)),
+            (json!({"record_id":"recOther","record_url":url}), None),
+            (json!({"record_id":"rec001"}), None),
+            (
+                json!({"record_id":"rec001","record_url":"https://evil.example/record/x"}),
+                None,
+            ),
+        ] {
+            let transport =
+                ReplayTransport::new(vec![(200, e2e_ok_body(json!({"record":record})))]);
+            assert_eq!(
+                feedback_record_url(&transport, &NoSleep, &e2e_tokens(), &input)
+                    .await
+                    .as_deref(),
+                expected
+            );
+            let seen = transport.seen();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].method, "Get");
+            assert_eq!(seen[0].url, "https://open.feishu.cn/open-apis/bitable/v1/apps/appbcbWCzen6/tables/tblsRc9GRRX/records/rec001");
+            assert_eq!(
+                seen[0].query,
+                vec![
+                    ("with_shared_url".into(), "true".into()),
+                    ("automatic_fields".into(), "false".into())
+                ]
+            );
+            assert_eq!(seen[0].timeout_secs, Some(2));
+            assert!(seen[0].body.is_none());
+        }
+        let transport = ReplayTransport::new(vec![(
+            403,
+            json!({"code":99991672,"msg":"denied"}).to_string(),
+        )]);
+        assert!(
+            feedback_record_url(&transport, &NoSleep, &e2e_tokens(), &input)
+                .await
+                .is_none()
+        );
+        for (base, table, record) in [
+            ("bad/", "tblOk", "recOk"),
+            ("appOk", "bad/", "recOk"),
+            ("appOk", "tblOk", "bad/"),
+        ] {
+            let request = DispatchInput {
+                base_token: base.into(),
+                table_id: Some(table.into()),
+                record_id: Some(record.into()),
+                ..valid_input()
+            };
+            let transport = ReplayTransport::new(vec![]);
+            assert!(
+                feedback_record_url(&transport, &NoSleep, &e2e_tokens(), &request)
+                    .await
+                    .is_none()
+            );
+            assert!(transport.seen().is_empty(), "非法坐标不能出站");
+        }
+        let transport = ReplayTransport::new(vec![]);
+        let input = DispatchInput {
+            record_id: None,
+            ..valid_input()
+        };
+        assert!(
+            feedback_record_url(&transport, &NoSleep, &e2e_tokens(), &input)
+                .await
+                .is_none()
+        );
+        assert!(transport.seen().is_empty(), "批量受理不能查单条记录");
+    }
+
+    #[tokio::test]
+    async fn feedback_links_record_lookup_has_total_budget() {
+        struct Pending;
+        #[async_trait::async_trait]
+        impl OutboundTransport for Pending {
+            async fn send(&self, _: OutboundRequest) -> Result<OutboundResponse, BaseError> {
+                std::future::pending().await
+            }
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            feedback_record_url(&Pending, &NoSleep, &e2e_tokens(), &valid_input()),
+        )
+        .await;
+        assert!(matches!(result, Ok(None)), "链接补充不能无限阻塞结果通知");
+    }
+
+    /// 已配好配置的请求：三件套**全不给**（那是首次建配置才用的）。
+    fn valid_input() -> DispatchInput {
+        DispatchInput {
+            base_token: "appbcbWCzen6".to_string(),
+            table_id: Some("tblsRc9GRRX".to_string()),
+            record_id: Some("rec001".to_string()),
+            requested_by: Some("测试触发人".to_string()),
+            notification_recipient: None,
+            applicant: None,
+            approval_code: None,
+            applicant_field: None,
+            backfill_field: None,
+        }
+    }
+
+    /// 首次建配置的请求：三件套齐备。
+    fn first_call_input() -> DispatchInput {
+        DispatchInput {
+            approval_code: Some("CODE-TEST".to_string()),
+            applicant_field: Some("申请人".to_string()),
+            backfill_field: Some("审批编号".to_string()),
+            ..valid_input()
+        }
+    }
+
+    #[test]
+    fn blank_coordinates_are_rejected() {
+        let mut input = valid_input();
+        input.base_token = "   ".to_string();
+        assert!(input.validate().is_err());
+
+        let mut input = valid_input();
+        input.table_id = Some(String::new());
+        assert!(input.validate().is_err());
     }
 
     #[test]
@@ -1125,59 +1753,52 @@ mod tests {
         assert!(valid_input().validate().is_ok());
     }
 
-    /// 鉴权四类出口：未签发 / Token 不符 / 停用 / 通过。
-    ///
-    /// 这是本次契约改形的**核心不变量**——「先验 Token，再报停用」必须钉住：
-    /// Token 不符时一律返回 `TOKEN_MISMATCH`，不泄露「配置是否存在 / 是否停用」
-    /// 这类旁路信息。
     #[test]
-    fn check_config_auth_covers_all_four_exits_in_order() {
-        // (1) 未签发（token_hash 空 / NULL）：必须在 Token 校验**之前**判，
-        //     报「还没签发」而不是「Token 错了」。
-        let unissued = config_row(7, true);
-        let outcome = check_config_auth(&unissued, "any-token").unwrap_err();
-        assert!(
-            matches!(outcome.response, Ok(ref r) if r.code == TOKEN_NOT_ISSUED),
-            "未签发应报 TOKEN_NOT_ISSUED: {outcome:?}"
-        );
-
-        // (2) Token 不符：停用位为假，但**必须先**返回 TOKEN_MISMATCH 而不是
-        //     CONFIG_DISABLED——这就是「先验 Token 再报停用」的落点。
-        let wrong_token = issued_config_row("correct-token");
-        let outcome = check_config_auth(&wrong_token, "wrong-token").unwrap_err();
-        assert!(
-            matches!(outcome.response, Ok(ref r) if r.code == TOKEN_MISMATCH),
-            "Token 不符应报 TOKEN_MISMATCH（即使已停用）: {outcome:?}"
-        );
-
-        // (3) Token 对但已停用：报 CONFIG_DISABLED。
-        let disabled = issued_config_row("correct-token");
-        let mut disabled = disabled;
-        disabled.insert("enabled", serde_json::json!(false));
-        let outcome = check_config_auth(&disabled, "correct-token").unwrap_err();
-        assert!(
-            matches!(outcome.response, Ok(ref r) if r.code == CONFIG_DISABLED),
-            "Token 对但已停用应报 CONFIG_DISABLED: {outcome:?}"
-        );
-
-        // (4) Token 对且启用：通过，返回 (config_id, base_token, table_id)。
-        let ok = issued_config_row("correct-token");
-        let (config_id, base_token, table_id) = check_config_auth(&ok, "correct-token")
-            .unwrap_or_else(|outcome| panic!("应通过: {outcome:?}"));
-        assert_eq!(
-            (config_id, base_token.as_str(), table_id.as_str()),
-            (7, "appTestBase", "tblTest")
-        );
+    fn complete_bitable_link_can_replace_the_separate_coordinates() {
+        let mut input = valid_input();
+        input.base_token =
+            "https://another-host/base/appbcbWCzen6?table=tblsRc9GRRX&view=vewA".to_string();
+        input.table_id = Some(String::new());
+        assert!(input.validate().is_ok());
+        input
+            .normalize_coordinates()
+            .unwrap_or_else(|error| panic!("完整链接应解析成功: {error}"));
+        assert_eq!(input.base_token, "appbcbWCzen6");
+        assert_eq!(input.table_id.as_deref(), Some("tblsRc9GRRX"));
     }
 
     #[test]
-    fn blank_config_key_is_rejected_before_db() {
-        // 空 key 必须在查库之前被拒（`validate_config_key` 的注释）。
-        assert!(validate_config_key("   ").is_err(), "空 key 应被拒");
+    fn provision_fields_are_all_or_nothing() {
+        // 半套（只给 approval_code）最危险：配置建了却没回填列，于是**校验失败也
+        // 报不进多维表格**——报错只能回到 HTTP 响应里，而页面按钮拿不到它。
+        let mut input = first_call_input();
+        input.applicant_field = None;
+        assert!(input.validate().is_err(), "只给 approval_code 应被拒");
+
+        let mut input = first_call_input();
+        input.backfill_field = None;
         assert!(
-            validate_config_key("  ok  ").is_ok(),
-            "两侧空白 trim 后应通过"
+            input.validate().is_err(),
+            "只给 approval_code + applicant 应被拒"
         );
+
+        // 三件套齐备 → 合法。
+        assert!(first_call_input().validate().is_ok());
+        // 全不给也合法（那是「配置已存在」的常态），且**不算**给了三件套。
+        assert!(valid_input().validate().is_ok());
+        assert!(
+            !valid_input().has_provision_fields(),
+            "三件套全 None 时不能算「已给出」——那正是老配置的常态"
+        );
+        assert!(first_call_input().has_provision_fields());
+    }
+
+    #[test]
+    fn blank_provision_field_is_rejected() {
+        // 空串与「没给」不同：给了空串是调用方的 bug，要指出来而不是当作没给。
+        let mut input = first_call_input();
+        input.approval_code = Some("  ".to_string());
+        assert!(input.validate().is_err(), "空 approval_code 应被拒");
     }
 
     #[test]
@@ -1209,10 +1830,29 @@ mod tests {
     }
 
     #[test]
+    fn response_message_is_readable_and_shared_with_data() {
+        let result = response(
+            true,
+            FeedbackStatus::Waiting,
+            "本轮未创建审批，需要补齐数据\n原因：缺少申请人".into(),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let data = result
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("缺少结果正文"));
+        assert_eq!(result.message, data["message"].as_str().unwrap_or_default());
+        assert_eq!(data["status"], "waiting");
+    }
+
+    #[test]
     fn result_body_is_flat_for_workflow_reference() {
-        // 工作流 response_value 只能引用声明过的字段，嵌套结构取不到。
+        // 保留原有字段，额外的通知结果独立成对象。
         let body = DispatchResultBody {
             accepted: true,
+            status: FeedbackStatus::Succeeded,
+            notification: NotificationResult::not_requested(),
             message: "ok".to_string(),
             serial_number: Some("202609280001".to_string()),
         };
@@ -1222,7 +1862,10 @@ mod tests {
         assert!(object.contains_key("message"));
         assert!(object.contains_key("serial_number"));
         // 所有值都是标量，没有嵌套对象/数组。
-        for (key, value) in object {
+        for (key, value) in object
+            .iter()
+            .filter(|(key, _)| key.as_str() != "notification")
+        {
             assert!(
                 !value.is_object() && !value.is_array(),
                 "字段 {key} 是嵌套结构，工作流引用不到"
@@ -1235,6 +1878,8 @@ mod tests {
         // 全表受理的响应没有编号；省略而不是给 null，让工作流的字段声明更简单。
         let body = DispatchResultBody {
             accepted: true,
+            status: FeedbackStatus::Accepted,
+            notification: NotificationResult::not_requested(),
             message: "已受理".to_string(),
             serial_number: None,
         };
@@ -1251,8 +1896,13 @@ mod tests {
         // 工作流会按 accepted 分支把失败当成功、Retryable 依赖 accepted 的重试不触发。
         // `response` 的 accepted 必须由调用方透传——失败（Terminal/Retryable）为 false，
         // 等待与受理（Waiting/批量）为 true。
-        let failed = response(false, "暂时失败，可重试：飞书服务错误".to_string(), None)
-            .unwrap_or_else(|error| panic!("应可构造: {error}"));
+        let failed = response(
+            false,
+            FeedbackStatus::Retryable,
+            "暂时失败，可重试：飞书服务错误".to_string(),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("应可构造: {error}"));
         let failed_data = failed
             .data
             .as_ref()
@@ -1266,8 +1916,13 @@ mod tests {
             "失败出口 accepted 必须为 false"
         );
 
-        let waiting = response(true, "本轮未处理：缺少必填字段".to_string(), None)
-            .unwrap_or_else(|error| panic!("应可构造: {error}"));
+        let waiting = response(
+            true,
+            FeedbackStatus::Waiting,
+            "本轮未处理：缺少必填字段".to_string(),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("应可构造: {error}"));
         let waiting_data = waiting
             .data
             .as_ref()
@@ -1289,9 +1944,8 @@ mod tests {
         let outcome = DispatchOutcome::success(
             Outcome::Failed,
             Some(1),
-            None,
-            None,
             false,
+            FeedbackStatus::Failed,
             "失败".to_string(),
             None,
         );
@@ -1382,6 +2036,65 @@ mod tests {
     }
 
     #[test]
+    fn applicant_token_errors_are_actionable_without_raw_details() {
+        let raw = "private-token-and-database-details";
+        for (error, hint, code) in [
+            (UserTokenError::NotAuthorized, "去授权", None),
+            (
+                UserTokenError::ReauthRequired {
+                    code: 20064,
+                    message: raw.into(),
+                },
+                "重新授权",
+                Some("20064"),
+            ),
+            (
+                UserTokenError::Failed {
+                    message: raw.into(),
+                },
+                "稍后重试",
+                None,
+            ),
+        ] {
+            let message = applicant_token_failure_message(&error);
+            assert!(message.starts_with("发起人姓名解析失败："), "{message}");
+            assert!(message.contains(hint), "{message}");
+            if let Some(code) = code {
+                assert!(message.contains(code), "{message}");
+            }
+            assert!(!message.contains(raw), "{message}");
+        }
+    }
+
+    #[test]
+    fn applicant_search_errors_are_actionable_without_raw_details() {
+        let raw = "private-feishu-response-and-token";
+        for (code, hint) in [
+            (99991672, "通讯录权限未开通"),
+            (99991679, "用户授权缺少通讯录权限"),
+            (99991668, "重新授权"),
+            (99991671, "重新授权"),
+            (123456, "核对配置和权限"),
+        ] {
+            let message = applicant_failure_message(&OutboundFailure {
+                kind: FailureKind::Fatal { code },
+                message: raw.into(),
+            });
+            assert!(message.contains(hint), "{message}");
+            assert!(message.contains(&code.to_string()), "{message}");
+            assert!(!message.contains(raw), "{message}");
+        }
+        let message = applicant_failure_message(&OutboundFailure {
+            kind: FailureKind::Retry {
+                retry_after_seconds: None,
+            },
+            message: raw.into(),
+        });
+        assert!(message.contains("稍后重试"), "{message}");
+        assert!(!message.contains(raw), "{message}");
+    }
+
+    #[test]
     fn blank_or_absent_applicant_is_normalized_away() {
         // 未传 / trim 后为空 → None（编排层回退读表格列）。这是「空白姓名不打任何
         // 请求」的落点：`resolve_optional_applicant` 在这一步就返回，取凭证与出站
@@ -1450,6 +2163,8 @@ mod tests {
         method: String,
         url: String,
         body: Option<Value>,
+        query: Vec<(String, String)>,
+        timeout_secs: Option<u64>,
     }
 
     /// 回放式传输：按脚本依次吐响应，并把每个请求原样记下来。
@@ -1499,6 +2214,8 @@ mod tests {
                     method: format!("{:?}", request.method),
                     url: request.url.clone(),
                     body: request.json_body.clone(),
+                    query: request.query.clone(),
+                    timeout_secs: request.timeout_secs,
                 });
             }
             let mut script = self
@@ -1654,13 +2371,6 @@ mod tests {
             repository(crate::addon::feishu::approval::domain::request_log_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::task_applicant_table::table_spec()),
             repository(crate::addon::feishu::approval::domain::user_token_table::table_spec()),
-            repository(crate::addon::feishu::portal::table::table_spec()),
-            repository(crate::addon::feishu::portal::domain::log_table::table_spec()),
-            repository(crate::addon::feishu::approval::domain::event_table::table_spec()),
-            Arc::new(
-                yang_base::action::auth::PasswordEngine::new(1)
-                    .unwrap_or_else(|e| panic!("PasswordEngine 应可构造: {e}")),
-            ),
             None,
         )
     }
@@ -1733,6 +2443,7 @@ mod tests {
             &snapshot,
             &mut widgets,
             &serde_json::Map::new(),
+            &[],
         )
         .await;
         assert!(
@@ -1744,6 +2455,7 @@ mod tests {
             &snapshot,
             &mut [],
             &serde_json::Map::new(),
+            &[],
         )
         .await;
         assert!(omitted.is_ok(), "未映射的可选外部控件不应查库: {omitted:?}");
@@ -1807,7 +2519,7 @@ mod tests {
             let snapshot = json!([{"id":"detail","type":"fieldList","children":[{"id":"linked","name":name,"type":"radioV2","externalData":{"externalDataLinkage":true}}]}]).to_string();
             let mut widgets = vec![WidgetMap { widget_id: "linked".into(), widget_type: "radioV2".into(), bitable_field: "fldRegression".into(), required: true, converter: Converter::Option, option_map: Default::default(), option_source_key: None, currency: None }];
             let mut cells = serde_json::Map::from_iter([("fldRegression".into(), json!("正确")), ("fldApplicant".into(), json!([{"id":E2E_APPLICANT_OPEN_ID}]))]);
-            resolve_external_options(&context, &snapshot, &mut widgets, &cells).await?;
+            resolve_external_options(&context, &snapshot, &mut widgets, &cells, &[]).await?;
             assert_eq!(widgets[0].option_map, std::collections::BTreeMap::from([("正确".into(), format!("{source}_good"))]));
 
             // 三处名称都不同，手选来源必须贯穿建计划、真实落库与派发读取。
@@ -1817,15 +2529,48 @@ mod tests {
             ]))?;
             let transport = ReplayTransport::new(vec![(200, e2e_fields_body()), (200, e2e_definition_body(&form))]);
             let tokens = e2e_tokens();
-            let plan = build_plan(&transport, &NoSleep, &tokens, &context, &ProvisionInput {
+            let provision_input = ProvisionInput {
                 base_token: &source, table_id: E2E_TABLE_ID, approval_code: E2E_APPROVAL_CODE,
                 applicant_field: "fldApplicant", backfill_field: "fldSerial", base_timezone: "Asia/Shanghai", maps: Some(&maps),
                 status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None,
-            }).await?;
+            };
+            let plan = build_plan(&transport, &NoSleep, &tokens, &context, &provision_input).await?;
             let mut transaction = database.transaction().await?;
             let config_id = insert_plan(&context, &mut transaction, &plan).await?;
             transaction.commit().await?;
             saved_config_id = Some(config_id);
+            // 模拟派发完成后配置已变动；通知必须再次按 ID、坐标和启用状态核对。
+            let ctx = ActionContext::new(yang_base::action::Request::default(), Arc::new(yang_base::tools::ToolsBuilder::new().build()?));
+            let feedback_input = super::DispatchInput {
+                base_token: source.clone(), table_id: Some(E2E_TABLE_ID.into()),
+                notification_recipient: Some(NotificationRecipient {
+                    receive_id_type: crate::addon::feishu::domain::approval_notification::ReceiveIdType::Email,
+                    receive_id: "initiator@example.com".into(),
+                }), ..valid_input()
+            };
+            for (id, base, table, expected) in [
+                (Some(config_id), source.as_str(), E2E_TABLE_ID, "failed"),
+                (Some(config_id + 1000000), source.as_str(), E2E_TABLE_ID, "skipped"),
+                (Some(config_id), "appWrong", E2E_TABLE_ID, "skipped"),
+                (Some(config_id), source.as_str(), "tblWrong", "skipped"),
+                (None, source.as_str(), E2E_TABLE_ID, "skipped"),
+            ] {
+                let request = super::DispatchInput { base_token: base.into(), table_id: Some(table.into()), notification_recipient: feedback_input.notification_recipient.clone(), ..valid_input() };
+                let mut result = DispatchOutcome::success(Outcome::Accepted, id, true, FeedbackStatus::Accepted, "已受理".into(), None);
+                complete_feedback(&ctx, &context, &request, &mut result).await;
+                let response = result.response?;
+                let data = response.data.ok_or_else(|| anyhow::anyhow!("缺少反馈"))?;
+                assert_eq!(data["notification"]["status"], expected);
+                assert_eq!(data["message"], response.message);
+                assert_eq!(data["status"], "accepted", "通知核对不改变原派发结论");
+            }
+            context.approval_configs().query().where_eq("id", json!(config_id))?
+                .update(yang_base::table::Record::new().set("enabled", false)).await?;
+            let mut result = DispatchOutcome::success(Outcome::Accepted, Some(config_id), true, FeedbackStatus::Accepted, "已受理".into(), None);
+            complete_feedback(&ctx, &context, &feedback_input, &mut result).await;
+            assert_eq!(result.response?.data.ok_or_else(|| anyhow::anyhow!("缺少反馈"))?["notification"]["status"], "skipped");
+            context.approval_configs().query().where_eq("id", json!(config_id))?
+                .update(yang_base::table::Record::new().set("enabled", true)).await?;
             let rows = context.approval_field_maps().query().where_eq("config_id", json!(config_id))?.all().await?;
             let rows: Vec<_> = rows.into_iter().map(yang_base::table::Record::into_map).collect();
             widgets = widget_maps_from_rows(&rows, |_| None).ok_or_else(|| anyhow::anyhow!("保存的映射无法恢复"))?;
@@ -1833,11 +2578,11 @@ mod tests {
             context.datasource_fields().query().where_eq("source_key", json!(source))?
                 .update(yang_base::table::Record::new().set("field_name", "")).await?;
             cells.insert("fldCompany".into(), json!("正确"));
-            resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells).await?;
+            resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells, &[]).await?;
             assert_eq!(widgets[0].option_map.get("正确"), Some(&format!("{source}_good")));
             let mut unnamed = form.clone();
             unnamed[0]["children"][0]["name"] = json!("");
-            resolve_external_options(&context, &unnamed.to_string(), &mut widgets, &cells).await?;
+            resolve_external_options(&context, &unnamed.to_string(), &mut widgets, &cells, &[]).await?;
             let coordinates = e2e_coordinates();
             let fields: Value = serde_json::from_str(&e2e_fields_body())?;
             let fields: Vec<bitable::FieldItem> =
@@ -1851,7 +2596,7 @@ mod tests {
                 ] } else { vec![] });
                 let tokens = e2e_tokens();
                 let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &fields };
-                let input = DispatchInput { context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: None, backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
+                let input = DispatchInput { fields: &fields, context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: None, backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
                 let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
                 if label == "正确" {
                     assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into(), instance_code: "INST-MANUAL".into() });
@@ -1860,19 +2605,33 @@ mod tests {
                     let sent: Value = serde_json::from_str(body["form"].as_str().ok_or_else(|| anyhow::anyhow!("缺少表单"))?)?;
                     assert_eq!(sent[0]["value"][0][0]["value"], json!(format!("{source}_good")));
                 } else {
-                    assert!(matches!(result, DispatchResult::Waiting { .. }), "{result:?}");
+                    let DispatchResult::Waiting { reason } = result else { panic!("应等待修正选项：{result:?}"); };
+                    for text in ["明细 / 付款公司名称/Company name", "付款公司名称/Company name", &name, label, "source_key="] {
+                        assert!(reason.contains(text), "缺少 {text}：{reason}");
+                    }
                     assert!(transport.seen().is_empty(), "等待态不得创建或回填");
                 }
             }
             cells.insert("fldCompany".into(), json!("正确"));
+            context.options().query().where_eq("source_key", json!(source))?
+                .update(yang_base::table::Record::new().set("enabled", false)).await?;
+            let transport = ReplayTransport::new(vec![(200, e2e_fields_body()), (200, e2e_definition_body(&form))]);
+            let error = build_plan(&transport, &NoSleep, &tokens, &context, &provision_input).await.err()
+                .ok_or_else(|| anyhow::anyhow!("无启用选项时建配置必须拒绝"))?;
+            assert!(error.to_string().contains(&name) && error.to_string().contains("没有启用选项"), "无选项的来源也必须有真实名称：{error}");
             context.datasource_fields().query().where_eq("source_key", json!(source))?
                 .update(yang_base::table::Record::new().set("enabled", false)).await?;
-            assert!(resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells).await.is_err());
+            let error = resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells, &fields).await.err().ok_or_else(|| anyhow::anyhow!("停用来源必须拒绝"))?;
+            assert!(error.to_string().contains(&name), "停用字段来源也必须有真实数据源名称：{error}");
             context.datasource_fields().query().where_eq("source_key", json!(source))?
                 .update(yang_base::table::Record::new().set("enabled", true)).await?;
             context.datasources().query().where_eq("id", json!(datasource_id))?
                 .update(yang_base::table::Record::new().set("status", "disabled")).await?;
-            assert!(resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells).await.is_err());
+            let error = resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells, &fields).await.err().ok_or_else(|| anyhow::anyhow!("停用数据源必须拒绝"))?;
+            assert!(error.to_string().contains(&name), "停用数据源也必须有真实名称：{error}");
+            widgets[0].option_source_key = Some(format!("{source}_missing"));
+            let error = resolve_external_options(&context, &plan.form_snapshot, &mut widgets, &cells, &fields).await.err().ok_or_else(|| anyhow::anyhow!("不存在来源必须拒绝"))?;
+            assert!(error.to_string().contains("名称暂不可用"), "未知来源必须说明名称不可用：{error}");
             Ok(())
         }.await;
         // tenant-boundary: raw-sql attachment-option-regression-cleanup
@@ -2142,6 +2901,7 @@ mod tests {
             &tokens,
             &backfill,
             &OrchestrationInput {
+                fields: &fields,
                 context: Some(&context),
                 coordinates: &coordinates,
                 record_id: E2E_RECORD_ID,
