@@ -1,0 +1,60 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "comments": [],
+    "current_nodes": [
+      {
+        "approvers": [
+          {
+            "task_id": "7691211560270334926",
+            "user_id": "ou_aad06cf4f5c2c081cf273829cb9d080d"
+          }
+        ],
+        "node_id": "181e3b2bd8ebf2ae9cf3c3be50af4447",
+        "node_name": "审批",
+        "type": "AND"
+      }
+    ],
+    "definition_code": "D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E",
+    "definition_name": "技术测试专用",
+    "department_id": "od-e2ebe89e1e313c2a3bf5fc064bfa6f4c",
+    "end_time": "0",
+    "form": "[{\"id\":\"widget17906688598360001\",\"name\":\"归属银行\",\"type\":\"radioV2\",\"ext\":null,\"value\":\"赣州银行股份有限公司\",\"option\":{\"key\":\"col_3:8e31c2e9055c\",\"text\":\"赣州银行股份有限公司\"}},{\"id\":\"widget17906732210030001\",\"name\":\"开户行行名\",\"type\":\"radioV2\",\"ext\":null,\"value\":\"赣州银行股份有限公司南康横市支行\",\"option\":{\"key\":\"col_2:a6ccef054be7\",\"text\":\"赣州银行股份有限公司南康横市支行\"}},{\"id\":\"widget17906733108350001\",\"name\":\"联行号\",\"type\":\"radioV2\",\"ext\":null,\"value\":\"313428350502\",\"option\":{\"key\":\"col_5:7a2ed0503d65\",\"text\":\"313428350502\"}},{\"id\":\"widget17907371746810001\",\"name\":\"办公地点(Office location)\",\"type\":\"radioV2\",\"ext\":null,\"value\":\"成都\",\"option\":{\"key\":\"fldeysrdna:d22258711825\",\"text\":\"成都\"}},{\"id\":\"widget17907373624970001\",\"name\":\"付款公司名称/Company name\",\"type\":\"radioV2\",\"ext\":null,\"value\":\"成都市易威行科技有限公司\",\"option\":{\"key\":\"fldq7lcb6y:dc6b027d9457\",\"text\":\"成都市易威行科技有限公司\"}}]",
+    "instance_code": "A56D1D1F-FBAA-45C7-B51B-4CC06D34B86C",
+    "operation_records": [
+      {
+        "cc_user_ids": [],
+        "create_time": "1790750737897",
+        "files": [],
+        "type": "START",
+        "user_id": "ou_aad06cf4f5c2c081cf273829cb9d080d"
+      }
+    ],
+    "reverted": false,
+    "serial_number": "202609300085",
+    "start_time": "1790750737897",
+    "status": "PENDING",
+    "tasks": [
+      {
+        "end_time": "0",
+        "id": "7691211560270334926",
+        "node_id": "181e3b2bd8ebf2ae9cf3c3be50af4447",
+        "node_name": "审批",
+        "start_time": "1790750738185",
+        "status": "PENDING",
+        "type": "AND",
+        "user_id": "ou_aad06cf4f5c2c081cf273829cb9d080d"
+      }
+    ],
+    "user_id": "ou_aad06cf4f5c2c081cf273829cb9d080d"
+  },
+  "_notice": {
+    "update": {
+      "command": "lark-cli update",
+      "current": "1.0.96",
+      "latest": "1.0.97",
+      "message": "lark-cli 1.0.97 available, current 1.0.96, run: lark-cli update"
+    }
+  }
+}

@@ -61,6 +61,12 @@ pub(super) struct CreatePortalInput {
     /// 每分钟最大查询次数；缺省 30，上限 120。
     #[serde(default)]
     pub(super) rate_limit_per_min: Option<u32>,
+    /// 是否启用模糊匹配；缺省 true。
+    #[serde(default)]
+    pub(super) fuzzy_enabled: Option<bool>,
+    /// 触发模糊匹配所需的最少连续数字位数；缺省 4。
+    #[serde(default)]
+    pub(super) fuzzy_min_digits: Option<u32>,
 }
 
 impl ParamInput for CreatePortalInput {
@@ -166,6 +172,14 @@ impl CreatePortalInput {
                 return Err(BaseError::ParamInvalid(
                     "rate_limit_per_min".to_string(),
                     format!("限速必须在 {RATE_LIMIT_MIN}..={RATE_LIMIT_MAX} 次/分钟"),
+                ));
+            }
+        }
+        if let Some(digits) = self.fuzzy_min_digits {
+            if !(2..=16).contains(&digits) {
+                return Err(BaseError::ParamInvalid(
+                    "fuzzy_min_digits".to_string(),
+                    "模糊匹配最低位数必须在 2..=16".to_string(),
                 ));
             }
         }
@@ -309,6 +323,14 @@ pub(super) async fn handle(
             "rate_limit_per_min",
             serde_json::json!(i64::from(input.rate_limit())),
         );
+        row.insert(
+            "fuzzy_enabled",
+            serde_json::json!(input.fuzzy_enabled.unwrap_or(true)),
+        );
+        row.insert(
+            "fuzzy_min_digits",
+            serde_json::json!(i64::from(input.fuzzy_min_digits.unwrap_or(4))),
+        );
         row.insert("enabled", serde_json::json!(true));
         for (column, value) in [
             ("passphrase_hash", passphrase_hash.as_deref()),
@@ -391,6 +413,8 @@ mod tests {
             result_labels: None,
             empty_message: None,
             rate_limit_per_min: None,
+            fuzzy_enabled: None,
+            fuzzy_min_digits: None,
         }
     }
 
@@ -467,6 +491,20 @@ mod tests {
             let mut input = input();
             input.rate_limit_per_min = Some(rate);
             assert!(input.validate().is_ok(), "限速 {rate} 应被接受");
+        }
+    }
+
+    #[test]
+    fn rejects_an_out_of_range_fuzzy_min_digits() {
+        for digits in [0u32, 1, 17, 100] {
+            let mut input = input();
+            input.fuzzy_min_digits = Some(digits);
+            assert!(input.validate().is_err(), "位数 {digits} 应被拒");
+        }
+        for digits in [2u32, 4, 16] {
+            let mut input = input();
+            input.fuzzy_min_digits = Some(digits);
+            assert!(input.validate().is_ok(), "位数 {digits} 应被接受");
         }
     }
 

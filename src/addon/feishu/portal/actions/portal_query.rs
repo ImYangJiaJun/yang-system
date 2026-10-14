@@ -45,6 +45,8 @@ const PORTAL_COLUMNS: &[&str] = &[
     "result_labels",
     "empty_message",
     "rate_limit_per_min",
+    "fuzzy_enabled",
+    "fuzzy_min_digits",
     "enabled",
 ];
 
@@ -258,6 +260,23 @@ pub(super) async fn handle(
         .all()
         .await?;
 
+    // 精确匹配落空时退一步做模糊匹配：用户敲入 ≥min_digits 位连续数字就当成在找卡号。
+    // 命中的行要明说是模糊结果，否则用户会把「前几位相同」误当成精确命中。
+    let fuzzy_enabled = portal.optional::<bool>("fuzzy_enabled")?.unwrap_or(true);
+    let fuzzy_min_digits = portal.optional::<i64>("fuzzy_min_digits")?.unwrap_or(4) as usize;
+    let (matched, fuzzy_message) = if matched.is_empty() && fuzzy_enabled {
+        let fuzzy =
+            fuzzy_match(&context, &query_source_key, &input.value, fuzzy_min_digits).await?;
+        if fuzzy.is_empty() {
+            (fuzzy, String::new())
+        } else {
+            let count = fuzzy.len();
+            (fuzzy, format!("模糊匹配到 {count} 条结果"))
+        }
+    } else {
+        (matched, String::new())
+    };
+
     // 第二步：按命中行的 `option_id` 反查开放列子行，合并成多列结果。
     let children = load_child_values(&context, &matched, &columns).await?;
     let rows = project_rows(&matched, &children, &columns)?;
@@ -280,11 +299,11 @@ pub(super) async fn handle(
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_EMPTY_MESSAGE.to_string())
     } else if rows.len() == MATCH_LIMIT {
-        // 精确匹配返回满页只可能是查询值本身不唯一（如同一卡号多行），
+        // 匹配返回满页只可能是查询值本身不唯一（如同一卡号多行）或模糊粗筛被截断，
         // 这时必须明说被截断了，否则用户会以为看到的就是全部。
         format!("匹配结果超过 {MATCH_LIMIT} 条，仅显示前 {MATCH_LIMIT} 条")
     } else {
-        String::new()
+        fuzzy_message
     };
 
     Ok(ApiResponse::success_value(
@@ -572,6 +591,89 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// 模糊匹配：输入含 ≥`min_digits` 位连续数字时，用前 `min_digits` 位数字做 LIKE 粗筛，
+/// 再在 Rust 里精筛。
+///
+/// 返回命中的行；输入凑不出 ≥`min_digits` 位连续数字（不够像卡号）时返回空，不触发模糊。
+async fn fuzzy_match(
+    context: &FeishuContext,
+    query_source_key: &str,
+    value: &str,
+    min_digits: usize,
+) -> Result<Vec<Record>, BaseError> {
+    let Some(like_key) = fuzzy_like_key(value, min_digits) else {
+        return Ok(Vec::new());
+    };
+    let input_digits = extract_digits(value);
+
+    let candidates = context
+        .options()
+        .query()
+        .select_fields(&["option_id", "source_key", "label"])?
+        .where_eq("source_key", serde_json::json!(query_source_key))?
+        .where_contains("label", &like_key)?
+        .where_eq("enabled", serde_json::json!(true))?
+        .page(1, MATCH_LIMIT)?
+        .all()
+        .await?;
+    Ok(fuzzy_filter_candidates(&candidates, &input_digits))
+}
+
+/// 提取字符串里的全部 ASCII 数字，按出现顺序拼接。
+fn extract_digits(input: &str) -> String {
+    input.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// 找到输入里第一段长度 ≥ `min_len` 的连续 ASCII 数字。
+fn first_digit_run(input: &str, min_len: usize) -> Option<String> {
+    let mut run = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_digit() {
+            run.push(ch);
+        } else {
+            if run.len() >= min_len {
+                return Some(run);
+            }
+            run.clear();
+        }
+    }
+    (run.len() >= min_len).then_some(run)
+}
+
+/// 模糊匹配的 LIKE 粗筛关键词：输入里第一段 ≥`min_digits` 位的连续数字，只取前 4 位。
+///
+/// 只取 4 位是因为库里卡号按 4 位分组（`"4514 6175 ..."`）——整段数字在存储里
+/// 并不连续，`LIKE '%45146175%'` 反而落空；只有落在单个分组内的 4 位数字能命中。
+/// 用户整段粘贴（`"4514617593174990"`）与分段输入（`"6175 9317"`）都因此能粗筛到。
+///
+/// `min_digits` 只决定**触发门槛**（不够长就不模糊），不改变粗筛取的位数。
+///
+/// ponytail: 粗筛固定取 4 位、且只取第一页 `MATCH_LIMIT` 条候选——若上百张卡共享
+/// 同一 4 位前缀，真命中有可能落在被截断的候选之外。卡号 4 位前缀撞车到这个量级
+/// 才会失手；真出现时再按 `option_id` 分页扫全量候选。
+fn fuzzy_like_key(value: &str, min_digits: usize) -> Option<String> {
+    first_digit_run(value, min_digits).map(|run| run.chars().take(4).collect())
+}
+
+/// 精筛：候选项去掉非数字后，必须包含输入的全部数字。
+///
+/// 这样 `"4514 6175 9317 4990"` 与 `"4514617593174990"` 视为同一卡号，输入只给
+/// 中间一段（`"61759317"`）也能命中。
+fn fuzzy_filter_candidates(candidates: &[Record], input_digits: &str) -> Vec<Record> {
+    candidates
+        .iter()
+        .filter(|record| {
+            let label: String = record
+                .optional::<String>("label")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            extract_digits(&label).contains(input_digits)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,5 +810,65 @@ mod tests {
             ROUTE.contains(&format!("{{{SLUG_PARAM}}}")),
             "路由必须带 {{{SLUG_PARAM}}} 路径参数，实际是 {ROUTE}"
         );
+    }
+
+    #[test]
+    fn extract_digits_keeps_only_ascii_digits() {
+        assert_eq!(extract_digits("4514 6175-9317"), "451461759317");
+        assert_eq!(extract_digits("卡号：4514"), "4514");
+        assert_eq!(extract_digits("没有数字"), "");
+    }
+
+    #[test]
+    fn first_digit_run_finds_the_first_run_of_enough_digits() {
+        assert_eq!(
+            first_digit_run("abc45146175def", 4).as_deref(),
+            Some("45146175")
+        );
+        // 前面那段不足 4 位，跳过它，取后面那段。
+        assert_eq!(first_digit_run("12 34567", 4).as_deref(), Some("34567"));
+        // 收尾的连续段也要能取到（循环结束后的兜底分支）。
+        assert_eq!(first_digit_run("ab1234", 4).as_deref(), Some("1234"));
+        // 没有任何 ≥4 位的连续数字段。
+        assert_eq!(first_digit_run("12 34 56", 4), None);
+    }
+
+    #[test]
+    fn fuzzy_like_key_takes_four_digits_so_spaced_labels_still_match() {
+        // 整段 16 位在库里带空格，LIKE 只能取前 4 位，否则 %45146175% 反而落空。
+        assert_eq!(
+            fuzzy_like_key("4514617593174990", 4).as_deref(),
+            Some("4514")
+        );
+        assert_eq!(fuzzy_like_key("6175 9317", 4).as_deref(), Some("6175"));
+        assert_eq!(fuzzy_like_key("abc45146175def", 4).as_deref(), Some("4514"));
+        // 不足 4 位连续数字：不触发模糊。
+        assert_eq!(fuzzy_like_key("123", 4), None);
+        assert_eq!(fuzzy_like_key("12 34", 4), None);
+    }
+
+    #[test]
+    fn fuzzy_like_key_honours_a_custom_min_digits_threshold() {
+        // 门槛只决定触不触发，不改变粗筛取的位数（仍是前 4 位）。
+        assert_eq!(fuzzy_like_key("12345", 6), None);
+        assert_eq!(fuzzy_like_key("123456", 6).as_deref(), Some("1234"));
+    }
+
+    #[test]
+    fn fuzzy_filter_ignores_spaces_and_matches_on_digit_substrings() {
+        let candidates = vec![
+            matched_card("card:a", "4514 6175 9317 4990"),
+            matched_card("card:b", "9999 8888 7777 6666"),
+        ];
+
+        // 整段粘贴（无空格）应命中带空格的库值。
+        let hits = fuzzy_filter_candidates(&candidates, "4514617593174990");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].require::<String>("option_id").unwrap_or_else(|error| panic!("option_id must be present: {error}")), "card:a");
+
+        // 只给中间一段，去掉非数字后包含即可命中。
+        assert_eq!(fuzzy_filter_candidates(&candidates, "61759317").len(), 1);
+        // 数字对不上：不命中。
+        assert!(fuzzy_filter_candidates(&candidates, "1234").is_empty());
     }
 }

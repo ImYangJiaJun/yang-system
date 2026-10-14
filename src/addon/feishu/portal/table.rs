@@ -117,6 +117,17 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     .title("每分钟限速")
                     .require(true)
                     .default(30),
+                // 是否启用模糊匹配。关闭后只做精确匹配；开启后精确匹配落空时退到模糊匹配。
+                fuzzy_enabled => Switch::new()
+                    .title("模糊匹配")
+                    .require(true)
+                    .default(true),
+                // 触发模糊匹配所需的最少连续数字位数。输入中必须出现至少这么长的一段连续 ASCII
+                // 数字才会触发模糊查询；不够长时只走精确匹配。
+                fuzzy_min_digits => Int::new()
+                    .title("模糊匹配最低位数")
+                    .require(true)
+                    .default(4),
                 // 启用/停用。停用后门户 URL 返回 404，但配置与日志保留。
                 enabled => Switch::new()
                     .title("启用")
@@ -294,6 +305,28 @@ mod tests {
             rate_limit.default_value(),
             Some(&serde_json::json!(30)),
             "rate_limit_per_min 应默认 30"
+        );
+    }
+
+    #[test]
+    fn fuzzy_columns_are_defaulted() {
+        // 存量行加列必须带默认值，否则 schema_sync 门禁启动即失败。
+        let definition = definition();
+        let fuzzy_enabled = definition
+            .field("fuzzy_enabled")
+            .unwrap_or_else(|| panic!("fuzzy_enabled 字段必须存在"));
+        assert_eq!(
+            fuzzy_enabled.default_value(),
+            Some(&serde_json::json!(true)),
+            "fuzzy_enabled 应默认 true"
+        );
+        let fuzzy_min_digits = definition
+            .field("fuzzy_min_digits")
+            .unwrap_or_else(|| panic!("fuzzy_min_digits 字段必须存在"));
+        assert_eq!(
+            fuzzy_min_digits.default_value(),
+            Some(&serde_json::json!(4)),
+            "fuzzy_min_digits 应默认 4"
         );
     }
 

@@ -1,0 +1,206 @@
+{
+  "area": "直授（direct grants）链路",
+  "summary": "access/grants 子域实现用户与权限字符串之间的直授关系（无角色聚合层）。授权表 authz_grant 以 (user_id, permission) 联合唯一键约束，所有字段仅 system 角色可读写，对外隐藏字段权限体系。权限键格式为点分隔小写段至少两段（如 access.grants.read），由 CHECK 约束在入库层面控制格式。授权写入和撤销在单事务内完成：写授权事实 + FOR UPDATE 锁目标用户行 + 递增 authz_version + 追加审计 Outbox，确保授权变更与失效传播原子一致。Token 签发时经 AuthzGrantResolver 读取目标用户全部直授记录，合并为稳定去重的权限集合注入 AuthorizationGrants。敏感权限（目前三条：account.users.reset_credentials、feishu.datasource.secret、feishu.datasource.write）有独立的 G2 闸门：授予时必须由内置全权组成员操作，否则 403。缺少的环节：没有直授转组批量操作能力、没有直授过期时间机制、缺少性能监控埋点。",
+  "components": [
+    {
+      "path": "src/addon/access/grants/mod.rs",
+      "role": "access.grants Module 装配点：定义表、上下文、中间件、4 个 Action 的注册和 step-up 保护"
+    },
+    {
+      "path": "src/addon/access/grants/table.rs",
+      "role": "authz_grant 表 Schema 声明：字段定义、联合唯一索引、permission 格式 CHECK 约束、system-only 权限控制"
+    },
+    {
+      "path": "src/addon/access/domain/repository.rs",
+      "role": "GrantRepository 授权事实唯一持久化边界：以 system 身份查询，封装 list/exists/insert/delete 四个事务内操作"
+    },
+    {
+      "path": "src/addon/access/domain/resolver.rs",
+      "role": "AuthzGrantResolver 实现 GrantResolver trait：Token 签发时读取用户全部直授记录并合并为授权快照"
+    },
+    {
+      "path": "src/addon/access/domain/group_resolver.rs",
+      "role": "GroupGrantResolver 实现 GrantResolver trait：Token 签发时解析用户所在权限组并附加组权限"
+    },
+    {
+      "path": "src/addon/access/domain/permission_catalog.rs",
+      "role": "权限目录投影：从冻结 Catalog 遍历所有 Action/Module 权限声明，安装后运行期只读，ensures_declared 为授予提供门禁"
+    },
+    {
+      "path": "src/addon/access/domain/sensitive_permissions.rs",
+      "role": "管理员等价权限显式清单与判定：is_admin_equivalent 在目录投影和授予闸门两处使用"
+    },
+    {
+      "path": "src/addon/access/domain/context.rs",
+      "role": "Access 上下文聚合点：持 GrantRepository、GroupRepository、PermissionCatalogHandle、AuthorizationPort 四个端口"
+    },
+    {
+      "path": "src/addon/access/grants/actions/grant_permission.rs",
+      "role": "授予权限 Action（POST /api/v1/access/grants）：输入 user_id + permission，含目录声明校验 + G2 闸门 + 单事务写入 + 授权版本递增 + 审计"
+    },
+    {
+      "path": "src/addon/access/grants/actions/revoke_permission.rs",
+      "role": "撤销权限 Action（POST /api/v1/access/grants/revoke）：输入 user_id + permission，单事务删除 + 版本递增 + 审计 + Redis 即时收敛"
+    },
+    {
+      "path": "src/addon/access/grants/actions/list_user_grants.rs",
+      "role": "查询用户直授权限 Action（GET /api/v1/access/users/{user_id}/grants）：返回该用户的全部 GrantView 列表"
+    },
+    {
+      "path": "src/addon/access/grants/actions/list_permissions.rs",
+      "role": "查询权限目录 Action（GET /api/v1/access/permissions）：返回冻结 Catalog 投影的所有 PermissionEntry"
+    },
+    {
+      "path": "src/addon/access/grants/actions/mod.rs",
+      "role": "4 个 Action 的注册表，按可审查顺序排列，统一签名后批量挂载到 ModuleSpec"
+    }
+  ],
+  "mechanisms": [
+    {
+      "name": "权限键生成与验证",
+      "how": "权限字符串由 Action 定义中的 permissions 数组或 Module 的 default_permissions 声明。格式约束为 regex r'^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$'（permission_catalog.rs:15），入库层由 CHECK 约束 chk_authz_grant_permission_format 强制执行，参数层由 Str 的 pattern 验证在请求时拦截。字段最大长度 128 字符（PERMISSION_MAX_LENGTH）",
+      "evidence": "src/addon/access/domain/permission_catalog.rs:15-17; src/addon/access/grants/table.rs:61-63"
+    },
+    {
+      "name": "权限目录投影与安装",
+      "how": "project_permissions() 在 app.rs 的 build_application 中调用：遍历所有 AddonSpec 的 Module 和 Action，收集 default_permissions 和 action.permissions 到 BTreeMap（自动按 key 排序），再逐条调用 is_admin_equivalent() 标记危害面。结果通过 PermissionCatalogHandle.install() 写入 OnceLock。安装后只读，ensure_declared() 在授予时 gate 未声明权限",
+      "evidence": "src/addon/access/domain/permission_catalog.rs:52-85, 102-106, 116-129; src/app.rs:159-160"
+    },
+    {
+      "name": "授予事务原子性（WAL 契约）",
+      "how": "grant_permission handle 在单 MySQL 事务内串行执行：(1) lock_authorization_version FOR UPDATE 锁目标用户行并检查启用状态 (2) ensure_may_grant_permission_in_tx G2 闸门判定管理员等价权限 (3) exists_in_tx 检查是否已持有 (4) insert_in_tx 写入 authz_grant (5) increment_locked_authorization_version 递增授权版本+追加 Outbox (6) 审计事件追加。全部成功后提交事务。revoke_permission 类似但先 delete_in_tx 再判断 changed（幂等：delete 返回 0 则不递增版本也没有审计事件）",
+      "evidence": "src/addon/access/grants/actions/grant_permission.rs:55-112; src/addon/access/grants/actions/revoke_permission.rs:51-84; src/addon/access/domain/repository.rs:89-105, 126-143"
+    },
+    {
+      "name": "G2 闸门：管理员等价权限授予限制",
+      "how": "ensure_may_grant_permission_in_tx 在 grant_permission 的授予路径上调用：先查 admin_equivalent_entry(permission) 看目标权限是否在敏感清单中；不在则直接放行（无锁 SELECT）。在则查 operator_is_system_admin_member_in_tx：找内置全权组 'system-admin' -> list_members_in_tx 看 operator_id 是否在其中。不在则返回 PermissionDenied 错误（含该权限的中文理由）。注意本函数不取新锁，依赖调用方已在之前 lock_authorization_version 持住 users 行锁",
+      "evidence": "src/addon/access/domain/groups/admin.rs:225-242; src/addon/access/domain/groups/admin.rs:300-314; src/addon/access/grants/actions/grant_permission.rs:71-78"
+    },
+    {
+      "name": "撤销后 Redis 即时收敛",
+      "how": "revoke_permission 在事务提交且 changed=true 时，额外调 ctx.tools().token()?.revoke_by_subject() 使 Redis 中该用户缓存立即失效。失败只 warn 不阻止返回成功——Outbox Worker 会异步兜底。grant_permission 不做此收敛（授予不需要立即踢下线）",
+      "evidence": "src/addon/access/grants/actions/revoke_permission.rs:89-102"
+    },
+    {
+      "name": "直授在 Token 签发中的合并",
+      "how": "Token 签发时，账号域的 CompositeGrantResolver 依次执行多个 GrantResolver：AuthzGrantResolver（直授）和 GroupGrantResolver（权限组）。AuthzGrantResolver.resolve 调 GrantRepository.list_by_user_in_tx 读全部直授记录，通过 grants_from_permissions 逐一 permission() 注入 AuthorizationGrants（去重 + BTreeSet 稳定排序）。直授只贡献 permissions 不贡献 roles（决策 D4）",
+      "evidence": "src/addon/access/domain/resolver.rs:38-53; src/addon/access/mod.rs:32-34, 106-108; src/addon/account/domain/grants.rs:51-53"
+    },
+    {
+      "name": "Step-up 重认证保护",
+      "how": "grant_permission 和 revoke_permission 两个写操作在 mod.rs 的 step_up_targets() 中登记，装配时挂 step_up.middleware(target, ...) 中间件。操作者在执行这两个 Action 前需先完成 step-up 重认证（指纹+二次密码），防止短时未锁屏时的越权写",
+      "evidence": "src/addon/access/grants/mod.rs:89-94; src/addon/access/grants/mod.rs:62-68"
+    },
+    {
+      "name": "字段级权限隔离",
+      "how": "authz_grant 表所有业务字段（user_id、permission、granted_by、occurred_at）声明为 readable_by([SYSTEM_ROLE]) + writable_by([SYSTEM_ROLE])。普通 user 角色无法直接读表，仅 GrantRepository 通过 trusted_query 以 [SYSTEM_ROLE] 身份查询。该安全策略由测试 grant_facts_are_only_readable_and_writable_by_system_role 确认",
+      "evidence": "src/addon/access/grants/table.rs:23-46; src/addon/access/domain/repository.rs:45-48; src/addon/access/grants/table.rs:103-133"
+    }
+  ],
+  "contracts": [
+    {
+      "source": "src/addon/access/domain/permission_catalog.rs:15",
+      "statement": "权限键格式为 `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`，即小写开头、点分隔、至少两段",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/table.rs:61-63 (CHECK约束); src/addon/access/grants/actions/grant_permission.rs:25 (参数校验pattern)"
+    },
+    {
+      "source": "src/addon/access/grants/table.rs:53-58",
+      "statement": "authz_grant 表有 (user_id, permission) 联合唯一键 uk_authz_grant_user_permission，保证同一用户不能重复获得同一权限",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/table.rs:53-58, 88-90 (单测); src/addon/access/grants/actions/grant_permission.rs:81 (幂等检查 exists_in_tx)"
+    },
+    {
+      "source": "src/addon/access/domain/sensitive_permissions.rs:50-63",
+      "statement": "管理员等价权限清单目前只有三条：account.users.reset_credentials、feishu.datasource.secret、feishu.datasource.write",
+      "status": "holds",
+      "evidence": "src/addon/access/domain/sensitive_permissions.rs:50-63; src/addon/access/domain/sensitive_permissions.rs:93-97 (单测确认)"
+    },
+    {
+      "source": "src/addon/access/domain/sensitive_permissions.rs:28-32",
+      "statement": "管理员等价标记在目录投影时写入 PermissionEntry.admin_equivalent，前端据此显示危害面",
+      "status": "holds",
+      "evidence": "src/addon/access/domain/permission_catalog.rs:78-80; src/addon/access/domain/permission_catalog.rs:238-263 (单测确认标记正确)"
+    },
+    {
+      "source": "src/addon/access/grants/actions/grant_permission.rs:138",
+      "statement": "授予权限需要 access.grants.write 权限",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/actions/grant_permission.rs:138 (.permissions([\"access.grants.write\"]))"
+    },
+    {
+      "source": "src/addon/access/grants/actions/list_permissions.rs:47",
+      "statement": "查询权限目录需要 access.grants.read 权限",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/actions/list_permissions.rs:47"
+    },
+    {
+      "source": "src/addon/access/grants/actions/list_user_grants.rs:104",
+      "statement": "查询用户直授权限需要 access.grants.read 权限",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/actions/list_user_grants.rs:104"
+    },
+    {
+      "source": "src/addon/access/grants/actions/revoke_permission.rs:128",
+      "statement": "撤销权限需要 access.grants.write 权限",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/actions/revoke_permission.rs:128"
+    },
+    {
+      "source": "src/addon/access/grants/actions/list_user_grants.rs:47-55",
+      "statement": "查询用户直授权限时先验证目标用户是否存在（查 authorization_version），不存在则返回 UserNotFound",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/actions/list_user_grants.rs:48-55"
+    },
+    {
+      "source": "src/addon/access/grants/mod.rs:89-94",
+      "statement": "grant_permission 和 revoke_permission 两个写操作都有 step-up 重认证保护",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/mod.rs:62-68, 89-94; src/addon/access/grants/mod.rs:100-109 (单测确认所有变更都已登记)"
+    },
+    {
+      "source": "src/addon/access/domain/resolver.rs:38-53",
+      "statement": "Token 签发时 AuthzGrantResolver 只补充权限、不附加角色（决策 D4）",
+      "status": "holds",
+      "evidence": "src/addon/access/domain/resolver.rs:60-71 (单测确认无角色附加)"
+    },
+    {
+      "source": "src/addon/access/grants/actions/grant_permission.rs:50-52",
+      "statement": "授予时先校验权限是否在 Catalog 中声明，未声明则拒绝授予",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/actions/grant_permission.rs:50-52; src/addon/access/domain/permission_catalog.rs:117-129 (ensure_declared 实现)"
+    },
+    {
+      "source": "src/addon/access/grants/actions/revoke_permission.rs:48",
+      "statement": "撤销不做目录成员校验，以便清理已从 Catalog 移除的权限",
+      "status": "holds",
+      "evidence": "src/addon/access/grants/actions/revoke_permission.rs:48 (注释明确声明)"
+    },
+    {
+      "source": "从 AGENTS.md 和记忆中的认识",
+      "statement": "access.grants.write 和 access.groups.write 能改动授权事实但授不出管理员等价权限，因此不是管理员等价",
+      "status": "holds",
+      "evidence": "src/addon/access/domain/sensitive_permissions.rs:16-20, 100-116 (文档论证 + 单测确认不误判)"
+    },
+    {
+      "source": "src/addon/access/domain/sensitive_permissions.rs:133-158",
+      "statement": "管理员等价清单每项都必须存在于当前冻结 Catalog 中，清单不会随权限改名静默失效",
+      "status": "holds",
+      "evidence": "src/addon/access/domain/sensitive_permissions.rs:137-158 (单测 every_listed_permission_is_declared_by_the_catalog)"
+    }
+  ],
+  "gaps": [
+    "缺少直授记录的过期/失效时间机制：authz_grant 表没有 expiry 字段，所有授予都是永久有效的",
+    "缺少批量撤销/批量授予能力：当前只能单条操作，没有批量导入或清空接口",
+    "没有直授变更的历史版本跟踪：authz_grant 表只保留当前快照（覆盖写/删除），无变更轨迹",
+    "没有性能监控埋点：GrantRepository 的 CRUD 操作没有 tracing::span 或 metrics 打点",
+    "没有直授数量上限控制：用户可以持有任意多条直授权限，无 page(limit) 分页实现，list_by_user_in_tx 是 all_in_tx（全量查询）",
+    "缺少直授权限与权限组的互转工具（如把用户的全部直授批量迁移到一个新组）",
+    "撤销的 Redis 即时收敛是 best-effort 且有 warn 日志但不冒泡为错误，意味着收敛失败时用户可能在窗口期内继续持有已撤销权限"
+  ],
+  "open_questions": [
+    "list_user_grants 的测试中，read_only_transaction 处理是否需要覆盖事务回滚分支？当前只有成功路径的测试",
+    "ensure_may_grant_permission_in_tx 依赖调用方已持锁但自身不做校验，将来新增调用路径时如何保证锁序一致？",
+    "全量 list_by_user_in_tx 没有分页，需要评估百/千条直授记录时内存开销"
+  ]
+}

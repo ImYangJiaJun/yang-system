@@ -1,0 +1,641 @@
+
+==> Authorization Redis monotonic cache integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --lib --locked authorization::version_cache::tests::real_redis_publish_is_monotonic_and_does_not_refresh_ignored_events -- --ignored --test-threads=1
+   Compiling cfg-if v1.0.4
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling windows-link v0.2.1
+   Compiling version_check v0.9.5
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling once_cell v1.21.4
+   Compiling futures-core v0.3.34
+   Compiling typenum v1.20.1
+   Compiling smallvec v1.15.2
+   Compiling bytes v1.12.1
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling itoa v1.0.18
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling serde v1.0.229
+   Compiling const-oid v0.9.6
+   Compiling serde_core v1.0.229
+   Compiling log v0.4.34
+   Compiling getrandom v0.2.17
+   Compiling windows-sys v0.61.2
+   Compiling lock_api v0.4.14
+   Compiling zeroize v1.8.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling autocfg v1.5.1
+   Compiling rand_core v0.6.4
+   Compiling equivalent v1.0.2
+   Compiling libm v0.2.16
+   Compiling futures-sink v0.3.34
+   Compiling subtle v2.6.1
+   Compiling percent-encoding v2.3.2
+   Compiling futures-io v0.3.34
+   Compiling zerocopy v0.8.56
+   Compiling generic-array v0.14.7
+   Compiling slab v0.4.12
+   Compiling futures-task v0.3.34
+   Compiling tracing-core v0.1.36
+   Compiling writeable v0.5.5
+   Compiling icu_locid_transform_data v1.5.1
+   Compiling cc v1.4.4
+   Compiling litemap v0.7.4
+   Compiling icu_properties_data v1.5.1
+   Compiling foldhash v0.2.0
+   Compiling icu_normalizer_data v1.5.1
+   Compiling untrusted v0.9.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling num-traits v0.2.19
+   Compiling parking_lot v0.12.5
+   Compiling hashbrown v0.16.1
+   Compiling utf8_iter v1.0.4
+   Compiling write16 v1.0.0
+   Compiling utf16_iter v1.0.5
+   Compiling zmij v1.0.23
+   Compiling thiserror v2.0.20
+   Compiling cpufeatures v0.2.17
+   Compiling base64 v0.22.1
+   Compiling serde_json v1.0.151
+   Compiling http v1.5.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling indexmap v2.11.4
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling ring v0.17.14
+   Compiling base64ct v1.6.0
+   Compiling futures-channel v0.3.34
+   Compiling digest v0.10.7
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.3.4
+   Compiling rustls v0.23.43
+   Compiling crossbeam-utils v0.8.22
+   Compiling spin v0.9.9
+   Compiling allocator-api2 v0.2.21
+   Compiling libc v0.2.189
+   Compiling pem-rfc7468 v0.7.0
+   Compiling webpki-roots v1.0.9
+   Compiling form_urlencoded v1.2.2
+   Compiling httparse v1.10.1
+   Compiling tower-service v0.3.3
+   Compiling num-bigint-dig v0.8.6
+   Compiling der v0.7.10
+   Compiling num-integer v0.1.47
+   Compiling lazy_static v1.5.0
+   Compiling bitflags v2.13.1
+   Compiling http-body v1.1.0
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling foldhash v0.1.5
+   Compiling try-lock v0.2.5
+   Compiling crc-catalog v2.5.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling want v0.3.1
+   Compiling crc32fast v1.5.1
+   Compiling tower-layer v0.3.3
+   Compiling parking v2.2.1
+   Compiling crc v3.3.0
+   Compiling tinyvec v1.12.0
+   Compiling hashbrown v0.15.5
+   Compiling rand_core v0.9.5
+   Compiling event-listener v5.4.2
+   Compiling webpki-roots v0.26.11
+   Compiling sync_wrapper v1.0.2
+   Compiling ipnet v2.12.2
+   Compiling simd-adler32 v0.3.10
+   Compiling spki v0.7.3
+   Compiling num-iter v0.1.46
+   Compiling unicode-normalization v0.1.25
+   Compiling hashlink v0.10.0
+   Compiling pkcs8 v0.10.2
+   Compiling unicode-properties v0.1.4
+   Compiling unicode-bidi v0.3.18
+   Compiling pkcs1 v0.7.5
+   Compiling adler2 v2.0.1
+   Compiling futures-intrusive v0.5.0
+   Compiling crossbeam-queue v0.3.13
+   Compiling http-body-util v0.1.5
+   Compiling atoi v2.0.0
+   Compiling stringprep v0.1.5
+   Compiling chrono v0.4.45
+   Compiling futures-util v0.3.34
+   Compiling miniz_oxide v0.8.9
+   Compiling hmac v0.12.1
+   Compiling signature v2.2.0
+   Compiling sha2 v0.10.9
+   Compiling encoding_rs v0.8.35
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling zlib-rs v0.6.8
+   Compiling hex v0.4.3
+   Compiling whoami v1.6.1
+   Compiling ryu v1.0.23
+   Compiling anyhow v1.0.104
+   Compiling rustversion v1.0.23
+   Compiling dotenvy v0.15.7
+   Compiling alloc-stdlib v0.2.4
+   Compiling hkdf v0.12.4
+   Compiling num-bigint v0.4.8
+   Compiling ppv-lite86 v0.2.21
+   Compiling tokio v1.53.1
+   Compiling sha1 v0.10.7
+   Compiling md-5 v0.10.6
+   Compiling aho-corasick v1.1.5
+   Compiling synstructure v0.13.2
+   Compiling mime v0.3.17
+   Compiling regex-syntax v0.8.11
+   Compiling byteorder v1.5.0
+   Compiling brotli-decompressor v5.0.3
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.8.7
+   Compiling rand v0.9.5
+   Compiling block-padding v0.3.3
+   Compiling heck v0.5.0
+   Compiling winapi v0.3.9
+   Compiling num-conv v0.1.0
+   Compiling powerfmt v0.2.0
+   Compiling rustls-webpki v0.103.15
+   Compiling time-core v0.1.4
+   Compiling strsim v0.11.1
+   Compiling ident_case v1.0.1
+   Compiling time-macros v0.2.22
+   Compiling darling_core v0.20.11
+   Compiling deranged v0.4.0
+   Compiling inout v0.1.4
+   Compiling rapidhash v4.5.1
+   Compiling brotli v8.0.4
+   Compiling flate2 v1.1.9
+   Compiling psm v0.1.26
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling displaydoc v0.2.7
+   Compiling futures-macro v0.3.34
+   Compiling thiserror-impl v2.0.20
+   Compiling rsa v0.9.10
+   Compiling async-trait v0.1.92
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.7.5
+   Compiling tracing-attributes v0.1.31
+   Compiling zerovec-derive v0.10.4
+   Compiling icu_provider_macros v1.5.0
+   Compiling regex-automata v0.4.18
+   Compiling pin-project-internal v1.1.13
+   Compiling multer v3.1.0
+   Compiling ahash v0.8.12
+   Compiling sha1_smol v1.0.1
+   Compiling num_cpus v1.17.0
+   Compiling crossbeam-epoch v0.9.20
+   Compiling compression-core v0.4.32
+   Compiling tokio-stream v0.1.19
+   Compiling time v0.3.41
+   Compiling metrics v0.24.6
+   Compiling cipher v0.4.4
+   Compiling serde_derive_internals v0.29.1
+   Compiling raw-cpuid v11.6.0
+   Compiling stacker v0.1.25
+   Compiling zerofrom v0.1.8
+   Compiling tracing-log v0.2.0
+   Compiling tracing v0.1.44
+   Compiling yoke v0.7.5
+   Compiling pin-project v1.1.13
+   Compiling fastrand v2.5.0
+   Compiling schemars v0.8.22
+   Compiling zerovec v0.10.4
+   Compiling opentelemetry v0.30.0
+   Compiling compression-codecs v0.4.31
+   Compiling darling_macro v0.20.11
+   Compiling axum-core v0.5.6
+   Compiling rand_xoshiro v0.7.0
+   Compiling left-right v0.11.8
+   Compiling sharded-slab v0.1.7
+   Compiling blake2 v0.10.6
+   Compiling password-hash v0.5.0
+   Compiling universal-hash v0.5.1
+   Compiling pem v3.0.6
+   Compiling serde_path_to_error v0.1.20
+   Compiling darling v0.20.11
+   Compiling nu-ansi-term v0.50.3
+   Compiling schemars_derive v0.8.22
+   Compiling simple_asn1 v0.6.3
+   Compiling thread_local v1.1.10
+   Compiling matchit v0.8.4
+   Compiling hashbag v0.1.13
+   Compiling opaque-debug v0.3.1
+   Compiling tinystr v0.7.6
+   Compiling icu_collections v1.5.0
+   Compiling matchers v0.2.0
+   Compiling quanta v0.12.6
+   Compiling metrics-exporter-prometheus v0.18.3
+   Compiling winnow v0.7.15
+   Compiling futures-executor v0.3.34
+   Compiling icu_locid v1.5.0
+   Compiling opentelemetry_sdk v0.30.0
+   Compiling dyn-clone v1.0.20
+   Compiling sketches-ddsketch v0.3.1
+   Compiling bumpalo v3.20.3
+   Compiling toml_write v0.1.2
+   Compiling metrics-util v0.20.4
+   Compiling regex v1.13.1
+   Compiling either v1.18.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling toml_datetime v0.6.11
+   Compiling tracing-serde v0.2.0
+   Compiling serde_spanned v0.6.9
+   Compiling icu_provider v1.5.0
+   Compiling itertools v0.14.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling jsonwebtoken v9.3.1
+   Compiling zopfli v0.8.3
+   Compiling polyval v0.6.2
+   Compiling evmap v11.0.0
+   Compiling yang-base-derive v0.3.0 (D:\code\lib_yang\crates\yang-base-derive)
+   Compiling argon2 v0.5.3
+   Compiling tokio-util v0.7.19
+   Compiling icu_locid_transform v1.5.0
+   Compiling tokio-rustls v0.26.4
+   Compiling deadpool-runtime v0.1.4
+   Compiling async-compression v0.4.32
+   Compiling deadpool v0.12.3
+   Compiling h2 v0.4.18
+   Compiling tower v0.5.3
+   Compiling combine v4.6.7
+   Compiling icu_properties v1.5.1
+   Compiling tower-http v0.7.0
+   Compiling toml_edit v0.22.27
+   Compiling hashbrown v0.14.5
+   Compiling tempfile v3.23.0
+   Compiling totp-lite v2.0.1
+   Compiling uuid v1.12.1
+   Compiling debug_unsafe v0.1.4
+   Compiling prost-derive v0.13.5
+   Compiling atoi_simd v0.16.1
+   Compiling tracing-opentelemetry v0.31.0
+   Compiling chumsky v0.9.3
+   Compiling zip v4.2.0
+   Compiling ghash v0.5.1
+   Compiling aes v0.8.4
+   Compiling ctr v0.9.2
+   Compiling codepage v0.1.3
+   Compiling quick-xml v0.37.5
+   Compiling aead v0.5.2
+   Compiling email-encoding v0.4.1
+   Compiling nom v8.0.0
+   Compiling quoted_printable v0.5.2
+   Compiling fast-float2 v0.2.4
+   Compiling icu_normalizer v1.5.0
+   Compiling toml v0.8.23
+   Compiling email_address v0.2.9
+   Compiling calamine v0.30.1
+   Compiling idna_adapter v1.2.0
+   Compiling aes-gcm v0.10.3
+   Compiling idna v1.1.0
+   Compiling cbc v0.1.2
+   Compiling url v2.5.8
+   Compiling prost v0.13.5
+   Compiling hyper v1.11.0
+   Compiling sqlx-core v0.8.6
+   Compiling tower-http v0.6.11
+   Compiling redis v0.32.7
+   Compiling hyper-util v0.1.20
+   Compiling lettre v0.11.19
+   Compiling sqlx-mysql v0.8.6
+   Compiling hyper-timeout v0.5.2
+   Compiling hyper-rustls v0.27.7
+   Compiling axum v0.8.9
+   Compiling tonic v0.13.1
+   Compiling reqwest v0.12.16
+   Compiling opentelemetry-proto v0.30.0
+   Compiling sqlx-macros-core v0.8.6
+   Compiling opentelemetry-otlp v0.30.0
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling deadpool-redis v0.22.0
+   Compiling yang-db v0.2.0 (D:\code\lib_yang\crates\yang-db)
+   Compiling yang-base v0.3.0 (D:\code\lib_yang\crates\yang-base)
+   Compiling yang-runtime v0.1.0 (D:\code\lib_yang\crates\yang-runtime)
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 40s
+     Running unittests src\lib.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\yang_system-6b57a003aee7b772.exe)
+
+running 1 test
+test infrastructure::authorization::version_cache::tests::real_redis_publish_is_monotonic_and_does_not_refresh_ignored_events ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 1.15s
+
+
+==> Authorization outbox worker replay integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --lib --locked authorization::worker::tests::real_outbox_supports_concurrent_claim_retry_and_expired_lease_replay -- --ignored --test-threads=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running unittests src\lib.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\yang_system-6b57a003aee7b772.exe)
+
+running 1 test
+test infrastructure::authorization::worker::tests::real_outbox_supports_concurrent_claim_retry_and_expired_lease_replay ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 0.64s
+
+
+==> Schema apply concurrency and retry integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test schema_apply_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 57.12s
+     Running tests\schema_apply_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\schema_apply_integration-7cdfcc2a6d142af9.exe)
+
+running 2 tests
+test concurrent_schema_apply_is_serialized_across_instances ... ok
+test failed_schema_apply_releases_lock_and_allows_clean_retry ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+
+==> Registration email verification integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test registration_email_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.25s
+     Running tests\registration_email_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\registration_email_integration-45f46deb1a99bf00.exe)
+
+running 4 tests
+test login_accepts_both_username_and_normalized_email ... ok
+test registration_email_code_is_private_bounded_and_single_use ... ok
+test session_revoke_kicks_one_device_without_affecting_others ... ok
+test totp_two_stage_login_and_step_up_second_factor ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.40s
+
+
+==> MFA email code and TOTP deactivate integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test mfa_email_code_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.12s
+     Running tests\mfa_email_code_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\mfa_email_code_integration-417c3100e68b7a3c.exe)
+
+running 3 tests
+test mfa_email_code_is_bounded_non_enumerating_and_single_use ... ok
+test totp_code_cannot_be_replayed_within_same_window ... ok
+test totp_deactivate_requires_step_up_and_restores_single_factor ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.05s
+
+
+==> Login email code integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test login_email_code_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.56s
+     Running tests\login_email_code_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\login_email_code_integration-a2bd7008b0beac05.exe)
+
+running 10 tests
+test backup_email_code_rejected_when_first_factor_is_email_code ... ok
+test disabled_account_suppresses_delivery_and_rejects_code_login ... ok
+test login_by_email_code_full_flow_issues_working_access_token ... ok
+test login_email_code_attempts_exhaustion_destroys_code ... ok
+test login_email_code_is_single_use ... ok
+test login_email_code_shares_login_rate_limit_budget ... ok
+test recovery_code_works_as_second_factor_on_email_code_login ... ok
+test registration_and_login_email_code_key_domains_are_isolated ... ok
+test request_login_email_code_is_non_enumerating_for_unregistered_email ... ok
+test totp_account_email_code_login_requires_second_factor ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.00s
+
+
+==> Avatar integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test avatar_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.13s
+     Running tests\avatar_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\avatar_integration-6e0f16a1e5999d5b.exe)
+
+running 4 tests
+test avatar_upload_me_projection_and_fetch_roundtrip ... ok
+test avatar_upload_rejects_invalid_inputs ... ok
+test delete_account_removes_avatar_row ... ok
+test get_avatar_requires_authentication ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.75s
+
+
+==> Account deletion and anonymization integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test account_deletion_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.54s
+     Running tests\account_deletion_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\account_deletion_integration-bfd84f5b9889ab88.exe)
+
+running 1 test
+test delete_account_clears_credentials_sessions_and_login_events ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.47s
+
+
+==> Session revocation integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test session_revocation_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.04s
+     Running tests\session_revocation_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\session_revocation_integration-3b97012c6748d88a.exe)
+
+running 1 test
+test revoking_a_session_rejects_its_refresh_token ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.24s
+
+
+==> Permission groups token signing integration
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test permission_groups_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.52s
+     Running tests\permission_groups_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\permission_groups_integration-2a61fb02964d4aca.exe)
+
+running 53 tests
+test a_non_admin_cannot_add_a_member_to_a_group_holding_admin_equivalent_permissions ... ok
+test a_non_admin_cannot_add_an_admin_equivalent_permission_to_a_group ... ok
+test a_non_admin_cannot_add_members_to_the_system_admin_group ... ok
+test a_non_admin_cannot_disable_a_system_admin_member ... ok
+test a_non_admin_cannot_enable_a_disabled_system_admin_member ... ok
+test a_non_admin_cannot_grant_an_admin_equivalent_permission ... ok
+test a_non_admin_cannot_remove_members_of_the_system_admin_group ... ok
+test a_system_admin_can_enable_a_disabled_system_admin_member ... ok
+test a_system_admin_can_grant_admin_equivalent_permissions_and_membership ... ok
+test a_user_without_the_required_permission_is_rejected_with_403 ... ok
+test add_group_member_rejects_a_missing_group_with_404 ... ok
+test add_group_member_rejects_a_missing_target_user_with_404 ... ok
+test adding_a_group_permission_invalidates_every_member ... ok
+test adding_a_member_beyond_the_limit_is_rejected ... ok
+test adding_an_existing_member_at_the_limit_stays_idempotent ... ok
+test adding_an_undeclared_permission_is_rejected ... ok
+test admin_can_remove_themselves_when_another_admin_remains ... ok
+test admin_issue_password_reset_declares_only_the_split_permission ... ok
+test an_item_pointing_at_a_missing_group_is_rejected_by_the_database ... ok
+test builtin_system_admin_group_is_immune_to_update_delete_and_item_changes ... ok
+test concurrent_adds_cannot_exceed_the_member_limit ... ok
+test concurrent_adds_of_different_members_do_not_deadlock ... ok
+test concurrent_admin_removals_never_leave_zero_active_admins ... ok
+test concurrent_duplicate_adds_of_the_same_member_stay_idempotent ... ok
+test concurrent_item_add_and_self_member_add_cannot_self_escalate ... ok
+test concurrent_item_adds_by_two_member_operators_do_not_deadlock ... ok
+test concurrent_item_and_member_add_on_the_same_group_do_not_deadlock ... ok
+test concurrent_member_removal_and_item_add_do_not_deadlock ... ok
+test concurrent_self_disables_never_leave_zero_active_admins ... ok
+test create_group_rejects_a_duplicate_group_key_with_param_invalid_400 ... ok
+test create_group_rejects_the_reserved_system_admin_key ... ok
+test create_group_still_accepts_an_ordinary_key ... ok
+test delete_races_add_member_without_orphans_or_500 ... ok
+test deleting_a_group_with_members_is_rejected ... ok
+test deleting_an_account_leaves_no_orphan_authorization_rows ... ok
+test every_group_write_action_without_step_up_is_rejected ... ok
+test group_membership_flows_into_the_issued_access_token ... ok
+test group_mutations_without_step_up_are_rejected ... ok
+test group_permission_change_respects_the_member_limit ... ok
+test list_user_grants_rejects_a_missing_target_user_with_404 ... ok
+test list_user_grants_returns_the_direct_grants_of_the_target_user ... ok
+test one_of_two_admins_can_be_disabled ... ok
+test only_account_users_manage_cannot_issue_password_reset ... ok
+test removing_a_group_permission_invalidates_members_and_is_idempotent ... ok
+test removing_an_already_disabled_admin_member_is_not_rejected ... ok
+test revoke_permission_removes_the_grant_stales_the_token_and_stays_idempotent ... ok
+test system_admin_group_token_carries_the_whole_catalog ... ok
+test the_last_system_admin_cannot_be_disabled_or_deleted ... ok
+test the_last_system_admin_cannot_be_removed_from_the_admin_group ... ok
+test the_permission_catalog_marks_exactly_the_admin_equivalent_permissions ... ok
+test the_split_reset_credential_permission_can_issue_password_reset ... ok
+test user_cannot_add_a_permission_to_their_own_group_beyond_their_holdings ... ok
+test user_cannot_add_themselves_to_a_group_granting_more_than_they_hold ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 406.04s
+
+
+==> 首账号引导并发仲裁集成测试
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test system_owner_bootstrap_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.74s
+     Running tests\system_owner_bootstrap_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\system_owner_bootstrap_integration-3af7cb3517e280e1.exe)
+
+running 3 tests
+test a_second_claim_returns_already_claimed_instead_of_failing ... ok
+test concurrent_first_registrations_produce_exactly_one_system_owner ... ok
+test later_registrations_degrade_to_plain_users ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
+
+
+==> Refresh rotation load benchmark
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test refresh_load_benchmark --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.48s
+     Running tests\refresh_load_benchmark.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\refresh_load_benchmark-3632756b70e74db6.exe)
+
+running 1 test
+test refresh_rotation_load_has_zero_errors_and_reports_percentiles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.84s
+
+
+==> 飞书选项 Schema 集成测试
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test feishu_options_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.59s
+     Running tests\feishu_options_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\feishu_options_integration-596b2e474e8ecef6.exe)
+
+running 2 tests
+test feishu_tables_are_created_with_required_unique_indexes ... ok
+test option_id_uniqueness_is_enforced_by_the_database ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.11s
+
+
+==> 飞书选项复合索引集成测试
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test feishu_option_index_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.58s
+     Running tests\feishu_option_index_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\feishu_option_index_integration-60c0789586f855d1.exe)
+
+running 2 tests
+test missing_pick_index_is_manually_dropped_then_restored_by_sync ... ok
+test pick_index_exists_with_the_declared_columns_in_order ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+
+
+==> 飞书取选项端点集成测试
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test feishu_approval_options_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.65s
+     Running tests\feishu_approval_options_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\feishu_approval_options_integration-2cc42a231df9c5d1.exe)
+
+running 21 tests
+test approval_options_advances_across_rows_that_share_a_sort_order ... ok
+test approval_options_advances_the_cursor_without_losing_or_repeating_options ... ok
+test approval_options_encrypts_the_result_when_the_datasource_requires_it ... ok
+test approval_options_filters_by_the_parent_binding ... ok
+test approval_options_hides_disabled_options ... ok
+test approval_options_ignores_an_unrelated_authorization_header ... ok
+test approval_options_matches_the_query_keyword ... ok
+test approval_options_rejects_a_disabled_binding ... ok
+test approval_options_rejects_a_disabled_datasource ... ok
+test approval_options_rejects_a_malformed_page_token ... ok
+test approval_options_rejects_a_wrong_token ... ok
+test approval_options_rejects_an_orphaned_binding ... ok
+test approval_options_reports_a_missing_datasource ... ok
+test approval_options_reports_when_encryption_is_enabled_but_unconfigured ... ok
+test approval_options_resolves_the_parent_by_its_label ... ok
+test approval_options_returns_the_first_page_with_a_next_page_token ... ok
+test protected_console_actions_still_require_authentication ... ok
+test upsert_cannot_move_an_option_across_datasources ... ok
+test upsert_compares_ownership_with_the_same_collation_as_the_write ... ok
+test upsert_is_idempotent_within_the_same_datasource ... ok
+test write_endpoints_accept_the_management_token_and_reject_anonymous_callers ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.02s
+
+
+==> 飞书 xlsx 导入集成测试
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test feishu_xlsx_import_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.77s
+     Running tests\feishu_xlsx_import_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\feishu_xlsx_import_integration-34fc0158f787d366.exe)
+
+running 17 tests
+test a_binding_that_derives_nothing_is_skipped_not_emptied ... ok
+test a_binding_with_nothing_to_derive_on_an_empty_source_is_not_skipped ... ok
+test a_failing_binding_does_not_roll_back_its_predecessors ... ok
+test a_finished_import_reports_idle_progress ... ok
+test a_missing_column_rejects_the_whole_import ... ok
+test a_second_import_keeps_created_at_and_moves_updated_at ... ok
+test an_empty_snapshot_fails_the_round_without_disabling ... ok
+test an_overlong_label_is_truncated_and_disabled_with_a_reason ... ok
+test an_overlong_label_with_trailing_space_is_still_recorded_and_disabled ... ok
+test creating_a_source_through_the_action_names_every_binding ... ok
+test extra_columns_are_ignored ... ok
+test files_with_different_headers_are_rejected_as_a_whole ... ok
+test import_writes_options_for_every_binding ... ok
+test importing_into_a_pull_source_is_rejected ... ok
+test re_importing_replaces_the_whole_snapshot ... ok
+test the_probe_endpoint_walks_the_real_multipart_path ... ok
+test the_pull_path_rejects_an_xlsx_source ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.40s
+
+
+==> 审批派发控制台与落记录集成测试
+    'C:\Users\16040\.cargo\bin\cargo.EXE' test --test feishu_approval_dispatch_integration --locked -- --ignored --test-threads=1
+   Compiling yang-system v0.1.0 (D:\code\lib_yang\project\yang-system)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.17s
+     Running tests\feishu_approval_dispatch_integration.rs (C:/Users/16040/AppData/Local/Temp/ys-int-full\debug\deps\feishu_approval_dispatch_integration-aa99befbfeefeef3.exe)
+
+running 8 tests
+test console_crud_loop_on_a_seeded_config ... ok
+test create_config_requires_outbound_credentials ... ok
+test delete_config_clears_pending_tasks_and_keeps_finished_ones ... ok
+test dispatch_batch_acceptance_writes_an_accepted_request_log ... ok
+test dispatch_provision_failure_writes_a_failed_request_log ... ok
+test dispatch_validation_failure_writes_a_failed_request_log ... ok
+test dispatch_without_config_reports_40401_and_writes_a_failed_log ... ok
+test list_requests_and_list_tasks_return_rows_with_filters ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.67s
+
+
+CI profile passed: integration

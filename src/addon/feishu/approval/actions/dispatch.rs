@@ -293,7 +293,7 @@ async fn write_config_failure(
     record_id: &str,
     backfill_field: &str,
     failure: &ProvisionError,
-) -> Result<(), crate::addon::feishu::domain::outbound::OutboundFailure> {
+) -> Result<(), OutboundFailure> {
     backfill
         .write(
             record_id,
@@ -469,7 +469,9 @@ pub(super) async fn handle(
             tracing::Span::current().record("config_key", config_key.as_str());
             tracing::Span::current()
                 .record("record_id", input.record_id.as_deref().unwrap_or_default());
-            handle_dispatch(&ctx, &input, &context, &config_key).await.unwrap_or_else(|error| DispatchOutcome::internal(None, error))
+            handle_dispatch(&ctx, &input, &context, &config_key)
+                .await
+                .unwrap_or_else(|error| DispatchOutcome::internal(None, error))
         }
     };
     // 收尾反馈：渲染展示文案 + 发送 IM 通知（若有接收人）。通知失败不影响审批结论。
@@ -1333,10 +1335,10 @@ mod tests {
     /// 构造一行带 `id` / `enabled` 的配置行（供 `check_config_auth` 用）。
     fn config_row(id: i64, enabled: bool) -> Record {
         let mut row = Record::new();
-        row.insert("id", serde_json::json!(id));
-        row.insert("base_token", serde_json::json!("appTestBase"));
-        row.insert("table_id", serde_json::json!("tblTest"));
-        row.insert("enabled", serde_json::json!(enabled));
+        row.insert("id", json!(id));
+        row.insert("base_token", json!("appTestBase"));
+        row.insert("table_id", json!("tblTest"));
+        row.insert("enabled", json!(enabled));
         row
     }
 

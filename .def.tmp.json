@@ -1,0 +1,43 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "approval_name": "往来付款类型/Current Payment Type_测试",
+    "form": "[{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"externalData\":{\"appId\":\"\",\"externalDataLinkage\":false,\"externalDataSearchable\":true,\"externalUrl\":\"\",\"key\":\"\",\"linkageConfigs\":[],\"token\":\"\"},\"id\":\"widget17902293404030001\",\"name\":\"办公地点(Office location)\",\"option\":[],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"externalData\":{\"appId\":\"\",\"externalDataLinkage\":true,\"externalDataSearchable\":true,\"externalUrl\":\"\",\"key\":\"\",\"linkageConfigs\":[{\"linkageWidgetID\":\"widget17902293404030001\",\"value\":\"\",\"key\":\"fldeysRdna\",\"extra_data\":\"\"}],\"token\":\"\"},\"id\":\"widget17902293451560001\",\"name\":\"公司名称/Company name\",\"option\":[],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17796881173030001\",\"name\":\"关联审批/Related Approval Form\",\"option\":{\"definitionIds\":[],\"limitAssociateTicket\":false,\"notLimitScope\":true},\"printable\":false,\"required\":false,\"type\":\"connect\",\"visible\":true,\"widget_default_value\":\"\"},{\"children\":[{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17796935635570001\",\"name\":\"费用明细/Expense details\",\"printable\":true,\"required\":true,\"type\":\"textarea\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17802950665910001\",\"name\":\"付款金额/Payment Amount\",\"option\":{\"maxValue\":\"\",\"minValue\":\"\"},\"printable\":true,\"required\":true,\"type\":\"number\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17800356620670001\",\"name\":\"附件attachment\",\"option\":null,\"printable\":true,\"required\":true,\"type\":\"attachmentV2\",\"visible\":true,\"widget_default_value\":\"\"}],\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17796881483690001\",\"name\":\"付款明细/Payment Details\",\"option\":{\"input_type\":\"LIST\",\"mobile_detail_type\":\"CARD\",\"print_type\":\"LIST\"},\"printable\":true,\"required\":true,\"type\":\"fieldList\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17802982850770001\",\"name\":\"付款备注/Payment Remarks\",\"printable\":true,\"required\":false,\"type\":\"input\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17802983364650001\",\"name\":\"收款方类型/Type of payee\",\"option\":[{\"value\":\"mpuvnw0h-fe2sqa3x3xk-0\",\"text\":\"个人\"},{\"value\":\"mpuvnw0h-f91ofki6wgl-0\",\"text\":\"企业\"}],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17805658206780001\",\"name\":\"收款人身份证号/Recipient's ID number\",\"printable\":true,\"required\":false,\"type\":\"input\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17802971232670001\",\"name\":\"收款方地址/Payee's address\",\"printable\":true,\"required\":true,\"type\":\"input\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17800356244440001\",\"name\":\"收款方账号/Recipient's account number\",\"printable\":true,\"required\":true,\"type\":\"input\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17802983962100001\",\"name\":\"收款银行支行/Receiving bank branc\",\"printable\":true,\"required\":true,\"type\":\"input\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"id\":\"widget17802984138220001\",\"name\":\"SWIFT Address\",\"printable\":true,\"required\":true,\"type\":\"input\",\"visible\":true,\"widget_default_value\":\"\"}]",
+    "node_list": [
+      {
+        "approver_chosen_multi": true,
+        "empty_assignee_list": [
+          {
+            "type": 2,
+            "user_id": "ou_aad06cf4f5c2c081cf273829cb9d080d"
+          }
+        ],
+        "empty_auto_pass": false,
+        "name": "审批",
+        "need_approver": false,
+        "node_id": "181e3b2bd8ebf2ae9cf3c3be50af4447",
+        "node_type": "AND",
+        "require_signature": false
+      },
+      {
+        "approver_chosen_multi": true,
+        "empty_assignee_list": [],
+        "name": "结束",
+        "need_approver": false,
+        "node_id": "b1a326c06d88bf042f73d70f50197905",
+        "node_type": "AND",
+        "require_signature": false
+      },
+      {
+        "approver_chosen_multi": false,
+        "empty_assignee_list": [],
+        "name": "提交",
+        "need_approver": false,
+        "node_id": "b078ffd28db767c502ac367053f6e0ac",
+        "node_type": "AND",
+        "require_signature": false
+      }
+    ]
+  }
+}

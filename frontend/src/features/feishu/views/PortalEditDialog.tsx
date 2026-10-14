@@ -59,6 +59,8 @@ type PortalFormValues = {
   custom_slug: string;
   empty_message: string;
   rate_limit_per_min: number;
+  fuzzy_enabled: boolean;
+  fuzzy_min_digits: number;
   result_labels: Record<string, string>;
   /// 口令有效期（天）。空 = 不过期。只在设置了口令时才有意义。
   passphrase_expires_days: string;
@@ -97,6 +99,12 @@ function buildSchema(isEdit: boolean) {
         .int("限速必须是整数")
         .min(1, "限速最小 1")
         .max(120, "限速最大 120"),
+      fuzzy_enabled: z.boolean(),
+      fuzzy_min_digits: z
+        .number()
+        .int("位数必须是整数")
+        .min(2, "最低 2 位")
+        .max(16, "最高 16 位"),
       result_labels: z.record(z.string(), z.string()),
       passphrase_expires_days: z.string(),
     })
@@ -175,6 +183,8 @@ function defaultValuesFor(portal: Portal | undefined): PortalFormValues {
       custom_slug: "",
       empty_message: "",
       rate_limit_per_min: 30,
+      fuzzy_enabled: true,
+      fuzzy_min_digits: 4,
       result_labels: {},
       passphrase_expires_days: "",
     };
@@ -188,6 +198,8 @@ function defaultValuesFor(portal: Portal | undefined): PortalFormValues {
     custom_slug: portal.custom_slug ?? "",
     empty_message: portal.empty_message ?? "",
     rate_limit_per_min: portal.rate_limit_per_min,
+    fuzzy_enabled: portal.fuzzy_enabled,
+    fuzzy_min_digits: portal.fuzzy_min_digits,
     result_labels: parsePortalLabels(portal.result_labels),
     passphrase_expires_days: "",
   };
@@ -260,6 +272,8 @@ export default function PortalEditDialog({
           result_labels: values.result_labels,
           empty_message: emptyMessage,
           rate_limit_per_min: values.rate_limit_per_min,
+          fuzzy_enabled: values.fuzzy_enabled,
+          fuzzy_min_digits: values.fuzzy_min_digits,
           custom_slug: customSlug,
         });
         // 口令是**独立端点**（`update_portal` 不收它）：只在填了的时候换一次，
@@ -279,6 +293,8 @@ export default function PortalEditDialog({
           result_labels: values.result_labels,
           empty_message: emptyMessage,
           rate_limit_per_min: values.rate_limit_per_min,
+          fuzzy_enabled: values.fuzzy_enabled,
+          fuzzy_min_digits: values.fuzzy_min_digits,
           custom_slug: customSlug,
         });
         // 有效期不在 `create_portal` 的入参里（后端只给了 `set_passphrase`），
@@ -485,6 +501,37 @@ export default function PortalEditDialog({
                 {errors.rate_limit_per_min.message}
               </p>
             ) : null}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="portal-fuzzy-enabled"
+              checked={watch("fuzzy_enabled")}
+              onCheckedChange={(checked) =>
+                setValue("fuzzy_enabled", checked === true)
+              }
+            />
+            <Label htmlFor="portal-fuzzy-enabled">启用模糊匹配</Label>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="portal-fuzzy-min-digits">模糊匹配最低位数</Label>
+            <Input
+              id="portal-fuzzy-min-digits"
+              type="number"
+              min={2}
+              max={16}
+              {...register("fuzzy_min_digits", { valueAsNumber: true })}
+            />
+            {errors.fuzzy_min_digits ? (
+              <p className="text-sm text-destructive">
+                {errors.fuzzy_min_digits.message}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                输入中至少包含这么多位连续数字时才会触发模糊查询
+              </p>
+            )}
           </div>
 
           {exposedColumns.length > 0 ? (

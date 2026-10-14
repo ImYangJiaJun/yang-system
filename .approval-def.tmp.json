@@ -1,0 +1,51 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "approval_name": "技术测试专用",
+    "form": "[{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"externalData\":{\"appId\":\"\",\"externalDataLinkage\":false,\"externalDataSearchable\":true,\"externalUrl\":\"\",\"key\":\"\",\"linkageConfigs\":[],\"token\":\"\"},\"id\":\"widget17906688598360001\",\"name\":\"归属银行\",\"option\":[],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"externalData\":{\"appId\":\"\",\"externalDataLinkage\":true,\"externalDataSearchable\":true,\"externalUrl\":\"\",\"key\":\"\",\"linkageConfigs\":[{\"linkageWidgetID\":\"widget17906688598360001\",\"value\":\"\",\"key\":\"归属银行\",\"extra_data\":\"\"}],\"token\":\"\"},\"id\":\"widget17906732210030001\",\"name\":\"开户行行名\",\"option\":[],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"externalData\":{\"appId\":\"\",\"externalDataLinkage\":true,\"externalDataSearchable\":false,\"externalUrl\":\"\",\"key\":\"\",\"linkageConfigs\":[{\"linkageWidgetID\":\"widget17906732210030001\",\"value\":\"\",\"key\":\"开户行行名\",\"extra_data\":\"\"}],\"token\":\"\"},\"id\":\"widget17906733108350001\",\"name\":\"联行号\",\"option\":[],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"externalData\":{\"appId\":\"\",\"externalDataLinkage\":false,\"externalDataSearchable\":false,\"externalUrl\":\"\",\"key\":\"\",\"linkageConfigs\":[],\"token\":\"\"},\"id\":\"widget17907371746810001\",\"name\":\"办公地点(Office location)\",\"option\":[{\"value\":\"fldeysrdna:d22258711825\",\"text\":\"成都\"},{\"value\":\"fldeysrdna:e2d11378ac18\",\"text\":\"西安\"},{\"value\":\"fldeysrdna:ea31f4d6d27d\",\"text\":\"重庆\"},{\"value\":\"fldeysrdna:585e793330e7\",\"text\":\"新加坡/Singapore\"},{\"value\":\"fldeysrdna:a0cc919fff3f\",\"text\":\"菲律宾/Philippines\"},{\"value\":\"fldeysrdna:3b93d1fe2679\",\"text\":\"美国/United States\"},{\"value\":\"fldeysrdna:1bb5e3986433\",\"text\":\"深圳\"},{\"value\":\"fldeysrdna:931175b3e845\",\"text\":\"日本/Japan\"}],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"},{\"default_value_type\":\"\",\"display_condition\":null,\"enable_default_value\":false,\"externalData\":{\"appId\":\"\",\"externalDataLinkage\":true,\"externalDataSearchable\":false,\"externalUrl\":\"\",\"key\":\"\",\"linkageConfigs\":[{\"linkageWidgetID\":\"widget17907371746810001\",\"value\":\"\",\"key\":\"fldeysRdna\",\"extra_data\":\"\"}],\"token\":\"\"},\"id\":\"widget17907373624970001\",\"name\":\"付款公司名称/Company name\",\"option\":[],\"printable\":true,\"required\":true,\"type\":\"radioV2\",\"visible\":true,\"widget_default_value\":\"\"}]",
+    "node_list": [
+      {
+        "approver_chosen_multi": true,
+        "empty_assignee_list": [
+          {
+            "type": 2,
+            "user_id": "ou_aad06cf4f5c2c081cf273829cb9d080d"
+          }
+        ],
+        "empty_auto_pass": false,
+        "name": "审批",
+        "need_approver": false,
+        "node_id": "181e3b2bd8ebf2ae9cf3c3be50af4447",
+        "node_type": "AND",
+        "require_signature": false
+      },
+      {
+        "approver_chosen_multi": true,
+        "empty_assignee_list": [],
+        "name": "结束",
+        "need_approver": false,
+        "node_id": "b1a326c06d88bf042f73d70f50197905",
+        "node_type": "AND",
+        "require_signature": false
+      },
+      {
+        "approver_chosen_multi": false,
+        "empty_assignee_list": [],
+        "name": "提交",
+        "need_approver": false,
+        "node_id": "b078ffd28db767c502ac367053f6e0ac",
+        "node_type": "AND",
+        "require_signature": false
+      }
+    ]
+  },
+  "_notice": {
+    "update": {
+      "command": "lark-cli update",
+      "current": "1.0.96",
+      "latest": "1.0.97",
+      "message": "lark-cli 1.0.97 available, current 1.0.96, run: lark-cli update"
+    }
+  }
+}

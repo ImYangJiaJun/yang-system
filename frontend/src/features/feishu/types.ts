@@ -1194,6 +1194,10 @@ export type Portal = {
   /// 查无结果时的提示（可选）。
   empty_message: string | null;
   rate_limit_per_min: number;
+  /// 是否启用模糊匹配。
+  fuzzy_enabled: boolean;
+  /// 触发模糊匹配所需的最少连续数字位数。
+  fuzzy_min_digits: number;
   enabled: boolean;
   created_at: number;
   updated_at: number;
@@ -1260,6 +1264,10 @@ export type CreatePortalInput = {
   empty_message?: string;
   /// 每分钟限速，1..=120，缺省 30。
   rate_limit_per_min?: number;
+  /// 是否启用模糊匹配；缺省 true。
+  fuzzy_enabled?: boolean;
+  /// 触发模糊匹配所需的最少连续数字位数；2..=16，缺省 4。
+  fuzzy_min_digits?: number;
   /// 自定义短链；为空时**省略该键**。
   custom_slug?: string;
 };
@@ -1279,6 +1287,10 @@ export type UpdatePortalInput = {
   result_labels?: Record<string, string>;
   empty_message?: string;
   rate_limit_per_min?: number;
+  /// 是否启用模糊匹配。
+  fuzzy_enabled?: boolean;
+  /// 触发模糊匹配所需的最少连续数字位数（2..=16）。
+  fuzzy_min_digits?: number;
   /// 显式给空串表示**清空**短链（回落到 UUID slug）。
   custom_slug?: string;
 };

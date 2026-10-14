@@ -296,7 +296,7 @@ describe("公开查询端点", () => {
 });
 
 describe("公开元信息端点", () => {
-  it("GET 到 /portal/{slug}（不带 /query），按信封 data 解析出四个字段", async () => {
+  it("GET 到 /portal/{slug}（不带 /query），按信封 data 解析出各字段（模糊配置缺省）", async () => {
     const calls = recordFetch(() =>
       envelope({
         title: "信用卡查询",
@@ -315,6 +315,8 @@ describe("公开元信息端点", () => {
       query_field_label: "完整卡号",
       access_mode: "passphrase",
       empty_message: "未找到该卡号的记录",
+      fuzzy_enabled: true,
+      fuzzy_min_digits: 4,
     });
   });
 

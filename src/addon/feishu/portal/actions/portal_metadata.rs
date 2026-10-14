@@ -54,6 +54,10 @@ pub(super) struct PortalMetadataOutput {
     access_mode: String,
     /// 查无结果时的提示文案；未配置时为空串。
     empty_message: String,
+    /// 是否启用模糊匹配。
+    fuzzy_enabled: bool,
+    /// 触发模糊匹配所需的最少连续数字位数。
+    fuzzy_min_digits: i64,
 }
 
 /// 注册公开元信息端点。
@@ -107,6 +111,8 @@ pub(super) async fn handle(
             empty_message: portal
                 .optional::<String>("empty_message")?
                 .unwrap_or_default(),
+            fuzzy_enabled: portal.optional::<bool>("fuzzy_enabled")?.unwrap_or(true),
+            fuzzy_min_digits: portal.optional::<i64>("fuzzy_min_digits")?.unwrap_or(4),
         },
         "门户元信息",
     )
@@ -166,11 +172,15 @@ mod tests {
             query_field_label: "卡号".to_string(),
             access_mode: "passphrase".to_string(),
             empty_message: "未找到匹配记录".to_string(),
+            fuzzy_enabled: true,
+            fuzzy_min_digits: 4,
         };
         let value = serde_json::to_value(output).unwrap_or_else(|e| panic!("应可序列化: {e}"));
         assert_eq!(value["title"], serde_json::json!("卡号查询"));
         assert_eq!(value["query_field_label"], serde_json::json!("卡号"));
         assert_eq!(value["access_mode"], serde_json::json!("passphrase"));
         assert_eq!(value["empty_message"], serde_json::json!("未找到匹配记录"));
+        assert_eq!(value["fuzzy_enabled"], serde_json::json!(true));
+        assert_eq!(value["fuzzy_min_digits"], serde_json::json!(4));
     }
 }

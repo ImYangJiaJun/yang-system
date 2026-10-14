@@ -113,6 +113,8 @@ function parsePortal(raw: Record<string, unknown>): Portal | null {
     result_labels: asNullableString(raw.result_labels),
     empty_message: asNullableString(raw.empty_message),
     rate_limit_per_min: asNumber(raw.rate_limit_per_min, 30),
+    fuzzy_enabled: raw.fuzzy_enabled !== false,
+    fuzzy_min_digits: asNumber(raw.fuzzy_min_digits, 4),
     enabled: raw.enabled !== false,
     created_at: asNumber(raw.created_at, 0),
     updated_at: asNumber(raw.updated_at, 0),
@@ -214,6 +216,8 @@ export async function createPortal(
       result_labels: input.result_labels,
       empty_message: input.empty_message,
       rate_limit_per_min: input.rate_limit_per_min,
+      fuzzy_enabled: input.fuzzy_enabled,
+      fuzzy_min_digits: input.fuzzy_min_digits,
       // 空短链必须**省略**：后端对 `Some("")` 走形状校验（长度 1..=64）会判参数错。
       custom_slug: input.custom_slug === "" ? undefined : input.custom_slug,
     },
@@ -250,6 +254,8 @@ export async function updatePortal(
       result_labels: input.result_labels,
       empty_message: input.empty_message,
       rate_limit_per_min: input.rate_limit_per_min,
+      fuzzy_enabled: input.fuzzy_enabled,
+      fuzzy_min_digits: input.fuzzy_min_digits,
       // 显式空串 = 清空短链（后端如此约定），所以这个键**照发**。
       custom_slug: input.custom_slug,
     },
@@ -448,6 +454,10 @@ export interface PortalMetadata {
   access_mode: PortalAccessMode;
   /// 查无结果时的提示；门户未配置时后端回空串，这里折成 `undefined`。
   empty_message?: string;
+  /// 是否启用模糊匹配。
+  fuzzy_enabled: boolean;
+  /// 触发模糊匹配所需的最少连续数字位数。
+  fuzzy_min_digits: number;
 }
 
 /// 取门户元信息。公开端点，停用与不存在同回 `40401`（不泄露存在性）。
@@ -472,6 +482,9 @@ export async function getPortalMetadata(
       typeof data?.query_field_label === "string" ? data.query_field_label : "",
     access_mode: asAccessMode(data?.access_mode),
     empty_message: asNullableString(data?.empty_message) ?? undefined,
+    fuzzy_enabled: data?.fuzzy_enabled !== false,
+    fuzzy_min_digits:
+      typeof data?.fuzzy_min_digits === "number" ? data.fuzzy_min_digits : 4,
   };
 }
 

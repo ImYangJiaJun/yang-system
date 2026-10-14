@@ -29,6 +29,8 @@ pub(super) const PORTAL_ITEM_COLUMNS: &[&str] = &[
     "result_labels",
     "empty_message",
     "rate_limit_per_min",
+    "fuzzy_enabled",
+    "fuzzy_min_digits",
     "enabled",
     "created_at",
     "updated_at",
@@ -65,6 +67,10 @@ pub(super) struct PortalItem {
     empty_message: Option<String>,
     /// 每分钟限速。
     rate_limit_per_min: i64,
+    /// 是否启用模糊匹配。
+    fuzzy_enabled: bool,
+    /// 触发模糊匹配所需的最少连续数字位数。
+    fuzzy_min_digits: i64,
     /// 启用/停用。
     enabled: bool,
     /// 创建时间（unix 秒）。
@@ -156,6 +162,8 @@ fn record_to_item(record: &Record) -> Result<PortalItem, BaseError> {
         result_labels: record.optional("result_labels")?,
         empty_message: record.optional("empty_message")?,
         rate_limit_per_min: record.optional("rate_limit_per_min")?.unwrap_or(30),
+        fuzzy_enabled: record.optional("fuzzy_enabled")?.unwrap_or(true),
+        fuzzy_min_digits: record.optional("fuzzy_min_digits")?.unwrap_or(4),
         enabled: record.optional("enabled")?.unwrap_or(true),
         created_at: record.require("created_at")?,
         updated_at: record.require("updated_at")?,
