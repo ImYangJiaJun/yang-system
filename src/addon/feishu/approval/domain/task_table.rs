@@ -76,7 +76,12 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .default("pending")
                 .filterable(true),
             // 创建成功后**立即**落库，不要等回写成功——那时响应已经丢了。
-            instance_code => Str::new().title("审批实例 Code").max_length(128),
+            // filterable 必开：事件 worker 用 instance_code 反查 task 行
+            // （`process_event_inner` 步骤 1），fail-closed 漏了只在运行期报错。
+            instance_code => Str::new()
+                .title("审批实例 Code")
+                .max_length(128)
+                .filterable(true),
             serial_number => Str::new().title("审批单编号").max_length(64),
             // 事件订阅回写的实例状态（设计 §八 二期列）。
             instance_status => Str::new()
