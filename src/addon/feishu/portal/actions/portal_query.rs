@@ -620,12 +620,12 @@ async fn fuzzy_match(
 }
 
 /// 提取字符串里的全部 ASCII 数字，按出现顺序拼接。
-fn extract_digits(input: &str) -> String {
+pub(super) fn extract_digits(input: &str) -> String {
     input.chars().filter(char::is_ascii_digit).collect()
 }
 
 /// 找到输入里第一段长度 ≥ `min_len` 的连续 ASCII 数字。
-fn first_digit_run(input: &str, min_len: usize) -> Option<String> {
+pub(super) fn first_digit_run(input: &str, min_len: usize) -> Option<String> {
     let mut run = String::new();
     for ch in input.chars() {
         if ch.is_ascii_digit() {
@@ -651,7 +651,7 @@ fn first_digit_run(input: &str, min_len: usize) -> Option<String> {
 /// ponytail: 粗筛固定取 4 位、且只取第一页 `MATCH_LIMIT` 条候选——若上百张卡共享
 /// 同一 4 位前缀，真命中有可能落在被截断的候选之外。卡号 4 位前缀撞车到这个量级
 /// 才会失手；真出现时再按 `option_id` 分页扫全量候选。
-fn fuzzy_like_key(value: &str, min_digits: usize) -> Option<String> {
+pub(super) fn fuzzy_like_key(value: &str, min_digits: usize) -> Option<String> {
     first_digit_run(value, min_digits).map(|run| run.chars().take(4).collect())
 }
 
@@ -659,7 +659,7 @@ fn fuzzy_like_key(value: &str, min_digits: usize) -> Option<String> {
 ///
 /// 这样 `"4514 6175 9317 4990"` 与 `"4514617593174990"` 视为同一卡号，输入只给
 /// 中间一段（`"61759317"`）也能命中。
-fn fuzzy_filter_candidates(candidates: &[Record], input_digits: &str) -> Vec<Record> {
+pub(super) fn fuzzy_filter_candidates(candidates: &[Record], input_digits: &str) -> Vec<Record> {
     candidates
         .iter()
         .filter(|record| {

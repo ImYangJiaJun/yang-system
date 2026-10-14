@@ -10,6 +10,7 @@ pub(super) mod list_portals;
 pub(super) mod portal_access_log;
 pub(super) mod portal_metadata;
 pub(super) mod portal_query;
+pub(super) mod portal_suggest;
 pub(super) mod set_passphrase;
 pub(super) mod toggle_portal;
 pub(super) mod update_portal;
@@ -36,5 +37,6 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = portal_access_log::register(module, Arc::clone(&context));
     let module = export_portal_results::register(module, Arc::clone(&context));
     let module = portal_metadata::register(module, Arc::clone(&context));
+    let module = portal_suggest::register(module, Arc::clone(&context));
     portal_query::register(module, context)
 }

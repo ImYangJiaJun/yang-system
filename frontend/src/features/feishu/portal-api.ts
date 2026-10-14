@@ -535,6 +535,36 @@ export async function queryPortal(
   };
 }
 
+/// 取门户查询建议（自动补全候选列表）。
+///
+/// 公开端点，匿名可访问。按输入前缀返回匹配的查询值候选，供前端自动补全下拉。
+/// 失败时返回空数组（不抛异常），让 UI 静默降级。
+export async function suggestPortal(
+  slug: string,
+  query: string,
+  session?: SessionContext,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const params = new URLSearchParams({ query });
+  try {
+    const data = asRecord(
+      await publicJson(
+        `/api/v1/feishu/portal/${encodeURIComponent(slug)}/suggest?${params}`,
+        { method: "GET", signal },
+        session?.token,
+      ),
+    );
+    return Array.isArray(data?.suggestions)
+      ? data.suggestions.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : [];
+  } catch {
+    // 建议失败不阻塞查询：静默返回空列表，让 UI 降级为纯输入框。
+    return [];
+  }
+}
+
 /* ------------------------------ React 接线 ------------------------------ */
 
 /// 公开页 mount 时取的门户元信息。

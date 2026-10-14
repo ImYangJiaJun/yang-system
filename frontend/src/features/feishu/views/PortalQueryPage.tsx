@@ -20,7 +20,7 @@
  */
 
 import { useMutation } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Navigate, useParams } from "react-router";
 
 import { useSessionCredentials } from "@/engine";
@@ -40,6 +40,7 @@ import {
 import {
   portalFailureView,
   queryPortal,
+  suggestPortal,
   usePortalMetadata,
 } from "../portal-api";
 
@@ -68,6 +69,31 @@ export default function PortalQueryPage() {
   const [passphrase, setPassphrase] = useState("");
   const [passphraseRevealed, setPassphraseRevealed] = useState(false);
   const [loginRequired, setLoginRequired] = useState(false);
+
+  // 自动补全状态：建议列表、下拉可见性、当前选中项索引、失焦延时 ref。
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 去抖调 suggest 端点：输入变化后 300ms 触发，去掉空格后检查是否 ≥4 位连续数字。
+  useEffect(() => {
+    const stripped = value.replace(/\s/g, "");
+    if (stripped.length < 4) {
+      setSuggestions([]);
+      setShowDropdown(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      const results = await suggestPortal(slug, stripped, session);
+      setSuggestions(results);
+      setShowDropdown(results.length > 0);
+      setSelectedIndex(-1);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [value, slug, session]);
 
   const query = useMutation({
     mutationFn: () =>
@@ -159,14 +185,69 @@ export default function PortalQueryPage() {
             </div>
           ) : null}
 
-          <div className="space-y-2">
+          <div className="relative space-y-2">
             <Label htmlFor="portal-value">查询</Label>
             <Input
               id="portal-value"
               value={value}
               placeholder={meta.query_field_label || FALLBACK_PLACEHOLDER}
               onChange={(event) => setValue(event.target.value)}
+              onFocus={() => {
+                if (suggestions.length > 0) setShowDropdown(true);
+              }}
+              onBlur={() => {
+                // 延时隐藏，让下拉项的 click 事件先触发。
+                blurTimerRef.current = setTimeout(
+                  () => setShowDropdown(false),
+                  150,
+                );
+              }}
+              onKeyDown={(event) => {
+                if (!showDropdown || suggestions.length === 0) return;
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setSelectedIndex((prev) =>
+                    prev < suggestions.length - 1 ? prev + 1 : 0,
+                  );
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setSelectedIndex((prev) =>
+                    prev > 0 ? prev - 1 : suggestions.length - 1,
+                  );
+                } else if (event.key === "Enter" && selectedIndex >= 0) {
+                  event.preventDefault();
+                  setValue(suggestions[selectedIndex]);
+                  setShowDropdown(false);
+                } else if (event.key === "Escape") {
+                  setShowDropdown(false);
+                }
+              }}
             />
+            {showDropdown && suggestions.length > 0 ? (
+              <div className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-md border border-border bg-popover shadow-md">
+                {suggestions.map((suggestion, index) => (
+                  <div
+                    key={suggestion}
+                    role="option"
+                    aria-selected={index === selectedIndex}
+                    className={`cursor-pointer px-3 py-2 text-sm ${
+                      index === selectedIndex
+                        ? "bg-accent text-accent-foreground"
+                        : "hover:bg-accent/50"
+                    }`}
+                    onMouseDown={(event) => {
+                      // mousedown 优先于 blur，避免下拉被提前隐藏。
+                      event.preventDefault();
+                      setValue(suggestion);
+                      setShowDropdown(false);
+                    }}
+                    onMouseEnter={() => setSelectedIndex(index)}
+                  >
+                    {suggestion}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           <Button type="submit" disabled={!canSubmit}>
