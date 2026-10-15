@@ -479,7 +479,7 @@ async fn pull_table_inner(
         outcome.rows_affected += written.rows_affected;
         outcome.disabled += written.disabled;
 
-        tracing::info!(
+        tracing::debug!(
             source_key = %binding.source_key,
             fetched = outcome.fetched,
             derived = derived.len(),

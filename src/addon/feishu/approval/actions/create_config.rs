@@ -236,7 +236,7 @@ pub(super) async fn handle(
     .await;
     let config_id = FeishuContext::finish_transaction(transaction, result).await?;
 
-    tracing::info!(
+    tracing::debug!(
         config_id,
         base_token = %coordinates.app_token,
         table_id = %coordinates.table_id.as_deref().unwrap_or_default(),

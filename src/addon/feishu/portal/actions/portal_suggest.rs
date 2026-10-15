@@ -115,7 +115,7 @@ pub(super) async fn handle(
         return empty_response();
     };
 
-    tracing::info!(
+    tracing::debug!(
         query_source_key,
         pattern,
         input_digits,
@@ -135,14 +135,14 @@ pub(super) async fn handle(
         .all()
         .await?;
 
-    tracing::info!(
+    tracing::debug!(
         candidate_count = candidates.len(),
         "suggest: DB query returned candidates"
     );
 
     let matched = fuzzy_filter_candidates(&candidates, &input_digits);
 
-    tracing::info!(
+    tracing::debug!(
         matched_count = matched.len(),
         "suggest: after Rust-side filter"
     );
