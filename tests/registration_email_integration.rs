@@ -230,33 +230,11 @@ async fn request_code(
         .context("测试投递器未收到验证码")
 }
 
-fn registration_body(username: &str, email: &str, code: &str) -> Value {
+fn registration_body(username: &str) -> Value {
     json!({
         "username": username,
         "password": PASSWORD,
-        "email": email,
-        "email_code": code,
     })
-}
-
-fn assert_invalid_code(result: Result<ApiResponse, BaseError>) -> anyhow::Result<()> {
-    match result {
-        Err(BaseError::ParamInvalid(field, message))
-            if field == "email_code" && message == "邮箱验证码无效或已过期" =>
-        {
-            Ok(())
-        }
-        Err(error) => anyhow::bail!("预期统一验证码拒绝，实际为: {error}"),
-        Ok(response) => anyhow::bail!("无效验证码不得成功: code={}", response.code),
-    }
-}
-
-fn wrong_code(code: &str) -> &'static str {
-    if code == "000000" {
-        "111111"
-    } else {
-        "000000"
-    }
 }
 
 fn finish_with_cleanup(
@@ -344,50 +322,40 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
         }
         tokio::time::sleep(Duration::from_millis(1_100)).await;
 
-        assert_invalid_code(
-            dispatch(
-                &app,
-                "register",
-                registration_body("wrong_once", normalized_email, wrong_code(&code)),
-                43_001,
-            )
-            .await,
-        )?;
         let registered = dispatch(
             &app,
             "register",
-            registration_body("verified_user", normalized_email, &code),
+            registration_body("verified_user"),
             43_001,
         )
         .await?;
-        ensure!(registered.code == 0, "正确验证码必须完成注册");
+        ensure!(registered.code == 0, "无邮箱注册必须成功");
         let registered_data = registered.data.context("注册响应缺少 data")?;
         ensure!(
-            registered_data["email"] == normalized_email,
-            "注册响应必须返回规范化已验证邮箱"
+            registered_data["email"].is_null(),
+            "注册响应 email 必须为 null"
         );
-        let stored: (String, i64) = sqlx::query_as(
+        let stored: (Option<String>, Option<i64>) = sqlx::query_as(
             "SELECT email, email_verified_at FROM users WHERE username = 'verified_user'",
         )
         .fetch_one(control.pool())
         .await?;
         ensure!(
-            stored.0 == normalized_email && stored.1 > 0,
-            "数据库必须保存验证事实"
+            stored.0.is_none() && stored.1.is_none(),
+            "数据库 email 与 email_verified_at 必须都是 NULL"
         );
-        ensure!(
-            redis.keys("*:code:*").await?.is_empty(),
-            "注册成功后验证码必须从 Redis 原子消费"
-        );
-        assert_invalid_code(
-            dispatch(
-                &app,
-                "register",
-                registration_body("replay_user", "replay@example.com", &code),
-                43_001,
-            )
-            .await,
-        )?;
+
+        // 注册不再写邮箱，已注册邮箱的抑制语义改由直写成对的已验证邮箱构造
+        // （chk_users_verified_email_pair 要求两列同时非空）。
+        let verified_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let bound = sqlx::query(
+            "UPDATE users SET email = ?, email_verified_at = ? WHERE username = 'verified_user'",
+        )
+        .bind(normalized_email)
+        .bind(verified_at)
+        .execute(control.pool())
+        .await?;
+        ensure!(bound.rows_affected() == 1, "直写已验证邮箱应影响一行");
 
         let suppressed = dispatch(
             &app,
@@ -401,85 +369,6 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
             sender.take_code(normalized_email)?.is_none(),
             "已有邮箱不得再次投递注册验证码"
         );
-        assert_invalid_code(
-            dispatch(
-                &app,
-                "register",
-                registration_body("existing_email_probe", normalized_email, "000000"),
-                43_001,
-            )
-            .await,
-        )?;
-
-        let concurrent_email = "concurrent@example.com";
-        let concurrent_code = request_code(&app, &sender, concurrent_email, 43_002).await?;
-        let mut tasks = Vec::new();
-        for username in ["concurrent_one", "concurrent_two"] {
-            let app = Arc::clone(&app);
-            let body = registration_body(username, concurrent_email, &concurrent_code);
-            tasks.push(tokio::spawn(async move {
-                dispatch(&app, "register", body, 43_002).await
-            }));
-        }
-        let mut successes = 0;
-        let mut denied = 0;
-        for task in tasks {
-            match task.await.context("并发注册任务 panic")? {
-                Ok(response) if response.code == 0 => successes += 1,
-                Err(BaseError::ParamInvalid(field, _)) if field == "email_code" => denied += 1,
-                other => anyhow::bail!("并发双消费返回非预期结果: {other:?}"),
-            }
-        }
-        ensure!(
-            successes == 1 && denied == 1,
-            "同一验证码并发只能成功一次: successes={successes}, denied={denied}"
-        );
-
-        let attempts_email = "attempts@example.com";
-        let attempts_code = request_code(&app, &sender, attempts_email, 43_003).await?;
-        for index in 0..3 {
-            assert_invalid_code(
-                dispatch(
-                    &app,
-                    "register",
-                    registration_body(
-                        &format!("attempt_{index}"),
-                        attempts_email,
-                        wrong_code(&attempts_code),
-                    ),
-                    43_003,
-                )
-                .await,
-            )?;
-        }
-        assert_invalid_code(
-            dispatch(
-                &app,
-                "register",
-                registration_body("attempt_exhausted", attempts_email, &attempts_code),
-                43_003,
-            )
-            .await,
-        )?;
-
-        let expired_email = "expired@example.com";
-        let expired_code = request_code(&app, &sender, expired_email, 43_004).await?;
-        let code_keys = redis.keys("*:code:*").await?;
-        ensure!(code_keys.len() == 1, "应仅有待过期的一枚验证码");
-        ensure!(
-            redis.expire(code_keys[0].clone(), 1).await?,
-            "应可缩短测试 TTL"
-        );
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
-        assert_invalid_code(
-            dispatch(
-                &app,
-                "register",
-                registration_body("expired_user", expired_email, &expired_code),
-                43_004,
-            )
-            .await,
-        )?;
 
         sender.fail_next(true);
         let before_failed_send = redis.keys("*:code:*").await?.len();
@@ -565,17 +454,26 @@ async fn login_accepts_both_username_and_normalized_email() -> anyhow::Result<()
         let application = build_app(Arc::clone(&tools), security_settings())?;
         let app = Arc::new(application.runtime);
 
-        // 注册一个用户（邮箱大小写混合验证归一化）。
+        // 注册不再写邮箱。邮箱登录仍按 users.email 分派，这里直写成对的
+        // 已验证邮箱（chk_users_verified_email_pair 要求两列同时非空）。
         let email = "Login.ByEmail@Example.COM";
-        let code = request_code(&app, &sender, email, 43_101).await?;
         let registered = dispatch(
             &app,
             "register",
-            registration_body("login_email_user", email, &code),
+            registration_body("login_email_user"),
             43_101,
         )
         .await?;
         ensure!(registered.code == 0, "注册应成功");
+        let verified_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let bound = sqlx::query(
+            "UPDATE users SET email = ?, email_verified_at = ? WHERE username = 'login_email_user'",
+        )
+        .bind(email.to_ascii_lowercase())
+        .bind(verified_at)
+        .execute(control.pool())
+        .await?;
+        ensure!(bound.rows_affected() == 1, "直写已验证邮箱应影响一行");
 
         // 1) 用归一化邮箱登录成功。
         let by_email = dispatch(
@@ -678,10 +576,8 @@ async fn session_revoke_kicks_one_device_without_affecting_others() -> anyhow::R
         let app = Arc::new(application.runtime);
 
         // 注册用户。
-        let email = "session-revoke@example.com";
-        let code = request_code(&app, &sender, email, 43_201).await?;
         let registered =
-            dispatch(&app, "register", registration_body("session_revoke_user", email, &code), 43_201)
+            dispatch(&app, "register", registration_body("session_revoke_user"), 43_201)
                 .await?;
         ensure!(registered.code == 0, "注册应成功");
 
@@ -847,10 +743,8 @@ async fn totp_two_stage_login() -> anyhow::Result<()> {
         let app = Arc::new(application.runtime);
 
         // 注册用户。
-        let email = "totp-two-stage@example.com";
-        let code = request_code(&app, &sender, email, 43_301).await?;
         let registered =
-            dispatch(&app, "register", registration_body("totp_two_stage_user", email, &code), 43_301)
+            dispatch(&app, "register", registration_body("totp_two_stage_user"), 43_301)
                 .await?;
         ensure!(registered.code == 0, "注册应成功");
 

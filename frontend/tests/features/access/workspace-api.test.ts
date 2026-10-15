@@ -383,7 +383,7 @@ describe("listPermissions reason 字段", () => {
         // 空串也算没有理由
         {
           permission: "account.users.read",
-          declared_by: ["account.user.list_users"],
+          declared_by: ["account.admin_users.list_users"],
           admin_equivalent: false,
           reason: "",
         },
@@ -407,7 +407,7 @@ describe("listPermissions reason 字段", () => {
       },
       {
         permission: "account.users.read",
-        declaredBy: ["account.user.list_users"],
+        declaredBy: ["account.admin_users.list_users"],
         adminEquivalent: false,
         reason: null,
       },

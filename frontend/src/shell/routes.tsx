@@ -150,6 +150,14 @@ export const appRoutes = [
             hydrateFallbackElement: <RouteFallback />,
           },
           {
+            path: "admin/users",
+            lazy: async () => ({
+              Component: (await import("@/features/account/UserAdminPage"))
+                .default,
+            }),
+            hydrateFallbackElement: <RouteFallback />,
+          },
+          {
             // 权限组管理面旧 URL：lazy 指向同一工作台页面，无 ?tab= 参数时
             // 按路径默认「按组」tab（旧入口兼容，页面文件见上）。
             path: "access/groups",

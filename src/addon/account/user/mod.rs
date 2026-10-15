@@ -24,18 +24,19 @@ use yang_base::definition::{
 use yang_base::transport::client_ip::TrustedClientIpMiddleware;
 use yang_base::BaseError;
 
-/// 装配 `account.user` Module：表 → 上下文 → 中间件 → Action 注册表 → 展示投影。
-pub(super) fn build_module(
+/// 装配账号模块上下文 [`Account`]：由安全配置派生密码引擎与限流器，
+/// 并绑定仓储与授权端口。管理端模块（`account.admin_users`）与 `account.user`
+/// 共享同一份上下文实例。
+pub(super) fn build_context(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
     system_owner_claimer: Arc<dyn SystemOwnerClaimer>,
     system_authorization: Arc<dyn SystemAuthorizationPort>,
-    authorization_validator: AuthorizationVersionValidator,
-) -> Result<ModuleSpec, BaseError> {
+) -> Result<Arc<Account>, BaseError> {
     let table = table::user_table_spec()?;
     let session_repository = SessionRepository::new(crate::schema::user_session()?);
     let login_event_repository = LoginEventRepository::new(crate::schema::login_event()?);
-    let account = Arc::new(Account::new(
+    Ok(Arc::new(Account::new(
         UserRepository::new(table.table_definition()?),
         session_repository,
         login_event_repository,
@@ -44,15 +45,22 @@ pub(super) fn build_module(
         grant_resolver,
         system_owner_claimer,
         system_authorization,
-    )?);
+    )?))
+}
 
+/// 装配 `account.user` Module：表 → 中间件 → Action 注册表 → 展示投影。
+pub(super) fn build_module(
+    account: Arc<Account>,
+    authorization_validator: AuthorizationVersionValidator,
+) -> Result<ModuleSpec, BaseError> {
+    let table = table::user_table_spec()?;
     let mut module = ModuleSpec::new(
         ModuleName::new("account.user")
             .map_err(|error| BaseError::ConfigError(error.to_string()))?,
     )
     .table(table)
     .middleware(TrustedClientIpMiddleware::from_cidrs(
-        &security.trusted_proxy_cidrs,
+        account.trusted_proxy_cidrs(),
     )?)
     .middleware(
         TokenAuthMiddleware::new(super::domain::claims::user_from_claims)

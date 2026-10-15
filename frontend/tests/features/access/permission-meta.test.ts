@@ -55,7 +55,7 @@ function catalogWith(modules: UiCatalog["modules"]): UiCatalog {
         requires_auth: true,
       },
       {
-        operation_id: "account.user.list_users",
+        operation_id: "account.admin_users.list_users",
         title: "用户列表",
         description: "管理端分页列出用户",
         method: "GET",
@@ -100,7 +100,7 @@ const ENTRIES: PermissionCatalogEntry[] = [
     // 模块前缀 account.users 与目录里的模块 account.user 不同源：模块名命不中，
     // 展示回退到权限字符串，分组回退到前缀
     permission: "account.users.read",
-    declaredBy: ["account.user.list_users"],
+    declaredBy: ["account.admin_users.list_users"],
     adminEquivalent: false,
     reason: null,
   },

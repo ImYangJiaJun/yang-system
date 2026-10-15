@@ -170,7 +170,7 @@ describe("email verification requests（注册 / 登录 MFA）", () => {
     expect(error).toMatchObject({ status: 401, message: "账号或密码错误" });
   });
 
-  it("注册提交邮箱所有权证明并拒绝畸形成功响应", async () => {
+  it("注册只提交用户名和密码；邮箱为空仍算成功，畸形响应拒绝", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -180,8 +180,8 @@ describe("email verification requests（注册 / 登录 MFA）", () => {
             data: {
               id: 42,
               username: "alice",
-              email: "alice@example.com",
-              email_verified_at: 1_785_000_000,
+              email: null,
+              email_verified_at: null,
             },
           }),
           { status: 201, headers: { "content-type": "application/json" } },
@@ -195,25 +195,19 @@ describe("email verification requests（注册 / 登录 MFA）", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(
-      register("alice", "correct-password", "alice@example.com", "123456"),
-    ).resolves.toEqual({
+    await expect(register("alice", "correct-password")).resolves.toEqual({
       id: 42,
       username: "alice",
-      email: "alice@example.com",
-      emailVerifiedAt: 1_785_000_000,
     });
     expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(
       JSON.stringify({
         username: "alice",
         password: "correct-password",
-        email: "alice@example.com",
-        email_code: "123456",
       }),
     );
-    await expect(
-      register("bob", "correct-password", "bob@example.com", "654321"),
-    ).rejects.toThrow("注册响应缺少已验证账户");
+    await expect(register("bob", "correct-password")).rejects.toThrow(
+      "注册响应缺少已验证账户",
+    );
   });
 });
 

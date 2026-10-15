@@ -2,7 +2,7 @@ import { ApiError } from "@/engine/http/errors";
 import { apiBase, parseJson } from "@/engine/http/http";
 
 /**
- * account 域业务流程请求：注册（邮箱验证码）、密码重置。
+ * account 域业务流程请求：注册（用户名与密码）、密码重置。
  * 会话生命周期（login/refresh/logout/disable）属引擎会话协议，见 engine/session/lifecycle.ts。
  */
 
@@ -14,8 +14,6 @@ export type RegistrationEmailChallenge = {
 export type RegisteredUser = {
   id: number;
   username: string;
-  email: string;
-  emailVerifiedAt: number;
 };
 
 type ApiEnvelope = {
@@ -176,13 +174,11 @@ export async function requestLoginEmailCode(
 export async function register(
   username: string,
   password: string,
-  email: string,
-  emailCode: string,
   signal?: AbortSignal,
 ): Promise<RegisteredUser> {
   const result = await requestPublicAction(
     "/api/v1/users/register",
-    { username, password, email, email_code: emailCode },
+    { username, password },
     signal,
   );
   const { payload } = result;
@@ -192,12 +188,7 @@ export async function register(
     !Number.isSafeInteger(data.id) ||
     data.id <= 0 ||
     typeof data.username !== "string" ||
-    !data.username ||
-    typeof data.email !== "string" ||
-    !data.email ||
-    typeof data.email_verified_at !== "number" ||
-    !Number.isSafeInteger(data.email_verified_at) ||
-    data.email_verified_at <= 0
+    !data.username
   ) {
     throw new ApiError("注册响应缺少已验证账户", {
       status: result.status,
@@ -209,8 +200,6 @@ export async function register(
   return {
     id: data.id,
     username: data.username,
-    email: data.email,
-    emailVerifiedAt: data.email_verified_at,
   };
 }
 

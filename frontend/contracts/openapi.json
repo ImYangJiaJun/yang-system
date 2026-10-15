@@ -2528,6 +2528,34 @@
                     "description": "多维表格 token。",
                     "type": "string"
                   },
+                  "department_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "end_time_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "flow_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "handler_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "maps": {
                     "description": "显式控件到列的映射；省略时按名称自动匹配。",
                     "items": {
@@ -2535,6 +2563,21 @@
                     },
                     "type": [
                       "array",
+                      "null"
+                    ]
+                  },
+                  "start_time_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status_field": {
+                    "default": null,
+                    "description": "六个可选回填目标列（设计 §5.1）。`field_id` **或**列名都接受，落库统一存 id； 空 = 不启用该回填。给了就在 `build_plan` 里校验目标列存在且类型匹配。",
+                    "type": [
+                      "string",
                       "null"
                     ]
                   },
@@ -3496,9 +3539,277 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/feishu/approval/configs/reveal-token": {
+      "post": {
+        "description": "取出这条配置上封存的工作流访问 Token 明文（纯读，不改变任何状态；每次追加审计）",
+        "operationId": "feishu.approval.reveal_config_token",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "回显输入。",
+                "properties": {
+                  "config_id": {
+                    "description": "目标配置的 `config_id`（控制台列表/详情已知）。",
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "config_id"
+                ],
+                "title": "RevealConfigTokenInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "回显访问 Token",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.approval.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/approval/configs/rotate-token": {
+      "post": {
+        "description": "为一条审批派发配置重新签发工作流访问 Token（旧值立即失效，工作流需粘新值）；每次追加审计",
+        "operationId": "feishu.approval.rotate_config_token",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "轮换输入。",
+                "properties": {
+                  "config_id": {
+                    "description": "目标配置的 `config_id`（控制台列表/详情已知）。",
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "config_id"
+                ],
+                "title": "RotateConfigTokenInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "轮换访问 Token",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.approval.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/feishu/approval/configs/update": {
       "post": {
-        "description": "更新配置名、启用开关、Base 时区或逐项字段映射；坐标与审批三件套不可改",
+        "description": "更新配置名、启用开关、Base 时区、逐项字段映射或六个可选回填列；坐标与审批三件套不可改",
         "operationId": "feishu.approval.update_config",
         "parameters": [],
         "requestBody": {
@@ -3549,11 +3860,39 @@
                     "format": "int64",
                     "type": "integer"
                   },
+                  "department_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "enabled": {
                     "default": null,
                     "description": "启用开关；省略即不改。",
                     "type": [
                       "boolean",
+                      "null"
+                    ]
+                  },
+                  "end_time_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "flow_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "handler_field": {
+                    "default": null,
+                    "type": [
+                      "string",
                       "null"
                     ]
                   },
@@ -3564,6 +3903,21 @@
                     },
                     "type": [
                       "array",
+                      "null"
+                    ]
+                  },
+                  "start_time_field": {
+                    "default": null,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status_field": {
+                    "default": null,
+                    "description": "六个可选回填目标列（设计 §5.1）。`field_id` **或**列名都接受，落库统一存 id； `Some(\"\")` = 清空该列。给了就校验目标列存在且类型匹配（拉一次字段）。",
+                    "type": [
+                      "string",
                       "null"
                     ]
                   },
@@ -7315,6 +7669,254 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/feishu/oauth/authorize-url": {
+      "post": {
+        "description": "生成飞书用户身份（OAuth）授权页链接，由管理员本人打开并完成授权",
+        "operationId": "feishu.approval.oauth_authorize_url",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "取授权链接的输入：无参数。",
+                "title": "AuthorizeUrlInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "生成飞书用户授权链接",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.approval.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/oauth/status": {
+      "post": {
+        "description": "查询本系统的飞书用户身份（OAuth）授权状态",
+        "operationId": "feishu.approval.oauth_status",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "状态查询输入：无参数。",
+                "title": "OauthStatusInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "飞书用户身份授权状态",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.approval.read"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/feishu/options/query": {
       "post": {
         "description": "分页查询飞书选项",
@@ -7879,10 +8481,2538 @@
         "x-yang-response-kind": "json"
       }
     },
+    "/api/v1/feishu/portal/{slug}": {
+      "get": {
+        "description": "按 slug 取门户的公开元信息：标题、查询键展示名、访问模式、空结果提示",
+        "operationId": "feishu.portal.portal_metadata",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "元信息端点无请求体（`slug` 走路径参数）。",
+                "title": "PortalMetadataInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "门户元信息",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portal/{slug}/query": {
+      "post": {
+        "description": "按精确值查询门户开放的数据；访问控制由门户的访问模式决定",
+        "operationId": "feishu.portal.portal_query",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "公开查询的输入契约（`slug` 走路径参数，从 `ctx.request` 取）。",
+                "properties": {
+                  "passphrase": {
+                    "default": null,
+                    "description": "门户口令；`access_mode = passphrase` 时必填。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "value": {
+                    "description": "查询值（精确匹配）。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "title": "PortalQueryInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "门户查询",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portal/{slug}/suggest": {
+      "get": {
+        "description": "按输入返回匹配的查询值候选列表，供前端自动补全",
+        "operationId": "feishu.portal.portal_suggest",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "建议端点的输入。\n\n# 为什么是空结构体（这里踩过坑）\n\n框架的 Action 输入**只从请求体反序列化**（`ActionContext::extract_input_owned`）， URL query 参数被存在 `ctx.request` 的 query map 里、从不进 input 结构体。本端点 上线首日声明了 `query: Option<String>` 字段，于是 `?query=4514` 恒反序列化成 `None`，对任何输入都回空建议——端点「注册成功、响应 200、永远空」。`query` 值 只能经 `ctx.request.get_query(\"query\")` 读取（与 `portal_metadata` 读 slug 同一模式）。",
+                "title": "PortalSuggestInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [],
+        "summary": "门户查询建议",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [],
+        "x-public": true,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portals": {
+      "delete": {
+        "description": "删除门户及其访问日志",
+        "operationId": "feishu.portal.delete_portal",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "删除门户的输入契约。",
+                "properties": {
+                  "portal_id": {
+                    "description": "目标门户 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "portal_id"
+                ],
+                "title": "DeletePortalInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "删除查询门户",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      },
+      "post": {
+        "description": "把数据源的指定列暴露为一个可对外查询的端点",
+        "operationId": "feishu.portal.create_portal",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "创建门户的输入契约。",
+                "properties": {
+                  "access_mode": {
+                    "description": "访问模式：`public` / `passphrase` / `login`。",
+                    "type": "string"
+                  },
+                  "custom_slug": {
+                    "default": null,
+                    "description": "自定义短链（可选；为空时用系统生成的 UUID slug）。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "datasource_id": {
+                    "description": "所属数据源 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "empty_message": {
+                    "default": null,
+                    "description": "查无结果时的提示文案（可选）。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "exposed_columns": {
+                    "description": "开放列：`field_id` 列表，必须都是该数据源已绑定的字段。",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "fuzzy_enabled": {
+                    "default": null,
+                    "description": "是否启用模糊匹配；缺省 true。",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "fuzzy_min_digits": {
+                    "default": null,
+                    "description": "触发模糊匹配所需的最少连续数字位数；缺省 4。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "passphrase": {
+                    "default": null,
+                    "description": "门户口令；`access_mode = passphrase` 时必填。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "query_field_id": {
+                    "description": "查询键：必须是该数据源已绑定的 `field_id`。",
+                    "type": "string"
+                  },
+                  "query_field_ids": {
+                    "default": null,
+                    "description": "多查询键（可选，`field_id` 列表）。",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "rate_limit_per_min": {
+                    "default": null,
+                    "description": "每分钟最大查询次数；缺省 30，上限 120。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "result_labels": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "default": null,
+                    "description": "展示名映射（可选）：`field_id` → 展示名。",
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "description": "门户名称（管理员用）。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "access_mode",
+                  "datasource_id",
+                  "exposed_columns",
+                  "query_field_id",
+                  "title"
+                ],
+                "title": "CreatePortalInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "新建查询门户",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      },
+      "put": {
+        "description": "更新门户的开放列、访问模式、限速等配置；省略的字段保持原值",
+        "operationId": "feishu.portal.update_portal",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "更新门户的输入契约；每个字段都是 `Option`，**省略即保持原值**。",
+                "properties": {
+                  "access_mode": {
+                    "default": null,
+                    "description": "访问模式。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "custom_slug": {
+                    "default": null,
+                    "description": "自定义短链；显式给空串表示**清空**（回落到 UUID slug）。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "empty_message": {
+                    "default": null,
+                    "description": "查无结果时的提示文案。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "exposed_columns": {
+                    "default": null,
+                    "description": "开放列（`field_id` 列表）。",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "fuzzy_enabled": {
+                    "default": null,
+                    "description": "是否启用模糊匹配。",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "fuzzy_min_digits": {
+                    "default": null,
+                    "description": "触发模糊匹配所需的最少连续数字位数。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "portal_id": {
+                    "description": "目标门户 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "query_field_id": {
+                    "default": null,
+                    "description": "查询键 `field_id`；改它会同时刷新冗余的 `query_field_source_key`。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "query_field_ids": {
+                    "default": null,
+                    "description": "多查询键（`field_id` 列表）。",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "rate_limit_per_min": {
+                    "default": null,
+                    "description": "每分钟最大查询次数。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "result_labels": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "default": null,
+                    "description": "展示名映射。",
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "default": null,
+                    "description": "门户名称。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "portal_id"
+                ],
+                "title": "UpdatePortalInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "更新查询门户",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portals/export": {
+      "post": {
+        "description": "导出门户查询结果（尚未实现）",
+        "operationId": "feishu.portal.export_portal_results",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "导出请求的输入契约。",
+                "properties": {
+                  "portal_id": {
+                    "description": "目标门户 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "value": {
+                    "description": "查询值（与 `portal_query` 同一口径，精确匹配）。",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "portal_id",
+                  "value"
+                ],
+                "title": "ExportPortalResultsInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "导出门户查询结果",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.read"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portals/log": {
+      "post": {
+        "description": "按时间倒序分页查询某个门户的访问日志",
+        "operationId": "feishu.portal.portal_access_log",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "definitions": {
+                  "OrderByItem": {
+                    "additionalProperties": false,
+                    "description": "排序条目（JSON 形态：`{\"field\": \"id\", \"direction\": \"desc\"}`）。",
+                    "properties": {
+                      "direction": {
+                        "allOf": [
+                          {
+                            "$ref": "#/definitions/SortOrder"
+                          }
+                        ],
+                        "default": "Asc",
+                        "description": "方向，缺省为 Asc"
+                      },
+                      "field": {
+                        "description": "字段名",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "field"
+                    ],
+                    "type": "object"
+                  },
+                  "SortOrder": {
+                    "description": "排序方向。",
+                    "oneOf": [
+                      {
+                        "description": "升序排序。",
+                        "enum": [
+                          "Asc"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "description": "降序排序。",
+                        "enum": [
+                          "Desc"
+                        ],
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "WhereCondition": {
+                    "description": "WHERE 条件枚举\n\n定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。\n\n# 变体\n\n- `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)\n\n# 示例\n\n```rust use yang_base::table::WhereCondition; use serde_json::json;\n\n// 等于条件 let eq_condition = WhereCondition::Eq { field: \"status\".to_string(), value: json!(\"active\"), };\n\n// 包含条件 let in_condition = WhereCondition::In { field: \"role\".to_string(), values: vec![json!(\"admin\"), json!(\"user\")], };\n\n// 模糊匹配 let like_condition = WhereCondition::Like { field: \"name\".to_string(), pattern: \"%alice%\".to_string(), };\n\n// 大于条件 let gt_condition = WhereCondition::Gt { field: \"age\".to_string(), value: json!(18), };\n\n// 空值判断 let is_null_condition = WhereCondition::IsNull { field: \"deleted_at\".to_string(), }; ```",
+                    "oneOf": [
+                      {
+                        "description": "等于条件 (field = value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "eq"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "包含于列表条件 (field IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "模糊匹配条件 (field LIKE pattern)\n\n# 字段\n\n- `field`：字段名 - `pattern`：匹配模式，支持 % 和 _ 通配符",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "pattern": {
+                            "description": "匹配模式",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "like"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "pattern",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于条件 (field > value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于等于条件 (field >= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于条件 (field < value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于等于条件 (field <= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "空值判断 (field IS NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "非空值判断 (field IS NOT NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_not_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不等于条件 (field <> value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "ne"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "区间条件 (field BETWEEN lo AND hi)\n\n# 字段\n\n- `field`：字段名 - `lo`：区间下界 - `hi`：区间上界",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "hi": {
+                            "description": "区间上界"
+                          },
+                          "lo": {
+                            "description": "区间下界"
+                          },
+                          "type": {
+                            "enum": [
+                              "between"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "hi",
+                          "lo",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不在列表条件 (field NOT IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "not_in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑与组（嵌套子条件全部成立），SQL 渲染为 `(c1 AND c2 AND ...)`\n\n空组等价于恒真（`1=1`），与顶层「无条件」语义一致。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "and"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑或组（嵌套子条件任一成立），SQL 渲染为 `(c1 OR c2 OR ...)`\n\n空组等价于恒假（`1=0`），避免拼出非法的空括号。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "or"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  }
+                },
+                "description": "访问日志查询的输入：门户 `id` + 标准分页契约。\n\n分页部分整体复用 [`ListInput`]，与通用 `TableView` 发出的六个键同构。",
+                "properties": {
+                  "count_total": {
+                    "default": false,
+                    "description": "是否额外执行 COUNT 查询。",
+                    "type": "boolean"
+                  },
+                  "order_by": {
+                    "description": "排序规则列表。",
+                    "items": {
+                      "$ref": "#/definitions/OrderByItem"
+                    },
+                    "type": "array"
+                  },
+                  "page": {
+                    "default": 1,
+                    "description": "页码（1 起步），缺省 1。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "page_size": {
+                    "default": 10,
+                    "description": "每页条数，缺省 10，必须 1..=100。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "portal_id": {
+                    "description": "目标门户 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "search": {
+                    "default": null,
+                    "description": "在表定义声明的 `searchable` 字段中执行关键词搜索。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "source_key": {
+                    "default": null,
+                    "description": "按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "where": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/WhereCondition"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "where 布尔过滤树（JSON key 为 `\"where\"`），缺省无条件。"
+                  }
+                },
+                "required": [
+                  "portal_id"
+                ],
+                "title": "PortalLogInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "门户访问日志",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.read"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portals/passphrase": {
+      "put": {
+        "description": "设置或更换门户的访问口令；只存 argon2 哈希，明文不落库",
+        "operationId": "feishu.portal.set_passphrase",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "设置口令的输入契约。",
+                "properties": {
+                  "expires_at": {
+                    "default": null,
+                    "description": "口令有效期（unix 秒）；为空表示永不过期。",
+                    "format": "int64",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "passphrase": {
+                    "description": "新口令（明文只在这一次请求里出现）。",
+                    "type": "string"
+                  },
+                  "portal_id": {
+                    "description": "目标门户 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "passphrase",
+                  "portal_id"
+                ],
+                "title": "SetPassphraseInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "设置门户口令",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portals/query": {
+      "post": {
+        "description": "分页查询飞书数据源查询门户",
+        "operationId": "feishu.portal.list_portals",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "definitions": {
+                  "OrderByItem": {
+                    "additionalProperties": false,
+                    "description": "排序条目（JSON 形态：`{\"field\": \"id\", \"direction\": \"desc\"}`）。",
+                    "properties": {
+                      "direction": {
+                        "allOf": [
+                          {
+                            "$ref": "#/definitions/SortOrder"
+                          }
+                        ],
+                        "default": "Asc",
+                        "description": "方向，缺省为 Asc"
+                      },
+                      "field": {
+                        "description": "字段名",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "field"
+                    ],
+                    "type": "object"
+                  },
+                  "SortOrder": {
+                    "description": "排序方向。",
+                    "oneOf": [
+                      {
+                        "description": "升序排序。",
+                        "enum": [
+                          "Asc"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "description": "降序排序。",
+                        "enum": [
+                          "Desc"
+                        ],
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "WhereCondition": {
+                    "description": "WHERE 条件枚举\n\n定义各种查询条件类型，支持常见的 SQL WHERE 子句操作。\n\n# 变体\n\n- `Eq`：等于条件 (field = value) - `In`：包含于列表条件 (field IN (values)) - `Like`：模糊匹配条件 (field LIKE pattern) - `Gt`：大于条件 (field > value) - `Gte`：大于等于条件 (field >= value) - `Lt`：小于条件 (field < value) - `Lte`：小于等于条件 (field <= value) - `IsNull`：空值判断 (field IS NULL) - `IsNotNull`：非空值判断 (field IS NOT NULL)\n\n# 示例\n\n```rust use yang_base::table::WhereCondition; use serde_json::json;\n\n// 等于条件 let eq_condition = WhereCondition::Eq { field: \"status\".to_string(), value: json!(\"active\"), };\n\n// 包含条件 let in_condition = WhereCondition::In { field: \"role\".to_string(), values: vec![json!(\"admin\"), json!(\"user\")], };\n\n// 模糊匹配 let like_condition = WhereCondition::Like { field: \"name\".to_string(), pattern: \"%alice%\".to_string(), };\n\n// 大于条件 let gt_condition = WhereCondition::Gt { field: \"age\".to_string(), value: json!(18), };\n\n// 空值判断 let is_null_condition = WhereCondition::IsNull { field: \"deleted_at\".to_string(), }; ```",
+                    "oneOf": [
+                      {
+                        "description": "等于条件 (field = value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "eq"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "包含于列表条件 (field IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "模糊匹配条件 (field LIKE pattern)\n\n# 字段\n\n- `field`：字段名 - `pattern`：匹配模式，支持 % 和 _ 通配符",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "pattern": {
+                            "description": "匹配模式",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "like"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "pattern",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于条件 (field > value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "大于等于条件 (field >= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "gte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于条件 (field < value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lt"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "小于等于条件 (field <= value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "lte"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "空值判断 (field IS NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "非空值判断 (field IS NOT NULL)\n\n# 字段\n\n- `field`：字段名",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "is_not_null"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不等于条件 (field <> value)\n\n# 字段\n\n- `field`：字段名 - `value`：比较值",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "ne"
+                            ],
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "比较值"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "区间条件 (field BETWEEN lo AND hi)\n\n# 字段\n\n- `field`：字段名 - `lo`：区间下界 - `hi`：区间上界",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "hi": {
+                            "description": "区间上界"
+                          },
+                          "lo": {
+                            "description": "区间下界"
+                          },
+                          "type": {
+                            "enum": [
+                              "between"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "hi",
+                          "lo",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "不在列表条件 (field NOT IN (values))\n\n# 字段\n\n- `field`：字段名 - `values`：值列表",
+                        "properties": {
+                          "field": {
+                            "description": "字段名",
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "not_in"
+                            ],
+                            "type": "string"
+                          },
+                          "values": {
+                            "description": "值列表",
+                            "items": true,
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "field",
+                          "type",
+                          "values"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑与组（嵌套子条件全部成立），SQL 渲染为 `(c1 AND c2 AND ...)`\n\n空组等价于恒真（`1=1`），与顶层「无条件」语义一致。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "and"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "description": "逻辑或组（嵌套子条件任一成立），SQL 渲染为 `(c1 OR c2 OR ...)`\n\n空组等价于恒假（`1=0`），避免拼出非法的空括号。\n\n# 字段\n\n- `conditions`：子条件列表，递归可含 `And`/`Or` 组",
+                        "properties": {
+                          "conditions": {
+                            "description": "子条件列表",
+                            "items": {
+                              "$ref": "#/definitions/WhereCondition"
+                            },
+                            "type": "array"
+                          },
+                          "type": {
+                            "enum": [
+                              "or"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "conditions",
+                          "type"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  }
+                },
+                "description": "列表查询输入；与通用 TableView 发送的标准 select 输入完全同构。\n\n不能 derive `Debug`：`OrderByItem`（框架内置分页输入类型）没有实现它—— 这是 `ADDON_ONBOARDING.md` 记录的既有摩擦点 ④，去掉 derive 即可。",
+                "properties": {
+                  "count_total": {
+                    "default": false,
+                    "description": "是否额外执行 COUNT 查询。",
+                    "type": "boolean"
+                  },
+                  "order_by": {
+                    "description": "排序规则列表。",
+                    "items": {
+                      "$ref": "#/definitions/OrderByItem"
+                    },
+                    "type": "array"
+                  },
+                  "page": {
+                    "default": 1,
+                    "description": "页码（1 起步），缺省 1。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "page_size": {
+                    "default": 10,
+                    "description": "每页条数，缺省 10，必须 1..=100。",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "search": {
+                    "default": null,
+                    "description": "在表定义声明的 `searchable` 字段中执行关键词搜索。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "source_key": {
+                    "default": null,
+                    "description": "按数据源过滤；本服务自己的扩展字段，前端不发即为 `None`。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "where": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/WhereCondition"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "where 布尔过滤树（JSON key 为 `\"where\"`），缺省无条件。"
+                  }
+                },
+                "title": "ListInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "门户列表",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.read"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
+    "/api/v1/feishu/portals/toggle": {
+      "put": {
+        "description": "启用或停用门户；停用后公开 URL 返回未找到，配置与日志保留",
+        "operationId": "feishu.portal.toggle_portal",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "description": "启停门户的输入契约。",
+                "properties": {
+                  "enabled": {
+                    "description": "`true` 启用，`false` 停用。",
+                    "type": "boolean"
+                  },
+                  "portal_id": {
+                    "description": "目标门户 `id`。",
+                    "format": "int64",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "portal_id"
+                ],
+                "title": "TogglePortalInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "const": 0,
+                      "type": "integer"
+                    },
+                    "data": {
+                      "$schema": "http://json-schema.org/draft-07/schema#",
+                      "description": "API 响应\n\n统一的 API 响应格式，用于所有 Action 的返回值\n\n# 字段\n\n- `code`: 状态码（0 表示成功，非零表示失败） - `message`: 响应消息 - `data`: 响应数据（可选）\n\n标注 `#[non_exhaustive]`：未来新增字段不构成破坏性变更。 请使用 [`ApiResponse::success`] / [`ApiResponse::fail`] / [`ApiResponse::from_error`] 等构造。\n\n# 示例\n\n```rust,ignore use yang_base::action::ApiResponse; use serde_json::json;\n\n// 创建成功响应 let response = ApiResponse::success( json!({ \"id\": 123, \"name\": \"Alice\" }), \"操作成功\" ); assert_eq!(response.code, 0);\n\n// 创建失败响应 let response = ApiResponse::fail(400001, \"参数错误\"); assert_eq!(response.code, 400001); assert!(response.data.is_none()); ```",
+                      "properties": {
+                        "code": {
+                          "description": "状态码\n\n- 0: 成功 - 非零: 失败（具体错误码由业务定义）",
+                          "format": "int32",
+                          "type": "integer"
+                        },
+                        "data": {
+                          "description": "响应数据\n\n成功时包含业务数据，失败时通常为 None"
+                        },
+                        "message": {
+                          "description": "响应消息\n\n描述操作结果的文本信息",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "ApiResponse",
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "请求参数错误"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "未认证"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "权限不足"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "启停查询门户",
+        "tags": [],
+        "x-permission-mode": "all",
+        "x-permissions": [
+          "feishu.portal.write"
+        ],
+        "x-public": false,
+        "x-yang-response-kind": "json"
+      }
+    },
     "/api/v1/users": {
       "get": {
         "description": "管理端分页列出用户（邮箱字段遵循 system 角色可见性）",
-        "operationId": "account.user.list_users",
+        "operationId": "account.admin_users.list_users",
         "parameters": [
           {
             "description": "",
@@ -10852,12 +13982,6 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
-                  "email": {
-                    "type": "string"
-                  },
-                  "email_code": {
-                    "type": "string"
-                  },
                   "password": {
                     "type": "string"
                   },
@@ -10866,8 +13990,6 @@
                   }
                 },
                 "required": [
-                  "email",
-                  "email_code",
                   "password",
                   "username"
                 ],
@@ -11847,7 +14969,7 @@
     "/api/v1/users/{id}/disable": {
       "post": {
         "description": "管理端停用目标账号并撤销其全部会话",
-        "operationId": "account.user.admin_disable_user",
+        "operationId": "account.admin_users.admin_disable_user",
         "parameters": [
           {
             "description": "",
@@ -11968,7 +15090,7 @@
     "/api/v1/users/{id}/enable": {
       "post": {
         "description": "管理端启用被停用的目标账号",
-        "operationId": "account.user.admin_enable_user",
+        "operationId": "account.admin_users.admin_enable_user",
         "parameters": [
           {
             "description": "",
@@ -12089,7 +15211,7 @@
     "/api/v1/users/{id}/password-reset-tokens": {
       "post": {
         "description": "管理端为目标用户签发一次性密码重置凭证（明文只回显一次）",
-        "operationId": "account.user.admin_issue_password_reset",
+        "operationId": "account.admin_users.admin_issue_password_reset",
         "parameters": [
           {
             "description": "",

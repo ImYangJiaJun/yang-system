@@ -5,6 +5,7 @@
 //! 能力经模块上下文 [`Account`] 单一出口提供。
 
 pub(crate) mod domain;
+mod admin_users;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;
@@ -44,6 +45,7 @@ pub(crate) fn authorization_port() -> crate::authorization::AuthorizationPort {
 /// 构建账号 Addon。
 ///
 /// Addon 边界负责声明产品能力及其 Module；应用层不应直接拼装 `account.user`。
+/// `account.user` 与 `account.admin_users` 共享同一份模块上下文 [`Account`]。
 pub(crate) fn build_addon(
     security: Arc<SecuritySettings>,
     grant_resolver: Arc<dyn GrantResolver>,
@@ -51,13 +53,16 @@ pub(crate) fn build_addon(
     system_authorization: Arc<dyn SystemAuthorizationPort>,
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<AddonSpec, BaseError> {
-    Ok(
-        AddonSpec::new(yang_base::addon!("account")).module(user::build_module(
-            security,
-            grant_resolver,
-            system_owner_claimer,
-            system_authorization,
-            authorization_validator,
-        )?),
-    )
+    let account = user::build_context(
+        security,
+        grant_resolver,
+        system_owner_claimer,
+        system_authorization,
+    )?;
+    Ok(AddonSpec::new(yang_base::addon!("account"))
+        .module(user::build_module(
+            Arc::clone(&account),
+            authorization_validator.clone(),
+        )?)
+        .module(admin_users::build_module(account, authorization_validator)?))
 }

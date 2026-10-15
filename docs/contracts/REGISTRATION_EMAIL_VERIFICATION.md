@@ -1,15 +1,14 @@
 # 注册邮箱验证码
 
-公开注册现在把“拥有该邮箱”作为创建全局 `users` 账户的前置事实。
+公开注册不再消费验证码。验证码契约仍服务换绑与其他入口。
 
 ## HTTP 契约
 
 1. `POST /api/v1/users/registration-email-verifications` 接收 `email`，成功时固定返回
    `202 Accepted` 与通用的 `accepted/expires_in/resend_after`，响应不包含邮箱或验证码。
-2. `POST /api/v1/users/register` 必须同时提交 `username/password/email/email_code`；只有
-   Redis 中与规范化邮箱绑定的验证码被原子消费后，才写入 `users.email` 与
-   `users.email_verified_at`。
-3. 验证码无效、过期、已用、尝试次数耗尽或邮箱已注册时，注册接口都使用同一
+2. `POST /api/v1/users/register` 只收 `username` 与 `password`，`users.email` 与
+   `users.email_verified_at` 两列写入 NULL。
+3. 验证码无效、过期、已用、尝试次数耗尽或邮箱已注册时，消费验证码的入口都使用同一
    `email_code` 拒绝语义；数据库唯一键竞态使用通用“用户名或邮箱已被注册”错误。
 
 邮箱只接受最长 254 字节的严格 ASCII 地址并统一转为小写。该规范化策略不尝试按
@@ -48,7 +47,7 @@ TLS 端口，若供应商只有其他传输模式，应增加并审计新的显�
 启动应用，由声明式 Schema 预检并同步 `users` 的
 邮箱列、唯一索引和“邮箱与验证时间同时为空或同时非空”的强制 CHECK，再滚动应用。
 变更只新增可空列、唯一索引和 CHECK，因此旧账户继续可登录；新注册
-必须完成邮箱验证。生产等量 staging 仍需测量唯一索引 DDL 的 metadata lock、复制延迟
+两列写入 NULL，邮箱在账户设置里可选绑定。生产等量 staging 仍需测量唯一索引 DDL 的 metadata lock、复制延迟
 和写入影响。
 
 关注以下有限标签指标：
@@ -68,5 +67,4 @@ cargo test --test registration_email_integration --locked -- `
   --ignored --test-threads=1
 ```
 
-该用例覆盖 Schema 约束、Redis 明文泄漏、冷却、已有账户抑制、错误次数、过期、SMTP
-失败清理以及同一验证码并发只能成功一次。
+该用例覆盖 Schema 约束、Redis 明文泄漏、冷却、已有账户抑制与 SMTP 失败清理。

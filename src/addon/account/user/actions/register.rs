@@ -9,8 +9,7 @@ use crate::addon::account::{Account, OwnerClaimOutcome};
 use crate::audit;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use yang_base::action::auth::{normalize_email, AuthOperation, RegistrationEmailVerification};
+use yang_base::action::auth::AuthOperation;
 use yang_base::action::ActionContext;
 use yang_base::definition::{HttpMethod, ModuleSpec, Password, Str};
 use yang_base::BaseError;
@@ -29,17 +28,6 @@ yang_base::params! {
             .require(true)
             .min_length(PASSWORD_MIN_LENGTH)
             .max_length(PASSWORD_MAX_LENGTH),
-        email: Str::new()
-            .title("注册邮箱")
-            .require(true)
-            .max_length(254)
-            .email(),
-        email_code: Str::new()
-            .title("邮箱验证码")
-            .require(true)
-            .min_length(6)
-            .max_length(6)
-            .pattern(r"^[0-9]{6}$"),
     }
 }
 
@@ -49,7 +37,6 @@ pub(super) async fn handle(
     account: Arc<Account>,
 ) -> Result<UserView, BaseError> {
     let username = normalize_username(&input.username)?;
-    let email = normalize_email(&input.email)?;
     validate_password_field("password", &input.password, Some(&username))?;
     account
         .rate_limiter()
@@ -61,31 +48,20 @@ pub(super) async fn handle(
             "用户名已存在".to_string(),
         ));
     }
-    RegistrationEmailVerification::from_context(&ctx)?
-        .consume(&ctx, &email, &input.email_code)
-        .await?;
     let password_hash = account.passwords().hash(&input.password).await?;
-    let email_verified_at = current_unix_timestamp()?;
 
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
         let id = match account
             .users()
-            .insert_in_tx(
-                &ctx,
-                &mut transaction,
-                &username,
-                &password_hash,
-                &email,
-                email_verified_at,
-            )
+            .insert_in_tx(&ctx, &mut transaction, &username, &password_hash)
             .await
         {
             Ok(id) => id,
             Err(BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(_))) => {
                 return Err(BaseError::ParamInvalid(
                     "registration".to_string(),
-                    "用户名或邮箱已被其他请求注册，请重新获取验证码".to_string(),
+                    "用户名已被其他请求注册".to_string(),
                 ));
             }
             Err(error) => return Err(error),
@@ -118,14 +94,6 @@ pub(super) async fn handle(
     account.view_by_id(&ctx, id).await
 }
 
-fn current_unix_timestamp() -> Result<i64, BaseError> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| BaseError::ConfigError("系统时间早于 Unix epoch".to_string()))?
-        .as_secs();
-    i64::try_from(seconds).map_err(|_| BaseError::ConfigError("系统时间超出 i64 范围".to_string()))
-}
-
 /// 自包含注册：路由/展示元数据与 Handler 在同一文件内原子绑定。
 pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec {
     module
@@ -146,15 +114,22 @@ mod tests {
     use yang_base::definition::ParamInput;
 
     #[test]
-    fn registration_contract_requires_email_ownership_proof() {
+    fn registration_contract_is_username_and_password_only() {
         let params = <RegisterInput as ParamInput>::params();
         let names = params
             .as_slice()
             .iter()
             .map(|param| param.name.as_str())
             .collect::<Vec<_>>();
-
-        assert_eq!(names, ["username", "password", "email", "email_code"]);
+        assert_eq!(names, ["username", "password"]);
         assert!(params.as_slice().iter().all(|param| param.required));
+
+        let injected = serde_json::from_value::<RegisterInput>(serde_json::json!({
+            "username": "alice",
+            "password": "correct-horse-battery",
+            "email": "alice@example.com",
+            "email_code": "123456"
+        }));
+        assert!(injected.is_err(), "注册不再接受邮箱字段");
     }
 }
