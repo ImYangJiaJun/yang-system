@@ -131,6 +131,29 @@ describe("兜底界面的接线", () => {
     }
   });
 
+  it("/admin/users 是 lazy 路由且带 hydrateFallbackElement", () => {
+    const found: { lazy?: unknown; hydrateFallbackElement?: unknown }[] = [];
+    const walk = (routes: readonly unknown[]) => {
+      for (const candidate of routes) {
+        const route = candidate as {
+          path?: string;
+          lazy?: unknown;
+          hydrateFallbackElement?: unknown;
+          children?: readonly unknown[];
+        };
+        if (route.path === "admin/users") found.push(route);
+        if (route.children) walk(route.children);
+      }
+    };
+    walk(appRoutes);
+
+    expect(found).toHaveLength(1);
+    expect(found[0]?.lazy).toEqual(expect.any(Function));
+    const fallback = found[0]?.hydrateFallbackElement as
+      { type?: unknown } | undefined;
+    expect(fallback?.type).toBe(RouteFallback);
+  });
+
   it("兜底界面自己是有内容、可朗读的，不是又一片空白", () => {
     render(<RouteFallback />);
 
