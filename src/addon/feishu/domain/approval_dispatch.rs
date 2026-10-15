@@ -29,8 +29,8 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::approval::{
-    create_instance, get_approval_definition, get_instance, CreateOutcome, GetOutcome,
-    InstanceDetail,
+    create_instance, get_approval_definition, get_instance, resolve_department_name, CreateOutcome,
+    GetOutcome, InstanceDetail,
 };
 use super::approval_attachment;
 use super::approval_convert::{build_form, Converter, FixedOffset, FormInput, WidgetMap};
@@ -417,7 +417,16 @@ pub(crate) async fn dispatch_one(
         match get_instance(transport, sleeper, tokens, &uuid).await {
             Ok(GetOutcome::Found(detail)) => {
                 tracing::info!(stage = "recover", instance_code = %detail.instance_code, "已恢复审批实例");
-                return finish_backfill(backfill, input, &uuid, *detail).await;
+                let mut detail = *detail;
+                fill_department_name(
+                    transport,
+                    sleeper,
+                    tokens,
+                    input.department_field,
+                    &mut detail,
+                )
+                .await;
+                return finish_backfill(backfill, input, &uuid, detail).await;
             }
             Ok(GetOutcome::NotFound) => {
                 tracing::info!(stage = "recover", "未找到已有审批实例，继续校验数据");
@@ -691,7 +700,7 @@ pub(crate) async fn dispatch_one(
     // ---- 5. 取 serial_number ----
     //
     // 回捞路径已经拿到了详情，只有正常创建路径需要再查一次。
-    let detail = match reclaimed {
+    let mut detail = match reclaimed {
         Some(detail) => detail,
         None => {
             tracing::info!(stage = "detail", instance_code = %instance_code, "开始查询审批实例编号");
@@ -718,6 +727,15 @@ pub(crate) async fn dispatch_one(
         }
     };
 
+    // 部门名解析（本次派发唯一一次额外出站；未配部门列时零调用）。
+    fill_department_name(
+        transport,
+        sleeper,
+        tokens,
+        input.department_field,
+        &mut detail,
+    )
+    .await;
     finish_backfill(backfill, input, &uuid, detail).await
 }
 
@@ -828,6 +846,31 @@ async fn validate_connections(
         }
     }
     Ok(())
+}
+
+/// 给详情补上发起人部门名（回填列优先写名字，解析失败退化为写 ID）。
+///
+/// **只在配置了部门回填列时才出站**——这是 `write_extended` 那句「值全部取自
+/// 已经拿到的那一份详情，零额外 API 调用」的**唯一例外**，且只在显式配置了
+/// 部门列时发生；未配该列的存量配置行为零变化（零额外调用）。
+///
+/// 解析失败不冒泡：`resolve_department_name` 内部 warn 后返回 `None`，
+/// `write_extended` 自然退化写 ID。
+pub(crate) async fn fill_department_name(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    department_field: Option<&str>,
+    detail: &mut InstanceDetail,
+) {
+    if department_field.is_none() {
+        return;
+    }
+    let Some(department_id) = detail.department_id.as_deref() else {
+        return;
+    };
+    detail.department_name =
+        resolve_department_name(transport, sleeper, tokens, department_id).await;
 }
 
 async fn finish_backfill(
@@ -949,13 +992,14 @@ pub(crate) async fn write_extended(
             ));
         }
     }
-    // 发起人部门：一期只写 `department_id` **原值**到文本列——部门名解析（contact
-    // 接口 + scope）在上层做（设计 §4.3 缺口 1：bot 形态的 id 格式能否直喂部门接口
-    // 尚未验证，且当前应用无 contact scope）。
+    // 发起人部门：**优先写解析出的部门名**（`fill_department_name` 在拿详情后
+    // 补上），解析失败/未配时退化为写 `department_id` 原值——信息不丢，用户
+    // 至少能看出「这一列的 ID 是没解析成功的」。
     if let Some(field) = input.department_field {
         if let Some(department) = detail
-            .department_id
+            .department_name
             .as_deref()
+            .or(detail.department_id.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
@@ -1675,6 +1719,7 @@ mod tests {
                     open_id: None,
                     user_id: None,
                     department_id: None,
+                    department_name: None,
                     uuid: None,
                     reverted: None,
                     task_list: None,
@@ -3230,6 +3275,58 @@ mod tests {
         );
     }
 
+    /// 部门列：**优先写解析出的名称**；未解析（`department_name` 为 `None`，
+    /// 无 scope / 部门不在可见范围时）退化为写原始 ID——信息不丢，用户至少
+    /// 能看出这一列没解析成功。
+    #[tokio::test]
+    async fn department_cell_prefers_the_resolved_name_over_the_raw_id() {
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[("fld_applicant", json!([{"id":"ou_abc"}]))]);
+        let mut request = input(&cells, &widgets);
+        request.department_field = Some("fld_department");
+
+        async fn department_cell(
+            request: &DispatchInput<'_>,
+            detail: InstanceDetail,
+        ) -> Option<Value> {
+            let backfill = RecordingBackfill::default();
+            assert!(matches!(
+                finish_backfill(&backfill, request, "source-uuid", detail).await,
+                DispatchResult::Backfilled { .. }
+            ));
+            backfill
+                .raw_writes()
+                .into_iter()
+                .find(|(_, field, _)| field == "fld_department")
+                .map(|(_, _, value)| value)
+        }
+
+        let resolved = department_cell(
+            &request,
+            InstanceDetail {
+                department_id: Some("db59a45c851464gf".to_string()),
+                department_name: Some("研发部".to_string()),
+                ..base_detail("INST-A", Some("SERIAL"))
+            },
+        )
+        .await;
+        assert_eq!(resolved, Some(json!("研发部")), "解析出名称时必须写名称");
+
+        let fallback = department_cell(
+            &request,
+            InstanceDetail {
+                department_id: Some("db59a45c851464gf".to_string()),
+                ..base_detail("INST-A", Some("SERIAL"))
+            },
+        )
+        .await;
+        assert_eq!(
+            fallback,
+            Some(json!("db59a45c851464gf")),
+            "未解析时退化为写 ID"
+        );
+    }
+
     #[test]
     fn flow_text_renders_approved_task_as_done() {
         // get 接口文档明写 task_list[].status 可为 APPROVED（通过）——它必须
@@ -3341,6 +3438,7 @@ mod tests {
             open_id: None,
             user_id: None,
             department_id: None,
+            department_name: None,
             uuid: None,
             reverted: None,
             task_list: None,

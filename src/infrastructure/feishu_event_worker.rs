@@ -21,7 +21,7 @@ use yang_base::tools::Tools;
 use crate::addon::feishu::domain::approval::{get_instance, GetOutcome};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
-    write_extended, BitableBackfill, DispatchInput,
+    fill_department_name, write_extended, BitableBackfill, DispatchInput,
 };
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -464,7 +464,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
 
     // 3. 调 get_instance 获取实例详情
     tracing::debug!(instance_code = %event.instance_code, "步骤 3: 调用 get_instance 获取审批详情");
-    let detail = match get_instance(
+    let mut detail = match get_instance(
         runner.transport(),
         runner.sleeper.as_ref(),
         &runner.tokens,
@@ -498,6 +498,16 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
             return EventOutcome::Failed(format!("获取实例详情失败: {}", failure.message));
         }
     };
+
+    // 3.5 部门名解析：配了部门回填列才有这次出站；解析失败退化为写 ID。
+    fill_department_name(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        department_field.as_deref(),
+        &mut detail,
+    )
+    .await;
 
     // 4. 构造 BitableBackfill
     tracing::debug!("步骤 4: 构造 BitableBackfill");

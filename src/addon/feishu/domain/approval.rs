@@ -214,9 +214,19 @@ pub(crate) struct InstanceDetail {
     /// `ou_` 前缀 open_id，语义与 bot 形态不同。
     pub(crate) user_id: Option<String>,
     /// 发起人部门 ID。**格式两形态不一致**：bot 形态**非** `od-` 前缀
-    /// （实测 `"db59a45c851464gf"`），user 形态是 `od-` 前缀。能否直接喂
-    /// contact 部门接口未验证（设计 §4.3）。
+    /// （实测 `"db59a45c851464gf"`），user 形态是 `od-` 前缀。两形态都能直喂
+    /// contact 部门接口——按前缀分流 `department_id_type`（2026-10-15 真机验证，
+    /// 见 [`resolve_department_name`]；设计 §4.3 缺口 1 已闭环）。
     pub(crate) department_id: Option<String>,
+    /// 发起人部门**名称**，由上层经 [`resolve_department_name`] 解析后填充。
+    ///
+    /// `None` = 未解析（未配部门列，上层刻意不出站）或解析失败（无 contact
+    /// scope / 部门不在应用可见范围）——回填列退化为写 [`Self::department_id`]
+    /// 原值，信息不丢。
+    ///
+    /// **刻意不放进 API 响应映射**：它是一次**额外**查询的结果，不属于实例详情
+    /// 本身；放在这里只是让它与 ID 同行，由上层决定是否填充。
+    pub(crate) department_name: Option<String>,
     /// 创建时传入的幂等键 `uuid`（bot 形态回显）。
     pub(crate) uuid: Option<String>,
     /// 撤销标记（官方语义「单据是否被撤销」；撤回走 `status="CANCELED"`，
@@ -329,6 +339,10 @@ pub(crate) async fn get_instance(
                 open_id: data.open_id,
                 user_id: data.user_id,
                 department_id: data.department_id,
+                // 部门名不在详情响应里（`department_path` 仅 user_access_token
+                // 形态返回，bot 流程不可用）——由上层按需调
+                // [`resolve_department_name`] 补上。
+                department_name: None,
                 uuid: data.uuid,
                 reverted: data.reverted,
                 task_list: data.task_list,
@@ -371,6 +385,107 @@ struct InstanceDetailData {
     task_list: Option<Vec<TaskNode>>,
     #[serde(default)]
     timeline: Option<Vec<TimelineRecord>>,
+}
+
+// ---------------------------------------------------------------------------
+// 发起人部门名解析（通讯录）
+// ---------------------------------------------------------------------------
+
+/// 部门查询的 URL：`GET /open-apis/contact/v3/departments/:department_id`。
+pub(crate) fn department_url(department_id: &str) -> anyhow::Result<String> {
+    validate_path_segment("department_id", department_id)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/contact/v3/departments/{department_id}"
+    ))
+}
+
+/// 部门 ID 形态 → `department_id_type` 查询参数。
+///
+/// 审批实例详情返回的部门 ID 两形态不一致（bot 非 `od-` 前缀 / user 是 `od-`
+/// 前缀），而部门接口**必须**声明 ID 类型才能寻址。判据只看前缀：`od-` 是
+/// open_department_id 的官方前缀，其余按自定义部门 ID（`department_id`）处理。
+fn department_id_type(department_id: &str) -> &'static str {
+    if department_id.starts_with("od-") {
+        "open_department_id"
+    } else {
+        "department_id"
+    }
+}
+
+/// 解析部门名称（`data.department.name`）。
+///
+/// 2026-10-15 真机验证（lark-cli）：`department_id_type=department_id` + bot 形态
+/// 非 `od-` 前缀 ID 的**格式被接口接受**——错误停在 40004「no dept authority」，
+/// 而不是 99992357「不是有效的 department_id」。设计 §4.3 缺口 1 的「能否直喂」
+/// 结论是**能**，剩下的只是权限范围问题。
+///
+/// 失败一律返回 `None` 并留 warn，**不**返回 `Err`：调用方据此退化为写原始 ID，
+/// 部门名是附带产物，任何解析失败都不该阻塞派发。两类常见失败（均属预期，不是
+/// 代码缺陷）：
+/// - `99991672`：应用未申请 `contact:department.base:readonly`；
+/// - `40004`：部门不在应用的通讯录可见范围内。
+pub(crate) async fn resolve_department_name(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    department_id: &str,
+) -> Option<String> {
+    let department_id = department_id.trim();
+    if department_id.is_empty() {
+        return None;
+    }
+    let url = match department_url(department_id) {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::warn!(error = %error, department_id, "部门 ID 非法，跳过部门名解析");
+            return None;
+        }
+    };
+    let request = OutboundRequest {
+        method: OutboundMethod::Get,
+        url,
+        query: vec![(
+            "department_id_type".to_string(),
+            department_id_type(department_id).to_string(),
+        )],
+        bearer_token: None,
+        json_body: None,
+        raw_body: None,
+        binary_limit: None,
+        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        idempotent: true, // 只读
+    };
+    match send_approval(transport, sleeper, tokens, request).await {
+        Ok(data) => {
+            let name = serde_json::from_str::<serde_json::Value>(&data)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("department")
+                        .and_then(|department| department.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty());
+            if name.is_none() {
+                tracing::warn!(
+                    department_id,
+                    "部门接口响应里没有部门名，回填退化为写部门 ID"
+                );
+            }
+            name
+        }
+        Err(failure) => {
+            tracing::warn!(
+                error = %failure.message,
+                department_id,
+                department_id_type = department_id_type(department_id),
+                "部门名称解析失败，回填退化为写部门 ID（无 contact scope 或部门不在可见范围时属预期）"
+            );
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +1002,7 @@ mod tests {
             open_id: None,
             user_id: None,
             department_id: None,
+            department_name: None,
             uuid: None,
             reverted: None,
             task_list: None,
@@ -1157,5 +1273,165 @@ mod tests {
 
         assert_eq!(result, ApplicantResolution::NotFound);
         assert_eq!(transport.call_count(), 0, "空姓名不得发出站请求");
+    }
+
+    // ---- 发起人部门名解析 ----
+
+    /// 假 token 缓存：预置常量凭证，本段用例不碰真实网络。
+    struct FakeTokenCache;
+
+    #[async_trait::async_trait]
+    impl super::super::tenant_token::TenantTokenCache for FakeTokenCache {
+        async fn get(&self) -> anyhow::Result<Option<String>> {
+            Ok(Some("t-fake".to_string()))
+        }
+        async fn put(&self, _token: &str, _ttl_seconds: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn invalidate(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn acquire_lock(&self, _owner: &str, _ttl_seconds: i64) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn release_lock(&self, _owner: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fake_tokens() -> TenantTokenProvider {
+        use super::super::tenant_token::FeishuCredentials;
+        TenantTokenProvider::new(
+            std::sync::Arc::new(FakeTokenCache),
+            std::sync::Arc::new(ScriptedTransport::new(Vec::new())),
+            std::sync::Arc::new(NoopSleeper),
+            FeishuCredentials {
+                app_id: "cli_fake".to_string(),
+                app_secret: "secret".to_string(),
+            },
+            "test",
+        )
+        .unwrap_or_else(|error| panic!("应可构造 token provider: {error}"))
+    }
+
+    /// 部门响应信封（`data.department` 形态）。
+    fn department_envelope(name: &str) -> OutboundResponse {
+        OutboundResponse {
+            status: 200,
+            body: format!(r#"{{"code":0,"msg":"ok","data":{{"department":{{"name":"{name}"}}}}}}"#),
+            bytes: None,
+            headers: BTreeMap::new(),
+        }
+    }
+
+    /// 钉住请求形状：**GET `/open-apis/contact/v3/departments/:id` + `department_id_type`**。
+    ///
+    /// bot 形态的部门 ID **非** `od-` 前缀，必须声明 `department_id_type=department_id`
+    /// ——2026-10-15 真机（lark-cli）验证：该组合的 ID 格式被接口接受（错误停在
+    /// 40004 可见范围，而非 99992357 格式无效）。只断言解析结果抓不住「参数写错
+    /// 但响应是测试自己喂的」这类 bug。
+    #[tokio::test]
+    async fn department_name_resolves_and_declares_the_id_type() {
+        let transport = ScriptedTransport::new(vec![Ok(department_envelope("研发部"))]);
+        let name =
+            resolve_department_name(&transport, &NoopSleeper, &fake_tokens(), "db59a45c851464gf")
+                .await;
+
+        assert_eq!(name.as_deref(), Some("研发部"));
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出一次部门查询"));
+        assert_eq!(request.method, OutboundMethod::Get);
+        assert!(
+            request
+                .url
+                .ends_with("/open-apis/contact/v3/departments/db59a45c851464gf"),
+            "{}",
+            request.url
+        );
+        assert_eq!(
+            request.query,
+            vec![(
+                "department_id_type".to_string(),
+                "department_id".to_string()
+            )],
+            "bot 形态（非 od- 前缀）必须声明自定义部门 ID 类型"
+        );
+    }
+
+    #[tokio::test]
+    async fn department_name_uses_open_department_id_for_od_prefix() {
+        let transport = ScriptedTransport::new(vec![Ok(department_envelope("市场部"))]);
+        let name = resolve_department_name(
+            &transport,
+            &NoopSleeper,
+            &fake_tokens(),
+            "od-e2ebe89e1e313c2a3bf5fc064bfa6f4c",
+        )
+        .await;
+
+        assert_eq!(name.as_deref(), Some("市场部"));
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出一次部门查询"));
+        assert_eq!(
+            request.query,
+            vec![(
+                "department_id_type".to_string(),
+                "open_department_id".to_string()
+            )],
+            "od- 前缀必须声明 open_department_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn department_name_degrades_to_none_without_authority() {
+        // 40004「部门不在应用可见范围」与 99991672「无 scope」都是**预期失败**：
+        // 返回 None（调用方退化为写 ID），不冒泡、不阻塞派发。两者都落 Fatal，
+        // 各只打一次请求。
+        for code in [40004, 99991672] {
+            let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+                status: 200,
+                body: format!(r#"{{"code":{code},"msg":"denied"}}"#),
+                bytes: None,
+                headers: BTreeMap::new(),
+            })]);
+            let name = resolve_department_name(
+                &transport,
+                &NoopSleeper,
+                &fake_tokens(),
+                "db59a45c851464gf",
+            )
+            .await;
+            assert!(name.is_none(), "code={code} 应退化为 None");
+            assert_eq!(transport.call_count(), 1, "Fatal 不重试（code={code}）");
+        }
+    }
+
+    #[tokio::test]
+    async fn department_name_is_none_when_response_has_no_name() {
+        // 有权限但响应缺 name（形态漂移）：宁可 None 让回填退化写 ID，
+        // 也不写空串把列清空。
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 200,
+            body: r#"{"code":0,"msg":"ok","data":{"department":{}}}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let name =
+            resolve_department_name(&transport, &NoopSleeper, &fake_tokens(), "db59a45c851464gf")
+                .await;
+        assert!(name.is_none());
+    }
+
+    #[tokio::test]
+    async fn department_name_skips_the_request_for_blank_or_illegal_ids() {
+        // 空脚本：若真发请求，脚本会耗尽并报错。
+        let transport = ScriptedTransport::new(Vec::new());
+        for id in ["", "   ", "bad/id", "a?b"] {
+            let name = resolve_department_name(&transport, &NoopSleeper, &fake_tokens(), id).await;
+            assert!(name.is_none(), "非法 ID {id:?} 应直接返回 None");
+        }
+        assert_eq!(transport.call_count(), 0, "非法 ID 不得发出站请求");
     }
 }
