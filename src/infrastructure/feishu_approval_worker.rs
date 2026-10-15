@@ -431,13 +431,13 @@ async fn run_round(
                 wait_ms = slot_started.elapsed().as_millis() as u64,
                 "审批任务取得创建名额，开始处理"
             );
-            let (outcome, applicant_open_id) = process_one(runner, task).await;
-            record_outcome(runner, task, &outcome, applicant_open_id.as_deref()).await;
+            let processed = process_one(runner, task).await;
+            record_outcome(runner, task, &processed).await;
             tracing::info!(
                 duration_ms = task_started.elapsed().as_millis() as u64,
                 "审批任务本轮处理结束"
             );
-            outcome
+            processed.result
         }
         .instrument(
             tracing::info_span!("approval_task", task_id = task.id, config_id = task.config_id,
@@ -504,6 +504,12 @@ struct ClaimedTask {
     timezone_offset: FixedOffset,
     widgets: Vec<WidgetMap>,
     form_snapshot: String,
+    /// 上一轮处理结论的原因（`feishu_approval_task.last_error`）。
+    ///
+    /// 通知去重的判据：中间态（waiting / retryable）每轮重扫都会产生**同一个**
+    /// 结论，本轮原因与它相同即「上一轮已经通知过」，不再重复发消息
+    /// （见 [`should_notify`]）。
+    last_error: Option<String>,
 }
 
 /// 播种：把「回填列为空」的多维表格记录变成待处理任务。
@@ -778,7 +784,9 @@ async fn claim(runner: &RoundRunner, cursor: &ResumeCursor) -> anyhow::Result<Ve
         // `page`/`page_size` 是 `select` 的缺省（`page_size` 缺省 10！），
         // 不显式限定就会只取 10 行——认领批就是这里的一行代码。
         .page(1, CLAIM_BATCH)?
-        .select_fields(&["id", "record_id", "config_id"])?
+        // `last_error` 进投影是给通知去重用的（`should_notify` 拿它与本轮原因
+        // 比对），多取一列省掉「每条任务再查一次自己」的读。
+        .select_fields(&["id", "record_id", "config_id", "last_error"])?
         .all()
         .await?;
     if rows.is_empty() {
@@ -849,7 +857,7 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         return Ok(None);
     };
 
-    // 发起人是**后续查询**，不是认领批的列（认领投影只有 id/record_id/config_id）：
+    // 发起人是**后续查询**，不是认领批的列（认领投影只有 id/record_id/config_id/last_error）：
     // 全表异步受理拿不到发起人，Action 解析后落在属性扩展表里（设计 §6.3）。
     let applicant = runner
         .context
@@ -945,11 +953,36 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         timezone_offset,
         widgets,
         form_snapshot: config.optional("form_snapshot")?.unwrap_or_default(),
+        last_error: row.optional("last_error")?,
     }))
 }
 
+/// 一条任务的处理产物。
+///
+/// 三个字段一起返回而不是拆成多次调用：它们都来自**同一次**记录读取，
+/// 分开取会让「读记录」发生两遍。
+struct TaskOutcome {
+    result: DispatchResult,
+    /// 申请人 open_id（任务表或表格列）——通知的首选接收人。
+    applicant_open_id: Option<String>,
+    /// 记录创建人 open_id（`automatic_fields` 取回）——申请人缺失时的兜底
+    /// 接收人，保证「用户发起过请求」这件事在任何结论下都有反馈出口。
+    creator_open_id: Option<String>,
+}
+
+impl TaskOutcome {
+    /// 早退构造：还没读到记录（拿不到创建人），只有结论。
+    fn early(result: DispatchResult) -> Self {
+        Self {
+            result,
+            applicant_open_id: None,
+            creator_open_id: None,
+        }
+    }
+}
+
 /// 处理一条记录。
-async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResult, Option<String>) {
+async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
     let coordinates = BitableCoordinates {
         app_token: task.base_token.clone(),
         table_id: task.table_id.clone(),
@@ -973,12 +1006,9 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
         // 表结构拿不到多半是凭证/网络抖动，判可重试。
         Err(failure) => {
             tracing::warn!(stage = "fields", kind = ?failure.kind, "审批任务读取表结构失败");
-            return (
-                DispatchResult::Retryable {
-                    message: format!("读取表结构失败：{}", failure.message),
-                },
-                None,
-            );
+            return TaskOutcome::early(DispatchResult::Retryable {
+                message: format!("读取表结构失败：{}", failure.message),
+            });
         }
     };
 
@@ -997,40 +1027,46 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
         std::slice::from_ref(&task.record_id),
     )
     .await;
-    let cells: serde_json::Map<String, serde_json::Value> = match found {
-        Ok(items) => match items.into_iter().next() {
-            Some(record) => match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
-                Ok(cells) => cells,
-                Err(error) => {
-                    tracing::warn!(stage = "record", "审批任务解析记录字段失败，详情见任务记录");
-                    return (
-                        DispatchResult::Terminal {
-                            message: format!("解析记录字段失败：{error}"),
-                        },
-                        None,
-                    );
+    let (cells, creator_open_id): (serde_json::Map<String, serde_json::Value>, Option<String>) =
+        match found {
+            Ok(items) => match items.into_iter().next() {
+                Some(record) => {
+                    // 记录创建人 = 通知接收人的兜底：申请人列空着时（waiting 的
+                    // 主因），「谁建了这条记录」是唯一还能定位到的触发人。
+                    // `automatic_fields: true` 时随记录**顶层**返回；取不到只是
+                    // 少一条兜底，不阻塞派发。
+                    let creator_open_id = record
+                        .created_by
+                        .as_ref()
+                        .map(|person| person.id.trim().to_string())
+                        .filter(|id| !id.is_empty());
+                    match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
+                        Ok(cells) => (cells, creator_open_id),
+                        Err(error) => {
+                            tracing::warn!(
+                                stage = "record",
+                                "审批任务解析记录字段失败，详情见任务记录"
+                            );
+                            return TaskOutcome::early(DispatchResult::Terminal {
+                                message: format!("解析记录字段失败：{error}"),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(stage = "record", "多维表格里已找不到审批源记录");
+                    return TaskOutcome::early(DispatchResult::Terminal {
+                        message: "多维表格里已找不到该记录".to_string(),
+                    });
                 }
             },
-            None => {
-                tracing::warn!(stage = "record", "多维表格里已找不到审批源记录");
-                return (
-                    DispatchResult::Terminal {
-                        message: "多维表格里已找不到该记录".to_string(),
-                    },
-                    None,
-                );
-            }
-        },
-        Err(failure) => {
-            tracing::warn!(stage = "record", kind = ?failure.kind, "审批任务读取源记录失败");
-            return (
-                DispatchResult::Retryable {
+            Err(failure) => {
+                tracing::warn!(stage = "record", kind = ?failure.kind, "审批任务读取源记录失败");
+                return TaskOutcome::early(DispatchResult::Retryable {
                     message: format!("读取记录失败：{}", failure.message),
-                },
-                None,
-            );
-        }
-    };
+                });
+            }
+        };
 
     // 回填列：配置里存的是 `field_id`，而 `batch_update` 的 `records[].fields` 按
     // **列名**作键——与上面那条筛选同一个口径（「按列名，不是 id」），所以要在这里
@@ -1040,12 +1076,9 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
         // 列被删了/改名后重名：重试好不了，判终态（回填列本身写不进去，只能留日志）。
         Err(error) => {
             tracing::warn!(stage = "fields", backfill_field = %task.backfill_field, "审批任务回填列不可用，详情见任务记录");
-            return (
-                DispatchResult::Terminal {
-                    message: format!("回填列不可用：{error}"),
-                },
-                None,
-            );
+            return TaskOutcome::early(DispatchResult::Terminal {
+                message: format!("回填列不可用：{error}"),
+            });
         }
     };
 
@@ -1096,7 +1129,11 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> (DispatchResul
         .clone()
         .or_else(|| extract_applicant_open_id(&cells, &task.applicant_field));
 
-    (result, open_id)
+    TaskOutcome {
+        result,
+        applicant_open_id: open_id,
+        creator_open_id,
+    }
 }
 
 /// 组装持久化事实，已确认实例在回填失败时也必须保留。
@@ -1155,13 +1192,26 @@ fn outcome_record(outcome: &DispatchResult) -> Record {
     row
 }
 
+/// 本轮是否该发通知。
+///
+/// 判据是「结论相对上一轮**发生了变化**」：
+/// - 终态（`backfilled` / `terminal`）只会出现一次（任务退出认领集），总是通知；
+/// - 中间态（`waiting` / `retryable` / `created_pending_backfill`）会随重扫反复
+///   出现，本轮原因与任务行 `last_error`（上一轮写入的原因）相同即「上一轮已经
+///   通知过」，跳过——否则一条缺申请人的记录会每轮给用户重发一条同样的消息。
+fn should_notify(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
+    let interim_reason = match outcome {
+        DispatchResult::Waiting { reason } => reason,
+        DispatchResult::Retryable { message } => message,
+        DispatchResult::CreatedPendingBackfill { message, .. } => message,
+        DispatchResult::Backfilled { .. } | DispatchResult::Terminal { .. } => return true,
+    };
+    task.last_error.as_deref() != Some(interim_reason.as_str())
+}
+
 /// 把处理结论落库。
-async fn record_outcome(
-    runner: &RoundRunner,
-    task: &ClaimedTask,
-    outcome: &DispatchResult,
-    applicant_open_id: Option<&str>,
-) {
+async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &TaskOutcome) {
+    let outcome = &processed.result;
     let row = outcome_record(outcome);
     let state = row
         .get("state")
@@ -1260,23 +1310,25 @@ async fn record_outcome(
         }
     }
 
-    // 通知：终态（成功/失败）时向触发人发 IM 消息。
-    // 失败只 warn，不影响审批结论（与 HTTP Action 的 complete_feedback 同一纪律）。
-    let should_notify = matches!(
-        outcome,
-        DispatchResult::Backfilled { .. } | DispatchResult::Terminal { .. }
-    );
-    if should_notify {
-        // 优先用 task.applicant_open_id（手动按钮触发时已落库），否则用传入的（poll 触发时从表格提取）
-        let open_id = task.applicant_open_id.as_deref().or(applicant_open_id);
+    // 通知：**任何结论都要反馈**（2026-10-15 原则：只要用户发起请求，成功/失败
+    // 都要发一条消息，失败附原因）。中间态的重复由 [`should_notify`] 按
+    // 「结论是否变化」去重。
+    //
+    // 接收人链：任务表申请人 → 表格申请人列 → **记录创建人**（兜底）。前两者
+    // 空着正是 waiting 的主因，而「谁建了这条记录」是那时唯一还能定位到的触发人。
+    // 三者都取不到才跳过——那时「发给谁」在事实上无解，留 warn 让静默丢失可查。
+    if should_notify(task, outcome) {
+        let open_id = task
+            .applicant_open_id
+            .as_deref()
+            .or(processed.applicant_open_id.as_deref())
+            .or(processed.creator_open_id.as_deref());
         match open_id {
             Some(open_id) => send_worker_notification(runner, task, outcome, open_id).await,
-            // 派发成功 ⇒ 申请人必然可提取，理论不可达；但「通知静默丢失」不可接受，
-            // 留一条 warn 让「消息没发」在任何情况下都有日志可查。
             None => tracing::warn!(
                 task_id = task.id,
                 config_id = task.config_id,
-                "Worker 通知：申请人 open_id 不可用（任务表与表格字段均为空），跳过通知"
+                "Worker 通知：申请人 open_id 与记录创建人均不可用，跳过通知"
             ),
         }
     }
@@ -1580,6 +1632,76 @@ mod tests {
         let mut cursor = ResumeCursor(42);
         cursor.advance(&[]);
         assert_eq!(cursor.0, 0, "扫描结束后旧 pending 任务必须能重新认领");
+    }
+
+    /// 最小 `ClaimedTask`：只给通知判定用得到的字段赋值。
+    fn claimed(last_error: Option<&str>) -> ClaimedTask {
+        ClaimedTask {
+            id: 1,
+            config_id: 1,
+            record_id: "rec1".to_string(),
+            base_token: "base".to_string(),
+            table_id: "tbl".to_string(),
+            approval_code: "CODE".to_string(),
+            applicant_field: "fld_applicant".to_string(),
+            applicant_open_id: None,
+            backfill_field: "fld_back".to_string(),
+            status_field: None,
+            flow_field: None,
+            start_time_field: None,
+            end_time_field: None,
+            department_field: None,
+            handler_field: None,
+            timezone_offset: FixedOffset::from_seconds(8 * 3600)
+                .unwrap_or_else(|error| panic!("{error}")),
+            widgets: Vec::new(),
+            form_snapshot: String::new(),
+            last_error: last_error.map(str::to_string),
+        }
+    }
+
+    /// 通知去重：**结论变化才发**。
+    ///
+    /// 中间态每轮重扫都会产生同一个结论，判据取「本轮原因 == 任务行 last_error
+    /// （上一轮写入的原因）」；终态只出现一次（任务退出认领集），总是发。
+    /// 这条不变量是「任何结论都要反馈」不变成「每轮重发一条」的唯一闸门。
+    #[test]
+    fn notification_dedup_fires_only_when_the_conclusion_changes() {
+        let waiting = DispatchResult::Waiting {
+            reason: "缺少申请人".into(),
+        };
+        // 首次（任务行还没有 last_error）→ 发。
+        assert!(should_notify(&claimed(None), &waiting));
+        // 上一轮就是同一个 waiting → 已通知过，不重复。
+        assert!(!should_notify(&claimed(Some("缺少申请人")), &waiting));
+        // 原因变了（用户补了申请人、又卡在外部选项）→ 是新结论，发。
+        assert!(should_notify(
+            &claimed(Some("缺少申请人")),
+            &DispatchResult::Waiting {
+                reason: "外部选项绑定不可用".into(),
+            }
+        ));
+
+        // retryable 同理。
+        let retryable = DispatchResult::Retryable {
+            message: "服务不可用".into(),
+        };
+        assert!(should_notify(&claimed(None), &retryable));
+        assert!(!should_notify(&claimed(Some("服务不可用")), &retryable));
+
+        // 终态：无论 last_error 是什么都发（它们只会出现一次）。
+        for outcome in [
+            DispatchResult::Backfilled {
+                serial_number: "SN".into(),
+                instance_code: "INST".into(),
+            },
+            DispatchResult::Terminal {
+                message: "配置错误".into(),
+            },
+        ] {
+            assert!(should_notify(&claimed(Some("缺少申请人")), &outcome));
+            assert!(should_notify(&claimed(None), &outcome));
+        }
     }
 
     #[test]

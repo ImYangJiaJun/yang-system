@@ -379,6 +379,11 @@ struct DispatchOutcome {
     /// 与 `dispatch_one` 内部的判定同源）。`complete_feedback` 在请求未显式
     /// 指定 `notification_recipient` 时用它兜底——「创建完成就通知触发人」的落点。
     applicant_open_id: Option<String>,
+    /// 通知的**最后兜底**接收人：记录创建人 open_id（`automatic_fields` 取回）。
+    ///
+    /// 申请人列空着时（waiting 的主因）它是唯一还能定位到的触发人——
+    /// 「用户发起过请求就必须收到反馈」这条原则不能因为申请人没填而断掉。
+    creator_open_id: Option<String>,
     /// 通知结果（默认 `{"status":"not_requested"}`）。
     notification: serde_json::Value,
     /// 原本要返回给工作流的结果。落记录绝不改变它——写失败只降级日志，
@@ -401,6 +406,7 @@ impl DispatchOutcome {
             table_id: None,
             record_summary: None,
             applicant_open_id: None,
+            creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Ok(ApiResponse::fail(code, message)),
         }
@@ -419,6 +425,7 @@ impl DispatchOutcome {
             table_id: None,
             record_summary: None,
             applicant_open_id: None,
+            creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Err(error),
         }
@@ -450,6 +457,7 @@ impl DispatchOutcome {
             table_id,
             record_summary: None,
             applicant_open_id: None,
+            creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: response(accepted, status, message, serial_number),
         }
@@ -1198,44 +1206,57 @@ async fn dispatch_single(
         &[record_id.to_string()],
     )
     .await;
-    let cells = match found {
-        Ok(items) => match items.into_iter().next() {
-            Some(record) => match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
-                Ok(cells) => {
-                    tracing::info!(
-                        stage = "record",
-                        cell_count = cells.len(),
-                        "审批派发源记录字段映射完成"
-                    );
-                    cells
+    let (cells, creator_open_id): (serde_json::Map<String, serde_json::Value>, Option<String>) =
+        match found {
+            Ok(items) => match items.into_iter().next() {
+                Some(record) => {
+                    // 记录创建人 = 通知接收人的最后兜底（与 worker 的
+                    // `process_one` 同一来源、同一用途）。
+                    let creator_open_id = record
+                        .created_by
+                        .as_ref()
+                        .map(|person| person.id.trim().to_string())
+                        .filter(|id| !id.is_empty());
+                    match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
+                        Ok(cells) => {
+                            tracing::info!(
+                                stage = "record",
+                                cell_count = cells.len(),
+                                "审批派发源记录字段映射完成"
+                            );
+                            (cells, creator_open_id)
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                stage = "record",
+                                "审批派发解析记录字段失败，详情见派发记录"
+                            );
+                            return Ok(DispatchOutcome::fail(
+                                50201,
+                                Some(config_id),
+                                format!("解析记录字段失败：{error}"),
+                            ));
+                        }
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!(stage = "record", "审批派发解析记录字段失败，详情见派发记录");
+                None => {
+                    tracing::warn!(stage = "record", "多维表格里找不到审批源记录");
                     return Ok(DispatchOutcome::fail(
-                        50201,
+                        40402,
                         Some(config_id),
-                        format!("解析记录字段失败：{error}"),
+                        "多维表格里找不到该记录",
                     ));
                 }
             },
-            None => {
-                tracing::warn!(stage = "record", "多维表格里找不到审批源记录");
+            Err(failure) => {
+                tracing::warn!(stage = "record", kind = ?failure.kind, "审批派发读取源记录失败");
                 return Ok(DispatchOutcome::fail(
-                    40402,
+                    50201,
                     Some(config_id),
-                    "多维表格里找不到该记录",
+                    format!("读取记录失败：{}", failure.message),
                 ));
             }
-        },
-        Err(failure) => {
-            tracing::warn!(stage = "record", kind = ?failure.kind, "审批派发读取源记录失败");
-            return Ok(DispatchOutcome::fail(
-                50201,
-                Some(config_id),
-                format!("读取记录失败：{}", failure.message),
-            ));
-        }
-    };
+        };
 
     // ---- 编排 ----
     let backfill = BitableBackfill {
@@ -1329,6 +1350,7 @@ async fn dispatch_single(
     outcome.instance_code = instance_code;
     outcome.record_summary = record_summary;
     outcome.applicant_open_id = notify_open_id;
+    outcome.creator_open_id = creator_open_id;
     Ok(outcome)
 }
 
@@ -1359,6 +1381,29 @@ fn response(
         },
         message,
     )
+}
+
+/// 请求未显式指定接收人时的兜底链：申请人 open_id → 记录创建人 open_id。
+///
+/// 兜底对**除受理外的任何状态**都给（2026-10-15 原则：用户发起请求就必须收到
+/// 反馈，成功失败都要，失败附原因）。旧口径「只在终态兜底、中间态交给 worker」
+/// 在「申请人列空着」时两头都发不出去——waiting 拿不到接收人，worker 又只认
+/// 终态，正是「创建失败没有任何通知」的根因。
+///
+/// `Accepted`（全表受理）除外：它只是「已入队」，真正的结果由 worker 逐条通知
+/// ——这里再发一次的话，受理 N 条会先来一条「已受理」再跟 N 条结果。
+fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipient> {
+    match outcome.status {
+        FeedbackStatus::Accepted => None,
+        _ => outcome
+            .applicant_open_id
+            .as_deref()
+            .or(outcome.creator_open_id.as_deref())
+            .map(|open_id| NotificationRecipient {
+                receive_id_type: ReceiveIdType::OpenId,
+                receive_id: open_id.to_string(),
+            }),
+    }
 }
 
 /// 收尾反馈：渲染展示文案 + 发送 IM 通知（若有接收人）。
@@ -1415,23 +1460,11 @@ async fn complete_feedback(
         base_token,
         table_id,
     );
-    // 接收人优先级：显式 `notification_recipient` > 申请人兜底。
-    //
-    // 兜底只在「创建完成」的终态（成功/失败）生效——等待与可重试是中间态，
-    // 由 worker 重试到终态后再通知（与 worker 的通知条件同口径）。
-    // 「没传接收人就零通知」是 2026-10-14 事故的另一半（HTTP 与 worker 两层
-    // 都跳过）；这里补上 HTTP 层兜底，消息不再依赖 worker 的轮询延迟。
-    let fallback_recipient = match outcome.status {
-        FeedbackStatus::Succeeded | FeedbackStatus::Failed => outcome
-            .applicant_open_id
-            .as_deref()
-            .map(|open_id| NotificationRecipient {
-                receive_id_type: ReceiveIdType::OpenId,
-                receive_id: open_id.to_string(),
-            }),
-        _ => None,
-    };
-    let recipient = input.notification_recipient.clone().or(fallback_recipient);
+    // 接收人优先级：显式 `notification_recipient` > 申请人 open_id > 记录创建人。
+    let recipient = input
+        .notification_recipient
+        .clone()
+        .or_else(|| fallback_recipient_of(outcome));
     let notification = match &recipient {
         None => NotificationResult::not_requested(),
         Some(_) if config.is_none() => NotificationResult::skipped(),
@@ -1642,6 +1675,45 @@ mod tests {
     #[test]
     fn valid_input_passes() {
         assert!(valid_input().validate().is_ok());
+    }
+
+    /// 兜底接收人链：申请人优先 → 记录创建人兜底 → 都没有则不发；全表受理不发。
+    ///
+    /// 「中间态也要兜底」是 2026-10-15 的原则变更点：旧实现只在
+    /// `Succeeded | Failed` 给兜底，waiting 时两层都发不出消息。
+    #[test]
+    fn fallback_recipient_covers_interim_states_and_falls_back_to_the_creator() {
+        let mut outcome = DispatchOutcome::fail(1, Some(7), "等待补齐数据");
+        outcome.status = FeedbackStatus::Waiting;
+        outcome.applicant_open_id = Some("ou_applicant".into());
+        outcome.creator_open_id = Some("ou_creator".into());
+        assert_eq!(
+            fallback_recipient_of(&outcome).map(|recipient| recipient.receive_id),
+            Some("ou_applicant".to_string()),
+            "申请人存在时必须优先发给申请人"
+        );
+
+        // 申请人列空着（waiting 主因）→ 记录创建人兜底。
+        outcome.applicant_open_id = None;
+        assert_eq!(
+            fallback_recipient_of(&outcome).map(|recipient| recipient.receive_id),
+            Some("ou_creator".to_string()),
+            "申请人缺失时必须退到记录创建人"
+        );
+
+        // 两者都无 → 不发（此时「发给谁」在事实上无解）。
+        outcome.creator_open_id = None;
+        assert!(fallback_recipient_of(&outcome).is_none());
+
+        // 全表受理不发：结果由 worker 逐条通知，避免 1 + N 条轰炸。
+        let mut accepted = DispatchOutcome::fail(0, Some(7), "已受理");
+        accepted.status = FeedbackStatus::Accepted;
+        accepted.applicant_open_id = Some("ou_applicant".into());
+        accepted.creator_open_id = Some("ou_creator".into());
+        assert!(
+            fallback_recipient_of(&accepted).is_none(),
+            "受理不是结果，不该发通知"
+        );
     }
 
     /// `check_config_auth` 的失败出口。仓库 deny `unwrap_used`/`unwrap_err`，

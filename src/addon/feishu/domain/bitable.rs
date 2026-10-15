@@ -204,6 +204,24 @@ pub(crate) struct RecordItem {
     /// **无法用单一 struct 表达**。强行 typed 会在取数列是数字类时反序列化失败。
     #[serde(default)]
     pub(crate) fields: BTreeMap<String, serde_json::Value>,
+    /// 记录创建人（`automatic_fields: true` 时才返回，**record 顶层**字段，
+    /// 不在 `fields` 里——官方《批量获取记录》响应示例）。
+    ///
+    /// 用途：通知接收人的最后兜底——申请人列空着时，向「建这条记录的人」反馈
+    /// 派发结论（见 `feishu_approval_worker::should_notify` 的接收人链）。
+    /// `id` 的类型跟随请求体的 `user_id_type`（本模块固定 `open_id`）。
+    #[serde(default)]
+    pub(crate) created_by: Option<RecordPerson>,
+}
+
+/// 记录的系统人员字段（`created_by` / `last_modified_by`）。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct RecordPerson {
+    #[serde(default)]
+    pub(crate) id: String,
+    /// 中文姓名。缺 contact 字段权限时可能不返回——本模块只消费 `id`。
+    #[serde(default)]
+    pub(crate) name: Option<String>,
 }
 
 /// 列出记录的 `data`。
@@ -1520,12 +1538,17 @@ pub(crate) async fn get_records_by_ids(
     // 指向「字段名不匹配」——与真正的原因（参数不存在）完全无关。少投影的代价只是
     // 多返回几列，而 `RecordItem.fields` 是 `BTreeMap<String, Value>`，任何形态都吃得下。
     //
-    // `automatic_fields: false` 必须留着：它挡掉 `created_by` / `created_time` 这类
-    // **没有 field_id 的系统字段**，它们进了 `fields` 之后 [`rekey_cells_by_field_id`]
-    // 会因为找不到对应列而报错。
+    // `automatic_fields: true`：取回 `created_by`——通知接收人的兜底（申请人列
+    // 空着时向记录创建人反馈派发结论）。官方响应示例把系统字段放在 record
+    // **顶层**，与 `fields` 平级，因此不经过 [`rekey_cells_by_field_id`]；若真机上
+    // 它们出现在 `fields` 里，rekey 已按 [`SYSTEM_FIELD_KEYS`] 豁免。
+    //
+    // `user_id_type: "open_id"` 显式写死：`created_by.id` 的类型跟随它，而 IM
+    // 通知接口只认 `open_id`（不写就吃默认值，默认值变了会静默换成别的 ID 形态）。
     let body = serde_json::json!({
         "record_ids": record_ids,
-        "automatic_fields": false,
+        "user_id_type": "open_id",
+        "automatic_fields": true,
     });
 
     let data: BatchGetRecordsData = send_json(
@@ -1554,6 +1577,18 @@ pub(crate) async fn get_records_by_ids(
     Ok(data.records)
 }
 
+/// `automatic_fields: true` 时可能随记录返回的系统字段键（都没有 field_id）。
+///
+/// 官方《批量获取记录》响应示例把它们放在 record **顶层**（与 `fields` 平级），
+/// 但真机形态以实测为准——两条路都收：出现在 `fields` 里时直接跳过，
+/// 不让 [`rekey_cells_by_field_id`] 的 fail-loud 把它们报成「未知键」。
+pub(crate) const SYSTEM_FIELD_KEYS: &[&str] = &[
+    "created_by",
+    "created_time",
+    "last_modified_by",
+    "last_modified_time",
+];
+
 /// 把官方响应的 `fields`（**按字段名**作键）重映射成按 `field_id` 作键。
 ///
 /// # 为什么这一步必须存在
@@ -1574,6 +1609,8 @@ pub(crate) async fn get_records_by_ids(
 ///
 /// 静默保留一个原键，后果是域里按 id 取不到 → 又变成「缺少申请人」——把这次修复
 /// 挪到别处而不是消除它。宁可在这里失败并点名是哪个键。
+///
+/// 例外只有 [`SYSTEM_FIELD_KEYS`]：它们是**已知**的系统字段，不是「未知键」。
 pub(crate) fn rekey_cells_by_field_id(
     fields: &[FieldItem],
     cells: &BTreeMap<String, serde_json::Value>,
@@ -1581,6 +1618,14 @@ pub(crate) fn rekey_cells_by_field_id(
     let mut out = serde_json::Map::new();
     let mut unknown: Vec<&str> = Vec::new();
     for (key, value) in cells {
+        // 系统自动字段（`automatic_fields: true` 时随记录返回，没有 field_id）
+        // 不参与重映射：官方把它们放在 record 顶层，但真机形态以实测为准——
+        // 出现在这里时直接丢弃，而不是让下面的 fail-loud 把它们报成「未知键」。
+        // 它们是**已知**字段，静默丢弃不损失业务数据（`created_by` 走
+        // [`RecordItem::created_by`] 这条独立通路）。
+        if SYSTEM_FIELD_KEYS.contains(&key.as_str()) {
+            continue;
+        }
         // 已经是 id 的直接收下：个别接口两种键都给，防御性写法没有代价。
         if fields.iter().any(|field| field.field_id == key.as_str()) {
             out.insert(key.clone(), value.clone());
@@ -1991,6 +2036,71 @@ mod tests {
     #[test]
     fn zero_page_size_is_rejected() {
         assert!(list_records_query(&[], None, None, 0).is_err());
+    }
+
+    // ---- 记录创建人（通知兜底接收人） ----
+
+    /// `created_by` 在 record **顶层**（官方 batch_get 响应示例），不在 `fields` 里。
+    #[test]
+    fn record_created_by_parses_from_the_top_level() {
+        let json = r#"{"records":[{"record_id":"rec1","created_by":{"id":"ou_creator","name":"张三"},"created_time":1691049973000,"fields":{"单选":"A"}}]}"#;
+        let data: BatchGetRecordsData =
+            serde_json::from_str(json).unwrap_or_else(|error| panic!("应可解析: {error}"));
+        assert_eq!(
+            data.records[0]
+                .created_by
+                .as_ref()
+                .map(|person| person.id.as_str()),
+            Some("ou_creator")
+        );
+        assert_eq!(
+            data.records[0]
+                .created_by
+                .as_ref()
+                .and_then(|person| person.name.as_deref()),
+            Some("张三")
+        );
+    }
+
+    /// 缺 `created_by`（未开 `automatic_fields` 或旧响应）不报错，只是没有兜底接收人。
+    #[test]
+    fn record_without_created_by_still_parses() {
+        let json = r#"{"records":[{"record_id":"rec1","fields":{}}]}"#;
+        let data: BatchGetRecordsData =
+            serde_json::from_str(json).unwrap_or_else(|error| panic!("应可解析: {error}"));
+        assert!(data.records[0].created_by.is_none());
+    }
+
+    /// 系统字段若随 `fields` 返回（真机形态以实测为准），rekey **跳过**而不是
+    /// 报「未知键」——它们是已知字段，静默丢弃不损失业务数据（`created_by`
+    /// 走 `RecordItem::created_by` 这条独立通路）。
+    #[test]
+    fn system_fields_in_cells_are_skipped_not_rejected() {
+        let mut cells = BTreeMap::new();
+        cells.insert("单选".to_string(), serde_json::json!("A"));
+        cells.insert(
+            "created_by".to_string(),
+            serde_json::json!({"id": "ou_x", "name": "张三"}),
+        );
+        cells.insert(
+            "created_time".to_string(),
+            serde_json::json!(1691049973000i64),
+        );
+        cells.insert(
+            "last_modified_by".to_string(),
+            serde_json::json!({"id": "ou_y"}),
+        );
+        cells.insert(
+            "last_modified_time".to_string(),
+            serde_json::json!(1691049973000i64),
+        );
+
+        let out = rekey_cells_by_field_id(&[field("fldA", "单选")], &cells)
+            .unwrap_or_else(|error| panic!("系统字段不得触发 fail-loud: {error}"));
+        assert_eq!(out.get("fldA"), Some(&serde_json::json!("A")));
+        for key in SYSTEM_FIELD_KEYS {
+            assert!(!out.contains_key(*key), "{key} 不该进 cells");
+        }
     }
 
     // ---- 字段名解析 ----
