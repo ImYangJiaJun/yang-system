@@ -1,60 +1,20 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router";
 
-import { register, requestRegistrationEmail } from "@/features/auth/api";
+import { register } from "@/features/auth/api";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
-import { useToast } from "@/shared/lib/toast";
 
-/// 创建账号（旧 RegisterPage.vue 语义）：先请求邮箱验证码（含重发冷却）再提交。
+/// 创建账号：用户名加密码即可。
 export default function RegisterPage() {
   const navigate = useNavigate();
-  const toast = useToast();
   const [username, setUsername] = useState("");
-  const [email, setEmail] = useState("");
-  const [emailCode, setEmailCode] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
-  const [sendingCode, setSendingCode] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [resendRemaining, setResendRemaining] = useState(0);
   const [errorMessage, setErrorMessage] = useState("");
-
-  useEffect(() => {
-    if (resendRemaining <= 0) return;
-    const timer = window.setTimeout(
-      () => setResendRemaining((prev) => Math.max(0, prev - 1)),
-      1000,
-    );
-    return () => window.clearTimeout(timer);
-  }, [resendRemaining]);
-
-  const sendCode = async () => {
-    if (sendingCode || resendRemaining > 0) return;
-    setErrorMessage("");
-    const normalizedEmail = email.trim().toLowerCase();
-    if (!normalizedEmail) {
-      setErrorMessage("请输入邮箱");
-      return;
-    }
-    setSendingCode(true);
-    try {
-      const challenge = await requestRegistrationEmail(normalizedEmail);
-      setEmail(normalizedEmail);
-      toast.info(
-        `若邮箱可用于注册，验证码将在 ${Math.ceil(challenge.expiresIn / 60)} 分钟内送达。`,
-      );
-      setResendRemaining(challenge.resendAfter);
-    } catch (cause) {
-      toast.error(
-        cause instanceof Error ? cause.message : "验证码发送失败，请稍后重试",
-      );
-    } finally {
-      setSendingCode(false);
-    }
-  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -62,10 +22,6 @@ export default function RegisterPage() {
     setErrorMessage("");
     if (username.trim().length < 3 || username.trim().length > 64) {
       setErrorMessage("帐号长度必须为 3 到 64 个字符");
-      return;
-    }
-    if (!/^\d{6}$/.test(emailCode.trim())) {
-      setErrorMessage("请输入 6 位验证码");
       return;
     }
     if (password.length < 10) {
@@ -78,12 +34,7 @@ export default function RegisterPage() {
     }
     setSubmitting(true);
     try {
-      await register(
-        username.trim(),
-        password,
-        email.trim().toLowerCase(),
-        emailCode.trim(),
-      );
+      await register(username.trim(), password);
       navigate("/login?registered=1", { replace: true });
     } catch (cause) {
       setErrorMessage(
@@ -100,7 +51,7 @@ export default function RegisterPage() {
         <div className="mb-6 space-y-1">
           <h1 className="text-xl font-semibold">创建账号</h1>
           <p className="text-sm text-muted-foreground">
-            使用已验证邮箱创建全局 YANG 账号。
+            使用用户名和密码创建账号。
           </p>
         </div>
         <form className="space-y-4" onSubmit={submit} noValidate>
@@ -112,40 +63,6 @@ export default function RegisterPage() {
               autoFocus
               value={username}
               onChange={(event) => setUsername(event.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="register-email">邮箱</Label>
-            <Input
-              id="register-email"
-              type="email"
-              autoComplete="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-            />
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full"
-            disabled={sendingCode || resendRemaining > 0}
-            onClick={() => void sendCode()}
-          >
-            {sendingCode
-              ? "发送中…"
-              : resendRemaining > 0
-                ? `重新发送（${resendRemaining}s）`
-                : "发送验证码"}
-          </Button>
-          <div className="space-y-1.5">
-            <Label htmlFor="register-email-code">邮箱验证码</Label>
-            <Input
-              id="register-email-code"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              maxLength={6}
-              value={emailCode}
-              onChange={(event) => setEmailCode(event.target.value)}
             />
           </div>
           <div className="space-y-1.5">
