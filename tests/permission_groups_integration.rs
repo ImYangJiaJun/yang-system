@@ -1422,7 +1422,7 @@ mod harness {
         let target = target_user_id.to_string();
         match authed_dispatch_with_path(
             app,
-            "account.user",
+            "account.admin_users",
             "admin_disable_user",
             json!({}),
             operator,
@@ -1445,7 +1445,7 @@ mod harness {
         let target = target_user_id.to_string();
         match authed_dispatch_with_path(
             app,
-            "account.user",
+            "account.admin_users",
             "admin_enable_user",
             json!({}),
             operator,
@@ -1471,7 +1471,7 @@ mod harness {
         let target = target_user_id.to_string();
         match authed_dispatch_with_path(
             app,
-            "account.user",
+            "account.admin_users",
             "admin_issue_password_reset",
             json!({}),
             operator,
@@ -2378,7 +2378,7 @@ async fn admin_issue_password_reset_declares_only_the_split_permission() {
     for addon in app.catalog().addons() {
         for module in &addon.modules {
             for action in module.actions() {
-                if module.name.as_str() == "account.user"
+                if module.name.as_str() == "account.admin_users"
                     && action.name.as_str() == "admin_issue_password_reset"
                 {
                     permissions = action.permissions.clone();

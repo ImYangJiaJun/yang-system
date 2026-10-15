@@ -193,7 +193,7 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 |---|---|
 | `disable_self.rs`（自助停用） | 操作后系统若将无 active 管理员则拒绝 |
 | `delete_account.rs`（自助删除） | 同上守卫；并清理该用户的 `authz_grant` 与 `user_group` 行（防孤儿授权）。**`system_owner` 哨兵行刻意保留**——哨兵是「引导已发生过」的永久标记，不是「当前管理员是谁」的实时索引。删除管理员账号不应让系统回到可重新引导的状态，否则任何后续注册都能竞争引导成为新系统管理员，违背「首个注册账号成为管理员、且仅一次」的不变量。需要重新引导时走灾备 SQL 显式删除旧哨兵行 |
-| `admin_disable_user.rs`（管理停用） | 保留既有自指防护，另加「最后一个」防护 |
+| `src/addon/account/admin_users/actions/admin_disable_user.rs`（管理停用） | 保留既有自指防护，另加「最后一个」防护 |
 | `POST /api/v1/access/groups/members/remove` | 移出 `system_admin` 组的操作受同一守卫 |
 
 ### 幂等语义
