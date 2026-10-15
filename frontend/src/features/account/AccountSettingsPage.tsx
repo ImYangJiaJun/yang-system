@@ -356,10 +356,9 @@ export default function AccountSettingsPage() {
     }
   };
 
-  const emailText =
-    profile?.email && profile.emailVerifiedAt
-      ? `${profile.email}（已验证）`
-      : "未绑定邮箱";
+  const emailBound = Boolean(profile?.email && profile.emailVerifiedAt);
+  const emailText = emailBound ? `${profile?.email}（已验证）` : "未绑定邮箱";
+  const emailHeading = emailBound ? "更换邮箱" : "绑定邮箱";
 
   return (
     <main className="mx-auto w-full max-w-2xl space-y-6 p-6">
@@ -499,9 +498,11 @@ export default function AccountSettingsPage() {
 
       {profile && (
         <section className="rounded-xl border border-border bg-card p-5">
-          <h2 className="text-base font-medium">更换邮箱</h2>
+          <h2 className="text-base font-medium">{emailHeading}</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            向新邮箱发送一次性验证码（与注册验证码独立），验证通过后完成换绑并重新登录
+            {emailBound
+              ? "向新邮箱发送一次性验证码（与注册验证码独立），验证通过后完成换绑并重新登录"
+              : "向邮箱发送一次性验证码，验证通过后即可用于找回密码"}
           </p>
           <form className="mt-3 space-y-3" onSubmit={submitEmail} noValidate>
             <div className="space-y-1.5">
@@ -541,7 +542,7 @@ export default function AccountSettingsPage() {
               </Button>
             </div>
             <Button type="submit" disabled={busy !== null}>
-              {busy === "email" ? "提交中…" : "更换邮箱"}
+              {busy === "email" ? "提交中…" : emailHeading}
             </Button>
           </form>
         </section>
