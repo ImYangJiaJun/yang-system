@@ -19,6 +19,10 @@ deploy/config.cloud.toml
 # 差点踩到：改注释时留下的 .bak-doc8154 里有 28 行凭据，且当时未被忽略）。
 deploy/config.cloud.toml.*
 deploy/.mysql-root-password
+# 财务正式服务器（deploy-finance-prod.ps1）的 SSH 登录密码，明文。同样绝不能提交。
+# 与上面 config.cloud.toml 同理：精确路径匹配不到 .bak / 变体，而它们一样是明文口令。
+deploy/.ssh-password
+deploy/.ssh-password.*
 deploy/*.tar
 deploy/*.tar.gz
 
