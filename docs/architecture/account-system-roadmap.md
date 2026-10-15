@@ -33,7 +33,7 @@
 >
 > **2026-09-24 更正**：「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）**曾**无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口。该状态已由「权限组与首账号引导」交付终结：**首个成功注册的账号在同一事务内被引导为系统管理员**（并发仲裁交给 `system_owner` 哨兵表的唯一约束，不做判空逻辑；运维 SQL 降为灾备路径），`access` 另交付**一层权限组**（`permission_group` / `permission_group_item` / `user_group`，有效权限 = 直授 ∪ 组权限），并补齐最后管理员守卫与防自提权不变量。设计见 `docs/architecture/2026-09-24-permission-groups-and-bootstrap-design.md`，契约见 `docs/contracts/AUTHZ_GRANTS.md`。
 >
-> **2026-09-26 更正（安全边界收口）**：对抗复核发现 `admin_issue_password_reset` 原先与日常启停共用 `account.users.manage`，而它对**路径参数指定的任意账号**签发密码重置凭证——持该权限的非管理员可重置系统管理员口令后登录成他，于是 `account.users.manage` 实质等价 root。已按两条修法收口：**(c)** 凭据签发拆为独立权限 `account.users.reset_credentials`（危害面在权限粒度上可见）；**(b)** 权限目录新增「管理员等价权限」显式清单与授予闸门——授予这类权限（`account.users.reset_credentials`、`feishu.datasource.secret`、`feishu.datasource.write`）要求调用者本身是内置全权组 `system_admin` 成员，否则 403。见设计 §8.1 附加规则二、§9.1 与 `docs/contracts/AUTHZ_GRANTS.md`「管理员等价权限」节。
+> **2026-09-26 更正（安全边界收口）**：对抗复核发现 `admin_issue_password_reset` 原先与日常启停共用 `account.users.manage`，而它对**路径参数指定的任意账号**签发密码重置凭证——持该权限的非管理员可重置系统管理员口令后登录成他，于是 `account.users.manage` 实质等价 root。已按两条修法收口：**(c)** 凭据签发拆为独立权限 `account.users.reset_credentials`（危害面在权限粒度上可见）；**(b)** 权限目录新增「管理员等价权限」显式清单与授予闸门——授予这类权限（`account.users.reset_credentials`、`feishu.datasource.secret`、`feishu.datasource.write`、`feishu.portal.write`）要求调用者本身是内置全权组 `system_admin` 成员，否则 403。见设计 §8.1 附加规则二、§9.1 与 `docs/contracts/AUTHZ_GRANTS.md`「管理员等价权限」节。
 >
 > **历史记录（原文，2026-09-05）**：进度表「✅ 已完成」指相关 Action/契约已落地并通过门禁，不表示该能力在生产中已可交付使用——尤其「D 管理动作」对应的 `access` 授权端口（grant/revoke/list）当前无冷启动引导（`NoSystemOwnerClaimer` 恒不声明最终管理员，`grant_permission` 需 `access.grants.write` 而无人能获得首条授权），权限管理面整体不可达、属预留端口，待「首次管理员授予」引导机制明确后再启用。
 
@@ -195,7 +195,7 @@
 - `GET /api/v1/users`（分页列表，email 字段遵循既有 system 角色可见性约束）。
 - 全部走既有 permission 校验 + Step-up + 审计；权限经 access grants 授予运营身份。
 - **凭据签发独立成权限**：管理签发重置凭证用 `account.users.reset_credentials`，与停用/启用的 `account.users.manage` 分开授予。二者危害面不同（前者对路径参数指定的任意账号签发凭证），混在一条权限里会让「日常启停」实质等价于 root。
-- **管理员等价权限与授予闸门**：`account.users.reset_credentials` 被列入「管理员等价权限」清单（另有 `feishu.datasource.secret` / `feishu.datasource.write`），授予它——无论直授、加组条目还是加组成员——都要求调用者本身是内置全权组 `system_admin` 成员，否则 403。清单与闸门见设计 §8.1 附加规则二、§9.1 与 `docs/contracts/AUTHZ_GRANTS.md`「管理员等价权限」节。
+- **管理员等价权限与授予闸门**：`account.users.reset_credentials` 被列入「管理员等价权限」清单（另有 `feishu.datasource.secret` / `feishu.datasource.write` / `feishu.portal.write`），授予它——无论直授、加组条目还是加组成员——都要求调用者本身是内置全权组 `system_admin` 成员，否则 403。清单与闸门见设计 §8.1 附加规则二、§9.1 与 `docs/contracts/AUTHZ_GRANTS.md`「管理员等价权限」节。
 
 ### 阶段 E：第二因子、删除与外部身份
 

@@ -424,11 +424,20 @@ async fn business_names_search_related_pagination_and_refresh_boundaries() {
     }
 }
 
+/// 一条夹具配置自己的访问 Token。
+///
+/// `token_hash` 列带唯一键（`table.rs` 的 `.unique(true)`，挡「两条配置共用一个
+/// Token」），因此同一次运行里种入的多条配置不能共用同一个 Token——按 `config_key`
+/// 派生保证唯一，派发时用同一个函数取回。
+fn seed_token(config_key: &str) -> String {
+    format!("{SEED_CONFIG_TOKEN}-{config_key}")
+}
+
 /// 播种一条启用中的配置行，返回 `(config_id, config_key)`。
 ///
 /// `config_key` 是 URL 路径段（随机 hex，与生产 `create_config` 生成的形态一致），
-/// 也是本用例里 `dispatch_as_workflow` 唯一需要引用的定位键；`SEED_CONFIG_TOKEN`
-/// 的摘要与密文一并写入，让「先建配置、再用 Token 派发」这条真实链路的用例能跑通。
+/// 也是本用例里 `dispatch_as_workflow` 唯一需要引用的定位键；[`seed_token`] 派生的
+/// 访问 Token 摘要一并写入，让「先建配置、再用 Token 派发」这条真实链路的用例能跑通。
 async fn seed_config(
     database: &Database,
     base_token: &str,
@@ -447,7 +456,7 @@ async fn seed_config(
     .bind(table_id)
     .bind(enabled)
     .bind(&config_key)
-    .bind(sha256_hex(SEED_CONFIG_TOKEN))
+    .bind(sha256_hex(&seed_token(&config_key)))
     .execute(database.pool())
     .await
     .context("种入审批配置失败")?;
@@ -546,14 +555,23 @@ async fn dispatch_validation_failure_writes_a_failed_request_log() {
         let (database, app, _token) =
             prepare_app(Some("cli_test_app"), Some("test-app-secret")).await?;
 
-        // 空 config_key 必须在查库之前被拒（`validate_config_key` 的注释），
-        // 不冒泡为 Err——与「校验失败要落一条 failed 记录」同一条不变量，只是这次
-        // 失败点提前到了 URL 路径校验层，而不是请求体字段校验。
-        let result = dispatch_as_workflow(&app, "   ", json!({ "record_id": "rec1" })).await;
-        let response = result.context("空 config_key 不应冒泡 Err——走 200 + fail 信封")?;
+        // 空 config_key 必须在查库之前被拒（`validate_config_key` 的注释）。
+        // 这一档连 config_id 都拿不到，`DispatchOutcome::internal` 把 `Err` 原样
+        // 冒泡（信封只给已拿到 config_id 的出口）——用例钉的是「失败也要落一条
+        // failed 记录」，响应形态不是它关心的事。
+        let error = dispatch_as_workflow(
+            &app,
+            "   ",
+            json!({ "token": SEED_CONFIG_TOKEN, "record_id": "rec1" }),
+        )
+        .await
+        .expect_err("空 config_key 连 config_id 都拿不到，按 DispatchOutcome::internal 冒泡为 Err");
+        let error = error
+            .downcast_ref::<BaseError>()
+            .context("冒泡的错误必须是 BaseError")?;
         ensure!(
-            response.code == 700005,
-            "空 config_key 必须给 ParamInvalid 的业务码 700005，实际: {response:?}"
+            error.code() == 700005,
+            "空 config_key 必须给 ParamInvalid 的业务码 700005，实际: {error:?}"
         );
 
         let (outcome, config_id, message) = latest_request_log(&database, "").await?;
@@ -566,7 +584,7 @@ async fn dispatch_validation_failure_writes_a_failed_request_log() {
             "校验失败时 config_id 必须为空（配置都还没查）"
         );
         ensure!(
-            message.contains("不能为空"),
+            message.contains("缺少派发配置标识"),
             "失败记录的消息要可行动，实际 {message}"
         );
 
@@ -585,9 +603,13 @@ async fn dispatch_without_config_reports_40401_and_writes_a_failed_log() {
         let (database, app, _token) =
             prepare_app(Some("cli_test_app"), Some("test-app-secret")).await?;
 
-        let response = dispatch_as_workflow(&app, "cfgNoConfig", json!({ "record_id": "rec1" }))
-            .await
-            .context("未配置出口不应返回 Err——那是业务失败，走 200 + fail 信封")?;
+        let response = dispatch_as_workflow(
+            &app,
+            "cfgNoConfig",
+            json!({ "token": SEED_CONFIG_TOKEN, "record_id": "rec1" }),
+        )
+        .await
+        .context("未配置出口不应返回 Err——那是业务失败，走 200 + fail 信封")?;
         ensure!(response.code == 40401, "未配置必须给出 40401: {response:?}");
 
         let (outcome, config_id, message) = latest_request_log(&database, "").await?;
@@ -633,7 +655,7 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
         let response = dispatch_as_workflow(
             &app,
             &config_key,
-            json!({ "token": SEED_CONFIG_TOKEN, "requested_by": "批量按钮" }),
+            json!({ "token": seed_token(&config_key), "requested_by": "批量按钮" }),
         )
         .await
         .context("批量受理不应返回 Err")?;
@@ -675,9 +697,13 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
     finish(outcome, "批量受理落记录").await;
 }
 
-/// provision 失败（dummy 凭证必然在取 token 一步失败）：35600 业务失败 + failed 行。
+/// provision 失败（夹具不装 HTTP 客户端，`outbound_setup::build` 必然失败）：
+/// 冒泡为 Err + failed 行。
 ///
-/// 全表受理（无 record_id）时不尝试回填，链路更干净；出一网一次但结果确定。
+/// 全表受理（无 record_id）时不尝试回填，链路更干净；失败点在出站栈，全程不出网。
+///
+/// 必须带 `applicant`：发起人解析是**唯一**会去建出站栈的那条支路，省掉它就连
+/// 出站栈都不建、受理必然成功——用例会退化成「批量受理」的副本。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn dispatch_provision_failure_writes_a_failed_request_log() {
@@ -686,21 +712,25 @@ async fn dispatch_provision_failure_writes_a_failed_request_log() {
             prepare_app(Some("cli_dummy_app"), Some("dummy-secret")).await?;
         let (config_id, config_key) =
             seed_config(&database, "appProvFail", "tblProvFail", true).await?;
-        // dummy 凭证（app_id/app_secret 非 None 但必然取不到真 token）+ 一条真实
-        // 签发的配置：Token 校验先过（这条链路的前置条件），provision/出站阶段才在
-        // 取凭证这一步确定性失败——这正是「provision 失败也要落一条 failed 记录」
-        // 要钉住的那条不变量，换成新契约后语义不变。
-        let response =
-            dispatch_as_workflow(&app, &config_key, json!({ "token": SEED_CONFIG_TOKEN }))
-                .await
-                .context("provision 失败不应返回 Err——走 200 + 业务失败信封")?;
+        // Token 校验先过（这条链路的前置条件），出站栈这一步确定性失败。
+        // `DispatchOutcome::internal` 把 `Err` 原样冒泡——与校验失败同档；用例钉的是
+        // 「provision 失败也要落一条 failed 记录，且 config_id 关联正确」。
+        let error = dispatch_as_workflow(
+            &app,
+            &config_key,
+            json!({ "token": seed_token(&config_key), "applicant": "夹具发起人" }),
+        )
+        .await
+        .expect_err("出站栈建不起来时必须冒泡为 Err");
         ensure!(
-            response.code != 0,
-            "provision 失败必须给非 0 业务码，实际: {response:?}"
+            format!("{error:#}").contains("HTTP 客户端未初始化"),
+            "provision 失败的原因必须可归因，实际: {error:#}"
         );
 
-        let (outcome, row_config_id, message) =
-            latest_request_log(&database, "appProvFail").await?;
+        // `DispatchOutcome::internal` 不携带坐标，`base_token` 落空串（见
+        // `write_request_log`），所以这行要按空 base_token 取；归因靠下面的
+        // `config_id` 关联——那才是本用例钉的东西。
+        let (outcome, row_config_id, message) = latest_request_log(&database, "").await?;
         ensure!(
             outcome == "failed",
             "provision 失败必须落 failed 桶，实际 {outcome}"

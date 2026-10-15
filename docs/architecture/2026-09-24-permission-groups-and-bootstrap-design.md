@@ -391,13 +391,14 @@ before = 调用者当前的有效权限集合
 
 三条权限的定位不同：`access.groups.*` 是权限组的读写面；`account.users.reset_credentials` 对任意账号签发密码重置凭证、可夺取其身份，因此被列入**管理员等价权限清单**。
 
-**管理员等价权限清单（G2，代码侧唯一事实来源）**：`src/addon/access/domain/sensitive_permissions.rs` 的 `ADMIN_EQUIVALENT_PERMISSIONS` 显式列出「获得或夺取其他主体凭据/身份，或绕过其余一切授权检查」的权限，每条附中文理由（理由会拼进 403 的拒绝信息）。当前 3 条：
+**管理员等价权限清单（G2，代码侧唯一事实来源）**：`src/addon/access/domain/sensitive_permissions.rs` 的 `ADMIN_EQUIVALENT_PERMISSIONS` 显式列出「获得或夺取其他主体凭据/身份，或绕过其余一切授权检查」的权限，每条附中文理由（理由会拼进 403 的拒绝信息）。当前 4 条：
 
 | 权限 | 为什么是管理员等价 |
 |---|---|
 | `account.users.reset_credentials` | 对任意账号签发密码重置凭证：凭此重置其口令并登录成他 |
 | `feishu.datasource.secret` | 回显数据源封存的 Token 明文，拿到即可冒充该数据源调用本系统 |
 | `feishu.datasource.write` | 创建/轮换数据源会把新凭据明文返回给调用者，签发即持有 |
+| `feishu.portal.write` | 创建门户会把数据源的敏感数据暴露到公开 URL，拿到 URL 即可绕过认证查询数据 |
 
 清单结果被 `project_permissions` 写进 `PermissionEntry::admin_equivalent`，随目录读接口返回；授予侧的闸门见 §8.1 附加规则二，错误语义见 §9.3。清单与冻结 Catalog 的一致性由单测 `every_listed_permission_is_declared_by_the_catalog` 与集成测试 `the_permission_catalog_marks_exactly_the_admin_equivalent_permissions` 钉住（权限一旦改名，两处都会变红）。
 

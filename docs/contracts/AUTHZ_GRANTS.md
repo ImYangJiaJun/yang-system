@@ -52,7 +52,7 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 因此不能让只持 `access.grants.write` / `access.groups.write` 的委派者自行完成。
 
 **清单是代码侧的显式、可评审事实**（`src/addon/access/domain/sensitive_permissions.rs` 的
-`ADMIN_EQUIVALENT_PERMISSIONS`，唯一事实来源），当前恰有 3 条，每条附中文理由（理由会拼进
+`ADMIN_EQUIVALENT_PERMISSIONS`，唯一事实来源），当前恰有 4 条，每条附中文理由（理由会拼进
 403 的拒绝信息，因此在生产路径上真的被读取）：
 
 | 管理员等价权限 | 为什么等价 |
@@ -60,6 +60,7 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 | `account.users.reset_credentials` | 对任意账号签发密码重置凭证：凭此重置其口令并登录成他，即夺取该账号的身份与全部权限 |
 | `feishu.datasource.secret` | 回显数据源封存的 Token 明文；该 Token 是数据源主体的入站凭据，拿到即可冒充该数据源调用本系统，不再经任何授权检查 |
 | `feishu.datasource.write` | 创建与轮换数据源都会把新凭据的明文返回给调用者（`create_datasource_table` / `rotate_token`），签发即持有，与直接读取凭据等价 |
+| `feishu.portal.write` | 创建门户会把数据源的敏感数据暴露到公开 URL，攻击者拿到 URL 即可绕过认证查询数据，等价于把数据源的内容对外发布 |
 
 清单刻意**不含** `access.grants.write` / `access.groups.write` / `account.users.manage`：前两者能
 改动授权事实，但授予侧的闸门让它们无论如何都授不出管理员等价权限，是「危害面被闸门封顶的

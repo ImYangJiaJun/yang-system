@@ -36,10 +36,11 @@ const SYSTEM_ADMIN_GROUP_KEY: &str = "system_admin";
 /// 当前 Catalog 已声明的权限」才有独立的判据——权限改名后清单会静默失效，只有这份
 /// 与代码侧清单分离的期望值才能把它钉红。生产清单见
 /// `src/addon/access/domain/sensitive_permissions.rs`。
-const ADMIN_EQUIVALENT_PERMISSIONS: [&str; 3] = [
+const ADMIN_EQUIVALENT_PERMISSIONS: [&str; 4] = [
     "account.users.reset_credentials",
     "feishu.datasource.secret",
     "feishu.datasource.write",
+    "feishu.portal.write",
 ];
 
 fn database_config() -> DatabaseConfig {
