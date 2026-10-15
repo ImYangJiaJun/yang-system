@@ -14,6 +14,10 @@ __pycache__/
 # 但下面这些是**生产凭据**或临时文件，绝不能提交。
 # 模板是 deploy/config.cloud.example.toml（已入库），首次部署时服务器上从它复制并填值。
 deploy/config.cloud.toml
+# 财务正式机自己的一份（deploy-finance-prod.ps1 的 -ConfigFile 默认值）。
+# 与测试机那份分开：密钥、对外地址都不同，同样是明文，绝不能提交。
+deploy/config.cloud.finance.toml
+deploy/config.cloud.finance.toml.*
 # 上面这条是精确路径，**备份/变体匹配不到**（如 config.cloud.toml.bak-20260923），
 # 而它们同样含明文凭据——一次 `git add -A` 就会把生产口令提交进去（2026-09-23 实际
 # 差点踩到：改注释时留下的 .bak-doc8154 里有 28 行凭据，且当时未被忽略）。

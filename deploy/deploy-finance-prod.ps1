@@ -5,10 +5,10 @@
 # 【本脚本与 deploy.ps1 的关系】同一套流程的两份拷贝，只差认证方式与目标机：
 #   deploy.ps1               → 测试服务器 47.109.148.207，SSH **私钥**登录
 #   deploy-finance-prod.ps1  → **财务正式服务器 47.112.16.98**，SSH **账号密码**登录（本文件）
-#   远端路径（/home/yjj/yang-system）、配置文件（deploy/config.cloud.toml）、蓝绿流程与全部
-#   开关两边一致。改动请尽量两边同步，别让它们漂移。
-#   ⚠️ 两个脚本共用**同一份** deploy/config.cloud.toml：给财务机 -SyncConfig 推的就是给测试机
-#      推的那一份（同样的 [token].active_secret 等）。财务环境若要独立密钥，得先改这份文件。
+#   远端路径（/home/yjj/yang-system）、蓝绿流程与全部开关两边一致。改动请尽量两边同步，
+#   别让它们漂移。
+#   ⚠️ 配置**不**共用：本脚本 -SyncConfig 推的是 deploy/config.cloud.finance.toml（-ConfigFile
+#      可改），deploy.ps1 推的是 deploy/config.cloud.toml。两台机器各有各的密钥与对外地址。
 #
 # ⚠️ 本文件必须保存为 **UTF-8 with BOM**。Windows PowerShell 5.1 对无 BOM 的文件
 #    按 ANSI 解析，会把下面的中文注释解成乱码并**直接破坏字符串引号配对**，报
@@ -128,6 +128,11 @@ param(
     # 建法与两个坑（BOM / 换行）见文件头。
     [string]$PasswordFile = '',
     # ↑↑↑ 改到这里为止 ↑↑↑
+
+    # -SyncConfig 推上去的本机配置。默认是财务机自己那份，**不是**测试机的
+    # config.cloud.toml——两台机器各有各的密钥与对外地址，共用一份会把测试机的
+    # 密钥和旧 IP 推到财务正式机上。
+    [string]$ConfigFile = 'config.cloud.finance.toml',
 
     [string]$RemoteDir = '/home/yjj/yang-system',
     [string]$BackendImage  = 'yang-system-backend:live',
@@ -492,7 +497,8 @@ function Confirm-PostSteps {
 }
 
 function Get-LocalCloudConfigPath {
-    Join-Path $scriptDir 'config.cloud.toml'
+    if ($ConfigFile) { return $ConfigFile }
+    Join-Path $scriptDir 'config.cloud.finance.toml'
 }
 
 # 把部署产物（脚本 + compose + 模板）同步到服务器。**只传这三个，绝不传本机 config.cloud.toml**
