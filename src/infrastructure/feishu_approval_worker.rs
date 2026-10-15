@@ -1369,11 +1369,19 @@ async fn send_worker_notification(
     // HTTP 路径通知「显式指定的接收人」（notification_recipient），本 worker
     // 通知「申请人」——两者互补：HTTP 没发时（未指定接收人是常态）由这里兜底，
     // HTTP 发过时才避免重复。
+    //
+    // 查 `succeeded` **与** `failed` 两档：HTTP 层只在终态兜底（`fallback_recipient_of`
+    // 只认 `Succeeded | Failed`），而 `outcome_for` 把 `Terminal` 折成 `failed`——
+    // 只查 `succeeded` 会让「HTTP 已发过失败通知」的终态在 worker 再发一遍。
+    // 中间态（`waiting`）HTTP 层不发，worker 必须接手，所以不查它。
     let request_log_check = async {
         let query = runner.context.approval_request_logs().query();
         let query = query.where_eq("record_id", serde_json::json!(task.record_id))?;
         let query = query.where_eq("config_id", serde_json::json!(task.config_id))?;
-        let query = query.where_eq("outcome", serde_json::json!("succeeded"))?;
+        let query = query.where_in(
+            "outcome",
+            vec![serde_json::json!("succeeded"), serde_json::json!("failed")],
+        )?;
         query.all().await
     };
     match request_log_check.await {
@@ -1708,6 +1716,8 @@ mod tests {
     fn http_notification_detection_reads_the_actual_notification_status() {
         // 只有 notification.status == "sent" 才算「HTTP 已通知」——判据必须是
         // 通知结果本身，不是 outcome=succeeded（2026-10-14「没发消息」事故根因）。
+        // 查询侧同时覆盖 succeeded 与 failed 两档：outcome_for 把 Terminal 折成
+        // failed，而 HTTP 层对 Failed 终态也发通知，只查 succeeded 会漏掉它。
         let mut sent = Record::new();
         sent.insert(
             "response_body",
