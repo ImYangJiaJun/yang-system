@@ -31,7 +31,8 @@ use serde::Deserialize;
 
 use super::outbound::{
     send_with_retry, FailureKind, OutboundFailure, OutboundMethod, OutboundRequest,
-    OutboundTransport, Sleeper, PULL_RETRY,
+    OutboundTransport, RetryPolicy, Sleeper, DEPARTMENT_REQUEST_TIMEOUT_SECS, DEPARTMENT_RETRY,
+    PULL_RETRY,
 };
 use super::tenant_token::{TenantTokenProvider, FEISHU_OPEN_BASE};
 
@@ -146,7 +147,7 @@ pub(crate) async fn create_instance(
         idempotent: true,
     };
 
-    match send_approval(transport, sleeper, tokens, request).await {
+    match send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await {
         Ok(response) => {
             let data: CreateInstanceData =
                 serde_json::from_str(&response).map_err(|error| OutboundFailure {
@@ -216,7 +217,8 @@ pub(crate) struct InstanceDetail {
     /// 发起人部门 ID。**格式两形态不一致**：bot 形态**非** `od-` 前缀
     /// （实测 `"db59a45c851464gf"`），user 形态是 `od-` 前缀。两形态都能直喂
     /// contact 部门接口——按前缀分流 `department_id_type`（2026-10-15 真机验证，
-    /// 见 [`resolve_department_name`]；设计 §4.3 缺口 1 已闭环）。
+    /// 见 [`resolve_department_name`]；设计 §4.3 的「能否直喂」已闭环，
+    /// **scope 仍需运维开通**）。
     pub(crate) department_id: Option<String>,
     /// 发起人部门**名称**，由上层经 [`resolve_department_name`] 解析后填充。
     ///
@@ -321,7 +323,7 @@ pub(crate) async fn get_instance(
         idempotent: true, // 只读
     };
 
-    match send_approval(transport, sleeper, tokens, request).await {
+    match send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await {
         Ok(response) => {
             let data: InstanceDetailData =
                 serde_json::from_str(&response).map_err(|error| OutboundFailure {
@@ -392,7 +394,7 @@ struct InstanceDetailData {
 // ---------------------------------------------------------------------------
 
 /// 部门查询的 URL：`GET /open-apis/contact/v3/departments/:department_id`。
-pub(crate) fn department_url(department_id: &str) -> anyhow::Result<String> {
+fn department_url(department_id: &str) -> anyhow::Result<String> {
     validate_path_segment("department_id", department_id)?;
     Ok(format!(
         "{FEISHU_OPEN_BASE}/open-apis/contact/v3/departments/{department_id}"
@@ -452,10 +454,12 @@ pub(crate) async fn resolve_department_name(
         json_body: None,
         raw_body: None,
         binary_limit: None,
-        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        // 短超时 + 不重试：本次调用排在编号回填**之前**，best-effort 富化
+        // 不能拖住主产物（见 `DEPARTMENT_RETRY`）。
+        timeout_secs: Some(DEPARTMENT_REQUEST_TIMEOUT_SECS),
         idempotent: true, // 只读
     };
-    match send_approval(transport, sleeper, tokens, request).await {
+    match send_approval(transport, sleeper, tokens, request, &DEPARTMENT_RETRY).await {
         Ok(data) => {
             let name = serde_json::from_str::<serde_json::Value>(&data)
                 .ok()
@@ -526,7 +530,7 @@ pub(crate) async fn get_approval_definition(
         idempotent: true, // 只读
     };
 
-    let response = send_approval(transport, sleeper, tokens, request).await?;
+    let response = send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await?;
     let data: ApprovalDefinitionData =
         serde_json::from_str(&response).map_err(|error| OutboundFailure {
             kind: FailureKind::Fatal { code: 0 },
@@ -560,11 +564,16 @@ struct ApprovalDefinitionData {
 /// 一处说「审批」），强行抽公共层会让两边的排查线索都变模糊。
 ///
 /// 返回**信封里的 `data` 序列化文本**，由各调用方自己反序列化成结构体。
+///
+/// `retry` 由调用方给：审批主链路用 [`PULL_RETRY`]，而 best-effort 富化
+/// （部门名解析）用 [`DEPARTMENT_RETRY`]——它排在编号回填之前，不能把主产物
+/// 拖在一次可放弃的查询上。
 async fn send_approval(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
     tokens: &TenantTokenProvider,
     request: OutboundRequest,
+    retry: &RetryPolicy,
 ) -> Result<String, OutboundFailure> {
     let mut token_refresh_used = false;
     let mut request = request;
@@ -578,7 +587,7 @@ async fn send_approval(
             })?;
         request.bearer_token = Some(token);
 
-        match send_with_retry(transport, sleeper, &request, PULL_RETRY).await {
+        match send_with_retry(transport, sleeper, &request, *retry).await {
             Ok(response) => return decode_data(&response.body),
             Err(failure) => {
                 if failure.kind == FailureKind::TokenExpired && !token_refresh_used {

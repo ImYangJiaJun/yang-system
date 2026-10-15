@@ -866,6 +866,12 @@ pub(crate) async fn fill_department_name(
     if department_field.is_none() {
         return;
     }
+    // 编号还没出现时 `finish_backfill` 会直接返回 `CreatedPendingBackfill`
+    // （`write_extended` 根本不执行，解析结果必被丢弃），而任务落回 pending
+    // 后下一轮还会再来——不拦的话就是每轮一次**白跑**的 contact 调用。
+    if serial_number_of(detail).is_none() {
+        return;
+    }
     let Some(department_id) = detail.department_id.as_deref() else {
         return;
     };
@@ -940,7 +946,8 @@ async fn finish_backfill(
 ///
 /// **整体写失败只 `tracing::warn`**——编号是主产物，扩展字段是附带
 /// （与既有「回填失败不吞事实」原则一致）。值全部取自**已经拿到的**那一份
-/// 详情，零额外 API 调用。
+/// 详情，零额外 API 调用——唯一例外是部门名（`fill_department_name` 在调用方
+/// 预先解析，且只在配置了部门列时发生）。
 pub(crate) async fn write_extended(
     backfill: &dyn Backfill,
     input: &DispatchInput<'_>,
@@ -995,15 +1002,20 @@ pub(crate) async fn write_extended(
     // 发起人部门：**优先写解析出的部门名**（`fill_department_name` 在拿详情后
     // 补上），解析失败/未配时退化为写 `department_id` 原值——信息不丢，用户
     // 至少能看出「这一列的 ID 是没解析成功的」。
+    //
+    // 判空必须逐项做（`or_else` 而不是 `or`）：`or` 会被一个空白名字短路，
+    // 随后的 filter 再把整条链判空——该列一个字都不写，连 ID 兜底都丢掉。
     if let Some(field) = input.department_field {
-        if let Some(department) = detail
-            .department_name
-            .as_deref()
-            .or(detail.department_id.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        let non_empty = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        if let Some(department) = non_empty(detail.department_name.as_deref())
+            .or_else(|| non_empty(detail.department_id.as_deref()))
         {
-            fields.push((field, Value::String(department.to_string())));
+            fields.push((field, Value::String(department)));
         }
     }
 
@@ -1977,6 +1989,18 @@ mod tests {
         r#"{"code":60012,"msg":"uuid conflict"}"#.to_string()
     }
 
+    /// 带 `department_id` 的详情（bot 形态：非 `od-` 前缀）。
+    fn ok_detail_with_department(instance_code: &str, serial: &str, department: &str) -> String {
+        format!(
+            r#"{{"code":0,"msg":"ok","data":{{"instance_code":"{instance_code}","serial_number":"{serial}","status":"PENDING","department_id":"{department}"}}}}"#
+        )
+    }
+
+    /// 部门查询的成功响应（`data.department.name`）。
+    fn department_body(name: &str) -> String {
+        format!(r#"{{"code":0,"msg":"ok","data":{{"department":{{"name":"{name}"}}}}}}"#)
+    }
+
     #[tokio::test]
     async fn connect_dispatch_validates_then_submits_official_array_including_details() {
         let code = "19EAC829-F1CB-527F-BE2A-1330422E60C0";
@@ -2608,6 +2632,131 @@ mod tests {
                 "202609280001".to_string()
             )]
         );
+    }
+
+    /// 部门名**接线**：`dispatch_one` 必须在回填前真的解析部门名。
+    ///
+    /// 这条用例存在的理由：取值链（`department_cell_prefers_*`）与解析函数
+    /// （`department_name_*`）各自有单测，但「`dispatch_one` 把两者接起来」此前
+    /// **零覆盖**——夹具的详情没有 `department_id`，解析在守卫处就返回了，
+    /// 于是删掉调用点、或把守卫写反，其余用例照样全绿。真机上那种断线的表现
+    /// 恰好是「悄悄写回 ID」，最难发现。
+    #[tokio::test]
+    async fn dispatch_one_resolves_department_name_before_backfilling() {
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-1")),
+            (
+                200,
+                &ok_detail_with_department("INST-1", "202609280001", "db59a45c851464gf"),
+            ),
+            (200, &department_body("研发部")),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[
+            ("fld_applicant", json!([{"id": "ou_abc"}])),
+            ("fld_title", json!("报销")),
+        ]);
+        let mut request = input(&cells, &widgets);
+        request.department_field = Some("fld_department");
+
+        let result = dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await;
+
+        assert!(
+            matches!(result, DispatchResult::Backfilled { .. }),
+            "{result:?}"
+        );
+        let department = backfill
+            .raw_writes()
+            .into_iter()
+            .find(|(_, field, _)| field == "fld_department")
+            .map(|(_, _, value)| value);
+        assert_eq!(
+            department,
+            Some(json!("研发部")),
+            "接线断了：部门列写回的不是解析出的名字"
+        );
+        assert!(
+            transport
+                .requests()
+                .iter()
+                .any(|url| url.contains("/contact/v3/departments/db59a45c851464gf")),
+            "应发生一次部门查询：{:?}",
+            transport.requests()
+        );
+    }
+
+    /// 未配部门列 → **零** contact 调用（脚本只喂了 create + detail 两条响应，
+    /// 多打一次请求就会耗尽脚本并把结论打成 Retryable，断言同时钉住两件事）。
+    #[tokio::test]
+    async fn dispatch_one_skips_department_lookup_without_the_field() {
+        let transport = ScriptedTransport::new(vec![
+            (200, &ok_create("INST-1")),
+            (
+                200,
+                &ok_detail_with_department("INST-1", "202609280001", "db59a45c851464gf"),
+            ),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[
+            ("fld_applicant", json!([{"id": "ou_abc"}])),
+            ("fld_title", json!("报销")),
+        ]);
+
+        let result = dispatch_one(
+            &transport,
+            &NoSleep,
+            &fake_tokens(),
+            &backfill,
+            &input(&cells, &widgets),
+        )
+        .await;
+
+        assert!(
+            matches!(result, DispatchResult::Backfilled { .. }),
+            "未配部门列不得多打请求：{result:?}"
+        );
+        assert!(
+            !transport
+                .requests()
+                .iter()
+                .any(|url| url.contains("/contact/v3/departments/")),
+            "未配部门列时零 contact 调用：{:?}",
+            transport.requests()
+        );
+    }
+
+    /// 恢复路径（带 connect/attachment 控件时先按 uuid 反查实例）**也**要接上
+    /// 部门名解析——它是 `dispatch_one` 里提前 `return` 的另一条分支，主路径的
+    /// 接线测试覆盖不到它。
+    #[tokio::test]
+    async fn recover_path_also_resolves_department_name() {
+        let transport = ScriptedTransport::new(vec![
+            (
+                200,
+                &ok_detail_with_department("INST-R", "202609280009", "db59a45c851464gf"),
+            ),
+            (200, &department_body("研发部")),
+        ]);
+        let backfill = RecordingBackfill::default();
+        let widgets = [widget("w1", "connect")];
+        let cells = cells(&[("fld_applicant", json!([{"id": "ou_abc"}]))]);
+        let mut request = input(&cells, &widgets);
+        request.department_field = Some("fld_department");
+
+        let result = dispatch_one(&transport, &NoSleep, &fake_tokens(), &backfill, &request).await;
+
+        assert!(
+            matches!(result, DispatchResult::Backfilled { .. }),
+            "{result:?}"
+        );
+        let department = backfill
+            .raw_writes()
+            .into_iter()
+            .find(|(_, field, _)| field == "fld_department")
+            .map(|(_, _, value)| value);
+        assert_eq!(department, Some(json!("研发部")), "恢复路径漏了部门名接线");
     }
 
     #[tokio::test]

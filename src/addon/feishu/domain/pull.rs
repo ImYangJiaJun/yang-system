@@ -1058,6 +1058,7 @@ mod tests {
                 RecordItem {
                     record_id: "rec".to_string(),
                     fields,
+                    created_by: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -1122,6 +1123,7 @@ mod tests {
             items: vec![RecordItem {
                 record_id: "rec".to_string(),
                 fields,
+                created_by: None,
             }],
         };
         assert!(extract_values_owned(&snap, "子", None).is_empty());

@@ -96,7 +96,9 @@
 
 **最优链路已确认——审批实例详情自带 `department_id`，无需调通讯录 user 接口**（报文 `od-e2ebe89e...` 实证；文档同页标注「发起审批用户所在部门的 ID」）。
 
-**⚠️ 2026-10-12 bot 路径修正**：生产（bot）形态的 `department_id` 是**另一种格式**（实测 `"db59a45c851464gf"`，非 od- 前缀）——它能否直接喂给 contact 部门接口（或需 `department_id_type` 参数）**未验证**，一期「发起人部门」实现时必须先试调一次；同时应用当前**无任何 contact scope**（99991672 实测，见 §11 验证项 6）。
+**⚠️ 2026-10-12 bot 路径修正 / ✅ 2026-10-15 形态闭环**：生产（bot）形态的 `department_id` 是**另一种格式**（实测 `"db59a45c851464gf"`，非 od- 前缀）。2026-10-15 真机（lark-cli，`department_id_type=department_id` + 该 ID）验证**格式被接口接受**——错误停在 40004「no dept authority」（可见范围），而非 99992357「不是有效的 department_id」。结论：按前缀分流 `department_id_type`（`od-` → `open_department_id`，其余 → `department_id`）即可直喂，**无需再试调**；实现见 `approval.rs::resolve_department_name`，解析失败退化为写原始 ID。
+
+**scope 已开通**（2026-10-15 应用管理员确认 `contact:department.base:readonly` 已申请，§11 验证项 6 的 99991672 不再适用）。剩余风险只有**部门可见范围**：目标部门须在应用的通讯录权限范围内，否则 40004——解析失败退化为写原始 ID（有 warn 日志可查，不阻塞派发）。
 
 - 取部门名：`GET /open-apis/contact/v3/departments/:department_id` → `data.department.name`；scope `contact:department.base:readonly`；部门须在应用通讯录权限范围内，否则 **40004**（真实复现）。
 - 一步到位的 `department_path` 仅 `user_access_token` 返回，bot 身份不返回——本项目 bot 流程不可用，弃。

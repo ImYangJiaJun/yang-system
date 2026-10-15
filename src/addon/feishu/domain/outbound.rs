@@ -492,6 +492,22 @@ pub(crate) const PULL_RETRY: RetryPolicy = RetryPolicy {
 /// 单页拉取的请求超时（秒）。比 token 那次宽松：一页最多 500 行、可能含长文本。
 pub(crate) const PULL_REQUEST_TIMEOUT_SECS: u64 = 20;
 
+/// 部门名解析：**best-effort 富化，一次即止**。
+///
+/// 它跑在编号回填**之前**，而编号是主产物——一个富化调用不能用 `PULL_RETRY`
+/// 的 3 次尝试把主产物拖住（最坏 `3×20s + 2×30s ≈ 120s`，超过单轮预算
+/// `ROUND_WORST_CASE_SECONDS`）。失败只是让部门列退化为写 ID，下一轮派发
+/// 或事件会自然再试。
+pub(crate) const DEPARTMENT_RETRY: RetryPolicy = RetryPolicy {
+    max_attempts: 1,
+    base_backoff_ms: 0,
+    max_backoff_ms: 0,
+    max_retry_after_ms: 0,
+};
+
+/// 部门名解析的请求超时（秒）。简单读接口，5 秒足够；超时即退化写 ID。
+pub(crate) const DEPARTMENT_REQUEST_TIMEOUT_SECS: u64 = 5;
+
 impl RetryPolicy {
     /// 单轮的最坏耗时上界（秒）。用于证明锁 TTL 足够覆盖临界区。
     pub(crate) fn worst_case_seconds(&self, request_timeout_secs: u64) -> u64 {
