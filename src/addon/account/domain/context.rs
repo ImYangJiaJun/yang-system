@@ -54,6 +54,8 @@ pub(crate) struct Account {
     issue_refresh_credential_version: bool,
     password_reset_ttl_seconds: u64,
     totp_settings: Option<TotpSettings>,
+    /// 受信代理网段：装配 `TrustedClientIpMiddleware` 时用于解析真实客户端 IP。
+    trusted_proxy_cidrs: Vec<String>,
 }
 
 impl Account {
@@ -82,6 +84,7 @@ impl Account {
             issue_refresh_credential_version: security.issue_refresh_credential_version,
             password_reset_ttl_seconds: security.password_reset_ttl_seconds,
             totp_settings: security.totp.clone(),
+            trusted_proxy_cidrs: security.trusted_proxy_cidrs.clone(),
         })
     }
 
@@ -119,6 +122,11 @@ impl Account {
     /// 凭据变更类能力（改密/重置/停用/全量撤销）的发布开关。
     pub(crate) fn credential_mutations_enabled(&self) -> bool {
         self.issue_refresh_credential_version
+    }
+
+    /// 受信代理网段（装配客户端 IP 中间件时使用）。
+    pub(crate) fn trusted_proxy_cidrs(&self) -> &[String] {
+        &self.trusted_proxy_cidrs
     }
 
     /// TOTP 配置域；未配置时 MFA Action 不注册。
