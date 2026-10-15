@@ -1385,17 +1385,20 @@ fn response(
 
 /// 请求未显式指定接收人时的兜底链：申请人 open_id → 记录创建人 open_id。
 ///
-/// 兜底对**除受理外的任何状态**都给（2026-10-15 原则：用户发起请求就必须收到
-/// 反馈，成功失败都要，失败附原因）。旧口径「只在终态兜底、中间态交给 worker」
-/// 在「申请人列空着」时两头都发不出去——waiting 拿不到接收人，worker 又只认
-/// 终态，正是「创建失败没有任何通知」的根因。
+/// **只在终态（成功/失败）兜底**：那是「最终结论」，HTTP 层当场发掉、消息不等
+/// worker 轮询。中间态（waiting / retryable / created_pending_backfill）交给
+/// worker——那边对**所有**结论都通知，并按「结论是否变化」去重。
 ///
-/// `Accepted`（全表受理）除外：它只是「已入队」，真正的结果由 worker 逐条通知
-/// ——这里再发一次的话，受理 N 条会先来一条「已受理」再跟 N 条结果。
+/// 两层为什么必须这样分工：worker 的去重判据是 `http_path_notified`，而它只把
+/// `outcome=succeeded` 的请求日志视作「HTTP 已通知」。若 HTTP 对 waiting 也发，
+/// 那条日志（outcome=waiting）匹配不上，worker 会对**同一个 waiting** 再发一条
+/// ——用户收到两条一样的消息（这正是本次要修的病症之一）。
+///
+/// `Accepted`（全表受理）也落在 `None`：它只是「已入队」，结果由 worker 逐条
+/// 通知，避免受理 N 条先来一条「已受理」再跟 N 条结果。
 fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipient> {
     match outcome.status {
-        FeedbackStatus::Accepted => None,
-        _ => outcome
+        FeedbackStatus::Succeeded | FeedbackStatus::Failed => outcome
             .applicant_open_id
             .as_deref()
             .or(outcome.creator_open_id.as_deref())
@@ -1403,6 +1406,7 @@ fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipi
                 receive_id_type: ReceiveIdType::OpenId,
                 receive_id: open_id.to_string(),
             }),
+        _ => None,
     }
 }
 
@@ -1677,14 +1681,16 @@ mod tests {
         assert!(valid_input().validate().is_ok());
     }
 
-    /// 兜底接收人链：申请人优先 → 记录创建人兜底 → 都没有则不发；全表受理不发。
+    /// 兜底接收人链：申请人优先 → 记录创建人兜底 → 都没有则不发。
     ///
-    /// 「中间态也要兜底」是 2026-10-15 的原则变更点：旧实现只在
-    /// `Succeeded | Failed` 给兜底，waiting 时两层都发不出消息。
+    /// **中间态一律不发**：HTTP 发过 waiting 后，那条请求日志的 outcome 是
+    /// waiting，而 worker 的 `http_path_notified` 只认 outcome=succeeded——
+    /// 匹配不上就会对同一个 waiting 再发一条，用户收到两条一样的消息。
+    /// 中间态的通知统一由 worker（全结论 + 去重）负责。
     #[test]
-    fn fallback_recipient_covers_interim_states_and_falls_back_to_the_creator() {
-        let mut outcome = DispatchOutcome::fail(1, Some(7), "等待补齐数据");
-        outcome.status = FeedbackStatus::Waiting;
+    fn fallback_recipient_covers_terminal_states_and_falls_back_to_the_creator() {
+        let mut outcome = DispatchOutcome::fail(1, Some(7), "创建失败");
+        outcome.status = FeedbackStatus::Failed;
         outcome.applicant_open_id = Some("ou_applicant".into());
         outcome.creator_open_id = Some("ou_creator".into());
         assert_eq!(
@@ -1705,15 +1711,23 @@ mod tests {
         outcome.creator_open_id = None;
         assert!(fallback_recipient_of(&outcome).is_none());
 
-        // 全表受理不发：结果由 worker 逐条通知，避免 1 + N 条轰炸。
-        let mut accepted = DispatchOutcome::fail(0, Some(7), "已受理");
-        accepted.status = FeedbackStatus::Accepted;
-        accepted.applicant_open_id = Some("ou_applicant".into());
-        accepted.creator_open_id = Some("ou_creator".into());
-        assert!(
-            fallback_recipient_of(&accepted).is_none(),
-            "受理不是结果，不该发通知"
-        );
+        // 中间态与受理都不在 HTTP 层发：前者由 worker 通知（避免重复），
+        // 后者只是「已入队」（结果由 worker 逐条通知，避免 1 + N 轰炸）。
+        for status in [
+            FeedbackStatus::Waiting,
+            FeedbackStatus::Retryable,
+            FeedbackStatus::CreatedPendingBackfill,
+            FeedbackStatus::Accepted,
+        ] {
+            let mut interim = DispatchOutcome::fail(0, Some(7), "中间态");
+            interim.status = status;
+            interim.applicant_open_id = Some("ou_applicant".into());
+            interim.creator_open_id = Some("ou_creator".into());
+            assert!(
+                fallback_recipient_of(&interim).is_none(),
+                "{status:?} 不该在 HTTP 层兜底"
+            );
+        }
     }
 
     /// `check_config_auth` 的失败出口。仓库 deny `unwrap_used`/`unwrap_err`，
