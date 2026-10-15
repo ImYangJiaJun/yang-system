@@ -297,14 +297,10 @@ impl UserRepository {
         transaction: &mut yang_db::Transaction,
         username: &str,
         password_hash: &str,
-        email: &str,
-        email_verified_at: i64,
     ) -> Result<i64, BaseError> {
         let record = Record::new()
             .set(USERNAME, username)
             .set(PASSWORD_HASH, password_hash)
-            .set(EMAIL, email)
-            .set(EMAIL_VERIFIED_AT, email_verified_at)
             .set(STATUS, UserStatus::Active.as_str());
         let (_, id) = self
             .trusted_query(ctx)?
