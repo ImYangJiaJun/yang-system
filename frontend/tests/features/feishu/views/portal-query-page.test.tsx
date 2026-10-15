@@ -339,6 +339,36 @@ describe("公开门户查询页", () => {
     );
     expect(suggestCalls).toHaveLength(0);
   });
+
+  it("继续输入数字会继续搜索：新请求带上完整输入（回归：曾只搜一次）", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes(SUGGEST_PATH)) return envelope({ suggestions: [] });
+      if (url.endsWith(METADATA_PATH)) return envelope(metadataBody());
+      return jsonResponse({ code: 401, message: "no session" }, 401);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    renderPortal();
+
+    const input = await screen.findByLabelText("查询");
+    await userEvent.type(input, "4514");
+    // 第一次搜索：4 位数字。
+    await waitFor(() => {
+      expect(
+        fetchSpy.mock.calls.some(([url]) => String(url).endsWith("query=4514")),
+      ).toBe(true);
+    });
+
+    // 继续输入：必须再发一次请求，且查询值是收窄后的完整输入。
+    await userEvent.type(input, "6175");
+    await waitFor(() => {
+      expect(
+        fetchSpy.mock.calls.some(([url]) =>
+          String(url).endsWith("query=45146175"),
+        ),
+      ).toBe(true);
+    });
+  });
 });
 
 describe("formatCardNumber", () => {

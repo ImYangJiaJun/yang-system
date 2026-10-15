@@ -19,7 +19,7 @@ use yang_base::BaseError;
 use crate::addon::feishu::domain::context::FeishuContext;
 
 use super::portal_query::{
-    extract_digits, find_portal, first_digit_run, fuzzy_filter_candidates, fuzzy_like_key,
+    coarse_pattern, extract_digits, find_portal, first_digit_run, fuzzy_filter_candidates,
 };
 
 /// 路由模板里的路径参数名（与 `portal_query` 同一约定）。
@@ -110,30 +110,26 @@ pub(super) async fn handle(
     }
 
     let query_source_key: String = portal.require("query_field_source_key")?;
-    let Some(like_key) = fuzzy_like_key(&query_stripped, fuzzy_min_digits) else {
-        tracing::info!(
-            query_stripped,
-            fuzzy_min_digits,
-            "suggest: fuzzy_like_key returned None"
-        );
+    let input_digits = extract_digits(&query_stripped);
+    let Some(pattern) = coarse_pattern(&input_digits) else {
         return empty_response();
     };
-    let input_digits = extract_digits(&query_stripped);
 
     tracing::info!(
         query_source_key,
-        like_key,
+        pattern,
         input_digits,
         "suggest: querying options"
     );
 
-    // 粗筛 + 精筛：与 portal_query 的 fuzzy_match 同一逻辑，但只取 label。
+    // 粗筛 + 精筛：粗筛的分块 LIKE 模式随输入位数收窄（见 `coarse_pattern`），
+    // 精筛在 Rust 里按数字子串核对（与旧 fuzzy_match 同一判据）。
     let candidates = context
         .options()
         .query()
         .select_fields(&["option_id", "source_key", "label"])?
         .where_eq("source_key", serde_json::json!(&query_source_key))?
-        .where_contains("label", &like_key)?
+        .where_like("label", pattern)?
         .where_eq("enabled", serde_json::json!(true))?
         .page(1, SUGGEST_LIMIT)?
         .all()

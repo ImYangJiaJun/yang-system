@@ -598,19 +598,33 @@ pub(super) fn first_digit_run(input: &str, min_len: usize) -> Option<String> {
     (run.len() >= min_len).then_some(run)
 }
 
-/// 模糊匹配的 LIKE 粗筛关键词：输入里第一段 ≥`min_digits` 位的连续数字，只取前 4 位。
+/// 粗筛 LIKE 模式：把输入数字按 4 位切块、块间用 `%` 连接（首尾也各补一个 `%`）。
 ///
-/// 只取 4 位是因为库里卡号按 4 位分组（`"4514 6175 ..."`）——整段数字在存储里
-/// 并不连续，`LIKE '%45146175%'` 反而落空；只有落在单个分组内的 4 位数字能命中。
-/// 用户整段粘贴（`"4514617593174990"`）与分段输入（`"6175 9317"`）都因此能粗筛到。
+/// 库里的卡号按 4 位分组存储（`"4514 6175 9317 4990"`），整段数字在原始值里
+/// 并不连续——`LIKE '%45146175%'` 会落空。逐块连接后 `%` 恰好吃掉分组间的空格：
+/// `%4514%6175%` 既能命中带空格的库值，也能命中无空格的连续值。
 ///
-/// `min_digits` 只决定**触发门槛**（不够长就不模糊），不改变粗筛取的位数。
+/// **模式随输入位数收窄**：每多 4 位数字就多一段约束。此前固定只取前 4 位，
+/// 180 张同前缀卡时真命中会落在候选页（`SUGGEST_LIMIT` 条）之外，表现为
+/// 「继续输入数字后搜不到」——分块后粗筛集合随输入同步变小，该问题消失。
 ///
-/// ponytail: 粗筛固定取 4 位、且只取第一页 `MATCH_LIMIT` 条候选——若上百张卡共享
-/// 同一 4 位前缀，真命中有可能落在被截断的候选之外。卡号 4 位前缀撞车到这个量级
-/// 才会失手；真出现时再按 `option_id` 分页扫全量候选。
-pub(super) fn fuzzy_like_key(value: &str, min_digits: usize) -> Option<String> {
-    first_digit_run(value, min_digits).map(|run| run.chars().take(4).collect())
+/// 最多取 4 块（16 位）：卡号最长 19 位，更长的输入对定位没有增量；同时把
+/// 模式长度压在引擎 LIKE 上限（128 字节）内。空输入返回 `None`。
+pub(super) fn coarse_pattern(input_digits: &str) -> Option<String> {
+    if input_digits.is_empty() {
+        return None;
+    }
+    const MAX_CHUNKS: usize = 4;
+    let mut pattern = String::with_capacity(input_digits.len() + 2 * MAX_CHUNKS);
+    pattern.push('%');
+    for (index, ch) in input_digits.chars().take(MAX_CHUNKS * 4).enumerate() {
+        if index > 0 && index % 4 == 0 {
+            pattern.push('%');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    Some(pattern)
 }
 
 /// 精筛：候选项去掉非数字后，必须包含输入的全部数字。
@@ -792,24 +806,37 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_like_key_takes_four_digits_so_spaced_labels_still_match() {
-        // 整段 16 位在库里带空格，LIKE 只能取前 4 位，否则 %45146175% 反而落空。
+    fn coarse_pattern_chunks_digits_so_spaced_labels_still_match() {
+        // 4 位一组、块间 `%`——`%` 恰好吃掉库值分组间的空格。
+        assert_eq!(coarse_pattern("4514").as_deref(), Some("%4514%"));
+        assert_eq!(coarse_pattern("45146175").as_deref(), Some("%4514%6175%"));
+        assert_eq!(coarse_pattern("61759317").as_deref(), Some("%6175%9317%"));
         assert_eq!(
-            fuzzy_like_key("4514617593174990", 4).as_deref(),
-            Some("4514")
+            coarse_pattern("4514617593174990").as_deref(),
+            Some("%4514%6175%9317%4990%")
         );
-        assert_eq!(fuzzy_like_key("6175 9317", 4).as_deref(), Some("6175"));
-        assert_eq!(fuzzy_like_key("abc45146175def", 4).as_deref(), Some("4514"));
-        // 不足 4 位连续数字：不触发模糊。
-        assert_eq!(fuzzy_like_key("123", 4), None);
-        assert_eq!(fuzzy_like_key("12 34", 4), None);
+        // 非 4 位对齐的尾块也照切（5 位 → 4+1）。
+        assert_eq!(coarse_pattern("45146").as_deref(), Some("%4514%6%"));
+        assert_eq!(coarse_pattern(""), None);
     }
 
     #[test]
-    fn fuzzy_like_key_honours_a_custom_min_digits_threshold() {
-        // 门槛只决定触不触发，不改变粗筛取的位数（仍是前 4 位）。
-        assert_eq!(fuzzy_like_key("12345", 6), None);
-        assert_eq!(fuzzy_like_key("123456", 6).as_deref(), Some("1234"));
+    fn coarse_pattern_narrows_monotonically_as_more_digits_arrive() {
+        // 关键回归：模式必须随输入位数**变窄**（此前固定只取前 4 位，180 张
+        // 同前缀卡时真命中落在候选页之外，表现为「继续输入数字后搜不到」）。
+        let four = coarse_pattern("4514").unwrap_or_default();
+        let eight = coarse_pattern("45146175").unwrap_or_default();
+        let twelve = coarse_pattern("451461759317").unwrap_or_default();
+        assert!(eight.starts_with(&four), "{eight} 必须以 {four} 为前缀");
+        assert!(twelve.starts_with(&eight), "{twelve} 必须以 {eight} 为前缀");
+    }
+
+    #[test]
+    fn coarse_pattern_caps_at_four_chunks_to_stay_under_the_like_limit() {
+        // 64 位数字只取前 16 位（4 块）：模式长度压在引擎 LIKE 上限（128 字节）内。
+        let pattern = coarse_pattern(&"9".repeat(64)).unwrap_or_default();
+        assert_eq!(pattern, "%9999%9999%9999%9999%");
+        assert!(pattern.len() <= 128, "实际 {} 字节", pattern.len());
     }
 
     #[test]
