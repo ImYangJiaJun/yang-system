@@ -204,7 +204,7 @@ Content-Type: application/json
 | `config_id` | Int, indexed | |
 | `record_id` | Str, unique | 多维表格记录 id |
 | `uuid` | Str, unique | 幂等键（§5.4 的派生与存储规则） |
-| `state` | Radio | `pending` / `creating` / `created` / `backfilled` / `terminal` |
+| `state` | Radio | `pending` / `creating` / `created` / `backfilled` / `terminal` / `unnotified` |
 | `instance_code` | Str, nullable | |
 | `serial_number` | Str, nullable | |
 | `attempts` | Int | 可重试次数 |
@@ -223,6 +223,16 @@ pending ──claim──> creating ──create 成功──> created ──bat
                      ▲
                      │ 可重试耗尽 / 60012 回捞失败
 ```
+
+`unnotified` 是 `terminal` 的孪生态（2026-10-16 补）：处理同样结束、同样退出认领集，
+区别只在于**通知没能送出去**（接收人链全空、发送失败，或配置行已不在而根本走不到
+通知）。两者必须分开——`terminal` 声称「已反馈」，而 `unnotified` 是唯一一档
+「用户永远等不到任何东西」的行。落库时序上通知排在状态写入**之前**：终态一旦落库
+就同时退出认领集与重扫集，之后再发现没人可通知就没有补救机会了。
+
+**已知未做**：`list_tasks` 的 `where` 树支持按 `state` 过滤，但控制台的任务下钻视图
+只按 `config_id` 查、没有状态筛选，也没有针对该状态的告警规则——所以这些行目前只能
+靠接口/SQL 捞。要让它真正「有人来看看」，还得给控制台加筛选（或给指标加告警）。
 
 **硬性时序要求**（这条是根因 D 的修正，必须写死在实现里）：
 

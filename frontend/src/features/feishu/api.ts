@@ -2012,7 +2012,7 @@ export async function updateApprovalConfig(
 }
 
 /// 删除配置（`feishu.approval.delete_config`）：配置行 + 映射行 + pending 任务行
-/// 同事务删除；backfilled/terminal 任务保留作流水。
+/// 同事务删除；backfilled/terminal/unnotified 任务保留作流水。
 export async function deleteApprovalConfig(
   configId: number,
   deps: FeishuInvokeDeps,

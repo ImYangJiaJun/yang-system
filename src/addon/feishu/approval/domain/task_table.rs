@@ -14,6 +14,11 @@
 //!                   terminal                  回到 created 重试
 //! ```
 //!
+//! `unnotified` 是 `terminal` 的**孪生态**：处理同样结束、同样退出认领集，区别只在
+//! 于**通知没能送出去**（接收人链全空，或发送本身失败）。分成两个值是因为
+//! 「处理完了但没人被告知」与「处理完了且已反馈」对运维是两件事：前者要人去捞，
+//! 后者不用。合并成一个值会让前者在状态列上与后者长得一模一样。
+//!
 //! `creating` 是**崩溃恢复的支点**：`create` 之前先写它，所以「create 成功但本地
 //! 未落库」的窗口从「编号永久丢失」降为「可判定、可续跑」。蓝绿 cutover 用
 //! `docker stop`（SIGTERM → 10 秒后 SIGKILL）静默杀掉处理中的批次，没有这个状态
@@ -75,6 +80,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     ("created", "已创建"),
                     ("backfilled", "已回填"),
                     ("terminal", "终止"),
+                    ("unnotified", "未通知"),
                 ])
                 .default("pending")
                 .filterable(true),
@@ -161,6 +167,39 @@ mod tests {
         assert!(state.is_required());
         assert!(state.is_filterable(), "认领查询按 state 过滤依赖该位");
         assert_eq!(state.default_value(), Some(&serde_json::json!("pending")));
+    }
+
+    /// `unnotified` 必须在候选值里：Radio 是**应用层白名单**，写一个不在候选值里的
+    /// 状态会在运行期被 `Validator::Custom` 拒掉，而拒掉的是「报告刚发生的事」——
+    /// 表现为终态写不进去，行留在 `pending` 里每轮空转。
+    #[test]
+    fn state_radio_carries_the_unnotified_value_alongside_terminal() {
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let field = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == "state")
+            .unwrap_or_else(|| panic!("state 字段必须存在"));
+        let values: Vec<&str> = field
+            .options
+            .iter()
+            .map(|(value, _)| value.as_str())
+            .collect();
+        assert_eq!(
+            values,
+            [
+                "pending",
+                "creating",
+                "created",
+                "backfilled",
+                "terminal",
+                "unnotified"
+            ]
+        );
+        // 每个候选值都要有中文标签：控制台按状态扫列表，英文原值读不出来。
+        for (value, label) in &field.options {
+            assert!(!label.trim().is_empty(), "{value} 缺中文标签");
+        }
     }
 
     #[test]

@@ -1130,7 +1130,8 @@ export type ApprovalTaskItem = {
   id: number;
   configId: number;
   recordId: string;
-  /// pending / creating / created / backfilled / terminal。
+  /// pending / creating / created / backfilled / terminal / unnotified。
+  /// `unnotified` = 处理已结束但**没人收到过消息**，是唯一需要人去捞的一档。
   state: string;
   instanceCode: string | null;
   serialNumber: string | null;

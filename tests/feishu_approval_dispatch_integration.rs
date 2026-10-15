@@ -952,7 +952,8 @@ async fn console_crud_loop_on_a_seeded_config() {
     finish(outcome, "配置 CRUD 闭环").await;
 }
 
-/// delete_config 同事务清 `pending` 任务行；backfilled / terminal 保留作流水。
+/// delete_config 同事务清 `pending` 任务行；backfilled / terminal / unnotified
+/// 保留作流水（后两者都是「处理已结束」，区别只在有没有送达通知）。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
@@ -962,6 +963,7 @@ async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
         seed_task(&database, config_id, "recPending", "pending").await?;
         seed_task(&database, config_id, "recBackfilled", "backfilled").await?;
         seed_task(&database, config_id, "recTerminal", "terminal").await?;
+        seed_task(&database, config_id, "recUnnotified", "unnotified").await?;
 
         let deleted = dispatch_as_operator(
             &app,
@@ -983,8 +985,13 @@ async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
                 .await
                 .context("读取剩余任务失败")?;
         ensure!(
-            remaining == ["backfilled".to_string(), "terminal".to_string()],
-            "backfilled / terminal 必须保留作流水，实际 {remaining:?}"
+            remaining
+                == [
+                    "backfilled".to_string(),
+                    "terminal".to_string(),
+                    "unnotified".to_string()
+                ],
+            "backfilled / terminal / unnotified 必须保留作流水，实际 {remaining:?}"
         );
 
         Ok(())

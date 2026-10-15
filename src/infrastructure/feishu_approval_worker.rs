@@ -798,22 +798,27 @@ async fn claim(runner: &RoundRunner, cursor: &ResumeCursor) -> anyhow::Result<Ve
         match load_task(runner, &row).await? {
             Some(task) => tasks.push(task),
             None => {
-                // 配置缺失/停用/时区无效：置终态，不再反复认领。
+                // 配置缺失/停用/时区无效：置 `unnotified`，不再反复认领。
+                // 走不到通知那一步（配置行都没了，渲染不出展示名），所以不能写
+                // `terminal`——那会谎称「已经有人被告知」。
                 let id = row.require("id")?;
-                mark_terminal(runner, id, "所属配置不存在或已停用").await;
+                mark_unnotified(runner, id, "所属配置不存在或已停用").await;
             }
         }
     }
     Ok(tasks)
 }
 
-/// 置终态（配置缺失等无法继续的情形）。
+/// 置 `unnotified`（配置缺失等无法继续、且**没有人会被通知**的情形）。
 ///
-/// 终态的意义是「该行退出认领集，等人工处理」，所以必须清租约——否则它还会被
-/// `lease_until <= now` 那条分支捞回来。
-async fn mark_terminal(runner: &RoundRunner, id: i64, reason: &str) {
+/// 不写 `terminal`：这条路径在 `load_task` 拿不到配置时就返回了，接收人链一次都
+/// 没解析过——写 `terminal` 等于宣称「已反馈」，而实际上没有任何消息出去。
+/// `unnotified` 与 `terminal` 一样退出认领集，但状态本身是「有人得来看看」的信号。
+///
+/// 必须清租约——否则它还会被 `lease_until <= now` 那条分支捞回来。
+async fn mark_unnotified(runner: &RoundRunner, id: i64, reason: &str) {
     let mut row = Record::new();
-    row.insert("state", serde_json::json!("terminal"));
+    row.insert("state", serde_json::json!("unnotified"));
     row.insert("last_error", serde_json::json!(reason));
     row.insert("lease_until", serde_json::Value::Null);
     // 两步而非 `and_then`：`where_eq` 返回 `Result`，而 `update` 返回 future，
@@ -1137,13 +1142,20 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
 }
 
 /// 组装持久化事实，已确认实例在回填失败时也必须保留。
-fn outcome_record(outcome: &DispatchResult) -> Record {
+///
+/// `notified` 是「本轮结论**已经送到人**」——由 [`record_outcome`] 在写库**之前**
+/// 先发通知得出。它只影响终态：终态一旦落库，该行同时退出认领集与重扫集，
+/// 此后再发现「没人可通知」就再也没有补救的机会，所以那种情形必须留下可区分的状态。
+fn outcome_record(outcome: &DispatchResult, notified: bool) -> Record {
     // 结论 → 状态 + 原因：
     //
     // - `backfilled`：编号已写进多维表格，任务完成（**终态**，不再认领）。
     // - `pending`：等待态与可重试。都回 pending——前者要靠用户补齐字段自然重扫，
     //   后者要靠下一轮重试；两者都不该退出认领集。
     // - `terminal`：配置/数据的结构性问题，回填字段已写原因，退出认领集。
+    // - `unnotified`：同上，但**结论没能送达到人**。它与 `terminal` 一样退出认领集
+    //   （接收人不会凭空出现，留在 `pending` 只是每轮空转重试），但状态本身可筛可数，
+    //   是「有人得来看看」的信号——这正是它没有和 `terminal` 合并的理由。
     //
     // 等待态写 `last_error` 只是**可观测**（运维能看到哪些行还缺什么），不影响
     // 认领——它不是状态位。
@@ -1154,6 +1166,7 @@ fn outcome_record(outcome: &DispatchResult) -> Record {
         | DispatchResult::CreatedPendingBackfill { message, .. } => {
             ("pending", Some(message.clone()))
         }
+        DispatchResult::Terminal { message } if !notified => ("unnotified", Some(message.clone())),
         DispatchResult::Terminal { message } => ("terminal", Some(message.clone())),
     };
     let mut row = Record::new();
@@ -1210,9 +1223,56 @@ fn should_notify(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
 }
 
 /// 把处理结论落库。
+///
+/// # 为什么通知排在写库**之前**
+///
+/// 终态一旦落库，该行同时退出认领集（`claim` 只认 `pending`）与重扫集
+/// （`seed_tasks` 只捞回填列为空的行）——那之后再发现「没人可通知」就再没有补救的
+/// 机会：用户永远等不到任何东西，也没人知道。所以先定接收人、先发，再按「到底有没
+/// 有送达」决定写 `terminal` 还是 `unnotified`。
+///
+/// 代价是反过来的那个窗口：发完、还没写库就被杀掉，下一轮会**重发**一次。
+/// 重复一条消息远轻于静默丢失一条。
 async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &TaskOutcome) {
     let outcome = &processed.result;
-    let row = outcome_record(outcome);
+
+    // 通知：**任何结论都要反馈**（2026-10-15 原则：只要用户发起请求，成功/失败
+    // 都要发一条消息，失败附原因）。中间态的重复由 [`should_notify`] 按
+    // 「结论是否变化」去重。
+    let notified = if should_notify(task, outcome) {
+        // 接收人链：任务表申请人 → 表格申请人列 → **记录创建人**（兜底）。前两者
+        // 空着正是 waiting 的主因，而「谁建了这条记录」是那时唯一还能定位到的触发人。
+        // 三者都取不到才放弃——那时「发给谁」在事实上无解，但**不能静默**：状态会落成
+        // `unnotified`，与 `terminal` 区分得开。
+        //
+        // 注意「可查」的边界：`list_tasks` 的 `where` 树支持按 `state` 过滤，但控制台
+        // 的任务下钻视图目前**只按 config_id 查、没有状态筛选**，所以这些行现在只能
+        // 通过接口/SQL 捞，不能指望有人在页面上顺手看见。
+        let open_id = task
+            .applicant_open_id
+            .as_deref()
+            .or(processed.applicant_open_id.as_deref())
+            .or(processed.creator_open_id.as_deref());
+        match open_id {
+            Some(open_id) => send_worker_notification(runner, task, outcome, open_id).await,
+            None => {
+                metrics::counter!("feishu_approval_notify_total", "result" => "no_recipient")
+                    .increment(1);
+                tracing::warn!(
+                    task_id = task.id,
+                    config_id = task.config_id,
+                    "Worker 通知：申请人 open_id 与记录创建人均不可用，本轮结论未送达"
+                );
+                false
+            }
+        }
+    } else {
+        // 同一结论上一轮已经通知过（`should_notify` 的去重语义），不算「没送达」。
+        // 终态永远走 `should_notify == true` 那一支，所以这里不会把终态误判成已送达。
+        true
+    };
+
+    let row = outcome_record(outcome, notified);
     let state = row
         .get("state")
         .and_then(serde_json::Value::as_str)
@@ -1309,29 +1369,6 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
             }
         }
     }
-
-    // 通知：**任何结论都要反馈**（2026-10-15 原则：只要用户发起请求，成功/失败
-    // 都要发一条消息，失败附原因）。中间态的重复由 [`should_notify`] 按
-    // 「结论是否变化」去重。
-    //
-    // 接收人链：任务表申请人 → 表格申请人列 → **记录创建人**（兜底）。前两者
-    // 空着正是 waiting 的主因，而「谁建了这条记录」是那时唯一还能定位到的触发人。
-    // 三者都取不到才跳过——那时「发给谁」在事实上无解，留 warn 让静默丢失可查。
-    if should_notify(task, outcome) {
-        let open_id = task
-            .applicant_open_id
-            .as_deref()
-            .or(processed.applicant_open_id.as_deref())
-            .or(processed.creator_open_id.as_deref());
-        match open_id {
-            Some(open_id) => send_worker_notification(runner, task, outcome, open_id).await,
-            None => tracing::warn!(
-                task_id = task.id,
-                config_id = task.config_id,
-                "Worker 通知：申请人 open_id 与记录创建人均不可用，跳过通知"
-            ),
-        }
-    }
 }
 
 /// 请求日志行是否表示「HTTP 路径**确实发出过**通知」。
@@ -1357,13 +1394,17 @@ fn http_path_notified(row: &Record) -> bool {
 
 /// Worker 路径的 IM 通知：向触发人发送审批派发结果。
 ///
-/// 失败只 warn，不冒泡。通知是附加价值，不该影响审批结论或重试逻辑。
+/// 返回**本轮结论是否已经送到人**——调用方拿它决定终态写 `terminal` 还是
+/// `unnotified`（见 [`outcome_record`]）。「HTTP 路径已经发过」算已送达；
+/// 查库失败、配置名读不到、发送失败都算未送达（那时确实一条都没出去）。
+///
+/// 发送失败只 warn，不冒泡。通知是附加价值，不该影响审批结论或重试逻辑。
 async fn send_worker_notification(
     runner: &RoundRunner,
     task: &ClaimedTask,
     outcome: &DispatchResult,
     open_id: &str,
-) {
+) -> bool {
     // 去重：只有 HTTP Action **确实发出过通知**才跳过。
     //
     // HTTP 路径通知「显式指定的接收人」（notification_recipient），本 worker
@@ -1393,7 +1434,8 @@ async fn send_worker_notification(
                     record_id = %task.record_id,
                     "Worker 通知：HTTP Action 已发送过通知，跳过重复通知"
                 );
-                return;
+                // 用户**已经收到过**——HTTP 那条就是发给他的。跳过不算未送达。
+                return true;
             }
         }
         Err(error) => {
@@ -1403,7 +1445,7 @@ async fn send_worker_notification(
                 config_id = task.config_id,
                 "Worker 通知：查询请求日志失败，跳过通知"
             );
-            return;
+            return false;
         }
     }
 
@@ -1426,7 +1468,7 @@ async fn send_worker_notification(
                 task_id = task.id,
                 "Worker 通知：配置展示名称读取失败，跳过通知"
             );
-            return;
+            return false;
         }
     };
 
@@ -1520,6 +1562,7 @@ async fn send_worker_notification(
                 message_id = ?result.message_id,
                 "Worker 通知：IM 消息发送成功"
             );
+            true
         }
         _ => {
             tracing::warn!(
@@ -1529,6 +1572,7 @@ async fn send_worker_notification(
                 message = %result.message,
                 "Worker 通知：IM 消息发送失败（不影响审批结论）"
             );
+            false
         }
     }
 }
@@ -1585,7 +1629,7 @@ mod tests {
                 instance_code: "INST-001".into(),
                 serial_number: number.clone(),
             };
-            let row = outcome_record(&outcome);
+            let row = outcome_record(&outcome, true);
             assert_eq!(row.get("state"), Some(&serde_json::json!("pending")));
             assert_eq!(
                 row.get("last_error"),
@@ -1601,38 +1645,78 @@ mod tests {
                 number.as_ref().map(|v| serde_json::json!(v)).as_ref()
             );
         }
-        for (outcome, state) in [
+        for (outcome, notified, state) in [
             (
                 DispatchResult::Backfilled {
                     instance_code: "INST".into(),
                     serial_number: "SN".into(),
                 },
+                true,
                 "backfilled",
             ),
             (
                 DispatchResult::Waiting {
                     reason: "补齐数据".into(),
                 },
+                true,
                 "pending",
             ),
             (
                 DispatchResult::Retryable {
                     message: "服务不可用".into(),
                 },
+                true,
                 "pending",
             ),
             (
                 DispatchResult::Terminal {
                     message: "配置错误".into(),
                 },
+                true,
                 "terminal",
+            ),
+            // 通知没送出去的终态必须与「已反馈的终态」区分开——这是本次修复的全部
+            // 意义所在：两者都退出认领集，但只有前者需要人去捞。
+            (
+                DispatchResult::Terminal {
+                    message: "配置错误".into(),
+                },
+                false,
+                "unnotified",
             ),
         ] {
             assert_eq!(
-                outcome_record(&outcome).get("state"),
-                Some(&serde_json::json!(state))
+                outcome_record(&outcome, notified).get("state"),
+                Some(&serde_json::json!(state)),
+                "notified={notified} 时状态写错"
             );
         }
+    }
+
+    /// `unnotified` 与 `terminal` 只有状态值不同：原因、清租约的语义必须一致，
+    /// 否则「未通知」的行会因为残留租约被重新捞回来空转。
+    #[test]
+    fn unnotified_differs_from_terminal_only_in_the_state_value() {
+        let outcome = DispatchResult::Terminal {
+            message: "映射控件「w1」已不在定义中".into(),
+        };
+        let notified = outcome_record(&outcome, true);
+        let silent = outcome_record(&outcome, false);
+
+        assert_eq!(notified.get("state"), Some(&serde_json::json!("terminal")));
+        assert_eq!(silent.get("state"), Some(&serde_json::json!("unnotified")));
+        for key in ["last_error", "lease_until"] {
+            assert_eq!(
+                notified.get(key),
+                silent.get(key),
+                "{key} 不该随是否送达而变"
+            );
+        }
+        assert_eq!(
+            silent.get("last_error"),
+            Some(&serde_json::json!("映射控件「w1」已不在定义中")),
+            "未通知的行同样要留住原因，否则运维只看到「未通知」不知道为什么"
+        );
     }
 
     #[test]

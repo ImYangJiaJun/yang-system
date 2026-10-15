@@ -184,6 +184,14 @@ describe("派发记录页 · 行展开", () => {
             instance_code: null,
             serial_number: null,
           }),
+          taskWire({
+            id: 3,
+            record_id: "recGHI",
+            state: "unnotified",
+            last_error: "映射控件「w1」已不在定义中",
+            instance_code: null,
+            serial_number: null,
+          }),
         ]),
     });
     renderRequests();
@@ -204,8 +212,14 @@ describe("派发记录页 · 行展开", () => {
     });
     // 任务行字段。`inst-1` 会同时出现在展开的返回体 JSON 原文里，用 getAll。
     expect(await screen.findByText("recDEF")).toBeInTheDocument();
-    expect(screen.getByText("terminal")).toBeInTheDocument();
+    // 状态列走中文标签映射，不再渲染英文原值。
+    expect(screen.getByText("终止")).toBeInTheDocument();
     expect(screen.getByText("表不存在")).toBeInTheDocument();
+    // `unnotified` 与 `terminal` 必须显示成两个不同的标签：前者是唯一一档
+    // 「处理完了但没人收到过消息」的行，画成同一个词就等于把这条修复抹掉。
+    expect(screen.getByText("未通知")).toBeInTheDocument();
+    expect(screen.queryByText("terminal")).not.toBeInTheDocument();
+    expect(screen.queryByText("unnotified")).not.toBeInTheDocument();
     expect(screen.getAllByText("inst-1").length).toBeGreaterThan(0);
   });
 

@@ -162,7 +162,7 @@ Terminal / Retryable / validate 失败 / 内部 Err）。`dispatch_single` 内�
 |---|---|---|---|
 | `list_widgets` | `POST /api/v1/feishu/approval/definitions/widgets` | `feishu.approval.write` | 按 `approval_code` 调 `approvals get`，`parse_form` 解析后返回控件列表（id/名称/类型/required）。归 write 侧与 `list_bitable_*` 同理：只读语义但出站耗配额 |
 | `list_requests` | `POST /api/v1/feishu/approval/requests/query` | `feishu.approval.read` | 派发记录分页；`request_body`/`response_body` 随行返回（体量小），前端本地展开 |
-| `list_tasks` | `POST /api/v1/feishu/approval/tasks/query` | `feishu.approval.read` | task 分页（按 config_id/state 过滤，options：pending/creating/created/backfilled/terminal），批量记录的下钻视图 |
+| `list_tasks` | `POST /api/v1/feishu/approval/tasks/query` | `feishu.approval.read` | task 分页（按 config_id/state 过滤，options：pending/creating/created/backfilled/terminal/unnotified），批量记录的下钻视图 |
 
 ### 5.3 前端
 

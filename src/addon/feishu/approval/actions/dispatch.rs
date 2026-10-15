@@ -694,7 +694,8 @@ async fn handle_dispatch(
 ///
 /// 与 worker 的 `record_outcome` **同口径**（状态映射逐项对齐）：
 /// - `Succeeded` → `backfilled` + instance_code + serial_number
-/// - `Failed` → `terminal` + last_error
+/// - `Failed` → `terminal` + last_error；**通知没送出去时写 `unnotified`**——
+///   与 `terminal` 一样退出认领集，但状态本身是「有人得来看看」的信号
 /// - `Waiting` / `Retryable` / `CreatedPendingBackfill` → `pending` + last_error
 ///   （worker 兜底重试；CreatedPendingBackfill 同时落 instance_code）
 /// - `Accepted`（全表受理）→ 不写：不是单条结果，worker 处理每条时自行落状态。
@@ -725,13 +726,8 @@ async fn record_dispatch_task(
     record_id: &str,
     outcome: &DispatchOutcome,
 ) {
-    let (state, reason) = match outcome.status {
-        FeedbackStatus::Succeeded => ("backfilled", None),
-        FeedbackStatus::Failed => ("terminal", Some(outcome.message.as_str())),
-        FeedbackStatus::Waiting
-        | FeedbackStatus::Retryable
-        | FeedbackStatus::CreatedPendingBackfill => ("pending", Some(outcome.message.as_str())),
-        FeedbackStatus::Accepted => return,
+    let Some((state, reason)) = task_state(outcome) else {
+        return;
     };
 
     let mut row = Record::new();
@@ -1410,6 +1406,44 @@ fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipi
     }
 }
 
+/// 本次 HTTP 派发的通知是否**确实发出去了**（`notification.status == "sent"`）。
+///
+/// 判据与 worker 的 `http_path_notified` 逐字一致：两边必须同口径，否则会出现
+/// 「HTTP 说发了、worker 说没发」这种同一行先写 `terminal` 再被改写的错配。
+/// 注意 `succeeded` 不等于已通知——工作流没传 `notification_recipient`、
+/// 申请人列空着、读配置展示名超时都会让通知停在 `not_requested` / `skipped`。
+fn notification_sent(outcome: &DispatchOutcome) -> bool {
+    outcome
+        .notification
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        == Some("sent")
+}
+
+/// 本次派发该把认领队列写成哪个状态。
+///
+/// 与 worker 的 `outcome_record` 同口径（那条路径另有单测钉住）。返回 `None`
+/// 表示**不写**——全表受理不是单条结果，逐条状态由 worker 处理时自行落。
+///
+/// `Failed` 而通知没送出去时写 `unnotified` 而不是 `terminal`：两者都退出认领集，
+/// 但只有后者意味着「已经有人被告知」。合并会让「处理完了、没人知道」在状态列上
+/// 与「处理完了、已反馈」长得一模一样。
+fn task_state(outcome: &DispatchOutcome) -> Option<(&'static str, Option<&str>)> {
+    match outcome.status {
+        FeedbackStatus::Succeeded => Some(("backfilled", None)),
+        FeedbackStatus::Failed if !notification_sent(outcome) => {
+            Some(("unnotified", Some(outcome.message.as_str())))
+        }
+        FeedbackStatus::Failed => Some(("terminal", Some(outcome.message.as_str()))),
+        FeedbackStatus::Waiting
+        | FeedbackStatus::Retryable
+        | FeedbackStatus::CreatedPendingBackfill => {
+            Some(("pending", Some(outcome.message.as_str())))
+        }
+        FeedbackStatus::Accepted => None,
+    }
+}
+
 /// 收尾反馈：渲染展示文案 + 发送 IM 通知（若有接收人）。
 ///
 /// 通知失败**不影响**审批结论——`outcome.response` 不变，只有 `outcome.message` 和
@@ -1728,6 +1762,66 @@ mod tests {
                 "{status:?} 不该在 HTTP 层兜底"
             );
         }
+    }
+
+    /// 终态写 `terminal` 还是 `unnotified`，只看通知到底有没有发出去。
+    ///
+    /// 这条不变量就是本次修复的全部内容：`terminal` 会让该行同时退出认领集与重扫集，
+    /// 之后再发现「没人可通知」就再无补救——所以「没人被告知」必须留下可区分的状态。
+    #[test]
+    fn a_failed_dispatch_without_a_sent_notification_is_marked_unnotified() {
+        let failed = |notification: serde_json::Value| {
+            let mut outcome = DispatchOutcome::fail(40005, Some(7), "创建失败");
+            outcome.status = FeedbackStatus::Failed;
+            outcome.notification = notification;
+            outcome
+        };
+
+        assert_eq!(
+            task_state(&failed(serde_json::json!({"status": "sent"}))),
+            Some(("terminal", Some("创建失败"))),
+            "通知已送达 → terminal"
+        );
+
+        // 三种「没人被告知」的形态都必须落到 unnotified：没指定接收人、有接收人但
+        // 读配置展示名失败被跳过、发送本身失败。原实现三种都写 terminal，静默消失。
+        for notification in [
+            serde_json::json!({"status": "not_requested"}),
+            serde_json::json!({"status": "skipped"}),
+            serde_json::json!({"status": "failed"}),
+            serde_json::json!({"status": "unavailable"}),
+        ] {
+            assert_eq!(
+                task_state(&failed(notification.clone())),
+                Some(("unnotified", Some("创建失败"))),
+                "notification={notification} 时必须写 unnotified"
+            );
+        }
+    }
+
+    /// 成功与中间态不参与这个判定——它们的行不会退出认领集（成功由编号回填本身
+    /// 作凭据，中间态还会重扫），所以「有没有送达」不改变它们的状态。
+    #[test]
+    fn only_terminal_failures_are_reclassified_by_the_notification_outcome() {
+        for (status, expected) in [
+            (FeedbackStatus::Succeeded, "backfilled"),
+            (FeedbackStatus::Waiting, "pending"),
+            (FeedbackStatus::Retryable, "pending"),
+            (FeedbackStatus::CreatedPendingBackfill, "pending"),
+        ] {
+            let mut outcome = DispatchOutcome::fail(0, Some(7), "中间态");
+            outcome.status = status;
+            outcome.notification = serde_json::json!({"status": "not_requested"});
+            assert_eq!(
+                task_state(&outcome).map(|(state, _)| state),
+                Some(expected),
+                "{status:?} 不该被通知结果改写状态"
+            );
+        }
+        // 全表受理不是单条结果：不写行。
+        let mut accepted = DispatchOutcome::fail(0, Some(7), "已受理");
+        accepted.status = FeedbackStatus::Accepted;
+        assert!(task_state(&accepted).is_none(), "受理态不写单条状态");
     }
 
     /// `check_config_auth` 的失败出口。仓库 deny `unwrap_used`/`unwrap_err`，
