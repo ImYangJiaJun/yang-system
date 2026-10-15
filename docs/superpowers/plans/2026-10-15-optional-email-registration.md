@@ -181,6 +181,8 @@ git commit -m "feat(frontend): 未绑定邮箱时显示绑定入口"
 
 ### Task 4: 后台用户列表与签发重置凭证
 
+> **执行结果（2026-10-15 补记）**：下面的 Step 3 是**当时**的设想，实际落地与它不同。无 `primary_action` 的模块在 `registry.rs:269` 会被整个丢掉（该行要求模块至少有可见 Action、View 或 `primary_action` 之一），所以最终改为新建 `account.admin_users` 模块并把四个管理动作从 `account.user` 迁过去。四个 operation id 随之变为 `account.admin_users.{list_users,admin_issue_password_reset,admin_disable_user,admin_enable_user}`。`build_addon` 里 `Account` 改为只构建一次、被两个模块共享。本任务的实际提交见 `22d27f4`、`24028316`、`845a8fcc`。
+
 **Files:**
 - Modify: `src/addon/account/user/mod.rs`（`presentation`，约 68 行）
 - Modify: `frontend/src/shell/routes.tsx`（在 `access/workspace` 路由之后加一条）
@@ -234,7 +236,7 @@ export async function issuePasswordReset(token: string | undefined, userId: numb
 }
 ```
 
-`UserAdminPage.tsx`：进入时 `listUsers`。每行显示用户名、邮箱（空则「未绑定」）、状态。按钮仅在 `useUiCatalog()` 报有 `account.user.admin_issue_password_reset` 时渲染。点击后展示返回的 `reset_token`，关闭对话框即从 state 清掉。失败用 toast，不吞错误。
+`UserAdminPage.tsx`：进入时 `listUsers`。每行显示用户名、邮箱（空则「未绑定」）、状态。按钮仅在 `useUiCatalog()` 报有 `account.admin_users.admin_issue_password_reset` 时渲染（实际落地的 operation id，见上方补记）。点击后展示返回的 `reset_token`，关闭对话框即从 state 清掉。失败用 toast，不吞错误。
 
 `routes.tsx` 在 `access/workspace` 后加：
 
