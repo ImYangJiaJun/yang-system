@@ -72,7 +72,9 @@ describe("账号设置页邮箱文案", () => {
     expect(
       screen.getByRole("heading", { name: "绑定邮箱" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "绑定邮箱" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "绑定邮箱" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("向邮箱发送一次性验证码，验证通过后即可用于找回密码"),
     ).toBeInTheDocument();
@@ -87,6 +89,8 @@ describe("账号设置页邮箱文案", () => {
         screen.getByRole("heading", { name: "更换邮箱" }),
       ).toBeInTheDocument(),
     );
-    expect(screen.getByRole("button", { name: "更换邮箱" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "更换邮箱" }),
+    ).toBeInTheDocument();
   });
 });
