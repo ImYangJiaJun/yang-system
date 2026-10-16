@@ -64,30 +64,14 @@ test("登录成功进入应用中心且 Token 不落 Web Storage", async ({ page
     .toBeNull();
 });
 
-test("注册必须先获取邮箱验证码并提交所有权证明", async ({ page }) => {
-  await page.route(
-    "**/api/v1/users/registration-email-verifications",
-    async (route) => {
-      expect(route.request().postDataJSON()).toEqual({
-        email: "alice@example.com",
-      });
-      await route.fulfill({
-        status: 202,
-        contentType: "application/json",
-        body: JSON.stringify({
-          code: 0,
-          message: "成功",
-          data: { accepted: true, expires_in: 600, resend_after: 60 },
-        }),
-      });
-    },
-  );
+test("注册只需用户名与密码，成功后回到登录页", async ({ page }) => {
+  // 2026-10-16：注册页已改为「用户名 + 密码」（邮箱验证码搬到账号设置页，
+  // 那条链路由 api.test.ts 与账号设置用例覆盖）。原用例还在等「邮箱」输入框，
+  // 30s 超时后失败，把 run_ci.py full 的 dev e2e 这一步整个挡住。
   await page.route("**/api/v1/users/register", async (route) => {
     expect(route.request().postDataJSON()).toEqual({
       username: "alice",
       password: "correct-password1",
-      email: "alice@example.com",
-      email_code: "123456",
     });
     await route.fulfill({
       status: 201,
@@ -95,23 +79,13 @@ test("注册必须先获取邮箱验证码并提交所有权证明", async ({ pa
       body: JSON.stringify({
         code: 0,
         message: "成功",
-        data: {
-          id: 42,
-          username: "alice",
-          email: "alice@example.com",
-          email_verified_at: 1_785_000_000,
-        },
+        data: { id: 42, username: "alice" },
       }),
     });
   });
 
   await page.goto("/register");
-  await page.getByLabel("邮箱", { exact: true }).fill("alice@example.com");
-  await page.getByRole("button", { name: "发送验证码" }).click();
-  await expect(page.getByText(/验证码将在 10 分钟内送达/)).toBeVisible();
-
   await page.getByLabel("帐号").fill("alice");
-  await page.getByLabel("邮箱验证码").fill("123456");
   await page.getByLabel("密码", { exact: true }).fill("correct-password1");
   await page.getByLabel("确认密码").fill("correct-password1");
   await page.getByRole("button", { name: "创建账号" }).click();
