@@ -296,6 +296,38 @@ impl RoundRunner {
     }
 }
 
+/// 本轮是谁触发的。
+///
+/// 受理请求（用户点按钮）**是唯一的入口**：它带着触发人姓名解析出的 open_id，
+/// 由 [`persist_applicant`] 落到任务行，成功时再把 open_id 回写进「发起人」列
+/// （`approval_dispatch.rs` 的 D2 传参路径）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RoundTrigger {
+    /// 受理请求：HTTP Action 收到点击后投的信号。
+    Manual,
+    /// 自动轮询。
+    Poll,
+}
+
+impl RoundTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Poll => "poll",
+        }
+    }
+
+    /// 能不能为「还没有任务行的记录」建行。
+    ///
+    /// 只有受理请求能。轮询建行等于「没人点也派发」：那条链路没有触发人可传，
+    /// 记录缺申请人时只能报「请填写该人员列」——可那一列本来就是点击时由系统
+    /// 回写的，于是用户收到一条点一下就自愈的假警报，而且该行落 `pending`
+    /// （`outcome_record` 对 `Waiting` 的映射），每轮轮询都会把它重新处理一遍。
+    fn discovers_new_records(self) -> bool {
+        matches!(self, Self::Manual)
+    }
+}
+
 /// 主循环：等信号或到点，然后跑一轮。
 async fn run_loop(
     runner: RoundRunner,
@@ -319,10 +351,10 @@ async fn run_loop(
             // 手动触发：投一个信号即跑一轮，与自动轮询走**完全同一条路径**；
             // 携带的受理发起人（已解析成 open_id）随本轮落到待处理任务行。
             Some((config_id, applicant)) = requests.recv() => {
-                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id)), "manual").await;
+                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id)), RoundTrigger::Manual).await;
             }
             _ = ticker.tick() => {
-                run_round(&runner, &mut cursor, None, "poll").await;
+                run_round(&runner, &mut cursor, None, RoundTrigger::Poll).await;
             }
         }
     }
@@ -350,12 +382,12 @@ async fn run_round(
     runner: &RoundRunner,
     cursor: &mut ResumeCursor,
     applicant: Option<(i64, String)>,
-    trigger: &str,
+    trigger: RoundTrigger,
 ) {
     let started = std::time::Instant::now();
-    tracing::Span::current().record("trigger", trigger);
+    tracing::Span::current().record("trigger", trigger.as_str());
     tracing::debug!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
-    match seed_tasks(runner).await {
+    match seed_tasks(runner, trigger).await {
         Ok(0) => {}
         Ok(seeded) => tracing::info!(seeded, "审批派发播种了新任务"),
         // 播种失败不中断整轮：已有的待处理任务仍然值得跑，而播种下一轮还会再来。
@@ -530,7 +562,7 @@ struct ClaimedTask {
 /// # 为什么要读全表而不是「只看有任务的行」
 ///
 /// 首次运行时库里一条任务都没有——不扫表就永远不会有第一条。
-async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
+async fn seed_tasks(runner: &RoundRunner, trigger: RoundTrigger) -> anyhow::Result<usize> {
     let configs = runner
         .context
         .approval_configs()
@@ -552,7 +584,7 @@ async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
 
     let mut seeded = 0usize;
     for config in configs {
-        match seed_config(runner, &config).await {
+        match seed_config(runner, &config, trigger).await {
             Ok(count) => seeded += count,
             // 一条配置坏掉不该拖垮别的配置：记下来，下一轮再来。
             Err(error) => {
@@ -565,7 +597,11 @@ async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
 }
 
 /// 单条配置的播种。
-async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<usize> {
+async fn seed_config(
+    runner: &RoundRunner,
+    config: &Record,
+    trigger: RoundTrigger,
+) -> anyhow::Result<usize> {
     let started = std::time::Instant::now();
     let config_id: i64 = config.require("id")?;
     let base_token: String = config.require("base_token")?;
@@ -627,6 +663,7 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
 
     let mut seeded = 0usize;
     let mut restored = 0usize;
+    let mut skipped = 0usize;
     for record in &pending_records {
         if record.record_id.is_empty() {
             continue;
@@ -649,6 +686,9 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
                 restored += 1;
                 tracing::info!(stage = "seed", config_id, task_id, record_id = %record.record_id, from = %state, "审批任务被拉回待处理");
             }
+            // 没有任务行 = 这条记录从没被受理过。轮询不建行（见
+            // [`RoundTrigger::discovers_new_records`]）：建了就成「没人点也派发」。
+            None if !trigger.discovers_new_records() => skipped += 1,
             None => {
                 // 幂等键与派发路径**同源**：同一个 record 只有一条任务行，
                 // 重复播种会撞 `record_id` 唯一索引而不是建出第二条。
@@ -668,6 +708,8 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
         config_id,
         seeded,
         restored,
+        // 轮询轮里这些是「没人点过、这轮不建行」的记录——不静默，留在日志里。
+        skipped,
         duration_ms = started.elapsed().as_millis() as u64,
         "审批配置播种完成"
     );
@@ -1832,6 +1874,16 @@ mod tests {
             batch_seconds < 120,
             "认领批 {CLAIM_BATCH} 条在限速下占 {batch_seconds}s，超过 2 分钟"
         );
+    }
+
+    #[test]
+    fn only_a_click_discovers_records_that_have_no_task_row_yet() {
+        // 自动轮询不能发现新记录。发现了就会在没有触发人的前提下派发：记录缺申请人
+        // 时只能报「请填写该人员列」，可那一列本来就是点击时由系统回写的——
+        // 用户会收到一条自愈的假警报（2026-10-16 实测：批量前 30 秒的轮询先报了两条
+        // 「需要修正数据」，点击后两条「已创建」）。
+        assert!(RoundTrigger::Manual.discovers_new_records());
+        assert!(!RoundTrigger::Poll.discovers_new_records());
     }
 
     #[test]
