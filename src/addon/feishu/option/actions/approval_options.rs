@@ -153,9 +153,14 @@ fn linkage_filter_target(
         return Ok(None);
     };
 
-    // 键匹配优先。**大小写不敏感是刻意的**：父字段 id 形如 `fldEblAr7X`，而控制台给
-    // `source_key` 的默认值恰恰是它的**小写**形式（`sourceKeyFromFieldId`），两种写法
-    // 运维都可能抄下来。两个键只差大小写的情形不存在，放宽没有代价。
+    // 键匹配优先。**大小写不敏感是刻意的**：比对目标是父字段 id（形如 `fldEblAr7X`），
+    // 而这一格是表单设计者在审批后台手填的自由文本，抄写时大小写会走样。
+    //
+    // 2026-10-16 更正：控制台给的默认 `source_key` 自 cb4a746 起是「小写(表 ID_field_id)」
+    // （`sourceKeyFromFieldId`），**不再**等于小写 field id——所以「默认值就是它的小写形式」
+    // 这条旧理由不成立了。放宽仍然必要，因为手填的常态就是把原始 field id 抄进这一格
+    // （真机抓到的键是自由文本，如「手动填写内容」），大小写走样只是抄写问题。
+    // 两个键只差大小写的情形不存在，放宽没有代价。
     let matched = parent_field_id
         .map(str::trim)
         .filter(|id| !id.is_empty())
@@ -998,9 +1003,10 @@ mod tests {
 
     #[test]
     fn key_matching_tolerates_case_and_padding() {
-        // 父字段 id 形如 `fldEblAr7X`，而控制台给 `source_key` 的默认值恰恰是它的
-        // **小写**形式（`sourceKeyFromFieldId`），两种写法运维都可能抄下来；
-        // 审批后台那一格也常被带上前后空格。两种偏差都必须容忍，否则「抄错」= 断链。
+        // 父字段 id 形如 `fldEblAr7X`，而这一格是审批后台手填的自由文本——大小写与
+        // 前后空格都会走样（默认 `source_key` 自 cb4a746 起是「小写(表 ID_field_id)」，
+        // 不再是小写 field id，但手抄原始 field id 仍是常态）。两种偏差都必须容忍，
+        // 否则「抄错」= 断链。
         // 每条都**额外带一个噪声参数**：这样若键匹配失效，通配回退会因 ≥2 个参数
         // fail-closed，用例才会转红。只带一个参数的话两种路径给出同样结果，
         // 用例在变异下照样绿——那是假强度（变异实验实测到过）。
