@@ -548,7 +548,9 @@ describe("飞书数据源列表页 · 建源入口是表级向导", () => {
       bitable_base_token: APP_TOKEN,
       bitable_table_id: "tblA",
       bitable_view_id: "vew1",
-      fields: [{ field_id: "fldA", source_key: "flda", parent_field_id: null }],
+      fields: [
+        { field_id: "fldA", source_key: "tbla_flda", parent_field_id: null },
+      ],
     });
   });
 
