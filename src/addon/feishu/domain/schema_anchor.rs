@@ -968,6 +968,12 @@ fn the_weakly_checked_sites_are_exactly_the_recorded_ones() {
         // 都在 `user_token_table` 的声明上，缺口由该表声明的单测钉住（必填列与
         // secret 列逐项断言）。
         "domain/user_token.rs",
+        // 共享 helper：`pick_option` 收 `&[Record]`（调用方 `resolve_external_options`
+        // 查好再传；`.first()` 解引用后的新绑定归属解析不出）——与 `option_write.rs`
+        // / `user_token.rs` 同形。用到的列（option_id / label）都在 `feishu_option`
+        // 的声明上，缺口由本模块的 `pick_option_takes_the_first_of_several_exact_matches`
+        // 单测钉住（同名重复取排序最前，不再阻塞）。
+        "domain/approval_provision.rs",
         // 新增（2026-10-13，按配置签发的访问 Token）：`check_config_auth` /
         // `rotate_config_token` 收的 `row: &Record` 由调用方查好再传进来，
         // 静态解析不到仓库接收者——与 `option_write.rs` / `user_token.rs` 同形。
