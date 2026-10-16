@@ -50,5 +50,9 @@ docs/reference/feishu/
 *.manifest.json
 *.ndjson
 
+# 测试/联调的一次性产物归档处（探针抓取、CI 日志、workflow 摘要）。
+# 只是挪出根目录，不是源码，不入库。
+.scratch-archive/
+
 # 业务侧提供的原始表格（境内银行网点信息管理等）。是**数据**不是源码。
 docs/*.xlsx
