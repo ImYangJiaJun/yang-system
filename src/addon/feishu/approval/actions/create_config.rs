@@ -22,6 +22,7 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::table::Record;
 use yang_base::BaseError;
 
+use crate::addon::feishu::domain::approval::subscribe_approval;
 use crate::addon::feishu::domain::approval_match::FieldMapping;
 use crate::addon::feishu::domain::approval_provision::{
     build_plan, fill_table_names, insert_plan, ProvisionInput,
@@ -235,6 +236,24 @@ pub(super) async fn handle(
     }
     .await;
     let config_id = FeishuContext::finish_transaction(transaction, result).await?;
+
+    // 建好即订阅该审批定义的事件（设计 §7.2 第 2 步）：不订阅的话飞书不推该
+    // 定义的事件，进度追踪收不到。best-effort——订阅失败不影响建配置的结果
+    //（worker 每次启动还会对全部启用配置重订一遍，见 `feishu_event_worker`）。
+    if let Err(failure) = subscribe_approval(
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        input.approval_code.trim(),
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %failure.message,
+            approval_code = %input.approval_code.trim(),
+            "审批定义事件订阅失败（配置已创建，worker 启动时会重订）"
+        );
+    }
 
     tracing::debug!(
         config_id,

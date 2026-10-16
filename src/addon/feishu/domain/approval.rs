@@ -74,6 +74,14 @@ pub(crate) fn approval_definition_url(approval_code: &str) -> anyhow::Result<Str
     ))
 }
 
+/// 审批定义事件订阅的 URL（设计 §7.2 第 2 步）。
+fn subscribe_url(approval_code: &str) -> anyhow::Result<String> {
+    validate_path_segment("approval_code", approval_code)?;
+    Ok(format!(
+        "{FEISHU_OPEN_BASE}/open-apis/approval/v4/approvals/{approval_code}/subscribe"
+    ))
+}
+
 /// 与 `bitable` 同一份校验：路径段里混进斜杠或查询串会让请求打到别的端点。
 fn validate_path_segment(name: &str, value: &str) -> anyhow::Result<()> {
     ensure!(!value.is_empty(), "{name} 不能为空");
@@ -543,6 +551,48 @@ pub(crate) async fn get_approval_definition(
     })
 }
 
+// ---------------------------------------------------------------------------
+// 审批定义事件订阅
+// ---------------------------------------------------------------------------
+
+/// 订阅审批定义事件（设计 §7.2 第 2 步）。
+///
+/// 只配控制台事件订阅还不够：官方要求按审批定义 Code 各调一次本接口，之后
+/// 应用才收得到该定义的事件推送（`approval/v4/approvals/:code/subscribe`）。
+/// 该订阅是**运行时状态**，控制台重配、发布新版本都可能把它清掉——因此建配置
+/// 和 worker 启动时都要调（`1390007` 已订阅视为成功，重复调用安全）。
+pub(crate) async fn subscribe_approval(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    approval_code: &str,
+) -> Result<(), OutboundFailure> {
+    let url = subscribe_url(approval_code).map_err(|error| OutboundFailure {
+        kind: FailureKind::Fatal { code: 0 },
+        message: error.to_string(),
+    })?;
+
+    let request = OutboundRequest {
+        method: OutboundMethod::Post,
+        url,
+        query: Vec::new(),
+        bearer_token: None,
+        json_body: None,
+        raw_body: None,
+        binary_limit: None,
+        timeout_secs: Some(APPROVAL_REQUEST_TIMEOUT_SECS),
+        // 幂等：重复订阅无副作用（1390007 已订阅），5xx 重试安全。
+        idempotent: true,
+    };
+
+    match send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await {
+        Ok(_) => Ok(()),
+        // 1390007 = subscription existed：已被清掉后的重订也走这条，不是失败。
+        Err(failure) if failure.kind == FailureKind::Fatal { code: 1390007 } => Ok(()),
+        Err(failure) => Err(failure),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ApprovalDefinitionData {
     approval_name: String,
@@ -793,6 +843,46 @@ mod tests {
     #[test]
     fn create_url_is_the_official_path() {
         assert!(create_instance_url().ends_with("/open-apis/approval/v4/instances"));
+    }
+
+    #[test]
+    fn subscribe_url_is_the_official_path() {
+        let url = subscribe_url("CODE-ABC").unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            url.ends_with("/open-apis/approval/v4/approvals/CODE-ABC/subscribe"),
+            "{url}"
+        );
+    }
+
+    /// 已订阅（1390007）与成功同义：重复订阅、被发布版本清掉后的重订都安全。
+    ///
+    /// 钉住请求形状（POST + 无请求体 + 正确路径），否则「接口选错但静默通过」
+    /// 那类 bug 测不出来。
+    #[tokio::test]
+    async fn subscribe_approval_treats_already_subscribed_as_success() {
+        let transport = ScriptedTransport::new(vec![Ok(OutboundResponse {
+            status: 400,
+            body: r#"{"code":1390007,"msg":"subscription existed","data":{}}"#.to_string(),
+            bytes: None,
+            headers: BTreeMap::new(),
+        })]);
+        let result = subscribe_approval(&transport, &NoopSleeper, &fake_tokens(), "CODE-ABC").await;
+        assert!(result.is_ok(), "1390007 已订阅应视为成功，实际 {result:?}");
+
+        let request = transport
+            .last_request()
+            .unwrap_or_else(|| panic!("应发出一次订阅请求"));
+        assert_eq!(request.method, OutboundMethod::Post, "订阅是 POST");
+        assert!(
+            request.url.ends_with("/approvals/CODE-ABC/subscribe"),
+            "{}",
+            request.url
+        );
+        assert!(
+            request.json_body.is_none(),
+            "订阅无请求体：{:?}",
+            request.json_body
+        );
     }
 
     #[test]

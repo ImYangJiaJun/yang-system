@@ -18,7 +18,7 @@ use tracing::Instrument;
 use yang_base::table::{Record, SortOrder};
 use yang_base::tools::Tools;
 
-use crate::addon::feishu::domain::approval::{get_instance, GetOutcome};
+use crate::addon::feishu::domain::approval::{get_instance, subscribe_approval, GetOutcome};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
     fill_department_name, write_extended, BitableBackfill, DispatchInput,
@@ -149,8 +149,13 @@ impl RoundRunner {
     }
 }
 
-/// 主循环：等信号或到点，然后跑一轮。
+/// 主循环：启动即订阅一次全部启用配置的审批定义，然后等信号或到点跑一轮。
 async fn run_loop(runner: RoundRunner, idle_poll: Duration, mut shutdown: watch::Receiver<bool>) {
+    // 按定义订阅是运行时状态，控制台重配、发布新版本都可能被清掉——每次启动
+    // 重订一遍，链路自愈（设计 §7.2 第 2 步）。失败只 warn，不挡运行。
+    if let Err(error) = subscribe_enabled_configs(&runner).await {
+        tracing::warn!(error = %error, "启动期订阅审批定义失败（下次启动会重试）");
+    }
     let mut ticker = tokio::time::interval(idle_poll);
     loop {
         tokio::select! {
@@ -165,6 +170,45 @@ async fn run_loop(runner: RoundRunner, idle_poll: Duration, mut shutdown: watch:
             }
         }
     }
+}
+
+/// 订阅全部启用配置的审批定义 Code。幂等（`1390007`=已订阅视为成功），
+/// 同一 Code 被多个配置共用时只调一次。
+async fn subscribe_enabled_configs(runner: &RoundRunner) -> anyhow::Result<()> {
+    let rows = runner
+        .context
+        .approval_configs()
+        .query()
+        .where_eq("enabled", serde_json::json!(true))?
+        .select_fields(&["id", "approval_code"])?
+        .all()
+        .await?;
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        let code = match row.optional::<String>("approval_code")? {
+            Some(code) => code.trim().to_string(),
+            None => continue,
+        };
+        if code.is_empty() || !seen.insert(code.clone()) {
+            continue;
+        }
+        match subscribe_approval(
+            runner.transport(),
+            runner.sleeper.as_ref(),
+            &runner.tokens,
+            &code,
+        )
+        .await
+        {
+            Ok(()) => tracing::info!(approval_code = %code, "审批定义事件订阅确认"),
+            Err(failure) => tracing::warn!(
+                error = %failure.message,
+                approval_code = %code,
+                "审批定义事件订阅失败"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// 一条已取出的待处理事件。
