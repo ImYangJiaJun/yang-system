@@ -689,6 +689,10 @@ fn open_ids_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Vec<String>, C
 }
 
 /// 从单元格里取出选项文案列表。
+///
+/// 数字也是文案：汇率这类控件是外部选项（`radioV2`），但多维表格里同名列是数字，
+/// 选项文案就是这个数字的文本（`"0.0435"`）。不读数字，标签列表为空，控件被提交
+/// 空值，飞书以 1395006 拒绝。`Number::to_string()` 保留原始字面量，与选项文案对齐。
 pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
     match cell {
         Value::Array(items) => items
@@ -702,10 +706,12 @@ pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 Value::String(text) => Some(text.clone()),
+                Value::Number(number) => Some(number.to_string()),
                 _ => None,
             })
             .collect(),
         Value::String(text) => vec![text.clone()],
+        Value::Number(number) => vec![number.to_string()],
         _ => Vec::new(),
     }
 }
@@ -1389,6 +1395,21 @@ mod tests {
         radio.converter = Converter::Option;
         let error = render_error(&[radio], &cells(&[("fld_src", json!("没配过的选项"))]));
         assert!(error.contains("没配过的选项"), "{error}");
+    }
+
+    #[test]
+    fn numeric_cell_is_a_label_for_an_option_control() {
+        // 汇率控件是 radioV2 外部选项，但多维表格里同名列是数字：单元格是 JSON
+        // 数字 0.0435，选项文案恰好是 "0.0435"。不把数字读成文案，标签列表为空，
+        // 控件被原样提交空值，飞书以 1395006 拒绝（「控件值不合法或者为空」）。
+        let mut radio = widget("w1", "radioV2");
+        radio.converter = Converter::Option;
+        radio
+            .option_map
+            .insert("0.0435".to_string(), "fldazessde:a88795fb787f".to_string());
+        let rendered = render(&[radio], &cells(&[("fld_src", json!(0.0435))]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rendered[0]["value"], json!("fldazessde:a88795fb787f"));
     }
 
     #[test]
