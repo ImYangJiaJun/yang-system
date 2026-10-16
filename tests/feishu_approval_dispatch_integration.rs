@@ -565,7 +565,8 @@ async fn dispatch_validation_failure_writes_a_failed_request_log() {
             json!({ "token": SEED_CONFIG_TOKEN, "record_id": "rec1" }),
         )
         .await
-        .expect_err("空 config_key 连 config_id 都拿不到，按 DispatchOutcome::internal 冒泡为 Err");
+        .err()
+        .context("空 config_key 连 config_id 都拿不到，按 DispatchOutcome::internal 冒泡为 Err")?;
         let error = error
             .downcast_ref::<BaseError>()
             .context("冒泡的错误必须是 BaseError")?;
@@ -721,7 +722,8 @@ async fn dispatch_provision_failure_writes_a_failed_request_log() {
             json!({ "token": seed_token(&config_key), "applicant": "夹具发起人" }),
         )
         .await
-        .expect_err("出站栈建不起来时必须冒泡为 Err");
+        .err()
+        .context("出站栈建不起来时必须冒泡为 Err")?;
         ensure!(
             format!("{error:#}").contains("HTTP 客户端未初始化"),
             "provision 失败的原因必须可归因，实际: {error:#}"

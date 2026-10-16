@@ -56,13 +56,3 @@ impl RegistrationEmailToolsExt for ToolsBuilder {
             )
     }
 }
-
-pub fn take_registration_code(email: &str) -> anyhow::Result<String> {
-    let normalized = email.trim().to_ascii_lowercase();
-    sender()
-        .codes
-        .lock()
-        .map_err(|_| anyhow::anyhow!("集成测试邮件缓冲区锁已损坏"))?
-        .remove(&normalized)
-        .ok_or_else(|| anyhow::anyhow!("集成测试未收到注册验证码"))
-}

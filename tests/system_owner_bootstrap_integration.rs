@@ -6,14 +6,11 @@
 
 use std::sync::Arc;
 
-mod common;
-
 /// 测试夹具：真库/真 Redis 上的应用装配与直接的数据库观测。
 ///
-/// Task 9 的并发引导对抗测试与本文件共用这套夹具；`register_with_code`
-/// 走真实注册 Action（邮箱验证码 → 注册），是最贴近生产路径的驱动方式。
+/// Task 9 的并发引导对抗测试与本文件共用这套夹具；`register_account`
+/// 走真实注册 Action（用户名 + 密码），是最贴近生产路径的驱动方式。
 mod harness {
-    use super::common::{take_registration_code, RegistrationEmailToolsExt};
     use anyhow::{ensure, Context};
     use jsonwebtoken::Algorithm;
     use serde_json::{json, Value};
@@ -125,7 +122,7 @@ mod harness {
         .await
         .unwrap_or_else(|error| panic!("同步引导测试 Schema 失败: {error}"));
         let redis = connect_test_redis().await;
-        // 命名空间按部署唯一：验证码与授权版本缓存不跨用例串味。
+        // 命名空间按部署唯一：授权版本缓存不跨用例串味。
         let deployment = format!(
             "system-owner-bootstrap-{}",
             SystemTime::now()
@@ -137,7 +134,6 @@ mod harness {
             ToolsBuilder::new()
                 .mysql(connect_test_database().await)
                 .cache(redis.clone())
-                .with_registration_email(format!("email-{deployment}"))
                 .extension(
                     AuthorizationVersionCache::new(redis, deployment)
                         .unwrap_or_else(|error| panic!("构建授权版本缓存失败: {error}")),
@@ -211,25 +207,12 @@ mod harness {
         .await
     }
 
-    /// 经真实注册路径创建一个账号：申请邮箱验证码 → 提交注册。
-    pub async fn register_with_code(
-        app: &BuiltApp,
-        username: &str,
-        email: &str,
-    ) -> anyhow::Result<()> {
-        let request =
-            dispatch(app, "request_registration_email", json!({ "email": email })).await?;
-        ensure!(request.code == 0, "验证码申请必须成功: {}", request.message);
-        let code = take_registration_code(email)?;
+    /// 经真实注册路径创建一个账号（注册只收用户名与密码）。
+    pub async fn register_account(app: &BuiltApp, username: &str) -> anyhow::Result<()> {
         let registered = dispatch(
             app,
             "register",
-            json!({
-                "username": username,
-                "password": PASSWORD,
-                "email": email,
-                "email_code": code,
-            }),
+            json!({ "username": username, "password": PASSWORD }),
         )
         .await?;
         ensure!(registered.code == 0, "注册必须成功: {}", registered.message);
@@ -282,7 +265,7 @@ async fn a_second_claim_returns_already_claimed_instead_of_failing() {
     let app = harness::build_test_app().await;
     harness::reset_business_tables(&app).await;
 
-    harness::register_with_code(&app, "first", "first@example.com")
+    harness::register_account(&app, "first")
         .await
         .unwrap_or_else(|error| panic!("首次注册应成功: {error}"));
     assert_eq!(
@@ -296,7 +279,7 @@ async fn a_second_claim_returns_already_claimed_instead_of_failing() {
         "首个注册账号必须被引导进内置全权组"
     );
 
-    harness::register_with_code(&app, "second", "second@example.com")
+    harness::register_account(&app, "second")
         .await
         .unwrap_or_else(|error| panic!("第二次注册不得报错: {error}"));
     assert_eq!(
@@ -328,9 +311,8 @@ async fn concurrent_first_registrations_produce_exactly_one_system_owner() {
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             let username = format!("racer{index}");
-            let email = format!("racer{index}@example.com");
             barrier.wait().await;
-            harness::register_with_code(&app, &username, &email).await
+            harness::register_account(&app, &username).await
         }));
     }
     let mut results = Vec::new();
@@ -359,10 +341,10 @@ async fn later_registrations_degrade_to_plain_users() {
     let app = harness::build_test_app().await;
     harness::reset_business_tables(&app).await;
 
-    harness::register_with_code(&app, "first", "first@example.com")
+    harness::register_account(&app, "first")
         .await
         .unwrap_or_else(|error| panic!("首个注册应成功: {error}"));
-    harness::register_with_code(&app, "second", "second@example.com")
+    harness::register_account(&app, "second")
         .await
         .unwrap_or_else(|error| panic!("第二个注册应成功并降级: {error}"));
 

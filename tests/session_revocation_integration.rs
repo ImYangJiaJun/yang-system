@@ -6,8 +6,6 @@
 //! `issue_refresh_credential_version = false` 下运行，使 revoke_session 不挂 Step-up，
 //! 从而聚焦「撤销 → refresh 失败」的核心语义。
 
-mod common;
-
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
@@ -24,8 +22,6 @@ use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
 use yang_system::schema::sync_with_database;
-
-use common::{take_registration_code, RegistrationEmailToolsExt};
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -205,22 +201,11 @@ async fn register_and_login(
     peer_port: u16,
 ) -> anyhow::Result<(String, String)> {
     let username = format!("revoke_{suffix}");
-    let email = format!("{username}@example.test");
-    dispatch(
-        app,
-        "account.user",
-        "request_registration_email",
-        json!({ "email": email }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    let code = take_registration_code(&email)?;
     let registered = dispatch(
         app,
         "account.user",
         "register",
-        json!({ "username": username, "password": PASSWORD, "email": email, "email_code": code }),
+        json!({ "username": username, "password": PASSWORD }),
         &[],
         peer_port,
     )
@@ -320,7 +305,6 @@ async fn revoking_a_session_rejects_its_refresh_token() -> anyhow::Result<()> {
                     database_config(),
                 )?)
                 .cache(redis.clone())
-                .with_registration_email(format!("email-{deployment}"))
                 .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
                 .token(token_manager())
                 .build()?,

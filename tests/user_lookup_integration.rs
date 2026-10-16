@@ -15,11 +15,14 @@ use yang_base::tools::ToolsBuilder;
 use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::addon::account::email_delivery::{
-    EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
+    ChangeEmailCodeSenderHandle, EmailDeliveryError, VerificationCodeSender,
+    VerificationCodeSenderHandle,
 };
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
-use yang_system::config::{EmailVerificationSettings, SecuritySettings};
+use yang_system::config::{
+    ChangeEmailVerificationConfig, EmailVerificationSettings, SecuritySettings,
+};
 use yang_system::schema::sync_with_database;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
@@ -30,8 +33,8 @@ struct CapturingEmailSender {
 }
 
 #[async_trait]
-impl RegistrationEmailSender for CapturingEmailSender {
-    async fn send_registration_code(
+impl VerificationCodeSender for CapturingEmailSender {
+    async fn send_verification_code(
         &self,
         recipient: &str,
         code: &str,
@@ -196,37 +199,21 @@ async fn dispatch(
     app.dispatch_context(handle, context).await
 }
 
-/// 注册邮箱已验证账号并密码登录，返回 access token。
-async fn register_and_login(
+/// 注册账号并绑定邮箱。
+///
+/// `change_email` 成功会撤销该账号全部会话，所以不返回 token；
+/// 需要登录态的调用方必须在绑定之后重新登录。
+async fn register_and_bind_email(
     app: &BuiltApp,
     sender: &CapturingEmailSender,
     username: &str,
     email: &str,
     peer_port: u16,
-) -> anyhow::Result<String> {
-    let response = dispatch(
-        app,
-        "request_registration_email",
-        Request::new(json!({ "email": email })),
-        peer_port,
-    )
-    .await?;
-    ensure!(response.code == 0, "注册验证码请求返回业务失败");
-    let code = sender
-        .codes
-        .lock()
-        .map_err(|_| anyhow::anyhow!("测试邮件缓冲区锁已损坏"))?
-        .remove(&email.trim().to_ascii_lowercase())
-        .context("测试投递器未收到注册验证码")?;
+) -> anyhow::Result<()> {
     let registered = dispatch(
         app,
         "register",
-        Request::new(json!({
-            "username": username,
-            "password": PASSWORD,
-            "email": email,
-            "email_code": code,
-        })),
+        Request::new(json!({ "username": username, "password": PASSWORD })),
         peer_port,
     )
     .await?;
@@ -244,7 +231,49 @@ async fn register_and_login(
         .and_then(|data| data["access_token"].as_str())
         .map(str::to_string)
         .context("登录响应缺少 access_token")?;
-    Ok(token)
+    let authorization = format!("Bearer {token}");
+
+    let requested = dispatch(
+        app,
+        "request_change_email",
+        Request::new(json!({ "new_email": email })).header("authorization", &authorization),
+        peer_port,
+    )
+    .await?;
+    ensure!(requested.code == 0, "改绑邮箱验证码请求返回业务失败");
+    let code = sender
+        .codes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("测试邮件缓冲区锁已损坏"))?
+        .remove(&email.trim().to_ascii_lowercase())
+        .context("测试投递器未收到改绑验证码")?;
+    let changed = dispatch(
+        app,
+        "change_email",
+        Request::new(json!({ "new_email": email, "email_code": code }))
+            .header("authorization", &authorization),
+        peer_port,
+    )
+    .await?;
+    ensure!(changed.code == 0, "邮箱绑定必须成功");
+    Ok(())
+}
+
+/// 密码登录，返回 access token。
+async fn login(app: &BuiltApp, username: &str, peer_port: u16) -> anyhow::Result<String> {
+    let logged_in = dispatch(
+        app,
+        "login",
+        Request::new(json!({ "username": username, "password": PASSWORD })),
+        peer_port,
+    )
+    .await?;
+    logged_in
+        .data
+        .as_ref()
+        .and_then(|data| data["access_token"].as_str())
+        .map(str::to_string)
+        .context("登录响应缺少 access_token")
 }
 
 /// 以真实 HTTP 形态调用 lookup：query 参数走 `Request::queries`、
@@ -313,17 +342,22 @@ async fn user_lookup_is_authenticated_only_and_filters_by_keyword() -> anyhow::R
                     redis.clone(),
                     namespace.clone(),
                 )?)
-                .extension(RegistrationEmailSenderHandle::new(sender.clone()))
-                .config(email_settings(namespace).engine_config())
+                .extension(ChangeEmailCodeSenderHandle(
+                    VerificationCodeSenderHandle::new(sender.clone()),
+                ))
+                .config(ChangeEmailVerificationConfig(
+                    email_settings(namespace).change_engine_config(),
+                ))
                 .build()?,
         );
         let application = build_app(Arc::clone(&tools), security_settings())?;
         let app = Arc::new(application.runtime);
 
-        // 两个可搜索用户（username 与 email 均可命中）。
-        let token_a =
-            register_and_login(&app, &sender, "alpha_user", "alpha@example.com", 44_001).await?;
-        let _ = register_and_login(&app, &sender, "beta_user", "beta@example.com", 44_002).await?;
+        // 两个可搜索用户（username 与 email 均可命中）。绑定邮箱会撤销会话，
+        // 所以查找用的 token 必须在绑定完成之后重新登录取得。
+        register_and_bind_email(&app, &sender, "alpha_user", "alpha@example.com", 44_001).await?;
+        register_and_bind_email(&app, &sender, "beta_user", "beta@example.com", 44_002).await?;
+        let token_a = login(&app, "alpha_user", 44_001).await?;
 
         // 1) authenticated-only：未登录 → 401（Unauthorized）。
         match lookup(&app, None, &[], 44_003).await {

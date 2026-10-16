@@ -322,13 +322,8 @@ async fn registration_email_code_is_private_bounded_and_single_use() -> anyhow::
         }
         tokio::time::sleep(Duration::from_millis(1_100)).await;
 
-        let registered = dispatch(
-            &app,
-            "register",
-            registration_body("verified_user"),
-            43_001,
-        )
-        .await?;
+        let registered =
+            dispatch(&app, "register", registration_body("verified_user"), 43_001).await?;
         ensure!(registered.code == 0, "无邮箱注册必须成功");
         let registered_data = registered.data.context("注册响应缺少 data")?;
         ensure!(

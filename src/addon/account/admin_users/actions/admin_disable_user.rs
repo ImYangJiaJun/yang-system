@@ -95,7 +95,12 @@ pub(super) async fn handle(
     Account::finish_transaction(transaction, result).await?;
 
     let immediate_convergence = account
-        .converge_revocation(&ctx, input.id, "account.admin_users.admin_disable_user", "user")
+        .converge_revocation(
+            &ctx,
+            input.id,
+            "account.admin_users.admin_disable_user",
+            "user",
+        )
         .await?;
     ApiResponse::success(
         json!({

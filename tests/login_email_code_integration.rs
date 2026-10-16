@@ -24,14 +24,15 @@ use yang_base::tools::ToolsBuilder;
 use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::addon::account::email_delivery::{
-    EmailDeliveryError, LoginEmailCodeSenderHandle, RegistrationEmailSender,
-    RegistrationEmailSenderHandle, VerificationCodeSender, VerificationCodeSenderHandle,
+    ChangeEmailCodeSenderHandle, EmailDeliveryError, LoginEmailCodeSenderHandle,
+    RegistrationEmailSender, RegistrationEmailSenderHandle, VerificationCodeSender,
+    VerificationCodeSenderHandle,
 };
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::{
-    EmailVerificationSettings, LoginEmailVerificationConfig, MfaEmailVerificationConfig,
-    SecuritySettings, TotpSettings,
+    ChangeEmailVerificationConfig, EmailVerificationSettings, LoginEmailVerificationConfig,
+    MfaEmailVerificationConfig, SecuritySettings, TotpSettings,
 };
 use yang_system::schema::sync_with_database;
 
@@ -264,7 +265,7 @@ async fn dispatch(
     .await
 }
 
-/// 装配真实依赖的完整应用（注册验证码 + 免密登录验证码双独立 key 域）。
+/// 装配真实依赖的完整应用（注册验证码 + 免密登录验证码 + 改绑验证码三套独立 key 域）。
 async fn build_login_app(
     database: &Database,
     redis: &RedisClient,
@@ -296,6 +297,9 @@ async fn build_login_app(
             .extension(RegistrationEmailSenderHandle::new(sender.clone()))
             .extension(LoginEmailCodeSenderHandle::new(sender.clone()))
             .extension(VerificationCodeSenderHandle::new(sender.clone()))
+            .extension(ChangeEmailCodeSenderHandle(
+                VerificationCodeSenderHandle::new(sender.clone()),
+            ))
             .config(
                 email_settings(namespace.clone(), "integration-registration-secret-32bytes")
                     .engine_config(),
@@ -303,6 +307,10 @@ async fn build_login_app(
             .config(MfaEmailVerificationConfig(
                 email_settings(namespace.clone(), "integration-mfa-email-secret-32bytes")
                     .mfa_engine_config(),
+            ))
+            .config(ChangeEmailVerificationConfig(
+                email_settings(namespace.clone(), "integration-change-email-secret-32bytes")
+                    .change_engine_config(),
             ))
             .config(TotpSettings {
                 aead_key: TOTP_AEAD_KEY.to_string(),
@@ -318,7 +326,9 @@ async fn build_login_app(
     Ok(Arc::new(application.runtime))
 }
 
-/// 注册一个邮箱已验证的账号。
+/// 注册账号并绑定邮箱：注册只收用户名与密码，邮箱经改绑流程写入。
+///
+/// 改绑成功会撤销该账号全部会话，因此必须排在调用方的任何登录之前。
 async fn register_user(
     app: &BuiltApp,
     sender: &CapturingEmailSender,
@@ -326,30 +336,47 @@ async fn register_user(
     email: &str,
     peer_port: u16,
 ) -> anyhow::Result<()> {
-    let response = dispatch(
-        app,
-        "request_registration_email",
-        json!({ "email": email }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    ensure!(response.code == 0, "注册验证码请求返回业务失败");
-    let code = sender.take_registration_code(email)?;
     let registered = dispatch(
         app,
         "register",
-        json!({
-            "username": username,
-            "password": PASSWORD,
-            "email": email,
-            "email_code": code,
-        }),
+        json!({ "username": username, "password": PASSWORD }),
         &[],
         peer_port,
     )
     .await?;
     ensure!(registered.code == 0, "注册必须成功");
+
+    let logged_in = login_with_password(app, username, None, peer_port).await?;
+    ensure!(logged_in.code == 0, "注册后登录必须成功");
+    let token = access_token(&logged_in)?;
+    let authorization = format!("Bearer {token}");
+
+    let requested = dispatch(
+        app,
+        "request_change_email",
+        json!({ "new_email": email }),
+        &[("authorization", authorization.as_str())],
+        peer_port,
+    )
+    .await?;
+    ensure!(requested.code == 0, "改绑邮箱验证码请求返回业务失败");
+    // 改绑验证码经 ChangeEmailCodeSenderHandle 落到同一个 VerificationCodeSender 捕获缓冲。
+    let code = sender
+        .take_login_code(email)?
+        .context("测试投递器未收到改绑验证码")?;
+
+    let changed = dispatch(
+        app,
+        "change_email",
+        json!({ "new_email": email, "email_code": code }),
+        &[("authorization", authorization.as_str())],
+        peer_port,
+    )
+    .await?;
+    ensure!(changed.code == 0, "邮箱绑定必须成功");
+    // 改绑按秒粒度设撤销水位线（不晚于水位线的 Token 一律撤销），
+    // 跨过它再让调用方登录，避免同秒新 Token 被误撤。
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
     Ok(())
 }
 
@@ -758,23 +785,19 @@ async fn registration_and_login_email_code_key_domains_are_isolated() -> anyhow:
         assert_invalid_code(
             login_by_email_code(&app, fresh_email, &registration_code, 44_601).await,
         )?;
-        // 注册码未被 login 域消费：同邮箱仍可完成注册。
+        // 跨域登录失败不得波及注册：注册码被 login 域拒绝后仍可注册
+        //（register 已不再消费注册验证码，该端点是遗留入口）。
         let registered = dispatch(
             &app,
             "register",
-            json!({
-                "username": "domain_fresh_user",
-                "password": PASSWORD,
-                "email": fresh_email,
-                "email_code": registration_code,
-            }),
+            json!({ "username": "domain_fresh_user", "password": PASSWORD }),
             &[],
             44_601,
         )
         .await?;
-        ensure!(registered.code == 0, "注册码不得被 login 域消费");
+        ensure!(registered.code == 0, "注册必须成功");
 
-        // 方向二：login 域签发的验证码不能用于注册（register 的 email_code）。
+        // 方向二：login 域签发的验证码不能用于注册（register 只收 username/password）。
         register_user(
             &app,
             &sender,
@@ -787,21 +810,24 @@ async fn registration_and_login_email_code_key_domains_are_isolated() -> anyhow:
         let login_code = sender
             .take_login_code("domain.login@example.com")?
             .context("必须收到登录验证码")?;
-        assert_invalid_code(
-            dispatch(
-                &app,
-                "register",
-                json!({
-                    "username": "domain_reverse_user",
-                    "password": PASSWORD,
-                    "email": "domain.login@example.com",
-                    "email_code": login_code,
-                }),
-                &[],
-                44_601,
-            )
-            .await,
-        )?;
+        // 夹带 login 域验证码的注册载荷必须被拒（deny_unknown_fields）。
+        let injected = dispatch(
+            &app,
+            "register",
+            json!({
+                "username": "domain_reverse_user",
+                "password": PASSWORD,
+                "email": "domain.login@example.com",
+                "email_code": login_code,
+            }),
+            &[],
+            44_601,
+        )
+        .await;
+        ensure!(
+            !matches!(&injected, Ok(response) if response.code == 0),
+            "register 不得接受 login 域验证码: {injected:?}"
+        );
         // login 码未被注册域消费：同码仍可完成免密登录。
         let logged_in =
             login_by_email_code(&app, "domain.login@example.com", &login_code, 44_601).await?;
