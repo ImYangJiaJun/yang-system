@@ -1406,6 +1406,35 @@ fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipi
     }
 }
 
+/// 本轮没发通知，是不是「交给 worker」而不是「无人可发」。
+///
+/// 判据就是 [`fallback_recipient_of`] 的状态门：被它挡下的那几档，worker 会接手
+/// （worker 对**所有**结论都通知，按「结论是否变化」去重）。所以「没有接收人」与
+/// 「中间态不在本层发」是两件事，响应文案与日志必须分开说——否则请求里传了发起人
+/// 的人会读到一句与事实相反的话。
+///
+/// `Accepted`（全表受理）也在这里：它只是「已入队」，结果由 worker 逐条通知。
+fn deferred_notification(outcome: &DispatchOutcome) -> bool {
+    matches!(
+        outcome.status,
+        FeedbackStatus::Waiting
+            | FeedbackStatus::Retryable
+            | FeedbackStatus::CreatedPendingBackfill
+            | FeedbackStatus::Accepted
+    )
+}
+
+/// 无显式接收人时选哪种「未发」结论文案：中间态/受理 → 交给 worker 的措辞，
+/// 终态 → 「未指定接收人」。抽成纯函数是为了让**接线**本身可测——只钉谓词和
+/// 构造器，把 `None => not_requested()` 改回来测试依然全绿，这层接线就没人守。
+fn notification_for_missing_recipient(outcome: &DispatchOutcome) -> NotificationResult {
+    if deferred_notification(outcome) {
+        NotificationResult::deferred_to_worker()
+    } else {
+        NotificationResult::not_requested()
+    }
+}
+
 /// 本次 HTTP 派发的通知是否**确实发出去了**（`notification.status == "sent"`）。
 ///
 /// 判据与 worker 的 `http_path_notified` 逐字一致：两边必须同口径，否则会出现
@@ -1503,8 +1532,12 @@ async fn complete_feedback(
         .notification_recipient
         .clone()
         .or_else(|| fallback_recipient_of(outcome));
+    // 「本层不发」有两种原因，必须分开报（见 [`deferred_notification`]）：
+    // 真取不到接收人 vs 中间态/受理刻意交给 worker。合并成一句「未指定接收人」
+    // 会把后者说成前者——请求里传了发起人、发起人也解析成功时，那句话是假的。
+    let deferred = deferred_notification(outcome);
     let notification = match &recipient {
-        None => NotificationResult::not_requested(),
+        None => notification_for_missing_recipient(outcome),
         Some(_) if config.is_none() => NotificationResult::skipped(),
         Some(recipient) => match context.settings().filter(|settings| settings.can_pull()) {
             Some(settings) => match outbound_setup::build(ctx, settings) {
@@ -1551,9 +1584,13 @@ async fn complete_feedback(
             message_id = ?notification.message_id,
             "HTTP 派发通知：IM 消息发送成功"
         ),
+        NotificationStatus::NotRequested if deferred => tracing::info!(
+            config_id,
+            "HTTP 派发通知：本轮为中间态/受理结论，通知由 Worker 轮询发送，本层跳过"
+        ),
         NotificationStatus::NotRequested => tracing::info!(
             config_id,
-            "HTTP 派发通知：无接收人（未指定 notification_recipient 且无申请人兜底），跳过通知"
+            "HTTP 派发通知：无接收人（未指定 notification_recipient 且申请人/记录创建人均不可用），跳过通知"
         ),
         _ => tracing::warn!(
             config_id,
@@ -1762,6 +1799,83 @@ mod tests {
                 "{status:?} 不该在 HTTP 层兜底"
             );
         }
+    }
+
+    /// 「本层没发」的两种原因分开报：中间态/受理是**刻意交给 worker**，不是
+    /// 「无人可发」。这一条钉住分界线——请求里传了发起人时，waiting 结论的
+    /// 响应文案必须说「由后台通知」，不能说「未指定接收人」。
+    #[test]
+    fn deferred_notification_distinguishes_delegated_from_unresolvable() {
+        let interim = |status: FeedbackStatus| {
+            let mut outcome = DispatchOutcome::fail(0, Some(7), "中间态");
+            outcome.status = status;
+            outcome.applicant_open_id = Some("ou_applicant".into());
+            outcome.creator_open_id = Some("ou_creator".into());
+            outcome
+        };
+        for status in [
+            FeedbackStatus::Waiting,
+            FeedbackStatus::Retryable,
+            FeedbackStatus::CreatedPendingBackfill,
+            FeedbackStatus::Accepted,
+        ] {
+            assert!(
+                deferred_notification(&interim(status)),
+                "{status:?} 应判为交给 worker"
+            );
+        }
+        for status in [FeedbackStatus::Succeeded, FeedbackStatus::Failed] {
+            assert!(
+                !deferred_notification(&interim(status)),
+                "{status:?} 终态不在本层发时应判为真·无接收人"
+            );
+        }
+    }
+
+    /// 钉住**接线**：无接收人时选哪个 NotificationResult 由结论状态决定。
+    /// 把 `notification_for_missing_recipient` 改成恒返回一个构造器，这条会红。
+    #[test]
+    fn missing_recipient_choice_is_pinned_by_outcome_status() {
+        let mut waiting = DispatchOutcome::fail(0, Some(7), "中间态");
+        waiting.status = FeedbackStatus::Waiting;
+        waiting.applicant_open_id = Some("ou_applicant".into());
+        let value = serde_json::to_value(notification_for_missing_recipient(&waiting))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("后台"),
+            "waiting + 有申请人必须回「交给后台」，不能回「未指定接收人」"
+        );
+
+        let mut failed = DispatchOutcome::fail(1, Some(7), "失败");
+        failed.status = FeedbackStatus::Failed;
+        failed.applicant_open_id = None;
+        failed.creator_open_id = None;
+        let value = serde_json::to_value(notification_for_missing_recipient(&failed))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("未指定接收人"),
+            "终态 + 真无接收人必须回「未指定接收人」"
+        );
+    }
+
+    #[test]
+    fn deferred_to_worker_message_is_not_the_no_recipient_lie() {
+        let result = crate::addon::feishu::domain::approval_notification::NotificationResult::deferred_to_worker();
+        // 序列化后的状态必须**不是** `sent`：worker 的去重（`http_path_notified`）
+        // 只看这一位，写成 sent 会让真正该由 worker 发的那条被跳过。
+        let value = serde_json::to_value(&result).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(value["status"], serde_json::json!("not_requested"));
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("后台"),
+            "文案必须说明由后台通知，而不是「未指定接收人」: {message}"
+        );
     }
 
     /// 终态写 `terminal` 还是 `unnotified`，只看通知到底有没有发出去。
@@ -2483,8 +2597,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "需要真实 MySQL 测试库"]
-    async fn real_mysql_resolves_detail_options_and_waits_on_ambiguous_labels() -> anyhow::Result<()>
-    {
+    async fn real_mysql_resolves_detail_options_and_picks_first_on_duplicate_labels(
+    ) -> anyhow::Result<()> {
         use crate::addon::feishu::domain::approval_convert::WidgetMap;
         use crate::addon::feishu::domain::approval_dispatch::DispatchInput;
         use crate::addon::feishu::domain::approval_provision::resolve_external_options;
@@ -2576,7 +2690,10 @@ mod tests {
                 serde_json::from_value(fields["data"]["items"].clone())?;
             for label in ["正确", "重名", "不存在"] {
                 cells.insert("fldCompany".into(), json!(label));
-                let transport = ReplayTransport::new(if label == "正确" { vec![
+                // 「重名」是三条同文案的启用选项（dup1/dup2/dup3），现在不再阻塞，
+                // 取排序最前的一条（sort_order 并列 → option_id 升序 → dup1）。
+                let dispatchable = label == "正确" || label == "重名";
+                let transport = ReplayTransport::new(if dispatchable { vec![
                     (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL"}))),
                     (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL","serial_number":"MANUAL-001","status":"PENDING"}))),
                     (200, e2e_ok_body(json!({}))),
@@ -2585,12 +2702,13 @@ mod tests {
                 let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &fields };
                 let input = DispatchInput { fields: &fields, context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: None, backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
                 let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
-                if label == "正确" {
+                if dispatchable {
                     assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into(), instance_code: "INST-MANUAL".into() });
                     let create = transport.took("Post", &crate::addon::feishu::domain::approval::create_instance_url());
                     let body = create.body.ok_or_else(|| anyhow::anyhow!("缺少提单请求体"))?;
                     let sent: Value = serde_json::from_str(body["form"].as_str().ok_or_else(|| anyhow::anyhow!("缺少表单"))?)?;
-                    assert_eq!(sent[0]["value"][0][0]["value"], json!(format!("{source}_good")));
+                    let expected = if label == "正确" { format!("{source}_good") } else { format!("{source}_dup1") };
+                    assert_eq!(sent[0]["value"][0][0]["value"], json!(expected), "同名重复必须取排序最前的那条");
                 } else {
                     assert!(matches!(result, DispatchResult::Waiting { .. }), "{result:?}");
                     assert!(transport.seen().is_empty(), "等待态不得创建或回填");
