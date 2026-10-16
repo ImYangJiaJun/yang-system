@@ -318,7 +318,7 @@ impl Backfill for BitableBackfill<'_> {
                 reason = "链接列不写错误文本", "审批回填没有可写单元格");
             return Ok(());
         }
-        tracing::info!(stage = "backfill", field_id = %field.field_id, field_type = field.field_type,
+        tracing::debug!(stage = "backfill", field_id = %field.field_id, field_type = field.field_type,
             row_count = records.len(), "审批回填开始批量更新多维表格记录");
         super::bitable::batch_update_records(
             self.transport,
@@ -361,7 +361,7 @@ impl Backfill for BitableBackfill<'_> {
         if cells.is_empty() {
             return Ok(());
         }
-        tracing::info!(
+        tracing::debug!(
             stage = "backfill",
             record_id,
             field_count = cells.len(),
@@ -401,7 +401,7 @@ pub(crate) async fn dispatch_one(
         input.record_id,
     );
     tracing::Span::current().record("uuid", uuid.as_str());
-    tracing::info!(
+    tracing::debug!(
         stage = "prepare",
         widget_count = input.widgets.len(),
         "审批记录开始派发"
@@ -475,7 +475,7 @@ pub(crate) async fn dispatch_one(
             }
         },
     };
-    tracing::info!(
+    tracing::debug!(
         stage = "applicant",
         applicant_field = input.applicant_field,
         "申请人字段校验通过"
@@ -497,7 +497,7 @@ pub(crate) async fn dispatch_one(
     };
     let mut widgets = input.widgets.to_vec();
     if let Some(context) = input.context {
-        tracing::info!(stage = "external_options", "开始解析审批外部选项");
+        tracing::debug!(stage = "external_options", "开始解析审批外部选项");
         if let Err(error) = super::approval_provision::resolve_external_options(
             context,
             &form_snapshot,
@@ -532,9 +532,9 @@ pub(crate) async fn dispatch_one(
                 }
             };
         }
-        tracing::info!(stage = "external_options", "审批外部选项解析完成");
+        tracing::debug!(stage = "external_options", "审批外部选项解析完成");
     }
-    tracing::info!(stage = "form", "开始校验附件并转换审批表单");
+    tracing::debug!(stage = "form", "开始校验附件并转换审批表单");
     let preflight = approval_attachment::preflight(&widgets, input.cells);
     let form = match preflight.and_then(|codes| {
         build_form(&FormInput {
@@ -546,7 +546,7 @@ pub(crate) async fn dispatch_one(
         })
     }) {
         Ok(form) => {
-            tracing::info!(stage = "form", "审批表单转换通过");
+            tracing::debug!(stage = "form", "审批表单转换通过");
             form
         }
         // 组装失败分两类：**数据不完整**（必填缺失、值形态不对）是等待态，
@@ -582,7 +582,7 @@ pub(crate) async fn dispatch_one(
         }
     };
 
-    tracing::info!(stage = "connections", "开始校验关联审批实例");
+    tracing::debug!(stage = "connections", "开始校验关联审批实例");
     if let Err(result) =
         validate_connections(transport, sleeper, tokens, &form_snapshot, &form).await
     {
@@ -592,14 +592,14 @@ pub(crate) async fn dispatch_one(
         );
         return result;
     }
-    tracing::info!(stage = "connections", "关联审批实例校验通过");
+    tracing::debug!(stage = "connections", "关联审批实例校验通过");
 
     let form = if input
         .widgets
         .iter()
         .any(|w| w.widget_type == "attachmentV2")
     {
-        tracing::info!(stage = "attachments", "开始搬运审批附件");
+        tracing::debug!(stage = "attachments", "开始搬运审批附件");
         let codes = match approval_attachment::transfer(
             transport,
             sleeper,
@@ -619,7 +619,7 @@ pub(crate) async fn dispatch_one(
                 };
             }
         };
-        tracing::info!(
+        tracing::debug!(
             stage = "attachments",
             file_count = codes.values().map(Vec::len).sum::<usize>(),
             "审批附件搬运完成"
@@ -653,7 +653,7 @@ pub(crate) async fn dispatch_one(
     // 回捞成功时，那次 `get_instance` 已经同时拿回了 `instance_code` 与
     // `serial_number`（官方文档的响应体同时含两者），所以**不再多打一次详情接口**
     // ——每条记录省一次 1000 次/分钟的配额消耗。
-    tracing::info!(stage = "create", "开始创建审批实例");
+    tracing::debug!(stage = "create", "开始创建审批实例");
     let reclaimed: Option<InstanceDetail>;
     let instance_code = match create_instance(
         transport,
@@ -667,7 +667,7 @@ pub(crate) async fn dispatch_one(
     .await
     {
         Ok(CreateOutcome::Created { instance_code }) => {
-            tracing::info!(stage = "create", instance_code = %instance_code, "审批实例创建成功，等待取编号和回填");
+            tracing::debug!(stage = "create", instance_code = %instance_code, "审批实例创建成功，等待取编号和回填");
             reclaimed = None;
             instance_code
         }
@@ -703,7 +703,7 @@ pub(crate) async fn dispatch_one(
     let mut detail = match reclaimed {
         Some(detail) => detail,
         None => {
-            tracing::info!(stage = "detail", instance_code = %instance_code, "开始查询审批实例编号");
+            tracing::debug!(stage = "detail", instance_code = %instance_code, "开始查询审批实例编号");
             match get_instance(transport, sleeper, tokens, &instance_code).await {
                 Ok(GetOutcome::Found(detail)) => *detail,
                 // 刚创建的实例查不到：判**可重试**，绝不写终态——否则刚建成的实例会被
@@ -908,7 +908,7 @@ async fn finish_backfill(
     };
     let value = serde_json::json!({"text": serial_number, "link": link});
     // ---- 6. 回写 ----
-    tracing::info!(stage = "backfill", instance_code = %detail.instance_code, serial_number = %serial_number, "开始回填审批编号");
+    tracing::debug!(stage = "backfill", instance_code = %detail.instance_code, serial_number = %serial_number, "开始回填审批编号");
     match backfill
         .write(input.record_id, input.backfill_field_name, &value)
         .await
@@ -916,7 +916,7 @@ async fn finish_backfill(
         Ok(()) => {
             // 编号已落库 = 主产物达成，`Backfilled` 结论已定；扩展字段是附带，
             // 写失败只 warn，**不改结论**（设计 §5.3）。
-            tracing::info!(stage = "backfill", instance_code = %detail.instance_code, serial_number = %serial_number, "审批编号回填成功");
+            tracing::debug!(stage = "backfill", instance_code = %detail.instance_code, serial_number = %serial_number, "审批编号回填成功");
             write_extended(backfill, input, &detail).await;
             DispatchResult::Backfilled {
                 serial_number,
@@ -1330,7 +1330,7 @@ pub(crate) async fn backfill_in_chunks(
     field_id: &str,
     rows: &[(String, Value)],
 ) -> BackfillReport {
-    tracing::info!(
+    tracing::debug!(
         stage = "backfill_batch",
         row_count = rows.len(),
         chunk_size = super::bitable::BACKFILL_CHUNK,
@@ -1340,7 +1340,7 @@ pub(crate) async fn backfill_in_chunks(
     for chunk in rows.chunks(super::bitable::BACKFILL_CHUNK) {
         write_chunk(backfill, field_id, chunk, &mut report).await;
     }
-    tracing::info!(
+    tracing::debug!(
         stage = "backfill_batch",
         written = report.written.len(),
         failed = report.failed.len(),

@@ -353,7 +353,7 @@ async fn run_round(
 ) {
     let started = std::time::Instant::now();
     tracing::Span::current().record("trigger", trigger);
-    tracing::info!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
+    tracing::debug!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
     match seed_tasks(runner).await {
         Ok(0) => {}
         Ok(seeded) => tracing::info!(seeded, "审批派发播种了新任务"),
@@ -378,7 +378,7 @@ async fn run_round(
     metrics::gauge!("feishu_approval_pending").set(claimed.len() as f64);
     if claimed.is_empty() {
         cursor.advance(&claimed);
-        tracing::info!(
+        tracing::debug!(
             stage = "claim",
             cursor_next = cursor.0,
             duration_ms = started.elapsed().as_millis() as u64,
@@ -386,7 +386,7 @@ async fn run_round(
         );
         return;
     }
-    tracing::info!(count = claimed.len(), "审批派发认领到任务");
+    tracing::debug!(count = claimed.len(), "审批派发认领到任务");
 
     let mut counts = [0usize; 4];
     let mut idled = false;
@@ -408,7 +408,7 @@ async fn run_round(
             idled = true;
             break;
         };
-        tracing::info!(stage = "rate_limit", task_id = task.id, config_id = task.config_id, record_id = %task.record_id, "审批任务等待创建名额");
+        tracing::debug!(stage = "rate_limit", task_id = task.id, config_id = task.config_id, record_id = %task.record_id, "审批任务等待创建名额");
         let slot_started = std::time::Instant::now();
         if let Err(failure) =
             acquire_create_slot(redis, &runner.deployment, runner.rate_per_minute).await
@@ -426,14 +426,14 @@ async fn run_round(
 
         let outcome = async {
             let task_started = std::time::Instant::now();
-            tracing::info!(
+            tracing::debug!(
                 stage = "rate_limit",
                 wait_ms = slot_started.elapsed().as_millis() as u64,
                 "审批任务取得创建名额，开始处理"
             );
             let processed = process_one(runner, task).await;
             record_outcome(runner, task, &processed).await;
-            tracing::info!(
+            tracing::debug!(
                 duration_ms = task_started.elapsed().as_millis() as u64,
                 "审批任务本轮处理结束"
             );
@@ -468,7 +468,7 @@ async fn run_round(
             "审批派发单轮超出预算；认领批或限速配置需要复核"
         );
     }
-    tracing::info!(
+    tracing::debug!(
         claimed = claimed.len(),
         backfilled = counts[0],
         waiting = counts[1],
@@ -543,7 +543,7 @@ async fn seed_tasks(runner: &RoundRunner) -> anyhow::Result<usize> {
         ])?
         .where_eq("enabled", serde_json::json!(true))?;
     let configs = all_pages(configs, SEED_MAX_CONFIG_PAGES).await?;
-    tracing::info!(
+    tracing::debug!(
         stage = "seed",
         config_count = configs.len(),
         "审批派发读取启用配置完成"
@@ -571,7 +571,7 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
     let table_id: String = config.require("table_id")?;
     let approval_code: String = config.require("approval_code")?;
     let backfill_field_id: String = config.require("backfill_field")?;
-    tracing::info!(stage = "seed", config_id, table_id = %table_id, backfill_field = %backfill_field_id, "审批派发开始扫描回填列为空的记录");
+    tracing::debug!(stage = "seed", config_id, table_id = %table_id, backfill_field = %backfill_field_id, "审批派发开始扫描回填列为空的记录");
 
     let coordinates = BitableCoordinates {
         app_token: base_token.clone(),
@@ -600,7 +600,7 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
     )
     .await
     .map_err(|failure| anyhow::anyhow!("筛选待处理记录失败：{}", failure.message))?;
-    tracing::info!(stage = "seed", config_id, table_id = %table_id, field_count = fields.len(), pending_records = pending_records.len(), "审批派发待处理记录扫描完成");
+    tracing::debug!(stage = "seed", config_id, table_id = %table_id, field_count = fields.len(), pending_records = pending_records.len(), "审批派发待处理记录扫描完成");
     if pending_records.is_empty() {
         return Ok(0);
     }
@@ -662,7 +662,7 @@ async fn seed_config(runner: &RoundRunner, config: &Record) -> anyhow::Result<us
             }
         }
     }
-    tracing::info!(
+    tracing::debug!(
         stage = "seed",
         config_id,
         seeded,
@@ -989,7 +989,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
         view_id: None,
     };
 
-    tracing::info!(stage = "fields", applicant_field = %task.applicant_field, backfill_field = %task.backfill_field, widget_count = task.widgets.len(), "审批任务开始读取多维表格结构");
+    tracing::debug!(stage = "fields", applicant_field = %task.applicant_field, backfill_field = %task.backfill_field, widget_count = task.widgets.len(), "审批任务开始读取多维表格结构");
 
     // 表结构要先拿：官方《批量获取记录》的 `fields` **按字段名**作键，而域里按
     // `field_id` 取值（配置存 id）。不重映射的话按 id 永远查不到，每条记录都判成
@@ -1012,7 +1012,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
         }
     };
 
-    tracing::info!(
+    tracing::debug!(
         stage = "record",
         field_count = fields.len(),
         "审批任务开始读取源记录"
@@ -1082,7 +1082,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
         }
     };
 
-    tracing::info!(
+    tracing::debug!(
         stage = "record",
         cell_count = cells.len(),
         "审批源记录字段映射完成"
@@ -1225,7 +1225,7 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
         DispatchResult::CreatedPendingBackfill { .. } => "created_pending_backfill",
         DispatchResult::Terminal { .. } => "terminal",
     };
-    tracing::info!(
+    tracing::debug!(
         stage = "persist",
         outcome = outcome_name,
         state,
@@ -1243,7 +1243,7 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
     if let Err(error) = result {
         tracing::warn!(error = %error, task_id = task.id, "写回审批任务状态失败");
     } else {
-        tracing::info!(stage = "persist", state, "审批任务状态写回成功");
+        tracing::debug!(stage = "persist", state, "审批任务状态写回成功");
     }
 
     // 指标：按结论分桶。`terminal` 与 `waiting` 分开是关键——前者要人动，

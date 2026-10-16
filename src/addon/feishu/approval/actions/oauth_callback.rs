@@ -157,7 +157,7 @@ pub(super) async fn handle(
         now,
     )
     .await?;
-    tracing::info!(
+    tracing::debug!(
         open_id = %open_id,
         name = name.as_deref().unwrap_or_default(),
         "飞书用户身份授权完成"

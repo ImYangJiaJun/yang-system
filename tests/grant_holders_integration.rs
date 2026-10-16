@@ -23,7 +23,7 @@ use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
 use yang_system::schema::sync_with_database;
 
-use common::{take_registration_code, RegistrationEmailToolsExt};
+use common::RegistrationEmailToolsExt;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 /// 被测权限：保留键（目录恒声明、可授予），且不是管理员等价权限（授予无需 Step-up）。
@@ -192,28 +192,11 @@ async fn register_and_login(
     peer_port: u16,
 ) -> anyhow::Result<(String, i64, String)> {
     let username = format!("holder_{suffix}");
-    let email = format!("{username}@example.test");
-    let registered = dispatch_with_query(
-        app,
-        "account.user",
-        "request_registration_email",
-        json!({ "email": email }),
-        &[],
-        peer_port,
-        &[],
-    )
-    .await?;
-    ensure!(
-        registered.code == 0,
-        "注册邮件请求必须成功: {}",
-        registered.message
-    );
-    let code = take_registration_code(&email)?;
     let registered = dispatch_with_query(
         app,
         "account.user",
         "register",
-        json!({ "username": username, "password": PASSWORD, "email": email, "email_code": code }),
+        json!({ "username": username, "password": PASSWORD }),
         &[],
         peer_port,
         &[],

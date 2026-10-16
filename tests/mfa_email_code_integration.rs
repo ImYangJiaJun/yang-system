@@ -21,13 +21,14 @@ use yang_base::tools::ToolsBuilder;
 use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
 use yang_system::addon::account::email_delivery::{
-    EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
-    VerificationCodeSender, VerificationCodeSenderHandle,
+    ChangeEmailCodeSenderHandle, EmailDeliveryError, RegistrationEmailSender,
+    RegistrationEmailSenderHandle, VerificationCodeSender, VerificationCodeSenderHandle,
 };
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::{
-    EmailVerificationSettings, MfaEmailVerificationConfig, SecuritySettings, TotpSettings,
+    ChangeEmailVerificationConfig, EmailVerificationSettings, MfaEmailVerificationConfig,
+    SecuritySettings, TotpSettings,
 };
 use yang_system::schema::sync_with_database;
 
@@ -43,14 +44,6 @@ struct CapturingEmailSender {
 }
 
 impl CapturingEmailSender {
-    fn take_registration_code(&self, email: &str) -> anyhow::Result<String> {
-        self.registration_codes
-            .lock()
-            .map_err(|_| anyhow::anyhow!("测试邮件缓冲区锁已损坏"))?
-            .remove(email)
-            .context("测试投递器未收到注册验证码")
-    }
-
     fn take_mfa_code(&self, email: &str) -> anyhow::Result<Option<String>> {
         self.mfa_codes
             .lock()
@@ -270,13 +263,20 @@ async fn build_mfa_app(
             )?)
             .extension(RegistrationEmailSenderHandle::new(sender.clone()))
             .extension(VerificationCodeSenderHandle::new(sender.clone()))
+            .extension(ChangeEmailCodeSenderHandle(
+                VerificationCodeSenderHandle::new(sender.clone()),
+            ))
             .config(
                 email_settings(namespace.clone(), "integration-registration-secret-32bytes")
                     .engine_config(),
             )
             .config(MfaEmailVerificationConfig(
-                email_settings(namespace, "integration-mfa-email-secret-32bytes")
+                email_settings(namespace.clone(), "integration-mfa-email-secret-32bytes")
                     .mfa_engine_config(),
+            ))
+            .config(ChangeEmailVerificationConfig(
+                email_settings(namespace, "integration-change-email-secret-32bytes")
+                    .change_engine_config(),
             ))
             .config(TotpSettings {
                 aead_key: TOTP_AEAD_KEY.to_string(),
@@ -288,7 +288,7 @@ async fn build_mfa_app(
     Ok(Arc::new(application.runtime))
 }
 
-/// 注册一个邮箱已验证的账号。
+/// 注册账号并绑定邮箱：注册只收用户名与密码，邮箱经改绑流程写入。
 async fn register_user(
     app: &BuiltApp,
     sender: &CapturingEmailSender,
@@ -296,30 +296,47 @@ async fn register_user(
     email: &str,
     peer_port: u16,
 ) -> anyhow::Result<()> {
-    let response = dispatch(
-        app,
-        "request_registration_email",
-        json!({ "email": email }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    ensure!(response.code == 0, "注册验证码请求返回业务失败");
-    let code = sender.take_registration_code(email)?;
     let registered = dispatch(
         app,
         "register",
-        json!({
-            "username": username,
-            "password": PASSWORD,
-            "email": email,
-            "email_code": code,
-        }),
+        json!({ "username": username, "password": PASSWORD }),
         &[],
         peer_port,
     )
     .await?;
     ensure!(registered.code == 0, "注册必须成功");
+
+    let logged_in = login(app, username, None, peer_port).await?;
+    ensure!(logged_in.code == 0, "注册后登录必须成功");
+    let token = access_token(&logged_in)?;
+    let authorization = format!("Bearer {token}");
+
+    let requested = dispatch(
+        app,
+        "request_change_email",
+        json!({ "new_email": email }),
+        &[("authorization", authorization.as_str())],
+        peer_port,
+    )
+    .await?;
+    ensure!(requested.code == 0, "改绑邮箱验证码请求返回业务失败");
+    // 改绑验证码与 MFA 验证码共用同一个 VerificationCodeSender 句柄，落在同一缓冲。
+    let code = sender
+        .take_mfa_code(email)?
+        .context("测试投递器未收到改绑验证码")?;
+
+    let changed = dispatch(
+        app,
+        "change_email",
+        json!({ "new_email": email, "email_code": code }),
+        &[("authorization", authorization.as_str())],
+        peer_port,
+    )
+    .await?;
+    ensure!(changed.code == 0, "邮箱绑定必须成功");
+    // 改绑会按秒粒度设撤销水位线（不晚于水位线的 Token 一律撤销），
+    // 跨过它再让调用方登录，避免同秒新 Token 被误撤。
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
     Ok(())
 }
 

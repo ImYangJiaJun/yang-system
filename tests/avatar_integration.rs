@@ -7,13 +7,11 @@
 //! `YANG_SYSTEM_TEST_REDIS_URL`（强制 DB 15）。
 
 use anyhow::{ensure, Context};
-use async_trait::async_trait;
 use base64::Engine;
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
@@ -21,49 +19,14 @@ use yang_base::token::TokenManager;
 use yang_base::tools::ToolsBuilder;
 use yang_base::BaseError;
 use yang_db::{Database, DatabaseConfig, RedisClient, RedisConfig};
-use yang_system::addon::account::email_delivery::{
-    EmailDeliveryError, RegistrationEmailSender, RegistrationEmailSenderHandle,
-};
 use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
-use yang_system::config::{EmailVerificationSettings, SecuritySettings};
+use yang_system::config::SecuritySettings;
 use yang_system::schema::sync_with_database;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 /// 解码后图片字节上限（与 src/addon/account/domain/avatar.rs 的 AVATAR_MAX_BYTES 对齐）。
 const AVATAR_MAX_BYTES: usize = 40 * 1024;
-
-/// 捕获注册验证码的测试投递器（注册链路需要真实发码）。
-#[derive(Clone, Default)]
-struct CapturingEmailSender {
-    codes: Arc<Mutex<BTreeMap<String, String>>>,
-}
-
-impl CapturingEmailSender {
-    fn take_code(&self, email: &str) -> anyhow::Result<String> {
-        self.codes
-            .lock()
-            .map_err(|_| anyhow::anyhow!("测试邮件缓冲区锁已损坏"))?
-            .remove(email)
-            .context("测试投递器未收到注册验证码")
-    }
-}
-
-#[async_trait]
-impl RegistrationEmailSender for CapturingEmailSender {
-    async fn send_registration_code(
-        &self,
-        recipient: &str,
-        code: &str,
-        _expires_in_seconds: u64,
-    ) -> Result<(), EmailDeliveryError> {
-        self.codes
-            .lock()
-            .map_err(|_| EmailDeliveryError::Unavailable)?
-            .insert(recipient.to_string(), code.to_string());
-        Ok(())
-    }
-}
 
 fn database_config() -> DatabaseConfig {
     DatabaseConfig::default()
@@ -90,20 +53,6 @@ fn security_settings() -> Arc<SecuritySettings> {
         trusted_proxy_cidrs: Vec::new(),
         totp: None,
     })
-}
-
-fn email_settings(namespace: String) -> EmailVerificationSettings {
-    EmailVerificationSettings {
-        namespace,
-        secret: "integration-email-verification-secret-32-bytes-minimum".to_string(),
-        ttl_seconds: 60,
-        resend_cooldown_seconds: 1,
-        max_attempts: 3,
-        send_window_seconds: 60,
-        send_ip_attempts: 1_000,
-        send_email_attempts: 100,
-        send_global_attempts: 10_000,
-    }
 }
 
 fn token_manager() -> TokenManager {
@@ -224,11 +173,10 @@ async fn dispatch(
     .await
 }
 
-/// 装配真实依赖的完整应用（注册验证码 + 声明式 Schema 同步出 user_avatar 表）。
+/// 装配真实依赖的完整应用（声明式 Schema 同步出 user_avatar 表）。
 async fn build_avatar_app(
     database: &Database,
     redis: &RedisClient,
-    sender: &CapturingEmailSender,
 ) -> anyhow::Result<Arc<BuiltApp>> {
     sync_with_database(
         connect_database().await?,
@@ -252,40 +200,24 @@ async fn build_avatar_app(
                 redis.clone(),
                 namespace.clone(),
             )?)
-            .extension(RegistrationEmailSenderHandle::new(sender.clone()))
-            .config(email_settings(namespace).engine_config())
             .build()?,
     );
     let application = build_app(tools, security_settings())?;
     Ok(Arc::new(application.runtime))
 }
 
-/// 注册一个邮箱已验证的账号并密码登录，返回（access token, 用户 ID）。
+/// 注册一个账号并密码登录，返回（access token, 用户 ID）。
 async fn register_and_login(
     app: &BuiltApp,
-    sender: &CapturingEmailSender,
     username: &str,
-    email: &str,
     peer_port: u16,
 ) -> anyhow::Result<(String, i64)> {
-    let response = dispatch(
-        app,
-        "request_registration_email",
-        json!({ "email": email }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    ensure!(response.code == 0, "注册验证码请求返回业务失败");
-    let code = sender.take_code(email)?;
     let registered = dispatch(
         app,
         "register",
         json!({
             "username": username,
             "password": PASSWORD,
-            "email": email,
-            "email_code": code,
         }),
         &[],
         peer_port,
@@ -427,16 +359,8 @@ async fn avatar_upload_me_projection_and_fetch_roundtrip() -> anyhow::Result<()>
     reset_redis(&redis).await?;
 
     let outcome = async {
-        let sender = CapturingEmailSender::default();
-        let app = build_avatar_app(&control, &redis, &sender).await?;
-        let (token, user_id) = register_and_login(
-            &app,
-            &sender,
-            "avatar_user",
-            "avatar.user@example.com",
-            45_001,
-        )
-        .await?;
+        let app = build_avatar_app(&control, &redis).await?;
+        let (token, user_id) = register_and_login(&app, "avatar_user", 45_001).await?;
 
         // 上传前：me 的 avatar_version 为 null，get_avatar 两个字段都为 null。
         let before = me(&app, &token, 45_001).await?;
@@ -524,11 +448,8 @@ async fn avatar_upload_rejects_invalid_inputs() -> anyhow::Result<()> {
     reset_redis(&redis).await?;
 
     let outcome = async {
-        let sender = CapturingEmailSender::default();
-        let app = build_avatar_app(&control, &redis, &sender).await?;
-        let (token, _user_id) =
-            register_and_login(&app, &sender, "avatar_guard", "avatar.guard@example.com", 45_101)
-                .await?;
+        let app = build_avatar_app(&control, &redis).await?;
+        let (token, _user_id) = register_and_login(&app, "avatar_guard", 45_101).await?;
 
         // 超过 40 KiB 解码上限。
         let oversized = vec![0_u8; AVATAR_MAX_BYTES + 1];
@@ -594,34 +515,14 @@ async fn delete_account_removes_avatar_row() -> anyhow::Result<()> {
     reset_redis(&redis).await?;
 
     let outcome = async {
-        let sender = CapturingEmailSender::default();
-        let app = build_avatar_app(&control, &redis, &sender).await?;
+        let app = build_avatar_app(&control, &redis).await?;
         // 首账号会被引导 claimer 变成系统管理员，而 spec §8.2 禁止删除最后一名
         // 启用的系统管理员（Task 13）。先消费掉那个名额，owner 才是可删除的普通账号。
-        let (bootstrap_token, _bootstrap_id) = register_and_login(
-            &app,
-            &sender,
-            "avatar_bootstrap",
-            "avatar.bootstrap@example.com",
-            45_201,
-        )
-        .await?;
-        let (owner_token, owner_id) = register_and_login(
-            &app,
-            &sender,
-            "avatar_owner",
-            "avatar.owner@example.com",
-            45_201,
-        )
-        .await?;
-        let (_observer_token, _observer_id) = register_and_login(
-            &app,
-            &sender,
-            "avatar_observer",
-            "avatar.observer@example.com",
-            45_201,
-        )
-        .await?;
+        let (bootstrap_token, _bootstrap_id) =
+            register_and_login(&app, "avatar_bootstrap", 45_201).await?;
+        let (owner_token, owner_id) = register_and_login(&app, "avatar_owner", 45_201).await?;
+        let (_observer_token, _observer_id) =
+            register_and_login(&app, "avatar_observer", 45_201).await?;
 
         // owner 上传头像。
         let uploaded = upload_avatar(
@@ -676,8 +577,7 @@ async fn get_avatar_requires_authentication() -> anyhow::Result<()> {
     reset_redis(&redis).await?;
 
     let outcome = async {
-        let sender = CapturingEmailSender::default();
-        let app = build_avatar_app(&control, &redis, &sender).await?;
+        let app = build_avatar_app(&control, &redis).await?;
         // 无 token 调用 get_avatar 必须 Unauthorized。
         match dispatch(&app, "get_avatar", json!({ "user_id": 1 }), &[], 45_301).await {
             Err(BaseError::Unauthorized(_)) => {}

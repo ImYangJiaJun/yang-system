@@ -200,7 +200,7 @@ async fn run_loop(
         }
         match processor.process_once().await {
             Ok(report) if report.claimed > 0 => {
-                tracing::info!(
+                tracing::debug!(
                     worker_id = %processor.worker_id,
                     claimed = report.claimed,
                     published = report.published,

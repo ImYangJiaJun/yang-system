@@ -80,7 +80,7 @@ pub(super) async fn handle(
     encrypt_key: Option<String>,
 ) -> Result<ResponseBody, BaseError> {
     let raw_body = &input.0;
-    tracing::info!(
+    tracing::debug!(
         body = %raw_body,
         body_size = raw_body.to_string().len(),
         "=== 飞书审批事件到达 ==="
@@ -94,7 +94,7 @@ pub(super) async fn handle(
     // 窗口），这是解密类故障唯一的自愈机会。
     let event_body = match raw_body.get("encrypt").and_then(Value::as_str) {
         Some(encrypted) => {
-            tracing::info!("检测到加密事件，开始解密");
+            tracing::debug!("检测到加密事件，开始解密");
             let Some(key_raw) = encrypt_key.as_deref() else {
                 tracing::error!("飞书发送了加密事件，但 event_encrypt_key 未配置");
                 return Err(BaseError::ConfigError(
@@ -105,7 +105,7 @@ pub(super) async fn handle(
             match crypto::decrypt_bytes(encrypted, &key) {
                 Ok(decrypted) => match serde_json::from_slice::<Value>(&decrypted) {
                     Ok(parsed) => {
-                        tracing::info!(
+                        tracing::debug!(
                             decrypted = %parsed,
                             decrypted_size = decrypted.len(),
                             "飞书事件解密成功"
@@ -133,7 +133,7 @@ pub(super) async fn handle(
             }
         }
         None => {
-            tracing::info!("明文事件，无需解密");
+            tracing::debug!("明文事件，无需解密");
             raw_body.clone()
         }
     };
@@ -148,7 +148,7 @@ pub(super) async fn handle(
                     "飞书事件 verification_token 不匹配，仍处理事件"
                 );
             } else {
-                tracing::info!("verification_token 校验通过");
+                tracing::debug!("verification_token 校验通过");
             }
         } else {
             tracing::warn!("事件中缺少 token 字段");
@@ -183,7 +183,7 @@ pub(super) async fn handle(
         })
         .unwrap_or_default();
 
-    tracing::info!(
+    tracing::debug!(
         event_id = %event_id,
         event_type = %event_type,
         instance_code = %instance_code,
@@ -211,7 +211,7 @@ pub(super) async fn handle(
     }
     record.insert("raw_payload", serde_json::json!(event_body.to_string()));
 
-    tracing::info!("开始插入事件落地表");
+    tracing::debug!("开始插入事件落地表");
 
     // 幂等插入：event_id 唯一索引，重复投递天然去重。
     //
@@ -228,7 +228,7 @@ pub(super) async fn handle(
     match result {
         Ok(_) => {
             FeishuContext::finish_transaction(transaction, Ok(())).await?;
-            tracing::info!(
+            tracing::debug!(
                 event_id = %event_id,
                 event_type = %event_type,
                 instance_code = %instance_code,

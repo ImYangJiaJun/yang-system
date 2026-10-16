@@ -79,7 +79,7 @@ pub(super) async fn handle(
     encrypt_key: Option<String>,
 ) -> Result<ResponseBody, BaseError> {
     let raw_body = &input.0;
-    tracing::info!(body = %raw_body, "飞书 challenge 请求到达");
+    tracing::debug!(body = %raw_body, "飞书 challenge 请求到达");
 
     // 解密或直接用明文
     let body = match raw_body.get("encrypt").and_then(Value::as_str) {
@@ -92,7 +92,7 @@ pub(super) async fn handle(
             match crypto::decrypt_bytes(encrypted, &key) {
                 Ok(decrypted) => match serde_json::from_slice::<Value>(&decrypted) {
                     Ok(parsed) => {
-                        tracing::info!(decrypted = %parsed, "飞书 challenge 解密成功");
+                        tracing::debug!(decrypted = %parsed, "飞书 challenge 解密成功");
                         parsed
                     }
                     Err(e) => {
@@ -118,7 +118,7 @@ pub(super) async fn handle(
 
     // 事件回调委托：飞书把 event_callback 推到了 challenge URL，转交事件接收处理。
     if r#type == "event_callback" {
-        tracing::info!("检测到 event_callback 类型，委托给事件接收处理");
+        tracing::debug!("检测到 event_callback 类型，委托给事件接收处理");
         return super::receive_approval_event::handle(
             ctx,
             super::receive_approval_event::EventRequest(body),

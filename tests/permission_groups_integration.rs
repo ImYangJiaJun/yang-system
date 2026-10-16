@@ -5,8 +5,6 @@
 //! 组名绝不进入 roles（spec §6.1）。单元测试只覆盖纯函数的合并语义，
 //! 「组事实 → Token claims」这条跨层链路只有在真实 MySQL/Redis 上才能验证。
 
-mod common;
-
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
 use serde_json::{json, Value};
@@ -24,8 +22,6 @@ use yang_system::app::build_app;
 use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
 use yang_system::schema::sync_with_database;
-
-use common::{take_registration_code, RegistrationEmailToolsExt};
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 const GROUP_READ_PERMISSION: &str = "access.grants.read";
@@ -226,22 +222,11 @@ async fn register_and_login(
     peer_port: u16,
 ) -> anyhow::Result<(String, i64)> {
     let username = format!("group_{suffix}");
-    let email = format!("{username}@example.test");
-    dispatch(
-        app,
-        "account.user",
-        "request_registration_email",
-        json!({ "email": email }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    let code = take_registration_code(&email)?;
     let registered = dispatch(
         app,
         "account.user",
         "register",
-        json!({ "username": username, "password": PASSWORD, "email": email, "email_code": code }),
+        json!({ "username": username, "password": PASSWORD }),
         &[],
         peer_port,
     )
@@ -423,7 +408,6 @@ async fn build_application(control: &Database, redis: &RedisClient) -> anyhow::R
                 database_config(),
             )?)
             .cache(redis.clone())
-            .with_registration_email(format!("email-{deployment}"))
             .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
             .token(token_manager())
             .build()?,
@@ -549,7 +533,6 @@ async fn system_admin_group_token_carries_the_whole_catalog() -> anyhow::Result<
 /// 2. **HTTP 状态码由测试侧按同一套分类重算**：框架的映射是传输层私有实现，
 ///    集成测试拿不到，只能覆盖本文件会遇到的类别（见 `http_status`）。
 mod harness {
-    use super::common::take_registration_code;
     use super::{
         build_application, connect_test_database, connect_test_redis, dispatch, dispatch_with_path,
         login, reset_database, reset_redis, PASSWORD, SYSTEM_ADMIN_GROUP_KEY,
@@ -594,22 +577,8 @@ mod harness {
             .unwrap_or_else(|error| panic!("装配测试应用失败: {error}"))
     }
 
-    /// 走真实注册路径创建账号（邮箱验证码 → 注册），返回新账号的用户 ID。
-    pub async fn register_with_code(
-        app: &BuiltApp,
-        username: &str,
-        email: &str,
-    ) -> anyhow::Result<i64> {
-        dispatch(
-            app,
-            "account.user",
-            "request_registration_email",
-            json!({ "email": email }),
-            &[],
-            PEER_PORT,
-        )
-        .await?;
-        let code = take_registration_code(email)?;
+    /// 走真实注册路径创建账号（用户名 + 密码），返回新账号的用户 ID。
+    pub async fn register_with_code(app: &BuiltApp, username: &str) -> anyhow::Result<i64> {
         let registered = dispatch(
             app,
             "account.user",
@@ -617,8 +586,6 @@ mod harness {
             json!({
                 "username": username,
                 "password": PASSWORD,
-                "email": email,
-                "email_code": code,
             }),
             &[],
             PEER_PORT,
@@ -636,7 +603,7 @@ mod harness {
     /// 让首账号经真实注册路径成为系统管理员，返回其管理员身份。
     pub async fn bootstrap_admin(app: &BuiltApp) -> Admin {
         let username = "admin";
-        let user_id = register_with_code(app, username, "admin@example.com")
+        let user_id = register_with_code(app, username)
             .await
             .unwrap_or_else(|error| panic!("引导管理员注册失败: {error}"));
         let token = login(app, username, PEER_PORT)
@@ -871,8 +838,7 @@ mod harness {
         username: &str,
         permission: &str,
     ) -> Admin {
-        let email = format!("{username}@example.com");
-        let user_id = register_with_code(app, username, &email)
+        let user_id = register_with_code(app, username)
             .await
             .unwrap_or_else(|error| panic!("注册 {username} 失败: {error}"));
         authed_dispatch(
@@ -961,8 +927,7 @@ mod harness {
     /// 入组会递增该账号的授权版本，因此令牌在入组**之后**签发——否则它一出生就是
     /// 过期的，用例会停在 401。
     pub async fn add_second_admin(app: &BuiltApp, first: &Admin, username: &str) -> Admin {
-        let email = format!("{username}@example.com");
-        let user_id = register_with_code(app, username, &email)
+        let user_id = register_with_code(app, username)
             .await
             .unwrap_or_else(|error| panic!("注册 {username} 失败: {error}"));
         let group_id = system_admin_group_id(app).await;
@@ -1830,7 +1795,7 @@ async fn deleting_a_group_with_members_is_rejected() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
     let group_id = harness::create_group(&app, &admin, "ops", "运维").await;
-    let user_id = harness::register_with_code(&app, "member1", "member1@example.com")
+    let user_id = harness::register_with_code(&app, "member1")
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     harness::add_member(&app, &admin, group_id, user_id).await;
@@ -1861,13 +1826,9 @@ async fn delete_races_add_member_without_orphans_or_500() {
 
     for round in 0..5 {
         let group_id = harness::create_group(&app, &admin, &format!("race{round}"), "竞态").await;
-        let user_id = harness::register_with_code(
-            &app,
-            &format!("racer{round}"),
-            &format!("racer{round}@example.com"),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
+        let user_id = harness::register_with_code(&app, &format!("racer{round}"))
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
 
         let (delete_result, add_result) = tokio::join!(
             harness::delete_group_status(&app, &admin, group_id),
@@ -1902,7 +1863,7 @@ async fn adding_a_group_permission_invalidates_every_member() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
     let group_id = harness::create_group(&app, &admin, "ops", "运维").await;
-    let member = harness::register_with_code(&app, "ops1", "ops1@example.com")
+    let member = harness::register_with_code(&app, "ops1")
         .await
         .unwrap_or_else(|e| panic!("{e}"));
     harness::add_member(&app, &admin, group_id, member).await;
@@ -1968,7 +1929,7 @@ async fn removing_a_group_permission_invalidates_members_and_is_idempotent() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
     let group_id = harness::create_group(&app, &admin, "ops", "运维").await;
-    let member = harness::register_with_code(&app, "ops2", "ops2@example.com")
+    let member = harness::register_with_code(&app, "ops2")
         .await
         .unwrap_or_else(|e| panic!("{e}"));
     harness::add_member(&app, &admin, group_id, member).await;
@@ -2618,7 +2579,7 @@ async fn adding_a_member_beyond_the_limit_is_rejected() {
         "夹具必须先把组填到恰好上限"
     );
 
-    let newcomer = harness::register_with_code(&app, "latecomer", "latecomer@example.com")
+    let newcomer = harness::register_with_code(&app, "latecomer")
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     let (status, message) = harness::add_member_outcome(&app, &admin, group_id, newcomer).await;
@@ -2667,7 +2628,7 @@ async fn concurrent_duplicate_adds_of_the_same_member_stay_idempotent() {
         let app = harness::build_test_app().await;
         let admin = harness::bootstrap_admin(&app).await;
         let group_id = harness::create_group(&app, &admin, "dup", "并发重复加成员").await;
-        let target = harness::register_with_code(&app, "dup_target", "dup_target@example.com")
+        let target = harness::register_with_code(&app, "dup_target")
             .await
             .unwrap_or_else(|error| panic!("{error}"));
 
@@ -2888,10 +2849,10 @@ async fn concurrent_adds_cannot_exceed_the_member_limit() {
             "第 {round} 轮夹具必须先把组填到只剩一个空位"
         );
 
-        let left = harness::register_with_code(&app, "limit_left", "limit_left@example.com")
+        let left = harness::register_with_code(&app, "limit_left")
             .await
             .unwrap_or_else(|error| panic!("{error}"));
-        let right = harness::register_with_code(&app, "limit_right", "limit_right@example.com")
+        let right = harness::register_with_code(&app, "limit_right")
             .await
             .unwrap_or_else(|error| panic!("{error}"));
         let left_operator =
@@ -2946,10 +2907,10 @@ async fn concurrent_adds_of_different_members_do_not_deadlock() {
             "第 {round} 轮夹具必须从成员集合为空的组出发，否则压不出旧缺陷"
         );
 
-        let left = harness::register_with_code(&app, "race_left", "race_left@example.com")
+        let left = harness::register_with_code(&app, "race_left")
             .await
             .unwrap_or_else(|error| panic!("{error}"));
-        let right = harness::register_with_code(&app, "race_right", "race_right@example.com")
+        let right = harness::register_with_code(&app, "race_right")
             .await
             .unwrap_or_else(|error| panic!("{error}"));
         // 操作者必须是两个**不同**账号：同一操作者会让两次请求的 users 行锁批相交、
@@ -2993,7 +2954,7 @@ async fn adding_an_existing_member_at_the_limit_stays_idempotent() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
     let group_id = harness::create_group(&app, &admin, "capped", "满员的组").await;
-    let target = harness::register_with_code(&app, "cap_target", "cap_target@example.com")
+    let target = harness::register_with_code(&app, "cap_target")
         .await
         .unwrap_or_else(|error| panic!("{error}"));
 
@@ -3250,7 +3211,7 @@ async fn concurrent_item_and_member_add_on_the_same_group_do_not_deadlock() {
         // 授权与入组都递增了授权版本，令牌必须在两者之后重签。
         let item_operator = harness::relogin(&app, &item_operator).await;
         let member_operator = harness::relogin(&app, &member_operator).await;
-        let newcomer = harness::register_with_code(&app, "fanout_new", "fanout_new@example.com")
+        let newcomer = harness::register_with_code(&app, "fanout_new")
             .await
             .unwrap_or_else(|error| panic!("{error}"));
 
@@ -3733,7 +3694,7 @@ async fn a_non_admin_cannot_add_members_to_the_system_admin_group() {
     harness::add_second_admin(&app, &first, "admin2").await;
     // 攻击者：只直授 `access.groups.write`，完全不在全权组内。
     let outsider = harness::grant_only(&app, &first, "outsider", "access.groups.write").await;
-    let target = harness::register_with_code(&app, "target", "target@example.com")
+    let target = harness::register_with_code(&app, "target")
         .await
         .unwrap_or_else(|error| panic!("注册加成员目标失败: {error}"));
     let group_id = harness::system_admin_group_id(&app).await;
@@ -3788,7 +3749,7 @@ async fn add_group_member_rejects_a_missing_group_with_404() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
     let group_id = harness::create_group(&app, &admin, "real", "真实组").await;
-    let member = harness::register_with_code(&app, "member", "member@example.com")
+    let member = harness::register_with_code(&app, "member")
         .await
         .unwrap_or_else(|error| panic!("注册目标用户失败: {error}"));
 
@@ -4078,7 +4039,7 @@ async fn list_user_grants_returns_the_direct_grants_of_the_target_user() {
     );
 
     // 反向对照：无任何直授的账号返回空数组（不是缺字段、更不是报错）。
-    let empty_user = harness::register_with_code(&app, "no_grants", "no_grants@example.com")
+    let empty_user = harness::register_with_code(&app, "no_grants")
         .await
         .unwrap_or_else(|error| panic!("注册零直授账号失败: {error}"));
     let response = harness::list_user_grants(&app, &admin, empty_user)
@@ -4141,7 +4102,7 @@ async fn a_user_without_the_required_permission_is_rejected_with_403() {
 
     // 写 Action 同一判据：持 access.groups.read 调需 access.grants.write 的
     // grant_permission——仍被权限中间件拒绝。
-    let target = harness::register_with_code(&app, "target", "target@example.com")
+    let target = harness::register_with_code(&app, "target")
         .await
         .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));
     let status =
@@ -4173,7 +4134,7 @@ async fn a_user_without_the_required_permission_is_rejected_with_403() {
 
     // 无 access.groups.read 的旁观者建组必须成功（建完即组所有者；管理权由所有者
     // 身份或全局写权限带来——create_group 的 register 注释「任何登录用户可建组」）。
-    let bystander_id = harness::register_with_code(&app, "bystander", "bystander@example.com")
+    let bystander_id = harness::register_with_code(&app, "bystander")
         .await
         .unwrap_or_else(|error| panic!("注册 bystander 失败: {error}"));
     let bystander = harness::Admin {
@@ -4237,10 +4198,10 @@ async fn a_user_without_the_required_permission_is_rejected_with_403() {
 async fn batch_grant_permissions_writes_every_item_and_repeats_idempotently() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    let alice = harness::register_with_code(&app, "alice", "alice@example.com")
+    let alice = harness::register_with_code(&app, "alice")
         .await
         .unwrap_or_else(|error| panic!("注册 alice 失败: {error}"));
-    let bob = harness::register_with_code(&app, "bob", "bob@example.com")
+    let bob = harness::register_with_code(&app, "bob")
         .await
         .unwrap_or_else(|error| panic!("注册 bob 失败: {error}"));
 
@@ -4359,7 +4320,7 @@ async fn batch_grant_permissions_writes_every_item_and_repeats_idempotently() {
 async fn batch_revoke_permissions_removes_rows_bumps_version_once_and_stales_old_tokens() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    let holder = harness::register_with_code(&app, "holder", "holder@example.com")
+    let holder = harness::register_with_code(&app, "holder")
         .await
         .unwrap_or_else(|error| panic!("注册 holder 失败: {error}"));
 
@@ -4490,7 +4451,7 @@ async fn a_batch_grant_containing_an_admin_equivalent_permission_is_rejected_who
     let admin = harness::bootstrap_admin(&app).await;
     // 攻击者：只直授 access.grants.write，完全不在全权组内（同单条闸门用例）。
     let outsider = harness::grant_only(&app, &admin, "outsider", "access.grants.write").await;
-    let target = harness::register_with_code(&app, "target", "target@example.com")
+    let target = harness::register_with_code(&app, "target")
         .await
         .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));
     let version_before = harness::authz_version_of(&app, target).await;
@@ -4559,7 +4520,7 @@ async fn a_batch_grant_containing_an_admin_equivalent_permission_is_rejected_who
 async fn an_expired_grant_disappears_from_refreshed_tokens_but_stays_for_audit() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    let holder = harness::register_with_code(&app, "holder", "holder@example.com")
+    let holder = harness::register_with_code(&app, "holder")
         .await
         .unwrap_or_else(|error| panic!("注册 holder 失败: {error}"));
 
@@ -4660,7 +4621,7 @@ async fn an_expired_grant_disappears_from_refreshed_tokens_but_stays_for_audit()
 async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    let holder = harness::register_with_code(&app, "holder_renew", "holder_renew@example.com")
+    let holder = harness::register_with_code(&app, "holder_renew")
         .await
         .unwrap_or_else(|error| panic!("注册 holder_renew 失败: {error}"));
 
@@ -4836,7 +4797,7 @@ async fn a_renewed_grant_resets_expiry_and_increments_version_once() {
 async fn batch_actions_over_the_item_limit_are_rejected_with_400() {
     let app = harness::build_test_app().await;
     let admin = harness::bootstrap_admin(&app).await;
-    let target = harness::register_with_code(&app, "target", "target@example.com")
+    let target = harness::register_with_code(&app, "target")
         .await
         .unwrap_or_else(|error| panic!("注册 target 失败: {error}"));
 

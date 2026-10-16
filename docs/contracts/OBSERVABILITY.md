@@ -51,11 +51,15 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 
 ### 审批派发诊断日志
 
-审批派发在 `INFO` 级别记录请求模式、配置匹配、Worker 唤醒、全队列扫描和播种、
-认领与限速、字段读取与映射、申请人/表单/外部选项/关联审批校验、附件搬运、实例
-创建或按 uuid 恢复、编号回填和本地状态写入。每轮汇总 `backfilled`、`waiting`、
-`retryable`、`terminal` 数量、是否中断、下一游标和耗时；`trigger=manual|poll`
-区分按钮唤醒与定时轮询。不带 `record_id` 的请求会唤醒所有启用配置的队列。
+**正常推进叙事在 `DEBUG` 级别，默认不输出**：请求模式、配置匹配、Worker 唤醒、
+全队列扫描和播种、认领与限速、字段读取与映射、申请人/表单/外部选项/关联审批校验、
+附件搬运、实例创建或按 uuid 恢复、编号回填和本地状态写入，以及每轮汇总的
+`backfilled`、`waiting`、`retryable`、`terminal` 数量、是否中断、下一游标和耗时
+（`trigger=manual|poll` 区分按钮唤醒与定时轮询）。**正常运行的 stdout 只留失败、
+等待、重试、跳过与降级**——轮询 worker 每 30 秒一轮，把每轮进度打在 `INFO` 会让
+正常运行时的日志被进度叙事淹没。排查时在 `logging.filter` 追加
+`yang_system::addon::feishu=debug,yang_system::infrastructure::feishu_approval_worker=debug`
+（或收窄到单个 target），查完恢复。不带 `record_id` 的请求会唤醒所有启用配置的队列。
 
 按 span 中的 `task_id`、`config_id`、`table_id`、`record_id`、`uuid` 关联处理过程，
 再看事件的 `stage`、控件 ID、字段 ID、失败类别和安全原因。`waiting` 和 `retryable`
@@ -63,6 +67,14 @@ JSON 的当前 `dispatch` span 固定携带 `module`、`action`、`request_id`�
 `last_error` 或派发记录中。实例创建成功与编号回填成功分别记录，避免把已创建但
 未回填误判为整条成功。HTTP 请求仍沿用框架的 `request_id`；后台轮次以任务 ID 和
 记录 ID 对照入口，不伪造继承已结束请求的关联标识。
+
+**同一口径适用于其余高频链路**：事件处理 worker 的每轮认领与逐事件步骤、出站拉取
+worker 的表级同步与轮末汇总、数据源字段同步、门户模糊联想的三条 `suggest:`、审批
+派发 HTTP 入口的「收到/处理结束/请求记录写入成功」、以及控制台 `create_config` 与
+OAuth 回调的成功行，全部在 `DEBUG`；它们的失败、跳过、等待与降级仍在
+`WARN`/`ERROR`。**启动与启停行保持 `INFO`**（`开始启动系统`、`数据库 schema 同步
+完成`、各 Worker 的 `已启动`/`已停止`）——每个进程生命周期只有一次，不构成噪声，
+关掉反而会让「服务到底起来没有」无从判断。
 
 出站重试和最终失败在 `WARN` 级别记录固定接口名、HTTP 状态、飞书业务码、尝试
 次数、退避时间、失败类别、已登记的错误码提示和耗时，成功调用细节为 `DEBUG`。

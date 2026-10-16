@@ -189,14 +189,14 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
     };
 
     if events.is_empty() {
-        tracing::info!(
+        tracing::debug!(
             duration_ms = started.elapsed().as_millis() as u64,
             "事件处理本轮没有待处理事件"
         );
         return;
     }
 
-    tracing::info!(count = events.len(), "事件处理认领到待处理事件");
+    tracing::debug!(count = events.len(), "事件处理认领到待处理事件");
     let mut processed = 0usize;
     let mut failed = 0usize;
     let mut terminal = 0usize;
@@ -230,7 +230,7 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         claimed = events.len(),
         processed,
         failed,
@@ -253,7 +253,7 @@ async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>>
         .select_fields(&["id", "instance_code", "retry_count"])?;
     let rows = query.all().await?;
 
-    tracing::info!(raw_row_count = rows.len(), "事件认领查询返回原始行数");
+    tracing::debug!(raw_row_count = rows.len(), "事件认领查询返回原始行数");
 
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
@@ -263,7 +263,7 @@ async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>>
             retry_count: row.optional("retry_count")?.unwrap_or(0i64),
         });
     }
-    tracing::info!(claimed = events.len(), "认领到未处理事件");
+    tracing::debug!(claimed = events.len(), "认领到未处理事件");
     Ok(events)
 }
 
@@ -288,7 +288,7 @@ async fn process_event(runner: &RoundRunner, event: &PendingEvent) -> EventOutco
 }
 
 async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> EventOutcome {
-    tracing::info!(
+    tracing::debug!(
         event_id = event.id,
         instance_code = %event.instance_code,
         retry_count = event.retry_count,
@@ -357,7 +357,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         }
     };
 
-    tracing::info!(
+    tracing::debug!(
         task_id,
         record_id = %record_id,
         config_id,
@@ -448,7 +448,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     let department_field = optional_nonempty(&config, "department_field");
     let handler_field = optional_nonempty(&config, "handler_field");
 
-    tracing::info!(
+    tracing::debug!(
         config_id,
         base_token = %base_token,
         table_id = %table_id,
@@ -473,7 +473,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     .await
     {
         Ok(GetOutcome::Found(detail)) => {
-            tracing::info!(
+            tracing::debug!(
                 instance_code = %event.instance_code,
                 status = ?detail.status,
                 start_time = ?detail.start_time,
@@ -573,12 +573,12 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     };
 
     // 6. 调 write_extended 回写多维表格
-    tracing::info!(
+    tracing::debug!(
         record_id = %record_id,
         "步骤 6: 调用 write_extended 回写多维表格"
     );
     write_extended(&backfill, &input, &detail).await;
-    tracing::info!("多维表格回写完成");
+    tracing::debug!("多维表格回写完成");
 
     // 7. 更新 task 行的 instance_status
     if let Some(status) = detail.status.as_deref() {
@@ -595,7 +595,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
                 if let Err(error) = query.update(row).await {
                     tracing::warn!(error = %error, task_id, "更新 task instance_status 失败");
                 } else {
-                    tracing::info!(task_id, status = %status, "task instance_status 更新成功");
+                    tracing::debug!(task_id, status = %status, "task instance_status 更新成功");
                 }
             }
             Err(error) => {
@@ -604,7 +604,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         event_id = event.id,
         instance_code = %event.instance_code,
         "=== 事件处理完成 ==="

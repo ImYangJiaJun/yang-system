@@ -479,7 +479,7 @@ pub(super) async fn handle(
     } else {
         "all"
     };
-    tracing::info!(stage = "request", mode, "收到审批派发请求");
+    tracing::debug!(stage = "request", mode, "收到审批派发请求");
     // 业务主体抽成内部函数、返回结构化结果而不是直接 return：每个出口
     // （含 `validate()` 失败——它也要落一条 failed 记录，且要落在还能拿到
     // `request_body` 的位置）都收敛成一条可落库的记录事实。落库用独立连接
@@ -529,7 +529,7 @@ pub(super) async fn handle(
         }
     }
     write_request_log(&context, &input, &outcome).await;
-    tracing::info!(
+    tracing::debug!(
         stage = "response",
         config_id = outcome.config_id,
         mode,
@@ -588,7 +588,7 @@ async fn handle_dispatch(
         Ok(verified) => verified,
         Err(outcome) => return Ok(outcome),
     };
-    tracing::info!(stage = "config", config_id, "审批派发已匹配启用配置");
+    tracing::debug!(stage = "config", config_id, "审批派发已匹配启用配置");
 
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
@@ -663,7 +663,7 @@ async fn handle_dispatch(
             if let Err(error) = handle.request_dispatch(config_id, resolved) {
                 return Ok(DispatchOutcome::internal(Some(config_id), error));
             }
-            tracing::info!(
+            tracing::debug!(
                 stage = "enqueue",
                 config_id,
                 scope = "all_enabled_configs",
@@ -785,7 +785,7 @@ async fn record_dispatch_task(
             Err(error) => Err(error),
         };
         match updated {
-            Ok(_) => tracing::info!(task_id = id, state, record_id, "派发结果已回写任务行"),
+            Ok(_) => tracing::debug!(task_id = id, state, record_id, "派发结果已回写任务行"),
             Err(error) => {
                 tracing::warn!(error = %error, task_id = id, "派发结果回写任务行失败");
             }
@@ -829,7 +829,7 @@ async fn record_dispatch_task(
     insert_row.insert("record_id", serde_json::json!(record_id));
     insert_row.insert("uuid", serde_json::json!(uuid));
     match context.approval_tasks().query().insert(insert_row).await {
-        Ok(_) => tracing::info!(record_id, state, "派发结果已建任务行"),
+        Ok(_) => tracing::debug!(record_id, state, "派发结果已建任务行"),
         Err(error) => {
             let text = error.to_string();
             if text.contains("Duplicate") || text.contains("1062") {
@@ -921,7 +921,7 @@ async fn write_request_log(
     {
         tracing::error!(error = %error, "审批派发请求记录写入失败");
     } else {
-        tracing::info!(
+        tracing::debug!(
             stage = "persist_request",
             config_id = outcome.config_id,
             outcome = outcome.outcome.as_str(),
@@ -1034,7 +1034,7 @@ async fn dispatch_single(
     record_id: &str,
     applicant: Option<String>,
 ) -> Result<DispatchOutcome, BaseError> {
-    tracing::info!(
+    tracing::debug!(
         stage = "config",
         config_id,
         record_id,
@@ -1154,8 +1154,8 @@ async fn dispatch_single(
     .await
     {
         Ok(fields) => {
-            tracing::info!(stage = "fields", config_id, applicant_field = %applicant_field, backfill_field = %backfill_field, widget_count = widgets.len(), "审批派发开始读取多维表格结构");
-            tracing::info!(
+            tracing::debug!(stage = "fields", config_id, applicant_field = %applicant_field, backfill_field = %backfill_field, widget_count = widgets.len(), "审批派发开始读取多维表格结构");
+            tracing::debug!(
                 stage = "record",
                 field_count = fields.len(),
                 "审批派发开始读取源记录"
@@ -1219,7 +1219,7 @@ async fn dispatch_single(
                         .filter(|id| !id.is_empty());
                     match bitable::rekey_cells_by_field_id(&fields, &record.fields) {
                         Ok(cells) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 stage = "record",
                                 cell_count = cells.len(),
                                 "审批派发源记录字段映射完成"

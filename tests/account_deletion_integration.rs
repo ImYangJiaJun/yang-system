@@ -24,7 +24,7 @@ use yang_system::authorization::AuthorizationVersionCache;
 use yang_system::config::SecuritySettings;
 use yang_system::schema::sync_with_database;
 
-use common::{take_registration_code, RegistrationEmailToolsExt};
+use common::RegistrationEmailToolsExt;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -187,22 +187,11 @@ async fn register_and_login(
     peer_port: u16,
 ) -> anyhow::Result<String> {
     let username = format!("delete_{suffix}");
-    let email = format!("{username}@example.test");
-    dispatch(
-        app,
-        "account.user",
-        "request_registration_email",
-        json!({ "email": email }),
-        &[],
-        peer_port,
-    )
-    .await?;
-    let code = take_registration_code(&email)?;
     let registered = dispatch(
         app,
         "account.user",
         "register",
-        json!({ "username": username, "password": PASSWORD, "email": email, "email_code": code }),
+        json!({ "username": username, "password": PASSWORD }),
         &[],
         peer_port,
     )

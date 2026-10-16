@@ -4,8 +4,8 @@
 //! 业务用例内联其中）；`domain/` 是 addon 层共享机制，Action 所需的全部
 //! 能力经模块上下文 [`Account`] 单一出口提供。
 
-pub(crate) mod domain;
 mod admin_users;
+pub(crate) mod domain;
 mod user;
 
 use crate::authorization::AuthorizationVersionValidator;

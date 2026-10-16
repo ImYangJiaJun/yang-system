@@ -358,7 +358,7 @@ async fn run_once(runner: &RoundRunner, only: Option<i64>) -> anyhow::Result<()>
             continue;
         }
         match pull_table(&deps, table).await {
-            Ok(outcome) => tracing::info!(
+            Ok(outcome) => tracing::debug!(
                 table_id = table.id,
                 fetched = outcome.fetched,
                 fields = outcome.fields,
@@ -381,7 +381,7 @@ async fn run_once(runner: &RoundRunner, only: Option<i64>) -> anyhow::Result<()>
     }
 
     if !selected.is_empty() {
-        tracing::info!(tables = selected.len(), failures, "飞书出站拉取一轮结束");
+        tracing::debug!(tables = selected.len(), failures, "飞书出站拉取一轮结束");
     }
     Ok(())
 }
