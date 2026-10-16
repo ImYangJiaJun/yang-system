@@ -649,6 +649,7 @@ pub(crate) async fn send_with_retry(
                 tracing::warn!(endpoint, method = ?request.method, http_status, business_code = code,
                     attempt, max_attempts = policy.max_attempts, ?kind,
                     hint = fatal_hint(code.unwrap_or_default()).unwrap_or_default(),
+                    response = %message,
                     duration_ms = started.elapsed().as_millis() as u64,
                     "飞书出站调用结束，失败交给上层处理");
                 metrics::counter!("feishu_outbound_request_total", "result" => "failed")
