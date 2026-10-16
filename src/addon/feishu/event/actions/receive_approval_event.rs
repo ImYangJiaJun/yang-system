@@ -80,11 +80,11 @@ pub(super) async fn handle(
     encrypt_key: Option<String>,
 ) -> Result<ResponseBody, BaseError> {
     let raw_body = &input.0;
-    tracing::debug!(
-        body = %raw_body,
+    tracing::info!(
         body_size = raw_body.to_string().len(),
         "=== 飞书审批事件到达 ==="
     );
+    tracing::debug!(body = %raw_body, "事件原始报文（成功时 DB raw_payload 已存一份）");
 
     // 解密或直接用明文。
     //
@@ -228,7 +228,7 @@ pub(super) async fn handle(
     match result {
         Ok(_) => {
             FeishuContext::finish_transaction(transaction, Ok(())).await?;
-            tracing::debug!(
+            tracing::info!(
                 event_id = %event_id,
                 event_type = %event_type,
                 instance_code = %instance_code,

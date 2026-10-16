@@ -361,7 +361,7 @@ impl Backfill for BitableBackfill<'_> {
         if cells.is_empty() {
             return Ok(());
         }
-        tracing::debug!(
+        tracing::info!(
             stage = "backfill",
             record_id,
             field_count = cells.len(),
@@ -1020,6 +1020,7 @@ pub(crate) async fn write_extended(
     }
 
     if fields.is_empty() {
+        tracing::info!(record_id = input.record_id, "扩展回填无可写字段，跳过本次回写");
         return;
     }
     // 一次写入；失败只 warn，绝不改调用方的结论（`finish_backfill` 已定 `Backfilled`）。

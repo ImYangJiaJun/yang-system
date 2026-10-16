@@ -196,7 +196,7 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
         return;
     }
 
-    tracing::debug!(count = events.len(), "事件处理认领到待处理事件");
+    tracing::info!(count = events.len(), "事件处理认领到待处理事件");
     let mut processed = 0usize;
     let mut failed = 0usize;
     let mut terminal = 0usize;
@@ -230,7 +230,7 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
         }
     }
 
-    tracing::debug!(
+    tracing::info!(
         claimed = events.len(),
         processed,
         failed,
@@ -578,7 +578,10 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         "步骤 6: 调用 write_extended 回写多维表格"
     );
     write_extended(&backfill, &input, &detail).await;
-    tracing::debug!("多维表格回写完成");
+    tracing::info!(
+        record_id = %record_id,
+        "多维表格回写完成"
+    );
 
     // 7. 更新 task 行的 instance_status
     if let Some(status) = detail.status.as_deref() {
@@ -595,7 +598,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
                 if let Err(error) = query.update(row).await {
                     tracing::warn!(error = %error, task_id, "更新 task instance_status 失败");
                 } else {
-                    tracing::debug!(task_id, status = %status, "task instance_status 更新成功");
+                    tracing::info!(task_id, status = %status, "task instance_status 更新成功");
                 }
             }
             Err(error) => {
