@@ -183,6 +183,18 @@ export function DatasourceTableWizard({
 
   const canSubmit = selected.length > 0 && sourceKeyErrors.length === 0;
 
+  /// 换表：**同时清空已勾选的字段**。
+  ///
+  /// `sourceKey` 是在**勾选那一刻**按当时的 `tableId` 派生的（见 `toggle`），而同一个
+  /// Base 的克隆表**共享 field_id**。不清空的话，「勾 A 表的字段 → 上一步 → 换到 B 表」
+  /// 时 `selected`（新表字段 ∩ 旧勾选键）会把旧勾选原样带过来，提交出去的是
+  /// `tblA_fldX` 这种带**旧表前缀**的标识——等以后真接入 A 表，它的默认值又撞上这一条，
+  /// 整批被「已被占用」拒掉，正是「同 Base 多表撞车」要消灭的形态。
+  function chooseTable(next: string) {
+    setTableId(next);
+    setConfigs({});
+  }
+
   function toggle(field: BitableField) {
     setConfigs((previous) => {
       if (previous[field.fieldId] !== undefined) {
@@ -216,7 +228,7 @@ export function DatasourceTableWizard({
       const token = parsed?.baseToken ?? rawToken;
       if (parsed && rawToken.includes("://")) {
         setAppToken(parsed.baseToken);
-        setTableId(parsed.tableId);
+        chooseTable(parsed.tableId);
         setViewId(parsed.viewId || WHOLE_TABLE_VIEW);
       }
       const loaded = await client.listTables(token);
@@ -360,7 +372,7 @@ export function DatasourceTableWizard({
             {tables.length > 0 ? (
               <div className="space-y-1.5">
                 <Label htmlFor={`${fieldId}-table`}>数据表</Label>
-                <Select value={tableId} onValueChange={setTableId}>
+                <Select value={tableId} onValueChange={chooseTable}>
                   <SelectTrigger id={`${fieldId}-table`} className="w-full">
                     <SelectValue placeholder="选择要接入的数据表" />
                   </SelectTrigger>

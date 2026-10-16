@@ -283,6 +283,40 @@ describe("配置向导 · 字段勾选与父列", () => {
   });
 });
 
+describe("配置向导 · 换表（克隆表共享 field_id）", () => {
+  it("换表后清空已勾选字段，不把旧表前缀的 source_key 带到新表", async () => {
+    // 同 Base 的克隆表 field_id 完全相同，而 source_key 是在**勾选那一刻**按当时的
+    // tableId 派生的。换表不清空的话，旧勾选会被新表的同 id 字段命中，提交出去的是
+    // tblA_ 前缀的标识——正是「同 Base 多表撞全局唯一索引」要消灭的形态。
+    const user = userEvent.setup();
+    const OTHER_TABLE = "tblCloneTable001";
+    const client = stubClient({
+      listTables: vi.fn().mockResolvedValue([
+        { tableId: TABLE_ID, name: "公司往来付款台账" },
+        { tableId: OTHER_TABLE, name: "克隆表" },
+      ]),
+      // 克隆表：字段 id 与源表逐一相同（这正是撞车的前提）。
+      listFields: vi.fn().mockResolvedValue(FIELDS),
+    });
+    await driveToFields(user, client);
+
+    await user.click(await screen.findByLabelText("费用类型/Fee Type*"));
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+
+    // 退回第 1 步换表，再走到勾字段这一步。
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+    await user.click(screen.getByRole("combobox", { name: "数据表" }));
+    await user.click(await screen.findByRole("option", { name: "克隆表" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    // 旧勾选必须已被清空：否则第 3 步的「下一步」会因 selected 非空而可点，
+    // 第 4 步就出现一条 tblauuoafa4acvt3_ 前缀、却属于克隆表的行。
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+  });
+});
+
 describe("配置向导 · 数据源名称", () => {
   it("名称是必填的，空名称不进第二步", async () => {
     const user = userEvent.setup();
