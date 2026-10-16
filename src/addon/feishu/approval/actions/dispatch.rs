@@ -44,6 +44,7 @@ use yang_base::BaseError;
 use crate::addon::feishu::approval::domain::request_log_writer::{
     normalized_requested_by, outcome_for, Outcome, RequestLog,
 };
+use crate::addon::feishu::approval::domain::task_applicant_table;
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
@@ -379,6 +380,17 @@ struct DispatchOutcome {
     /// 与 `dispatch_one` 内部的判定同源）。`complete_feedback` 在请求未显式
     /// 指定 `notification_recipient` 时用它兜底——「创建完成就通知触发人」的落点。
     applicant_open_id: Option<String>,
+    /// **仅来自请求参数**的发起人 open_id（不含表格申请人列的回退）。
+    ///
+    /// 与 [`Self::applicant_open_id`] 的分工：那个是「通知该发给谁」（传参优先、
+    /// 回退表格列），这个是「worker 看不到的那一半」——单条点击解析出的发起人只
+    /// 活在那一次同步派发里，worker 重试读的是表格列，于是报出与点击时不同的原因、
+    /// 通知退回记录创建人。`handle` 把它落进 `feishu_approval_task_applicant`
+    /// （与全表受理同一张表），重试路径才有点击时的那个人。
+    ///
+    /// 只落参数来源、不落表格列：表格列 worker 自己读得到，落下去反而会把列上的
+    /// 后续修正钉死。
+    requested_applicant_open_id: Option<String>,
     /// 通知的**最后兜底**接收人：记录创建人 open_id（`automatic_fields` 取回）。
     ///
     /// 申请人列空着时（waiting 的主因）它是唯一还能定位到的触发人——
@@ -406,6 +418,7 @@ impl DispatchOutcome {
             table_id: None,
             record_summary: None,
             applicant_open_id: None,
+            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Ok(ApiResponse::fail(code, message)),
@@ -425,6 +438,7 @@ impl DispatchOutcome {
             table_id: None,
             record_summary: None,
             applicant_open_id: None,
+            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Err(error),
@@ -457,6 +471,7 @@ impl DispatchOutcome {
             table_id,
             record_summary: None,
             applicant_open_id: None,
+            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: response(accepted, status, message, serial_number),
@@ -522,10 +537,22 @@ pub(super) async fn handle(
             outcome.base_token.as_deref(),
             outcome.table_id.as_deref(),
         ) {
-            record_dispatch_task(
+            let task_id = record_dispatch_task(
                 &context, config_id, base_token, table_id, record_id, &outcome,
             )
             .await;
+            // 点击时传入的发起人落进任务属性表：worker 重试/通知只有从这里才看得
+            // 到它（表格申请人列是另一条来源，空着正是 waiting 的主因）。落库失败
+            // 只降级日志——重试会退回表格列，与本次改动前同形。
+            if let (Some(task_id), Some(open_id)) =
+                (task_id, outcome.requested_applicant_open_id.as_deref())
+            {
+                if let Err(error) =
+                    task_applicant_table::upsert_task_applicant(&context, task_id, open_id).await
+                {
+                    tracing::warn!(error = %error, task_id, "点击发起人落库失败");
+                }
+            }
         }
     }
     write_request_log(&context, &input, &outcome).await;
@@ -718,6 +745,9 @@ async fn handle_dispatch(
 /// 含配置/表名定位）——比 worker 的简短原因长，但排查信息更全，与请求记录同源。
 ///
 /// 写失败只 `warn`，绝不改变派发结果（与 [`write_request_log`] 同纪律）。
+///
+/// 返回任务行 id（写成功后按 `record_id` 查回）——调用方拿它把**点击时传入的
+/// 发起人**落进 `feishu_approval_task_applicant`，worker 重试才看得到那个人。
 async fn record_dispatch_task(
     context: &FeishuContext,
     config_id: i64,
@@ -725,10 +755,8 @@ async fn record_dispatch_task(
     table_id: &str,
     record_id: &str,
     outcome: &DispatchOutcome,
-) {
-    let Some((state, reason)) = task_state(outcome) else {
-        return;
-    };
+) -> Option<i64> {
+    let (state, reason) = task_state(outcome)?;
 
     let mut row = Record::new();
     row.insert("state", serde_json::json!(state));
@@ -756,12 +784,12 @@ async fn record_dispatch_task(
             Ok(row) => row,
             Err(error) => {
                 tracing::warn!(error = %error, record_id, "派发结果回写：查询任务行失败");
-                return;
+                return None;
             }
         },
         Err(error) => {
             tracing::warn!(error = %error, record_id, "派发结果回写：构造查询失败");
-            return;
+            return None;
         }
     };
     if let Some(existing_row) = existing {
@@ -769,7 +797,7 @@ async fn record_dispatch_task(
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(error = %error, record_id, "派发结果回写：任务行缺 id");
-                return;
+                return None;
             }
         };
         let updated = match context
@@ -786,79 +814,117 @@ async fn record_dispatch_task(
                 tracing::warn!(error = %error, task_id = id, "派发结果回写任务行失败");
             }
         }
-        return;
-    }
-
-    // 行不存在（记录在 worker 首扫前被派发）：insert。
-    // uuid 与派发路径**同源**派生（seed 同款）：60012 对账与事件订阅都靠它。
-    let approval_code: String = match context
-        .approval_configs()
-        .query()
-        .select_fields(&["approval_code"])
-        .and_then(|query| query.where_primary_key_eq(serde_json::json!(config_id)))
-    {
-        Ok(query) => match query.optional().await {
-            Ok(Some(config)) => match config.require("approval_code") {
-                Ok(code) => code,
+    } else {
+        // 行不存在（记录在 worker 首扫前被派发）：insert。
+        // uuid 与派发路径**同源**派生（seed 同款）：60012 对账与事件订阅都靠它。
+        let approval_code: String = match context
+            .approval_configs()
+            .query()
+            .select_fields(&["approval_code"])
+            .and_then(|query| query.where_primary_key_eq(serde_json::json!(config_id)))
+        {
+            Ok(query) => match query.optional().await {
+                Ok(Some(config)) => match config.require("approval_code") {
+                    Ok(code) => code,
+                    Err(error) => {
+                        tracing::warn!(error = %error, config_id, "派发结果回写：配置缺 approval_code");
+                        return None;
+                    }
+                },
+                Ok(None) => {
+                    tracing::warn!(config_id, "派发结果回写：配置不存在");
+                    return None;
+                }
                 Err(error) => {
-                    tracing::warn!(error = %error, config_id, "派发结果回写：配置缺 approval_code");
-                    return;
+                    tracing::warn!(error = %error, config_id, "派发结果回写：读配置失败");
+                    return None;
                 }
             },
-            Ok(None) => {
-                tracing::warn!(config_id, "派发结果回写：配置不存在");
-                return;
-            }
             Err(error) => {
-                tracing::warn!(error = %error, config_id, "派发结果回写：读配置失败");
-                return;
+                tracing::warn!(error = %error, config_id, "派发结果回写：构造配置查询失败");
+                return None;
+            }
+        };
+        let uuid = derive_uuid(base_token, table_id, &approval_code, record_id);
+        let mut insert_row = row.clone();
+        insert_row.insert("config_id", serde_json::json!(config_id));
+        insert_row.insert("record_id", serde_json::json!(record_id));
+        insert_row.insert("uuid", serde_json::json!(uuid));
+        match context.approval_tasks().query().insert(insert_row).await {
+            Ok(_) => tracing::debug!(record_id, state, "派发结果已建任务行"),
+            Err(error) => {
+                let text = error.to_string();
+                if text.contains("Duplicate") || text.contains("1062") {
+                    // 并发竞态：查询与插入之间 seed 建了行 → 转为按 record_id update。
+                    let raced = match context
+                        .approval_tasks()
+                        .query()
+                        .where_eq("record_id", serde_json::json!(record_id))
+                    {
+                        Ok(query) => query.update(row).await,
+                        Err(error) => Err(error),
+                    };
+                    match raced {
+                        Ok(_) => {
+                            tracing::info!(
+                                record_id,
+                                state,
+                                "派发结果已回写任务行（并发建行后转 update）"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                record_id,
+                                "派发结果回写任务行失败（竞态转 update 亦失败）"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(error = %error, record_id, "派发结果建任务行失败");
+                }
+            }
+        }
+    }
+
+    // 任务行 id：调用方要拿它落点击发起人（`feishu_approval_task_applicant`）。
+    // 回写走 update / insert / 竞态转 update 三条路，统一在这里查一次，免得每条路
+    // 各带一份 id（record_id 有唯一索引，这次查询是索引命中）。
+    task_id_by_record_id(context, record_id).await
+}
+
+/// 按 `record_id` 取任务行 id。取不到只返回 `None`——调用方因此少落一次发起人，
+/// 不该影响回写结果。
+///
+/// 失败**必须留痕**：静默的后果是「发起人再也落不进去」只表现为 worker 重试又报
+/// 「缺少申请人」，排查时看不到任何新日志（与相邻几条失败路径同口径）。
+async fn task_id_by_record_id(context: &FeishuContext, record_id: &str) -> Option<i64> {
+    let built = context
+        .approval_tasks()
+        .query()
+        .select_fields(&["id"])
+        .and_then(|query| query.where_eq("record_id", serde_json::json!(record_id)));
+    let row = match built {
+        Ok(query) => match query.optional().await {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(error = %error, record_id, "点击发起人落库：查任务行失败");
+                return None;
             }
         },
         Err(error) => {
-            tracing::warn!(error = %error, config_id, "派发结果回写：构造配置查询失败");
-            return;
+            tracing::warn!(error = %error, record_id, "点击发起人落库：构造任务行查询失败");
+            return None;
         }
     };
-    let uuid = derive_uuid(base_token, table_id, &approval_code, record_id);
-    let mut insert_row = row.clone();
-    insert_row.insert("config_id", serde_json::json!(config_id));
-    insert_row.insert("record_id", serde_json::json!(record_id));
-    insert_row.insert("uuid", serde_json::json!(uuid));
-    match context.approval_tasks().query().insert(insert_row).await {
-        Ok(_) => tracing::debug!(record_id, state, "派发结果已建任务行"),
-        Err(error) => {
-            let text = error.to_string();
-            if text.contains("Duplicate") || text.contains("1062") {
-                // 并发竞态：查询与插入之间 seed 建了行 → 转为按 record_id update。
-                let raced = match context
-                    .approval_tasks()
-                    .query()
-                    .where_eq("record_id", serde_json::json!(record_id))
-                {
-                    Ok(query) => query.update(row).await,
-                    Err(error) => Err(error),
-                };
-                match raced {
-                    Ok(_) => {
-                        tracing::info!(
-                            record_id,
-                            state,
-                            "派发结果已回写任务行（并发建行后转 update）"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            record_id,
-                            "派发结果回写任务行失败（竞态转 update 亦失败）"
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(error = %error, record_id, "派发结果建任务行失败");
-            }
-        }
+    let id = row.and_then(|row| row.require("id").ok());
+    if id.is_none() {
+        tracing::warn!(
+            record_id,
+            "点击发起人落库：回写后查不到任务行，发起人不会落库"
+        );
     }
+    id
 }
 
 /// 把一次派发请求落成一条请求记录（独立连接自动提交）。
@@ -1266,11 +1332,15 @@ async fn dispatch_single(
     // 两处必须同源，否则会出现「派发用了 A 的 open_id、通知却发给 B」）。
     // 在 cells / resolved_applicant 还在手的这里算好，随 outcome 带到
     // complete_feedback——请求未显式指定 notification_recipient 时用它兜底。
-    let notify_open_id = resolved_applicant
+    // 参数来源的那一份单独留出来：`notify_open_id` 里可能掺了表格列的回退值，
+    // 而落库只该落 worker 读不到的那一半（见 `requested_applicant_open_id` 文档）。
+    let requested_applicant_open_id = resolved_applicant
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .map(str::to_string);
+    let notify_open_id = requested_applicant_open_id
+        .clone()
         .or_else(|| applicant_open_id(&cells, &applicant_field));
 
     let result = dispatch_one(
@@ -1346,6 +1416,7 @@ async fn dispatch_single(
     outcome.instance_code = instance_code;
     outcome.record_summary = record_summary;
     outcome.applicant_open_id = notify_open_id;
+    outcome.requested_applicant_open_id = requested_applicant_open_id;
     outcome.creator_open_id = creator_open_id;
     Ok(outcome)
 }
