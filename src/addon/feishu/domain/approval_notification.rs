@@ -93,6 +93,23 @@ impl NotificationResult {
             uuid: None,
         }
     }
+    /// 本层**刻意**不发，但**不是**「无人可发」：中间态（waiting / retryable /
+    /// created_pending_backfill）与全表受理的结论由 worker 轮询通知。
+    ///
+    /// 与 [`Self::not_requested`] 分开的原因：请求里传了发起人、发起人也解析成功时，
+    /// 仍可能走到这里（`fallback_recipient_of` 的状态门只放终态），那时回「未指定
+    /// 接收人」是与事实相反的结论——2026-10-16 真机：`applicant=杨佳俊` 解析成功、
+    /// 结论是 waiting，响应里却写着「未指定接收人」。
+    pub(crate) fn deferred_to_worker() -> Self {
+        Self {
+            status: NotificationStatus::NotRequested,
+            message:
+                "本轮结论由后台轮询发送通知（中间态结论在变化时发；全表受理逐条发），本层未发。"
+                    .into(),
+            message_id: None,
+            uuid: None,
+        }
+    }
     pub(crate) fn skipped() -> Self {
         Self {
             status: NotificationStatus::Skipped,

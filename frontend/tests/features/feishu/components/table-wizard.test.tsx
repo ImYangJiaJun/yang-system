@@ -192,7 +192,7 @@ describe("配置向导 · 字段勾选与父列", () => {
     ).toBeInTheDocument();
   });
 
-  it("source_key 默认按 field_id 派生，且直接可用（形状合法）", async () => {
+  it("source_key 默认按「表 ID + field_id」派生，且直接可用（形状合法）", async () => {
     const user = userEvent.setup();
     const client = stubClient();
     await driveToFields(user, client);
@@ -201,9 +201,10 @@ describe("配置向导 · 字段勾选与父列", () => {
     await user.click(screen.getByRole("button", { name: "下一步" }));
 
     const sourceKey = await screen.findByLabelText("源标识");
-    // field_id 带大写，派生值必须落到合法形状里（大写会被后端拒）
-    expect(sourceKey).toHaveValue("fldeblar7x");
-    expect(SOURCE_KEY_PATTERN.test("fldeblar7x")).toBe(true);
+    // field_id 带大写，派生值必须落到合法形状里（大写会被后端拒）。
+    // 表 ID 必须在里面：同一个 Base 的多张表共用同一批 field_id，不带表就撞全局唯一索引。
+    expect(sourceKey).toHaveValue("tblauuoafa4acvt3_fldeblar7x");
+    expect(SOURCE_KEY_PATTERN.test("tblauuoafa4acvt3_fldeblar7x")).toBe(true);
   });
 
   it("提交的父指针是 field_id，不是 source_key", async () => {
@@ -236,14 +237,14 @@ describe("配置向导 · 字段勾选与父列", () => {
         fieldId: "fldTyg5VBz",
         fieldName: "费用大类/Main Exp Cat*",
         type: 3,
-        sourceKey: "fldtyg5vbz",
+        sourceKey: "tblauuoafa4acvt3_fldtyg5vbz",
         parentFieldId: null,
       },
       {
         fieldId: "fldEblAr7X",
         fieldName: "费用类型/Fee Type*",
         type: 3,
-        sourceKey: "fldeblar7x",
+        sourceKey: "tblauuoafa4acvt3_fldeblar7x",
         parentFieldId: "fldTyg5VBz",
       },
     ]);
@@ -276,7 +277,7 @@ describe("配置向导 · 字段勾选与父列", () => {
 
     // 形状修好但撞上另一行的标识：同样拦住（那是全局唯一索引，创建时必炸）
     await user.clear(inputs[1]);
-    await user.type(inputs[1], "fldtyg5vbz");
+    await user.type(inputs[1], "tblauuoafa4acvt3_fldtyg5vbz");
     expect(screen.getByRole("alert")).toHaveTextContent(/重复/);
     expect(screen.getByRole("button", { name: "创建数据源" })).toBeDisabled();
   });

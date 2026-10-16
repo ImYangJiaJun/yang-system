@@ -48,6 +48,7 @@ use yang_base::table::{Record, SortOrder};
 use yang_base::tools::Tools;
 use yang_base::BaseError;
 
+use crate::addon::feishu::approval::domain::task_applicant_table::upsert_task_applicant;
 use crate::addon::feishu::domain::approval::instance_applink;
 use crate::addon::feishu::domain::approval_convert::{FixedOffset, WidgetMap};
 use crate::addon::feishu::domain::approval_dispatch::{
@@ -715,43 +716,10 @@ async fn persist_applicant(runner: &RoundRunner, config_id: i64, open_id: &str) 
                 continue;
             }
         };
-        if let Err(error) = upsert_applicant(runner, task_id, open_id).await {
+        if let Err(error) = upsert_task_applicant(&runner.context, task_id, open_id).await {
             tracing::warn!(error = %error, task_id, "受理发起人落库失败");
         }
     }
-}
-
-/// 按 task_id upsert 一行受理发起人：已有则更新 `open_id`，没有则插入。
-async fn upsert_applicant(runner: &RoundRunner, task_id: i64, open_id: &str) -> anyhow::Result<()> {
-    let existing = runner
-        .context
-        .approval_task_applicants()
-        .query()
-        .where_eq("task_id", serde_json::json!(task_id))?
-        .optional()
-        .await?;
-    if existing.is_some() {
-        let mut row = Record::new();
-        row.insert("open_id", serde_json::json!(open_id));
-        runner
-            .context
-            .approval_task_applicants()
-            .query()
-            .where_eq("task_id", serde_json::json!(task_id))?
-            .update(row)
-            .await?;
-    } else {
-        let mut row = Record::new();
-        row.insert("task_id", serde_json::json!(task_id));
-        row.insert("open_id", serde_json::json!(open_id));
-        runner
-            .context
-            .approval_task_applicants()
-            .query()
-            .insert(row)
-            .await?;
-    }
-    Ok(())
 }
 
 /// 认领待处理任务。

@@ -732,14 +732,19 @@ export function parseLinkageMapping(
 /// （后端会拒，且它是全局唯一索引）。
 export const SOURCE_KEY_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 
-/// `field_id` → 默认 `source_key`。
+/// `table_id` + `field_id` → 默认 `source_key`。
 ///
 /// **默认值必须直接可用**：运维不改这一栏也能过。所以派生只做两件确定性的事——
 /// 小写化、把 `[^a-z0-9_]` 换成下划线——再保证首字符是字母。
 /// 不做「拼上字段名」那种聪明事：字段名可以改名，而 `source_key` 创建后不可改。
-export function sourceKeyFromFieldId(fieldId: string): string {
-  return fieldId
-    .trim()
+///
+/// **为什么必须带上 `table_id`**：`field_id` 只在**单张表**内唯一。实测
+/// `ZoCWb82JQaCCiAspCqbcUvlsnwg` 这个 Base 的 17 张表共享同一批 30 个 `field_id`
+/// （复制出来的表沿用原表 ID），而 `source_key` 在库上是**全局唯一**索引——
+/// 只用 `field_id` 派生，同一个 Base 的第二张表勾同样的列会整批撞
+/// 「数据源标识已被占用」。
+export function sourceKeyFromFieldId(tableId: string, fieldId: string): string {
+  return `${tableId.trim()}_${fieldId.trim()}`
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, "_")
     .replace(/^(?![a-z])/, "f_")

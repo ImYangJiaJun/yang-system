@@ -44,6 +44,7 @@ use yang_base::BaseError;
 use crate::addon::feishu::approval::domain::request_log_writer::{
     normalized_requested_by, outcome_for, Outcome, RequestLog,
 };
+use crate::addon::feishu::approval::domain::task_applicant_table;
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
@@ -379,6 +380,17 @@ struct DispatchOutcome {
     /// 与 `dispatch_one` 内部的判定同源）。`complete_feedback` 在请求未显式
     /// 指定 `notification_recipient` 时用它兜底——「创建完成就通知触发人」的落点。
     applicant_open_id: Option<String>,
+    /// **仅来自请求参数**的发起人 open_id（不含表格申请人列的回退）。
+    ///
+    /// 与 [`Self::applicant_open_id`] 的分工：那个是「通知该发给谁」（传参优先、
+    /// 回退表格列），这个是「worker 看不到的那一半」——单条点击解析出的发起人只
+    /// 活在那一次同步派发里，worker 重试读的是表格列，于是报出与点击时不同的原因、
+    /// 通知退回记录创建人。`handle` 把它落进 `feishu_approval_task_applicant`
+    /// （与全表受理同一张表），重试路径才有点击时的那个人。
+    ///
+    /// 只落参数来源、不落表格列：表格列 worker 自己读得到，落下去反而会把列上的
+    /// 后续修正钉死。
+    requested_applicant_open_id: Option<String>,
     /// 通知的**最后兜底**接收人：记录创建人 open_id（`automatic_fields` 取回）。
     ///
     /// 申请人列空着时（waiting 的主因）它是唯一还能定位到的触发人——
@@ -406,6 +418,7 @@ impl DispatchOutcome {
             table_id: None,
             record_summary: None,
             applicant_open_id: None,
+            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Ok(ApiResponse::fail(code, message)),
@@ -425,6 +438,7 @@ impl DispatchOutcome {
             table_id: None,
             record_summary: None,
             applicant_open_id: None,
+            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: Err(error),
@@ -457,6 +471,7 @@ impl DispatchOutcome {
             table_id,
             record_summary: None,
             applicant_open_id: None,
+            requested_applicant_open_id: None,
             creator_open_id: None,
             notification: serde_json::json!({"status":"not_requested"}),
             response: response(accepted, status, message, serial_number),
@@ -522,10 +537,22 @@ pub(super) async fn handle(
             outcome.base_token.as_deref(),
             outcome.table_id.as_deref(),
         ) {
-            record_dispatch_task(
+            let task_id = record_dispatch_task(
                 &context, config_id, base_token, table_id, record_id, &outcome,
             )
             .await;
+            // 点击时传入的发起人落进任务属性表：worker 重试/通知只有从这里才看得
+            // 到它（表格申请人列是另一条来源，空着正是 waiting 的主因）。落库失败
+            // 只降级日志——重试会退回表格列，与本次改动前同形。
+            if let (Some(task_id), Some(open_id)) =
+                (task_id, outcome.requested_applicant_open_id.as_deref())
+            {
+                if let Err(error) =
+                    task_applicant_table::upsert_task_applicant(&context, task_id, open_id).await
+                {
+                    tracing::warn!(error = %error, task_id, "点击发起人落库失败");
+                }
+            }
         }
     }
     write_request_log(&context, &input, &outcome).await;
@@ -718,6 +745,9 @@ async fn handle_dispatch(
 /// 含配置/表名定位）——比 worker 的简短原因长，但排查信息更全，与请求记录同源。
 ///
 /// 写失败只 `warn`，绝不改变派发结果（与 [`write_request_log`] 同纪律）。
+///
+/// 返回任务行 id（写成功后按 `record_id` 查回）——调用方拿它把**点击时传入的
+/// 发起人**落进 `feishu_approval_task_applicant`，worker 重试才看得到那个人。
 async fn record_dispatch_task(
     context: &FeishuContext,
     config_id: i64,
@@ -725,10 +755,8 @@ async fn record_dispatch_task(
     table_id: &str,
     record_id: &str,
     outcome: &DispatchOutcome,
-) {
-    let Some((state, reason)) = task_state(outcome) else {
-        return;
-    };
+) -> Option<i64> {
+    let (state, reason) = task_state(outcome)?;
 
     let mut row = Record::new();
     row.insert("state", serde_json::json!(state));
@@ -756,12 +784,12 @@ async fn record_dispatch_task(
             Ok(row) => row,
             Err(error) => {
                 tracing::warn!(error = %error, record_id, "派发结果回写：查询任务行失败");
-                return;
+                return None;
             }
         },
         Err(error) => {
             tracing::warn!(error = %error, record_id, "派发结果回写：构造查询失败");
-            return;
+            return None;
         }
     };
     if let Some(existing_row) = existing {
@@ -769,7 +797,7 @@ async fn record_dispatch_task(
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(error = %error, record_id, "派发结果回写：任务行缺 id");
-                return;
+                return None;
             }
         };
         let updated = match context
@@ -786,79 +814,117 @@ async fn record_dispatch_task(
                 tracing::warn!(error = %error, task_id = id, "派发结果回写任务行失败");
             }
         }
-        return;
-    }
-
-    // 行不存在（记录在 worker 首扫前被派发）：insert。
-    // uuid 与派发路径**同源**派生（seed 同款）：60012 对账与事件订阅都靠它。
-    let approval_code: String = match context
-        .approval_configs()
-        .query()
-        .select_fields(&["approval_code"])
-        .and_then(|query| query.where_primary_key_eq(serde_json::json!(config_id)))
-    {
-        Ok(query) => match query.optional().await {
-            Ok(Some(config)) => match config.require("approval_code") {
-                Ok(code) => code,
+    } else {
+        // 行不存在（记录在 worker 首扫前被派发）：insert。
+        // uuid 与派发路径**同源**派生（seed 同款）：60012 对账与事件订阅都靠它。
+        let approval_code: String = match context
+            .approval_configs()
+            .query()
+            .select_fields(&["approval_code"])
+            .and_then(|query| query.where_primary_key_eq(serde_json::json!(config_id)))
+        {
+            Ok(query) => match query.optional().await {
+                Ok(Some(config)) => match config.require("approval_code") {
+                    Ok(code) => code,
+                    Err(error) => {
+                        tracing::warn!(error = %error, config_id, "派发结果回写：配置缺 approval_code");
+                        return None;
+                    }
+                },
+                Ok(None) => {
+                    tracing::warn!(config_id, "派发结果回写：配置不存在");
+                    return None;
+                }
                 Err(error) => {
-                    tracing::warn!(error = %error, config_id, "派发结果回写：配置缺 approval_code");
-                    return;
+                    tracing::warn!(error = %error, config_id, "派发结果回写：读配置失败");
+                    return None;
                 }
             },
-            Ok(None) => {
-                tracing::warn!(config_id, "派发结果回写：配置不存在");
-                return;
-            }
             Err(error) => {
-                tracing::warn!(error = %error, config_id, "派发结果回写：读配置失败");
-                return;
+                tracing::warn!(error = %error, config_id, "派发结果回写：构造配置查询失败");
+                return None;
+            }
+        };
+        let uuid = derive_uuid(base_token, table_id, &approval_code, record_id);
+        let mut insert_row = row.clone();
+        insert_row.insert("config_id", serde_json::json!(config_id));
+        insert_row.insert("record_id", serde_json::json!(record_id));
+        insert_row.insert("uuid", serde_json::json!(uuid));
+        match context.approval_tasks().query().insert(insert_row).await {
+            Ok(_) => tracing::debug!(record_id, state, "派发结果已建任务行"),
+            Err(error) => {
+                let text = error.to_string();
+                if text.contains("Duplicate") || text.contains("1062") {
+                    // 并发竞态：查询与插入之间 seed 建了行 → 转为按 record_id update。
+                    let raced = match context
+                        .approval_tasks()
+                        .query()
+                        .where_eq("record_id", serde_json::json!(record_id))
+                    {
+                        Ok(query) => query.update(row).await,
+                        Err(error) => Err(error),
+                    };
+                    match raced {
+                        Ok(_) => {
+                            tracing::info!(
+                                record_id,
+                                state,
+                                "派发结果已回写任务行（并发建行后转 update）"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                record_id,
+                                "派发结果回写任务行失败（竞态转 update 亦失败）"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(error = %error, record_id, "派发结果建任务行失败");
+                }
+            }
+        }
+    }
+
+    // 任务行 id：调用方要拿它落点击发起人（`feishu_approval_task_applicant`）。
+    // 回写走 update / insert / 竞态转 update 三条路，统一在这里查一次，免得每条路
+    // 各带一份 id（record_id 有唯一索引，这次查询是索引命中）。
+    task_id_by_record_id(context, record_id).await
+}
+
+/// 按 `record_id` 取任务行 id。取不到只返回 `None`——调用方因此少落一次发起人，
+/// 不该影响回写结果。
+///
+/// 失败**必须留痕**：静默的后果是「发起人再也落不进去」只表现为 worker 重试又报
+/// 「缺少申请人」，排查时看不到任何新日志（与相邻几条失败路径同口径）。
+async fn task_id_by_record_id(context: &FeishuContext, record_id: &str) -> Option<i64> {
+    let built = context
+        .approval_tasks()
+        .query()
+        .select_fields(&["id"])
+        .and_then(|query| query.where_eq("record_id", serde_json::json!(record_id)));
+    let row = match built {
+        Ok(query) => match query.optional().await {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(error = %error, record_id, "点击发起人落库：查任务行失败");
+                return None;
             }
         },
         Err(error) => {
-            tracing::warn!(error = %error, config_id, "派发结果回写：构造配置查询失败");
-            return;
+            tracing::warn!(error = %error, record_id, "点击发起人落库：构造任务行查询失败");
+            return None;
         }
     };
-    let uuid = derive_uuid(base_token, table_id, &approval_code, record_id);
-    let mut insert_row = row.clone();
-    insert_row.insert("config_id", serde_json::json!(config_id));
-    insert_row.insert("record_id", serde_json::json!(record_id));
-    insert_row.insert("uuid", serde_json::json!(uuid));
-    match context.approval_tasks().query().insert(insert_row).await {
-        Ok(_) => tracing::debug!(record_id, state, "派发结果已建任务行"),
-        Err(error) => {
-            let text = error.to_string();
-            if text.contains("Duplicate") || text.contains("1062") {
-                // 并发竞态：查询与插入之间 seed 建了行 → 转为按 record_id update。
-                let raced = match context
-                    .approval_tasks()
-                    .query()
-                    .where_eq("record_id", serde_json::json!(record_id))
-                {
-                    Ok(query) => query.update(row).await,
-                    Err(error) => Err(error),
-                };
-                match raced {
-                    Ok(_) => {
-                        tracing::info!(
-                            record_id,
-                            state,
-                            "派发结果已回写任务行（并发建行后转 update）"
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            record_id,
-                            "派发结果回写任务行失败（竞态转 update 亦失败）"
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(error = %error, record_id, "派发结果建任务行失败");
-            }
-        }
+    let id = row.and_then(|row| row.require("id").ok());
+    if id.is_none() {
+        tracing::warn!(
+            record_id,
+            "点击发起人落库：回写后查不到任务行，发起人不会落库"
+        );
     }
+    id
 }
 
 /// 把一次派发请求落成一条请求记录（独立连接自动提交）。
@@ -1266,11 +1332,15 @@ async fn dispatch_single(
     // 两处必须同源，否则会出现「派发用了 A 的 open_id、通知却发给 B」）。
     // 在 cells / resolved_applicant 还在手的这里算好，随 outcome 带到
     // complete_feedback——请求未显式指定 notification_recipient 时用它兜底。
-    let notify_open_id = resolved_applicant
+    // 参数来源的那一份单独留出来：`notify_open_id` 里可能掺了表格列的回退值，
+    // 而落库只该落 worker 读不到的那一半（见 `requested_applicant_open_id` 文档）。
+    let requested_applicant_open_id = resolved_applicant
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .map(str::to_string);
+    let notify_open_id = requested_applicant_open_id
+        .clone()
         .or_else(|| applicant_open_id(&cells, &applicant_field));
 
     let result = dispatch_one(
@@ -1346,6 +1416,7 @@ async fn dispatch_single(
     outcome.instance_code = instance_code;
     outcome.record_summary = record_summary;
     outcome.applicant_open_id = notify_open_id;
+    outcome.requested_applicant_open_id = requested_applicant_open_id;
     outcome.creator_open_id = creator_open_id;
     Ok(outcome)
 }
@@ -1403,6 +1474,35 @@ fn fallback_recipient_of(outcome: &DispatchOutcome) -> Option<NotificationRecipi
                 receive_id: open_id.to_string(),
             }),
         _ => None,
+    }
+}
+
+/// 本轮没发通知，是不是「交给 worker」而不是「无人可发」。
+///
+/// 判据就是 [`fallback_recipient_of`] 的状态门：被它挡下的那几档，worker 会接手
+/// （worker 对**所有**结论都通知，按「结论是否变化」去重）。所以「没有接收人」与
+/// 「中间态不在本层发」是两件事，响应文案与日志必须分开说——否则请求里传了发起人
+/// 的人会读到一句与事实相反的话。
+///
+/// `Accepted`（全表受理）也在这里：它只是「已入队」，结果由 worker 逐条通知。
+fn deferred_notification(outcome: &DispatchOutcome) -> bool {
+    matches!(
+        outcome.status,
+        FeedbackStatus::Waiting
+            | FeedbackStatus::Retryable
+            | FeedbackStatus::CreatedPendingBackfill
+            | FeedbackStatus::Accepted
+    )
+}
+
+/// 无显式接收人时选哪种「未发」结论文案：中间态/受理 → 交给 worker 的措辞，
+/// 终态 → 「未指定接收人」。抽成纯函数是为了让**接线**本身可测——只钉谓词和
+/// 构造器，把 `None => not_requested()` 改回来测试依然全绿，这层接线就没人守。
+fn notification_for_missing_recipient(outcome: &DispatchOutcome) -> NotificationResult {
+    if deferred_notification(outcome) {
+        NotificationResult::deferred_to_worker()
+    } else {
+        NotificationResult::not_requested()
     }
 }
 
@@ -1503,8 +1603,12 @@ async fn complete_feedback(
         .notification_recipient
         .clone()
         .or_else(|| fallback_recipient_of(outcome));
+    // 「本层不发」有两种原因，必须分开报（见 [`deferred_notification`]）：
+    // 真取不到接收人 vs 中间态/受理刻意交给 worker。合并成一句「未指定接收人」
+    // 会把后者说成前者——请求里传了发起人、发起人也解析成功时，那句话是假的。
+    let deferred = deferred_notification(outcome);
     let notification = match &recipient {
-        None => NotificationResult::not_requested(),
+        None => notification_for_missing_recipient(outcome),
         Some(_) if config.is_none() => NotificationResult::skipped(),
         Some(recipient) => match context.settings().filter(|settings| settings.can_pull()) {
             Some(settings) => match outbound_setup::build(ctx, settings) {
@@ -1551,9 +1655,13 @@ async fn complete_feedback(
             message_id = ?notification.message_id,
             "HTTP 派发通知：IM 消息发送成功"
         ),
+        NotificationStatus::NotRequested if deferred => tracing::info!(
+            config_id,
+            "HTTP 派发通知：本轮为中间态/受理结论，通知由 Worker 轮询发送，本层跳过"
+        ),
         NotificationStatus::NotRequested => tracing::info!(
             config_id,
-            "HTTP 派发通知：无接收人（未指定 notification_recipient 且无申请人兜底），跳过通知"
+            "HTTP 派发通知：无接收人（未指定 notification_recipient 且申请人/记录创建人均不可用），跳过通知"
         ),
         _ => tracing::warn!(
             config_id,
@@ -1762,6 +1870,83 @@ mod tests {
                 "{status:?} 不该在 HTTP 层兜底"
             );
         }
+    }
+
+    /// 「本层没发」的两种原因分开报：中间态/受理是**刻意交给 worker**，不是
+    /// 「无人可发」。这一条钉住分界线——请求里传了发起人时，waiting 结论的
+    /// 响应文案必须说「由后台通知」，不能说「未指定接收人」。
+    #[test]
+    fn deferred_notification_distinguishes_delegated_from_unresolvable() {
+        let interim = |status: FeedbackStatus| {
+            let mut outcome = DispatchOutcome::fail(0, Some(7), "中间态");
+            outcome.status = status;
+            outcome.applicant_open_id = Some("ou_applicant".into());
+            outcome.creator_open_id = Some("ou_creator".into());
+            outcome
+        };
+        for status in [
+            FeedbackStatus::Waiting,
+            FeedbackStatus::Retryable,
+            FeedbackStatus::CreatedPendingBackfill,
+            FeedbackStatus::Accepted,
+        ] {
+            assert!(
+                deferred_notification(&interim(status)),
+                "{status:?} 应判为交给 worker"
+            );
+        }
+        for status in [FeedbackStatus::Succeeded, FeedbackStatus::Failed] {
+            assert!(
+                !deferred_notification(&interim(status)),
+                "{status:?} 终态不在本层发时应判为真·无接收人"
+            );
+        }
+    }
+
+    /// 钉住**接线**：无接收人时选哪个 NotificationResult 由结论状态决定。
+    /// 把 `notification_for_missing_recipient` 改成恒返回一个构造器，这条会红。
+    #[test]
+    fn missing_recipient_choice_is_pinned_by_outcome_status() {
+        let mut waiting = DispatchOutcome::fail(0, Some(7), "中间态");
+        waiting.status = FeedbackStatus::Waiting;
+        waiting.applicant_open_id = Some("ou_applicant".into());
+        let value = serde_json::to_value(notification_for_missing_recipient(&waiting))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("后台"),
+            "waiting + 有申请人必须回「交给后台」，不能回「未指定接收人」"
+        );
+
+        let mut failed = DispatchOutcome::fail(1, Some(7), "失败");
+        failed.status = FeedbackStatus::Failed;
+        failed.applicant_open_id = None;
+        failed.creator_open_id = None;
+        let value = serde_json::to_value(notification_for_missing_recipient(&failed))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("未指定接收人"),
+            "终态 + 真无接收人必须回「未指定接收人」"
+        );
+    }
+
+    #[test]
+    fn deferred_to_worker_message_is_not_the_no_recipient_lie() {
+        let result = crate::addon::feishu::domain::approval_notification::NotificationResult::deferred_to_worker();
+        // 序列化后的状态必须**不是** `sent`：worker 的去重（`http_path_notified`）
+        // 只看这一位，写成 sent 会让真正该由 worker 发的那条被跳过。
+        let value = serde_json::to_value(&result).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(value["status"], serde_json::json!("not_requested"));
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("后台"),
+            "文案必须说明由后台通知，而不是「未指定接收人」: {message}"
+        );
     }
 
     /// 终态写 `terminal` 还是 `unnotified`，只看通知到底有没有发出去。
@@ -2483,8 +2668,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "需要真实 MySQL 测试库"]
-    async fn real_mysql_resolves_detail_options_and_waits_on_ambiguous_labels() -> anyhow::Result<()>
-    {
+    async fn real_mysql_resolves_detail_options_and_picks_first_on_duplicate_labels(
+    ) -> anyhow::Result<()> {
         use crate::addon::feishu::domain::approval_convert::WidgetMap;
         use crate::addon::feishu::domain::approval_dispatch::DispatchInput;
         use crate::addon::feishu::domain::approval_provision::resolve_external_options;
@@ -2576,7 +2761,10 @@ mod tests {
                 serde_json::from_value(fields["data"]["items"].clone())?;
             for label in ["正确", "重名", "不存在"] {
                 cells.insert("fldCompany".into(), json!(label));
-                let transport = ReplayTransport::new(if label == "正确" { vec![
+                // 「重名」是三条同文案的启用选项（dup1/dup2/dup3），现在不再阻塞，
+                // 取排序最前的一条（sort_order 并列 → option_id 升序 → dup1）。
+                let dispatchable = label == "正确" || label == "重名";
+                let transport = ReplayTransport::new(if dispatchable { vec![
                     (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL"}))),
                     (200, e2e_ok_body(json!({"instance_code":"INST-MANUAL","serial_number":"MANUAL-001","status":"PENDING"}))),
                     (200, e2e_ok_body(json!({}))),
@@ -2585,12 +2773,13 @@ mod tests {
                 let backfill = BitableBackfill { transport: &transport, sleeper: &NoSleep, tokens: &tokens, coordinates: &coordinates, fields: &fields };
                 let input = DispatchInput { fields: &fields, context: Some(&context), coordinates: &coordinates, record_id: E2E_RECORD_ID, cells: &cells, applicant_field: "fldApplicant", applicant: None, backfill_field_name: "审批编号", status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None, approval_code: E2E_APPROVAL_CODE, form_snapshot: plan.form_snapshot.clone(), widgets: &widgets, timezone_offset: FixedOffset::from_iana("Asia/Shanghai")? };
                 let result = dispatch_one(&transport, &NoSleep, &tokens, &backfill, &input).await;
-                if label == "正确" {
+                if dispatchable {
                     assert_eq!(result, DispatchResult::Backfilled { serial_number: "MANUAL-001".into(), instance_code: "INST-MANUAL".into() });
                     let create = transport.took("Post", &crate::addon::feishu::domain::approval::create_instance_url());
                     let body = create.body.ok_or_else(|| anyhow::anyhow!("缺少提单请求体"))?;
                     let sent: Value = serde_json::from_str(body["form"].as_str().ok_or_else(|| anyhow::anyhow!("缺少表单"))?)?;
-                    assert_eq!(sent[0]["value"][0][0]["value"], json!(format!("{source}_good")));
+                    let expected = if label == "正确" { format!("{source}_good") } else { format!("{source}_dup1") };
+                    assert_eq!(sent[0]["value"][0][0]["value"], json!(expected), "同名重复必须取排序最前的那条");
                 } else {
                     assert!(matches!(result, DispatchResult::Waiting { .. }), "{result:?}");
                     assert!(transport.seen().is_empty(), "等待态不得创建或回填");

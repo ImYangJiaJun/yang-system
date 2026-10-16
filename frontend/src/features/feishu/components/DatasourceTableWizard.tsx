@@ -80,7 +80,8 @@ const NO_PARENT = "__none__";
 const WHOLE_TABLE_VIEW = "__whole_table__";
 
 const SOURCE_KEY_HELP =
-  "进接口 URL 路径段，全局唯一、创建后不可修改。默认按字段 ID 派生，直接可用。";
+  "进接口 URL 路径段，全局唯一、创建后不可修改。默认按「表 ID + 字段 ID」派生，直接可用" +
+  "——同一个 Base 里的多张表会共用同一批字段 ID，标识里不带表就会互相撞。";
 
 const SOURCE_KEY_ERROR =
   "标识形状不对：必须是小写字母开头的 [a-z0-9_]（小写字母开头，只含小写字母、数字与下划线），最长 64 字节。";
@@ -199,7 +200,7 @@ export function DatasourceTableWizard({
       return {
         ...previous,
         [field.fieldId]: {
-          sourceKey: sourceKeyFromFieldId(field.fieldId),
+          sourceKey: sourceKeyFromFieldId(tableId, field.fieldId),
           parentFieldId: null,
         },
       };

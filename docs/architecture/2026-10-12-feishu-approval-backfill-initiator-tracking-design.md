@@ -242,6 +242,16 @@ applicant: Option<String>,
 - worker `process_one` 取发起人优先级：`task.applicant_open_id` → 表格列（D2 回退）→ `Waiting`。
 - 单条同步路径不经过任务行，`DispatchInput.applicant` 直接进 `OrchestrationInput`（`approval_dispatch.rs:87` 加字段）。
 
+**2026-10-16 更正最后一条**：单条同步路径**也落**这张表。原判断「直接透传不需要落列」只对那一次同步派发成立——`record_dispatch_task` 把 waiting 结果写回任务行（状态 `pending`），worker 会兜底重试同一条记录，而那条重试读的是表格申请人列。真机后果：请求里 `applicant=杨佳俊` 解析成功，worker 却报「缺少申请人或人员字段中没有有效 ID」，且通知退回「记录创建人」兜底——用户明明传了发起人，收到的消息在说没有。现在 Action 在回写任务行后，把**请求参数来源**的发起人 upsert 进 `feishu_approval_task_applicant`（与全表受理共用 `upsert_task_applicant`）。**表格列来源不落**：worker 自己读得到，落了反而会把列上的后续修正钉死。
+
+已知窗口：任务行先写、发起人后写，两者之间若被 worker 认领，那一轮仍按表格列处理——下一轮即修正（间隔一个扫描周期）。要消掉它得让任务行的可见性与发起人写入原子化，代价大于收益。
+
+**顺带记一条扩散**（不是新引入，只是现在更容易发生）：持久化之后，worker 的重试走的就是**传参路径**，而传参路径成功时会把 open_id 写回多维表格的申请人列（§6.4）。也就是说，点击人的 open_id 会被写进表格——与 HTTP 点击自己成功时同一条路径、同一行为，不算回归，但「落这张表」的副作用不止「通知发给谁」。
+
+**已知缺口（登记，未修）**：这张表现在有**两个写入方**（`persist_applicant` 按「config + pending」批量写、单条点击按 task_id 写），而 `task_id` 只有普通索引、没有唯一索引。顺序执行时后写者覆盖先写者（可接受：全表点击的语义就是「以我身份处理这批」）；真并发下两边都 SELECT 到无行、都 INSERT，会留下两行，而读取侧 `optional()` 没有 ORDER BY——取哪行由 DB 决定，发起人身份因此不确定。窗口很窄（两次相邻 DB 写 vs 30 秒轮询）且派发结论下一轮自愈，但**发起人身份不会自愈**。正解是给 `task_id` 加唯一索引 + 撞 1062 转 update（与 `record_dispatch_task` 对 `record_id` 的做法同形），但那要 ALTER 已有表，得先确认存量重复行怎么处理——留作单独决定。
+
+另外记一句实现漂移：本节写的「`feishu_approval_task` 新增列 `applicant_open_id`」在实现中改成了**独立表** `feishu_approval_task_applicant`（理由见 `task_applicant_table.rs` 模块注释：那张表是认领队列，本表是解析结果存放点，写入方与生命周期不同）。
+
 ### 6.4 写回发起人列
 
 传参路径创建成功（`finish_backfill` 的 `Backfilled` 分支）后，把 `[{"id": applicant}]` 写入 `applicant_field` 目标列：

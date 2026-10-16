@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-use yang_base::table::Record;
+use yang_base::table::{Record, SortOrder};
 use yang_base::BaseError;
 use yang_db::Transaction;
 
@@ -901,16 +901,38 @@ pub(crate) async fn resolve_external_options(
                 .where_eq("source_key", serde_json::json!(source))?
                 .where_eq("enabled", serde_json::json!(true))?
                 .where_eq("label", serde_json::json!(label))?
+                // 同文案多选项时取排序最前：先按数据源自己的 `sort_order`，
+                // `option_id` 兜底决胜（与出站点 `approval_options.rs` 同序，
+                // 复合索引 idx_feishu_option_pick 正好覆盖，无 filesort）。
+                .order_by("sort_order", SortOrder::Asc)?
+                .order_by("option_id", SortOrder::Asc)?
                 .page(1, 2)?
                 .all()
                 .await
                 .map_err(|e| ProvisionError::Store(e.to_string()))?;
-            let option_id = match unique_option(&rows, source, &label) {
-                Ok(id) => id,
+            let option_id = match pick_option(&rows, source, &label) {
+                Ok(id) => {
+                    // 同名重复不再阻塞，但这是数据质量问题：排进日志提醒清理。
+                    // 展示与用户填的都是文案，任一 option_id 渲染出的文本相同，
+                    // 取排序最前不改变任何可见结果。查询只取 2 行抽样，所以日志
+                    // 只报「多条」不报具体条数（page(1,2) 截断后的数会低估）。
+                    if rows.len() > 1 {
+                        tracing::warn!(
+                            stage = "external_options",
+                            widget_id = %widget.widget_id,
+                            bitable_field = %widget.bitable_field,
+                            source_key = source,
+                            label = %label,
+                            option_id = %id,
+                            "外部选项文案命中多条启用选项，取排序最前（建议清理同名重复）"
+                        );
+                    }
+                    id
+                }
                 Err(ProvisionError::Invalid(_)) => {
                     tracing::info!(stage = "external_options", widget_id = %widget.widget_id,
                     bitable_field = %widget.bitable_field, source_key = source,
-                    match_count = rows.len(), reason = "当前文案没有唯一且完全匹配的启用选项",
+                    reason = "当前文案没有匹配的启用选项",
                     "审批外部选项匹配失败");
                     let source_name = option_source_name(context, source).await;
                     return Err(ProvisionError::Invalid(vec![option_match_feedback(
@@ -979,18 +1001,31 @@ fn option_match_feedback(
     label: &str,
 ) -> String {
     use super::approval_feedback::{field_name, one_line, widget_name};
-    format!("审批控件：{}\n来源字段：{}\n选项来源：{}\n当前值：{}\n原因：没有唯一且完全匹配的启用选项\n处理：检查选项是否启用、文案是否完全一致，清理同名重复项。\n技术定位：控件={}；字段={}；source_key={}",
+    format!("审批控件：{}\n来源字段：{}\n选项来源：{}\n当前值：{}\n原因：没有匹配的启用选项\n处理：检查选项是否启用、文案是否完全一致。\n技术定位：控件={}；字段={}；source_key={}",
         widget_name(form, &widget.widget_id), field_name(fields, &widget.bitable_field), one_line(source_name, 200),
         one_line(label, 160), one_line(&widget.widget_id, 100), one_line(&widget.bitable_field, 100), one_line(source, 100))
 }
 
-fn unique_option(rows: &[Record], source: &str, label: &str) -> Result<String, ProvisionError> {
-    if rows.len() != 1 || rows[0].require::<String>("label")? != label {
+/// 从「完全匹配的启用选项」里确定性挑一个。
+///
+/// 2026-10-16 决策：同名重复不再阻塞。控件展示与用户看到的就是**文案**，option_id
+/// 只是背后载体——同一个文案配多条启用选项时，任一 id 渲染出的文本都相同，取
+/// 排序最前（`sort_order` 升序、`option_id` 决胜，见调用点的 order_by）。只有
+/// 「一个都匹配不上」才失败。
+fn pick_option(rows: &[Record], source: &str, label: &str) -> Result<String, ProvisionError> {
+    let Some(row) = rows.first() else {
         return Err(ProvisionError::Invalid(vec![format!(
-            "数据源「{source}」的文案「{label}」没有唯一且完全匹配的启用选项"
+            "数据源「{source}」的文案「{label}」没有匹配的启用选项"
+        )]));
+    };
+    // 查询已按 label 过滤，这里再比一次是防御 DB 比较宽松（大小写/排序规则）
+    // 导致的「返回了但不完全相等」——宁可在配置期失败，也不把不相等的文案发出去。
+    if row.require::<String>("label")? != label {
+        return Err(ProvisionError::Invalid(vec![format!(
+            "数据源「{source}」的文案「{label}」没有匹配的启用选项"
         )]));
     }
-    Ok(rows[0].require("option_id")?)
+    Ok(row.require("option_id")?)
 }
 
 /// 扫字段绑定表时的页数上界。绑定行数量级在百级（每数据源几列），给足余量。
@@ -1080,16 +1115,30 @@ mod tests {
     use super::super::approval_match::{FormWidget, WidgetOptions};
     use super::*;
 
+    /// 同名重复**不再**阻塞：文案是用户看到的东西，option_id 只是载体，
+    /// 取排序最前即可。只有「一个都匹配不上」才失败。
+    ///
+    /// 「取最前」的排序由调用点的 `order_by(sort_order, option_id)` 保证，
+    /// 这里钉住的是「多条命中时不报错、用第一条」这一半契约。
     #[test]
-    fn selected_option_requires_one_exact_match() {
-        let row = |label: &str| Record::new().set("label", label).set("option_id", "id1");
+    fn pick_option_takes_the_first_of_several_exact_matches() {
+        let row = |label: &str, option_id: &str| {
+            Record::new()
+                .set("label", label)
+                .set("option_id", option_id)
+        };
         assert_eq!(
-            unique_option(&[row("银行")], "source", "银行").unwrap_or_else(|e| panic!("{e}")),
+            pick_option(&[row("银行", "id1")], "source", "银行").unwrap_or_else(|e| panic!("{e}")),
             "id1"
         );
-        assert!(unique_option(&[], "source", "银行").is_err());
-        assert!(unique_option(&[row("银行"), row("银行")], "source", "银行").is_err());
-        assert!(unique_option(&[row("银行 ")], "source", "银行").is_err());
+        assert_eq!(
+            pick_option(&[row("银行", "id1"), row("银行", "id2")], "source", "银行")
+                .unwrap_or_else(|e| panic!("{e}")),
+            "id1",
+            "同名重复取排序最前，不再判为歧义"
+        );
+        assert!(pick_option(&[], "source", "银行").is_err());
+        assert!(pick_option(&[row("银行 ", "id1")], "source", "银行").is_err());
     }
 
     /// 取出失败值。不用 `unwrap_err()`：clippy 的 `unwrap_used` 是 deny，
