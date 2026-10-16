@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-use super::approval_match::FormWidget;
+use super::approval_match::{is_eligible_for_mapping, FormWidget};
 
 /// 一个审批控件在库里的映射快照。
 #[derive(Debug, Clone)]
@@ -264,6 +264,15 @@ fn assemble_definition(
     let mut values = Vec::new();
     for node in definition {
         if node.r#type == "fieldList" {
+            // 明细下一条列都没映射（子控件全是不提单类型，或都没配上同名列）：
+            // 这个容器永远填不出值，判必填只会让配置永远派发不出去。
+            if !node
+                .walk()
+                .iter()
+                .any(|child| mappings.contains_key(child.id.as_str()))
+            {
+                continue;
+            }
             let has_value = node.walk().iter().any(|child| {
                 mappings
                     .get(child.id.as_str())
@@ -292,7 +301,10 @@ fn assemble_definition(
                 }
                 values.push(value);
             }
-        } else if node.required {
+        } else if node.required && is_eligible_for_mapping(&node.r#type) {
+            // 只对**配置期会生成映射**的控件强制必填。配置期静默跳过的控件
+            // （说明/公式/明细父级…）在这里判必填，报出的是一个来源字段根本不存在
+            // 的错误，而且补数据永远不会让它消失。
             return Err(ConvertError::MissingRequired {
                 widget_id: node.id.clone(),
             });
@@ -395,7 +407,8 @@ fn check_converter_matches(widget: &WidgetMap) -> Result<(), ConvertError> {
 fn assemble_direct(widget: &WidgetMap, cell: &Value) -> Result<Value, ConvertError> {
     match widget.widget_type.as_str() {
         // 数字与金额取 JSON 数字，**不能**是字符串——传字符串会被 1390001 拒掉。
-        "number" | "amount" => number_from_cell(widget, cell),
+        // formula 同属数值：官方要求 value 为公式算出的数值，与多维表格同名数字列对齐。
+        "number" | "amount" | "formula" => number_from_cell(widget, cell),
         // 电话：多维表格存成文本，拆出区号与号码。
         "telephone" => assemble_telephone(widget, cell),
         "connect" => connection_codes(cell)
@@ -1060,6 +1073,54 @@ mod tests {
         let required = r#"[{"id":"detail","type":"fieldList","required":true,"children":[{"id":"child","type":"input"}]}]"#;
         assert!(
             matches!(render_definition(required, &widgets, &cells(&[])), Err(ConvertError::MissingRequired { widget_id }) if widget_id == "detail")
+        );
+    }
+
+    #[test]
+    fn required_formula_takes_its_number_from_the_matching_column() {
+        // 夹具是**真实定义原文**（财税费用付款（6.0）—— 批量测试，2026-10-16
+        // `approvals get`）：必填的「合计付款金额」是 formula，而多维表格里有同名数字列。
+        // 官方《审批实例表单控件参数》把 formula 列为可提单控件：value 就是公式算出的
+        // 数值，「若不匹配则返回报错」。所以它必须像 number 一样取值，而不是被当成
+        // 「缺少必填值 / 请填写来源字段」——那个来源字段其实存在。
+        let snapshot = r#"[{"default_value_type":"","display_condition":null,"enable_default_value":false,"id":"widget17800354264810001","name":"合计付款金额/Payment amount","option":{"isCapital":false},"printable":true,"required":true,"type":"formula","visible":true,"widget_default_value":""},{"id":"child","type":"input"}]"#;
+        let mut total = widget("widget17800354264810001", "formula");
+        total.bitable_field = "fld_total".to_string();
+        total.required = true;
+        let widgets = [total, widget("child", "input")];
+        assert_eq!(
+            render_definition(
+                snapshot,
+                &widgets,
+                &cells(&[("fld_total", json!(1234.5)), ("fld_src", json!("测试"))]),
+            )
+            .unwrap_or_else(|e| panic!("{e}")),
+            json!([
+                {"id":"widget17800354264810001","type":"formula","value":1234.5},
+                {"id":"child","type":"input","value":"测试"}
+            ])
+        );
+    }
+
+    #[test]
+    fn required_formula_without_a_value_still_blocks_the_dispatch() {
+        let snapshot = r#"[{"id":"total","type":"formula","required":true}]"#;
+        let mut total = widget("total", "formula");
+        total.required = true;
+        assert!(matches!(
+            render_definition(snapshot, &[total], &cells(&[])),
+            Err(ConvertError::MissingRequired { widget_id }) if widget_id == "total"
+        ));
+    }
+
+    #[test]
+    fn required_detail_with_no_mapped_column_is_omitted_instead_of_blocking() {
+        // 明细下一条列都没映射（子控件全是不提单类型，或都没配上同名列）：
+        // 这个容器永远填不出值，判必填只会让配置永远派发不出去。
+        let snapshot = r#"[{"id":"detail","type":"fieldList","required":true,"children":[{"id":"note","type":"text"}]}]"#;
+        assert_eq!(
+            render_definition(snapshot, &[], &cells(&[])).unwrap_or_else(|e| panic!("{e}")),
+            json!([])
         );
     }
 

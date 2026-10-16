@@ -142,6 +142,32 @@ pub(crate) fn widget_name(form: &[FormWidget], id: &str) -> String {
     find(form, id).unwrap_or_else(|| "名称暂不可用".into())
 }
 
+fn find_node<'a>(form: &'a [FormWidget], id: &str) -> Option<&'a FormWidget> {
+    form.iter().find(|widget| widget.id == id).or_else(|| {
+        form.iter()
+            .find_map(|widget| find_node(&widget.children, id))
+    })
+}
+
+/// 必填明细父级自身不进映射表（`approval_match::is_eligible_for_mapping`），
+/// 字段定位必然为空。列出它下面**已映射**的列名，否则「请填写来源字段」是在让
+/// 用户去找一个根本不存在的字段。
+fn detail_columns(
+    form: &[FormWidget],
+    id: &str,
+    widgets: &[WidgetMap],
+    fields: &[FieldItem],
+) -> Option<String> {
+    let node = find_node(form, id).filter(|node| node.r#type == "fieldList")?;
+    let names: Vec<String> = node
+        .walk()
+        .iter()
+        .filter_map(|child| widgets.iter().find(|w| w.widget_id == child.id))
+        .map(|mapping| field_name(fields, &mapping.bitable_field))
+        .collect();
+    (!names.is_empty()).then(|| names.join(" / "))
+}
+
 pub(crate) fn conversion_reason(
     error: &ConvertError,
     snapshot: &str,
@@ -185,8 +211,18 @@ pub(crate) fn conversion_reason(
         .find(|w| w.widget_id == *id)
         .map(|w| w.bitable_field.as_str())
         .unwrap_or_default();
+    // 明细容器没有自己的映射行：改指它下面已映射的列，别让用户去找空字段。
+    let detail = if field.is_empty() {
+        detail_columns(&form, id, widgets, fields)
+    } else {
+        None
+    };
+    let (source, suggestion) = match detail {
+        Some(columns) => (columns, "请在多维表格补齐该明细的列值。"),
+        None => (field_name(fields, field), suggestion),
+    };
     format!("审批控件：{}\n来源字段：{}\n原因：{reason}\n处理：{suggestion}\n控件定位：{}；字段定位：{}",
-        widget_name(&form, id), field_name(fields, field), one_line(id, 100), one_line(field, 100))
+        widget_name(&form, id), source, one_line(id, 100), one_line(field, 100))
 }
 
 /// 飞书原始响应可能含内部信息，用户只看业务码与固定说明。
@@ -455,5 +491,39 @@ mod tests {
             .find_map(|line| line.strip_prefix("记录："))
             .unwrap_or_default();
         assert_eq!(record.chars().count(), 80, "记录摘要必须有界");
+    }
+
+    #[test]
+    fn missing_required_detail_points_at_its_mapped_columns() {
+        // 必填明细父级自身不进映射表，字段定位必然是空的。文案若还说
+        // 「请填写来源字段」，就是在让用户去找一个不存在的字段——要改成
+        // 列出该明细下**已映射**的列名。
+        let snapshot = r#"[{"id":"detail","name":"付款明细/Payment Details","type":"fieldList","required":true,"children":[{"id":"fee","name":"费用类型/Fee Type","type":"radioV2"}]}]"#;
+        let widget = WidgetMap {
+            widget_id: "fee".into(),
+            widget_type: "radioV2".into(),
+            required: true,
+            bitable_field: "fld_fee".into(),
+            converter: super::super::approval_convert::Converter::Option,
+            option_map: Default::default(),
+            option_source_key: None,
+            currency: None,
+        };
+        let fields = serde_json::from_value::<Vec<FieldItem>>(
+            json!([{"field_id":"fld_fee","field_name":"费用类型"}]),
+        )
+        .unwrap_or_default();
+        let message = conversion_reason(
+            &ConvertError::MissingRequired {
+                widget_id: "detail".into(),
+            },
+            snapshot,
+            &[widget],
+            &fields,
+        );
+        assert!(message.contains("付款明细/Payment Details"), "{message}");
+        assert!(message.contains("费用类型"), "{message}");
+        assert!(!message.contains("名称暂不可用"), "{message}");
+        assert!(!message.contains("请填写来源字段"), "{message}");
     }
 }

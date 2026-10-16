@@ -422,12 +422,14 @@ pub(crate) enum MatchOutcome {
     Invalid(Vec<MatchError>),
 }
 
-/// 定义里的不支持提单控件（官方清单）。
+/// 定义里的不支持提单控件。
 ///
-/// 与 `approval_convert::is_unsupported_widget_type` 同源，但**这里是配置期校验的
-/// 第一处拦截**：那处是处理一条记录时才报，这处是根本配不进配置。
+/// 配置期不显示、不映射；派发期的必填判定也用同一份（`is_eligible_for_mapping`），
+/// 否则配置期静默跳过的控件在派发期会被当成「必填却无映射」。
+///
+/// `formula` **不在**这里：官方《审批实例表单控件参数》把它列为可提单控件，value
+/// 就是公式算出的数值（与多维表格同名数字列对齐）。
 const UNSUPPORTED_TYPES: &[&str] = &[
-    "formula",
     "mutableGroup",
     "serialNumber",
     "text",
@@ -467,10 +469,27 @@ pub(crate) struct FieldMapping {
     pub(crate) option_source_key: Option<String>,
 }
 
+/// 这类控件会不会出现在配置里（明细父级只作分组展示，仍然出现）。
+///
+/// 说明、公式和飞书自动生成的分组不能通过 `instances.create` 传值，因而不出现在
+/// 配置向导，也不进映射表。
+fn is_configurable_control(widget_type: &str) -> bool {
+    widget_type == "fieldList" || !UNSUPPORTED_TYPES.contains(&widget_type)
+}
+
+/// 这类控件会不会被写进映射表。
+///
+/// **派发期的必填判定必须用同一个谓词**（`approval_convert::assemble_definition`）：
+/// 配置期静默跳过的控件在映射表里没有行，派发期再按 `required` 拦，报出来的就是
+/// 一个「来源字段」根本不存在的必填错误——而且补数据永远不会让它消失。
+pub(crate) fn is_eligible_for_mapping(widget_type: &str) -> bool {
+    widget_type != "fieldList" && is_configurable_control(widget_type)
+}
+
 pub(crate) fn mapping_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)> {
     preview_widgets(form)
         .into_iter()
-        .filter(|(widget, _)| widget.r#type != "fieldList")
+        .filter(|(widget, _)| is_eligible_for_mapping(&widget.r#type))
         .collect()
 }
 
@@ -483,10 +502,7 @@ pub(crate) fn preview_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)>
             } else {
                 format!("{parent}_{}", widget.name.trim())
             };
-            // 说明、公式和飞书自动生成的分组不能通过 instances.create 传值，
-            // 因而不应出现在配置向导；明细父级仍保留作分组展示，子控件继续展开。
-            let supported = widget.r#type == "fieldList"
-                || !UNSUPPORTED_TYPES.contains(&widget.r#type.as_str());
+            let supported = is_configurable_control(&widget.r#type);
             if supported {
                 flat.push((widget, name.clone()));
             }
@@ -1007,7 +1023,7 @@ mod tests {
 
     #[test]
     fn explicit_optional_invalid_types_and_options_are_rejected() {
-        for kind in ["formula", "image", "number", "radioV2"] {
+        for kind in ["text", "image", "number", "radioV2"] {
             let mut widget = input("可选", "w", false);
             widget.r#type = kind.to_string();
             assert!(
@@ -1113,13 +1129,21 @@ mod tests {
                 .iter()
                 .map(|(widget, _)| widget.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["group-child", "detail", "child1", "child2", "note"]
+            vec![
+                "formula",
+                "group-child",
+                "detail",
+                "child1",
+                "child2",
+                "note"
+            ]
         );
-        assert_eq!(preview[0].1, "交易类型/Transaction Type");
+        assert_eq!(preview[1].1, "交易类型/Transaction Type");
         assert!(matches!(
             match_fields(
                 &form,
                 &[
+                    column("合计", "f4", &[]),
                     column("交易类型/Transaction Type", "f0", &[]),
                     column("付款明细_费用明细/Expense details", "f1", &[]),
                     column("付款明细_付款金额/Payment Amount", "f2", &[]),
@@ -1544,6 +1568,30 @@ mod tests {
         assert!(
             matches!(match_by_name(&form, &[]), MatchOutcome::Matched(maps) if maps.is_empty())
         );
+    }
+
+    #[test]
+    fn required_formula_maps_to_the_same_named_numeric_column() {
+        // 公式是可提单控件（官方清单），同名数字列存在时必须进映射，
+        // 否则派发期会把它当成「必填却无映射」而整单失败。
+        let mut total = input("合计付款金额/Payment amount", "total", true);
+        total.r#type = "formula".to_string();
+        let form = vec![total, input("备注", "note", false)];
+        let columns = [
+            column("合计付款金额/Payment amount", "f1", &[]),
+            column("备注", "f2", &[]),
+        ];
+        let MatchOutcome::Matched(maps) = match_by_name(&form, &columns) else {
+            panic!("公式控件应匹配到同名数字列")
+        };
+        assert_eq!(maps.len(), 2);
+        let total = maps
+            .iter()
+            .find(|m| m.widget_id == "total")
+            .unwrap_or_else(|| panic!("映射里应有公式控件"));
+        assert_eq!(total.widget_type, "formula");
+        assert_eq!(total.bitable_field, "f1");
+        assert!(total.required);
     }
 
     #[test]
