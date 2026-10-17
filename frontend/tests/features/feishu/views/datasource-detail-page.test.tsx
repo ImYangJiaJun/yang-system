@@ -635,6 +635,269 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
   });
 });
 
+/// 外部数据源父子视图：搜索跨字段、父级/子项两列、展开区与分组视图。
+describe("飞书数据源详情页 · 父子视图", () => {
+  it("搜索框输入：请求体带 search，且用 source_key in 收在本数据源的全部绑定里", async () => {
+    const user = userEvent.setup();
+    const calls = stubDetail({ optionList: () => listPage(TWO_OPTIONS) });
+    renderDetail();
+
+    await screen.findByText("差旅费");
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索选项" }),
+      "差旅",
+    );
+
+    await waitFor(() => {
+      const last = bodiesOf(calls, OPTIONS_PATH).at(-1);
+      expect(last?.search).toBe("差旅");
+      // 搜索跨字段：不带 source_key，也不按左栏选中的字段收窄
+      expect(last?.source_key).toBeUndefined();
+      expect(last?.where).toEqual({
+        type: "in",
+        field: "source_key",
+        values: [SOURCE_KEY],
+      });
+    });
+    // 标题切到搜索态
+    expect(screen.getByText("搜索结果")).toBeInTheDocument();
+    expect(screen.getByText("· 全部字段")).toBeInTheDocument();
+  });
+
+  it("搜索无结果：说「没有匹配的选项」，给清除搜索，不写「还没有选项推过来」", async () => {
+    const user = userEvent.setup();
+    stubDetail({ optionList: () => listPage([]) });
+    renderDetail();
+
+    await screen.findByText("还没有选项推过来");
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索选项" }),
+      "差旅",
+    );
+
+    expect(await screen.findByText("没有匹配的选项")).toBeInTheDocument();
+    expect(
+      screen.getByText(/都没有名称或标识包含「差旅」的选项/),
+    ).toBeInTheDocument();
+    // 搜索空态不复用「还没推过来」：两个语义下一步动作完全不同
+    expect(
+      screen.queryByRole("heading", { name: "还没有选项推过来" }),
+    ).toBeNull();
+
+    // 清除搜索回到普通列表（初始那一页在 15s staleTime 内走缓存，不发新请求）
+    await user.click(screen.getByRole("button", { name: "清除搜索" }));
+    await waitFor(() =>
+      expect(screen.queryByText("没有匹配的选项")).toBeNull(),
+    );
+    expect(
+      screen.getByRole("heading", { name: "还没有选项推过来" }),
+    ).toBeInTheDocument();
+  });
+
+  it("搜索态：结果带「所属字段」与「父级」两列，父字段名按结果行自己的绑定推导", async () => {
+    const user = userEvent.setup();
+    // 两个字段、带父字段关系：搜索跨字段时结果行的父字段**不是**选中字段的父字段
+    stubDetail({
+      datasourceList: () =>
+        listPage([
+          datasourceWire({
+            id: DATASOURCE_ID,
+            title: "公司往来付款",
+            ingest_mode: "pull",
+            fields: [
+              {
+                field_id: "fldB",
+                field_name: "费用类型/Fee Type*",
+                source_key: SOURCE_KEY,
+                parent_field_id: "fldA",
+                enabled: true,
+              },
+              {
+                field_id: "fldA",
+                field_name: "费用大类/Main Exp Cat*",
+                source_key: "main_exp_cat",
+                parent_field_id: null,
+                enabled: true,
+              },
+            ],
+          }),
+        ]),
+      optionList: () =>
+        listPage([
+          optionWire({
+            option_id: "child_1",
+            label: "差旅费",
+            parent_key: "parent_1",
+            parent_label: "业务划转",
+          }),
+        ]),
+    });
+    renderDetail();
+
+    await screen.findByText("差旅费");
+    await user.type(
+      screen.getByRole("searchbox", { name: "搜索选项" }),
+      "差旅",
+    );
+
+    // 先等搜索态确立：标题切「搜索结果」是唯一可靠信号（防抖 300ms + 请求落地）。
+    // 不能拿「业务划转」当信号——非搜索态的父级列也渲染同一个文案。
+    await screen.findByText("搜索结果");
+    // 搜索态第一帧是骨架（新查询 key 没有 keepPreviousData），等结果落地
+    expect(await screen.findByText("业务划转")).toBeInTheDocument();
+
+    // 父级列：父文案 + 按结果行 source_key 推导出的父字段名
+    expect(screen.getByText(/· 费用大类\/Main Exp Cat\*/)).toBeInTheDocument();
+    // 所属字段列在搜索态出现（列头）
+    expect(screen.getByText("所属字段")).toBeInTheDocument();
+  });
+
+  it("父级列：parentKey 为 null 的行显示「顶级」，无子项的行画灰字", async () => {
+    stubDetail({ optionList: () => listPage(TWO_OPTIONS) });
+    renderDetail();
+
+    expect(await screen.findAllByText("顶级")).toHaveLength(2);
+    expect(screen.getAllByText("无子项")).toHaveLength(2);
+  });
+
+  it("父级列：有父键但查不到父行时显示警示「父级未找到」", async () => {
+    stubDetail({
+      optionList: () =>
+        listPage([
+          optionWire({
+            option_id: "orphan_child",
+            label: "差旅费",
+            // 父键指向一条不存在的选项（旧规则留下的行）
+            parent_key: "gone_parent",
+            parent_label: null,
+          }),
+        ]),
+    });
+    renderDetail();
+
+    expect(await screen.findByText("父级未找到")).toBeInTheDocument();
+  });
+
+  it("点「N 个子项」展开：子项反查发 eq parent_key，且不带 source_key", async () => {
+    const user = userEvent.setup();
+    const calls = stubDetail({
+      optionList: () =>
+        listPage([
+          optionWire({
+            option_id: "parent_opt",
+            label: "费用大类",
+            parent_key: null,
+            children_count: 2,
+          }),
+          optionWire({
+            option_id: "child_opt",
+            label: "差旅费",
+            parent_key: "parent_opt",
+            parent_label: "费用大类",
+          }),
+        ]),
+    });
+    renderDetail();
+
+    await user.click(await screen.findByRole("button", { name: "2 个子项" }));
+
+    await waitFor(() => {
+      const last = bodiesOf(calls, OPTIONS_PATH).at(-1);
+      expect(last?.where).toEqual({
+        type: "eq",
+        field: "parent_key",
+        value: "parent_opt",
+      });
+      expect(last?.source_key).toBeUndefined();
+      expect(last?.page_size).toBe(100);
+    });
+    // 展开区的子项列表渲染出来（含父级链上的当前节点）
+    expect(await screen.findByText("子项 · 2 条")).toBeInTheDocument();
+  });
+
+  it("选中字段有父字段时默认按父级分组，分组头带父文案、来自与查看链接", async () => {
+    const user = userEvent.setup();
+    // 费用类型（parent_field_id = fldA）是子字段；默认按展示序选中根字段
+    // 费用大类，所以先点字段表里的子字段那一行，分组视图才出现。
+    stubDetail({
+      datasourceList: () =>
+        listPage([
+          datasourceWire({
+            id: DATASOURCE_ID,
+            title: "公司往来付款",
+            ingest_mode: "pull",
+            fields: [
+              {
+                field_id: "fldB",
+                field_name: "费用类型/Fee Type*",
+                source_key: SOURCE_KEY,
+                parent_field_id: "fldA",
+                enabled: true,
+              },
+              {
+                field_id: "fldA",
+                field_name: "费用大类/Main Exp Cat*",
+                source_key: "main_exp_cat",
+                parent_field_id: null,
+                enabled: true,
+              },
+            ],
+          }),
+        ]),
+      optionList: (body) =>
+        body.source_key === SOURCE_KEY
+          ? listPage([
+              optionWire({
+                option_id: "child_1",
+                label: "差旅费",
+                parent_key: "parent_1",
+                parent_label: "业务划转",
+              }),
+              optionWire({
+                option_id: "top_1",
+                label: "顶级项",
+                parent_key: null,
+              }),
+            ])
+          : listPage([]),
+    });
+    renderDetail();
+
+    await screen.findByText(/数据源 #7/);
+    const bindingRows = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-slot="binding-row"]'),
+    );
+    await user.click(bindingRows[1]); // 费用类型（有父字段）
+
+    expect(await screen.findByText("业务划转")).toBeInTheDocument();
+    expect(
+      screen.getByText(/来自 费用大类\/Main Exp Cat\*/),
+    ).toBeInTheDocument();
+    // 无父行归入「顶级选项」组
+    expect(screen.getByText("顶级选项")).toBeInTheDocument();
+    // 默认是分组档
+    expect(screen.getByRole("button", { name: "按父级分组" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    // 分组头右侧的「在父字段中查看」切到父字段：父字段没有父字段了，
+    // 分组切换与分组头一起消失（那一页在 15s staleTime 内走缓存，不发新请求）
+    await user.click(
+      screen.getByRole("button", {
+        name: /在「费用大类\/Main Exp Cat\*」中查看/,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "按父级分组" })).toBeNull(),
+    );
+    expect(screen.queryByText("业务划转")).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "还没有选项推过来" }),
+    ).toBeInTheDocument();
+  });
+});
+
 /// xlsx 源：它没有上游可探、也没有定时同步，因此详情页要说的是另一组事实——
 /// 「视图」那一格对它不适用、「最近写库的导入」才是它的同步状态，另给一个**重新导入**入口。
 describe("飞书数据源详情页 · xlsx 源", () => {

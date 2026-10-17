@@ -245,6 +245,11 @@ export const feishuQueryKeys = {
       {
         page: query.page,
         pageSize: query.pageSize,
+        // 入参必须进 key（同 approvalConfigList 的教训）：漏掉 search，react-query
+        // 15s staleTime 内搜索只改闭包不改 key，缓存命中旧的全量列表。
+        search: query.search?.trim() ?? "",
+        // where 直接放对象，react-query 做结构比对；undefined 与缺省同哈希。
+        where: query.where,
         orderBy:
           query.orderBy.length > 0 ? query.orderBy : DEFAULT_OPTION_ORDER_BY,
       },
@@ -382,11 +387,16 @@ export function buildDatasourceListBody(
 }
 
 function buildOptionListBody(query: OptionListQuery): Record<string, unknown> {
+  const search = query.search?.trim() ?? "";
   return {
     page: query.page,
     page_size: query.pageSize,
-    // `source_key` 是本服务自己的扩展字段，**发在顶层**，不是塞进 where
-    source_key: query.sourceKey,
+    // `source_key` 是本服务自己的扩展字段，**发在顶层**，不是塞进 where。
+    // 只有非空才发：子项/父行反查与跨字段搜索要跨整张表，带上它就把查询
+    // 收窄进一个字段里了（那些查询的 `sourceKey` 传空串）。
+    source_key: query.sourceKey === "" ? undefined : query.sourceKey,
+    search: search === "" ? undefined : search,
+    where: query.where,
     order_by:
       query.orderBy.length > 0 ? query.orderBy : DEFAULT_OPTION_ORDER_BY,
     count_total: true,
@@ -430,6 +440,8 @@ export const OPTION_ITEM_KEYS = {
   is_default: "isDefault",
   enabled: "enabled",
   parent_key: "parentKey",
+  parent_label: "parentLabel",
+  children_count: "childrenCount",
   last_push_at: "lastPushAt",
   updated_at: "updatedAt",
 } as const satisfies Record<string, keyof OptionItem>;
@@ -607,6 +619,8 @@ function parseOptionItem(raw: Record<string, unknown>): OptionItem | null {
     isDefault: raw.is_default === true,
     enabled: raw.enabled !== false,
     parentKey: asNullableString(raw.parent_key),
+    parentLabel: asNullableString(raw.parent_label),
+    childrenCount: asNumber(raw.children_count, 0),
     updatedAt: asNumber(raw.updated_at, 0),
     lastPushAt: asNullableNumber(raw.last_push_at),
   };

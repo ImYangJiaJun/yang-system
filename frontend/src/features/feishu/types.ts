@@ -333,6 +333,11 @@ export type OptionItem = {
   /// 界面拿它显示「这条选项挂在哪个父项下」。级联配错时，一个孤零零的子项
   /// 会在这里暴露出来——比只看到「选项少了几条」好排查得多。
   parentKey: string | null;
+  /// 父选项文案（后端在返回本页时同批查回）。查不到为 `null`——**不是**「无父」：
+  /// 无父是 `parentKey` 为 `null`，这里是「有父键但父行查不到」。
+  parentLabel: string | null;
+  /// 直接子项条数（后端同批算出）。0 就是没有子项。
+  childrenCount: number;
   /// unix 秒；这行选项最后一次被**写入**的时间。
   ///
   /// **不要拿它当「推送还活着吗」的信号**：两条写入路径（多维表格推送、服务端拉取）
@@ -385,6 +390,14 @@ export type OptionListQuery = {
   page: number;
   pageSize: number;
   orderBy: OrderByClause[];
+  /// 跨字段搜索词（后端打在 option_id + label 的 %kw% LIKE 上）。
+  /// 搜索时 `sourceKey` 传空串，并在 `where` 里发 `source_key in` 整表绑定——
+  /// 要跨字段，不能带 source_key（见 `buildOptionListBody` 的空串省略规则）。
+  search?: string;
+  /// 额外过滤树（eq/in/like/...，形状与 `DatasourceListQuery` 的 where 同源）。
+  /// 子项反查发 `eq parent_key`、父行反查发 `eq option_id`，此时同样要求
+  /// `sourceKey` 传空串——父行挂在父字段自己的 source_key 下，不在当前字段里。
+  where?: Record<string, unknown>;
 };
 
 export type DatasourceView = "ledger" | "cards";

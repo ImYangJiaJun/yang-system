@@ -1,5 +1,6 @@
 //! 选项列表（前端控制台，只读）。
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use yang_base::action::builtin::OrderByItem;
@@ -32,6 +33,11 @@ pub(super) struct OptionItem {
     enabled: bool,
     /// 级联父键（裸 `option_id`）；无父为 `None`。
     parent_key: Option<String>,
+    /// 父选项的文案（派生投影：按本页 `parent_key` 批量反查父行）。
+    /// None = 父键指向的选项查不到——推送型数据源没有父键、或旧规则版本遗留行。
+    parent_label: Option<String>,
+    /// 直接子项数（全表里 `parent_key == 本行 option_id` 的行数；父子可跨字段，同数据源内）。
+    children_count: i64,
     /// 这条选项最近一次被写入的时间（unix 秒）。**存活信号用它而不是 `updated_at`**：
     /// 拉取侧恒写它，而 `updated_at` 只在 UPDATE 时变。
     last_push_at: Option<i64>,
@@ -51,8 +57,26 @@ impl OptionItem {
             parent_key: record.optional("parent_key")?,
             last_push_at: record.optional("last_push_at")?,
             updated_at: record.require("updated_at")?,
+            // 派生投影由 handle 在 rows → items 之后批量填充。
+            parent_label: None,
+            children_count: 0,
         })
     }
+}
+
+/// 本页所有非空父键（trim 后）去重，供 `where_in` 反查父行。
+///
+/// 空串也算没有父：写入侧 `derive.rs` 的 `ancestor_key` 对空级返回空串，
+/// 库里可能存空字符串而不是 NULL，所以这里不能只靠 `Option` 的形状判断。
+fn distinct_parent_keys(items: &[OptionItem]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .filter_map(|item| item.parent_key.as_deref().map(str::trim))
+        .filter(|key| !key.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|key| serde_json::Value::String(key.to_string()))
+        .collect()
 }
 
 /// 注册选项列表端点。
@@ -128,10 +152,66 @@ pub(super) async fn handle(
 
     // i18n 落 Text 列存 JSON 文本；这里回原样，前端按文本展示即可。
     // 映射在 `OptionItem::from_record` 里——结构体化的理由是让**键集可对账**。
-    let items = rows
+    let mut items = rows
         .iter()
         .map(OptionItem::from_record)
         .collect::<Result<Vec<_>, BaseError>>()?;
+
+    // 派生投影：父级文案 + 直接子项数。
+    //
+    // 父行挂在**父字段自己的 source_key** 下、不在本页结果里，所以必须按 `parent_key`
+    // 反查；子行同理按 `parent_key` 反查计数。本页最多 100 行、各一次 `where_in`，
+    // 不是 N+1（口径照 `portal_query.rs` 的既有 `where_in("parent_key", …)` 用法）。
+    // `where_in` 拒绝空列表，两个集合都先判空短路。
+    let parent_keys = distinct_parent_keys(&items);
+    let mut parent_labels: HashMap<String, String> = HashMap::new();
+    if !parent_keys.is_empty() {
+        for record in context
+            .options()
+            .query()
+            .select_fields(&["option_id", "label"])?
+            .where_in("option_id", parent_keys)?
+            .all()
+            .await?
+        {
+            parent_labels.insert(record.require("option_id")?, record.require("label")?);
+        }
+    }
+
+    let option_ids: Vec<serde_json::Value> = items
+        .iter()
+        .map(|item| serde_json::json!(&item.option_id))
+        .collect();
+    let mut children_counts: HashMap<String, i64> = HashMap::new();
+    if !option_ids.is_empty() {
+        for record in context
+            .options()
+            .query()
+            .select_fields(&["parent_key"])?
+            .where_in("parent_key", option_ids)?
+            .all()
+            .await?
+        {
+            let Some(parent_key) = record.optional::<String>("parent_key")? else {
+                continue;
+            };
+            // 根级行的父键是空串，挂不到任何 `option_id` 上，别给它计数。
+            if parent_key.is_empty() {
+                continue;
+            }
+            *children_counts.entry(parent_key).or_default() += 1;
+        }
+    }
+
+    for item in &mut items {
+        item.parent_label = item
+            .parent_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .and_then(|key| parent_labels.get(key).cloned());
+        item.children_count = children_counts.get(&item.option_id).copied().unwrap_or(0);
+    }
 
     Ok(ApiResponse::success_value(
         serde_json::json!({
@@ -165,6 +245,8 @@ mod tests {
             is_default: false,
             enabled: true,
             parent_key: None,
+            parent_label: None,
+            children_count: 0,
             last_push_at: None,
             updated_at: 0,
         };
@@ -179,5 +261,39 @@ mod tests {
             &spec,
             "选项",
         );
+    }
+
+    /// 空串也算没有父（写入侧 `derive.rs` 对空级返回空串）、空白 trim 后同样算没有；
+    /// 重复父键只反查一次。
+    #[test]
+    fn distinct_parent_keys_trims_blanks_and_dedupes() {
+        let item = |parent_key: Option<&str>| OptionItem {
+            option_id: "opt".to_string(),
+            source_key: "k".to_string(),
+            label: "L".to_string(),
+            i18n: None,
+            sort_order: 1,
+            is_default: false,
+            enabled: true,
+            parent_key: parent_key.map(str::to_string),
+            parent_label: None,
+            children_count: 0,
+            last_push_at: None,
+            updated_at: 0,
+        };
+        let keys: Vec<String> = distinct_parent_keys(&[
+            item(Some("a")),
+            item(Some("a")),  // 去重
+            item(Some("")),   // 空串 = 没有父
+            item(Some("  ")), // 空白 = 没有父
+            item(None),
+            item(Some(" b ")), // trim
+        ])
+        .into_iter()
+        .map(|value| value.as_str().expect("父键应是字符串").to_string())
+        .collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"a".to_string()));
+        assert!(keys.contains(&"b".to_string()));
     }
 }

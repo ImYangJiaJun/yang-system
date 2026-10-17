@@ -40,7 +40,10 @@ import {
   type FeishuInvokeDeps,
 } from "@/features/feishu/api";
 import { DEFAULT_OPTION_ORDER_BY } from "@/features/feishu/api";
-import type { DatasourceListQuery } from "@/features/feishu/types";
+import type {
+  DatasourceListQuery,
+  OptionListQuery,
+} from "@/features/feishu/types";
 
 import projections from "../../../contracts/feishu-projections.json";
 import {
@@ -456,8 +459,39 @@ describe("query key 工厂", () => {
       "feishu",
       "options",
       "expense_category",
-      { page: 1, pageSize: 10, orderBy: DEFAULT_OPTION_ORDER_BY },
+      {
+        page: 1,
+        pageSize: 10,
+        search: "",
+        where: undefined,
+        orderBy: DEFAULT_OPTION_ORDER_BY,
+      },
     ]);
+  });
+
+  it("选项键里搜索词被 trim，且搜索词 / where 必须进键", () => {
+    // 与 approvalConfigList 同一条教训：漏掉 search，react-query 15s staleTime 内
+    // 搜索只改闭包不改 key，缓存命中旧的全量列表，用户感知为搜索失效。
+    const base: OptionListQuery = {
+      sourceKey: "",
+      page: 1,
+      pageSize: 10,
+      orderBy: [],
+      search: "  服务  ",
+      where: { type: "in", field: "source_key", values: ["a", "b"] },
+    };
+    const key = feishuQueryKeys.optionList(base);
+    expect((key[3] as { search: string }).search).toBe("服务");
+    // 换搜索词、换 where（子项 vs 父行反查）都必须换缓存条目
+    expect(feishuQueryKeys.optionList({ ...base, search: "差旅" })).not.toEqual(
+      key,
+    );
+    expect(
+      feishuQueryKeys.optionList({
+        ...base,
+        where: { type: "eq", field: "parent_key", value: "opt1" },
+      }),
+    ).not.toEqual(key);
   });
 
   it("搜索词在键里被 trim，且排序已补确定性收尾键", () => {
@@ -797,10 +831,12 @@ describe("投影契约（emit ↔ read）", () => {
     label: "探针选项",
     i18n: '{"zh_cn":"探针"}',
     sort_order: 99,
-    // 兜底 false / true / null 都换掉
+    // 兜底 false / true / null / 0 都换掉
     is_default: true,
     enabled: false,
     parent_key: "optPARENT",
+    parent_label: "父级探针文案",
+    children_count: 3,
     last_push_at: 1758000004,
     updated_at: 1758000005,
   };
@@ -944,6 +980,96 @@ describe("投影契约（emit ↔ read）", () => {
         CONTRACT.client_fields?.list_options?.order_by,
         `选项列表在 order_by 里发了 ${clause.field}，契约里没记`,
       ).toContain(clause.field);
+    }
+
+    // 跨字段搜索：search 键逐字对账（trim 后发出），where 的字段名过契约
+    const searchCalls = stubFetch({
+      code: 0,
+      data: { items: [], page: 1, page_size: 1, total: 0 },
+    });
+    await listOptions(
+      {
+        sourceKey: "",
+        page: 1,
+        pageSize: 1,
+        orderBy: [],
+        search: "  服务  ",
+        where: {
+          type: "in",
+          field: "source_key",
+          values: ["a", "b"],
+        },
+      },
+      deps,
+    );
+    const searchBody = searchCalls.at(-1)?.body as Record<string, unknown>;
+    expect(searchBody.search).toBe("服务");
+    // 跨字段查询不能带 source_key：带了就把范围收窄进一个字段里了
+    expect(searchBody.source_key).toBeUndefined();
+    for (const field of collector(searchBody.where)) {
+      expect(
+        CONTRACT.client_fields?.list_options?.where,
+        `选项列表在 where 里发了 ${field}，契约里没记`,
+      ).toContain(field);
+    }
+
+    // 子项反查：where 发 eq parent_key，同样过契约
+    const childCalls = stubFetch({
+      code: 0,
+      data: { items: [], page: 1, page_size: 1, total: 0 },
+    });
+    await listOptions(
+      {
+        sourceKey: "",
+        page: 1,
+        pageSize: 100,
+        orderBy: [],
+        where: { type: "eq", field: "parent_key", value: "optPARENT" },
+      },
+      deps,
+    );
+    const childBody = childCalls.at(-1)?.body as Record<string, unknown>;
+    expect(childBody.where).toEqual({
+      type: "eq",
+      field: "parent_key",
+      value: "optPARENT",
+    });
+    expect(childBody.source_key).toBeUndefined();
+    for (const field of collector(childBody.where)) {
+      expect(
+        CONTRACT.client_fields?.list_options?.where,
+        `选项列表在 where 里发了 ${field}，契约里没记`,
+      ).toContain(field);
+    }
+
+    // 父级链上溯：where 发 eq option_id（父行挂在父字段自己的 source_key 下，
+    // 不在当前字段的结果里），同样过契约——契约的 where 允许集里有它
+    const parentCalls = stubFetch({
+      code: 0,
+      data: { items: [], page: 1, page_size: 1, total: 0 },
+    });
+    await listOptions(
+      {
+        sourceKey: "",
+        page: 1,
+        pageSize: 1,
+        orderBy: [],
+        where: { type: "eq", field: "option_id", value: "optPARENT" },
+      },
+      deps,
+    );
+    const parentBody = parentCalls.at(-1)?.body as Record<string, unknown>;
+    expect(parentBody.where).toEqual({
+      type: "eq",
+      field: "option_id",
+      value: "optPARENT",
+    });
+    expect(parentBody.source_key).toBeUndefined();
+    for (const field of collector(parentBody.where)) {
+      expect(
+        CONTRACT.client_fields?.list_options?.where,
+        `选项列表在 where 里发了 ${field}，契约里没记`,
+      ).toContain(field);
     }
   });
 

@@ -30,7 +30,13 @@
  *    去重键 `option_id` 恒作收尾，否则同一批写入落下的同一个 unix 秒会让翻页重复或漏行。
  */
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Link, useParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -38,13 +44,16 @@ import {
   ArrowLeft,
   ArrowUp,
   ArrowUpDown,
+  ChevronRight,
   RefreshCw,
+  Search,
   Upload,
 } from "lucide-react";
 
 import { useSessionCredentials, useUiCatalog } from "@/engine";
 
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import {
   Table,
@@ -63,6 +72,7 @@ import {
   canWriteDatasources,
   checkDatasourceHealth,
   hasOperation,
+  listOptions,
   useCredentialClient,
   useDatasourceList,
   useFeishuActions,
@@ -70,15 +80,17 @@ import {
   usePullSchedule,
   useXlsxImportClient,
 } from "../api";
-import type { XlsxImportReport } from "../api";
+import type { FeishuInvokeDeps, XlsxImportReport } from "../api";
 import { canReadPortals } from "../portal-api";
 import { CredentialChecklist } from "../components/CredentialChecklist";
 import { FieldBindingsTable } from "../components/FieldBindingsTable";
 import { DatasourceHealthPanel } from "../components/DatasourceHealthPanel";
 import { StatusBadge } from "../components/StatusBadge";
 import { XlsxReimportDialog } from "../components/XlsxReimportDialog";
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from "../list-query";
 import PortalConfigPanel from "./PortalConfigPanel";
 import type {
+  DatasourceFieldBinding,
   DatasourceGap,
   DatasourceItem,
   OptionItem,
@@ -103,6 +115,14 @@ const SKELETON_ROWS = 5;
 /// 选项表默认每页条数。详情页是逐条看数据的入口，一屏装下更多行比列表页
 /// 更重要——默认 50，而不是列表页共享的 10（`DEFAULT_PAGE_SIZE`）。
 const DETAIL_PAGE_SIZE = 50;
+
+/// 父级链上溯的最大跳数。父子关系来自「同一行共现」，配错的规则能造出环；
+/// 8 跳没走出头就停，避免无限发请求。
+const PARENT_CHAIN_MAX_HOPS = 8;
+
+/// 展开区子项列表的拉取条数。直接子项通常不超出这一页；total 超出时
+/// 在列表尾部提示「还有 N 条未显示」（设计稿接受的口径）。
+const CHILDREN_PAGE_SIZE = 100;
 
 /// 「立即拉取」的轮询节拍与总预算。
 ///
@@ -181,6 +201,143 @@ function i18nText(item: OptionItem): string {
   return parseI18n(item.i18n)
     .map((pair) => `${localeLabel(pair.locale)}：${pair.text}`)
     .join(" · ");
+}
+
+/// 字段绑定的 source_key → 展示名。选项行的 `source_key` 属于某条绑定；
+/// 拿不到绑定（理论上不该发生）就退回 source_key 本身，不编名字。
+function fieldNameOf(
+  bindings: DatasourceFieldBinding[],
+  sourceKey: string,
+): string {
+  return (
+    bindings.find((binding) => binding.sourceKey === sourceKey)?.fieldName ??
+    sourceKey
+  );
+}
+
+/// 父级链：从叶子逐跳上溯。每跳发一发 `where: eq option_id` 的取单条查询
+/// （父行挂在**父字段自己的 source_key** 下，不在当前这一发的结果里），
+/// 最多 [`PARENT_CHAIN_MAX_HOPS`] 跳防环；某一跳查不到就停在那一跳。
+async function fetchParentChain(
+  leaf: OptionItem,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<OptionItem[]> {
+  const chain: OptionItem[] = [leaf];
+  let current = leaf;
+  for (let hop = 0; hop < PARENT_CHAIN_MAX_HOPS; hop++) {
+    if (current.parentKey === null) break;
+    const page = await listOptions(
+      {
+        sourceKey: "",
+        page: 1,
+        pageSize: 1,
+        orderBy: [],
+        where: {
+          type: "eq",
+          field: "option_id",
+          value: current.parentKey,
+        },
+      },
+      deps,
+      signal,
+    );
+    const parent = page.items[0];
+    if (parent === undefined) break;
+    chain.push(parent);
+    current = parent;
+  }
+  return chain;
+}
+
+/// 选项表列集合。分组视图的分组头已经写了父级信息，行内不再画「父级」列；
+/// 搜索态要显示命中的「所属字段」，同时砍掉排序序号与写入时间这两列
+/// （在「这条值在不在、它的父/子是谁」这件事上它们不是决策信息）。
+function optionColumns(
+  showField: boolean,
+  showParent: boolean,
+  compact: boolean,
+): string[] {
+  const columns = ["name"];
+  if (showField) columns.push("field");
+  if (showParent) columns.push("parent");
+  columns.push("kids", "id");
+  if (!compact) columns.push("sort");
+  columns.push("default", "state", "i18n");
+  if (!compact) columns.push("when");
+  return columns;
+}
+
+const COLUMN_LABEL: Record<string, string> = {
+  name: "选项名称",
+  field: "所属字段",
+  parent: "父级",
+  kids: "子项",
+  id: "标识",
+  sort: "排序",
+  default: "默认",
+  state: "状态",
+  i18n: "多语言",
+  when: "最近写入",
+};
+
+/// 父级单元格：无父 → 「顶级」（推送型数据源本来就没有父键，正常态）；
+/// 有父且拿到文案 → 父文案 + 小字「 · {父字段名}」（字段名推导不出就不带）；
+/// 有父但查不到行 → 警示黄字「父级未找到」。
+function ParentCell({
+  item,
+  parentFieldName,
+}: {
+  item: OptionItem;
+  parentFieldName: string | null;
+}) {
+  if (item.parentKey === null || item.parentKey === "") {
+    return <span className="text-muted-foreground">顶级</span>;
+  }
+  if (item.parentLabel !== null) {
+    return (
+      <>
+        {item.parentLabel}
+        {parentFieldName !== null ? (
+          <span className="text-xs text-muted-foreground">
+            {" "}
+            · {parentFieldName}
+          </span>
+        ) : null}
+      </>
+    );
+  }
+  return <span className="text-xs text-tone-warning">父级未找到</span>;
+}
+
+/// 子项单元格：有子项 → 计数按钮（点击切换展开，展开态箭头旋转）；
+/// 无子项 → 灰字，不画按钮。
+function KidsCell({
+  item,
+  expanded,
+  onToggle,
+}: {
+  item: OptionItem;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (item.childrenCount <= 0) {
+    return <span className="text-muted-foreground">无子项</span>;
+  }
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      onClick={onToggle}
+      className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-0.5 text-xs hover:bg-muted"
+    >
+      <ChevronRight
+        className={`size-3 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`}
+        aria-hidden="true"
+      />
+      {item.childrenCount} 个子项
+    </button>
+  );
 }
 
 function SortableHeader({
@@ -357,6 +514,17 @@ export default function DatasourceDetailPage() {
   const [orderBy, setOrderBy] = useState<OrderByClause[]>(
     DEFAULT_OPTION_ORDER_BY,
   );
+  /// 搜索词：输入框绑**立即**值（要跟手），查询走 300ms 去抖后的快照。
+  const [searchInput, setSearchInput] = useState("");
+  const debouncedSearch = useDebouncedValue(searchInput, SEARCH_DEBOUNCE_MS);
+  /// 分组/平铺两档。默认按父级分组；只有选中字段有父字段时才出现在工具条。
+  const [view, setView] = useState<"group" | "flat">("group");
+  /// 展开中的那一行（点击子项按钮切换；同时只展开一行，切字段/搜索即收起）。
+  const [expandedOptionId, setExpandedOptionId] = useState<string | null>(null);
+  /// 分组视图里被折叠的组（键是 parentKey，`__none__` 是无父组）。
+  const [collapsedGroups, setCollapsedGroups] = useState<
+    Record<string, boolean>
+  >({});
 
   // 这条数据源本身。没有「取单条数据源」的 Action，所以借列表端点 + **一个 `id`
   // 等值条件**（`id` 已声明 `filterable`）。不再用 `search`：检索只覆盖 `searchable`
@@ -406,7 +574,7 @@ export default function DatasourceDetailPage() {
   const [contextTab, setContextTab] = useState<
     "options" | "credentials" | "sync" | "health" | "portal"
   >("options");
-  const bindings = datasource?.fields ?? [];
+  const bindings = useMemo(() => datasource?.fields ?? [], [datasource]);
   // 默认按**展示序**取第一条启用中的绑定，而不是数组里的第一条：上面的字段表就是
   // 按展示序画的，取别的话高亮行会停在表中间某一行的位置，看着像「它替你选了一个
   // 八竿子打不着的字段」。
@@ -425,12 +593,70 @@ export default function DatasourceDetailPage() {
       ? selectedSourceKey
       : defaultSourceKey;
 
+  /// 搜索态：词非空**且**有绑定可收窄（无绑定时退回普通列表——本来也查不动）。
+  /// 搜索跨本数据源的全部绑定字段，查询忽略左栏选中的字段。
+  const isSearching = debouncedSearch.trim() !== "" && bindings.length > 0;
+  /// 当前选中的绑定与其父绑定。父级列的「 · {父字段名}」与分组头的「来自」
+  /// 都由 parentFieldId → 同数据源另一条绑定推导；推导不出就不带。
+  const currentBinding =
+    bindings.find((binding) => binding.sourceKey === optionSourceKey) ?? null;
+  const parentBinding =
+    currentBinding?.parentFieldId != null
+      ? (bindings.find(
+          (binding) => binding.fieldId === currentBinding.parentFieldId,
+        ) ?? null)
+      : null;
+
+  /// 父级列的「 · {父字段名}」按**每一行自己的** source_key 推导：
+  /// 行绑定 → parentFieldId → 同数据源另一条绑定。搜索跨字段时每行的
+  /// 父字段各不相同，不能拿选中字段的父绑定套到所有行上（那是错的字段名）。
+  const parentFieldNameOf = useMemo(
+    () =>
+      (item: OptionItem): string | null => {
+        const binding = bindings.find(
+          (candidate) => candidate.sourceKey === item.sourceKey,
+        );
+        if (binding === undefined || binding.parentFieldId === null) {
+          return null;
+        }
+        const parent = bindings.find(
+          (candidate) => candidate.fieldId === binding.parentFieldId,
+        );
+        return parent === undefined
+          ? null
+          : (parent.fieldName ?? parent.sourceKey);
+      },
+    [bindings],
+  );
+
   const query = useMemo<OptionListQuery>(
-    () => ({ sourceKey: optionSourceKey, page, pageSize, orderBy }),
-    [optionSourceKey, page, pageSize, orderBy],
+    () => ({
+      sourceKey: isSearching ? "" : optionSourceKey,
+      page,
+      pageSize,
+      orderBy,
+      search: isSearching ? debouncedSearch.trim() : undefined,
+      // 搜索收在本数据源内：把范围钉在全部绑定的 source_key 上，不跨数据源。
+      where: isSearching
+        ? {
+            type: "in",
+            field: "source_key",
+            values: bindings.map((binding) => binding.sourceKey),
+          }
+        : undefined,
+    }),
+    [
+      isSearching,
+      debouncedSearch,
+      optionSourceKey,
+      page,
+      pageSize,
+      orderBy,
+      bindings,
+    ],
   );
   const optionsQuery = useOptionList(query, {
-    enabled: optionSourceKey !== "",
+    enabled: optionSourceKey !== "" || isSearching,
   });
   const items = optionsQuery.data?.items ?? [];
   const total = optionsQuery.data?.total ?? null;
@@ -538,6 +764,37 @@ export default function DatasourceDetailPage() {
         { field: "option_id", direction: "Asc" },
       ];
     });
+  }
+
+  /// 点击某一行的「N 个子项」：切换展开/收起（同时只展开一行）。
+  function toggleExpand(optionId: string) {
+    setExpandedOptionId((current) => (current === optionId ? null : optionId));
+  }
+
+  /// 展开区里子项的钻取：切到该子项所在的字段并就地展开它。
+  /// 搜索态下钻会先清掉搜索词（搜索结果集里没有「切换字段」这一说）。
+  function handleDrill(child: OptionItem) {
+    setSearchInput("");
+    setSelectedSourceKey(child.sourceKey);
+    setPage(1);
+    setView("flat");
+    setExpandedOptionId(child.optionId);
+  }
+
+  /// 分组头「在「{父字段名}」中查看」：切到父字段看平铺表。
+  function handleJumpToParent() {
+    if (parentBinding === null) return;
+    setSelectedSourceKey(parentBinding.sourceKey);
+    setPage(1);
+    setView("flat");
+    setExpandedOptionId(null);
+  }
+
+  /// 搜索无结果空态的「清除搜索」。
+  function clearSearch() {
+    setSearchInput("");
+    setPage(1);
+    setExpandedOptionId(null);
   }
 
   return (
@@ -675,6 +932,8 @@ export default function DatasourceDetailPage() {
                 onSelect={(sourceKey) => {
                   setSelectedSourceKey(sourceKey);
                   setPage(1);
+                  // 切字段时收起展开区：展开区里的父子关系是**旧字段**的。
+                  setExpandedOptionId(null);
                 }}
               />
             </div>
@@ -759,13 +1018,24 @@ export default function DatasourceDetailPage() {
           {/* Tab 内容：选项数据 */}
           {contextTab === "options" && (
             <section className="rounded-lg border border-border bg-card">
-              <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
                 <div>
                   <h2 className="text-sm font-semibold">
-                    {bindings.find(
-                      (binding) => binding.sourceKey === optionSourceKey,
-                    )?.fieldName ?? optionSourceKey}{" "}
-                    · 选项列表
+                    {isSearching ? (
+                      <>
+                        搜索结果{" "}
+                        <span className="font-normal text-muted-foreground">
+                          · 全部字段
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        {bindings.find(
+                          (binding) => binding.sourceKey === optionSourceKey,
+                        )?.fieldName ?? optionSourceKey}{" "}
+                        · 选项列表
+                      </>
+                    )}
                   </h2>
                   {total !== null &&
                   optionsQuery.isSuccess &&
@@ -776,7 +1046,53 @@ export default function DatasourceDetailPage() {
                     </p>
                   ) : null}
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  {/* 搜索框：跨本数据源的全部绑定字段（后端 search 打在
+                      option_id + label 上）。300ms 去抖，输入变化回第 1 页。 */}
+                  <div className="relative">
+                    <Search
+                      className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                    <Input
+                      type="search"
+                      value={searchInput}
+                      onChange={(event) => {
+                        setSearchInput(event.target.value);
+                        setPage(1);
+                        setExpandedOptionId(null);
+                      }}
+                      placeholder="搜索选项名称或标识（全部字段）"
+                      aria-label="搜索选项"
+                      className="h-8 w-56 pl-7"
+                      autoComplete="off"
+                    />
+                  </div>
+                  {/* 分组/平铺两档：只在选中字段有父字段、且不在搜索态时出现。 */}
+                  {!isSearching && parentBinding !== null ? (
+                    <div className="inline-flex items-center rounded-md border border-border p-0.5">
+                      {(
+                        [
+                          ["group", "按父级分组"],
+                          ["flat", "平铺"],
+                        ] as const
+                      ).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          aria-pressed={view === value}
+                          onClick={() => setView(value)}
+                          className={
+                            view === value
+                              ? "rounded-sm bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground"
+                              : "rounded-sm px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground"
+                          }
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   <label className="text-xs text-muted-foreground">每页</label>
                   <select
                     className="rounded border border-border px-2 py-1 text-sm"
@@ -861,13 +1177,18 @@ export default function DatasourceDetailPage() {
                   <TableBody>
                     {Array.from({ length: SKELETON_ROWS }, (_, index) => (
                       <TableRow key={index}>
-                        <TableCell colSpan={7}>
+                        <TableCell colSpan={9}>
                           <Skeleton className="h-4 w-full" />
                         </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
+              ) : isSearching && items.length === 0 ? (
+                <SearchEmptyState
+                  term={debouncedSearch.trim()}
+                  onClear={clearSearch}
+                />
               ) : items.length === 0 ? (
                 <OptionEmptyState
                   sourceKey={optionSourceKey}
@@ -875,11 +1196,48 @@ export default function DatasourceDetailPage() {
                 />
               ) : (
                 <>
-                  <OptionTable
-                    items={items}
-                    orderBy={orderBy}
-                    onSort={toggleSort}
-                  />
+                  {!isSearching &&
+                  view === "group" &&
+                  parentBinding !== null ? (
+                    <GroupedOptionTable
+                      items={items}
+                      expandedOptionId={expandedOptionId}
+                      onToggleExpand={toggleExpand}
+                      parentFieldName={
+                        parentBinding.fieldName ?? parentBinding.sourceKey
+                      }
+                      parentFieldNameOf={parentFieldNameOf}
+                      fieldNameOf={(sourceKey) =>
+                        fieldNameOf(bindings, sourceKey)
+                      }
+                      onDrill={handleDrill}
+                      onJumpToParent={handleJumpToParent}
+                      collapsedGroups={collapsedGroups}
+                      onToggleGroup={(key) =>
+                        setCollapsedGroups((previous) => ({
+                          ...previous,
+                          [key]: !previous[key],
+                        }))
+                      }
+                    />
+                  ) : (
+                    <OptionTable
+                      items={items}
+                      orderBy={orderBy}
+                      onSort={toggleSort}
+                      // 搜索跨字段，结果里必须带「所属字段」与「父级」两列——
+                      // 搜一条值就是要直接看到它挂在谁名下；同时砍掉排序/最近写入。
+                      showField={isSearching}
+                      compact={isSearching}
+                      expandedOptionId={expandedOptionId}
+                      onToggleExpand={toggleExpand}
+                      parentFieldNameOf={parentFieldNameOf}
+                      fieldNameOf={(sourceKey) =>
+                        fieldNameOf(bindings, sourceKey)
+                      }
+                      onDrill={handleDrill}
+                    />
+                  )}
                   <div className="flex items-center justify-between border-t border-border bg-muted/30 px-4 py-3 text-sm">
                     <span className="text-muted-foreground">共 {total} 条</span>
                     <div className="flex gap-2">
@@ -1131,80 +1489,492 @@ function OptionEmptyState({
   );
 }
 
+/// 搜索无结果 ≠ 「一个都没有」：**不复用** OptionEmptyState（那是「还没选项推过来」
+/// 的语义，下一步是看推送/导入）。这里说的是「匹配不到」，下一步是换个词或清除。
+function SearchEmptyState({
+  term,
+  onClear,
+}: {
+  term: string;
+  onClear: () => void;
+}) {
+  return (
+    <div className="space-y-3 p-6">
+      <div className="text-center">
+        <p className="text-sm font-medium">没有匹配的选项</p>
+        <p className="mx-auto mt-1 max-w-[44ch] text-sm text-muted-foreground">
+          本数据源的全部字段里都没有名称或标识包含「{term}」的选项。
+        </p>
+      </div>
+      <div className="flex justify-center">
+        <Button variant="outline" size="sm" onClick={onClear}>
+          清除搜索
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/// 一个单元格的渲染。平铺表与分组表共用（分组表不画 field/parent 两列，
+/// 分组头已经写了父级信息）。
+function optionCell(
+  item: OptionItem,
+  column: string,
+  opts: {
+    fieldNameOf: (sourceKey: string) => string;
+    parentFieldNameOf: (item: OptionItem) => string | null;
+    expanded: boolean;
+    onToggle: () => void;
+  },
+) {
+  switch (column) {
+    case "name":
+      return <TableCell className="font-medium">{item.label}</TableCell>;
+    case "field":
+      return (
+        <TableCell className="text-xs text-muted-foreground">
+          {opts.fieldNameOf(item.sourceKey)}
+        </TableCell>
+      );
+    case "parent":
+      return (
+        <TableCell>
+          <ParentCell
+            item={item}
+            parentFieldName={opts.parentFieldNameOf(item)}
+          />
+        </TableCell>
+      );
+    case "kids":
+      return (
+        <TableCell>
+          <KidsCell
+            item={item}
+            expanded={opts.expanded}
+            onToggle={opts.onToggle}
+          />
+        </TableCell>
+      );
+    case "id":
+      return (
+        <TableCell className="font-mono text-xs">{item.optionId}</TableCell>
+      );
+    case "sort":
+      return (
+        <TableCell className="text-right tabular-nums">
+          {item.sortOrder}
+        </TableCell>
+      );
+    case "default":
+      return (
+        <TableCell>
+          {item.isDefault ? (
+            <StatusBadge tone="neutral">默认</StatusBadge>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+      );
+    case "state":
+      return (
+        <TableCell>
+          <StatusBadge tone={item.enabled ? "positive" : "warning"}>
+            {item.enabled ? "启用" : "已停用"}
+          </StatusBadge>
+        </TableCell>
+      );
+    case "i18n": {
+      const translations = i18nText(item);
+      return (
+        <TableCell
+          className="text-xs text-muted-foreground"
+          title={translations === "" ? (item.i18n ?? undefined) : undefined}
+        >
+          {translations === "" ? "—" : translations}
+        </TableCell>
+      );
+    }
+    case "when":
+      return (
+        <TableCell className="text-xs text-muted-foreground tabular-nums">
+          {formatUnixSeconds(item.updatedAt)}
+        </TableCell>
+      );
+  }
+}
+
+/// 选项表（平铺 / 搜索两种模式，列集合见 [`optionColumns`]）。
+/// 展开中的行在下方多一行跨整列的关系区（父级链 + 子项）。
 function OptionTable({
   items,
   orderBy,
   onSort,
+  showField = false,
+  // 平铺与搜索态都画「父级」列（搜索一条值就是要直接看到它挂在谁名下）；
+  // 分组视图由 GroupedOptionTable 自己决定列集合，不走这里。
+  showParent = true,
+  compact = false,
+  expandedOptionId,
+  onToggleExpand,
+  parentFieldNameOf,
+  fieldNameOf,
+  onDrill,
 }: {
   items: OptionItem[];
   orderBy: OrderByClause[];
   onSort: (field: string) => void;
+  showField?: boolean;
+  showParent?: boolean;
+  compact?: boolean;
+  expandedOptionId: string | null;
+  onToggleExpand: (optionId: string) => void;
+  parentFieldNameOf: (item: OptionItem) => string | null;
+  fieldNameOf: (sourceKey: string) => string;
+  onDrill: (option: OptionItem) => void;
 }) {
   const sorted = orderBy.find((clause) => clause.field === "updated_at");
+  const columns = optionColumns(showField, showParent, compact);
 
   return (
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>选项名称</TableHead>
-          <TableHead>标识</TableHead>
-          <TableHead className="text-right">排序</TableHead>
-          <TableHead>默认</TableHead>
-          <TableHead>状态</TableHead>
-          <TableHead>多语言</TableHead>
-          <TableHead
-            aria-sort={
-              sorted
-                ? sorted.direction === "Asc"
-                  ? "ascending"
-                  : "descending"
-                : "none"
-            }
-          >
-            <SortableHeader orderBy={orderBy} onSort={onSort} />
-          </TableHead>
+          {columns.map((column) =>
+            column === "when" ? (
+              <TableHead
+                key={column}
+                aria-sort={
+                  sorted
+                    ? sorted.direction === "Asc"
+                      ? "ascending"
+                      : "descending"
+                    : "none"
+                }
+              >
+                <SortableHeader orderBy={orderBy} onSort={onSort} />
+              </TableHead>
+            ) : (
+              <TableHead
+                key={column}
+                className={column === "sort" ? "text-right" : undefined}
+              >
+                {COLUMN_LABEL[column]}
+              </TableHead>
+            ),
+          )}
         </TableRow>
       </TableHeader>
       <TableBody>
-        {items.map((item) => {
-          const translations = i18nText(item);
-          return (
-            <TableRow key={item.optionId} data-slot="option-row">
-              <TableCell className="font-medium">{item.label}</TableCell>
-              <TableCell className="font-mono text-xs">
-                {item.optionId}
-              </TableCell>
-              <TableCell className="text-right tabular-nums">
-                {item.sortOrder}
-              </TableCell>
-              <TableCell>
-                {item.isDefault ? (
-                  <StatusBadge tone="neutral">默认</StatusBadge>
-                ) : (
-                  <span className="text-muted-foreground">—</span>
-                )}
-              </TableCell>
-              <TableCell>
-                <StatusBadge tone={item.enabled ? "positive" : "warning"}>
-                  {item.enabled ? "启用" : "已停用"}
-                </StatusBadge>
-              </TableCell>
-              <TableCell
-                className="text-xs text-muted-foreground"
-                title={
-                  translations === "" ? (item.i18n ?? undefined) : undefined
-                }
-              >
-                {translations === "" ? "—" : translations}
-              </TableCell>
-              <TableCell className="text-xs text-muted-foreground tabular-nums">
-                {formatUnixSeconds(item.updatedAt)}
-              </TableCell>
+        {items.map((item) => (
+          <Fragment key={item.optionId}>
+            <TableRow data-slot="option-row">
+              {columns.map((column) => (
+                <Fragment key={column}>
+                  {optionCell(item, column, {
+                    fieldNameOf,
+                    parentFieldNameOf,
+                    expanded: expandedOptionId === item.optionId,
+                    onToggle: () => onToggleExpand(item.optionId),
+                  })}
+                </Fragment>
+              ))}
             </TableRow>
+            {expandedOptionId === item.optionId ? (
+              <TableRow>
+                <TableCell colSpan={columns.length} className="bg-muted/50 p-4">
+                  <OptionRelationRow
+                    key={item.optionId}
+                    option={item}
+                    fieldNameOf={fieldNameOf}
+                    onDrill={onDrill}
+                  />
+                </TableCell>
+              </TableRow>
+            ) : null}
+          </Fragment>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+/// 分组视图：把当前页按 parentKey **客户端**分组，保持组内后端顺序。
+///
+/// 同父跨页会重复分组头——设计稿接受的口径：分组按页做，不做全表聚合。
+/// 分组头 = 父文案 + 「来自 {父字段名}」+ 条数 + 「在父字段中查看」链接；
+/// 整头可点击折叠/展开该组（链接是独立按钮，点了只跳字段、不折叠）。
+function GroupedOptionTable({
+  items,
+  expandedOptionId,
+  onToggleExpand,
+  parentFieldName,
+  parentFieldNameOf,
+  fieldNameOf,
+  onDrill,
+  onJumpToParent,
+  collapsedGroups,
+  onToggleGroup,
+}: {
+  items: OptionItem[];
+  expandedOptionId: string | null;
+  onToggleExpand: (optionId: string) => void;
+  parentFieldName: string;
+  parentFieldNameOf: (item: OptionItem) => string | null;
+  fieldNameOf: (sourceKey: string) => string;
+  onDrill: (option: OptionItem) => void;
+  onJumpToParent: () => void;
+  collapsedGroups: Record<string, boolean>;
+  onToggleGroup: (key: string) => void;
+}) {
+  const NONE = "__none__";
+  const groups: Array<{ key: string; items: OptionItem[] }> = [];
+  const groupIndex = new Map<string, number>();
+  for (const item of items) {
+    const key = item.parentKey === null ? NONE : item.parentKey;
+    const index = groupIndex.get(key);
+    if (index === undefined) {
+      groupIndex.set(key, groups.length);
+      groups.push({ key, items: [item] });
+    } else {
+      groups[index]?.items.push(item);
+    }
+  }
+  const columns = optionColumns(false, false, false);
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          {columns.map((column) => (
+            <TableHead
+              key={column}
+              className={column === "sort" ? "text-right" : undefined}
+            >
+              {COLUMN_LABEL[column]}
+            </TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {groups.map((group) => {
+          const collapsed = collapsedGroups[group.key] === true;
+          const head = group.items[0] as OptionItem;
+          // 有父键但查不到行（旧规则留下的行）与「顶级」是两个不同的组
+          const isOrphan = group.key !== NONE && head.parentLabel === null;
+          return (
+            <Fragment key={group.key}>
+              <TableRow>
+                <TableCell colSpan={columns.length} className="p-0">
+                  <div className="flex flex-wrap items-center gap-2 bg-muted/50 px-3 py-2">
+                    <button
+                      type="button"
+                      aria-expanded={!collapsed}
+                      onClick={() => onToggleGroup(group.key)}
+                      className="inline-flex items-center gap-1.5 text-left"
+                    >
+                      <ChevronRight
+                        className={`size-3.5 text-muted-foreground transition-transform ${collapsed ? "" : "rotate-90"}`}
+                        aria-hidden="true"
+                      />
+                      <span
+                        className={`text-sm font-semibold ${isOrphan ? "text-tone-warning" : ""}`}
+                      >
+                        {group.key === NONE
+                          ? "顶级选项"
+                          : (head.parentLabel ?? "父级未找到")}
+                      </span>
+                      {group.key !== NONE ? (
+                        head.parentLabel !== null ? (
+                          <span className="text-xs text-muted-foreground">
+                            来自 {parentFieldName}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">
+                            父键指向的选项不在库里
+                          </span>
+                        )
+                      ) : null}
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        {group.items.length} 条
+                      </span>
+                    </button>
+                    {group.key !== NONE && head.parentLabel !== null ? (
+                      <button
+                        type="button"
+                        onClick={onJumpToParent}
+                        className="ml-auto text-xs underline decoration-border underline-offset-4 hover:decoration-muted-foreground"
+                      >
+                        在「{parentFieldName}」中查看
+                      </button>
+                    ) : null}
+                  </div>
+                </TableCell>
+              </TableRow>
+              {!collapsed
+                ? group.items.map((item) => (
+                    <Fragment key={item.optionId}>
+                      <TableRow data-slot="option-row">
+                        {columns.map((column) => (
+                          <Fragment key={column}>
+                            {optionCell(item, column, {
+                              fieldNameOf,
+                              parentFieldNameOf,
+                              expanded: expandedOptionId === item.optionId,
+                              onToggle: () => onToggleExpand(item.optionId),
+                            })}
+                          </Fragment>
+                        ))}
+                      </TableRow>
+                      {expandedOptionId === item.optionId ? (
+                        <TableRow>
+                          <TableCell
+                            colSpan={columns.length}
+                            className="bg-muted/50 p-4"
+                          >
+                            <OptionRelationRow
+                              key={item.optionId}
+                              option={item}
+                              fieldNameOf={fieldNameOf}
+                              onDrill={onDrill}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+                    </Fragment>
+                  ))
+                : null}
+            </Fragment>
           );
         })}
       </TableBody>
     </Table>
+  );
+}
+
+/// 展开区（点某一行的「N 个子项」后出现在该行下方，跨整列）。
+///
+/// 数据来源两路，都在挂载时查一次（`key` 用展开行的 optionId，换行展开不会串）：
+///   · 子项列表：`where: eq parent_key`，一页 100 条，total 超出时提示未显示条数；
+///   · 父级链：逐跳上溯（`where: eq option_id`），最多 8 跳防环。
+function OptionRelationRow({
+  option,
+  fieldNameOf,
+  onDrill,
+}: {
+  option: OptionItem;
+  fieldNameOf: (sourceKey: string) => string;
+  onDrill: (option: OptionItem) => void;
+}) {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalog.data, session }),
+    [catalog.data, session],
+  );
+  const childrenQuery = useOptionList(
+    {
+      sourceKey: "",
+      page: 1,
+      pageSize: CHILDREN_PAGE_SIZE,
+      orderBy: [],
+      where: { type: "eq", field: "parent_key", value: option.optionId },
+    },
+    { enabled: true },
+  );
+  const chainQuery = useQuery({
+    queryKey: ["feishu", "options", "parent-chain", option.optionId],
+    queryFn: ({ signal }) => fetchParentChain(option, deps, signal),
+    // 展开时只查一次链：同一行反复展开不再打网。
+    staleTime: Infinity,
+  });
+  const children = childrenQuery.data?.items ?? [];
+  const childrenTotal = childrenQuery.data?.total ?? null;
+  const crumbs = (chainQuery.data ?? []).slice().reverse();
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-xs font-semibold text-muted-foreground">父级链</h4>
+        {chainQuery.isPending ? (
+          <Skeleton className="mt-1 h-4 w-2/3" />
+        ) : (
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-sm">
+            {crumbs.map((node, index) => {
+              const last = index === crumbs.length - 1;
+              return (
+                <span
+                  key={node.optionId}
+                  className={`inline-flex items-baseline gap-1 ${last ? "font-semibold" : ""}`}
+                >
+                  <span className="text-xs text-muted-foreground">
+                    {fieldNameOf(node.sourceKey)}
+                  </span>
+                  <span>{node.label}</span>
+                  {last ? null : (
+                    <span className="text-muted-foreground" aria-hidden="true">
+                      ›
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <div>
+        <h4 className="text-xs font-semibold text-muted-foreground">
+          子项 · {childrenTotal ?? children.length} 条
+        </h4>
+        {childrenQuery.isPending || childrenQuery.isPlaceholderData ? (
+          <Skeleton className="mt-1 h-16 w-full" />
+        ) : (
+          <div className="mt-1 overflow-hidden rounded-md border border-border">
+            {children.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">
+                没有子项
+              </p>
+            ) : (
+              children.map((child) => (
+                <div
+                  key={child.optionId}
+                  className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1.5 text-sm last:border-b-0"
+                >
+                  <span className="font-medium">{child.label}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {fieldNameOf(child.sourceKey)}
+                  </span>
+                  <StatusBadge tone={child.enabled ? "positive" : "warning"}>
+                    {child.enabled ? "启用" : "已停用"}
+                  </StatusBadge>
+                  {child.childrenCount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => onDrill(child)}
+                      className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-0.5 text-xs hover:bg-muted"
+                      title="切到这一条所在的字段并展开它的子项"
+                    >
+                      <ChevronRight
+                        className="size-3 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      {child.childrenCount} 个子项
+                    </button>
+                  ) : null}
+                  <span className="ml-auto font-mono text-xs text-muted-foreground">
+                    {child.optionId}
+                  </span>
+                </div>
+              ))
+            )}
+            {childrenTotal !== null && childrenTotal > children.length ? (
+              <p className="px-3 py-1.5 text-xs text-muted-foreground">
+                还有 {childrenTotal - children.length} 条未显示
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
