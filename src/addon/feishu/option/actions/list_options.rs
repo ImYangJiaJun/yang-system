@@ -290,7 +290,12 @@ mod tests {
             item(Some(" b ")), // trim
         ])
         .into_iter()
-        .map(|value| value.as_str().expect("父键应是字符串").to_string())
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("父键应是字符串"))
+                .to_string()
+        })
         .collect();
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&"a".to_string()));
