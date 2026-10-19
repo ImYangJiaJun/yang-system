@@ -369,6 +369,7 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
           usesExternalOptions: true,
           optionSources: [
             {
+              datasourceId: 1,
               sourceKey: "fldq7lcb6y",
               fieldName: "付款公司名称/Payer Company name",
               datasourceTitle: "财税费用付款",
@@ -389,12 +390,20 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
     await user.click(
       screen.getByRole("combobox", {
+        name: "付款公司名称/Company name的外部选项数据源",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: /财税费用付款/ }),
+    );
+    await user.click(
+      screen.getByRole("combobox", {
         name: "付款公司名称/Company name的外部选项来源",
       }),
     );
     await user.click(
       await screen.findByRole("option", {
-        name: /财税费用付款.*Payer Company name/,
+        name: /Payer Company name/,
       }),
     );
     await user.click(screen.getByRole("button", { name: "预览控件" }));
@@ -467,11 +476,13 @@ describe("编辑字段映射", () => {
             usesExternalOptions: true,
             optionSources: [
               {
+                datasourceId: 2,
                 sourceKey: "same",
                 fieldName: "费用金额",
                 datasourceTitle: "同名来源",
               },
               {
+                datasourceId: 3,
                 sourceKey: "manual",
                 fieldName: "手动关联的公司列",
                 datasourceTitle: "手选来源",
@@ -491,20 +502,30 @@ describe("编辑字段映射", () => {
         />,
       );
       await user.click(screen.getByRole("button", { name: "预览控件" }));
-      const source = await screen.findByRole("combobox", {
+      const datasource = await screen.findByRole("combobox", {
+        name: "费用金额的外部选项数据源",
+      });
+      const source = screen.getByRole("combobox", {
         name: "费用金额的外部选项来源",
       });
-      expect(source).toHaveTextContent(
+      expect(datasource).toHaveTextContent(
         savedSource === "manual"
-          ? "手动关联的公司列"
+          ? "手选来源"
           : savedSource === "missing"
             ? "来源已失效"
             : "同名来源",
       );
-      if (savedSource === "missing")
+      if (savedSource === "manual")
+        expect(source).toHaveTextContent("手动关联的公司列");
+      if (savedSource === null) expect(source).toHaveTextContent("费用金额");
+      if (savedSource === "missing") {
+        expect(source).toBeDisabled();
         expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
-      await user.click(source);
+      }
+      await user.click(datasource);
       await user.click(await screen.findByRole("option", { name: /同名来源/ }));
+      await user.click(source);
+      await user.click(await screen.findByRole("option", { name: /费用金额/ }));
       await user.click(screen.getByRole("button", { name: "下一步" }));
       await user.click(screen.getByRole("button", { name: "下一步" }));
       await user.click(screen.getByRole("button", { name: "保存配置" }));
@@ -524,6 +545,50 @@ describe("编辑字段映射", () => {
     15000,
   );
 
+  it("明细子控件按限定名自动预选外部选项来源", async () => {
+    const user = userEvent.setup();
+    const client = stubClient({
+      listWidgets: vi.fn().mockResolvedValue([
+        { id: "detail", name: "明细", type: "fieldList", required: true },
+        {
+          id: "child",
+          name: "类别",
+          qualifiedName: "明细_类别",
+          type: "radioV2",
+          required: true,
+          usesExternalOptions: true,
+          optionSources: [
+            {
+              datasourceId: 1,
+              sourceKey: "qualified",
+              fieldName: "明细_类别",
+              datasourceTitle: "数据源",
+            },
+            {
+              datasourceId: 1,
+              sourceKey: "bare",
+              fieldName: "类别",
+              datasourceTitle: "数据源",
+            },
+          ],
+        },
+      ]),
+    });
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await user.click(
+      await screen.findByRole("combobox", {
+        name: "明细_类别对应的多维表格字段",
+      }),
+    );
+    await user.click(await screen.findByRole("option", { name: /费用金额/ }));
+    expect(
+      screen.getByRole("combobox", { name: "明细_类别的外部选项来源" }),
+    ).toHaveTextContent("明细_类别");
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+  }, 15000);
+
   it("同名外部来源有多个时等待手选，可选未映射控件无需来源", async () => {
     const user = userEvent.setup();
     const client = stubClient({
@@ -536,11 +601,13 @@ describe("编辑字段映射", () => {
           usesExternalOptions: true,
           optionSources: [
             {
+              datasourceId: 1,
               sourceKey: "first",
               fieldName: "费用金额",
               datasourceTitle: "来源一",
             },
             {
+              datasourceId: 2,
               sourceKey: "second",
               fieldName: "费用金额",
               datasourceTitle: "来源二",
@@ -560,17 +627,23 @@ describe("编辑字段映射", () => {
     await driveToStep2(user, client);
     await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
     await user.click(screen.getByRole("button", { name: "预览控件" }));
-    const source = await screen.findByRole("combobox", {
+    const datasource = await screen.findByRole("combobox", {
+      name: "费用金额的外部选项数据源",
+    });
+    const source = screen.getByRole("combobox", {
       name: "费用金额的外部选项来源",
     });
-    expect(source).toHaveTextContent("请选择选项来源");
+    expect(datasource).toHaveTextContent("请选择数据源");
+    expect(source).toBeDisabled();
     expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
     expect(screen.getByText(/没有可用的外部选项来源/)).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "可选银行的外部选项来源" }),
     ).toBeDisabled();
-    await user.click(source);
+    await user.click(datasource);
     await user.click(await screen.findByRole("option", { name: /来源二/ }));
+    await user.click(source);
+    await user.click(await screen.findByRole("option", { name: /费用金额/ }));
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
   }, 15000);
 

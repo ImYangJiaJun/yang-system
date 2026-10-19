@@ -728,12 +728,28 @@ async fn load_option_sources(
     let unavailable_names = tokio::time::timeout(std::time::Duration::from_secs(2), lookup)
         .await
         .unwrap_or_default();
-    select_option_sources(&linked, explicit_sources, &sources, &unavailable_names)
+    let qualified_names = widget_qualified_names(form);
+    select_option_sources(
+        &linked,
+        &qualified_names,
+        explicit_sources,
+        &sources,
+        &unavailable_names,
+    )
+}
+
+/// 控件 id → 明细限定名（父_子），与列匹配（approval_match::match_fields）同一套命名。
+fn widget_qualified_names(form: &[FormWidget]) -> BTreeMap<&str, String> {
+    super::approval_match::preview_widgets(form)
+        .into_iter()
+        .map(|(widget, qualified)| (widget.id.as_str(), qualified))
+        .collect()
 }
 
 /// 向导与保存/派发共用的启用来源候选，不返回 Token 或其他凭据。
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ApprovalOptionSource {
+    pub(crate) datasource_id: i64,
     pub(crate) source_key: String,
     pub(crate) field_name: String,
     pub(crate) datasource_title: String,
@@ -768,7 +784,8 @@ pub(crate) async fn list_option_sources(
 
     let mut out = Vec::new();
     for binding in &bindings {
-        let Some(title) = titles.get(&binding.require::<i64>("datasource_id")?) else {
+        let datasource_id = binding.require::<i64>("datasource_id")?;
+        let Some(title) = titles.get(&datasource_id) else {
             continue;
         };
         let name = binding_display_name(binding)?;
@@ -779,6 +796,7 @@ pub(crate) async fn list_option_sources(
             );
         }
         out.push(ApprovalOptionSource {
+            datasource_id,
             source_key: binding.require("source_key")?,
             field_name: name.unwrap_or_default(),
             datasource_title: title.clone(),
@@ -789,6 +807,7 @@ pub(crate) async fn list_option_sources(
 
 fn select_option_sources(
     linked: &[&FormWidget],
+    qualified_names: &BTreeMap<&str, String>,
     explicit_sources: &BTreeMap<String, String>,
     sources: &[ApprovalOptionSource],
     unavailable_names: &BTreeMap<String, String>,
@@ -808,9 +827,18 @@ fn select_option_sources(
             }
             continue;
         }
+        let qualified = qualified_names
+            .get(widget.id.as_str())
+            .map(String::as_str)
+            .unwrap_or_else(|| widget.name.trim());
+        let name = if sources.iter().any(|source| source.field_name == qualified) {
+            qualified
+        } else {
+            widget.name.trim()
+        };
         let candidates: Vec<_> = sources
             .iter()
-            .filter(|source| source.field_name == widget.name.trim())
+            .filter(|source| source.field_name == name)
             .collect();
         match candidates.as_slice() {
             [source] => {
@@ -1258,12 +1286,14 @@ mod tests {
         };
         assert_eq!(widgets[0].bitable_field, "fldCompany");
         let sources = vec![ApprovalOptionSource {
+            datasource_id: 1,
             source_key: "fldq7lcb6y".into(),
             field_name: "付款公司名称/Payer Company name".into(),
             datasource_title: "财税费用付款".into(),
         }];
         let external = select_option_sources(
             &linked_widgets(&form, None),
+            &widget_qualified_names(&form),
             &BTreeMap::from([("company".into(), "fldq7lcb6y".into())]),
             &sources,
             &BTreeMap::new(),
@@ -1303,33 +1333,119 @@ mod tests {
         let sources: Vec<_> = ["first", "second"]
             .iter()
             .map(|key| ApprovalOptionSource {
+                datasource_id: 1,
                 source_key: (*key).into(),
                 field_name: "公司".into(),
                 datasource_title: (*key).into(),
             })
             .collect();
         let linked = linked_widgets(&form, None);
-        assert!(
-            select_option_sources(&linked, &BTreeMap::new(), &sources, &BTreeMap::new()).is_err()
-        );
+        let qualified_names = widget_qualified_names(&form);
+        assert!(select_option_sources(
+            &linked,
+            &qualified_names,
+            &BTreeMap::new(),
+            &sources,
+            &BTreeMap::new()
+        )
+        .is_err());
         let explicit =
             BTreeMap::from([("a".into(), "first".into()), ("b".into(), "second".into())]);
         assert_eq!(
-            select_option_sources(&linked, &explicit, &sources, &BTreeMap::new())
-                .unwrap_or_else(|error| panic!("{error}")),
+            select_option_sources(
+                &linked,
+                &qualified_names,
+                &explicit,
+                &sources,
+                &BTreeMap::new()
+            )
+            .unwrap_or_else(|error| panic!("{error}")),
             explicit
         );
         assert!(select_option_sources(
             &linked,
+            &qualified_names,
             &BTreeMap::from([("a".into(), "missing".into())]),
             &sources[..1],
             &BTreeMap::new()
         )
         .is_err());
         assert_eq!(
-            select_option_sources(&linked, &BTreeMap::new(), &sources[..1], &BTreeMap::new())
-                .unwrap_or_else(|error| panic!("{error}")),
+            select_option_sources(
+                &linked,
+                &qualified_names,
+                &BTreeMap::new(),
+                &sources[..1],
+                &BTreeMap::new()
+            )
+            .unwrap_or_else(|error| panic!("{error}")),
             BTreeMap::from([("a".into(), "first".into()), ("b".into(), "first".into())])
+        );
+    }
+
+    #[test]
+    fn detail_child_option_source_prefers_the_qualified_field_name() {
+        let form = parse_form(&serde_json::json!([{
+            "id": "detail", "name": "明细", "type": "fieldList",
+            "children": [{
+                "id": "child", "name": "类别", "type": "radioV2", "required": true,
+                "externalData": {"externalDataLinkage": true}
+            }]
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let sources = vec![
+            ApprovalOptionSource {
+                datasource_id: 1,
+                source_key: "qualified".into(),
+                field_name: "明细_类别".into(),
+                datasource_title: "数据源".into(),
+            },
+            ApprovalOptionSource {
+                datasource_id: 1,
+                source_key: "bare".into(),
+                field_name: "类别".into(),
+                datasource_title: "数据源".into(),
+            },
+        ];
+        assert_eq!(
+            select_option_sources(
+                &linked_widgets(&form, None),
+                &widget_qualified_names(&form),
+                &BTreeMap::new(),
+                &sources,
+                &BTreeMap::new()
+            )
+            .unwrap_or_else(|error| panic!("{error}")),
+            BTreeMap::from([("child".into(), "qualified".into())])
+        );
+    }
+
+    #[test]
+    fn detail_child_option_source_falls_back_to_the_bare_name() {
+        let form = parse_form(&serde_json::json!([{
+            "id": "detail", "name": "明细", "type": "fieldList",
+            "children": [{
+                "id": "child", "name": "类别", "type": "radioV2", "required": true,
+                "externalData": {"externalDataLinkage": true}
+            }]
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let sources = vec![ApprovalOptionSource {
+            datasource_id: 1,
+            source_key: "bare".into(),
+            field_name: "类别".into(),
+            datasource_title: "数据源".into(),
+        }];
+        assert_eq!(
+            select_option_sources(
+                &linked_widgets(&form, None),
+                &widget_qualified_names(&form),
+                &BTreeMap::new(),
+                &sources,
+                &BTreeMap::new()
+            )
+            .unwrap_or_else(|error| panic!("{error}")),
+            BTreeMap::from([("child".into(), "bare".into())])
         );
     }
 

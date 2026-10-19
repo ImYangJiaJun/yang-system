@@ -285,6 +285,7 @@ describe("审批配置外部选项绑定", () => {
         ],
         option_sources: [
           {
+            datasource_id: 3,
             source_key: "fldq7lcb6y",
             field_name: "付款公司名称/Payer Company name",
             datasource_title: "财税费用付款",
@@ -297,6 +298,7 @@ describe("审批配置外部选项绑定", () => {
       usesExternalOptions: true,
       optionSources: [
         {
+          datasourceId: 3,
           sourceKey: "fldq7lcb6y",
           fieldName: "付款公司名称/Payer Company name",
           datasourceTitle: "财税费用付款",

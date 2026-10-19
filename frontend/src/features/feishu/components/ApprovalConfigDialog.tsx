@@ -47,6 +47,7 @@ import type { ApprovalWizardClient, CreateApprovalConfigInput } from "../api";
 import {
   parseBitableLink,
   type ApprovalConfigItem,
+  type ApprovalWidget,
   type BitableField,
   type BitableTable,
 } from "../types";
@@ -119,6 +120,9 @@ export function ApprovalConfigDialog({
       ]) ?? [],
     ),
   );
+  const [optionDatasources, setOptionDatasources] = useState<
+    Record<string, number>
+  >({});
   const [widgets, setWidgets] = useState<Awaited<
     ReturnType<ApprovalWizardClient["listWidgets"]>
   > | null>(null);
@@ -247,10 +251,18 @@ export function ApprovalConfigDialog({
             loadedWidgets
               .filter((widget) => widget.usesExternalOptions)
               .map((widget) => {
-                const candidates =
+                const qualified = (widget.qualifiedName ?? widget.name).trim();
+                let candidates =
                   widget.optionSources?.filter(
-                    (source) => source.fieldName.trim() === widget.name.trim(),
+                    (source) => source.fieldName.trim() === qualified,
                   ) ?? [];
+                if (candidates.length === 0) {
+                  candidates =
+                    widget.optionSources?.filter(
+                      (source) =>
+                        source.fieldName.trim() === widget.name.trim(),
+                    ) ?? [];
+                }
                 return [
                   widget.id,
                   (keepSavedSources && previous[widget.id]) ||
@@ -259,6 +271,7 @@ export function ApprovalConfigDialog({
               }),
           ),
         );
+        setOptionDatasources({});
         if (!initialConfig) {
           const owned = new Set<string>();
           setMaps(
@@ -621,66 +634,50 @@ export function ApprovalConfigDialog({
                                 </SelectContent>
                               </Select>
                               {widget.usesExternalOptions ? (
-                                <div className="mt-2 space-y-1">
-                                  <p className="text-xs text-muted-foreground">
-                                    外部选项来源
-                                  </p>
-                                  <Select
-                                    value={
-                                      optionSources[widget.id] || "__none__"
-                                    }
-                                    disabled={
-                                      widgetsPending || !maps[widget.id]
-                                    }
-                                    onValueChange={(value) =>
+                                <OptionSourcePicker
+                                  widget={widget}
+                                  sourceKey={optionSources[widget.id] ?? ""}
+                                  datasourceId={optionDatasources[widget.id]}
+                                  disabled={widgetsPending || !maps[widget.id]}
+                                  onDatasourceChange={(datasourceId) => {
+                                    setOptionDatasources((previous) => {
+                                      const next = { ...previous };
+                                      if (datasourceId === null) {
+                                        delete next[widget.id];
+                                      } else {
+                                        next[widget.id] = datasourceId;
+                                      }
+                                      return next;
+                                    });
+                                    const belongs = widget.optionSources?.some(
+                                      (source) =>
+                                        source.sourceKey ===
+                                          optionSources[widget.id] &&
+                                        source.datasourceId === datasourceId,
+                                    );
+                                    if (!belongs) {
                                       setOptionSources((previous) => ({
                                         ...previous,
-                                        [widget.id]:
-                                          value === "__none__" ? "" : value,
-                                      }))
+                                        [widget.id]: "",
+                                      }));
                                     }
-                                  >
-                                    <SelectTrigger
-                                      aria-label={`${widget.qualifiedName ?? widget.name}的外部选项来源`}
-                                      className="w-full min-w-48"
-                                    >
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="__none__">
-                                        请选择选项来源
-                                      </SelectItem>
-                                      {optionSources[widget.id] &&
-                                      !widget.optionSources?.some(
-                                        (source) =>
-                                          source.sourceKey ===
-                                          optionSources[widget.id],
-                                      ) ? (
-                                        <SelectItem
-                                          value={optionSources[widget.id]}
-                                        >
-                                          来源已失效（{optionSources[widget.id]}
-                                          ）
-                                        </SelectItem>
-                                      ) : null}
-                                      {widget.optionSources?.map((source) => (
-                                        <SelectItem
-                                          key={source.sourceKey}
-                                          value={source.sourceKey}
-                                        >
-                                          {source.datasourceTitle} ·{" "}
-                                          {source.fieldName || source.sourceKey}
-                                          （{source.sourceKey}）
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                  {widget.optionSources?.length === 0 ? (
-                                    <p className="text-xs text-destructive">
-                                      没有可用的外部选项来源，请检查数据源及字段绑定是否启用。
-                                    </p>
-                                  ) : null}
-                                </div>
+                                  }}
+                                  onSourceChange={(sourceKey) => {
+                                    const source = widget.optionSources?.find(
+                                      (item) => item.sourceKey === sourceKey,
+                                    );
+                                    setOptionSources((previous) => ({
+                                      ...previous,
+                                      [widget.id]: sourceKey,
+                                    }));
+                                    if (source) {
+                                      setOptionDatasources((previous) => ({
+                                        ...previous,
+                                        [widget.id]: source.datasourceId,
+                                      }));
+                                    }
+                                  }}
+                                />
                               ) : null}
                               {widget.type === "connect" ? (
                                 <p className="text-muted-foreground mt-1 text-xs">
@@ -890,6 +887,108 @@ export function ApprovalConfigDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/// 外部选项来源的两级选择：先选数据源，再选该数据源下的字段。
+///
+/// 已保存的 sourceKey 可能已经失效（来源停用/删除），此时数据源下拉显示
+/// 「来源已失效」且字段下拉禁用，下一步由 `step2Ready` 拦住。
+function OptionSourcePicker({
+  widget,
+  sourceKey,
+  datasourceId,
+  disabled,
+  onDatasourceChange,
+  onSourceChange,
+}: {
+  widget: ApprovalWidget;
+  sourceKey: string;
+  datasourceId: number | undefined;
+  disabled: boolean;
+  onDatasourceChange: (datasourceId: number | null) => void;
+  onSourceChange: (sourceKey: string) => void;
+}) {
+  const sources = widget.optionSources ?? [];
+  const saved = sources.find((source) => source.sourceKey === sourceKey);
+  const invalid = sourceKey !== "" && !saved;
+  const currentDatasource = datasourceId ?? saved?.datasourceId;
+  const datasources = [
+    ...new Map(sources.map((source) => [source.datasourceId, source])).values(),
+  ];
+  const fields = sources.filter(
+    (source) => source.datasourceId === currentDatasource,
+  );
+  const datasourceValue = invalid
+    ? "__invalid__"
+    : currentDatasource === undefined
+      ? "__none__"
+      : String(currentDatasource);
+  return (
+    <div className="mt-2 space-y-1">
+      <p className="text-xs text-muted-foreground">外部选项来源</p>
+      <Select
+        value={datasourceValue}
+        disabled={disabled}
+        onValueChange={(value) => {
+          if (value === "__none__" || value === "__invalid__") {
+            onDatasourceChange(null);
+          } else {
+            onDatasourceChange(Number(value));
+          }
+        }}
+      >
+        <SelectTrigger
+          aria-label={`${widget.qualifiedName ?? widget.name}的外部选项数据源`}
+          className="w-full min-w-48"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__none__">请选择数据源</SelectItem>
+          {invalid ? (
+            <SelectItem value="__invalid__">
+              来源已失效（{sourceKey}）
+            </SelectItem>
+          ) : null}
+          {datasources.map((source) => (
+            <SelectItem
+              key={source.datasourceId}
+              value={String(source.datasourceId)}
+            >
+              {source.datasourceTitle}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select
+        value={invalid ? "__none__" : sourceKey || "__none__"}
+        disabled={disabled || currentDatasource === undefined || invalid}
+        onValueChange={(value) => {
+          if (value !== "__none__") onSourceChange(value);
+        }}
+      >
+        <SelectTrigger
+          aria-label={`${widget.qualifiedName ?? widget.name}的外部选项来源`}
+          className="w-full min-w-48"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__none__">请选择字段</SelectItem>
+          {fields.map((source) => (
+            <SelectItem key={source.sourceKey} value={source.sourceKey}>
+              {source.fieldName || source.sourceKey}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {sources.length === 0 ? (
+        <p className="text-xs text-destructive">
+          没有可用的外部选项来源，请检查数据源及字段绑定是否启用。
+        </p>
+      ) : null}
+    </div>
   );
 }
 

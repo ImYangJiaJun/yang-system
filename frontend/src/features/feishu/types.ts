@@ -1096,6 +1096,8 @@ export type ApprovalWidget = {
 };
 
 export type ApprovalOptionSource = {
+  /// 所属数据源主键。两级选择按它分组。
+  datasourceId: number;
   sourceKey: string;
   fieldName: string;
   datasourceTitle: string;

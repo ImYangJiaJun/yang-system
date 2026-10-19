@@ -2066,6 +2066,7 @@ export async function listApprovalWidgets(
       return sourceKey === ""
         ? null
         : {
+            datasourceId: asNumber(raw.datasource_id, 0),
             sourceKey,
             fieldName: asString(raw.field_name),
             datasourceTitle: asString(raw.datasource_title),
