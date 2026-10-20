@@ -88,8 +88,8 @@ pub(super) async fn handle(
         // 目标」。
         //
         // 锁序：必须整集升序（理由见 `lock_users_ascending_in_tx`），且必须**先于**组行锁
-        // （全局锁序见 `domain::groups::admin` 的模块注释）：`add_group_item` 是先锁
-        // users 行、再由外键取父组行的 S 锁，成员变更也必须同向，否则在同一组行上成环。
+        // （全局锁序见 `domain::groups::admin` 的模块注释）：`add_group_item` 也是先锁
+        // users 行、再锁组行，成员变更必须同向，否则在同一组行上成环。
         let mut lock_set: BTreeSet<i64> = probed_members.iter().copied().collect();
         lock_set.insert(operator_id);
         lock_set.insert(input.user_id);

@@ -1,7 +1,8 @@
 # 授权存储与权限目录契约
 
 **生成：** 2026-09-03
-**更新：** 2026-10-03（管理接口表改新口径：9 个组接口 authenticated-only，授权判定下沉 handler 内；
+**更新：** 2026-10-20（管理员等价清单新增 `feishu.approval.write`）；
+2026-10-03（管理接口表改新口径：9 个组接口 authenticated-only，授权判定下沉 handler 内；
 `access.groups.read/write` 降为保留权限键，不被任何 Action 强制；`get_group` 不可见与不存在统一 404）；
 2026-09-26（新增「管理员等价权限」显式清单与授予闸门；账号管理拆分出独立的凭据签发权限 `account.users.reset_credentials`）；
 2026-09-24（首账号引导成为初始授权主路径；新增一层权限组）
@@ -52,12 +53,13 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 因此不能让只持 `access.grants.write` / `access.groups.write` 的委派者自行完成。
 
 **清单是代码侧的显式、可评审事实**（`src/addon/access/domain/sensitive_permissions.rs` 的
-`ADMIN_EQUIVALENT_PERMISSIONS`，唯一事实来源），当前恰有 4 条，每条附中文理由（理由会拼进
+`ADMIN_EQUIVALENT_PERMISSIONS`，唯一事实来源），当前恰有 5 条，每条附中文理由（理由会拼进
 403 的拒绝信息，因此在生产路径上真的被读取）：
 
 | 管理员等价权限 | 为什么等价 |
 |---|---|
 | `account.users.reset_credentials` | 对任意账号签发密码重置凭证：凭此重置其口令并登录成他，即夺取该账号的身份与全部权限 |
+| `feishu.approval.write` | `create_config` / `reveal_config_token` / `rotate_config_token` 可签发或回显工作流派发 Token；派发端点是 public、仅按 `token_hash` 验机器凭据，拿到 Token 即绕过其余全部授权检查 |
 | `feishu.datasource.secret` | 回显数据源封存的 Token 明文；该 Token 是数据源主体的入站凭据，拿到即可冒充该数据源调用本系统，不再经任何授权检查 |
 | `feishu.datasource.write` | 创建与轮换数据源都会把新凭据的明文返回给调用者（`create_datasource_table` / `rotate_token`），签发即持有，与直接读取凭据等价 |
 | `feishu.portal.write` | 创建门户会把数据源的敏感数据暴露到公开 URL，攻击者拿到 URL 即可绕过认证查询数据，等价于把数据源的内容对外发布 |
@@ -184,6 +186,17 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 - **不受此限**：修改**他人**的成员关系、修改自己**不所属**的组（这些是正常的授权管理
   行为）。`system_admin` 成员本就持有全部权限，`after ⊄ before` 恒不成立，因此不受约束。
 - 移出成员**不做**该校验：移出只会减少权限，且管理员必须能退出全权组。
+
+**委派子集闸门（转授他人）**：组权限会授予全体成员，因此下面两条路径即使不改变调用者
+自身权限，也不得把调用者**未持有**的权限转授出去：
+
+- `add_group_item`：操作者的有效权限必须包含本次加入的权限（无条件校验；`system_admin`
+  成员的有效权限是目录全集，自然放行）。
+- `add_group_member`：目标组经目录解析后的**实际贡献**必须是操作者有效权限的子集
+  （孤儿条目在解析期被丢弃，不参与比较）；重复添加已有成员不转授新权限，仍按幂等成功返回。
+
+两者失败均为 `PermissionDenied` → 403，消息点名缺少的权限。这两条与上面的不变量互补：
+不变量防调用者自身权限变大，本闸门防调用者把别人的权限变大。
 
 ### 最后一名管理员守卫
 

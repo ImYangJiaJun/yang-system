@@ -4,8 +4,8 @@ use crate::addon::access::domain::context::Access;
 use crate::addon::access::domain::groups::admin::{
     assert_no_self_escalation, effective_permissions_of_in_tx,
     ensure_may_modify_members_of_group_in_tx, ensure_member_limit,
-    ensure_operator_may_manage_group_from_ctx, invalidate_users_in_tx, lock_users_ascending_in_tx,
-    simulate_after_join,
+    ensure_operator_holds_group_permissions_in_tx, ensure_operator_may_manage_group_from_ctx,
+    invalidate_users_in_tx, lock_users_ascending_in_tx, simulate_after_join,
 };
 use crate::addon::access::domain::groups::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::audit;
@@ -150,8 +150,8 @@ async fn join_group_once(
         // 「199 名成员」而双双放行，成员数越过 `MAX_GROUP_MEMBERS`。
         //
         // 锁序：必须在 users 行锁**之后**取（全局锁序见 `domain::groups::admin` 的模块
-        // 注释）。这不是任意的——`add_group_item` 先锁 users 行、再在插入条目时由外键取
-        // 父组行的 S 锁，次序正是「users 行 → 组行」；成员变更若反过来就会与它成环。
+        // 注释）。这不是任意的——`add_group_item` 先锁 users 行、再锁组行，次序正是
+        // 「users 行 → 组行」；成员变更若反过来就会与它成环。
         // 也正因为组行是**主键等值命中的记录锁**（不是间隙锁），它对空成员集合的组同样
         // 能真正串行化——旧实现拿成员行 `FOR UPDATE` 当串行化点时，空组上只剩彼此兼容的
         // 间隙锁，两个并发加成员都通过它、随后靠插入意向锁与间隙锁互锁成环（40001）。
@@ -204,6 +204,19 @@ async fn join_group_once(
         // - 真的会新增时，交给它的必须是「插入后」的成员数，该函数的口径是「超过上限才
         //   拒绝」，恰好 200 名合法。成员数读自组行锁保护下的名单，事务提交前不会漂移。
         if !members.contains(&input.user_id) {
+            // 委派子集闸门：owner 通常不是组成员，§8.1 的自提权判定（只在
+            // `input.user_id == operator_id` 时生效）挡不住「把同伙加入自建组」。
+            // 入组会把目标组的全部权限转授给新成员，因此操作者的有效权限必须覆盖
+            // 目标组的**实际贡献**（用目录解析后的集合，孤儿条目自然被丢弃）。
+            // 只对「真的会新增成员」判定：重复添加不转授任何新权限，必须保持幂等成功。
+            ensure_operator_holds_group_permissions_in_tx(
+                access,
+                ctx,
+                &mut transaction,
+                operator_id,
+                &group,
+            )
+            .await?;
             ensure_member_limit(members.len() as u64 + 1)?;
         }
 

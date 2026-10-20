@@ -95,11 +95,13 @@ pub(super) async fn handle(
         lock_set.insert(operator_id);
         lock_users_ascending_in_tx(&access, &ctx, &mut transaction, &lock_set).await?;
 
-        // 第三步：锁后读。它是本事务的第一条普通读，因此快照在此建立——必然包含
-        // 「先于本事务取到这批锁」的全部提交，是判据的唯一事实来源。
+        // 第三步：锁组行（`permission_group` 主键上的 `FOR UPDATE` 记录锁），再读组事实。
+        // 锁序必须是 users 行 → 组行（见 `domain::groups::admin` 模块注释）。并发重复
+        // 添加同一权限时，后到者在组行锁上排队，其后的判据读必然看到先到者提交的条目，
+        // 直接走幂等分支，不会把唯一键冲突泄漏成 500；并发删组同样在这把锁上排队。
         let group = access
             .groups()
-            .find_by_id_in_tx(&ctx, &mut transaction, input.group_id)
+            .lock_group_in_tx(&ctx, &mut transaction, input.group_id)
             .await?
             .ok_or_else(|| BaseError::RecordNotFound("权限组".to_string()))?;
         // 内置全权组的权限由权限目录计算，写入条目既无意义又会让解析出现第二口径。
@@ -132,6 +134,23 @@ pub(super) async fn handle(
             &input.permission,
         )
         .await?;
+
+        // 委派子集闸门（无条件）：只能把**自己已持有**的权限写进组。
+        //
+        // 组权限会授予全体成员，因此「加条目」本质上是把一条权限转授出去。§8.1 的
+        // 自提权判定只在操作者本人是组成员时生效，而 owner 通常不是成员——没有这条
+        // 校验时，任何自助注册账号都能把 `access.grants.write` 这类自己并不持有的
+        // 权限装进自建组，再拉同伙入组，两个账号即可互相授权。
+        // system_admin 成员的有效权限是目录全集（本次新增的权限已经 `ensure_declared`
+        // 确认在目录内），因此管理员路径自然放行。
+        let effective =
+            effective_permissions_of_in_tx(&access, &ctx, &mut transaction, operator_id).await?;
+        if !effective.contains(&input.permission) {
+            return Err(BaseError::PermissionDenied(format!(
+                "权限 {} 不在你当前的有效权限中，不能授予自己未持有的权限",
+                input.permission
+            )));
+        }
 
         // spec §8.1 路径二：给自己**已属于**的组加一条自己没有的权限，同样是自提权。
         // 组权限只影响成员，因此只有调用者本身在该组内时这条不变量才可能被破坏。

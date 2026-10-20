@@ -32,8 +32,9 @@ const SYSTEM_ADMIN_GROUP_KEY: &str = "system_admin";
 /// 当前 Catalog 已声明的权限」才有独立的判据——权限改名后清单会静默失效，只有这份
 /// 与代码侧清单分离的期望值才能把它钉红。生产清单见
 /// `src/addon/access/domain/sensitive_permissions.rs`。
-const ADMIN_EQUIVALENT_PERMISSIONS: [&str; 4] = [
+const ADMIN_EQUIVALENT_PERMISSIONS: [&str; 5] = [
     "account.users.reset_credentials",
+    "feishu.approval.write",
     "feishu.datasource.secret",
     "feishu.datasource.write",
     "feishu.portal.write",
@@ -2042,6 +2043,94 @@ async fn user_cannot_add_a_permission_to_their_own_group_beyond_their_holdings()
     );
 }
 
+/// access-infra#9 路径一：owner 不是成员时，也不能把**自己未持有**的权限装进自建组。
+///
+/// 缺陷形态：`add_group_item` 的 §8.1 子集校验只在 `members.contains(operator)` 时
+/// 执行，而 owner 通常不是成员。任一自助注册账号建组后即可把 `access.grants.write`
+/// 写进组，再拉同伙入组，两个账号互相授权——这正是 P0-1 提权链的第一步。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn owner_cannot_add_a_permission_they_do_not_hold_to_their_own_group() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    // owner 只持 access.groups.write：它不持有 access.grants.write。
+    let owner = harness::grant_only(&app, &admin, "owner", "access.groups.write").await;
+    let group_id = harness::create_group(&app, &owner, "owner_group", "自建组").await;
+    assert!(
+        !harness::is_member(&app, group_id, owner.user_id).await,
+        "夹具必须从「owner 不是成员」出发，否则会先撞上 §8.1 自提权判定而不是本闸门"
+    );
+
+    let status =
+        harness::add_group_item_status(&app, &owner, group_id, "access.grants.write").await;
+    assert_eq!(
+        status, 403,
+        "owner 不得把自己未持有的权限写进自建组，必须 403 PermissionDenied"
+    );
+    assert_eq!(
+        harness::item_rows_of_group(&app, group_id).await,
+        0,
+        "被拒的条目不得落库"
+    );
+}
+
+/// access-infra#9 路径二：owner 不能把同伙加入持有 owner 未持有权限的组。
+///
+/// 缺陷形态：`add_group_member` 的 §8.1 子集校验只在 `input.user_id == operator_id`
+/// 时执行，owner 因此可以把第二个账号加入自建组，完成「A 加权限 → A 拉 B → B 用
+/// access.grants.write 给 A 授权」的提权链。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn owner_cannot_add_a_member_to_a_group_holding_permissions_they_do_not_hold() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let owner = harness::grant_only(&app, &admin, "owner2", "access.groups.write").await;
+    let group_id = harness::create_group(&app, &owner, "owner_group2", "自建组").await;
+    // 前置：由全权组成员把 owner 不持有的 access.grants.write 写进该组。
+    harness::add_group_item(&app, &admin, group_id, "access.grants.write").await;
+    let accomplice = harness::register_with_code(&app, "accomplice")
+        .await
+        .unwrap_or_else(|error| panic!("注册同伙失败: {error}"));
+
+    let status = harness::add_member_status(&app, &owner, group_id, accomplice).await;
+    assert_eq!(
+        status, 403,
+        "owner 不得把同伙加入持有自己未持有权限的组，必须 403 PermissionDenied"
+    );
+    assert!(
+        !harness::is_member(&app, group_id, accomplice).await,
+        "被拒的成员写入不得落库"
+    );
+}
+
+/// access-infra#9 的活性对照：owner 持有的普通权限仍可正常入组并转授。
+///
+/// 闸门只要求「操作者有效权限覆盖目标组贡献」，不能把正常的自助组管理一并锁死：
+/// owner 仅凭「组所有者」身份（不需要 access.groups.write）管理自建组。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn owner_can_add_and_transfer_permissions_they_hold() {
+    let app = harness::build_test_app().await;
+    let admin = harness::bootstrap_admin(&app).await;
+    let owner = harness::grant_only(&app, &admin, "owner3", "feishu.datasource.read").await;
+    let group_id = harness::create_group(&app, &owner, "owner_group3", "自建组").await;
+
+    assert_eq!(
+        harness::add_group_item_status(&app, &owner, group_id, "feishu.datasource.read").await,
+        200,
+        "owner 必须能把自己持有的权限写进自建组"
+    );
+    let teammate = harness::register_with_code(&app, "teammate")
+        .await
+        .unwrap_or_else(|error| panic!("注册成员失败: {error}"));
+    assert_eq!(
+        harness::add_member_status(&app, &owner, group_id, teammate).await,
+        200,
+        "目标组贡献是 owner 有效权限的子集，加成员必须放行"
+    );
+    assert!(harness::is_member(&app, group_id, teammate).await);
+}
+
 /// Review Focus 2：管理员把自己移出全权组（非最后一名）必须成功。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要真实 MySQL/Redis"]
@@ -3201,11 +3290,15 @@ async fn concurrent_item_and_member_add_on_the_same_group_do_not_deadlock() {
         harness::seed_members_directly(&app, group_id, 40).await;
 
         // 两名成员操作者：都在组内（因此两组行锁必然相交），都持 access.groups.write。
+        // 两人也都持 access.grants.read：条目请求要写入这条权限，而委派子集闸门要求
+        // 操作者持有它——否则「条目请求先提交」时成员请求会被 403，用例测不到锁序。
         let item_operator =
             harness::grant_only(&app, &admin, "fanout_a", "access.groups.write").await;
         harness::grant_permission(&app, &admin, item_operator.user_id, "access.grants.read").await;
         let member_operator =
             harness::grant_only(&app, &admin, "fanout_b", "access.groups.write").await;
+        harness::grant_permission(&app, &admin, member_operator.user_id, "access.grants.read")
+            .await;
         harness::add_member(&app, &admin, group_id, item_operator.user_id).await;
         harness::add_member(&app, &admin, group_id, member_operator.user_id).await;
         // 授权与入组都递增了授权版本，令牌必须在两者之后重签。
@@ -3330,6 +3423,62 @@ async fn concurrent_item_adds_by_two_member_operators_do_not_deadlock() {
             statuses,
             vec![200, 200],
             "第 {round} 轮两名成员操作者并发加权限不得死锁/超时，实际 {statuses:?}"
+        );
+    }
+}
+
+/// access-infra#16：同一组并发追加**同一条**权限不得把唯一键冲突泄漏成 5xx。
+///
+/// 缺陷形态：`add_group_item` 读组事实用无锁的 `find_by_id_in_tx`，两个并发请求都
+/// 读不到条目、都走到 INSERT，后到者撞 `uk_permission_group_item`，客户端收到 500。
+/// 组行锁把「读条目 → 插入」整段串行化后，后到者必然看到先到者的提交并返回幂等成功。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_duplicate_item_adds_do_not_leak_500() {
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let first = harness::bootstrap_admin(&app).await;
+        let second = harness::add_second_admin(&app, &first, "admin2").await;
+        let group_id = harness::create_group(&app, &first, "duplicate", "并发重复条目组").await;
+        // 必须用**两个不同操作者**：同一账号的请求会先在同一把 users 行锁上排队，
+        // 那样即使没有组行锁也测不出并发重复添加。组内无成员，两条事务的 users 锁
+        // 集合互不相交，唯一能串行化它们的就是本任务新增的组行锁。
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for operator in [first, second] {
+            let app = app.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                harness::item_mutation_outcome(
+                    &app,
+                    &operator,
+                    "add_group_item",
+                    group_id,
+                    "access.grants.read",
+                )
+                .await
+                .0
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(
+                handle
+                    .await
+                    .unwrap_or_else(|error| panic!("任务不应 panic: {error}")),
+            );
+        }
+        assert_eq!(
+            statuses,
+            vec![200, 200],
+            "第 {round} 轮并发重复添加同一条权限不得泄漏 5xx（唯一键冲突会被折算成 500），\
+             实际 {statuses:?}"
+        );
+        assert_eq!(
+            harness::item_rows_of_group(&app, group_id).await,
+            1,
+            "第 {round} 轮唯一键必须恰好一行，重复添加按幂等返回"
         );
     }
 }
