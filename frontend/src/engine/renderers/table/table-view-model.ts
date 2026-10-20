@@ -25,15 +25,22 @@ export function flattenDisplayRows(
   source: SourceRow[],
   depth = 0,
   path = "root",
+  idField = "id",
 ): DisplayRow[] {
   return source.flatMap((row, index) => {
     const rowPath = `${path}.${index}`;
+    // 行键必须是记录主键：页内路径会在翻页后复用，批量操作可能命中错误记录。
+    const primary = row[idField];
+    const hasPrimary =
+      typeof primary === "number" ||
+      (typeof primary === "string" && primary.trim() !== "");
+    const key = hasPrimary ? String(primary) : rowPath;
     const children = Array.isArray(row.children)
       ? (row.children as SourceRow[])
       : [];
     return [
-      { data: row, depth, key: rowPath },
-      ...flattenDisplayRows(children, depth + 1, rowPath),
+      { data: row, depth, key },
+      ...flattenDisplayRows(children, depth + 1, rowPath, idField),
     ];
   });
 }

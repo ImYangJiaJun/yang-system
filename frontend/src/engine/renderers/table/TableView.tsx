@@ -69,7 +69,7 @@ export function TableView({
     (action) => action.operation_id === view.data_action,
   );
   const query = useTableQuery(view, dataAction);
-  const [selectedRows, setSelectedRows] = useState<SourceRow[]>([]);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   // 列显示偏好：localStorage 按 view_id 持久化，至少保留一列。
   const allFields = useMemo(() => allColumnFields(view), [view]);
   const [visibleFields, setVisibleFields] = useState<string[]>(() =>
@@ -98,8 +98,23 @@ export function TableView({
     [view, query.state, query.rows],
   );
   const displayRows = useMemo(
-    () => flattenDisplayRows(treeResult.rows),
-    [treeResult.rows],
+    () =>
+      flattenDisplayRows(
+        treeResult.rows,
+        0,
+        "root",
+        view.tree?.id_field ?? "id",
+      ),
+    [treeResult.rows, view.tree?.id_field],
+  );
+
+  // 批量提交按**当前** rows 重新映射选择：数据刷新后不会提交过期行快照。
+  const selectedRows = useMemo(
+    () =>
+      displayRows
+        .filter((row) => selectedKeys.includes(row.key))
+        .map((row) => row.data),
+    [displayRows, selectedKeys],
   );
 
   const relation = useRelationOptions(view, actions, query.rows);
@@ -270,7 +285,8 @@ export function TableView({
         onSortChange={query.changeSort}
         labelFor={relation.labelFor}
         selectionEnabled={presented.bulkActions.length > 0}
-        onSelectionChange={setSelectedRows}
+        selectionResetKey={JSON.stringify(query.state)}
+        onSelectionChange={setSelectedKeys}
         rowActionGroups={presented.rowActionGroups}
         onOpenAction={presented.openAction}
       />

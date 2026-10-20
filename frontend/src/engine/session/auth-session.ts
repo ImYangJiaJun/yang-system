@@ -17,6 +17,10 @@ let activeRefresh: Promise<LoginResult> | undefined;
 let currentAccessToken: string | undefined;
 let expiredAccessToken: string | undefined;
 
+/// 刷新请求的最长等待时间。超过即中止并按可重试错误交给调用方，
+/// 避免刷新端点挂起时启动骨架永久停在 pending。
+const REFRESH_TIMEOUT_MS = 10_000;
+
 export class SessionExpiredError extends Error {
   constructor(options?: { cause?: unknown }) {
     super("登录状态已过期，请重新登录", options);
@@ -81,7 +85,14 @@ function terminalRefreshFailure(cause: unknown): boolean {
 
 async function refreshTokenPair(): Promise<LoginResult> {
   if (!activeRefresh) {
-    activeRefresh = withRefreshLock(refreshSession)
+    activeRefresh = withRefreshLock(() =>
+      refreshSession(
+        typeof AbortSignal !== "undefined" &&
+          typeof AbortSignal.timeout === "function"
+          ? AbortSignal.timeout(REFRESH_TIMEOUT_MS)
+          : undefined,
+      ),
+    )
       .then((tokens) => {
         persistTokenPair(tokens);
         dispatchSessionEvent(SESSION_REFRESHED_EVENT, tokens);
@@ -123,16 +134,25 @@ async function refreshAccessToken(failedAccessToken: string): Promise<string> {
   }
 }
 
-export async function requestWithTokenRefresh(
+export async function requestWithTokenRefresh<T>(
   accessToken: string | undefined,
-  request: (accessToken: string | undefined) => Promise<Response>,
-): Promise<Response> {
+  request: (accessToken: string | undefined) => Promise<T>,
+): Promise<T> {
   const normalizedAccessToken = accessToken?.trim() || undefined;
-  const response = await request(normalizedAccessToken);
-  if (response.status !== 401 || !normalizedAccessToken) return response;
+  if (!normalizedAccessToken) return request(undefined);
 
-  const renewedAccessToken = await refreshAccessToken(normalizedAccessToken);
-  const retried = await request(renewedAccessToken);
-  if (retried.status === 401) expireSession(renewedAccessToken);
-  return retried;
+  let result: T;
+  try {
+    result = await request(normalizedAccessToken);
+  } catch (cause) {
+    // 生命周期端点（登出/停用）以抛 ApiError 表示 401，与返回 Response 的
+    // 请求共用同一套续期逻辑。
+    if (!(cause instanceof ApiError) || cause.status !== 401) throw cause;
+    return request(await refreshAccessToken(normalizedAccessToken));
+  }
+  if (!(result instanceof Response) || result.status !== 401) return result;
+
+  // 刷新成功后的重试若仍 401，那是业务拒绝而非会话失效：原样交给调用方，
+  // 只有刷新端点本身的失败才允许 expireSession。
+  return request(await refreshAccessToken(normalizedAccessToken));
 }
