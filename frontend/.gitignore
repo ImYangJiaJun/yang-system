@@ -4,4 +4,5 @@ dist/
 test-results/
 test-results-production/
 playwright-report/
+output/
 .vite/
