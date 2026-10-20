@@ -124,8 +124,14 @@ function verifyLocaleContract(candidate) {
   if (/\.toLocale(?:Lower|Upper)Case\(\s*\)/.test(candidate.application)) {
     throw new Error("应用代码禁止使用依赖浏览器环境的无参数 locale 大小写转换");
   }
-  if (/\.toLocale(?:String|DateString|TimeString)\(\s*\)/.test(candidate.application)) {
-    throw new Error("应用代码禁止使用依赖浏览器环境的无参数 locale 日期/时间格式化");
+  if (
+    /\.toLocale(?:String|DateString|TimeString)\(\s*\)/.test(
+      candidate.application,
+    )
+  ) {
+    throw new Error(
+      "应用代码禁止使用依赖浏览器环境的无参数 locale 日期/时间格式化",
+    );
   }
   if (/\.localeCompare\([^,)]*\)/.test(candidate.application)) {
     throw new Error("应用代码禁止使用依赖浏览器环境的无 locale 文本排序");
