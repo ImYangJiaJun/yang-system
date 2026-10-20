@@ -1103,6 +1103,100 @@ async fn list_requests_and_list_tasks_return_rows_with_filters() {
     finish(outcome, "记录与任务列表").await;
 }
 
+/// #32 + #30：全表受理即便显式传了 `notification_recipient` 也不由 HTTP 同步
+/// 路径发通知（交给 worker 逐条发），且请求记录里的 Token 必须已脱敏。
+///
+/// 受理路径不建出站栈、不出网：结论是 `Accepted`（中间态），状态门把它挡在
+/// 本层之外；若回归成「显式接收人绕过状态门」，这里会尝试真实出站并因 dummy
+/// 凭证失败——断言会先看到 `notification.status != not_requested`。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log() {
+    let outcome = async {
+        let database = connect_database().await?;
+        reset_database(&database).await?;
+        sync_with_database(database, database_config(), security_settings())
+            .await
+            .context("同步 Schema 失败")?;
+        let database = connect_database().await?;
+        let redis = connect_redis().await?;
+        let (_config_id, config_key) =
+            seed_config(&database, "appRedact", "tblRedact", true).await?;
+        let (handle, _receiver) = ApprovalDispatchHandle::new();
+        let app = build_feishu_app(
+            &database,
+            &redis,
+            feishu_settings(Some("cli_test_app"), Some("test-app-secret")),
+            Some(handle),
+        )
+        .await?;
+
+        let response = dispatch_as_workflow(
+            &app,
+            &config_key,
+            json!({
+                "token": seed_token(&config_key),
+                "requested_by": "脱敏用例",
+                "notification_recipient": {
+                    "receive_id_type": "open_id",
+                    "receive_id": "ou_explicit",
+                },
+            }),
+        )
+        .await
+        .context("受理不应返回 Err")?;
+        ensure!(response.code == 0, "受理必须成功: {response:?}");
+        let data = response_data(&response)?;
+        ensure!(
+            data["accepted"] == json!(true),
+            "受理 accepted 必须为 true: {data}"
+        );
+        ensure!(
+            data["notification"]["status"] == json!("not_requested"),
+            "中间态（受理）不得由 HTTP 发通知，实际: {data}"
+        );
+        ensure!(
+            data["notification"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("后台"),
+            "受理结论必须说明由后台通知: {data}"
+        );
+
+        let (request_body, outcome_text): (String, String) = sqlx::query_as(
+            "SELECT `request_body`, `outcome` \
+             FROM `feishu_approval_request_log` WHERE `base_token` = ? \
+             ORDER BY `id` DESC LIMIT 1",
+        )
+        .bind("appRedact")
+        .fetch_one(database.pool())
+        .await
+        .context("读取请求记录失败")?;
+        ensure!(outcome_text == "accepted", "实际 outcome: {outcome_text}");
+        ensure!(
+            !request_body.contains(&seed_token(&config_key)),
+            "请求记录不得含明文 Token: {request_body}"
+        );
+        ensure!(
+            request_body.contains("<redacted>"),
+            "请求记录必须含脱敏占位符: {request_body}"
+        );
+        ensure!(
+            request_body.contains("脱敏用例"),
+            "非敏感字段（requested_by）必须保留: {request_body}"
+        );
+        ensure!(
+            request_body.contains("ou_explicit"),
+            "非敏感字段（notification_recipient）必须保留: {request_body}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    finish(outcome, "受理通知门与请求体脱敏").await;
+}
+
 /// 每个用例的统一收尾：无论成败都清掉测试表。
 async fn finish(outcome: anyhow::Result<()>, what: &str) {
     let cleanup = match connect_database().await {

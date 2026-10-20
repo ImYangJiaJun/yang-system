@@ -115,9 +115,7 @@ pub(super) async fn handle(
         .optional::<i64>("rate_limit_per_min")?
         .unwrap_or(30)
         .clamp(1, i64::from(u32::MAX)) as u32;
-    if let Err(error) = rate_limit::check_query(&ctx, portal_id, &client_ip, limit).await {
-        return Err(error);
-    }
+    rate_limit::check_query(&ctx, portal_id, &client_ip, limit).await?;
     if let Err(reason) = authorize(
         &ctx,
         &context,

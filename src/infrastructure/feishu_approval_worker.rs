@@ -1154,8 +1154,9 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
 /// 组装持久化事实，已确认实例在回填失败时也必须保留。
 ///
 /// `notified` 是「本轮结论**已经送到人**」——由 [`record_outcome`] 在写库**之前**
-/// 先发通知得出。它只影响终态：终态一旦落库，该行同时退出认领集与重扫集，
-/// 此后再发现「没人可通知」就再也没有补救的机会，所以那种情形必须留下可区分的状态。
+/// 先发通知得出。它影响两处：终态决定写 `terminal` 还是 `unnotified`；中间态的
+/// 失败则给 `last_error` 加「通知未送达」前缀，让 [`should_notify`] 下一轮重试
+/// （原样写本轮原因会被当成「上一轮已通知」，失败一次即永久跳过）。
 fn outcome_record(outcome: &DispatchResult, notified: bool) -> Record {
     // 结论 → 状态 + 原因：
     //
@@ -1168,7 +1169,11 @@ fn outcome_record(outcome: &DispatchResult, notified: bool) -> Record {
     //   是「有人得来看看」的信号——这正是它没有和 `terminal` 合并的理由。
     //
     // 等待态写 `last_error` 只是**可观测**（运维能看到哪些行还缺什么），不影响
-    // 认领——它不是状态位。
+    // 认领——它不是状态位。但中间态的通知**没送达**时不能把本轮原因原样写进去：
+    // `should_notify` 以「本轮原因 == last_error」判「上一轮已通知」（见 [`should_notify`]），
+    // 原样落库会让下一轮永久跳过这条通知（#37：失败一次就再也不重试）。加
+    // 「通知未送达：」前缀既是可读的失败标记，又让下一轮比较必然不等 → 重试。
+    // 终态不受影响：`unnotified` 仍写原始原因（见下面的测试）。
     let (state, reason) = match outcome {
         DispatchResult::Backfilled { .. } => ("backfilled", None),
         DispatchResult::Waiting { reason } => ("pending", Some(reason.clone())),
@@ -1178,6 +1183,11 @@ fn outcome_record(outcome: &DispatchResult, notified: bool) -> Record {
         }
         DispatchResult::Terminal { message } if !notified => ("unnotified", Some(message.clone())),
         DispatchResult::Terminal { message } => ("terminal", Some(message.clone())),
+    };
+    let notification_failed_interim = state == "pending" && !notified;
+    let reason = match (notification_failed_interim, reason) {
+        (true, Some(reason)) => Some(format!("通知未送达：{reason}")),
+        (_, reason) => reason,
     };
     let mut row = Record::new();
     row.insert("state", serde_json::json!(state));
@@ -1222,6 +1232,8 @@ fn outcome_record(outcome: &DispatchResult, notified: bool) -> Record {
 /// - 中间态（`waiting` / `retryable` / `created_pending_backfill`）会随重扫反复
 ///   出现，本轮原因与任务行 `last_error`（上一轮写入的原因）相同即「上一轮已经
 ///   通知过」，跳过——否则一条缺申请人的记录会每轮给用户重发一条同样的消息。
+///   发送失败的那一轮落的是「通知未送达：原因」前缀（见 [`outcome_record`]），
+///   比较必然不等，因此下一轮会重试。
 fn should_notify(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
     let interim_reason = match outcome {
         DispatchResult::Waiting { reason } => reason,
@@ -1803,6 +1815,77 @@ mod tests {
         ] {
             assert!(should_notify(&claimed(Some("缺少申请人")), &outcome));
             assert!(should_notify(&claimed(None), &outcome));
+        }
+    }
+
+    /// #37：中间态通知**发送失败**时不能把本轮原因原样写进去重字段，否则下一轮
+    /// `should_notify` 会判「上一轮已通知」——失败一次就永久不再重试。
+    #[test]
+    fn failed_interim_notification_is_retried_on_the_next_round() {
+        for waiting in [
+            DispatchResult::Waiting {
+                reason: "缺少申请人".into(),
+            },
+            DispatchResult::Retryable {
+                message: "服务不可用".into(),
+            },
+            DispatchResult::CreatedPendingBackfill {
+                message: "编号回填失败".into(),
+                instance_code: "INST".into(),
+                serial_number: None,
+            },
+        ] {
+            let reason = match &waiting {
+                DispatchResult::Waiting { reason } => reason.clone(),
+                DispatchResult::Retryable { message }
+                | DispatchResult::CreatedPendingBackfill { message, .. } => message.clone(),
+                DispatchResult::Backfilled { .. } | DispatchResult::Terminal { .. } => {
+                    panic!("只测中间态")
+                }
+            };
+
+            // 首轮发送失败：落库的是失败标记，不是本轮原因本身。
+            let failed = outcome_record(&waiting, false);
+            let stored = failed
+                .get("last_error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            assert_ne!(stored, reason, "失败不能伪装成已通知");
+            assert!(stored.contains("通知未送达"), "失败标记要可读: {stored}");
+            // 下一轮同样的中间态必须重试。
+            assert!(
+                should_notify(&claimed(Some(stored.as_str())), &waiting),
+                "首轮发送失败后，下一轮必须重试: {stored}"
+            );
+
+            // 发送成功后落本轮原因 → 下一轮跳过（既有去重语义不回归）。
+            let sent = outcome_record(&waiting, true);
+            assert_eq!(sent.get("last_error"), Some(&serde_json::json!(reason)));
+            assert!(
+                !should_notify(&claimed(Some(reason.as_str())), &waiting),
+                "发送成功后下一轮不得重发"
+            );
+        }
+
+        // 终态语义不变：unnotified/terminal 仍只由「是否送达」决定。
+        let terminal = DispatchResult::Terminal {
+            message: "配置错误".into(),
+        };
+        assert_eq!(
+            outcome_record(&terminal, false).get("state"),
+            Some(&serde_json::json!("unnotified"))
+        );
+        assert_eq!(
+            outcome_record(&terminal, true).get("state"),
+            Some(&serde_json::json!("terminal"))
+        );
+        for notified in [true, false] {
+            assert_eq!(
+                outcome_record(&terminal, notified).get("last_error"),
+                Some(&serde_json::json!("配置错误")),
+                "终态原因不因是否送达而改写"
+            );
         }
     }
 

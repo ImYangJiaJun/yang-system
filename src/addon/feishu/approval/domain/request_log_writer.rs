@@ -68,7 +68,8 @@ pub(crate) struct RequestLog {
     /// 配置存在或建成后关联；校验失败与配置未建成（40401/35600）的请求为空。
     pub(crate) config_id: Option<i64>,
     pub(crate) record_id: Option<String>,
-    /// `DispatchInput` 的 serde_json 序列化原文。
+    /// 落库前的 `DispatchInput` 序列化；`token` 已替换为 `<redacted>`
+    /// （见 `actions/dispatch.rs` 的 `redacted_request_body`）。
     pub(crate) request_body: String,
     pub(crate) outcome: Outcome,
     /// 结果说明（复用响应 message；失败时为可行动原因）。
