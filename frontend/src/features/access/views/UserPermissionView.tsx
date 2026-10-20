@@ -16,6 +16,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
+import { formatProductDate } from "@/shared/lib/product-locale";
 
 import { hasOperation, useSessionCredentials, useUiCatalog } from "@/engine";
 import { Badge } from "@/shared/ui/badge";
@@ -67,7 +68,7 @@ function fallbackMeta(permission: string): PermissionMeta {
 }
 
 function formatDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString();
+  return formatProductDate(unixSeconds * 1000);
 }
 
 /// 直授行的过期徽标：已过期 / 永久 / 临期「N 天后过期」（N 按自然日向上取整）。

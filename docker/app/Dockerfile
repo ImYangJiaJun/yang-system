@@ -73,8 +73,12 @@ EXPOSE 8080 9090
 
 # 容器级健康检查用业务面 /health/live（始终可用）；
 # 编排器的 readiness 探针应指向管理面 /health/ready（:9090，带依赖检查与预算）。
+# readiness 调用是 **best-effort**：只为了让 /health/ready 的 handler 周期性更新
+# yang_system_readiness_ready 指标（否则该 gauge 只在部署探针调用时更新，
+# 依赖故障后告警永远看不到）。它不参与容器健康判定。
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
-    CMD curl --fail --silent --max-time 2 http://127.0.0.1:8080/health/live || exit 1
+    CMD curl --fail --silent --max-time 2 http://127.0.0.1:8080/health/live || exit 1; \
+        curl --silent --max-time 2 http://127.0.0.1:9090/health/ready >/dev/null 2>&1 || true
 
 # main.rs 固定读取相对路径 config.toml，因此 WORKDIR 必须是 /app。
 ENTRYPOINT ["/usr/local/bin/yang-system"]

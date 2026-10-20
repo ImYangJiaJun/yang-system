@@ -262,6 +262,15 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
                         tracing::warn!(error = %error, event_id = event.id, "置事件终态失败");
                     }
                     terminal += 1;
+                    // 终态丢弃是刻意的毒事件隔离；但必须可观测，否则「状态列停在旧值」
+                    // 只能靠翻库发现。计数器给告警/看板，error 日志留单条证据。
+                    metrics::counter!("feishu_event_terminal_total").increment(1);
+                    tracing::error!(
+                        event_id = event.id,
+                        retry_count = new_count,
+                        error = %message,
+                        "飞书事件连续失败达到上限，已置终态并从队列移除"
+                    );
                 } else if let Err(error) = mark_retry(runner, event.id, new_count, &message).await {
                     tracing::warn!(error = %error, event_id = event.id, "更新事件重试信息失败");
                 }

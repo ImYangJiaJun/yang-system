@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/shared/ui/button";
 import { useToast } from "@/shared/lib/toast";
+import { formatProductDateTime } from "@/shared/lib/product-locale";
 import { useFeishuOAuth } from "../api";
 
-/// unix 秒 → 本地可读时间。
+/// unix 秒 → 产品 locale 的可读时间。
 function formatUnixSeconds(value: number) {
-  return new Date(value * 1000).toLocaleString();
+  return formatProductDateTime(value * 1000);
 }
 
 function messageOf(cause: unknown) {

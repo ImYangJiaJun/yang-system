@@ -13,3 +13,19 @@ export function productLowerCase(value: string): string {
 export function compareProductText(left: string, right: string): number {
   return left.localeCompare(right, PRODUCT_LOCALE);
 }
+
+const PRODUCT_DATE_FORMAT = new Intl.DateTimeFormat(PRODUCT_LOCALE);
+const PRODUCT_DATE_TIME_FORMAT = new Intl.DateTimeFormat(PRODUCT_LOCALE, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+/// 以产品唯一 locale 格式化日期；参数是毫秒时间戳或 Date。
+export function formatProductDate(value: Date | number): string {
+  return PRODUCT_DATE_FORMAT.format(value);
+}
+
+/// 以产品唯一 locale 格式化日期+时间；参数是毫秒时间戳或 Date。
+export function formatProductDateTime(value: Date | number): string {
+  return PRODUCT_DATE_TIME_FORMAT.format(value);
+}

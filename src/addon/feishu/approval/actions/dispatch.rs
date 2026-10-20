@@ -1356,6 +1356,32 @@ async fn dispatch_single(
         .clone()
         .or_else(|| applicant_open_id(&cells, &applicant_field));
 
+    // 与 worker 共用同一创建令牌桶：同步单条也不能突破官方 100 次/分钟。
+    // 放在所有配置/记录校验之后、真正 create 之前，避免为注定失败的请求占名额。
+    let deployment = ctx
+        .tools()
+        .extension::<crate::authorization::AuthorizationVersionCache>()?
+        .deployment()
+        .to_string();
+    if let Err(failure) = crate::addon::feishu::domain::approval_rate_limit::acquire_create_slot(
+        ctx.tools().cache()?,
+        &deployment,
+        settings.approval_create_rate_per_minute,
+    )
+    .await
+    {
+        tracing::warn!(
+            stage = "rate_limit",
+            kind = ?failure.kind,
+            "审批派发同步创建未取得令牌桶名额"
+        );
+        return Ok(DispatchOutcome::fail(
+            42901,
+            Some(config_id),
+            format!("创建审批实例限速：{}", failure.message),
+        ));
+    }
+
     let result = dispatch_one(
         outbound.transport(),
         outbound.sleeper(),
