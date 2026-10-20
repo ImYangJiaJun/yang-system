@@ -2708,7 +2708,7 @@
     },
     "/api/v1/feishu/approval/configs/delete": {
       "post": {
-        "description": "删除配置、它的字段映射与待处理任务；已完结任务保留作流水",
+        "description": "删除配置、它的字段映射与全部任务行；请求流水保留",
         "operationId": "feishu.approval.delete_config",
         "parameters": [],
         "requestBody": {

@@ -2,8 +2,11 @@
 //!
 //! # 同事务清理三件事
 //!
-//! 配置行 + 它的字段映射行 + **`state=pending` 的任务行**；backfilled / terminal /
-//! unnotified 任务行保留作流水（已完结的历史审批单要留在库里可查）。
+//! 配置行 + 它的字段映射行 + **该配置的全部任务行**。任务表以全局唯一的
+//! `record_id` 作并发去重键；若删除配置时保留已完结任务，重建配置后对同一记录
+//! 重新派发会撞上旧的 `record_id` 唯一键，播种永久卡住（feishu-approval#31）。
+//! 任务流水属于已删除的配置，因此这里一并清掉；配置的请求流水仍保留在
+//! `feishu_approval_request_log`。
 //!
 //! # 不加未完结守卫
 //!
@@ -58,7 +61,7 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         )
         .route(HttpMethod::Post, "/api/v1/feishu/approval/configs/delete")
         .display_name("删除审批派发配置")
-        .description("删除配置、它的字段映射与待处理任务；已完结任务保留作流水")
+        .description("删除配置、它的字段映射与全部任务行；请求流水保留")
         .permissions(["feishu.approval.write"])
         .register()
 }
@@ -79,6 +82,30 @@ pub(super) async fn handle(
             .where_eq("config_id", serde_json::json!(input.config_id))?
             .delete_in_tx(&mut transaction)
             .await?;
+        // 先收掉任务的属性扩展行：task_applicant 没有外键，不主动清会留下
+        // 指向已删除任务（乃至已删除配置）的孤儿 PII。
+        let task_ids: Vec<i64> = context
+            .approval_tasks()
+            .query()
+            .select_fields(&["id"])?
+            .where_eq("config_id", serde_json::json!(input.config_id))?
+            .all_in_tx(&mut transaction)
+            .await?
+            .iter()
+            .map(|record| record.require("id"))
+            .collect::<Result<_, BaseError>>()?;
+        let deleted_applicants = if task_ids.is_empty() {
+            0
+        } else {
+            let values: Vec<serde_json::Value> =
+                task_ids.iter().map(|id| serde_json::json!(id)).collect();
+            context
+                .approval_task_applicants()
+                .query()
+                .where_in("task_id", values)?
+                .delete_in_tx(&mut transaction)
+                .await?
+        };
         let deleted_pending_tasks = context
             .approval_tasks()
             .query()
@@ -86,6 +113,16 @@ pub(super) async fn handle(
             .where_eq("state", serde_json::json!("pending"))?
             .delete_in_tx(&mut transaction)
             .await?;
+        // 已完结任务也必须清：task 表的 record_id 是全局唯一键，保留旧配置的
+        // 完结行会让重建配置后的同记录播种永久卡住（#31）。请求流水仍在
+        // feishu_approval_request_log，不受影响。
+        let deleted_finished_tasks = context
+            .approval_tasks()
+            .query()
+            .where_eq("config_id", serde_json::json!(input.config_id))?
+            .delete_in_tx(&mut transaction)
+            .await?;
+        let deleted_tasks = deleted_pending_tasks + deleted_finished_tasks;
         let deleted_configs = context
             .approval_configs()
             .query()
@@ -109,6 +146,8 @@ pub(super) async fn handle(
                     "deleted_pending_tasks",
                     serde_json::json!(deleted_pending_tasks),
                 ),
+                ("deleted_tasks", serde_json::json!(deleted_tasks)),
+                ("deleted_applicants", serde_json::json!(deleted_applicants)),
             ])?),
         )?;
         audit::append_in_tx(&mut transaction, &event).await?;
@@ -117,6 +156,8 @@ pub(super) async fn handle(
             "config_id": input.config_id,
             "deleted_field_maps": deleted_maps,
             "deleted_pending_tasks": deleted_pending_tasks,
+            "deleted_tasks": deleted_tasks,
+            "deleted_applicants": deleted_applicants,
         }))
     }
     .await;

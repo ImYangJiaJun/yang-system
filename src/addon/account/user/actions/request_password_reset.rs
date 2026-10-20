@@ -54,18 +54,26 @@ pub(super) async fn handle(
     };
     let issued = account.issue_password_reset(&ctx, user_id).await?;
     let link = ctx.tools().config::<PasswordResetLinkConfig>()?;
-    let sender = ctx.tools().extension::<PasswordResetEmailSenderHandle>()?;
-    // 投递失败只记日志，不改变响应，避免泄露邮箱存在性；明文凭证只进入邮件链接。
-    if let Err(error) = sender
-        .send_password_reset_link(&email, &link.reset_url(issued.raw_token()), ttl_seconds)
-        .await
-    {
-        tracing::warn!(
-            error = %error,
-            reset_fingerprint = issued.fingerprint(),
-            "密码重置邮件投递失败"
-        );
-    }
+    let sender = ctx
+        .tools()
+        .extension::<PasswordResetEmailSenderHandle>()?
+        .clone();
+    let reset_url = link.reset_url(issued.raw_token());
+    let fingerprint = issued.fingerprint().to_string();
+    // 投递移出请求路径：同步 SMTP 会让「邮箱存在」比「不存在」慢一个网络往返，
+    // 形成可测量的账号枚举侧信道。响应与失败处理都不依赖投递结果（失败只记日志）。
+    tokio::spawn(async move {
+        if let Err(error) = sender
+            .send_password_reset_link(&email, &reset_url, ttl_seconds)
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                reset_fingerprint = %fingerprint,
+                "密码重置邮件投递失败"
+            );
+        }
+    });
     Ok(accepted(ttl_seconds))
 }
 

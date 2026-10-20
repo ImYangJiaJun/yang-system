@@ -952,11 +952,11 @@ async fn console_crud_loop_on_a_seeded_config() {
     finish(outcome, "配置 CRUD 闭环").await;
 }
 
-/// delete_config 同事务清 `pending` 任务行；backfilled / terminal / unnotified
-/// 保留作流水（后两者都是「处理已结束」，区别只在有没有送达通知）。
+/// delete_config 必须清掉该配置的**全部**任务行：task 表的 record_id 是全局
+/// 唯一键，保留完结行会让重建配置后的同记录播种永久卡住（#31）。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
+async fn delete_config_clears_all_tasks_and_unblocks_recreated_config() {
     let outcome = async {
         let (database, app, token) = prepare_app(None, None).await?;
         let (config_id, _config_key) = seed_config(&database, "appTasks", "tblTasks", true).await?;
@@ -964,6 +964,15 @@ async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
         seed_task(&database, config_id, "recBackfilled", "backfilled").await?;
         seed_task(&database, config_id, "recTerminal", "terminal").await?;
         seed_task(&database, config_id, "recUnnotified", "unnotified").await?;
+        sqlx::query(
+            "INSERT INTO `feishu_approval_task_applicant` (`task_id`, `open_id`) \
+             SELECT `id`, 'ou_orphan' FROM `feishu_approval_task` \
+             WHERE `config_id` = ? AND `record_id` = 'recPending'",
+        )
+        .bind(config_id)
+        .execute(database.pool())
+        .await
+        .context("种入申请人扩展行失败")?;
 
         let deleted = dispatch_as_operator(
             &app,
@@ -976,29 +985,54 @@ async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
         let data = response_data(&deleted)?;
         ensure!(
             data["deleted_pending_tasks"] == json!(1),
-            "只应清 pending 任务: {data}"
+            "pending 任务计数必须保留: {data}"
+        );
+        ensure!(
+            data["deleted_tasks"] == json!(4),
+            "全部任务行都应清掉: {data}"
+        );
+        ensure!(
+            data["deleted_applicants"] == json!(1),
+            "任务的属性扩展行也必须一并清理: {data}"
         );
 
-        let remaining: Vec<String> =
-            sqlx::query_scalar("SELECT `state` FROM `feishu_approval_task` ORDER BY `id`")
-                .fetch_all(database.pool())
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM `feishu_approval_task` WHERE `config_id` = ?")
+                .bind(config_id)
+                .fetch_one(database.pool())
                 .await
-                .context("读取剩余任务失败")?;
+                .context("统计剩余任务失败")?;
+        ensure!(remaining == 0, "配置 A 的任务行必须全部清空");
+        let orphan_applicants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM `feishu_approval_task_applicant` WHERE `open_id` = 'ou_orphan'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .context("统计申请人孤儿行失败")?;
         ensure!(
-            remaining
-                == [
-                    "backfilled".to_string(),
-                    "terminal".to_string(),
-                    "unnotified".to_string()
-                ],
-            "backfilled / terminal / unnotified 必须保留作流水，实际 {remaining:?}"
+            orphan_applicants == 0,
+            "申请人扩展行不得留下指向已删除任务的孤儿"
         );
+
+        // 重建配置后，同一 record_id 必须能重新播种（旧的全局唯一键不再被占用）。
+        let (config_b, _config_key_b) =
+            seed_config(&database, "appTasksB", "tblTasksB", true).await?;
+        seed_task(&database, config_b, "recBackfilled", "pending").await?;
+        let rebound: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM `feishu_approval_task` \
+             WHERE `config_id` = ? AND `record_id` = 'recBackfilled'",
+        )
+        .bind(config_b)
+        .fetch_one(database.pool())
+        .await
+        .context("统计重建配置任务失败")?;
+        ensure!(rebound == 1, "重建配置后同 record_id 必须能落任务行");
 
         Ok(())
     }
     .await;
 
-    finish(outcome, "删除清 pending 保留完结").await;
+    finish(outcome, "删除清全部任务并可重建").await;
 }
 
 /// list_requests 随行带请求体/返回体；list_tasks 按 config_id / state 过滤。
