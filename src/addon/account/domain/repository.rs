@@ -127,21 +127,6 @@ impl UserRepository {
         Ok(!rows.is_empty())
     }
 
-    pub(crate) async fn email_exists(
-        &self,
-        ctx: &ActionContext,
-        email: &str,
-    ) -> Result<bool, BaseError> {
-        let rows = self
-            .trusted_query(ctx)?
-            .select_fields(&[USER_ID])?
-            .where_eq(EMAIL, serde_json::Value::String(email.to_string()))?
-            .page(1, 1)?
-            .all()
-            .await?;
-        Ok(!rows.is_empty())
-    }
-
     /// 按已验证邮箱定位启用状态的用户 ID；停用用户与不存在一样返回 None，
     /// 供防枚举的自助找回流程使用（不外泄邮箱是否注册）。
     pub(crate) async fn find_active_user_by_email(

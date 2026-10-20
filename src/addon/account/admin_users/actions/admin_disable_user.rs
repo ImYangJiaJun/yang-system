@@ -31,6 +31,11 @@ pub(super) async fn handle(
             "目标用户必须是正整数".to_string(),
         ));
     }
+    if !account.credential_mutations_enabled() {
+        return Err(BaseError::ConfigError(
+            "账号停用必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
+        ));
+    }
     // 防锁定：操作者不能停用自身（否则最后一名持权管理员可把自己锁出系统，
     // 且无上帝账号兜底，只能靠运维手工 SQL 恢复）。
     if operator_id == input.id {
@@ -74,6 +79,9 @@ pub(super) async fn handle(
             return Err(Account::last_system_admin_guard("停用"));
         }
         Account::disable_locked_in_tx(&mut transaction, &locked).await?;
+        account
+            .revoke_all_sessions_in_tx(&ctx, &mut transaction, input.id)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,

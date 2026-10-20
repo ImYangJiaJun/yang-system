@@ -60,6 +60,9 @@ pub(super) async fn handle(
             return Err(Account::last_system_admin_guard("停用"));
         }
         Account::disable_locked_in_tx(&mut transaction, &locked).await?;
+        account
+            .revoke_all_sessions_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,

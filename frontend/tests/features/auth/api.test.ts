@@ -11,7 +11,6 @@ import {
   register,
   requestLoginEmailCode,
   requestMfaEmailCode,
-  requestRegistrationEmail,
   resetPassword,
 } from "@/features/auth/api";
 import { ApiError, SecondFactorRequiredError } from "@/engine/http/errors";
@@ -103,29 +102,7 @@ describe("login", () => {
   });
 });
 
-describe("email verification requests（注册 / 登录 MFA）", () => {
-  it("请求验证码只发送邮箱并验证通用 202 响应", async () => {
-    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
-      expect(url).toBe("/api/v1/users/registration-email-verifications");
-      expect(init.method).toBe("POST");
-      expect(init.credentials).toBe("include");
-      expect(init.body).toBe(JSON.stringify({ email: "alice@example.com" }));
-      return new Response(
-        JSON.stringify({
-          code: 0,
-          message: "成功",
-          data: { accepted: true, expires_in: 600, resend_after: 60 },
-        }),
-        { status: 202, headers: { "content-type": "application/json" } },
-      );
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      requestRegistrationEmail("alice@example.com"),
-    ).resolves.toEqual({ expiresIn: 600, resendAfter: 60 });
-  });
-
+describe("email verification requests（登录 / 登录 MFA）", () => {
   it("请求 MFA 邮箱验证码携带账号密码并验证通用 202 响应", async () => {
     const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe("/api/v1/users/mfa/email-code");

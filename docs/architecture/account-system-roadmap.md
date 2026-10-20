@@ -85,7 +85,7 @@
 
 | 能力 | 状态 | 关键位置 |
 |---|---|---|
-| 邮箱验证码注册 | ✅ 防枚举统一响应、摘要入 Redis、原子消费 | `user/actions/request_registration_email.rs:29`、`register.rs` |
+| 邮箱验证码注册 | ⚠️ 公开端点已于 2026-10-20 移除（无消费方/发信滥用面）；注册只收 username+password | `register.rs` |
 | 邮箱归一化 | ✅ 框架 `normalize_email` | `register.rs:52` |
 | 用户名+密码登录 | ✅ Argon2（框架 `PasswordEngine`） | `user/actions/login.rs` |
 | Refresh Cookie 轮换 | ✅ host-only/HttpOnly/SameSite=Strict + 同源校验 | `domain/context.rs:31-34` |

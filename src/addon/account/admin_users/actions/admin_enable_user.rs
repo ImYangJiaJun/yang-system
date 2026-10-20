@@ -35,6 +35,11 @@ pub(super) async fn handle(
             "目标用户必须是正整数".to_string(),
         ));
     }
+    if !account.credential_mutations_enabled() {
+        return Err(BaseError::ConfigError(
+            "账号启用必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
+        ));
+    }
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
         let locked = account

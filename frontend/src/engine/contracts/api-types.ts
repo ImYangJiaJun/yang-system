@@ -1428,26 +1428,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/users/registration-email-verifications": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * 发送注册邮箱验证码
-         * @description 按邮箱、来源地址和全局容量限制投递一次性注册验证码
-         */
-        post: operations["account.user.request_registration_email"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/users/request-password-reset": {
         parameters: {
             query?: never;
@@ -1621,7 +1601,7 @@ export interface components {
         BatchGrantItem: {
             /**
              * Format: int64
-             * @description Unix 秒；缺省 = 永久有效。过期后权限在解析侧失效、行保留做审计。
+             * @description Unix 秒；缺省 = 永久有效。到期后在签发/刷新时过滤，行保留做审计；已签发的 Access Token 最长保留一个 access TTL。
              * @default null
              */
             expires_at: number | null;
@@ -10895,90 +10875,6 @@ export interface operations {
                             /** Format: int64 */
                             updated_at: number;
                             username: string;
-                        };
-                        message: string;
-                    };
-                };
-            };
-            /** @description 请求参数错误 */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-            /** @description 未认证 */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-            /** @description 权限不足 */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-            /** @description 服务器内部错误 */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-        };
-    };
-    "account.user.request_registration_email": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    email: string;
-                };
-            };
-        };
-        responses: {
-            /** @description 成功 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** @constant */
-                        code: 0;
-                        /**
-                         * RegistrationEmailCodeAccepted
-                         * @description 验证码请求被接受后的通用响应（不暴露身份是否真实存在）。
-                         */
-                        data: {
-                            /** @description 请求已被接受（不保证邮件真实投递）。 */
-                            accepted: boolean;
-                            /**
-                             * Format: uint64
-                             * @description 验证码有效期（秒）。
-                             */
-                            expires_in: number;
-                            /**
-                             * Format: uint64
-                             * @description 重发冷却（秒）。
-                             */
-                            resend_after: number;
                         };
                         message: string;
                     };

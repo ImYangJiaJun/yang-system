@@ -31,6 +31,11 @@ pub(super) async fn handle(
         .authenticated_user()
         .ok_or_else(|| BaseError::Unauthorized("需要登录".to_string()))?
         .id;
+    if !account.credential_mutations_enabled() {
+        return Err(BaseError::ConfigError(
+            "TOTP 停用必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
+        ));
+    }
 
     let observed = account
         .users()
@@ -53,6 +58,9 @@ pub(super) async fn handle(
             .deactivate_totp_in_tx(&ctx, &mut transaction, user_id)
             .await?;
         Account::increment_versions_in_tx(&mut transaction, &locked).await?;
+        account
+            .revoke_all_sessions_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,

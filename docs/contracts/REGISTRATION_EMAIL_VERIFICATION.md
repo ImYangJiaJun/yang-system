@@ -1,11 +1,16 @@
 # 注册邮箱验证码
 
+> **2026-10-20 起**：公开注册验证码端点
+> `POST /api/v1/users/registration-email-verifications` 已移除（无消费方，且可被匿名用于
+> 向任意邮箱真实发信）。本文档保留验证码引擎的安全边界与换绑/登录入口的共享语义；
+> 注册流程只收 `username` 与 `password`。
+
 公开注册不再消费验证码。验证码契约仍服务换绑与其他入口。
 
 ## HTTP 契约
 
-1. `POST /api/v1/users/registration-email-verifications` 接收 `email`，成功时固定返回
-   `202 Accepted` 与通用的 `accepted/expires_in/resend_after`，响应不包含邮箱或验证码。
+1. ~~`POST /api/v1/users/registration-email-verifications`~~（2026-10-20 移除；注册只收
+   `username` 与 `password`）。
 2. `POST /api/v1/users/register` 只收 `username` 与 `password`，`users.email` 与
    `users.email_verified_at` 两列写入 NULL。
 3. 验证码无效、过期、已用、尝试次数耗尽或邮箱已注册时，消费验证码的入口都使用同一

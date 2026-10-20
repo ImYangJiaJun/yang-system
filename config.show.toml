@@ -236,7 +236,8 @@ timeout_seconds = 10
 #                          默认 1000，允许 1..=1000000
 
 [email.verification]
-# 注册邮箱验证码（必填段）。Redis key 前缀 yang-system:<ns>:registration-email。
+# 邮箱验证码引擎（保留给换绑/未来入口；公开注册端点已于 2026-10-20 移除）。
+# Redis key 前缀 yang-system:<ns>:registration-email。
 namespace = "local"
 secret = "replace-with-independent-email-verification-secret"
 ttl_seconds = 600

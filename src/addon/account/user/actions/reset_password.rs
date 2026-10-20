@@ -84,6 +84,9 @@ pub(super) async fn handle(
             .update_password_hash_in_tx(&ctx, &mut transaction, target_user_id, &new_password_hash)
             .await?;
         Account::increment_versions_in_tx(&mut transaction, &locked_user).await?;
+        account
+            .revoke_all_sessions_in_tx(&ctx, &mut transaction, target_user_id)
+            .await?;
         Account::consume_reset_in_tx(&mut transaction, &locked_reset).await?;
         let event = audit::succeeded_system_event(
             &ctx,

@@ -265,8 +265,9 @@ Redis、SMTP、邮箱验证码、Token 等运行参数按
 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成。
 部署时应限制 `config.toml` 的读取权限，并通过部署系统生成或挂载该文件。
 
-注册邮箱验证码的接口、防枚举/重放边界、SMTP/secret provider 配置与真实集成门禁见
+登录/换绑邮箱验证码的防枚举/重放边界、SMTP/secret provider 配置与真实集成门禁见
 [`docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md`](docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md)。
+公开注册验证码端点已于 2026-10-20 移除（无消费方，且可被匿名用于向任意邮箱发信）。
 
 当前骨架没有平台管理域，注册流程只创建普通账号，任何账号都不会成为系统最终管理员
 （组合根注入的是不声明最终管理员的默认声明器）。后续引入管理域时应重新评估首次
@@ -290,10 +291,9 @@ $env:YANG_SYSTEM_TEST_REDIS_URL = "redis://127.0.0.1:6379/15"
 python scripts/run_ci.py integration
 ```
 
-该门禁覆盖邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例
+该门禁覆盖登录/MFA 邮箱验证码对抗边界、Refresh 轮换负载基准、Schema 预检/apply 与跨实例
 并发 apply，不使用 mock 替代 MySQL 或 Redis。入口为
-`tests/registration_email_integration.rs`、`tests/refresh_load_benchmark.rs` 和
-`tests/schema_apply_integration.rs`。
+`tests/refresh_load_benchmark.rs` 和 `tests/schema_apply_integration.rs`。
 
 ## 参考能力
 

@@ -22,7 +22,6 @@ mod request_change_email;
 mod request_login_email_code;
 mod request_mfa_email_code;
 mod request_password_reset;
-mod request_registration_email;
 mod reset_password;
 mod revoke_session;
 mod security_events;
@@ -47,7 +46,6 @@ macro_rules! action_registry {
 
 /// account.user 的全部 Action，按可审查的顺序排列。
 const ACTIONS: &[Register] = action_registry![
-    request_registration_email,
     register,
     login,
     list_sessions,

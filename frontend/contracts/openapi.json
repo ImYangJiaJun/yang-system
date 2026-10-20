@@ -313,7 +313,7 @@
                     "properties": {
                       "expires_at": {
                         "default": null,
-                        "description": "Unix 秒；缺省 = 永久有效。过期后权限在解析侧失效、行保留做审计。",
+                        "description": "Unix 秒；缺省 = 永久有效。到期后在签发/刷新时过滤，行保留做审计；已签发的 Access Token 最长保留一个 access TTL。",
                         "format": "int64",
                         "type": [
                           "integer",
@@ -14136,134 +14136,6 @@
         },
         "security": [],
         "summary": "注册用户",
-        "tags": [],
-        "x-permission-mode": "all",
-        "x-permissions": [],
-        "x-public": true,
-        "x-yang-response-kind": "json"
-      }
-    },
-    "/api/v1/users/registration-email-verifications": {
-      "post": {
-        "description": "按邮箱、来源地址和全局容量限制投递一次性注册验证码",
-        "operationId": "account.user.request_registration_email",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "additionalProperties": false,
-                "properties": {
-                  "email": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "email"
-                ],
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "code": {
-                      "const": 0,
-                      "type": "integer"
-                    },
-                    "data": {
-                      "$schema": "http://json-schema.org/draft-07/schema#",
-                      "description": "验证码请求被接受后的通用响应（不暴露身份是否真实存在）。",
-                      "properties": {
-                        "accepted": {
-                          "description": "请求已被接受（不保证邮件真实投递）。",
-                          "type": "boolean"
-                        },
-                        "expires_in": {
-                          "description": "验证码有效期（秒）。",
-                          "format": "uint64",
-                          "minimum": 0.0,
-                          "type": "integer"
-                        },
-                        "resend_after": {
-                          "description": "重发冷却（秒）。",
-                          "format": "uint64",
-                          "minimum": 0.0,
-                          "type": "integer"
-                        }
-                      },
-                      "required": [
-                        "accepted",
-                        "expires_in",
-                        "resend_after"
-                      ],
-                      "title": "RegistrationEmailCodeAccepted",
-                      "type": "object"
-                    },
-                    "message": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "code",
-                    "message",
-                    "data"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "成功"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "请求参数错误"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "未认证"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "权限不足"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            },
-            "description": "服务器内部错误"
-          }
-        },
-        "security": [],
-        "summary": "发送注册邮箱验证码",
         "tags": [],
         "x-permission-mode": "all",
         "x-permissions": [],

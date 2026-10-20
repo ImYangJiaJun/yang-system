@@ -159,19 +159,6 @@ INTEGRATION = (
         ),
     ),
     Command(
-        "Registration email verification integration",
-        (
-            "cargo",
-            "test",
-            "--test",
-            "registration_email_integration",
-            "--locked",
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ),
-    ),
-    Command(
         "MFA email code and TOTP deactivate integration",
         (
             "cargo",
