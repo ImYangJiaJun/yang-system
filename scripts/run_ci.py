@@ -85,6 +85,10 @@ FRONTEND_PRODUCTION_E2E = Command(
 
 FULL = (
     *ARCHITECTURE,
+    Command(
+        "Deploy script syntax",
+        ("python", "scripts/check_deploy_syntax.py"),
+    ),
     Command("Rust formatting", ("cargo", "fmt", "--", "--check")),
     Command("Rust all-target tests", ("cargo", "test", "--all-targets", "--locked")),
     Command(
@@ -113,7 +117,7 @@ INTEGRATION = (
     ),
     Command(
         "审批明细外部选项精确查询集成测试",
-        ("cargo", "test", "--lib", "--locked", "real_mysql_resolves_detail_options_and_waits_on_ambiguous_labels", "--", "--ignored", "--test-threads=1"),
+        ("cargo", "test", "--lib", "--locked", "real_mysql_resolves_detail_options_and_picks_first_on_duplicate_labels", "--", "--ignored", "--test-threads=1"),
     ),
     Command(
         "飞书用户身份凭证读写往返集成测试",
@@ -504,6 +508,31 @@ def self_test() -> None:
         f"漏登记={sorted(discovered_integration_tests - integration_tests)} "
         f"登记了不存在的入口={sorted(integration_tests - discovered_integration_tests)}"
     )
+    # `--lib <filter>` 在测试改名后会匹配 0 个测试并以 0 退出（静默假绿）。
+    # 自检直接回到源码里找同名符号：过滤名不存在就立刻失败。
+    lib_filter_commands = [
+        command
+        for command in INTEGRATION
+        if command.argv[:3] == ("cargo", "test", "--lib") and len(command.argv) > 4
+    ]
+    assert lib_filter_commands, "INTEGRATION 必须包含 --lib 过滤测试"
+    rust_sources = []
+    for source_root, _, filenames in os.walk("src"):
+        for filename in filenames:
+            if filename.endswith(".rs"):
+                with open(
+                    os.path.join(source_root, filename), encoding="utf-8"
+                ) as source_file:
+                    rust_sources.append(source_file.read())
+    source_blob = "\n".join(rust_sources)
+    for command in lib_filter_commands:
+        filter_name = command.argv[4]
+        # cargo 的过滤是子串匹配，带模块路径的过滤名在源码里通常只出现叶子函数名。
+        leaf_name = filter_name.rsplit("::", 1)[-1]
+        assert leaf_name in source_blob, (
+            f"--lib 过滤名 {filter_name} 的测试函数 {leaf_name} 已不在 src 中："
+            "测试改名后 cargo 会以 0 个测试成功退出"
+        )
     authorization_cache = next(
         command
         for command in INTEGRATION

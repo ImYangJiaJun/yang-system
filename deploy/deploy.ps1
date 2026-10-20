@@ -111,17 +111,13 @@ param(
     [string]$DeployScript = 'deploy-blue-green.sh',
 
     # 应用边缘（宿主端口）的发布绑定地址。
-    #   **本文件默认 0.0.0.0** —— 这台部署目标（测试环境）就是要用「公网 IP:18654」直接访问，
-    #   所以默认值取公网。改成 127.0.0.1 会让线上容器只绑 loopback、公网立刻不可达。
-    #   ⚠️ 0.0.0.0 是**明文 http 直连公网**：凭据 / 会话 Cookie / 密码重置令牌都会以明文传输。
-    #   ⚠️ **同事注意**：「拿本脚本部署 = 默认把应用暴露到公网」。若你的环境不需要公网直连，
-    #      务必显式传 `-EdgeBindAddr 127.0.0.1`，并把边缘交给宿主机上的受信 TLS 代理。
-    #   注意 deploy-blue-green.sh 里 BIND_ADDR 的默认值**仍是 127.0.0.1**（被 CI 部署合同
-    #   门禁 frontend/scripts/verify-deployment-contract.mjs 锁定，不要改）——本参数的作用
-    #   就是每次显式覆盖它，所以这里的默认值才是实际生效的那个。
+    #   **默认 127.0.0.1（仅本机可达）**：公网访问必须显式 opt-in：
+    #     1) 传 `-EdgeBindAddr 0.0.0.0`（或由编排层覆盖 BIND_ADDR）；
+    #     2) 在宿主机上配受信 TLS 反代，只转发需要的路径。
+    #   ⚠️ 0.0.0.0 是**明文 http 直连公网**：凭据 / 会话 Cookie / 密码重置令牌都会明文传输。
     #   管理面 9154 不受本参数影响，始终只绑 loopback（见 deploy-blue-green.sh 的
     #   METRICS_BIND_ADDR），公网不可见。
-    [string]$EdgeBindAddr = '0.0.0.0',
+    [string]$EdgeBindAddr = '127.0.0.1',
 
     # 应用边缘的宿主端口（线上）。
     # 留空 = 用 deploy-blue-green.sh 里的默认值（当前 18654）——**刻意让默认值只有

@@ -6,22 +6,22 @@ groups:
         expr: |
           sum by (job) (rate(yang_system_action_requests_total{result="error"}[5m]))
           /
-          clamp_min(sum by (job) (rate(yang_system_action_requests_total[5m])), 0.001)
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total{result=~"success|error"}[5m])), 0.001)
       - record: yang_system:sli_action_error_ratio:rate1h
         expr: |
           sum by (job) (rate(yang_system_action_requests_total{result="error"}[1h]))
           /
-          clamp_min(sum by (job) (rate(yang_system_action_requests_total[1h])), 0.001)
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total{result=~"success|error"}[1h])), 0.001)
       - record: yang_system:sli_action_error_ratio:rate6h
         expr: |
           sum by (job) (rate(yang_system_action_requests_total{result="error"}[6h]))
           /
-          clamp_min(sum by (job) (rate(yang_system_action_requests_total[6h])), 0.001)
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total{result=~"success|error"}[6h])), 0.001)
       - record: yang_system:sli_action_error_ratio:rate3d
         expr: |
           sum by (job) (rate(yang_system_action_requests_total{result="error"}[3d]))
           /
-          clamp_min(sum by (job) (rate(yang_system_action_requests_total[3d])), 0.001)
+          clamp_min(sum by (job) (rate(yang_system_action_requests_total{result=~"success|error"}[3d])), 0.001)
       - record: yang_system:sli_action_latency_p95_seconds:rate5m
         expr: |
           histogram_quantile(
@@ -75,8 +75,12 @@ groups:
           summary: "yang-system Action p95 latency exceeds 500 ms"
           runbook: "docs/contracts/SLO.md"
 
+      # `absent` 只覆盖「从未上报」；运行期的依赖故障需要管理面周期性探测
+      # （部署编排每 15-30s 请求 /health/ready，或应用后台任务刷新该 gauge）。
       - alert: YangSystemReadinessUnavailable
-        expr: max_over_time(yang_system_readiness_ready[2m]) == 0
+        expr: |
+          max_over_time(yang_system_readiness_ready[2m]) == 0
+          or absent(yang_system_readiness_ready)
         for: 2m
         labels:
           severity: critical

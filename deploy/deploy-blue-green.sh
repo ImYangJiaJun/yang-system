@@ -426,7 +426,7 @@ container_binding() {
 mysql_scalar() {
   local out errf rc=0
   errf=$(mktemp) || { err "无法创建临时文件（mktemp 失败）"; return 1; }
-  out=$(docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$MYSQL_CONTAINER" \
+  out=$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
           mysql -uroot -N -B -e "$1" 2>"$errf") || rc=$?
   if [ "$rc" -ne 0 ]; then
     err "MySQL 查询失败（退出码 $rc）：$1"
@@ -452,14 +452,21 @@ require_integer() {
   return 0
 }
 
+# 把 SQL 里的明文口令替换掉再进日志/错误信息。
+redact_sql() {
+  printf '%s' "$1" | sed -E "s/(IDENTIFIED BY[[:space:]]*)'[^']*'/\1'<redacted>'/gi"
+}
+
 # 执行一条**写入/DDL** 语句。任何失败都必须立刻中止并把 MySQL 的原始报错打出来——
 # 这是清库路径，绝不允许出现 `|| true`（那等于把「没清掉」当成「清掉了」）。
 mysql_exec() {
   local out rc=0
-  out=$(docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$MYSQL_CONTAINER" \
-          mysql -uroot -e "$1" 2>&1) || rc=$?
+  # SQL 走 stdin 而不是 `-e`：CREATE/ALTER USER 里带口令，放 argv 会进进程列表。
+  # `-e MYSQL_PWD` 只传变量名、值从本进程环境继承，同样不落 argv。
+  out=$(printf '%s\n' "$1" | MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
+          mysql -uroot 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
-    err "MySQL 语句失败（退出码 $rc）：$1"
+    err "MySQL 语句失败（退出码 $rc）：$(redact_sql "$1")"
     printf '%s\n' "$out" | sed 's/^/      /' >&2
     return 1
   fi
