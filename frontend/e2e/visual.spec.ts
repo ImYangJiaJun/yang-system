@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { mockSessionRestore } from "./support";
+import { mockSessionRestore, resetDemoData } from "./support";
 
 /**
  * 视觉回归基线（ADR-5 §2.5）：核心页面明暗双主题截图。
@@ -37,7 +37,9 @@ test("登录页明暗主题", async ({ page }) => {
   });
 });
 
-test("工作台表格页与 Action 对话框明暗主题", async ({ page }) => {
+test("工作台表格页与 Action 对话框明暗主题", async ({ page, request }) => {
+  // 截图对行内容敏感：先重置回种子数据，不受其他 spec 的增删影响。
+  await resetDemoData(request);
   await mockSessionRestore(page);
   await page.goto("/workbench");
   await expect(page.getByRole("heading", { name: "项目目录" })).toBeVisible();

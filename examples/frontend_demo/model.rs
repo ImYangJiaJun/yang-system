@@ -31,8 +31,9 @@ pub(super) struct MutationOutput {
     pub(super) id: i64,
 }
 
-pub(super) fn fixture_items() -> DemoItems {
-    Arc::new(tokio::sync::RwLock::new(vec![
+/// 种子数据本身：重置端点与首次启动共用同一份，避免两处漂移。
+pub(super) fn fixture() -> Vec<DemoItem> {
+    vec![
         DemoItem {
             id: 1,
             name: "平台能力".to_string(),
@@ -47,5 +48,9 @@ pub(super) fn fixture_items() -> DemoItems {
             status: "draft".to_string(),
             parent_id: Some(1),
         },
-    ]))
+    ]
+}
+
+pub(super) fn fixture_items() -> DemoItems {
+    Arc::new(tokio::sync::RwLock::new(fixture()))
 }

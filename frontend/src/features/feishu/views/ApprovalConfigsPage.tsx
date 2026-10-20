@@ -161,7 +161,11 @@ export default function ApprovalConfigsPage() {
       if (kind === "delete") {
         const result = await actions.deleteConfig(item.id);
         toast.success(
-          `已删除「${item.title}」${result.deletedPendingTasks > 0 ? `，并清掉 ${result.deletedPendingTasks} 条待处理任务` : ""}`,
+          `已删除「${item.title}」${
+            result.deletedTasks > 0
+              ? `，并清掉 ${result.deletedTasks} 条任务行`
+              : ""
+          }；派发请求记录保留`,
         );
         back();
       } else {
@@ -464,7 +468,7 @@ export default function ApprovalConfigsPage() {
             <DialogDescription>
               <span className="block">
                 {confirm?.kind === "delete"
-                  ? "删除后该配置的字段映射与待处理任务会一并清除；已完结的审批单流水保留。删除不可恢复。"
+                  ? "删除后该配置的字段映射与全部任务行（含已完结）会一并清除；仅派发请求记录保留。删除不可恢复。"
                   : confirm?.item.enabled
                     ? "停用后，新的派发请求将不再通过此配置受理。"
                     : "启用后，此配置可受理新的派发请求；仍需飞书工作流触发。"}

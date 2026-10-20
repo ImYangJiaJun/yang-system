@@ -13,6 +13,11 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
+import {
+  restoreClipboard,
+  stubExecCommand,
+  stubInsecureClipboard,
+} from "@test/helpers/clipboard";
 import { renderTestApp } from "@test/helpers/render-app";
 
 import {
@@ -28,6 +33,7 @@ const CONFIG_UPDATE_PATH = "/api/v1/feishu/approval/configs/update";
 const CONFIG_DELETE_PATH = "/api/v1/feishu/approval/configs/delete";
 
 afterEach(() => {
+  restoreClipboard();
   vi.unstubAllGlobals();
   sessionStorage.clear();
   localStorage.clear();
@@ -159,6 +165,49 @@ describe("审批派发配置页 · 列表", () => {
     expect(
       calls.filter((call) => call.url.endsWith("/configs/rotate-token")).length,
     ).toBe(0);
+  });
+
+  it("剪贴板写不进去时，轮换/回显的 Token 明文就地渲染成可选中的 code 块", async () => {
+    const user = userEvent.setup();
+    stubApprovalApi({
+      configList: () =>
+        listPage([
+          approvalConfigWire({
+            config_key: "cfg-issued",
+            token_rotated_at: 1_700_000_000,
+          }),
+        ]),
+    });
+    renderConfigs();
+    await screen.findByText("差旅报销");
+    await user.click(screen.getAllByRole("button", { name: "查看配置" })[0]!);
+    await user.click(await screen.findByRole("tab", { name: "接入数据" }));
+    const content = within(screen.getByRole("tabpanel", { name: "接入数据" }));
+
+    // 明文 HTTP + 降级也失败：复制彻底不可用（必须在 userEvent.setup 之后装桩）。
+    stubInsecureClipboard();
+    stubExecCommand(false);
+
+    // 回显失败：明文就在页面上，可选中。
+    await user.click(content.getByRole("button", { name: "复制 Token" }));
+    const revealAlert = await screen.findByRole("alert");
+    expect(revealAlert).toHaveTextContent("stub-current-token");
+    expect(revealAlert.querySelector("code")).toHaveTextContent(
+      "stub-current-token",
+    );
+    expect(screen.queryByText(/已复制当前访问 Token/)).toBeNull();
+
+    // 轮换失败：换成新明文，旧的那段不留在页面上。
+    await user.click(screen.getByRole("button", { name: "轮换访问 Token" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("stub-rotated-token"),
+    );
+    const rotateAlert = screen.getByRole("alert");
+    expect(rotateAlert.querySelector("code")).toHaveTextContent(
+      "stub-rotated-token",
+    );
+    expect(rotateAlert).not.toHaveTextContent("stub-current-token");
+    expect(screen.queryByText(/请联系管理员重新轮换/)).toBeNull();
   });
 
   it("从未签发过的配置：接入数据 tab 引导去签发，不渲染无效的派发链接", async () => {
@@ -362,14 +411,22 @@ describe("审批派发配置页 · 行操作", () => {
     // 确认对话框指认对象
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(/费用报销（#2）/)).toBeInTheDocument();
+    // 后端现在连已完结任务行一起删（record_id 全局唯一），文案不能再承诺保留。
+    expect(
+      within(dialog).getByText(/全部任务行（含已完结）会一并清除/),
+    ).toBeInTheDocument();
     // 行内还有「删除」按钮，确认动作必须限定在对话框里
     await userEvent.click(within(dialog).getByRole("button", { name: "删除" }));
 
     await waitFor(() => {
       expect(bodiesOf(calls, CONFIG_DELETE_PATH)).toEqual([{ config_id: 2 }]);
     });
-    // 成功 toast（含被清掉的 pending 任务数）
-    expect(await screen.findByText(/已删除「费用报销」/)).toBeInTheDocument();
+    // 成功 toast 报任务行总数，并说明请求流水仍在。
+    expect(
+      await screen.findByText(
+        /已删除「费用报销」，并清掉 3 条任务行；派发请求记录保留/,
+      ),
+    ).toBeInTheDocument();
     await waitFor(() => {
       expect(countCalls(calls, CONFIG_LIST_PATH)).toBeGreaterThan(1);
     });

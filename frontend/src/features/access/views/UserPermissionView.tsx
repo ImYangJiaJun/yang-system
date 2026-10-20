@@ -159,6 +159,22 @@ export function UserPermissionView() {
       ),
     [groupDetailQueries, groups],
   );
+  /// 组列表与组详情是**多源**的：只要有一处没落定（或当前身份根本看不到组），
+  /// 成员身份与并集就都不完整——此时任何「不属于任何组」「没有任何有效权限」
+  /// 都是把「没加载/看不到」说成了事实。
+  const groupsPending =
+    canReadGroupsOf &&
+    (groupsQuery.isPending ||
+      groupDetailQueries.some((query) => query.isPending));
+  const groupsFailed =
+    canReadGroupsOf &&
+    (groupsQuery.isError || groupDetailQueries.some((query) => query.isError));
+  const groupDetailsIncomplete =
+    !canReadGroupsOf || groupsPending || groupsFailed;
+  function retryGroupDetails() {
+    void groupsQuery.refetch();
+    for (const query of groupDetailQueries) void query.refetch();
+  }
 
   /// 直授权限按模块分组（行模型与权限目录同一套分组，中文名/危险徽标同源）。
   const grantGroups = useMemo(() => {
@@ -319,8 +335,14 @@ export function UserPermissionView() {
             groupDetails={groupDetails}
             targetUserId={targetUserId}
             canReadGroupsOf={canReadGroupsOf}
+            pending={groupsPending}
+            failed={groupsFailed}
+            onRetry={retryGroupDetails}
           />
-          <EffectiveUnionCard union={union} />
+          <EffectiveUnionCard
+            union={union}
+            incomplete={groupDetailsIncomplete}
+          />
         </>
       )}
 
@@ -516,11 +538,18 @@ function GroupMembershipCard({
   groupDetails,
   targetUserId,
   canReadGroupsOf,
+  pending,
+  failed,
+  onRetry,
 }: {
   groups: GroupSummary[];
   groupDetails: Map<number, GroupDetail | undefined>;
   targetUserId: number;
   canReadGroupsOf: boolean;
+  /// 组列表/组详情还有没落定的查询：此时不下「不属于任何组」的结论。
+  pending: boolean;
+  failed: boolean;
+  onRetry: () => void;
 }) {
   const memberships = groups.filter((group) =>
     groupDetails.get(group.id)?.members.includes(targetUserId),
@@ -541,6 +570,21 @@ function GroupMembershipCard({
         <p className="text-sm text-muted-foreground">
           当前身份看不到权限组，无法计算组成员身份。
         </p>
+      ) : pending ? (
+        <p aria-live="polite" className="text-sm text-muted-foreground">
+          正在读取权限组成员…
+        </p>
+      ) : failed ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          <span>部分权限组详情没有取到，暂时无法判断所属权限组。</span>
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            <RefreshCw aria-hidden="true" />
+            重试
+          </Button>
+        </div>
       ) : memberships.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           该用户不属于任何权限组。
@@ -574,7 +618,14 @@ function GroupMembershipCard({
 
 /* ------------------------------ 有效权限并集 ----------------------------- */
 
-function EffectiveUnionCard({ union }: { union: UnionEntry[] }) {
+function EffectiveUnionCard({
+  union,
+  incomplete,
+}: {
+  union: UnionEntry[];
+  /// 组详情没全部落定：空并集只能说明「目前没看到」，不是「没有」。
+  incomplete: boolean;
+}) {
   return (
     <section
       aria-labelledby="workspace-effective-union-heading"
@@ -591,50 +642,59 @@ function EffectiveUnionCard({ union }: { union: UnionEntry[] }) {
       </p>
       {union.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          该用户当前没有任何有效权限。
+          {incomplete
+            ? "部分权限组详情未取到，暂时无法判断有效权限。"
+            : "该用户当前没有任何有效权限。"}
         </p>
       ) : (
-        <ul aria-label="有效权限并集" className="space-y-1">
-          {union.map((entry) => (
-            <li
-              key={entry.permission}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
-            >
-              <div className="min-w-0">
-                {entry.meta !== undefined &&
-                entry.meta.title !== entry.permission ? (
-                  <>
-                    <span className="block text-sm font-medium">
-                      {entry.meta.title}
-                    </span>
-                    <span className="block truncate font-mono text-xs text-muted-foreground">
+        <>
+          {incomplete ? (
+            <p aria-live="polite" className="text-xs text-muted-foreground">
+              部分权限组详情未取到，下面的并集可能不完整。
+            </p>
+          ) : null}
+          <ul aria-label="有效权限并集" className="space-y-1">
+            {union.map((entry) => (
+              <li
+                key={entry.permission}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
+              >
+                <div className="min-w-0">
+                  {entry.meta !== undefined &&
+                  entry.meta.title !== entry.permission ? (
+                    <>
+                      <span className="block text-sm font-medium">
+                        {entry.meta.title}
+                      </span>
+                      <span className="block truncate font-mono text-xs text-muted-foreground">
+                        {entry.permission}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="block font-mono text-sm">
                       {entry.permission}
                     </span>
-                  </>
-                ) : (
-                  <span className="block font-mono text-sm">
-                    {entry.permission}
-                  </span>
-                )}
-              </div>
-              <span className="flex flex-wrap items-center gap-1">
-                {entry.sources.map((source) =>
-                  source.kind === "direct" ? (
-                    <Badge key="direct" variant="outline">
-                      直授
-                    </Badge>
-                  ) : (
-                    <PermissionBadge
-                      key={source.title}
-                      kind="source"
-                      sourceTitle={source.title}
-                    />
-                  ),
-                )}
-              </span>
-            </li>
-          ))}
-        </ul>
+                  )}
+                </div>
+                <span className="flex flex-wrap items-center gap-1">
+                  {entry.sources.map((source) =>
+                    source.kind === "direct" ? (
+                      <Badge key="direct" variant="outline">
+                        直授
+                      </Badge>
+                    ) : (
+                      <PermissionBadge
+                        key={source.title}
+                        kind="source"
+                        sourceTitle={source.title}
+                      />
+                    ),
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </section>
   );

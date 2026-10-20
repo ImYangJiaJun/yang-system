@@ -152,6 +152,49 @@ describe("FieldBindingsTable", () => {
     expect(statusDot).toBeInTheDocument();
   });
 
+  it("键盘可达：行可聚焦，Enter/Space 都能切换字段，选中行带 aria-current", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const { container } = render(
+      <FieldBindingsTable
+        bindings={CHAIN}
+        selectedSourceKey={null}
+        onSelect={onSelect}
+      />,
+    );
+
+    // 行是真正的 button：可聚焦，Enter 与 Space 都触发原生 click。
+    const row = rows(container)[1]!;
+    expect(row.tagName).toBe("BUTTON");
+    row.focus();
+    expect(row).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenLastCalledWith("fee_type");
+
+    await user.keyboard(" ");
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(onSelect).toHaveBeenLastCalledWith("fee_type");
+  });
+
+  it("选中行用 aria-current 表达当前字段", () => {
+    render(
+      <FieldBindingsTable
+        bindings={CHAIN}
+        selectedSourceKey="fee_type"
+        onSelect={() => {}}
+      />,
+    );
+
+    const selectedRow = rows(document.body).find(
+      (row) => row.dataset.selected === "true",
+    );
+    expect(selectedRow).toHaveAttribute("aria-current", "true");
+    rows(document.body)
+      .filter((row) => row !== selectedRow)
+      .forEach((row) => expect(row).not.toHaveAttribute("aria-current"));
+  });
+
   it("一条绑定都没有时整块不渲染", () => {
     const { container } = render(
       <FieldBindingsTable

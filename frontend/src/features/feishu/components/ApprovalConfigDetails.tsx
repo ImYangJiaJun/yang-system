@@ -85,6 +85,9 @@ export function ApprovalConfigDetails({
   const [relatedSize, setRelatedSize] = useState(10);
   const [rotatingToken, setRotatingToken] = useState(false);
   const [revealingToken, setRevealingToken] = useState(false);
+  /// 剪贴板写不进去时的退路：Token 明文只在这一次响应里出现，复制不成
+  /// 就必须把它就地摆出来（照抄 CredentialChecklist 的 copyFailure 形态）。
+  const [tokenCopyFailure, setTokenCopyFailure] = useState<string | null>(null);
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const toast = useToast();
   const actions = useApprovalActions();
@@ -129,6 +132,7 @@ export function ApprovalConfigDetails({
   }
   async function rotateToken() {
     setRotatingToken(true);
+    setTokenCopyFailure(null);
     try {
       const token = await actions.rotateConfigToken(item.id);
       if (!token) {
@@ -143,8 +147,9 @@ export function ApprovalConfigDetails({
           "已轮换并复制新 Token；旧 Token 立即失效，请把新值粘回飞书工作流。",
         );
       } else {
+        setTokenCopyFailure(token);
         toast.error(
-          "已轮换，但无法自动复制。新 Token 只出现这一次，请联系管理员重新轮换。",
+          "已轮换，但无法自动复制。新 Token 已显示在页面上，请选中后手动复制。",
         );
       }
     } catch (cause) {
@@ -158,6 +163,7 @@ export function ApprovalConfigDetails({
   /// 不该被当成「看一眼 Token」的入口。
   async function revealToken() {
     setRevealingToken(true);
+    setTokenCopyFailure(null);
     try {
       const token = await actions.revealConfigToken(item.id);
       if (!token) {
@@ -168,7 +174,10 @@ export function ApprovalConfigDetails({
       if (outcome === "copied") {
         toast.success("已复制当前访问 Token。");
       } else {
-        toast.error("无法自动复制，请选中文字手动复制。");
+        setTokenCopyFailure(token);
+        toast.error(
+          "无法自动复制。当前 Token 已显示在页面上，请选中后手动复制。",
+        );
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -229,6 +238,20 @@ export function ApprovalConfigDetails({
           <span className="text-sm text-muted-foreground">只读</span>
         )}
       </header>
+      {tokenCopyFailure === null ? null : (
+        <div
+          role="alert"
+          className="space-y-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          <p>
+            浏览器这次没允许写剪贴板。下面的 Token 明文只出现这一次，选中后按
+            Ctrl/Cmd + C 手动复制。
+          </p>
+          <code className="block rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-xs break-all text-foreground select-all">
+            {tokenCopyFailure}
+          </code>
+        </div>
+      )}
       <div className="rounded-xl border bg-card p-5 sm:p-6">
         <p className="mb-5 text-xs font-medium text-muted-foreground">
           这条配置如何工作

@@ -338,6 +338,7 @@ export function stubApprovalApi(
           config_id: 1,
           deleted_field_maps: 2,
           deleted_pending_tasks: 1,
+          deleted_tasks: 3,
         });
       }
       if (url.endsWith("/api/v1/feishu/approval/definitions/widgets")) {

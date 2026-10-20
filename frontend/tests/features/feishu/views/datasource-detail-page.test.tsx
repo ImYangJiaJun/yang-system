@@ -633,6 +633,70 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
     ).toHaveLength(0);
     vi.unstubAllGlobals();
   });
+
+  it("轮换成功后回读数据源，「最近轮换」不再显示旧值", async () => {
+    const user = userEvent.setup();
+    let listCalls = 0;
+    const calls = stubDetail({
+      tableConfig: true,
+      datasourceList: () => {
+        listCalls += 1;
+        return listPage([
+          datasourceWire({
+            id: DATASOURCE_ID,
+            title: "公司往来付款",
+            ingest_mode: "pull",
+            bitable_base_token: "app1",
+            bitable_table_id: "tblA",
+            fields: [
+              {
+                field_id: "fldEblAr7X",
+                field_name: "费用类型/Fee Type*",
+                source_key: SOURCE_KEY,
+                parent_field_id: null,
+                enabled: true,
+                // 第一次是「从未轮换」；轮换后的回读给出新时间。
+                token_rotated_at: listCalls === 1 ? null : 1_800_000_000,
+              },
+            ],
+          }),
+        ]);
+      },
+      optionList: () => listPage(TWO_OPTIONS),
+    });
+    renderDetail();
+
+    await screen.findByText(/数据源 #7/);
+    await user.click(screen.getByRole("button", { name: "凭据配置" }));
+    await waitFor(() => expect(credentialRows()).toHaveLength(1));
+    expect(credentialRows()[0]).toHaveTextContent("从未轮换");
+
+    await user.click(
+      within(credentialRows()[0]!).getByRole("button", {
+        name: /轮换 Token：/,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "轮换 Token" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        calls.filter((call) => call.url.endsWith("/rotate-token")),
+      ).toHaveLength(1),
+    );
+    // 写成功后 datasources 前缀失效 → 数据源回读一次，最近轮换时间上屏。
+    await waitFor(() =>
+      expect(countCalls(calls, LIST_PATH)).toBeGreaterThan(1),
+    );
+    await waitFor(() =>
+      expect(credentialRows()[0]).toHaveTextContent(
+        `最近轮换 ${formatUnixSeconds(1_800_000_000)}`,
+      ),
+    );
+    expect(credentialRows()[0]).not.toHaveTextContent("从未轮换");
+  });
 });
 
 /// 外部数据源父子视图：搜索跨字段、父级/子项两列、展开区与分组视图。

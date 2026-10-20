@@ -2025,13 +2025,18 @@ export async function updateApprovalConfig(
   );
 }
 
-/// 删除配置（`feishu.approval.delete_config`）：配置行 + 映射行 + pending 任务行
-/// 同事务删除；backfilled/terminal/unnotified 任务保留作流水。
+/// 删除配置（`feishu.approval.delete_config`）：配置行 + 映射行 + **全部**任务行
+/// 同事务删除（record_id 全局唯一，保留已完结行会卡住重建后的播种）；
+/// `feishu_approval_request_log` 的派发请求记录不受影响。
 export async function deleteApprovalConfig(
   configId: number,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
-): Promise<{ deletedMaps: number; deletedPendingTasks: number }> {
+): Promise<{
+  deletedMaps: number;
+  deletedPendingTasks: number;
+  deletedTasks: number;
+}> {
   const result = await invokeFeishuAction(
     deps,
     APPROVAL_OPERATION_IDS.deleteConfig,
@@ -2042,6 +2047,7 @@ export async function deleteApprovalConfig(
   return {
     deletedMaps: asNumber(data?.deleted_field_maps, 0),
     deletedPendingTasks: asNumber(data?.deleted_pending_tasks, 0),
+    deletedTasks: asNumber(data?.deleted_tasks, 0),
   };
 }
 
@@ -2191,9 +2197,11 @@ export type ApprovalActions = {
     configId: number,
     patch: UpdateApprovalConfigPatch,
   ) => Promise<void>;
-  deleteConfig: (
-    configId: number,
-  ) => Promise<{ deletedMaps: number; deletedPendingTasks: number }>;
+  deleteConfig: (configId: number) => Promise<{
+    deletedMaps: number;
+    deletedPendingTasks: number;
+    deletedTasks: number;
+  }>;
   /// 重新签发一条配置的工作流访问 Token；返回新明文（旧值立即失效，工作流需粘新值）。
   rotateConfigToken: (configId: number) => Promise<string>;
   /// 取出这条配置**当前**的访问 Token 明文（纯读，可反复调用）。
