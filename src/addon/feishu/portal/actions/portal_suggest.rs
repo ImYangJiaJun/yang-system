@@ -6,7 +6,9 @@
 //! # 为什么是 GET 而不是 POST
 //!
 //! 建议是幂等的只读查询，没有请求体（`query` 走 URL 参数），适合 GET + 浏览器缓存。
-//! 与 `portal_metadata` 同一取舍：公开、匿名可访问、失败不消耗可用性预算。
+//! 与 `portal_metadata` 同一取舍：端点仍注册为 public，但 handler 复用
+//! `portal_query` 的 `access_mode` 判权与按门户主键的限速——public 门户匿名可用，
+//! login 门户要求已登录，passphrase 门户直接 403（建议值走 GET，不应把口令放进 URL）。
 
 use std::sync::Arc;
 
@@ -17,9 +19,12 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
+use crate::addon::feishu::domain::rate_limit;
+use yang_base::transport::client_ip::client_ip_identity;
 
 use super::portal_query::{
-    coarse_pattern, extract_digits, find_portal, first_digit_run, fuzzy_filter_candidates,
+    authorize, coarse_pattern, codes, extract_digits, find_portal, first_digit_run,
+    fuzzy_filter_candidates,
 };
 
 /// 路由模板里的路径参数名（与 `portal_query` 同一约定）。
@@ -96,6 +101,34 @@ pub(super) async fn handle(
     };
     if !portal.optional::<bool>("enabled")?.unwrap_or(true) {
         return Ok(ApiResponse::fail(PORTAL_NOT_FOUND, "门户不存在"));
+    }
+
+    // 与 portal_query 同一套判权与限速：suggest 返回的是查询键的真实取值，
+    // 不能成为绕过 access_mode 的匿名枚举入口。passphrase 门户在这里直接 403
+    // （建议值走 GET，不应把口令放进 URL）；login 门户要求已登录。
+    let portal_id: i64 = portal.require("id")?;
+    let access_mode: String = portal
+        .optional("access_mode")?
+        .unwrap_or_else(|| "public".to_string());
+    let client_ip: String = client_ip_identity(&ctx).chars().take(45).collect();
+    let limit = portal
+        .optional::<i64>("rate_limit_per_min")?
+        .unwrap_or(30)
+        .clamp(1, i64::from(u32::MAX)) as u32;
+    if let Err(error) = rate_limit::check_query(&ctx, portal_id, &client_ip, limit).await {
+        return Err(error);
+    }
+    if let Err(reason) = authorize(
+        &ctx,
+        &context,
+        &access_mode,
+        None,
+        portal.optional::<String>("passphrase_hash")?.as_deref(),
+        portal.optional::<i64>("passphrase_expires_at")?,
+    )
+    .await?
+    {
+        return Ok(ApiResponse::fail(codes::FORBIDDEN, reason));
     }
 
     let fuzzy_enabled = portal.optional::<bool>("fuzzy_enabled")?.unwrap_or(true);

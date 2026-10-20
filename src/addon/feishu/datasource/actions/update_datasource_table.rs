@@ -211,16 +211,45 @@ pub(super) async fn handle(
 
     let result: Result<(usize, usize, usize), BaseError> = async {
         // 0) 数据源必须存在。不存在就明确 404，而不是「更新了 0 行」的静默成功。
-        let exists = context
+        let existing_row = context
             .datasources()
             .query()
-            .select_fields(&["id"])?
+            .select_fields(&[
+                "id",
+                "ingest_mode",
+                "bitable_base_token",
+                "bitable_table_id",
+                "bitable_view_id",
+            ])?
             .where_eq("id", serde_json::json!(input.datasource_id))?
             .optional()
             .await?;
-        if exists.is_none() {
+        let Some(existing_row) = existing_row else {
             return Err(BaseError::RecordNotFound("数据源不存在".to_string()));
-        }
+        };
+
+        // 取数方式与坐标必须按**合并后**的状态校验：只把 ingest_mode 改成 pull、
+        // 不带坐标时，创建期校验不会重跑，源会静默永不同步。
+        let existing_mode = existing_row
+            .optional::<String>("ingest_mode")?
+            .unwrap_or_else(|| "push".to_string());
+        let existing_base = existing_row.optional::<String>("bitable_base_token")?;
+        let existing_table = existing_row.optional::<String>("bitable_table_id")?;
+        let merged_mode = input
+            .ingest_mode
+            .as_deref()
+            .unwrap_or(existing_mode.as_str());
+        let merged_base = resolved
+            .as_ref()
+            .map(|coordinates| coordinates.app_token.as_str())
+            .or(input.bitable_base_token.as_deref())
+            .or(existing_base.as_deref());
+        let merged_table = resolved
+            .as_ref()
+            .and_then(|coordinates| coordinates.table_id.as_deref())
+            .or(input.bitable_table_id.as_deref())
+            .or(existing_table.as_deref());
+        ensure_pull_coordinates(merged_mode, merged_base, merged_table)?;
 
         // 1) 读现有绑定（只取更新需要的两列）。
         let rows = context
@@ -392,6 +421,23 @@ pub(super) async fn handle(
     )
 }
 
+/// pull 模式必须同时具备 base_token 与 table_id（update 按合并后的状态判定）。
+fn ensure_pull_coordinates(
+    mode: &str,
+    base: Option<&str>,
+    table: Option<&str>,
+) -> Result<(), BaseError> {
+    let base = base.map(str::trim).filter(|value| !value.is_empty());
+    let table = table.map(str::trim).filter(|value| !value.is_empty());
+    if mode == "pull" && (base.is_none() || table.is_none()) {
+        return Err(BaseError::ParamInvalid(
+            "ingest_mode".to_string(),
+            "pull 模式必须提供 bitable_base_token 与 bitable_table_id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +555,13 @@ mod tests {
             input.validate().is_ok(),
             "xlsx_import 必须被 update 路径接受——两处白名单是两份拷贝"
         );
+    }
+
+    #[test]
+    fn pull_mode_requires_both_coordinates() {
+        assert!(ensure_pull_coordinates("pull", Some("app"), Some("tbl")).is_ok());
+        assert!(ensure_pull_coordinates("pull", None, Some("tbl")).is_err());
+        assert!(ensure_pull_coordinates("pull", Some("app"), Some("  ")).is_err());
+        assert!(ensure_pull_coordinates("push", None, None).is_ok());
     }
 }

@@ -17,6 +17,7 @@ use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::crypto;
+use crate::addon::feishu::domain::token::tokens_equal;
 use crate::config::FeishuSettings;
 
 /// 事件接收请求体——用 `Value` 接收任意 JSON，避免反序列化失败。
@@ -38,7 +39,10 @@ pub(super) fn register(
     context: FeishuContext,
     settings: &FeishuSettings,
 ) -> ModuleSpec {
-    let verification_token = settings.event_verification_token.clone();
+    // 没有 verification_token 就不注册：否则公开端点无从校验来源，等于接受任意伪造事件。
+    let Some(verification_token) = settings.event_verification_token.clone() else {
+        return module;
+    };
     let encrypt_key = settings.event_encrypt_key.clone();
     module
         .action_fn(
@@ -48,7 +52,7 @@ pub(super) fn register(
                     ctx,
                     input,
                     context.clone(),
-                    verification_token.clone(),
+                    Some(verification_token.clone()),
                     encrypt_key.clone(),
                 )
             },
@@ -84,7 +88,6 @@ pub(super) async fn handle(
         body_size = raw_body.to_string().len(),
         "=== 飞书审批事件到达 ==="
     );
-    tracing::debug!(body = %raw_body, "事件原始报文（成功时 DB raw_payload 已存一份）");
 
     // 解密或直接用明文。
     //
@@ -133,27 +136,34 @@ pub(super) async fn handle(
             }
         }
         None => {
+            // 配置了 Encrypt Key 后，飞书所有推送都应加密；明文只可能是伪造或配置漂移。
+            if encrypt_key.is_some() {
+                return Err(BaseError::Unauthorized(
+                    "已配置 event_encrypt_key，拒绝明文事件".to_string(),
+                ));
+            }
             tracing::debug!("明文事件，无需解密");
             raw_body.clone()
         }
     };
 
-    // 验签（仅日志，不阻断）
-    if let Some(expected_token) = verification_token.as_deref() {
-        if let Some(actual_token) = event_body.get("token").and_then(Value::as_str) {
-            if actual_token != expected_token {
-                tracing::warn!(
-                    feishu_token = %actual_token,
-                    expected_token = %expected_token,
-                    "飞书事件 verification_token 不匹配，仍处理事件"
-                );
-            } else {
-                tracing::debug!("verification_token 校验通过");
-            }
-        } else {
-            tracing::warn!("事件中缺少 token 字段");
-        }
+    // 验签 fail-closed：缺 Token 或不匹配一律拒绝；比较走常数时间。
+    let Some(expected_token) = verification_token.as_deref() else {
+        return Err(BaseError::ConfigError(
+            "飞书事件 verification_token 未配置".to_string(),
+        ));
+    };
+    let Some(actual_token) = event_body.get("token").and_then(Value::as_str) else {
+        return Err(BaseError::Unauthorized(
+            "飞书事件缺少 verification_token".to_string(),
+        ));
+    };
+    if !tokens_equal(actual_token, expected_token) {
+        return Err(BaseError::Unauthorized(
+            "飞书事件 verification_token 不匹配".to_string(),
+        ));
     }
+    tracing::debug!("飞书事件 verification_token 校验通过");
 
     // 提取事件字段（飞书推送结构：顶层有 type/event_callback/uuid/token，
     // 业务字段在 event 嵌套层里）

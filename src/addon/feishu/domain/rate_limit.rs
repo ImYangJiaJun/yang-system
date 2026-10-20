@@ -38,8 +38,12 @@ return { current, ttl }
 "#;
 
 /// 门户查询的计数键。
-pub(crate) fn query_key(slug: &str, client_ip: &str) -> String {
-    format!("portal:query:{slug}:{client_ip}")
+///
+/// 用**门户主键**而不是调用方传入的 slug：slug 查询在库层大小写不敏感
+/// （`utf8mb4_unicode_ci`），原始 slug 的 `ABC`/`abc` 变体会命中同一门户却落入
+/// 不同计数键，口令爆破预算可被成倍放大。主键是解析后的唯一事实。
+pub(crate) fn query_key(portal_id: i64, client_ip: &str) -> String {
+    format!("portal:query:{portal_id}:{client_ip}")
 }
 
 /// 超限判定（纯函数，便于单测；Redis 只负责给出计数与 TTL）。
@@ -55,13 +59,13 @@ fn verdict(current: i64, limit_per_minute: u32, ttl: i64) -> Result<(), BaseErro
 /// 记一次查询并判定是否超限；超限返回 [`BaseError::RateLimitExceeded`]（HTTP 429）。
 pub(crate) async fn check_query(
     ctx: &ActionContext,
-    slug: &str,
+    portal_id: i64,
     client_ip: &str,
     limit_per_minute: u32,
 ) -> Result<(), BaseError> {
     let cache = ctx.tools().cache()?;
     let script = cache.script(COUNTER_SCRIPT);
-    let keys = [query_key(slug, client_ip)];
+    let keys = [query_key(portal_id, client_ip)];
     let args = [WINDOW_SECONDS.to_string()];
     let (current, ttl): (i64, i64) = cache.eval_script(&script, &keys, &args).await?;
     verdict(current, limit_per_minute, ttl)
@@ -72,11 +76,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_key_shape_is_slug_then_client_ip() {
-        assert_eq!(
-            query_key("abc123", "203.0.113.7"),
-            "portal:query:abc123:203.0.113.7"
-        );
+    fn the_key_shape_is_portal_id_then_client_ip() {
+        assert_eq!(query_key(42, "203.0.113.7"), "portal:query:42:203.0.113.7");
     }
 
     #[test]

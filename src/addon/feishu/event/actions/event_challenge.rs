@@ -18,6 +18,7 @@ use yang_base::BaseError;
 
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::crypto;
+use crate::addon::feishu::domain::token::tokens_equal;
 use crate::config::FeishuSettings;
 
 /// challenge 请求体——用 `Value` 接收任意 JSON，避免反序列化失败。
@@ -63,8 +64,8 @@ pub(super) fn register(
 
 /// 处理 challenge 请求。
 ///
-/// 任何失败都返回 `Ok(ResponseBody::raw(...))`，不用 `Err`：匿名端点的 `Err`
-/// 会消耗全站可用性预算（与 `approval_options` 同一纪律。
+/// 解密类失败返回 raw error body（不消耗全站可用性预算，飞书会重试）；
+/// verification_token 缺失或不匹配返回 403，**不再回显 challenge**。
 ///
 /// # 事件回调兼容
 ///
@@ -79,7 +80,6 @@ pub(super) async fn handle(
     encrypt_key: Option<String>,
 ) -> Result<ResponseBody, BaseError> {
     let raw_body = &input.0;
-    tracing::debug!(body = %raw_body, "飞书 challenge 请求到达");
 
     // 解密或直接用明文
     let body = match raw_body.get("encrypt").and_then(Value::as_str) {
@@ -108,7 +108,14 @@ pub(super) async fn handle(
                 }
             }
         }
-        None => raw_body.clone(),
+        None => {
+            if encrypt_key.is_some() {
+                return Err(BaseError::Unauthorized(
+                    "已配置 event_encrypt_key，拒绝明文 challenge".to_string(),
+                ));
+            }
+            raw_body.clone()
+        }
     };
 
     // 从 body 提取字段
@@ -140,13 +147,12 @@ pub(super) async fn handle(
         tracing::warn!(body = %body, r#type = %r#type, "飞书 challenge 请求 type 不是 url_verification");
     }
 
-    // verification_token 校验（仅日志，不阻断）
-    if !token.is_empty() && token != verification_token {
-        tracing::warn!(
-            feishu_token = %token,
-            expected_token = %verification_token,
-            "飞书 challenge verification_token 不匹配，仍返回 challenge"
-        );
+    // verification_token 校验（fail-closed）：缺失或不匹配一律 403。
+    if token.is_empty() || !tokens_equal(token, &verification_token) {
+        tracing::warn!("飞书 challenge verification_token 缺失或不匹配，拒绝应答");
+        return Err(BaseError::PermissionDenied(
+            "飞书 challenge verification_token 无效".to_string(),
+        ));
     }
 
     raw_json(serde_json::json!({"challenge": challenge}))
