@@ -31,7 +31,7 @@ use yang_base::BaseError;
 use yang_db::Transaction;
 
 use super::approval::get_approval_definition;
-use super::approval_convert::{Converter, WidgetMap};
+use super::approval_convert::{Converter, FixedOffset, WidgetMap};
 use super::approval_match::{
     columns_from_fields, match_fields, resolve_field_coord, Column, FieldMapping, FormWidget,
     MatchOutcome,
@@ -325,6 +325,15 @@ fn plan(
 ) -> Result<ProvisionPlan, ProvisionError> {
     let mut reasons: Vec<String> = Vec::new();
 
+    // Base 时区在配置期就校验：同步派发会当场报错，而 worker 在解析失败时
+    // 回退到部署默认值——同一个配置两条路径行为不同，用户很难发现。
+    if let Err(error) = FixedOffset::from_iana(input.base_timezone.trim()) {
+        return Err(ProvisionError::Invalid(vec![format!(
+            "Base 时区「{}」无效：{error}",
+            input.base_timezone.trim()
+        )]));
+    }
+
     // ---- 两个关键坐标 ----
     //
     // 两条分开判而不是用 `resolve_key_coords`：合并版返回裸 `Option`，
@@ -402,6 +411,27 @@ fn plan(
         }
     }
 
+    // 六个可选回填列先解析成 id，再与申请/回填列一起查重：多列写同一格会让
+    // 后写覆盖先写，而两条路径的写入顺序并不稳定。外部选项的 reasons 与这里的
+    // 重复项在同一次检查里一起返回。
+    let status_field_id = resolve_optional_id(columns, input.status_field);
+    let flow_field_id = resolve_optional_id(columns, input.flow_field);
+    let start_time_field_id = resolve_optional_id(columns, input.start_time_field);
+    let end_time_field_id = resolve_optional_id(columns, input.end_time_field);
+    let department_field_id = resolve_optional_id(columns, input.department_field);
+    let handler_field_id = resolve_optional_id(columns, input.handler_field);
+    reasons.extend(duplicate_backfill_targets(
+        &applicant.field_id,
+        &backfill.field_id,
+        &[
+            ("申请状态", status_field_id.as_deref()),
+            ("审批流程", flow_field_id.as_deref()),
+            ("发起时间", start_time_field_id.as_deref()),
+            ("完成时间", end_time_field_id.as_deref()),
+            ("发起人部门", department_field_id.as_deref()),
+            ("当前处理人", handler_field_id.as_deref()),
+        ],
+    ));
     if !reasons.is_empty() {
         return Err(ProvisionError::Invalid(reasons));
     }
@@ -419,12 +449,12 @@ fn plan(
         backfill_field_id: backfill.field_id.clone(),
         // 六个可选回填列：坐标解析成 id（`None`/空/未命中都落 `None`）。类型与存在性
         // 已在 `build_plan` 的 `check_backfill_targets` 里查过，这里只管存 id。
-        status_field_id: resolve_optional_id(columns, input.status_field),
-        flow_field_id: resolve_optional_id(columns, input.flow_field),
-        start_time_field_id: resolve_optional_id(columns, input.start_time_field),
-        end_time_field_id: resolve_optional_id(columns, input.end_time_field),
-        department_field_id: resolve_optional_id(columns, input.department_field),
-        handler_field_id: resolve_optional_id(columns, input.handler_field),
+        status_field_id,
+        flow_field_id,
+        start_time_field_id,
+        end_time_field_id,
+        department_field_id,
+        handler_field_id,
         base_timezone: input.base_timezone.trim().to_string(),
         approval_name: approval_name.trim().to_string(),
         form_snapshot: form_snapshot.to_string(),
@@ -500,6 +530,32 @@ pub(crate) fn check_backfill_targets(
                 "{label}回填列「{}」的类型是 {type_label}（type={field_type}），应为{}",
                 column.field_name,
                 expected_label(allowed),
+            ));
+        }
+    }
+    reasons
+}
+
+/// 六个可选回填目标与申请/回填列之间不得重复使用同一 `field_id`。
+///
+/// 多列写同一格会让后写覆盖先写，而两条写入路径的顺序并不稳定；配置期拒绝
+/// 比运行期静默丢值好。`targets` 的 label 用于错误信息，`Option` 为未配置。
+fn duplicate_backfill_targets(
+    applicant_id: &str,
+    backfill_id: &str,
+    targets: &[(&str, Option<&str>)],
+) -> Vec<String> {
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+    seen.insert(applicant_id, "申请人");
+    seen.insert(backfill_id, "回填列");
+    let mut reasons = Vec::new();
+    for (label, id) in targets {
+        let Some(id) = id else {
+            continue;
+        };
+        if let Some(previous) = seen.insert(id, label) {
+            reasons.push(format!(
+                "回填目标「{label}」与「{previous}」使用了同一列（field_id={id}）"
             ));
         }
     }
@@ -1933,5 +1989,26 @@ mod tests {
         );
         assert_eq!(plan.handler_field_id.as_deref(), Some("fldHandler"));
         assert_eq!(plan.flow_field_id, None, "未给的列落 None");
+    }
+
+    #[test]
+    fn duplicate_backfill_targets_are_reported_together() {
+        let reasons = duplicate_backfill_targets(
+            "fldApplicant",
+            "fldBackfill",
+            &[
+                ("申请状态", Some("fldBackfill")),
+                ("审批流程", Some("fldFlow")),
+                ("完成时间", Some("fldFlow")),
+                ("当前处理人", None),
+            ],
+        );
+        assert_eq!(
+            reasons.len(),
+            2,
+            "与回填列重复 + 两个目标互相重复都应报出: {reasons:?}"
+        );
+        assert!(reasons.iter().any(|reason| reason.contains("fldBackfill")));
+        assert!(reasons.iter().any(|reason| reason.contains("fldFlow")));
     }
 }
