@@ -375,8 +375,10 @@ readiness_budget_ms = 2000
 
 [logging]
 # tracing 过滤器：只控制级别，不改变生产 JSON 日志结构（一行一个 object）。
-# 默认："yang_system=info,tower_http=info"
-filter = "yang_system=info,tower_http=info"
+# 默认："yang_system=info,tower_http=info,error"
+# 末尾的 error 是全局兜底：未显式匹配的 target（yang_base / yang_db / yang_runtime 等）
+# 仍保留 ERROR，避免框架层错误被静默丢弃。
+filter = "yang_system=info,tower_http=info,error"
 
 # 飞书外部数据源集成（整段可选；省略表示未集成，行为与不启用完全一致）。
 [feishu]

@@ -26,7 +26,8 @@ const MAX_BATCH_ITEMS: usize = 100;
 pub(super) struct BatchGrantItem {
     user_id: i64,
     permission: String,
-    /// Unix 秒；缺省 = 永久有效。过期后权限在解析侧失效、行保留做审计。
+    /// Unix 秒；缺省 = 永久有效。到期后在签发/刷新时过滤，行保留做审计；已签发的
+    /// Access Token 最长保留一个 access TTL。
     #[serde(default)]
     expires_at: Option<i64>,
 }
@@ -142,12 +143,17 @@ fn validate_grant_items(
                 "过期时间必须大于当前时间".to_string(),
             ));
         }
-        if let Err(BaseError::ParamInvalid(_, message)) = catalog.ensure_declared(&item.permission)
-        {
-            return Err(BaseError::ParamInvalid(
-                format!("items[{index}].permission"),
-                message,
-            ));
+        match catalog.ensure_declared(&item.permission) {
+            Ok(()) => {}
+            Err(BaseError::ParamInvalid(_, message)) => {
+                return Err(BaseError::ParamInvalid(
+                    format!("items[{index}].permission"),
+                    message,
+                ));
+            }
+            // 目录未安装等非输入错误必须原样上抛：吞掉它们会让整批校验「看起来通过」，
+            // 随后才在写入阶段以更难定位的形态失败。
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -378,6 +384,26 @@ mod tests {
         assert_eq!(valid.items.len(), 2);
         assert_eq!(valid.items[0].expires_at, None, "缺省=永久");
         assert_eq!(valid.items[1].expires_at, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn catalog_errors_that_are_not_param_invalid_are_not_swallowed() {
+        // 目录未安装时 ensure_declared 返回 ConfigError；validate_grant_items 必须原样
+        // 上抛，而不是像只匹配 ParamInvalid 的旧实现那样把整批当成通过。
+        let items = vec![BatchGrantItem {
+            user_id: 7,
+            permission: "access.grants.read".to_string(),
+            expires_at: None,
+        }];
+        let error = expected_error(validate_grant_items(
+            &items,
+            &PermissionCatalogHandle::new(),
+            1_700_000_000,
+        ));
+        assert!(
+            matches!(error, BaseError::ConfigError(_)),
+            "目录未安装的 ConfigError 必须原样上抛，实际 {error:?}"
+        );
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub(crate) fn grants_table_spec() -> Result<TableSpec, BaseError> {
                 .writable_by([SYSTEM_ROLE]),
         expires_at => Int::new()
                 .title("过期时间")
-                .description("Unix 秒；NULL=永久有效。过期后权限在解析侧失效、行保留做审计")
+                .description("Unix 秒；NULL=永久有效。到期后在签发/刷新时过滤，行保留做审计；已签发的 Access Token 最长保留一个 access TTL")
                 .filterable(true)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),

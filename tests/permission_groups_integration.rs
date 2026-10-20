@@ -1216,29 +1216,6 @@ mod harness {
         }
     }
 
-    /// 该 Access Token 是否已被判定为**不可用**，接受「已撤销」与「版本过期」两种死法。
-    ///
-    /// [`member_token_is_stale`] 只认 `AuthorizationStale`，而撤销路径的
-    /// `revoke_by_subject` 会把主题的 Token **直接标为已撤销**（`TokenRevoked`）——
-    /// 那是比版本过期更强的即时收敛。撤销用例的探针必须同时接受这两种形态。
-    pub async fn member_token_is_dead(app: &BuiltApp, token: &str) -> bool {
-        let authorization = format!("Bearer {token}");
-        match dispatch(
-            app,
-            "account.user",
-            "me",
-            json!({}),
-            &[("authorization", authorization.as_str())],
-            PEER_PORT,
-        )
-        .await
-        {
-            Ok(_) => false,
-            Err(BaseError::TokenRevoked) | Err(BaseError::AuthorizationStale) => true,
-            Err(other) => panic!("Token 可用性探针返回预期外错误: {other}"),
-        }
-    }
-
     /// 组条目写 Action 的请求体构造。
     fn item_body(group_id: i64, permission: &str) -> Value {
         json!({ "group_id": group_id, "permission": permission })
@@ -4071,12 +4048,12 @@ async fn builtin_system_admin_group_is_immune_to_update_delete_and_item_changes(
     );
 }
 
-/// `revoke_permission` 的端到端覆盖：撤销直授事实、令牌立即失效、幂等。
+/// `revoke_permission` 的端到端覆盖：撤销直授事实、版本失效、Refresh 会话保留、幂等。
 ///
 /// 契约（AUTHZ_GRANTS.md §写入一致性）：撤销必须在同一事务里删事实行 + 递增授权
-/// 版本 + 追加 Outbox，并由 `revoke_by_subject` 立即收敛 Redis 水位线——旧 Access
-/// Token 必须在撤销后**立刻**失效，而不是等 Outbox 异步传播。重复撤销幂等
-/// （`changed: false`），不再递增版本。
+/// 版本 + 追加 Outbox，**不**调用 `revoke_by_subject`——单条权限撤销不应连带撤销
+/// 目标用户的 Refresh Token。旧 Access Token 在版本水位线传播后按 AuthorizationStale
+/// 失效；新签发的令牌不再含该权限。重复撤销幂等（`changed: false`），不再递增版本。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "需要真实 MySQL/Redis"]
 async fn revoke_permission_removes_the_grant_stales_the_token_and_stays_idempotent() {
@@ -4110,11 +4087,23 @@ async fn revoke_permission_removes_the_grant_stales_the_token_and_stays_idempote
         version_before + 1,
         "撤销必须单调递增授权版本"
     );
-    // 旧令牌立即失效：撤销路径经 `revoke_by_subject` 把令牌标为已撤销（TokenRevoked），
-    // 比版本水位线（AuthorizationStale）更强的即时收敛，不等 Outbox 异步传播。
+    // 旧令牌失效走授权版本水位线（与批量撤销同一路径）：夹具不启动 Outbox Worker，
+    // 等校验器缓存 TTL 过期后回查主库即可观测 AuthorizationStale。这里刻意不用
+    // `member_token_is_dead`：它会接受 TokenRevoked，而 TokenRevoked 正意味着目标
+    // 全部 Refresh Token 被连带撤销——那正是本次修复要消除的行为。
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
     assert!(
-        harness::member_token_is_dead(&app, &holder.token).await,
-        "撤销后旧 Access Token 必须立即不可用"
+        harness::member_token_is_stale(&app, &holder.token).await,
+        "撤销后旧 Access Token 必须因授权版本变化而失效（AuthorizationStale），且不得被标记为 TokenRevoked"
+    );
+    // Refresh 会话保留：账号仍可正常登录，新令牌不含被撤销的权限。
+    let fresh_permissions = token_permissions(&harness::login_as(&app, "revokee").await)
+        .unwrap_or_else(|error| panic!("校验新 Token claims 失败: {error}"));
+    assert!(
+        !fresh_permissions
+            .iter()
+            .any(|permission| permission == "access.grants.read"),
+        "新签发的令牌不得再含被撤销的 access.grants.read，实际 {fresh_permissions:?}"
     );
 
     // 幂等：重复撤销仍成功，但不再改变任何事实（版本不得再增）。

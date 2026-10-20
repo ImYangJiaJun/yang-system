@@ -100,10 +100,18 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 | `permission` | VARCHAR(128) | 权限字符串 |
 | `granted_by` | BIGINT | 授权操作人用户 ID（灾备 SQL 引导时填操作者标识或 `0`） |
 | `occurred_at` | BIGINT | 授权发生的 Unix 时间戳（插入时自动写入） |
+| `expires_at` | BIGINT 可空 | Unix 秒；NULL=永久有效。到期后在签发/刷新时过滤，行保留做审计 |
 
 约束：`uk_authz_grant_user_permission (user_id, permission)` 复合唯一索引；
 `chk_authz_grant_permission_format` 权限格式 CHECK。表结构由
 `src/addon/access/grants/table.rs` 声明，启动时增量同步，不使用 SQL 迁移文件。
+
+**过期语义（软过期）**：`expires_at` 只在签发/刷新 Token 时过滤
+（`list_by_user_in_tx` 的 `expires_at IS NULL OR expires_at > now`）。已经签发的
+Access Token 内的权限快照不会因到期而被主动改写，最长保留一个
+`token.access_ttl_seconds`（默认 3600 秒）。需要立即收敛时走撤销或续期：二者都会在
+同一事务删除/改写事实行、递增 `authz_version` 并追加 Outbox；单条撤销不调用
+`revoke_by_subject`，目标用户的 Refresh 会话保留。
 
 ## 权限组
 
@@ -364,6 +372,9 @@ COMMIT;
   要求调用者是内置全权组 `system_admin` 成员，否则 403。闸门是 `access.grants.write`
   与 handler 内组管理权判定**之上**追加的一层主体判据（组条目/成员路径不再另行
   要求 `access.groups.write`）。
+- **单条权限撤销不杀 Refresh 会话**：`revoke_permission` 只递增授权版本 + 追加 Outbox，
+  不调用 `revoke_by_subject`；目标用户可继续刷新，下一次签发的 claims 不再含被撤销权限。
+  批量撤销同款。
 - **全部写操作**（组生命周期、条目、成员）都写 append-only 审计，按
   `docs/contracts/AUDIT.md` 契约记录。
 - 加组权限经 `ensure_declared` fail-closed；**移组权限刻意不做目录校验**，已从 Catalog

@@ -851,7 +851,9 @@ impl Default for LoggingSettings {
 }
 
 fn default_logging_filter() -> String {
-    "yang_system=info,tower_http=info".to_owned()
+    // `error` 是全局兜底：未显式匹配的 target（yang_base / yang_db / yang_runtime 等）
+    // 也保留 ERROR。只写两个 target 指令会把框架层的错误整段静默丢弃。
+    "yang_system=info,tower_http=info,error".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1889,7 +1891,10 @@ link_base_url = "http://localhost:5273"
         assert_eq!(settings.security.argon2_max_concurrency, 4);
         assert_eq!(settings.security.auth_rate_limit_ip_attempts, 30);
         assert!(!settings.security.issue_refresh_credential_version);
-        assert_eq!(settings.logging.filter, "yang_system=info,tower_http=info");
+        assert_eq!(
+            settings.logging.filter,
+            "yang_system=info,tower_http=info,error"
+        );
         assert_eq!(settings.shutdown.total_timeout_seconds, 30);
     }
 
