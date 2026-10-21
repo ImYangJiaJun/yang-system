@@ -269,9 +269,8 @@ Redis、SMTP、邮箱验证码、Token 等运行参数按
 [`docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md`](docs/contracts/REGISTRATION_EMAIL_VERIFICATION.md)。
 公开注册验证码端点已于 2026-10-20 移除（无消费方，且可被匿名用于向任意邮箱发信）。
 
-当前骨架没有平台管理域，注册流程只创建普通账号，任何账号都不会成为系统最终管理员
-（组合根注入的是不声明最终管理员的默认声明器）。后续引入管理域时应重新评估首次
-注册前的访问限制。
+全新部署时首个成功注册的账号会在同一事务内被引导为 `system_admin`（内置全权组），
+后续注册只创建普通账号；日常授权走控制台，手工 SQL 仅用于哨兵被误删等灾备场景。
 
 `app.environment` 支持 `development|test|production`，缺省时按 `production`
 处理。示例配置仅面向本地开发，部署配置必须显式复核该标识。
