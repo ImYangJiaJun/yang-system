@@ -131,7 +131,11 @@ pub(super) async fn handle(
             super::receive_approval_event::EventRequest(body),
             context,
             Some(verification_token),
-            encrypt_key,
+            // `body` 已在本函数解密（或本来就是无需解密的明文）；事件接收 handler
+            // 若再看到 `encrypt_key = Some`，会把「没有 encrypt 字段」误判为明文
+            // 注入并 401。这里传入 None 表示“已完成解密/校验”，不能把配置的 key
+            // 继续往下传——否则「共用订阅 URL + Encrypt Key」会让所有事件被拒。
+            None,
         )
         .await;
     }

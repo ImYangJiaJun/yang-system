@@ -1385,6 +1385,56 @@ async fn terminal_event_can_be_queried_and_requeued_but_success_cannot() {
     finish(outcome, "失败终态事件查询与人工重试").await;
 }
 
+/// 共用订阅 URL + Encrypt Key：challenge 端点解密后把 body 委托给事件 handler，
+/// 不能再次把「已解密 body 没有 encrypt 字段」误判为明文注入并 401。
+///
+/// 密文由测试密钥 `test-event-encrypt-key` 按飞书格式（SHA-256 派生密钥、
+/// AES-256-CBC、IV 前置、PKCS#7）生成，明文是下面的 event_callback；不是生产密文。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn shared_challenge_url_accepts_encrypted_event_callback() {
+    const ENCRYPTED_EVENT: &str = "MnoNzE4lNEff09rLlyBpEmYF7iHKL+Xg2xgIOQ/MrjulRcPe9Sc+TaNW12vq3kmIHE2d5RSa1RHIvXRmd4oV7O1klWfqmk6VtFvE3t1z0biayg//TeaSGzR0uItaqyITp741crRS6FsRMytSnfkpvc+Jptd6my5GVCNdR5MUrV/pgpPSBzI9vilCME5vprmw2VRW3Xs6Jm4CwyOS/2jovSdgFWBymTpp8TXRoyoPGT0Tm+IyZsXSLujQDbCHFUBNV3o/Pof9m4aLj+uGD4hoGVBUPbdWY9BinZj/xqKYkPQ=";
+
+    let outcome = async {
+        let database = connect_database().await?;
+        reset_database(&database).await?;
+        sync_with_database(database, database_config(), security_settings()).await?;
+        let database = connect_database().await?;
+        let redis = connect_redis().await?;
+
+        let mut settings =
+            (*feishu_settings(Some("cli_test_app"), Some("cli_test_secret"))).clone();
+        settings.event_verification_token = Some("test-event-token".to_string());
+        settings.event_encrypt_key = Some("test-event-encrypt-key".to_string());
+        let app = build_feishu_app(&database, &redis, Arc::new(settings), None).await?;
+
+        // challenge 端点必须成功解密、委托事件 handler 并落库，而不是 401。
+        let _ = dispatch(
+            &app,
+            "feishu.event",
+            "event_challenge",
+            json!({ "encrypt": ENCRYPTED_EVENT }),
+            &[],
+            &[],
+        )
+        .await?;
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feishu_approval_event WHERE event_id = 'evt-shared-url-001'",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        ensure!(
+            count == 1,
+            "共用 challenge URL 的加密事件必须落库，实际 {count} 行"
+        );
+        Ok(())
+    }
+    .await;
+
+    finish(outcome, "共用订阅 URL 加密事件").await;
+}
+
 /// 每个用例的统一收尾：无论成败都清掉测试表。
 async fn finish(outcome: anyhow::Result<()>, what: &str) {
     let cleanup = match connect_database().await {
