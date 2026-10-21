@@ -4,6 +4,7 @@ use crate::addon::account::domain::status::UserStatus;
 use crate::addon::account::Account;
 use crate::audit;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use yang_base::action::auth::BrowserSession;
 use yang_base::action::{ActionContext, ApiResponse};
@@ -41,8 +42,20 @@ pub(super) async fn handle(
     }
     let deleted_username = format!("deleted_{user_id}");
 
+    // 匿名化删除前先把 {目标} ∪ 全权组成员按 user_id 升序整批锁住；匿名化会
+    // 清理 user_group 行，必须与成员变更路径保持同一锁序。
+    let guard_members = account
+        .system_authorization()
+        .system_admin_member_ids(&ctx)
+        .await?;
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
+        let mut lock_set: BTreeSet<i64> = guard_members.iter().copied().collect();
+        lock_set.insert(user_id);
+        account
+            .system_authorization()
+            .lock_users_ascending_in_tx(&ctx, &mut transaction, &lock_set)
+            .await?;
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)
             .await?;

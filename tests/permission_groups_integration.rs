@@ -2537,6 +2537,60 @@ async fn concurrent_self_disables_never_leave_zero_active_admins() {
     }
 }
 
+/// access-infra#11：生命周期路径先锁目标 users 行、再按升序锁全权组成员，
+/// 与成员变更路径的「全组成员升序 → 组行」形成 ABBA 环。
+///
+/// 用 id 较小的 first 与 id 较大的 second：disable 打开事务后若先锁 second、
+/// 再去要 first，而 remove 先锁 first、再去要 second，就会在真库上撞 40001。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要真实 MySQL/Redis"]
+async fn concurrent_admin_disable_and_admin_group_removal_do_not_deadlock() {
+    for round in 0..3 {
+        let app = harness::build_test_app().await;
+        let first = harness::bootstrap_admin(&app).await;
+        let second = harness::add_second_admin(&app, &first, "admin2").await;
+        let group_id = harness::system_admin_group_id(&app).await;
+        let second_id = second.user_id;
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let disable = {
+            let app = app.clone();
+            let first = first.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                harness::admin_disable_status(&app, &first, second_id).await
+            })
+        };
+        let remove = {
+            let app = app.clone();
+            let first = first.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                harness::remove_member_status(&app, &first, group_id, second_id).await
+            })
+        };
+        let disable_status = disable
+            .await
+            .unwrap_or_else(|error| panic!("停用任务 panic: {error}"));
+        let remove_status = remove
+            .await
+            .unwrap_or_else(|error| panic!("移出任务 panic: {error}"));
+
+        for (name, status) in [("disable", disable_status), ("remove", remove_status)] {
+            assert!(
+                status == 200 || status == 400 || status == 403,
+                "第 {round} 轮 {name} 返回预期外状态 {status}（500 通常是 InnoDB 死锁）"
+            );
+        }
+        assert!(
+            disable_status == 200 || remove_status == 200,
+            "第 {round} 轮两个操作都未成功: disable={disable_status}, remove={remove_status}"
+        );
+    }
+}
+
 /// spec §8.2 的守卫语义是「本次操作之后仍有至少一名启用管理员」，
 /// 而不是「当前至少有两名」。
 ///

@@ -4,7 +4,10 @@
 //! 并发仲裁完全交给 `system_owner` 表的唯一约束——**不做任何「判空」**。
 //! 「用户表为空则本次注册者晋升」是典型 TOCTOU，在并发下会产出多个管理员。
 
-use super::admin::{count_active_system_admins_in_tx, invalidate_users_in_tx};
+use super::admin::{
+    count_active_system_admins_in_tx, invalidate_users_in_tx,
+    lock_users_ascending_in_tx as lock_users_ascending,
+};
 use super::repository::SYSTEM_ADMIN_GROUP_KEY;
 use crate::addon::access::domain::context::Access;
 use crate::addon::account::{OwnerClaimOutcome, SystemAuthorizationPort, SystemOwnerClaimer};
@@ -150,6 +153,49 @@ impl SystemAuthorizationPort for AccessSystemOwnerClaimer {
             return Err(system_admin_member_guard());
         }
         Ok(())
+    }
+
+    async fn system_admin_member_ids(&self, ctx: &ActionContext) -> Result<Vec<i64>, BaseError> {
+        let mut transaction = ctx
+            .tools()
+            .mysql()?
+            .read_only_transaction()
+            .await
+            .map_err(BaseError::from)?;
+        let result = async {
+            let Some(group) = self
+                .access
+                .groups()
+                .find_by_key_in_tx(ctx, &mut transaction, SYSTEM_ADMIN_GROUP_KEY)
+                .await?
+            else {
+                return Ok(Vec::new());
+            };
+            self.access
+                .groups()
+                .list_members_in_tx(ctx, &mut transaction, group.id)
+                .await
+        }
+        .await;
+        match result {
+            Ok(members) => {
+                transaction.commit().await.map_err(BaseError::from)?;
+                Ok(members)
+            }
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn lock_users_ascending_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        user_ids: &BTreeSet<i64>,
+    ) -> Result<(), BaseError> {
+        lock_users_ascending(&self.access, ctx, transaction, user_ids).await
     }
 }
 

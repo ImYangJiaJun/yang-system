@@ -2,6 +2,7 @@
 //! 所需的授权事实（最后管理员不变量与账号事实清理）。
 
 use async_trait::async_trait;
+use std::collections::BTreeSet;
 use yang_base::action::ActionContext;
 use yang_base::BaseError;
 use yang_db::Transaction;
@@ -62,6 +63,25 @@ pub(crate) trait SystemAuthorizationPort: Send + Sync {
         transaction: &mut Transaction,
         operator_id: i64,
         target_user_id: i64,
+    ) -> Result<(), BaseError>;
+
+    /// 在事务外探查内置全权组成员 ID。
+    ///
+    /// 生命周期路径必须在加锁**之前**知道成员集合，才能按 `user_id` 升序一次性锁住
+    /// `{目标} ∪ {成员}`。若先锁目标行、再按升序锁成员，会与成员变更路径的
+    /// 「全组成员升序 → 组行」形成 ABBA 环。探针允许陈旧（只用于定锁集）；
+    /// 权威判据仍是事务内的 `remains_an_admin_after`。
+    async fn system_admin_member_ids(&self, ctx: &ActionContext) -> Result<Vec<i64>, BaseError>;
+
+    /// 按 `user_id` 升序整批锁定 users 行（`FOR UPDATE`）。
+    ///
+    /// 与组管理路径共用同一锁序入口；生命周期 Action 必须先调用它，再调用
+    /// `lock_credential_in_tx`（后者对同一批中的目标行重复加锁是安全的）。
+    async fn lock_users_ascending_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        user_ids: &BTreeSet<i64>,
     ) -> Result<(), BaseError>;
 
     /// 账号删除时清理其授权事实（`authz_grant` 直授与 `user_group` 成员行）。
