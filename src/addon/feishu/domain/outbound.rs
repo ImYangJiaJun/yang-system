@@ -789,7 +789,10 @@ mod tests {
             })
             .await
             .is_err());
-        server.await.unwrap_or_else(|e| panic!("{e}"));
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap_or_else(|_| panic!("本地 HTTP 服务未在 10 秒内收齐全部请求"))
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
     // ---- classify ----

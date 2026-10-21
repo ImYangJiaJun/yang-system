@@ -384,6 +384,11 @@ def run(command: Command) -> None:
     argv = [executable(command.argv[0]), *command.argv[1:]]
     environment = os.environ.copy()
     environment.update(command.env)
+    # 本机 HTTP 用例直连 127.0.0.1；开发者环境常设有 HTTP_PROXY（本机 VPN），
+    # 不排除回环地址时请求会被代理吞掉，表现为偶发 "error sending request"
+    # 或测试挂起。只放行回环地址，外网请求仍按环境代理走（如 pnpm audit）。
+    environment["NO_PROXY"] = "127.0.0.1,localhost"
+    environment["no_proxy"] = "127.0.0.1,localhost"
     print(f"\n==> {command.name}\n    {shlex.join(argv)}", flush=True)
     if command.network_retries <= 0:
         subprocess.run(argv, check=True, env=environment)

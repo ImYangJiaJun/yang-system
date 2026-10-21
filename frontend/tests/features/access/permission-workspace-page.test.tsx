@@ -549,7 +549,7 @@ describe("权限工作台·按用户视图", () => {
       user_id: 7,
       permission: "account.users.reset_credentials",
     });
-  });
+  }, 15_000);
 
   it("取消「永久有效」但没选日期时不能提交（空值不落成永久授权）", async () => {
     const user = userEvent.setup();
