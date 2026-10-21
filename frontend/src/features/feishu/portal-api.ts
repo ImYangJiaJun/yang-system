@@ -106,7 +106,6 @@ function parsePortal(raw: Record<string, unknown>): Portal | null {
       typeof raw.query_field_source_key === "string"
         ? raw.query_field_source_key
         : "",
-    query_field_ids: asNullableString(raw.query_field_ids),
     access_mode: asAccessMode(raw.access_mode),
     exposed_columns:
       typeof raw.exposed_columns === "string" ? raw.exposed_columns : "[]",

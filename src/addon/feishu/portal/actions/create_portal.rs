@@ -49,9 +49,6 @@ pub(super) struct CreatePortalInput {
     /// 自定义短链（可选；为空时用系统生成的 UUID slug）。
     #[serde(default)]
     pub(super) custom_slug: Option<String>,
-    /// 多查询键（可选，`field_id` 列表）。
-    #[serde(default)]
-    pub(super) query_field_ids: Option<Vec<String>>,
     /// 展示名映射（可选）：`field_id` → 展示名。
     #[serde(default)]
     pub(super) result_labels: Option<HashMap<String, String>>,
@@ -191,13 +188,10 @@ impl CreatePortalInput {
         self.rate_limit_per_min.unwrap_or(RATE_LIMIT_DEFAULT)
     }
 
-    /// 进入事务前要校验的 `field_id` 全集（查询键 + 开放列 + 多查询键）。
+    /// 进入事务前要校验的 `field_id` 全集（查询键 + 开放列）。
     fn referenced_field_ids(&self) -> Vec<String> {
         let mut ids = vec![self.query_field_id.clone()];
         ids.extend(self.exposed_columns.iter().cloned());
-        if let Some(multi) = &self.query_field_ids {
-            ids.extend(multi.iter().cloned());
-        }
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -276,9 +270,6 @@ pub(super) async fn handle(
         "query_field_id",
     )?;
     require_all_bound(&bindings, &input.exposed_columns, "exposed_columns")?;
-    if let Some(multi) = &input.query_field_ids {
-        require_all_bound(&bindings, multi, "query_field_ids")?;
-    }
 
     // 哈希在事务外做：argon2 是**故意**慢的，把它塞进事务会把行锁持有到几百毫秒。
     let passphrase_hash = match input.passphrase.as_deref() {
@@ -348,14 +339,6 @@ pub(super) async fn handle(
                     .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))?),
             );
         }
-        if let Some(multi) = &input.query_field_ids {
-            row.insert(
-                "query_field_ids",
-                serde_json::json!(serde_json::to_string(multi)
-                    .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))?),
-            );
-        }
-
         let (_, portal_id) = context
             .portals()
             .query()
@@ -409,7 +392,6 @@ mod tests {
             access_mode: "public".to_string(),
             passphrase: None,
             custom_slug: None,
-            query_field_ids: None,
             result_labels: None,
             empty_message: None,
             rate_limit_per_min: None,
@@ -537,8 +519,8 @@ mod tests {
     #[test]
     fn referenced_field_ids_deduplicate_and_include_every_source() {
         let mut input = input();
-        input.query_field_ids = Some(vec!["fldCard".to_string(), "fldShop".to_string()]);
         // 查询键与开放列都进来，重复的只留一份。
+        input.exposed_columns = vec!["fldShop".to_string(), "fldCard".to_string()];
         assert_eq!(
             input.referenced_field_ids(),
             vec!["fldCard".to_string(), "fldShop".to_string()]

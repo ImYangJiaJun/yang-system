@@ -7819,11 +7819,6 @@ export interface operations {
                      */
                     query_field_id?: string | null;
                     /**
-                     * @description 多查询键（`field_id` 列表）。
-                     * @default null
-                     */
-                    query_field_ids?: string[] | null;
-                    /**
                      * Format: uint32
                      * @description 每分钟最大查询次数。
                      * @default null
@@ -7984,11 +7979,6 @@ export interface operations {
                     passphrase?: string | null;
                     /** @description 查询键：必须是该数据源已绑定的 `field_id`。 */
                     query_field_id: string;
-                    /**
-                     * @description 多查询键（可选，`field_id` 列表）。
-                     * @default null
-                     */
-                    query_field_ids?: string[] | null;
                     /**
                      * Format: uint32
                      * @description 每分钟最大查询次数；缺省 30，上限 120。
