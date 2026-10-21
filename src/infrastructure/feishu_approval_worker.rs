@@ -834,17 +834,24 @@ async fn mark_unnotified(runner: &RoundRunner, id: i64, reason: &str) {
     // 两步而非 `and_then`：`where_eq` 返回 `Result`，而 `update` 返回 future，
     // 两者不能链在同一个闭包里。本函数**不**返回 `Result`——写不进去时把它记成
     // 日志而不是冒泡，因为终态写失败不该中断「报告刚发生的事」。
+    //
+    // 最小乐观 CAS：claim 只认 `pending`，这里也只允许从 `pending` 推进。
+    // HTTP 同步派发可能在此期间已写入 `backfilled`/`terminal`，affected == 0
+    // 即「先写者胜」，不能把对方的终态覆盖成 `unnotified`。
     let result = match runner
         .context
         .approval_tasks()
         .query()
         .where_eq("id", serde_json::json!(id))
+        .and_then(|query| query.where_eq("state", serde_json::json!("pending")))
     {
         Ok(query) => query.update(row).await,
         Err(error) => Err(error),
     };
-    if let Err(error) = result {
-        tracing::warn!(error = %error, task_id = id, "置审批任务终态失败");
+    match result {
+        Ok(0) => tracing::warn!(task_id = id, "任务状态已被并发路径推进，跳过置 unnotified"),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(error = %error, task_id = id, "置审批任务终态失败"),
     }
 }
 
@@ -1313,19 +1320,30 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
         state,
         "审批任务处理结论，等待和可重试任务保留 pending；具体原因见阶段日志和任务 last_error"
     );
+    // 最小乐观 CAS：claim 只认 `pending`，这里也只允许从 `pending` 推进。
+    // HTTP 同步派发与 worker 可能同时处理同一条记录——如果同步路径已把状态推进
+    // （例如已写 `backfilled`/`terminal`），本次回写必须放手：affected == 0 表示
+    // 「先写者胜」，通知可能已由对方发过，状态以先写者为准。
+    // 不改 uuid 幂等与通知语义：uuid 仍是重复建单的最后防线，通知去重仍看
+    // `should_notify`；这里只决定「谁有权落最终状态」。
     let result = match runner
         .context
         .approval_tasks()
         .query()
         .where_eq("id", serde_json::json!(task.id))
+        .and_then(|query| query.where_eq("state", serde_json::json!("pending")))
     {
         Ok(query) => query.update(row).await,
         Err(error) => Err(error),
     };
-    if let Err(error) = result {
-        tracing::warn!(error = %error, task_id = task.id, "写回审批任务状态失败");
-    } else {
-        tracing::debug!(stage = "persist", state, "审批任务状态写回成功");
+    match result {
+        Ok(0) => tracing::warn!(
+            task_id = task.id,
+            state,
+            "任务状态已被并发路径推进，跳过回写（通知可能已发，状态以先写者为准）"
+        ),
+        Ok(_) => tracing::debug!(stage = "persist", state, "审批任务状态写回成功"),
+        Err(error) => tracing::warn!(error = %error, task_id = task.id, "写回审批任务状态失败"),
     }
 
     // 指标：按结论分桶。`terminal` 与 `waiting` 分开是关键——前者要人动，

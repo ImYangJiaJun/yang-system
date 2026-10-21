@@ -773,11 +773,16 @@ async fn record_dispatch_task(
         row.insert("serial_number", serde_json::json!(serial_number));
     }
 
-    // 已有行（seed 建过的常见路径）：按主键 update。
+    // 已有行（seed 建过的常见路径）：按主键 update，并以刚读到的 state 做乐观 CAS。
+    //
+    // 这是**最小乐观 CAS**：worker 可能正在处理同一条记录（HTTP 同步路径与 worker
+    // 是两个执行者），回写只允许从「读到的那个状态」推进，affected == 0 说明状态
+    // 已被并发路径推进过——以先写者为准，跳过回写，不当作成功。
+    // 不改 uuid 幂等与通知语义：那是两条路径共用的事实，与谁先落状态无关。
     let existing = match context
         .approval_tasks()
         .query()
-        .select_fields(&["id"])
+        .select_fields(&["id", "state"])
         .and_then(|query| query.where_eq("record_id", serde_json::json!(record_id)))
     {
         Ok(query) => match query.optional().await {
@@ -800,15 +805,30 @@ async fn record_dispatch_task(
                 return None;
             }
         };
+        let expected_state: String = match existing_row.require("state") {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(error = %error, record_id, "派发结果回写：任务行读不到 state");
+                return None;
+            }
+        };
         let updated = match context
             .approval_tasks()
             .query()
             .where_primary_key_eq(serde_json::json!(id))
+            .and_then(|query| query.where_eq("state", serde_json::json!(&expected_state)))
         {
             Ok(query) => query.update(row).await,
             Err(error) => Err(error),
         };
         match updated {
+            Ok(0) => tracing::warn!(
+                task_id = id,
+                state,
+                expected_state = %expected_state,
+                record_id,
+                "派发结果回写：任务状态已被并发路径推进，跳过回写"
+            ),
             Ok(_) => tracing::debug!(task_id = id, state, record_id, "派发结果已回写任务行"),
             Err(error) => {
                 tracing::warn!(error = %error, task_id = id, "派发结果回写任务行失败");
@@ -856,15 +876,23 @@ async fn record_dispatch_task(
                 let text = error.to_string();
                 if text.contains("Duplicate") || text.contains("1062") {
                     // 并发竞态：查询与插入之间 seed 建了行 → 转为按 record_id update。
-                    let raced = match context
+                    // 同样带最小乐观 CAS：seed 建的行是 `pending`，若它已被 worker 推进
+                    // 到终态就不要覆盖（affected == 0 即「先写者胜」）。
+                    let raced = context
                         .approval_tasks()
                         .query()
                         .where_eq("record_id", serde_json::json!(record_id))
-                    {
+                        .and_then(|query| query.where_eq("state", serde_json::json!("pending")));
+                    let raced = match raced {
                         Ok(query) => query.update(row).await,
                         Err(error) => Err(error),
                     };
                     match raced {
+                        Ok(0) => tracing::warn!(
+                            record_id,
+                            state,
+                            "派发结果回写：并发建行后转 update 时任务状态已非 pending，跳过回写"
+                        ),
                         Ok(_) => {
                             tracing::info!(
                                 record_id,
