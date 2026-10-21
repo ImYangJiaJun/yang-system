@@ -277,8 +277,23 @@ SYNC_CONFIG=1 RESET_DB=1 RESET_DB_CONFIRM=yes ./deploy-blue-green.sh refresh
 
 ## 五、当前暴露形态与 TLS 边缘
 
-**当前默认仅本机可达**：两个入口脚本的 `EdgeBindAddr` 默认值都是 `127.0.0.1`。
-需要公网访问时必须显式 opt-in（`-EdgeBindAddr 0.0.0.0`），并尽快在宿主机上配受信 TLS 反代。
+**默认是兼容模式 `auto`**：两个入口脚本的 `EdgeBindAddr` 默认值都是 `auto`——
+已有线上容器时沿用它的实际边缘绑定（例如当前公网部署仍是 `0.0.0.0:18654`），
+所以直接重部署**不会改变既有暴露面**；全新部署没有线上容器时回落到 `127.0.0.1`
+（仅本机可达）。要新开公网明文入口必须显式 `-EdgeBindAddr 0.0.0.0`，并尽快在
+宿主机上配受信 TLS 反代；要收回公网传 `-EdgeBindAddr 127.0.0.1`。
+
+**发布前只读预检**（`deploy-blue-green.sh` 在起绿容器/切流量之前执行，失败即中止，
+线上不受影响）：
+- `feishu_user_token` 至多一行（`slot` 唯一索引）；
+- `feishu_approval_task_applicant` 无重复 `task_id`（唯一索引）；
+- `feishu_datasource_portal` 的 `exposed_columns` / `result_labels` 均为合法 JSON；
+- `[feishu].enabled = true` 时 `event_verification_token` 非空；若本部署确实不用
+  审批事件，显式传 `-AllowMissingEventToken` 跳过这一条；
+- `[logging].filter` 若显式配置，提醒补 `,error`（非阻塞）。
+
+外部 MySQL（`[mysql].url` 的 host 不是本脚本管理的容器）无法由脚本预检，需按
+`docs/assessments/2026-10-22-remediation-acceptance.md` §4.1 的只读 SELECT 人工确认。
 
 > ⚠️ 显式开到 `0.0.0.0` 是**明文 http**：登录凭据、会话 Cookie、密码重置令牌都在公网上
 > 不加密传输。飞书审批的「关联外部选项」要求**公网可访问、不能是内网地址**

@@ -40,6 +40,10 @@ pub(super) struct UpdatePortalInput {
     /// 自定义短链；显式给空串表示**清空**（回落到 UUID slug）。
     #[serde(default)]
     pub(super) custom_slug: Option<String>,
+    /// 已废弃的多查询键字段：历史上可写但从未被读取。为兼容旧控制台/脚本，
+    /// 仍接受该键但**不校验、不落库、不影响查询**；新客户端不应再发送。
+    #[serde(default)]
+    pub(super) query_field_ids: Option<Vec<String>>,
     /// 展示名映射。
     #[serde(default)]
     pub(super) result_labels: Option<HashMap<String, String>>,
@@ -195,6 +199,8 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
+    // 兼容字段：读一次以避免 dead_code；不参与字段校验、不落库、不影响查询。
+    let _ = input.query_field_ids.as_ref();
     if input.changes_nothing() {
         return Err(BaseError::ParamInvalid(
             "portal_id".to_string(),
@@ -361,6 +367,7 @@ mod tests {
             exposed_columns: None,
             access_mode: None,
             custom_slug: None,
+            query_field_ids: None,
             result_labels: None,
             empty_message: None,
             rate_limit_per_min: None,
@@ -372,6 +379,18 @@ mod tests {
     #[test]
     fn accepts_a_partial_update() {
         assert!(input().validate().is_ok());
+    }
+
+    #[test]
+    fn deprecated_query_field_ids_is_accepted_but_ignored() {
+        // 旧客户端仍可能发送该键；为兼容不返回 400，但它不参与字段校验/写入。
+        let mut input = input();
+        input.query_field_ids = Some(vec!["fldCard".to_string(), "fldUnknown".to_string()]);
+        assert!(input.validate().is_ok());
+        assert!(
+            input.referenced_field_ids().is_empty(),
+            "废弃字段不得进入字段绑定校验"
+        );
     }
 
     #[test]

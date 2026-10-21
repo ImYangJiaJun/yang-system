@@ -416,6 +416,29 @@ container_binding() {
   docker inspect -f "$fmt" "$1" 2>/dev/null || true
 }
 
+# 解析 BIND_ADDR=auto（deploy.ps1 / deploy-finance-prod.ps1 的默认值）：
+# - 已有线上容器：沿用它的应用边缘实际绑定（通常是 0.0.0.0 或 127.0.0.1），
+#   直接重部署不会把既有公网暴露面悄悄改成 loopback；
+# - 没有线上容器（全新部署）：回落到安全默认 127.0.0.1，公网仍需显式 opt-in。
+# 显式传 BIND_ADDR=127.0.0.1 / 0.0.0.0 时不走本函数。
+resolve_bind_addr() {
+  [ "$BIND_ADDR" = "auto" ] || return 0
+  local actual="" bind=""
+  if exists "$LIVE_BACKEND"; then
+    actual=$(container_binding "$LIVE_BACKEND" 8081)
+  fi
+  if [ -n "$actual" ]; then
+    bind="${actual%:*}"
+  fi
+  if [ -n "$bind" ]; then
+    BIND_ADDR="$bind"
+    info "BIND_ADDR=auto：沿用线上容器的应用边缘绑定 ${actual}（直接重部署保持既有暴露面）"
+  else
+    BIND_ADDR="127.0.0.1"
+    info "BIND_ADDR=auto：未发现线上容器或读不到绑定，使用安全默认 127.0.0.1（仅本机可达）"
+  fi
+}
+
 # ---------- refresh 用的辅助函数 ----------
 # 以 root 执行一条**只读**标量查询并打印结果。
 # 判据沿用 ensure_database：必须区分「查到空」与「查询失败」，所以**不能**写 `2>/dev/null`。
@@ -455,6 +478,77 @@ require_integer() {
 # 把 SQL 里的明文口令替换掉再进日志/错误信息。
 redact_sql() {
   printf '%s' "$1" | sed -E "s/(IDENTIFIED BY[[:space:]]*)'[^']*'/\1'<redacted>'/gi"
+}
+
+# ---------- 发布前只读预检 ----------
+# 新版本启动时的 schema 同步会新增两个唯一索引；存量重复数据会让进程拒绝启动。
+# 这里在**起绿容器/切流量之前**只读检查，失败就中止，线上不受影响。
+# 外部 MySQL（[mysql].url 的 host 不是本脚本管理的容器）无法从这里查询，退回人工检查。
+preflight_release_data() {
+  if [ "$MYSQL_HOST" != "$MYSQL_CONTAINER" ]; then
+    warn "MySQL 由外部实例提供（host=${MYSQL_HOST}），跳过发布前数据预检。"
+    warn "  请先以只读账号执行验收报告 §4.1 的三条 SELECT，确认无重复/损坏数据再部署。"
+    return 0
+  fi
+  if ! running "$MYSQL_CONTAINER"; then
+    warn "$MYSQL_CONTAINER 未运行，跳过发布前数据预检（外部/未启动的 MySQL 请人工检查）。"
+    return 0
+  fi
+  [ -n "${MYSQL_ROOT_PASSWORD:-}" ] || load_root_password
+
+  local db="$MYSQL_DATABASE" present n
+  present=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db}' AND table_name='feishu_user_token'") || die "发布前预检查询失败"
+  require_integer "feishu_user_token 表存在性" "$present" || die "发布前预检查询结果异常"
+  if [ "$present" = "1" ]; then
+    n=$(mysql_scalar "SELECT COUNT(*) FROM \`${db}\`.\`feishu_user_token\`") || die "发布前预检查询失败"
+    require_integer "feishu_user_token 行数" "$n" || die "发布前预检查询结果异常"
+    [ "$n" -le 1 ] || die "feishu_user_token 有 ${n} 行；新版本 slot 唯一索引需要至多一行。
+  请先在维护窗口保留最新一行、删除多余行（DB 写操作需单独批准），再重新部署。
+  预检 SQL：SELECT id, authorized_at FROM \`${db}\`.\`feishu_user_token\` ORDER BY authorized_at DESC;"
+  fi
+
+  present=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db}' AND table_name='feishu_approval_task_applicant'") || die "发布前预检查询失败"
+  require_integer "task_applicant 表存在性" "$present" || die "发布前预检查询结果异常"
+  if [ "$present" = "1" ]; then
+    n=$(mysql_scalar "SELECT COUNT(*) FROM (SELECT task_id FROM \`${db}\`.\`feishu_approval_task_applicant\` GROUP BY task_id HAVING COUNT(*) > 1) AS dup") || die "发布前预检查询失败"
+    require_integer "task_applicant 重复行数" "$n" || die "发布前预检查询结果异常"
+    [ "$n" = "0" ] || die "feishu_approval_task_applicant 有 ${n} 个重复 task_id；新版本唯一索引会拒绝启动。
+  请先保留每个 task_id 一行并删除重复行（DB 写操作需单独批准），再重新部署。
+  预检 SQL：SELECT task_id, COUNT(*) FROM \`${db}\`.\`feishu_approval_task_applicant\` GROUP BY task_id HAVING COUNT(*) > 1;"
+  fi
+
+  present=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db}' AND table_name='feishu_datasource_portal'") || die "发布前预检查询失败"
+  require_integer "portal 表存在性" "$present" || die "发布前预检查询结果异常"
+  if [ "$present" = "1" ]; then
+    n=$(mysql_scalar "SELECT COUNT(*) FROM \`${db}\`.\`feishu_datasource_portal\` WHERE (exposed_columns IS NOT NULL AND JSON_VALID(exposed_columns)=0) OR (result_labels IS NOT NULL AND JSON_VALID(result_labels)=0)") || die "发布前预检查询失败"
+    require_integer "portal 损坏 JSON 行数" "$n" || die "发布前预检查询结果异常"
+    [ "$n" = "0" ] || die "feishu_datasource_portal 有 ${n} 行 JSON 配置损坏；新版本公开查询会直接 5xx。
+  请先修正这些行（DB 写操作需单独批准），再重新部署。
+  预检 SQL：SELECT id, slug FROM \`${db}\`.\`feishu_datasource_portal\` WHERE (exposed_columns IS NOT NULL AND JSON_VALID(exposed_columns)=0) OR (result_labels IS NOT NULL AND JSON_VALID(result_labels)=0);"
+  fi
+  ok "发布前数据预检通过"
+}
+
+# 配置预检：新版本在未配置 event_verification_token 时不再注册事件端点。
+# 这里只判断“非空”，绝不打印值；如果本部署确实不用审批事件，可显式设
+# ALLOW_MISSING_EVENT_TOKEN=1 跳过这一条。
+preflight_release_config() {
+  local config_path="${1:-$APP_DIR/$CONFIG_FILE}" enabled token filter
+  enabled=$(toml_get feishu enabled "$config_path")
+  if [ "$enabled" = "true" ]; then
+    token=$(toml_get feishu event_verification_token "$config_path")
+    if [ -z "$token" ] && [ "${ALLOW_MISSING_EVENT_TOKEN:-0}" != "1" ]; then
+      die "feishu 已启用，但 event_verification_token 为空：新版本不会注册审批事件端点，飞书事件会 404。
+  请先在配置里填入与飞书开发者后台一致的 token；若本部署确实不用审批事件，设 ALLOW_MISSING_EVENT_TOKEN=1 后再部署。"
+    fi
+  fi
+  filter=$(toml_get logging filter "$config_path")
+  if [ -n "$filter" ]; then
+    case "$filter" in
+      *error*) ;;
+      *) warn "logging.filter 未包含全局 error；yang_base/yang_db/yang_runtime 的 ERROR 会被静默丢弃。建议补上 ',error'。" ;;
+    esac
+  fi
 }
 
 # 执行一条**写入/DDL** 语句。任何失败都必须立刻中止并把 MySQL 的原始报错打出来——
@@ -1079,8 +1173,11 @@ prepare() {
   ensure_network
   require_config
   load_mysql_env
+  # 配置与存量数据都在**起绿容器之前**只读预检；失败即中止，线上不受影响。
+  preflight_release_config
   # 部署前先确保库存在——应用只建表不建库，库缺失时容器会起来就退出。
   ensure_database
+  preflight_release_data
   # 优先用镜像包；包不在时退回复用本机已有镜像。
   # **上传成功后两侧都会删包**（deploy.ps1 删本机的，cmd_cutover 删服务器上的），
   # 所以「镜像没变、只想改运行时参数（宿主端口 / BIND_ADDR / 环境变量）」的重新部署
@@ -1312,9 +1409,11 @@ cmd_refresh() {
     require_config "$APP_DIR/$STAGED_CONFIG"
     # 顺带把 [mysql].url 试解析一遍（写坏了当场中止），并把 MYSQL_* 设成**新配置**的值。
     load_mysql_env "$APP_DIR/$STAGED_CONFIG"
+    preflight_release_config "$APP_DIR/$STAGED_CONFIG"
   else
     require_config
     load_mysql_env
+    preflight_release_config
   fi
   if [ "$RESET_DB" = 1 ]; then
     # 顺序有意为之：**先做只读的拒绝判断，再碰任何会写盘的东西**。
@@ -1355,6 +1454,7 @@ cmd_refresh() {
   # ensure_database 兜住「新配置指向了一个还不存在的库」：应用只建表不建库，缺库时连接会
   # 直接失败。它在这里是幂等的（库已存在就只报一句「已存在」）。
   ensure_database
+  preflight_release_data
   start_all_pairs
 
   # ---- 6) 验证 ----
@@ -1478,11 +1578,11 @@ main() {
     status)   cmd_status ;;
     logs)     cmd_logs "${2:-}" ;;
     infra-up) cmd_infra_up ;;
-    smoke)    cmd_smoke ;;
-    cutover)  cmd_cutover ;;
-    deploy)   cmd_deploy ;;
-    rollback) cmd_rollback ;;
-    refresh)  cmd_refresh ;;
+    smoke)    resolve_bind_addr; cmd_smoke ;;
+    cutover)  resolve_bind_addr; cmd_cutover ;;
+    deploy)   resolve_bind_addr; cmd_deploy ;;
+    rollback) resolve_bind_addr; cmd_rollback ;;
+    refresh)  resolve_bind_addr; cmd_refresh ;;
     *) cat <<USAGE
 用法：$0 {status|logs|infra-up|smoke|cutover|deploy|rollback|refresh} [参数]
 
@@ -1505,9 +1605,14 @@ main() {
   APP_DIR         部署目录，默认 /home/yjj/yang-system
   BIND_ADDR       应用边缘的发布绑定地址，默认 127.0.0.1（只对宿主机可见，公网交给受信
                   TLS 边缘）。设为 0.0.0.0 即**明文 http 直连公网**——仅限测试环境。
+                  deploy.ps1 默认传 auto：已有线上容器时沿用其实际绑定，全新部署才用
+                  loopback；显式传 127.0.0.1/0.0.0.0 可改变暴露面。
                   管理面 9154 由 METRICS_BIND_ADDR 单独控制，**不随边缘一起暴露**。
                   ⚠️ 这个默认值被 frontend/scripts/verify-deployment-contract.mjs 锁定，
                   不要改它；要覆盖请在调用时传（deploy.ps1 用 -EdgeBindAddr）。
+  ALLOW_MISSING_EVENT_TOKEN
+                  设为 1 时跳过「feishu 已启用但 event_verification_token 为空」的发布前
+                  预检。仅在本部署确实不使用审批事件时使用。
   LIVE_HOST_PORT  线上宿主端口，默认 18654。
                   ⚠️ 必须是阿里云安全组放行的端口（当前只放行 80/443 与 18000-19000 段），
                   否则公网不可达——且浏览器会经系统代理给出误导性的 503。

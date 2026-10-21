@@ -1641,7 +1641,7 @@ export interface components {
         BatchGrantItem: {
             /**
              * Format: int64
-             * @description Unix 秒；缺省 = 永久有效。到期后由后台收敛在一个周期内递增授权版本并写 Outbox，行保留做审计。
+             * @description Unix 秒；缺省 = 永久有效。到期后由后台收敛按周期递增授权版本并写 Outbox（无积压时一个周期），行保留做审计。
              * @default null
              */
             expires_at: number | null;
@@ -8085,6 +8085,11 @@ export interface operations {
                      */
                     query_field_id?: string | null;
                     /**
+                     * @description 已废弃的多查询键字段：历史上可写但从未被读取。为兼容旧控制台/脚本， 仍接受该键但**不校验、不落库、不影响查询**；新客户端不应再发送。
+                     * @default null
+                     */
+                    query_field_ids?: string[] | null;
+                    /**
                      * Format: uint32
                      * @description 每分钟最大查询次数。
                      * @default null
@@ -8245,6 +8250,11 @@ export interface operations {
                     passphrase?: string | null;
                     /** @description 查询键：必须是该数据源已绑定的 `field_id`。 */
                     query_field_id: string;
+                    /**
+                     * @description 已废弃的多查询键字段：历史上可写但从未被读取。为兼容旧控制台/脚本， 仍接受该键但**不校验、不落库、不影响查询**；新客户端不应再发送。
+                     * @default null
+                     */
+                    query_field_ids?: string[] | null;
                     /**
                      * Format: uint32
                      * @description 每分钟最大查询次数；缺省 30，上限 120。
