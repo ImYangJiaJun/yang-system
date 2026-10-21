@@ -200,7 +200,7 @@ mod tests {
                 .await?;
         ensure!(
             remaining == vec!["boundary-session".to_string(), "fresh-session".to_string()],
-            "恰好 90 天与更近的会话必须保留: {remaining:?}"
+            "保留期边界与更近日期的会话必须保留: {remaining:?}"
         );
 
         sqlx::query("DROP TABLE IF EXISTS user_session")
