@@ -17,6 +17,7 @@ use std::sync::Arc;
 use yang_base::definition::AddonSpec;
 use yang_base::BaseError;
 
+pub(crate) use domain::grant_expiry::GrantExpiryHandle;
 pub(crate) use domain::permission_catalog::{project_permissions, PermissionCatalogHandle};
 pub(crate) use domain::resolver::AuthzGrantResolver;
 
@@ -46,6 +47,11 @@ impl AccessAddon {
     /// 账号生命周期所需的授权事实端口（最后管理员判定与授权事实清理）。
     pub(crate) fn system_authorization_port(&self) -> Arc<dyn SystemAuthorizationPort> {
         Arc::new(AccessSystemOwnerClaimer::new(Arc::clone(&self.access)))
+    }
+
+    /// 过期直授的后台收敛句柄（`into_spec` 会消费 Addon，须在之前取）。
+    pub(crate) fn grant_expiry_handle(&self) -> GrantExpiryHandle {
+        GrantExpiryHandle::new(Arc::clone(&self.access))
     }
 
     /// 取出 Addon 定义交给 AppBuilder。

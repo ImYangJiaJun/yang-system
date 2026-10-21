@@ -107,6 +107,7 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "login_event",
         "audit_event",
         "authorization_outbox",
+        "feishu_approval_event",
         "feishu_approval_request_log",
         "feishu_approval_task",
         "feishu_approval_field_map",
@@ -543,6 +544,35 @@ async fn seed_request_log(
     .await
     .context("种入请求记录失败")?;
     Ok(())
+}
+
+/// 播种一条审批事件行，返回主键。
+///
+/// `processed_at = None` 即待处理队列；`Some` + `retry_count = 10` 是 worker 置的
+/// 失败终态；`Some` + `retry_count < 10` 是成功处理（不可重放）。
+async fn seed_event(
+    database: &Database,
+    event_id: &str,
+    processed_at: Option<i64>,
+    retry_count: i64,
+    last_error: Option<&str>,
+) -> anyhow::Result<i64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let result = sqlx::query(
+        "INSERT INTO `feishu_approval_event` \
+         (`event_id`, `event_type`, `instance_code`, `status`, `received_at`, \
+          `processed_at`, `retry_count`, `last_error`, `created_at`, `updated_at`) \
+         VALUES (?, 'approval_instance', 'INST-FIXTURE', 'APPROVED', ?, ?, ?, ?, NOW(), NOW())",
+    )
+    .bind(event_id)
+    .bind(now)
+    .bind(processed_at)
+    .bind(retry_count)
+    .bind(last_error)
+    .execute(database.pool())
+    .await
+    .context("种入审批事件失败")?;
+    Ok(result.last_insert_id() as i64)
 }
 
 // ---------------------------------------------------------------- 用例
@@ -1229,6 +1259,130 @@ async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log()
     .await;
 
     finish(outcome, "受理通知门与请求体脱敏").await;
+}
+
+/// 失败终态事件可查询、可人工重试回队；成功事件拒绝重放。
+///
+/// 「下一轮 worker 可认领」用 `processed_at IS NULL` 断言——这正是
+/// `claim_events` 的唯一筛选条件（`where_null("processed_at")`），不启动 worker
+/// 是为了避免出站打飞书。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn terminal_event_can_be_queried_and_requeued_but_success_cannot() {
+    let outcome = async {
+        let (database, app, token) = prepare_app(None, None).await?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+
+        let terminal_id = seed_event(
+            &database,
+            "evt-terminal-requeue",
+            Some(now),
+            10,
+            Some("连续失败超 10 次: boom"),
+        )
+        .await?;
+        let succeeded_id =
+            seed_event(&database, "evt-succeeded-no-replay", Some(now), 0, None).await?;
+
+        // 终态过滤只返回失败终态行；成功事件不在其中。
+        let listed =
+            dispatch_as_operator(&app, "list_events", &token, json!({"terminal_only": true}))
+                .await?;
+        let data = response_data(&listed)?;
+        let ids: Vec<i64> = data["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("items 必须是数组: {data}"))
+            .iter()
+            .map(|item| item["id"].as_i64().unwrap_or_default())
+            .collect();
+        ensure!(
+            ids == vec![terminal_id],
+            "terminal_only 只应返回终态事件，实际: {data}"
+        );
+        ensure!(
+            data["items"][0]["last_error"] == "连续失败超 10 次: boom",
+            "终态行必须带可排查的 last_error: {data}"
+        );
+
+        // 人工重试终态事件：重置回待处理队列。
+        let authorization = format!("Bearer {token}");
+        let terminal_id_text = terminal_id.to_string();
+        let retried = dispatch(
+            &app,
+            "feishu.approval",
+            "retry_event",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            &[("id", terminal_id_text.as_str())],
+        )
+        .await
+        .context("重试终态事件不应返回 Err")?;
+        let data = response_data(&retried)?;
+        ensure!(
+            data["requeued"] == true && data["previous_retry_count"] == 10,
+            "重试响应必须带 previous_retry_count: {data}"
+        );
+
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT `processed_at`, `retry_count`, `last_error` \
+             FROM `feishu_approval_event` WHERE `id` = ?",
+        )
+        .bind(terminal_id)
+        .fetch_one(database.pool())
+        .await
+        .context("读取重试后的事件行失败")?;
+        ensure!(
+            row.get::<Option<i64>, _>("processed_at").is_none(),
+            "processed_at 必须重置为 NULL（worker 认领条件）"
+        );
+        ensure!(
+            row.get::<i64, _>("retry_count") == 0,
+            "retry_count 必须清零"
+        );
+        ensure!(
+            row.get::<Option<String>, _>("last_error").is_none(),
+            "last_error 必须清空"
+        );
+
+        // 成功事件不可重试：400（ParamInvalid 冒泡为 Err）。
+        let succeeded_id_text = succeeded_id.to_string();
+        let replay = dispatch(
+            &app,
+            "feishu.approval",
+            "retry_event",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            &[("id", succeeded_id_text.as_str())],
+        )
+        .await;
+        // 必须命中「成功事件不可重放」这条判据，而不是仅靠 CAS 兜底：两者都返回
+        // Err，只有文案能区分行为走了哪条路径（摘除终态判断时此断言变红）。
+        let error = match replay {
+            Ok(_) => panic!("成功事件重放必须被拒绝"),
+            Err(error) => error,
+        };
+        ensure!(
+            error.to_string().contains("已成功处理"),
+            "必须命中成功事件不可重放的判据，实际错误: {error}"
+        );
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM `audit_event` \
+             WHERE `action` = 'feishu.approval.retry_event' AND `result` = 'succeeded'",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        ensure!(
+            audit_count == 1,
+            "人工重试必须写一条成功审计，实际 {audit_count}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    finish(outcome, "失败终态事件查询与人工重试").await;
 }
 
 /// 每个用例的统一收尾：无论成败都清掉测试表。

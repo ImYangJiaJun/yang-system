@@ -58,7 +58,7 @@ pub(crate) fn build_module(
     authorization_validator: AuthorizationVersionValidator,
 ) -> Result<ModuleSpec, BaseError> {
     let spec = ModuleSpec::new(module_name()?).table(table::table_spec()?);
-    // 与 datasource / option 模块同一套认证中间件：7 个控制台 Action（JWT 鉴权）
+    // 与 datasource / option 模块同一套认证中间件：14 个控制台 Action（JWT 鉴权）
     // 要靠它才有身份。public 的机器入口（dispatch）**不经过**它——`Next::run` 对
     // 默认 `ProtectedActions` scope 的判据是 `!policy.is_public`，它本来就被跳过，
     // 因此管理 Token 的 `Authorization` 头不会被抢（见

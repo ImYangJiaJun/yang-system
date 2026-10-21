@@ -6,6 +6,21 @@
 use yang_base::definition::{Int, Key, Str, TableSpec, Text, Timestamp};
 use yang_base::BaseError;
 
+/// 连续失败多少次后放弃（置终态，不再由 worker 自动重试）。
+///
+/// 放在表声明旁是因为「终态」的判定完全由本表两列决定（`processed_at` 非空 +
+/// `retry_count` 达上限），控制台的查询/人工重试 Action 与 worker 必须用同一个
+/// 阈值，否则会造出「worker 已丢弃、控制台不认为是终态」的盲区。
+pub(crate) const MAX_EVENT_RETRY_COUNT: i64 = 10;
+
+/// 事件是否已进入失败终态（可人工重试回队）。
+///
+/// 成功事件也是 `processed_at` 非空，但 `retry_count < 上限`——两者必须同时
+/// 判定，否则会把成功事件当成可重放对象。
+pub(crate) fn is_terminal_event(processed_at: Option<i64>, retry_count: i64) -> bool {
+    processed_at.is_some() && retry_count >= MAX_EVENT_RETRY_COUNT
+}
+
 /// 声明事件落地表。
 pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
     let table_name = yang_base::table!("feishu_approval_event");
@@ -58,7 +73,8 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             retry_count => Int::new()
                 .title("重试次数")
                 .require(true)
-                .default(0),
+                .default(0)
+                .filterable(true),
             // 最后一次错误信息；处理失败时记录
             last_error => Text::new().title("最后错误"),
             created_at => Timestamp::new().created_at().title("创建时间"),
@@ -136,12 +152,36 @@ mod tests {
     }
 
     #[test]
+    fn terminal_event_requires_both_processed_at_and_retry_limit() {
+        assert!(!is_terminal_event(None, 0), "待处理事件不是终态");
+        assert!(
+            !is_terminal_event(None, MAX_EVENT_RETRY_COUNT),
+            "未置处理时间不算终态"
+        );
+        assert!(
+            !is_terminal_event(Some(1_700_000_000), MAX_EVENT_RETRY_COUNT - 1),
+            "成功事件（重试未达上限）不是终态，不得允许重放"
+        );
+        assert!(is_terminal_event(
+            Some(1_700_000_000),
+            MAX_EVENT_RETRY_COUNT
+        ));
+        assert!(is_terminal_event(
+            Some(1_700_000_000),
+            MAX_EVENT_RETRY_COUNT + 1
+        ));
+    }
+
+    #[test]
     fn retry_count_defaults_to_zero() {
         let definition = definition();
         let retry_count = definition
             .field("retry_count")
             .unwrap_or_else(|| panic!("retry_count 字段必须存在"));
         assert_eq!(retry_count.default_value(), Some(&serde_json::json!(0)));
+        // 终态查询（terminal_only）与人工重试的 CAS 条件都按该列过滤，漏了
+        // filterable 只会在运行期报 FieldPermissionDenied。
+        assert!(retry_count.is_filterable(), "retry_count 必须可筛选");
     }
 
     #[test]

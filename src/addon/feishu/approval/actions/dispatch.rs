@@ -957,10 +957,12 @@ async fn task_id_by_record_id(context: &FeishuContext, record_id: &str) -> Optio
 
 /// 落库用的请求体：`token` 一律替换成占位符，其余字段原样保留。
 ///
-/// `request_body` 会被 `list_requests` 在 `feishu.approval.read` 下原样回显，
+/// `request_body` 会被 `list_requests` 在 `feishu.approval.read` 下回显，
 /// 而 `token` 是该配置的有效派发凭据（可创建审批实例、回写多维表格）。
 /// 明文落库等于把「只读权限」升级成「派发权限」——所以写入前必须脱敏。
-/// 历史行的明文按 0.1 暂缓项处理（不轮换、不清洗）。
+/// 历史行的明文另有读侧兜底：`list_requests::redact_request_body` 在回显前再
+/// 替换一次顶层 `token`，解析失败返回固定占位文案。库内明文清洗与 Token 轮换
+/// 仍按 0.1 暂缓项处理（本文件的写入路径不碰历史行，也不做任何清洗写）。
 fn redacted_request_body(input: &DispatchInput) -> Result<String, BaseError> {
     let mut body = serde_json::to_value(input)
         .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))?;

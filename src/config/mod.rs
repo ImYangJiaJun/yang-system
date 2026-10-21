@@ -13,7 +13,7 @@ use yang_db::{DatabaseConfig, RedisConfig};
 pub use yang_runtime::observability::ObservabilitySettings;
 
 const MAX_ACCESS_TTL_SECONDS: u64 = 24 * 60 * 60;
-const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
+pub(crate) const MAX_REFRESH_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 
 /// 「踢出单台设备」时 jti 黑名单必须保留的最长时间（秒）。
 ///

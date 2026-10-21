@@ -5,7 +5,7 @@
 //!
 //! # 两组端点，两条注册纪律
 //!
-//! - **控制台（12 个 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
+//! - **控制台（14 个 Action）无条件注册**：控制台走 JWT 鉴权，不依赖出站凭证存在
 //!   （`create_config` / `list_widgets` 运行时按其自身逻辑校验凭证并返回 50301），
 //!   所以注册在 `can_pull()` 门禁**之前**。
 //! - **派发端点只在集成可用时注册**：与 `option` module 的机器入口同一条纪律——
@@ -27,6 +27,7 @@ pub(super) mod create_config;
 pub(super) mod delete_config;
 pub(super) mod dispatch;
 pub(super) mod list_configs;
+pub(super) mod list_events;
 pub(super) mod list_requests;
 pub(super) mod list_tasks;
 pub(super) mod list_widgets;
@@ -34,6 +35,7 @@ pub(super) mod oauth_authorize_url;
 pub(super) mod oauth_callback;
 pub(super) mod oauth_status;
 pub(super) mod refresh_names;
+pub(super) mod retry_event;
 pub(super) mod reveal_config_token;
 pub(super) mod rotate_config_token;
 pub(super) mod update_config;
@@ -62,6 +64,9 @@ pub(super) fn register_all(
     let module = list_widgets::register(module, Arc::clone(&context));
     let module = list_requests::register(module, Arc::clone(&context));
     let module = list_tasks::register(module, Arc::clone(&context));
+    // 事件排查与人工重试只读写本库，不打飞书，因此不过 `can_pull()` 门禁。
+    let module = list_events::register(module, Arc::clone(&context));
+    let module = retry_event::register(module, Arc::clone(&context));
     // 飞书用户身份（OAuth）：状态与授权链接是控制台 Action，无条件注册
     // （授权链接在缺配置时按业务码 50302 失败，而不是让按钮凭空消失）。
     let module = oauth_status::register(module, Arc::clone(&context));
@@ -89,7 +94,7 @@ mod tests {
 
     use crate::addon::feishu::domain::repository::Repository;
 
-    /// 12 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
+    /// 14 个控制台 Action 的路由：两态（有/无凭证）都必须注册。
     const CONSOLE_ROUTES: &[(&str, &str)] = &[
         ("list_configs", "/api/v1/feishu/approval/configs/query"),
         ("create_config", "/api/v1/feishu/approval/configs/create"),
@@ -113,6 +118,8 @@ mod tests {
         ),
         ("list_requests", "/api/v1/feishu/approval/requests/query"),
         ("list_tasks", "/api/v1/feishu/approval/tasks/query"),
+        ("list_events", "/api/v1/feishu/approval/events/query"),
+        ("retry_event", "/api/v1/feishu/approval/events/{id}/retry"),
         ("oauth_status", "/api/v1/feishu/oauth/status"),
         ("oauth_authorize_url", "/api/v1/feishu/oauth/authorize-url"),
     ];
@@ -120,7 +127,7 @@ mod tests {
     /// 装配好的 module（带一个可用的 `FeishuSettings`）。
     ///
     /// 用惰性连接池：这些用例只读路由表，不碰数据库。
-    fn registered_module(with_credentials: bool) -> ModuleSpec {
+    pub(super) fn registered_module(with_credentials: bool) -> ModuleSpec {
         let pool = Arc::new(
             sqlx::MySqlPool::connect_lazy("mysql://user:pass@localhost:3306/yang")
                 .unwrap_or_else(|error| panic!("惰性连接池应可构造: {error}")),
@@ -196,7 +203,7 @@ mod tests {
             .collect()
     }
 
-    /// 11 个控制台路由在**有凭证**时全部注册。
+    /// 14 个控制台路由在**有凭证**时全部注册。
     #[tokio::test]
     async fn console_routes_are_registered_with_credentials() {
         let module = registered_module(true);
@@ -209,7 +216,7 @@ mod tests {
         }
     }
 
-    /// 11 个控制台路由在**无凭证**时也全部注册（控制台不依赖出站凭证存在）。
+    /// 14 个控制台路由在**无凭证**时也全部注册（控制台不依赖出站凭证存在）。
     #[tokio::test]
     async fn console_routes_are_registered_without_credentials() {
         let module = registered_module(false);

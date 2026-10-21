@@ -26,8 +26,8 @@ const MAX_BATCH_ITEMS: usize = 100;
 pub(super) struct BatchGrantItem {
     user_id: i64,
     permission: String,
-    /// Unix 秒；缺省 = 永久有效。到期后在签发/刷新时过滤，行保留做审计；已签发的
-    /// Access Token 最长保留一个 access TTL。
+    /// Unix 秒；缺省 = 永久有效。到期后由后台收敛按周期递增授权版本并写
+    /// Outbox（无积压时一个周期），行保留做审计。
     #[serde(default)]
     expires_at: Option<i64>,
 }

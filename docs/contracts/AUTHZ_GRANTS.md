@@ -100,17 +100,27 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 | `permission` | VARCHAR(128) | 权限字符串 |
 | `granted_by` | BIGINT | 授权操作人用户 ID（灾备 SQL 引导时填操作者标识或 `0`） |
 | `occurred_at` | BIGINT | 授权发生的 Unix 时间戳（插入时自动写入） |
-| `expires_at` | BIGINT 可空 | Unix 秒；NULL=永久有效。到期后在签发/刷新时过滤，行保留做审计 |
+| `expires_at` | BIGINT 可空 | Unix 秒；NULL=永久有效。到期后读端过滤，行保留做审计；后台收敛按周期递增授权版本（积压时按批排空） |
+| `converged_at` | BIGINT 可空 | 系统在直授过期后递增授权版本的时间；NULL=尚未收敛。审计读端不投影本列 |
 
 约束：`uk_authz_grant_user_permission (user_id, permission)` 复合唯一索引；
 `chk_authz_grant_permission_format` 权限格式 CHECK。表结构由
 `src/addon/access/grants/table.rs` 声明，启动时增量同步，不使用 SQL 迁移文件。
 
-**过期语义（软过期）**：`expires_at` 只在签发/刷新 Token 时过滤
-（`list_by_user_in_tx` 的 `expires_at IS NULL OR expires_at > now`）。已经签发的
-Access Token 内的权限快照不会因到期而被主动改写，最长保留一个
-`token.access_ttl_seconds`（默认 3600 秒）。需要立即收敛时走撤销或续期：二者都会在
-同一事务删除/改写事实行、递增 `authz_version` 并追加 Outbox；单条撤销不调用
+**过期语义（软过期 + 后台收敛）**：读端仍按 `expires_at` 过滤
+（`list_by_user_in_tx` 的 `expires_at IS NULL OR expires_at > now`），因此过期行不会
+再进入新签发的 Token 快照。已经签发的 Access Token 由后台收敛 Worker 主动失效：
+每 60 秒扫描 `expires_at <= now AND converged_at IS NULL` 的直授行，对所属用户
+递增 `authz_version` 并追加 `authorization_outbox`，然后把这些行标记
+`converged_at = now`。**无积压且单实例**时，过期权限在已签发 Access Token 中的
+存活时间上界是一个收敛周期（60 秒）加 Outbox 传播延迟；单轮最多处理 200 行，
+存在积压时按 `ceil(pending/200)` 个周期排空，不再依赖 access TTL 自然过期。
+
+收敛标记是幂等凭据：同一行标记后不会再次触发版本递增；续期会在同一 UPDATE 里把
+`converged_at` 重置为 NULL，未来再次过期时重新收敛。行被并发续期/撤销时收敛 CAS
+（`id + expires_at + converged_at IS NULL`）失败，下一轮再处理，绝不误标。行本身
+**保留做审计**。需要立即收敛（不等后台周期）时走撤销或续期：二者都会在同一事务
+删除/改写事实行、递增 `authz_version` 并追加 Outbox；单条撤销不调用
 `revoke_by_subject`，目标用户的 Refresh 会话保留。
 
 ## 权限组

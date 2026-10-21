@@ -150,6 +150,32 @@ INTEGRATION = (
         ),
     ),
     Command(
+        "Session cleanup retention integration",
+        (
+            "cargo",
+            "test",
+            "--lib",
+            "--locked",
+            "infrastructure::session_cleanup::tests::real_mysql_deletes_only_sessions_older_than_retention",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
+        "Grant expiry convergence integration",
+        (
+            "cargo",
+            "test",
+            "--lib",
+            "--locked",
+            "addon::access::domain::grant_expiry::tests::real_mysql_converges_expired_grants_once_and_reconverges_after_renew",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
         "Schema apply concurrency and retry integration",
         (
             "cargo",

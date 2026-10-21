@@ -91,11 +91,11 @@ export const OPTION_OPERATION_IDS = {
   approvalOptions: "feishu.option.approval_options",
 } as const;
 
-/// 审批派发控制台的 8 个 Action。
+/// 审批派发控制台的 14 个受保护 Action。
 ///
 /// **每一粒都必须是服务端真实注册过的 `operation_id`**（逐个对着
 /// `src/addon/feishu/approval/actions/*.rs` 的 `action_name!(...)` 核过）。
-/// 服务端 `action_name!` 的展开形态是「模块名 + 点 + 动作名」，八个动作的模块名
+/// 服务端 `action_name!` 的展开形态是「模块名 + 点 + 动作名」，这些动作的模块名
 /// 都是 `feishu.approval`（注册在 `approval/mod.rs` 的 `build_module`）。
 /// 与数据源 Action 不同，它们**无条件注册**（不挂 `can_pull()` 门禁）：控制台
 /// 不依赖飞书凭证存在，`create_config` / `list_widgets` 运行时按其自身逻辑校验。
@@ -108,6 +108,10 @@ export const APPROVAL_OPERATION_IDS = {
   listWidgets: "feishu.approval.list_widgets",
   listRequests: "feishu.approval.list_requests",
   listTasks: "feishu.approval.list_tasks",
+  /// 审批事件查询（`terminal_only` 过滤失败终态）。读权限。
+  listEvents: "feishu.approval.list_events",
+  /// 把失败终态事件重置回待处理队列。写权限；成功事件拒绝重放。
+  retryEvent: "feishu.approval.retry_event",
   /// 飞书用户身份（OAuth）授权状态。读权限。
   oauthStatus: "feishu.approval.oauth_status",
   /// 取授权链接。**写权限**：它会签发一个一次性的 state（CSRF 防护）。

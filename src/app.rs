@@ -23,6 +23,15 @@ pub(crate) const YANG_SYSTEM_METRIC_NAMES: RuntimeMetricNames = RuntimeMetricNam
 
 pub struct Application {
     pub runtime: BuiltApp,
+    /// 过期直授的后台收敛句柄；由 bootstrap 在 Tools 关闭前驱动。
+    pub(crate) grant_expiry: access::GrantExpiryHandle,
+}
+
+impl Application {
+    /// 供后台 Worker 使用的收敛句柄（内部只克隆 `Arc`）。
+    pub(crate) fn grant_expiry_handle(&self) -> access::GrantExpiryHandle {
+        self.grant_expiry.clone()
+    }
 }
 
 pub fn build_app(
@@ -77,6 +86,8 @@ fn build_application(
         authorization_port,
     )
     .context("构建 access Addon 失败")?;
+    // `into_spec` 会消费 Addon，收敛句柄必须在此之前取。
+    let grant_expiry = access.grant_expiry_handle();
     // 直授权限与权限组权限是两个独立事实源，各由一个解析器负责，账号域只做合并。
     let grant_resolvers: Vec<Arc<dyn account::GrantResolver>> =
         vec![access.grant_resolver(), access.group_grant_resolver()];
@@ -131,7 +142,10 @@ fn build_application(
         .install(access::project_permissions(runtime.catalog().addons()))
         .context("安装权限目录投影失败")?;
 
-    Ok(Application { runtime })
+    Ok(Application {
+        runtime,
+        grant_expiry,
+    })
 }
 
 #[cfg(test)]

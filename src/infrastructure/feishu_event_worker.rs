@@ -18,6 +18,7 @@ use tracing::Instrument;
 use yang_base::table::{Record, SortOrder};
 use yang_base::tools::Tools;
 
+use crate::addon::feishu::approval::domain::event_table::MAX_EVENT_RETRY_COUNT;
 use crate::addon::feishu::domain::approval::{get_instance, subscribe_approval, GetOutcome};
 use crate::addon::feishu::domain::approval_convert::FixedOffset;
 use crate::addon::feishu::domain::approval_dispatch::{
@@ -35,9 +36,6 @@ use crate::config::FeishuSettings;
 
 /// 每轮最多处理多少条事件。
 const EVENT_BATCH: usize = 50;
-
-/// 连续失败多少次后放弃（置终态，不再重试）。
-const MAX_RETRY_COUNT: i64 = 10;
 
 /// 编译期守护：批量不超框架上限。
 const _: () = assert!(EVENT_BATCH <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE);
@@ -257,7 +255,7 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
             EventOutcome::Failed(message) => {
                 failed += 1;
                 let new_count = event.retry_count + 1;
-                if new_count >= MAX_RETRY_COUNT {
+                if new_count >= MAX_EVENT_RETRY_COUNT {
                     if let Err(error) = mark_terminal_event(runner, event.id, &message).await {
                         tracing::warn!(error = %error, event_id = event.id, "置事件终态失败");
                     }
@@ -676,7 +674,10 @@ fn optional_nonempty(config: &Record, field: &str) -> Option<String> {
     }
 }
 
-/// 标记事件已处理（设 `processed_at`，清 `last_error`）。
+/// 标记事件已处理（设 `processed_at`，清 `last_error` 并把重试计数归零）。
+///
+/// 重试计数归零让 `is_terminal_event` 不会把「成功处理但此前的重试计数恰好
+/// 达到上限」的事件误判为终态；单实例部署下也是终态判据的幂等加固。
 async fn mark_processed(runner: &RoundRunner, event_id: i64) -> anyhow::Result<()> {
     let mut row = Record::new();
     let now = std::time::SystemTime::now()
@@ -684,6 +685,7 @@ async fn mark_processed(runner: &RoundRunner, event_id: i64) -> anyhow::Result<(
         .unwrap_or_default()
         .as_secs() as i64;
     row.insert("processed_at", serde_json::json!(now));
+    row.insert("retry_count", serde_json::json!(0));
     row.insert("last_error", serde_json::Value::Null);
     runner
         .context
@@ -727,10 +729,12 @@ async fn mark_terminal_event(
         .as_secs() as i64;
     let mut row = Record::new();
     row.insert("processed_at", serde_json::json!(now));
-    row.insert("retry_count", serde_json::json!(MAX_RETRY_COUNT));
+    row.insert("retry_count", serde_json::json!(MAX_EVENT_RETRY_COUNT));
     row.insert(
         "last_error",
-        serde_json::json!(format!("连续失败超 {MAX_RETRY_COUNT} 次: {error_message}")),
+        serde_json::json!(format!(
+            "连续失败超 {MAX_EVENT_RETRY_COUNT} 次: {error_message}"
+        )),
     );
     runner
         .context
@@ -755,6 +759,6 @@ mod tests {
 
     #[test]
     fn max_retry_count_is_positive() {
-        const { assert!(MAX_RETRY_COUNT > 0) };
+        const { assert!(MAX_EVENT_RETRY_COUNT > 0) };
     }
 }

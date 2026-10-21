@@ -163,8 +163,10 @@ Terminal / Retryable / validate 失败 / 内部 Err）。`dispatch_single` 内�
 | Action | 路由 | 权限 | 说明 |
 |---|---|---|---|
 | `list_widgets` | `POST /api/v1/feishu/approval/definitions/widgets` | `feishu.approval.write` | 按 `approval_code` 调 `approvals get`，`parse_form` 解析后返回控件列表（id/名称/类型/required）。归 write 侧与 `list_bitable_*` 同理：只读语义但出站耗配额 |
-| `list_requests` | `POST /api/v1/feishu/approval/requests/query` | `feishu.approval.read` | 派发记录分页；`request_body`/`response_body` 随行返回（体量小），前端本地展开 |
+| `list_requests` | `POST /api/v1/feishu/approval/requests/query` | `feishu.approval.read` | 派发记录分页；`request_body`/`response_body` 随行返回（体量小），前端本地展开。**`request_body` 读侧脱敏**：顶层 `token` 替换为 `<redacted>`，解析失败返回 `[unparseable request body]`（历史明文不回显；库内清洗与 Token 轮换仍按暂缓项 0.1） |
 | `list_tasks` | `POST /api/v1/feishu/approval/tasks/query` | `feishu.approval.read` | task 分页（按 config_id/state 过滤，options：pending/creating/created/backfilled/terminal/unnotified），批量记录的下钻视图 |
+| `list_events` | `POST /api/v1/feishu/approval/events/query` | `feishu.approval.read` | 审批事件分页（id 倒序）；`terminal_only=true` 过滤 `processed_at` 非空且 `retry_count >= MAX_EVENT_RETRY_COUNT` 的失败终态行 |
+| `retry_event` | `POST /api/v1/feishu/approval/events/{id}/retry` | `feishu.approval.write` | 人工重试失败终态事件：重置 `processed_at=NULL`、`retry_count=0`、`last_error=NULL` 回队；成功事件 400 拒绝重放；更新条件含终态判据（affected=0 即状态冲突） |
 
 ### 5.3 前端
 
