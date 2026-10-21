@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
@@ -357,6 +357,9 @@ async fn user_lookup_is_authenticated_only_and_filters_by_keyword() -> anyhow::R
         // 所以查找用的 token 必须在绑定完成之后重新登录取得。
         register_and_bind_email(&app, &sender, "alpha_user", "alpha@example.com", 44_001).await?;
         register_and_bind_email(&app, &sender, "beta_user", "beta@example.com", 44_002).await?;
+        // 改绑邮箱按秒粒度写撤销水位线（iat <= watermark 一律撤销）。两次绑定
+        // 完成后跨过当前秒边界再登录，避免同一秒签发的测试 Token 被误判为已撤销。
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
         let token_a = login(&app, "alpha_user", 44_001).await?;
 
         // 1) authenticated-only：未登录 → 401（Unauthorized）。
