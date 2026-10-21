@@ -468,10 +468,11 @@ pnpm --dir frontend check
 - `account#3`：新增 `session_cleanup` Worker（refresh 硬上限 90 天 + 7 天余量，6 小时一轮，真实 MySQL 用例 + 变异）。
 - `access-infra#13`：新增 `authz_grant.converged_at` + 60 秒 `GrantExpiryWorker`，先 CAS 标记再递增 `authz_version` + Outbox；续期重置标记。
 - `feishu-approval#38`：新增 `list_events` / `retry_event`，终态 CAS 回队、成功事件拒绝重放；控制台 UI 暂未接入（API-only）。
-- `tests-ops#60`：父仓 `.dockerignore` 已本地提交 `e27a2d3`；推送到 `lib_yang` master 需单独确认。
+- `tests-ops#60`：父仓 `.dockerignore` 已提交 `e27a2d3` 并 push 到 `lib_yang/master`；父仓 CI 的历史失败为既有问题，不影响 yang-system 的 nested CI。
 - `feishu-approval#30` / P0-8：新写入与历史行读侧均脱敏；库内明文清洗与 Token 轮换仍属暂缓项 0.1。
 - 验收中新发现并修复：共用事件订阅 URL + Encrypt Key 时，challenge 解密后委托事件 handler 被二次判为明文而 401（`a5bd63e`，集成测试 + 变异）。
-- 最终验收报告见 [`2026-10-22-remediation-acceptance.md`](2026-10-22-remediation-acceptance.md)；GitHub Actions `CI` 在最终代码 `a5bd63e` 上三个 job 全部成功（run `39662660039`）。
+- 重部署兼容：`EdgeBindAddr` 默认改为 auto（已有线上容器沿用实际绑定，新部署 loopback）；`deploy-blue-green.sh` 起绿容器前只读预检 user_token/task_applicant/portal JSON/event token；门户 `query_field_ids` 重新接受但忽略（`10449f0`）。
+- 最终验收报告见 [`2026-10-22-remediation-acceptance.md`](2026-10-22-remediation-acceptance.md)；GitHub Actions `CI` 在最终代码 `10449f0` 上的运行 `39667444577` 见报告第 2 节。
 - 暂缓项不变：P0-2、P0-9、0.1；2 条误报不变。
 
 ---
