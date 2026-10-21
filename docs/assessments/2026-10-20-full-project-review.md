@@ -463,4 +463,17 @@ pnpm --dir frontend check
 
 ---
 
+## 十、2026-10-22 闭环补充
+
+- `account#3`：新增 `session_cleanup` Worker（refresh 硬上限 90 天 + 7 天余量，6 小时一轮，真实 MySQL 用例 + 变异）。
+- `access-infra#13`：新增 `authz_grant.converged_at` + 60 秒 `GrantExpiryWorker`，先 CAS 标记再递增 `authz_version` + Outbox；续期重置标记。
+- `feishu-approval#38`：新增 `list_events` / `retry_event`，终态 CAS 回队、成功事件拒绝重放；控制台 UI 暂未接入（API-only）。
+- `tests-ops#60`：父仓 `.dockerignore` 已本地提交 `e27a2d3`；推送到 `lib_yang` master 需单独确认。
+- `feishu-approval#30` / P0-8：新写入与历史行读侧均脱敏；库内明文清洗与 Token 轮换仍属暂缓项 0.1。
+- 验收中新发现并修复：共用事件订阅 URL + Encrypt Key 时，challenge 解密后委托事件 handler 被二次判为明文而 401（`a5bd63e`，集成测试 + 变异）。
+- 最终验收报告见 [`2026-10-22-remediation-acceptance.md`](2026-10-22-remediation-acceptance.md)；GitHub Actions `CI` 在最终代码 `a5bd63e` 上三个 job 全部成功（run `39662660039`）。
+- 暂缓项不变：P0-2、P0-9、0.1；2 条误报不变。
+
+---
+
 *本报告由 7 个领域并行审查 + 3 组对抗核验生成；所有代码位置以 `main@9f68346` 为准。修复时按阶段 0 的未暂缓项执行；P0-2、P0-9 与 0.1 按 2026-10-20 决策暂缓，待后续决策。*
