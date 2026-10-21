@@ -390,7 +390,16 @@ def run(command: Command) -> None:
         return
     for attempt in range(1, command.network_retries + 2):
         completed = subprocess.run(
-            argv, check=False, env=environment, capture_output=True, text=True
+            argv,
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+            # pnpm/npm 的输出是 UTF-8；Windows 默认按 GBK 解码会在出现
+            # 非 ASCII 字符（如 ✓/中文提示）时让 reader 线程直接抛
+            # UnicodeDecodeError，把成功的审计误报成失败。
+            encoding="utf-8",
+            errors="replace",
         )
         output = f"{completed.stdout}\n{completed.stderr}"
         if completed.returncode == 0:
