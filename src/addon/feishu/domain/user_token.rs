@@ -487,10 +487,15 @@ pub(crate) struct UserTokenRow {
     pub(crate) authorized_at: i64,
 }
 
+/// 单行槽位的固定值。`slot` 列带唯一索引，`1` 就是「唯一一行」的那一格
+/// （见 `user_token_table` 的模块文档）。
+const SINGLE_SLOT: i64 = 1;
+
 /// 读唯一一行；`None` = 从未授权。
 ///
-/// 不按主键取值：这张表的不变式是「**至多一行**」（见 `user_token_table` 的模块文档），
-/// 按「第一行」读写就不必依赖「插入时能显式指定自增主键」这一 DSL 行为。
+/// 单行不变式的**唯一事实**是 `slot` 的唯一索引：这里按 `slot = 1` 定位，而不再
+/// 依赖「表里只有一行 / 取第一行」这种约定。凭证列仍要显式 `select_fields`
+/// （`secret` 列不进默认投影）。
 pub(crate) async fn load_single(tokens: &Repository) -> Result<Option<UserTokenRow>, BaseError> {
     // 两个凭证列是 `secret`（`hidden = true`），**不进默认投影**：不显式点名就查不出来，
     // 报「字段未找到 [表: record]: access_token」。`select_fields` 只校验字段存在与角色
@@ -508,6 +513,7 @@ pub(crate) async fn load_single(tokens: &Repository) -> Result<Option<UserTokenR
             "refresh_token_expires_at",
             "authorized_at",
         ])?
+        .where_eq("slot", json!(SINGLE_SLOT))?
         .page(1, 1)?
         .all()
         .await?;
@@ -528,7 +534,10 @@ pub(crate) async fn load_single(tokens: &Repository) -> Result<Option<UserTokenR
 
 /// 落一次**完整授权**的结果（授权回调专用）。
 ///
-/// 已有行就整体替换（换账号授权也是替换，不是新增），没有就插入。
+/// 已有行就整体替换（换账号授权也是替换，不是新增），没有就插入；`slot` 恒写
+/// [`SINGLE_SLOT`]，并发插入时第二条会撞它的唯一索引——那是**竞态**而不是故障，
+/// 重新读回先落库的那行并按 id 覆盖（后到者胜，与「整体替换」同义）。
+/// 其他数据库错误原样返回，绝不吞成「竞态」。
 /// `authorized_at` 只在这里写——**刷新不重置它**，那正是飞书 365 天规则的判据。
 pub(crate) async fn store_authorization(
     tokens: &Repository,
@@ -538,6 +547,7 @@ pub(crate) async fn store_authorization(
     authorized_at: i64,
 ) -> Result<(), BaseError> {
     let mut row = Record::new();
+    row.insert("slot", json!(SINGLE_SLOT));
     row.insert("open_id", json!(open_id));
     row.insert("user_name", json!(user_name));
     row.insert("access_token", json!(&bundle.access_token));
@@ -562,10 +572,33 @@ pub(crate) async fn store_authorization(
                 .await?;
         }
         None => {
-            tokens.query().insert(row).await?;
+            if let Err(error) = tokens.query().insert(row.clone()).await {
+                if !is_duplicate_key_error(&error) {
+                    return Err(error);
+                }
+                // 查询与插入之间另一个授权请求落了行：按唯一索引读回并覆盖。
+                let Some(existing) = load_single(tokens).await? else {
+                    return Err(error);
+                };
+                tokens
+                    .query()
+                    .where_eq("id", json!(existing.id))?
+                    .update(row)
+                    .await?;
+            }
         }
     }
     Ok(())
+}
+
+/// 是否唯一索引冲突（MySQL 1062）。
+///
+/// `DbError::ConstraintError` 同时覆盖唯一键与外键，而本表没有外键列；按报文里的
+/// `Duplicate` / `1062` / `唯一键` 识别，只把这三种当并发竞态。其余错误
+/// （连接、权限、字段非法）必须原样冒泡——吞掉它们等于把真实故障伪装成成功。
+fn is_duplicate_key_error(error: &BaseError) -> bool {
+    let text = error.to_string();
+    text.contains("Duplicate") || text.contains("1062") || text.contains("唯一键")
 }
 
 /// 刷新之后写回凭证。**不碰 `authorized_at`**（见 [`store_authorization`]）。
@@ -946,6 +979,31 @@ mod tests {
             transport.seen()[0].bearer_token.as_deref(),
             Some("u-access-1")
         );
+    }
+
+    #[test]
+    fn only_unique_key_conflicts_are_treated_as_an_insert_race() {
+        // 唯一索引冲突是并发授权 insert 的竞态信号；其他 DB 错误必须原样冒泡，
+        // 不能被当成「有人先插了」吞掉。
+        for duplicate in [
+            "Duplicate entry '1' for key 'feishu_user_token.slot'",
+            "Error 1062: duplicate",
+            "唯一键冲突",
+        ] {
+            let error = BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(
+                duplicate.to_string(),
+            ));
+            assert!(is_duplicate_key_error(&error), "{duplicate} 应识别为竞态");
+        }
+
+        for other in [
+            "连接错误: 连接被重置",
+            "约束错误: Cannot add or update a child row: a foreign key constraint fails",
+        ] {
+            let error =
+                BaseError::DatabaseExecuteFailed(yang_db::DbError::Unknown(other.to_string()));
+            assert!(!is_duplicate_key_error(&error), "{other} 不得被吞成竞态");
+        }
     }
 
     #[test]

@@ -29,6 +29,13 @@ function logoutResponse() {
   );
 }
 
+function unauthorizedResponse() {
+  return new Response(
+    JSON.stringify({ code: 40102, message: "Token 已过期" }),
+    { status: 401, headers: { "content-type": "application/json" } },
+  );
+}
+
 beforeEach(() => {
   clearStoredSession();
 });
@@ -199,5 +206,85 @@ describe("SessionController", () => {
       ([key]) => key === "yang.session-signal",
     );
     expect(signalCall?.[1]).toContain('"reason":"logout"');
+  });
+
+  it("Access Token 过期后登出仍清空本地，并用刷新结果重试服务端", async () => {
+    vi.stubGlobal("BroadcastChannel", undefined);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        if (url.includes("/api/v1/users/refresh"))
+          return tokenResponse("access-refreshed");
+        if (url.includes("/api/v1/users/logout")) {
+          const authorization = new Headers(init.headers).get("authorization");
+          calls.push(`logout:${authorization}`);
+          return authorization === "Bearer access-expired"
+            ? unauthorizedResponse()
+            : logoutResponse();
+        }
+        throw new Error(`测试未覆盖的请求：${url}`);
+      }),
+    );
+    const controller = new SessionController();
+    controller.beginSession({ accessToken: "access-expired" });
+
+    await expect(controller.endSession()).resolves.toBe(true);
+
+    expect(calls).toEqual([
+      "logout:Bearer access-expired",
+      "logout:Bearer access-refreshed",
+    ]);
+    expect(controller.getSnapshot().loggedIn).toBe(false);
+    const signalCall = setItem.mock.calls.find(
+      ([key]) => key === "yang.session-signal",
+    );
+    expect(signalCall?.[1]).toContain('"reason":"logout"');
+  });
+
+  it("服务端不可达时登出/停用仍清空本地会话", async () => {
+    vi.stubGlobal("BroadcastChannel", undefined);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    const logoutController = new SessionController();
+    logoutController.beginSession({ accessToken: "access-token" });
+    await expect(logoutController.endSession()).rejects.toThrow("offline");
+    expect(logoutController.getSnapshot().loggedIn).toBe(false);
+
+    const disableController = new SessionController();
+    disableController.beginSession({ accessToken: "access-token" });
+    await expect(disableController.disableAccount()).rejects.toThrow("offline");
+    expect(disableController.getSnapshot().loggedIn).toBe(false);
+
+    const logoutSignals = setItem.mock.calls.filter(
+      ([key, value]) =>
+        key === "yang.session-signal" &&
+        String(value).includes('"reason":"logout"'),
+    );
+    expect(logoutSignals).toHaveLength(2);
+  });
+
+  it("恢复超时按可重试错误收敛为匿名，不永久停在 pending", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      }),
+    );
+    const controller = new SessionController();
+
+    await expect(controller.restoreFromCookie()).resolves.toBe(false);
+
+    expect(controller.getSnapshot()).toMatchObject({
+      token: "",
+      restoreState: "anonymous",
+      loggedIn: false,
+    });
   });
 });

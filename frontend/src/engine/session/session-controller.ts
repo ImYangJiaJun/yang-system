@@ -7,9 +7,13 @@ import {
   clearStoredSession,
   discardLegacyStoredCredentials,
   persistTokenPair,
+  requestWithTokenRefresh,
   restoreSessionFromCookie,
 } from "./auth-session";
 import { publishSessionEnd } from "./session-coordination";
+
+/// 登出/停用的服务端收敛上限：挂起请求不能让本地清理无限等待。
+const TERMINATION_TIMEOUT_MS = 10_000;
 
 /**
  * 会话协议控制器：纯 TS、框架无关（禁止 import react/vue）。
@@ -103,16 +107,32 @@ export class SessionController {
   }
 
   async endSession(): Promise<boolean> {
-    await requestLogout(this.token || undefined);
-    this.clearSession();
-    publishSessionEnd("logout");
+    try {
+      await requestWithTokenRefresh(this.token || undefined, (token) =>
+        requestLogout(token, AbortSignal.timeout(TERMINATION_TIMEOUT_MS)),
+      );
+    } finally {
+      // 服务端不可达或 Access Token 已过期也必须清本地：否则用户被卡在
+      // 「已登出但界面仍是登录态」的半状态。10s 超时保证挂起请求不会让
+      // finally 永不执行；保留已有结束原因，避免覆盖 session-expired。
+      this.clearSession(this.snapshot.sessionEndReason);
+      publishSessionEnd("logout");
+    }
     return true;
   }
 
   async disableAccount(): Promise<boolean> {
-    await requestDisableAccount(this.token || undefined);
-    this.clearSession();
-    publishSessionEnd("logout");
+    try {
+      await requestWithTokenRefresh(this.token || undefined, (token) =>
+        requestDisableAccount(
+          token,
+          AbortSignal.timeout(TERMINATION_TIMEOUT_MS),
+        ),
+      );
+    } finally {
+      this.clearSession(this.snapshot.sessionEndReason);
+      publishSessionEnd("logout");
+    }
     return true;
   }
 

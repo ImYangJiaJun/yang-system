@@ -53,6 +53,10 @@ pub(crate) const ADMIN_EQUIVALENT_PERMISSIONS: &[AdminEquivalentPermission] = &[
         reason: "对任意账号签发密码重置凭证：凭此重置其口令并登录成他，即夺取该账号的身份与全部权限",
     },
     AdminEquivalentPermission {
+        permission: "feishu.approval.write",
+        reason: "create_config / reveal_config_token / rotate_config_token 可签发或回显工作流派发 Token；派发端点是 public、仅按 token_hash 验机器凭据，拿到 Token 即绕过其余全部授权检查",
+    },
+    AdminEquivalentPermission {
         permission: "feishu.datasource.secret",
         reason: "回显数据源封存的 Token 明文；该 Token 是数据源主体的入站凭据，拿到即可冒充该数据源调用本系统，不再经任何授权检查",
     },
@@ -95,6 +99,7 @@ mod tests {
     #[test]
     fn the_known_admin_equivalent_permissions_are_recognized() {
         assert!(is_admin_equivalent("account.users.reset_credentials"));
+        assert!(is_admin_equivalent("feishu.approval.write"));
         assert!(is_admin_equivalent("feishu.datasource.secret"));
         assert!(is_admin_equivalent("feishu.datasource.write"));
     }

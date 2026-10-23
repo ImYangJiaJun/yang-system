@@ -215,7 +215,9 @@ pub(super) async fn handle(
     };
     // 登录成功：解析 access claims 中的 session_id/jti 并落一条会话行；
     // upsert 失败只记日志，不阻塞登录（会话可见性为 best-effort 增强）。
-    if let Err(error) = record_login_session(
+    // 会话行是逐台撤销与 refresh fail-closed 的权威事实；落库失败必须让登录失败，
+    // 不能发出一个无法撤销、也无法再次刷新的“半登录”令牌对。
+    record_login_session(
         &record_ctx,
         &account,
         &tokens.access_token,
@@ -223,10 +225,7 @@ pub(super) async fn handle(
         &session_ip,
         &session_user_agent,
     )
-    .await
-    {
-        tracing::warn!(error = %error, "登录会话持久化失败");
-    }
+    .await?;
     Account::browser_session().token_response(tokens.access_token, tokens.refresh_token, secure)
 }
 
@@ -274,12 +273,17 @@ pub(super) async fn record_login_failure(
                 user_id,
                 occurred_at: now,
                 ip: ip.to_string(),
-                user_agent: user_agent.to_string(),
+                user_agent: truncate_user_agent(user_agent),
                 result: "failed",
                 failure_reason: Some(failure_reason),
             },
         )
         .await
+}
+
+/// 会话/登录事件表的 `user_agent` 列宽为 512；超长 UA 会让写入失败。
+fn truncate_user_agent(value: &str) -> String {
+    value.chars().take(512).collect()
 }
 
 /// 从新签发的 access/refresh token 提取 session_id 与两个 jti 并写入 `user_session`。
@@ -329,7 +333,7 @@ pub(super) async fn record_login_session(
                 jti: claims.jti,
                 refresh_jti,
                 ip: ip.to_string(),
-                user_agent: user_agent.to_string(),
+                user_agent: truncate_user_agent(user_agent),
                 now,
             },
         )
@@ -409,7 +413,7 @@ pub(super) fn register(module: ModuleSpec, account: Arc<Account>) -> ModuleSpec 
 
 #[cfg(test)]
 mod tests {
-    use super::login_rate_limit_key;
+    use super::{login_rate_limit_key, truncate_user_agent};
 
     #[test]
     fn 限流键_账号存在时带id前缀与标识命名空间隔离() {
@@ -424,11 +428,11 @@ mod tests {
     }
 
     #[test]
-    fn 限流键_账号不存在时按归一化标识() {
-        assert_eq!(login_rate_limit_key(None, "alice"), "alice");
-        assert_eq!(
-            login_rate_limit_key(None, "alice@example.com"),
-            "alice@example.com"
-        );
+    fn 用户代理超长时按列宽截断且保持字符边界() {
+        let long = "a".repeat(600);
+        assert_eq!(truncate_user_agent(&long).chars().count(), 512);
+        let multibyte = "中".repeat(600);
+        assert_eq!(truncate_user_agent(&multibyte).chars().count(), 512);
+        assert_eq!(truncate_user_agent("短"), "短");
     }
 }

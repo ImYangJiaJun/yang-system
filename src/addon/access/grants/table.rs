@@ -14,6 +14,7 @@ pub(crate) const PERMISSION: &str = "permission";
 pub(crate) const GRANTED_BY: &str = "granted_by";
 pub(crate) const OCCURRED_AT: &str = "occurred_at";
 pub(crate) const EXPIRES_AT: &str = "expires_at";
+pub(crate) const CONVERGED_AT: &str = "converged_at";
 pub(crate) const GRANT_RECORD_FIELDS: &[&str] = &[
     GRANT_ID,
     USER_ID,
@@ -53,7 +54,13 @@ pub(crate) fn grants_table_spec() -> Result<TableSpec, BaseError> {
                 .writable_by([SYSTEM_ROLE]),
         expires_at => Int::new()
                 .title("过期时间")
-                .description("Unix 秒；NULL=永久有效。过期后权限在解析侧失效、行保留做审计")
+                .description("Unix 秒；NULL=永久有效。到期后由后台收敛按周期递增授权版本并写 Outbox（无积压时一个周期），行保留做审计")
+                .filterable(true)
+                .readable_by([SYSTEM_ROLE])
+                .writable_by([SYSTEM_ROLE]),
+        converged_at => Int::new()
+                .title("过期收敛时间")
+                .description("系统在直授过期后递增授权版本的时间；NULL=尚未收敛")
                 .filterable(true)
                 .readable_by([SYSTEM_ROLE])
                 .writable_by([SYSTEM_ROLE]),
@@ -80,6 +87,16 @@ pub(crate) fn grants_table_spec() -> Result<TableSpec, BaseError> {
         .index_named(
             "idx_authz_grant_granted_by",
             [field_ref(&table_name, GRANTED_BY)?],
+        )
+        // 过期收敛扫描索引：`expires_at <= now AND converged_at IS NULL`
+        // 按 `expires_at, id` 稳定取批，避免每轮全表扫。
+        .index_named(
+            "idx_authz_grant_expiry_convergence",
+            [
+                field_ref(&table_name, EXPIRES_AT)?,
+                field_ref(&table_name, CONVERGED_AT)?,
+                field_ref(&table_name, GRANT_ID)?,
+            ],
         )
         .check_named(
             "chk_authz_grant_permission_format",
@@ -153,6 +170,43 @@ mod tests {
         assert!(!expires.is_required(), "expires_at 必须可空（NULL=永久）");
     }
 
+    #[test]
+    fn grant_schema_declares_expiry_convergence_marker_and_index() {
+        let spec = grants_table_spec().unwrap_or_else(|error| panic!("授权表定义应有效: {error}"));
+        let converged = spec
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == CONVERGED_AT)
+            .unwrap_or_else(|| panic!("应存在 converged_at 字段"));
+        assert!(
+            !converged.storage.required,
+            "converged_at 必须可空（NULL=尚未收敛）"
+        );
+        assert!(
+            converged.access.filterable,
+            "收敛扫描需要 SQL 层筛选 converged_at IS NULL"
+        );
+
+        let index = spec
+            .indexes
+            .iter()
+            .find(|index| index.name.as_deref() == Some("idx_authz_grant_expiry_convergence"))
+            .unwrap_or_else(|| panic!("应存在过期收敛索引"));
+        assert!(!index.unique, "收敛索引不是唯一索引");
+        assert_eq!(
+            index
+                .fields
+                .iter()
+                .map(|field| field.field().as_str())
+                .collect::<Vec<_>>(),
+            [EXPIRES_AT, CONVERGED_AT, GRANT_ID],
+            "收敛索引必须按 expires_at, converged_at, id 排列"
+        );
+
+        // 审计读端不暴露收敛标记：它只是后台收敛的幂等凭据。
+        assert!(!GRANT_RECORD_FIELDS.contains(&CONVERGED_AT));
+    }
+
     #[tokio::test]
     async fn grant_facts_are_only_readable_and_writable_by_system_role() {
         let pool = sqlx::mysql::MySqlPoolOptions::new()
@@ -163,7 +217,14 @@ mod tests {
             .unwrap_or_else(|error| panic!("授权表定义应有效: {error}"));
         let table = definition.bind(Arc::new(pool));
 
-        for field_name in [USER_ID, PERMISSION, GRANTED_BY, OCCURRED_AT, EXPIRES_AT] {
+        for field_name in [
+            USER_ID,
+            PERMISSION,
+            GRANTED_BY,
+            OCCURRED_AT,
+            EXPIRES_AT,
+            CONVERGED_AT,
+        ] {
             let denied = table.query(["user"]).select_fields(&[field_name]);
             assert!(matches!(
                 denied,

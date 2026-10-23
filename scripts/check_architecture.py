@@ -1302,7 +1302,9 @@ def check_lock_before_gate(root: Path) -> list[str]:
                 if depth == 0:
                     body_end = idx
                     break
-        handle_body = source[body_start:body_end]
+        # 在**骨架**上搜索，而不是原文：注释/字符串里的伪锁调用不得伪造顺序。
+        # strip_literals 保持等长，body_start/body_end 与行号计算仍然有效。
+        handle_body = skeleton[body_start:body_end]
         lock_match = lock_re.search(handle_body)
         gate_match = gate_re.search(handle_body)
         if lock_match is None or gate_match is None:
@@ -2122,32 +2124,35 @@ def self_test() -> None:
         # 清理：后续测试不应受上面违规文件的影响
         (root / "src/addon/access/groups/actions/add_group_item.rs").unlink()
 
-        # 注释中的文字提及不应触发（strip_literals 已剥离注释）
+        # 注释中的伪锁 + 真实 gate + 真实 lock 在 gate 之后：必须仍报错。
+        # 旧实现直接在原文上搜索，会把注释里的 lock 当成真锁而漏报。
         write(
             root / "src/addon/access/grants/actions/grant_permission.rs",
-            "// ensure_may_grant_permission_in_tx 必须放在 lock_authorization_version 之后\n"
+            "// lock_authorization_version 在 ensure_may_grant_permission_in_tx 之前\n"
             "pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n"
-            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
             "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
             "}\n"
             "pub(super) fn register() {}\n",
         )
-        assert check_lock_before_gate(root) == [], (
-            "注释中的函数名提及不应影响检查"
+        errors = check_lock_before_gate(root)
+        assert any("G2 闸门" in error and "出现在行锁" in error for error in errors), (
+            "注释中的伪锁不得掩盖真实的 gate-before-lock"
         )
 
-        # 字符串字面量中的伪装不应触发
+        # 字符串字面量中的伪锁 + 真实 gate + 真实 lock 在 gate 之后：必须仍报错。
         write(
             root / "src/addon/access/grants/actions/grant_permission.rs",
             'pub(super) async fn handle(ctx: ActionContext) -> Result<ApiResponse, BaseError> {\n'
             '    let _ = "lock_authorization_version 必须在 ensure_may_grant_permission_in_tx 之前";\n'
-            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
             "    ensure_may_grant_permission_in_tx(&access, &ctx, &mut tx, operator_id, &permission).await?;\n"
+            "    let locked = access.authorization().lock_authorization_version(pool, &mut tx, user_id).await?;\n"
             "}\n"
             "pub(super) fn register() {}\n",
         )
-        assert check_lock_before_gate(root) == [], (
-            "字符串字面量中的函数名伪装不应影响检查"
+        errors = check_lock_before_gate(root)
+        assert any("G2 闸门" in error and "出现在行锁" in error for error in errors), (
+            "字符串字面量中的伪锁不得掩盖真实的 gate-before-lock"
         )
 
 

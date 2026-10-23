@@ -31,6 +31,90 @@ pub(crate) fn sniff_is_zip(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK\x03\x04")
 }
 
+/// 解压后总大小上限：16 MiB 的压缩包可以膨胀到 GB 级，必须在交给 calamine 前挡住。
+const MAX_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let slice = bytes.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let slice = bytes.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes(slice.try_into().ok()?))
+}
+
+/// 读取 zip 中央目录，累计解压后大小；超过上限即拒绝整份文件。
+///
+/// 这是**成本极低的预检**：只读中央目录的大小字段，不解压任何 entry。结构不完整时
+/// 返回 `Ok`，让 calamine 给出更具体的「文件读不出来」错误；只有明确的超限才在
+/// 这里拒绝。ZIP64 的 0xFFFFFFFF 标记视为超限（无法证明其大小）。
+fn ensure_uncompressed_size_bounded(bytes: &[u8]) -> Result<(), XlsxError> {
+    if bytes.len() < 22 {
+        return Ok(());
+    }
+    let search_start = bytes.len().saturating_sub(22 + 65_535);
+    let mut eocd = None;
+    for offset in (search_start..=bytes.len() - 22).rev() {
+        if bytes.get(offset..offset + 4) == Some(b"PK\x05\x06") {
+            let comment_len = read_u16_le(bytes, offset + 20).unwrap_or(0) as usize;
+            if offset + 22 + comment_len == bytes.len() {
+                eocd = Some(offset);
+                break;
+            }
+        }
+    }
+    let Some(eocd) = eocd else {
+        return Ok(());
+    };
+    let Some(cd_size) = read_u32_le(bytes, eocd + 12).map(|value| value as usize) else {
+        return Ok(());
+    };
+    let Some(cd_offset) = read_u32_le(bytes, eocd + 16).map(|value| value as usize) else {
+        return Ok(());
+    };
+    if cd_offset == u32::MAX as usize || cd_size == u32::MAX as usize {
+        return Err(XlsxError::TooLarge {
+            limit: MAX_UNCOMPRESSED_BYTES,
+        });
+    }
+    let Some(cd_end) = cd_offset
+        .checked_add(cd_size)
+        .filter(|end| *end <= bytes.len())
+    else {
+        return Ok(());
+    };
+    let mut offset = cd_offset;
+    let mut total = 0_u64;
+    while offset + 46 <= cd_end {
+        if bytes.get(offset..offset + 4) != Some(b"PK\x01\x02") {
+            break;
+        }
+        let Some(uncompressed) = read_u32_le(bytes, offset + 24) else {
+            break;
+        };
+        if uncompressed == u32::MAX {
+            return Err(XlsxError::TooLarge {
+                limit: MAX_UNCOMPRESSED_BYTES,
+            });
+        }
+        total = total.saturating_add(u64::from(uncompressed));
+        if total > MAX_UNCOMPRESSED_BYTES {
+            return Err(XlsxError::TooLarge {
+                limit: MAX_UNCOMPRESSED_BYTES,
+            });
+        }
+        let name_len = read_u16_le(bytes, offset + 28).unwrap_or(0) as usize;
+        let extra_len = read_u16_le(bytes, offset + 30).unwrap_or(0) as usize;
+        let comment_len = read_u16_le(bytes, offset + 32).unwrap_or(0) as usize;
+        let Some(next) = offset.checked_add(46 + name_len + extra_len + comment_len) else {
+            break;
+        };
+        offset = next;
+    }
+    Ok(())
+}
+
 /// 列名长度上限，与 `field_id` 的 `max_length(64)` 对齐。
 ///
 /// 应用层不校验 `field_id` 的长度，所以不在这里挡住的话，
@@ -71,6 +155,8 @@ pub(crate) enum XlsxError {
     },
     /// 表头里缺了我们需要的列。`missing` 是缺的那些（不是全部要的）。
     HeaderMissingColumns { file: String, missing: Vec<String> },
+    /// 解压后总大小超过上限（疑似压缩炸弹）。
+    TooLarge { limit: u64 },
 }
 
 impl std::fmt::Display for XlsxError {
@@ -97,6 +183,9 @@ impl std::fmt::Display for XlsxError {
             }
             Self::HeaderMissingColumns { file, missing } => {
                 write!(f, "文件 {file} 的表头缺少必需列：{}", missing.join("、"))
+            }
+            Self::TooLarge { limit } => {
+                write!(f, "解压后大小超过 {limit} 字节上限（疑似压缩炸弹）")
             }
         }
     }
@@ -157,6 +246,7 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
     if !sniff_is_zip(bytes) {
         return Err(XlsxError::NotZip);
     }
+    ensure_uncompressed_size_bounded(bytes)?;
     // calamine 只能从 Read + Seek 构造。文件是请求作用域的临时文件，
     // 但这一层收 &[u8] 以便单测直接喂夹具字节。
     let cursor = std::io::Cursor::new(bytes);
@@ -360,6 +450,7 @@ pub(crate) fn read_snapshot_with_progress(
         }
 
         let cursor = std::io::Cursor::new(bytes.as_slice());
+        ensure_uncompressed_size_bounded(bytes)?;
         let mut workbook = guarded("打开工作簿", || {
             Xlsx::new(cursor).map_err(|error| XlsxError::Unreadable(error.to_string()))
         })?;
@@ -1074,5 +1165,35 @@ mod tests {
             None,
             "dimension 比表头还小：下溢归 None"
         );
+    }
+
+    fn zip_with_uncompressed_size(size: u32) -> Vec<u8> {
+        let name = b"xl/worksheets/sheet1.xml";
+        let mut entry = vec![0u8; 46];
+        entry[0..4].copy_from_slice(b"PK\x01\x02");
+        entry[24..28].copy_from_slice(&size.to_le_bytes());
+        entry[28..30].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        entry.extend_from_slice(name);
+        let cd_size = entry.len() as u32;
+        let mut bytes = entry;
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&[0u8; 4]);
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&cd_size.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn zip_uncompressed_size_is_bounded_before_calamine() {
+        let small = zip_with_uncompressed_size(1024);
+        assert!(ensure_uncompressed_size_bounded(&small).is_ok());
+        let bomb = zip_with_uncompressed_size(300 * 1024 * 1024);
+        assert!(matches!(
+            ensure_uncompressed_size_bounded(&bomb),
+            Err(XlsxError::TooLarge { .. })
+        ));
     }
 }

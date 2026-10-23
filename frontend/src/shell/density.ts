@@ -17,9 +17,15 @@ export const DENSITY_OPTIONS: ReadonlyArray<{
 ];
 
 export function loadDensity(): Density {
-  if (typeof localStorage === "undefined") return "default";
-  const raw = localStorage.getItem(DENSITY_STORAGE_KEY);
-  return raw === "compact" || raw === "loose" ? raw : "default";
+  try {
+    if (typeof localStorage === "undefined") return "default";
+    const raw = localStorage.getItem(DENSITY_STORAGE_KEY);
+    return raw === "compact" || raw === "loose" ? raw : "default";
+  } catch {
+    // 隐私模式/存储策略可能让 localStorage getter 或 getItem 直接抛错；
+    // 启动路径必须降级为默认密度而不是崩溃。
+    return "default";
+  }
 }
 
 export function persistDensity(density: Density): void {

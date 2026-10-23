@@ -50,16 +50,21 @@ export function FieldBindingsTable({
       {ordered.map(({ binding, depth }) => {
         const selected = binding.sourceKey === selectedSourceKey;
         return (
-          <div
+          <button
             key={binding.fieldId}
+            type="button"
             data-slot="binding-row"
             data-depth={depth}
             data-selected={selected ? "true" : undefined}
-            className={`group flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 transition-colors ${
+            aria-current={selected ? "true" : undefined}
+            className={`group flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-left transition-colors ${
               selected
                 ? "bg-blue-50 border-l-[3px] border-blue-500 pl-2.5"
                 : "hover:bg-muted/50"
-            } ${depth > 0 ? "ml-5" : ""}`}
+            } ${
+              // 子行缩进 1.25rem：宽度要扣掉这段，否则 w-full + ml-5 会横向溢出卡片。
+              depth > 0 ? "ml-5 w-[calc(100%_-_1.25rem)]" : "w-full"
+            }`}
             onClick={() => onSelect(binding.sourceKey)}
           >
             {/* 状态点 */}
@@ -81,7 +86,7 @@ export function FieldBindingsTable({
             <span className="text-xs text-muted-foreground flex-shrink-0">
               {binding.sourceKey}
             </span>
-          </div>
+          </button>
         );
       })}
       {/* 图例 */}

@@ -118,7 +118,7 @@ const CODE_CONTACT_SCOPE_MISSING: i32 = 99991672;
 /// 派发端点的输入契约。
 ///
 /// `Serialize` 是请求记录落库需要的：`request_body` 列存的就是本结构的序列化
-/// 原文（见 `domain/request_log_writer.rs`）。
+/// 结果，但 `token` 会先被替换成占位符（见 `redacted_request_body`）。
 ///
 /// # 为什么没有 `base_token` / `table_id` / `approval_code` 等配置字段
 ///
@@ -773,11 +773,16 @@ async fn record_dispatch_task(
         row.insert("serial_number", serde_json::json!(serial_number));
     }
 
-    // 已有行（seed 建过的常见路径）：按主键 update。
+    // 已有行（seed 建过的常见路径）：按主键 update，并以刚读到的 state 做乐观 CAS。
+    //
+    // 这是**最小乐观 CAS**：worker 可能正在处理同一条记录（HTTP 同步路径与 worker
+    // 是两个执行者），回写只允许从「读到的那个状态」推进，affected == 0 说明状态
+    // 已被并发路径推进过——以先写者为准，跳过回写，不当作成功。
+    // 不改 uuid 幂等与通知语义：那是两条路径共用的事实，与谁先落状态无关。
     let existing = match context
         .approval_tasks()
         .query()
-        .select_fields(&["id"])
+        .select_fields(&["id", "state"])
         .and_then(|query| query.where_eq("record_id", serde_json::json!(record_id)))
     {
         Ok(query) => match query.optional().await {
@@ -800,15 +805,30 @@ async fn record_dispatch_task(
                 return None;
             }
         };
+        let expected_state: String = match existing_row.require("state") {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(error = %error, record_id, "派发结果回写：任务行读不到 state");
+                return None;
+            }
+        };
         let updated = match context
             .approval_tasks()
             .query()
             .where_primary_key_eq(serde_json::json!(id))
+            .and_then(|query| query.where_eq("state", serde_json::json!(&expected_state)))
         {
             Ok(query) => query.update(row).await,
             Err(error) => Err(error),
         };
         match updated {
+            Ok(0) => tracing::warn!(
+                task_id = id,
+                state,
+                expected_state = %expected_state,
+                record_id,
+                "派发结果回写：任务状态已被并发路径推进，跳过回写"
+            ),
             Ok(_) => tracing::debug!(task_id = id, state, record_id, "派发结果已回写任务行"),
             Err(error) => {
                 tracing::warn!(error = %error, task_id = id, "派发结果回写任务行失败");
@@ -856,15 +876,23 @@ async fn record_dispatch_task(
                 let text = error.to_string();
                 if text.contains("Duplicate") || text.contains("1062") {
                     // 并发竞态：查询与插入之间 seed 建了行 → 转为按 record_id update。
-                    let raced = match context
+                    // 同样带最小乐观 CAS：seed 建的行是 `pending`，若它已被 worker 推进
+                    // 到终态就不要覆盖（affected == 0 即「先写者胜」）。
+                    let raced = context
                         .approval_tasks()
                         .query()
                         .where_eq("record_id", serde_json::json!(record_id))
-                    {
+                        .and_then(|query| query.where_eq("state", serde_json::json!("pending")));
+                    let raced = match raced {
                         Ok(query) => query.update(row).await,
                         Err(error) => Err(error),
                     };
                     match raced {
+                        Ok(0) => tracing::warn!(
+                            record_id,
+                            state,
+                            "派发结果回写：并发建行后转 update 时任务状态已非 pending，跳过回写"
+                        ),
                         Ok(_) => {
                             tracing::info!(
                                 record_id,
@@ -927,6 +955,21 @@ async fn task_id_by_record_id(context: &FeishuContext, record_id: &str) -> Optio
     id
 }
 
+/// 落库用的请求体：`token` 一律替换成占位符，其余字段原样保留。
+///
+/// `request_body` 会被 `list_requests` 在 `feishu.approval.read` 下回显，
+/// 而 `token` 是该配置的有效派发凭据（可创建审批实例、回写多维表格）。
+/// 明文落库等于把「只读权限」升级成「派发权限」——所以写入前必须脱敏。
+/// 历史行的明文另有读侧兜底：`list_requests::redact_request_body` 在回显前再
+/// 替换一次顶层 `token`，解析失败返回固定占位文案。库内明文清洗与 Token 轮换
+/// 仍按 0.1 暂缓项处理（本文件的写入路径不碰历史行，也不做任何清洗写）。
+fn redacted_request_body(input: &DispatchInput) -> Result<String, BaseError> {
+    let mut body = serde_json::to_value(input)
+        .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))?;
+    body["token"] = serde_json::json!("<redacted>");
+    serde_json::to_string(&body).map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))
+}
+
 /// 把一次派发请求落成一条请求记录（独立连接自动提交）。
 ///
 /// 写失败只降级 `tracing::error!`，**绝不改变派发结果**——见
@@ -936,12 +979,12 @@ async fn write_request_log(
     input: &DispatchInput,
     outcome: &DispatchOutcome,
 ) {
-    let request_body = match serde_json::to_string(input) {
+    let request_body = match redacted_request_body(input) {
         Ok(body) => body,
         Err(error) => {
             // 输入全是字符串字段，序列化失败实际不可达；真发生了也宁可不记
             // 也不记半行（request_body 必填）。
-            tracing::error!(error = %error, "派发请求体序列化失败，放弃落请求记录");
+            tracing::error!(error = %error, "派发请求体脱敏/序列化失败，放弃落请求记录");
             return;
         }
     };
@@ -1343,6 +1386,32 @@ async fn dispatch_single(
         .clone()
         .or_else(|| applicant_open_id(&cells, &applicant_field));
 
+    // 与 worker 共用同一创建令牌桶：同步单条也不能突破官方 100 次/分钟。
+    // 放在所有配置/记录校验之后、真正 create 之前，避免为注定失败的请求占名额。
+    let deployment = ctx
+        .tools()
+        .extension::<crate::authorization::AuthorizationVersionCache>()?
+        .deployment()
+        .to_string();
+    if let Err(failure) = crate::addon::feishu::domain::approval_rate_limit::acquire_create_slot(
+        ctx.tools().cache()?,
+        &deployment,
+        settings.approval_create_rate_per_minute,
+    )
+    .await
+    {
+        tracing::warn!(
+            stage = "rate_limit",
+            kind = ?failure.kind,
+            "审批派发同步创建未取得令牌桶名额"
+        );
+        return Ok(DispatchOutcome::fail(
+            42901,
+            Some(config_id),
+            format!("创建审批实例限速：{}", failure.message),
+        ));
+    }
+
     let result = dispatch_one(
         outbound.transport(),
         outbound.sleeper(),
@@ -1495,6 +1564,26 @@ fn deferred_notification(outcome: &DispatchOutcome) -> bool {
     )
 }
 
+/// HTTP 同步路径本轮要不要发通知、发给谁。
+///
+/// **状态门先于接收人**：中间态（`Waiting` / `Retryable` /
+/// `CreatedPendingBackfill`）与 `Accepted` 统一交给 worker，即便请求显式传了
+/// `notification_recipient` 也不在本层发——否则 worker 会按「结论变化」再发一条，
+/// 用户收到重复或超量消息（#32）。终态才允许发送：显式接收人优先，其次申请人
+/// open_id，最后记录创建人。
+fn http_notification_recipient(
+    input: &DispatchInput,
+    outcome: &DispatchOutcome,
+) -> Option<NotificationRecipient> {
+    if deferred_notification(outcome) {
+        return None;
+    }
+    input
+        .notification_recipient
+        .clone()
+        .or_else(|| fallback_recipient_of(outcome))
+}
+
 /// 无显式接收人时选哪种「未发」结论文案：中间态/受理 → 交给 worker 的措辞，
 /// 终态 → 「未指定接收人」。抽成纯函数是为了让**接线**本身可测——只钉谓词和
 /// 构造器，把 `None => not_requested()` 改回来测试依然全绿，这层接线就没人守。
@@ -1598,11 +1687,9 @@ async fn complete_feedback(
         base_token,
         table_id,
     );
-    // 接收人优先级：显式 `notification_recipient` > 申请人 open_id > 记录创建人。
-    let recipient = input
-        .notification_recipient
-        .clone()
-        .or_else(|| fallback_recipient_of(outcome));
+    // 接收人：状态门先于接收人——中间态/受理即使显式传了接收人也交给 worker，
+    // 只有终态才在本层发（见 [`http_notification_recipient`]）。
+    let recipient = http_notification_recipient(input, outcome);
     // 「本层不发」有两种原因，必须分开报（见 [`deferred_notification`]）：
     // 真取不到接收人 vs 中间态/受理刻意交给 worker。合并成一句「未指定接收人」
     // 会把后者说成前者——请求里传了发起人、发起人也解析成功时，那句话是假的。
@@ -1932,6 +2019,89 @@ mod tests {
                 .unwrap_or_default()
                 .contains("未指定接收人"),
             "终态 + 真无接收人必须回「未指定接收人」"
+        );
+    }
+
+    /// #32：显式接收人只允许终态发送；中间态与受理一律交给 worker（0 条），
+    /// 终态 1 条。`complete_feedback` 只用这个函数选接收人，所以「0/1 条」的
+    /// 判据就是它——不先改这里，任何调用点都发不出去。
+    #[test]
+    fn explicit_recipient_is_gated_to_terminal_states() {
+        let mut input = valid_input();
+        input.notification_recipient = Some(NotificationRecipient {
+            receive_id_type: ReceiveIdType::OpenId,
+            receive_id: "ou_explicit".to_string(),
+        });
+        let with_status = |status: FeedbackStatus| {
+            let mut outcome = DispatchOutcome::fail(0, Some(7), "中间态");
+            outcome.status = status;
+            outcome.applicant_open_id = Some("ou_applicant".into());
+            outcome.creator_open_id = Some("ou_creator".into());
+            outcome
+        };
+
+        // 0 条：中间态与受理即使显式指定了接收人也不由 HTTP 同步路径发送。
+        for status in [
+            FeedbackStatus::Waiting,
+            FeedbackStatus::Retryable,
+            FeedbackStatus::CreatedPendingBackfill,
+            FeedbackStatus::Accepted,
+        ] {
+            assert!(
+                http_notification_recipient(&input, &with_status(status)).is_none(),
+                "{status:?} 显式接收人也必须为 0 条（交给 worker）"
+            );
+        }
+
+        // 1 条：终态照旧发送，且显式接收人优先于申请人/创建人兜底。
+        for status in [FeedbackStatus::Succeeded, FeedbackStatus::Failed] {
+            assert_eq!(
+                http_notification_recipient(&input, &with_status(status))
+                    .map(|recipient| recipient.receive_id),
+                Some("ou_explicit".to_string()),
+                "{status:?} 终态必须发 1 条，且显式接收人优先"
+            );
+        }
+
+        // 显式接收人缺省时，终态的兜底链不回归。
+        let mut without_explicit = valid_input();
+        without_explicit.notification_recipient = None;
+        assert_eq!(
+            http_notification_recipient(&without_explicit, &with_status(FeedbackStatus::Failed))
+                .map(|recipient| recipient.receive_id),
+            Some("ou_applicant".to_string())
+        );
+    }
+
+    /// #30：请求记录落库前必须脱敏——`token` 是有效派发凭据，而 `request_body`
+    /// 会在 `feishu.approval.read` 下原样回显给只读账号。
+    #[test]
+    fn request_body_is_redacted_before_persistence() {
+        let mut input = valid_input();
+        input.token = "super-secret-dispatch-token".to_string();
+        input.applicant = Some("杨佳俊".to_string());
+        input.notification_recipient = Some(NotificationRecipient {
+            receive_id_type: ReceiveIdType::OpenId,
+            receive_id: "ou_recipient".to_string(),
+        });
+
+        let body = redacted_request_body(&input).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            !body.contains("super-secret-dispatch-token"),
+            "序列化结果不得含明文 token: {body}"
+        );
+        assert!(body.contains("<redacted>"), "必须含脱敏占位符: {body}");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(value["token"], json!("<redacted>"));
+        // 非敏感字段必须保留（排障与审计要用）。
+        assert_eq!(value["record_id"], json!("rec001"));
+        assert_eq!(value["requested_by"], json!("测试触发人"));
+        assert_eq!(value["applicant"], json!("杨佳俊"));
+        assert_eq!(
+            value["notification_recipient"]["receive_id"],
+            json!("ou_recipient")
         );
     }
 

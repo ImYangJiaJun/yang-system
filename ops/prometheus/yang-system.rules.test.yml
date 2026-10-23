@@ -39,6 +39,40 @@ tests:
         alertname: YangSystemAvailabilityErrorBudgetFastBurn
         exp_alerts: []
 
+  # 分母不得包含 business_error：错误 4/min + 成功 196/min 本应触发，
+  # 若把 1000/min 的 business_error 也算进分母，错误率会被稀释到 0.0033 而漏报。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="error"}'
+        values: '0+4x14'
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="success"}'
+        values: '0+196x14'
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="business_error"}'
+        values: '0+1000x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: YangSystemAvailabilityErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              job: yang-system
+              severity: critical
+              slo: availability
+            exp_annotations:
+              summary: "yang-system availability error budget is burning quickly"
+              runbook: "docs/contracts/SLO.md"
+
+  # 只有 business_error 高、没有 error：业务失败不消耗错误预算，不得触发。
+  - interval: 1m
+    input_series:
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="success"}'
+        values: '0+100x14'
+      - series: 'yang_system_action_requests_total{job="yang-system", instance="127.0.0.1:9090", operation="account.user.login", result="business_error"}'
+        values: '0+1000x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: YangSystemAvailabilityErrorBudgetFastBurn
+        exp_alerts: []
+
   # readiness：连续两分钟没有一次就绪，应触发 critical。
   - interval: 1m
     input_series:
@@ -66,6 +100,20 @@ tests:
       - eval_time: 5m
         alertname: YangSystemReadinessUnavailable
         exp_alerts: []
+
+  # readiness 指标完全缺失（从未上报）也必须告警，而不是静默。
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: YangSystemReadinessUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              slo: readiness
+            exp_annotations:
+              summary: "yang-system instance has not passed readiness for two minutes"
+              runbook: "docs/contracts/SLO.md"
 
   # 注册邮件：25% 投递失败率（sent 3/min、failed 1/min）持续超过 10 分钟，应触发 warning。
   - interval: 1m
@@ -280,11 +328,14 @@ tests:
               runbook: "docs/contracts/SLO.md"
 
   # 传播 p99 反例：桶计数累计 99/100（p99≈1s，低于 2 秒目标），不应触发。
+  # 必须补 +Inf 桶：histogram_quantile 用 +Inf 作为总计数，缺了它实际是空转。
   - interval: 1m
     input_series:
       - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="1"}'
         values: '0+99x24'
       - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="2.5"}'
+        values: '0+100x24'
+      - series: 'authz_propagation_seconds_bucket{job="yang-system", instance="127.0.0.1:9090", le="+Inf"}'
         values: '0+100x24'
     alert_rule_test:
       - eval_time: 25m

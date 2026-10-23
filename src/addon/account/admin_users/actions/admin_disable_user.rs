@@ -4,6 +4,7 @@ use crate::addon::account::domain::status::UserStatus;
 use crate::addon::account::Account;
 use crate::audit;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use yang_base::action::{ActionContext, ApiResponse};
 use yang_base::definition::{HttpMethod, Key, ModuleSpec};
@@ -31,6 +32,11 @@ pub(super) async fn handle(
             "目标用户必须是正整数".to_string(),
         ));
     }
+    if !account.credential_mutations_enabled() {
+        return Err(BaseError::ConfigError(
+            "账号停用必须在全部实例开启 Refresh 凭据版本签发后启用".to_string(),
+        ));
+    }
     // 防锁定：操作者不能停用自身（否则最后一名持权管理员可把自己锁出系统，
     // 且无上帝账号兜底，只能靠运维手工 SQL 恢复）。
     if operator_id == input.id {
@@ -39,8 +45,20 @@ pub(super) async fn handle(
             "不能停用当前操作者的账号".to_string(),
         ));
     }
+    // 生命周期路径必须先把全权组成员与目标行按 user_id 升序整批锁住，再锁目标
+    // 凭据行；否则会与成员变更路径的「全组成员升序 → 组行」形成 ABBA 环。
+    let guard_members = account
+        .system_authorization()
+        .system_admin_member_ids(&ctx)
+        .await?;
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
+        let mut lock_set: BTreeSet<i64> = guard_members.iter().copied().collect();
+        lock_set.insert(input.id);
+        account
+            .system_authorization()
+            .lock_users_ascending_in_tx(&ctx, &mut transaction, &lock_set)
+            .await?;
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, input.id)
             .await?;
@@ -74,6 +92,9 @@ pub(super) async fn handle(
             return Err(Account::last_system_admin_guard("停用"));
         }
         Account::disable_locked_in_tx(&mut transaction, &locked).await?;
+        account
+            .revoke_all_sessions_in_tx(&ctx, &mut transaction, input.id)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,

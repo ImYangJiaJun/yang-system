@@ -110,7 +110,6 @@ function portalWire(overrides: Record<string, unknown> = {}) {
     custom_slug: null,
     query_field_id: "fld_card",
     query_field_source_key: "card_no",
-    query_field_ids: null,
     access_mode: "public",
     exposed_columns: '["fld_limit"]',
     result_labels: null,

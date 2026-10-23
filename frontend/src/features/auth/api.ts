@@ -6,11 +6,6 @@ import { apiBase, parseJson } from "@/engine/http/http";
  * 会话生命周期（login/refresh/logout/disable）属引擎会话协议，见 engine/session/lifecycle.ts。
  */
 
-export type RegistrationEmailChallenge = {
-  expiresIn: number;
-  resendAfter: number;
-};
-
 export type RegisteredUser = {
   id: number;
   username: string;
@@ -54,39 +49,6 @@ function recordData(data: unknown): Record<string, unknown> | undefined {
   return data !== null && typeof data === "object" && !Array.isArray(data)
     ? (data as Record<string, unknown>)
     : undefined;
-}
-
-export async function requestRegistrationEmail(
-  email: string,
-  signal?: AbortSignal,
-): Promise<RegistrationEmailChallenge> {
-  const result = await requestPublicAction(
-    "/api/v1/users/registration-email-verifications",
-    { email },
-    signal,
-  );
-  const { payload } = result;
-  const data = recordData(payload.data);
-  if (
-    data?.accepted !== true ||
-    typeof data.expires_in !== "number" ||
-    !Number.isSafeInteger(data.expires_in) ||
-    data.expires_in <= 0 ||
-    typeof data.resend_after !== "number" ||
-    !Number.isSafeInteger(data.resend_after) ||
-    data.resend_after <= 0
-  ) {
-    throw new ApiError("验证码响应缺少有效时限", {
-      status: result.status,
-      code: payload.code,
-      requestId: result.requestId,
-      details: payload,
-    });
-  }
-  return {
-    expiresIn: data.expires_in,
-    resendAfter: data.resend_after,
-  };
 }
 
 export type MfaEmailCodeChallenge = {

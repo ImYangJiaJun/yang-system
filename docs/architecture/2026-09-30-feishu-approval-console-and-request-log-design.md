@@ -37,7 +37,9 @@
    `load_task:640-647` 读不到启用配置即返回 None，认领侧 `:598-604` 把任务标 terminal
    「所属配置不存在或已停用」，不重试、不坏数据。删除动作改为**同事务清理该配置的
    `state=pending` 任务行**（在途行此时必然仍为 pending——状态只在结束时写回），
-   backfilled/terminal 行保留作流水。
+   backfilled/terminal 行也一并删除：task 表的 `record_id` 是全局唯一键，保留旧配置的
+   完结行会让重建配置后的同记录播种永久卡住（2026-10-20 修复 #31）。请求流水仍在
+   `feishu_approval_request_log`。
 2. **配置读取只发生在认领时（快照）**：`process_one`（`:702-797`）只消费 `ClaimedTask`
    快照，处理中删配置无任何竞态路径。佐证 1 的结论。
 3. **field_map 表零唯一约束**（`field_map_table.rs:35-74` 只有 `config_id` indexed）。
@@ -147,7 +149,7 @@ Terminal / Retryable / validate 失败 / 内部 Err）。`dispatch_single` 内�
 | `list_configs` | `POST /api/v1/feishu/approval/configs/query` | `feishu.approval.read`；分页用共享 `ListInput`（与通用 TableView 同构）；映射按 config 分组带出（一次 `where_in` 防 N+1，照 `list_datasources`）；**不投影 `form_snapshot` 大字段** |
 | `create_config` | `POST /api/v1/feishu/approval/configs/create` | `feishu.approval.write`；**复用 `approval_provision::build_plan + insert_plan` 整条校验链**——手动建与首调自动建同一套保证；入参 `base_token/table_id/approval_code/applicant_field/backfill_field/base_timezone`（与 `DispatchInput` 三件套同语义，标题由 approval_name 自动生成）；在 `insert_plan` 层 match `ConstraintError` → 「该多维表格已配置，请先查询或删除后重建」（§2.2-4） |
 | `update_config` | `POST /api/v1/feishu/approval/configs/update` | `feishu.approval.write`；仅 `title` / `enabled` / `base_timezone` 三项。坐标与三件套不可改（改 = 删了重建，见 §7） |
-| `delete_config` | `POST /api/v1/feishu/approval/configs/delete` | `feishu.approval.write`；同事务删配置行 + field_map 行 + **`state=pending` 的 task 行**（backfilled/terminal 保留作流水）。无需未完结守卫（§2.2-1/2） |
+| `delete_config` | `POST /api/v1/feishu/approval/configs/delete` | `feishu.approval.write`；同事务删配置行 + field_map 行 + **该配置全部 task 行**（`record_id` 全局唯一，保留完结行会阻塞重建后的同记录播种；请求流水保留）。无需未完结守卫（§2.2-1/2） |
 
 三个写 Action 在**同一事务**里落 `audit_event`：`audit::succeeded_event`（user actor，
 取自 `ctx.actor()?.user_id()`——与 delete_options 用 system 变体不同，控制台是登录用户），
@@ -161,8 +163,10 @@ Terminal / Retryable / validate 失败 / 内部 Err）。`dispatch_single` 内�
 | Action | 路由 | 权限 | 说明 |
 |---|---|---|---|
 | `list_widgets` | `POST /api/v1/feishu/approval/definitions/widgets` | `feishu.approval.write` | 按 `approval_code` 调 `approvals get`，`parse_form` 解析后返回控件列表（id/名称/类型/required）。归 write 侧与 `list_bitable_*` 同理：只读语义但出站耗配额 |
-| `list_requests` | `POST /api/v1/feishu/approval/requests/query` | `feishu.approval.read` | 派发记录分页；`request_body`/`response_body` 随行返回（体量小），前端本地展开 |
+| `list_requests` | `POST /api/v1/feishu/approval/requests/query` | `feishu.approval.read` | 派发记录分页；`request_body`/`response_body` 随行返回（体量小），前端本地展开。**`request_body` 读侧脱敏**：顶层 `token` 替换为 `<redacted>`，解析失败返回 `[unparseable request body]`（历史明文不回显；库内清洗与 Token 轮换仍按暂缓项 0.1） |
 | `list_tasks` | `POST /api/v1/feishu/approval/tasks/query` | `feishu.approval.read` | task 分页（按 config_id/state 过滤，options：pending/creating/created/backfilled/terminal/unnotified），批量记录的下钻视图 |
+| `list_events` | `POST /api/v1/feishu/approval/events/query` | `feishu.approval.read` | 审批事件分页（id 倒序）；`terminal_only=true` 过滤 `processed_at` 非空且 `retry_count >= MAX_EVENT_RETRY_COUNT` 的失败终态行 |
+| `retry_event` | `POST /api/v1/feishu/approval/events/{id}/retry` | `feishu.approval.write` | 人工重试失败终态事件：重置 `processed_at=NULL`、`retry_count=0`、`last_error=NULL` 回队；成功事件 400 拒绝重放；更新条件含终态判据（affected=0 即状态冲突） |
 
 ### 5.3 前端
 
@@ -213,7 +217,7 @@ Terminal / Retryable / validate 失败 / 内部 Err）。`dispatch_single` 内�
 后端：表声明单测（照 task_table 六条形态）；各 Action 入参校验单测；
 `create_config` 的 ConstraintError 映射单测；`dispatch` 落记录的全出口集成测试
 （真实 MySQL，含 validate 失败、单条成功/等待/失败、批量受理、provision 失败）；
-`delete_config` 清 pending 任务与保留历史行的单测。
+`delete_config` 清全部任务行、重建后可重新播种的单测。
 前端：两页 view 测试（照 datasources 页测试形态）+ 向导分步测试 + 契约对账。
 门禁：每任务 `python scripts/run_ci.py quick`；新表与写站点过 schema_anchor；
 领先 `frontend/tests/engine/contracts/openapi-contract.test.ts` 的静态编译。

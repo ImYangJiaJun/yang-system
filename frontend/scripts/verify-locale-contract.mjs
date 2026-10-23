@@ -48,6 +48,12 @@ const mutations = [
     '"x".toLocaleLowerCase();\nexport const PRODUCT_LOCALE',
   ],
   [
+    "unpinned date locale",
+    "application",
+    "export const PRODUCT_LOCALE",
+    '"x".toLocaleDateString();\nexport const PRODUCT_LOCALE',
+  ],
+  [
     "reopen trigger",
     "document",
     "<!-- locale-contract: reopen-trigger second-locale -->",
@@ -117,6 +123,15 @@ function verifyLocaleContract(candidate) {
   }
   if (/\.toLocale(?:Lower|Upper)Case\(\s*\)/.test(candidate.application)) {
     throw new Error("应用代码禁止使用依赖浏览器环境的无参数 locale 大小写转换");
+  }
+  if (
+    /\.toLocale(?:String|DateString|TimeString)\(\s*\)/.test(
+      candidate.application,
+    )
+  ) {
+    throw new Error(
+      "应用代码禁止使用依赖浏览器环境的无参数 locale 日期/时间格式化",
+    );
   }
   if (/\.localeCompare\([^,)]*\)/.test(candidate.application)) {
     throw new Error("应用代码禁止使用依赖浏览器环境的无 locale 文本排序");

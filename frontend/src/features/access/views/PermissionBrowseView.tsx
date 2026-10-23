@@ -14,6 +14,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { formatProductDate } from "@/shared/lib/product-locale";
 import {
   useQuery,
   useQueryClient,
@@ -72,7 +73,7 @@ function messageOf(cause: unknown): string {
 }
 
 function formatDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString();
+  return formatProductDate(unixSeconds * 1000);
 }
 
 /// 持有者行的过期徽标（与按用户视图的直授徽标同一口径：已过期 / 永久 / 临期）。

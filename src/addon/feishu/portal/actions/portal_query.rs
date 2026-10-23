@@ -64,11 +64,11 @@ const UA_MAX: usize = 500;
 const DEFAULT_EMPTY_MESSAGE: &str = "未找到匹配记录";
 
 /// 失败信封的错误码。
-mod codes {
+pub(super) mod codes {
     /// 门户不存在 / 已停用（两者同码，不泄露「这个 slug 存在但被停用」）。
     pub(super) const PORTAL_NOT_FOUND: i32 = 40401;
     /// 访问被拒（口令错误 / 口令过期 / 未登录）。与「无权限」统一，不泄露口令是否存在。
-    pub(super) const FORBIDDEN: i32 = 40301;
+    pub(crate) const FORBIDDEN: i32 = 40301;
 }
 
 /// 公开查询的输入契约（`slug` 走路径参数，从 `ctx.request` 取）。
@@ -196,7 +196,7 @@ pub(super) async fn handle(
         .optional::<i64>("rate_limit_per_min")?
         .unwrap_or(30)
         .clamp(1, i64::from(u32::MAX)) as u32;
-    if let Err(error) = rate_limit::check_query(&ctx, &slug, &client_ip, limit).await {
+    if let Err(error) = rate_limit::check_query(&ctx, portal_id, &client_ip, limit).await {
         write_log(
             &context,
             portal_id,
@@ -237,12 +237,16 @@ pub(super) async fn handle(
 
     let datasource_id: i64 = portal.require("datasource_id")?;
     let query_source_key: String = portal.require("query_field_source_key")?;
-    let exposed: Vec<String> =
-        serde_json::from_str(&portal.require::<String>("exposed_columns")?).unwrap_or_default();
-    let labels: HashMap<String, String> = portal
-        .optional::<String>("result_labels")?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
+    let exposed: Vec<String> = serde_json::from_str(&portal.require::<String>("exposed_columns")?)
+        .map_err(|error| {
+            BaseError::ConfigError(format!("门户 exposed_columns 配置损坏: {error}"))
+        })?;
+    let labels: HashMap<String, String> = match portal.optional::<String>("result_labels")? {
+        Some(raw) => serde_json::from_str(&raw).map_err(|error| {
+            BaseError::ConfigError(format!("门户 result_labels 配置损坏: {error}"))
+        })?,
+        None => HashMap::new(),
+    };
 
     let columns = load_exposed_columns(&context, datasource_id, &exposed, &labels).await?;
 
@@ -264,7 +268,7 @@ pub(super) async fn handle(
     // 精确匹配落空时直接返回空结果，由前端引导用户使用自动补全选择完整值。
 
     // 第二步：按命中行的 `option_id` 反查开放列子行，合并成多列结果。
-    let children = load_child_values(&context, &matched, &columns).await?;
+    let (children, children_truncated) = load_child_values(&context, &matched, &columns).await?;
     let rows = project_rows(&matched, &children, &columns)?;
     let status = if rows.is_empty() { "miss" } else { "hit" };
     write_log(
@@ -284,6 +288,8 @@ pub(super) async fn handle(
             .optional::<String>("empty_message")?
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_EMPTY_MESSAGE.to_string())
+    } else if children_truncated {
+        format!("开放列数据超过 {CHILD_MAX_ROWS} 行上限，部分列值已截断")
     } else if rows.len() == MATCH_LIMIT {
         // 匹配返回满页只可能是查询值本身不唯一（如同一卡号多行），
         // 这时必须明说被截断了，否则用户会以为看到的就是全部。
@@ -331,7 +337,7 @@ pub(super) async fn find_portal(
 ///
 /// 返回 `Result<Result<(), String>, BaseError>` 而不是 `Result<(), BaseError>`：
 /// 「拒绝」不是故障，把它做成 `Err` 会让每次被拒都记成 `result="error"`。
-async fn authorize(
+pub(super) async fn authorize(
     ctx: &ActionContext,
     context: &FeishuContext,
     access_mode: &str,
@@ -432,22 +438,25 @@ async fn load_exposed_columns(
         .collect())
 }
 
-/// 一次取回的开放列数据行数上限（= 查询层每页硬上限 `MAX_TABLE_QUERY_PAGE_SIZE`）。
-///
-/// 开放列数据是「命中行 × 开放列」的展开，精确匹配下命中行通常 0 或 1 行，远够用。
-const CHILD_LIMIT: usize = 100;
+/// 一次取回的开放列数据行数上限（查询层每页硬上限 `MAX_TABLE_QUERY_PAGE_SIZE`）。
+const CHILD_PAGE_SIZE: usize = 100;
+
+/// 开放列数据的总行数上限：命中行 × 开放列的展开，超过即明确报告截断。
+const CHILD_MAX_ROWS: usize = 10_000;
 
 /// 取命中行在开放列上的数据，按父选项分组。
 ///
-/// 返回 `命中行 option_id -> (开放列 source_key -> 文案)`。`feishu_option` 一行 = 一个
-/// 字段的一个取值，同一记录的其他字段靠 `parent_key`（= 父选项的 `option_id`）串起来。
+/// 返回 `(命中行 option_id -> (开放列 source_key -> 文案), 是否截断)`。
+/// `feishu_option` 一行 = 一个字段的一个取值，同一记录的其他字段靠 `parent_key`
+/// （= 父选项的 `option_id`）串起来。查询层单页上限只有 100，必须分页取全，
+/// 否则多命中/多开放列时会静默丢掉列值。
 async fn load_child_values(
     context: &FeishuContext,
     matched: &[Record],
     columns: &[ExposedColumn],
-) -> Result<HashMap<String, HashMap<String, String>>, BaseError> {
+) -> Result<(HashMap<String, HashMap<String, String>>, bool), BaseError> {
     if matched.is_empty() || columns.is_empty() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), false));
     }
     let option_ids = matched
         .iter()
@@ -461,16 +470,30 @@ async fn load_child_values(
         .map(|column| serde_json::json!(&column.source_key))
         .collect::<Vec<_>>();
 
-    let rows = context
+    let query = context
         .options()
         .query()
         .select_fields(&["parent_key", "source_key", "label"])?
         .where_in("parent_key", option_ids)?
         .where_in("source_key", source_keys)?
-        .where_eq("enabled", serde_json::json!(true))?
-        .page(1, CHILD_LIMIT)?
-        .all()
-        .await?;
+        .where_eq("enabled", serde_json::json!(true))?;
+
+    let mut rows = Vec::new();
+    let mut page = 1usize;
+    let mut truncated = false;
+    loop {
+        let batch = query.clone().page(page, CHILD_PAGE_SIZE)?.all().await?;
+        let batch_len = batch.len();
+        rows.extend(batch);
+        if batch_len < CHILD_PAGE_SIZE {
+            break;
+        }
+        if rows.len() >= CHILD_MAX_ROWS {
+            truncated = true;
+            break;
+        }
+        page += 1;
+    }
 
     let mut by_parent: HashMap<String, HashMap<String, String>> = HashMap::new();
     for record in &rows {
@@ -484,7 +507,7 @@ async fn load_child_values(
             .or_default()
             .insert(record.require("source_key")?, record.require("label")?);
     }
-    Ok(by_parent)
+    Ok((by_parent, truncated))
 }
 
 /// 把命中行投影成结果行。

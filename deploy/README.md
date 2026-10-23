@@ -215,9 +215,9 @@ SYNC_CONFIG=1 RESET_DB=1 RESET_DB_CONFIRM=yes ./deploy-blue-green.sh refresh
   中途失败（清库语句、Redis、起容器）时，脚本会**先把容器起回去**再退出，不会把站点留在
   停着的状态；库若停在半途，修好原因后重跑一次同样的 refresh 即可重新对齐。
   服务器上还没有线上容器时，结论会明确写成「已执行，但**未经验证**」而不是「完成 ✔」。
-- ⚠️ **清库之后没有任何账号能登录**：注册出来的新账号零权限，而授予权限只有手工 SQL
-  （见 `docs/contracts/AUTHZ_GRANTS.md` 的「初始授权运维手册」），系统也没有「首个注册账号
-  即管理员」的引导。
+- ⚠️ **清库之后没有任何账号能登录**：全新部署时首个成功注册的账号会在同一事务内被引导为
+  `system_admin`（内置全权组），之后即可通过控制台继续授权；手工 SQL 只在哨兵行被误删等
+  灾备场景使用（见 `docs/contracts/AUTHZ_GRANTS.md`）。
 - ⚠️ **不可恢复**：MySQL 没有备份机制，清掉就没了（见 `docs/operations/RUNBOOK_BACKUP.md`）。
 - ⚠️ 清库对**已签发 Token** 的影响：`users` 行被删掉后，请求期的授权版本校验会拒绝**绝大多数**
   旧 Token（缓存未命中或版本不等时会回查 MySQL 的 `users.authz_version`，用户不存在即拒）。
@@ -277,14 +277,28 @@ SYNC_CONFIG=1 RESET_DB=1 RESET_DB_CONFIRM=yes ./deploy-blue-green.sh refresh
 
 ## 五、当前暴露形态与 TLS 边缘
 
-**本测试环境当前是公网明文直连**：`http://47.109.148.207:18654/`，由
-`deploy.ps1 -EdgeBindAddr 0.0.0.0` 发布（`deploy.ps1` 的该参数默认值即 `0.0.0.0`，
-所以不带参数也是公网直连；要收回请显式传 `-EdgeBindAddr 127.0.0.1`）。
+**默认是兼容模式 `auto`**：两个入口脚本的 `EdgeBindAddr` 默认值都是 `auto`——
+已有线上容器时沿用它的实际边缘绑定（例如当前公网部署仍是 `0.0.0.0:18654`），
+所以直接重部署**不会改变既有暴露面**；全新部署没有线上容器时回落到 `127.0.0.1`
+（仅本机可达）。要新开公网明文入口必须显式 `-EdgeBindAddr 0.0.0.0`，并尽快在
+宿主机上配受信 TLS 反代；要收回公网传 `-EdgeBindAddr 127.0.0.1`。
 
-> ⚠️ 这是**明文 http**：登录凭据、会话 Cookie、密码重置令牌都在公网上不加密传输。
-> 之所以这样，是因为飞书审批的「关联外部选项」要求**公网可访问、不能是内网地址**
+**发布前只读预检**（`deploy-blue-green.sh` 在起绿容器/切流量之前执行，失败即中止，
+线上不受影响）：
+- `feishu_user_token` 至多一行（`slot` 唯一索引）；
+- `feishu_approval_task_applicant` 无重复 `task_id`（唯一索引）；
+- `feishu_datasource_portal` 的 `exposed_columns` / `result_labels` 均为合法 JSON；
+- `[feishu].enabled = true` 时 `event_verification_token` 非空；若本部署确实不用
+  审批事件，显式传 `-AllowMissingEventToken` 跳过这一条；
+- `[logging].filter` 若显式配置，提醒补 `,error`（非阻塞）。
+
+外部 MySQL（`[mysql].url` 的 host 不是本脚本管理的容器）无法由脚本预检，需按
+`docs/assessments/2026-10-22-remediation-acceptance.md` §4.1 的只读 SELECT 人工确认。
+
+> ⚠️ 显式开到 `0.0.0.0` 是**明文 http**：登录凭据、会话 Cookie、密码重置令牌都在公网上
+> 不加密传输。飞书审批的「关联外部选项」要求**公网可访问、不能是内网地址**
 > （官方原文：`docs/reference/feishu` 的 `approval/.../associate-external-options.md`，
-> 另有 **3 秒**请求超时），而 TLS 边缘还没落地。
+> 另有 **3 秒**请求超时），最小暴露形态是宿主机 nginx 只放行取选项路径并终结 TLS。
 > **上线真实用户前必须换成下面的形态之一。**
 
 演进路径，按暴露面从小到大：

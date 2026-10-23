@@ -2,6 +2,14 @@
 //!
 //! `request_body` / `response_body` 随行返回：单次派发请求的体量小，前端本地展开
 //! 比二次加载更省事。
+//!
+//! # 读侧脱敏
+//!
+//! 新写入的 `request_body` 已在 `dispatch::redacted_request_body` 里把 `token`
+//! 换成 `<redacted>`；但 2026-10 之前的历史行仍是明文 Token。本端点只读，不能回滚
+//! 这些行，也不能把「只读权限」升级成「派发权限」——所以回显前必须再脱敏一次。
+//! 解析失败按 fail-closed 返回固定占位文案，绝不原样吐出可能含凭据的残缺报文。
+//! 历史行的库内清洗与 Token 轮换仍按暂缓项 0.1 处理，本端点不做任何 DB 写。
 
 use std::sync::Arc;
 
@@ -75,6 +83,29 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         .register()
 }
 
+/// 无法解析时返回的固定文案（fail-closed：不原样回显）。
+const UNPARSEABLE_REQUEST_BODY: &str = "[unparseable request body]";
+
+/// 回显前的读侧脱敏：只替换顶层 `token`，其余字段原样保留。
+///
+/// 历史行可能仍是明文；新行已经是 `<redacted>`（替换是幂等的）。非对象或
+/// 解析失败一律返回固定占位文案——残缺报文里同样可能有凭据片段。
+pub(super) fn redact_request_body(raw: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return UNPARSEABLE_REQUEST_BODY.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return UNPARSEABLE_REQUEST_BODY.to_string();
+    };
+    if object.contains_key("token") {
+        object.insert(
+            "token".to_string(),
+            serde_json::Value::String("<redacted>".to_string()),
+        );
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| UNPARSEABLE_REQUEST_BODY.to_string())
+}
+
 pub(super) async fn handle(
     _ctx: ActionContext,
     input: ListInput,
@@ -122,7 +153,7 @@ pub(super) async fn handle(
                 table_id: record.require("table_id")?,
                 config_id: record.optional("config_id")?,
                 record_id: record.optional("record_id")?,
-                request_body: record.require("request_body")?,
+                request_body: redact_request_body(&record.require::<String>("request_body")?),
                 outcome: record.require("outcome")?,
                 message: record.require("message")?,
                 serial_number: record.optional("serial_number")?,
@@ -146,6 +177,48 @@ pub(super) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 历史行的明文 Token 必须被替换，其余字段原样保留。
+    #[test]
+    fn legacy_plaintext_token_is_redacted_on_read() {
+        let redacted = redact_request_body(
+            r#"{"token":"real-dispatch-token","record_id":"rec001","applicant":"张三"}"#,
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&redacted).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(value["token"], "<redacted>");
+        assert_eq!(value["record_id"], "rec001");
+        assert_eq!(value["applicant"], "张三");
+        assert!(
+            !redacted.contains("real-dispatch-token"),
+            "明文 Token 不得回显: {redacted}"
+        );
+    }
+
+    /// 新行已经是占位符：脱敏必须幂等。
+    #[test]
+    fn already_redacted_body_is_unchanged() {
+        let redacted = redact_request_body(r#"{"token":"<redacted>","record_id":"rec001"}"#);
+        let value: serde_json::Value =
+            serde_json::from_str(&redacted).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(value["token"], "<redacted>");
+        assert_eq!(value["record_id"], "rec001");
+    }
+
+    /// 解析失败 fail-closed：固定占位文案，绝不原样返回残缺报文。
+    #[test]
+    fn malformed_body_is_not_echoed() {
+        for raw in [
+            r#"{"token":"real-dispatch-token""#,
+            r#"token=real-dispatch-token"#,
+            "[]",
+            "null",
+        ] {
+            let redacted = redact_request_body(raw);
+            assert_eq!(redacted, UNPARSEABLE_REQUEST_BODY, "输入: {raw}");
+            assert!(!redacted.contains("real-dispatch-token"));
+        }
+    }
 
     /// 投影列清单与列表项序列化键逐一对账：多一列少一列都说明漂移。
     #[test]

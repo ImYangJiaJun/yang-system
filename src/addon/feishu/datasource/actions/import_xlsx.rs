@@ -262,18 +262,23 @@ pub(super) async fn handle(
     // 代价是每份文件多解析一次表头（`read_header` 只驱动到表头行结束，不扫 sheetData；
     // 贵的那一段是 `Xlsx::new` 读字符串表）。换的是「一条只在探表头存在的规则不会在
     // 重新导入时消失」。
-    let mut headers = Vec::with_capacity(loaded.len());
-    for (index, (name, bytes)) in loaded.iter().enumerate() {
-        let header = xlsx::read_header(bytes).map_err(|error| {
-            BaseError::ParamInvalid("files".to_string(), format!("{name}：{error}"))
-        })?;
-        headers.push((name.clone(), header));
-        // `files_done` = **读完并校验过表头**的文件数：这一步就是那道校验，
-        // 所以它 +1 的时机在这里，而不是在「把字节读进内存」那一步。
-        import_progress::report_loading(input.datasource_id, files_total, (index + 1) as u32);
-    }
-    xlsx::require_consistent_headers(&headers)
-        .map_err(|error| BaseError::ParamInvalid("files".to_string(), error.to_string()))?;
+    // 表头解析也是同步 CPU 活（`Xlsx::new` 会急切读完 sharedStrings）；与下面的
+    // snapshot 解析一样移进 spawn_blocking，避免占住 tokio worker。
+    let loaded = tokio::task::spawn_blocking(move || {
+        let mut headers = Vec::with_capacity(loaded.len());
+        for (index, (name, bytes)) in loaded.iter().enumerate() {
+            let header = xlsx::read_header(bytes).map_err(|error| {
+                BaseError::ParamInvalid("files".to_string(), format!("{name}：{error}"))
+            })?;
+            headers.push((name.clone(), header));
+            import_progress::report_loading(input.datasource_id, files_total, (index + 1) as u32);
+        }
+        xlsx::require_consistent_headers(&headers)
+            .map_err(|error| BaseError::ParamInvalid("files".to_string(), error.to_string()))?;
+        Ok::<_, BaseError>(loaded)
+    })
+    .await
+    .map_err(|error| BaseError::ConfigError(format!("表头解析任务失败：{error}")))??;
 
     // 解析挪进 `spawn_blocking`：它是同步 CPU 活，15 万行要跑十几秒，占住一个 tokio
     // worker 就意味着单 vCPU 部署上「进度 GET」与它抢同一个线程——而那正是进度要解决

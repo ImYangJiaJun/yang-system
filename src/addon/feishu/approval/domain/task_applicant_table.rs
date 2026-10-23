@@ -14,7 +14,7 @@
 //! 不声明 `created_at`/`updated_at`：本表是任务的属性扩展而非台账，写入即终态，
 //! 没有按时间扫描的查询。
 
-use yang_base::definition::{Int, Key, Str, TableSpec};
+use yang_base::definition::{FieldName, FieldRef, Int, Key, Str, TableName, TableSpec};
 use yang_base::table::Record;
 use yang_base::BaseError;
 
@@ -60,35 +60,56 @@ pub(crate) async fn upsert_task_applicant(
     } else {
         row.insert("task_id", serde_json::json!(task_id));
         row.insert("open_id", serde_json::json!(open_id));
-        context
-            .approval_task_applicants()
-            .query()
-            .insert(row)
-            .await?;
+        let inserted = context.approval_task_applicants().query().insert(row).await;
+        if let Err(error) = inserted {
+            // 并发路径已经插入同一 task_id 时，唯一索引会拒绝本次 INSERT；
+            // 退化成更新即可（本表的不变式是「一个任务至多一行发起人」）。
+            let mut update = Record::new();
+            update.insert("open_id", serde_json::json!(open_id));
+            let affected = context
+                .approval_task_applicants()
+                .query()
+                .where_eq("task_id", serde_json::json!(task_id))?
+                .update(update)
+                .await?;
+            if affected != 1 {
+                return Err(error);
+            }
+        }
     }
     Ok(())
 }
 
+fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError> {
+    let field = FieldName::new(field).map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    Ok(FieldRef::new(table_name.clone(), field))
+}
+
 /// 申请人解析结果表。
 pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
-    Ok(
-        TableSpec::new(yang_base::table!("feishu_approval_task_applicant"))
-            .title("飞书审批任务申请人")
-            .fields(yang_base::fields! {
-                // 与 `task_table` 同一形态：`sortable`/`filterable` 是 fail-closed 的，
-                // 漏了只在运行期报 FieldPermissionDenied，启动与单测都发现不了。
-                id => Key::new().title("ID").filterable(true).sortable(true),
-                task_id => Int::new()
-                    .title("任务 ID")
-                    .require(true)
-                    .indexed(true)
-                    .filterable(true),
-                open_id => Str::new()
-                    .title("发起人 Open ID")
-                    .require(true)
-                    .max_length(64),
-            }),
-    )
+    let table_name = yang_base::table!("feishu_approval_task_applicant");
+    Ok(TableSpec::new(table_name.clone())
+        .title("飞书审批任务申请人")
+        .fields(yang_base::fields! {
+            // 与 `task_table` 同一形态：`sortable`/`filterable` 是 fail-closed 的，
+            // 漏了只在运行期报 FieldPermissionDenied，启动与单测都发现不了。
+            id => Key::new().title("ID").filterable(true).sortable(true),
+            task_id => Int::new()
+                .title("任务 ID")
+                .require(true)
+                .indexed(true)
+                .filterable(true),
+            open_id => Str::new()
+                .title("发起人 Open ID")
+                .require(true)
+                .max_length(64),
+        })
+        // 「一个任务至多一行发起人」由数据库钉死：读-改-插在两条写入路径并发时
+        // 会各插一行，读取侧只取第一行，谁是发起人就成了看运气。
+        .unique_named(
+            "uk_feishu_approval_task_applicant_task_id",
+            [field_ref(&table_name, "task_id")?],
+        ))
 }
 
 #[cfg(test)]
@@ -137,5 +158,17 @@ mod tests {
                 field.name()
             );
         }
+    }
+
+    #[test]
+    fn task_id_has_a_unique_index_for_the_single_row_invariant() {
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        assert!(
+            spec.indexes.iter().any(|index| {
+                index.unique
+                    && index.name.as_deref() == Some("uk_feishu_approval_task_applicant_task_id")
+            }),
+            "task_id 必须有唯一索引，防止并发 upsert 留下两行"
+        );
     }
 }

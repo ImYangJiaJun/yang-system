@@ -54,6 +54,7 @@
 | 列 | 类型 | 说明 |
 |---|---|---|
 | `id` | `Key` | 主键 |
+| `slot` | `Int` 必填、默认 `1`、**唯一索引** | 单行不变式的数据库约束；并发授权插入时第二条撞它，转为按 id 覆盖 |
 | `open_id` / `user_name` | `Str(64)` 必填 / `Str(128)` | 授权人身份与展示名 |
 | `access_token` / `refresh_token` | `Text` 必填、`secret`、仅 `SYSTEM_ROLE` 可读写 | 照 `feishu_datasource_field.token_cipher` 的处置 |
 | `access_token_expires_at` / `refresh_token_expires_at` | `Timestamp` 必填 | 以响应里的 `expires_in` / `refresh_token_expires_in` 实算 |
@@ -61,8 +62,10 @@
 | `authorized_at` | `Timestamp` 必填 | **最近一次完整授权时间**（350 天判据） |
 | `created_at` / `updated_at` | 标准列 | |
 
-**不变量**：至多一行。读写按「第一行」定位（`load_single`），不依赖「插入时能显式指定
-自增主键」这一 DSL 行为。
+**不变量**：至多一行。由 `slot = 1` 的**唯一索引**钉死，`load_single` 按 `slot = 1`
+定位，不再依赖「表里只有一行 / 取第一行」这种约定。存量库若已因旧代码的并发插入存在
+多行，schema 同步新增唯一索引会 fail-closed（启动失败）；部署前需先人工去重，保留
+最新一行。
 
 ## 5. 三条时钟与刷新语义
 

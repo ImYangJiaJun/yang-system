@@ -41,14 +41,21 @@ pub(super) struct LookupUser {
     status: UserStatus,
 }
 
-impl TryFrom<&Record> for LookupUser {
-    type Error = BaseError;
-
-    fn try_from(user: &Record) -> Result<Self, Self::Error> {
+impl LookupUser {
+    /// 把用户记录投影为查找视图。
+    ///
+    /// `email` 受字段级契约约束：只有持有 `account.users.read` 的调用方才能看到；
+    /// 其余登录用户拿到 `null`。服务端仍可按邮箱搜索（不回显命中值），因此用户选择器
+    /// 的可用性不变，批量收割邮箱的路径被关闭。
+    fn from_record(user: &Record, include_email: bool) -> Result<Self, BaseError> {
         Ok(Self {
             id: user.require(USER_ID)?,
             username: user.require(USERNAME)?,
-            email: user.optional(EMAIL)?,
+            email: if include_email {
+                user.optional(EMAIL)?
+            } else {
+                None
+            },
             status: UserStatus::from_storage(&user.require::<String>(STATUS)?)?,
         })
     }
@@ -81,13 +88,16 @@ pub(super) async fn handle(
     account: Arc<Account>,
 ) -> Result<LookupUsersResult, BaseError> {
     let (page, page_size) = resolve_page(&input)?;
+    let include_email = ctx
+        .authenticated_user()
+        .is_some_and(|user| user.has_permission("account.users.read"));
     let records = account
         .users()
         .search(&ctx, input.q.as_deref(), page, page_size)
         .await?;
     let users = records
         .iter()
-        .map(LookupUser::try_from)
+        .map(|record| LookupUser::from_record(record, include_email))
         .collect::<Result<Vec<_>, BaseError>>()?;
 
     Ok(LookupUsersResult { users })
@@ -188,7 +198,7 @@ mod tests {
             .set(crate::addon::account::user::table::STATUS, "active")
             .set(crate::addon::account::user::table::CREATED_AT, 10)
             .set(crate::addon::account::user::table::UPDATED_AT, 11);
-        let user = LookupUser::try_from(&record)
+        let user = LookupUser::from_record(&record, true)
             .unwrap_or_else(|error| panic!("完整记录应转换为查找视图: {error}"));
         let value = serde_json::to_value(user)
             .unwrap_or_else(|error| panic!("查找视图应可序列化: {error}"));
@@ -211,7 +221,7 @@ mod tests {
             .set(USER_ID, 8)
             .set(USERNAME, "ghost")
             .set(crate::addon::account::user::table::STATUS, "deleted");
-        let user = LookupUser::try_from(&record)
+        let user = LookupUser::from_record(&record, true)
             .unwrap_or_else(|error| panic!("匿名化用户应可转换为查找视图: {error}"));
         let value = serde_json::to_value(user)
             .unwrap_or_else(|error| panic!("查找视图应可序列化: {error}"));
@@ -219,5 +229,20 @@ mod tests {
         assert_eq!(value["username"], serde_json::json!("ghost"));
         assert_eq!(value["email"], serde_json::Value::Null);
         assert_eq!(value["status"], serde_json::json!("deleted"));
+    }
+
+    #[test]
+    fn lookup_user_hides_email_without_the_read_permission() {
+        let record = Record::new()
+            .set(USER_ID, 9)
+            .set(USERNAME, "alice")
+            .set(EMAIL, "alice@example.com")
+            .set(crate::addon::account::user::table::STATUS, "active");
+        let user = LookupUser::from_record(&record, false)
+            .unwrap_or_else(|error| panic!("查找视图应可转换: {error}"));
+        let value = serde_json::to_value(user)
+            .unwrap_or_else(|error| panic!("查找视图应可序列化: {error}"));
+        assert_eq!(value["email"], serde_json::Value::Null);
+        assert_eq!(value["username"], serde_json::json!("alice"));
     }
 }

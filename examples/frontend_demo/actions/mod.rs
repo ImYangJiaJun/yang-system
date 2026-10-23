@@ -14,6 +14,7 @@ mod insight;
 mod list;
 mod preview;
 mod redirect;
+mod reset;
 mod upload;
 
 use super::model::DemoItems;
@@ -61,6 +62,7 @@ const ITEMS_ACTIONS: &[ItemsRegister] = action_registry![ItemsRegister;
     delete,
     bulk_delete,
     insight,
+    reset,
     // scaffold:action-registration
 ];
 

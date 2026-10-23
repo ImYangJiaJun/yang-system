@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
+import { PRODUCT_LOCALE } from "@/shared/lib/product-locale";
 import {
   restoreClipboard,
   stubExecCommand,
@@ -197,6 +198,22 @@ describe("账号设置页", () => {
     expect(
       screen.getByRole("heading", { name: "账号设置" }),
     ).toBeInTheDocument();
+  });
+
+  it("时间显式按产品 locale 格式化（不用浏览器隐式 locale）", async () => {
+    stubAccountApi();
+    renderTestApp({ path: "/account", authenticated: true });
+
+    await waitFor(() => expect(screen.getByText("alice")).toBeInTheDocument());
+    const expected = new Intl.DateTimeFormat(PRODUCT_LOCALE, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(500 * 1000));
+    expect(screen.getByText(expected)).toBeInTheDocument();
   });
 
   it("修改密码成功清空会话并跳转登录页", async () => {

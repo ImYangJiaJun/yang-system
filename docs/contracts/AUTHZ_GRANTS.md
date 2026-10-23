@@ -1,7 +1,8 @@
 # 授权存储与权限目录契约
 
 **生成：** 2026-09-03
-**更新：** 2026-10-03（管理接口表改新口径：9 个组接口 authenticated-only，授权判定下沉 handler 内；
+**更新：** 2026-10-20（管理员等价清单新增 `feishu.approval.write`）；
+2026-10-03（管理接口表改新口径：9 个组接口 authenticated-only，授权判定下沉 handler 内；
 `access.groups.read/write` 降为保留权限键，不被任何 Action 强制；`get_group` 不可见与不存在统一 404）；
 2026-09-26（新增「管理员等价权限」显式清单与授予闸门；账号管理拆分出独立的凭据签发权限 `account.users.reset_credentials`）；
 2026-09-24（首账号引导成为初始授权主路径；新增一层权限组）
@@ -52,12 +53,13 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 因此不能让只持 `access.grants.write` / `access.groups.write` 的委派者自行完成。
 
 **清单是代码侧的显式、可评审事实**（`src/addon/access/domain/sensitive_permissions.rs` 的
-`ADMIN_EQUIVALENT_PERMISSIONS`，唯一事实来源），当前恰有 4 条，每条附中文理由（理由会拼进
+`ADMIN_EQUIVALENT_PERMISSIONS`，唯一事实来源），当前恰有 5 条，每条附中文理由（理由会拼进
 403 的拒绝信息，因此在生产路径上真的被读取）：
 
 | 管理员等价权限 | 为什么等价 |
 |---|---|
 | `account.users.reset_credentials` | 对任意账号签发密码重置凭证：凭此重置其口令并登录成他，即夺取该账号的身份与全部权限 |
+| `feishu.approval.write` | `create_config` / `reveal_config_token` / `rotate_config_token` 可签发或回显工作流派发 Token；派发端点是 public、仅按 `token_hash` 验机器凭据，拿到 Token 即绕过其余全部授权检查 |
 | `feishu.datasource.secret` | 回显数据源封存的 Token 明文；该 Token 是数据源主体的入站凭据，拿到即可冒充该数据源调用本系统，不再经任何授权检查 |
 | `feishu.datasource.write` | 创建与轮换数据源都会把新凭据的明文返回给调用者（`create_datasource_table` / `rotate_token`），签发即持有，与直接读取凭据等价 |
 | `feishu.portal.write` | 创建门户会把数据源的敏感数据暴露到公开 URL，攻击者拿到 URL 即可绕过认证查询数据，等价于把数据源的内容对外发布 |
@@ -98,10 +100,28 @@ Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限�
 | `permission` | VARCHAR(128) | 权限字符串 |
 | `granted_by` | BIGINT | 授权操作人用户 ID（灾备 SQL 引导时填操作者标识或 `0`） |
 | `occurred_at` | BIGINT | 授权发生的 Unix 时间戳（插入时自动写入） |
+| `expires_at` | BIGINT 可空 | Unix 秒；NULL=永久有效。到期后读端过滤，行保留做审计；后台收敛按周期递增授权版本（积压时按批排空） |
+| `converged_at` | BIGINT 可空 | 系统在直授过期后递增授权版本的时间；NULL=尚未收敛。审计读端不投影本列 |
 
 约束：`uk_authz_grant_user_permission (user_id, permission)` 复合唯一索引；
 `chk_authz_grant_permission_format` 权限格式 CHECK。表结构由
 `src/addon/access/grants/table.rs` 声明，启动时增量同步，不使用 SQL 迁移文件。
+
+**过期语义（软过期 + 后台收敛）**：读端仍按 `expires_at` 过滤
+（`list_by_user_in_tx` 的 `expires_at IS NULL OR expires_at > now`），因此过期行不会
+再进入新签发的 Token 快照。已经签发的 Access Token 由后台收敛 Worker 主动失效：
+每 60 秒扫描 `expires_at <= now AND converged_at IS NULL` 的直授行，对所属用户
+递增 `authz_version` 并追加 `authorization_outbox`，然后把这些行标记
+`converged_at = now`。**无积压且单实例**时，过期权限在已签发 Access Token 中的
+存活时间上界是一个收敛周期（60 秒）加 Outbox 传播延迟；单轮最多处理 200 行，
+存在积压时按 `ceil(pending/200)` 个周期排空，不再依赖 access TTL 自然过期。
+
+收敛标记是幂等凭据：同一行标记后不会再次触发版本递增；续期会在同一 UPDATE 里把
+`converged_at` 重置为 NULL，未来再次过期时重新收敛。行被并发续期/撤销时收敛 CAS
+（`id + expires_at + converged_at IS NULL`）失败，下一轮再处理，绝不误标。行本身
+**保留做审计**。需要立即收敛（不等后台周期）时走撤销或续期：二者都会在同一事务
+删除/改写事实行、递增 `authz_version` 并追加 Outbox；单条撤销不调用
+`revoke_by_subject`，目标用户的 Refresh 会话保留。
 
 ## 权限组
 
@@ -184,6 +204,17 @@ UNIQUE `uk_user_group (user_id, group_id)`；两条外键 `fk_user_group_user �
 - **不受此限**：修改**他人**的成员关系、修改自己**不所属**的组（这些是正常的授权管理
   行为）。`system_admin` 成员本就持有全部权限，`after ⊄ before` 恒不成立，因此不受约束。
 - 移出成员**不做**该校验：移出只会减少权限，且管理员必须能退出全权组。
+
+**委派子集闸门（转授他人）**：组权限会授予全体成员，因此下面两条路径即使不改变调用者
+自身权限，也不得把调用者**未持有**的权限转授出去：
+
+- `add_group_item`：操作者的有效权限必须包含本次加入的权限（无条件校验；`system_admin`
+  成员的有效权限是目录全集，自然放行）。
+- `add_group_member`：目标组经目录解析后的**实际贡献**必须是操作者有效权限的子集
+  （孤儿条目在解析期被丢弃，不参与比较）；重复添加已有成员不转授新权限，仍按幂等成功返回。
+
+两者失败均为 `PermissionDenied` → 403，消息点名缺少的权限。这两条与上面的不变量互补：
+不变量防调用者自身权限变大，本闸门防调用者把别人的权限变大。
 
 ### 最后一名管理员守卫
 
@@ -351,6 +382,9 @@ COMMIT;
   要求调用者是内置全权组 `system_admin` 成员，否则 403。闸门是 `access.grants.write`
   与 handler 内组管理权判定**之上**追加的一层主体判据（组条目/成员路径不再另行
   要求 `access.groups.write`）。
+- **单条权限撤销不杀 Refresh 会话**：`revoke_permission` 只递增授权版本 + 追加 Outbox，
+  不调用 `revoke_by_subject`；目标用户可继续刷新，下一次签发的 claims 不再含被撤销权限。
+  批量撤销同款。
 - **全部写操作**（组生命周期、条目、成员）都写 append-only 审计，按
   `docs/contracts/AUDIT.md` 契约记录。
 - 加组权限经 `ensure_declared` fail-closed；**移组权限刻意不做目录校验**，已从 Catalog

@@ -1,13 +1,16 @@
 import { expect, test } from "@playwright/test";
 
-import { mockSessionRestore } from "./support";
+import { mockSessionRestore, resetDemoData } from "./support";
 
 /**
  * 表格视图 E2E（对齐旧 e2e/table-view.spec.ts 的行为断言，选择器按新 UI 重写）：
  * 工作台 → 通用 TableView（树/搜索/关系/新增/行操作/筛选/列设置/bulk/custom view）。
+ *
+ * 演示后端是共享内存态：每个用例先重置种子数据，用例之间（以及 CI 重试）互不依赖。
  */
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, request }) => {
+  await resetDemoData(request);
   await mockSessionRestore(page);
   await page.goto("/workbench");
   await expect(page.getByRole("heading", { name: "项目目录" })).toBeVisible();
@@ -81,7 +84,7 @@ test("表格支持渐进筛选、活动条件和列管理", async ({ page }) => 
   await expect(page.getByRole("columnheader", { name: "分类" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "重置" }).click();
-  // 行操作用例已删除「通用渲染器」；重置后断言幸存行与完整条件集合。
+  // 每个用例都从种子数据开始（beforeEach 重置），重置后是完整的两行与零条件。
   await expect(page.getByText("平台能力", { exact: true })).toBeVisible();
   await expect(page.getByText(/\d+ 个活动条件/)).toHaveCount(0);
 });

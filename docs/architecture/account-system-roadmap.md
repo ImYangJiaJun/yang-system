@@ -85,7 +85,7 @@
 
 | 能力 | 状态 | 关键位置 |
 |---|---|---|
-| 邮箱验证码注册 | ✅ 防枚举统一响应、摘要入 Redis、原子消费 | `user/actions/request_registration_email.rs:29`、`register.rs` |
+| 邮箱验证码注册 | ⚠️ 公开端点已于 2026-10-20 移除（无消费方/发信滥用面）；注册只收 username+password | `register.rs` |
 | 邮箱归一化 | ✅ 框架 `normalize_email` | `register.rs:52` |
 | 用户名+密码登录 | ✅ Argon2（框架 `PasswordEngine`） | `user/actions/login.rs` |
 | Refresh Cookie 轮换 | ✅ host-only/HttpOnly/SameSite=Strict + 同源校验 | `domain/context.rs:31-34` |
@@ -180,6 +180,7 @@
 - **写放大控制**：`last_seen_at` 节流更新（同一 session 60s 内不重复写）或经 Worker 异步落；refresh 是热路径，受 `tests/refresh_load_benchmark.rs` 零错误基准守护。
 - Action：`GET /api/v1/users/sessions`（列出活跃会话，标记当前设备）、`POST /api/v1/users/sessions/revoke`（按 `session_id` 撤销，Step-up + jti 黑名单 + 行标记 + 审计）。「退出全部设备」语义不变。
 - 会话并发策略：默认「不限数量 + 可见可踢」，作为显式决策记录于此。
+- **会话保留期清理**：`user_session` 行按 `last_seen_at` 保留 refresh token 硬上限 `MAX_REFRESH_TTL_SECONDS`（90 天）+ 7 天安全余量（共 97 天），余量覆盖 60 秒 `last_seen_at` 节流、应用/数据库时钟漂移与 touch 失败窗口。`SessionCleanupWorker` 每 6 小时用数据库时钟删除更早的行，防止 IP/UA 与逐设备会话记录无界累积；撤销标记与活跃会话过滤已先行完成。
 - 前端账号中心加「登录设备」区块。
 
 **C-2 登录历史（独立表，不从 audit_event 投影）**：

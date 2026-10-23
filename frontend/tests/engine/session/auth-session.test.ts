@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  activeAccessToken,
   clearStoredSession,
   persistTokenPair,
   SESSION_EXPIRED_EVENT,
@@ -37,7 +38,7 @@ describe("requestWithTokenRefresh", () => {
     );
     vi.stubGlobal("navigator", { locks: { request: requestLock } });
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      expect(init.signal).toBeUndefined();
+      expect(init.signal).toBeInstanceOf(AbortSignal);
       expect(init.credentials).toBe("include");
       expect(init.body).toBe("{}");
       return tokenResponse("access-new");
@@ -145,19 +146,81 @@ describe("requestWithTokenRefresh", () => {
     window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   });
 
-  it("刷新成功但重试仍为 401 时不进入刷新循环", async () => {
+  it("刷新成功但重试仍是业务 401 时不结束会话，交给调用方处理", async () => {
     persistTokenPair({ accessToken: "access-retry-old" });
-    const fetchMock = vi.fn(async () => tokenResponse("access-retry-new"));
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => tokenResponse("access-retry-new")),
+    );
+    const expired = vi.fn();
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired);
     const request = vi.fn(async () => new Response(undefined, { status: 401 }));
 
     await expect(
       requestWithTokenRefresh("access-retry-old", request),
-    ).rejects.toBeInstanceOf(SessionExpiredError);
+    ).resolves.toMatchObject({ status: 401 });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledTimes(2);
-    expect(sessionStorage.getItem("yang.token")).toBeNull();
+    expect(expired).not.toHaveBeenCalled();
+    // 会话仍然有效：新 Token 已写入且没有清空本地状态。
+    expect(activeAccessToken()).toBe("access-retry-new");
+    window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
+  });
+
+  it("新 Token 再次过期时仍能再次刷新，不触发过期事件", async () => {
+    persistTokenPair({ accessToken: "access-t0" });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse("access-t1"))
+      .mockResolvedValueOnce(tokenResponse("access-t2"));
+    vi.stubGlobal("fetch", fetchMock);
+    const expired = vi.fn();
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired);
+    const seen: Array<string | undefined> = [];
+    let attempt = 0;
+    const request = vi.fn(async (accessToken?: string) => {
+      seen.push(accessToken);
+      attempt += 1;
+      // 第 1 次（T0）与第 3 次（T1 的首次使用）401，其余放行。
+      return new Response(undefined, {
+        status: attempt === 1 || attempt === 3 ? 401 : 200,
+      });
+    });
+
+    await expect(
+      requestWithTokenRefresh("access-t0", request),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      requestWithTokenRefresh(activeAccessToken(), request),
+    ).resolves.toMatchObject({ status: 200 });
+
+    expect(seen).toEqual(["access-t0", "access-t1", "access-t1", "access-t2"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(expired).not.toHaveBeenCalled();
+    expect(activeAccessToken()).toBe("access-t2");
+    window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
+  });
+
+  it("刷新超时按可重试错误处理并保留会话", async () => {
+    persistTokenPair({ accessToken: "access-old" });
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const expired = vi.fn();
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired);
+
+    await expect(
+      requestWithTokenRefresh(
+        "access-old",
+        async () => new Response(undefined, { status: 401 }),
+      ),
+    ).rejects.toThrow("timed out");
+
+    expect(expired).not.toHaveBeenCalled();
+    expect(activeAccessToken()).toBe("access-old");
+    window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   });
 
   it("刷新网络失败时保留会话，允许稍后重试", async () => {

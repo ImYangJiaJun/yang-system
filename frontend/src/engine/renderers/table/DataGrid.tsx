@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -43,7 +43,9 @@ interface DataGridProps {
   onSortChange: (field: string | null, descending: boolean) => void;
   labelFor: (operationId: string, value: unknown) => string | undefined;
   selectionEnabled: boolean;
-  onSelectionChange: (rows: SourceRow[]) => void;
+  /// 分页/查询/排序变化时清空选择；由调用方按查询状态生成。
+  selectionResetKey: string;
+  onSelectionChange: (keys: string[]) => void;
   rowActionGroups: PresentedActionGroups;
   onOpenAction: (
     presentation: ActionPresentationSchema,
@@ -63,6 +65,7 @@ export function DataGrid({
   onSortChange,
   labelFor,
   selectionEnabled,
+  selectionResetKey,
   onSelectionChange,
   rowActionGroups,
   onOpenAction,
@@ -70,6 +73,13 @@ export function DataGrid({
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const hasRowActions =
     Boolean(rowActionGroups.primary) || rowActionGroups.overflow.length > 0;
+
+  // 选择属于当前查询结果：翻页/筛选/搜索/排序后旧键必须丢弃，否则批量操作
+  // 会把上一页的记录混进提交（行键已改为记录主键，不会误命中，但也不该残留）。
+  useEffect(() => {
+    setRowSelection({});
+    onSelectionChange([]);
+  }, [selectionResetKey, onSelectionChange]);
 
   const columns = useMemo<ColumnDef<DisplayRow>[]>(() => {
     const defs: ColumnDef<DisplayRow>[] = [];
@@ -186,7 +196,7 @@ export function DataGrid({
       setRowSelection((prev) => {
         const next = typeof updater === "function" ? updater(prev) : updater;
         onSelectionChange(
-          rows.filter((row) => next[row.key]).map((row) => row.data),
+          Object.keys(next).filter((key) => next[key] === true),
         );
         return next;
       });

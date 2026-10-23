@@ -85,6 +85,10 @@ FRONTEND_PRODUCTION_E2E = Command(
 
 FULL = (
     *ARCHITECTURE,
+    Command(
+        "Deploy script syntax",
+        ("python", "scripts/check_deploy_syntax.py"),
+    ),
     Command("Rust formatting", ("cargo", "fmt", "--", "--check")),
     Command("Rust all-target tests", ("cargo", "test", "--all-targets", "--locked")),
     Command(
@@ -113,7 +117,7 @@ INTEGRATION = (
     ),
     Command(
         "审批明细外部选项精确查询集成测试",
-        ("cargo", "test", "--lib", "--locked", "real_mysql_resolves_detail_options_and_waits_on_ambiguous_labels", "--", "--ignored", "--test-threads=1"),
+        ("cargo", "test", "--lib", "--locked", "real_mysql_resolves_detail_options_and_picks_first_on_duplicate_labels", "--", "--ignored", "--test-threads=1"),
     ),
     Command(
         "飞书用户身份凭证读写往返集成测试",
@@ -146,25 +150,38 @@ INTEGRATION = (
         ),
     ),
     Command(
-        "Schema apply concurrency and retry integration",
+        "Session cleanup retention integration",
         (
             "cargo",
             "test",
-            "--test",
-            "schema_apply_integration",
+            "--lib",
             "--locked",
+            "infrastructure::session_cleanup::tests::real_mysql_deletes_only_sessions_older_than_retention",
             "--",
             "--ignored",
             "--test-threads=1",
         ),
     ),
     Command(
-        "Registration email verification integration",
+        "Grant expiry convergence integration",
+        (
+            "cargo",
+            "test",
+            "--lib",
+            "--locked",
+            "addon::access::domain::grant_expiry::tests::real_mysql_converges_expired_grants_once_and_reconverges_after_renew",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+    ),
+    Command(
+        "Schema apply concurrency and retry integration",
         (
             "cargo",
             "test",
             "--test",
-            "registration_email_integration",
+            "schema_apply_integration",
             "--locked",
             "--",
             "--ignored",
@@ -393,13 +410,27 @@ def run(command: Command) -> None:
     argv = [executable(command.argv[0]), *command.argv[1:]]
     environment = os.environ.copy()
     environment.update(command.env)
+    # 本机 HTTP 用例直连 127.0.0.1；开发者环境常设有 HTTP_PROXY（本机 VPN），
+    # 不排除回环地址时请求会被代理吞掉，表现为偶发 "error sending request"
+    # 或测试挂起。只放行回环地址，外网请求仍按环境代理走（如 pnpm audit）。
+    environment["NO_PROXY"] = "127.0.0.1,localhost"
+    environment["no_proxy"] = "127.0.0.1,localhost"
     print(f"\n==> {command.name}\n    {shlex.join(argv)}", flush=True)
     if command.network_retries <= 0:
         subprocess.run(argv, check=True, env=environment)
         return
     for attempt in range(1, command.network_retries + 2):
         completed = subprocess.run(
-            argv, check=False, env=environment, capture_output=True, text=True
+            argv,
+            check=False,
+            env=environment,
+            capture_output=True,
+            text=True,
+            # pnpm/npm 的输出是 UTF-8；Windows 默认按 GBK 解码会在出现
+            # 非 ASCII 字符（如 ✓/中文提示）时让 reader 线程直接抛
+            # UnicodeDecodeError，把成功的审计误报成失败。
+            encoding="utf-8",
+            errors="replace",
         )
         output = f"{completed.stdout}\n{completed.stderr}"
         if completed.returncode == 0:
@@ -517,6 +548,31 @@ def self_test() -> None:
         f"漏登记={sorted(discovered_integration_tests - integration_tests)} "
         f"登记了不存在的入口={sorted(integration_tests - discovered_integration_tests)}"
     )
+    # `--lib <filter>` 在测试改名后会匹配 0 个测试并以 0 退出（静默假绿）。
+    # 自检直接回到源码里找同名符号：过滤名不存在就立刻失败。
+    lib_filter_commands = [
+        command
+        for command in INTEGRATION
+        if command.argv[:3] == ("cargo", "test", "--lib") and len(command.argv) > 4
+    ]
+    assert lib_filter_commands, "INTEGRATION 必须包含 --lib 过滤测试"
+    rust_sources = []
+    for source_root, _, filenames in os.walk("src"):
+        for filename in filenames:
+            if filename.endswith(".rs"):
+                with open(
+                    os.path.join(source_root, filename), encoding="utf-8"
+                ) as source_file:
+                    rust_sources.append(source_file.read())
+    source_blob = "\n".join(rust_sources)
+    for command in lib_filter_commands:
+        filter_name = command.argv[4]
+        # cargo 的过滤是子串匹配，带模块路径的过滤名在源码里通常只出现叶子函数名。
+        leaf_name = filter_name.rsplit("::", 1)[-1]
+        assert leaf_name in source_blob, (
+            f"--lib 过滤名 {filter_name} 的测试函数 {leaf_name} 已不在 src 中："
+            "测试改名后 cargo 会以 0 个测试成功退出"
+        )
     authorization_cache = next(
         command
         for command in INTEGRATION

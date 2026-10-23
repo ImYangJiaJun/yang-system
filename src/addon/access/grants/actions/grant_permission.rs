@@ -27,7 +27,7 @@ yang_base::params! {
             .pattern(PERMISSION_PATTERN),
         expires_at: Int::new()
             .title("过期时间")
-            .description("Unix 秒；留空=永久有效。过期后权限在解析侧失效、行保留做审计")
+            .description("Unix 秒；留空=永久有效。到期后由后台收敛按周期递增授权版本并写 Outbox（无积压时一个周期），行保留做审计")
             .require(false),
     }
 }

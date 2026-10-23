@@ -304,6 +304,15 @@ store-then-process 的落地缓冲（结构照 `feishu_approval_request_log` 的
 
 处理失败（富化 GET 失败、写表失败）→ `processed_at` 保持 NULL + 重试计数，连续失败超限置错误并停止（防毒事件死循环）。
 
+**终态可恢复**：置终态（`processed_at` 非空 + `retry_count >= MAX_EVENT_RETRY_COUNT`）
+只是停止自动重试，不是永久丢弃。服务端提供两条只读写本库的恢复 Action
+（控制台 UI 暂未接入，经 Action API 调用）：
+`list_events`（`terminal_only=true` 查询失败终态）与 `retry_event`（按 id 重置
+`processed_at=NULL` / `retry_count=0` / `last_error=NULL`，下一轮 worker 重新认领）。
+成功处理的事件（`retry_count < 上限`）拒绝重放，避免重复回写；更新用
+`id + 终态判据` 做 CAS，并发下命中 0 行返回状态冲突。阈值常量与 worker 共用
+`MAX_EVENT_RETRY_COUNT`。
+
 ### 7.5 配额预算（每事件 1 次详情 GET，1000 次/分钟）
 
 | 事件量级 | 消耗/分钟 | 占比 |

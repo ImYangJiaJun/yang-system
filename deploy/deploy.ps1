@@ -11,11 +11,10 @@
 # 【同事上手：只需改下面 param 里的 3 个 SSH 默认值】
 #   把 $SshUser / $SshHost / $SshKey 改成你自己的，然后直接运行即可。
 #
-#   ⚠️ 但**先看这一条**：本脚本的 -EdgeBindAddr 默认是 0.0.0.0，含义是
-#      「把应用边缘发布到**所有网卡**」，也就是**明文 http 直接暴露到公网**。
-#      本仓库当前的部署目标（测试环境）就是这么用的；如果你的环境不需要公网直连，
-#      请显式传 `-EdgeBindAddr 127.0.0.1`，否则你会在不知情的情况下开放一个
-#      明文入口——登录凭据与密码重置令牌都会在公网上明文传输。
+#   ⚠️ 关于 `-EdgeBindAddr`：默认 `auto` 会**沿用已有线上容器的实际绑定**，所以直接
+#      重部署不会改变当前暴露面；全新部署则回落到 127.0.0.1（仅本机可达）。要新开
+#      公网明文入口必须显式传 `-EdgeBindAddr 0.0.0.0`，并尽快在宿主机上配受信 TLS
+#      反代；要收回公网传 `-EdgeBindAddr 127.0.0.1`。
 #
 # 用法：
 #   .\deploy.ps1                  # 完整：build + save + 上传 + 远程 smoke + cutover
@@ -111,17 +110,19 @@ param(
     [string]$DeployScript = 'deploy-blue-green.sh',
 
     # 应用边缘（宿主端口）的发布绑定地址。
-    #   **本文件默认 0.0.0.0** —— 这台部署目标（测试环境）就是要用「公网 IP:18654」直接访问，
-    #   所以默认值取公网。改成 127.0.0.1 会让线上容器只绑 loopback、公网立刻不可达。
-    #   ⚠️ 0.0.0.0 是**明文 http 直连公网**：凭据 / 会话 Cookie / 密码重置令牌都会以明文传输。
-    #   ⚠️ **同事注意**：「拿本脚本部署 = 默认把应用暴露到公网」。若你的环境不需要公网直连，
-    #      务必显式传 `-EdgeBindAddr 127.0.0.1`，并把边缘交给宿主机上的受信 TLS 代理。
-    #   注意 deploy-blue-green.sh 里 BIND_ADDR 的默认值**仍是 127.0.0.1**（被 CI 部署合同
-    #   门禁 frontend/scripts/verify-deployment-contract.mjs 锁定，不要改）——本参数的作用
-    #   就是每次显式覆盖它，所以这里的默认值才是实际生效的那个。
+    #   **默认 auto（兼容模式）**：已有线上容器时沿用其实际绑定（通常是 0.0.0.0 或
+    #   127.0.0.1），直接重部署不会改变既有暴露面；全新部署（没有线上容器）回落到
+    #   127.0.0.1，仅本机可达。
+    #   显式传 `-EdgeBindAddr 0.0.0.0` 才会新开公网明文入口（并应尽快配 TLS 反代）；
+    #   显式传 `-EdgeBindAddr 127.0.0.1` 可收回公网。
+    #   ⚠️ 0.0.0.0 是**明文 http 直连公网**：凭据 / 会话 Cookie / 密码重置令牌都会明文传输。
     #   管理面 9154 不受本参数影响，始终只绑 loopback（见 deploy-blue-green.sh 的
     #   METRICS_BIND_ADDR），公网不可见。
-    [string]$EdgeBindAddr = '0.0.0.0',
+    [string]$EdgeBindAddr = 'auto',
+
+    # 本部署确实不使用审批事件时，允许配置里没有 event_verification_token。
+    # 默认 false：新版本在缺少该 token 时不注册事件端点，部署预检会直接中止。
+    [switch]$AllowMissingEventToken,
 
     # 应用边缘的宿主端口（线上）。
     # 留空 = 用 deploy-blue-green.sh 里的默认值（当前 18654）——**刻意让默认值只有
@@ -228,6 +229,7 @@ function Get-RemoteEnv {
     # RESET_DB_CONFIRM 是远端**必填**的确认闸门，只在本地交互确认通过后才转发——
     # 少了它远端会拒绝执行清库（fail-closed），这正是我们要的。
     if ($SyncConfig) { $pairs['SYNC_CONFIG'] = '1' }
+    if ($AllowMissingEventToken) { $pairs['ALLOW_MISSING_EVENT_TOKEN'] = '1' }
     if ($ResetDb) {
         $pairs['RESET_DB'] = '1'
         if ($ResetConfirmed) { $pairs['RESET_DB_CONFIRM'] = 'yes' }

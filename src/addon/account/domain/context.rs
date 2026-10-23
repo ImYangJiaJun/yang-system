@@ -325,6 +325,27 @@ impl Account {
         increment_locked_credential_versions(transaction, locked).await
     }
 
+    /// 在调用方事务内撤销目标用户的全部未撤销会话。
+    ///
+    /// 必须与 `increment_versions_in_tx` / `disable_locked_in_tx` 等版本递增动作同事务
+    /// 调用：版本递增只让旧 Token 失效，会话行仍会以「活跃」出现在设备列表里。
+    pub(crate) async fn revoke_all_sessions_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut Transaction,
+        user_id: i64,
+    ) -> Result<u64, BaseError> {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| BaseError::ConfigError("系统时间早于 Unix epoch".to_string()))?
+            .as_secs();
+        let now = i64::try_from(seconds)
+            .map_err(|_| BaseError::ConfigError("系统时间超出 i64 范围".to_string()))?;
+        self.sessions
+            .revoke_all_for_user_in_tx(ctx, transaction, user_id, now)
+            .await
+    }
+
     /// 在持有的用户行锁内匿名化删除账号并递增两个安全版本（路线图 E-2b）。
     pub(crate) async fn anonymize_locked_in_tx(
         transaction: &mut Transaction,
@@ -492,7 +513,7 @@ impl Account {
         ctx: &ActionContext,
         user_id: i64,
     ) -> Result<TokenPairClaims, BaseError> {
-        let snapshot = self.authorization_snapshot(ctx, user_id).await?;
+        let snapshot = self.authorization_snapshot(ctx, user_id, None).await?;
         let session_id = new_session_id()?;
         self.claims_from_snapshot(&snapshot, Some(&session_id))
     }
@@ -522,9 +543,14 @@ impl Account {
             .sub
             .parse::<i64>()
             .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
-        let snapshot = self.authorization_snapshot(ctx, user_id).await?;
-        claims::validate_refresh_credential_version(old_claims, snapshot.credential_version)?;
         let inherited_session_id = claims::session_id_from_claims(old_claims)?;
+        // 会话行是本 Token 的唯一权威撤销事实：`revoke_session` 标记 revoked 后，
+        // 即使攻击者抢在 jti 黑名单写入前轮换出新的 refresh jti，下一次 refresh 也会
+        // 在这里被 fail-closed 拒绝。老 Token 无 session_id 时保持兼容（不查）。
+        let snapshot = self
+            .authorization_snapshot(ctx, user_id, inherited_session_id.as_deref())
+            .await?;
+        claims::validate_refresh_credential_version(old_claims, snapshot.credential_version)?;
         self.claims_from_snapshot(&snapshot, inherited_session_id.as_deref())
     }
 
@@ -544,10 +570,14 @@ impl Account {
     }
 
     /// 在只读事务内组装授权快照：用户状态、两个安全版本与外围域授权扩展。
+    ///
+    /// `session_id` 存在时，同一事务内先校验会话行仍存在且未撤销；这是 refresh
+    /// 路径的权威撤销判定，缺失即 fail-closed。
     async fn authorization_snapshot(
         &self,
         ctx: &ActionContext,
         user_id: i64,
+        session_id: Option<&str>,
     ) -> Result<AuthorizationSnapshot, BaseError> {
         let mut transaction = ctx
             .tools()
@@ -556,6 +586,17 @@ impl Account {
             .await
             .map_err(BaseError::from)?;
         let snapshot_result: Result<AuthorizationSnapshot, BaseError> = async {
+            if let Some(session_id) = session_id {
+                if !self
+                    .sessions
+                    .is_active_in_tx(ctx, &mut transaction, session_id)
+                    .await?
+                {
+                    return Err(BaseError::Unauthorized(
+                        "会话已撤销，请重新登录".to_string(),
+                    ));
+                }
+            }
             let state = self
                 .users
                 .find_authorization_state_in_tx(ctx, &mut transaction, user_id)

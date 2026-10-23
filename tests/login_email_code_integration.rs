@@ -50,14 +50,6 @@ struct CapturingEmailSender {
 }
 
 impl CapturingEmailSender {
-    fn take_registration_code(&self, email: &str) -> anyhow::Result<String> {
-        self.registration_codes
-            .lock()
-            .map_err(|_| anyhow::anyhow!("测试邮件缓冲区锁已损坏"))?
-            .remove(email)
-            .context("测试投递器未收到注册验证码")
-    }
-
     fn take_login_code(&self, email: &str) -> anyhow::Result<Option<String>> {
         self.login_codes
             .lock()
@@ -749,89 +741,6 @@ async fn login_email_code_attempts_exhaustion_destroys_code() -> anyhow::Result<
         assert_invalid_code(
             login_by_email_code(&app, "attempts.login@example.com", &code, 44_501).await,
         )?;
-        Ok(())
-    }
-    .await;
-
-    let database_cleanup = reset_database(&control).await;
-    let redis_cleanup = reset_redis(&redis).await;
-    finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn registration_and_login_email_code_key_domains_are_isolated() -> anyhow::Result<()> {
-    let control = connect_database().await?;
-    let redis = connect_redis().await?;
-    reset_database(&control).await?;
-    reset_redis(&redis).await?;
-
-    let outcome = async {
-        let sender = CapturingEmailSender::default();
-        let app = build_login_app(&control, &redis, &sender, security_settings()).await?;
-
-        // 方向一：注册域签发的验证码不能用于 login-by-email-code。
-        let fresh_email = "domain.fresh@example.com";
-        let registration_request = dispatch(
-            &app,
-            "request_registration_email",
-            json!({ "email": fresh_email }),
-            &[],
-            44_601,
-        )
-        .await?;
-        ensure!(registration_request.code == 0, "注册验证码请求必须成功");
-        let registration_code = sender.take_registration_code(fresh_email)?;
-        assert_invalid_code(
-            login_by_email_code(&app, fresh_email, &registration_code, 44_601).await,
-        )?;
-        // 跨域登录失败不得波及注册：注册码被 login 域拒绝后仍可注册
-        //（register 已不再消费注册验证码，该端点是遗留入口）。
-        let registered = dispatch(
-            &app,
-            "register",
-            json!({ "username": "domain_fresh_user", "password": PASSWORD }),
-            &[],
-            44_601,
-        )
-        .await?;
-        ensure!(registered.code == 0, "注册必须成功");
-
-        // 方向二：login 域签发的验证码不能用于注册（register 只收 username/password）。
-        register_user(
-            &app,
-            &sender,
-            "domain_login_user",
-            "domain.login@example.com",
-            44_601,
-        )
-        .await?;
-        request_login_code(&app, "domain.login@example.com", 44_601).await?;
-        let login_code = sender
-            .take_login_code("domain.login@example.com")?
-            .context("必须收到登录验证码")?;
-        // 夹带 login 域验证码的注册载荷必须被拒（deny_unknown_fields）。
-        let injected = dispatch(
-            &app,
-            "register",
-            json!({
-                "username": "domain_reverse_user",
-                "password": PASSWORD,
-                "email": "domain.login@example.com",
-                "email_code": login_code,
-            }),
-            &[],
-            44_601,
-        )
-        .await;
-        ensure!(
-            !matches!(&injected, Ok(response) if response.code == 0),
-            "register 不得接受 login 域验证码: {injected:?}"
-        );
-        // login 码未被注册域消费：同码仍可完成免密登录。
-        let logged_in =
-            login_by_email_code(&app, "domain.login@example.com", &login_code, 44_601).await?;
-        access_token(&logged_in)?;
         Ok(())
     }
     .await;

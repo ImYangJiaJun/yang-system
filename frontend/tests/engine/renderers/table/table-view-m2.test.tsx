@@ -7,6 +7,7 @@ import { clearStoredSession } from "@/engine/session/auth-session";
 import { createSessionController } from "@/engine/session/session-controller";
 import { SessionControllerContext } from "@/engine/session/use-session";
 import { parseUiCatalog } from "@/engine/contracts/ui-catalog";
+import type { TableViewSchema } from "@/engine/contracts/ui-catalog";
 import { TableView } from "@/engine/renderers/table/TableView";
 
 import listFixture from "@test/fixtures/demo-items-list.json";
@@ -33,7 +34,7 @@ function jsonResponse(payload: unknown, status = 200) {
 type CapturedRequest = { url: string; method: string; body: unknown };
 
 interface MockRoutes {
-  onList?: () => Response;
+  onList?: (body: unknown) => Response;
   onBulkDelete?: (body: unknown) => Response;
   onDownload?: () => Response;
   onPreview?: () => Response;
@@ -71,7 +72,7 @@ function installFetchMock(routes: MockRoutes = {}) {
         );
       }
       if (url.includes("/api/v1/demo/items/query")) {
-        return routes.onList?.() ?? jsonResponse(listFixture);
+        return routes.onList?.(parsedBody) ?? jsonResponse(listFixture);
       }
       if (url.includes("/api/v1/demo/categories/options")) {
         return jsonResponse(optionsFixture);
@@ -126,6 +127,7 @@ function installFetchMock(routes: MockRoutes = {}) {
 
 function renderTableView(
   options: {
+    view?: TableViewSchema;
     actionEffects?: {
       handleAttachment?: (
         result: import("@/engine/http/types").InvocationResult,
@@ -143,7 +145,7 @@ function renderTableView(
     <SessionControllerContext.Provider value={controller}>
       <QueryClientProvider client={queryClient}>
         <TableView
-          view={view}
+          view={options.view ?? view}
           actions={catalog.actions}
           actionEffects={options.actionEffects}
         />
@@ -211,6 +213,95 @@ describe("bulk Action 链路", () => {
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent("已删除"),
     );
+  });
+});
+
+describe("批量选择跨分页", () => {
+  it("翻页清空选择，批量提交只命中当前页记录", async () => {
+    const paginatedView: TableViewSchema = { ...view, tree: undefined };
+    const { captured } = installFetchMock({
+      onList: (body) => {
+        const page = Number((body as { page?: number } | undefined)?.page ?? 1);
+        const items =
+          page === 1
+            ? [
+                {
+                  category_id: 1,
+                  id: 1,
+                  name: "第一页甲",
+                  parent_id: null,
+                  status: "active",
+                },
+                {
+                  category_id: 1,
+                  id: 2,
+                  name: "第一页乙",
+                  parent_id: null,
+                  status: "draft",
+                },
+              ]
+            : [
+                {
+                  category_id: 1,
+                  id: 11,
+                  name: "第二页丙",
+                  parent_id: null,
+                  status: "active",
+                },
+              ];
+        return jsonResponse({
+          code: 0,
+          message: "成功",
+          data: { items, page, page_size: 10, total: 11 },
+        });
+      },
+    });
+    renderTableView({ view: paginatedView });
+    await waitFor(() =>
+      expect(screen.getByText("第一页甲")).toBeInTheDocument(),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("checkbox", { name: "选择第 1 行" }));
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() =>
+      expect(screen.getByText("第二页丙")).toBeInTheDocument(),
+    );
+
+    // 分页变化清空选择，批量入口回到不可用。
+    expect(screen.getByText("已选 0 项")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批量删除项目" })).toBeDisabled();
+
+    // 回到上一页：选择状态确实被清空，而不是仅因新行键不匹配而暂时失效。
+    await user.click(screen.getByRole("button", { name: "上一页" }));
+    await waitFor(() =>
+      expect(screen.getByText("第一页甲")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "选择第 1 行" }),
+    ).not.toBeChecked();
+    expect(screen.getByText("已选 0 项")).toBeInTheDocument();
+
+    // 只选中当前页的行，提交的 selected 不含上一页记录。
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() =>
+      expect(screen.getByText("第二页丙")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "选择第 1 行" }));
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "批量删除项目" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "确认" }));
+
+    await waitFor(() => {
+      const bulk = captured.find((request) =>
+        request.url.includes("/api/v1/demo/items/bulk-delete"),
+      );
+      const body = bulk?.body as { selected: Array<{ id: number }> };
+      expect(body.selected.map((row) => row.id)).toEqual([11]);
+    });
   });
 });
 

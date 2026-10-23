@@ -224,7 +224,8 @@ pub(super) async fn handle(
             return Err(error);
         }
     };
-    if let Err(error) = record_login_session(
+    // 与密码登录同语义：会话行落库失败必须让登录失败，不能发出无法撤销的令牌对。
+    record_login_session(
         &record_ctx,
         &account,
         &tokens.access_token,
@@ -232,10 +233,7 @@ pub(super) async fn handle(
         &session_ip,
         &session_user_agent,
     )
-    .await
-    {
-        tracing::warn!(error = %error, "邮箱验证码登录会话持久化失败");
-    }
+    .await?;
     Account::browser_session().token_response(tokens.access_token, tokens.refresh_token, secure)
 }
 

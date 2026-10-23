@@ -5,6 +5,7 @@ use crate::addon::account::Account;
 use crate::audit;
 use serde::Serialize;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use yang_base::action::auth::BrowserSession;
 use yang_base::action::{ActionContext, ApiResponse};
@@ -42,8 +43,19 @@ pub(super) async fn handle(
     }
 
     // 持锁事务内停用账号并递增安全版本；当前骨架无外围关系需要级联。
+    // 先按升序整批锁 {目标} ∪ 全权组成员，避免与成员变更路径形成 ABBA 环。
+    let guard_members = account
+        .system_authorization()
+        .system_admin_member_ids(&ctx)
+        .await?;
     let mut transaction = ctx.tools().mysql()?.transaction().await?;
     let result = async {
+        let mut lock_set: BTreeSet<i64> = guard_members.iter().copied().collect();
+        lock_set.insert(user_id);
+        account
+            .system_authorization()
+            .lock_users_ascending_in_tx(&ctx, &mut transaction, &lock_set)
+            .await?;
         let locked = account
             .lock_credential_in_tx(&ctx, &mut transaction, user_id)
             .await?;
@@ -60,6 +72,9 @@ pub(super) async fn handle(
             return Err(Account::last_system_admin_guard("停用"));
         }
         Account::disable_locked_in_tx(&mut transaction, &locked).await?;
+        account
+            .revoke_all_sessions_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,

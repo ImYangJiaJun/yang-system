@@ -23,7 +23,6 @@ pub(super) const PORTAL_ITEM_COLUMNS: &[&str] = &[
     "custom_slug",
     "query_field_id",
     "query_field_source_key",
-    "query_field_ids",
     "access_mode",
     "exposed_columns",
     "result_labels",
@@ -55,8 +54,6 @@ pub(super) struct PortalItem {
     query_field_id: String,
     /// 查询键 source_key（冗余）。
     query_field_source_key: String,
-    /// 多查询键（JSON 数组，可选）。
-    query_field_ids: Option<String>,
     /// 访问模式：public / passphrase / login。
     access_mode: String,
     /// 开放列（JSON 数组）。
@@ -154,7 +151,6 @@ fn record_to_item(record: &Record) -> Result<PortalItem, BaseError> {
         custom_slug: record.optional("custom_slug")?,
         query_field_id: record.require("query_field_id")?,
         query_field_source_key: record.require("query_field_source_key")?,
-        query_field_ids: record.optional("query_field_ids")?,
         access_mode: record
             .optional("access_mode")?
             .unwrap_or_else(|| "public".to_string()),

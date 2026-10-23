@@ -5,14 +5,15 @@
 //! 读取（Token 签发快照、管理查询）与写入（授权/撤销）都收敛在本 Repository。
 
 use crate::addon::access::grants::table::{
-    EXPIRES_AT, GRANTED_BY, GRANT_ID, GRANT_RECORD_FIELDS, OCCURRED_AT, PERMISSION, SYSTEM_ROLE,
-    USER_ID,
+    CONVERGED_AT, EXPIRES_AT, GRANTED_BY, GRANT_ID, GRANT_RECORD_FIELDS, OCCURRED_AT, PERMISSION,
+    SYSTEM_ROLE, USER_ID,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yang_base::action::ActionContext;
 use yang_base::table::{Record, TableDefinition, TableQuery, WhereCondition};
 use yang_base::BaseError;
+use yang_db::{field, table, CompareOp, SortOrder};
 
 /// 一条直授权限事实；`expires_at` 为 `None` 表示永久有效（NULL=永久）。
 /// `user_id` 随行读出，批量判据（一次读多用户）与单用户查询共用同一结构。
@@ -23,6 +24,16 @@ pub(crate) struct GrantRecord {
     pub(crate) granted_by: i64,
     pub(crate) occurred_at: i64,
     pub(crate) expires_at: Option<i64>,
+}
+
+/// 一条等待过期收敛的直授事实扫描投影。
+///
+/// `expires_at` 在 SQL 侧已用 `<= now` 过滤，故必有值；`id` 与 `expires_at`
+/// 同时作为收敛 CAS 的定位条件，防止并发续期/撤销后误标。
+pub(crate) struct ExpiredGrant {
+    pub(crate) id: i64,
+    pub(crate) user_id: i64,
+    pub(crate) expires_at: i64,
 }
 
 impl TryFrom<&Record> for GrantRecord {
@@ -167,6 +178,71 @@ impl GrantRepository {
         rows.iter().map(GrantRecord::try_from).collect()
     }
 
+    /// 读取一批**已过期但尚未收敛**的直授行（按 `expires_at, id` 稳定升序取批）。
+    ///
+    /// 收敛判据完全下推到 SQL：`expires_at <= now AND converged_at IS NULL`，
+    /// 命中表声明里的 `idx_authz_grant_expiry_convergence`。`expires_at` 为 NULL
+    /// 的永久授权天然不满足 `<= now`，不进入扫描。
+    pub(crate) async fn list_expired_unconverged_in_tx(
+        &self,
+        _ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<ExpiredGrant>, BaseError> {
+        let rows: Vec<(i64, i64, Option<i64>)> = transaction
+            .table(table!("authz_grant"))
+            .field(field!("id"))
+            .field(field!("user_id"))
+            .field(field!("expires_at"))
+            .where_and(field!("expires_at"), CompareOp::Lte, now)?
+            .where_null(field!("converged_at"))
+            .order(field!("expires_at"), SortOrder::Asc)
+            .order(field!("id"), SortOrder::Asc)
+            .limit(limit as u64)
+            .select()
+            .await
+            .map_err(BaseError::from)?;
+        rows.into_iter()
+            .map(|(id, user_id, expires_at)| {
+                let expires_at = expires_at.ok_or_else(|| {
+                    BaseError::ConfigError("过期直授行缺少 expires_at".to_string())
+                })?;
+                Ok(ExpiredGrant {
+                    id,
+                    user_id,
+                    expires_at,
+                })
+            })
+            .collect()
+    }
+
+    /// 把一条过期直授行标记为已收敛（CAS），返回影响行数。
+    ///
+    /// 条件同时校验 `id`、观察到的 `expires_at` 与 `converged_at IS NULL`：
+    /// 行被并发续期（`expires_at` 变化且 `converged_at` 被重置）或删除时
+    /// `affected = 0`，调用方跳过该行、下一轮再处理——绝不把未真正收敛的行误标。
+    pub(crate) async fn mark_converged_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        id: i64,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<u64, BaseError> {
+        let affected = self
+            .trusted_query(ctx)?
+            .where_eq(GRANT_ID, serde_json::Value::Number(id.into()))?
+            .where_eq(
+                EXPIRES_AT,
+                serde_json::Value::Number(observed_expires_at.into()),
+            )?
+            .where_null(CONVERGED_AT)?
+            .update_in_tx(transaction, Record::new().set(CONVERGED_AT, now))
+            .await?;
+        Ok(affected)
+    }
+
     /// 查询 (user_id, permission) 既有直授行的过期时间。
     ///
     /// 无行返回 `None`；有行返回 `Some(expires_at)`（`None` 表示该行永久有效）。
@@ -235,7 +311,10 @@ impl GrantRepository {
     ) -> Result<(), BaseError> {
         let record = Record::new()
             .set(GRANTED_BY, granted_by)
-            .set(EXPIRES_AT, serde_json::Value::Null);
+            .set(EXPIRES_AT, serde_json::Value::Null)
+            // 续期即重新计时：旧的收敛标记必须清掉，否则未来再次过期时
+            // 扫描会把它当成「已收敛」而漏掉版本递增。
+            .set(CONVERGED_AT, serde_json::Value::Null);
         let record = if let Some(expires_at) = expires_at {
             record.set(EXPIRES_AT, expires_at)
         } else {

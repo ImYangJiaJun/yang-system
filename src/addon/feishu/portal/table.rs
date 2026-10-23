@@ -61,10 +61,6 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     .require(true)
                     .max_length(64)
                     .filterable(true),
-                // 多查询键（AND 组合）。JSON 数组：field_id 列表。
-                // 为空时使用单键 `query_field_id`；非空时多键 AND 查询。
-                // 用 Text 存 JSON 而非关联表：键数少（通常 <5）、总是整组读写、不需要按键查询。
-                query_field_ids => Text::new().title("多查询键"),
                 // 自定义短链。可选，为空时使用 UUID `slug`。
                 // **唯一**：自定义短链也是公开 URL 的一部分，重复会让路由分派歧义。
                 // ≤64 字符，允许小写字母/数字/连字符/下划线（URL 友好）。
@@ -290,7 +286,6 @@ mod tests {
             "passphrase_expires_at",
             "result_labels",
             "empty_message",
-            "query_field_ids",
             "custom_slug",
         ] {
             let field = definition
@@ -345,15 +340,5 @@ mod tests {
             declared.storage.unique,
             "custom_slug 必须建唯一索引：它是公开 URL 的一部分，重复会让路由分派歧义"
         );
-    }
-
-    #[test]
-    fn query_field_ids_stores_json_for_multi_key_support() {
-        // 多查询键（AND 组合）用 Text 存 JSON 数组。
-        let definition = definition();
-        let ids = definition
-            .field("query_field_ids")
-            .unwrap_or_else(|| panic!("query_field_ids 必须存在"));
-        assert!(!ids.is_required(), "query_field_ids 必须可空（单键场景）");
     }
 }

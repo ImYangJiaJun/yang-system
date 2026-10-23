@@ -48,6 +48,9 @@ pub(super) async fn handle(
             .await?;
         Account::ensure_active(locked.status())?;
         Account::increment_versions_in_tx(&mut transaction, &locked).await?;
+        account
+            .revoke_all_sessions_in_tx(&ctx, &mut transaction, user_id)
+            .await?;
         let event = audit::succeeded_event(
             &ctx,
             None,

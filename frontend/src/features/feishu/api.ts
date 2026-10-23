@@ -91,11 +91,11 @@ export const OPTION_OPERATION_IDS = {
   approvalOptions: "feishu.option.approval_options",
 } as const;
 
-/// 审批派发控制台的 8 个 Action。
+/// 审批派发控制台的 14 个受保护 Action。
 ///
 /// **每一粒都必须是服务端真实注册过的 `operation_id`**（逐个对着
 /// `src/addon/feishu/approval/actions/*.rs` 的 `action_name!(...)` 核过）。
-/// 服务端 `action_name!` 的展开形态是「模块名 + 点 + 动作名」，八个动作的模块名
+/// 服务端 `action_name!` 的展开形态是「模块名 + 点 + 动作名」，这些动作的模块名
 /// 都是 `feishu.approval`（注册在 `approval/mod.rs` 的 `build_module`）。
 /// 与数据源 Action 不同，它们**无条件注册**（不挂 `can_pull()` 门禁）：控制台
 /// 不依赖飞书凭证存在，`create_config` / `list_widgets` 运行时按其自身逻辑校验。
@@ -108,6 +108,10 @@ export const APPROVAL_OPERATION_IDS = {
   listWidgets: "feishu.approval.list_widgets",
   listRequests: "feishu.approval.list_requests",
   listTasks: "feishu.approval.list_tasks",
+  /// 审批事件查询（`terminal_only` 过滤失败终态）。读权限。
+  listEvents: "feishu.approval.list_events",
+  /// 把失败终态事件重置回待处理队列。写权限；成功事件拒绝重放。
+  retryEvent: "feishu.approval.retry_event",
   /// 飞书用户身份（OAuth）授权状态。读权限。
   oauthStatus: "feishu.approval.oauth_status",
   /// 取授权链接。**写权限**：它会签发一个一次性的 state（CSRF 防护）。
@@ -2025,13 +2029,18 @@ export async function updateApprovalConfig(
   );
 }
 
-/// 删除配置（`feishu.approval.delete_config`）：配置行 + 映射行 + pending 任务行
-/// 同事务删除；backfilled/terminal/unnotified 任务保留作流水。
+/// 删除配置（`feishu.approval.delete_config`）：配置行 + 映射行 + **全部**任务行
+/// 同事务删除（record_id 全局唯一，保留已完结行会卡住重建后的播种）；
+/// `feishu_approval_request_log` 的派发请求记录不受影响。
 export async function deleteApprovalConfig(
   configId: number,
   deps: FeishuInvokeDeps,
   signal?: AbortSignal,
-): Promise<{ deletedMaps: number; deletedPendingTasks: number }> {
+): Promise<{
+  deletedMaps: number;
+  deletedPendingTasks: number;
+  deletedTasks: number;
+}> {
   const result = await invokeFeishuAction(
     deps,
     APPROVAL_OPERATION_IDS.deleteConfig,
@@ -2042,6 +2051,7 @@ export async function deleteApprovalConfig(
   return {
     deletedMaps: asNumber(data?.deleted_field_maps, 0),
     deletedPendingTasks: asNumber(data?.deleted_pending_tasks, 0),
+    deletedTasks: asNumber(data?.deleted_tasks, 0),
   };
 }
 
@@ -2191,9 +2201,11 @@ export type ApprovalActions = {
     configId: number,
     patch: UpdateApprovalConfigPatch,
   ) => Promise<void>;
-  deleteConfig: (
-    configId: number,
-  ) => Promise<{ deletedMaps: number; deletedPendingTasks: number }>;
+  deleteConfig: (configId: number) => Promise<{
+    deletedMaps: number;
+    deletedPendingTasks: number;
+    deletedTasks: number;
+  }>;
   /// 重新签发一条配置的工作流访问 Token；返回新明文（旧值立即失效，工作流需粘新值）。
   rotateConfigToken: (configId: number) => Promise<string>;
   /// 取出这条配置**当前**的访问 Token 明文（纯读，可反复调用）。

@@ -13,12 +13,21 @@
  * add_group_member 契约。
  */
 
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
+
+// 固定非 UTC 时区：CI（GitHub Actions）默认 TZ=UTC，而「本地日末」与旧的
+// `Date.parse("...T23:59:59Z")` 在 UTC 下是同一秒——不换时区，回归测试等于空转。
+const ORIGINAL_TZ = process.env.TZ;
+process.env.TZ = "Asia/Shanghai";
+afterAll(() => {
+  if (ORIGINAL_TZ === undefined) delete process.env.TZ;
+  else process.env.TZ = ORIGINAL_TZ;
+});
 
 await import("@/features/access/views/PermissionWorkspacePage");
 
@@ -540,8 +549,133 @@ describe("权限工作台·按用户视图", () => {
       user_id: 7,
       permission: "account.users.reset_credentials",
     });
+  }, 15_000);
+
+  it("取消「永久有效」但没选日期时不能提交（空值不落成永久授权）", async () => {
+    const user = userEvent.setup();
+    const calls = stubAccessApi();
+
+    renderTestApp({ path: "/access/workspace", authenticated: true });
+    await pickUser(user, "alice");
+
+    const direct = await screen.findByRole("region", { name: "直授权限" });
+    await user.click(
+      within(direct).getByRole("button", { name: "授予新权限" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "权限目录 权限" }),
+    );
+    // 取消「永久有效」：日期还没选，确认必须不可用。
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "永久有效" }),
+    );
+    expect(
+      within(dialog).getByText("非永久授权必须选择过期日期。"),
+    ).toBeInTheDocument();
+    const confirm = within(dialog).getByRole("button", { name: "确认授予" });
+    expect(confirm).toBeDisabled();
+    await user.click(confirm);
+
+    expect(callsTo(calls, GRANT_PATH)).toHaveLength(0);
   });
 
+  it("过期日期按本地日末换算成 unix 秒（不是 UTC 日末）", async () => {
+    const user = userEvent.setup();
+    const calls = stubAccessApi();
+
+    renderTestApp({ path: "/access/workspace", authenticated: true });
+    await pickUser(user, "alice");
+
+    const direct = await screen.findByRole("region", { name: "直授权限" });
+    await user.click(
+      within(direct).getByRole("button", { name: "授予新权限" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "权限目录 权限" }),
+    );
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "永久有效" }),
+    );
+    fireEvent.change(within(dialog).getByLabelText("过期日期"), {
+      target: { value: "2026-01-15" },
+    });
+    await user.click(within(dialog).getByRole("button", { name: "确认授予" }));
+
+    await waitFor(() => {
+      expect(callsTo(calls, GRANT_PATH)).toHaveLength(1);
+    });
+    const expiresAt = callsTo(calls, GRANT_PATH)[0]?.body?.expires_at;
+    // 守卫：如果运行环境的 TZ 还是 UTC，下面的「本地日末」与旧的 UTC 解析同值，
+    // 这条测试会假通过——直接失败提示需要非 UTC 时区。
+    expect(new Date(2026, 0, 15, 23, 59, 59).getTimezoneOffset()).not.toBe(0);
+    expect(expiresAt).toBe(
+      Math.floor(new Date(2026, 0, 15, 23, 59, 59).getTime() / 1000),
+    );
+    // 显式钉住旧实现会产生的 UTC 日末，确保两者在本时区确实不同。
+    expect(expiresAt).not.toBe(
+      Math.floor(Date.parse("2026-01-15T23:59:59Z") / 1000),
+    );
+    const local = new Date(Number(expiresAt) * 1000);
+    expect(local.getFullYear()).toBe(2026);
+    expect(local.getMonth()).toBe(0);
+    expect(local.getDate()).toBe(15);
+    expect(local.getHours()).toBe(23);
+    expect(local.getMinutes()).toBe(59);
+    expect(local.getSeconds()).toBe(59);
+  });
+});
+
+/* ------------------------- 加载/失败不得下事实断言 ------------------------- */
+
+describe("权限工作台·按用户视图的组详情态", () => {
+  it("组详情还在加载：不出现「不属于任何组」「没有任何有效权限」", async () => {
+    const user = userEvent.setup();
+    stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      // 永不落定：把 pending 那一帧定住。
+      groupDetail: () => new Promise<never>(() => {}),
+    });
+
+    renderTestApp({ path: "/access/workspace", authenticated: true });
+    await pickUser(user, "alice");
+
+    expect(await screen.findByText("正在读取权限组成员…")).toBeInTheDocument();
+    expect(screen.queryByText("该用户不属于任何权限组。")).toBeNull();
+    expect(screen.queryByText("该用户当前没有任何有效权限。")).toBeNull();
+    expect(
+      screen.getByText("部分权限组详情未取到，暂时无法判断有效权限。"),
+    ).toBeInTheDocument();
+  });
+
+  it("组详情加载失败：给「部分数据未取到」与重试，不断言成员身份", async () => {
+    const user = userEvent.setup();
+    stubAccessApi({
+      groupList: () => ({ groups: [groupWire({ id: 2 })] }),
+      groupDetail: () =>
+        jsonResponse({ code: 500, message: "组详情暂时不可用" }, 500),
+    });
+
+    renderTestApp({ path: "/access/workspace", authenticated: true });
+    await pickUser(user, "alice");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "部分权限组详情没有取到，暂时无法判断所属权限组。",
+    );
+    expect(
+      within(alert).getByRole("button", { name: "重试" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("该用户不属于任何权限组。")).toBeNull();
+    expect(screen.queryByText("该用户当前没有任何有效权限。")).toBeNull();
+    expect(
+      screen.getByText("部分权限组详情未取到，暂时无法判断有效权限。"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("权限工作台·按用户视图（授予契约）", () => {
   it("授予新权限弹窗提交对齐 grant_permission 契约；重新授予预选该权限", async () => {
     const user = userEvent.setup();
     const now = Math.floor(Date.now() / 1000);

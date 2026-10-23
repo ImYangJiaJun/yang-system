@@ -4,6 +4,7 @@ import {
   activeAccessToken,
   clearStoredSession,
   persistTokenPair,
+  SESSION_EXPIRED_EVENT,
   SESSION_RELOGIN_REQUIRED_EVENT,
 } from "@/engine/session/auth-session";
 import type {
@@ -230,7 +231,57 @@ describe("invokeAction", () => {
     await expect(
       invokeAction(action, { id: 1, name: "A" }, { token: "access-old" }),
     ).resolves.toMatchObject({ data: { ok: true } });
-    expect(authorizations).toEqual(["Bearer access-old", "Bearer access-new"]);
+    // 刷新后的请求路径以 activeAccessToken 为准，后续请求不再携带 T0。
+    expect(activeAccessToken()).toBe("access-new");
+    await invokeAction(
+      action,
+      { id: 1, name: "A" },
+      { token: activeAccessToken() },
+    );
+    expect(authorizations).toEqual([
+      "Bearer access-old",
+      "Bearer access-new",
+      "Bearer access-new",
+    ]);
+    // 只发生一次刷新。
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === "/api/v1/users/refresh"),
+    ).toHaveLength(1);
+  });
+
+  it("刷新成功后的业务 401 不登出，作为 API 错误交给调用方", async () => {
+    persistTokenPair({ accessToken: "access-old" });
+    const expired = vi.fn();
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired);
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/api/v1/users/refresh") {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            message: "成功",
+            data: { access_token: "access-new" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ code: 40301, message: "无权限操作" }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await invokeAction(
+      action,
+      { id: 1, name: "A" },
+      { token: "access-old" },
+    ).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 401, message: "无权限操作" });
+    expect(expired).not.toHaveBeenCalled();
+    expect(activeAccessToken()).toBe("access-new");
+    window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   });
 
   it("multipart Action 使用 FormData 并在发送前执行 MIME 与大小边界", async () => {

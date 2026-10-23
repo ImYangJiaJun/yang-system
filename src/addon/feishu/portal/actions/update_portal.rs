@@ -40,7 +40,8 @@ pub(super) struct UpdatePortalInput {
     /// 自定义短链；显式给空串表示**清空**（回落到 UUID slug）。
     #[serde(default)]
     pub(super) custom_slug: Option<String>,
-    /// 多查询键（`field_id` 列表）。
+    /// 已废弃的多查询键字段：历史上可写但从未被读取。为兼容旧控制台/脚本，
+    /// 仍接受该键但**不校验、不落库、不影响查询**；新客户端不应再发送。
     #[serde(default)]
     pub(super) query_field_ids: Option<Vec<String>>,
     /// 展示名映射。
@@ -134,7 +135,7 @@ impl UpdatePortalInput {
         Ok(())
     }
 
-    /// 本次请求点名要校验的 `field_id`（查询键 + 开放列 + 多查询键）。
+    /// 本次请求点名要校验的 `field_id`（查询键 + 开放列）。
     fn referenced_field_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         if let Some(field_id) = &self.query_field_id {
@@ -142,9 +143,6 @@ impl UpdatePortalInput {
         }
         if let Some(columns) = &self.exposed_columns {
             ids.extend(columns.iter().cloned());
-        }
-        if let Some(multi) = &self.query_field_ids {
-            ids.extend(multi.iter().cloned());
         }
         ids.sort_unstable();
         ids.dedup();
@@ -158,7 +156,6 @@ impl UpdatePortalInput {
             && self.exposed_columns.is_none()
             && self.access_mode.is_none()
             && self.custom_slug.is_none()
-            && self.query_field_ids.is_none()
             && self.result_labels.is_none()
             && self.empty_message.is_none()
             && self.rate_limit_per_min.is_none()
@@ -202,6 +199,8 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
+    // 兼容字段：读一次以避免 dead_code；不参与字段校验、不落库、不影响查询。
+    let _ = input.query_field_ids.as_ref();
     if input.changes_nothing() {
         return Err(BaseError::ParamInvalid(
             "portal_id".to_string(),
@@ -257,9 +256,6 @@ pub(super) async fn handle(
     if let Some(columns) = &input.exposed_columns {
         require_all_bound(&bindings, columns, "exposed_columns")?;
     }
-    if let Some(multi) = &input.query_field_ids {
-        require_all_bound(&bindings, multi, "query_field_ids")?;
-    }
 
     // 切到口令模式却没有存量口令 = 切出一个谁也进不去的门户。口令本身走 set_passphrase。
     if input.access_mode.as_deref() == Some("passphrase") && !has_passphrase {
@@ -303,13 +299,6 @@ pub(super) async fn handle(
             } else {
                 record.insert("custom_slug", serde_json::json!(slug));
             }
-        }
-        if let Some(multi) = &input.query_field_ids {
-            record.insert(
-                "query_field_ids",
-                serde_json::json!(serde_json::to_string(multi)
-                    .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))?),
-            );
         }
         if let Some(labels) = &input.result_labels {
             record.insert(
@@ -393,6 +382,18 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_query_field_ids_is_accepted_but_ignored() {
+        // 旧客户端仍可能发送该键；为兼容不返回 400，但它不参与字段校验/写入。
+        let mut input = input();
+        input.query_field_ids = Some(vec!["fldCard".to_string(), "fldUnknown".to_string()]);
+        assert!(input.validate().is_ok());
+        assert!(
+            input.referenced_field_ids().is_empty(),
+            "废弃字段不得进入字段绑定校验"
+        );
+    }
+
+    #[test]
     fn rejects_a_non_positive_portal_id() {
         let mut input = input();
         input.portal_id = 0;
@@ -455,7 +456,6 @@ mod tests {
         let mut input = input();
         input.query_field_id = Some("fldCard".to_string());
         input.exposed_columns = Some(vec!["fldShop".to_string()]);
-        input.query_field_ids = Some(vec!["fldCard".to_string()]);
         assert_eq!(
             input.referenced_field_ids(),
             vec!["fldCard".to_string(), "fldShop".to_string()]

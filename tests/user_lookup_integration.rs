@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use yang_base::action::{ApiResponse, Request, RequestMeta};
 use yang_base::definition::{ActionName, ActionRef, BuiltApp, ModuleName};
 use yang_base::token::TokenManager;
@@ -357,6 +357,9 @@ async fn user_lookup_is_authenticated_only_and_filters_by_keyword() -> anyhow::R
         // 所以查找用的 token 必须在绑定完成之后重新登录取得。
         register_and_bind_email(&app, &sender, "alpha_user", "alpha@example.com", 44_001).await?;
         register_and_bind_email(&app, &sender, "beta_user", "beta@example.com", 44_002).await?;
+        // 改绑邮箱按秒粒度写撤销水位线（iat <= watermark 一律撤销）。两次绑定
+        // 完成后跨过当前秒边界再登录，避免同一秒签发的测试 Token 被误判为已撤销。
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
         let token_a = login(&app, "alpha_user", 44_001).await?;
 
         // 1) authenticated-only：未登录 → 401（Unauthorized）。
@@ -396,6 +399,26 @@ async fn user_lookup_is_authenticated_only_and_filters_by_keyword() -> anyhow::R
             usernames(&data) == ["beta_user"],
             "关键词 beta@ 应命中 beta_user 的邮箱: {:?}",
             usernames(&data)
+        );
+
+        // 4b) email 字段受 account.users.read 约束：非管理员拿到 null，管理员可见。
+        // alpha_user 是首个注册账号（system_admin），beta_user 是普通账号。
+        let token_b = login(&app, "beta_user", 44_002).await?;
+        let as_normal = lookup(&app, Some(&token_b), &[("q", "alpha")], 44_003).await?;
+        ensure!(as_normal.code == 0, "普通用户查找应成功");
+        let normal_data = as_normal.data.context("普通用户查找响应缺少 data")?;
+        ensure!(
+            normal_data["users"][0]["email"].is_null(),
+            "非管理员不得从 lookup 看到邮箱: {:?}",
+            normal_data["users"][0]
+        );
+        let as_admin = lookup(&app, Some(&token_a), &[("q", "alpha")], 44_003).await?;
+        ensure!(as_admin.code == 0, "管理员查找应成功");
+        let admin_data = as_admin.data.context("管理员查找响应缺少 data")?;
+        ensure!(
+            admin_data["users"][0]["email"] == "alpha@example.com",
+            "管理员必须能看到邮箱: {:?}",
+            admin_data["users"][0]
         );
 
         // 5) 响应契约：每个用户只暴露 id/username/email/status。

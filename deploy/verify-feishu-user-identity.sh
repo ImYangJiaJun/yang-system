@@ -37,12 +37,12 @@ if [ -f config.cloud.toml ]; then
 fi
 
 mysql_q() {
-  docker exec "$MYSQL_CONTAINER" mysql -uroot -p"$(cat .mysql-root-password)" \
-    --default-character-set=utf8mb4 -N -B -e "$1" 2>/dev/null
+  MYSQL_PWD="$(cat .mysql-root-password)" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
+    mysql -uroot --default-character-set=utf8mb4 -N -B -e "$1"
 }
 mysql_t() {
-  docker exec "$MYSQL_CONTAINER" mysql -uroot -p"$(cat .mysql-root-password)" \
-    --default-character-set=utf8mb4 -t -e "$1" 2>/dev/null
+  MYSQL_PWD="$(cat .mysql-root-password)" docker exec -e MYSQL_PWD "$MYSQL_CONTAINER" \
+    mysql -uroot --default-character-set=utf8mb4 -t -e "$1"
 }
 
 echo "----------------------------------------------------------"

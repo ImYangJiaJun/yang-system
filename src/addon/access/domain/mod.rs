@@ -6,6 +6,7 @@
 //! 管理员等价权限清单（sensitive_permissions）与权限组域机制（groups）。
 
 pub(crate) mod context;
+pub(crate) mod grant_expiry;
 pub(crate) mod group_resolver;
 pub(crate) mod groups;
 pub(crate) mod permission_catalog;

@@ -11,7 +11,8 @@
  * 2. **直授单选、组条目多选**：直授一次只授予一条权限（带过期时间字段），
  *    组条目一次可勾多条（组里没有过期概念，字段不出现）；
  * 3. **过期时间用原生 date 控件 + 「永久」选项**：转 unix 秒整数（选到哪天授权到
- *    那天的最后一秒），「永久」或清空提交 `null`（服务端 `expires_at: Option<i64>`）。
+ *    那天的**本地**最后一秒），「永久」提交 `null`（服务端 `expires_at: Option<i64>`）。
+ *    取消「永久」后日期是必填的：空日期不提交，免得把「想设限期」静默落成永久授权。
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -135,15 +136,24 @@ export function PermissionPickerDialog({
     [dangerSelected],
   );
 
-  /// 选到哪天，授权到那天的最后一秒（比「当天 00:00 过期」宽容一天）。
+  /// 选到哪天，授权到**本地时区**那天的最后一秒（比「当天 00:00 过期」宽容一天）。
+  /// 不能用 `Date.parse("YYYY-MM-DDT23:59:59Z")`：那是 UTC 日末，东八区会提前 8 小时失效。
   function expiresAtOf(): number | null {
     if (permanent || expiresOn === "") return null;
-    const ms = Date.parse(`${expiresOn}T23:59:59Z`);
-    return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+    const [year, month, day] = expiresOn.split("-").map(Number);
+    if (!year || !month || !day) return null;
+    return Math.floor(
+      new Date(year, month - 1, day, 23, 59, 59).getTime() / 1000,
+    );
   }
 
+  /// 非永久模式下没选日期就不许提交（否则空值会落成永久授权）。
+  const expiryReady = mode !== "direct" || permanent || expiresOn !== "";
   const canSubmit =
-    !busy && selected.length > 0 && (dangerSelected.length === 0 || confirmed);
+    !busy &&
+    selected.length > 0 &&
+    expiryReady &&
+    (dangerSelected.length === 0 || confirmed);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -264,9 +274,15 @@ export function PermissionPickerDialog({
                   <Input
                     id="permission-expires-on"
                     type="date"
+                    required
                     value={expiresOn}
                     onChange={(event) => setExpiresOn(event.target.value)}
                   />
+                  {expiresOn === "" ? (
+                    <p className="text-xs text-destructive">
+                      非永久授权必须选择过期日期。
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
             </div>

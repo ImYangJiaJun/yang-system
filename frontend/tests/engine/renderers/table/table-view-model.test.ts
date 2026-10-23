@@ -50,18 +50,29 @@ const field = (name: string, writeOnly = false): FormFieldSchema => ({
 });
 
 describe("table view model", () => {
-  it("稳定展平树行并保留深度和路径键", () => {
+  it("稳定展平树行并按记录主键生成行键", () => {
     expect(
       flattenDisplayRows([
         { id: 1, children: [{ id: 2 }, { id: 3 }] },
         { id: 4 },
       ]).map(({ data, depth, key }) => ({ id: data.id, depth, key })),
     ).toEqual([
-      { id: 1, depth: 0, key: "root.0" },
-      { id: 2, depth: 1, key: "root.0.0" },
-      { id: 3, depth: 1, key: "root.0.1" },
-      { id: 4, depth: 0, key: "root.1" },
+      { id: 1, depth: 0, key: "1" },
+      { id: 2, depth: 1, key: "2" },
+      { id: 3, depth: 1, key: "3" },
+      { id: 4, depth: 0, key: "4" },
     ]);
+  });
+
+  it("缺少主键时回退页内路径，并支持自定义主键字段", () => {
+    expect(
+      flattenDisplayRows([{ code: "a" }, { code: "b" }], 0, "root", "code").map(
+        (row) => row.key,
+      ),
+    ).toEqual(["a", "b"]);
+    expect(
+      flattenDisplayRows([{ name: "无主键" }]).map((row) => row.key),
+    ).toEqual(["root.0"]);
   });
 
   it("将精确筛选构造成类型化 where，并忽略空输入", () => {

@@ -13,6 +13,8 @@ use crate::feishu_approval_worker::{ApprovalDispatchHandle, ApprovalDispatchWork
 use crate::feishu_event_worker::FeishuEventWorker;
 use crate::feishu_oauth_reminder::FeishuOauthReminderWorker;
 use crate::feishu_pull::{FeishuPullHandle, FeishuPullWorker};
+use crate::infrastructure::grant_expiry_worker::GrantExpiryWorker;
+use crate::infrastructure::session_cleanup::SessionCleanupWorker;
 use anyhow::Context;
 use std::future::Future;
 use std::path::Path;
@@ -31,6 +33,8 @@ const TRIGGER_SIGNAL: &str = "signal";
 const TRIGGER_OPERATION_EXIT: &str = "operation_exit";
 const PHASE_HTTP_DRAIN: &str = "http_drain";
 const PHASE_AUTHORIZATION_OUTBOX_WORKER: &str = "authorization_outbox_worker";
+const PHASE_GRANT_EXPIRY_WORKER: &str = "grant_expiry_worker";
+const PHASE_SESSION_CLEANUP_WORKER: &str = "session_cleanup_worker";
 const PHASE_FEISHU_PULL_WORKER: &str = "feishu_pull_worker";
 const PHASE_FEISHU_APPROVAL_WORKER: &str = "feishu_approval_worker";
 const PHASE_FEISHU_EVENT_WORKER: &str = "feishu_event_worker";
@@ -242,6 +246,8 @@ async fn run_after_tools_created(
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
+    // `application.runtime` 稍后会被移进 `Arc`，收敛句柄必须在那之前取出。
+    let grant_expiry = application.grant_expiry_handle();
 
     let initializer = DatabaseInitializer::new(initializer_mysql);
     let definitions =
@@ -272,6 +278,14 @@ async fn run_after_tools_created(
     let outbox_worker = AuthorizationOutboxWorker::start(&tools, settings.authorization.clone())
         .await
         .context("启动授权 Outbox Worker 失败")?;
+    // 过期直授收敛：无条件启动。过期行若只靠签发/刷新过滤，已签发的 Access Token
+    // 最长还能再活一个 access TTL；后台每 60 秒递增版本并写 Outbox 把它收敛掉。
+    let grant_expiry_worker = GrantExpiryWorker::start(Arc::clone(&tools), grant_expiry)
+        .context("启动过期直授收敛 Worker 失败")?;
+    // 会话保留期清理：无条件启动。不清理会让 IP/UA 与逐设备会话行无界累积；
+    // 保留期与 refresh token 硬上限对齐，删除的只可能是已无法续期的会话。
+    let session_cleanup_worker = SessionCleanupWorker::start(Arc::clone(&tools))
+        .context("启动会话保留期清理 Worker 失败")?;
     // 飞书出站拉取 Worker：**只在 can_pull() 为真时起**。凭证还是占位值时起来，
     // 只会拿占位凭证按间隔反复出网、每轮都失败并告警——这正是 can_pull() 要挡的状态。
     // 段未配置、或已配置但凭证是占位值时，这里安静地不起，行为与未集成飞书一致。
@@ -387,10 +401,21 @@ async fn run_after_tools_created(
     };
     readiness_gate.mark_not_ready();
     shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;
-    // 两个后台任务都要在 Tools 关闭前停：Tools 关掉后 worker 每轮会拿到
-    // `Tools 已关闭` 并空转刷错误日志。分两个阶段跑，各自的耗时在关闭预算里可分辨。
+    // 后台任务都要在 Tools 关闭前停：Tools 关掉后 worker 每轮会拿到
+    // `Tools 已关闭` 并空转刷错误日志。分阶段跑，各自的耗时在关闭预算里可分辨。
     let outbox_shutdown = shutdown_budget
         .run_phase(PHASE_AUTHORIZATION_OUTBOX_WORKER, outbox_worker.shutdown())
+        .await
+        .map_err(anyhow::Error::from);
+    let grant_expiry_shutdown = shutdown_budget
+        .run_phase(PHASE_GRANT_EXPIRY_WORKER, grant_expiry_worker.shutdown())
+        .await
+        .map_err(anyhow::Error::from);
+    let session_cleanup_shutdown = shutdown_budget
+        .run_phase(
+            PHASE_SESSION_CLEANUP_WORKER,
+            session_cleanup_worker.shutdown(),
+        )
         .await
         .map_err(anyhow::Error::from);
     let feishu_shutdown = match feishu_pull_worker {
@@ -425,8 +450,10 @@ async fn run_after_tools_created(
             .map_err(anyhow::Error::from),
         None => Ok(()),
     };
-    // `and` 保留第一个错误：四者都失败时先看到的是更早那个阶段的问题。
+    // `and` 保留第一个错误：任一阶段失败时先看到的是更早那个阶段的问题。
     let shutdown_result = outbox_shutdown
+        .and(grant_expiry_shutdown)
+        .and(session_cleanup_shutdown)
         .and(feishu_shutdown)
         .and(approval_shutdown)
         .and(event_shutdown)

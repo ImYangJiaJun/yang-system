@@ -1205,8 +1205,6 @@ export type Portal = {
   query_field_id: string;
   /// 查询键 source_key（冗余，用于展示）。
   query_field_source_key: string;
-  /// 多查询键（JSON 数组，可选）。Phase 1 单键，保留投影。
-  query_field_ids: string | null;
   access_mode: PortalAccessMode;
   /// 开放列 field_id 的 JSON 数组。
   exposed_columns: string;

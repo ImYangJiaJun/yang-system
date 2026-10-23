@@ -495,10 +495,9 @@ impl GroupRepository {
     /// 换成组行记录锁后，同一组的成员变更在**第一步**就排队，间隙锁连出现的机会都没有。
     ///
     /// **锁序**：调用方必须**先**取 users 行锁、**再**调用本方法，即相对次序恒为
-    /// 「users 行 → 组行」（`add_group_member` 与 `remove_group_member` 都遵守；
-    /// 全局锁序见 `domain::groups::admin` 的模块注释）。这条次序不是任意选的：
-    /// `add_group_item` 先按升序锁 users 行、再在插入条目时由外键取**父组行**的 S 锁，
-    /// 次序正是「users 行 → 组行」。成员变更若反过来（组行 → users 行），两条路径就会在
+    /// 「users 行 → 组行」（组条目与成员变更路径都遵守；全局锁序见
+    /// `domain::groups::admin` 的模块注释）。这条次序不是任意选的：条目路径同样先按
+    /// 升序锁 users 行、再锁组行。若成员变更反过来（组行 → users 行），两条路径就会在
     /// 同一组行与同一批 users 行上构成 ABBA 环——把一个死锁换成另一个。
     pub(crate) async fn lock_group_in_tx(
         &self,

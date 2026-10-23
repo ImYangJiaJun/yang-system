@@ -43,6 +43,18 @@ pub(crate) fn verify_token(presented: &str, stored_hash: &str) -> bool {
     computed.as_bytes().ct_eq(normalized.as_bytes()).into()
 }
 
+/// 常数时间比较两个**明文** Token（例如飞书事件推送的 verification_token）。
+///
+/// 长度不同直接返回 false；长度本身不是秘密（飞书 token 长度固定）。
+pub(crate) fn tokens_equal(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.ct_eq(right).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +111,12 @@ mod tests {
         // 从 secret 文件读入的值可能带结尾换行
         let padded = format!("  {}\n", hash_token("a-source-token"));
         assert!(verify_token("a-source-token", &padded));
+    }
+
+    #[test]
+    fn plaintext_tokens_compare_by_value() {
+        assert!(tokens_equal("feishu-token", "feishu-token"));
+        assert!(!tokens_equal("feishu-token", "feishu-tokeN"));
+        assert!(!tokens_equal("short", "longer"));
     }
 }

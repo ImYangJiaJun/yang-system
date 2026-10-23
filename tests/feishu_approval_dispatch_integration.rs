@@ -107,6 +107,7 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "login_event",
         "audit_event",
         "authorization_outbox",
+        "feishu_approval_event",
         "feishu_approval_request_log",
         "feishu_approval_task",
         "feishu_approval_field_map",
@@ -545,6 +546,35 @@ async fn seed_request_log(
     Ok(())
 }
 
+/// 播种一条审批事件行，返回主键。
+///
+/// `processed_at = None` 即待处理队列；`Some` + `retry_count = 10` 是 worker 置的
+/// 失败终态；`Some` + `retry_count < 10` 是成功处理（不可重放）。
+async fn seed_event(
+    database: &Database,
+    event_id: &str,
+    processed_at: Option<i64>,
+    retry_count: i64,
+    last_error: Option<&str>,
+) -> anyhow::Result<i64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let result = sqlx::query(
+        "INSERT INTO `feishu_approval_event` \
+         (`event_id`, `event_type`, `instance_code`, `status`, `received_at`, \
+          `processed_at`, `retry_count`, `last_error`, `created_at`, `updated_at`) \
+         VALUES (?, 'approval_instance', 'INST-FIXTURE', 'APPROVED', ?, ?, ?, ?, NOW(), NOW())",
+    )
+    .bind(event_id)
+    .bind(now)
+    .bind(processed_at)
+    .bind(retry_count)
+    .bind(last_error)
+    .execute(database.pool())
+    .await
+    .context("种入审批事件失败")?;
+    Ok(result.last_insert_id() as i64)
+}
+
 // ---------------------------------------------------------------- 用例
 
 /// dispatch 校验失败也要落一条 `failed` 记录——而且请求人归一照旧生效。
@@ -952,11 +982,11 @@ async fn console_crud_loop_on_a_seeded_config() {
     finish(outcome, "配置 CRUD 闭环").await;
 }
 
-/// delete_config 同事务清 `pending` 任务行；backfilled / terminal / unnotified
-/// 保留作流水（后两者都是「处理已结束」，区别只在有没有送达通知）。
+/// delete_config 必须清掉该配置的**全部**任务行：task 表的 record_id 是全局
+/// 唯一键，保留完结行会让重建配置后的同记录播种永久卡住（#31）。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
-async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
+async fn delete_config_clears_all_tasks_and_unblocks_recreated_config() {
     let outcome = async {
         let (database, app, token) = prepare_app(None, None).await?;
         let (config_id, _config_key) = seed_config(&database, "appTasks", "tblTasks", true).await?;
@@ -964,6 +994,15 @@ async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
         seed_task(&database, config_id, "recBackfilled", "backfilled").await?;
         seed_task(&database, config_id, "recTerminal", "terminal").await?;
         seed_task(&database, config_id, "recUnnotified", "unnotified").await?;
+        sqlx::query(
+            "INSERT INTO `feishu_approval_task_applicant` (`task_id`, `open_id`) \
+             SELECT `id`, 'ou_orphan' FROM `feishu_approval_task` \
+             WHERE `config_id` = ? AND `record_id` = 'recPending'",
+        )
+        .bind(config_id)
+        .execute(database.pool())
+        .await
+        .context("种入申请人扩展行失败")?;
 
         let deleted = dispatch_as_operator(
             &app,
@@ -976,29 +1015,54 @@ async fn delete_config_clears_pending_tasks_and_keeps_finished_ones() {
         let data = response_data(&deleted)?;
         ensure!(
             data["deleted_pending_tasks"] == json!(1),
-            "只应清 pending 任务: {data}"
+            "pending 任务计数必须保留: {data}"
+        );
+        ensure!(
+            data["deleted_tasks"] == json!(4),
+            "全部任务行都应清掉: {data}"
+        );
+        ensure!(
+            data["deleted_applicants"] == json!(1),
+            "任务的属性扩展行也必须一并清理: {data}"
         );
 
-        let remaining: Vec<String> =
-            sqlx::query_scalar("SELECT `state` FROM `feishu_approval_task` ORDER BY `id`")
-                .fetch_all(database.pool())
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM `feishu_approval_task` WHERE `config_id` = ?")
+                .bind(config_id)
+                .fetch_one(database.pool())
                 .await
-                .context("读取剩余任务失败")?;
+                .context("统计剩余任务失败")?;
+        ensure!(remaining == 0, "配置 A 的任务行必须全部清空");
+        let orphan_applicants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM `feishu_approval_task_applicant` WHERE `open_id` = 'ou_orphan'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .context("统计申请人孤儿行失败")?;
         ensure!(
-            remaining
-                == [
-                    "backfilled".to_string(),
-                    "terminal".to_string(),
-                    "unnotified".to_string()
-                ],
-            "backfilled / terminal / unnotified 必须保留作流水，实际 {remaining:?}"
+            orphan_applicants == 0,
+            "申请人扩展行不得留下指向已删除任务的孤儿"
         );
+
+        // 重建配置后，同一 record_id 必须能重新播种（旧的全局唯一键不再被占用）。
+        let (config_b, _config_key_b) =
+            seed_config(&database, "appTasksB", "tblTasksB", true).await?;
+        seed_task(&database, config_b, "recBackfilled", "pending").await?;
+        let rebound: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM `feishu_approval_task` \
+             WHERE `config_id` = ? AND `record_id` = 'recBackfilled'",
+        )
+        .bind(config_b)
+        .fetch_one(database.pool())
+        .await
+        .context("统计重建配置任务失败")?;
+        ensure!(rebound == 1, "重建配置后同 record_id 必须能落任务行");
 
         Ok(())
     }
     .await;
 
-    finish(outcome, "删除清 pending 保留完结").await;
+    finish(outcome, "删除清全部任务并可重建").await;
 }
 
 /// list_requests 随行带请求体/返回体；list_tasks 按 config_id / state 过滤。
@@ -1101,6 +1165,274 @@ async fn list_requests_and_list_tasks_return_rows_with_filters() {
     .await;
 
     finish(outcome, "记录与任务列表").await;
+}
+
+/// #32 + #30：全表受理即便显式传了 `notification_recipient` 也不由 HTTP 同步
+/// 路径发通知（交给 worker 逐条发），且请求记录里的 Token 必须已脱敏。
+///
+/// 受理路径不建出站栈、不出网：结论是 `Accepted`（中间态），状态门把它挡在
+/// 本层之外；若回归成「显式接收人绕过状态门」，这里会尝试真实出站并因 dummy
+/// 凭证失败——断言会先看到 `notification.status != not_requested`。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn acceptance_with_explicit_recipient_defers_and_redacts_the_request_log() {
+    let outcome = async {
+        let database = connect_database().await?;
+        reset_database(&database).await?;
+        sync_with_database(database, database_config(), security_settings())
+            .await
+            .context("同步 Schema 失败")?;
+        let database = connect_database().await?;
+        let redis = connect_redis().await?;
+        let (_config_id, config_key) =
+            seed_config(&database, "appRedact", "tblRedact", true).await?;
+        let (handle, _receiver) = ApprovalDispatchHandle::new();
+        let app = build_feishu_app(
+            &database,
+            &redis,
+            feishu_settings(Some("cli_test_app"), Some("test-app-secret")),
+            Some(handle),
+        )
+        .await?;
+
+        let response = dispatch_as_workflow(
+            &app,
+            &config_key,
+            json!({
+                "token": seed_token(&config_key),
+                "requested_by": "脱敏用例",
+                "notification_recipient": {
+                    "receive_id_type": "open_id",
+                    "receive_id": "ou_explicit",
+                },
+            }),
+        )
+        .await
+        .context("受理不应返回 Err")?;
+        ensure!(response.code == 0, "受理必须成功: {response:?}");
+        let data = response_data(&response)?;
+        ensure!(
+            data["accepted"] == json!(true),
+            "受理 accepted 必须为 true: {data}"
+        );
+        ensure!(
+            data["notification"]["status"] == json!("not_requested"),
+            "中间态（受理）不得由 HTTP 发通知，实际: {data}"
+        );
+        ensure!(
+            data["notification"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("后台"),
+            "受理结论必须说明由后台通知: {data}"
+        );
+
+        let (request_body, outcome_text): (String, String) = sqlx::query_as(
+            "SELECT `request_body`, `outcome` \
+             FROM `feishu_approval_request_log` WHERE `base_token` = ? \
+             ORDER BY `id` DESC LIMIT 1",
+        )
+        .bind("appRedact")
+        .fetch_one(database.pool())
+        .await
+        .context("读取请求记录失败")?;
+        ensure!(outcome_text == "accepted", "实际 outcome: {outcome_text}");
+        ensure!(
+            !request_body.contains(&seed_token(&config_key)),
+            "请求记录不得含明文 Token: {request_body}"
+        );
+        ensure!(
+            request_body.contains("<redacted>"),
+            "请求记录必须含脱敏占位符: {request_body}"
+        );
+        ensure!(
+            request_body.contains("脱敏用例"),
+            "非敏感字段（requested_by）必须保留: {request_body}"
+        );
+        ensure!(
+            request_body.contains("ou_explicit"),
+            "非敏感字段（notification_recipient）必须保留: {request_body}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    finish(outcome, "受理通知门与请求体脱敏").await;
+}
+
+/// 失败终态事件可查询、可人工重试回队；成功事件拒绝重放。
+///
+/// 「下一轮 worker 可认领」用 `processed_at IS NULL` 断言——这正是
+/// `claim_events` 的唯一筛选条件（`where_null("processed_at")`），不启动 worker
+/// 是为了避免出站打飞书。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn terminal_event_can_be_queried_and_requeued_but_success_cannot() {
+    let outcome = async {
+        let (database, app, token) = prepare_app(None, None).await?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+
+        let terminal_id = seed_event(
+            &database,
+            "evt-terminal-requeue",
+            Some(now),
+            10,
+            Some("连续失败超 10 次: boom"),
+        )
+        .await?;
+        let succeeded_id =
+            seed_event(&database, "evt-succeeded-no-replay", Some(now), 0, None).await?;
+
+        // 终态过滤只返回失败终态行；成功事件不在其中。
+        let listed =
+            dispatch_as_operator(&app, "list_events", &token, json!({"terminal_only": true}))
+                .await?;
+        let data = response_data(&listed)?;
+        let ids: Vec<i64> = data["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("items 必须是数组: {data}"))
+            .iter()
+            .map(|item| item["id"].as_i64().unwrap_or_default())
+            .collect();
+        ensure!(
+            ids == vec![terminal_id],
+            "terminal_only 只应返回终态事件，实际: {data}"
+        );
+        ensure!(
+            data["items"][0]["last_error"] == "连续失败超 10 次: boom",
+            "终态行必须带可排查的 last_error: {data}"
+        );
+
+        // 人工重试终态事件：重置回待处理队列。
+        let authorization = format!("Bearer {token}");
+        let terminal_id_text = terminal_id.to_string();
+        let retried = dispatch(
+            &app,
+            "feishu.approval",
+            "retry_event",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            &[("id", terminal_id_text.as_str())],
+        )
+        .await
+        .context("重试终态事件不应返回 Err")?;
+        let data = response_data(&retried)?;
+        ensure!(
+            data["requeued"] == true && data["previous_retry_count"] == 10,
+            "重试响应必须带 previous_retry_count: {data}"
+        );
+
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT `processed_at`, `retry_count`, `last_error` \
+             FROM `feishu_approval_event` WHERE `id` = ?",
+        )
+        .bind(terminal_id)
+        .fetch_one(database.pool())
+        .await
+        .context("读取重试后的事件行失败")?;
+        ensure!(
+            row.get::<Option<i64>, _>("processed_at").is_none(),
+            "processed_at 必须重置为 NULL（worker 认领条件）"
+        );
+        ensure!(
+            row.get::<i64, _>("retry_count") == 0,
+            "retry_count 必须清零"
+        );
+        ensure!(
+            row.get::<Option<String>, _>("last_error").is_none(),
+            "last_error 必须清空"
+        );
+
+        // 成功事件不可重试：400（ParamInvalid 冒泡为 Err）。
+        let succeeded_id_text = succeeded_id.to_string();
+        let replay = dispatch(
+            &app,
+            "feishu.approval",
+            "retry_event",
+            json!({}),
+            &[("authorization", authorization.as_str())],
+            &[("id", succeeded_id_text.as_str())],
+        )
+        .await;
+        // 必须命中「成功事件不可重放」这条判据，而不是仅靠 CAS 兜底：两者都返回
+        // Err，只有文案能区分行为走了哪条路径（摘除终态判断时此断言变红）。
+        let error = match replay {
+            Ok(_) => panic!("成功事件重放必须被拒绝"),
+            Err(error) => error,
+        };
+        ensure!(
+            error.to_string().contains("已成功处理"),
+            "必须命中成功事件不可重放的判据，实际错误: {error}"
+        );
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM `audit_event` \
+             WHERE `action` = 'feishu.approval.retry_event' AND `result` = 'succeeded'",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        ensure!(
+            audit_count == 1,
+            "人工重试必须写一条成功审计，实际 {audit_count}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    finish(outcome, "失败终态事件查询与人工重试").await;
+}
+
+/// 共用订阅 URL + Encrypt Key：challenge 端点解密后把 body 委托给事件 handler，
+/// 不能再次把「已解密 body 没有 encrypt 字段」误判为明文注入并 401。
+///
+/// 密文由测试密钥 `test-event-encrypt-key` 按飞书格式（SHA-256 派生密钥、
+/// AES-256-CBC、IV 前置、PKCS#7）生成，明文是下面的 event_callback；不是生产密文。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn shared_challenge_url_accepts_encrypted_event_callback() {
+    const ENCRYPTED_EVENT: &str = "MnoNzE4lNEff09rLlyBpEmYF7iHKL+Xg2xgIOQ/MrjulRcPe9Sc+TaNW12vq3kmIHE2d5RSa1RHIvXRmd4oV7O1klWfqmk6VtFvE3t1z0biayg//TeaSGzR0uItaqyITp741crRS6FsRMytSnfkpvc+Jptd6my5GVCNdR5MUrV/pgpPSBzI9vilCME5vprmw2VRW3Xs6Jm4CwyOS/2jovSdgFWBymTpp8TXRoyoPGT0Tm+IyZsXSLujQDbCHFUBNV3o/Pof9m4aLj+uGD4hoGVBUPbdWY9BinZj/xqKYkPQ=";
+
+    let outcome = async {
+        let database = connect_database().await?;
+        reset_database(&database).await?;
+        sync_with_database(database, database_config(), security_settings()).await?;
+        let database = connect_database().await?;
+        let redis = connect_redis().await?;
+
+        let mut settings =
+            (*feishu_settings(Some("cli_test_app"), Some("cli_test_secret"))).clone();
+        settings.event_verification_token = Some("test-event-token".to_string());
+        settings.event_encrypt_key = Some("test-event-encrypt-key".to_string());
+        let app = build_feishu_app(&database, &redis, Arc::new(settings), None).await?;
+
+        // challenge 端点必须成功解密、委托事件 handler 并落库，而不是 401。
+        let _ = dispatch(
+            &app,
+            "feishu.event",
+            "event_challenge",
+            json!({ "encrypt": ENCRYPTED_EVENT }),
+            &[],
+            &[],
+        )
+        .await?;
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feishu_approval_event WHERE event_id = 'evt-shared-url-001'",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        ensure!(
+            count == 1,
+            "共用 challenge URL 的加密事件必须落库，实际 {count} 行"
+        );
+        Ok(())
+    }
+    .await;
+
+    finish(outcome, "共用订阅 URL 加密事件").await;
 }
 
 /// 每个用例的统一收尾：无论成败都清掉测试表。

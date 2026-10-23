@@ -25,11 +25,11 @@
 //!
 //! ## 为什么是「users 行 → 组行」，而不是反过来（收尾回合改正）
 //!
-//! 这条相对次序是被 `add_group_item` 逼出来的：它先按升序锁 users 行（`{操作者} ∪
-//! {组成员}`），再在插入条目时由 `permission_group_item` 的外键取**父组行**的 S 锁，
-//! 次序正是「users 行 → 组行」。成员变更若反过来先取组行 X 锁、再取 users 行，就会与
-//! 它构成 ABBA 环：一方持组行等 users 行、另一方持 users 行等组行（父外键 S 锁），
-//! MySQL 只能牺牲一个。因此成员变更统一为「先 users 行、后组行」。
+//! 这条相对次序由组条目路径与成员变更路径共同遵守：`add_group_item` /
+//! `remove_group_item` 都先按升序锁 users 行（`{操作者} ∪ {组成员}`），再锁组行；
+//! 成员变更同样如此。若任一成员变更反过来先取组行 X 锁、再取 users 行，就会与条目
+//! 路径构成 ABBA 环：一方持组行等 users 行、另一方持 users 行等组行，MySQL 只能
+//! 牺牲一个。因此所有组写路径统一为「先 users 行、后组行」。
 //!
 //! 这个顺序下 `remove_group_member` 在事务前先做一次只读**探查**确定 users 行锁集合
 //! （成员 id 必须先于加锁知道）。探针允许陈旧：只为定锁集，判据读在组行锁之后。
@@ -335,6 +335,43 @@ pub(crate) async fn ensure_may_modify_members_of_group_in_tx(
     Err(BaseError::PermissionDenied(format!(
         "该权限组持有管理员等价权限 {}（{}），只有系统管理员可以修改它的成员",
         entry.permission, entry.reason
+    )))
+}
+
+/// 委派子集闸门（组 → 成员方向）：操作者只能把**自己已持有**的组权限转授给他人。
+///
+/// 判据用 [`resolve_group_permissions`] 计算目标组的**实际贡献**，而不是拿原始条目
+/// 逐个比较：孤儿条目在解析期被静默丢弃，按原始条目比较会把它们也算成「缺少」，
+/// 误拒合法操作。`system_admin` 组的贡献是目录全集；操作者是该组成员时其有效权限
+/// 同样是全集，因此本闸门对管理员路径自然放行。
+///
+/// **锁序**：本函数只做普通 SELECT，不取新锁；调用方必须已按全局锁序持有本次事务要
+/// 触碰的 users 行与目标组行锁。
+pub(crate) async fn ensure_operator_holds_group_permissions_in_tx(
+    access: &Access,
+    ctx: &ActionContext,
+    transaction: &mut Transaction,
+    operator_id: i64,
+    group: &GroupRecord,
+) -> Result<(), BaseError> {
+    let catalog = catalog_permissions(access.permission_catalog())?;
+    let items = access
+        .groups()
+        .list_items_in_tx(ctx, transaction, group.id)
+        .await?;
+    let contribution = resolve_group_permissions(&group.group_key, &items, &catalog);
+    let effective = effective_permissions_of_in_tx(access, ctx, transaction, operator_id).await?;
+    let missing: Vec<&str> = contribution
+        .iter()
+        .map(String::as_str)
+        .filter(|permission| !effective.contains(*permission))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(BaseError::PermissionDenied(format!(
+        "目标组授予的权限（{}）不在你的有效权限中，不能把你未持有的权限转授给其他成员",
+        missing.join(", ")
     )))
 }
 

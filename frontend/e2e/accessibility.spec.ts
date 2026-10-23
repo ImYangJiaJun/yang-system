@@ -1,7 +1,7 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-import { mockSessionRestore } from "./support";
+import { mockSessionRestore, resetDemoData } from "./support";
 
 /**
  * 可访问性（ADR-5 §2.3）：核心页面 axe 零 critical/serious 违规 + 键盘可达性。
@@ -46,7 +46,9 @@ test("登录页满足 WCAG AA 且可以纯键盘提交", async ({ page }) => {
   await expect(page.getByText("账号或密码错误")).toBeVisible();
 });
 
-test("工作台表格页满足 WCAG AA", async ({ page }) => {
+test("工作台表格页满足 WCAG AA", async ({ page, request }) => {
+  // 表格数据与其他 spec 共用内存后端：先重置，避免前序用例删改后这里超时。
+  await resetDemoData(request);
   await mockSessionRestore(page);
   await page.goto("/workbench");
   await expect(page.getByText("平台能力", { exact: true })).toBeVisible();

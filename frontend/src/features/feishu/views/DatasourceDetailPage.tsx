@@ -38,7 +38,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { Link, useParams } from "react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
   ArrowLeft,
@@ -71,6 +71,7 @@ import {
   XLSX_OPERATION_IDS,
   canWriteDatasources,
   checkDatasourceHealth,
+  feishuQueryKeys,
   hasOperation,
   listOptions,
   useCredentialClient,
@@ -1391,6 +1392,7 @@ function HealthSection({ datasource }: { datasource: DatasourceItem }) {
 /// 只给回显的部署，轮换按钮会在确认框里说「没有轮换权限」，而不是发一个必然 403 的请求。
 function CredentialSection({ datasource }: { datasource: DatasourceItem }) {
   const catalog = useUiCatalog();
+  const queryClient = useQueryClient();
   const credentialClient = useCredentialClient();
   const canReveal = hasOperation(catalog.data, TABLE_OPERATION_IDS.reveal);
   const canRotate = hasOperation(catalog.data, TABLE_OPERATION_IDS.rotate);
@@ -1420,7 +1422,16 @@ function CredentialSection({ datasource }: { datasource: DatasourceItem }) {
 
   return (
     <div className="space-y-2">
-      <CredentialChecklist items={items} client={client} />
+      <CredentialChecklist
+        items={items}
+        client={client}
+        onRotated={() => {
+          // 轮换会写绑定行的 token_rotated_at：不重读数据源，这一块永远显示旧时间。
+          void queryClient.invalidateQueries({
+            queryKey: feishuQueryKeys.datasources(),
+          });
+        }}
+      />
       {disabledCount > 0 ? (
         <p className="text-xs text-muted-foreground">
           还有 {disabledCount} 条已停用的绑定没列在这里：停用的字段出站时会被拒

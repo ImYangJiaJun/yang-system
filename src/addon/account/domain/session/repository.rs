@@ -250,6 +250,50 @@ impl SessionRepository {
         Ok(affected)
     }
 
+    /// 目标会话是否仍然有效（存在且未撤销）。
+    ///
+    /// 供 refresh 路径在签发新令牌前做权威判定：会话行缺失或 `revoked_at` 非空
+    /// 一律视为已撤销，fail-closed 拒绝；老 Token 无 `session_id` 时调用方不查。
+    pub(crate) async fn is_active_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        session_id: &str,
+    ) -> Result<bool, BaseError> {
+        let rows = self
+            .query(ctx)?
+            .select_fields(&[SESSION_ID])?
+            .where_eq(
+                SESSION_ID,
+                serde_json::Value::String(session_id.to_string()),
+            )?
+            .where_null(REVOKED_AT)?
+            .page(1, 1)?
+            .all_in_tx(transaction)
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
+    /// 在调用方事务内把某用户全部未撤销会话标记为已撤销。
+    ///
+    /// 全量失效路径（登出/改密/重置/停用/TOTP 变更）必须与版本递增同事务调用，
+    /// 否则设备列表会继续把已失效设备显示为活跃，且 PII 无限累积。
+    pub(crate) async fn revoke_all_for_user_in_tx(
+        &self,
+        ctx: &ActionContext,
+        transaction: &mut yang_db::Transaction,
+        user_id: i64,
+        now: i64,
+    ) -> Result<u64, BaseError> {
+        let affected = self
+            .query(ctx)?
+            .where_eq(USER_ID, serde_json::Value::Number(user_id.into()))?
+            .where_null(REVOKED_AT)?
+            .update_in_tx(transaction, Record::new().set(REVOKED_AT, now))
+            .await?;
+        Ok(affected)
+    }
+
     /// 在调用方事务内撤销单个会话（与成功审计同事务原子提交）。
     pub(crate) async fn revoke_in_tx(
         &self,

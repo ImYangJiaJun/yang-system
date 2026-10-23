@@ -26,8 +26,20 @@ export function inferDisplayKind(column: TableColumnSchema): DisplayKind {
   return "text";
 }
 
+function toDate(value: unknown): Date {
+  // Timestamp 契约是 Unix 秒；直接 new Date(String(value)) 会得到 Invalid Date，
+  // 让单元格退化成原始秒数。纯数字（数字或数字字符串）一律按秒换算。
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value * 1000);
+  }
+  if (typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value.trim())) {
+    return new Date(Number(value) * 1000);
+  }
+  return new Date(String(value));
+}
+
 function formatDate(value: unknown, withTime: boolean): string {
-  const date = new Date(String(value));
+  const date = toDate(value);
   if (Number.isNaN(date.getTime())) return formatCell(value);
   return new Intl.DateTimeFormat(PRODUCT_LOCALE, {
     year: "numeric",

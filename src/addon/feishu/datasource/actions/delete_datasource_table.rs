@@ -98,7 +98,15 @@ pub(super) async fn handle(
                 .await?;
         }
 
-        // 3) 删绑定，再删表级行。
+        // 3) 先删除引用该数据源的门户：否则会留下指向不存在数据源的公开入口。
+        context
+            .portals()
+            .query()
+            .where_eq("datasource_id", serde_json::json!(input.datasource_id))?
+            .delete_in_tx(&mut transaction)
+            .await?;
+
+        // 4) 删绑定，再删表级行。
         context
             .datasource_fields()
             .query()

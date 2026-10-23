@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TableColumnSchema } from "@/engine/contracts/ui-catalog";
+import { PRODUCT_LOCALE } from "@/shared/lib/product-locale";
 import {
   inferDisplayKind,
   resolveCellPresentation,
@@ -72,5 +73,30 @@ describe("business cell model", () => {
         99,
       ).text,
     ).toBe("99");
+  });
+
+  it("date_time 把 Unix 秒按时间戳渲染，不按日期字符串解析", () => {
+    const seconds = 1720000000;
+    const expected = new Intl.DateTimeFormat(PRODUCT_LOCALE, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(seconds * 1000));
+
+    const numeric = resolveCellPresentation(
+      column({ widget: "date_time" }),
+      seconds,
+    );
+    expect(numeric).toMatchObject({ kind: "date_time", text: expected });
+    expect(numeric.text).not.toBe(String(seconds));
+
+    // 后端 JSON 可能把 Timestamp 序列化成数字字符串，同样按秒处理。
+    expect(
+      resolveCellPresentation(column({ widget: "date_time" }), String(seconds))
+        .text,
+    ).toBe(expected);
   });
 });

@@ -49,7 +49,8 @@ pub(super) struct CreatePortalInput {
     /// 自定义短链（可选；为空时用系统生成的 UUID slug）。
     #[serde(default)]
     pub(super) custom_slug: Option<String>,
-    /// 多查询键（可选，`field_id` 列表）。
+    /// 已废弃的多查询键字段：历史上可写但从未被读取。为兼容旧控制台/脚本，
+    /// 仍接受该键但**不校验、不落库、不影响查询**；新客户端不应再发送。
     #[serde(default)]
     pub(super) query_field_ids: Option<Vec<String>>,
     /// 展示名映射（可选）：`field_id` → 展示名。
@@ -191,13 +192,10 @@ impl CreatePortalInput {
         self.rate_limit_per_min.unwrap_or(RATE_LIMIT_DEFAULT)
     }
 
-    /// 进入事务前要校验的 `field_id` 全集（查询键 + 开放列 + 多查询键）。
+    /// 进入事务前要校验的 `field_id` 全集（查询键 + 开放列）。
     fn referenced_field_ids(&self) -> Vec<String> {
         let mut ids = vec![self.query_field_id.clone()];
         ids.extend(self.exposed_columns.iter().cloned());
-        if let Some(multi) = &self.query_field_ids {
-            ids.extend(multi.iter().cloned());
-        }
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -266,6 +264,8 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
+    // 兼容字段：读一次以避免 dead_code；不参与字段校验、不落库、不影响查询。
+    let _ = input.query_field_ids.as_ref();
     ensure_datasource_is_active(&context, input.datasource_id).await?;
 
     let referenced = input.referenced_field_ids();
@@ -276,9 +276,6 @@ pub(super) async fn handle(
         "query_field_id",
     )?;
     require_all_bound(&bindings, &input.exposed_columns, "exposed_columns")?;
-    if let Some(multi) = &input.query_field_ids {
-        require_all_bound(&bindings, multi, "query_field_ids")?;
-    }
 
     // 哈希在事务外做：argon2 是**故意**慢的，把它塞进事务会把行锁持有到几百毫秒。
     let passphrase_hash = match input.passphrase.as_deref() {
@@ -348,14 +345,6 @@ pub(super) async fn handle(
                     .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))?),
             );
         }
-        if let Some(multi) = &input.query_field_ids {
-            row.insert(
-                "query_field_ids",
-                serde_json::json!(serde_json::to_string(multi)
-                    .map_err(|error| BaseError::JsonSerializeFailed(error.to_string()))?),
-            );
-        }
-
         let (_, portal_id) = context
             .portals()
             .query()
@@ -421,6 +410,19 @@ mod tests {
     #[test]
     fn accepts_a_public_portal() {
         assert!(input().validate().is_ok());
+    }
+
+    #[test]
+    fn deprecated_query_field_ids_is_accepted_but_ignored() {
+        // 旧客户端仍可能发送该键；为兼容不返回 400，但它不参与字段校验/写入。
+        let mut input = input();
+        input.query_field_ids = Some(vec!["fldCard".to_string(), "fldUnknown".to_string()]);
+        assert!(input.validate().is_ok());
+        assert_eq!(
+            input.referenced_field_ids(),
+            vec!["fldCard".to_string(), "fldShop".to_string()],
+            "废弃字段不得进入字段绑定校验"
+        );
     }
 
     #[test]
@@ -537,8 +539,8 @@ mod tests {
     #[test]
     fn referenced_field_ids_deduplicate_and_include_every_source() {
         let mut input = input();
-        input.query_field_ids = Some(vec!["fldCard".to_string(), "fldShop".to_string()]);
         // 查询键与开放列都进来，重复的只留一份。
+        input.exposed_columns = vec!["fldShop".to_string(), "fldCard".to_string()];
         assert_eq!(
             input.referenced_field_ids(),
             vec!["fldCard".to_string(), "fldShop".to_string()]

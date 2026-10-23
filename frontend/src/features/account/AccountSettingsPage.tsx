@@ -32,10 +32,26 @@ import {
   useSessionSnapshot,
 } from "@/engine/session/use-session";
 import { copyText } from "@/shared/lib/clipboard";
+import { PRODUCT_LOCALE } from "@/shared/lib/product-locale";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
 import { useToast } from "@/shared/lib/toast";
+
+/// 账号页的时间展示：显式产品 locale（`scripts/verify-locale-contract.mjs` 的合同），
+/// 不用 `toLocaleString()` 的隐式浏览器 locale。
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat(PRODUCT_LOCALE, {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function formatDateTime(unixSeconds: number): string {
+  return DATE_TIME_FORMATTER.format(new Date(unixSeconds * 1000));
+}
 
 /// 账号设置页：资料展示 + 修改密码 + 修改用户名 + 停用账号。
 export default function AccountSettingsPage() {
@@ -422,7 +438,7 @@ export default function AccountSettingsPage() {
             <dt className="text-muted-foreground">邮箱</dt>
             <dd>{emailText}</dd>
             <dt className="text-muted-foreground">注册时间</dt>
-            <dd>{new Date(profile.createdAt * 1000).toLocaleString()}</dd>
+            <dd>{formatDateTime(profile.createdAt)}</dd>
           </dl>
         </section>
       )}
@@ -658,8 +674,7 @@ export default function AccountSettingsPage() {
                   )}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {session.ip} · 最近活动{" "}
-                  {new Date(session.lastSeenAt * 1000).toLocaleString()}
+                  {session.ip} · 最近活动 {formatDateTime(session.lastSeenAt)}
                 </p>
               </div>
               {!session.current && (
@@ -706,8 +721,7 @@ export default function AccountSettingsPage() {
                 )}
               </p>
               <p className="text-xs text-muted-foreground">
-                {event.ip} ·{" "}
-                {new Date(event.occurredAt * 1000).toLocaleString()}
+                {event.ip} · {formatDateTime(event.occurredAt)}
               </p>
             </li>
           ))}

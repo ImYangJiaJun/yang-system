@@ -385,3 +385,79 @@ async fn revoking_a_session_rejects_its_refresh_token() -> anyhow::Result<()> {
     let redis_cleanup = reset_redis(&redis).await;
     finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
 }
+
+/// 即使 jti 黑名单尚未写入，只要会话行被标记撤销，refresh 就必须 fail-closed。
+///
+/// 回归：refresh 路径曾完全不读 `user_session.revoked_at`，只依赖 `revoke_session`
+/// 提交后的 best-effort jti 拉黑；并发轮换或拉黑失败会让被撤销设备继续续期。
+/// 本用例直接改库标记 revoked_at、不写任何 jti 黑名单，隔离出会话行判定本身。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn refresh_rejects_a_session_row_marked_revoked_without_jti_blacklist() -> anyhow::Result<()>
+{
+    let control = connect_test_database().await?;
+    let redis = connect_test_redis().await?;
+    reset_database(&control).await?;
+    reset_redis(&redis).await?;
+
+    let outcome = async {
+        sync_with_database(
+            connect_test_database().await?,
+            database_config(),
+            security_settings(),
+        )
+        .await?;
+        let deployment = format!(
+            "session-row-revoke-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        );
+        let tools = Arc::new(
+            ToolsBuilder::new()
+                .mysql(Database::from_pool(
+                    control.pool().clone(),
+                    database_config(),
+                )?)
+                .cache(redis.clone())
+                .extension(AuthorizationVersionCache::new(redis.clone(), deployment)?)
+                .token(token_manager())
+                .build()?,
+        );
+        let app = build_app(tools, security_settings())?;
+        let runtime = app.runtime;
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+
+        let (token, cookie) = register_and_login(&runtime, suffix, 42_002).await?;
+        let session_id = current_session_id(&runtime, &token, 42_002).await?;
+
+        // 只标记会话行，不写任何 jti 黑名单：模拟 revoke_session 提交后拉黑失败，
+        // 或攻击者在拉黑前并发轮换出新 jti 的窗口。
+        sqlx::query("UPDATE user_session SET revoked_at = UNIX_TIMESTAMP() WHERE session_id = ?")
+            .bind(&session_id)
+            .execute(control.pool())
+            .await?;
+
+        let refresh_after_revoke = dispatch(
+            &runtime,
+            "account.user",
+            "refresh",
+            json!({}),
+            &[("cookie", format!("yang_refresh={cookie}").as_str())],
+            42_002,
+        )
+        .await;
+        let still_valid = match refresh_after_revoke {
+            Ok(response) => response.code == 0,
+            Err(_) => false,
+        };
+        ensure!(
+            !still_valid,
+            "会话行 revoked_at 非空时 refresh 必须 fail-closed，即使 jti 未拉黑"
+        );
+        Ok(())
+    }
+    .await;
+
+    let database_cleanup = reset_database(&control).await;
+    let redis_cleanup = reset_redis(&redis).await;
+    finish_with_cleanup(outcome, database_cleanup, redis_cleanup)
+}

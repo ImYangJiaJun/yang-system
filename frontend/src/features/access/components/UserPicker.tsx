@@ -162,7 +162,7 @@ export function UserPicker(props: UserPickerProps) {
                       {user.username}
                     </span>
                     <span className="block truncate font-mono text-xs text-muted-foreground">
-                      {user.email ?? "（无邮箱）"}
+                      {user.email ?? "邮箱仅管理员可见"}
                     </span>
                   </span>
                   {inactive ? <Badge variant="secondary">{label}</Badge> : null}
