@@ -694,7 +694,7 @@ fn open_ids_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Vec<String>, C
 /// 选项文案就是这个数字的文本（`"0.0435"`）。不读数字，标签列表为空，控件被提交
 /// 空值，飞书以 1395006 拒绝。`Number::to_string()` 保留原始字面量，与选项文案对齐。
 pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
-    match cell {
+    let labels = match cell {
         Value::Array(items) => items
             .iter()
             .filter_map(|item| match item {
@@ -713,7 +713,14 @@ pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
         Value::String(text) => vec![text.clone()],
         Value::Number(number) => vec![number.to_string()],
         _ => Vec::new(),
-    }
+    };
+    // 与拉取侧 `derive::derive_options` 的 trim 同口径：落库的选项文案是 trim 过的
+    // （数据源实测存在 "CNY 人民币\n" 这种尾随换行），派发端不 trim 就永远匹配不上
+    // 已启用的选项，报「没有匹配的启用选项」。只去首尾，内部空白原样保留。
+    labels
+        .into_iter()
+        .map(|label| label.trim().to_string())
+        .collect()
 }
 
 /// 多维表格单元格取文本。多态单元格（`[{"text": …}]`）取第一个 text。
@@ -1387,6 +1394,38 @@ mod tests {
         let rendered = render(&[checkbox], &cells(&[("fld_src", json!(["A", "B"]))]))
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(rendered[0]["value"], json!(["va", "vb"]));
+    }
+
+    #[test]
+    fn option_labels_are_trimmed_like_the_pull_side() {
+        // 拉取侧（`derive.rs`）落库前 trim；派发端也必须 trim。实测数据源有
+        // "CNY 人民币\n" 这种尾随换行（用户在选项名里粘贴了换行），不 trim 时
+        // 外部选项永远匹配不上已启用的选项。
+        assert_eq!(
+            labels_from_cell(&json!(["CNY 人民币\n"])),
+            vec!["CNY 人民币"]
+        );
+        assert_eq!(labels_from_cell(&json!("  北京  ")), vec!["北京"]);
+        assert_eq!(
+            labels_from_cell(&json!([{"text": "USD 美元\r\n"}])),
+            vec!["USD 美元"]
+        );
+    }
+
+    #[test]
+    fn radio_maps_a_label_with_a_trailing_newline() {
+        // 映射键是 trim 后的文案（外部选项由 pull 派生），单元格却带着换行；
+        // 两侧归一后才能命中。
+        let mut radio = widget("w1", "radioV2");
+        radio
+            .option_map
+            .insert("CNY 人民币".to_string(), "src:cf2f7bd799cf".to_string());
+        let rendered = render(
+            &[radio],
+            &cells(&[("fld_src", json!([{"text": "CNY 人民币\n"}]))]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rendered[0]["value"], json!("src:cf2f7bd799cf"));
     }
 
     #[test]
