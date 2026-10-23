@@ -14,6 +14,7 @@ pub(crate) mod context;
 pub(crate) mod crypto;
 pub(crate) mod derive;
 pub(crate) mod field_binding;
+pub(crate) mod field_maintenance;
 pub(crate) mod i18n;
 pub(crate) mod import_progress;
 pub(crate) mod linkage;

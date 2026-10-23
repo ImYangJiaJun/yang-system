@@ -27,8 +27,8 @@ use yang_base::BaseError;
 use yang_db::Database;
 
 use super::bitable::{
-    cell_label, list_all_records, resolve_current_field_names, BitableCoordinates, CellValue,
-    RecordsSnapshot,
+    cell_label, is_single_value_field_type, list_all_fields, list_all_records, BitableCoordinates,
+    CellValue, FieldItem, RecordsSnapshot,
 };
 use super::context::FeishuContext;
 use super::derive::{derive_options, snapshot_digest, DerivedOption, RawValue};
@@ -74,7 +74,7 @@ pub(crate) struct BoundField {
 /// 中间列（既自己取值、又是别人的父）是最容易漏的那一例。
 ///
 /// 只在**绑定集合内**找父：不在集合里的 `parent_field_id` 查不到名字，这里略过——
-/// 「父列不在集合内」由 [`bind_fields`] 报错，不在这里静默降级。
+/// 「父列不在集合内」由 [`partition_bindings`] 标成跳过，不在这里静默降级。
 pub(crate) fn collect_field_names(fields: &[BoundField]) -> Vec<String> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut names: Vec<String> = Vec::new();
@@ -128,15 +128,118 @@ pub(crate) struct PullTable {
     pub(crate) bindings: Vec<TableBinding>,
 }
 
+/// 一轮表级拉取的结果状态。
+///
+/// 失败（`Err`）不在这里：整轮失败由 worker 记成 `failed`。这里只区分
+/// 「全部字段都处理了」与「有字段被跳过、其余字段仍处理了」。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PullStatus {
+    #[default]
+    Success,
+    Partial,
+}
+
+impl PullStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+/// 一条绑定本轮被跳过的原因。
+///
+/// 每种原因对应不同的修法，所以不合并成一个笼统的「失败」：界面给业务人员看的
+/// 指引必须能指向「去多维表格把这一列补回来 / 改成唯一列名 / 换一列」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkipReason {
+    /// 远端字段 ID 已不存在，或字段名为空。
+    MissingField,
+    /// 字段名在表内不唯一，按名字取数会取到不确定的列。
+    DuplicateName,
+    /// 字段类型不能作为选项值（多选、人员、附件、关联等）。
+    UnsupportedType,
+    /// 父绑定不在本表的启用绑定里（被停用或删除）。
+    ParentUnavailable,
+    /// 父绑定本轮也被跳过了：整棵子树必须一起暂停，否则子选项 id 会静默变化。
+    ParentSkipped,
+    /// 父指针成环。
+    ParentCycle,
+}
+
+impl SkipReason {
+    /// 给人看的一句话。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::MissingField => "多维表格里已找不到这个字段（可能已被删除，或字段名为空）",
+            Self::DuplicateName => "字段名在表内不唯一，按名字取数会取到不确定的列",
+            Self::UnsupportedType => "字段类型不支持作为选项值",
+            Self::ParentUnavailable => "父字段不在本表的启用绑定里（已停用或已删除）",
+            Self::ParentSkipped => "父字段本轮也被跳过，子字段一起暂停",
+            Self::ParentCycle => "父指针成环",
+        }
+    }
+}
+
+/// 一条本轮被跳过的绑定。摘要会写进表级 `last_error`，也会展示在体检/控制台。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkippedBinding {
+    pub(crate) source_key: String,
+    pub(crate) field_id: String,
+    /// 绑定行上的名字缓存；远端字段被删后，这是**最后一次成功解析出来的名字**。
+    pub(crate) field_name: Option<String>,
+    pub(crate) reason: SkipReason,
+}
+
+impl SkippedBinding {
+    /// 业务人员看的名字：缓存优先，没有名字才退回 ID。
+    pub(crate) fn display_name(&self) -> &str {
+        self.field_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.field_id)
+    }
+}
+
+/// 把一组被跳过的绑定压成一句可落库、可展示的摘要。
+///
+/// 必须点名**字段名**：业务人员看不懂 `field_id`。ID 与 `source_key` 作为次要信息
+/// 放在括号里，供运维定位。
+pub(crate) fn skipped_summary(skipped: &[SkippedBinding]) -> String {
+    let details: Vec<String> = skipped
+        .iter()
+        .map(|item| {
+            format!(
+                "字段「{}」（字段 ID {}，标识 {}）：{}",
+                item.display_name(),
+                item.field_id,
+                item.source_key,
+                item.reason.label()
+            )
+        })
+        .collect();
+    format!(
+        "本轮跳过 {} 个字段，其余字段照常同步：{}",
+        details.len(),
+        details.join("；")
+    )
+}
+
 /// 一张表一轮拉取的结果。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TablePullOutcome {
+    /// 整轮状态：全部处理 vs 部分字段被跳过。
+    pub(crate) status: PullStatus,
+    /// 本轮被跳过的绑定（按原绑定顺序）。
+    pub(crate) skipped_bindings: Vec<SkippedBinding>,
     /// 拉到的记录行数。**一份快照服务整表**，所以这是表级数字。
     pub(crate) fetched: usize,
-    /// 本轮处理的字段绑定条数。
+    /// 本轮**实际处理**的字段绑定条数（不含被跳过的）。
     pub(crate) fields: usize,
     /// 内容未变而跳过写库的字段数。
-    pub(crate) skipped: usize,
+    pub(crate) unchanged: usize,
     /// 写入路径 `rows_affected` 之和，**不是行数**（多行 ODKU 的 `rows_affected`
     /// ∈ `[N,2N]`，也分不出 inserted/updated；口径见 `option_write` 模块文档）。
     pub(crate) rows_affected: u64,
@@ -316,27 +419,28 @@ pub(crate) fn check_pullable(
 /// 逐字段各扫一遍表是 **N 次全表扫描**；这里把「取回」合并成一次、把「落库」拆成
 /// 每字段一个事务（§6.2 末句「拉取合并、落库拆开」）。
 ///
+/// # 字段级隔离（本次需求 D1）
+///
+/// 远端字段缺失、重名、类型不支持、父链不可用时，**只跳过受影响的绑定及其子树**，
+/// 其余绑定照常派生落库。跳过的原因与字段名汇总进 `last_error`，表级状态为
+/// `partial`；整轮没有任何可处理字段时才落成失败。
+///
 /// # 状态列的归属（设计 §6.3）
 ///
 /// `snapshot_digest` 落在**字段绑定**行——一个字段内容没变就该跳过它的写库；
-/// `last_pull_at` / `last_success_at` / `consecutive_failures` / `last_error`
-/// 落在**表级**行——失败是整轮的（决策 D4）。
-///
-/// 本函数只写**成功**那一组状态。失败状态由调用方在失败路径上写：表级失败语义与
-/// 告警（自增 `consecutive_failures`、写 `last_error`、达阈值发邮件）是 T10 的内容，
-/// 两边都写会让连续失败次数翻倍。
+/// `last_pull_at` / `last_success_at` / `consecutive_failures` / `last_error` /
+/// `last_pull_status` 落在**表级**行。状态写入由调用方（worker）统一收口：
+/// 成功、部分成功、失败三条路径各自写一次，避免两边都写导致计数翻倍。
 ///
 /// 一张表启用中的绑定为空时直接返回：它本来就没有要与飞书同步的东西。
 pub(crate) async fn pull_table(
     deps: &PullDeps<'_>,
     table: &PullTable,
 ) -> Result<TablePullOutcome, BaseError> {
-    let outcome = pull_table_inner(deps, table).await?;
-    record_table_success(deps, table.id).await?;
-    Ok(outcome)
+    pull_table_inner(deps, table).await
 }
 
-/// 表级编排的本体。拆出来只是为了让 [`pull_table`] 的成功状态收尾一眼可见。
+/// 表级编排的本体。
 async fn pull_table_inner(
     deps: &PullDeps<'_>,
     table: &PullTable,
@@ -346,21 +450,32 @@ async fn pull_table_inner(
         return Ok(outcome);
     }
 
-    // 1) 一次元数据往返，解析整表勾选列（含父列）的**当前**名字。
-    //    缺失即整体失败（全有或全无）：`resolve_field_names` 会点名每一个找不到的
-    //    `field_id`，运维一次就能看全要修的东西。
-    let resolved = resolve_current_field_names(
+    // 1) 一次元数据往返。与旧的「全有或全无」不同：缺失/重名/类型不支持不再让整表
+    //    失败，而是把受影响的绑定（及其子树）标成 skipped，其余字段继续。
+    let fields = list_all_fields(
         deps.transport,
         deps.sleeper,
         deps.tokens,
         &table.coordinates,
-        &resolve_targets(&table.bindings),
     )
     .await
     .map_err(internal_error)?;
-    let bound = bind_fields(&table.bindings, &resolved)?;
+    let PartitionResult {
+        healthy_indices,
+        bound,
+        skipped,
+    } = partition_bindings(&table.bindings, &fields);
+    outcome.skipped_bindings = skipped;
 
-    // 2) 一次取回一份快照，服务整表所有字段——这是表级拉取的全部意义。
+    if healthy_indices.is_empty() {
+        // 一条能处理的都没有：这不是「部分成功」，而是整表本轮无法同步。
+        // 返回 Err 让 worker 记 failed 并告警；跳过清单已经点名每一列。
+        return Err(BaseError::ConfigError(skipped_summary(
+            &outcome.skipped_bindings,
+        )));
+    }
+
+    // 2) 一次取回一份快照，服务整表所有**可处理**字段——这是表级拉取的全部意义。
     let snapshot = list_all_records(
         deps.transport,
         deps.sleeper,
@@ -374,10 +489,11 @@ async fn pull_table_inner(
     outcome.fetched = snapshot.items.len();
 
     // 3) 空快照歧义守卫。**同一份快照服务整表**，所以这判据也是表级的：只要还有任一
-    //    字段本地留着已启用选项，整张表本轮一个写都不做（理由见模块文档）。
+    //    可处理字段本地留着已启用选项，整张表本轮一个写都不做（理由见模块文档）。
     if snapshot.items.is_empty() {
         let mut suspicious = Vec::new();
-        for binding in &table.bindings {
+        for index in &healthy_indices {
+            let binding = &table.bindings[*index];
             let (_, active) = count_existing(deps, &binding.source_key).await?;
             if active > 0 {
                 suspicious.push(binding.source_key.clone());
@@ -398,8 +514,9 @@ async fn pull_table_inner(
         }
     }
 
-    // 4) 逐条绑定：抽取 → 派生 → 比对 → 落库（每条一个事务）。
-    for (binding, field) in table.bindings.iter().zip(bound.iter()) {
+    // 4) 逐条**可处理**绑定：抽取 → 派生 → 比对 → 落库（每条一个事务）。
+    for (index, field) in healthy_indices.iter().zip(bound.iter()) {
+        let binding = &table.bindings[*index];
         outcome.fields += 1;
         let linkage = parent_linkage(field, &table.bindings, &bound)?;
         let values = extract_values_owned(&snapshot, &field.field_name, linkage.as_ref());
@@ -435,7 +552,7 @@ async fn pull_table_inner(
         let unchanged =
             binding.snapshot_digest.as_deref() == Some(digest.as_str()) && disabled_rows == 0;
         if unchanged {
-            outcome.skipped += 1;
+            outcome.unchanged += 1;
         }
 
         // 跨源夺取预检与补集扫描都在进事务前做完：前者是可归因的业务失败，
@@ -488,6 +605,12 @@ async fn pull_table_inner(
             "飞书数据源字段同步完成"
         );
     }
+
+    outcome.status = if outcome.skipped_bindings.is_empty() {
+        PullStatus::Success
+    } else {
+        PullStatus::Partial
+    };
     Ok(outcome)
 }
 
@@ -578,13 +701,17 @@ async fn persist_binding(
 ///
 /// 独立事务（不与某个绑定共用）：这两列描述的是**整轮**，而落库是逐字段的。
 /// 一个字段写到一半失败时整轮在调用方落成失败，这一组状态就不会被写。
-async fn record_table_success(deps: &PullDeps<'_>, table_id: i64) -> Result<(), BaseError> {
+pub(crate) async fn record_table_success(
+    deps: &PullDeps<'_>,
+    table_id: i64,
+) -> Result<(), BaseError> {
     let mut transaction = deps.database.transaction().await?;
     let mut update = Record::new();
     update.insert("last_pull_at", serde_json::json!(now_seconds()));
     update.insert("last_success_at", serde_json::json!(now_seconds()));
     update.insert("consecutive_failures", serde_json::json!(0));
     update.insert("last_error", serde_json::Value::Null);
+    update.insert("last_pull_status", serde_json::json!("success"));
     let result = deps
         .context
         .datasources()
@@ -594,6 +721,57 @@ async fn record_table_success(deps: &PullDeps<'_>, table_id: i64) -> Result<(), 
         .await;
     match result {
         Ok(_) => transaction.commit().await.map_err(BaseError::from),
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// 记录一次**部分成功**：`consecutive_failures` 自增、写 `last_error` 与
+/// `last_pull_status = partial`，返回自增后的次数。
+///
+/// 部分成功仍然是一次「有字段没同步」的失败，所以沿用同一个连续失败计数与告警阈值：
+/// 否则一个被删字段可以永远静默地停更，而告警系统毫无反应。区别只在状态与文案——
+/// 健康字段已经写库，`last_success_at` **不**推进（它不是整表成功）。
+pub(crate) async fn record_table_partial(
+    deps: &PullDeps<'_>,
+    table_id: i64,
+    message: &str,
+) -> Result<i64, BaseError> {
+    let current = deps
+        .context
+        .datasources()
+        .query()
+        .select_fields(&["consecutive_failures"])?
+        .where_eq("id", serde_json::json!(table_id))?
+        .optional()
+        .await?;
+    let Some(current) = current else {
+        tracing::warn!(table_id, "表级数据源已不存在，本轮部分成功状态无处记账");
+        return Ok(0);
+    };
+    let failures: i64 = current.optional("consecutive_failures")?.unwrap_or(0);
+    let message: String = message.chars().take(1000).collect();
+
+    let mut transaction = deps.database.transaction().await?;
+    let mut update = Record::new();
+    update.insert("consecutive_failures", serde_json::json!(failures + 1));
+    update.insert("last_pull_at", serde_json::json!(now_seconds()));
+    update.insert("last_error", serde_json::json!(message));
+    update.insert("last_pull_status", serde_json::json!("partial"));
+    let result = deps
+        .context
+        .datasources()
+        .query()
+        .where_eq("id", serde_json::json!(table_id))?
+        .update_in_tx(&mut transaction, update)
+        .await;
+    match result {
+        Ok(_) => {
+            transaction.commit().await.map_err(BaseError::from)?;
+            Ok(failures + 1)
+        }
         Err(error) => {
             let _ = transaction.rollback().await;
             Err(error)
@@ -640,6 +818,7 @@ pub(crate) async fn record_table_failure(
     // 「刚试过、又失败了」才是运维要的那条信息。
     update.insert("last_pull_at", serde_json::json!(now_seconds()));
     update.insert("last_error", serde_json::json!(message));
+    update.insert("last_pull_status", serde_json::json!("failed"));
     let result = deps
         .context
         .datasources()
@@ -682,71 +861,174 @@ fn declared_parent(binding: &TableBinding) -> Option<&str> {
         .filter(|parent| !parent.is_empty())
 }
 
-/// 本轮要交给「列出字段」解析的 `field_id` 全集：绑定列 + 父列，去重保序。
-///
-/// 与 [`collect_field_names`] 是同一件事的两个阶段：这里给的是 **id**（解析的输入），
-/// 那里给的是**名字**（查询参数的输入）。父列也要解析——快照里靠名字取父列的值。
-fn resolve_targets(bindings: &[TableBinding]) -> Vec<String> {
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut ids = Vec::new();
-    for binding in bindings {
-        for id in std::iter::once(binding.field_id.as_str()).chain(declared_parent(binding)) {
-            if seen.insert(id) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-    ids
+/// 一张表的绑定分区结果。
+struct PartitionResult {
+    /// 可处理绑定在 `bindings` 里的下标（保序）。
+    healthy_indices: Vec<usize>,
+    /// 与 `healthy_indices` 一一对应的解析结果。
+    bound: Vec<BoundField>,
+    /// 本轮跳过的绑定（保序，带字段名缓存与原因）。
+    skipped: Vec<SkippedBinding>,
 }
 
-/// 把「列出字段」的解析结果贴回绑定。
+/// 在绑定集合里按 `field_id` 找下标。
 ///
-/// 返回的顺序与入参 `bindings` **逐一对应**——派生父键要靠这个对应关系取父的
-/// `source_key`。
-///
-/// # 父列不在集合里为什么是失败而不是降级
-///
-/// 集合来自「启用中的绑定」。父列不在里面只有两种可能：启用位与父指针漂移
-/// （`validate_fields` 不允许，但手工改库可以），或父列的绑定行被删了。两种情况都
-/// 读不到父列的文案——父列进不了 `field_names`、快照里也没有它。此时若静默按「无父」
-/// 派生，子选项的 `option_id` 会**整棵子树一起变**：飞书上已选中的值全部失联，
-/// 而且**不报错**（失效形态是「下拉静默变空」）。所以整体失败并点名，符合 D4。
-fn bind_fields(
-    bindings: &[TableBinding],
-    resolved: &[(String, String)],
-) -> Result<Vec<BoundField>, BaseError> {
-    let name_of = |field_id: &str| {
-        resolved
-            .iter()
-            .find(|(id, _)| id == field_id)
-            .map(|(_, name)| name.clone())
-    };
+/// 绑定表没有 `(datasource_id, field_id)` 唯一索引，手工改库可能造出重复行；
+/// 这里取第一条，与旧实现的 `find` 口径一致。新增/改绑入口自己会挡重复。
+fn parent_index(bindings: &[TableBinding], field_id: &str) -> Option<usize> {
+    bindings
+        .iter()
+        .position(|binding| binding.field_id == field_id)
+}
 
-    let mut bound = Vec::with_capacity(bindings.len());
-    for binding in bindings {
-        let Some(field_name) = name_of(&binding.field_id) else {
-            return Err(BaseError::ConfigError(format!(
-                "多维表格里找不到字段绑定 {} 的 field_id {}",
-                binding.source_key, binding.field_id
-            )));
-        };
-        let parent_field_id = declared_parent(binding).map(str::to_string);
-        if let Some(parent) = parent_field_id.as_deref() {
-            if !bindings.iter().any(|other| other.field_id == parent) {
-                return Err(BaseError::ConfigError(format!(
-                    "字段绑定 {} 的父列 {parent} 不在本表的启用绑定里：读不到父列文案会让\
-                     整棵子树的选项 id 变化（飞书控件上已选中的值会失联），本轮整表停止",
-                    binding.source_key
-                )));
+/// 父绑定被跳过时，把整棵子树也标成跳过。
+///
+/// 不能把「父被跳过」静默当成「无父」：子选项的 `option_id` 含祖先链哈希，
+/// 静默改父键会让整棵子树换 id，飞书已选中的值全部失联且不报错。
+fn propagate_parent_skips(bindings: &[TableBinding], skipped: &mut HashMap<usize, SkipReason>) {
+    loop {
+        let mut changed = false;
+        for (index, binding) in bindings.iter().enumerate() {
+            if skipped.contains_key(&index) {
+                continue;
+            }
+            let Some(parent) = declared_parent(binding) else {
+                continue;
+            };
+            let Some(parent_index) = parent_index(bindings, parent) else {
+                continue;
+            };
+            if skipped.contains_key(&parent_index) {
+                skipped.insert(index, SkipReason::ParentSkipped);
+                changed = true;
             }
         }
-        bound.push(BoundField {
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// 把绑定分成「可处理」与「跳过」两组。
+///
+/// 判据与旧的 `resolve_field_names`/`bind_fields` 同源，但**失败粒度从整表降到绑定**：
+/// - 远端找不到 `field_id`、或字段名为空 → `MissingField`
+/// - 字段名在表内不唯一 → `DuplicateName`（按名字取数会取到不确定的列）
+/// - 字段类型不能作为选项值 → `UnsupportedType`
+/// - 父绑定不在启用集合里 → `ParentUnavailable`
+/// - 父绑定被跳过 → `ParentSkipped`（整棵子树一起暂停）
+/// - 父指针成环 → `ParentCycle`
+///
+/// 只跳过受影响的绑定及其子树；无关分支照常同步。
+fn partition_bindings(bindings: &[TableBinding], fields: &[FieldItem]) -> PartitionResult {
+    let mut remote_by_id: HashMap<&str, &FieldItem> = HashMap::new();
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for field in fields {
+        remote_by_id.insert(field.field_id.as_str(), field);
+        let name = field.field_name.trim();
+        if !name.is_empty() {
+            *name_counts.entry(name).or_insert(0) += 1;
+        }
+    }
+
+    let mut skipped: HashMap<usize, SkipReason> = HashMap::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        let Some(remote) = remote_by_id.get(binding.field_id.as_str()) else {
+            skipped.insert(index, SkipReason::MissingField);
+            continue;
+        };
+        let name = remote.field_name.trim();
+        if name.is_empty() {
+            skipped.insert(index, SkipReason::MissingField);
+            continue;
+        }
+        if name_counts.get(name).copied().unwrap_or(0) > 1 {
+            skipped.insert(index, SkipReason::DuplicateName);
+            continue;
+        }
+        if remote
+            .field_type
+            .is_some_and(|field_type| !is_single_value_field_type(field_type))
+        {
+            skipped.insert(index, SkipReason::UnsupportedType);
+        }
+    }
+
+    // 父绑定不在启用集合里：直接标 ParentUnavailable；父已被跳过则标 ParentSkipped。
+    for (index, binding) in bindings.iter().enumerate() {
+        if skipped.contains_key(&index) {
+            continue;
+        }
+        let Some(parent) = declared_parent(binding) else {
+            continue;
+        };
+        match parent_index(bindings, parent) {
+            None => {
+                skipped.insert(index, SkipReason::ParentUnavailable);
+            }
+            Some(parent_index) if skipped.contains_key(&parent_index) => {
+                skipped.insert(index, SkipReason::ParentSkipped);
+            }
+            Some(_) => {}
+        }
+    }
+    propagate_parent_skips(bindings, &mut skipped);
+
+    // 成环：沿父链走，第一次回到路径上的节点时，只把环上的节点标成 ParentCycle；
+    // 环前面的节点由下一轮传播标成 ParentSkipped。
+    for start in 0..bindings.len() {
+        if skipped.contains_key(&start) {
+            continue;
+        }
+        let mut path: Vec<usize> = Vec::new();
+        let mut cursor = Some(start);
+        while let Some(index) = cursor {
+            if let Some(position) = path.iter().position(|&seen| seen == index) {
+                for &member in &path[position..] {
+                    skipped.insert(member, SkipReason::ParentCycle);
+                }
+                break;
+            }
+            path.push(index);
+            cursor =
+                declared_parent(&bindings[index]).and_then(|parent| parent_index(bindings, parent));
+        }
+    }
+    propagate_parent_skips(bindings, &mut skipped);
+
+    let mut result = PartitionResult {
+        healthy_indices: Vec::new(),
+        bound: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for (index, binding) in bindings.iter().enumerate() {
+        if let Some(reason) = skipped.get(&index).copied() {
+            result.skipped.push(SkippedBinding {
+                source_key: binding.source_key.clone(),
+                field_id: binding.field_id.clone(),
+                field_name: binding.field_name.clone(),
+                reason,
+            });
+            continue;
+        }
+        let Some(remote) = remote_by_id.get(binding.field_id.as_str()) else {
+            // 防守性兜底：理论上不会走到，仍然点名而不是 panic。
+            result.skipped.push(SkippedBinding {
+                source_key: binding.source_key.clone(),
+                field_id: binding.field_id.clone(),
+                field_name: binding.field_name.clone(),
+                reason: SkipReason::MissingField,
+            });
+            continue;
+        };
+        result.healthy_indices.push(index);
+        result.bound.push(BoundField {
             field_id: binding.field_id.clone(),
-            field_name,
-            parent_field_id,
+            field_name: remote.field_name.trim().to_string(),
+            parent_field_id: declared_parent(binding).map(str::to_string),
         });
     }
-    Ok(bound)
+    result
 }
 
 /// 一条绑定的祖先链：从**根到直接父**，每级给出「父的 `source_key`」与「父的**当前**名字」。
@@ -793,8 +1075,8 @@ pub(crate) fn parent_linkage(
                 .find(|other| other.field_id == parent_field_id),
             bound.iter().find(|other| other.field_id == parent_field_id),
         ) else {
-            // `bind_fields` 已经挡过一次；这是同一条判据的第二道，防的是将来有人绕过它
-            // 单独调用本函数。
+            // `partition_bindings` 已经挡过一次；这是同一条判据的第二道，防的是将来
+            // 有人绕过它单独调用本函数（xlsx 导入就复用本函数）。
             return Err(BaseError::ConfigError(format!(
                 "字段绑定 {} 的父列 {parent_field_id} 不在本表的启用绑定里",
                 field.field_id
@@ -1366,68 +1648,142 @@ mod tests {
         assert_ne!(derived[0].parent_key, derived[1].parent_key);
     }
 
-    #[test]
-    fn the_targets_cover_bound_columns_and_their_parents() {
-        // 父列也要解析：快照里靠**名字**取父列的值，拼不出父键的子树会整棵塌掉
-        let bindings = vec![
-            table_binding("fldA", Some("币种"), None),
-            table_binding("fldB", Some("汇率"), Some("fldA")),
-        ];
-        assert_eq!(resolve_targets(&bindings), vec!["fldA", "fldB"]);
+    fn field_item(field_id: &str, field_name: &str, field_type: i32) -> FieldItem {
+        FieldItem {
+            is_primary: false,
+            field_id: field_id.to_string(),
+            field_name: field_name.to_string(),
+            field_type: Some(field_type),
+            ui_type: None,
+            property: None,
+        }
+    }
+
+    fn bound_field<'a>(partition: &'a PartitionResult, field_id: &str) -> &'a BoundField {
+        partition
+            .bound
+            .iter()
+            .find(|field| field.field_id == field_id)
+            .unwrap_or_else(|| panic!("{field_id} 应在可处理集合里"))
     }
 
     #[test]
-    fn the_targets_cover_every_ancestor_of_a_deep_chain() {
-        // 四级链的祖先列靠**绑定之间的并集**覆盖：L4 只声明 L3 是父，但 L3 的绑定
-        // 自己声明了 L2，L2 又声明 L1——所以四列全在集合里。
-        // 这条是「祖先列本来就在快照里、要补的只是取值那一跳」的机械依据；
-        // 哪天有人把 resolve_targets 改成「只取直接父且不叠加」，这里会红。
+    fn partition_resolves_current_names_and_keeps_parent_edges() {
+        // 父列也要进快照：快照里靠**名字**取父列的值，拼不出父键的子树会整棵塌掉。
+        // 名字取**本轮解析结果**，不是绑定行上的旧缓存。
         let bindings = vec![
-            table_binding("fldL1", Some("交易类型"), None),
-            table_binding("fldL2", Some("费用大类"), Some("fldL1")),
-            table_binding("fldL3", Some("费用类型"), Some("fldL2")),
-            table_binding("fldL4", Some("银行流水摘要"), Some("fldL3")),
+            table_binding("fldA", Some("旧币种"), None),
+            table_binding("fldB", Some("旧汇率"), Some("fldA")),
         ];
+        let fields = vec![field_item("fldA", "币种", 3), field_item("fldB", "汇率", 2)];
+        let partition = partition_bindings(&bindings, &fields);
+        assert!(partition.skipped.is_empty());
+        assert_eq!(partition.bound.len(), 2);
+        assert_eq!(bound_field(&partition, "fldA").field_name, "币种");
         assert_eq!(
-            resolve_targets(&bindings),
-            vec!["fldL1", "fldL2", "fldL3", "fldL4"]
+            bound_field(&partition, "fldB").parent_field_id.as_deref(),
+            Some("fldA")
         );
     }
 
     #[test]
-    fn a_blank_parent_pointer_is_not_a_target() {
-        // 界面清空父列时可能提交空串而不是 null；当成「没有父」，
-        // 而不是拿一个空 id 去解析（那会让整表因为一个不存在的字段停摆）
-        let bindings = vec![table_binding("fldA", Some("币种"), Some("   "))];
-        assert_eq!(resolve_targets(&bindings), vec!["fldA"]);
-        let bound = bind_fields(&bindings, &[("fldA".to_string(), "币种".to_string())])
-            .unwrap_or_else(|error| panic!("应可绑定: {error}"));
-        assert!(bound[0].parent_field_id.is_none());
+    fn a_missing_remote_field_skips_only_that_binding() {
+        // 本次需求 D1 的核心：一个字段被删不再拖停整表。
+        let bindings = vec![
+            table_binding("fldA", Some("币种"), None),
+            table_binding("fldGONE", Some("银行流水摘要"), None),
+        ];
+        let fields = vec![field_item("fldA", "币种", 3)];
+        let partition = partition_bindings(&bindings, &fields);
+        assert_eq!(partition.healthy_indices, vec![0]);
+        assert_eq!(partition.skipped.len(), 1);
+        assert_eq!(partition.skipped[0].field_id, "fldGONE");
+        assert_eq!(
+            partition.skipped[0].field_name.as_deref(),
+            Some("银行流水摘要"),
+            "远端字段已删，必须保留最后一次解析出来的名字给业务人员看"
+        );
+        assert_eq!(partition.skipped[0].reason, SkipReason::MissingField);
     }
 
     #[test]
-    fn a_binding_whose_parent_is_not_enabled_fails_the_whole_table() {
-        // 父列不在启用集合里 → 读不到父列文案，快照里也没有它 → 子树 option_id 整棵变，
-        // 飞书控件上已选中的值全部失联**且不报错**。所以整体失败并点名（D4 全有或全无）。
+    fn a_duplicate_field_name_skips_every_colliding_binding() {
+        // 按名字取数会取到不确定的列；只跳过受影响的绑定，不拖停无关字段。
+        let bindings = vec![
+            table_binding("fldA", Some("币种"), None),
+            table_binding("fldB", Some("币种"), None),
+            table_binding("fldC", Some("汇率"), None),
+        ];
+        let fields = vec![
+            field_item("fldA", "币种", 3),
+            field_item("fldB", "币种", 3),
+            field_item("fldC", "汇率", 2),
+        ];
+        let partition = partition_bindings(&bindings, &fields);
+        assert_eq!(partition.healthy_indices, vec![2]);
+        assert_eq!(partition.skipped.len(), 2);
+        assert!(partition
+            .skipped
+            .iter()
+            .all(|item| item.reason == SkipReason::DuplicateName));
+    }
+
+    #[test]
+    fn an_unsupported_field_type_is_skipped() {
+        // 多选/人员/附件等类型的单元格不是一个可用的选项值；旧实现会静默产出空标签，
+        // 再叠加补集停用会把整列选项清空。现在显式跳过并点名。
+        let bindings = vec![table_binding("fldA", Some("多选列"), None)];
+        let fields = vec![field_item("fldA", "多选列", 4)];
+        let partition = partition_bindings(&bindings, &fields);
+        assert!(partition.healthy_indices.is_empty());
+        assert_eq!(partition.skipped[0].reason, SkipReason::UnsupportedType);
+    }
+
+    #[test]
+    fn a_missing_parent_skips_the_whole_subtree() {
+        // 父列不在启用集合里 → 读不到父列文案，快照里也没有它 → 子树 option_id 整棵变。
+        // 旧实现整表失败；现在只跳过这棵子树，并明确区分「父不可用」与「父也被跳过」。
         let bindings = vec![
             table_binding("fldA", Some("币种"), None),
             table_binding("fldB", Some("汇率"), Some("fldDisabled")),
+            table_binding("fldC", Some("折算价"), Some("fldB")),
         ];
-        let resolved = vec![
-            ("fldA".to_string(), "币种".to_string()),
-            ("fldB".to_string(), "汇率".to_string()),
+        let fields = vec![
+            field_item("fldA", "币种", 3),
+            field_item("fldB", "汇率", 2),
+            field_item("fldC", "折算价", 2),
         ];
-        let Err(error) = bind_fields(&bindings, &resolved) else {
-            panic!("父列不在启用集合里必须整体失败，不能静默降级成无父");
-        };
-        assert!(
-            error.to_string().contains("fldDisabled"),
-            "错误里要点名缺失的父列: {error}"
+        let partition = partition_bindings(&bindings, &fields);
+        assert_eq!(partition.healthy_indices, vec![0]);
+        assert_eq!(partition.skipped.len(), 2);
+        assert_eq!(partition.skipped[0].reason, SkipReason::ParentUnavailable);
+        assert_eq!(
+            partition.skipped[1].reason,
+            SkipReason::ParentSkipped,
+            "父被跳过时，子也必须一起暂停，不能按无父处理"
         );
     }
 
     #[test]
-    fn the_parent_linkage_uses_the_resolved_name_not_the_cache() {
+    fn a_parent_pointer_cycle_is_skipped_instead_of_hanging() {
+        // `validate_fields` 拒自环与缺失父，但**手工改库能造出 a→b→a**。
+        // 分区必须能收敛（不能死循环），并只跳过环上的绑定。
+        let bindings = vec![
+            table_binding("fldA", Some("甲"), Some("fldB")),
+            table_binding("fldB", Some("乙"), Some("fldA")),
+        ];
+        let fields = vec![field_item("fldA", "甲", 3), field_item("fldB", "乙", 3)];
+        let partition = partition_bindings(&bindings, &fields);
+        assert!(partition.healthy_indices.is_empty());
+        assert_eq!(partition.skipped.len(), 2);
+        assert!(partition
+            .skipped
+            .iter()
+            .all(|item| item.reason == SkipReason::ParentCycle));
+    }
+
+    #[test]
+    fn parent_linkage_uses_the_resolved_name_not_the_cache() {
         // 父列改名后，缓存里的旧名字在快照里读不到任何值 → 全部子项静默变成无父。
         // 所以父键必须用**本轮解析出来的**名字。
         let bindings = vec![
@@ -1441,13 +1797,12 @@ mod tests {
             },
             table_binding("fldB", Some("汇率"), Some("fldA")),
         ];
-        let resolved = vec![
-            ("fldA".to_string(), "币种（改名后）".to_string()),
-            ("fldB".to_string(), "汇率".to_string()),
+        let fields = vec![
+            field_item("fldA", "币种（改名后）", 3),
+            field_item("fldB", "汇率", 2),
         ];
-        let bound =
-            bind_fields(&bindings, &resolved).unwrap_or_else(|error| panic!("应可绑定: {error}"));
-        let linkage = parent_linkage(&bound[1], &bindings, &bound)
+        let partition = partition_bindings(&bindings, &fields);
+        let linkage = parent_linkage(bound_field(&partition, "fldB"), &bindings, &partition.bound)
             .unwrap_or_else(|error| panic!("应可解析: {error}"))
             .unwrap_or_else(|| panic!("fldB 声明了父列"));
         assert_eq!(
@@ -1469,22 +1824,26 @@ mod tests {
             table_binding("fldL3", Some("费用类型"), Some("fldL2")),
             table_binding("fldL4", Some("银行流水摘要"), Some("fldL3")),
         ];
-        let resolved = vec![
-            ("fldL1".to_string(), "交易类型".to_string()),
-            ("fldL2".to_string(), "费用大类".to_string()),
-            ("fldL3".to_string(), "费用类型".to_string()),
-            ("fldL4".to_string(), "银行流水摘要".to_string()),
+        let fields = vec![
+            field_item("fldL1", "交易类型", 3),
+            field_item("fldL2", "费用大类", 3),
+            field_item("fldL3", "费用类型", 3),
+            field_item("fldL4", "银行流水摘要", 3),
         ];
-        let bound =
-            bind_fields(&bindings, &resolved).unwrap_or_else(|error| panic!("应可绑定: {error}"));
-        let linkage = parent_linkage(&bound[3], &bindings, &bound)
-            .unwrap_or_else(|error| panic!("应可解析: {error}"))
-            .unwrap_or_else(|| panic!("fldL4 声明了父列"));
+        let partition = partition_bindings(&bindings, &fields);
+        assert!(partition.skipped.is_empty());
+        let linkage = parent_linkage(
+            bound_field(&partition, "fldL4"),
+            &bindings,
+            &partition.bound,
+        )
+        .unwrap_or_else(|error| panic!("应可解析: {error}"))
+        .unwrap_or_else(|| panic!("fldL4 声明了父列"));
         assert_eq!(
             linkage
                 .ancestors
                 .iter()
-                .map(|l| l.field_name.as_str())
+                .map(|level| level.field_name.as_str())
                 .collect::<Vec<_>>(),
             vec!["交易类型", "费用大类", "费用类型"],
             "从根到直接父；反了的话折叠出来是另一条键"
@@ -1493,20 +1852,25 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_pointer_cycle_fails_loudly_instead_of_hanging() {
-        // `validate_fields` 拒自环与缺失父，但**手工改库能造出 a→b→a**。
-        // 上溯不设 visited 守卫的话这里会死循环——不是报错，是 worker 卡住不返回。
-        // 两条都在启用绑定里，所以 `bind_fields` 那道「父不在集合里」挡不住它
+    fn parent_linkage_still_guards_cycles_when_called_directly() {
+        // 分区已经会跳过成环绑定；但 `parent_linkage` 还有第二个消费者
+        // （xlsx 导入），守卫不能因为分区存在就拆掉。
         let bindings = vec![
             table_binding("fldA", Some("甲"), Some("fldB")),
             table_binding("fldB", Some("乙"), Some("fldA")),
         ];
-        let resolved = vec![
-            ("fldA".to_string(), "甲".to_string()),
-            ("fldB".to_string(), "乙".to_string()),
+        let bound = vec![
+            BoundField {
+                field_id: "fldA".to_string(),
+                field_name: "甲".to_string(),
+                parent_field_id: Some("fldB".to_string()),
+            },
+            BoundField {
+                field_id: "fldB".to_string(),
+                field_name: "乙".to_string(),
+                parent_field_id: Some("fldA".to_string()),
+            },
         ];
-        let bound =
-            bind_fields(&bindings, &resolved).unwrap_or_else(|error| panic!("应可绑定: {error}"));
         let error = parent_linkage(&bound[0], &bindings, &bound)
             .err()
             .unwrap_or_else(|| panic!("成环必须失败，不能静默上溯"));
@@ -1519,11 +1883,45 @@ mod tests {
     #[test]
     fn a_binding_without_a_parent_has_no_linkage() {
         let bindings = vec![table_binding("fldA", Some("币种"), None)];
-        let bound = bind_fields(&bindings, &[("fldA".to_string(), "币种".to_string())])
-            .unwrap_or_else(|error| panic!("应可绑定: {error}"));
-        let linkage = parent_linkage(&bound[0], &bindings, &bound)
+        let fields = vec![field_item("fldA", "币种", 3)];
+        let partition = partition_bindings(&bindings, &fields);
+        let linkage = parent_linkage(bound_field(&partition, "fldA"), &bindings, &partition.bound)
             .unwrap_or_else(|error| panic!("应可解析: {error}"));
         assert!(linkage.is_none());
+    }
+
+    #[test]
+    fn a_blank_parent_pointer_is_treated_as_no_parent() {
+        // 界面清空父列时可能提交空串而不是 null；当成「没有父」，而不是拿一个空 id
+        // 去解析（那会让整表因为一个不存在的字段停摆）。
+        let bindings = vec![table_binding("fldA", Some("币种"), Some("   "))];
+        let fields = vec![field_item("fldA", "币种", 3)];
+        let partition = partition_bindings(&bindings, &fields);
+        assert!(partition.skipped.is_empty());
+        assert!(bound_field(&partition, "fldA").parent_field_id.is_none());
+    }
+
+    #[test]
+    fn the_skip_summary_names_the_field_for_business_users() {
+        let skipped = vec![SkippedBinding {
+            source_key: "old_rate".to_string(),
+            field_id: "fldGONE".to_string(),
+            field_name: Some("银行流水摘要".to_string()),
+            reason: SkipReason::MissingField,
+        }];
+        let summary = skipped_summary(&skipped);
+        assert!(
+            summary.contains("银行流水摘要"),
+            "必须点名字段名: {summary}"
+        );
+        assert!(
+            summary.contains("fldGONE"),
+            "ID 作为次要定位信息: {summary}"
+        );
+        assert!(
+            summary.contains("old_rate"),
+            "source_key 作为次要定位信息: {summary}"
+        );
     }
 
     #[test]

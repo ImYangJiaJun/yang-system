@@ -30,6 +30,7 @@ pub(super) const DATASOURCE_ITEM_COLUMNS: &[&str] = &[
     "last_success_at",
     "consecutive_failures",
     "last_error",
+    "last_pull_status",
     // `snapshot_digest` **不再投影**：摘要归属在表级化时已搬到字段绑定，
     // 表级那一列是「保留列」，谁都不写它（`pull.rs` 只把摘要写进绑定行）。
     // 继续投影它 = 前端永远读到 null，却把它文档成「内容摘要」——一句假话。
@@ -143,6 +144,9 @@ pub(super) struct DatasourceItem {
     last_success_at: Option<i64>,
     consecutive_failures: i64,
     last_error: Option<String>,
+    /// 最近一轮结果：`success` / `partial` / `failed`；从没拉过是 `None`。
+    /// `partial` 表示有字段被跳过、其余字段已同步——界面必须与整表失败分开画。
+    last_pull_status: Option<String>,
     /// 勾选的字段绑定。**空数组表示一条都没配**，不是「没取到」。
     fields: Vec<FieldBindingItem>,
 }
@@ -240,6 +244,7 @@ pub(super) async fn handle(
             last_success_at: record.optional("last_success_at")?,
             consecutive_failures: record.optional("consecutive_failures")?.unwrap_or(0),
             last_error: record.optional("last_error")?,
+            last_pull_status: record.optional("last_pull_status")?,
             // 没配绑定的数据源得到**空数组**，不是缺键——前端不必到处补 `?? []`
             fields: groups.remove(&id).unwrap_or_default(),
         });
@@ -408,6 +413,7 @@ mod tests {
             last_success_at: None,
             consecutive_failures: 0,
             last_error: None,
+            last_pull_status: None,
             fields: Vec::new(),
         };
         projection_contract::assert_keys(&item, &["list_datasources", "item", "emitted"], "表级行");

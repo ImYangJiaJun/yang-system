@@ -24,24 +24,8 @@ use crate::addon::feishu::domain::bitable::{resolve_bitable_link, validate_path_
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::crypto::issue_token;
 use crate::addon::feishu::domain::field_binding::{validate_fields, FieldBindingInput};
+use crate::addon::feishu::domain::field_maintenance::fold_duplicate_source_key;
 use crate::infrastructure::audit;
-
-/// `insert_returning_id_in_tx` 会把底层唯一键冲突包装成
-/// `DatabaseExecuteFailed`，传输层因此只能返回 500。这里把数据源标识的唯一键冲突
-/// 折算成参数错误；其它数据库约束仍原样上抛。
-fn fold_duplicate_source_key(error: BaseError) -> BaseError {
-    if let BaseError::DatabaseExecuteFailed(yang_db::DbError::ConstraintError(message)) = &error {
-        if message.contains("Duplicate entry")
-            && message.contains("uk_feishu_datasource_field_source_key")
-        {
-            return BaseError::ParamInvalid(
-                "source_key".to_string(),
-                "数据源标识已被占用，请换一个标识".to_string(),
-            );
-        }
-    }
-    error
-}
 
 /// 在写入表级行前查重，避免一次注定回滚的事务；唯一索引兜底仍由
 /// [`fold_duplicate_source_key`] 处理并发创建。

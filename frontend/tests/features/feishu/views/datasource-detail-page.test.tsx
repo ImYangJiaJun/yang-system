@@ -1285,3 +1285,104 @@ describe("飞书数据源详情页 · xlsx 源", () => {
     expect(screen.queryByText(/已重新导入/)).toBeNull();
   });
 });
+
+/// 外部数据源维护：入口只在「pull + 有权限」时出现；部分成功有独立横幅；
+/// 打开对话框会并行拉远端字段与体检。
+describe("飞书数据源详情页 · 外部数据源维护", () => {
+  const PARTIAL_ROW = datasourceWire({
+    id: DATASOURCE_ID,
+    title: "公司往来付款",
+    ingest_mode: "pull",
+    bitable_base_token: "app1",
+    bitable_table_id: "tblA",
+    last_pull_status: "partial",
+    last_error: "字段「费用类型/Fee Type*」在 Bitable 中缺失，本轮已跳过",
+    fields: [
+      {
+        field_id: "fldEblAr7X",
+        field_name: "费用类型/Fee Type*",
+        source_key: SOURCE_KEY,
+        parent_field_id: null,
+        enabled: true,
+      },
+    ],
+  });
+
+  it("「维护字段」只在 pull 源且有权限时渲染", async () => {
+    stubDetail({ fieldMaintenance: true });
+    renderDetail();
+
+    await screen.findByText(/数据源 #7/);
+    expect(
+      screen.getByRole("button", { name: "维护字段" }),
+    ).toBeInTheDocument();
+  });
+
+  it("打开维护对话框：并行拉远端字段与体检", async () => {
+    const user = userEvent.setup();
+    const calls = stubDetail({ fieldMaintenance: true });
+    renderDetail();
+
+    await user.click(await screen.findByRole("button", { name: "维护字段" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("维护字段")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        bodiesOf(calls, "/api/v1/feishu/datasources/bitable-fields")[0],
+      ).toEqual({ app_token: "app1", table_id: "tblA" });
+      expect(
+        bodiesOf(calls, "/api/v1/feishu/datasources/table/health")[0],
+      ).toEqual({ datasource_id: DATASOURCE_ID });
+    });
+  });
+
+  it("目录里没有维护权限时整个入口不出现", async () => {
+    stubDetail();
+    renderDetail();
+
+    await screen.findByText(/数据源 #7/);
+    expect(screen.queryByRole("button", { name: "维护字段" })).toBeNull();
+  });
+
+  it("xlsx 源没有远端字段可维护：即使有权限也不渲染入口", async () => {
+    stubDetail({
+      fieldMaintenance: true,
+      datasourceList: () =>
+        listPage([
+          datasourceWire({
+            id: DATASOURCE_ID,
+            title: "银行网点",
+            ingest_mode: "xlsx_import",
+            fields: [],
+          }),
+        ]),
+    });
+    renderDetail();
+
+    await screen.findByText(/数据源 #7/);
+    expect(screen.queryByRole("button", { name: "维护字段" })).toBeNull();
+  });
+
+  it("partial 状态给独立横幅：原样展示 lastError，并能一键去维护", async () => {
+    const user = userEvent.setup();
+    stubDetail({
+      fieldMaintenance: true,
+      datasourceList: () => listPage([PARTIAL_ROW]),
+      optionList: () => listPage([]),
+    });
+    renderDetail();
+
+    // 徽章与横幅都会写「部分字段暂停」（两个不同位置，语义一致）。
+    expect((await screen.findAllByText("部分字段暂停")).length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      screen.getByText(/字段「费用类型\/Fee Type\*」在 Bitable 中缺失/),
+    ).toBeInTheDocument();
+    // 它不是整轮失败：不能画出连续失败计数
+    expect(screen.queryByText(/连续失败/)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "去维护" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+});

@@ -25,6 +25,7 @@ function item(overrides: Partial<DatasourceItem> = {}): DatasourceItem {
     lastSuccessAt: 1758000000,
     consecutiveFailures: 0,
     lastError: null,
+    lastPullStatus: null,
     ...overrides,
   };
 }
@@ -90,6 +91,32 @@ describe("syncHealth", () => {
     const health = syncHealth(item({ consecutiveFailures: 3 }));
     expect(health.tone).toBe("warning");
     expect(health.title).toContain("3");
+  });
+
+  it("部分字段暂停优先于连续失败计数：它不是「一直没成功」", () => {
+    // 一轮里有字段被跳过、其余字段已经同步——红的失败计数会把人引向重试，
+    // 而这里要的是去「维护字段」修那几列。
+    const health = syncHealth(
+      item({ lastPullStatus: "partial", consecutiveFailures: 4 }),
+    );
+    expect(health.tone).toBe("warning");
+    expect(health.title).toBe("部分字段暂停");
+    expect(health.detail).toContain("其余字段仍在同步");
+    expect(health.detail).toContain("维护字段");
+  });
+
+  it("整轮失败仍走连续失败分支，不被部分成功那条抢走", () => {
+    const health = syncHealth(
+      item({ lastPullStatus: "failed", consecutiveFailures: 2 }),
+    );
+    expect(health.title).toContain("2");
+    expect(health.title).not.toBe("部分字段暂停");
+  });
+
+  it("部分成功不会被读成「同步正常」", () => {
+    const health = syncHealth(item({ lastPullStatus: "partial" }));
+    expect(health.title).not.toBe("同步正常");
+    expect(health.tone).toBe("warning");
   });
 
   it("坐标齐备但从未同步过，是「尚未同步」而不是失败", () => {

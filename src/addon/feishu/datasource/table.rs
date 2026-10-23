@@ -74,6 +74,17 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             last_success_at => Timestamp::new().title("最近同步成功时间").sortable(true),
             consecutive_failures => Int::new().title("连续失败次数").default(0),
             last_error => Text::new().title("最近错误"),
+            // 最近一轮的结果。**可空**：存量行没有这一列，且「从没拉过」与
+            // 「成功/部分成功/失败」是四种不同的状态，不能用一个默认值抹平。
+            // `partial` 是本次新增的语义：部分字段被跳过，其余字段仍已同步。
+            last_pull_status => Radio::<String>::new()
+                .title("最近拉取状态")
+                .varchar(16)
+                .options([
+                    ("success", "成功"),
+                    ("partial", "部分成功"),
+                    ("failed", "失败"),
+                ]),
             // **已废弃**：摘要归属已改为「每条字段绑定一份」，见 `field_table.rs` 的
             // `snapshot_digest`。此列保留只为避免一次破坏性的列删除，不再被读写。
             snapshot_digest => Str::new().title("快照摘要（已废弃）").max_length(64),
@@ -253,6 +264,7 @@ mod tests {
             "last_pull_at",
             "last_success_at",
             "last_error",
+            "last_pull_status",
             "snapshot_digest",
         ] {
             let field = definition

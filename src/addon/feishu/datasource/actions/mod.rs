@@ -10,6 +10,7 @@
 //! 在表级模型下已全部消失。留着它们会让同一批表有两个可写入口——审计语义与数据来源
 //! 就此分叉（`option/mod.rs` 对机器入口的既有立场）。配置单位是**表**，入口也只有一套。
 
+pub(super) mod add_datasource_field;
 pub(super) mod create_datasource_table;
 pub(super) mod delete_datasource_table;
 pub(super) mod get_import_progress;
@@ -23,8 +24,10 @@ pub(super) mod probe_xlsx_headers;
 pub(super) mod pull_now;
 pub(super) mod pull_probe;
 pub(super) mod pull_schedule;
+pub(super) mod repoint_datasource_field;
 pub(super) mod reveal_token;
 pub(super) mod rotate_token;
+pub(super) mod set_datasource_field_enabled;
 pub(super) mod update_datasource_table;
 
 use std::sync::Arc;
@@ -47,6 +50,11 @@ pub(super) fn register_all(module: ModuleSpec, context: Arc<FeishuContext>) -> M
     let module = create_datasource_table::register(module, Arc::clone(&context));
     let module = update_datasource_table::register(module, Arc::clone(&context));
     let module = delete_datasource_table::register(module, Arc::clone(&context));
+    // 绑定级维护：改绑 / 停用启用 / 新增。三个都按 source_key 定位，不碰
+    // 已有绑定的 source_key 与 Token。
+    let module = repoint_datasource_field::register(module, Arc::clone(&context));
+    let module = set_datasource_field_enabled::register(module, Arc::clone(&context));
+    let module = add_datasource_field::register(module, Arc::clone(&context));
     let module = list_bitable_tables::register(module, Arc::clone(&context));
     let module = health_check::register(module, Arc::clone(&context));
     let module = list_bitable_views::register(module, Arc::clone(&context));

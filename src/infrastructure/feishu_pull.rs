@@ -41,7 +41,8 @@ use crate::addon::feishu::domain::alert::{alert_pull_failure, FeishuAlertSenderH
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{HttpClientTransport, TokioSleeper};
 use crate::addon::feishu::domain::pull::{
-    load_pull_tables, pull_table, record_table_failure, table_is_still_active, PullDeps, PullTable,
+    load_pull_tables, pull_table, record_table_failure, record_table_partial, record_table_success,
+    skipped_summary, table_is_still_active, PullDeps, PullStatus, PullTable, TablePullOutcome,
 };
 use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
@@ -358,15 +359,29 @@ async fn run_once(runner: &RoundRunner, only: Option<i64>) -> anyhow::Result<()>
             continue;
         }
         match pull_table(&deps, table).await {
-            Ok(outcome) => tracing::debug!(
-                table_id = table.id,
-                fetched = outcome.fetched,
-                fields = outcome.fields,
-                skipped = outcome.skipped,
-                rows_affected = outcome.rows_affected,
-                disabled = outcome.disabled,
-                "飞书表级数据源同步完成"
-            ),
+            Ok(outcome) => {
+                if outcome.status == PullStatus::Partial {
+                    record_table_partial_and_alert(runner, &deps, table, &outcome).await;
+                } else if let Err(error) = record_table_success(&deps, table.id).await {
+                    // 状态写不上不影响数据：本轮已经落库，下一轮会重新写。
+                    tracing::error!(
+                        error = %error,
+                        table_id = table.id,
+                        "记录表级同步成功状态时出错"
+                    );
+                }
+                tracing::debug!(
+                    table_id = table.id,
+                    status = outcome.status.as_str(),
+                    fetched = outcome.fetched,
+                    fields = outcome.fields,
+                    skipped_fields = outcome.skipped_bindings.len(),
+                    unchanged = outcome.unchanged,
+                    rows_affected = outcome.rows_affected,
+                    disabled = outcome.disabled,
+                    "飞书表级数据源同步完成"
+                );
+            }
             Err(error) => {
                 failures += 1;
                 tracing::warn!(
@@ -418,9 +433,37 @@ async fn record_table_failure_and_alert(
             return;
         }
     };
+    send_pull_alert(runner, table, &message, failures).await;
+}
 
-    // 告警只是「失败之后的第二件事」：没有 feishu 段、或告警通道没注册（正在关停、
-    // 或装配遗漏）时，上面的失败状态已经落库，跳过发信即可。
+/// 部分成功后的收尾：写 `partial` 状态，并按同一阈值发告警。
+///
+/// 部分成功**不是**静默降级：有字段没同步，就必须和整表失败一样进入连续失败计数；
+/// 区别只在状态与文案——健康字段已经写库，`last_success_at` 不推进。
+async fn record_table_partial_and_alert(
+    runner: &RoundRunner,
+    deps: &PullDeps<'_>,
+    table: &PullTable,
+    outcome: &TablePullOutcome,
+) {
+    let message = skipped_summary(&outcome.skipped_bindings);
+    let failures = match record_table_partial(deps, table.id, &message).await {
+        Ok(failures) => failures,
+        Err(record_error) => {
+            tracing::error!(
+                error = %record_error,
+                table_id = table.id,
+                "记录表级部分成功状态时出错"
+            );
+            return;
+        }
+    };
+    send_pull_alert(runner, table, &message, failures).await;
+}
+
+/// 告警只是「状态落库之后的第二件事」：没有 feishu 段、或告警通道没注册时，
+/// 状态已经落库，跳过发信即可。
+async fn send_pull_alert(runner: &RoundRunner, table: &PullTable, message: &str, failures: i64) {
     let Some(settings) = runner.context.settings() else {
         return;
     };
@@ -436,7 +479,7 @@ async fn record_table_failure_and_alert(
         &settings.alert_recipients,
         settings.alert_failure_threshold,
         &table.title,
-        &message,
+        message,
         failures,
     )
     .await;

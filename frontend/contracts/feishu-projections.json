@@ -42,6 +42,7 @@
         "last_success_at",
         "consecutive_failures",
         "last_error",
+        "last_pull_status",
         "fields"
       ],
       "backend_only": {},
@@ -89,6 +90,9 @@
       "emitted": [
         "ok",
         "missing_fields",
+        "duplicate_name_fields",
+        "unsupported_type_fields",
+        "unbound_fields",
         "view_missing",
         "table_missing",
         "unchecked"
@@ -97,7 +101,33 @@
       "query_only": {}
     },
     "missing_field": {
-      "emitted": ["field_id", "source_key"],
+      "emitted": ["field_id", "field_name", "source_key", "affected_children"],
+      "backend_only": {},
+      "query_only": {}
+    },
+    "affected_child": {
+      "emitted": ["field_id", "field_name", "source_key"],
+      "backend_only": {},
+      "query_only": {}
+    },
+    "duplicate_name_field": {
+      "emitted": ["field_id", "field_name", "source_key"],
+      "backend_only": {},
+      "query_only": {}
+    },
+    "unsupported_type_field": {
+      "emitted": [
+        "field_id",
+        "field_name",
+        "field_type",
+        "ui_type",
+        "source_key"
+      ],
+      "backend_only": {},
+      "query_only": {}
+    },
+    "unbound_field": {
+      "emitted": ["field_id", "field_name", "field_type", "ui_type"],
       "backend_only": {},
       "query_only": {}
     }
@@ -143,6 +173,10 @@
       },
       "ingest_mode": {
         "values": ["push", "pull", "xlsx_import"],
+        "enforced_by": "backend"
+      },
+      "last_pull_status": {
+        "values": ["success", "partial", "failed"],
         "enforced_by": "backend"
       }
     },

@@ -13,6 +13,9 @@ import { PRODUCT_LOCALE } from "@/shared/lib/product-locale";
 /// 数据源状态：后端只回这两个值（`datasource/table.rs` 的 Radio 选项）。
 export type DatasourceStatus = "active" | "disabled";
 
+/// 最近一轮拉取的结果。`partial` = 有字段被跳过，其余字段仍已同步。
+export type LastPullStatus = "success" | "partial" | "failed";
+
 /// 默认语言。写错（例如 `zh-CN`）会让该数据源在飞书侧所有语言下都取不到文案。
 export type DefaultLocale = "zh_cn" | "en_us" | "ja_jp";
 
@@ -160,6 +163,10 @@ export type DatasourceItem = {
   consecutiveFailures: number;
   /// 最近一次失败的错误原文（可能较长）。
   lastError: string | null;
+  /// 最近一轮拉取的结果。`null` = 从没拉过（或服务端还没投影这个键）。
+  /// `partial` 表示有字段被跳过、其余字段已同步——它**不是**整轮失败，
+  /// 所以界面要和连续失败分开画。
+  lastPullStatus: LastPullStatus | null;
   // `snapshotDigest` **不在这里**：摘要归属在表级化时搬到了字段绑定，
   // 表级那一列谁都不写。逐字段的摘要在绑定表上，需要时再加投影。
 };
@@ -557,6 +564,18 @@ export function syncHealth(item: DatasourceItem): SyncHealth {
     };
   }
 
+  // 部分成功**排在连续失败之前**：一轮里有字段被跳过、其余字段已经同步，
+  // 那不是「一直没成功」，红的失败计数会把人引向重试，而这里要的是去修字段。
+  // `failed` 不在此列——整轮失败仍由下面的连续失败分支说明。
+  if (item.lastPullStatus === "partial") {
+    return {
+      tone: "warning",
+      title: "部分字段暂停",
+      detail:
+        "有字段在 Bitable 中缺失或被跳过，其余字段仍在同步。打开『维护字段』修复。",
+    };
+  }
+
   if (item.consecutiveFailures > 0) {
     return {
       tone: "warning",
@@ -898,12 +917,48 @@ export type DatasourceFieldBinding = {
   tokenRotatedAt?: number | null;
 };
 
-/// 体检报告（`health_check`，后端 `MissingField` / `HealthReport` 的投影）。
+/// 体检报告里的一个「受影响子字段」：父字段坏了，它会一起暂停。
+export type HealthAffectedChild = {
+  fieldId: string;
+  /// 最后一次解析出来的字段名。远端已删时它是**唯一还能给人看的名字**。
+  fieldName: string | null;
+  sourceKey: string;
+};
+
+/// 体检报告（`health_check`，后端 `HealthReport` 的投影）。
 export type HealthReport = {
   /// 没有已知问题**且**每一项都真的查过。
   ok: boolean;
   /// 勾了但表里已被删除的字段。**改名不在里面**（改名能自愈）。
-  missingFields: Array<{ fieldId: string; sourceKey: string }>;
+  missingFields: Array<{
+    fieldId: string;
+    /// 业务人员看的是名字；远端已删时它是最后一次解析出来的缓存。
+    fieldName: string | null;
+    sourceKey: string;
+    /// 这个字段是父级时，会一起暂停的整棵子树。
+    affectedChildren: HealthAffectedChild[];
+  }>;
+  /// 字段名在表内不唯一（按名字取数会取到不确定的列）。
+  duplicateNameFields: Array<{
+    fieldId: string;
+    fieldName: string;
+    sourceKey: string;
+  }>;
+  /// 字段类型不能作为选项值（多选/人员/附件/关联等）。
+  unsupportedTypeFields: Array<{
+    fieldId: string;
+    fieldName: string;
+    fieldType: number | null;
+    uiType: string | null;
+    sourceKey: string;
+  }>;
+  /// 远端有、本地没绑定的字段。**不算故障**，不压 `ok`；是「可新增」清单。
+  unboundFields: Array<{
+    fieldId: string;
+    fieldName: string;
+    fieldType: number | null;
+    uiType: string | null;
+  }>;
   viewMissing: boolean;
   tableMissing: boolean;
   /// 本轮没能查成的项及其原因。非空时 `ok` 必为 false——

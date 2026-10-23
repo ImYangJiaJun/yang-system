@@ -19,6 +19,7 @@
 //! `unchecked` 非空时 `ok` 必为 `false`：一次因为网络抖动而根本没查成的体检，
 //! 报成「没问题」比报错更危险——运维会据此跳过一张其实已经坏掉的表。
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -28,7 +29,7 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::bitable::{
-    list_all_fields, list_all_views, BitableCoordinates, FieldItem,
+    is_single_value_field_type, list_all_fields, list_all_views, BitableCoordinates, FieldItem,
 };
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
@@ -73,12 +74,26 @@ impl HealthCheckInput {
     }
 }
 
-/// 一条启用中的绑定的定位信息——体检要比对的最小单位。
+/// 一条绑定的定位信息——体检要比对的最小单位。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BindingRef {
     /// 身份。比对按它，**不按名字**。
     pub(super) field_id: String,
+    /// 最后一次解析出来的名字缓存。远端字段被删后，这是**唯一还能给人看的名字**。
+    pub(super) field_name: Option<String>,
     /// 给人看的定位信息：只报 `field_id` 运维看不懂，只报 `source_key` 又定位不到列。
+    pub(super) source_key: String,
+    /// 同表内的父列。用来算「这个字段坏了会连带暂停哪些子字段」。
+    pub(super) parent_field_id: Option<String>,
+    /// 是否启用。问题只看启用中的绑定；「未绑定字段」的差集要看全部绑定。
+    pub(super) enabled: bool,
+}
+
+/// 一个会跟着坏字段一起暂停的子字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct ChildRef {
+    pub(super) field_id: String,
+    pub(super) field_name: Option<String>,
     pub(super) source_key: String,
 }
 
@@ -87,8 +102,39 @@ pub(super) struct BindingRef {
 pub(super) struct MissingField {
     /// 多维表格字段 ID。
     pub(super) field_id: String,
+    /// 最后一次成功解析出来的字段名。**业务人员看的是它。**
+    pub(super) field_name: Option<String>,
     /// 进 URL 的数据源标识——运维在界面上看到的是它。
     pub(super) source_key: String,
+    /// 这个字段是父级时，会一起暂停的整棵子树。
+    pub(super) affected_children: Vec<ChildRef>,
+}
+
+/// 一个字段名在表内不唯一的绑定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct DuplicateNameField {
+    pub(super) field_id: String,
+    pub(super) field_name: String,
+    pub(super) source_key: String,
+}
+
+/// 一个字段类型不能作为选项值的绑定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct UnsupportedTypeField {
+    pub(super) field_id: String,
+    pub(super) field_name: String,
+    pub(super) field_type: Option<i32>,
+    pub(super) ui_type: Option<String>,
+    pub(super) source_key: String,
+}
+
+/// 远端存在、本系统还没绑定的字段（可新增）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct UnboundField {
+    pub(super) field_id: String,
+    pub(super) field_name: String,
+    pub(super) field_type: Option<i32>,
+    pub(super) ui_type: Option<String>,
 }
 
 /// 体检报告。
@@ -98,6 +144,12 @@ pub(super) struct HealthReport {
     pub(super) ok: bool,
     /// 勾了但表里已被删除的字段。改名**不在**这里。
     pub(super) missing_fields: Vec<MissingField>,
+    /// 字段名在表内不唯一（按名字取数会取到不确定的列）。
+    pub(super) duplicate_name_fields: Vec<DuplicateNameField>,
+    /// 字段类型不能作为选项值（多选/人员/附件/关联等）。
+    pub(super) unsupported_type_fields: Vec<UnsupportedTypeField>,
+    /// 远端有、本地没绑定的字段。**不算问题**，不压 `ok`；是「可新增」清单。
+    pub(super) unbound_fields: Vec<UnboundField>,
     /// 配置的视图在表里已不存在。
     pub(super) view_missing: bool,
     /// 数据表已不存在（或应用已无权限读到它）。
@@ -118,35 +170,134 @@ impl HealthReport {
     }
 }
 
-/// 纯函数：拿「远端字段」与「勾选的绑定」比对出报告。
+/// 这个字段的整棵子树（所有后代，不只直接子级）。
 ///
-/// 三种失败模式**一起报**，不在第一件上短路：运维点一次体检就是为了看全要修的东西，
+/// 拉取时父绑定被跳过，整棵子树必须一起暂停；体检要把这个影响面直接告诉业务人员，
+/// 而不是让他们自己顺着父指针推。`seen` 防手工改库造出的环把这里也卡住。
+fn affected_children(bindings: &[BindingRef], parent_field_id: &str) -> Vec<ChildRef> {
+    let mut result = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut queue: Vec<&str> = vec![parent_field_id];
+    while let Some(parent) = queue.pop() {
+        for binding in bindings
+            .iter()
+            .filter(|binding| binding.enabled && binding.parent_field_id.as_deref() == Some(parent))
+        {
+            if !seen.insert(binding.field_id.as_str()) {
+                continue;
+            }
+            result.push(ChildRef {
+                field_id: binding.field_id.clone(),
+                field_name: binding.field_name.clone(),
+                source_key: binding.source_key.clone(),
+            });
+            queue.push(binding.field_id.as_str());
+        }
+    }
+    result
+}
+
+/// 纯函数：拿「远端字段」与「绑定」比对出报告。
+///
+/// 各类问题**一起报**，不在第一件上短路：运维点一次体检就是为了看全要修的东西，
 /// 报一件改一件是让人跑 N 趟。
+///
+/// `bindings` 传**全部绑定**（含停用）：问题只看启用中的，但「远端有、本地未绑定」
+/// 的差集必须把停用行也算作已绑定——否则一个被有意停用的字段会永远出现在可新增清单里。
 pub(super) fn classify(
     remote: &[FieldItem],
     bindings: &[BindingRef],
     view_ok: bool,
     table_ok: bool,
 ) -> HealthReport {
+    let remote_by_id: HashMap<&str, &FieldItem> = remote
+        .iter()
+        .map(|field| (field.field_id.as_str(), field))
+        .collect();
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for field in remote {
+        let name = field.field_name.trim();
+        if !name.is_empty() {
+            *name_counts.entry(name).or_insert(0) += 1;
+        }
+    }
+    let enabled: Vec<&BindingRef> = bindings.iter().filter(|binding| binding.enabled).collect();
+
     // 按 `field_id` 比对，**不看名字**：名字每轮都会被解析刷新，拿它比会把改名
-    // 报成「字段没了」（假警报）。
-    let missing_fields: Vec<MissingField> = bindings
+    // 报成「字段没了」（假警报）。字段名为空与字段不存在同义。
+    let missing_fields: Vec<MissingField> = enabled
         .iter()
         .filter(|binding| {
-            !remote
-                .iter()
-                .any(|field| field.field_id == binding.field_id)
+            remote_by_id
+                .get(binding.field_id.as_str())
+                .map_or(true, |field| field.field_name.trim().is_empty())
         })
         .map(|binding| MissingField {
             field_id: binding.field_id.clone(),
+            field_name: binding.field_name.clone(),
             source_key: binding.source_key.clone(),
+            affected_children: affected_children(bindings, &binding.field_id),
+        })
+        .collect();
+
+    let mut duplicate_name_fields = Vec::new();
+    let mut unsupported_type_fields = Vec::new();
+    for binding in &enabled {
+        let Some(field) = remote_by_id.get(binding.field_id.as_str()) else {
+            continue;
+        };
+        let name = field.field_name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name_counts.get(name).copied().unwrap_or(0) > 1 {
+            duplicate_name_fields.push(DuplicateNameField {
+                field_id: binding.field_id.clone(),
+                field_name: name.to_string(),
+                source_key: binding.source_key.clone(),
+            });
+            continue;
+        }
+        if field
+            .field_type
+            .is_some_and(|field_type| !is_single_value_field_type(field_type))
+        {
+            unsupported_type_fields.push(UnsupportedTypeField {
+                field_id: binding.field_id.clone(),
+                field_name: name.to_string(),
+                field_type: field.field_type,
+                ui_type: field.ui_type.clone(),
+                source_key: binding.source_key.clone(),
+            });
+        }
+    }
+
+    let bound_ids: HashSet<&str> = bindings
+        .iter()
+        .map(|binding| binding.field_id.as_str())
+        .collect();
+    let unbound_fields: Vec<UnboundField> = remote
+        .iter()
+        .filter(|field| !bound_ids.contains(field.field_id.as_str()))
+        .map(|field| UnboundField {
+            field_id: field.field_id.clone(),
+            field_name: field.field_name.trim().to_string(),
+            field_type: field.field_type,
+            ui_type: field.ui_type.clone(),
         })
         .collect();
 
     HealthReport {
-        // 三种失败模式是并列的，任一为真都不是「通过」。
-        ok: table_ok && view_ok && missing_fields.is_empty(),
+        // 各类问题是并列的，任一为真都不是「通过」。未绑定字段只是提示，不压 ok。
+        ok: table_ok
+            && view_ok
+            && missing_fields.is_empty()
+            && duplicate_name_fields.is_empty()
+            && unsupported_type_fields.is_empty(),
         missing_fields,
+        duplicate_name_fields,
+        unsupported_type_fields,
+        unbound_fields,
         view_missing: !view_ok,
         table_missing: !table_ok,
         unchecked: Vec::new(),
@@ -256,14 +407,21 @@ pub(super) async fn handle(
 
     let outbound = outbound_setup::build(&ctx, settings)?;
 
-    // 2) 只查**启用中**的绑定：取消勾选 = 停用不删行，停用的列本就不参与拉取，
-    //    它的列被删了也不是问题。
+    // 2) 查**全部**绑定（含停用）：
+    //    - 缺字段/重名/类型不支持只看启用中的（停用的列本就不参与拉取）；
+    //    - 「远端有、本地未绑定」的差集必须把停用行也算作已绑定，否则一个被有意
+    //      停用的字段会永远出现在可新增清单里。
     let binding_rows = context
         .datasource_fields()
         .query()
-        .select_fields(&["field_id", "source_key"])?
+        .select_fields(&[
+            "field_id",
+            "field_name",
+            "source_key",
+            "parent_field_id",
+            "enabled",
+        ])?
         .where_eq("datasource_id", serde_json::json!(input.datasource_id))?
-        .where_eq("enabled", serde_json::json!(true))?
         .all()
         .await?;
     let bindings: Vec<BindingRef> = binding_rows
@@ -271,7 +429,10 @@ pub(super) async fn handle(
         .map(|row| {
             Ok(BindingRef {
                 field_id: row.require("field_id")?,
+                field_name: row.optional("field_name")?,
                 source_key: row.require("source_key")?,
+                parent_field_id: row.optional("parent_field_id")?,
+                enabled: row.optional("enabled")?.unwrap_or(true),
             })
         })
         .collect::<Result<_, BaseError>>()?;
@@ -333,15 +494,40 @@ mod tests {
 
     /// 体检报告的键集与契约对账。
     ///
-    /// 嵌套项单独对一次：`missing_fields[]` 是**另一个形状**（`field_id` / `source_key`），
-    /// 前端在那两个键上拼给运维看的标识，漏一个就画不出「哪一列被删了」。
+    /// 嵌套项逐个对：`missing_fields[]` / `affected_children[]` / `unbound_fields[]`
+    /// 都是**另一个形状**，前端在这些键上给业务人员拼展示名，漏一个就画不出
+    /// 「哪一列被删了、会连带暂停哪些子字段、哪些列可以新增」。
     #[test]
     fn the_committed_contract_matches_the_report_structs() {
         let report = HealthReport {
-            ok: true,
+            ok: false,
             missing_fields: vec![MissingField {
                 field_id: "fldA".to_string(),
+                field_name: Some("银行流水摘要".to_string()),
                 source_key: "k".to_string(),
+                affected_children: vec![ChildRef {
+                    field_id: "fldB".to_string(),
+                    field_name: Some("子字段".to_string()),
+                    source_key: "child".to_string(),
+                }],
+            }],
+            duplicate_name_fields: vec![DuplicateNameField {
+                field_id: "fldD".to_string(),
+                field_name: "币种".to_string(),
+                source_key: "dup".to_string(),
+            }],
+            unsupported_type_fields: vec![UnsupportedTypeField {
+                field_id: "fldU".to_string(),
+                field_name: "多选列".to_string(),
+                field_type: Some(4),
+                ui_type: Some("MultiSelect".to_string()),
+                source_key: "multi".to_string(),
+            }],
+            unbound_fields: vec![UnboundField {
+                field_id: "fldN".to_string(),
+                field_name: "新增列".to_string(),
+                field_type: Some(3),
+                ui_type: Some("SingleSelect".to_string()),
             }],
             view_missing: false,
             table_missing: false,
@@ -353,32 +539,66 @@ mod tests {
             "体检报告",
         );
 
-        let missing = MissingField {
-            field_id: "fldA".to_string(),
-            source_key: "k".to_string(),
-        };
+        let missing = &report.missing_fields[0];
         projection_contract::assert_keys(
-            &missing,
+            missing,
             &["health_check", "missing_field", "emitted"],
             "体检的缺失字段项",
+        );
+        projection_contract::assert_keys(
+            &missing.affected_children[0],
+            &["health_check", "affected_child", "emitted"],
+            "缺失字段的受影响子字段",
+        );
+        projection_contract::assert_keys(
+            &report.duplicate_name_fields[0],
+            &["health_check", "duplicate_name_field", "emitted"],
+            "重名字段项",
+        );
+        projection_contract::assert_keys(
+            &report.unsupported_type_fields[0],
+            &["health_check", "unsupported_type_field", "emitted"],
+            "类型不支持的字段项",
+        );
+        projection_contract::assert_keys(
+            &report.unbound_fields[0],
+            &["health_check", "unbound_field", "emitted"],
+            "未绑定字段项",
         );
     }
 
     fn remote_field(field_id: &str, field_name: &str) -> FieldItem {
+        remote_field_typed(field_id, field_name, 3)
+    }
+
+    fn remote_field_typed(field_id: &str, field_name: &str, field_type: i32) -> FieldItem {
         FieldItem {
             is_primary: false,
             field_id: field_id.to_string(),
             field_name: field_name.to_string(),
-            field_type: Some(3),
+            field_type: Some(field_type),
             ui_type: Some("SingleSelect".to_string()),
             property: None,
         }
     }
 
     fn binding(field_id: &str, source_key: &str) -> BindingRef {
+        binding_with(field_id, None, source_key, None, true)
+    }
+
+    fn binding_with(
+        field_id: &str,
+        field_name: Option<&str>,
+        source_key: &str,
+        parent_field_id: Option<&str>,
+        enabled: bool,
+    ) -> BindingRef {
         BindingRef {
             field_id: field_id.to_string(),
+            field_name: field_name.map(str::to_string),
             source_key: source_key.to_string(),
+            parent_field_id: parent_field_id.map(str::to_string),
+            enabled,
         }
     }
 
@@ -396,15 +616,101 @@ mod tests {
     }
 
     #[test]
-    fn a_deleted_field_is_reported_by_id_and_key() {
-        // 只报 field_id 运维看不懂；只报 source_key 定位不到列。两个都要给。
+    fn a_deleted_field_is_reported_with_its_name_id_and_key() {
+        // 业务人员看名字；运维定位看 field_id 与 source_key。三个都要给。
         let remote = vec![remote_field("fldA", "币种")];
-        let bindings = vec![binding("fldA", "currency"), binding("fldGONE", "old_rate")];
+        let bindings = vec![
+            binding("fldA", "currency"),
+            binding_with("fldGONE", Some("银行流水摘要"), "old_rate", None, true),
+        ];
         let report = classify(&remote, &bindings, true, true);
         assert!(!report.ok);
         assert_eq!(report.missing_fields.len(), 1);
         assert_eq!(report.missing_fields[0].field_id, "fldGONE");
+        assert_eq!(
+            report.missing_fields[0].field_name.as_deref(),
+            Some("银行流水摘要"),
+            "远端字段已删，必须显示最后一次解析出来的名字"
+        );
         assert_eq!(report.missing_fields[0].source_key, "old_rate");
+    }
+
+    #[test]
+    fn a_field_with_an_empty_remote_name_is_missing() {
+        // 空名字和字段不存在同义：按名字取数会取到空。
+        let remote = vec![remote_field("fldA", "   ")];
+        let bindings = vec![binding("fldA", "currency")];
+        let report = classify(&remote, &bindings, true, true);
+        assert_eq!(report.missing_fields.len(), 1);
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn affected_children_lists_the_whole_subtree() {
+        // 父字段被删时，业务人员要直接看到「哪些子字段会一起暂停」。
+        let remote = vec![remote_field("fldA", "币种")];
+        let bindings = vec![
+            binding("fldA", "currency"),
+            binding_with("fldGONE", Some("银行流水摘要"), "old_rate", None, true),
+            binding_with("fldB", Some("费用类型"), "fee_type", Some("fldGONE"), true),
+            binding_with("fldC", Some("支出结构"), "structure", Some("fldB"), true),
+        ];
+        let report = classify(&remote, &bindings, true, true);
+        let children: Vec<&str> = report.missing_fields[0]
+            .affected_children
+            .iter()
+            .map(|child| child.field_id.as_str())
+            .collect();
+        assert_eq!(children, vec!["fldB", "fldC"], "孙字段也要列出来");
+    }
+
+    #[test]
+    fn duplicate_names_are_reported_and_fail_the_report() {
+        let remote = vec![remote_field("fldA", "币种"), remote_field("fldB", "币种")];
+        let bindings = vec![binding("fldA", "currency"), binding("fldB", "fx")];
+        let report = classify(&remote, &bindings, true, true);
+        assert!(!report.ok);
+        assert_eq!(report.duplicate_name_fields.len(), 2);
+        assert!(report
+            .duplicate_name_fields
+            .iter()
+            .all(|item| item.field_name == "币种"));
+    }
+
+    #[test]
+    fn unsupported_types_are_reported_and_fail_the_report() {
+        let remote = vec![remote_field_typed("fldA", "多选列", 4)];
+        let bindings = vec![binding("fldA", "multi")];
+        let report = classify(&remote, &bindings, true, true);
+        assert!(!report.ok);
+        assert_eq!(report.unsupported_type_fields.len(), 1);
+        assert_eq!(report.unsupported_type_fields[0].field_type, Some(4));
+    }
+
+    #[test]
+    fn unbound_fields_are_listed_but_do_not_fail_health() {
+        // 远端新增字段是「可新增」提示，不是故障；不能把体检做成一片红。
+        let remote = vec![remote_field("fldA", "币种"), remote_field("fldB", "新增列")];
+        let bindings = vec![binding("fldA", "currency")];
+        let report = classify(&remote, &bindings, true, true);
+        assert!(report.ok);
+        assert_eq!(report.unbound_fields.len(), 1);
+        assert_eq!(report.unbound_fields[0].field_id, "fldB");
+    }
+
+    #[test]
+    fn a_disabled_binding_counts_as_bound_but_is_not_a_problem() {
+        // 停用行不参与拉取，所以它的远端字段缺了也不报问题；
+        // 但它仍然算「已绑定」，不能出现在可新增清单里。
+        let remote = vec![remote_field("fldA", "币种")];
+        let bindings = vec![
+            binding("fldA", "currency"),
+            binding_with("fldB", Some("已停用列"), "disabled", None, false),
+        ];
+        let report = classify(&remote, &bindings, true, true);
+        assert!(report.ok);
+        assert!(report.missing_fields.is_empty());
+        assert!(report.unbound_fields.is_empty());
     }
 
     #[test]

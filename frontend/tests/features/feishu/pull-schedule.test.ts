@@ -39,6 +39,7 @@ function item(overrides: Partial<DatasourceItem> = {}): DatasourceItem {
     lastSuccessAt: 1758000000,
     consecutiveFailures: 0,
     lastError: null,
+    lastPullStatus: null,
     ...overrides,
   };
 }

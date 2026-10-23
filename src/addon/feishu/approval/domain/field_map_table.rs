@@ -72,7 +72,13 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 // JSON 文本：{"<多维表格文案>":"<审批控件 value>"}。
                 // DSL 没有 Json builder，落 Text 列。
                 option_map => Text::new().title("选项映射"),
-                option_source_key => Str::new().title("外部选项来源").max_length(64),
+                // `filterable` 必开：字段维护要按 `source_key` 反查「哪些审批配置
+                // 引用了它」，DSL 是 fail-closed，漏了会在运行期吃 FieldPermissionDenied。
+                option_source_key => Str::new()
+                    .title("外部选项来源")
+                    .max_length(64)
+                    .indexed(true)
+                    .filterable(true),
                 created_at => Timestamp::new().created_at().title("创建时间"),
                 updated_at => Timestamp::new().updated_at().title("更新时间"),
             }),

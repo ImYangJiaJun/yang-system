@@ -45,6 +45,10 @@ export type FeishuApiStubOptions = {
   /// 表级扩展（T11/T12）：体检 + 回显 + 轮换三粒权限位与它们的端点。
   /// **默认关**——存量用例走的是字段级口径的目录，多开三粒会让它们发出没被覆盖的请求。
   tableConfig?: boolean;
+  /// 外部数据源维护（改绑 / 停用启用 / 新增）三粒权限位与端点。
+  /// **默认关**：没有这一组就等于「当前身份没有维护权限」，详情页不渲染入口。
+  /// 打开时会连带登记 `health_check`——维护对话框打开就要拉一份体检报告。
+  fieldMaintenance?: boolean;
   /// 各端点的响应。返回 Response 时原样使用（用来构造错误态）。
   datasourceList?: Handler;
   optionList?: Handler;
@@ -72,6 +76,10 @@ export type FeishuApiStubOptions = {
   /// `pull_now` 那条 can_pull 门控上——没有飞书凭证的部署照样有它们。
   xlsxProbe?: Handler;
   xlsxImport?: Handler;
+  /// 维护三端点：改绑 / 停用启用 / 新增。
+  repointField?: Handler;
+  setFieldEnabled?: Handler;
+  addField?: Handler;
 };
 
 export function jsonResponse(payload: unknown, status = 200): Response {
@@ -126,6 +134,8 @@ function catalogFor(options: FeishuApiStubOptions) {
     // 表级扩展也必须进 revision：它增删的是**同一次会话里**的 Action 集合，
     // revision 不变的话引擎会直接复用上一份目录（`CatalogCache.accept`）。
     (options.tableConfig ?? false) ? "1" : "0",
+    // 同理，维护三粒也改变目录形状。
+    (options.fieldMaintenance ?? false) ? "1" : "0",
   ].join("");
   const revision = `${flags}${"a".repeat(64)}`.slice(0, 64);
   const actions = [APPROVAL_OPTIONS_ACTION];
@@ -233,6 +243,36 @@ function catalogFor(options: FeishuApiStubOptions) {
       ),
     );
   }
+  if (options.fieldMaintenance ?? false) {
+    // 维护对话框打开就要体检报告；真实部署里两粒同一权限位，但存量用例只开
+    // `tableConfig` 时不希望多出维护入口，所以这一粒跟着维护开关走。
+    if (!(options.tableConfig ?? false)) {
+      actions.push(
+        action(
+          "feishu.datasource.health_check",
+          "POST",
+          "/api/v1/feishu/datasources/table/health",
+        ),
+      );
+    }
+    actions.push(
+      action(
+        "feishu.datasource.repoint_datasource_field",
+        "POST",
+        "/api/v1/feishu/datasources/field/repoint",
+      ),
+      action(
+        "feishu.datasource.set_datasource_field_enabled",
+        "POST",
+        "/api/v1/feishu/datasources/field/status",
+      ),
+      action(
+        "feishu.datasource.add_datasource_field",
+        "POST",
+        "/api/v1/feishu/datasources/field/add",
+      ),
+    );
+  }
   return {
     code: 0,
     message: "成功",
@@ -296,6 +336,9 @@ export function datasourceWire(
     last_success_at: null,
     consecutive_failures: 0,
     last_error: null,
+    // 最近一轮拉取结果：默认 null（从没拉过/未投影）。`partial` 是新增语义，
+    // 界面要与整轮失败分开画。
+    last_pull_status: null,
     updated_at: 1758000000,
     // 字段绑定：一条数据源有 N 条，`source_key` 属于这一层。
     fields: [],
@@ -411,9 +454,36 @@ export function stubFeishuApi(
         return respond(options.health, payload, {
           ok: true,
           missing_fields: [],
+          duplicate_name_fields: [],
+          unsupported_type_fields: [],
+          unbound_fields: [],
           view_missing: false,
           table_missing: false,
           unchecked: [],
+        });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/field/repoint")) {
+        return respond(options.repointField, payload, {
+          source_key: payload.source_key ?? "",
+          field_id: payload.field_id ?? "",
+          field_name: "改绑后的字段",
+          updated_portals: 0,
+          affected_approval_configs: [],
+        });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/field/status")) {
+        return respond(options.setFieldEnabled, payload, {
+          source_key: payload.source_key ?? "",
+          enabled: payload.enabled === true,
+          changed: true,
+        });
+      }
+      if (url.endsWith("/api/v1/feishu/datasources/field/add")) {
+        return respond(options.addField, payload, {
+          source_key: "new_field_key",
+          field_id: payload.field_id ?? "",
+          field_name: "新增列",
+          token: "new-field-token",
         });
       }
       if (url.endsWith("/api/v1/feishu/datasources/reveal-token")) {

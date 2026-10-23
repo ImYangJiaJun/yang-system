@@ -51,7 +51,17 @@ const rotateName = (name = FIELD_NAME) => `轮换 Token：${name}`;
 /// 体检报告夹具：一个字段被删（`fldGONE` / `old_rate`），表与视图都在。
 const reportFixture: HealthReport = {
   ok: false,
-  missingFields: [{ fieldId: "fldGONE", sourceKey: "old_rate" }],
+  missingFields: [
+    {
+      fieldId: "fldGONE",
+      fieldName: "银行流水摘要",
+      sourceKey: "old_rate",
+      affectedChildren: [],
+    },
+  ],
+  duplicateNameFields: [],
+  unsupportedTypeFields: [],
+  unboundFields: [],
   viewMissing: false,
   tableMissing: false,
   unchecked: [],
@@ -504,16 +514,85 @@ describe("凭据清单：明文 HTTP 部署下的复制", () => {
 });
 
 describe("体检面板", () => {
-  it("把缺失的字段按 id 与 source_key 一起列出", () => {
-    // 只报 field_id 运维看不懂；只报 source_key 又定位不到列。两个都要给。
+  it("把缺失的字段按名字、id 与 source_key 一起列出", () => {
+    // 业务人员看名字；运维定位看 field_id 与 source_key。三者都要给。
     render(<DatasourceHealthPanel report={reportFixture} />);
+    expect(screen.getByText("银行流水摘要")).toBeInTheDocument();
     expect(screen.getByText("fldGONE")).toBeInTheDocument();
     expect(screen.getByText("old_rate")).toBeInTheDocument();
     // 说明这是「被删除」而不是「被改名」（改名能自愈，不该出现在这里），
     // 并给出下一步动作
     expect(
-      screen.getByText(/已被删除：在向导里取消勾选它/),
+      screen.getByText(/已被删除：到「维护字段」停用它，或改绑到另一列/),
     ).toBeInTheDocument();
+  });
+
+  it("缺失字段名解析不出来时明说未知，且列出会连带暂停的子字段名", () => {
+    render(
+      <DatasourceHealthPanel
+        report={{
+          ...reportFixture,
+          missingFields: [
+            {
+              fieldId: "fldGONE",
+              fieldName: null,
+              sourceKey: "old_rate",
+              affectedChildren: [
+                {
+                  fieldId: "fldB",
+                  fieldName: "费用类型",
+                  sourceKey: "fee_type",
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("（未知字段名）")).toBeInTheDocument();
+    expect(screen.getByText(/会连带暂停：费用类型/)).toBeInTheDocument();
+  });
+
+  it("重名、类型不支持、远端新增三段各自列出并说清性质", () => {
+    render(
+      <DatasourceHealthPanel
+        report={{
+          ok: false,
+          missingFields: [],
+          duplicateNameFields: [
+            { fieldId: "fldDUP", fieldName: "币种", sourceKey: "currency" },
+          ],
+          unsupportedTypeFields: [
+            {
+              fieldId: "fldMULTI",
+              fieldName: "多选列",
+              fieldType: 4,
+              uiType: "MultiSelect",
+              sourceKey: "multi",
+            },
+          ],
+          unboundFields: [
+            {
+              fieldId: "fldNEW",
+              fieldName: "远端新增列",
+              fieldType: 3,
+              uiType: "SingleSelect",
+            },
+          ],
+          viewMissing: false,
+          tableMissing: false,
+          unchecked: [],
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/字段名重复（按名字取数会取到不确定的列）/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("多选列")).toBeInTheDocument();
+    expect(screen.getByText(/当前类型 4 多选/)).toBeInTheDocument();
+    // 未绑定不是故障，文案必须说清
+    expect(screen.getByText("远端新增、尚未绑定")).toBeInTheDocument();
+    expect(screen.getByText(/这不是故障/)).toBeInTheDocument();
   });
 
   it("全绿时明说通过", () => {
@@ -522,6 +601,9 @@ describe("体检面板", () => {
         report={{
           ok: true,
           missingFields: [],
+          duplicateNameFields: [],
+          unsupportedTypeFields: [],
+          unboundFields: [],
           viewMissing: false,
           tableMissing: false,
           unchecked: [],
@@ -538,6 +620,9 @@ describe("体检面板", () => {
         report={{
           ok: false,
           missingFields: [],
+          duplicateNameFields: [],
+          unsupportedTypeFields: [],
+          unboundFields: [],
           viewMissing: false,
           tableMissing: false,
           unchecked: ["列出字段：定时拉取未启用"],
@@ -555,6 +640,9 @@ describe("体检面板", () => {
         report={{
           ok: false,
           missingFields: [],
+          duplicateNameFields: [],
+          unsupportedTypeFields: [],
+          unboundFields: [],
           viewMissing: true,
           tableMissing: true,
           unchecked: [],

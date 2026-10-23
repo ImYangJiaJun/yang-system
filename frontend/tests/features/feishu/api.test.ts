@@ -3,12 +3,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActionDemoSchema, UiCatalog } from "@/engine";
 import {
   DATASOURCE_OPERATION_IDS,
+  canMaintainDatasources,
   canWriteDatasources,
+  addDatasourceField,
   buildDatasourceListBody,
   DATASOURCE_ITEM_KEYS,
   FIELD_BINDING_KEYS,
+  HEALTH_AFFECTED_CHILD_KEYS,
+  HEALTH_DUPLICATE_NAME_FIELD_KEYS,
   HEALTH_MISSING_FIELD_KEYS,
   HEALTH_REPORT_KEYS,
+  HEALTH_UNBOUND_FIELD_KEYS,
+  HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS,
   IMPORT_PROGRESS_KEYS,
   OPTION_ITEM_KEYS,
   PULL_SCHEDULE_KEYS,
@@ -28,9 +34,11 @@ import {
   listOptions,
   precheckApprovalOptions,
   probeXlsxHeaders,
+  repointDatasourceField,
   requireAction,
   revealFieldToken,
   rotateFieldToken,
+  setDatasourceFieldEnabled,
   updateDatasourceTable,
   createApprovalConfig,
   updateApprovalConfig,
@@ -110,6 +118,21 @@ const DEPLOYED_ACTIONS: ActionDemoSchema[] = [
     ...DATASOURCE_LIST_ACTION,
     operation_id: "feishu.datasource.pull_now",
     path: "/api/v1/feishu/datasources/pull-now",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.repoint_datasource_field",
+    path: "/api/v1/feishu/datasources/field/repoint",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.set_datasource_field_enabled",
+    path: "/api/v1/feishu/datasources/field/status",
+  },
+  {
+    ...DATASOURCE_LIST_ACTION,
+    operation_id: "feishu.datasource.add_datasource_field",
+    path: "/api/v1/feishu/datasources/field/add",
   },
   {
     ...DATASOURCE_LIST_ACTION,
@@ -542,11 +565,29 @@ describe("写侧权限门控（canWriteDatasources）", () => {
       update: "feishu.datasource.update_datasource_table",
       remove: "feishu.datasource.delete_datasource_table",
       pullNow: "feishu.datasource.pull_now",
+      repointField: "feishu.datasource.repoint_datasource_field",
+      setFieldEnabled: "feishu.datasource.set_datasource_field_enabled",
+      addField: "feishu.datasource.add_datasource_field",
     });
     for (const id of Object.values(DATASOURCE_OPERATION_IDS)) {
       // 字段级那三个 id 正是服务端已经删掉的：任何一处留着它们都是死门控。
       expect(id).not.toMatch(/(create|update|delete)_datasource$/);
     }
+  });
+
+  it("维护入口只看 repoint 一粒：目录里没有它就整体不渲染", () => {
+    expect(canMaintainDatasources(catalogWith(DEPLOYED_ACTIONS))).toBe(true);
+    expect(
+      canMaintainDatasources(
+        catalogWith(
+          DEPLOYED_ACTIONS.filter(
+            (action) =>
+              action.operation_id !==
+              "feishu.datasource.repoint_datasource_field",
+          ),
+        ),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -729,6 +770,14 @@ describe("投影契约（emit ↔ read）", () => {
     ["list_options", "item", OPTION_ITEM_KEYS],
     ["health_check", "report", HEALTH_REPORT_KEYS],
     ["health_check", "missing_field", HEALTH_MISSING_FIELD_KEYS],
+    ["health_check", "affected_child", HEALTH_AFFECTED_CHILD_KEYS],
+    ["health_check", "duplicate_name_field", HEALTH_DUPLICATE_NAME_FIELD_KEYS],
+    [
+      "health_check",
+      "unsupported_type_field",
+      HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS,
+    ],
+    ["health_check", "unbound_field", HEALTH_UNBOUND_FIELD_KEYS],
     ["pull_schedule", "result", PULL_SCHEDULE_KEYS],
     ["get_import_progress", "result", IMPORT_PROGRESS_KEYS],
   ] as const;
@@ -761,6 +810,7 @@ describe("投影契约（emit ↔ read）", () => {
     last_success_at: 1758000002,
     consecutive_failures: 7,
     last_error: "探针错误",
+    last_pull_status: "partial",
     fields: [BINDING_PROBE],
   };
 
@@ -845,15 +895,43 @@ describe("投影契约（emit ↔ read）", () => {
   const HEALTH_PROBE: Record<string, unknown> = {
     // `ok` 的兜底是 false（读不出结论不能算通过）
     ok: true,
-    // 占位：嵌套数组在下面单独填（它自己是一个「形状」，有自己的一行契约）。
+    // 占位：嵌套数组在下面单独填（每一层都是一个「形状」，有自己的一行契约）。
     missing_fields: [],
+    duplicate_name_fields: [],
+    unsupported_type_fields: [],
+    unbound_fields: [],
     view_missing: true,
     table_missing: true,
     unchecked: ["这一轮没查成"],
   };
+  const AFFECTED_CHILD_PROBE: Record<string, unknown> = {
+    field_id: "fldCHILD",
+    field_name: "子字段",
+    source_key: "child_key",
+  };
   const MISSING_PROBE: Record<string, unknown> = {
     field_id: "fldPROBE",
+    field_name: "探针字段",
     source_key: "probe_key",
+    affected_children: [AFFECTED_CHILD_PROBE],
+  };
+  const DUPLICATE_PROBE: Record<string, unknown> = {
+    field_id: "fldDUP",
+    field_name: "币种",
+    source_key: "dup_key",
+  };
+  const UNSUPPORTED_PROBE: Record<string, unknown> = {
+    field_id: "fldMULTI",
+    field_name: "多选列",
+    field_type: 4,
+    ui_type: "MultiSelect",
+    source_key: "multi_key",
+  };
+  const UNBOUND_PROBE: Record<string, unknown> = {
+    field_id: "fldNEW",
+    field_name: "新增列",
+    field_type: 3,
+    ui_type: "SingleSelect",
   };
   const SCHEDULE_PROBE: Record<string, unknown> = {
     interval_seconds: 900,
@@ -906,7 +984,7 @@ describe("投影契约（emit ↔ read）", () => {
     expect(page.items[0]).toEqual(expectedFrom(OPTION_ITEM_KEYS, OPTION_PROBE));
   });
 
-  it("体检报告（含嵌套的缺失字段项）：同上", async () => {
+  it("体检报告（含四类嵌套项）：同上", async () => {
     const wire = {
       ...wireFrom(CONTRACT.health_check?.report?.emitted ?? [], HEALTH_PROBE),
       missing_fields: [
@@ -915,13 +993,45 @@ describe("投影契约（emit ↔ read）", () => {
           MISSING_PROBE,
         ),
       ],
+      duplicate_name_fields: [
+        wireFrom(
+          CONTRACT.health_check?.duplicate_name_field?.emitted ?? [],
+          DUPLICATE_PROBE,
+        ),
+      ],
+      unsupported_type_fields: [
+        wireFrom(
+          CONTRACT.health_check?.unsupported_type_field?.emitted ?? [],
+          UNSUPPORTED_PROBE,
+        ),
+      ],
+      unbound_fields: [
+        wireFrom(
+          CONTRACT.health_check?.unbound_field?.emitted ?? [],
+          UNBOUND_PROBE,
+        ),
+      ],
     };
     stubFetch({ code: 0, data: wire });
 
     const report = await checkDatasourceHealth(7, TABLE_DEPS);
     expect(report).toEqual({
       ...expectedFrom(HEALTH_REPORT_KEYS, HEALTH_PROBE),
-      missingFields: [expectedFrom(HEALTH_MISSING_FIELD_KEYS, MISSING_PROBE)],
+      missingFields: [
+        {
+          ...expectedFrom(HEALTH_MISSING_FIELD_KEYS, MISSING_PROBE),
+          affectedChildren: [
+            expectedFrom(HEALTH_AFFECTED_CHILD_KEYS, AFFECTED_CHILD_PROBE),
+          ],
+        },
+      ],
+      duplicateNameFields: [
+        expectedFrom(HEALTH_DUPLICATE_NAME_FIELD_KEYS, DUPLICATE_PROBE),
+      ],
+      unsupportedTypeFields: [
+        expectedFrom(HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS, UNSUPPORTED_PROBE),
+      ],
+      unboundFields: [expectedFrom(HEALTH_UNBOUND_FIELD_KEYS, UNBOUND_PROBE)],
     });
   });
 
@@ -1323,7 +1433,17 @@ describe("体检与凭据端点", () => {
     expect(calls[0]?.body).toEqual({ datasource_id: 7 });
     expect(report).toEqual({
       ok: false,
-      missingFields: [{ fieldId: "fldGONE", sourceKey: "old_rate" }],
+      missingFields: [
+        {
+          fieldId: "fldGONE",
+          fieldName: null,
+          sourceKey: "old_rate",
+          affectedChildren: [],
+        },
+      ],
+      duplicateNameFields: [],
+      unsupportedTypeFields: [],
+      unboundFields: [],
       viewMissing: false,
       tableMissing: false,
       unchecked: [],
@@ -1369,6 +1489,114 @@ describe("体检与凭据端点", () => {
       /找不到 Action「feishu\.datasource\.reveal_token」/,
     );
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("外部数据源维护端点", () => {
+  it("改绑：body 精确为 datasource_id / source_key / field_id / parent_field_id", async () => {
+    // 后端 `RepointFieldInput` 是 `deny_unknown_fields`：多一个键就是 400。
+    // 定位按 `source_key`（不是 `field_id`——后者正是要换的东西）。
+    const calls = stubFetch({
+      code: 0,
+      data: {
+        source_key: "old_rate",
+        field_id: "fldB",
+        field_name: "汇率/Exchange Rate",
+        updated_portals: 2,
+        affected_approval_configs: [
+          { id: 3, title: "费用审批" },
+          { id: 4, title: null },
+        ],
+      },
+    });
+    const result = await repointDatasourceField(
+      {
+        datasourceId: 7,
+        sourceKey: "old_rate",
+        fieldId: "fldB",
+        parentFieldId: null,
+      },
+      deps,
+    );
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/field/repoint");
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.body).toEqual({
+      datasource_id: 7,
+      source_key: "old_rate",
+      field_id: "fldB",
+      parent_field_id: null,
+    });
+    expect(result).toEqual({
+      sourceKey: "old_rate",
+      fieldId: "fldB",
+      fieldName: "汇率/Exchange Rate",
+      updatedPortals: 2,
+      affectedApprovalConfigs: [
+        { id: 3, title: "费用审批" },
+        { id: 4, title: null },
+      ],
+    });
+  });
+
+  it("停用/启用：三个键，回执如实带出 changed", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: { source_key: "old_rate", enabled: false, changed: true },
+    });
+    const result = await setDatasourceFieldEnabled(
+      { datasourceId: 7, sourceKey: "old_rate", enabled: false },
+      deps,
+    );
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/field/status");
+    expect(calls[0]?.body).toEqual({
+      datasource_id: 7,
+      source_key: "old_rate",
+      enabled: false,
+    });
+    expect(result).toEqual({
+      sourceKey: "old_rate",
+      enabled: false,
+      changed: true,
+    });
+  });
+
+  it("新增：省略 source_key 时整个键不出现；Token 明文原样带回", async () => {
+    const calls = stubFetch({
+      code: 0,
+      data: {
+        source_key: "tblA_fldNEW",
+        field_id: "fldNEW",
+        field_name: "远端新增列",
+        token: "one-time-token",
+      },
+    });
+    const result = await addDatasourceField(
+      { datasourceId: 7, fieldId: "fldNEW" },
+      deps,
+    );
+
+    expect(calls[0]?.url).toBe("/api/v1/feishu/datasources/field/add");
+    expect(calls[0]?.body).toEqual({
+      datasource_id: 7,
+      field_id: "fldNEW",
+      parent_field_id: null,
+    });
+    expect(calls[0]?.body).not.toHaveProperty("source_key");
+    expect(result).toEqual({
+      sourceKey: "tblA_fldNEW",
+      fieldId: "fldNEW",
+      fieldName: "远端新增列",
+      token: "one-time-token",
+    });
+  });
+
+  it("新增响应缺 token 时拒绝：没有明文就没法粘进审批后台", async () => {
+    stubFetch({ code: 0, data: { source_key: "k", field_id: "fldNEW" } });
+    await expect(
+      addDatasourceField({ datasourceId: 7, fieldId: "fldNEW" }, deps),
+    ).rejects.toThrow(/没有 token/);
   });
 });
 

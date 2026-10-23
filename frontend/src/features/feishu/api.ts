@@ -54,6 +54,7 @@ import type {
   FeishuOAuthStatus,
   HealthReport,
   IngestMode,
+  LastPullStatus,
   ListPage,
   OptionItem,
   OptionListQuery,
@@ -84,6 +85,11 @@ export const DATASOURCE_OPERATION_IDS = {
   remove: "feishu.datasource.delete_datasource_table",
   pullNow: "feishu.datasource.pull_now",
   pullSchedule: "feishu.datasource.pull_schedule",
+  /// 字段级维护（外部数据源维护）：原地改绑 / 停用启用 / 新增。
+  /// 三者都按 `source_key` 定位绑定，**不碰** `source_key`、Token 与绑定行 id。
+  repointField: "feishu.datasource.repoint_datasource_field",
+  setFieldEnabled: "feishu.datasource.set_datasource_field_enabled",
+  addField: "feishu.datasource.add_datasource_field",
 } as const;
 
 export const OPTION_OPERATION_IDS = {
@@ -193,6 +199,17 @@ export function canReadDatasources(catalog: UiCatalog | undefined): boolean {
 /// 能否写（「添加数据源」与列表项上的重命名/停用/启用/删除是否**渲染**，不是禁用）。
 export function canWriteDatasources(catalog: UiCatalog | undefined): boolean {
   return hasOperation(catalog, DATASOURCE_OPERATION_IDS.create);
+}
+
+/// 能否维护字段（改绑 / 停用启用 / 新增）。
+///
+/// 判据是「目录里有没有 repoint 这一粒」：三粒在服务端同一权限位
+/// （`feishu.datasource.write`）、同一模块注册，所以缺一粒就整体不渲染维护入口，
+/// 免得用户点开一个半残的对话框。
+export function canMaintainDatasources(
+  catalog: UiCatalog | undefined,
+): boolean {
+  return hasOperation(catalog, DATASOURCE_OPERATION_IDS.repointField);
 }
 
 /// 能否看某个数据源的选项（详情页 403 分支的分支条件）。
@@ -431,6 +448,7 @@ export const DATASOURCE_ITEM_KEYS = {
   last_success_at: "lastSuccessAt",
   consecutive_failures: "consecutiveFailures",
   last_error: "lastError",
+  last_pull_status: "lastPullStatus",
   fields: "fields",
 } as const satisfies Record<string, keyof DatasourceItem>;
 
@@ -454,6 +472,9 @@ export const OPTION_ITEM_KEYS = {
 export const HEALTH_REPORT_KEYS = {
   ok: "ok",
   missing_fields: "missingFields",
+  duplicate_name_fields: "duplicateNameFields",
+  unsupported_type_fields: "unsupportedTypeFields",
+  unbound_fields: "unboundFields",
   view_missing: "viewMissing",
   table_missing: "tableMissing",
   unchecked: "unchecked",
@@ -462,10 +483,52 @@ export const HEALTH_REPORT_KEYS = {
 /// 体检报告里嵌套的那一项（`missing_fields[]`）——**另一个形状**，单独对账。
 export const HEALTH_MISSING_FIELD_KEYS = {
   field_id: "fieldId",
+  field_name: "fieldName",
   source_key: "sourceKey",
+  affected_children: "affectedChildren",
 } as const satisfies Record<
   string,
   keyof HealthReport["missingFields"][number]
+>;
+
+/// 缺失字段的受影响子字段（`missing_fields[].affected_children[]`）。再下一层。
+export const HEALTH_AFFECTED_CHILD_KEYS = {
+  field_id: "fieldId",
+  field_name: "fieldName",
+  source_key: "sourceKey",
+} as const satisfies Record<
+  string,
+  keyof HealthReport["missingFields"][number]["affectedChildren"][number]
+>;
+
+export const HEALTH_DUPLICATE_NAME_FIELD_KEYS = {
+  field_id: "fieldId",
+  field_name: "fieldName",
+  source_key: "sourceKey",
+} as const satisfies Record<
+  string,
+  keyof HealthReport["duplicateNameFields"][number]
+>;
+
+export const HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS = {
+  field_id: "fieldId",
+  field_name: "fieldName",
+  field_type: "fieldType",
+  ui_type: "uiType",
+  source_key: "sourceKey",
+} as const satisfies Record<
+  string,
+  keyof HealthReport["unsupportedTypeFields"][number]
+>;
+
+export const HEALTH_UNBOUND_FIELD_KEYS = {
+  field_id: "fieldId",
+  field_name: "fieldName",
+  field_type: "fieldType",
+  ui_type: "uiType",
+} as const satisfies Record<
+  string,
+  keyof HealthReport["unboundFields"][number]
 >;
 
 /// 自动拉取排程那一半（`pull_schedule`）。
@@ -593,6 +656,7 @@ function parseDatasourceItem(
     lastSuccessAt: asNullableNumber(raw.last_success_at),
     consecutiveFailures: asNumber(raw.consecutive_failures, 0),
     lastError: asNullableString(raw.last_error),
+    lastPullStatus: parseLastPullStatus(raw.last_pull_status),
     // `snapshot_digest` 不再解析：表级那一列是**保留列**（谁都不写），摘要归属在字段绑定。
     // 它曾经被解析进 `snapshotDigest` 并文档成「内容摘要」——而那永远是 null。
   };
@@ -609,6 +673,14 @@ function asNullableNumber(value: unknown): number | null {
 /// 可空字符串：空串与缺失一律折成 `null`，避免界面出现「有值但不可见」的空白格。
 function asNullableString(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
+}
+
+/// 最近一轮拉取结果。认不出的取值折成 `null`（= 没有结论），**不猜**：
+/// 把一个未知状态当成 `success` 会对一条其实有问题的源说「同步正常」。
+function parseLastPullStatus(value: unknown): LastPullStatus | null {
+  return value === "success" || value === "partial" || value === "failed"
+    ? value
+    : null;
 }
 
 function parseOptionItem(raw: Record<string, unknown>): OptionItem | null {
@@ -1297,6 +1369,45 @@ export function useXlsxImportClient(): XlsxImportClient {
 
 /* ------------------------------ 体检与凭据 ------------------------------- */
 
+function parseHealthAffectedChild(
+  raw: Record<string, unknown>,
+): HealthReport["missingFields"][number]["affectedChildren"][number] | null {
+  const fieldId = asString(raw.field_id);
+  const sourceKey = asString(raw.source_key);
+  if (fieldId === "" && sourceKey === "") return null;
+  return { fieldId, fieldName: asNullableString(raw.field_name), sourceKey };
+}
+
+/// 一条「勾了但远端已删」的绑定。
+///
+/// 名字可能是 `null`（首次拉取前就没解析过），界面据此显示「未知字段名」——
+/// 不要编一个 `field_id` 上去冒充名字。
+function parseHealthMissingField(
+  raw: Record<string, unknown>,
+): HealthReport["missingFields"][number] | null {
+  const fieldId = asString(raw.field_id);
+  const sourceKey = asString(raw.source_key);
+  if (fieldId === "" && sourceKey === "") return null;
+  const rawChildren = raw.affected_children;
+  return {
+    fieldId,
+    fieldName: asNullableString(raw.field_name),
+    sourceKey,
+    affectedChildren: Array.isArray(rawChildren)
+      ? rawChildren
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map(parseHealthAffectedChild)
+          .filter(
+            (
+              item,
+            ): item is HealthReport["missingFields"][number]["affectedChildren"][number] =>
+              item !== null,
+          )
+      : [],
+  };
+}
+
 function parseHealthReport(data: unknown): HealthReport {
   const record = asRecord(data);
   const rawMissing = record?.missing_fields;
@@ -1304,17 +1415,61 @@ function parseHealthReport(data: unknown): HealthReport {
     ? rawMissing
         .map((item) => asRecord(item))
         .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map(parseHealthMissingField)
+        .filter(
+          (item): item is HealthReport["missingFields"][number] =>
+            item !== null,
+        )
+    : [];
+  const rawDuplicate = record?.duplicate_name_fields;
+  const duplicateNameFields = Array.isArray(rawDuplicate)
+    ? rawDuplicate
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
         .map((item) => ({
           fieldId: asString(item.field_id),
+          fieldName: asString(item.field_name),
           sourceKey: asString(item.source_key),
         }))
         .filter((item) => item.fieldId !== "" || item.sourceKey !== "")
+    : [];
+  const rawUnsupported = record?.unsupported_type_fields;
+  const unsupportedTypeFields = Array.isArray(rawUnsupported)
+    ? rawUnsupported
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map((item) => ({
+          fieldId: asString(item.field_id),
+          fieldName: asString(item.field_name),
+          fieldType: asNullableNumber(item.field_type),
+          uiType: asNullableString(item.ui_type),
+          sourceKey: asString(item.source_key),
+        }))
+        .filter((item) => item.fieldId !== "" || item.sourceKey !== "")
+    : [];
+  const rawUnbound = record?.unbound_fields;
+  const unboundFields = Array.isArray(rawUnbound)
+    ? rawUnbound
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map((item) => ({
+          fieldId: asString(item.field_id),
+          fieldName: asString(item.field_name),
+          fieldType: asNullableNumber(item.field_type),
+          uiType: asNullableString(item.ui_type),
+        }))
+        // 没有 `field_id` 的条目加不了（它是新增请求的唯一坐标），留着只会画一个
+        // 点不动的按钮。
+        .filter((item) => item.fieldId !== "")
     : [];
   const rawUnchecked = record?.unchecked;
   return {
     // 缺 `ok` 键时按**不通过**处理：一份读不出结论的报告不能被读成通过
     ok: record?.ok === true,
     missingFields,
+    duplicateNameFields,
+    unsupportedTypeFields,
+    unboundFields,
     viewMissing: record?.view_missing === true,
     tableMissing: record?.table_missing === true,
     unchecked: Array.isArray(rawUnchecked)
@@ -1338,6 +1493,198 @@ export async function checkDatasourceHealth(
     signal,
   );
   return parseHealthReport(result.data);
+}
+
+/* ---------------------------- 外部数据源维护 ---------------------------- */
+
+/// 原地改绑一条绑定：换 `field_id`，**保留**绑定行、`source_key` 与 Token。
+///
+/// 后端按 `source_key` 定位，所以与 `update_datasource_table`（整份替换）不同：
+/// 它不会把「改指」解释成「新增一条 + 停用旧条」，审批后台里已经配好的
+/// URL/Token 因此不受影响。
+export type RepointFieldInput = {
+  datasourceId: number;
+  /// 绑定的稳定标识。**不是** `field_id`：后者正是本次要换的东西。
+  sourceKey: string;
+  fieldId: string;
+  /// **省略 = 保持原父指针；显式 `null` = 解除父级**——后端刻意区分这两态，
+  /// 所以这里也**不能**把 `undefined` 折成 `null`。
+  parentFieldId?: string | null;
+};
+
+/// 一条引用了该 `source_key` 的审批派发配置。
+export type AffectedApprovalConfig = {
+  id: number;
+  title: string | null;
+};
+
+export type RepointFieldResult = {
+  sourceKey: string;
+  fieldId: string;
+  fieldName: string;
+  /// 引用旧 `field_id` 的门户里被同步改指的数量。
+  updatedPortals: number;
+  affectedApprovalConfigs: AffectedApprovalConfig[];
+};
+
+export async function repointDatasourceField(
+  input: RepointFieldInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<RepointFieldResult> {
+  const body: Record<string, unknown> = {
+    datasource_id: input.datasourceId,
+    source_key: input.sourceKey,
+    field_id: input.fieldId,
+  };
+  // 三态：省略 = 保持；null = 解除；字符串 = 改指。不要把 undefined 折成 null。
+  if (input.parentFieldId !== undefined) {
+    body.parent_field_id = input.parentFieldId;
+  }
+  const result = await invokeFeishuAction(
+    deps,
+    DATASOURCE_OPERATION_IDS.repointField,
+    body,
+    signal,
+  );
+  const data = asRecord(result.data);
+  const rawAffected = data?.affected_approval_configs;
+  return {
+    sourceKey: asString(data?.source_key, input.sourceKey),
+    fieldId: asString(data?.field_id, input.fieldId),
+    fieldName: asString(data?.field_name),
+    updatedPortals: asNumber(data?.updated_portals, 0),
+    affectedApprovalConfigs: Array.isArray(rawAffected)
+      ? rawAffected
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map((item) => ({
+            id: asNumber(item.id, 0),
+            title: asNullableString(item.title),
+          }))
+          .filter((item) => item.id > 0)
+      : [],
+  };
+}
+
+export type SetFieldEnabledInput = {
+  datasourceId: number;
+  sourceKey: string;
+  enabled: boolean;
+};
+
+export type SetFieldEnabledResult = {
+  sourceKey: string;
+  enabled: boolean;
+  /// `false` = 服务端发现状态本来就一致，这一轮什么也没写。
+  changed: boolean;
+};
+
+/// 停用/启用一条绑定。停用**保留**绑定行、`source_key`、Token 与历史选项：
+/// 出站立即返回 40301，重新启用即恢复。
+export async function setDatasourceFieldEnabled(
+  input: SetFieldEnabledInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<SetFieldEnabledResult> {
+  const result = await invokeFeishuAction(
+    deps,
+    DATASOURCE_OPERATION_IDS.setFieldEnabled,
+    {
+      datasource_id: input.datasourceId,
+      source_key: input.sourceKey,
+      enabled: input.enabled,
+    },
+    signal,
+  );
+  const data = asRecord(result.data);
+  return {
+    sourceKey: asString(data?.source_key, input.sourceKey),
+    enabled: data?.enabled === true,
+    changed: data?.changed === true,
+  };
+}
+
+export type AddFieldInput = {
+  datasourceId: number;
+  fieldId: string;
+  /// 省略 = 由服务端按 `table_id + field_id` 派生并自动避让冲突。
+  sourceKey?: string;
+  parentFieldId?: string | null;
+};
+
+/// 新增绑定的回执。**`token` 明文只在此刻出现一次**——服务端只存摘要，
+/// 事后只能走回显端点（那需要额外的读权限），所以界面必须当场提供复制。
+export type AddedDatasourceField = {
+  sourceKey: string;
+  fieldId: string;
+  fieldName: string;
+  token: string;
+};
+
+export async function addDatasourceField(
+  input: AddFieldInput,
+  deps: FeishuInvokeDeps,
+  signal?: AbortSignal,
+): Promise<AddedDatasourceField> {
+  const operationId = DATASOURCE_OPERATION_IDS.addField;
+  const body: Record<string, unknown> = {
+    datasource_id: input.datasourceId,
+    field_id: input.fieldId,
+    parent_field_id: input.parentFieldId ?? null,
+  };
+  const sourceKey = input.sourceKey?.trim() ?? "";
+  if (sourceKey !== "") body.source_key = sourceKey;
+
+  const result = await invokeFeishuAction(deps, operationId, body, signal);
+  const data = asRecord(result.data);
+  const token = asString(data?.token);
+  if (token === "") {
+    // 没有明文就没有「粘到审批后台」这一步可做：不能返回一个空值让人去复制。
+    throw new Error(`「${operationId}」的响应里没有 token`);
+  }
+  return {
+    sourceKey: asString(data?.source_key),
+    fieldId: asString(data?.field_id, input.fieldId),
+    fieldName: asString(data?.field_name),
+    token,
+  };
+}
+
+/// 维护对话框要的一组数据访问入口（照 `TableWizardClient` 的注入范式：
+/// 组件不摸目录与会话，于是渲染它不必先把整棵应用壳搭起来）。
+export type DatasourceMaintenanceClient = {
+  listFields: (appToken: string, tableId: string) => Promise<BitableField[]>;
+  health: (datasourceId: number) => Promise<HealthReport>;
+  repoint: (input: RepointFieldInput) => Promise<RepointFieldResult>;
+  setEnabled: (input: SetFieldEnabledInput) => Promise<SetFieldEnabledResult>;
+  addField: (input: AddFieldInput) => Promise<AddedDatasourceField>;
+};
+
+export function useDatasourceMaintenanceClient(): DatasourceMaintenanceClient {
+  const session = useSessionCredentials();
+  const catalog = useUiCatalog();
+  const catalogData = catalog.data;
+
+  const deps = useMemo<FeishuInvokeDeps>(
+    () => ({ catalog: catalogData, session }),
+    [catalogData, session],
+  );
+
+  return useMemo(
+    () => ({
+      listFields: (appToken: string, tableId: string) =>
+        listBitableFields(appToken, tableId, deps),
+      health: (datasourceId: number) =>
+        checkDatasourceHealth(datasourceId, deps),
+      repoint: (input: RepointFieldInput) =>
+        repointDatasourceField(input, deps),
+      setEnabled: (input: SetFieldEnabledInput) =>
+        setDatasourceFieldEnabled(input, deps),
+      addField: (input: AddFieldInput) => addDatasourceField(input, deps),
+    }),
+    [deps],
+  );
 }
 
 /// 回显端点的响应契约：`{"token":"<明文>"}`。两个端点同形。

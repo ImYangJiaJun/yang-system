@@ -48,6 +48,7 @@ import {
   RefreshCw,
   Search,
   Upload,
+  Wrench,
 } from "lucide-react";
 
 import { useSessionCredentials, useUiCatalog } from "@/engine";
@@ -69,6 +70,7 @@ import {
   DEFAULT_OPTION_ORDER_BY,
   TABLE_OPERATION_IDS,
   XLSX_OPERATION_IDS,
+  canMaintainDatasources,
   canWriteDatasources,
   checkDatasourceHealth,
   feishuQueryKeys,
@@ -76,6 +78,7 @@ import {
   listOptions,
   useCredentialClient,
   useDatasourceList,
+  useDatasourceMaintenanceClient,
   useFeishuActions,
   useOptionList,
   usePullSchedule,
@@ -84,6 +87,7 @@ import {
 import type { FeishuInvokeDeps, XlsxImportReport } from "../api";
 import { canReadPortals } from "../portal-api";
 import { CredentialChecklist } from "../components/CredentialChecklist";
+import { DatasourceFieldMaintenanceDialog } from "../components/DatasourceFieldMaintenanceDialog";
 import { FieldBindingsTable } from "../components/FieldBindingsTable";
 import { DatasourceHealthPanel } from "../components/DatasourceHealthPanel";
 import { StatusBadge } from "../components/StatusBadge";
@@ -504,9 +508,12 @@ export default function DatasourceDetailPage() {
   const datasourceId = parseDatasourceId(rawId);
   const actions = useFeishuActions();
   const xlsxClient = useXlsxImportClient();
+  const maintenanceClient = useDatasourceMaintenanceClient();
+  const queryClient = useQueryClient();
   // 403 态的「重试」重拉的是**界面目录**：权限刚开通时目录还是上一份缓存。
   const catalog = useUiCatalog();
   const [reimportOpen, setReimportOpen] = useState(false);
+  const [maintainOpen, setMaintainOpen] = useState(false);
   /// 重新导入的回执。它是**唯一**记录「这一轮导了什么、写了多少」的地方——
   /// 服务端只回这一次，库里不留（导入不写表级时间戳）。
   const [reimportNotice, setReimportNotice] = useState<string | null>(null);
@@ -709,6 +716,20 @@ export default function DatasourceDetailPage() {
     void latestImportedQuery.refetch();
   }
 
+  /// 字段维护成功（改绑 / 停用启用 / 新增）：数据源与体检都要重取。
+  ///
+  /// 两处都有**服务端刚写下的状态**：改绑会换 `field_id`/字段名、停用会翻
+  /// `enabled`、新增会多一条绑定与一个 `source_key`。不回读的话，这一页会继续
+  /// 用旧绑定索引选项、体检面板也还停在修好之前。
+  function handleMaintenanceChanged() {
+    void queryClient.invalidateQueries({
+      queryKey: feishuQueryKeys.datasources(),
+    });
+    // 体检查询的键是 `["feishu", "health", id]`（见 `HealthSection`），
+    // 用前缀作废即可；选项查询不在其中——它按 source_key 取，标识没有变。
+    void queryClient.invalidateQueries({ queryKey: ["feishu", "health"] });
+  }
+
   // 落定：`lastPullAt` 变了就说明这一轮跑过了。**成功失败都算**（见 `pullLanded`）——
   // 失败的一轮同样写了 `last_pull_at`，拿它当判据是为了不让按钮在失败时一直转。
   useEffect(() => {
@@ -871,6 +892,20 @@ export default function DatasourceDetailPage() {
                   }
                   return null;
                 })()}
+                {/* 维护字段：只有「定时拉取」源才有远端字段可维护，且目录里得
+                    真有 repoint 这一粒（没有就整体不渲染，免得点开一个半残的
+                    对话框）。它不改 source_key / Token，只改绑定指向。 */}
+                {asIngestMode(datasource.ingestMode) === "pull" &&
+                canMaintainDatasources(catalog.data) ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setMaintainOpen(true)}
+                  >
+                    <Wrench className="mr-2 size-4" aria-hidden="true" />
+                    维护字段
+                  </Button>
+                ) : null}
               </>
             )}
             {/* 状态徽章 */}
@@ -901,6 +936,40 @@ export default function DatasourceDetailPage() {
         <span className="font-medium">选项级停用</span>
         （下面状态列里的「已停用」）只影响那一条，而且后端是把它禁用而不是删除，改回来就恢复。
       </p>
+
+      {/* 部分成功 ≠ 整轮失败：有字段被跳过、其余字段仍在同步。红的失败计数会把人
+          引向重试，而这里要的是去修那几个字段——所以单独一条横幅，并把服务端
+          带回的原文（含被跳过字段名）原样展示。 */}
+      {gap === null &&
+      datasource !== null &&
+      asIngestMode(datasource.ingestMode) === "pull" &&
+      datasource.lastPullStatus === "partial" ? (
+        <div
+          role="status"
+          className="space-y-2 rounded-md border border-tone-warning/40 bg-tone-warning/10 px-3 py-2 text-sm text-tone-warning"
+        >
+          <p className="font-medium">部分字段暂停</p>
+          <p>
+            有字段在 Bitable
+            中缺失或被跳过，其余字段仍在同步。打开「维护字段」修复。
+          </p>
+          {datasource.lastError !== null ? (
+            <pre className="max-h-32 overflow-auto rounded-md border border-border bg-muted/50 p-2 text-xs whitespace-pre-wrap text-foreground">
+              {datasource.lastError}
+            </pre>
+          ) : null}
+          {canMaintainDatasources(catalog.data) ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMaintainOpen(true)}
+            >
+              <Wrench aria-hidden="true" />
+              去维护
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* 这条数据源取不到时，**只在一处**说明原因。三个区块共用同一个依赖
           （那一条表级行），在三个标题下重复同一句话、还各带一个「重试」，
@@ -1330,6 +1399,18 @@ export default function DatasourceDetailPage() {
           client={xlsxClient}
           onImported={handleReimported}
           onCancel={() => setReimportOpen(false)}
+        />
+      ) : null}
+
+      {datasource !== null &&
+      asIngestMode(datasource.ingestMode) === "pull" &&
+      canMaintainDatasources(catalog.data) ? (
+        <DatasourceFieldMaintenanceDialog
+          open={maintainOpen}
+          datasource={datasource}
+          client={maintenanceClient}
+          onChanged={handleMaintenanceChanged}
+          onClose={() => setMaintainOpen(false)}
         />
       ) : null}
     </main>
