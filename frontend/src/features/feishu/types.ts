@@ -944,13 +944,20 @@ export type HealthReport = {
     fieldName: string;
     sourceKey: string;
   }>;
-  /// 字段类型不能作为选项值（多选/人员/附件/关联等）。
+  /// 字段类型不能作为选项值（人员/附件/关联/群组/复选框/地理位置等）。
   unsupportedTypeFields: Array<{
     fieldId: string;
     fieldName: string;
     fieldType: number | null;
     uiType: string | null;
     sourceKey: string;
+  }>;
+  /// 多选字段被用作级联父列：拉取会跳过它及整棵子树。
+  multiValueParentFields: Array<{
+    fieldId: string;
+    fieldName: string;
+    sourceKey: string;
+    affectedChildren: HealthAffectedChild[];
   }>;
   /// 远端有、本地没绑定的字段。**不算故障**，不压 `ok`；是「可新增」清单。
   unboundFields: Array<{

@@ -12,6 +12,7 @@ import {
   HEALTH_AFFECTED_CHILD_KEYS,
   HEALTH_DUPLICATE_NAME_FIELD_KEYS,
   HEALTH_MISSING_FIELD_KEYS,
+  HEALTH_MULTI_VALUE_PARENT_KEYS,
   HEALTH_REPORT_KEYS,
   HEALTH_UNBOUND_FIELD_KEYS,
   HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS,
@@ -777,6 +778,11 @@ describe("投影契约（emit ↔ read）", () => {
       "unsupported_type_field",
       HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS,
     ],
+    [
+      "health_check",
+      "multi_value_parent_field",
+      HEALTH_MULTI_VALUE_PARENT_KEYS,
+    ],
     ["health_check", "unbound_field", HEALTH_UNBOUND_FIELD_KEYS],
     ["pull_schedule", "result", PULL_SCHEDULE_KEYS],
     ["get_import_progress", "result", IMPORT_PROGRESS_KEYS],
@@ -899,6 +905,7 @@ describe("投影契约（emit ↔ read）", () => {
     missing_fields: [],
     duplicate_name_fields: [],
     unsupported_type_fields: [],
+    multi_value_parent_fields: [],
     unbound_fields: [],
     view_missing: true,
     table_missing: true,
@@ -921,11 +928,17 @@ describe("投影契约（emit ↔ read）", () => {
     source_key: "dup_key",
   };
   const UNSUPPORTED_PROBE: Record<string, unknown> = {
+    field_id: "fldFILES",
+    field_name: "附件列",
+    field_type: 17,
+    ui_type: "Attachment",
+    source_key: "files_key",
+  };
+  const MULTI_PARENT_PROBE: Record<string, unknown> = {
     field_id: "fldMULTI",
-    field_name: "多选列",
-    field_type: 4,
-    ui_type: "MultiSelect",
+    field_name: "多选父列",
     source_key: "multi_key",
+    affected_children: [AFFECTED_CHILD_PROBE],
   };
   const UNBOUND_PROBE: Record<string, unknown> = {
     field_id: "fldNEW",
@@ -1005,6 +1018,12 @@ describe("投影契约（emit ↔ read）", () => {
           UNSUPPORTED_PROBE,
         ),
       ],
+      multi_value_parent_fields: [
+        wireFrom(
+          CONTRACT.health_check?.multi_value_parent_field?.emitted ?? [],
+          MULTI_PARENT_PROBE,
+        ),
+      ],
       unbound_fields: [
         wireFrom(
           CONTRACT.health_check?.unbound_field?.emitted ?? [],
@@ -1030,6 +1049,14 @@ describe("投影契约（emit ↔ read）", () => {
       ],
       unsupportedTypeFields: [
         expectedFrom(HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS, UNSUPPORTED_PROBE),
+      ],
+      multiValueParentFields: [
+        {
+          ...expectedFrom(HEALTH_MULTI_VALUE_PARENT_KEYS, MULTI_PARENT_PROBE),
+          affectedChildren: [
+            expectedFrom(HEALTH_AFFECTED_CHILD_KEYS, AFFECTED_CHILD_PROBE),
+          ],
+        },
       ],
       unboundFields: [expectedFrom(HEALTH_UNBOUND_FIELD_KEYS, UNBOUND_PROBE)],
     });
@@ -1443,6 +1470,7 @@ describe("体检与凭据端点", () => {
       ],
       duplicateNameFields: [],
       unsupportedTypeFields: [],
+      multiValueParentFields: [],
       unboundFields: [],
       viewMissing: false,
       tableMissing: false,

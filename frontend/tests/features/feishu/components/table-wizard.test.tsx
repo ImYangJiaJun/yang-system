@@ -192,6 +192,30 @@ describe("配置向导 · 字段勾选与父列", () => {
     ).toBeInTheDocument();
   });
 
+  it("多选列（type=4）不作为父列候选", async () => {
+    // 父键按「一格一个文案」折叠，多选父会产生歧义；拉取侧会跳过整棵子树。
+    const user = userEvent.setup();
+    const client = stubClient({
+      listFields: vi
+        .fn()
+        .mockResolvedValue([
+          ...FIELDS,
+          { fieldId: "fldMulti", fieldName: "可提供的附件类型", type: 4 },
+        ]),
+    });
+    await driveToFields(user, client);
+    await user.click(await screen.findByLabelText("费用类型/Fee Type*"));
+    await user.click(await screen.findByLabelText("可提供的附件类型"));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    const parentSelects = await screen.findAllByLabelText("父列");
+    // 行序 = 字段列表序：费用类型在前，多选列在后。
+    await user.click(parentSelects[0]);
+    expect(
+      screen.queryByRole("option", { name: "可提供的附件类型" }),
+    ).toBeNull();
+  });
+
   it("source_key 默认按「表 ID + field_id」派生，且直接可用（形状合法）", async () => {
     const user = userEvent.setup();
     const client = stubClient();

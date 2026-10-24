@@ -61,6 +61,7 @@ const reportFixture: HealthReport = {
   ],
   duplicateNameFields: [],
   unsupportedTypeFields: [],
+  multiValueParentFields: [],
   unboundFields: [],
   viewMissing: false,
   tableMissing: false,
@@ -564,13 +565,14 @@ describe("体检面板", () => {
           ],
           unsupportedTypeFields: [
             {
-              fieldId: "fldMULTI",
-              fieldName: "多选列",
-              fieldType: 4,
-              uiType: "MultiSelect",
-              sourceKey: "multi",
+              fieldId: "fldFILES",
+              fieldName: "附件列",
+              fieldType: 17,
+              uiType: "Attachment",
+              sourceKey: "files",
             },
           ],
+          multiValueParentFields: [],
           unboundFields: [
             {
               fieldId: "fldNEW",
@@ -588,11 +590,45 @@ describe("体检面板", () => {
     expect(
       screen.getByText(/字段名重复（按名字取数会取到不确定的列）/),
     ).toBeInTheDocument();
-    expect(screen.getByText("多选列")).toBeInTheDocument();
-    expect(screen.getByText(/当前类型 4 多选/)).toBeInTheDocument();
+    expect(screen.getByText("附件列")).toBeInTheDocument();
+    expect(screen.getByText(/当前类型 17 附件/)).toBeInTheDocument();
     // 未绑定不是故障，文案必须说清
     expect(screen.getByText("远端新增、尚未绑定")).toBeInTheDocument();
     expect(screen.getByText(/这不是故障/)).toBeInTheDocument();
+  });
+
+  it("多选字段被用作级联父列时单独列出并点明连带暂停", () => {
+    render(
+      <DatasourceHealthPanel
+        report={{
+          ok: false,
+          missingFields: [],
+          duplicateNameFields: [],
+          unsupportedTypeFields: [],
+          multiValueParentFields: [
+            {
+              fieldId: "fldMULTI",
+              fieldName: "多选父列",
+              sourceKey: "multi",
+              affectedChildren: [
+                {
+                  fieldId: "fldCHILD",
+                  fieldName: "子字段",
+                  sourceKey: "child",
+                },
+              ],
+            },
+          ],
+          unboundFields: [],
+          viewMissing: false,
+          tableMissing: false,
+          unchecked: [],
+        }}
+      />,
+    );
+    expect(screen.getByText("多选字段不能作为级联父列")).toBeInTheDocument();
+    expect(screen.getByText("多选父列")).toBeInTheDocument();
+    expect(screen.getByText(/会连带暂停：子字段/)).toBeInTheDocument();
   });
 
   it("全绿时明说通过", () => {
@@ -603,6 +639,7 @@ describe("体检面板", () => {
           missingFields: [],
           duplicateNameFields: [],
           unsupportedTypeFields: [],
+          multiValueParentFields: [],
           unboundFields: [],
           viewMissing: false,
           tableMissing: false,
@@ -622,6 +659,7 @@ describe("体检面板", () => {
           missingFields: [],
           duplicateNameFields: [],
           unsupportedTypeFields: [],
+          multiValueParentFields: [],
           unboundFields: [],
           viewMissing: false,
           tableMissing: false,
@@ -642,6 +680,7 @@ describe("体检面板", () => {
           missingFields: [],
           duplicateNameFields: [],
           unsupportedTypeFields: [],
+          multiValueParentFields: [],
           unboundFields: [],
           viewMissing: true,
           tableMissing: true,

@@ -175,7 +175,7 @@ pub(super) struct PullProbeResult {
     sample_raw_kinds: Vec<String>,
     /// 该列在本页为空的行数。
     empty: usize,
-    /// 该列在本页**取值不支持的形态**（多值、人员、地理位置等）的行数。
+    /// 该列在本页**取值不支持的形态**（人员、地理位置、混合数组等）的行数。
     unsupported: usize,
 }
 
@@ -217,7 +217,7 @@ pub(super) async fn handle(
 
     let target = resolve_target(&input, &context).await?;
 
-    // 2) 解析取数列：field_id -> 精确字段名，并校验它是单值字段。
+    // 2) 解析取数列：field_id -> 精确字段名，并校验它可作为选项来源。
     let fields = list_all_fields(
         outbound.transport(),
         outbound.sleeper(),
@@ -257,6 +257,10 @@ pub(super) async fn handle(
         None => "未知（列出字段里没有同名项）".to_string(),
     };
 
+    // 探针必须镜像拉取口径：只有多选列（type=4）才按元素展开；其它列返回多个
+    // 文案时，`extract_values_owned` 会整格跳过，探针也要计成 unsupported。
+    let multi_value = field.as_ref().and_then(|field| field.field_type) == Some(4);
+
     // 3) 真实拉取一页，凭证在这一步注入（Authorization: Bearer <tenant_access_token>）。
     let page = first_records_page(
         outbound.transport(),
@@ -280,10 +284,17 @@ pub(super) async fn handle(
             continue;
         };
         match cell_label(value) {
-            CellValue::Text(label) => {
-                if sample_labels.len() < SAMPLE_LIMIT {
-                    sample_labels.push(label);
-                    sample_raw_kinds.push(json_kind(value).to_string());
+            // 多选列按元素逐个给出；探针也逐个采样，才能看到真实的「一格多值」形态。
+            // 非多选列返回多个值时，拉取会整格跳过——探针同样计成 unsupported。
+            CellValue::Text(labels) => {
+                if !push_sample_labels(
+                    value,
+                    labels,
+                    multi_value,
+                    &mut sample_labels,
+                    &mut sample_raw_kinds,
+                ) {
+                    unsupported += 1;
                 }
             }
             CellValue::Empty => empty += 1,
@@ -370,6 +381,30 @@ fn trimmed_column(
         .filter(|value| !value.is_empty()))
 }
 
+/// 把一格的标签追加进采样（最多 `SAMPLE_LIMIT` 条）。
+///
+/// 多选列一格可能有多个文案；探针要逐个采样，否则「一格多值」会被误报成单值。
+/// 返回 `false` 表示这一格按拉取口径属于 unsupported（非多选列返回多个值）。
+fn push_sample_labels(
+    value: &serde_json::Value,
+    labels: Vec<String>,
+    multi_value: bool,
+    sample_labels: &mut Vec<String>,
+    sample_raw_kinds: &mut Vec<String>,
+) -> bool {
+    if !multi_value && labels.len() > 1 {
+        return false;
+    }
+    for label in labels {
+        if sample_labels.len() >= SAMPLE_LIMIT {
+            break;
+        }
+        sample_labels.push(label);
+        sample_raw_kinds.push(json_kind(value).to_string());
+    }
+    true
+}
+
 /// 单元格值的 JSON 形态名，用于回报「原始数据长什么样」。
 fn json_kind(value: &serde_json::Value) -> &'static str {
     match value {
@@ -448,6 +483,49 @@ mod tests {
         payload.base_token = Some("  base  ".to_string());
         let target = ProbeTarget::from_input(&payload);
         assert_eq!(target.coordinates.app_token, "base");
+    }
+
+    #[test]
+    fn a_multi_select_cell_is_sampled_per_element() {
+        let value = serde_json::json!(["付款申请单/Payment Application", "发票/invoice"]);
+        let CellValue::Text(cell_labels) = cell_label(&value) else {
+            panic!("多选单元格应取到多个标签");
+        };
+        let mut labels = Vec::new();
+        let mut kinds = Vec::new();
+        assert!(push_sample_labels(
+            &value,
+            cell_labels,
+            true,
+            &mut labels,
+            &mut kinds
+        ));
+        assert_eq!(
+            labels,
+            vec!["付款申请单/Payment Application", "发票/invoice"]
+        );
+        assert_eq!(kinds, vec!["array", "array"]);
+    }
+
+    #[test]
+    fn a_non_multi_column_with_multiple_labels_is_unsupported() {
+        // 公式/查找列返回 ["A","B"]：拉取会整格跳过，探针也必须报 unsupported，
+        // 不能给出"两个样本、unsupported=0"的假绿。
+        let value = serde_json::json!(["A", "B"]);
+        let CellValue::Text(cell_labels) = cell_label(&value) else {
+            panic!("数组应取到标签");
+        };
+        let mut labels = Vec::new();
+        let mut kinds = Vec::new();
+        assert!(!push_sample_labels(
+            &value,
+            cell_labels,
+            false,
+            &mut labels,
+            &mut kinds
+        ));
+        assert!(labels.is_empty());
+        assert!(kinds.is_empty());
     }
 
     #[test]

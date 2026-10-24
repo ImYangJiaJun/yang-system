@@ -27,7 +27,7 @@ use yang_base::BaseError;
 use yang_db::Database;
 
 use super::bitable::{
-    cell_label, is_single_value_field_type, list_all_fields, list_all_records, BitableCoordinates,
+    cell_label, is_option_source_field_type, list_all_fields, list_all_records, BitableCoordinates,
     CellValue, FieldItem, RecordsSnapshot,
 };
 use super::context::FeishuContext;
@@ -158,8 +158,10 @@ pub(crate) enum SkipReason {
     MissingField,
     /// 字段名在表内不唯一，按名字取数会取到不确定的列。
     DuplicateName,
-    /// 字段类型不能作为选项值（多选、人员、附件、关联等）。
+    /// 字段类型不能作为选项值（人员、附件、关联、群组、复选框、地理位置等）。
     UnsupportedType,
+    /// 多选列被用作级联父列：父键需要唯一文案，多选一格可能有多个值。
+    MultiValueParent,
     /// 父绑定不在本表的启用绑定里（被停用或删除）。
     ParentUnavailable,
     /// 父绑定本轮也被跳过了：整棵子树必须一起暂停，否则子选项 id 会静默变化。
@@ -175,6 +177,9 @@ impl SkipReason {
             Self::MissingField => "多维表格里已找不到这个字段（可能已被删除，或字段名为空）",
             Self::DuplicateName => "字段名在表内不唯一，按名字取数会取到不确定的列",
             Self::UnsupportedType => "字段类型不支持作为选项值",
+            Self::MultiValueParent => {
+                "多选字段只能作为叶子取数列，不能作为级联父列（父键需要唯一文案）"
+            }
             Self::ParentUnavailable => "父字段不在本表的启用绑定里（已停用或已删除）",
             Self::ParentSkipped => "父字段本轮也被跳过，子字段一起暂停",
             Self::ParentCycle => "父指针成环",
@@ -519,7 +524,14 @@ async fn pull_table_inner(
         let binding = &table.bindings[*index];
         outcome.fields += 1;
         let linkage = parent_linkage(field, &table.bindings, &bound)?;
-        let values = extract_values_owned(&snapshot, &field.field_name, linkage.as_ref());
+        // 只有多选列才按元素展开；其余列（含公式/查找引用）返回多值仍按旧的
+        // 「取数列必须是单值」规则跳过，避免悄悄扩大取值口径。
+        let field_type = fields
+            .iter()
+            .find(|remote| remote.field_id == field.field_id)
+            .and_then(|remote| remote.field_type);
+        let values =
+            extract_values_owned(&snapshot, &field.field_name, field_type, linkage.as_ref());
         // 派生要 `&[RawValue]`，而 `RawValue.ancestors` 是借用切片——先把每行的祖先引用
         // 算好（它活到本语句块末），再借出去；派生完即丢。
         let ancestor_refs: Vec<Vec<&str>> = values
@@ -915,6 +927,7 @@ fn propagate_parent_skips(bindings: &[TableBinding], skipped: &mut HashMap<usize
 /// - 远端找不到 `field_id`、或字段名为空 → `MissingField`
 /// - 字段名在表内不唯一 → `DuplicateName`（按名字取数会取到不确定的列）
 /// - 字段类型不能作为选项值 → `UnsupportedType`
+/// - 多选列被用作级联父列 → `MultiValueParent`（多选列只能作为叶子取数列）
 /// - 父绑定不在启用集合里 → `ParentUnavailable`
 /// - 父绑定被跳过 → `ParentSkipped`（整棵子树一起暂停）
 /// - 父指针成环 → `ParentCycle`
@@ -948,9 +961,19 @@ fn partition_bindings(bindings: &[TableBinding], fields: &[FieldItem]) -> Partit
         }
         if remote
             .field_type
-            .is_some_and(|field_type| !is_single_value_field_type(field_type))
+            .is_some_and(|field_type| !is_option_source_field_type(field_type))
         {
             skipped.insert(index, SkipReason::UnsupportedType);
+            continue;
+        }
+        // 多选列可以当选项来源（逐元素展开），但不能当父列：父键按一格一个文案
+        // 折叠，多值父会让子项挂到不确定的父上。父被跳过时，子树由下面的传播一并暂停。
+        if remote.field_type == Some(4)
+            && bindings
+                .iter()
+                .any(|other| declared_parent(other) == Some(remote.field_id.as_str()))
+        {
+            skipped.insert(index, SkipReason::MultiValueParent);
         }
     }
 
@@ -1119,6 +1142,7 @@ fn internal_error(failure: OutboundFailure) -> BaseError {
 fn extract_values_owned(
     snapshot: &RecordsSnapshot,
     field_name: &str,
+    field_type: Option<i32>,
     linkage: Option<&Linkage>,
 ) -> Vec<OwnedRawValue> {
     let mut values = Vec::new();
@@ -1127,17 +1151,24 @@ fn extract_values_owned(
         let Some(value) = record.fields.get(field_name) else {
             continue;
         };
-        let label = match cell_label(value) {
-            CellValue::Text(label) => label,
+        let labels = match cell_label(value) {
+            CellValue::Text(labels) => labels,
             CellValue::Empty => continue,
             CellValue::Unsupported => {
                 unsupported += 1;
                 continue;
             }
         };
+        // 旧的「取数列必须是单值」规则只对多选列放宽：其他列（尤其公式/查找）
+        // 返回多值时仍然跳过并告警，不把取值口径悄悄放大。
+        if field_type != Some(4) && labels.len() > 1 {
+            unsupported += 1;
+            continue;
+        }
         // 每一级祖先各读**同一条 record** 里那一列（A7b：同行共现，不去父表反查）。
-        // 取不到（列不在快照里）或不是文本（人员/地理位置等多值列）都记成**空串**，
+        // 取不到（列不在快照里）或不是单值文本（人员/地理位置/多选父列）都记成**空串**，
         // 由派生的两条空级规则处理：直接父为空 ⇒ 本行无父；中间级为空 ⇒ 跳过那一级。
+        // 多选父列在 `partition_bindings` 已被跳过，这里的 `len() != 1` 只是防守。
         let ancestors = match linkage {
             None => Vec::new(),
             Some(linkage) => linkage
@@ -1148,21 +1179,27 @@ fn extract_values_owned(
                         .fields
                         .get(&level.field_name)
                         .and_then(|value| match cell_label(value) {
-                            CellValue::Text(label) => Some(label),
+                            CellValue::Text(mut labels) if labels.len() == 1 => labels.pop(),
                             _ => None,
                         })
                         .unwrap_or_default()
                 })
                 .collect(),
         };
-        values.push(OwnedRawValue { ancestors, label });
+        // 多选列的每个元素各派生一个选项；同一格共享该记录（同行）的祖先链。
+        for label in labels {
+            values.push(OwnedRawValue {
+                ancestors: ancestors.clone(),
+                label,
+            });
+        }
     }
     if unsupported > 0 {
         // 非空告警：静默丢弃会让「取数列选错类型」表现为「选项莫名变少」。
         tracing::warn!(
             unsupported,
             field_name,
-            "取数列存在取值不支持的单元格，已跳过（多值列或人员/地理位置等无文本类型）"
+            "取数列存在取值不支持的单元格，已跳过（人员/地理位置等无文本类型，或非多选列返回了多个值）"
         );
     }
     values
@@ -1365,7 +1402,7 @@ mod tests {
     fn values_pair_child_with_the_same_rows_parent() {
         // 父键由**同行共现**读出，这是 A7b 的依据
         let snap = snapshot(vec![("6.9025", "USD 美元"), ("0.8807", "HKD 港币")]);
-        let values = extract_values_owned(&snap, "子", Some(&linkage()));
+        let values = extract_values_owned(&snap, "子", Some(3), Some(&linkage()));
         assert_eq!(values.len(), 2);
         assert_eq!(values[0].label, "6.9025");
         assert_eq!(values[0].ancestors, vec!["USD 美元"]);
@@ -1375,7 +1412,7 @@ mod tests {
     #[test]
     fn without_linkage_parents_are_absent() {
         let snap = snapshot(vec![("甲", "父值")]);
-        let values = extract_values_owned(&snap, "子", None);
+        let values = extract_values_owned(&snap, "子", Some(3), None);
         assert_eq!(values.len(), 1);
         assert!(values[0].ancestors.is_empty());
     }
@@ -1383,7 +1420,7 @@ mod tests {
     #[test]
     fn empty_cells_do_not_produce_values() {
         let snap = snapshot(vec![("", "USD"), ("6.9025", "USD")]);
-        let values = extract_values_owned(&snap, "子", Some(&linkage()));
+        let values = extract_values_owned(&snap, "子", Some(3), Some(&linkage()));
         assert_eq!(values.len(), 1, "空单元格不贡献任何值");
         assert_eq!(values[0].label, "6.9025");
     }
@@ -1392,7 +1429,7 @@ mod tests {
     fn missing_child_column_yields_nothing() {
         // 取数列名配错时不是报错，而是没有任何值——上层会看到 derived=0
         let snap = snapshot(vec![("甲", "父值")]);
-        assert!(extract_values_owned(&snap, "不存在的列", None).is_empty());
+        assert!(extract_values_owned(&snap, "不存在的列", Some(3), None).is_empty());
     }
 
     #[test]
@@ -1408,7 +1445,62 @@ mod tests {
                 created_by: None,
             }],
         };
-        assert!(extract_values_owned(&snap, "子", None).is_empty());
+        assert!(extract_values_owned(&snap, "子", Some(11), None).is_empty());
+    }
+
+    fn snapshot_with(
+        fields: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> RecordsSnapshot {
+        RecordsSnapshot {
+            total: 1,
+            items: vec![RecordItem {
+                record_id: "rec".to_string(),
+                fields,
+                created_by: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn multi_select_cells_yield_one_value_per_label_sharing_the_rows_ancestor_chain() {
+        // 一条记录带两个附件类型：两个选项，父链都取同一条记录的父列。
+        let fields = std::collections::BTreeMap::from([
+            ("子".to_string(), json!(["A", "B"])),
+            ("父".to_string(), json!("P")),
+        ]);
+        let snap = snapshot_with(fields);
+        let values = extract_values_owned(&snap, "子", Some(4), Some(&linkage()));
+        assert_eq!(values.len(), 2, "多选列的每个元素各产一个值");
+        assert_eq!(values[0].label, "A");
+        assert_eq!(values[0].ancestors, vec!["P"]);
+        assert_eq!(values[1].label, "B");
+        assert_eq!(values[1].ancestors, vec!["P"], "同一格的元素共享同行祖先链");
+    }
+
+    #[test]
+    fn empty_multi_select_cells_contribute_no_values() {
+        for cell in [json!([]), json!(["", "   "])] {
+            let fields = std::collections::BTreeMap::from([("子".to_string(), cell)]);
+            assert!(extract_values_owned(&snapshot_with(fields), "子", Some(4), None).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_mixed_multi_select_cell_is_skipped_as_a_whole() {
+        // 混入不可识别元素时不能「丢一半、留一半」。
+        let fields = std::collections::BTreeMap::from([(
+            "子".to_string(),
+            json!(["A", {"id": "ou_x", "name": "张三"}]),
+        )]);
+        assert!(extract_values_owned(&snapshot_with(fields), "子", Some(4), None).is_empty());
+    }
+
+    #[test]
+    fn a_non_multi_select_field_with_multiple_labels_is_still_skipped() {
+        // 公式/查找列也可能返回数组；旧的「取数列必须是单值」规则不能因为
+        // 支持多选列而被悄悄放宽。
+        let fields = std::collections::BTreeMap::from([("子".to_string(), json!(["A", "B"]))]);
+        assert!(extract_values_owned(&snapshot_with(fields), "子", Some(20), None).is_empty());
     }
 
     #[test]
@@ -1730,13 +1822,38 @@ mod tests {
 
     #[test]
     fn an_unsupported_field_type_is_skipped() {
-        // 多选/人员/附件等类型的单元格不是一个可用的选项值；旧实现会静默产出空标签，
+        // 人员/附件等类型的单元格里没有可用的选项文案；旧实现会静默产出空标签，
         // 再叠加补集停用会把整列选项清空。现在显式跳过并点名。
-        let bindings = vec![table_binding("fldA", Some("多选列"), None)];
-        let fields = vec![field_item("fldA", "多选列", 4)];
+        let bindings = vec![table_binding("fldA", Some("附件列"), None)];
+        let fields = vec![field_item("fldA", "附件列", 17)];
         let partition = partition_bindings(&bindings, &fields);
         assert!(partition.healthy_indices.is_empty());
         assert_eq!(partition.skipped[0].reason, SkipReason::UnsupportedType);
+    }
+
+    #[test]
+    fn a_multi_select_leaf_is_healthy() {
+        // 多选列按元素展开，可以作为叶子取数列。
+        let bindings = vec![table_binding("fldA", Some("可提供的附件类型"), None)];
+        let fields = vec![field_item("fldA", "可提供的附件类型", 4)];
+        let partition = partition_bindings(&bindings, &fields);
+        assert_eq!(partition.healthy_indices, vec![0]);
+        assert!(partition.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_multi_select_parent_is_skipped_with_the_whole_subtree() {
+        // 父键需要唯一文案；多选父会让子项挂到不确定的父上。
+        // 父被跳过时，子树必须一起暂停（不能按无父处理）。
+        let bindings = vec![
+            table_binding("fldP", Some("多选父"), None),
+            table_binding("fldC", Some("子"), Some("fldP")),
+        ];
+        let fields = vec![field_item("fldP", "多选父", 4), field_item("fldC", "子", 3)];
+        let partition = partition_bindings(&bindings, &fields);
+        assert!(partition.healthy_indices.is_empty());
+        assert_eq!(partition.skipped[0].reason, SkipReason::MultiValueParent);
+        assert_eq!(partition.skipped[1].reason, SkipReason::ParentSkipped);
     }
 
     #[test]

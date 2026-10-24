@@ -92,6 +92,7 @@
         "missing_fields",
         "duplicate_name_fields",
         "unsupported_type_fields",
+        "multi_value_parent_fields",
         "unbound_fields",
         "view_missing",
         "table_missing",
@@ -123,6 +124,11 @@
         "ui_type",
         "source_key"
       ],
+      "backend_only": {},
+      "query_only": {}
+    },
+    "multi_value_parent_field": {
+      "emitted": ["field_id", "field_name", "source_key", "affected_children"],
       "backend_only": {},
       "query_only": {}
     },

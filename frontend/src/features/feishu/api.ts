@@ -474,6 +474,7 @@ export const HEALTH_REPORT_KEYS = {
   missing_fields: "missingFields",
   duplicate_name_fields: "duplicateNameFields",
   unsupported_type_fields: "unsupportedTypeFields",
+  multi_value_parent_fields: "multiValueParentFields",
   unbound_fields: "unboundFields",
   view_missing: "viewMissing",
   table_missing: "tableMissing",
@@ -519,6 +520,16 @@ export const HEALTH_UNSUPPORTED_TYPE_FIELD_KEYS = {
 } as const satisfies Record<
   string,
   keyof HealthReport["unsupportedTypeFields"][number]
+>;
+
+export const HEALTH_MULTI_VALUE_PARENT_KEYS = {
+  field_id: "fieldId",
+  field_name: "fieldName",
+  source_key: "sourceKey",
+  affected_children: "affectedChildren",
+} as const satisfies Record<
+  string,
+  keyof HealthReport["multiValueParentFields"][number]
 >;
 
 export const HEALTH_UNBOUND_FIELD_KEYS = {
@@ -1408,6 +1419,33 @@ function parseHealthMissingField(
   };
 }
 
+/// 一条「多选字段被用作级联父列」的绑定：拉取会跳过它及整棵子树。
+function parseHealthMultiValueParent(
+  raw: Record<string, unknown>,
+): HealthReport["multiValueParentFields"][number] | null {
+  const fieldId = asString(raw.field_id);
+  const sourceKey = asString(raw.source_key);
+  if (fieldId === "" && sourceKey === "") return null;
+  const rawChildren = raw.affected_children;
+  return {
+    fieldId,
+    fieldName: asString(raw.field_name),
+    sourceKey,
+    affectedChildren: Array.isArray(rawChildren)
+      ? rawChildren
+          .map((item) => asRecord(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+          .map(parseHealthAffectedChild)
+          .filter(
+            (
+              item,
+            ): item is HealthReport["multiValueParentFields"][number]["affectedChildren"][number] =>
+              item !== null,
+          )
+      : [],
+  };
+}
+
 function parseHealthReport(data: unknown): HealthReport {
   const record = asRecord(data);
   const rawMissing = record?.missing_fields;
@@ -1447,6 +1485,17 @@ function parseHealthReport(data: unknown): HealthReport {
         }))
         .filter((item) => item.fieldId !== "" || item.sourceKey !== "")
     : [];
+  const rawMultiValueParents = record?.multi_value_parent_fields;
+  const multiValueParentFields = Array.isArray(rawMultiValueParents)
+    ? rawMultiValueParents
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map(parseHealthMultiValueParent)
+        .filter(
+          (item): item is HealthReport["multiValueParentFields"][number] =>
+            item !== null,
+        )
+    : [];
   const rawUnbound = record?.unbound_fields;
   const unboundFields = Array.isArray(rawUnbound)
     ? rawUnbound
@@ -1469,6 +1518,7 @@ function parseHealthReport(data: unknown): HealthReport {
     missingFields,
     duplicateNameFields,
     unsupportedTypeFields,
+    multiValueParentFields,
     unboundFields,
     viewMissing: record?.view_missing === true,
     tableMissing: record?.table_missing === true,

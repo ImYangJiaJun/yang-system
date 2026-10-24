@@ -370,14 +370,23 @@ impl FieldItem {
 
 /// 官方《多维表格记录数据结构》里值形态为**单值**的字段类型。
 ///
-/// 取数列必须落在这些类型上。多值类型（多选 `4`、人员 `11`、附件 `17`、关联
-/// `18`/`21`、群组 `23`）与无文本类型（复选框 `7`、地理位置 `22`）一律拒绝——
-/// 详见 [`check_coordinate_field`]。
+/// 这一位只用于**级联父列**：父键按「一格一个文案」折叠，多值父会产生歧义。
+/// 选项来源列的判定见 [`is_option_source_field_type`]——它在本集合之外还接受多选。
 pub(crate) fn is_single_value_field_type(field_type: i32) -> bool {
     // 1 文本（含条码）/ 2 数字（含进度、货币、评分）/ 3 单选 / 5 日期 /
     // 13 电话号码 / 15 超链接 / 20 公式 / 1005 自动编号：这些在记录接口里
     // 都是**单个** string 或 number。
     matches!(field_type, 1 | 2 | 3 | 5 | 13 | 15 | 20 | 1005)
+}
+
+/// 可以作为**选项来源列**的字段类型。
+///
+/// 比 [`is_single_value_field_type`] 多接受多选 `4`：多选单元格是文案数组，拉取时
+/// 按元素逐个展开成一个选项（见 `pull::extract_values_owned`）。其余多值类型
+/// （人员 `11`、附件 `17`、关联 `18`/`21`、群组 `23`）与无文本类型（复选框 `7`、
+/// 地理位置 `22`）仍然拒绝——它们的单元格里没有可用的文案。
+pub(crate) fn is_option_source_field_type(field_type: i32) -> bool {
+    is_single_value_field_type(field_type) || field_type == 4
 }
 
 /// 校验取数列的字段类型是否可用，返回可读的类型名。
@@ -395,10 +404,10 @@ pub(crate) fn check_coordinate_field(field: &FieldItem) -> anyhow::Result<String
         return Ok(label);
     };
     ensure!(
-        is_single_value_field_type(field_type),
-        "字段「{}」的类型是 {}（type={field_type}），不是单值字段：\
-         取数列必须指向文本、数字、单选、日期、电话、超链接或公式列。\
-         多选/人员/附件/关联/群组/复选框/地理位置的单元格不是一个可用的选项值",
+        is_option_source_field_type(field_type),
+        "字段「{}」的类型是 {}（type={field_type}），不能作为选项来源：\
+         取数列必须指向文本、数字、单选、多选、日期、电话、超链接或公式列。\
+         人员/附件/关联/群组/复选框/地理位置不是可用的选项值",
         field.field_name,
         label
     );
@@ -524,15 +533,15 @@ pub(crate) async fn resolve_current_field_names(
 /// 整体停用。这种情况必须能被上层看见并拒绝。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CellValue {
-    /// 取到了文本。
-    Text(String),
-    /// 单元格确实为空（缺列、`null`、空串、空数组）。
+    /// 取到了文案；多选列按元素逐个给出（一个元素一个选项）。
+    Text(Vec<String>),
+    /// 单元格确实为空（缺列、`null`、空串、空数组、全空白元素）。
     Empty,
-    /// 列类型不支持取值（多值列、人员、群组、地理位置、复选框等）。
+    /// 列类型不支持取值（人员、群组、地理位置、复选框、混合数组等）。
     Unsupported,
 }
 
-/// 从单元格值里取一个用于展示的标签。
+/// 从单元格值里取一组用于展示的标签。
 ///
 /// **单选字段同时接受裸字符串与长度 1 的数组**。两种形态都有实证：
 /// 官方《列出记录》响应示例写的是 `"单选": "选项1"`（裸字符串），而本仓库
@@ -540,22 +549,31 @@ pub(crate) enum CellValue {
 /// 且该字段定义为 `multiple: false`），其 manifest 也把 `physical_type` 标为
 /// `array<string>`。既然两个方向都有证据，就两个都吃——写错方向是**静默丢数据**
 /// （选项取空 → 飞书控件显示为空），代价远大于多一个分支。
+///
+/// 多选列同样是数组：**每个元素各出一个标签**，由拉取侧逐个派生选项。元素必须是
+/// 可抠出文案的字符串/数字/`{text}`；人员、附件、关联等对象数组不含 `text`，
+/// 整格判 `Unsupported`，不静默丢元素（混入不可识别元素时也不截断）。
 pub(crate) fn cell_label(value: &serde_json::Value) -> CellValue {
     match value {
         serde_json::Value::String(text) => classify_text(text),
         serde_json::Value::Number(number) => classify_text(&number.to_string()),
         serde_json::Value::Null => CellValue::Empty,
-        serde_json::Value::Array(items) => match items.as_slice() {
-            [] => CellValue::Empty,
-            // 长度 1：单值列。这正是「单选用数组返回」的那种形态。
-            [single] => match union_text(single) {
-                Some(text) => classify_text(&text),
-                None => CellValue::Unsupported,
-            },
-            // 长度 ≥2：多值列。取数列必须指向单值列，报出来而不是随手取第一个
-            // ——静默取第一个会让「汇率（多选）」这种列悄悄产出一个看起来正常的选项集。
-            _ => CellValue::Unsupported,
-        },
+        serde_json::Value::Array(items) => {
+            let mut labels = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(text) = union_text(item) else {
+                    return CellValue::Unsupported;
+                };
+                if !text.trim().is_empty() {
+                    labels.push(text);
+                }
+            }
+            if labels.is_empty() {
+                CellValue::Empty
+            } else {
+                CellValue::Text(labels)
+            }
+        }
         serde_json::Value::Object(_) => match union_text(value) {
             Some(text) => classify_text(&text),
             // 人员 / 群组 / 地理位置：对象里没有 `text` 键
@@ -582,7 +600,7 @@ fn classify_text(text: &str) -> CellValue {
     if text.trim().is_empty() {
         CellValue::Empty
     } else {
-        CellValue::Text(text.to_string())
+        CellValue::Text(vec![text.to_string()])
     }
 }
 
@@ -2180,6 +2198,10 @@ mod tests {
                 "type={field_type} 是单值字段，应被接受"
             );
             assert!(
+                is_option_source_field_type(field_type),
+                "单值字段都可以作为选项来源"
+            );
+            assert!(
                 check_coordinate_field(&field_of_type(field_type, None)).is_ok(),
                 "type={field_type} 的校验应通过"
             );
@@ -2187,17 +2209,27 @@ mod tests {
     }
 
     #[test]
-    fn multi_value_and_textless_field_types_are_rejected() {
-        // 4 多选 / 7 复选框 / 11 人员 / 17 附件 / 18 关联 / 21 双向关联 /
-        // 22 地理位置 / 23 群组 —— 单元格不是一个可用的选项值
-        for field_type in [4, 7, 11, 17, 18, 21, 22, 23] {
+    fn multi_select_is_an_option_source_but_not_a_single_value_parent() {
+        // 多选列的单元格是文案数组；它可以当选项来源（逐个元素展开），
+        // 但不能当级联父列（父键需要唯一文案）。
+        assert!(!is_single_value_field_type(4));
+        assert!(is_option_source_field_type(4));
+        assert!(check_coordinate_field(&field_of_type(4, Some("MultiSelect"))).is_ok());
+    }
+
+    #[test]
+    fn textless_and_object_field_types_are_rejected() {
+        // 7 复选框 / 11 人员 / 17 附件 / 18 关联 / 21 双向关联 /
+        // 22 地理位置 / 23 群组 —— 单元格里没有可用的选项文案
+        for field_type in [7, 11, 17, 18, 21, 22, 23] {
             assert!(!is_single_value_field_type(field_type));
-            let error = check_coordinate_field(&field_of_type(field_type, Some("MultiSelect")))
+            assert!(!is_option_source_field_type(field_type));
+            let error = check_coordinate_field(&field_of_type(field_type, Some("Unsupported")))
                 .err()
                 .unwrap_or_else(|| panic!("type={field_type} 必须被拒绝"));
             let text = error.to_string();
             assert!(
-                text.contains("不是单值字段"),
+                text.contains("不能作为选项来源"),
                 "报错要说清原因，实际: {text}"
             );
         }
@@ -2235,7 +2267,10 @@ mod tests {
 
     #[test]
     fn string_cell_is_text() {
-        assert_eq!(cell_label(&json!("选项1")), CellValue::Text("选项1".into()));
+        assert_eq!(
+            cell_label(&json!("选项1")),
+            CellValue::Text(vec!["选项1".into()])
+        );
     }
 
     #[test]
@@ -2244,37 +2279,69 @@ mod tests {
         // 两个方向都吃，写错方向是静默丢数据
         assert_eq!(
             cell_label(&json!(["股东借款"])),
-            CellValue::Text("股东借款".into())
+            CellValue::Text(vec!["股东借款".into()])
         );
     }
 
     #[test]
-    fn multi_value_arrays_are_unsupported_not_silently_truncated() {
-        // 取数列必须指向单值列；静默取第一个会让多选列悄悄产出看起来正常的选项集
-        assert_eq!(cell_label(&json!(["A", "B"])), CellValue::Unsupported);
+    fn multi_select_arrays_yield_one_label_per_element() {
+        // 真实形态：一条记录可同时带多个附件类型。首尾空白元素跳过，
+        // 但**不截断**、不取第一个。
+        assert_eq!(
+            cell_label(&json!(["付款申请单/Payment Application", "发票/invoice"])),
+            CellValue::Text(vec![
+                "付款申请单/Payment Application".into(),
+                "发票/invoice".into()
+            ])
+        );
+        assert_eq!(
+            cell_label(&json!(["A", "  ", "B"])),
+            CellValue::Text(vec!["A".into(), "B".into()])
+        );
         assert_eq!(cell_label(&json!([])), CellValue::Empty);
+        assert_eq!(cell_label(&json!(["", "   "])), CellValue::Empty);
+    }
+
+    #[test]
+    fn mixed_or_object_arrays_are_unsupported_not_silently_truncated() {
+        // 混入不可识别的元素时整格拒绝，不能「丢一半、留一半」——
+        // 静默截断会让多选列悄悄产出一个看起来正常的选项集。
+        assert_eq!(
+            cell_label(&json!(["A", {"id": "ou_x", "name": "张三"}])),
+            CellValue::Unsupported
+        );
+        assert_eq!(
+            cell_label(&json!([{"id": "ou_x", "name": "张三"}])),
+            CellValue::Unsupported
+        );
     }
 
     #[test]
     fn numeric_cells_arrive_as_strings_on_the_list_endpoint() {
         // 官方《列出记录》示例：数字 "100"、货币 "1"、进度 "0.66"、评分 "3"
         for value in ["100", "0.66", "3"] {
-            assert_eq!(cell_label(&json!(value)), CellValue::Text(value.into()));
+            assert_eq!(
+                cell_label(&json!(value)),
+                CellValue::Text(vec![value.into()])
+            );
         }
         // 若将来走《查询记录》，同样的列会以 number 出现——一并支持
-        assert_eq!(cell_label(&json!(0.66)), CellValue::Text("0.66".into()));
-        assert_eq!(cell_label(&json!(3)), CellValue::Text("3".into()));
+        assert_eq!(
+            cell_label(&json!(0.66)),
+            CellValue::Text(vec!["0.66".into()])
+        );
+        assert_eq!(cell_label(&json!(3)), CellValue::Text(vec!["3".into()]));
     }
 
     #[test]
     fn formula_and_lookup_objects_yield_their_text() {
         assert_eq!(
             cell_label(&json!([{"text": "多行文本内容1", "type": "text"}])),
-            CellValue::Text("多行文本内容1".into())
+            CellValue::Text(vec!["多行文本内容1".into()])
         );
         assert_eq!(
             cell_label(&json!({"text": "链接文案", "type": "text"})),
-            CellValue::Text("链接文案".into())
+            CellValue::Text(vec!["链接文案".into()])
         );
     }
 
