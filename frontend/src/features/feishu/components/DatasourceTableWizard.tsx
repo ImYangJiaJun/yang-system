@@ -158,8 +158,10 @@ export function DatasourceTableWizard({
   );
 
   /// 已有父列的行：可选父 = 其余已勾选字段。
+  // 多选列（type=4）只能作为叶子取数列：父键按「一格一个文案」折叠，多选父
+  // 会让子项挂到不确定的父上，拉取时会跳过整棵子树。这里直接不提供候选。
   const candidatesFor = (selfId: string): BitableField[] =>
-    selected.filter((field) => field.fieldId !== selfId);
+    selected.filter((field) => field.fieldId !== selfId && field.type !== 4);
 
   const sourceKeyErrors = useMemo<string[]>(() => {
     const seen = new Map<string, number>();

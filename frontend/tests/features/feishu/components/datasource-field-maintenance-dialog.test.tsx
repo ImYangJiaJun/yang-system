@@ -51,6 +51,7 @@ const REPORT: HealthReport = {
   ],
   duplicateNameFields: [],
   unsupportedTypeFields: [],
+  multiValueParentFields: [],
   unboundFields: [
     {
       fieldId: "fldNEW",

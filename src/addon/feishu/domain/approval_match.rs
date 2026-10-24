@@ -221,13 +221,16 @@ impl FormWidget {
     }
 }
 
-/// 多维表格侧的列定义（只取按名匹配要用的两样）。
+/// 多维表格侧的列定义（按名匹配与类型兼容性判定要用的几样）。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Column {
     pub(crate) field_id: String,
     pub(crate) field_name: String,
     /// 列里的选项名。只有 select 类型的列才有。
     pub(crate) options: Vec<String>,
+    /// 官方字段类型码。**多选 `4` 与单选 `3` 的选项列表一模一样**，只靠
+    /// `options` 分不开；而「多选列不能填进单选控件」正是要拦的那一类。
+    pub(crate) field_type: Option<i32>,
 }
 
 /// 由《列出字段》的响应构造按名匹配用的列集合。
@@ -237,12 +240,6 @@ pub(crate) struct Column {
 /// 按名匹配要的是**列名 + 选项名**，而两样都只在 `list_all_fields` 里——
 /// 直接用调用方传来的列名会丢掉选项（`property.options[].name`），
 /// 单选控件的选项值就派生不出来。
-///
-/// # 只留匹配要用的三样
-///
-/// `field_type` / `ui_type` 一概不进 [`Column`]：类型兼容性判定（`check_type_compatibility`
-/// 当前只拦「列是选项而控件要数字」这类）**只看有没有选项**，不需要类型码。
-/// 多留两样只会让「`Column` 是什么」变模糊。
 pub(crate) fn columns_from_fields(fields: &[FieldItem]) -> Vec<Column> {
     fields
         .iter()
@@ -250,6 +247,7 @@ pub(crate) fn columns_from_fields(fields: &[FieldItem]) -> Vec<Column> {
             field_id: field.field_id.clone(),
             field_name: field.field_name.trim().to_string(),
             options: field.option_names(),
+            field_type: field.field_type,
         })
         .collect()
 }
@@ -326,6 +324,12 @@ pub(crate) enum MatchError {
         column: String,
         column_kind: String,
     },
+    /// 多选列被填进单选控件：一条记录可能有多个值，单选控件装不下。
+    MultiValueColumn {
+        widget: String,
+        widget_type: String,
+        column: String,
+    },
     /// 同名列出现多次（多维表格列名不唯一）。
     AmbiguousColumn {
         widget: String,
@@ -374,6 +378,15 @@ impl std::fmt::Display for MatchError {
             } => write!(
                 formatter,
                 "控件「{widget}」（{widget_type}）与同名列「{column}」（{column_kind}）类型不匹配"
+            ),
+            Self::MultiValueColumn {
+                widget,
+                widget_type,
+                column,
+            } => write!(
+                formatter,
+                "控件「{widget}」（{widget_type}）是单选控件，但列「{column}」是多选列：\
+                 多选列只能映射到多选控件（checkboxV2），或改用单值列"
             ),
             Self::AmbiguousColumn {
                 widget,
@@ -731,8 +744,23 @@ fn find_column<'a>(
 /// 只对**少数几类**做强校验：多维表格的列类型是数字编码（文本 / 数字 / 单选 …），
 /// 而审批控件是字符串（`input` / `number` / `radioV2` …）。两边的分类法**不是
 /// 一一对应**的（例如多维表格的 `select` 对上审批的 `radioV2` 也对上 `checkboxV2`），
-/// 所以这里只拦「明显会让提交失败」的两类：数字对文本、文本对数字。
+/// 所以这里只拦「明显会让提交失败」的两类：数字对选项列、多选列对单选控件。
+///
+/// 多选列 → 单选控件这一条是**配置期**必须拦的：一条记录可能带多个值，单选控件
+/// 装不下；旧实现放行到派发期，只在日志里报 `BadValue`（控制台看到的是脱敏后的
+/// 「值的格式不符合审批控件要求」），用户很难归因。
 fn check_type_compatibility(widget: &FormWidget, column: &Column) -> Result<(), MatchError> {
+    // 多选列只能进**多选控件**（checkbox/checkboxV2）；radio 虽然同为 Option
+    // 转换器，但只装得下一个值，同样必须拒绝。其它控件（input/date/…）会走
+    // Direct 转换并静默取数组的第一个元素，更是必须拦下。
+    let multi_value_widget = matches!(widget.r#type.as_str(), "checkbox" | "checkboxV2");
+    if column.field_type == Some(4) && !multi_value_widget {
+        return Err(MatchError::MultiValueColumn {
+            widget: widget.name.clone(),
+            widget_type: widget.r#type.clone(),
+            column: column.field_name.clone(),
+        });
+    }
     let numeric_widget = matches!(widget.r#type.as_str(), "number" | "amount");
     let numeric_column = column.options.is_empty() && is_numeric_column(column);
     if numeric_widget && !numeric_column && !column.options.is_empty() {
@@ -892,6 +920,21 @@ mod tests {
             field_id: id.to_string(),
             field_name: name.to_string(),
             options: options.iter().map(|value| (*value).to_string()).collect(),
+            field_type: Some(3),
+        }
+    }
+
+    fn multi_column(name: &str, id: &str, options: &[&str]) -> Column {
+        Column {
+            field_type: Some(4),
+            ..column(name, id, options)
+        }
+    }
+
+    fn linked_checkbox(name: &str, id: &str) -> FormWidget {
+        FormWidget {
+            r#type: "checkboxV2".to_string(),
+            ..linked_radio(name, id)
         }
     }
 
@@ -1550,6 +1593,69 @@ mod tests {
                 assert!(maps[0].option_map.is_empty(), "留给调用方补");
             }
             MatchOutcome::Invalid(errors) => panic!("链接态不应报派生失败: {errors:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_select_column_cannot_map_to_a_single_select_control() {
+        // 一条记录可能带多个附件类型，radioV2 只能装一个；配置期就拦，
+        // 不要留到派发期报「值的格式不符合审批控件要求」。
+        let form = vec![linked_radio("可提供的附件类型", "w1")];
+        let columns = vec![multi_column(
+            "可提供的附件类型",
+            "fldA",
+            &["付款申请单", "发票"],
+        )];
+        match match_by_name(&form, &columns) {
+            MatchOutcome::Matched(_) => panic!("多选列填单选控件应失败"),
+            MatchOutcome::Invalid(errors) => assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error, MatchError::MultiValueColumn { .. })),
+                "{:?}",
+                errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    #[test]
+    fn multi_select_column_cannot_map_to_a_text_input_either() {
+        // input 走 Direct 转换，`text_from_cell` 会静默取数组第一个元素；
+        // 不拦的话其余标签会被悄悄丢掉。
+        let form = vec![input("可提供的附件类型", "w1", true)];
+        let columns = vec![multi_column(
+            "可提供的附件类型",
+            "fldA",
+            &["付款申请单", "发票"],
+        )];
+        match match_by_name(&form, &columns) {
+            MatchOutcome::Matched(_) => panic!("多选列填文本控件应失败"),
+            MatchOutcome::Invalid(errors) => assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error, MatchError::MultiValueColumn { .. })),
+                "{:?}",
+                errors.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    #[test]
+    fn multi_select_column_maps_to_a_checkbox_control() {
+        // 同样的多选列 + 外部选项，映射到 checkboxV2 是合法的；转换器是 Option。
+        let form = vec![linked_checkbox("可提供的附件类型", "w1")];
+        let columns = vec![multi_column(
+            "可提供的附件类型",
+            "fldA",
+            &["付款申请单", "发票"],
+        )];
+        match match_by_name(&form, &columns) {
+            MatchOutcome::Matched(maps) => {
+                assert_eq!(maps.len(), 1);
+                assert_eq!(maps[0].widget_type, "checkboxV2");
+                assert_eq!(maps[0].converter, Converter::Option);
+            }
+            MatchOutcome::Invalid(errors) => panic!("多选控件应接受多选列: {errors:?}"),
         }
     }
 

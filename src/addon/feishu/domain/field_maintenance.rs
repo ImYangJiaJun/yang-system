@@ -16,7 +16,10 @@ use yang_base::table::Record;
 use yang_base::BaseError;
 use yang_db::Transaction;
 
-use super::bitable::{is_single_value_field_type, list_all_fields, BitableCoordinates, FieldItem};
+use super::bitable::{
+    is_option_source_field_type, is_single_value_field_type, list_all_fields, BitableCoordinates,
+    FieldItem,
+};
 use super::context::FeishuContext;
 use super::outbound::{OutboundTransport, Sleeper};
 use super::source_key::valid_source_key;
@@ -213,7 +216,7 @@ pub(crate) fn validate_target_field(
         ));
     }
     if let Some(field_type) = field.field_type {
-        if !is_single_value_field_type(field_type) {
+        if !is_option_source_field_type(field_type) {
             let label = field
                 .ui_type
                 .as_deref()
@@ -225,7 +228,7 @@ pub(crate) fn validate_target_field(
                 "field_id".to_string(),
                 format!(
                     "字段「{name}」的类型是 {label}，不能作为选项来源；\
-                     取数列必须指向文本、数字、单选、日期、电话、超链接或公式列"
+                     取数列必须指向文本、数字、单选、多选、日期、电话、超链接或公式列"
                 ),
             ));
         }
@@ -311,7 +314,21 @@ pub(crate) fn validate_ancestor_fields(
                 ),
             ));
         }
-        validate_target_field(fields, parent, bindings, Some(&binding.source_key))?;
+        let ancestor = validate_target_field(fields, parent, bindings, Some(&binding.source_key))?;
+        // 多选列可以当叶子取数列（逐元素展开），但不能当级联父列：父键按
+        // 「一格一个文案」折叠，多值父会让子项挂到不确定的父上。
+        if ancestor
+            .field_type
+            .is_some_and(|field_type| !is_single_value_field_type(field_type))
+        {
+            return Err(BaseError::ParamInvalid(
+                "parent_field_id".to_string(),
+                format!(
+                    "父字段「{}」是多选列，不能作为级联父列；多选列只能作为叶子取数列",
+                    ancestor.field_name.trim()
+                ),
+            ));
+        }
         cursor = trimmed(binding.parent_field_id.as_deref());
     }
     Ok(())
@@ -688,7 +705,7 @@ mod tests {
         let fields = vec![
             field("fldA", "币种", 3),
             field("fldB", "币种", 3),
-            field("fldC", "多选列", 4),
+            field("fldC", "附件列", 17),
         ];
         let bindings = vec![binding(1, "fldA", "currency", None, true)];
         let err = validate_target_field(&fields, "fldGONE", &bindings, None)
@@ -705,6 +722,29 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("类型不支持应被拒"));
         assert!(err.to_string().contains("不能作为选项来源"));
+    }
+
+    #[test]
+    fn validate_target_field_accepts_multi_select_as_a_leaf_source() {
+        let fields = vec![field("fldM", "可提供的附件类型", 4)];
+        let bindings: Vec<BindingRow> = Vec::new();
+        let field = validate_target_field(&fields, "fldM", &bindings, None)
+            .unwrap_or_else(|error| panic!("多选列应可作为选项来源: {error}"));
+        assert_eq!(field.field_type, Some(4));
+    }
+
+    #[test]
+    fn a_multi_select_field_cannot_be_a_parent() {
+        // 叶子可以，父列不行：父键按一格一个文案折叠，多值父会产生歧义。
+        let fields = vec![field("fldM", "多选父", 4), field("fldC", "子", 3)];
+        let bindings = vec![
+            binding(1, "fldM", "multi", None, true),
+            binding(2, "fldC", "child", Some("fldM"), true),
+        ];
+        let error = validate_ancestor_fields(&fields, &bindings, Some("fldM"))
+            .err()
+            .unwrap_or_else(|| panic!("多选父列应被拒"));
+        assert!(error.to_string().contains("不能作为级联父列"));
     }
 
     #[test]

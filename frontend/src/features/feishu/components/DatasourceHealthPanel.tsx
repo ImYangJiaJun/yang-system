@@ -187,7 +187,8 @@ export function DatasourceHealthPanel({
                 <span className="text-xs text-muted-foreground">
                   当前类型 {typeLabel(field.fieldType)}
                   {field.uiType === null ? "" : `（${field.uiType}）`}
-                  ，这一列取不到可枚举的选项；请改绑到单选/文本一类的列。
+                  ，这一列取不到可枚举的选项；请改绑到文本、数字、单选、多选、日期、
+                  电话、超链接或公式一类的列。
                 </span>
                 <code className="rounded-sm bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
                   {field.fieldId}
@@ -195,6 +196,43 @@ export function DatasourceHealthPanel({
                 <code className="rounded-sm bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
                   {field.sourceKey}
                 </code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {report.multiValueParentFields.length > 0 ? (
+        <div className="space-y-2">
+          <h3 className="text-xs font-medium text-muted-foreground">
+            多选字段不能作为级联父列
+          </h3>
+          <ul className="space-y-1">
+            {report.multiValueParentFields.map((field) => (
+              <li
+                key={`${field.fieldId}/${field.sourceKey}`}
+                data-slot="multi-value-parent-field"
+                className="flex flex-wrap items-baseline gap-2 text-sm"
+              >
+                <span className="font-medium">{field.fieldName}</span>
+                <span className="text-xs text-muted-foreground">
+                  多选列只能作为叶子取数列；它被当成父列时，这一列和整棵子树都会被跳过。
+                  请改绑父列或解除父级。
+                </span>
+                <code className="rounded-sm bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                  {field.fieldId}
+                </code>
+                <code className="rounded-sm bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                  {field.sourceKey}
+                </code>
+                {field.affectedChildren.length > 0 ? (
+                  <p className="w-full text-xs text-tone-warning">
+                    会连带暂停：
+                    {field.affectedChildren
+                      .map((child) => child.fieldName ?? child.fieldId)
+                      .join("、")}
+                  </p>
+                ) : null}
               </li>
             ))}
           </ul>

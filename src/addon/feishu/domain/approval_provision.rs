@@ -1253,6 +1253,14 @@ mod tests {
             field_id: id.to_string(),
             field_name: name.to_string(),
             options: options.iter().map(|value| (*value).to_string()).collect(),
+            field_type: Some(3),
+        }
+    }
+
+    fn multi_column(id: &str, name: &str, options: &[&str]) -> Column {
+        Column {
+            field_type: Some(4),
+            ..column(id, name, options)
         }
     }
 
@@ -1374,6 +1382,56 @@ mod tests {
         assert_eq!(
             result.widgets[0].option_source_key.as_deref(),
             Some("fldq7lcb6y")
+        );
+        assert!(result.widgets[0].option_map.is_empty());
+    }
+
+    #[test]
+    fn a_checkbox_widget_with_external_options_keeps_its_source_and_option_converter() {
+        // 多选控件 + 本系统外部选项：配置期必须保留 source_key，且转换器是 Option，
+        // 派发期才会把一格里的多个文案映射成 option_id 数组。
+        let maps: Vec<FieldMapping> = serde_json::from_value(serde_json::json!([{
+            "widget_id": "attachment", "bitable_field": "fldAttach",
+            "option_source_key": "tbluhvnuqjw1pxv1_fldp6thdlp"
+        }]))
+        .unwrap_or_else(|error| panic!("手动来源应能被接收: {error}"));
+        let form = parse_form(&serde_json::json!([{
+            "id": "attachment",
+            "name": "可提供的附件类型/Available attachment type",
+            "type": "checkboxV2", "required": true, "option": [],
+            "externalData": {
+                "externalDataLinkage": false,
+                "externalUrl": "http://47.109.148.207:18654/api/v1/feishu/approval/options/tbluhvnuqjw1pxv1_fldp6thdlp"
+            }
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let external =
+            BTreeMap::from([("attachment".into(), "tbluhvnuqjw1pxv1_fldp6thdlp".into())]);
+        let result = plan(
+            &ProvisionInput {
+                maps: Some(&maps),
+                ..input("fldP", "fldB")
+            },
+            "t",
+            &form,
+            &[
+                multi_column(
+                    "fldAttach",
+                    "可提供的附件类型/Available attachment type",
+                    &["付款申请单", "发票"],
+                ),
+                column("fldP", "申请人", &[]),
+                column("fldB", "审批编号", &[]),
+            ],
+            &external,
+            "[]",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(result.widgets[0].widget_type, "checkboxV2");
+        assert_eq!(result.widgets[0].converter, Converter::Option);
+        assert_eq!(
+            result.widgets[0].option_source_key.as_deref(),
+            Some("tbluhvnuqjw1pxv1_fldp6thdlp")
         );
         assert!(result.widgets[0].option_map.is_empty());
     }

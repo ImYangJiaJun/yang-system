@@ -29,7 +29,7 @@ use yang_base::definition::{HttpMethod, ModuleSpec, ParamInput, Params};
 use yang_base::BaseError;
 
 use crate::addon::feishu::domain::bitable::{
-    is_single_value_field_type, list_all_fields, list_all_views, BitableCoordinates, FieldItem,
+    is_option_source_field_type, list_all_fields, list_all_views, BitableCoordinates, FieldItem,
 };
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
@@ -128,6 +128,19 @@ pub(super) struct UnsupportedTypeField {
     pub(super) source_key: String,
 }
 
+/// 一个多选字段被用作**级联父列**：拉取会跳过它，并连带暂停整棵子树。
+///
+/// 多选列本身可以作为**叶子**取数列（按元素逐个展开），所以它不在
+/// [`UnsupportedTypeField`] 里；这里报的是「父列角色」用错，不是类型不支持。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct MultiValueParentField {
+    pub(super) field_id: String,
+    pub(super) field_name: String,
+    pub(super) source_key: String,
+    /// 会一起暂停的整棵子树。
+    pub(super) affected_children: Vec<ChildRef>,
+}
+
 /// 远端存在、本系统还没绑定的字段（可新增）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct UnboundField {
@@ -146,8 +159,10 @@ pub(super) struct HealthReport {
     pub(super) missing_fields: Vec<MissingField>,
     /// 字段名在表内不唯一（按名字取数会取到不确定的列）。
     pub(super) duplicate_name_fields: Vec<DuplicateNameField>,
-    /// 字段类型不能作为选项值（多选/人员/附件/关联等）。
+    /// 字段类型不能作为选项值（人员/附件/关联/群组/复选框/地理位置等）。
     pub(super) unsupported_type_fields: Vec<UnsupportedTypeField>,
+    /// 多选字段被用作级联父列：拉取会跳过它及整棵子树。
+    pub(super) multi_value_parent_fields: Vec<MultiValueParentField>,
     /// 远端有、本地没绑定的字段。**不算问题**，不压 `ok`；是「可新增」清单。
     pub(super) unbound_fields: Vec<UnboundField>,
     /// 配置的视图在表里已不存在。
@@ -260,7 +275,7 @@ pub(super) fn classify(
         }
         if field
             .field_type
-            .is_some_and(|field_type| !is_single_value_field_type(field_type))
+            .is_some_and(|field_type| !is_option_source_field_type(field_type))
         {
             unsupported_type_fields.push(UnsupportedTypeField {
                 field_id: binding.field_id.clone(),
@@ -271,6 +286,27 @@ pub(super) fn classify(
             });
         }
     }
+
+    // 多选列作为**叶子**取数列是合法的；只有被别的绑定当作父列时，拉取才会
+    // 以 `MultiValueParent` 跳过它并连带暂停整棵子树。这是一个独立的配置问题，
+    // 不能只靠「类型支持」判通过——否则体检显示 ok，实际拉取却 partial。
+    let multi_value_parent_fields: Vec<MultiValueParentField> = enabled
+        .iter()
+        .filter_map(|binding| {
+            let field = remote_by_id.get(binding.field_id.as_str())?;
+            let name = field.field_name.trim();
+            if name.is_empty() || field.field_type != Some(4) {
+                return None;
+            }
+            let affected_children = affected_children(bindings, &binding.field_id);
+            (!affected_children.is_empty()).then(|| MultiValueParentField {
+                field_id: binding.field_id.clone(),
+                field_name: name.to_string(),
+                source_key: binding.source_key.clone(),
+                affected_children,
+            })
+        })
+        .collect();
 
     let bound_ids: HashSet<&str> = bindings
         .iter()
@@ -293,10 +329,12 @@ pub(super) fn classify(
             && view_ok
             && missing_fields.is_empty()
             && duplicate_name_fields.is_empty()
-            && unsupported_type_fields.is_empty(),
+            && unsupported_type_fields.is_empty()
+            && multi_value_parent_fields.is_empty(),
         missing_fields,
         duplicate_name_fields,
         unsupported_type_fields,
+        multi_value_parent_fields,
         unbound_fields,
         view_missing: !view_ok,
         table_missing: !table_ok,
@@ -518,10 +556,20 @@ mod tests {
             }],
             unsupported_type_fields: vec![UnsupportedTypeField {
                 field_id: "fldU".to_string(),
-                field_name: "多选列".to_string(),
-                field_type: Some(4),
-                ui_type: Some("MultiSelect".to_string()),
+                field_name: "附件列".to_string(),
+                field_type: Some(17),
+                ui_type: Some("Attachment".to_string()),
+                source_key: "files".to_string(),
+            }],
+            multi_value_parent_fields: vec![MultiValueParentField {
+                field_id: "fldM".to_string(),
+                field_name: "多选父列".to_string(),
                 source_key: "multi".to_string(),
+                affected_children: vec![ChildRef {
+                    field_id: "fldC".to_string(),
+                    field_name: Some("子字段".to_string()),
+                    source_key: "child".to_string(),
+                }],
             }],
             unbound_fields: vec![UnboundField {
                 field_id: "fldN".to_string(),
@@ -559,6 +607,11 @@ mod tests {
             &report.unsupported_type_fields[0],
             &["health_check", "unsupported_type_field", "emitted"],
             "类型不支持的字段项",
+        );
+        projection_contract::assert_keys(
+            &report.multi_value_parent_fields[0],
+            &["health_check", "multi_value_parent_field", "emitted"],
+            "多选父列项",
         );
         projection_contract::assert_keys(
             &report.unbound_fields[0],
@@ -679,12 +732,45 @@ mod tests {
 
     #[test]
     fn unsupported_types_are_reported_and_fail_the_report() {
-        let remote = vec![remote_field_typed("fldA", "多选列", 4)];
-        let bindings = vec![binding("fldA", "multi")];
+        let remote = vec![remote_field_typed("fldA", "附件列", 17)];
+        let bindings = vec![binding("fldA", "files")];
         let report = classify(&remote, &bindings, true, true);
         assert!(!report.ok);
         assert_eq!(report.unsupported_type_fields.len(), 1);
-        assert_eq!(report.unsupported_type_fields[0].field_type, Some(4));
+        assert_eq!(report.unsupported_type_fields[0].field_type, Some(17));
+    }
+
+    #[test]
+    fn multi_select_is_a_valid_option_source_and_does_not_fail_health() {
+        // 多选列按元素展开成选项，不再是"不支持的类型"。
+        let remote = vec![remote_field_typed("fldA", "可提供的附件类型", 4)];
+        let bindings = vec![binding("fldA", "attachment")];
+        let report = classify(&remote, &bindings, true, true);
+        assert!(report.ok);
+        assert!(report.unsupported_type_fields.is_empty());
+        assert!(report.multi_value_parent_fields.is_empty());
+    }
+
+    #[test]
+    fn a_multi_select_parent_is_reported_and_fails_the_report() {
+        // 叶子合法、父列非法：拉取会跳过它并连带暂停整棵子树，
+        // 体检不能因为"类型受支持"就给绿灯。
+        let remote = vec![
+            remote_field_typed("fldP", "多选父", 4),
+            remote_field("fldC", "子"),
+        ];
+        let bindings = vec![
+            binding("fldP", "parent"),
+            binding_with("fldC", Some("子"), "child", Some("fldP"), true),
+        ];
+        let report = classify(&remote, &bindings, true, true);
+        assert!(!report.ok);
+        assert_eq!(report.multi_value_parent_fields.len(), 1);
+        assert_eq!(report.multi_value_parent_fields[0].field_id, "fldP");
+        assert_eq!(
+            report.multi_value_parent_fields[0].affected_children[0].field_id,
+            "fldC"
+        );
     }
 
     #[test]
