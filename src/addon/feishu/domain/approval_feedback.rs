@@ -8,6 +8,7 @@ use super::approval_convert::{ConvertError, WidgetMap};
 use super::approval_match::FormWidget;
 use super::bitable::FieldItem;
 use super::outbound::{fatal_hint, FailureKind, OutboundFailure};
+use super::widget_rules;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -149,16 +150,16 @@ fn find_node<'a>(form: &'a [FormWidget], id: &str) -> Option<&'a FormWidget> {
     })
 }
 
-/// 必填明细父级自身不进映射表（`approval_match::is_eligible_for_mapping`），
-/// 字段定位必然为空。列出它下面**已映射**的列名，否则「请填写来源字段」是在让
-/// 用户去找一个根本不存在的字段。
-fn detail_columns(
+/// 必填容器（明细 / 控件组）父级自身不进映射表
+/// （`approval_match::is_eligible_for_mapping`），字段定位必然为空。列出它下面
+/// **已映射**的列名，否则「请填写来源字段」是在让用户去找一个根本不存在的字段。
+fn container_columns(
     form: &[FormWidget],
     id: &str,
     widgets: &[WidgetMap],
     fields: &[FieldItem],
 ) -> Option<String> {
-    let node = find_node(form, id).filter(|node| node.r#type == "fieldList")?;
+    let node = find_node(form, id).filter(|node| widget_rules::is_container(&node.r#type))?;
     let names: Vec<String> = node
         .walk()
         .iter()
@@ -211,14 +212,14 @@ pub(crate) fn conversion_reason(
         .find(|w| w.widget_id == *id)
         .map(|w| w.bitable_field.as_str())
         .unwrap_or_default();
-    // 明细容器没有自己的映射行：改指它下面已映射的列，别让用户去找空字段。
-    let detail = if field.is_empty() {
-        detail_columns(&form, id, widgets, fields)
+    // 容器没有自己的映射行：改指它下面已映射的列，别让用户去找空字段。
+    let container = if field.is_empty() {
+        container_columns(&form, id, widgets, fields)
     } else {
         None
     };
-    let (source, suggestion) = match detail {
-        Some(columns) => (columns, "请在多维表格补齐该明细的列值。"),
+    let (source, suggestion) = match container {
+        Some(columns) => (columns, "请在多维表格补齐该容器下子控件对应的列值。"),
         None => (field_name(fields, field), suggestion),
     };
     format!("审批控件：{}\n来源字段：{}\n原因：{reason}\n处理：{suggestion}\n控件定位：{}；字段定位：{}",
@@ -524,6 +525,36 @@ mod tests {
         assert!(message.contains("付款明细/Payment Details"), "{message}");
         assert!(message.contains("费用类型"), "{message}");
         assert!(!message.contains("名称暂不可用"), "{message}");
+        assert!(!message.contains("请填写来源字段"), "{message}");
+    }
+
+    #[test]
+    fn missing_required_group_points_at_its_mapped_columns() {
+        let snapshot = r#"[{"id":"leave","name":"请假","type":"leaveGroupV2","required":true,"value":[{"id":"widgetLeaveGroupReason","name":"请假事由","type":"textarea"}]}]"#;
+        let widget = WidgetMap {
+            widget_id: "widgetLeaveGroupReason".into(),
+            widget_type: "textarea".into(),
+            required: true,
+            bitable_field: "fld_reason".into(),
+            converter: super::super::approval_convert::Converter::Direct,
+            option_map: Default::default(),
+            option_source_key: None,
+            currency: None,
+        };
+        let fields = serde_json::from_value::<Vec<FieldItem>>(
+            json!([{"field_id":"fld_reason","field_name":"请假事由"}]),
+        )
+        .unwrap_or_default();
+        let message = conversion_reason(
+            &ConvertError::MissingRequired {
+                widget_id: "leave".into(),
+            },
+            snapshot,
+            &[widget],
+            &fields,
+        );
+        assert!(message.contains("请假"), "{message}");
+        assert!(message.contains("请假事由"), "{message}");
         assert!(!message.contains("请填写来源字段"), "{message}");
     }
 }

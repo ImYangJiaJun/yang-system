@@ -17,7 +17,10 @@
 //! 收到一个看似合法的空控件，错误信息指向飞书而不是指向配置）：
 //!
 //! - `address` 的地理库 `id`；
-//! - `image` / `imageV2` 的 file code；附件由派发链路下载上传后提供 code。
+//! - 旧版 `attachment` / `document` 的 file code。
+//!
+//! `attachmentV2` / `image` / `imageV2` 则都由派发链路下载源文件、上传到审批
+//! 系统后提供 file code（见 `approval_attachment`），本模块只消费这些 code。
 
 #![allow(dead_code)] // 转换器先落地并自带测试；消费者（派发编排）在后续任务接入。
 
@@ -26,6 +29,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use super::approval_match::{is_eligible_for_mapping, FormWidget};
+use super::widget_rules::{self, is_container, is_media, upload_type};
 
 /// 一个审批控件在库里的映射快照。
 #[derive(Debug, Clone)]
@@ -218,7 +222,7 @@ pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> 
     for node in definition.iter().flat_map(FormWidget::walk) {
         if node.id.is_empty()
             || node.r#type.is_empty()
-            || (node.r#type != "fieldList" && !node.children.is_empty())
+            || (!is_container(&node.r#type) && !node.children.is_empty())
             || nodes.insert(&node.id, node).is_some()
         {
             return Err(ConvertError::InvalidDefinition(format!(
@@ -235,6 +239,12 @@ pub(crate) fn build_form(input: &FormInput<'_>) -> Result<String, ConvertError> 
                 mapping.widget_id
             ))
         })?;
+        // 旧配置可能给控件组父级落过映射（当时它被当成普通控件）。控件组没有
+        // 单列语义，直接忽略：子控件映射仍然生效，避免部署后整条记录终态失败。
+        // 明细父级的旧映射仍按定义错误处理（配置期从不会生成它）。
+        if widget_rules::is_control_group(&node.r#type) {
+            continue;
+        }
         if node.r#type != mapping.widget_type
             || node.r#type == "fieldList"
             || mappings
@@ -289,6 +299,26 @@ fn assemble_definition(
             }
             let row = assemble_definition(&node.children, mappings, input)?;
             values.push(json!({"id": node.id, "type": "fieldList", "value": [row]}));
+        } else if is_container(&node.r#type) {
+            // 控件组：子控件在 `children` 里（定义原文的 `value`，阶段一已解析）。
+            // 一个子控件都没配映射时整个组省略——它永远填不出值。
+            if !node
+                .walk()
+                .iter()
+                .any(|child| mappings.contains_key(child.id.as_str()))
+            {
+                continue;
+            }
+            let children = assemble_definition(&node.children, mappings, input)?;
+            if children.is_empty() {
+                if node.required {
+                    return Err(ConvertError::MissingRequired {
+                        widget_id: node.id.clone(),
+                    });
+                }
+                continue;
+            }
+            values.push(json!({"id": node.id, "type": node.r#type, "value": children}));
         } else if let Some(mapping) = mappings.get(node.id.as_str()) {
             let mut mapping = (*mapping).clone();
             mapping.required |= node.required;
@@ -341,14 +371,19 @@ fn assemble_widget(
 
     check_converter_matches(widget)?;
 
-    let value = if widget.widget_type == "attachmentV2" {
+    let value = if is_media(&widget.widget_type) {
+        let label = if upload_type(&widget.widget_type) == "image" {
+            "图片"
+        } else {
+            "附件"
+        };
         let codes = input
             .attachment_codes
             .get(&widget.widget_id)
             .filter(|codes| !codes.is_empty() && codes.iter().all(|code| !code.trim().is_empty()))
             .ok_or_else(|| ConvertError::BadValue {
                 widget_id: widget.widget_id.clone(),
-                reason: "附件尚未搬运到审批系统".to_string(),
+                reason: format!("{label}尚未搬运到审批系统"),
             })?;
         json!(codes)
     } else {
@@ -383,6 +418,17 @@ fn assemble_widget(
 /// 这是配置期的错误，不是数据期的。放行的后果是原始毫秒时间戳被当字符串发给飞书，
 /// 报回来 1390001（控件参数错误）——排查方向指向飞书而不是指向这份配置。
 fn check_converter_matches(widget: &WidgetMap) -> Result<(), ConvertError> {
+    // 这两个子控件的值可能是假勤/加班类型 ID，不是选项文案，允许直取。
+    // 只对 radioV2、没有外部选项来源、且没有固定选项映射的映射放行；普通控件
+    // 即使 id 撞上这两个固定 id，也不能绕过类型检查。
+    if widget.converter == Converter::Direct
+        && widget.widget_type == "radioV2"
+        && widget_rules::is_raw_option_child(&widget.widget_id)
+        && widget.option_source_key.is_none()
+        && widget.option_map.is_empty()
+    {
+        return Ok(());
+    }
     let kind = widget.widget_type.as_str();
     let expected = match kind {
         "date" | "dateInterval" => Converter::Date,
@@ -814,35 +860,17 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 /// 创建实例 API 不支持的控件类型。
 ///
-/// 清单来源：官方《审批实例表单控件参数》的「审批实例 API 不支持的控件」表。
-/// 含这些控件的审批定义**不能仅通过 API 提单**，必须在配置保存时就拦下。
+/// 清单统一维护在 `widget_rules`：配置期与派发期共用同一张表，避免各自维护
+/// 一份后静默漂移。
 pub(crate) fn is_unsupported_widget_type(widget_type: &str) -> bool {
-    matches!(
-        widget_type,
-        // 「说明」控件：发起时不可编辑。
-        "text"
-            // 「引用多维表格」。
-            | "mutableGroup"
-            // 「收款账户」。
-            | "account"
-            // 「流水号」。
-            | "serialNumber"
-            // 控件组：出差 / 录用 / 转正 / 补卡 / 调岗 / 离职。
-            | "tripGroup"
-            | "apaascorehrOnboardingGroup"
-            | "apaascorehrRegularateGroup"
-            | "remedyGroupV2"
-            | "apaascorehrJobAdjustGroup"
-            | "apaascorehrOffboardingGroup"
-    )
+    widget_rules::is_unsupported(widget_type)
 }
 
 /// 需要人工提供凭据、本模块不自动准备的控件类型。
+///
+/// 图片与附件已由上传链路自动处理，清单同样以 `widget_rules` 为准。
 pub(crate) fn needs_manual_value(widget_type: &str) -> bool {
-    matches!(
-        widget_type,
-        "address" | "attachment" | "image" | "imageV2" | "document"
-    )
+    widget_rules::needs_manual_value(widget_type)
 }
 
 #[cfg(test)]
@@ -946,11 +974,20 @@ mod tests {
         widgets: &[WidgetMap],
         cells: &Map<String, Value>,
     ) -> Result<Value, ConvertError> {
+        render_definition_with_codes(snapshot, widgets, cells, &BTreeMap::new())
+    }
+
+    fn render_definition_with_codes(
+        snapshot: &str,
+        widgets: &[WidgetMap],
+        cells: &Map<String, Value>,
+        attachment_codes: &BTreeMap<String, Vec<String>>,
+    ) -> Result<Value, ConvertError> {
         let form = build_form(&FormInput {
             widgets,
             form_snapshot: snapshot,
             cells,
-            attachment_codes: &BTreeMap::new(),
+            attachment_codes,
             timezone_offset: shanghai(),
         })?;
         Ok(serde_json::from_str(&form).unwrap_or_else(|e| panic!("{e}")))
@@ -1072,6 +1109,219 @@ mod tests {
                 {"id":"other","type":"fieldList","value":[[{"id":"amount","type":"amount","value":12.5,"currency":"CNY"}]]}
             ])
         );
+    }
+
+    #[test]
+    fn leave_group_assembles_child_widgets_array() {
+        let snapshot = r#"[{"id":"leave","type":"leaveGroupV2","required":true,"value":[
+            {"id":"widgetLeaveGroupType","type":"radioV2","required":true,"value":[{"text":"年假","value":"annual"}]},
+            {"id":"widgetLeaveGroupStartTime","type":"date","required":true},
+            {"id":"widgetLeaveGroupEndTime","type":"date","required":true},
+            {"id":"widgetLeaveGroupReason","type":"input","required":true}
+        ]}]"#;
+        let mut kind = widget("widgetLeaveGroupType", "radioV2");
+        kind.converter = Converter::Direct;
+        kind.bitable_field = "fld_kind".to_string();
+        let mut start = widget("widgetLeaveGroupStartTime", "date");
+        start.bitable_field = "fld_start".to_string();
+        let mut end = widget("widgetLeaveGroupEndTime", "date");
+        end.bitable_field = "fld_end".to_string();
+        let mut reason = widget("widgetLeaveGroupReason", "input");
+        reason.bitable_field = "fld_reason".to_string();
+        let actual = render_definition(
+            snapshot,
+            &[kind, start, end, reason],
+            &cells(&[
+                ("fld_kind", json!("annual")),
+                ("fld_start", json!(1_790_524_800_000_i64)),
+                ("fld_end", json!(1_790_611_200_000_i64)),
+                ("fld_reason", json!("家里有事")),
+            ]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{
+                "id":"leave","type":"leaveGroupV2","value":[
+                    {"id":"widgetLeaveGroupType","type":"radioV2","value":"annual"},
+                    {"id":"widgetLeaveGroupStartTime","type":"date","value":"2026-09-28T00:00:00+08:00"},
+                    {"id":"widgetLeaveGroupEndTime","type":"date","value":"2026-09-29T00:00:00+08:00"},
+                    {"id":"widgetLeaveGroupReason","type":"input","value":"家里有事"}
+                ]
+            }])
+        );
+    }
+
+    #[test]
+    fn work_group_keeps_nested_field_list() {
+        let snapshot = r#"[{"id":"work","type":"workGroup","value":[
+            {"id":"widgetWorkGroupTimeRangeFieldList","type":"fieldList","children":[
+                {"id":"start","type":"date","required":true},
+                {"id":"end","type":"date","required":true}
+            ]}
+        ]}]"#;
+        let mut start = widget("start", "date");
+        start.bitable_field = "fld_start".to_string();
+        let mut end = widget("end", "date");
+        end.bitable_field = "fld_end".to_string();
+        let actual = render_definition(
+            snapshot,
+            &[start, end],
+            &cells(&[
+                ("fld_start", json!(1_790_524_800_000_i64)),
+                ("fld_end", json!(1_790_611_200_000_i64)),
+            ]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{
+                "id":"work","type":"workGroup","value":[{
+                    "id":"widgetWorkGroupTimeRangeFieldList","type":"fieldList","value":[[
+                        {"id":"start","type":"date","value":"2026-09-28T00:00:00+08:00"},
+                        {"id":"end","type":"date","value":"2026-09-29T00:00:00+08:00"}
+                    ]]
+                }]
+            }])
+        );
+    }
+
+    #[test]
+    fn out_group_assembles_image_child() {
+        let snapshot = r#"[{"id":"out","type":"outGroup","value":[
+            {"id":"widgetOutGroupImage","type":"image","required":true}
+        ]}]"#;
+        let mut image = widget("widgetOutGroupImage", "image");
+        image.bitable_field = "fld_image".to_string();
+        let codes = BTreeMap::from([(
+            "widgetOutGroupImage".to_string(),
+            vec!["CODE-IMG".to_string()],
+        )]);
+        let actual = render_definition_with_codes(
+            snapshot,
+            &[image],
+            &cells(&[(
+                "fld_image",
+                json!([{"file_token":"Token1", "name":"a.png", "size":1}]),
+            )]),
+            &codes,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{
+                "id":"out","type":"outGroup","value":[
+                    {"id":"widgetOutGroupImage","type":"image","value":["CODE-IMG"]}
+                ]
+            }])
+        );
+    }
+
+    #[test]
+    fn container_parent_mappings_are_ignored_for_legacy_configs() {
+        for (kind, id) in [
+            ("leaveGroupV2", "leave"),
+            ("workGroup", "work"),
+            ("outGroup", "out"),
+        ] {
+            let snapshot = format!(r#"[{{"id":"{id}","type":"{kind}","value":[]}}]"#);
+            assert_eq!(
+                render_definition(&snapshot, &[widget(id, kind)], &cells(&[]))
+                    .unwrap_or_else(|e| panic!("{kind}: {e}")),
+                json!([]),
+                "{kind} 父级映射应被忽略，不能阻断派发"
+            );
+        }
+    }
+
+    #[test]
+    fn required_group_with_mapped_but_empty_children_waits() {
+        let snapshot = r#"[{"id":"leave","type":"leaveGroupV2","required":true,"value":[
+            {"id":"widgetLeaveGroupReason","type":"textarea","required":false}
+        ]}]"#;
+        let mut reason = widget("widgetLeaveGroupReason", "textarea");
+        reason.required = false;
+        reason.bitable_field = "fld_reason".to_string();
+        assert!(
+            matches!(
+                render_definition(
+                    snapshot,
+                    &[reason],
+                    &cells(&[("fld_reason", json!("  "))])
+                ),
+                Err(ConvertError::MissingRequired { widget_id }) if widget_id == "leave"
+            ),
+            "必填控件组在子值全空时应报 MissingRequired"
+        );
+    }
+
+    #[test]
+    fn raw_option_exception_does_not_apply_to_other_widget_types() {
+        let snapshot = r#"[{"id":"leave","type":"leaveGroupV2","value":[
+            {"id":"widgetLeaveGroupType","type":"date","required":true}
+        ]}]"#;
+        let mut date = widget("widgetLeaveGroupType", "date");
+        date.converter = Converter::Direct;
+        date.bitable_field = "fld_date".to_string();
+        assert!(
+            matches!(
+                render_definition(
+                    snapshot,
+                    &[date],
+                    &cells(&[("fld_date", json!(1_790_524_800_000_i64))])
+                ),
+                Err(ConvertError::ConverterMismatch { .. })
+            ),
+            "固定 id 不能绕过非 radioV2 控件的转换器检查"
+        );
+    }
+
+    #[test]
+    fn raw_option_child_direct_value_passes() {
+        let snapshot = r#"[{"id":"leave","type":"leaveGroupV2","value":[
+            {"id":"widgetLeaveGroupType","type":"radioV2","required":true}
+        ]}]"#;
+        let mut kind = widget("widgetLeaveGroupType", "radioV2");
+        kind.converter = Converter::Direct;
+        let actual = render_definition(snapshot, &[kind], &cells(&[("fld_src", json!("annual"))]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            actual,
+            json!([{"id":"leave","type":"leaveGroupV2","value":[
+                {"id":"widgetLeaveGroupType","type":"radioV2","value":"annual"}
+            ]}])
+        );
+    }
+
+    #[test]
+    fn image_uses_uploaded_codes() {
+        for kind in ["image", "imageV2"] {
+            let widgets = [widget("w1", kind)];
+            let snapshot = flat_snapshot(&widgets);
+            let cells = cells(&[(
+                "fld_src",
+                json!([{"file_token":"Token1", "name":"a.png", "size":1}]),
+            )]);
+            assert!(
+                matches!(
+                    build_form(&FormInput {
+                        widgets: &widgets,
+                        form_snapshot: &snapshot,
+                        cells: &cells,
+                        attachment_codes: &BTreeMap::new(),
+                        timezone_offset: shanghai()
+                    }),
+                    Err(ConvertError::BadValue { .. })
+                ),
+                "{kind} 缺少上传 code 时必须报错"
+            );
+            let codes = BTreeMap::from([("w1".to_string(), vec!["CODE-IMG".to_string()])]);
+            assert_eq!(
+                render_definition_with_codes(&snapshot, &widgets, &cells, &codes)
+                    .unwrap_or_else(|e| panic!("{e}")),
+                json!([{"id":"w1","type":kind,"value":["CODE-IMG"]}])
+            );
+        }
     }
 
     #[test]
@@ -1531,6 +1781,11 @@ mod tests {
             "radioV2",
             "checkboxV2",
             "contact",
+            "leaveGroupV2",
+            "workGroup",
+            "outGroup",
+            "image",
+            "imageV2",
         ] {
             assert!(!is_unsupported_widget_type(kind), "{kind} 应被支持");
         }

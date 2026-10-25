@@ -262,6 +262,57 @@ describe("建配置向导 · 第二步（审批 Code + 控件预览）", () => {
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
   });
 
+  it("控件组父级只展示分组，子控件分别选列，假勤类型控件提示需填飞书选项 ID", async () => {
+    const user = userEvent.setup();
+    const client = stubClient({
+      listWidgets: vi.fn().mockResolvedValue([
+        {
+          id: "widgetLeaveGroupV2",
+          name: "",
+          type: "leaveGroupV2",
+          required: true,
+        },
+        {
+          id: "widgetLeaveGroupType",
+          name: "假期类型",
+          type: "radioV2",
+          required: true,
+        },
+        {
+          id: "widgetLeaveGroupStartTime",
+          name: "开始时间",
+          type: "date",
+          required: false,
+        },
+      ]),
+    });
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+
+    // 父级是容器：显示分组说明（名称回退到类型名），且没有选列下拉。
+    const parent = (await screen.findByText("控件组，子控件分别选列")).closest(
+      "tr",
+    );
+    expect(parent).toHaveTextContent("请假控件组");
+    expect(parent?.querySelector('[role="combobox"]')).toBeNull();
+
+    // 子控件各自可选列；假勤类型控件提示值必须是飞书选项 ID。
+    const leaveType = screen.getByRole("combobox", {
+      name: "假期类型对应的多维表格字段",
+    });
+    expect(
+      screen.getByRole("combobox", { name: "开始时间对应的多维表格字段" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("需填飞书选项 ID")).toBeInTheDocument();
+
+    // 必填子控件未映射时不能继续。
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+    await user.click(leaveType);
+    await user.click(await screen.findByRole("option", { name: /费用金额/ }));
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+  });
+
   it("关联审批显示超链接或实例 Code 的映射说明并按名预选", async () => {
     const user = userEvent.setup();
     const client = stubClient({

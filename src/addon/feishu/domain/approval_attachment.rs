@@ -1,4 +1,4 @@
-//! 多维表格附件搬运到审批系统；源 URL 不作为请求目标。
+//! 多维表格附件/图片搬运到审批系统；源 URL 不作为请求目标。
 use super::approval_convert::{ConvertError, WidgetMap};
 use super::bitable::BitableCoordinates;
 use super::outbound::{
@@ -6,12 +6,12 @@ use super::outbound::{
     OutboundResponse, OutboundTransport, Sleeper, PULL_RETRY,
 };
 use super::tenant_token::TenantTokenProvider;
+use super::widget_rules::{is_media, max_upload_bytes, upload_type};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const UPLOAD_URL: &str = "https://www.feishu.cn/approval/openapi/v2/file/upload";
 
 #[derive(Debug, Deserialize)]
@@ -25,10 +25,18 @@ pub(crate) fn attachments(
     widget: &WidgetMap,
     cells: &Map<String, Value>,
 ) -> Result<Vec<Attachment>, ConvertError> {
+    let limit = max_upload_bytes(&widget.widget_type);
+    let label = if upload_type(&widget.widget_type) == "image" {
+        "图片"
+    } else {
+        "附件"
+    };
     let bad = || ConvertError::BadValue {
         widget_id: widget.widget_id.clone(),
-        reason: "附件必须是多维表格附件数组，含合法 file_token、文件名和 1 字节至 50 MiB 的 size"
-            .to_string(),
+        reason: format!(
+            "{label}必须是多维表格附件数组，含合法 file_token、文件名和 1 字节至 {} MiB 的 size",
+            limit / (1024 * 1024)
+        ),
     };
     let Some(value) = cells.get(&widget.bitable_field) else {
         return Ok(Vec::new());
@@ -51,7 +59,7 @@ pub(crate) fn attachments(
                 .rsplit_once('.')
                 .is_some_and(|(stem, ext)| !stem.trim().is_empty() && !ext.trim().is_empty())
             || file.size == 0
-            || file.size > MAX_ATTACHMENT_BYTES as u64
+            || file.size > limit as u64
         {
             return Err(bad());
         }
@@ -65,7 +73,7 @@ pub(crate) fn preflight(
     cells: &Map<String, Value>,
 ) -> Result<BTreeMap<String, Vec<String>>, ConvertError> {
     let mut codes = BTreeMap::new();
-    for widget in widgets.iter().filter(|w| w.widget_type == "attachmentV2") {
+    for widget in widgets.iter().filter(|w| is_media(&w.widget_type)) {
         let files = attachments(widget, cells)?;
         if !files.is_empty() {
             codes.insert(
@@ -77,12 +85,33 @@ pub(crate) fn preflight(
     Ok(codes)
 }
 
-fn multipart(name: &str, bytes: &[u8]) -> (String, Vec<u8>) {
+fn multipart(name: &str, bytes: &[u8], file_type: &str) -> (String, Vec<u8>) {
+    let content_type = if file_type == "image" {
+        image_content_type(name)
+    } else {
+        "application/octet-stream"
+    };
     let boundary = format!("feishu-{}", uuid::Uuid::new_v4());
-    let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{name}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"type\"\r\n\r\nattachment\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"content\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
+    let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{name}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"type\"\r\n\r\n{file_type}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"content\"; filename=\"{name}\"\r\nContent-Type: {content_type}\r\n\r\n").into_bytes();
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// 图片 part 的 Content-Type 按扩展名猜；猜不到回退二进制流。
+fn image_content_type(name: &str) -> &'static str {
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("heic") => "image/heic",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn send(
@@ -95,7 +124,7 @@ async fn send(
         tokens
             .tenant_access_token()
             .await
-            .map_err(|_| retry("附件调用无法取得应用 token"))?,
+            .map_err(|_| retry("附件/图片调用无法取得应用 token"))?,
     );
     for refresh in [false, true] {
         match send_with_retry(transport, sleeper, &request, PULL_RETRY).await {
@@ -104,13 +133,13 @@ async fn send(
                     tokens
                         .invalidate_and_refresh()
                         .await
-                        .map_err(|_| retry("附件调用刷新应用 token 失败"))?,
+                        .map_err(|_| retry("附件/图片调用刷新应用 token 失败"))?,
                 );
             }
             result => return result,
         }
     }
-    Err(retry("附件调用 token 失效"))
+    Err(retry("附件/图片调用 token 失效"))
 }
 
 fn retry(message: &str) -> OutboundFailure {
@@ -132,8 +161,10 @@ pub(crate) async fn transfer(
     cells: &Map<String, Value>,
 ) -> Result<BTreeMap<String, Vec<String>>, OutboundFailure> {
     let mut codes = BTreeMap::new();
-    for widget in widgets.iter().filter(|w| w.widget_type == "attachmentV2") {
+    for widget in widgets.iter().filter(|w| is_media(&w.widget_type)) {
         let files = attachments(widget, cells).map_err(|e| retry(&e.to_string()))?;
+        let file_type = upload_type(&widget.widget_type);
+        let limit = max_upload_bytes(&widget.widget_type);
         let mut uploaded = Vec::new();
         for file in files {
             // 官方下载配额 5 QPS；单条内串行，跨请求仍以服务端 429 退避兜底。
@@ -153,7 +184,7 @@ pub(crate) async fn transfer(
                     bearer_token: None,
                     json_body: None,
                     raw_body: None,
-                    binary_limit: Some(MAX_ATTACHMENT_BYTES),
+                    binary_limit: Some(limit),
                     timeout_secs: Some(120),
                     idempotent: true,
                 },
@@ -162,7 +193,7 @@ pub(crate) async fn transfer(
             let bytes = response
                 .bytes
                 .filter(|b| response.status == 200 && b.len() as u64 == file.size)
-                .ok_or_else(|| retry("附件下载不是完整二进制文件或大小与记录不一致"))?;
+                .ok_or_else(|| retry("附件/图片下载不是完整二进制文件或大小与记录不一致"))?;
             let response = send(
                 transport,
                 sleeper,
@@ -173,7 +204,7 @@ pub(crate) async fn transfer(
                     query: Vec::new(),
                     bearer_token: None,
                     json_body: None,
-                    raw_body: Some(multipart(&file.name, &bytes)),
+                    raw_body: Some(multipart(&file.name, &bytes, file_type)),
                     binary_limit: None,
                     timeout_secs: Some(120),
                     // 上传没有幂等键，超时交给任务下一轮重试；审批实例仍由 UUID 去重。
@@ -182,7 +213,7 @@ pub(crate) async fn transfer(
             )
             .await?;
             let value: Value = serde_json::from_str(&response.body)
-                .map_err(|_| retry("审批附件上传响应不是 JSON"))?;
+                .map_err(|_| retry("审批附件/图片上传响应不是 JSON"))?;
             let code = value
                 .get("data")
                 .and_then(|d| d.get("code"))
@@ -190,7 +221,7 @@ pub(crate) async fn transfer(
                 .filter(|c| {
                     value.get("code").and_then(Value::as_i64) == Some(0) && !c.trim().is_empty()
                 })
-                .ok_or_else(|| retry("审批附件上传响应缺少成功标记或 file code"))?;
+                .ok_or_else(|| retry("审批附件/图片上传响应缺少成功标记或 file code"))?;
             uploaded.push(code.to_string());
         }
         if !uploaded.is_empty() {
@@ -204,6 +235,19 @@ pub(crate) async fn transfer(
 mod tests {
     use super::super::approval_convert::Converter;
     use super::*;
+
+    fn widget_map(id: &str, kind: &str) -> WidgetMap {
+        WidgetMap {
+            widget_id: id.to_string(),
+            widget_type: kind.to_string(),
+            bitable_field: "f".to_string(),
+            required: true,
+            converter: Converter::Direct,
+            option_map: BTreeMap::new(),
+            option_source_key: None,
+            currency: None,
+        }
+    }
 
     #[test]
     fn attachment_metadata_rejects_invalid_tokens_names_sizes_and_shapes() {
@@ -232,7 +276,7 @@ mod tests {
             ("name", json!("a\\b.pdf")),
             ("name", json!(format!("{}.pdf", "a".repeat(1024)))),
             ("size", json!(0)),
-            ("size", json!(MAX_ATTACHMENT_BYTES + 1)),
+            ("size", json!(max_upload_bytes("attachmentV2") + 1)),
         ] {
             let mut file = valid.clone();
             file[key] = value;
@@ -244,7 +288,7 @@ mod tests {
         for value in [json!("Token1"), json!({"file_token":"Token1"}), json!([{}])] {
             assert!(attachments(&widget, &Map::from_iter([("f".to_string(), value)])).is_err());
         }
-        for size in [1, MAX_ATTACHMENT_BYTES] {
+        for size in [1, max_upload_bytes("attachmentV2")] {
             let mut file = valid.clone();
             file["size"] = json!(size);
             assert_eq!(
@@ -270,5 +314,67 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"))
             .is_empty());
         }
+    }
+
+    #[test]
+    fn image_preflight_accepts_images_and_enforces_ten_mib() {
+        let image = widget_map("img", "image");
+        let cells = Map::from_iter([(
+            "f".to_string(),
+            json!([{"file_token":"Token1", "name":"a.png", "size":1}]),
+        )]);
+        let codes =
+            preflight(std::slice::from_ref(&image), &cells).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(codes.get("img").map(|codes| codes.len()), Some(1));
+
+        let max = max_upload_bytes("image");
+        assert_eq!(max, 10 * 1024 * 1024);
+        for (size, accepted) in [(max, true), (max + 1, false)] {
+            let cells = Map::from_iter([(
+                "f".to_string(),
+                json!([{"file_token":"Token1", "name":"a.png", "size":size}]),
+            )]);
+            assert_eq!(
+                attachments(&image, &cells).is_ok(),
+                accepted,
+                "图片 size {size}"
+            );
+        }
+        // 附件上限仍是 50 MiB。
+        let attachment = widget_map("att", "attachmentV2");
+        let cells = Map::from_iter([(
+            "f".to_string(),
+            json!([{
+                "file_token": "Token1",
+                "name": "a.pdf",
+                "size": max_upload_bytes("attachmentV2"),
+            }]),
+        )]);
+        assert!(attachments(&attachment, &cells).is_ok());
+    }
+
+    #[test]
+    fn multipart_carries_upload_type_and_guessed_image_content_type() {
+        for (name, content_type) in [
+            ("a.png", "image/png"),
+            ("a.JPG", "image/jpeg"),
+            ("a.webp", "image/webp"),
+            ("a.bin", "application/octet-stream"),
+        ] {
+            let (_, body) = multipart(name, b"x", "image");
+            let body = String::from_utf8_lossy(&body);
+            assert!(body.contains("name=\"type\"\r\n\r\nimage"), "{body}");
+            assert!(
+                body.contains(&format!("Content-Type: {content_type}")),
+                "{body}"
+            );
+        }
+        let (_, body) = multipart("a.pdf", b"x", "attachment");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("name=\"type\"\r\n\r\nattachment"), "{body}");
+        assert!(
+            body.contains("Content-Type: application/octet-stream"),
+            "{body}"
+        );
     }
 }

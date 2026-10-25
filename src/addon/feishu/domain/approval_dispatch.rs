@@ -38,6 +38,7 @@ use super::approval_uuid::derive_uuid;
 use super::bitable::{BitableCoordinates, FieldItem};
 use super::outbound::{FailureKind, OutboundFailure, OutboundTransport, Sleeper};
 use super::tenant_token::TenantTokenProvider;
+use super::widget_rules;
 
 /// 单条处理的结论。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,6 +379,13 @@ impl Backfill for BitableBackfill<'_> {
     }
 }
 
+/// 任一映射控件需要走附件/图片搬运（下载多维表格文件并上传审批）。
+fn requires_media_transfer(widgets: &[WidgetMap]) -> bool {
+    widgets
+        .iter()
+        .any(|widget| widget_rules::is_media(&widget.widget_type))
+}
+
 /// 处理一条记录。
 ///
 /// 本函数**不做落库**（任务行的写入由调用方在 claim 阶段完成，因为那需要事务，
@@ -407,11 +415,9 @@ pub(crate) async fn dispatch_one(
         "审批记录开始派发"
     );
 
-    // 先恢复已创建实例；源附件或关联审批权限变化也不能阻断编号回填。
-    if input
-        .widgets
-        .iter()
-        .any(|w| matches!(w.widget_type.as_str(), "attachmentV2" | "connect"))
+    // 先恢复已创建实例；源附件/图片或关联审批权限变化也不能阻断编号回填。
+    if input.widgets.iter().any(|w| w.widget_type == "connect")
+        || requires_media_transfer(input.widgets)
     {
         tracing::info!(stage = "recover", "查询已有审批实例，优先恢复回填");
         match get_instance(transport, sleeper, tokens, &uuid).await {
@@ -534,7 +540,7 @@ pub(crate) async fn dispatch_one(
         }
         tracing::debug!(stage = "external_options", "审批外部选项解析完成");
     }
-    tracing::debug!(stage = "form", "开始校验附件并转换审批表单");
+    tracing::debug!(stage = "form", "开始校验附件/图片并转换审批表单");
     let preflight = approval_attachment::preflight(&widgets, input.cells);
     let form = match preflight.and_then(|codes| {
         build_form(&FormInput {
@@ -594,12 +600,8 @@ pub(crate) async fn dispatch_one(
     }
     tracing::debug!(stage = "connections", "关联审批实例校验通过");
 
-    let form = if input
-        .widgets
-        .iter()
-        .any(|w| w.widget_type == "attachmentV2")
-    {
-        tracing::debug!(stage = "attachments", "开始搬运审批附件");
+    let form = if requires_media_transfer(input.widgets) {
+        tracing::debug!(stage = "attachments", "开始搬运审批附件/图片");
         let codes = match approval_attachment::transfer(
             transport,
             sleeper,
@@ -613,7 +615,7 @@ pub(crate) async fn dispatch_one(
         {
             Ok(codes) => codes,
             Err(failure) => {
-                tracing::warn!(stage = "attachments", kind = ?failure.kind, "审批附件搬运失败，等待下一轮重试");
+                tracing::warn!(stage = "attachments", kind = ?failure.kind, "审批附件/图片搬运失败，等待下一轮重试");
                 return DispatchResult::Retryable {
                     message: super::approval_feedback::outbound_reason(&failure),
                 };
@@ -622,7 +624,7 @@ pub(crate) async fn dispatch_one(
         tracing::debug!(
             stage = "attachments",
             file_count = codes.values().map(Vec::len).sum::<usize>(),
-            "审批附件搬运完成"
+            "审批附件/图片搬运完成"
         );
         match build_form(&FormInput {
             widgets: &widgets,
@@ -739,7 +741,7 @@ pub(crate) async fn dispatch_one(
     finish_backfill(backfill, input, &uuid, detail).await
 }
 
-/// 在上传附件和创建审批之前校验关联实例；同一实例在一单中只查询一次。
+/// 在上传附件/图片和创建审批之前校验关联实例；同一实例在一单中只查询一次。
 async fn validate_connections(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
@@ -1478,6 +1480,17 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn media_transfer_covers_attachments_and_images() {
+        for kind in ["attachmentV2", "image", "imageV2"] {
+            assert!(
+                requires_media_transfer(&[widget("w", kind)]),
+                "{kind} 应触发上传"
+            );
+        }
+        assert!(!requires_media_transfer(&[widget("w", "input")]));
     }
 
     /// 记录每个请求的脚本化传输 + 记录回写的假 backfill。

@@ -352,11 +352,21 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 1. **三方定义**：`approvals get` **不返回 `is_external`**（实测，该字段只在
    `approvals/search` 里）。判据改为「**`approvals get` 拿不到 `form`**」——三方定义
    走 `external_approvals` 另一个资源，取不到表单。
-2. **不含 API 不支持的控件**：`text`、`mutableGroup`、`serialNumber`、各类
-   `*Group`（见 `lark-approval-instance-form-control-parameters.md:14-30`）。
+2. **不含无法派发的控件**，按原因分两类：
+   - **官方实例 API 不支持**：`text`、`mutableGroup`、`serialNumber`、`account`、
+     `tripGroup`、`remedyGroupV2`、旧版控件组 `leaveGroup` / `remedyGroup` 与
+     `apaascorehr*` 系列（官方实例文档《审批实例表单控件参数》的「不支持通过 API
+     提单的控件」表）。
+   - **本系统暂不支持（配置期拒绝）**：`shiftGroup`、`shiftGroupV2`——官方实例 API
+     支持，但本系统尚未实现其控件组子控件映射；将来补齐映射即可放开。
+   控件组仅支持 `leaveGroupV2` / `workGroup` / `outGroup`（见 §6.2「控件组」）。
+   其中 `account`、旧 `leaveGroup` / `remedyGroup` / `remedyGroupV2`、
+   `shiftGroup` / `shiftGroupV2` 在**必填**时于配置期直接报错；`text` /
+   `mutableGroup` / `serialNumber` / `tripGroup` / `apaascorehr*` 仍按既有语义
+   不展示、不映射（可选项留空是合法的，历史定义也不会因此被卡住）。
 3. **不含需人工准备值的控件**：`address`（地理库 id）、旧 `attachment` /
-   `image*` / `document`（file code）。
-   `attachmentV2` 从同名多维表格附件列自动下载并上传，允许必填映射。
+   `document`（file code）。
+   `attachmentV2`、`image` / `imageV2` 从同名多维表格附件列自动下载并上传，允许必填映射。
    `connect` 从超链接或文本列解析审批实例 Code，派发前校验实例与关联范围。
    **必填的拦下、可选的放行**——留空提交对可选控件是合法的。
 
@@ -385,8 +395,11 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 | 联系人 | `contact` | `{value: [...], open_ids: [...]}`，推荐只写 `open_ids` |
 | 部门 | `department` | 对象数组，元素字段名 `open_id`，值为 `open_department_id` |
 | 明细 | `fieldList` | 二维数组，子项按各自控件类型组装 |
+| 附件 | `attachmentV2` | file code 数组（自动上传，见「附件搬运」） |
+| 图片 | `image` / `imageV2` | file code 数组（自动上传，见「附件搬运」） |
+| 控件组 | `leaveGroupV2` / `workGroup` / `outGroup` | 子控件对象数组，外层为 `{id, type, value: [...]}`（见「控件组」） |
 
-请求组装按配置的 `form_snapshot` 恢复明细父子结构，子控件保留定义中的原始 id；一条多维表格记录在每个明细控件中形成一行。旧配置快照为空时，创建前补取审批定义；损坏或与映射不一致的快照阻止创建。联系人 `open_ids` 与 `value` 同级。附件需审批文件上传接口返回的 file code，不能使用多维表格 file_token 或实例读回的下载 URL；当前 `attachmentV2` 自动搬运附件，普通控件和明细子控件共用同一流程。
+请求组装按配置的 `form_snapshot` 恢复明细父子结构，子控件保留定义中的原始 id；一条多维表格记录在每个明细控件中形成一行。旧配置快照为空时，创建前补取审批定义；损坏或与映射不一致的快照阻止创建。联系人 `open_ids` 与 `value` 同级。附件需审批文件上传接口返回的 file code，不能使用多维表格 file_token 或实例读回的下载 URL；当前 `attachmentV2`、`image` / `imageV2` 自动搬运附件，普通控件、明细子控件与控件组子控件共用同一流程。
 | 电话 | `telephone` | `{countryCode, nationalNumber}` |
 | 地址 | `address` | 对象数组，至少含地理库 `id` |
 | 关联审批 | `connect` | `instance_code` 数组 |
@@ -419,10 +432,51 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 
 #### 6.2.2 需要人工准备值的控件
 
-`address`、旧 `attachment`、`image`/`imageV2`、`document` 这几类需要用户直接提供 token/id
+`address`、旧 `attachment`、`document` 这几类需要用户直接提供 token/id
 （`lark-approval-instance-value-sourcing.md:88-97`），本设计**不自动准备**——配置期就
 明确报错而非静默传空（静默传空会让飞书收到一个看似合法的空控件，错误信息指向飞书
 而不是指向配置）。
+
+`image` / `imageV2` 已移出本清单：与 `attachmentV2` 共用多维表格附件下载 + 审批文件
+上传通道（上传 `type=image`，单文件上限 10 MiB，见下方「附件搬运」）。
+
+#### 控件组（`leaveGroupV2` / `workGroup` / `outGroup`）
+
+控件组是容器：父控件不映射多维表格列，也不参与按名匹配；配置向导与映射表只处理其下
+**官方实例文档列出的子控件白名单**。控件类型规则收敛在
+`src/addon/feishu/domain/widget_rules.rs` 单一来源，配置期与派发期共用同一份判定
+（配置期静默跳过的类型，派发期不会再被当成「必填却无映射」）。
+
+- **子控件白名单**（按控件 id）：
+  - `leaveGroupV2`：`widgetLeaveGroupType`(radioV2)、`widgetLeaveGroupStartTime` /
+    `widgetLeaveGroupEndTime`(date)、`widgetLeaveGroupReason`(textarea)、
+    `widgetLeaveCertification`(image)、`widgetLeaveGroupFeedingArrivingLate` /
+    `widgetLeaveGroupFeedingOffLeaveEarly`(radioV2)。
+  - `workGroup`：`widgetWorkGroupOvertimeWorkers`(contact)、
+    `widgetWorkGroupType`(radioV2)、`widgetWorkGroupTimeRangeFieldList`(fieldList，
+    其下 `widgetWorkGroupStartTime` / `widgetWorkGroupEndTime` 两个 date 子控件
+    各自映射列)、`widgetWorkGroupReason`(textarea)。
+  - `outGroup`：`widgetOutGroupType`(radioV2)、`widgetOutGroupStartTime` /
+    `widgetOutGroupEndTime`(date)、`widgetOutGroupReason`(textarea)、
+    `widgetOutGroupImage`(image)。
+
+  说明、公式、不可见（`visible=false`）以及时长、单位、规则等自动计算或仅作展示的
+  子控件不在白名单内：不展示、不映射，也不参与必填校验。
+- **父子映射**：父级只作分组展示；子控件各自按「父名_子名」匹配列或手动选列，映射行
+  存子控件 id。父级 `name` 为空时（官方 `leaveGroupV2` 就是空串）用类型标签兜底
+  （请假控件组 / 加班控件组 / 外出控件组），限定名因此是
+  `请假控件组_假期类型` 而不是 `_假期类型`。必填控件组缺值时，错误提示会列出该组下
+  已映射子控件对应的列名（`container_columns`），而不是笼统报父控件缺失。
+- **raw option ID**：`widgetLeaveGroupType` / `widgetWorkGroupType` 的 `option` 可能为空，
+  其值是飞书假勤/加班类型 ID（不是文案）。没有固定选项可供派生时按 `direct` 直取，
+  不要求选项映射；若该子控件确实有固定选项或链接了外部数据源，仍按常规选项映射处理。
+  配置 UI 对此有提示。
+- **value 形态**：派发时组装为
+  `{"id": 父控件id, "type": 控件组type, "value": [子控件对象...]}`；子控件对象按各自
+  类型组装（radioV2 字符串、date 为 RFC3339、textarea 文本、contact
+  `{value, open_ids}`、image 为 file code 数组）。`workGroup` 的
+  `widgetWorkGroupTimeRangeFieldList` 保持嵌套 `fieldList` 形态：`value` 是二维数组，
+  内层为日期子控件对象。
 
 #### 关联审批（2026-10-11 实现）
 
@@ -436,7 +490,7 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 
 实测同时修复了更新字段映射时报 500 的审计格式问题：审计摘要不允许数组包含对象，改为 before/after 记录 `maps_count`，映射明细仍保存在配置表中。真实配置更新审计 id=2560 记录 12→13 项；生产摘要路径的回归测试及恢复嵌套对象的变异测试验证该错误不会静默通过。实测服务使用本地独立端口，未部署云端。
 
-#### 附件搬运（2026-10-10 实现）
+#### 附件与图片搬运（2026-10-10 实现；2026-10-24 补 `image` / `imageV2`）
 
 真实验证使用「技术测试专用」定义 D0557DA6-CC9A-4B6B-BDF2-8DC675D2DD6E：记录 recvxx5WwbjyiI 创建编号 202610100097（明细一行、附件一个），记录 recvxCCwxthflm 创建编号 202610100098（明细一行、附件三个）。系统应用身份完成下载、审批上传、创建及编号回填，附件内容 SHA-256 一致。首次文本回填原「申请编号」链接字段被飞书以 1254068 URLFieldConvFail 拒绝，曾临时使用文本字段「系统审批编号验证」（fld31Ycysg）。后续通过当前 Rust `dispatch_one → finish_backfill → BitableBackfill` 复用两条已有实例，已将原链接字段 fldnNUwM35 写为 `{"text":"审批编号","link":"审批 AppLink"}` 并真实读回核对一致，没有新增实例；本地配置 id=1 已恢复指向原字段。证据为 target/approval-link-live-result.json 和 target/approval-link-config-result.json。
 
@@ -444,14 +498,14 @@ uuid = 规范 UUIDv5(命名空间 = NS, 名字 = "<base_token>|<table_id>|<appro
 
 「往来」数据源的附件字段 fldP6ThDLp 经用户授权直接配置，随后由正常拉取 worker 入库；这不代表已测试受保护配置接口。两条本地任务曾残留旧选项匹配错误，核对远端 UUID、实例及实际回填后已事务修复为 backfilled，因此该状态不能作为自动 worker 持久化通过的证据。实测证据保存在 target/attachment-system-verification.json 和 target/attachment-task-reconciliation-*.json；本地服务停止，未部署云端。
 
-`attachmentV2` 的源值是多维表格附件数组，包含 `file_token`、`name`、`size`。配置按控件名（明细子控件用父名_子名）匹配附件列，存字段 ID。
+`attachmentV2`、`image`、`imageV2` 的源值都是多维表格附件数组，包含 `file_token`、`name`、`size`。配置按控件名（明细子控件与控件组子控件用父名_子名）匹配附件列，存字段 ID。
 
 1. 有附件映射时先按稳定 UUID 查询已创建实例；存在则恢复编号回填，源附件或申请人已删除也不阻断恢复。
 2. 校验全部附件元数据与完整表单；必填缺失或非法数据返回等待态，可选空附件不提交控件。预检失败不下载或上传。
 3. 用应用 `tenant_access_token` 调官方下载接口，并带 `bitablePerm` 的表、字段、记录、file_token 坐标。忽略单元格内 `url`/`tmp_url`。
-4. 逐文件串行下载，要求 HTTP 200、实际字节数与源 size 一致，上限 50 MiB；拒绝部分响应。下载幂等可退避，文件间隔 200ms，跨请求限流由飞书 429 退避兜底。
-5. 调审批文件上传接口，multipart 字段为 `name`、`type=attachment`、`content`；只接受外层 `code=0` 且内层 `data.code` 非空。
-6. 将上传 codes 作为 `attachmentV2.value` 字符串数组，按定义快照恢复明细结构后创建审批，成功沿用既有编号回填。
+4. 逐文件串行下载，要求 HTTP 200、实际字节数与源 size 一致；`attachmentV2` 上限 50 MiB，`image` / `imageV2` 上限 10 MiB；拒绝部分响应。下载幂等可退避，文件间隔 200ms，跨请求限流由飞书 429 退避兜底。
+5. 调审批文件上传接口，multipart 字段为 `name`、`type`、`content`；`attachmentV2` 传 `type=attachment`，`image` / `imageV2` 传 `type=image`；只接受外层 `code=0` 且内层 `data.code` 非空。
+6. 将上传 codes 作为对应控件（`attachmentV2` / `image` / `imageV2`）的 `value` 字符串数组，按定义快照恢复明细与控件组结构后创建审批，成功沿用既有编号回填。
 
 按钮派发和后台 worker 均调用共享 `dispatch_one`。下载/上传失败保持可重试且不写终态编号；上传非幂等，不自动退避重发，明确 token 失效只刷新重发一次。下一轮可能重新上传未被实例引用的文件，审批实例由稳定 UUID 去重。当前逐文件在内存中搬运，没有磁盘缓存或上传 code 持久化。旧实测记录描述的是当时能力，不代表新链路真实验证结果。
 
@@ -733,9 +787,12 @@ create 返回 60012
    缓解措施（`1390003` 判可重试而非终态）保留，它管的是并发窗口。
 6. ~~**`is_external` 字段名与「不支持的控件」的确切判据未验证**~~ → **已实测**：
    `approvals get` **不返回 `is_external`**（该字段只在 `approvals/search` 里），判据
-   改为「`approvals get` 拿不到 `form`」；**不支持的控件清单**以
-   `lark-approval-instance-form-control-parameters.md:14-30` 为准，**定义里存在且必填
-   就拦**（可选控件留空提交是合法的）。详见 §6.1.2。
+   改为「`approvals get` 拿不到 `form`」；**官方不支持的控件清单**以官方实例文档
+   《审批实例表单控件参数》为准，本系统另外在配置期拦下旧版控件组
+   `leaveGroup` / `remedyGroup`，并拒绝官方支持但尚未实现子控件映射的
+   `shiftGroup` / `shiftGroupV2`（§6.1.2）；上述明确列出的类型**必填时**拦下，
+   其余官方不支持类型（`text` / `serialNumber` 等）按既有语义不展示、不映射
+   （可选控件留空提交是合法的）。详见 §6.1.2。
    遗留：`search_launchable` **只支持 `user_access_token`**，`tenant_access_token`
    用不了——所以「列出可用定义」这类功能不要指望它。
 7. ~~**`serial_number` 的稳定时间窗**~~ → **单次实测无窗口**（创建后立刻可查，§12.3）。

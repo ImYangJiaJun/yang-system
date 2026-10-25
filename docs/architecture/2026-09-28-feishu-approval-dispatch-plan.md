@@ -119,6 +119,20 @@
 > - **本任务新增的模块都带文件级 `#![allow(dead_code)]`**：消费者（派发编排）在后续
 >   任务才接入，这是仓库既有惯例（`outbound.rs:32`、`access/groups/table.rs`）。每处
 >   都注明消费者落在哪个任务。
+> - **控件类型规则收敛到 `domain/widget_rules.rs`**（2026-10-24）：配置期与派发期共用
+>   同一份判定，避免配置期静默跳过的类型在派发期被当成「必填却无映射」。
+> - **控件组支持 `leaveGroupV2` / `workGroup` / `outGroup`**：只映射官方实例文档列出的
+>   子控件白名单；父级容器不选列，子控件按「父名_子名」匹配或手动选列；派发组装为
+>   `{id, type, value: [子控件对象...]}`，`workGroup` 的
+>   `widgetWorkGroupTimeRangeFieldList` 保持嵌套 `fieldList`。`widgetLeaveGroupType` /
+>   `widgetWorkGroupType` 的 option 可能为空，值是假勤/加班类型 ID（不是文案），按
+>   `direct` 直取，配置 UI 有提示。
+> - **`image` / `imageV2` 改为自动上传**：与 `attachmentV2` 共用多维表格附件下载 +
+>   审批文件上传通道，上传 `type=image`，单文件上限 10 MiB（`attachmentV2` 仍 50 MiB）。
+>   仍需人工值的是 `address`、旧 `attachment`、`document`。
+> - **配置期拒绝清单**：新增 `account`、旧版控件组 `leaveGroup` / `remedyGroup`
+>   （官方实例 API 不支持），以及 `shiftGroup` / `shiftGroupV2`（官方实例 API 支持，
+>   但本系统尚未实现控件组子控件映射）。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -181,6 +195,7 @@
 | `src/addon/feishu/domain/approval.rs` | 审批 API 客户端：`instances create` / `instances get` / `approvals get` |
 | `src/addon/feishu/domain/approval_dispatch.rs` | 单条处理编排（校验 → 转换 → create → get → 回写） |
 | `src/addon/feishu/domain/approval_convert.rs` | 控件值转换器（`direct`/`date`/`option`） |
+| `src/addon/feishu/domain/widget_rules.rs` | 控件类型规则单一来源（配置期与派发期共用：不支持/人工值/控件组子控件白名单） |
 | `src/addon/feishu/domain/approval_uuid.rs` | `uuid` 派生（UUIDv5） |
 | `src/infrastructure/feishu_approval_worker.rs` | 后台 worker：认领 + 限速 + 批量处理 |
 
@@ -576,6 +591,17 @@ fn missing_required_widget_is_reported_with_widget_id() {
 }
 
 #[test]
+fn control_group_value_is_child_object_array() {
+    // 父级容器不选列；value 是子控件对象数组。
+    // workGroup 的 widgetWorkGroupTimeRangeFieldList 保持嵌套 fieldList（二维数组）。
+}
+
+#[test]
+fn image_uses_uploaded_file_code() {
+    // image / imageV2 与 attachmentV2 共用上传通道，value 是 file code 数组。
+}
+
+#[test]
 fn output_is_compressed_json_array_string() {
     // form 是字符串，且必须是数组形态（instance/create.md:30 示例）。
     let s = build_form(/* ... */).unwrap_or_else(|e| panic!("{e:?}"));
@@ -596,8 +622,9 @@ cargo test --lib --locked approval_convert
 按 `~/.claude/skills/lark-approval/references/lark-approval-instance-form-control-parameters.md` 的结构逐类型实现。**关键约束**：
 
 - `approvals/get` 的 `form` **不是可直接提交的模板**（`lark-approval-initiate.md:10`），每个控件的 `value` 要按类型重新组装。
-- 三类**不自动准备**的值（`lark-approval-instance-value-sourcing.md:88-97`）：`address` 的地理库 `id`、`connect` 的 `instance_code`、`attachmentV2`/`image` 的 file code。遇到这些控件，**返回明确的 `ConvertError`**，不要静默传空。
-- 缺少必填值时返回的错误要带**控件 id**。
+- **不自动准备**的值（以 `domain/widget_rules.rs` 为准）：`address` 的地理库 `id`、旧 `attachment` / `document` 的 file code。遇到这些控件，**返回明确的 `ConvertError`**，不要静默传空。`connect` 已自动解析实例 Code，`attachmentV2` / `image` / `imageV2` 已自动上传，均不再拦截（见设计文档 §6.2）。
+- **控件组**（`leaveGroupV2` / `workGroup` / `outGroup`）只按官方实例文档列出的子控件白名单组装，父级不产出 value 项；`workGroup` 的 `widgetWorkGroupTimeRangeFieldList` 保持嵌套 `fieldList`。
+- 缺少必填值时返回的错误要带**控件 id**；控件组缺值时列出该组已映射的子列（`container_columns`）。
 
 - [ ] **Step 4: 运行确认通过**
 

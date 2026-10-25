@@ -47,6 +47,7 @@ use serde::Deserialize;
 
 use super::approval_convert::{Converter, WidgetMap};
 use super::bitable::FieldItem;
+use super::widget_rules;
 
 /// 审批定义 `form` 字段里的多态 `option` 取值。
 ///
@@ -84,38 +85,133 @@ pub(crate) struct OptionItem {
 /// 「什么进了配置」变得更难读。`externalData` 也不是为了它的内容，而是为了让
 /// **类型系统确认这确实是 JSON**——见下方 `external_data` 的说明。
 #[derive(Debug, Clone, Deserialize)]
+#[serde(from = "FormWidgetRaw")]
 pub(crate) struct FormWidget {
     /// 控件 id。创建实例时要的 `form[].id`。
-    #[serde(default)]
     pub(crate) id: String,
     /// 控件名。**实测是服务端解好的可读中文**（不是 `@i18n@` 键）——这是按名匹配的依据。
-    #[serde(default)]
     pub(crate) name: String,
     /// 控件类型（`input` / `radioV2` / `fieldList` / …）。
-    #[serde(default)]
     pub(crate) r#type: String,
     /// 是否必填。判定「配置期报错」的依据。
-    #[serde(default)]
     pub(crate) required: bool,
     /// 关联审批允许的定义 Code；其他控件的 value 保持原始形态。
-    #[serde(default)]
     pub(crate) value: serde_json::Value,
     /// 多态选项；`None` 表示「无选项」（键缺失或值为 `null`）。
-    #[serde(default)]
     pub(crate) option: Option<WidgetOptions>,
     /// 外部数据源链接。
     ///
     /// 声明成 `serde_json::Value` 是**为了能识别出这个键存在**——实测里
     /// 识别级联链接态与非级联选项接口；实际选项由调用方查本地绑定。
-    ///
+    pub(crate) external_data: Option<serde_json::Value>,
+    /// 子控件（明细在 `children` 里，控件组由 `value` 解析而来）。
+    pub(crate) children: Vec<FormWidget>,
+}
+
+/// [`FormWidget`] 的反序列化中间形态。
+///
+/// 控件组的子控件定义在 `value` 数组里（不是 `children`），serde 无法直接
+/// 落到同一个字段上，所以先原样收下，再在 `From` 里按控件组规则筛选与排序。
+#[derive(Debug, Clone, Deserialize)]
+struct FormWidgetRaw {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    required: bool,
+    #[serde(default)]
+    value: serde_json::Value,
+    #[serde(default)]
+    option: Option<WidgetOptions>,
     /// **`rename` 不能省**：JSON 键是驼峰的 `externalData`，Rust 字段是
     /// snake_case。没有这一行，字段恒为 `None`，而症状是「链接态被当成非链接」
     /// ——一条静默的、指向完全相反方向的判定。
     #[serde(default, rename = "externalData")]
-    pub(crate) external_data: Option<serde_json::Value>,
-    /// 明细控件的子控件（嵌套结构）。
+    external_data: Option<serde_json::Value>,
     #[serde(default)]
-    pub(crate) children: Vec<FormWidget>,
+    children: Vec<FormWidget>,
+}
+
+impl From<FormWidgetRaw> for FormWidget {
+    fn from(raw: FormWidgetRaw) -> Self {
+        // 控件组：子控件在 `value` 数组里，只留白名单内且可见的，并按白名单排序。
+        // 其它类型（明细等）沿用 `children`。
+        let children = match widget_rules::group_child_ids(&raw.r#type) {
+            Some(whitelist) => group_children(&raw, whitelist),
+            None => raw.children,
+        };
+        Self {
+            id: raw.id,
+            name: raw.name,
+            r#type: raw.r#type,
+            required: raw.required,
+            value: raw.value,
+            option: raw.option,
+            external_data: raw.external_data,
+            children,
+        }
+    }
+}
+
+/// 解析控件组的子控件：丢弃 `visible=false`（缺省可见）与白名单外的项，
+/// 再按白名单顺序稳定排序；`value` 不是数组（含 JSON 字符串形态）时视为没有子控件。
+fn group_children(raw: &FormWidgetRaw, whitelist: &[&str]) -> Vec<FormWidget> {
+    let parsed;
+    let items: &[serde_json::Value] = match &raw.value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::String(text) => {
+            parsed = serde_json::from_str::<Vec<serde_json::Value>>(text).unwrap_or_default();
+            &parsed
+        }
+        _ => return Vec::new(),
+    };
+    let mut children: Vec<FormWidget> = items
+        .iter()
+        .filter(|item| {
+            item.get("visible")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .filter_map(|item| serde_json::from_value::<FormWidget>(item.clone()).ok())
+        .filter(|child| whitelist.contains(&child.id.as_str()))
+        .collect();
+    children.sort_by_key(|child| {
+        whitelist
+            .iter()
+            .position(|id| *id == child.id)
+            .unwrap_or(usize::MAX)
+    });
+
+    // 加班控件组的两个条件必填项必须按实例文档校正：
+    // - 关联了加班规则（isSetRule=1）时，加班类型由规则决定，定义里的 required
+    //   可能仍是 true，但提单时无需填写；
+    // - 加班时段无论定义怎么写，实例接口都要求至少一段。
+    if raw.r#type == "workGroup" {
+        let rule_linked = matches!(
+            raw.option.as_ref(),
+            Some(WidgetOptions::Config(option)) if option_flag_is_one(option.get("isSetRule"))
+        );
+        for child in &mut children {
+            match child.id.as_str() {
+                "widgetWorkGroupType" if rule_linked => child.required = false,
+                "widgetWorkGroupTimeRangeFieldList" => child.required = true,
+                _ => {}
+            }
+        }
+    }
+    children
+}
+
+/// `isSetRule` 在真实响应里可能是数字 1，也可能是布尔 true。
+fn option_flag_is_one(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Number(number)) => number.as_i64() == Some(1),
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        _ => false,
+    }
 }
 
 impl FormWidget {
@@ -346,7 +442,7 @@ pub(crate) enum MatchError {
         widget: String,
         widget_type: String,
     },
-    /// 需要人工准备值的控件（旧附件 / 图片 / 地址），配置期直接拒绝。
+    /// 需要人工准备值的控件（旧附件控件 / 文档 / 地址），配置期直接拒绝。
     ManualValueWidget {
         widget: String,
         widget_type: String,
@@ -405,11 +501,12 @@ impl std::fmt::Display for MatchError {
             ),
             Self::UnsupportedWidget { widget, widget_type } => write!(
                 formatter,
-                "控件「{widget}」（{widget_type}）不支持通过 API 提单"
+                "控件「{widget}」（{widget_type}）不支持通过 API 提单：{}",
+                widget_rules::unsupported_reason(widget_type)
             ),
             Self::ManualValueWidget { widget, widget_type } => write!(
                 formatter,
-                "控件「{widget}」（{widget_type}）需要人工准备值（旧附件控件 / 图片 / 文档 / 地址），不参与自动派发"
+                "控件「{widget}」（{widget_type}）需要人工准备值（旧附件控件 / 文档 / 地址），不参与自动派发"
             ),
             Self::ColumnReused {
                 column,
@@ -435,34 +532,6 @@ pub(crate) enum MatchOutcome {
     Invalid(Vec<MatchError>),
 }
 
-/// 定义里的不支持提单控件。
-///
-/// 配置期不显示、不映射；派发期的必填判定也用同一份（`is_eligible_for_mapping`），
-/// 否则配置期静默跳过的控件在派发期会被当成「必填却无映射」。
-///
-/// `formula` **不在**这里：官方《审批实例表单控件参数》把它列为可提单控件，value
-/// 就是公式算出的数值（与多维表格同名数字列对齐）。
-const UNSUPPORTED_TYPES: &[&str] = &[
-    "mutableGroup",
-    "serialNumber",
-    "text",
-    "shiftGroup",
-    "shiftGroupV2",
-    "tripGroup",
-    "leaveGroup",
-    "workGroup",
-    "outGroup",
-    "remedyGroupV2",
-    "apaascorehrOnboardingGroup",
-    "apaascorehrRegularateGroup",
-    "apaascorehrJobAdjustGroup",
-    "apaascorehrOffboardingGroup",
-];
-
-/// 需要人工准备值的控件类型：它们的值不是多维表格能给的（file code / 地理库 id /
-/// 地理库 id），配置期就拦下，免得配完之后每一条记录都失败。
-const MANUAL_VALUE_TYPES: &[&str] = &["address", "attachment", "image", "imageV2", "document"];
-
 /// 由审批定义与列定义按名匹配出一张映射表。
 ///
 /// **全量校验**：一次返回**所有**不成立的控件，而不是遇到第一个就停——
@@ -482,12 +551,11 @@ pub(crate) struct FieldMapping {
     pub(crate) option_source_key: Option<String>,
 }
 
-/// 这类控件会不会出现在配置里（明细父级只作分组展示，仍然出现）。
+/// 这类控件会不会出现在配置里（明细 / 控件组父级只作分组展示，仍然出现）。
 ///
-/// 说明、公式和飞书自动生成的分组不能通过 `instances.create` 传值，因而不出现在
-/// 配置向导，也不进映射表。
+/// 判据统一在 [`widget_rules`]：官方不支持提单的控件不出现在配置向导。
 fn is_configurable_control(widget_type: &str) -> bool {
-    widget_type == "fieldList" || !UNSUPPORTED_TYPES.contains(&widget_type)
+    widget_rules::is_configurable(widget_type)
 }
 
 /// 这类控件会不会被写进映射表。
@@ -496,7 +564,7 @@ fn is_configurable_control(widget_type: &str) -> bool {
 /// 配置期静默跳过的控件在映射表里没有行，派发期再按 `required` 拦，报出来的就是
 /// 一个「来源字段」根本不存在的必填错误——而且补数据永远不会让它消失。
 pub(crate) fn is_eligible_for_mapping(widget_type: &str) -> bool {
-    widget_type != "fieldList" && is_configurable_control(widget_type)
+    widget_rules::is_mappable(widget_type)
 }
 
 pub(crate) fn mapping_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)> {
@@ -506,14 +574,31 @@ pub(crate) fn mapping_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)>
         .collect()
 }
 
-/// 预览保留明细父级与定义顺序；父级仅展示，不参与列映射。
+/// 预览/按名匹配用的控件名。控件组父级可能没有名称（官方定义里 leaveGroupV2
+/// 的 name 就是空串），用类型标签兜底，避免子控件限定名变成 `_假期类型`。
+fn preview_name(widget: &FormWidget) -> &str {
+    let name = widget.name.trim();
+    if !name.is_empty() {
+        return name;
+    }
+    match widget.r#type.as_str() {
+        "fieldList" => "明细",
+        "leaveGroupV2" => "请假控件组",
+        "workGroup" => "加班控件组",
+        "outGroup" => "外出控件组",
+        _ => "",
+    }
+}
+
+/// 预览保留明细 / 控件组父级与定义顺序；父级仅展示，不参与列映射。
 pub(crate) fn preview_widgets(form: &[FormWidget]) -> Vec<(&FormWidget, String)> {
     fn collect<'a>(form: &'a [FormWidget], parent: &str, flat: &mut Vec<(&'a FormWidget, String)>) {
         for widget in form {
+            let display = preview_name(widget);
             let name = if parent.is_empty() {
-                widget.name.trim().to_string()
+                display.to_string()
             } else {
-                format!("{parent}_{}", widget.name.trim())
+                format!("{parent}_{display}")
             };
             let supported = is_configurable_control(&widget.r#type);
             if supported {
@@ -539,6 +624,18 @@ pub(crate) fn match_fields(
     let mut errors: Vec<MatchError> = Vec::new();
     let mut widgets: Vec<WidgetMap> = Vec::new();
     let mut column_owner: BTreeMap<String, String> = BTreeMap::new();
+
+    // 官方实例 API 不支持 / 本系统暂未实现的控件不会进 mapping_widgets（预览阶段
+    // 已过滤），所以不能依赖下面的遍历来报错；这里单独走整棵定义树。只拦**必填**：
+    // 可选项留空是合法的，静默跳过即可。
+    for widget in form.iter().flat_map(FormWidget::walk) {
+        if widget.required && widget_rules::must_reject_at_config(&widget.r#type) {
+            errors.push(MatchError::UnsupportedWidget {
+                widget: widget.name.clone(),
+                widget_type: widget.r#type.clone(),
+            });
+        }
+    }
 
     let flat = mapping_widgets(form);
     let mut selected = BTreeMap::new();
@@ -587,7 +684,7 @@ pub(crate) fn match_fields(
     }
 
     for (widget, qualified_name) in flat {
-        if UNSUPPORTED_TYPES.contains(&widget.r#type.as_str()) {
+        if widget_rules::is_unsupported(&widget.r#type) {
             if widget.required || selected.contains_key(widget.id.as_str()) {
                 errors.push(MatchError::UnsupportedWidget {
                     widget: widget.name.clone(),
@@ -596,7 +693,7 @@ pub(crate) fn match_fields(
             }
             continue;
         }
-        if MANUAL_VALUE_TYPES.contains(&widget.r#type.as_str()) {
+        if widget_rules::needs_manual_value(&widget.r#type) {
             // **可选**的人工值控件不拦（留空提交是合法的，官方允许不传必填控件
             // 之外的任何控件）；**必填**的拦下来——留空会让审批单缺核心内容。
             if widget.required || selected.contains_key(widget.id.as_str()) {
@@ -678,8 +775,14 @@ pub(crate) fn match_fields(
             // 缺失 / null / 对象：都没有可派生的固定选项。
             _ => BTreeMap::new(),
         };
+        // 假勤/加班类型子控件只有在「没有固定选项可派生」时才允许直取；
+        // 有固定选项（例如未关联加班规则的加班类型）仍按常规选项映射处理。
+        let raw_option_direct = widget_rules::is_raw_option_child(&widget.id)
+            && !widget.links_to_our_options()
+            && !has_fixed_options(widget);
         if (widget.required || maps.is_some())
             && !widget.links_to_our_options()
+            && !raw_option_direct
             && option_map.is_empty()
             && matches!(
                 widget.r#type.as_str(),
@@ -698,7 +801,7 @@ pub(crate) fn match_fields(
             widget_type: widget.r#type.clone(),
             required: widget.required,
             bitable_field: column.field_id.clone(),
-            converter: converter_for(&widget.r#type),
+            converter: converter_for(widget),
             option_map,
             option_source_key: None,
             currency: None,
@@ -812,12 +915,30 @@ fn derive_option_map(
     map
 }
 
+/// 控件是否带有非空的固定选项（`radioV2` / `checkboxV2` 的常见形态）。
+fn has_fixed_options(widget: &FormWidget) -> bool {
+    matches!(
+        widget.option,
+        Some(WidgetOptions::Fixed(ref items)) if !items.is_empty()
+    )
+}
+
 /// 控件类型 → 值转换器。
 ///
 /// 与 `approval_convert` 的判据同源，但这里**在配置期**就定好并落库——
 /// 运行期不再按 `type` 推断，少一处可能漂移的地方。
-fn converter_for(widget_type: &str) -> Converter {
-    match widget_type {
+///
+/// 假勤 / 加班类型子控件（`widgetLeaveGroupType` / `widgetWorkGroupType`）的
+/// 值可能是飞书类型 ID 而不是文案、`option` 也可能为空：没有固定选项可供派生时
+/// 直接取值，不能套选项映射。
+fn converter_for(widget: &FormWidget) -> Converter {
+    if widget_rules::is_raw_option_child(&widget.id)
+        && !widget.links_to_our_options()
+        && !has_fixed_options(widget)
+    {
+        return Converter::Direct;
+    }
+    match widget.r#type.as_str() {
         "date" | "dateInterval" => Converter::Date,
         "radio" | "radioV2" | "checkbox" | "checkboxV2" => Converter::Option,
         _ => Converter::Direct,
@@ -1066,7 +1187,9 @@ mod tests {
 
     #[test]
     fn explicit_optional_invalid_types_and_options_are_rejected() {
-        for kind in ["text", "image", "number", "radioV2"] {
+        // `image` / `imageV2` 已改由附件上传链路自动处理，换成旧 v1 附件
+        // （人工值，仍须在配置期拒绝）。
+        for kind in ["text", "attachment", "number", "radioV2"] {
             let mut widget = input("可选", "w", false);
             widget.r#type = kind.to_string();
             assert!(
@@ -1736,5 +1859,359 @@ mod tests {
             MatchOutcome::Matched(maps) => assert!(maps[0].option_map.is_empty()),
             MatchOutcome::Invalid(errors) => panic!("非必填报错: {errors:?}"),
         }
+    }
+
+    #[test]
+    fn group_value_children_are_parsed_filtered_and_ordered() {
+        // 控件组的子控件在 `value` 数组里（不是 `children`）：只留白名单内
+        // 且可见的，并按白名单顺序排序。
+        let leave: FormWidget = serde_json::from_value(serde_json::json!({
+            "id": "leave",
+            "name": "请假",
+            "type": "leaveGroupV2",
+            "required": true,
+            "value": [
+                {"id": "widgetLeaveGroupEndTime", "name": "结束时间", "type": "date"},
+                {"id": "widgetLeaveGroupReason", "name": "请假事由", "type": "textarea", "visible": false},
+                {"id": "widgetLeaveGroupType", "name": "请假类型", "type": "radioV2"},
+                {"id": "widgetOutOfWhitelist", "name": "说明", "type": "text"},
+                {"id": "widgetLeaveGroupStartTime", "name": "开始时间", "type": "date"}
+            ]
+        }))
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            leave
+                .children
+                .iter()
+                .map(|child| child.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "widgetLeaveGroupType",
+                "widgetLeaveGroupStartTime",
+                "widgetLeaveGroupEndTime"
+            ]
+        );
+        assert_eq!(leave.children[0].name, "请假类型");
+        assert_eq!(leave.children[0].r#type, "radioV2");
+
+        // `value` 不是数组（空对象 / null）时没有子控件。
+        for value in [serde_json::json!({}), serde_json::Value::Null] {
+            let work: FormWidget = serde_json::from_value(serde_json::json!({
+                "id": "work",
+                "name": "加班",
+                "type": "workGroup",
+                "value": value
+            }))
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(work.children.is_empty(), "{value}");
+        }
+    }
+
+    #[test]
+    fn group_parents_are_previewed_but_not_mapped() {
+        // 控件组父级只作分组展示，子控件才参与列映射。
+        let form: Vec<FormWidget> = serde_json::from_value(serde_json::json!([{
+            "id": "out",
+            "name": "外出",
+            "type": "outGroup",
+            "required": true,
+            "value": [
+                {"id": "widgetOutGroupType", "name": "外出类型", "type": "radioV2", "required": true},
+                {"id": "widgetOutGroupStartTime", "name": "开始时间", "type": "date"}
+            ]
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            preview_widgets(&form)
+                .iter()
+                .map(|(widget, name)| (widget.id.as_str(), name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("out", "外出"),
+                ("widgetOutGroupType", "外出_外出类型"),
+                ("widgetOutGroupStartTime", "外出_开始时间"),
+            ]
+        );
+        assert_eq!(
+            mapping_widgets(&form)
+                .iter()
+                .map(|(widget, _)| widget.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["widgetOutGroupType", "widgetOutGroupStartTime"]
+        );
+    }
+
+    #[test]
+    fn raw_option_group_children_use_direct_converter() {
+        // 假勤类型子控件的 `option` 可能为空、值是飞书类型 ID：直取，
+        // 不报「选项无法从列里派生」。
+        let form: Vec<FormWidget> = serde_json::from_value(serde_json::json!([{
+            "id": "leave",
+            "name": "请假",
+            "type": "leaveGroupV2",
+            "required": true,
+            "value": [
+                {"id": "widgetLeaveGroupType", "name": "请假类型", "type": "radioV2", "required": true, "option": []}
+            ]
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let columns = vec![column("请假类型", "f1", &["年假"])];
+        let MatchOutcome::Matched(maps) = match_by_name(&form, &columns) else {
+            panic!("类型 ID 子控件应可直取");
+        };
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].widget_id, "widgetLeaveGroupType");
+        assert_eq!(maps[0].converter, Converter::Direct);
+        assert!(maps[0].option_map.is_empty());
+
+        // 普通无固定选项的单选仍然报 UnresolvableOptions。
+        let mut plain = input("普通单选", "plain", true);
+        plain.r#type = "radioV2".to_string();
+        plain.option = Some(WidgetOptions::Fixed(vec![]));
+        match match_by_name(&[plain], &[column("普通单选", "f2", &["年假"])]) {
+            MatchOutcome::Invalid(errors) => assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error, MatchError::UnresolvableOptions { .. })),
+                "{errors:?}"
+            ),
+            MatchOutcome::Matched(maps) => panic!("普通单选应报派生失败: {maps:?}"),
+        }
+    }
+
+    #[test]
+    fn account_and_old_group_names_are_unsupported() {
+        // 官方清单里的 account；旧控件组名 leaveGroup / remedyGroup；
+        // 以及官方支持但本系统未实现子控件映射的 shiftGroup。
+        for kind in ["account", "remedyGroup", "leaveGroup", "shiftGroup"] {
+            assert!(widget_rules::is_unsupported(kind), "{kind}");
+            assert!(!is_configurable_control(kind), "{kind} 不应出现在配置里");
+            assert!(!is_eligible_for_mapping(kind), "{kind} 不应进映射表");
+            let widget: FormWidget = serde_json::from_value(serde_json::json!({
+                "id": "w",
+                "name": "控件",
+                "type": kind,
+                "required": true
+            }))
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                preview_widgets(std::slice::from_ref(&widget)).is_empty(),
+                "{kind} 不应出现在配置预览里"
+            );
+        }
+        assert!(
+            widget_rules::unsupported_reason("shiftGroup").contains("暂未支持该控件组的子控件映射")
+        );
+        assert_eq!(
+            widget_rules::unsupported_reason("leaveGroup"),
+            "该控件组版本不在官方实例 API 支持范围内"
+        );
+        assert_eq!(
+            widget_rules::unsupported_reason("account"),
+            "官方实例 API 不支持该控件"
+        );
+        // 控件组父级可预览但不进映射；图片已是可映射控件。
+        for kind in ["leaveGroupV2", "workGroup", "outGroup"] {
+            assert!(is_configurable_control(kind), "{kind}");
+            assert!(!is_eligible_for_mapping(kind), "容器不进映射: {kind}");
+            let widget: FormWidget = serde_json::from_value(serde_json::json!({
+                "id": "w",
+                "name": "控件",
+                "type": kind
+            }))
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                !preview_widgets(std::slice::from_ref(&widget)).is_empty(),
+                "{kind} 应可预览"
+            );
+        }
+        assert!(is_configurable_control("image") && is_eligible_for_mapping("image"));
+    }
+
+    #[test]
+    fn required_config_reject_widgets_fail_at_config_time() {
+        for kind in [
+            "account",
+            "remedyGroup",
+            "remedyGroupV2",
+            "leaveGroup",
+            "shiftGroup",
+            "shiftGroupV2",
+        ] {
+            let required: FormWidget = serde_json::from_value(serde_json::json!({
+                "id": "w", "name": "控件", "type": kind, "required": true
+            }))
+            .unwrap_or_else(|error| panic!("{error}"));
+            match match_by_name(std::slice::from_ref(&required), &[]) {
+                MatchOutcome::Invalid(errors) => assert!(
+                    errors
+                        .iter()
+                        .any(|error| matches!(error, MatchError::UnsupportedWidget { .. })),
+                    "{kind}: {errors:?}"
+                ),
+                MatchOutcome::Matched(maps) => {
+                    panic!("{kind} 必填应在配置期被拦下，实际 {maps:?}")
+                }
+            }
+
+            // 可选时保持既有语义：不展示、不映射、不报错。
+            let optional: FormWidget = serde_json::from_value(serde_json::json!({
+                "id": "w", "name": "控件", "type": kind
+            }))
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                matches!(
+                    match_by_name(std::slice::from_ref(&optional), &[]),
+                    MatchOutcome::Matched(ref maps) if maps.is_empty()
+                ),
+                "{kind} 可选时不应阻断配置"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_option_child_with_fixed_options_still_needs_option_mapping() {
+        let form: Vec<FormWidget> = serde_json::from_value(serde_json::json!([{
+            "id": "work",
+            "name": "加班",
+            "type": "workGroup",
+            "required": true,
+            "value": [
+                {
+                    "id": "widgetWorkGroupType",
+                    "name": "加班类型",
+                    "type": "radioV2",
+                    "required": true,
+                    "option": [{"text": "调休", "value": "LEAVE"}]
+                }
+            ]
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        // 列里没有同名选项：即使显式映射也必须报错，不能存成 Option + 空 map。
+        let columns = vec![column("加班类型", "f1", &["别的"])];
+        match match_fields(
+            &form,
+            &columns,
+            Some(&[mapping("widgetWorkGroupType", "f1")]),
+        ) {
+            MatchOutcome::Invalid(errors) => assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error, MatchError::UnresolvableOptions { .. })),
+                "{errors:?}"
+            ),
+            MatchOutcome::Matched(maps) => panic!("固定选项未命中应报错: {maps:?}"),
+        }
+
+        // 命中时仍走 Option，并把选项值带出来。
+        let columns = vec![column("加班类型", "f1", &["调休"])];
+        let MatchOutcome::Matched(maps) = match_fields(
+            &form,
+            &columns,
+            Some(&[mapping("widgetWorkGroupType", "f1")]),
+        ) else {
+            panic!("固定选项命中应通过");
+        };
+        assert_eq!(maps[0].converter, Converter::Option);
+        assert_eq!(
+            maps[0].option_map.get("调休").map(String::as_str),
+            Some("LEAVE")
+        );
+    }
+
+    #[test]
+    fn work_group_required_flags_follow_rule_and_time_range() {
+        let parse = |is_set_rule: serde_json::Value| -> FormWidget {
+            serde_json::from_value(serde_json::json!({
+                "id": "work",
+                "name": "加班",
+                "type": "workGroup",
+                "required": true,
+                "option": {"isSetRule": is_set_rule},
+                "value": [
+                    {
+                        "id": "widgetWorkGroupType",
+                        "name": "加班类型",
+                        "type": "radioV2",
+                        "required": true,
+                        "option": []
+                    },
+                    {
+                        "id": "widgetWorkGroupTimeRangeFieldList",
+                        "name": "加班时段",
+                        "type": "fieldList",
+                        "required": false,
+                        "children": [
+                            {"id": "start", "name": "开始", "type": "date", "required": true},
+                            {"id": "end", "name": "结束", "type": "date", "required": true}
+                        ]
+                    }
+                ]
+            }))
+            .unwrap_or_else(|error| panic!("{error}"))
+        };
+
+        let linked = parse(serde_json::json!(1));
+        let type_child = linked
+            .children
+            .iter()
+            .find(|child| child.id == "widgetWorkGroupType")
+            .unwrap_or_else(|| panic!("缺少加班类型子控件"));
+        assert!(!type_child.required, "关联加班规则时类型不需要填写");
+        let range = linked
+            .children
+            .iter()
+            .find(|child| child.id == "widgetWorkGroupTimeRangeFieldList")
+            .unwrap_or_else(|| panic!("缺少加班时段子控件"));
+        assert!(range.required, "加班时段至少一段");
+
+        let custom = parse(serde_json::json!(0));
+        let type_child = custom
+            .children
+            .iter()
+            .find(|child| child.id == "widgetWorkGroupType")
+            .unwrap_or_else(|| panic!("缺少加班类型子控件"));
+        assert!(type_child.required, "未关联规则时类型按定义必填");
+    }
+
+    #[test]
+    fn empty_group_name_falls_back_to_type_label() {
+        let form: Vec<FormWidget> = serde_json::from_value(serde_json::json!([{
+            "id": "leave",
+            "name": "",
+            "type": "leaveGroupV2",
+            "value": [
+                {"id": "widgetLeaveGroupType", "name": "假期类型", "type": "radioV2"}
+            ]
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let preview = preview_widgets(&form);
+        assert_eq!(preview[0].1, "请假控件组");
+        assert_eq!(preview[1].1, "请假控件组_假期类型");
+    }
+
+    #[test]
+    fn required_image_is_mappable() {
+        let mut image = input("图片", "img", true);
+        image.r#type = "image".to_string();
+        let columns = vec![column("图片", "f1", &[])];
+        let MatchOutcome::Matched(maps) = match_by_name(&[image], &columns) else {
+            panic!("图片应可映射");
+        };
+        assert_eq!(maps[0].widget_type, "image");
+        assert_eq!(maps[0].converter, Converter::Direct);
+    }
+
+    #[test]
+    fn string_group_value_is_parsed() {
+        let form: Vec<FormWidget> = serde_json::from_value(serde_json::json!([{
+            "id": "leave",
+            "type": "leaveGroupV2",
+            "value": "[{\"id\":\"widgetLeaveGroupType\",\"type\":\"radioV2\"}]"
+        }]))
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(form[0].children.len(), 1);
+        assert_eq!(form[0].children[0].id, "widgetLeaveGroupType");
     }
 }

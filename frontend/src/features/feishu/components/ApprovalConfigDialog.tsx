@@ -57,6 +57,31 @@ type Step = 1 | 2 | 3 | 4;
 /// Select 不接受空串作为 item value，手填态给一个哨兵值。
 const MANUAL = "__manual__";
 
+/// 飞书审批控件组（容器）：父级只作分组展示，本身不选列；子控件各自选列。
+const CONTAINER_WIDGET_TYPES = new Set([
+  "fieldList",
+  "leaveGroupV2",
+  "workGroup",
+  "outGroup",
+]);
+const isContainerWidget = (type: string) => CONTAINER_WIDGET_TYPES.has(type);
+
+/// 控件组父级可能没有名称（文档里 leaveGroupV2 的 name 就是空串），用类型名兜底。
+const WIDGET_LABELS: Record<string, string> = {
+  fieldList: "明细",
+  leaveGroupV2: "请假控件组",
+  workGroup: "加班控件组",
+  outGroup: "外出控件组",
+};
+const widgetLabel = (widget: ApprovalWidget) =>
+  widget.name?.trim() || WIDGET_LABELS[widget.type] || widget.type;
+
+/// 这两个子控件必须填飞书假勤/加班类型 ID，不是文案。
+const ATTENDANCE_TYPE_WIDGET_IDS = new Set([
+  "widgetLeaveGroupType",
+  "widgetWorkGroupType",
+]);
+
 /// 向导权限提示（设计 §5.3）：建配置的坐标/字段端点归 `feishu.datasource.write`。
 const PERMISSION_NOTE =
   "建配置向导需同时持有 feishu.approval.write 与 feishu.datasource.write（或为系统管理员）：坐标与字段列表走数据源侧的 list_bitable_* 端点。";
@@ -172,7 +197,7 @@ export function ApprovalConfigDialog({
     approvalCode.trim(),
   ]);
   const mappingWidgets =
-    widgets?.filter((widget) => widget.type !== "fieldList") ?? [];
+    widgets?.filter((widget) => !isContainerWidget(widget.type)) ?? [];
   const step2Ready =
     mappingKey === currentKey &&
     widgets !== null &&
@@ -277,7 +302,7 @@ export function ApprovalConfigDialog({
           setMaps(
             Object.fromEntries(
               loadedWidgets
-                .filter((widget) => widget.type !== "fieldList")
+                .filter((widget) => !isContainerWidget(widget.type))
                 .map((widget) => {
                   const qualified = widget.qualifiedName ?? widget.name;
                   let candidates = loadedFields.filter(
@@ -531,13 +556,15 @@ export function ApprovalConfigDialog({
                       </TableRow>
                     ) : (
                       widgets.map((widget) =>
-                        widget.type === "fieldList" ? (
+                        isContainerWidget(widget.type) ? (
                           <TableRow key={widget.id} className="bg-muted/50">
                             <TableCell colSpan={2} className="py-2">
                               <div className="flex items-center gap-2 text-sm font-medium">
-                                <span>{widget.name}</span>
+                                <span>{widgetLabel(widget)}</span>
                                 <span className="text-xs font-normal text-muted-foreground">
-                                  明细分组，无需选列
+                                  {widget.type === "fieldList"
+                                    ? "明细分组，无需选列"
+                                    : "控件组，子控件分别选列"}
                                 </span>
                               </div>
                               {showTechnicalInfo ? (
@@ -573,11 +600,19 @@ export function ApprovalConfigDialog({
                                     关联审批
                                   </span>
                                 ) : null}
+                                {ATTENDANCE_TYPE_WIDGET_IDS.has(widget.id) ? (
+                                  <span
+                                    className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700"
+                                    title="该列的值必须是飞书假勤/加班类型 ID，不是文案"
+                                  >
+                                    需填飞书选项 ID
+                                  </span>
+                                ) : null}
                               </div>
                               {widget.qualifiedName &&
                               widget.qualifiedName !== widget.name ? (
                                 <p className="mt-1 text-xs text-muted-foreground">
-                                  明细路径：{widget.qualifiedName}
+                                  分组路径：{widget.qualifiedName}
                                 </p>
                               ) : null}
                               {showTechnicalInfo ? (
@@ -807,12 +842,14 @@ export function ApprovalConfigDialog({
                 <p
                   key={widget.id}
                   className={
-                    widget.type === "fieldList" ? "font-medium" : undefined
+                    isContainerWidget(widget.type) ? "font-medium" : undefined
                   }
                 >
-                  {widget.qualifiedName ?? widget.name}
-                  {widget.type === "fieldList"
-                    ? "（明细分组）"
+                  {widget.qualifiedName?.trim() || widgetLabel(widget)}
+                  {isContainerWidget(widget.type)
+                    ? widget.type === "fieldList"
+                      ? "（明细分组）"
+                      : "（控件组）"
                     : ` → ${fields.find((f) => f.fieldId === maps[widget.id])?.fieldName ?? "不映射"}`}
                   {maps[widget.id] && widget.usesExternalOptions ? (
                     <span className="block text-xs text-muted-foreground">
