@@ -685,13 +685,22 @@ fn assemble_telephone(widget: &WidgetMap, cell: &Value) -> Result<Value, Convert
 }
 
 fn number_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Value, ConvertError> {
-    if cell.is_number() {
-        return Ok(cell.clone());
-    }
-    // 多维表格的数字偶尔以字符串形态出现（公式字段、文本化的数字）。
-    if let Some(text) = cell.as_str() {
-        if let Ok(parsed) = text.trim().parse::<f64>() {
-            return Ok(json!(parsed));
+    // 公式字段（type 20 / Number）的单元格是**单元素数组**：实测 `[1]`。
+    // 只接受恰好一个数值，多值公式不静默截断。
+    let scalar = match cell {
+        Value::Array(items) if items.len() == 1 => Some(&items[0]),
+        Value::Array(_) => None,
+        other => Some(other),
+    };
+    if let Some(scalar) = scalar {
+        if scalar.is_number() {
+            return Ok(scalar.clone());
+        }
+        // 多维表格的数字偶尔以字符串形态出现（公式字段、文本化的数字）。
+        if let Some(text) = scalar.as_str() {
+            if let Ok(parsed) = text.trim().parse::<f64>() {
+                return Ok(json!(parsed));
+            }
         }
     }
     Err(ConvertError::BadValue {
@@ -1377,6 +1386,22 @@ mod tests {
                 {"id":"widget17800354264810001","type":"formula","value":1234.5},
                 {"id":"child","type":"input","value":"测试"}
             ])
+        );
+    }
+
+    #[test]
+    fn formula_array_cell_takes_its_single_number_and_rejects_multiple() {
+        // 真机 Base 公式字段（type 20 / Number）的单元格是单元素数组：[1]。
+        // 只认恰好一个值；多值公式不能被静默截成第一个。
+        let widgets = [widget("w1", "formula")];
+        assert_eq!(
+            render(&widgets, &cells(&[("fld_src", json!([1]))])).unwrap_or_else(|e| panic!("{e}"))
+                [0]["value"],
+            json!(1)
+        );
+        assert!(
+            render(&widgets, &cells(&[("fld_src", json!([1, 2]))])).is_err(),
+            "多值公式不能静默截断"
         );
     }
 
