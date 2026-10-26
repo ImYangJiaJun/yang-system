@@ -450,9 +450,33 @@ async fn run_after_tools_created(
     tokio::pin!(budget_started);
 
     // 首个退出事件只负责触发关闭；此处不先等待 HTTP，所有 worker 同时收到信号。
-    let serve_result = tokio::select! {
-        result = &mut serve => Some(result),
-        _ = &mut budget_started => None,
+    //
+    // 运行期监督（D7-3）：worker 的 JoinHandle 不进任何 select 时，panic/退出
+    // 只留下句柄完成，readiness 与进程都继续绿。这里每 5 秒看一眼审批 worker，
+    // 一旦结束就按「业务阶段失败」走同一条关闭路径。监督 future 放在块里，
+    // 借用在 select 结束时释放，后面的关闭阶段才能按值取走 worker。
+    let serve_result = {
+        let worker_guard = async {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                ticker.tick().await;
+                if approval_worker
+                    .as_ref()
+                    .is_some_and(ApprovalDispatchWorker::has_exited)
+                {
+                    return "feishu_approval_worker";
+                }
+            }
+        };
+        tokio::pin!(worker_guard);
+        tokio::select! {
+            result = &mut serve => Some(result),
+            _ = &mut budget_started => None,
+            exited = &mut worker_guard => {
+                tracing::error!(worker = exited, "关键后台 Worker 意外退出，触发进程关闭");
+                Some(Err(anyhow::anyhow!("{exited} 意外退出")))
+            }
+        }
     };
     readiness_gate.mark_not_ready();
     shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;

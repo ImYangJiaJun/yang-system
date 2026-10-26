@@ -45,7 +45,7 @@ use crate::addon::feishu::approval::domain::request_log_writer::{
     normalized_requested_by, outcome_for, Outcome, RequestLog,
 };
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
-use crate::addon::feishu::domain::approval_convert::FixedOffset;
+use crate::addon::feishu::domain::approval_convert::{format_local, FixedOffset};
 use crate::addon::feishu::domain::approval_dispatch::{
     applicant_open_id, dispatch_one, widget_maps_from_rows, BitableBackfill,
     DispatchInput as OrchestrationInput, DispatchResult as OrchestrationResult,
@@ -374,8 +374,10 @@ struct DispatchOutcome {
     /// 必填列的取值来源。旧形态从请求体拿，改形后请求体不再携带配置数据。
     base_token: Option<String>,
     table_id: Option<String>,
-    /// 记录摘要（用于通知展示）。
-    record_summary: Option<String>,
+    /// 记录在当前视图里的行号（1 起）；查不到时为 `None`。
+    ///
+    /// 只用于通知正文的「记录：第 N 行」；稳定定位仍是技术定位行里的 `record_id`。
+    row_number: Option<usize>,
     /// 通知的兜底接收人：派发时解析出的申请人 open_id（传参优先、回退表格列，
     /// 与 `dispatch_one` 内部的判定同源）。`complete_feedback` 在请求未显式
     /// 指定 `notification_recipient` 时用它兜底——「创建完成就通知触发人」的落点。
@@ -417,7 +419,7 @@ impl DispatchOutcome {
             config_id,
             base_token: None,
             table_id: None,
-            record_summary: None,
+            row_number: None,
             applicant_open_id: None,
             requested_applicant_open_id: None,
             creator_open_id: None,
@@ -438,7 +440,7 @@ impl DispatchOutcome {
             config_id,
             base_token: None,
             table_id: None,
-            record_summary: None,
+            row_number: None,
             applicant_open_id: None,
             requested_applicant_open_id: None,
             creator_open_id: None,
@@ -472,7 +474,7 @@ impl DispatchOutcome {
             config_id,
             base_token,
             table_id,
-            record_summary: None,
+            row_number: None,
             applicant_open_id: None,
             requested_applicant_open_id: None,
             creator_open_id: None,
@@ -492,6 +494,11 @@ pub(super) async fn handle(
     context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
     let started = std::time::Instant::now();
+    // 「点击时间」就是这次 HTTP 请求被处理的时间；worker 延后发通知时从请求
+    // 记录里取同一个值，两层不会各写各的。
+    let clicked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
     let mode = if input.record_id.is_some() {
         "single"
     } else {
@@ -526,6 +533,7 @@ pub(super) async fn handle(
             &base_token,
             &table_id,
             record_id,
+            clicked_at,
             &input,
             &mut outcome,
         )
@@ -1119,6 +1127,17 @@ async fn dispatch_single(
             }
         };
 
+    // 行号只用于通知正文；查不到（翻页超上限、并发删除）就留空，不阻塞派发。
+    let row_number = bitable::record_row_number(
+        outbound.transport(),
+        outbound.sleeper(),
+        &outbound.tokens,
+        &coordinates,
+        record_id,
+    )
+    .await
+    .ok()
+    .flatten();
     let snapshot = DispatchSnapshot::new(
         &config_row,
         map_maps,
@@ -1263,7 +1282,6 @@ async fn dispatch_single(
         }
         _ => None,
     };
-    let record_summary = approval_feedback::record_summary(&fields, &cells);
     let mut outcome = DispatchOutcome::success(
         outcome_kind,
         Some(config_id),
@@ -1276,7 +1294,7 @@ async fn dispatch_single(
     );
     outcome.claim = Some(claim);
     outcome.instance_code = instance_code;
-    outcome.record_summary = record_summary;
+    outcome.row_number = row_number;
     outcome.applicant_open_id = notify_open_id;
     outcome.requested_applicant_open_id = requested_applicant_open_id;
     outcome.creator_open_id = creator_open_id;
@@ -1430,7 +1448,7 @@ fn task_state(outcome: &DispatchOutcome) -> Option<(&'static str, Option<&str>)>
 ///
 /// 通知失败**不影响**审批结论——`outcome.response` 不变，只有 `outcome.message` 和
 /// `outcome.notification` 被更新。名称补充和通知均发生在派发之后，不重跑审批。
-#[allow(clippy::too_many_arguments)] // 8 个参数：handler 级上下文逐个传入，收结构体无实质收益。
+#[allow(clippy::too_many_arguments)] // 9 个参数：handler 级上下文逐个传入，收结构体无实质收益。
 async fn complete_feedback(
     ctx: &ActionContext,
     context: &FeishuContext,
@@ -1438,6 +1456,7 @@ async fn complete_feedback(
     base_token: &str,
     table_id: &str,
     record_id: Option<&str>,
+    clicked_at: i64,
     input: &DispatchInput,
     outcome: &mut DispatchOutcome,
 ) {
@@ -1471,12 +1490,20 @@ async fn complete_feedback(
         name("table_name"),
         name("approval_name")
     );
+    // 点击时间按配置的 Base 时区展示；配置行读不到时宁可不写，也不写一个
+    // 没标时区的时刻。
+    let clicked_at = config
+        .as_ref()
+        .and_then(|row| row.optional::<String>("base_timezone").ok().flatten())
+        .and_then(|zone| FixedOffset::from_iana(zone.trim()).ok())
+        .map(|timezone| format_local(clicked_at, timezone));
     outcome.message = approval_feedback::render(
         outcome.status,
         &outcome.message,
         &names,
-        outcome.record_summary.as_deref(),
         record_id,
+        outcome.row_number,
+        clicked_at.as_deref(),
         base_token,
         table_id,
     );
@@ -1593,9 +1620,8 @@ fn feedback_references(
         references.push(FeedbackReference {
             label: "原记录",
             text: outcome
-                .record_summary
-                .clone()
-                .unwrap_or_else(|| "本次触发的记录（摘要暂不可用）".into()),
+                .row_number
+                .map_or_else(|| "打开原记录".to_string(), |row| format!("第 {row} 行")),
             href: record_url,
         });
     }

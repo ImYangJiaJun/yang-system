@@ -199,6 +199,7 @@ fn post_content(text: &str, references: &[FeedbackReference]) -> serde_json::Val
     };
     let mut record = None;
     let mut table = None;
+    let mut clicked_at = None;
     let mut current_value = None;
     let mut specific_step = None;
     let mut general_step = None;
@@ -217,6 +218,7 @@ fn post_content(text: &str, references: &[FeedbackReference]) -> serde_json::Val
         match label {
             "记录" => record = Some(value),
             "数据表" => table = Some(value),
+            "点击时间" => clicked_at = Some(value),
             "配置" | "多维表" | "审批" | "技术定位" | "控件定位" => {}
             "当前值" => current_value = Some(value),
             "处理" => specific_step = Some(value),
@@ -238,6 +240,9 @@ fn post_content(text: &str, references: &[FeedbackReference]) -> serde_json::Val
         (Some(record), None) => push("记录", record.into()),
         (None, Some(table)) => push("数据表", table.into()),
         (None, None) => {}
+    }
+    if let Some(value) = clicked_at {
+        push("点击时间", value.into());
     }
     if !reasons.is_empty() {
         let label = if title == FeedbackStatus::Succeeded.heading()
@@ -421,6 +426,22 @@ mod tests {
     }
 
     #[test]
+    fn post_content_puts_the_click_time_under_the_record() {
+        let text = "【本轮未创建审批，需要修正数据】\n记录：第 5 行\n点击时间：2026-10-26 10:32:55\n说明：本轮未处理：缺少必填值";
+        assert_eq!(
+            post_content(text, &[]),
+            json!({"zh_cn":{
+                "title":"本轮未创建审批，需要修正数据",
+                "content":[
+                    [{"tag":"text","text":"记录：","style":["bold"]},{"tag":"text","text":"第 5 行"}],
+                    [{"tag":"text","text":"点击时间：","style":["bold"]},{"tag":"text","text":"2026-10-26 10:32:55"}],
+                    [{"tag":"text","text":"原因：","style":["bold"]},{"tag":"text","text":"缺少必填值"}]
+                ]
+            }})
+        );
+    }
+
+    #[test]
     fn post_content_keeps_plain_headings_and_dynamic_markup_literal() {
         for text in [
             "正文",
@@ -485,6 +506,7 @@ mod tests {
                 status,
                 "安全说明",
                 "配置：付款申请\n数据表：付款表",
+                None,
                 None,
                 None,
                 "base",

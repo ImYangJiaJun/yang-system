@@ -840,6 +840,21 @@ fn format_rfc3339(millis: i64, offset: FixedOffset) -> String {
     )
 }
 
+/// Unix 秒 → `YYYY-MM-DD HH:MM:SS`（按给定固定偏移）。
+///
+/// 通知正文给人看，不用 RFC3339 的 `T` 和偏移后缀；换算与 [`format_rfc3339`]
+/// 同一套 `civil_from_days`，避免两处日期算法漂移。
+pub(crate) fn format_local(seconds: i64, offset: FixedOffset) -> String {
+    let shifted = seconds + i64::from(offset.seconds);
+    let days = shifted.div_euclid(86_400);
+    let seconds_of_day = shifted.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
 /// 由「自 1970-01-01 起的天数」求公历年月日。
 ///
 /// Howard Hinnant 的 `civil_from_days` 算法：把 3 月当作一年的起点，消掉闰年
@@ -1529,6 +1544,21 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(rendered[0]["value"], json!("2026-09-28T00:00:00+08:00"));
+    }
+
+    #[test]
+    fn local_time_format_matches_the_rfc3339_conversion() {
+        // 同一个瞬时：1790524800 s 在 +08:00 是 2026-09-28 00:00:00，
+        // 在 UTC 是前一天 16:00:00。通知正文只换展示形态，不换换算口径。
+        let utc = FixedOffset::from_seconds(0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            super::format_local(1_790_524_800, shanghai()),
+            "2026-09-28 00:00:00"
+        );
+        assert_eq!(
+            super::format_local(1_790_524_800, utc),
+            "2026-09-27 16:00:00"
+        );
     }
 
     #[test]

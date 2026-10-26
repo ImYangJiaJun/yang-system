@@ -2,7 +2,6 @@
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::{Map, Value};
 
 use super::approval_convert::{ConvertError, WidgetMap};
 use super::approval_match::FormWidget;
@@ -95,37 +94,6 @@ pub(crate) fn field_name(fields: &[FieldItem], id: &str) -> String {
             .find(|f| f.field_id == id || f.field_name == id)
             .map(|f| f.field_name.as_str()),
     )
-}
-
-/// 不把人员、链接、附件或未知对象序列化成正文。
-fn cell_text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(v) => Some(v.clone()),
-        Value::Number(v) => Some(v.to_string()),
-        Value::Array(values) => {
-            let parts: Vec<_> = values
-                .iter()
-                .filter_map(|v| {
-                    if v["type"] == "text" {
-                        v["text"].as_str().map(str::to_owned)
-                    } else {
-                        v.as_str().map(str::to_owned)
-                    }
-                })
-                .collect();
-            (!parts.is_empty()).then(|| parts.join(""))
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn record_summary(fields: &[FieldItem], cells: &Map<String, Value>) -> Option<String> {
-    let primary = fields.iter().find(|f| f.is_primary)?;
-    if !matches!(primary.field_type, Some(1 | 2 | 3 | 4 | 20 | 1005)) {
-        return None;
-    }
-    let text = cell_text(cells.get(&primary.field_id)?)?;
-    (!text.trim().is_empty()).then(|| one_line(&text, 80))
 }
 
 pub(crate) fn widget_name(form: &[FormWidget], id: &str) -> String {
@@ -240,23 +208,24 @@ pub(crate) fn outbound_reason(failure: &OutboundFailure) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 8 个参数：两条通知链路的展示要素逐个平铺，收结构体只是挪位置。
 pub(crate) fn render(
     status: FeedbackStatus,
     reason: &str,
     names: &str,
-    summary: Option<&str>,
     record_id: Option<&str>,
+    row_number: Option<usize>,
+    clicked_at: Option<&str>,
     base: &str,
     table: &str,
 ) -> String {
-    let record = record_id.map(|_| {
-        summary
-            .map(|v| one_line(v, 80))
-            .unwrap_or_else(|| "摘要暂不可用".into())
-    });
     let mut lines = vec![format!("【{}】", status.heading()), names.to_string()];
-    if let Some(record) = record {
-        lines.push(format!("记录：{record}"));
+    // 正文只写行号；`record_id` 只出现在最下面的技术定位行。
+    if let Some(row) = row_number {
+        lines.push(format!("记录：第 {row} 行"));
+    }
+    if let Some(clicked_at) = clicked_at {
+        lines.push(format!("点击时间：{}", one_line(clicked_at, 40)));
     }
     lines.push(format!("说明：{}", truncate(reason, 950)));
     lines.push(format!("下一步：{}", status.suggestion()));
@@ -277,34 +246,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn summary_and_names_have_safe_fallbacks_and_limits() {
+    fn names_have_safe_fallbacks_and_limits() {
         assert_eq!(display_name(None), "名称暂不可用");
         assert_eq!(display_name(Some("  ")), "名称暂不可用");
         assert_eq!(display_name(Some("  名称\n后半  ")), "名称 后半");
         assert_eq!(one_line(&"😀".repeat(101), 100).chars().count(), 100);
-        for (kind, cell, expected) in [
-            (1, json!(""), None),
-            (2, json!(123), Some("123")),
-            (1, json!(["第一段", "第二段"]), Some("第一段第二段")),
-            (1, json!(true), None),
-            (17, json!("private-attachment"), None),
-            (11, json!([{"id":"ou_private","name":"人名"}]), None),
-            (
-                1,
-                json!([{"type":"text","text":"可读"},{"type":"link","url":"private-url"}]),
-                Some("可读"),
-            ),
-            (1, json!({"text":"private-object"}), None),
-            (1, json!(null), None),
-        ] {
-            let fields: Vec<FieldItem> = serde_json::from_value(
-                json!([{"field_id":"name","field_name":"名称","type":kind,"is_primary":true}]),
-            )
-            .unwrap_or_else(|e| panic!("{e}"));
-            let cells = Map::from_iter([("name".into(), cell)]);
-            assert_eq!(record_summary(&fields, &cells).as_deref(), expected);
-            assert_eq!(record_summary(&fields, &Map::new()), None);
-        }
         let form: Vec<FormWidget> = serde_json::from_value(json!([{"id":"parent","name":"明细","children":[{"id":"empty"},{"id":"literal","name":"名称暂不可用"}]}])).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(widget_name(&form, "empty"), "明细 / 名称暂不可用");
         assert_eq!(widget_name(&form, "literal"), "明细 / 名称暂不可用");
@@ -313,17 +259,22 @@ mod tests {
             FeedbackStatus::Failed,
             "原因",
             "名称信息",
-            None,
             Some("rec"),
+            Some(5),
+            Some("2026-10-26 10:32:55"),
             "base",
             "table",
         );
-        assert!(body.contains("记录：摘要暂不可用"));
+        assert!(body.contains("记录：第 5 行"), "{body}");
+        assert!(!body.contains("记录：rec"), "正文不写记录 id：{body}");
+        assert!(body.contains("点击时间：2026-10-26 10:32:55"), "{body}");
+        assert!(!body.contains("摘要暂不可用"), "{body}");
         assert!(body.contains("技术定位：Base=base；表=table；记录=rec"));
         assert!(!render(
             FeedbackStatus::Accepted,
             "原因",
             "名称信息",
+            None,
             None,
             None,
             "base",
@@ -334,6 +285,7 @@ mod tests {
             FeedbackStatus::Failed,
             "原因",
             &"名称".repeat(2000),
+            None,
             None,
             None,
             "base",
@@ -372,8 +324,9 @@ mod tests {
                 status,
                 "原因",
                 "名称",
-                Some("摘要"),
                 Some("rec"),
+                Some(1),
+                None,
                 "base",
                 "table",
             );
@@ -429,24 +382,6 @@ mod tests {
     }
 
     #[test]
-    fn summary_uses_primary_and_does_not_dump_objects() {
-        let fields: Vec<FieldItem> = serde_json::from_value(json!([
-            {"field_id":"other","field_name":"附件","type":17},
-            {"field_id":"name","field_name":"公司名称","type":1,"is_primary":true}
-        ]))
-        .unwrap_or_else(|e| panic!("{e}"));
-        let cells = json!({"other":{"url":"secret"},"name":[{"type":"text","text":"成都市易威行科技有限公司"}]}).as_object().cloned().unwrap_or_default();
-        assert_eq!(
-            record_summary(&fields, &cells).as_deref(),
-            Some("成都市易威行科技有限公司")
-        );
-        let mut missing = fields.clone();
-        missing[1].is_primary = false;
-        assert_eq!(record_summary(&missing, &cells), None);
-        assert_eq!(cell_text(&json!({"url":"secret"})), None);
-    }
-
-    #[test]
     fn conversion_uses_nested_names_and_masks_raw_values() {
         let snapshot =
             r#"[{"id":"detail","name":"付款明细","children":[{"id":"date","name":"付款日期"}]}]"#;
@@ -480,8 +415,9 @@ mod tests {
             FeedbackStatus::Waiting,
             &message.repeat(20),
             "表格：测试",
-            Some(&"😀".repeat(120)),
             Some("rec"),
+            Some(5),
+            Some("2026-10-26 10:32:55"),
             "base",
             "table",
         );
@@ -491,7 +427,7 @@ mod tests {
             .lines()
             .find_map(|line| line.strip_prefix("记录："))
             .unwrap_or_default();
-        assert_eq!(record.chars().count(), 80, "记录摘要必须有界");
+        assert_eq!(record, "第 5 行", "记录行只写行号");
     }
 
     #[test]

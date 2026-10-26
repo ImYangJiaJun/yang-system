@@ -37,8 +37,8 @@
 //! 走回捞路径拿到同一个实例，不会重复建单。
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use tokio::sync::{mpsc, watch};
@@ -50,7 +50,7 @@ use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::approval::domain::task_applicant_table::upsert_task_applicant;
 use crate::addon::feishu::domain::approval::instance_applink;
-use crate::addon::feishu::domain::approval_convert::{FixedOffset, WidgetMap};
+use crate::addon::feishu::domain::approval_convert::{format_local, FixedOffset, WidgetMap};
 use crate::addon::feishu::domain::approval_dispatch::{
     applicant_open_id as extract_applicant_open_id, backfill_in_chunks, dispatch_one,
     widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput, DispatchResult,
@@ -110,6 +110,15 @@ const _: () = assert!(CLAIM_BATCH <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE
 /// 这个常量现在只作为「一轮该在多长时间内跑完」的**度量基准**，
 /// `tests` 里有断言钉住它——超了说明限速或批大小配置有误。
 const ROUND_WORST_CASE_SECONDS: i64 = 300;
+
+/// 心跳巡检间隔。
+const PROGRESS_WATCH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 超过这个时间没有任何阶段推进，就判定为「停住」并告警。
+///
+/// 心跳按**阶段**更新（seed / claim / 单条处理 / 落库），正常轮次里两次推进
+/// 之间只有秒级；3 分钟没有推进已经不是慢，而是卡在某个 await 上。
+const PROGRESS_STALL_AFTER: Duration = Duration::from_secs(180);
 
 /// 上一轮处理到的记录游标。
 ///
@@ -179,6 +188,8 @@ impl ApprovalDispatchHandle {
 pub(crate) struct ApprovalDispatchWorker {
     shutdown: watch::Sender<bool>,
     task: OwnedTask<()>,
+    /// 心跳巡检：主循环卡住时它仍然在跑，负责把「卡在哪一阶段」写进日志与指标。
+    watchdog: OwnedTask<()>,
 }
 
 impl ApprovalDispatchWorker {
@@ -230,6 +241,7 @@ impl ApprovalDispatchWorker {
             })?;
 
         let (shutdown, receiver) = watch::channel(false);
+        let heartbeat = ProgressHeartbeat::default();
         let runner = RoundRunner {
             tools,
             context,
@@ -237,9 +249,11 @@ impl ApprovalDispatchWorker {
             transport,
             sleeper,
             timezone_offset,
+            heartbeat: heartbeat.clone(),
         };
         let idle_poll = Duration::from_secs(settings.approval_scan_interval_seconds);
-        let task = tokio::spawn(run_loop(runner, idle_poll, requests, receiver));
+        let task = tokio::spawn(run_loop(runner, idle_poll, requests, receiver.clone()));
+        let watchdog = tokio::spawn(watch_progress(heartbeat, receiver));
 
         tracing::info!(
             rate_per_minute = settings.approval_create_rate_per_minute,
@@ -249,7 +263,13 @@ impl ApprovalDispatchWorker {
         Ok(Self {
             shutdown,
             task: OwnedTask::new(task),
+            watchdog: OwnedTask::new(watchdog),
         })
+    }
+
+    /// 主循环是否已经结束（正常退出或 panic）。用于进程级监督。
+    pub(crate) fn has_exited(&self) -> bool {
+        self.task.is_finished()
     }
 
     /// 先广播停止，再由总关闭预算统一等待。
@@ -264,6 +284,10 @@ impl ApprovalDispatchWorker {
             .join()
             .await
             .context("等待审批派发 Worker 退出失败")?;
+        self.watchdog
+            .join()
+            .await
+            .context("等待审批派发心跳巡检退出失败")?;
         Ok(())
     }
 }
@@ -295,11 +319,118 @@ struct RoundRunner {
     transport: Arc<HttpClientTransport>,
     sleeper: Arc<TokioSleeper>,
     timezone_offset: FixedOffset,
+    heartbeat: ProgressHeartbeat,
 }
 
 impl RoundRunner {
     fn transport(&self) -> &dyn OutboundTransport {
         self.transport.as_ref()
+    }
+}
+
+/// 最近一次推进的观测点：阶段、任务与时刻。
+///
+/// 单独抽出来是因为它要在**卡住时**仍然可读：主循环自己无法报告「我卡在
+/// 哪个 await」，巡检任务拿这份快照就能说清。`stage` 只接受固定短标签，
+/// 避免把任务 id 之外的动态值写进指标基数。
+#[derive(Clone, Default)]
+struct ProgressHeartbeat {
+    state: Arc<Mutex<HeartbeatState>>,
+}
+
+#[derive(Default)]
+struct HeartbeatState {
+    stage: &'static str,
+    task_id: Option<i64>,
+    at: Option<Instant>,
+    /// 本轮停住是否已经告警过，避免每 30 秒刷一条同样的 WARN。
+    warned: bool,
+}
+
+impl HeartbeatState {
+    /// 是否该告警：有观测点、超过阈值、且本轮还没告警过。
+    fn is_stalled(&self, threshold: Duration) -> bool {
+        !self.warned && self.at.is_some_and(|at| at.elapsed() >= threshold)
+    }
+}
+
+impl ProgressHeartbeat {
+    /// 记录一次推进。恢复推进时补一条 INFO，让「WARN → INFO」在日志里成对。
+    fn mark(&self, stage: &'static str, task_id: Option<i64>) {
+        let resumed = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let resumed = state.warned;
+            state.stage = stage;
+            state.task_id = task_id;
+            state.at = Some(Instant::now());
+            state.warned = false;
+            resumed
+        };
+        metrics::gauge!("feishu_approval_last_progress_timestamp_seconds").set(unix_now_seconds());
+        if resumed {
+            tracing::info!(stage, task_id, "审批派发 Worker 恢复推进");
+        }
+    }
+
+    fn mark_warned(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .warned = true;
+    }
+
+    fn should_warn(&self, threshold: Duration) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_stalled(threshold)
+    }
+
+    /// `(阶段, 任务, 已停滞时长, 是否已告警)`；没有观测点时为 `None`。
+    fn snapshot(&self) -> Option<(&'static str, Option<i64>, Duration, bool)> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .at
+            .map(|at| (state.stage, state.task_id, at.elapsed(), state.warned))
+    }
+}
+
+fn unix_now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_secs_f64())
+}
+
+/// 心跳巡检：主循环卡住时它仍然活着，负责把停滞阶段写进日志与指标。
+///
+/// 这是「进程还活着、worker 不推进」这一类的唯一可观测出口；没有它，readiness
+/// 与 `/health/live` 都会保持绿色（D7-3）。
+async fn watch_progress(heartbeat: ProgressHeartbeat, mut shutdown: watch::Receiver<bool>) {
+    let mut ticker = tokio::time::interval(PROGRESS_WATCH_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return;
+                }
+            }
+            _ = ticker.tick() => {
+                if !heartbeat.should_warn(PROGRESS_STALL_AFTER) {
+                    continue;
+                }
+                let Some((stage, task_id, idle, _)) = heartbeat.snapshot() else {
+                    continue;
+                };
+                heartbeat.mark_warned();
+                tracing::warn!(
+                    stage,
+                    task_id,
+                    idle_seconds = idle.as_secs(),
+                    "审批派发 Worker 长时间没有推进，卡住阶段已定位"
+                );
+                metrics::counter!("feishu_approval_worker_stall_total", "stage" => stage).increment(1);
+            }
+        }
     }
 }
 
@@ -393,6 +524,7 @@ async fn run_round(
 ) {
     let started = std::time::Instant::now();
     tracing::Span::current().record("trigger", trigger.as_str());
+    runner.heartbeat.mark("seed", None);
     tracing::debug!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
     match seed_tasks(runner, trigger).await {
         Ok(0) => {}
@@ -406,6 +538,7 @@ async fn run_round(
     if let Some((config_id, open_id)) = applicant {
         persist_applicant(runner, config_id, &open_id).await;
     }
+    runner.heartbeat.mark("claim", None);
     let claimed = match claim(runner, cursor).await {
         Ok(claimed) => claimed,
         Err(error) => {
@@ -418,6 +551,7 @@ async fn run_round(
     metrics::gauge!("feishu_approval_pending").set(claimed.len() as f64);
     if claimed.is_empty() {
         cursor.advance(&claimed);
+        runner.heartbeat.mark("idle", None);
         tracing::debug!(
             stage = "claim",
             cursor_next = cursor.0,
@@ -449,7 +583,9 @@ async fn run_round(
 
         let outcome = async {
             let task_started = std::time::Instant::now();
+            runner.heartbeat.mark("process", Some(task.id));
             let processed = process_one(runner, task).await;
+            runner.heartbeat.mark("record_outcome", Some(task.id));
             record_outcome(runner, task, &processed).await;
             tracing::debug!(
                 duration_ms = task_started.elapsed().as_millis() as u64,
@@ -486,6 +622,7 @@ async fn run_round(
             "审批派发单轮超出预算；认领批或限速配置需要复核"
         );
     }
+    runner.heartbeat.mark("idle", None);
     tracing::debug!(
         claimed = claimed.len(),
         backfilled = counts[0],
@@ -1401,21 +1538,17 @@ async fn send_worker_notification(
     // 通知「申请人」——两者互补：HTTP 没发时（未指定接收人是常态）由这里兜底，
     // HTTP 发过时才避免重复。
     //
-    // 查 `succeeded` **与** `failed` 两档：HTTP 层只在终态兜底（`fallback_recipient_of`
-    // 只认 `Succeeded | Failed`），而 `outcome_for` 把 `Terminal` 折成 `failed`——
-    // 只查 `succeeded` 会让「HTTP 已发过失败通知」的终态在 worker 再发一遍。
-    // 中间态（`waiting`）HTTP 层不发，worker 必须接手，所以不查它。
+    // 查**全部结论**：是否已通知仍只看 `notification.status == "sent"`
+    // （HTTP 层只在终态兜底，`outcome_for` 把 `Terminal` 折成 `failed`；
+    // 中间态 HTTP 层按设计不发，由 worker 接手）。同时取最近一条请求记录的
+    // `created_at` 作「点击时间」——worker 可能晚几分钟才处理，不能用当前时间。
     let request_log_check = async {
         let query = runner.context.approval_request_logs().query();
         let query = query.where_eq("record_id", serde_json::json!(task.record_id))?;
         let query = query.where_eq("config_id", serde_json::json!(task.config_id))?;
-        let query = query.where_in(
-            "outcome",
-            vec![serde_json::json!("succeeded"), serde_json::json!("failed")],
-        )?;
         query.all().await
     };
-    match request_log_check.await {
+    let clicked_at = match request_log_check.await {
         Ok(rows) => {
             if rows.iter().any(http_path_notified) {
                 tracing::info!(
@@ -1427,6 +1560,9 @@ async fn send_worker_notification(
                 // 用户**已经收到过**——HTTP 那条就是发给他的。跳过不算未送达。
                 return true;
             }
+            rows.iter()
+                .filter_map(|row| row.optional::<i64>("created_at").ok().flatten())
+                .max()
         }
         Err(error) => {
             tracing::warn!(
@@ -1437,7 +1573,7 @@ async fn send_worker_notification(
             );
             return false;
         }
-    }
+    };
 
     // 读配置行取展示名（2s 预算，与 HTTP Action 的 complete_feedback 一致）
     let config_lookup = async {
@@ -1480,12 +1616,29 @@ async fn send_worker_notification(
     let status = outcome.feedback_status();
     let (accepted, reason, _serial) = outcome.response_parts();
     let _ = accepted; // 通知不关心 HTTP 语义的 accepted
+                      // 行号与 HTTP 路径同源：默认视图顺序；查不到就留空（技术定位行仍给 record_id）。
+    let row_number = bitable::record_row_number(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &BitableCoordinates {
+            app_token: task.base_token.clone(),
+            table_id: task.table_id.clone(),
+            view_id: None,
+        },
+        &task.record_id,
+    )
+    .await
+    .ok()
+    .flatten();
+    let clicked_at = clicked_at.map(|seconds| format_local(seconds, task.timezone_offset));
     let message = approval_feedback::render(
         status,
         &reason,
         &names,
-        None, // Worker 路径不取记录摘要，省一次 API 调用
-        Some(&task.record_id),
+        Some(task.record_id.as_str()),
+        row_number,
+        clicked_at.as_deref(),
         &task.base_token,
         &task.table_id,
     );
@@ -1665,6 +1818,7 @@ mod tests {
                 transport,
                 sleeper: Arc::new(TokioSleeper),
                 timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
+                heartbeat: ProgressHeartbeat::default(),
             });
         }
         let pool = runners[0].context.approval_tasks().pool();
@@ -2077,5 +2231,52 @@ mod tests {
             ROUND_WORST_CASE_SECONDS as u64 >= policy_seconds * 2,
             "单轮预算 {ROUND_WORST_CASE_SECONDS}s 覆盖不了两轮完整重试 {policy_seconds}s"
         );
+    }
+
+    #[test]
+    fn heartbeat_marks_the_stage_and_flags_a_stall_once() {
+        let heartbeat = ProgressHeartbeat::default();
+        assert!(heartbeat.snapshot().is_none(), "未推进前没有观测点");
+
+        heartbeat.mark("process", Some(7));
+        let (stage, task_id, idle, warned) = heartbeat
+            .snapshot()
+            .unwrap_or_else(|| panic!("mark 后必须有快照"));
+        assert_eq!((stage, task_id), ("process", Some(7)));
+        assert!(!warned);
+        assert!(idle < PROGRESS_STALL_AFTER);
+
+        // 直接把时刻拨到阈值之外，避免测试真的等 3 分钟。
+        {
+            let mut state = heartbeat
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.at = Some(Instant::now() - PROGRESS_STALL_AFTER);
+        }
+        let (_, _, idle, warned) = heartbeat.snapshot().unwrap_or_else(|| panic!("有快照"));
+        assert!(!warned);
+        assert!(idle >= PROGRESS_STALL_AFTER);
+        {
+            let state = heartbeat
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert!(state.is_stalled(PROGRESS_STALL_AFTER));
+        }
+
+        // 同一轮只告警一次；恢复推进时重置标记。
+        heartbeat.mark_warned();
+        {
+            let state = heartbeat
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert!(!state.is_stalled(PROGRESS_STALL_AFTER), "同一轮不重复告警");
+        }
+        heartbeat.mark("idle", None);
+        let (stage, task_id, _, warned) = heartbeat.snapshot().unwrap_or_else(|| panic!("有快照"));
+        assert_eq!((stage, task_id), ("idle", None));
+        assert!(!warned, "恢复推进后重置告警标记");
     }
 }

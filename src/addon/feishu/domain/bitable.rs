@@ -1163,6 +1163,57 @@ pub(crate) async fn list_all_records(
     })
 }
 
+/// 记录在**当前视图**里的行号（1 起）。找不到或翻页超上限时返回 `None`。
+///
+/// 只用于消息展示：行号随视图排序/筛选变化，不能当稳定标识——稳定定位仍是
+/// `record_id`（技术定位行）。翻页上限与种子扫描同量级，超了宁可没有行号，
+/// 也不把整张表拉完。
+pub(crate) async fn record_row_number(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    coordinates: &BitableCoordinates,
+    record_id: &str,
+) -> Result<Option<usize>, OutboundFailure> {
+    const MAX_PAGES: u32 = 20;
+    let url = records_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
+        OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: error.to_string(),
+        }
+    })?;
+    let mut cursor: Option<String> = None;
+    let mut row = 0usize;
+    for _ in 0..MAX_PAGES {
+        let query = list_records_query(
+            &[],
+            coordinates.view_id.as_deref(),
+            cursor.as_deref(),
+            PAGE_SIZE,
+        )
+        .map_err(|error| OutboundFailure {
+            kind: FailureKind::Fatal { code: 0 },
+            message: error.to_string(),
+        })?;
+        let page: ListRecordsData = fetch_page(transport, sleeper, tokens, &url, query).await?;
+        for item in &page.items {
+            row += 1;
+            if item.record_id == record_id {
+                return Ok(Some(row));
+            }
+        }
+        if !page.has_more {
+            return Ok(None);
+        }
+        // `has_more=true` 却没有 page_token：再翻会重取第一页，直接放弃行号。
+        match page.page_token.filter(|token| !token.is_empty()) {
+            Some(token) => cursor = Some(token),
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
 /// 拉取某张数据表下的全部视图。
 ///
 /// 供配置向导第二步用。**注意视图的职责**：它决定**拉取哪些行**，不决定能勾哪些字段
