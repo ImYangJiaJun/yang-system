@@ -780,28 +780,36 @@ fn open_ids_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Vec<String>, C
     }
 }
 
+/// 剥掉 v3 批量读取对公式/查找字段的包装 `{"type":2,"value":[...]}`。
+///
+/// 与 `number_from_cell` 处理的是同一实测形态。两条读路径不同形：单条 GET 给
+/// `[1]` / `"文案"`，worker 走的 `records/batch_get` 多包一层。不剥壳时对象会
+/// 落进各分支的 `_` 兜底，表现为「必填控件被提交 null/空串」→ 飞书 1395006。
+fn unwrap_typed_cell(cell: &Value) -> &Value {
+    match cell {
+        Value::Object(map) => match (map.get("type"), map.get("value")) {
+            (Some(_), Some(inner)) => unwrap_typed_cell(inner),
+            _ => cell,
+        },
+        _ => cell,
+    }
+}
+
 /// 从单元格里取出选项文案列表。
 ///
 /// 数字也是文案：汇率这类控件是外部选项（`radioV2`），但多维表格里同名列是数字，
 /// 选项文案就是这个数字的文本（`"0.0435"`）。不读数字，标签列表为空，控件被提交
 /// 空值，飞书以 1395006 拒绝。`Number::to_string()` 保留原始字面量，与选项文案对齐。
 pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
-    let labels = match cell {
-        Value::Array(items) => items
+    let labels = match unwrap_typed_cell(cell) {
+        Value::Array(items) => items.iter().flat_map(labels_from_cell).collect(),
+        // 多维表格的选项单元格常是 `[{"text": "已批准"}]`；人员/地点列则是
+        // `{"name": …}`。两者都取可读文案。
+        Value::Object(map) => ["text", "name", "value"]
             .iter()
-            .filter_map(|item| match item {
-                // 多维表格的选项单元格常是 `[{"text": "已批准"}]`。
-                Value::Object(map) => map
-                    .get("text")
-                    .or_else(|| map.get("name"))
-                    .or_else(|| map.get("value"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                Value::String(text) => Some(text.clone()),
-                Value::Number(number) => Some(number.to_string()),
-                _ => None,
-            })
-            .collect(),
+            .find_map(|key| map.get(*key))
+            .map(labels_from_cell)
+            .unwrap_or_default(),
         Value::String(text) => vec![text.clone()],
         Value::Number(number) => vec![number.to_string()],
         _ => Vec::new(),
@@ -817,7 +825,7 @@ pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
 
 /// 多维表格单元格取文本。多态单元格（`[{"text": …}]`）取第一个 text。
 fn text_from_cell(cell: &Value) -> String {
-    match cell {
+    match unwrap_typed_cell(cell) {
         Value::String(text) => text.clone(),
         Value::Number(number) => number.to_string(),
         Value::Bool(value) => value.to_string(),
@@ -838,7 +846,7 @@ fn text_from_cell(cell: &Value) -> String {
 /// 空值判定。多维表格的「空」有多种形态：null、空串、空数组、
 /// 以及只有空文本的多态单元格（`[{"text": ""}]`）。
 fn is_empty(value: &Value) -> bool {
-    match value {
+    match unwrap_typed_cell(value) {
         Value::Null => true,
         Value::String(text) => text.trim().is_empty(),
         Value::Array(items) => items.iter().all(is_empty),
@@ -1769,6 +1777,53 @@ mod tests {
             labels_from_cell(&json!([{"text": "USD 美元\r\n"}])),
             vec!["USD 美元"]
         );
+    }
+
+    #[test]
+    fn batch_get_typed_wrapper_is_unwrapped_everywhere() {
+        // v3 批量读取（worker 实际走的路径）把公式/查找字段包成
+        // `{"type":2,"value":[...]}`。真机：汇率列是查找字段 `[1]`，单选控件
+        // 不剥壳时标签为空 → 提交 `value: null` → 飞书 1395006。
+        assert_eq!(
+            labels_from_cell(&json!({"type": 2, "value": [1]})),
+            vec!["1"]
+        );
+        assert_eq!(
+            labels_from_cell(&json!([{"type": 2, "value": [1]}])),
+            vec!["1"]
+        );
+        assert_eq!(
+            labels_from_cell(&json!({"type": 2, "value": ["文案"]})),
+            vec!["文案"]
+        );
+
+        let mut radio = widget("w1", "radioV2");
+        radio
+            .option_map
+            .insert("1".to_string(), "src:rate".to_string());
+        let rendered = render(
+            &[radio],
+            &cells(&[("fld_src", json!({"type": 2, "value": [1]}))]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rendered[0]["value"], json!("src:rate"));
+
+        // 文本控件同样要剥壳。
+        let rendered = render(
+            &[widget("w1", "input")],
+            &cells(&[("fld_src", json!({"type": 2, "value": ["测试"]}))]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rendered[0]["value"], json!("测试"));
+
+        // 空包装必须按空判：否则必填校验放行、把空值交给飞书。
+        let mut required = widget("w1", "input");
+        required.required = true;
+        let error = render_error(
+            &[required],
+            &cells(&[("fld_src", json!({"type": 2, "value": []}))]),
+        );
+        assert!(error.contains("缺少必填"), "{error}");
     }
 
     #[test]
