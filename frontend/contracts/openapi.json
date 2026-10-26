@@ -2708,7 +2708,7 @@
     },
     "/api/v1/feishu/approval/configs/delete": {
       "post": {
-        "description": "删除配置、它的字段映射与全部任务行；请求流水保留",
+        "description": "无待执行、在途或待核查任务时删除配置、字段映射与任务行；请求流水保留",
         "operationId": "feishu.approval.delete_config",
         "parameters": [],
         "requestBody": {
@@ -7992,7 +7992,7 @@
                 "max_file_bytes": 16777216,
                 "max_files": 32,
                 "max_text_field_bytes": 65536,
-                "max_total_bytes": 16777216
+                "max_total_bytes": 17825792
               }
             }
           },
@@ -8151,7 +8151,7 @@
                 "max_file_bytes": 16777216,
                 "max_files": 32,
                 "max_text_field_bytes": 65536,
-                "max_total_bytes": 16777216
+                "max_total_bytes": 17825792
               }
             }
           },

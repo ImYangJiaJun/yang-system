@@ -359,7 +359,7 @@ export interface paths {
         put?: never;
         /**
          * 删除审批派发配置
-         * @description 删除配置、它的字段映射与全部任务行；请求流水保留
+         * @description 无待执行、在途或待核查任务时删除配置、字段映射与任务行；请求流水保留
          */
         post: operations["feishu.approval.delete_config"];
         delete?: never;
