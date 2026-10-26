@@ -216,6 +216,7 @@ export function approvalConfigWire(
     base_token: "appbcbWCzen6",
     table_id: "tblsRc9GRRX",
     approval_code: "CODE-TRAVEL",
+    approval_id: null,
     applicant_field: "fldApp",
     backfill_field: "fldBack",
     base_timezone: "Asia/Shanghai",

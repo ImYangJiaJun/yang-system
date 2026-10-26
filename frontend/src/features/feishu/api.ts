@@ -2207,6 +2207,7 @@ function parseApprovalConfigItem(
     baseToken: asString(raw.base_token),
     tableId: asString(raw.table_id),
     approvalCode: asString(raw.approval_code),
+    approvalId: asNullableString(raw.approval_id),
     applicantField: asString(raw.applicant_field),
     backfillField: asString(raw.backfill_field),
     statusField: asNullableString(raw.status_field),
@@ -2306,6 +2307,8 @@ export type CreateApprovalConfigInput = {
   baseToken: string;
   tableId: string;
   approvalCode: string;
+  /// 审批定义的数字 ID（控制台跳转用）；空 / 未给一律不发。
+  approvalId?: string;
   applicantField: string;
   backfillField: string;
   /// 六个可选回填扩展列（field_id 或列名）；留空 = 不回填该列。
@@ -2361,6 +2364,9 @@ export async function createApprovalConfig(
       base_token: input.baseToken.trim(),
       table_id: input.tableId.trim(),
       approval_code: input.approvalCode.trim(),
+      ...(input.approvalId?.trim()
+        ? { approval_id: input.approvalId.trim() }
+        : {}),
       applicant_field: input.applicantField.trim(),
       backfill_field: input.backfillField.trim(),
       base_timezone: input.baseTimezone.trim(),
@@ -2389,6 +2395,8 @@ export type UpdateApprovalConfigPatch = {
   title?: string;
   enabled?: boolean;
   baseTimezone?: string;
+  /// 审批定义的数字 ID；`""` 表示清空（**必须发送**，不能当「未给」省略）。
+  approvalId?: string;
   /// 六个可选回填扩展列；未给 = 不改（空串同样不改）。
   statusField?: string;
   flowField?: string;
@@ -2409,6 +2417,9 @@ export async function updateApprovalConfig(
   if (patch.title !== undefined) body.title = patch.title;
   if (patch.enabled !== undefined) body.enabled = patch.enabled;
   if (patch.baseTimezone !== undefined) body.base_timezone = patch.baseTimezone;
+  // 空串也要发：后端把它当「清空该列」，省略才是「不改」。
+  if (patch.approvalId !== undefined)
+    body.approval_id = patch.approvalId.trim();
   Object.assign(body, extendedBackfillFields(patch));
   if (patch.maps !== undefined)
     body.maps = patch.maps.map((map) => ({

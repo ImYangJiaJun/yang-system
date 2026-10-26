@@ -984,3 +984,97 @@ describe("建配置向导 · 第四步（提交）", () => {
     expect(onCancel).not.toHaveBeenCalled();
   });
 });
+
+describe("审批定义 id（详情页跳转）", () => {
+  const DEFINITION_URL =
+    "https://www.feishu.cn/approval/admin/createApproval?id=7699783289053989908&definitionCode=CODE-TRAVEL";
+
+  it("创建态粘贴完整后台地址，提交带解析出的 approvalId", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    await driveToStep2(user, client);
+    const code = screen.getByLabelText("审批定义 Code");
+    await user.click(code);
+    await user.paste(DEFINITION_URL);
+    expect(code).toHaveValue(DEFINITION_URL);
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    expect(client.listWidgets).toHaveBeenLastCalledWith("CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(
+      await screen.findByRole("combobox", { name: "申请人员字段" }),
+    );
+    await user.click(await screen.findByRole("option", { name: /申请人/ }));
+    await user.click(screen.getByRole("combobox", { name: "回填字段" }));
+    await user.click(await screen.findByRole("option", { name: /审批编号/ }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(await screen.findByRole("button", { name: "创建配置" }));
+    await waitFor(() =>
+      expect(client.createConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          approvalCode: "CODE-TRAVEL",
+          approvalId: "7699783289053989908",
+        }),
+      ),
+    );
+  }, 15000);
+
+  it("编辑态粘贴匹配链接，保存带 approvalId", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    render(
+      <ApprovalConfigDialog
+        client={client}
+        onCancel={vi.fn()}
+        initialConfig={SAVED_CONFIG}
+      />,
+    );
+    const link = screen.getByLabelText("审批定义链接（可选）");
+    await user.click(link);
+    await user.paste(DEFINITION_URL);
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+    await waitFor(() =>
+      expect(client.updateConfig).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({ approvalId: "7699783289053989908" }),
+      ),
+    );
+  }, 15000);
+
+  it("编辑态链接与配置不一致或缺 id 时提示并阻止继续", async () => {
+    const user = userEvent.setup();
+    render(
+      <ApprovalConfigDialog
+        client={stubClient()}
+        onCancel={vi.fn()}
+        initialConfig={SAVED_CONFIG}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+    const link = screen.getByLabelText("审批定义链接（可选）");
+    await user.click(link);
+    await user.paste(
+      "https://www.feishu.cn/approval/admin/createApproval?id=7699783289053989908&definitionCode=OTHER-CODE",
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "链接里的审批定义与当前配置不一致。",
+    );
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+    await user.clear(link);
+    await user.click(link);
+    await user.paste(
+      "https://www.feishu.cn/approval/admin/createApproval?definitionCode=CODE-TRAVEL",
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "链接里没有 id 参数，无法用于跳转。",
+    );
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+  }, 15000);
+});

@@ -61,6 +61,27 @@ describe("审批配置业务阅读", () => {
     expect(screen.queryByRole("link", { name: "打开审批定义" })).toBeNull();
     expect(screen.getByText("打开多维表（标识待核对）")).toBeInTheDocument();
   });
+  it("有审批定义 id 时链接精确指向审批后台定义页", async () => {
+    stubApprovalApi({
+      configList: () =>
+        listPage([approvalConfigWire({ approval_id: "7699783289053989908" })]),
+    });
+    render("?config=1");
+    expect(
+      await screen.findByRole("link", { name: "打开审批定义" }),
+    ).toHaveAttribute(
+      "href",
+      "https://www.feishu.cn/approval/admin/createApproval?id=7699783289053989908&definitionCode=CODE-TRAVEL",
+    );
+  });
+  it("缺审批定义 id 时提示补全链接，不给错误跳转", async () => {
+    stubApprovalApi({ configList: () => listPage([approvalConfigWire()]) });
+    render("?config=1");
+    expect(
+      await screen.findByText("打开审批定义（请编辑配置补全审批定义链接）"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "打开审批定义" })).toBeNull();
+  });
   it("列表优先展示业务名称，技术标识不占主阅读区", async () => {
     stubApprovalApi({ configList: () => listPage([businessRow()]) });
     render();

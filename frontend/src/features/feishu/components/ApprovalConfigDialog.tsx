@@ -45,6 +45,8 @@ import {
 
 import type { ApprovalWizardClient, CreateApprovalConfigInput } from "../api";
 import {
+  approvalAdminUrl,
+  parseApprovalDefinitionInput,
   parseBitableLink,
   type ApprovalConfigItem,
   type ApprovalWidget,
@@ -131,6 +133,21 @@ export function ApprovalConfigDialog({
   const [approvalCode, setApprovalCode] = useState(
     initialConfig?.approvalCode ?? "",
   );
+  // 输入框原始值：允许粘贴整条审批后台地址，回写解析结果时不截断用户输入。
+  const [approvalInput, setApprovalInput] = useState(
+    initialConfig?.approvalCode ?? "",
+  );
+  /// 审批定义的数字 ID（详情页「打开审批定义」跳转用）；空 = 未提供。
+  const [approvalId, setApprovalId] = useState(initialConfig?.approvalId ?? "");
+  // 编辑态：允许粘贴审批后台地址补全 ID，输入框保留原始链接。
+  const [definitionLink, setDefinitionLink] = useState(
+    initialConfig?.approvalId
+      ? approvalAdminUrl(initialConfig.approvalCode, initialConfig.approvalId)
+      : "",
+  );
+  const [definitionLinkError, setDefinitionLinkError] = useState<string | null>(
+    null,
+  );
   const [mappingKey, setMappingKey] = useState<string | null>(null);
   const [maps, setMaps] = useState<Record<string, string>>(
     Object.fromEntries(
@@ -199,6 +216,7 @@ export function ApprovalConfigDialog({
   const mappingWidgets =
     widgets?.filter((widget) => !isContainerWidget(widget.type)) ?? [];
   const step2Ready =
+    definitionLinkError === null &&
     mappingKey === currentKey &&
     widgets !== null &&
     Object.values(maps).some(Boolean) &&
@@ -345,6 +363,7 @@ export function ApprovalConfigDialog({
       baseToken,
       tableId,
       approvalCode,
+      ...(approvalId.trim() ? { approvalId: approvalId.trim() } : {}),
       applicantField,
       backfillField,
       baseTimezone: timezone,
@@ -366,6 +385,9 @@ export function ApprovalConfigDialog({
           maps: input.maps,
           baseTimezone: timezone,
           ...(title !== initialConfig.title ? { title } : {}),
+          ...(approvalId !== (initialConfig.approvalId ?? "")
+            ? { approvalId }
+            : {}),
           ...extended,
         });
       } else {
@@ -479,13 +501,63 @@ export function ApprovalConfigDialog({
               <Label htmlFor="approval-code">审批定义 Code</Label>
               <Input
                 id="approval-code"
-                value={approvalCode}
+                value={approvalInput}
                 disabled={Boolean(initialConfig) || widgetsPending}
-                onChange={(event) => setApprovalCode(event.target.value)}
-                placeholder="approval code（审批后台「审批定义」里复制）"
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setApprovalInput(value);
+                  const parsed = parseApprovalDefinitionInput(value);
+                  setApprovalCode(parsed.approvalCode);
+                  setApprovalId(parsed.approvalId ?? "");
+                }}
+                placeholder="审批定义 Code，或粘贴审批后台地址"
                 autoComplete="off"
               />
             </div>
+            {initialConfig ? (
+              <div className="space-y-1.5">
+                <Label htmlFor="approval-definition-link">
+                  审批定义链接（可选）
+                </Label>
+                <Input
+                  id="approval-definition-link"
+                  value={definitionLink}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setDefinitionLink(value);
+                    if (value.trim() === "") {
+                      setApprovalId("");
+                      setDefinitionLinkError(null);
+                      return;
+                    }
+                    const parsed = parseApprovalDefinitionInput(value);
+                    if (parsed.approvalCode !== initialConfig.approvalCode) {
+                      setDefinitionLinkError(
+                        "链接里的审批定义与当前配置不一致。",
+                      );
+                    } else if (!parsed.approvalId) {
+                      setDefinitionLinkError(
+                        "链接里没有 id 参数，无法用于跳转。",
+                      );
+                    } else {
+                      setApprovalId(parsed.approvalId);
+                      setDefinitionLinkError(null);
+                    }
+                  }}
+                  placeholder="https://www.feishu.cn/approval/admin/createApproval?id=…&definitionCode=…"
+                  autoComplete="off"
+                />
+                <p className="text-xs text-muted-foreground">
+                  粘贴审批后台地址可自动识别审批定义
+                  id，用于详情页「打开审批定义」跳转。
+                </p>
+                {definitionLinkError !== null ? (
+                  <p role="alert" className="text-xs text-destructive">
+                    {definitionLinkError}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
             <Button
               variant="outline"
               disabled={approvalCode.trim() === "" || widgetsPending}

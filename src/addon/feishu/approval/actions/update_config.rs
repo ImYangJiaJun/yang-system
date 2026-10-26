@@ -41,6 +41,10 @@ pub(super) struct UpdateConfigInput {
     /// Base 时区（IANA 名）；省略即不改。
     #[serde(default)]
     pub(super) base_timezone: Option<String>,
+    /// 审批定义的数字 ID（只用于控制台「打开审批定义」跳转）；省略即不改，
+    /// `Some("")` = 清空。
+    #[serde(default)]
+    pub(super) approval_id: Option<String>,
     /// 全量替换字段映射；省略即不改。
     #[serde(default)]
     pub(super) maps: Option<Vec<FieldMapping>>,
@@ -87,13 +91,27 @@ impl UpdateConfigInput {
         if self.title.is_none()
             && self.enabled.is_none()
             && self.base_timezone.is_none()
+            && self.approval_id.is_none()
             && self.maps.is_none()
             && !self.has_backfill_fields()
         {
             return Err(BaseError::ParamInvalid(
-                "title/enabled/base_timezone/maps/回填列".to_string(),
+                "title/enabled/base_timezone/approval_id/maps/回填列".to_string(),
                 "至少提供一个要更新的字段".to_string(),
             ));
+        }
+        if let Some(approval_id) = self.approval_id.as_deref() {
+            let approval_id = approval_id.trim();
+            // 空串是「清空该列」，不是非法值。
+            if !approval_id.is_empty()
+                && (approval_id.len() > 64
+                    || !approval_id.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                return Err(BaseError::ParamInvalid(
+                    "approval_id".to_string(),
+                    "审批定义 ID 必须是 1..=64 位数字".to_string(),
+                ));
+            }
         }
         if let Some(title) = self.title.as_deref() {
             if title.trim().is_empty() || title.chars().count() > 100 {
@@ -273,6 +291,18 @@ pub(super) async fn handle(
             record.insert("base_timezone", serde_json::json!(timezone));
             after_timezone = timezone.to_string();
         }
+        // 审批定义 ID：空串 = 清空（写 NULL），非空写 trim 后的值。
+        if let Some(value) = input.approval_id.as_deref() {
+            let value = value.trim();
+            record.insert(
+                "approval_id",
+                if value.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(value)
+                },
+            );
+        }
         if let Some(plan) = &plan {
             for (key, name) in [
                 ("base_name", plan.base_name.as_deref()),
@@ -418,6 +448,7 @@ mod tests {
             title: None,
             enabled: None,
             base_timezone: None,
+            approval_id: None,
             maps: None,
             status_field: None,
             flow_field: None,
@@ -459,6 +490,39 @@ mod tests {
         ] {
             assert!(value.validate().is_ok(), "单个字段也应可更新");
         }
+    }
+
+    #[test]
+    fn approval_id_alone_is_a_valid_update() {
+        let value = UpdateConfigInput {
+            approval_id: Some("7699783289053989908".to_string()),
+            ..input()
+        };
+        assert!(value.validate().is_ok(), "仅 approval_id 也是合法更新");
+    }
+
+    #[test]
+    fn non_numeric_approval_id_is_rejected() {
+        let value = UpdateConfigInput {
+            approval_id: Some("ABC123".to_string()),
+            ..input()
+        };
+        assert!(value.validate().is_err(), "非数字必须被拒");
+
+        let value = UpdateConfigInput {
+            approval_id: Some("7".repeat(65)),
+            ..input()
+        };
+        assert!(value.validate().is_err(), "超过 64 位必须被拒");
+    }
+
+    #[test]
+    fn blank_approval_id_is_allowed_and_means_clear() {
+        let value = UpdateConfigInput {
+            approval_id: Some(String::new()),
+            ..input()
+        };
+        assert!(value.validate().is_ok(), "空串是清空语义，不是没给");
     }
 
     /// 六个回填列：`Some("")` 也算「给了」（清空该列），不能因空串被判成「没有更新字段」。

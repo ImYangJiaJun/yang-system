@@ -864,6 +864,39 @@ export function parseBitableLink(value: string): {
   return { baseToken, tableId, viewId };
 }
 
+/// 解析用户粘贴的审批定义输入：完整审批后台地址或裸 `definitionCode`。
+///
+/// 「打开审批定义」要跳飞书后台的定义页，而该页 URL 需要数字 `id`
+/// （形如 `.../createApproval?id=769...&definitionCode=BB85...`）——飞书接口
+/// 不返回它，只能由用户粘贴。地址里只有纯数字的 `id` 才采用（后端同口径），
+/// 其余一律当作没给；裸 Code 原样返回，`id` 为 `null`。
+export function parseApprovalDefinitionInput(value: string): {
+  approvalCode: string;
+  approvalId: string | null;
+} {
+  const raw = value.trim();
+  if (raw === "") return { approvalCode: "", approvalId: null };
+  // 只切第一个 `?` 之后的 query：后台地址前面的 host/路径不参与判断。
+  const queryIndex = raw.indexOf("?");
+  if (queryIndex === -1) return { approvalCode: raw, approvalId: null };
+  const params = new URLSearchParams(raw.slice(queryIndex + 1));
+  const code = params.get("definitionCode");
+  if (code === null) return { approvalCode: raw, approvalId: null };
+  const id = params.get("id");
+  return {
+    approvalCode: code,
+    approvalId: id !== null && /^[0-9]+$/.test(id) ? id : null,
+  };
+}
+
+/// 拼飞书审批后台的定义地址。`id` 必须在前——官方后台按它定位定义。
+export function approvalAdminUrl(
+  approvalCode: string,
+  approvalId: string,
+): string {
+  return `https://www.feishu.cn/approval/admin/createApproval?id=${encodeURIComponent(approvalId)}&definitionCode=${encodeURIComponent(approvalCode)}`;
+}
+
 /// 多维表格视图（`list_bitable_views` 的一项）。
 export type BitableView = {
   viewId: string;
@@ -1114,6 +1147,8 @@ export type ApprovalConfigItem = {
   baseToken: string;
   tableId: string;
   approvalCode: string;
+  /// 审批定义的数字 ID（控制台「打开审批定义」跳转用）；存量配置为 null。
+  approvalId?: string | null;
   applicantField: string;
   backfillField: string;
   /// 六个可选回填扩展列（设计 §5.1）：存目标列 `field_id`，空 = 不回填该列。

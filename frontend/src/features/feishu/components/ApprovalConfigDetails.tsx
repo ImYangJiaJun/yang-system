@@ -14,7 +14,11 @@ import { useToast } from "@/shared/lib/toast";
 import { useApprovalActions, useApprovalConfigList } from "../api";
 import { ListPagination } from "./ListPagination";
 import { StatusBadge } from "./StatusBadge";
-import { formatUnixSeconds, type ApprovalConfigItem } from "../types";
+import {
+  approvalAdminUrl,
+  formatUnixSeconds,
+  type ApprovalConfigItem,
+} from "../types";
 
 const WIDGET_LABELS: Record<string, string> = {
   input: "文本",
@@ -133,9 +137,11 @@ export function ApprovalConfigDetails({
     validCoordinate(item.baseToken) && validCoordinate(item.tableId)
       ? `https://www.feishu.cn/base/${encodeURIComponent(item.baseToken)}?table=${encodeURIComponent(item.tableId)}`
       : undefined;
-  const approvalUrl = validCoordinate(item.approvalCode)
-    ? `https://www.feishu.cn/approval/admin/createApproval?definitionCode=${encodeURIComponent(item.approvalCode)}`
-    : undefined;
+  const approvalId = item.approvalId?.trim() ?? "";
+  const approvalUrl =
+    validCoordinate(item.approvalCode) && /^[0-9]+$/.test(approvalId)
+      ? approvalAdminUrl(item.approvalCode, approvalId)
+      : undefined;
   const dispatchUrl = item.configKey
     ? `${window.location.origin}/api/v1/feishu/approval/dispatch/${item.configKey}`
     : undefined;
@@ -292,9 +298,17 @@ export function ApprovalConfigDetails({
             <p className="mt-2 break-words text-lg font-medium">
               {nameOf(item.approvalName, "审批名称待补充")}
             </p>
-            <ExternalLinkButton href={approvalUrl}>
-              打开审批定义
-            </ExternalLinkButton>
+            {approvalUrl ? (
+              <ExternalLinkButton href={approvalUrl}>
+                打开审批定义
+              </ExternalLinkButton>
+            ) : (
+              <p className="mt-3 text-xs text-muted-foreground">
+                {validCoordinate(item.approvalCode)
+                  ? "打开审批定义（请编辑配置补全审批定义链接）"
+                  : "打开审批定义（标识待核对）"}
+              </p>
+            )}
             <Button
               size="sm"
               variant="link"

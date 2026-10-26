@@ -47,6 +47,10 @@ pub(super) struct CreateConfigInput {
     pub(super) table_id: String,
     /// 审批定义 code。
     pub(super) approval_code: String,
+    /// 审批定义的数字 ID，只用于控制台「打开审批定义」跳转。由用户粘贴完整审批
+    /// 后台地址解析得到；空 / 缺省 = 不写。
+    #[serde(default)]
+    pub(super) approval_id: Option<String>,
     /// 申请人员字段（`field_id` **或**列名都接受，落库统一存 id）。
     pub(super) applicant_field: String,
     /// 回填字段（同上）。
@@ -99,6 +103,18 @@ impl CreateConfigInput {
                 return Err(BaseError::ParamInvalid(
                     name.to_string(),
                     "不能为空".to_string(),
+                ));
+            }
+        }
+        if let Some(approval_id) = self.approval_id.as_deref() {
+            let approval_id = approval_id.trim();
+            if !approval_id.is_empty()
+                && (approval_id.len() > 64
+                    || !approval_id.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                return Err(BaseError::ParamInvalid(
+                    "approval_id".to_string(),
+                    "审批定义 ID 必须是 1..=64 位数字".to_string(),
                 ));
             }
         }
@@ -210,6 +226,13 @@ pub(super) async fn handle(
             .map(|elapsed| elapsed.as_secs() as i64)
             .unwrap_or_default();
         let mut columns = Record::new();
+        // 审批定义 ID（可选）：仅控制台跳转用，空 / 缺省就不写。
+        if let Some(approval_id) = input.approval_id.as_deref() {
+            let approval_id = approval_id.trim();
+            if !approval_id.is_empty() {
+                columns.insert("approval_id", serde_json::json!(approval_id));
+            }
+        }
         columns.insert("config_key", serde_json::json!(&config_key));
         columns.insert("token_hash", serde_json::json!(&issued.hash));
         columns.insert("token_cipher", serde_json::json!(&issued.cipher));
@@ -284,6 +307,7 @@ mod tests {
             base_token: "appbcbWCzen6".to_string(),
             table_id: "tblsRc9GRRX".to_string(),
             approval_code: "CODE-TEST".to_string(),
+            approval_id: None,
             applicant_field: "申请人".to_string(),
             backfill_field: "审批编号".to_string(),
             base_timezone: "Asia/Shanghai".to_string(),
@@ -330,6 +354,33 @@ mod tests {
         }))
         .unwrap_or_else(|error| panic!("{error}"));
         assert!(legacy.status_field.is_none() && legacy.handler_field.is_none());
+    }
+
+    #[test]
+    fn numeric_approval_id_is_accepted_and_optional() {
+        let mut value = input();
+        value.approval_id = Some(" 7699783289053989908 ".to_string());
+        assert!(
+            value.validate().is_ok(),
+            "数字 id 应通过（首尾空白被 trim）"
+        );
+
+        let mut value = input();
+        value.approval_id = Some(String::new());
+        assert!(value.validate().is_ok(), "空串视为未给");
+
+        assert!(input().validate().is_ok(), "缺省通过");
+    }
+
+    #[test]
+    fn non_numeric_or_overlong_approval_id_is_rejected() {
+        let mut value = input();
+        value.approval_id = Some("ABC123".to_string());
+        assert!(value.validate().is_err(), "非数字必须被拒");
+
+        let mut value = input();
+        value.approval_id = Some("7".repeat(65));
+        assert!(value.validate().is_err(), "超过 64 位必须被拒");
     }
 
     #[test]

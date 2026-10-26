@@ -2457,3 +2457,41 @@ describe("审批配置可选回填扩展列（设计 §5.1）", () => {
     expect(body).not.toHaveProperty("status_field");
   });
 });
+
+describe("审批定义 id（控制台跳转）", () => {
+  const approvalDeps: FeishuInvokeDeps = {
+    session: deps.session,
+    catalog: catalogWith(
+      ["create_config", "update_config"].map((action) => ({
+        ...DATASOURCE_LIST_ACTION,
+        operation_id: `feishu.approval.${action}`,
+        path: `/api/v1/feishu/approval/${action}`,
+      })),
+    ),
+  };
+
+  it("创建：带 approvalId 时请求体含 trim 后的 approval_id", async () => {
+    const calls = stubFetch({ code: 0, message: "ok", data: { config_id: 7 } });
+    await createApprovalConfig(
+      {
+        baseToken: "app",
+        tableId: "table",
+        approvalCode: "code",
+        approvalId: " 7699783289053989908 ",
+        applicantField: "person",
+        backfillField: "serial",
+        baseTimezone: "Asia/Shanghai",
+      },
+      approvalDeps,
+    );
+    const body = calls[0]?.body as Record<string, unknown>;
+    expect(body).toMatchObject({ approval_id: "7699783289053989908" });
+  });
+
+  it("更新：approvalId 空串也必须发送（表示清空）", async () => {
+    const calls = stubFetch({ code: 0, message: "ok", data: null });
+    await updateApprovalConfig(7, { approvalId: "" }, approvalDeps);
+    const body = calls[0]?.body as Record<string, unknown>;
+    expect(body).toMatchObject({ config_id: 7, approval_id: "" });
+  });
+});

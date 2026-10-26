@@ -2516,6 +2516,14 @@
                     "description": "审批定义 code。",
                     "type": "string"
                   },
+                  "approval_id": {
+                    "default": null,
+                    "description": "审批定义的数字 ID，只用于控制台「打开审批定义」跳转。由用户粘贴完整审批 后台地址解析得到；空 / 缺省 = 不写。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "backfill_field": {
                     "description": "回填字段（同上）。",
                     "type": "string"
@@ -3847,6 +3855,14 @@
                 },
                 "description": "可更新字段均可省略，至少给一个。",
                 "properties": {
+                  "approval_id": {
+                    "default": null,
+                    "description": "审批定义的数字 ID（只用于控制台「打开审批定义」跳转）；省略即不改， `Some(\"\")` = 清空。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "base_timezone": {
                     "default": null,
                     "description": "Base 时区（IANA 名）；省略即不改。",

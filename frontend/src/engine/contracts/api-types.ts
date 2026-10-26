@@ -4467,6 +4467,11 @@ export interface operations {
                     applicant_field: string;
                     /** @description 审批定义 code。 */
                     approval_code: string;
+                    /**
+                     * @description 审批定义的数字 ID，只用于控制台「打开审批定义」跳转。由用户粘贴完整审批 后台地址解析得到；空 / 缺省 = 不写。
+                     * @default null
+                     */
+                    approval_id?: string | null;
                     /** @description 回填字段（同上）。 */
                     backfill_field: string;
                     /** @description Base 时区（IANA 名）。多维表格日期是不带时区的毫秒时间戳，而审批 `date` 控件要带偏移量——猜错会让审批里的时间整体偏移，所以必须显式给定。 */
@@ -5181,6 +5186,11 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": {
+                    /**
+                     * @description 审批定义的数字 ID（只用于控制台「打开审批定义」跳转）；省略即不改， `Some("")` = 清空。
+                     * @default null
+                     */
+                    approval_id?: string | null;
                     /**
                      * @description Base 时区（IANA 名）；省略即不改。
                      * @default null

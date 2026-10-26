@@ -31,6 +31,7 @@ pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "base_token",
     "table_id",
     "approval_code",
+    "approval_id",
     "applicant_field",
     "backfill_field",
     "status_field",
@@ -123,6 +124,8 @@ pub(super) struct ConfigItem {
     table_id: String,
     /// 审批定义 code。
     approval_code: String,
+    /// 审批定义的数字 ID（控制台「打开审批定义」跳转用）；存量配置为 `None`。
+    approval_id: Option<String>,
     /// 申请人员字段 ID（存 id：改列名不会让配置失效）。
     applicant_field: String,
     /// 回填字段 ID。
@@ -313,6 +316,7 @@ pub(super) async fn handle(
             base_token: record.require("base_token")?,
             table_id: record.require("table_id")?,
             approval_code: record.require("approval_code")?,
+            approval_id: record.optional("approval_id")?,
             applicant_field: record.require("applicant_field")?,
             backfill_field: record.require("backfill_field")?,
             status_field: record.optional("status_field")?,
@@ -409,6 +413,7 @@ mod tests {
             base_token: "appTest".to_string(),
             table_id: "tblTest".to_string(),
             approval_code: "CODE-TEST".to_string(),
+            approval_id: None,
             applicant_field: "fldP".to_string(),
             backfill_field: "fldB".to_string(),
             status_field: Some("fldStatus".to_string()),

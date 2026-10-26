@@ -66,6 +66,10 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .max_length(128)
                 .searchable(true)
                 .filterable(true),
+            // 审批定义的数字 ID：只用于控制台「打开审批定义」跳转审批后台（URL 需要
+            // `id=` 参数，而「查看审批定义」接口不返回它），由用户粘贴完整审批后台
+            // 地址解析得到；存量配置为空。
+            approval_id => Str::new().title("审批定义 ID").max_length(64),
             // --- 两个关键字段的坐标 ---
             //
             // 存 **field_id** 而不是字段名：用户在多维表格里改列名会静默失配，
@@ -297,6 +301,17 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} 字段必须存在"));
             assert!(!field.is_required(), "{name} 可空");
         }
+    }
+
+    #[test]
+    fn approval_id_is_optional() {
+        // 只用于控制台「打开审批定义」跳转：由用户粘贴审批后台地址解析，
+        // 存量配置没有这个值，不能设必填。
+        let definition = definition();
+        let approval_id = definition
+            .field("approval_id")
+            .unwrap_or_else(|| panic!("approval_id 字段必须存在"));
+        assert!(!approval_id.is_required(), "approval_id 可空");
     }
 
     #[test]
