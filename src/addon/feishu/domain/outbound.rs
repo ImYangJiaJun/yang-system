@@ -116,11 +116,12 @@ pub(crate) const CODE_INSTANCE_NOT_FOUND: i32 = 1390003;
 // 请求/响应
 // ---------------------------------------------------------------------------
 
-/// 出站方法。只支持两种：取 token 与取记录都是 GET/POST 的简单形态。
+/// 出站方法。取 token、取记录用 GET/POST；编辑已发送的 IM 消息用 PUT。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutboundMethod {
     Get,
     Post,
+    Put,
 }
 
 /// 传输中立的请求描述。
@@ -218,6 +219,7 @@ impl OutboundTransport for HttpClientTransport {
         let builder = match request.method {
             OutboundMethod::Get => self.client.get(&request.url),
             OutboundMethod::Post => self.client.post(&request.url),
+            OutboundMethod::Put => self.client.put(&request.url),
         };
 
         let mut builder = builder.queries(
@@ -618,6 +620,9 @@ pub(crate) async fn send_with_retry(
 ) -> Result<OutboundResponse, OutboundFailure> {
     // 只打印固定接口名；完整 URL 可能携带资源 Token 或下载凭证。
     let endpoint = match request.url.split('?').next().unwrap_or_default() {
+        // 编辑消息：`PUT /im/v1/messages/:message_id`。带尾斜杠，不会吞掉发消息的
+        // `POST /im/v1/messages`（那个保持 other）。
+        url if url.contains("/im/v1/messages/") => "im.messages.edit",
         url if url.contains("/approval/v4/instances") => "approval.instances",
         url if url.contains("/approval/v4/approvals/") => "approval.definition",
         url if url.ends_with("/fields") => "bitable.fields",
@@ -835,6 +840,50 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("本地 HTTP 服务未在 10 秒内收齐全部请求"))
             .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// PUT 必须真的以 PUT 发出，且**不受审批创建名额闸门约束**。
+    ///
+    /// 编辑消息走 `PUT /im/v1/messages/:message_id`；若 `Put` 误落进 create 闸门，
+    /// 未配置共享限流器时会直接 `ConfigError`，消息永远补不上行号。
+    #[tokio::test]
+    async fn http_transport_sends_put_outside_the_approval_create_gate() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let address = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap_or_else(|e| panic!("{e}"));
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap_or_else(|e| panic!("{e}")));
+            }
+            let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let body = r#"{"code":0,"msg":"ok"}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .unwrap_or_else(|e| panic!("{e}"));
+            head
+        });
+        // 刻意不配置审批创建名额：Put 若被闸门拦住会在这里直接失败。
+        let transport =
+            HttpClientTransport::new(HttpClient::new(2).unwrap_or_else(|e| panic!("{e}")));
+        let mut request = get_request();
+        request.method = OutboundMethod::Put;
+        request.url = format!("http://{address}/open-apis/im/v1/messages/om_x");
+        let response = transport
+            .send(request)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(response.status, 200);
+        let head = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap_or_else(|_| panic!("本地服务未在 5 秒内收到请求"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(head.starts_with("put "), "实际请求行: {head}");
     }
 
     // ---- classify ----

@@ -28,7 +28,7 @@
 
 #![allow(dead_code)] // 出站能力先落地；消费者（拉取 worker）在后续批次接入。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{ensure, Context};
 use serde::Deserialize;
@@ -1163,19 +1163,25 @@ pub(crate) async fn list_all_records(
     })
 }
 
-/// 记录在**当前视图**里的行号（1 起）。找不到或翻页超上限时返回 `None`。
+/// 一次扫描取多条记录在**当前视图**里的行号（1 起）。
 ///
 /// 只用于消息展示：行号随视图排序/筛选变化，不能当稳定标识——稳定定位仍是
 /// `record_id`（技术定位行）。翻页上限与种子扫描同量级，超了宁可没有行号，
-/// 也不把整张表拉完。
-pub(crate) async fn record_row_number(
+/// 也不把整张表拉完；因此翻页结束或超上限时返回**已找到的部分**而不报错。
+/// 全部目标找到即提前返回。
+pub(crate) async fn record_row_numbers(
     transport: &dyn OutboundTransport,
     sleeper: &dyn Sleeper,
     tokens: &TenantTokenProvider,
     coordinates: &BitableCoordinates,
-    record_id: &str,
-) -> Result<Option<usize>, OutboundFailure> {
+    record_ids: &[String],
+) -> Result<HashMap<String, usize>, OutboundFailure> {
     const MAX_PAGES: u32 = 20;
+    let mut found = HashMap::new();
+    if record_ids.is_empty() {
+        return Ok(found);
+    }
+    let targets: HashSet<&str> = record_ids.iter().map(String::as_str).collect();
     let url = records_url(&coordinates.app_token, &coordinates.table_id).map_err(|error| {
         OutboundFailure {
             kind: FailureKind::Fatal { code: 0 },
@@ -1198,20 +1204,23 @@ pub(crate) async fn record_row_number(
         let page: ListRecordsData = fetch_page(transport, sleeper, tokens, &url, query).await?;
         for item in &page.items {
             row += 1;
-            if item.record_id == record_id {
-                return Ok(Some(row));
+            if targets.contains(item.record_id.as_str()) {
+                found.insert(item.record_id.clone(), row);
             }
         }
-        if !page.has_more {
-            return Ok(None);
+        if found.len() == targets.len() {
+            return Ok(found);
         }
-        // `has_more=true` 却没有 page_token：再翻会重取第一页，直接放弃行号。
+        if !page.has_more {
+            return Ok(found);
+        }
+        // `has_more=true` 却没有 page_token：再翻会重取第一页，直接放弃剩余行号。
         match page.page_token.filter(|token| !token.is_empty()) {
             Some(token) => cursor = Some(token),
-            None => return Ok(None),
+            None => return Ok(found),
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// 拉取某张数据表下的全部视图。
@@ -2105,6 +2114,207 @@ mod tests {
     #[test]
     fn zero_page_size_is_rejected() {
         assert!(list_records_query(&[], None, None, 0).is_err());
+    }
+
+    // ---- 行号扫描（批量） ----
+
+    use super::super::tenant_token::{FeishuCredentials, TenantTokenCache};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn row_page(items: &[&str], has_more: bool, page_token: Option<&str>) -> String {
+        serde_json::json!({
+            "code": 0,
+            "data": {
+                "has_more": has_more,
+                "page_token": page_token,
+                "items": items
+                    .iter()
+                    .map(|id| serde_json::json!({"record_id": id, "fields": {}}))
+                    .collect::<Vec<_>>(),
+            }
+        })
+        .to_string()
+    }
+
+    struct ScanTransport {
+        responses: Mutex<VecDeque<String>>,
+        seen: Mutex<Vec<OutboundRequest>>,
+    }
+
+    impl ScanTransport {
+        fn new(bodies: Vec<String>) -> Self {
+            Self {
+                responses: Mutex::new(bodies.into()),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<OutboundRequest> {
+            self.seen.lock().unwrap_or_else(|e| panic!("{e}")).clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundTransport for ScanTransport {
+        async fn send(
+            &self,
+            request: OutboundRequest,
+        ) -> Result<OutboundResponse, yang_base::BaseError> {
+            self.seen
+                .lock()
+                .map_err(|_| yang_base::BaseError::ConfigError("锁中毒".into()))?
+                .push(request);
+            let body = self
+                .responses
+                .lock()
+                .map_err(|_| yang_base::BaseError::ConfigError("锁中毒".into()))?
+                .pop_front()
+                .unwrap_or_else(|| panic!("脚本耗尽"));
+            Ok(OutboundResponse {
+                status: 200,
+                body,
+                bytes: None,
+                headers: BTreeMap::new(),
+            })
+        }
+    }
+
+    struct ScanCache;
+    #[async_trait::async_trait]
+    impl TenantTokenCache for ScanCache {
+        async fn get(&self) -> anyhow::Result<Option<String>> {
+            Ok(Some("t-scan".into()))
+        }
+        async fn put(&self, _: &str, _: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn invalidate(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn acquire_lock(&self, _: &str, _: i64) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn release_lock(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoSleep;
+    #[async_trait::async_trait]
+    impl Sleeper for NoSleep {
+        async fn sleep(&self, _: Duration) {}
+    }
+
+    fn scan_tokens(transport: Arc<ScanTransport>) -> TenantTokenProvider {
+        TenantTokenProvider::new(
+            Arc::new(ScanCache),
+            transport,
+            Arc::new(NoSleep),
+            FeishuCredentials {
+                app_id: "cli_test".into(),
+                app_secret: "secret".into(),
+            },
+            "row-scan-test",
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn scan_coordinates() -> BitableCoordinates {
+        BitableCoordinates {
+            app_token: "appRowScan".into(),
+            table_id: "tblRowScan".into(),
+            view_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn row_numbers_collect_targets_across_pages_with_one_scan() {
+        let transport = Arc::new(ScanTransport::new(vec![
+            row_page(&["recX", "recA", "recY"], true, Some("pg2")),
+            row_page(&["recB", "recZ"], false, None),
+        ]));
+        let tokens = scan_tokens(transport.clone());
+        let ids = vec!["recA".to_string(), "recB".to_string()];
+
+        let rows = record_row_numbers(
+            transport.as_ref(),
+            &NoSleep,
+            &tokens,
+            &scan_coordinates(),
+            &ids,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(rows.get("recA"), Some(&2), "第一页第 2 行");
+        assert_eq!(rows.get("recB"), Some(&4), "第二页第 2 条 = 总第 4 行");
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2, "一次扫描翻两页，不能按记录重复扫");
+        assert!(
+            requests[1]
+                .query
+                .iter()
+                .any(|(key, value)| key == "page_token" && value == "pg2"),
+            "第二页必须带 page_token"
+        );
+    }
+
+    #[tokio::test]
+    async fn row_numbers_stop_once_every_target_is_found() {
+        let transport = Arc::new(ScanTransport::new(vec![row_page(
+            &["recX", "recA"],
+            true,
+            Some("pg2"),
+        )]));
+        let tokens = scan_tokens(transport.clone());
+        let ids = vec!["recA".to_string()];
+
+        let rows = record_row_numbers(
+            transport.as_ref(),
+            &NoSleep,
+            &tokens,
+            &scan_coordinates(),
+            &ids,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(rows.get("recA"), Some(&2));
+        assert_eq!(transport.requests().len(), 1, "全部目标已找到就不能再翻页");
+    }
+
+    #[tokio::test]
+    async fn row_numbers_return_empty_when_missing_or_not_requested() {
+        let transport = Arc::new(ScanTransport::new(vec![row_page(&["recX"], false, None)]));
+        let tokens = scan_tokens(transport.clone());
+        let ids = vec!["recMissing".to_string()];
+        let rows = record_row_numbers(
+            transport.as_ref(),
+            &NoSleep,
+            &tokens,
+            &scan_coordinates(),
+            &ids,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(rows.is_empty(), "找不到时不报错，返回已找到的部分（空）");
+        assert_eq!(transport.requests().len(), 1);
+
+        let transport = Arc::new(ScanTransport::new(vec![]));
+        let tokens = scan_tokens(transport.clone());
+        let rows = record_row_numbers(
+            transport.as_ref(),
+            &NoSleep,
+            &tokens,
+            &scan_coordinates(),
+            &[],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(rows.is_empty());
+        assert!(transport.requests().is_empty(), "空目标不发请求");
     }
 
     // ---- 记录创建人（通知兜底接收人） ----

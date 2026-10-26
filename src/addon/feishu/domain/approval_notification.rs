@@ -136,6 +136,7 @@ const MESSAGE_RETRY: RetryPolicy = RetryPolicy {
 };
 
 /// 链接地址由坐标校验或飞书记录接口提供，不能从业务正文解析。
+#[derive(Debug, Clone)]
 pub(crate) struct FeedbackReference {
     pub(crate) label: &'static str,
     pub(crate) text: String,
@@ -203,6 +204,7 @@ fn post_content(text: &str, references: &[FeedbackReference]) -> serde_json::Val
     let mut current_value = None;
     let mut specific_step = None;
     let mut general_step = None;
+    let mut technical = None;
     let mut reasons = Vec::new();
     let mut context = Vec::new();
     for line in body.lines() {
@@ -219,7 +221,10 @@ fn post_content(text: &str, references: &[FeedbackReference]) -> serde_json::Val
             "记录" => record = Some(value),
             "数据表" => table = Some(value),
             "点击时间" => clicked_at = Some(value),
-            "配置" | "多维表" | "审批" | "技术定位" | "控件定位" => {}
+            "配置" | "多维表" | "审批" | "控件定位" => {}
+            // reason 里可能先有一处 source_key 的技术定位；render 追加的 Base/表/记录
+            // 在最后，覆盖后取到的就是稳定定位（含 record_id）。
+            "技术定位" => technical = Some(value),
             "当前值" => current_value = Some(value),
             "处理" => specific_step = Some(value),
             "下一步" => general_step = Some(value),
@@ -274,6 +279,12 @@ fn post_content(text: &str, references: &[FeedbackReference]) -> serde_json::Val
             node,
         ]);
     }
+    if let Some(value) = technical {
+        content.push(vec![
+            json!({"tag":"text","text":"技术定位：","style":["bold"]}),
+            json!({"tag":"text","text":value}),
+        ]);
+    }
     json!({"zh_cn":{"title":title,"content":content}})
 }
 
@@ -289,7 +300,7 @@ async fn send_post(
     recipient.validate().map_err(|_| invalid_response())?;
     let content =
         serde_json::to_string(&post_content(text, references)).map_err(|_| invalid_response())?;
-    let mut request = OutboundRequest {
+    let request = OutboundRequest {
         method: OutboundMethod::Post,
         url: "https://open.feishu.cn/open-apis/im/v1/messages".into(),
         query: vec![(
@@ -310,6 +321,23 @@ async fn send_post(
         timeout_secs: Some(2),
         idempotent: true,
     };
+    let value = send_message_request(transport, sleeper, tokens, request).await?;
+    value["data"]["message_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(invalid_response)
+}
+
+/// 发送与编辑共用的尾部：出站重试、`code == 0` 确认、token 失效后刷新重试一次。
+///
+/// 只返回已确认成功的响应 JSON；原始响应体绝不向上抛（含内部信息）。
+async fn send_message_request(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    mut request: OutboundRequest,
+) -> Result<serde_json::Value, OutboundFailure> {
     let mut refreshed = false;
     loop {
         match send_with_retry(transport, sleeper, &request, MESSAGE_RETRY).await {
@@ -319,11 +347,7 @@ async fn send_post(
                 if value["code"].as_i64() != Some(0) {
                     return Err(invalid_response());
                 }
-                return value["data"]["message_id"]
-                    .as_str()
-                    .filter(|id| !id.trim().is_empty())
-                    .map(str::to_owned)
-                    .ok_or_else(invalid_response);
+                return Ok(value);
             }
             Err(failure) if failure.kind == FailureKind::TokenExpired && !refreshed => {
                 refreshed = true;
@@ -337,6 +361,53 @@ async fn send_post(
             Err(failure) => return Err(failure),
         }
     }
+}
+
+/// 编辑已发送的消息：`PUT /open-apis/im/v1/messages/:message_id`。
+///
+/// 只能编辑本机器人发出、未撤回、未超可编辑时间的消息；同一条最多编辑 20 次
+/// （飞书限制）。这里只做一次编辑，不重试业务失败。
+pub(crate) async fn edit_feedback(
+    transport: &dyn OutboundTransport,
+    sleeper: &dyn Sleeper,
+    tokens: &TenantTokenProvider,
+    message_id: &str,
+    text: &str,
+    references: &[FeedbackReference],
+) -> Result<(), OutboundFailure> {
+    if !valid_message_id(message_id) {
+        return Err(invalid_response());
+    }
+    let content =
+        serde_json::to_string(&post_content(text, references)).map_err(|_| invalid_response())?;
+    let request = OutboundRequest {
+        method: OutboundMethod::Put,
+        url: format!("https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"),
+        query: Vec::new(),
+        bearer_token: Some(
+            tokens
+                .tenant_access_token()
+                .await
+                .map_err(|_| invalid_response())?,
+        ),
+        json_body: Some(serde_json::json!({"msg_type":"post","content":content})),
+        raw_body: None,
+        binary_limit: None,
+        timeout_secs: Some(2),
+        idempotent: true,
+    };
+    send_message_request(transport, sleeper, tokens, request)
+        .await
+        .map(|_| ())
+}
+
+/// 消息 ID 直接进 URL 路径，只放 ASCII 字母数字与 `_` `-`。
+fn valid_message_id(message_id: &str) -> bool {
+    !message_id.is_empty()
+        && message_id.len() <= 128
+        && message_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn invalid_response() -> OutboundFailure {
@@ -420,10 +491,32 @@ mod tests {
                     [{"tag":"text","text":"记录：","style":["bold"]},{"tag":"text","text":"公司\"A\"😀：子公司（付款表）"}],
                     [{"tag":"text","text":"原因：","style":["bold"]},{"tag":"text","text":"没有唯一且完全匹配的启用选项"}],
                     [{"tag":"text","text":"涉及：","style":["bold"]},{"tag":"text","text":"审批控件：明细 / 付款公司；来源字段：实际付款公司；选项来源：合作企业 / 企业名称"}],
-                    [{"tag":"text","text":"下一步：","style":["bold"]},{"tag":"text","text":"清理同名重复项"}]
+                    [{"tag":"text","text":"下一步：","style":["bold"]},{"tag":"text","text":"清理同名重复项"}],
+                    [{"tag":"text","text":"技术定位：","style":["bold"]},{"tag":"text","text":"Base=appExample；表=tblExample"}]
                 ]
             }})
         );
+    }
+
+    /// 技术定位行必须真的进 IM 富文本——record_id 是唯一稳定的定位标识。
+    /// 正文里可能先出现一处 source_key 的技术定位，取**最后一处**（render 追加的
+    /// Base/表/记录）。
+    #[test]
+    fn post_content_shows_the_technical_record_id() {
+        let text = "【审批实例已确认】\n记录：第 2 行\n技术定位：source_key=fldExample\n技术定位：Base=baseA；表=tblA；记录=rec123";
+        let post = post_content(text, &[]);
+        let rows = post["zh_cn"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("缺少段落"));
+        let technical: Vec<_> = rows
+            .iter()
+            .filter(|row| row[0]["text"] == "技术定位：")
+            .collect();
+        assert_eq!(technical.len(), 1, "技术定位只保留最后一处: {post}");
+        assert_eq!(technical[0][1]["text"], "Base=baseA；表=tblA；记录=rec123");
+        let rendered = post.to_string();
+        assert!(rendered.contains("技术定位："), "{rendered}");
+        assert!(rendered.contains("记录=rec123"), "{rendered}");
     }
 
     #[test]
@@ -516,7 +609,7 @@ mod tests {
             let post = post_content(&text, &[]);
             assert_eq!(post["zh_cn"]["title"], status.heading());
             let rows = &post["zh_cn"]["content"];
-            assert_eq!(rows.as_array().map(Vec::len), Some(3));
+            assert_eq!(rows.as_array().map(Vec::len), Some(4));
             assert_eq!(rows[0][0]["text"], "数据表：");
             assert_eq!(rows[0][1]["text"], "付款表");
             let reason_label =
@@ -528,6 +621,8 @@ mod tests {
             assert_eq!(rows[1][0]["text"], reason_label);
             assert_eq!(rows[1][1]["text"], "安全说明");
             assert_eq!(rows[2][0]["text"], "下一步：");
+            assert_eq!(rows[3][0]["text"], "技术定位：");
+            assert_eq!(rows[3][1]["text"], "Base=base；表=table");
         }
     }
 
@@ -606,6 +701,7 @@ mod tests {
         async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
             assert!(
                 request.url.ends_with("/im/v1/messages")
+                    || request.url.contains("/im/v1/messages/")
                     || request
                         .url
                         .ends_with("/auth/v3/tenant_access_token/internal"),
@@ -728,6 +824,86 @@ mod tests {
                 "成都市易威行科技有限公司"
             );
         }
+    }
+
+    /// 编辑消息：PUT 到同一条 message_id，正文形状与发送一致（post），
+    /// 且技术定位里的 record_id 与行号都出现在富文本里。
+    #[tokio::test]
+    async fn edit_feedback_puts_post_to_the_same_message() {
+        let replay = Arc::new(Replay::new(vec![(
+            200,
+            json!({"code":0,"data":{"message_id":"om_x"}}),
+        )]));
+        let text = "【本轮未创建审批，需要修正数据】\n记录：第 2 行\n数据表：付款表\n技术定位：Base=baseA；表=tblA；记录=recB";
+        let references = [FeedbackReference {
+            label: "原记录",
+            text: "第 2 行".into(),
+            href: Some("https://tenant.feishu.cn/record/recB".into()),
+        }];
+        let result = edit_feedback(
+            replay.as_ref(),
+            &NoSleep,
+            &provider(replay.clone()),
+            "om_x",
+            text,
+            &references,
+        )
+        .await;
+        assert!(result.is_ok(), "编辑应成功: {result:?}");
+        let requests = replay.requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method, OutboundMethod::Put);
+        assert!(
+            request.url.ends_with("/open-apis/im/v1/messages/om_x"),
+            "{}",
+            request.url
+        );
+        assert!(request.query.is_empty(), "编辑接口没有查询参数");
+        assert_eq!(request.timeout_secs, Some(2));
+        assert!(request.idempotent);
+        let body = request
+            .json_body
+            .as_ref()
+            .unwrap_or_else(|| panic!("缺少正文"));
+        assert_eq!(body["msg_type"], "post");
+        let content: Value = serde_json::from_str(
+            body["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("content 必须是 JSON 字符串")),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let rows = content["zh_cn"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("缺少段落"));
+        let technical = rows
+            .iter()
+            .find(|row| row[0]["text"] == "技术定位：")
+            .unwrap_or_else(|| panic!("缺少技术定位段: {content}"));
+        assert_eq!(technical[1]["text"], "Base=baseA；表=tblA；记录=recB");
+        assert!(
+            rows.iter().any(|row| row[1]["text"]
+                .as_str()
+                .is_some_and(|value| value.contains("第 2 行"))),
+            "正文缺少行号: {content}"
+        );
+
+        // 非法 message_id 必须在出站前拒绝，不烧配额。
+        let replay = Arc::new(Replay::new(vec![]));
+        let too_long = "x".repeat(129);
+        for invalid in ["", "om/evil", "om x", "\u{0000}", too_long.as_str()] {
+            let result = edit_feedback(
+                replay.as_ref(),
+                &NoSleep,
+                &provider(replay.clone()),
+                invalid,
+                text,
+                &references,
+            )
+            .await;
+            assert!(result.is_err(), "非法 message_id 必须拒绝: {invalid:?}");
+        }
+        assert!(replay.requests().is_empty());
     }
 
     #[tokio::test]

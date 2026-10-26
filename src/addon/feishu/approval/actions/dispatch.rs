@@ -56,6 +56,7 @@ use crate::addon::feishu::domain::approval_notification::{
     self, FeedbackReference, NotificationRecipient, NotificationResult, NotificationStatus,
     ReceiveIdType,
 };
+use crate::addon::feishu::domain::approval_row_edit;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
@@ -374,10 +375,6 @@ struct DispatchOutcome {
     /// 必填列的取值来源。旧形态从请求体拿，改形后请求体不再携带配置数据。
     base_token: Option<String>,
     table_id: Option<String>,
-    /// 记录在当前视图里的行号（1 起）；查不到时为 `None`。
-    ///
-    /// 只用于通知正文的「记录：第 N 行」；稳定定位仍是技术定位行里的 `record_id`。
-    row_number: Option<usize>,
     /// 通知的兜底接收人：派发时解析出的申请人 open_id（传参优先、回退表格列，
     /// 与 `dispatch_one` 内部的判定同源）。`complete_feedback` 在请求未显式
     /// 指定 `notification_recipient` 时用它兜底——「创建完成就通知触发人」的落点。
@@ -419,7 +416,6 @@ impl DispatchOutcome {
             config_id,
             base_token: None,
             table_id: None,
-            row_number: None,
             applicant_open_id: None,
             requested_applicant_open_id: None,
             creator_open_id: None,
@@ -440,7 +436,6 @@ impl DispatchOutcome {
             config_id,
             base_token: None,
             table_id: None,
-            row_number: None,
             applicant_open_id: None,
             requested_applicant_open_id: None,
             creator_open_id: None,
@@ -474,7 +469,6 @@ impl DispatchOutcome {
             config_id,
             base_token,
             table_id,
-            row_number: None,
             applicant_open_id: None,
             requested_applicant_open_id: None,
             creator_open_id: None,
@@ -1127,17 +1121,6 @@ async fn dispatch_single(
             }
         };
 
-    // 行号只用于通知正文；查不到（翻页超上限、并发删除）就留空，不阻塞派发。
-    let row_number = bitable::record_row_number(
-        outbound.transport(),
-        outbound.sleeper(),
-        &outbound.tokens,
-        &coordinates,
-        record_id,
-    )
-    .await
-    .ok()
-    .flatten();
     let snapshot = DispatchSnapshot::new(
         &config_row,
         map_maps,
@@ -1153,7 +1136,7 @@ async fn dispatch_single(
         .into_iter()
         .next();
     let Some(claim) = claim else {
-        let mut outcome = DispatchOutcome::success(
+        return Ok(DispatchOutcome::success(
             Outcome::Accepted,
             Some(config_id),
             Some(base_token),
@@ -1162,9 +1145,7 @@ async fn dispatch_single(
             FeedbackStatus::Queued,
             "任务已被受理或正在处理，本轮不会重复执行".into(),
             None,
-        );
-        outcome.row_number = row_number;
-        return Ok(outcome);
+        ));
     };
     let persisted = context
         .approval_tasks()
@@ -1296,7 +1277,6 @@ async fn dispatch_single(
     );
     outcome.claim = Some(claim);
     outcome.instance_code = instance_code;
-    outcome.row_number = row_number;
     outcome.applicant_open_id = notify_open_id;
     outcome.requested_applicant_open_id = requested_applicant_open_id;
     outcome.creator_open_id = creator_open_id;
@@ -1500,12 +1480,15 @@ async fn complete_feedback(
         .and_then(|row| row.optional::<String>("base_timezone").ok().flatten())
         .and_then(|zone| FixedOffset::from_iana(zone.trim()).ok())
         .map(|timezone| format_local(clicked_at, timezone));
+    // 原始原因要在 render 覆写 `outcome.message` 之前留一份：后台补行号时
+    // 需要用同一份原文重渲染（消息先按无行号出站）。
+    let reason = outcome.message.clone();
     outcome.message = approval_feedback::render(
         outcome.status,
-        &outcome.message,
+        &reason,
         &names,
         record_id,
-        outcome.row_number,
+        None,
         clicked_at.as_deref(),
         base_token,
         table_id,
@@ -1542,7 +1525,7 @@ async fn complete_feedback(
                         &name("approval_name"),
                         record_url,
                     );
-                    approval_notification::send_feedback(
+                    let notification = approval_notification::send_feedback(
                         outbound.transport(),
                         outbound.sleeper(),
                         &outbound.tokens,
@@ -1550,7 +1533,35 @@ async fn complete_feedback(
                         &outcome.message,
                         &references,
                     )
-                    .await
+                    .await;
+                    // 消息先按「无行号」立即出站；行号在后台扫表后用飞书编辑
+                    // 消息接口补进**同一条**消息，不阻塞本请求。
+                    if let Some(record_id) = record_id {
+                        if let Some(edit) = approval_row_edit::RowNumberEdit::after_send(
+                            &notification,
+                            outcome.status,
+                            &reason,
+                            &names,
+                            record_id,
+                            clicked_at.as_deref(),
+                            base_token,
+                            table_id,
+                            &references,
+                        ) {
+                            // 显式丢弃 JoinHandle：后台任务独立执行（detach），
+                            // 请求不等待它。
+                            std::mem::drop(tokio::spawn(async move {
+                                approval_row_edit::apply(
+                                    outbound.transport(),
+                                    outbound.sleeper(),
+                                    &outbound.tokens,
+                                    vec![edit],
+                                )
+                                .await;
+                            }));
+                        }
+                    }
+                    notification
                 }
                 Err(_) => NotificationResult::unavailable(),
             },
@@ -1622,9 +1633,8 @@ fn feedback_references(
     if record_id.is_some() {
         references.push(FeedbackReference {
             label: "原记录",
-            text: outcome
-                .row_number
-                .map_or_else(|| "打开原记录".to_string(), |row| format!("第 {row} 行")),
+            // 行号由发送后的编辑任务补；首条消息这里只放可点击的文案。
+            text: "打开原记录".to_string(),
             href: record_url,
         });
     }

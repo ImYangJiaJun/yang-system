@@ -9,6 +9,7 @@ pub(crate) mod approval_match;
 pub(crate) mod approval_notification;
 pub(crate) mod approval_provision;
 pub(crate) mod approval_rate_limit;
+pub(crate) mod approval_row_edit;
 pub(crate) mod approval_uuid;
 pub(crate) mod bitable;
 pub(crate) mod context;

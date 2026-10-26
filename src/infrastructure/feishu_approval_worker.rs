@@ -60,6 +60,7 @@ use crate::addon::feishu::domain::approval_feedback;
 use crate::addon::feishu::domain::approval_notification::{
     FeedbackReference, NotificationRecipient, ReceiveIdType,
 };
+use crate::addon::feishu::domain::approval_row_edit;
 use crate::addon::feishu::domain::approval_uuid::derive_uuid;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -564,6 +565,7 @@ async fn run_round(
 
     let mut counts = [0usize; 4];
     let mut idled = false;
+    let mut row_edits = Vec::new();
     for task in &claimed {
         if idled {
             break;
@@ -581,23 +583,26 @@ async fn run_round(
             break;
         }
 
-        let outcome = async {
+        let (outcome, edit) = async {
             let task_started = std::time::Instant::now();
             runner.heartbeat.mark("process", Some(task.id));
             let processed = process_one(runner, task).await;
             runner.heartbeat.mark("record_outcome", Some(task.id));
-            record_outcome(runner, task, &processed).await;
+            let edit = record_outcome(runner, task, &processed).await;
             tracing::debug!(
                 duration_ms = task_started.elapsed().as_millis() as u64,
                 "审批任务本轮处理结束"
             );
-            processed.result
+            (processed.result, edit)
         }
         .instrument(
             tracing::info_span!("approval_task", task_id = task.id, config_id = task.config_id,
             table_id = %task.table_id, record_id = %task.record_id),
         )
         .await;
+        if let Some(edit) = edit {
+            row_edits.push(edit);
+        }
         counts[match outcome {
             DispatchResult::Backfilled { .. } => 0,
             DispatchResult::Waiting { .. } => 1,
@@ -608,6 +613,19 @@ async fn run_round(
     // 全部走完才推进游标：中途 `idled` 中断时**不推进**，否则会跳过未处理的记录。
     if !idled {
         cursor.advance(&claimed);
+    }
+
+    // 行号补写放在**发送之后**：消息已先按无行号出站，这里只扫一次表、逐条编辑
+    // 同一条消息。中断（idled）时也要补已收集的消息——它们已经送达。
+    if !row_edits.is_empty() {
+        runner.heartbeat.mark("row_edit", None);
+        approval_row_edit::apply(
+            runner.transport(),
+            runner.sleeper.as_ref(),
+            &runner.tokens,
+            row_edits,
+        )
+        .await;
     }
 
     // 超预算告警：这是「认领批 × 限速」这条配置关系是否成立的**唯一**可观测出口。
@@ -1360,7 +1378,7 @@ fn should_notify(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
     task.last_error.as_deref() != Some(interim_reason.as_str())
 }
 
-/// 把处理结论落库。
+/// 把处理结论落库；返回送达后待补行号的那条消息（没有则为 `None`）。
 ///
 /// # 为什么通知排在写库**之前**
 ///
@@ -1371,19 +1389,27 @@ fn should_notify(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
 ///
 /// 代价是反过来的那个窗口：发完、还没写库就被杀掉，下一轮会**重发**一次。
 /// 重复一条消息远轻于静默丢失一条。
-async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &TaskOutcome) {
+///
+/// 补行号的编辑**不在这里做**：发送路径不能同步扫表，收集起来交给
+/// `run_round` 在轮末统一处理；本函数只把「已送达且可编辑」的消息带出去。
+async fn record_outcome(
+    runner: &RoundRunner,
+    task: &ClaimedTask,
+    processed: &TaskOutcome,
+) -> Option<approval_row_edit::RowNumberEdit> {
     let outcome = &processed.result;
     if !approval_execution::is_owned(&runner.context, &task.claim)
         .await
         .unwrap_or(false)
     {
         tracing::warn!(task_id = task.id, "任务执行权已失效，拒绝通知与结果写回");
-        return;
+        return None;
     }
 
     // 通知：**任何结论都要反馈**（2026-10-15 原则：只要用户发起请求，成功/失败
     // 都要发一条消息，失败附原因）。中间态的重复由 [`should_notify`] 按
     // 「结论是否变化」去重。
+    let mut edit = None;
     let notified = if should_notify(task, outcome) {
         // 接收人链：任务表申请人 → 表格申请人列 → **记录创建人**（兜底）。前两者
         // 空着正是 waiting 的主因，而「谁建了这条记录」是那时唯一还能定位到的触发人。
@@ -1399,7 +1425,11 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
             .or(processed.applicant_open_id.as_deref())
             .or(processed.creator_open_id.as_deref());
         match open_id {
-            Some(open_id) => send_worker_notification(runner, task, outcome, open_id).await,
+            Some(open_id) => {
+                let notification = send_worker_notification(runner, task, outcome, open_id).await;
+                edit = notification.edit;
+                notification.notified
+            }
             None => {
                 metrics::counter!("feishu_approval_notify_total", "result" => "no_recipient")
                     .increment(1);
@@ -1444,11 +1474,11 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
         Ok(true) => tracing::debug!(stage = "persist", state, "审批任务状态写回成功"),
         Ok(false) => {
             tracing::warn!(task_id = task.id, "任务执行权已失效，拒绝写回");
-            return;
+            return None;
         }
         Err(error) => {
             tracing::error!(%error, task_id=task.id, "审批任务结果未能持久确认");
-            return;
+            return None;
         }
     }
 
@@ -1515,6 +1545,8 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
             }
         }
     }
+
+    edit
 }
 
 /// 请求日志行是否表示「HTTP 路径**确实发出过**通知」。
@@ -1538,10 +1570,20 @@ fn http_path_notified(row: &Record) -> bool {
         .unwrap_or(false)
 }
 
+/// 发送结果：是否已送达人，加上「送达后要补行号」的那条消息。
+///
+/// 补行号单独带出而不是在发送函数里做：发送路径不能同步扫表（点击后的消息要
+/// 立即出站），扫描统一由 `run_round` 在一轮末尾按表批量执行。
+struct WorkerNotification {
+    notified: bool,
+    edit: Option<approval_row_edit::RowNumberEdit>,
+}
+
 /// Worker 路径的 IM 通知：向触发人发送审批派发结果。
 ///
-/// 返回**本轮结论是否已经送到人**——调用方拿它决定终态写 `terminal` 还是
-/// `unnotified`（见 [`outcome_record`]）。「HTTP 路径已经发过」算已送达；
+/// 返回**本轮结论是否已经送到人**（`notified`）与送达后待补行号的消息
+/// （`edit`）——调用方拿 `notified` 决定终态写 `terminal` 还是 `unnotified`
+/// （见 [`outcome_record`]）。「HTTP 路径已经发过」算已送达；
 /// 查库失败、配置名读不到、发送失败都算未送达（那时确实一条都没出去）。
 ///
 /// 发送失败只 warn，不冒泡。通知是附加价值，不该影响审批结论或重试逻辑。
@@ -1550,7 +1592,7 @@ async fn send_worker_notification(
     task: &ClaimedTask,
     outcome: &DispatchResult,
     open_id: &str,
-) -> bool {
+) -> WorkerNotification {
     // 去重：只有 HTTP Action **确实发出过通知**才跳过。
     //
     // HTTP 路径通知「显式指定的接收人」（notification_recipient），本 worker
@@ -1577,7 +1619,10 @@ async fn send_worker_notification(
                     "Worker 通知：HTTP Action 已发送过通知，跳过重复通知"
                 );
                 // 用户**已经收到过**——HTTP 那条就是发给他的。跳过不算未送达。
-                return true;
+                return WorkerNotification {
+                    notified: true,
+                    edit: None,
+                };
             }
             rows.iter()
                 .filter_map(|row| row.optional::<i64>("created_at").ok().flatten())
@@ -1590,7 +1635,10 @@ async fn send_worker_notification(
                 config_id = task.config_id,
                 "Worker 通知：查询请求日志失败，跳过通知"
             );
-            return false;
+            return WorkerNotification {
+                notified: false,
+                edit: None,
+            };
         }
     };
 
@@ -1613,7 +1661,10 @@ async fn send_worker_notification(
                 task_id = task.id,
                 "Worker 通知：配置展示名称读取失败，跳过通知"
             );
-            return false;
+            return WorkerNotification {
+                notified: false,
+                edit: None,
+            };
         }
     };
 
@@ -1631,32 +1682,17 @@ async fn send_worker_notification(
         name("approval_name")
     );
 
-    // 渲染消息正文
+    // 渲染消息正文（先按「无行号」出站，行号由轮末批量扫描后编辑补上）
     let status = outcome.feedback_status();
     let (accepted, reason, _serial) = outcome.response_parts();
     let _ = accepted; // 通知不关心 HTTP 语义的 accepted
-                      // 行号与 HTTP 路径同源：默认视图顺序；查不到就留空（技术定位行仍给 record_id）。
-    let row_number = bitable::record_row_number(
-        runner.transport(),
-        runner.sleeper.as_ref(),
-        &runner.tokens,
-        &BitableCoordinates {
-            app_token: task.base_token.clone(),
-            table_id: task.table_id.clone(),
-            view_id: None,
-        },
-        &task.record_id,
-    )
-    .await
-    .ok()
-    .flatten();
     let clicked_at = clicked_at.map(|seconds| format_local(seconds, task.timezone_offset));
     let message = approval_feedback::render(
         status,
         &reason,
         &names,
         Some(task.record_id.as_str()),
-        row_number,
+        None,
         clicked_at.as_deref(),
         &task.base_token,
         &task.table_id,
@@ -1724,7 +1760,21 @@ async fn send_worker_notification(
                 message_id = ?result.message_id,
                 "Worker 通知：IM 消息发送成功"
             );
-            true
+            let edit = approval_row_edit::RowNumberEdit::after_send(
+                &result,
+                status,
+                &reason,
+                &names,
+                &task.record_id,
+                clicked_at.as_deref(),
+                &task.base_token,
+                &task.table_id,
+                &references,
+            );
+            WorkerNotification {
+                notified: true,
+                edit,
+            }
         }
         _ => {
             tracing::warn!(
@@ -1734,7 +1784,10 @@ async fn send_worker_notification(
                 message = %result.message,
                 "Worker 通知：IM 消息发送失败（不影响审批结论）"
             );
-            false
+            WorkerNotification {
+                notified: false,
+                edit: None,
+            }
         }
     }
 }
@@ -1864,7 +1917,7 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("应至少认领一次"))?;
         sqlx::query("UPDATE feishu_approval_task SET worker_id='new-owner',last_error='新持有者的结果' WHERE id=?")
             .bind(task_id).execute(pool).await?;
-        record_outcome(
+        let _ = record_outcome(
             &runners[0],
             old,
             &TaskOutcome::early(DispatchResult::Waiting {
