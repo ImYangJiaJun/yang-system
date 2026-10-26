@@ -48,6 +48,14 @@ impl AuthorizationVersionSnapshot {
 /// 授权版本读取端口：Token 校验回源与管理查询共享的事实源。
 #[async_trait]
 pub trait AuthorizationVersionSource: Send + Sync {
+    /// 会话撤销以 MySQL 为准；不得用授权版本缓存跳过逐设备事实。
+    async fn is_session_active(
+        &self,
+        pool: &MySqlPool,
+        user_id: i64,
+        session_id: &str,
+    ) -> Result<bool, BaseError>;
+
     /// 从最终事实源（MySQL）读取用户授权版本快照；用户不存在返回 `None`。
     async fn find_authorization_version(
         &self,
@@ -203,6 +211,15 @@ mod tests {
 
     #[async_trait]
     impl AuthorizationVersionSource for FakeSource {
+        async fn is_session_active(
+            &self,
+            _pool: &MySqlPool,
+            _user_id: i64,
+            _session_id: &str,
+        ) -> Result<bool, BaseError> {
+            Ok(true)
+        }
+
         async fn find_authorization_version(
             &self,
             _pool: &MySqlPool,

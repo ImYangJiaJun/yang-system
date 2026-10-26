@@ -532,8 +532,7 @@ impl Account {
 
     /// 按旧 Refresh Token 声明组装新声明，并校验凭据版本未失效。
     ///
-    /// `session_id` 从旧 claims 继承（老 Token 无该字段时按无会话记录降级，
-    /// 不拒绝既有会话），保证「踢出某设备」在轮换后仍能定位同一会话行。
+    /// `session_id` 从旧 claims 继承；无持久会话的旧 Token 必须重新登录。
     pub(crate) async fn claims_for_refresh(
         &self,
         ctx: &ActionContext,
@@ -543,15 +542,13 @@ impl Account {
             .sub
             .parse::<i64>()
             .map_err(|_| BaseError::Unauthorized("Token subject 无效".to_string()))?;
-        let inherited_session_id = claims::session_id_from_claims(old_claims)?;
-        // 会话行是本 Token 的唯一权威撤销事实：`revoke_session` 标记 revoked 后，
-        // 即使攻击者抢在 jti 黑名单写入前轮换出新的 refresh jti，下一次 refresh 也会
-        // 在这里被 fail-closed 拒绝。老 Token 无 session_id 时保持兼容（不查）。
+        let inherited_session_id =
+            claims::session_id_from_claims(old_claims)?.ok_or(BaseError::TokenRevoked)?;
         let snapshot = self
-            .authorization_snapshot(ctx, user_id, inherited_session_id.as_deref())
+            .authorization_snapshot(ctx, user_id, Some((&inherited_session_id, &old_claims.jti)))
             .await?;
         claims::validate_refresh_credential_version(old_claims, snapshot.credential_version)?;
-        self.claims_from_snapshot(&snapshot, inherited_session_id.as_deref())
+        self.claims_from_snapshot(&snapshot, Some(&inherited_session_id))
     }
 
     fn claims_from_snapshot(
@@ -571,13 +568,12 @@ impl Account {
 
     /// 在只读事务内组装授权快照：用户状态、两个安全版本与外围域授权扩展。
     ///
-    /// `session_id` 存在时，同一事务内先校验会话行仍存在且未撤销；这是 refresh
-    /// 路径的权威撤销判定，缺失即 fail-closed。
+    /// Refresh 必须归属当前用户的活跃会话，且 JTI 仍是持久化的当前代次。
     async fn authorization_snapshot(
         &self,
         ctx: &ActionContext,
         user_id: i64,
-        session_id: Option<&str>,
+        refresh_session: Option<(&str, &str)>,
     ) -> Result<AuthorizationSnapshot, BaseError> {
         let mut transaction = ctx
             .tools()
@@ -586,15 +582,19 @@ impl Account {
             .await
             .map_err(BaseError::from)?;
         let snapshot_result: Result<AuthorizationSnapshot, BaseError> = async {
-            if let Some(session_id) = session_id {
+            if let Some((session_id, refresh_jti)) = refresh_session {
                 if !self
                     .sessions
-                    .is_active_in_tx(ctx, &mut transaction, session_id)
+                    .is_current_refresh_in_tx(
+                        ctx,
+                        &mut transaction,
+                        user_id,
+                        session_id,
+                        refresh_jti,
+                    )
                     .await?
                 {
-                    return Err(BaseError::Unauthorized(
-                        "会话已撤销，请重新登录".to_string(),
-                    ));
+                    return Err(BaseError::TokenRevoked);
                 }
             }
             let state = self

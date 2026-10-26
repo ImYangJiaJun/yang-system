@@ -44,6 +44,23 @@ pub(crate) struct AccountAuthorizationPort;
 
 #[async_trait]
 impl AuthorizationVersionSource for AccountAuthorizationPort {
+    async fn is_session_active(
+        &self,
+        pool: &MySqlPool,
+        user_id: i64,
+        session_id: &str,
+    ) -> Result<bool, BaseError> {
+        let row: Option<(String,)> = QueryBuilder::from_pool(pool, table!("user_session"))
+            .field(field!("session_id"))
+            .where_and(field!("session_id"), CompareOp::Eq, session_id)?
+            .where_and(field!("user_id"), CompareOp::Eq, user_id)?
+            .where_null(field!("revoked_at"))
+            .find()
+            .await
+            .map_err(BaseError::from)?;
+        Ok(row.is_some())
+    }
+
     /// 读取 Token 校验所需的最小授权事实。
     async fn find_authorization_version(
         &self,

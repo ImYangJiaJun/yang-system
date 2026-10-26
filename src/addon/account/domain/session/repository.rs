@@ -109,14 +109,14 @@ impl SessionRepository {
         Ok(())
     }
 
-    /// refresh 轮换时更新 jti（access 与 refresh）；`last_seen_at` 仅在节流窗口外
-    /// 更新（写放大控制）。
-    pub(crate) async fn touch_on_refresh(
+    /// 返回令牌前以旧 Refresh JTI 原子推进会话；并发撤销或重复消费均拒绝。
+    pub(crate) async fn rotate_refresh(
         &self,
         ctx: &ActionContext,
+        user_id: i64,
         session_id: &str,
-        jti: &str,
-        refresh_jti: &str,
+        consumed_jti: &str,
+        (jti, refresh_jti): (&str, &str),
         now: i64,
     ) -> Result<(), BaseError> {
         let rows = self
@@ -126,15 +126,14 @@ impl SessionRepository {
                 SESSION_ID,
                 serde_json::Value::String(session_id.to_string()),
             )?
+            .where_eq(USER_ID, serde_json::json!(user_id))?
+            .where_eq(REFRESH_JTI, serde_json::json!(consumed_jti))?
             .where_null(REVOKED_AT)?
             .page(1, 1)?
             .all()
             .await?;
         let Some(record) = rows.first() else {
-            // 会话行缺失（老 Token 无 session_id 或已被清理）时降级为只更新 jti 的
-            // 幂等写入；不拒绝 refresh（兼容既有会话）。
-            let _ = jti;
-            return Ok(());
+            return Err(BaseError::TokenRevoked);
         };
         let last_seen: i64 = record.require(LAST_SEEN_AT)?;
         let mut update = Record::new()
@@ -143,13 +142,20 @@ impl SessionRepository {
         if now.saturating_sub(last_seen) >= SESSION_LAST_SEEN_THROTTLE_SECONDS {
             update = update.set(LAST_SEEN_AT, now);
         }
-        self.query(ctx)?
+        let affected = self
+            .query(ctx)?
             .where_eq(
                 SESSION_ID,
                 serde_json::Value::String(session_id.to_string()),
             )?
+            .where_eq(USER_ID, serde_json::json!(user_id))?
+            .where_eq(REFRESH_JTI, serde_json::json!(consumed_jti))?
+            .where_null(REVOKED_AT)?
             .update(update)
             .await?;
+        if affected != 1 {
+            return Err(BaseError::TokenRevoked);
+        }
         Ok(())
     }
 
@@ -250,15 +256,14 @@ impl SessionRepository {
         Ok(affected)
     }
 
-    /// 目标会话是否仍然有效（存在且未撤销）。
-    ///
-    /// 供 refresh 路径在签发新令牌前做权威判定：会话行缺失或 `revoked_at` 非空
-    /// 一律视为已撤销，fail-closed 拒绝；老 Token 无 `session_id` 时调用方不查。
-    pub(crate) async fn is_active_in_tx(
+    /// 在授权快照内验证 Refresh 的归属、撤销状态及当前代次。
+    pub(crate) async fn is_current_refresh_in_tx(
         &self,
         ctx: &ActionContext,
         transaction: &mut yang_db::Transaction,
+        user_id: i64,
         session_id: &str,
+        refresh_jti: &str,
     ) -> Result<bool, BaseError> {
         let rows = self
             .query(ctx)?
@@ -267,6 +272,8 @@ impl SessionRepository {
                 SESSION_ID,
                 serde_json::Value::String(session_id.to_string()),
             )?
+            .where_eq(USER_ID, serde_json::json!(user_id))?
+            .where_eq(REFRESH_JTI, serde_json::json!(refresh_jti))?
             .where_null(REVOKED_AT)?
             .page(1, 1)?
             .all_in_tx(transaction)

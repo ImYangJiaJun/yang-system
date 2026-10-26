@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use yang_base::action::{ActionContext, TokenClaimsValidator};
 use yang_base::token::TokenClaims;
 use yang_base::BaseError;
@@ -87,6 +88,28 @@ impl TokenClaimsValidator for AuthorizationVersionValidator {
             }
         };
 
+        let session_id = claims
+            .custom
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|session| !session.is_empty())
+            .ok_or(BaseError::TokenRevoked)?;
+        let pool = ctx
+            .tools()
+            .mysql()
+            .map_err(|_| BaseError::AuthorizationCheckUnavailable)?
+            .pool();
+        let active = tokio::time::timeout(
+            Duration::from_secs(5),
+            source.is_session_active(pool, user_id, session_id),
+        )
+        .await
+        .map_err(|_| BaseError::AuthorizationCheckUnavailable)?
+        .map_err(|_| BaseError::AuthorizationCheckUnavailable)?;
+        if !active {
+            return Err(BaseError::TokenRevoked);
+        }
+
         let fallback_reason = match cache.read(user_id).await {
             Ok(CachedAuthorizationVersion::Version(current_version)) => {
                 match compare_versions(token_version, current_version) {
@@ -145,95 +168,113 @@ async fn validate_via_source(
     user_id: i64,
     token_version: i64,
 ) -> Result<(), BaseError> {
-    let snapshot = match source
-        .find_authorization_version(ctx.tools().mysql()?.pool(), user_id)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            record_check("unavailable", "mysql");
-            tracing::error!(
-                request_id = %ctx.request_id,
-                user_id,
-                token_version,
-                error_code = BaseError::AuthorizationCheckUnavailable.code_str(),
-                error = %error,
-                "MySQL 授权版本回源失败"
-            );
-            return Err(BaseError::AuthorizationCheckUnavailable);
-        }
-    };
-    let snapshot = match snapshot {
-        Some(snapshot) => snapshot,
-        None => {
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_secs(super::version_cache::CACHE_TTL_SECONDS as u64);
+    let operation = async {
+        let cache_deadline = match cache {
+            Some(cache) => cache.begin_snapshot().await.ok(),
+            None => None,
+        };
+        let snapshot = match source
+            .find_authorization_version(ctx.tools().mysql()?.pool(), user_id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                record_check("unavailable", "mysql");
+                tracing::error!(
+                    request_id = %ctx.request_id,
+                    user_id,
+                    token_version,
+                    error_code = BaseError::AuthorizationCheckUnavailable.code_str(),
+                    error = %error,
+                    "MySQL 授权版本回源失败"
+                );
+                return Err(BaseError::AuthorizationCheckUnavailable);
+            }
+        };
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None => {
+                record_check("invalid", "mysql");
+                tracing::warn!(
+                    request_id = %ctx.request_id,
+                    user_id,
+                    token_version,
+                    error_code = BaseError::AuthorizationVersionInvalid.code_str(),
+                    "Access Token 对应用户不存在"
+                );
+                return Err(BaseError::AuthorizationVersionInvalid);
+            }
+        };
+        let current_version = snapshot.version();
+        if !snapshot.is_active() || current_version < 1 {
             record_check("invalid", "mysql");
             tracing::warn!(
                 request_id = %ctx.request_id,
                 user_id,
                 token_version,
+                current_version,
+                status = %snapshot.status(),
                 error_code = BaseError::AuthorizationVersionInvalid.code_str(),
-                "Access Token 对应用户不存在"
+                "Access Token 对应用户状态或授权版本无效"
             );
             return Err(BaseError::AuthorizationVersionInvalid);
         }
-    };
-    let current_version = snapshot.version();
-    if !snapshot.is_active() || current_version < 1 {
-        record_check("invalid", "mysql");
-        tracing::warn!(
-            request_id = %ctx.request_id,
-            user_id,
-            token_version,
-            current_version,
-            status = %snapshot.status(),
-            error_code = BaseError::AuthorizationVersionInvalid.code_str(),
-            "Access Token 对应用户状态或授权版本无效"
-        );
-        return Err(BaseError::AuthorizationVersionInvalid);
-    }
 
-    match compare_versions(token_version, current_version) {
-        VersionComparison::Match => {
-            record_check("match", "mysql");
-            if let Some(cache) = cache {
-                if let Err(error) = cache.publish(user_id, current_version).await {
-                    tracing::warn!(
-                        request_id = %ctx.request_id,
-                        user_id,
-                        token_version,
-                        current_version,
-                        error = %error,
-                        "MySQL 授权版本校验成功，但回填 Redis 失败"
-                    );
+        match compare_versions(token_version, current_version) {
+            VersionComparison::Match => {
+                record_check("match", "mysql");
+                if let (Some(cache), Some(cache_deadline)) = (cache, cache_deadline) {
+                    if let Err(error) = cache
+                        .publish_snapshot(user_id, current_version, cache_deadline)
+                        .await
+                    {
+                        tracing::warn!(
+                            request_id = %ctx.request_id,
+                            user_id,
+                            token_version,
+                            current_version,
+                            error = %error,
+                            "MySQL 授权版本校验成功，但回填 Redis 失败"
+                        );
+                    }
                 }
+                Ok(())
             }
-            Ok(())
+            VersionComparison::Stale => {
+                record_check("stale", "mysql");
+                tracing::info!(
+                    request_id = %ctx.request_id,
+                    user_id,
+                    token_version,
+                    current_version,
+                    error_code = BaseError::AuthorizationStale.code_str(),
+                    "MySQL 判定 Access Token 授权版本已过期"
+                );
+                Err(BaseError::AuthorizationStale)
+            }
+            VersionComparison::CacheBehind => {
+                record_check("invalid", "mysql");
+                tracing::error!(
+                    request_id = %ctx.request_id,
+                    user_id,
+                    token_version,
+                    current_version,
+                    error_code = BaseError::AuthorizationVersionInvalid.code_str(),
+                    "Access Token 授权版本领先于 MySQL 事实版本"
+                );
+                Err(BaseError::AuthorizationVersionInvalid)
+            }
         }
-        VersionComparison::Stale => {
-            record_check("stale", "mysql");
-            tracing::info!(
-                request_id = %ctx.request_id,
-                user_id,
-                token_version,
-                current_version,
-                error_code = BaseError::AuthorizationStale.code_str(),
-                "MySQL 判定 Access Token 授权版本已过期"
-            );
-            Err(BaseError::AuthorizationStale)
-        }
-        VersionComparison::CacheBehind => {
-            record_check("invalid", "mysql");
-            tracing::error!(
-                request_id = %ctx.request_id,
-                user_id,
-                token_version,
-                current_version,
-                error_code = BaseError::AuthorizationVersionInvalid.code_str(),
-                "Access Token 授权版本领先于 MySQL 事实版本"
-            );
-            Err(BaseError::AuthorizationVersionInvalid)
-        }
+    };
+    let result = tokio::time::timeout_at(deadline, operation)
+        .await
+        .map_err(|_| BaseError::AuthorizationCheckUnavailable)?;
+    if tokio::time::Instant::now() >= deadline {
+        return Err(BaseError::AuthorizationCheckUnavailable);
     }
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +375,15 @@ mod tests {
 
     #[async_trait]
     impl AuthorizationVersionSource for FakeSource {
+        async fn is_session_active(
+            &self,
+            _pool: &sqlx::MySqlPool,
+            _user_id: i64,
+            _session_id: &str,
+        ) -> Result<bool, BaseError> {
+            Ok(true)
+        }
+
         async fn find_authorization_version(
             &self,
             _pool: &sqlx::MySqlPool,
@@ -351,6 +401,39 @@ mod tests {
             calls: AtomicUsize::new(0),
             snapshot,
         })
+    }
+
+    struct DelayedSource;
+
+    #[async_trait]
+    impl AuthorizationVersionSource for DelayedSource {
+        async fn is_session_active(
+            &self,
+            _pool: &sqlx::MySqlPool,
+            _user_id: i64,
+            _session_id: &str,
+        ) -> Result<bool, BaseError> {
+            Ok(true)
+        }
+
+        async fn find_authorization_version(
+            &self,
+            _pool: &sqlx::MySqlPool,
+            _user_id: i64,
+        ) -> Result<Option<AuthorizationVersionSnapshot>, BaseError> {
+            tokio::time::sleep(std::time::Duration::from_millis(5_100)).await;
+            Ok(Some(AuthorizationVersionSnapshot::new("active", true, 7)))
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_source_cannot_authorize_a_snapshot_past_its_freshness_budget() {
+        let source: Arc<dyn AuthorizationVersionSource> = Arc::new(DelayedSource);
+        let result = validate_via_source(&test_ctx(), &source, None, 42, 7).await;
+        assert!(
+            matches!(result, Err(BaseError::AuthorizationCheckUnavailable)),
+            "超过5秒的新鲜度预算不能继续按旧查询结果放行: {result:?}"
+        );
     }
 
     /// 回源端口未装配必须 fail-closed，且不触碰任何存储。

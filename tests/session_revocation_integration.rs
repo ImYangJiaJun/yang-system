@@ -3,8 +3,7 @@
 //! 回归对象（路线图 C-1d + 评审 2026-09-14 致命缺陷）：`revoke_session` 曾只把
 //! access token 的 jti 写入黑名单，而 refresh 轮换校验的是 refresh token 自身的 jti
 //! （二者独立生成），导致被踢设备仍可凭 refresh cookie 无限续期。本测试在
-//! `issue_refresh_credential_version = false` 下运行，使 revoke_session 不挂 Step-up，
-//! 从而聚焦「撤销 → refresh 失败」的核心语义。
+//! 开启凭据版本签发；同时验证 Access、Refresh 与 Redis 丢失下的持久化撤销。
 
 use anyhow::{ensure, Context};
 use jsonwebtoken::Algorithm;
@@ -277,6 +276,299 @@ fn finish_with_cleanup(
         (Ok(()), Ok(()), Err(error)) => Err(error.context("会话撤销 Redis 清理失败")),
         (Ok(()), Ok(()), Ok(())) => Ok(()),
     }
+}
+
+async fn session_test_app(database: &Database, redis: &RedisClient) -> anyhow::Result<BuiltApp> {
+    reset_database(database).await?;
+    reset_redis(redis).await?;
+    sync_with_database(
+        connect_test_database().await?,
+        database_config(),
+        security_settings(),
+    )
+    .await?;
+    let tools = Arc::new(
+        ToolsBuilder::new()
+            .mysql(Database::from_pool(
+                database.pool().clone(),
+                database_config(),
+            )?)
+            .cache(redis.clone())
+            .extension(AuthorizationVersionCache::new(
+                redis.clone(),
+                format!(
+                    "durable-session-{}",
+                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+                ),
+            )?)
+            .token(token_manager())
+            .build()?,
+    );
+    Ok(build_app(tools, security_settings())?.runtime)
+}
+
+async fn refresh(app: &BuiltApp, cookie: &str) -> Result<ApiResponse, BaseError> {
+    dispatch(
+        app,
+        "account.user",
+        "refresh",
+        json!({}),
+        &[("cookie", format!("yang_refresh={cookie}").as_str())],
+        42_003,
+    )
+    .await
+}
+
+async fn me(app: &BuiltApp, token: &str) -> Result<ApiResponse, BaseError> {
+    dispatch(
+        app,
+        "account.user",
+        "me",
+        json!({}),
+        &[("authorization", format!("Bearer {token}").as_str())],
+        42_003,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn durable_session_revocation_rejects_historical_access_after_redis_loss(
+) -> anyhow::Result<()> {
+    let database = connect_test_database().await?;
+    let redis = connect_test_redis().await?;
+    let app = session_test_app(&database, &redis).await?;
+    let outcome = async {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let (old_access, old_cookie) = register_and_login(&app, suffix, 42_003).await?;
+        let session_id = current_session_id(&app, &old_access, 42_003).await?;
+        let rotated = refresh(&app, &old_cookie).await?;
+        ensure!(rotated.code == 0, "正常轮换必须成功");
+        let new_access = access_token(&rotated)?;
+        let other_device = dispatch(
+            &app,
+            "account.user",
+            "login",
+            json!({"username": format!("revoke_{suffix}"), "password": PASSWORD}),
+            &[],
+            42_004,
+        )
+        .await?;
+        ensure!(other_device.code == 0, "同账号另一设备必须能登录");
+        let other_access = access_token(&other_device)?;
+        let revoked = dispatch(
+            &app,
+            "account.user",
+            "revoke_session",
+            json!({"session_id":session_id}),
+            &[("authorization", format!("Bearer {other_access}").as_str())],
+            42_004,
+        )
+        .await?;
+        ensure!(revoked.code == 0, "撤销必须成功");
+        reset_redis(&redis).await?;
+        for access in [&old_access, &new_access] {
+            let result = me(&app, access).await;
+            ensure!(
+                matches!(result, Err(BaseError::TokenRevoked)),
+                "已撤销 session 的所有历史 Access 必须在 Redis 丢失后仍被拒绝"
+            );
+        }
+        ensure!(
+            me(&app, &other_access).await?.code == 0,
+            "逐台撤销不得影响另一设备"
+        );
+        ensure!(
+            refresh(&app, &refresh_cookie(&other_device)?).await?.code == 0,
+            "另一设备的 Refresh 必须仍可用"
+        );
+        Ok(())
+    }
+    .await;
+    finish_with_cleanup(
+        outcome,
+        reset_database(&database).await,
+        reset_redis(&redis).await,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn durable_refresh_consumption_survives_empty_redis() -> anyhow::Result<()> {
+    let database = connect_test_database().await?;
+    let redis = connect_test_redis().await?;
+    let app = session_test_app(&database, &redis).await?;
+    let outcome = async {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let (_, first) = register_and_login(&app, suffix, 42_005).await?;
+        let rotated = refresh(&app, &first).await?;
+        ensure!(rotated.code == 0, "首次轮换必须成功");
+        let second = refresh_cookie(&rotated)?;
+        reset_redis(&redis).await?;
+        let replay = refresh(&app, &first).await;
+        ensure!(
+            matches!(replay, Err(BaseError::TokenRevoked)),
+            "Redis 变空后已消费的 Refresh 仍必须被拒绝"
+        );
+        ensure!(
+            refresh(&app, &second).await?.code == 0,
+            "拒绝旧 JTI 不得覆盖当前 Refresh 或撤销其他设备"
+        );
+        Ok(())
+    }
+    .await;
+    finish_with_cleanup(
+        outcome,
+        reset_database(&database).await,
+        reset_redis(&redis).await,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn durable_session_rejects_legacy_and_wrong_owner_claims() -> anyhow::Result<()> {
+    let database = connect_test_database().await?;
+    let redis = connect_test_redis().await?;
+    let app = session_test_app(&database, &redis).await?;
+    let outcome = async {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let (access, cookie) = register_and_login(&app, suffix, 42_006).await?;
+        let (_, stranger_cookie) = register_and_login(&app, suffix + 1, 42_007).await?;
+        let manager = token_manager();
+        let access_claims = manager.verify_token(&access)?;
+        let refresh_claims = manager.verify_token(&cookie)?;
+        let stranger = manager.verify_token(&stranger_cookie)?;
+        for session in [
+            Value::Null,
+            Value::String("missing-session".into()),
+            stranger.custom["session_id"].clone(),
+        ] {
+            let mut custom = access_claims.custom.clone();
+            custom["session_id"] = session.clone();
+            let forged_access = manager.generate_access_token(&access_claims.sub, custom)?;
+            ensure!(
+                matches!(me(&app, &forged_access).await, Err(BaseError::TokenRevoked)),
+                "缺少会话或会话属于另一用户时不能使用 Access"
+            );
+            let mut custom = refresh_claims.custom.clone();
+            custom["session_id"] = session;
+            let forged_refresh =
+                manager.generate_refresh_token_with_claims(&refresh_claims.sub, custom)?;
+            ensure!(
+                matches!(
+                    refresh(&app, &forged_refresh).await,
+                    Err(BaseError::TokenRevoked)
+                ),
+                "缺少会话或会话属于另一用户时不能使用 Refresh"
+            );
+        }
+        ensure!(me(&app, &access).await?.code == 0, "有效会话仍必须可用");
+        Ok(())
+    }
+    .await;
+    finish_with_cleanup(
+        outcome,
+        reset_database(&database).await,
+        reset_redis(&redis).await,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn durable_session_storage_failure_is_unavailable_not_revoked() -> anyhow::Result<()> {
+    let database = connect_test_database().await?;
+    let redis = connect_test_redis().await?;
+    let app = session_test_app(&database, &redis).await?;
+    let outcome = async {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let (access, _) = register_and_login(&app, suffix, 42_009).await?;
+        ensure!(
+            me(&app, &access).await?.code == 0,
+            "缓存命中前必须是合法会话"
+        );
+        let mut held = Vec::new();
+        for _ in 0..20 {
+            held.push(database.pool().acquire().await?);
+        }
+        let blocked = tokio::time::timeout(std::time::Duration::from_secs(6), me(&app, &access))
+            .await
+            .context("会话回源超过5秒预算仍未结束")?;
+        ensure!(
+            matches!(blocked, Err(BaseError::AuthorizationCheckUnavailable)),
+            "会话连接池耗尽应返回依赖不可用"
+        );
+        drop(held);
+        ensure!(
+            me(&app, &access).await?.code == 0,
+            "依赖恢复后原会话应继续有效"
+        );
+        sqlx::query("DROP TABLE user_session")
+            .execute(database.pool())
+            .await?;
+        ensure!(
+            matches!(
+                me(&app, &access).await,
+                Err(BaseError::AuthorizationCheckUnavailable)
+            ),
+            "数据库查询失败不能伪装成会话已撤销或继续用授权缓存放行"
+        );
+        Ok(())
+    }
+    .await;
+    finish_with_cleanup(
+        outcome,
+        reset_database(&database).await,
+        reset_redis(&redis).await,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn durable_refresh_cannot_commit_after_concurrent_revocation() -> anyhow::Result<()> {
+    let database = connect_test_database().await?;
+    let redis = connect_test_redis().await?;
+    let app = session_test_app(&database, &redis).await?;
+    let outcome = async {
+        for change in [
+            "UPDATE user_session SET revoked_at = UNIX_TIMESTAMP() WHERE session_id = ?",
+            "UPDATE user_session SET refresh_jti = 'already-rotated' WHERE session_id = ?",
+            "DELETE FROM user_session WHERE session_id = ?",
+        ] {
+            let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let (access, cookie) = register_and_login(&app, suffix, 42_008).await?;
+            let session = current_session_id(&app, &access, 42_008).await?;
+            let mut transaction = database.pool().begin().await?;
+            sqlx::query("SELECT session_id FROM user_session WHERE session_id = ? FOR UPDATE")
+                .bind(&session).fetch_one(&mut *transaction).await?;
+            let change_after_snapshot = async {
+                // 等实际 UPDATE 进入行锁等待，确保不是仅验证较早的快照检查。
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        let waiting: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON l.ENGINE=w.ENGINE AND l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID WHERE l.OBJECT_SCHEMA=DATABASE() AND l.OBJECT_NAME='user_session'"
+                        ).fetch_one(database.pool()).await?;
+                        if waiting > 0 { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }).await.context("Refresh 未进入会话 UPDATE 行锁屏障")??;
+                sqlx::query(change).bind(&session).execute(&mut *transaction).await?;
+                transaction.commit().await?;
+                Ok::<_, anyhow::Error>(())
+            };
+            let (rotated, changed) = tokio::join!(refresh(&app, &cookie), change_after_snapshot);
+            changed?;
+            ensure!(matches!(rotated, Err(BaseError::TokenRevoked)),
+                "快照校验后撤销、推进代次或删除会话均必须阻止成功响应: {change}");
+        }
+        Ok(())
+    }
+    .await;
+    finish_with_cleanup(
+        outcome,
+        reset_database(&database).await,
+        reset_redis(&redis).await,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

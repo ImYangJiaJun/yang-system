@@ -61,51 +61,60 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     let secure = BrowserSession::validate_same_origin(&ctx.request)?;
     let refresh_token = Account::browser_session().refresh_token(&ctx.request)?;
+    let old_claims = ctx.tools().token()?.verify_token(&refresh_token)?;
     let touch_ctx = ctx.clone();
     let tokens = RefreshAction::new(UserClaimsResolver {
         account: Arc::clone(&account),
     })
     .handle(ctx, RefreshInput { refresh_token })
     .await?;
-    // refresh 热路径：节流更新会话行（last_seen_at 60s 窗口内不重复写，
-    // jti 随轮换更新）；失败只记日志，不阻塞 refresh。
-    if let Err(error) = touch_session_on_refresh(
+    persist_session_rotation(
         &touch_ctx,
         &account,
+        &old_claims,
         &tokens.access_token,
         &tokens.refresh_token,
     )
-    .await
-    {
-        tracing::warn!(error = %error, "refresh 会话行更新失败");
-    }
+    .await?;
     Account::browser_session().token_response(tokens.access_token, tokens.refresh_token, secure)
 }
 
-/// 从新 access/refresh token 提取 session_id 与两个 jti 并节流更新 `user_session` 行。
-async fn touch_session_on_refresh(
+/// 持久化成功前不暴露新 Token 对；未知提交结果要求重新登录。
+async fn persist_session_rotation(
     ctx: &ActionContext,
     account: &Account,
+    old_claims: &TokenClaims,
     access_token: &str,
     refresh_token: &str,
 ) -> Result<(), BaseError> {
     let claims = ctx.tools().token()?.verify_token(access_token)?;
     if claims.token_type != TokenType::Access {
-        return Ok(());
+        return Err(BaseError::TokenRevoked);
     }
     let Some(session_id) = claims
         .custom
         .get("session_id")
         .and_then(|value| value.as_str())
     else {
-        return Ok(()); // 老 Token 无 session_id：按无会话记录降级
+        return Err(BaseError::TokenRevoked);
     };
     // 记录轮换后的 refresh jti，供后续逐台撤销拉黑（否则撤销只命中 access jti）。
     let refresh_jti = ctx.tools().token()?.verify_token(refresh_token)?.jti;
+    let user_id = old_claims
+        .sub
+        .parse::<i64>()
+        .map_err(|_| BaseError::TokenRevoked)?;
     let now = current_unix_timestamp()?;
     account
         .sessions()
-        .touch_on_refresh(ctx, session_id, &claims.jti, &refresh_jti, now)
+        .rotate_refresh(
+            ctx,
+            user_id,
+            session_id,
+            &old_claims.jti,
+            (&claims.jti, &refresh_jti),
+            now,
+        )
         .await
 }
 

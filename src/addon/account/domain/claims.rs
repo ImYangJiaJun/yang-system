@@ -18,7 +18,7 @@ struct AppClaims {
     /// 跨 Refresh 轮换稳定的会话标识（路线图 C-1）。
     ///
     /// 登录时生成、refresh 时从旧 claims 继承；`user_session` 表以它为键。
-    /// 老 Token 无此字段（`Option`）时按「无会话记录」降级处理。
+    /// 解析保留旧字段形状；请求校验器拒绝无持久会话的旧 Token。
     #[serde(default)]
     session_id: Option<String>,
     roles: Vec<String>,
@@ -58,8 +58,7 @@ pub(super) fn claims_for_user(
         serde_json::json!({ "authz_version": authz_version })
     };
     // 把 session_id 一并写入 refresh claims，使 `claims_for_refresh` 能从旧 refresh
-    // 声明继承会话标识（否则轮换后新 access token 的 session_id 恒为 None，
-    // 逐台撤销/会话行更新因此失效）。老 Token 无该字段时按 None 降级。
+    // 声明继承会话标识，确保轮换仍受同一会话行约束。
     if let Some(session_id) = session_id {
         refresh["session_id"] = serde_json::json!(session_id);
     }
@@ -92,8 +91,7 @@ pub(super) fn validate_refresh_credential_version(
 
 /// 从旧 Token claims 提取会话标识（refresh 轮换继承用）。
 ///
-/// 老 Token 无 `session_id` 字段时返回 `None`，调用方按「无会话记录」降级，
-/// 不拒绝既有会话（增量数据兼容，路线图 Rollback 一节）。
+/// 解析旧 Token 时允许返回 `None`；Access 与 Refresh 入口均将它判为需重新登录。
 pub(crate) fn session_id_from_claims(claims: &TokenClaims) -> Result<Option<String>, BaseError> {
     let Some(value) = claims.custom.get("session_id") else {
         return Ok(None);

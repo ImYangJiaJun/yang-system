@@ -214,7 +214,6 @@ pub(super) async fn handle(
         }
     };
     // 登录成功：解析 access claims 中的 session_id/jti 并落一条会话行；
-    // upsert 失败只记日志，不阻塞登录（会话可见性为 best-effort 增强）。
     // 会话行是逐台撤销与 refresh fail-closed 的权威事实；落库失败必须让登录失败，
     // 不能发出一个无法撤销、也无法再次刷新的“半登录”令牌对。
     record_login_session(
