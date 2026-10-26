@@ -1153,7 +1153,7 @@ async fn dispatch_single(
         .into_iter()
         .next();
     let Some(claim) = claim else {
-        return Ok(DispatchOutcome::success(
+        let mut outcome = DispatchOutcome::success(
             Outcome::Accepted,
             Some(config_id),
             Some(base_token),
@@ -1162,7 +1162,9 @@ async fn dispatch_single(
             FeedbackStatus::Accepted,
             "任务已持久受理或已有处理结果，请查看任务状态；不会重复执行".into(),
             None,
-        ));
+        );
+        outcome.row_number = row_number;
+        return Ok(outcome);
     };
     let persisted = context
         .approval_tasks()

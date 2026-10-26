@@ -952,10 +952,29 @@ async fn load_task(
         .optional::<String>("dispatch_payload")?
         .map(|payload| serde_json::from_str::<approval_execution::DispatchSnapshot>(&payload))
         .transpose()?;
-    let config = snapshot
-        .as_ref()
-        .map(|snapshot| Record::from(snapshot.config.clone()))
-        .unwrap_or(config);
+    // 首次受理快照固定的是**申请人/显式接收人**；配置本身可能在控制台重新保存过
+    // （最典型：审批控件改了类型 → 控件 id 也变了）。快照比库里的配置旧时，
+    // 定义与映射都必须改用新配置，否则永远拿旧控件 id 撞「映射控件已不在定义中」。
+    let snapshot_is_fresh = match snapshot.as_ref() {
+        None => true,
+        Some(snapshot) => {
+            let snapshot_at = Record::from(snapshot.config.clone())
+                .optional::<i64>("form_snapshot_at")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let live_at = config
+                .optional::<i64>("form_snapshot_at")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            snapshot_at >= live_at
+        }
+    };
+    let config = match snapshot.as_ref().filter(|_| snapshot_is_fresh) {
+        Some(snapshot) => Record::from(snapshot.config.clone()),
+        None => config,
+    };
     // 发起人是**后续查询**，不是认领批的列（认领投影只有 id/record_id/config_id/last_error）：
     // 全表异步受理拿不到发起人，Action 解析后落在属性扩展表里（设计 §6.3）。
     let applicant = runner
@@ -972,7 +991,7 @@ async fn load_task(
             None => None,
         },
     };
-    let maps = match snapshot.as_ref() {
+    let maps = match snapshot.as_ref().filter(|_| snapshot_is_fresh) {
         Some(snapshot) => snapshot.maps.clone(),
         None => runner
             .context
