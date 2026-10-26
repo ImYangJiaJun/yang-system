@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use yang_base::database::DatabaseInitializer;
 use yang_base::http::HttpClient;
 use yang_base::tools::{Tools, ToolsBuilder};
-use yang_base::transport::axum::{serve_with_shutdown, AxumTransportConfig};
+use yang_base::transport::axum::{serve_listener_with_shutdown, AxumTransportConfig};
 use yang_db::{Database, RedisClient};
 use yang_runtime::observability::{LogIdentity, TelemetryRuntime};
 use yang_runtime::shutdown::ShutdownBudget;
@@ -32,6 +32,7 @@ use yang_runtime::shutdown::ShutdownBudget;
 const TRIGGER_SIGNAL: &str = "signal";
 const TRIGGER_OPERATION_EXIT: &str = "operation_exit";
 const PHASE_HTTP_DRAIN: &str = "http_drain";
+const PHASE_MANAGEMENT_DRAIN: &str = "management_drain";
 const PHASE_AUTHORIZATION_OUTBOX_WORKER: &str = "authorization_outbox_worker";
 const PHASE_GRANT_EXPIRY_WORKER: &str = "grant_expiry_worker";
 const PHASE_SESSION_CLEANUP_WORKER: &str = "session_cleanup_worker";
@@ -42,7 +43,28 @@ const PHASE_FEISHU_OAUTH_REMINDER_WORKER: &str = "feishu_oauth_reminder_worker";
 const PHASE_TOOLS_CLOSE: &str = "tools_close";
 const PHASE_OBSERVABILITY: &str = "observability";
 
+/// 一次性只读冒烟不会创建 telemetry exporter、监听器或任何业务后台任务。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupMode {
+    Serve,
+    ReadOnlySmoke,
+}
+
+impl StartupMode {
+    pub fn from_args(args: &[std::ffi::OsString]) -> anyhow::Result<Self> {
+        match args {
+            [] => Ok(Self::Serve),
+            [arg] if arg == "--smoke-check" => Ok(Self::ReadOnlySmoke),
+            _ => anyhow::bail!("用法：yang-system [--smoke-check]"),
+        }
+    }
+}
+
 pub async fn run(config_path: &Path) -> anyhow::Result<()> {
+    run_with_mode(config_path, StartupMode::Serve).await
+}
+
+pub async fn run_with_mode(config_path: &Path, mode: StartupMode) -> anyhow::Result<()> {
     let settings = Settings::load(config_path)?;
     let log_identity = LogIdentity::new(
         &settings.app.name,
@@ -50,11 +72,14 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         settings.app.environment.as_str(),
     )
     .with_metric_names(YANG_SYSTEM_METRIC_NAMES);
-    let mut telemetry = TelemetryRuntime::initialize(
-        &settings.observability,
-        &settings.logging.filter,
-        &log_identity,
-    )?;
+    let mut telemetry = match mode {
+        StartupMode::Serve => Some(TelemetryRuntime::initialize(
+            &settings.observability,
+            &settings.logging.filter,
+            &log_identity,
+        )?),
+        StartupMode::ReadOnlySmoke => None,
+    };
     let shutdown_budget =
         ShutdownBudget::new(Duration::from_secs(settings.shutdown.total_timeout_seconds))
             .with_metric_names(YANG_SYSTEM_METRIC_NAMES);
@@ -68,23 +93,31 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let result = run_after_telemetry_initialized(
         &settings,
         log_identity,
-        &mut telemetry,
+        telemetry.as_mut(),
         shutdown_budget.clone(),
+        mode,
     )
     .await;
     shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;
-    let telemetry_result = shutdown_budget
-        .run_phase(PHASE_OBSERVABILITY, telemetry.shutdown())
-        .await
-        .map_err(anyhow::Error::from);
+    let telemetry_result = match telemetry.as_mut() {
+        Some(telemetry) => {
+            let deadline = shutdown_budget.wait_started().await;
+            shutdown_budget
+                .run_phase(PHASE_OBSERVABILITY, telemetry.shutdown_before(deadline))
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        None => Ok(()),
+    };
     combine_operation_and_cleanup(result, telemetry_result, "可观测性运行时")
 }
 
 async fn run_after_telemetry_initialized(
     settings: &Settings,
     log_identity: LogIdentity,
-    telemetry: &mut TelemetryRuntime,
+    telemetry: Option<&mut TelemetryRuntime>,
     shutdown_budget: ShutdownBudget,
+    mode: StartupMode,
 ) -> anyhow::Result<()> {
     let token_manager = settings.token.build_manager()?;
 
@@ -202,6 +235,7 @@ async fn run_after_telemetry_initialized(
             feishu_pull_handle,
             feishu_pull_requests,
             approval_dispatch_requests,
+            mode,
         ),
         tools.close(),
         &shutdown_budget,
@@ -233,16 +267,17 @@ fn combine_operation_and_cleanup<T>(
 ///
 /// 该函数整体位于 [`run_then_cleanup`] 的 operation 边界内，因此应用构建、schema、
 /// 地址解析/绑定、服务运行失败以及正常退出都会进入同一个关闭出口。
-#[allow(clippy::too_many_arguments)] // 8 个参数：新增审批派发的通道后越过了默认 7 的上限；收成结构体会改动更大的接口面。
+#[allow(clippy::too_many_arguments)] // 启动期资源与通道按所有权传递，不引入进程级容器。
 async fn run_after_tools_created(
     settings: &Settings,
     initializer_mysql: Database,
     tools: Arc<Tools>,
     shutdown_budget: ShutdownBudget,
-    telemetry: &mut TelemetryRuntime,
+    telemetry: Option<&mut TelemetryRuntime>,
     feishu_pull_handle: FeishuPullHandle,
     feishu_pull_requests: mpsc::UnboundedReceiver<Option<i64>>,
     approval_dispatch_requests: mpsc::UnboundedReceiver<(i64, Option<String>)>,
+    mode: StartupMode,
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
         .context("构建应用模块失败")?;
@@ -253,6 +288,26 @@ async fn run_after_tools_created(
     let definitions =
         crate::schema::definitions(&application.runtime).context("构建完整数据库 schema 失败")?;
     let schema = definitions.iter().collect::<Vec<_>>();
+    if mode == StartupMode::ReadOnlySmoke {
+        let report = initializer
+            .preflight_table_definitions(&schema)
+            .await
+            .context("只读 schema 预检失败")?;
+        anyhow::ensure!(report.is_safe(), "只读 schema 预检发现旧数据冲突");
+        let health = tools.health_check().await;
+        anyhow::ensure!(health.is_healthy(), "只读冒烟依赖检查失败");
+        println!(
+            "{}",
+            serde_json::json!({
+                "interface": "yang-system-smoke-v1",
+                "mode": "read_only",
+                "status": "ok",
+                "schema_changes": report.plan.changes.len(),
+            })
+        );
+        return Ok(());
+    }
+    let telemetry = telemetry.context("正常启动缺少 telemetry 运行时")?;
     let report = initializer
         .sync_table_definitions(&schema)
         .await
@@ -268,6 +323,9 @@ async fn run_after_tools_created(
     drop(initializer);
 
     let bind = settings.bind_addr()?;
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("绑定 HTTP 地址失败: {bind}"))?;
     telemetry
         .start_management_server(
             settings.observability.metrics_bind_addr()?,
@@ -377,12 +435,13 @@ async fn run_after_tools_created(
     };
     let transport_config = AxumTransportConfig {
         max_body_bytes: settings.http.max_body_bytes,
+        max_json_body_bytes: Some(settings.http.max_json_body_bytes),
         request_timeout: Some(Duration::from_secs(settings.http.request_timeout_seconds)),
         max_concurrency: Some(settings.http.max_concurrency),
         ..AxumTransportConfig::default()
     };
     let serve = async move {
-        serve_with_shutdown(bind, runtime, transport_config, shutdown_signal)
+        serve_listener_with_shutdown(listener, runtime, transport_config, shutdown_signal)
             .await
             .context("HTTP 服务运行失败")
     };
@@ -390,74 +449,100 @@ async fn run_after_tools_created(
     let budget_started = shutdown_budget.wait_started();
     tokio::pin!(budget_started);
 
+    // 首个退出事件只负责触发关闭；此处不先等待 HTTP，所有 worker 同时收到信号。
     let serve_result = tokio::select! {
-        result = &mut serve => result,
-        _ = &mut budget_started => {
-            shutdown_budget
-                .run_phase(PHASE_HTTP_DRAIN, &mut serve)
-                .await
-                .map_err(anyhow::Error::from)
-        }
+        result = &mut serve => Some(result),
+        _ = &mut budget_started => None,
     };
     readiness_gate.mark_not_ready();
     shutdown_budget.begin(TRIGGER_OPERATION_EXIT).await;
-    // 后台任务都要在 Tools 关闭前停：Tools 关掉后 worker 每轮会拿到
-    // `Tools 已关闭` 并空转刷错误日志。分阶段跑，各自的耗时在关闭预算里可分辨。
-    let outbox_shutdown = shutdown_budget
-        .run_phase(PHASE_AUTHORIZATION_OUTBOX_WORKER, outbox_worker.shutdown())
-        .await
-        .map_err(anyhow::Error::from);
-    let grant_expiry_shutdown = shutdown_budget
-        .run_phase(PHASE_GRANT_EXPIRY_WORKER, grant_expiry_worker.shutdown())
-        .await
-        .map_err(anyhow::Error::from);
-    let session_cleanup_shutdown = shutdown_budget
-        .run_phase(
+    outbox_worker.request_shutdown();
+    grant_expiry_worker.request_shutdown();
+    session_cleanup_worker.request_shutdown();
+    if let Some(worker) = &feishu_pull_worker {
+        worker.request_shutdown();
+    }
+    if let Some(worker) = &approval_worker {
+        worker.request_shutdown();
+    }
+    if let Some(worker) = &event_worker {
+        worker.request_shutdown();
+    }
+    if let Some(worker) = &oauth_reminder_worker {
+        worker.request_shutdown();
+    }
+    telemetry.request_management_shutdown();
+
+    // HTTP、管理面和七类 worker 共用截止时间，并给资源关闭 / trace 留出总预算的
+    // 10%（最多 1 秒）。超时取消关闭 future 时 OwnedTask 仍持有句柄并请求 abort。
+    let reserve = (Duration::from_secs(settings.shutdown.total_timeout_seconds) / 10)
+        .min(Duration::from_secs(1));
+    let (http, outbox, grants, sessions, pull, approval, event, oauth, management) = tokio::join!(
+        shutdown_budget.run_phase_with_reserve(PHASE_HTTP_DRAIN, reserve, async {
+            match serve_result {
+                Some(result) => result,
+                None => (&mut serve).await,
+            }
+        }),
+        shutdown_budget.run_phase_with_reserve(
+            PHASE_AUTHORIZATION_OUTBOX_WORKER,
+            reserve,
+            outbox_worker.shutdown()
+        ),
+        shutdown_budget.run_phase_with_reserve(
+            PHASE_GRANT_EXPIRY_WORKER,
+            reserve,
+            grant_expiry_worker.shutdown()
+        ),
+        shutdown_budget.run_phase_with_reserve(
             PHASE_SESSION_CLEANUP_WORKER,
-            session_cleanup_worker.shutdown(),
-        )
-        .await
+            reserve,
+            session_cleanup_worker.shutdown()
+        ),
+        shutdown_budget.run_phase_with_reserve(PHASE_FEISHU_PULL_WORKER, reserve, async {
+            match feishu_pull_worker {
+                Some(worker) => worker.shutdown().await,
+                None => Ok(()),
+            }
+        }),
+        shutdown_budget.run_phase_with_reserve(PHASE_FEISHU_APPROVAL_WORKER, reserve, async {
+            match approval_worker {
+                Some(worker) => worker.shutdown().await,
+                None => Ok(()),
+            }
+        }),
+        shutdown_budget.run_phase_with_reserve(PHASE_FEISHU_EVENT_WORKER, reserve, async {
+            match event_worker {
+                Some(worker) => worker.shutdown().await,
+                None => Ok(()),
+            }
+        }),
+        shutdown_budget.run_phase_with_reserve(
+            PHASE_FEISHU_OAUTH_REMINDER_WORKER,
+            reserve,
+            async {
+                match oauth_reminder_worker {
+                    Some(worker) => worker.shutdown().await,
+                    None => Ok(()),
+                }
+            }
+        ),
+        shutdown_budget.run_phase_with_reserve(
+            PHASE_MANAGEMENT_DRAIN,
+            reserve,
+            telemetry.shutdown_management()
+        ),
+    );
+    let serve_result = http.map_err(anyhow::Error::from);
+    let shutdown_result = outbox
+        .and(grants)
+        .and(sessions)
+        .and(pull)
+        .and(approval)
+        .and(event)
+        .and(oauth)
+        .and(management)
         .map_err(anyhow::Error::from);
-    let feishu_shutdown = match feishu_pull_worker {
-        Some(worker) => shutdown_budget
-            .run_phase(PHASE_FEISHU_PULL_WORKER, worker.shutdown())
-            .await
-            .map_err(anyhow::Error::from),
-        None => Ok(()),
-    };
-    // 审批派发同一批次里收口：它与拉取共用出站与数据库，任何一个泄漏都会让
-    // `Tools` 在关闭预算内拿不到干净的引用。顺序紧跟拉取，不额外串一层预算。
-    let approval_shutdown = match approval_worker {
-        Some(worker) => shutdown_budget
-            .run_phase(PHASE_FEISHU_APPROVAL_WORKER, worker.shutdown())
-            .await
-            .map_err(anyhow::Error::from),
-        None => Ok(()),
-    };
-    // 事件处理 worker 关闭。
-    let event_shutdown = match event_worker {
-        Some(worker) => shutdown_budget
-            .run_phase(PHASE_FEISHU_EVENT_WORKER, worker.shutdown())
-            .await
-            .map_err(anyhow::Error::from),
-        None => Ok(()),
-    };
-    // 提醒 worker 与派发同批收口：它也用出站与数据库。
-    let oauth_reminder_shutdown = match oauth_reminder_worker {
-        Some(worker) => shutdown_budget
-            .run_phase(PHASE_FEISHU_OAUTH_REMINDER_WORKER, worker.shutdown())
-            .await
-            .map_err(anyhow::Error::from),
-        None => Ok(()),
-    };
-    // `and` 保留第一个错误：任一阶段失败时先看到的是更早那个阶段的问题。
-    let shutdown_result = outbox_shutdown
-        .and(grant_expiry_shutdown)
-        .and(session_cleanup_shutdown)
-        .and(feishu_shutdown)
-        .and(approval_shutdown)
-        .and(event_shutdown)
-        .and(oauth_reminder_shutdown);
     match (serve_result, shutdown_result) {
         (Err(serve_error), Err(worker_error)) => {
             tracing::error!(
@@ -510,6 +595,106 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use yang_base::tools::ToolsState;
+
+    #[test]
+    fn startup_mode_is_explicit_and_rejects_unknown_arguments() -> anyhow::Result<()> {
+        assert_eq!(StartupMode::from_args(&[])?, StartupMode::Serve);
+        assert_eq!(
+            StartupMode::from_args(&["--smoke-check".into()])?,
+            StartupMode::ReadOnlySmoke
+        );
+        for args in [
+            vec!["--unknown".into()],
+            vec!["--smoke-check".into(), "extra".into()],
+        ] {
+            assert!(StartupMode::from_args(&args).is_err());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要本机 YANG_SYSTEM_TEST_DATABASE_URL，可创建随机 scratch 测试库"]
+    async fn smoke_mode_preserves_empty_schema_and_does_not_bind_http() -> anyhow::Result<()> {
+        use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+        use std::str::FromStr;
+        use yang_base::token::TokenManager;
+        use yang_db::DatabaseConfig;
+
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let options = MySqlConnectOptions::from_str(&url)?;
+        anyhow::ensure!(
+            matches!(options.get_host(), "127.0.0.1" | "localhost" | "::1")
+                && options
+                    .get_database()
+                    .is_some_and(|name| name.ends_with("_test")),
+            "只读冒烟回归仅允许从 loopback 的 _test 数据库派生 scratch 库"
+        );
+        let admin = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await?;
+        let current: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(&admin)
+            .await?;
+        anyhow::ensure!(current.ends_with("_test"), "拒绝非测试数据库");
+        let scratch = format!("yang_smoke_{}_test", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE `{scratch}`"))
+            .execute(&admin)
+            .await?;
+        let outcome = async {
+            let pool = MySqlPoolOptions::new()
+                .max_connections(2)
+                .connect_with(options.database(&scratch))
+                .await?;
+            let mysql = Database::from_pool(pool.clone(), DatabaseConfig::default())?;
+            let initializer = Database::from_pool(pool.clone(), DatabaseConfig::default())?;
+            let token = TokenManager::new_symmetric(
+                "smoke-test-token-key-0123456789abcdef",
+                jsonwebtoken::Algorithm::HS256,
+                "smoke-test".into(),
+                "smoke-test".into(),
+                60,
+                120,
+            )?;
+            let tools = Arc::new(ToolsBuilder::new().mysql(mysql).token(token).build()?);
+            // 仅反序列化仓内无真实凭据模板；不加载宿主机 config、env 或 secret 目录。
+            let mut settings: Settings = toml::from_str(include_str!("../config.example.toml"))?;
+            settings.security = crate::config::SecuritySettings::default();
+            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            settings.http.bind = occupied.local_addr()?.to_string();
+            let (pull, pulls) = FeishuPullHandle::new(60);
+            let (_, approvals) = ApprovalDispatchHandle::new();
+            let result = run_after_tools_created(
+                &settings,
+                initializer,
+                Arc::clone(&tools),
+                ShutdownBudget::new(Duration::from_secs(1)),
+                None,
+                pull,
+                pulls,
+                approvals,
+                StartupMode::ReadOnlySmoke,
+            )
+            .await;
+            let tables: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()",
+            )
+            .fetch_one(&pool)
+            .await?;
+            tools.close().await;
+            result?;
+            anyhow::ensure!(tables == 0, "只读冒烟不得创建表，实际 {tables} 张");
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        let cleanup = sqlx::query(&format!("DROP DATABASE `{scratch}`"))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        outcome?;
+        cleanup?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn cleanup_runs_exactly_once_for_success_and_every_post_tools_failure() {

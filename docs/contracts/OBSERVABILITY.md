@@ -116,8 +116,9 @@ OAuth 回调的成功行，全部在 `DEBUG`；它们的失败、跳过、等待
 ## Readiness 总预算
 
 生产编排应把 readiness 指向管理面 `/health/ready`。进程在 Schema/audit 校验与
-后台 worker 启动完成前保持 `lifecycle` 未就绪，收到关闭信号后先撤销 readiness，
-再进入 HTTP drain。依赖检查共享 `observability.readiness_budget_ms` 一个总预算；
+后台 worker 启动完成且业务监听器绑定成功前保持 `lifecycle` 未就绪。收到关闭信号后
+先撤销 readiness，同时通知七类业务 worker 与管理面退出，再并行等待 HTTP、管理面和
+各 worker drain。依赖检查共享 `observability.readiness_budget_ms` 一个总预算；
 不会给 MySQL、Redis 各自累加一份 timeout。
 
 响应原因只有 `lifecycle`、`dependency`、`timeout` 三个有限值，不暴露连接串或底层
@@ -137,6 +138,13 @@ Redis span 位于同一条下游链路。
 `otel.kind=client`。禁止记录 SQL 文本、绑定参数、Redis command/key/value 或 Lua
 脚本。关闭 tracer provider 和指标监听器复用进程唯一关闭预算，确保批量 exporter
 有界刷新，不另行累加超时。
+
+所有 drain 使用同一个绝对截止时间，并预留总预算的 10%（最多 1 秒）给 Tools 与
+trace 收尾。worker/管理面通过 `OwnedTask` 持有任务句柄：等待关闭被外层超时取消、
+所有者直接丢弃或后续启动步骤失败时，Drop 都请求 abort，不能先 take 裸 JoinHandle
+再等待。abort 是 Tokio 协作取消，不能据此声称已终止不让出执行权的代码或正在运行的
+`spawn_blocking`。任务 panic 会在 join 时返回错误；本改动不提供运行期停滞检测，
+也不把关闭回归当作外部告警送达或探针新鲜度证明。耗时 histogram 的有限桶覆盖至 300 秒。
 
 机器可加载告警与 firing/silent 演练分别位于
 `ops/prometheus/yang-system.rules.yml` 和

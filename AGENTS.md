@@ -69,6 +69,7 @@ docker/mysql/init/           # 本地 MySQL 建库脚本
 其他常用命令：
 
 - `cargo run --locked` — 启动后端（`http://127.0.0.1:8080`），需要已配置 `config.toml`。Cargo features 只剩 `default = ["account"]`，没有 addon 级 feature 组合。
+- `cargo run --locked --bin yang-system -- --smoke-check` — 一次性只读检查完整 schema/旧数据和 MySQL/Redis，成功返回 `yang-system-smoke-v1` JSON 后退出；不执行 DDL、不监听 HTTP、不启动任何业务 worker 或 OTLP exporter。部署 smoke 必须使用此模式，报告不能替代锁内 schema 执行或回滚兼容证明。
 - `python scripts/check_architecture.py` — 架构门禁：保证 `actions/` 中一个文件只承载一个 Action（恰好一个 `pub(super) async fn handle` + 一个自包含 `pub(super) fn register`）、文件与 `mod.rs` 的 `ACTIONS` 注册表数组一致，裸 SQL 路径有 `// tenant-boundary: <kind> <id>` 边界注释；前端侧还锁定 `main.tsx` 唯一 createRoot、`TableView.tsx` 行数与 hook 边界、`registry.ts` 静态字面量 import。
 - `python scripts/new_action.py <module_actions_dir> <name> --title "..." --method POST --path /api/v1/...` — 新增 Action 脚手架（创建文件、声明 mod、注册）；生成器拒绝覆盖已有文件，生成的代码稳定返回“尚未实现”错误，必须补齐强类型输入、输出和业务逻辑后才算完成。
 - `pnpm --dir frontend dev` — 前端开发服务器（`http://localhost:5273`），默认通过 Vite 代理访问 `127.0.0.1:8080` 的真实后端（`VITE_DEV_API_ORIGIN` 可改代理目标；代理禁止开 `changeOrigin`，后端 BrowserSession 同源校验比对 Origin 与 Host）。

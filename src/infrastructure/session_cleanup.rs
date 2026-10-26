@@ -12,9 +12,9 @@ use sqlx::MySqlPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use yang_base::tools::Tools;
 use yang_db::{field, table, CompareOp, QueryBuilder, SqlExpr};
+use yang_runtime::shutdown::OwnedTask;
 
 /// 安全余量：覆盖 `last_seen_at` 的 60 秒节流、touch 失败窗口与时钟漂移。
 const SESSION_RETENTION_MARGIN_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -25,11 +25,14 @@ const SESSION_RETENTION_SECONDS: u64 =
 
 /// 清理扫描间隔：保留期以天计，6 小时一轮足以跟上增长。
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// 单批最多删除 1000 行；积压批次之间让出执行权并检查关闭信号。
+const SESSION_CLEANUP_BATCH_SIZE: u64 = 1000;
+const SESSION_CLEANUP_BACKLOG_DELAY: Duration = Duration::from_millis(100);
 
 /// 与 HTTP 服务同生共死的会话清理 Worker 句柄。
 pub struct SessionCleanupWorker {
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedTask<()>,
 }
 
 impl SessionCleanupWorker {
@@ -39,16 +42,20 @@ impl SessionCleanupWorker {
         let task = tokio::spawn(run_loop(pool, receiver));
         Ok(Self {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         })
+    }
+
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
     }
 
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         let _ = self.shutdown.send(true);
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await.context("等待会话清理 Worker 退出失败")?;
+        self.task
+            .join()
+            .await
+            .context("等待会话清理 Worker 退出失败")?;
         Ok(())
     }
 }
@@ -56,9 +63,6 @@ impl SessionCleanupWorker {
 impl Drop for SessionCleanupWorker {
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
     }
 }
 
@@ -67,11 +71,15 @@ async fn run_loop(pool: MySqlPool, mut shutdown: watch::Receiver<bool>) {
         if *shutdown.borrow() {
             break;
         }
+        let mut delay = SESSION_CLEANUP_INTERVAL;
         match cleanup_once(&pool).await {
             Ok(deleted) => {
                 metrics::counter!("session_cleanup_runs_total", "result" => "success").increment(1);
                 metrics::counter!("session_cleanup_deleted_total").increment(deleted);
                 tracing::info!(deleted, "会话保留期清理完成");
+                if deleted >= SESSION_CLEANUP_BATCH_SIZE {
+                    delay = SESSION_CLEANUP_BACKLOG_DELAY;
+                }
             }
             Err(error) => {
                 metrics::counter!("session_cleanup_runs_total", "result" => "error").increment(1);
@@ -84,15 +92,32 @@ async fn run_loop(pool: MySqlPool, mut shutdown: watch::Receiver<bool>) {
                     break;
                 }
             }
-            () = tokio::time::sleep(SESSION_CLEANUP_INTERVAL) => {}
+            () = tokio::time::sleep(delay) => {}
         }
     }
 }
 
 async fn cleanup_once(pool: &MySqlPool) -> anyhow::Result<u64> {
+    // QueryBuilder 的 limit 只约束 SELECT，不能对 delete() 链接 limit 冒充有界删除。
+    let candidates: Vec<(String,)> = QueryBuilder::from_pool(pool, table!("user_session"))
+        .field(field!("session_id"))
+        .where_expr(
+            field!("last_seen_at"),
+            CompareOp::Lt,
+            SqlExpr::unix_timestamp_add(-(SESSION_RETENTION_SECONDS as i64)),
+        )?
+        .limit(SESSION_CLEANUP_BATCH_SIZE)
+        .select()
+        .await
+        .context("查询过期会话批次失败")?;
+    delete_stale_candidates(pool, candidates.into_iter().map(|(id,)| id).collect()).await
+}
+
+async fn delete_stale_candidates(pool: &MySqlPool, candidates: Vec<String>) -> anyhow::Result<u64> {
     // 用数据库时钟做比较（DSL 的 UNIX_TIMESTAMP() 表达式），不把应用时钟带进
-    // 删除谓词；同时避免在 production 代码里出现裸 SQL。
+    // 删除谓词；重新检查保留期，保护 SELECT 后被 refresh 触碰的会话。
     let deleted = QueryBuilder::from_pool(pool, table!("user_session"))
+        .where_in(field!("session_id"), candidates)
         .where_expr(
             field!("last_seen_at"),
             CompareOp::Lt,
@@ -116,6 +141,36 @@ mod tests {
     use anyhow::ensure;
     use yang_base::database::DatabaseInitializer;
     use yang_db::{Database, DatabaseConfig};
+
+    #[tokio::test]
+    async fn cancelled_shutdown_aborts_inflight_cleanup() -> anyhow::Result<()> {
+        let (shutdown, _receiver) = watch::channel(false);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (dropped, released) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _resource = dropped;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await?;
+        let worker = SessionCleanupWorker {
+            shutdown,
+            task: OwnedTask::new(task),
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), worker.shutdown())
+                .await
+                .is_err()
+        );
+        // 关闭 future 被总预算取消后，仍必须销毁正在运行的任务所持资源。
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), released)
+                .await
+                .is_ok(),
+            "关闭等待被取消后后台任务仍在运行"
+        );
+        Ok(())
+    }
 
     #[test]
     fn retention_covers_refresh_token_hard_limit_with_margin() {
@@ -207,6 +262,91 @@ mod tests {
             .execute(database.pool())
             .await?;
         database.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL"]
+    async fn real_mysql_cleanup_batches_and_drains_backlog() -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        ensure!(name.ends_with("_test"), "拒绝在非测试数据库清理会话");
+        sqlx::query("DROP TABLE IF EXISTS user_session")
+            .execute(database.pool())
+            .await?;
+        let definition = crate::infrastructure::schema::user_session()?;
+        let initializer = Database::from_pool(database.pool().clone(), DatabaseConfig::default())?;
+        DatabaseInitializer::new(initializer)
+            .sync_table_definitions(&[&definition])
+            .await?;
+        let now: i64 = sqlx::query_scalar("SELECT CAST(UNIX_TIMESTAMP() AS SIGNED)")
+            .fetch_one(database.pool())
+            .await?;
+        let stale = now - SESSION_RETENTION_SECONDS as i64 - 3600;
+        // 超过单批上限，显式调用只应删除 1000 行。
+        insert_stale_batch(database.pool(), stale, 1001).await?;
+        ensure!(
+            cleanup_once(database.pool()).await? == 1000,
+            "单轮清理必须有行数上限"
+        );
+        ensure!(
+            cleanup_once(database.pool()).await? == 1,
+            "下一轮应清掉剩余会话"
+        );
+
+        // 模拟候选读取后 refresh 更新 last_seen_at；删除必须复核谓词。
+        insert_stale_batch(database.pool(), now, 1).await?;
+        ensure!(
+            delete_stale_candidates(database.pool(), vec!["stale-0".into()]).await? == 0,
+            "已刷新候选不得删除"
+        );
+        sqlx::query("DELETE FROM user_session WHERE session_id = 'stale-0'")
+            .execute(database.pool())
+            .await?;
+
+        insert_stale_batch(database.pool(), stale, 1001).await?;
+        let (shutdown, receiver) = watch::channel(false);
+        let mut worker = OwnedTask::new(tokio::spawn(run_loop(database.pool().clone(), receiver)));
+        let drained = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_session")
+                    .fetch_one(database.pool())
+                    .await?;
+                if remaining == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+        let _ = shutdown.send(true);
+        worker.join().await?;
+        drained.context("积压清理不能每批等待六小时")??;
+        sqlx::query("DROP TABLE user_session")
+            .execute(database.pool())
+            .await?;
+        database.close().await;
+        Ok(())
+    }
+
+    async fn insert_stale_batch(pool: &MySqlPool, stale: i64, count: usize) -> anyhow::Result<()> {
+        let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
+            "INSERT INTO user_session (session_id,user_id,current_jti,created_at,last_seen_at,ip,user_agent) "
+        );
+        query.push_values(0..count, |mut row, id| {
+            row.push_bind(format!("stale-{id}"))
+                .push_bind(1)
+                .push_bind(format!("jti-{id}"))
+                .push_bind(stale)
+                .push_bind(stale)
+                .push_bind("127.0.0.1")
+                .push_bind("cleanup-test");
+        });
+        query.build().execute(pool).await?;
         Ok(())
     }
 }
