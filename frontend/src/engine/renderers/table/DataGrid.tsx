@@ -193,13 +193,10 @@ export function DataGrid({
     state: { rowSelection },
     enableRowSelection: selectionEnabled,
     onRowSelectionChange: (updater) => {
-      setRowSelection((prev) => {
-        const next = typeof updater === "function" ? updater(prev) : updater;
-        onSelectionChange(
-          Object.keys(next).filter((key) => next[key] === true),
-        );
-        return next;
-      });
+      const next =
+        typeof updater === "function" ? updater(rowSelection) : updater;
+      setRowSelection(next);
+      onSelectionChange(Object.keys(next).filter((key) => next[key] === true));
     },
   });
 

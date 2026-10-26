@@ -1,4 +1,5 @@
 import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearStoredSession } from "@/engine/session/auth-session";
@@ -29,6 +30,19 @@ afterEach(() => {
 });
 
 describe("认证门控", () => {
+  it("瞬态恢复失败留在原路由，可显式重试而不误判退出", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(jsonResponse({ code: 40102 }, 401));
+    vi.stubGlobal("fetch", fetchMock);
+    const { router } = renderAt("/m/demo.items.main");
+    await userEvent.click(
+      await screen.findByRole("button", { name: "重试恢复会话" }),
+    );
+    await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it("restoreState 为 pending 时渲染全屏骨架，恢复失败后离开骨架", async () => {
     // refresh 挂起 → 会话保持 pending；测试末尾放行，避免模块级 activeRefresh
     //  Promise 泄漏到后续用例（auth-session 的刷新去重是模块级单例）。

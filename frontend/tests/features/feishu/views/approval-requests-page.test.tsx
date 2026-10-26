@@ -192,6 +192,15 @@ describe("派发记录页 · 行展开", () => {
             instance_code: null,
             serial_number: null,
           }),
+          taskWire({
+            id: 4,
+            record_id: "rec-review",
+            state: "review",
+            last_error: "外部写入结果未知，请核查飞书记录",
+            instance_code: null,
+            serial_number: null,
+          }),
+          taskWire({ id: 5, record_id: "rec-future", state: "future_state" }),
         ]),
     });
     renderRequests();
@@ -215,11 +224,18 @@ describe("派发记录页 · 行展开", () => {
     // 状态列走中文标签映射，不再渲染英文原值。
     expect(screen.getByText("终止")).toBeInTheDocument();
     expect(screen.getByText("表不存在")).toBeInTheDocument();
-    // `unnotified` 与 `terminal` 必须显示成两个不同的标签：前者是唯一一档
+    // `unnotified` 与 `terminal` 必须显示成两个不同的标签：前者是
     // 「处理完了但没人收到过消息」的行，画成同一个词就等于把这条修复抹掉。
     expect(screen.getByText("未通知")).toBeInTheDocument();
     expect(screen.queryByText("terminal")).not.toBeInTheDocument();
     expect(screen.queryByText("unnotified")).not.toBeInTheDocument();
+    expect(screen.getByText("待人工核查")).toBeInTheDocument();
+    expect(
+      screen.getByText("外部写入结果未知，请核查飞书记录"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("review")).not.toBeInTheDocument();
+    expect(screen.getByText("future_state")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /重试|重放/ })).toBeNull();
     expect(screen.getAllByText("inst-1").length).toBeGreaterThan(0);
   });
 

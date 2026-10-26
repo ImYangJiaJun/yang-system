@@ -1,6 +1,7 @@
 import { refreshSession, type LoginResult } from "./lifecycle";
 import { withRefreshLock } from "./refresh-lock";
 import { ApiError } from "../http/errors";
+import { waitForSignal, withRequestDeadline } from "../http/deadline";
 
 export const SESSION_EXPIRED_EVENT = "yang:session-expired";
 export const SESSION_REFRESHED_EVENT = "yang:session-refreshed";
@@ -16,6 +17,7 @@ const CREDENTIAL_KEYS = ["yang.token", "yang.refresh-token"] as const;
 let activeRefresh: Promise<LoginResult> | undefined;
 let currentAccessToken: string | undefined;
 let expiredAccessToken: string | undefined;
+let sessionGeneration = 0;
 
 /// 刷新请求的最长等待时间。超过即中止并按可重试错误交给调用方，
 /// 避免刷新端点挂起时启动骨架永久停在 pending。
@@ -46,13 +48,19 @@ export function discardLegacyStoredCredentials() {
   for (const key of CREDENTIAL_KEYS) target?.removeItem(key);
 }
 
-export function persistTokenPair(tokens: LoginResult) {
+export function persistTokenPair(tokens: LoginResult, newSession = true) {
+  if (newSession) {
+    sessionGeneration += 1;
+    activeRefresh = undefined;
+  }
   currentAccessToken = tokens.accessToken;
   discardLegacyStoredCredentials();
   expiredAccessToken = undefined;
 }
 
 export function clearStoredSession() {
+  sessionGeneration += 1;
+  activeRefresh = undefined;
   currentAccessToken = undefined;
   const target = storage();
   for (const key of SESSION_KEYS) target?.removeItem(key);
@@ -85,22 +93,22 @@ function terminalRefreshFailure(cause: unknown): boolean {
 
 async function refreshTokenPair(): Promise<LoginResult> {
   if (!activeRefresh) {
-    activeRefresh = withRefreshLock(() =>
-      refreshSession(
-        typeof AbortSignal !== "undefined" &&
-          typeof AbortSignal.timeout === "function"
-          ? AbortSignal.timeout(REFRESH_TIMEOUT_MS)
-          : undefined,
-      ),
+    const generation = sessionGeneration;
+    const pending = withRequestDeadline(
+      (signal) => withRefreshLock(() => refreshSession(signal), signal),
+      undefined,
+      REFRESH_TIMEOUT_MS,
     )
       .then((tokens) => {
-        persistTokenPair(tokens);
+        assertGeneration(generation);
+        persistTokenPair(tokens, false);
         dispatchSessionEvent(SESSION_REFRESHED_EVENT, tokens);
         return tokens;
       })
       .finally(() => {
-        activeRefresh = undefined;
+        if (activeRefresh === pending) activeRefresh = undefined;
       });
+    activeRefresh = pending;
   }
   return activeRefresh;
 }
@@ -109,9 +117,11 @@ export async function restoreSessionFromCookie(): Promise<
   LoginResult | undefined
 > {
   if (currentAccessToken) return { accessToken: currentAccessToken };
+  const generation = sessionGeneration;
   try {
     return await refreshTokenPair();
   } catch (cause: unknown) {
+    assertGeneration(generation);
     if (terminalRefreshFailure(cause)) {
       clearStoredSession();
       return undefined;
@@ -124,9 +134,11 @@ async function refreshAccessToken(failedAccessToken: string): Promise<string> {
   if (currentAccessToken && currentAccessToken !== failedAccessToken) {
     return currentAccessToken;
   }
+  const generation = sessionGeneration;
   try {
     return (await refreshTokenPair()).accessToken;
   } catch (cause: unknown) {
+    assertGeneration(generation);
     if (terminalRefreshFailure(cause)) {
       expireSession(failedAccessToken, cause);
     }
@@ -137,22 +149,38 @@ async function refreshAccessToken(failedAccessToken: string): Promise<string> {
 export async function requestWithTokenRefresh<T>(
   accessToken: string | undefined,
   request: (accessToken: string | undefined) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted();
+  const generation = sessionGeneration;
   const normalizedAccessToken = accessToken?.trim() || undefined;
   if (!normalizedAccessToken) return request(undefined);
 
+  const execute = async (token: string | undefined): Promise<T> => {
+    assertGeneration(generation);
+    signal?.throwIfAborted();
+    const response = await waitForSignal(request(token), signal);
+    assertGeneration(generation);
+    return response;
+  };
+  const refresh = () =>
+    waitForSignal(refreshAccessToken(normalizedAccessToken), signal);
   let result: T;
   try {
-    result = await request(normalizedAccessToken);
+    result = await execute(normalizedAccessToken);
   } catch (cause) {
-    // 生命周期端点（登出/停用）以抛 ApiError 表示 401，与返回 Response 的
-    // 请求共用同一套续期逻辑。
+    assertGeneration(generation);
     if (!(cause instanceof ApiError) || cause.status !== 401) throw cause;
-    return request(await refreshAccessToken(normalizedAccessToken));
+    return execute(await refresh());
   }
   if (!(result instanceof Response) || result.status !== 401) return result;
 
-  // 刷新成功后的重试若仍 401，那是业务拒绝而非会话失效：原样交给调用方，
-  // 只有刷新端点本身的失败才允许 expireSession。
-  return request(await refreshAccessToken(normalizedAccessToken));
+  // 只重放一次鉴权前被拒的请求；第二次业务401不能清会话。
+  return execute(await refresh());
+}
+
+function assertGeneration(generation: number): void {
+  if (generation !== sessionGeneration) {
+    throw new DOMException("会话已变更，请重新发起操作", "AbortError");
+  }
 }

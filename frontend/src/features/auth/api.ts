@@ -1,3 +1,4 @@
+import { withRequestDeadline } from "@/engine";
 import { ApiError } from "@/engine/http/errors";
 import { apiBase, parseJson } from "@/engine/http/http";
 
@@ -22,27 +23,29 @@ async function requestPublicAction(
   body: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<{ payload: ApiEnvelope; status: number; requestId?: string }> {
-  const response = await fetch(`${apiBase}${path}`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    credentials: "include",
-    signal,
-  });
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
+  return withRequestDeadline(async (signal) => {
+    const response = await fetch(`${apiBase}${path}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      credentials: "include",
+      signal,
     });
-  }
-  return { payload, status: response.status, requestId };
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    return { payload, status: response.status, requestId };
+  }, signal);
 }
 
 function recordData(data: unknown): Record<string, unknown> | undefined {

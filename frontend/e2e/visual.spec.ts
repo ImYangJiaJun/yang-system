@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { mockSessionRestore, resetDemoData } from "./support";
+import {
+  mockAnonymousSession,
+  mockSessionRestore,
+  resetDemoData,
+} from "./support";
 
 /**
  * 视觉回归基线（ADR-5 §2.5）：核心页面明暗双主题截图。
@@ -23,6 +27,7 @@ async function stable(page: import("@playwright/test").Page) {
 }
 
 test("登录页明暗主题", async ({ page }) => {
+  await mockAnonymousSession(page);
   await page.goto("/login");
   await stable(page);
   await expect(page).toHaveScreenshot("login-light.png", {
@@ -65,7 +70,11 @@ test("工作台表格页与 Action 对话框明暗主题", async ({ page, reques
   });
 
   // 模态对话框期间背景不可交互：先关闭再切主题，然后重开拍亮色。
-  await page.keyboard.press("Escape");
+  const close = dialog.getByRole("button", { name: "Close", exact: true });
+  await expect(close).toBeVisible();
+  await expect(close).toHaveCSS("opacity", "0.7");
+  await close.click({ timeout: 3_000 });
+  await expect(dialog).toBeHidden();
   await page.getByRole("button", { name: "切换明暗主题" }).click();
   await page.getByRole("button", { name: "新增项目" }).click();
   await expect(page.getByRole("dialog").getByLabel("名称")).toBeVisible();
@@ -73,4 +82,9 @@ test("工作台表格页与 Action 对话框明暗主题", async ({ page, reques
   await expect(page).toHaveScreenshot("action-dialog-light.png", {
     maxDiffPixelRatio: 0.02,
   });
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click({ timeout: 3_000 });
+  await expect(page.getByRole("dialog")).toBeHidden();
 });

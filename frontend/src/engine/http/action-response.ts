@@ -24,12 +24,22 @@ export async function parseActionResponse(
     (response.type === "opaqueredirect" ||
       (response.status >= 300 && response.status < 400))
   ) {
+    const location = response.headers.get("location") ?? undefined;
+    if (
+      location &&
+      new URL(location, window.location.href).origin !== window.location.origin
+    ) {
+      throw new ApiError("重定向目标必须同源", {
+        status: response.status,
+        requestId,
+      });
+    }
     return {
       kind: "redirect",
       status: response.status,
       durationMs,
       requestId,
-      location: response.headers.get("location") ?? undefined,
+      location,
     };
   }
 

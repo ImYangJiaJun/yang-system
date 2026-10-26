@@ -121,6 +121,43 @@ describe("invokeAction", () => {
     expect(relogin).toHaveBeenCalledOnce();
     window.removeEventListener(SESSION_RELOGIN_REQUIRED_EVENT, relogin);
   });
+  it("旧身份的迟到凭据变更回执不能清空新登录", async () => {
+    persistTokenPair({ accessToken: "old" });
+    let release!: () => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                release = () => {
+                  controller.enqueue(
+                    new TextEncoder().encode(
+                      JSON.stringify({
+                        code: 0,
+                        data: { relogin_required: true },
+                      }),
+                    ),
+                  );
+                  controller.close();
+                };
+              },
+            }),
+          ),
+      ),
+    );
+    const pending = invokeAction(
+      action,
+      { id: 1, name: "test" },
+      { token: "old" },
+    ).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    persistTokenPair({ accessToken: "new" });
+    release();
+    expect(await pending).toMatchObject({ name: "AbortError" });
+    expect(activeAccessToken()).toBe("new");
+  });
 
   it("按来源构建 path/query/header/body 且注入会话上下文", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
@@ -363,5 +400,39 @@ describe("invokeAction", () => {
       status: 0,
       location: undefined,
     });
+  });
+  it.each([
+    "https://outside.example/path",
+    "javascript:alert(1)",
+    "//outside.example/path",
+  ])("拒绝不受信重定向 %s", async (location) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () => new Response(null, { status: 302, headers: { location } }),
+      ),
+    );
+    await expect(
+      invokeAction(
+        {
+          ...action,
+          response_kind: "redirect",
+          path: "/api/redirect",
+          method: "GET",
+          params: [],
+        },
+        {},
+        {},
+      ),
+    ).rejects.toThrow("重定向目标");
+  });
+  it("JSON Action 的204无体不能误报成功", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    await expect(
+      invokeAction(action, { id: 1, name: "test" }, {}),
+    ).rejects.toMatchObject({ status: 204 });
   });
 });

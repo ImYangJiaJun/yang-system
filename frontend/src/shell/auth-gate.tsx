@@ -2,8 +2,12 @@ import type { ReactNode } from "react";
 import { Navigate, useSearchParams } from "react-router";
 
 import { safeRedirectTarget } from "@/features/auth/redirect";
-import { useRestoredSession } from "@/engine/session/use-session";
+import {
+  useRestoredSession,
+  useSessionController,
+} from "@/engine/session/use-session";
 import { Skeleton } from "@/shared/ui/skeleton";
+import { Button } from "@/shared/ui/button";
 
 /// 会话恢复进行中的全屏骨架（restoreState === "pending"）。
 export function SessionPendingScreen() {
@@ -19,10 +23,23 @@ export function SessionPendingScreen() {
   );
 }
 
+function SessionRestoreFailedScreen() {
+  const controller = useSessionController();
+  return (
+    <main className="flex min-h-svh flex-col items-center justify-center gap-4 bg-background">
+      <p role="alert">暂时无法恢复会话，请检查网络后重试。</p>
+      <Button onClick={() => void controller.restoreFromCookie()}>
+        重试恢复会话
+      </Button>
+    </main>
+  );
+}
+
 /// 受保护区域门控：pending → 骨架；anonymous → /login；authenticated → children。
 export function RequireAuth({ children }: { children: ReactNode }) {
   const snapshot = useRestoredSession();
   if (snapshot.restoreState === "pending") return <SessionPendingScreen />;
+  if (snapshot.restoreState === "failed") return <SessionRestoreFailedScreen />;
   if (!snapshot.loggedIn) return <Navigate to="/login" replace />;
   return children;
 }
@@ -34,6 +51,7 @@ export function RedirectIfAuthed({ children }: { children: ReactNode }) {
   const snapshot = useRestoredSession();
   const [searchParams] = useSearchParams();
   if (snapshot.restoreState === "pending") return <SessionPendingScreen />;
+  if (snapshot.restoreState === "failed") return <SessionRestoreFailedScreen />;
   if (snapshot.loggedIn) {
     return (
       <Navigate to={safeRedirectTarget(searchParams.get("redirect"))} replace />

@@ -33,7 +33,8 @@ export default function UserAdminPage() {
 
   useEffect(() => {
     let cancelled = false;
-    listUsers(token, 1)
+    const controller = new AbortController();
+    listUsers(token, 1, controller.signal)
       .then((rows) => {
         if (!cancelled) setUsers(rows);
       })
@@ -44,6 +45,7 @@ export default function UserAdminPage() {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
     // toast 身份不稳定，只在进入时拉一次。
     // eslint-disable-next-line react-hooks/exhaustive-deps

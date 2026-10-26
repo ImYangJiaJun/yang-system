@@ -1,3 +1,4 @@
+import { withRequestDeadline } from "../http/deadline";
 import { ApiError, SecondFactorRequiredError } from "../http/errors";
 import { apiBase, parseJson } from "../http/http";
 
@@ -38,36 +39,38 @@ async function requestAccessToken(
   missingTokenMessage: string,
   signal?: AbortSignal,
 ): Promise<LoginResult> {
-  const response = await fetch(`${apiBase}${path}`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-    credentials: "include",
-    signal,
-  });
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
+  return withRequestDeadline(async (signal) => {
+    const response = await fetch(`${apiBase}${path}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      credentials: "include",
+      signal,
     });
-  }
-  const result = accessToken(payload.data);
-  if (!result) {
-    throw new ApiError(missingTokenMessage, {
-      status: response.status,
-      code: payload.code,
-      requestId,
-      details: payload,
-    });
-  }
-  return result;
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    const result = accessToken(payload.data);
+    if (!result) {
+      throw new ApiError(missingTokenMessage, {
+        status: response.status,
+        code: payload.code,
+        requestId,
+        details: payload,
+      });
+    }
+    return result;
+  }, signal);
 }
 
 export async function refreshSession(
@@ -179,36 +182,38 @@ async function requestAccountTermination(
   accessToken: string | undefined,
   signal: AbortSignal | undefined,
 ): Promise<{ immediateConvergence: boolean }> {
-  const response = await fetch(`${apiBase}${path}`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
-    body: "{}",
-    credentials: "include",
-    signal,
-  });
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  const data =
-    payload?.data !== null &&
-    typeof payload?.data === "object" &&
-    !Array.isArray(payload.data)
-      ? (payload.data as Record<string, unknown>)
-      : undefined;
-  const validResult =
-    data?.[confirmationField] === true &&
-    typeof data.immediate_convergence === "boolean" &&
-    data.relogin_required === true;
-  if (!response.ok || payload?.code !== 0 || !validResult) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
+  return withRequestDeadline(async (signal) => {
+    const response = await fetch(`${apiBase}${path}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+      body: "{}",
+      credentials: "include",
+      signal,
     });
-  }
-  return { immediateConvergence: data.immediate_convergence as boolean };
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    const data =
+      payload?.data !== null &&
+      typeof payload?.data === "object" &&
+      !Array.isArray(payload.data)
+        ? (payload.data as Record<string, unknown>)
+        : undefined;
+    const validResult =
+      data?.[confirmationField] === true &&
+      typeof data.immediate_convergence === "boolean" &&
+      data.relogin_required === true;
+    if (!response.ok || payload?.code !== 0 || !validResult) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    return { immediateConvergence: data.immediate_convergence as boolean };
+  }, signal);
 }

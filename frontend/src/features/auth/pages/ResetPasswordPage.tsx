@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router";
+import { useEffect, useState, type FormEvent } from "react";
+import { Link, useLocation, useNavigate } from "react-router";
 
 import { resetPassword } from "@/features/auth/api";
 import { publishSessionEnd } from "@/engine/session/session-coordination";
@@ -10,13 +10,33 @@ import { Label } from "@/shared/ui/label";
 import { useToast } from "@/shared/lib/toast";
 
 /// 重置密码（旧 ResetPasswordPage.vue 语义）：一次性凭证 + 新密码；
-/// 凭证可由链接 query（?token=）预填。成功后清空会话并广播凭据变更。
+/// 新链接用 fragment，兼容旧 query；读取后立即移除地址中的一次性凭据。
 export default function ResetPasswordPage() {
   const controller = useSessionController();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const location = useLocation();
   const toast = useToast();
-  const [resetToken, setResetToken] = useState(searchParams.get("token") ?? "");
+  const [resetToken, setResetToken] = useState(
+    () =>
+      new URLSearchParams(location.hash.slice(1)).get("token") ??
+      new URLSearchParams(location.search).get("token") ??
+      "",
+  );
+  useEffect(() => {
+    const query = new URLSearchParams(location.search);
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    if (!query.has("token") && !fragment.has("token")) return;
+    query.delete("token");
+    fragment.delete("token");
+    navigate(
+      {
+        pathname: location.pathname,
+        search: query.toString(),
+        hash: fragment.toString(),
+      },
+      { replace: true },
+    );
+  }, [location, navigate]);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);

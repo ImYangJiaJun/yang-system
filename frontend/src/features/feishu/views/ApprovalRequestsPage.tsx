@@ -379,8 +379,8 @@ function JsonBlock({ title, text }: { title: string; text: string | null }) {
 /// 任务状态的中文标签。
 ///
 /// 状态列是运维扫这张表的第一眼，英文原值读不出来。`unnotified`（未通知）与
-/// `terminal`（终止）**必须分开显示**：两者都表示「处理已结束、退出认领集」，
-/// 但前者意味着**没人收到过任何消息**，是唯一需要人去捞的那一档。
+/// `terminal`（终止）必须分开显示；`review` 表示外部写入结果未知或重试耗尽，
+/// 需要人工核查，不能当作确定失败或提示自动重放。
 const TASK_STATE_LABELS: Record<string, string> = {
   pending: "待处理",
   creating: "创建中",
@@ -388,6 +388,7 @@ const TASK_STATE_LABELS: Record<string, string> = {
   backfilled: "已回填",
   terminal: "终止",
   unnotified: "未通知",
+  review: "待人工核查",
 };
 
 function taskStateLabel(state: string): string {

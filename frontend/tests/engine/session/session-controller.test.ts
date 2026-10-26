@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearStoredSession } from "@/engine/session/auth-session";
+import {
+  clearStoredSession,
+  persistTokenPair,
+} from "@/engine/session/auth-session";
 import { SessionController } from "@/engine/session/session-controller";
 
 function tokenResponse(accessToken: string) {
@@ -49,6 +52,37 @@ afterEach(() => {
 });
 
 describe("SessionController", () => {
+  it("已解析的恢复结果也不能跨过新的登录代次", async () => {
+    persistTokenPair({ accessToken: "old" });
+    const controller = new SessionController();
+    const pending = controller.restoreFromCookie();
+    controller.beginSession({ accessToken: "new" });
+    await pending;
+    expect(controller.getSnapshot().token).toBe("new");
+  });
+  it.each(["endSession", "disableAccount"] as const)(
+    "迟到 %s 不能清除新登录",
+    async (operation) => {
+      let release!: (response: Response) => void;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          () =>
+            new Promise<Response>((resolve) => {
+              release = resolve;
+            }),
+        ),
+      );
+      const controller = new SessionController();
+      controller.beginSession({ accessToken: "old" });
+      const pending = controller[operation]().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      controller.beginSession({ accessToken: "new" });
+      release(logoutResponse());
+      await pending;
+      expect(controller.getSnapshot().token).toBe("new");
+    },
+  );
   it("beginSession 通过显式协调动作清空旧 owner 并写入内存 Token", () => {
     const onSessionReset = vi.fn();
     const controller = new SessionController({ onSessionReset });
@@ -270,7 +304,7 @@ describe("SessionController", () => {
     expect(logoutSignals).toHaveLength(2);
   });
 
-  it("恢复超时按可重试错误收敛为匿名，不永久停在 pending", async () => {
+  it("恢复超时保留可重试状态，重试成功后恢复会话", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -283,8 +317,50 @@ describe("SessionController", () => {
 
     expect(controller.getSnapshot()).toMatchObject({
       token: "",
-      restoreState: "anonymous",
+      restoreState: "failed",
       loggedIn: false,
     });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => tokenResponse("recovered")),
+    );
+    await expect(controller.restoreFromCookie()).resolves.toBe(true);
+    expect(controller.getSnapshot().token).toBe("recovered");
   });
+
+  it.each(["logout", "credentials-changed", "cross-tab", "new-login"])(
+    "迟到 restore 成功/失败不能覆盖 %s 后的会话",
+    async (boundary) => {
+      for (const status of [200, 401, 503]) {
+        clearStoredSession();
+        let release!: (response: Response) => void;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(
+            () =>
+              new Promise<Response>((resolve) => {
+                release = resolve;
+              }),
+          ),
+        );
+        const controller = new SessionController();
+        const pending = controller.restoreFromCookie();
+        await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+        if (boundary === "new-login")
+          controller.beginSession({ accessToken: "new-login" });
+        else
+          controller.clearSession(
+            boundary === "credentials-changed" ? boundary : "session-expired",
+          );
+        const expected = controller.getSnapshot();
+        release(
+          status === 200
+            ? tokenResponse("obsolete")
+            : new Response("{}", { status }),
+        );
+        await pending;
+        expect(controller.getSnapshot()).toEqual(expected);
+      }
+    },
+  );
 });

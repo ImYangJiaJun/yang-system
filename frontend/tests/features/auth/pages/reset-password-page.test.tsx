@@ -22,6 +22,25 @@ afterEach(() => {
 });
 
 describe("ResetPasswordPage", () => {
+  it.each(["?token=private&keep=yes", "?keep=yes#token=private"])(
+    "读取 %s 后清理地址中的凭据",
+    async (suffix) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => jsonResponse({ code: 40102 }, 401)),
+      );
+      const { router } = renderTestApp({
+        path: `/reset-password${suffix}`,
+        authenticated: false,
+      });
+      await screen.findByRole("heading", { name: "重置密码" });
+      expect(screen.getByLabelText("重置凭证")).toHaveValue("private");
+      await waitFor(() => {
+        expect(router.state.location.search).toBe("?keep=yes");
+        expect(router.state.location.hash).toBe("");
+      });
+    },
+  );
   it("从链接 query 预填重置凭证", async () => {
     vi.stubGlobal(
       "fetch",

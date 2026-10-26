@@ -11,6 +11,7 @@ import {
   restoreSessionFromCookie,
 } from "./auth-session";
 import { publishSessionEnd } from "./session-coordination";
+import { withRequestDeadline } from "../http/deadline";
 
 /// 登出/停用的服务端收敛上限：挂起请求不能让本地清理无限等待。
 const TERMINATION_TIMEOUT_MS = 10_000;
@@ -23,7 +24,8 @@ const TERMINATION_TIMEOUT_MS = 10_000;
  * 多标签页结束广播。React 侧只通过 useSyncExternalStore 薄壳（api/use-session.ts）订阅。
  */
 
-export type SessionRestoreState = "pending" | "authenticated" | "anonymous";
+export type SessionRestoreState =
+  "pending" | "authenticated" | "anonymous" | "failed";
 
 /// 会话结束原因：失效传播到登录页时展示对应提示（避免 URL reason 的导航竞态）。
 export type SessionEndReason = "session-expired" | "credentials-changed";
@@ -44,6 +46,7 @@ export class SessionController {
   private token = "";
   private restoreState: SessionRestoreState = "pending";
   private activeRestore: Promise<boolean> | undefined;
+  private generation = 0;
   private snapshot: SessionSnapshot = {
     token: "",
     restoreState: "pending",
@@ -67,8 +70,10 @@ export class SessionController {
 
   /// 登录建立会话：先级联清空旧 owner，再写入新凭据。
   beginSession(tokens: LoginResult): void {
+    this.generation += 1;
+    this.activeRestore = undefined;
     this.options.onSessionReset?.();
-    this.setTokenPair(tokens);
+    this.setTokenPair(tokens, true);
   }
 
   /// 自动刷新轮换：只换 token，保留当前身份上下文，不触发 owner 级联。
@@ -77,6 +82,8 @@ export class SessionController {
   }
 
   clearSession(reason?: SessionEndReason): void {
+    this.generation += 1;
+    this.activeRestore = undefined;
     clearStoredSession();
     this.options.onSessionReset?.();
     this.commit("", "anonymous", reason);
@@ -86,8 +93,11 @@ export class SessionController {
     if (this.snapshot.loggedIn) return true;
     if (this.restoreState === "anonymous") return false;
     if (!this.activeRestore) {
-      this.activeRestore = restoreSessionFromCookie()
+      const generation = this.generation;
+      this.commit("", "pending");
+      const pending = restoreSessionFromCookie()
         .then((tokens) => {
+          if (generation !== this.generation) return false;
           if (!tokens) {
             this.commit("", "anonymous");
             return false;
@@ -96,48 +106,66 @@ export class SessionController {
           return true;
         })
         .catch(() => {
-          this.commit("", "anonymous");
+          if (generation === this.generation) this.commit("", "failed");
           return false;
         })
         .finally(() => {
-          this.activeRestore = undefined;
+          if (this.activeRestore === pending) this.activeRestore = undefined;
         });
+      this.activeRestore = pending;
     }
     return this.activeRestore;
   }
 
   async endSession(): Promise<boolean> {
+    const generation = this.generation;
     try {
-      await requestWithTokenRefresh(this.token || undefined, (token) =>
-        requestLogout(token, AbortSignal.timeout(TERMINATION_TIMEOUT_MS)),
+      await withRequestDeadline(
+        (signal) =>
+          requestWithTokenRefresh(
+            this.token || undefined,
+            (token) => requestLogout(token, signal),
+            signal,
+          ),
+        undefined,
+        TERMINATION_TIMEOUT_MS,
       );
     } finally {
       // 服务端不可达或 Access Token 已过期也必须清本地：否则用户被卡在
       // 「已登出但界面仍是登录态」的半状态。10s 超时保证挂起请求不会让
       // finally 永不执行；保留已有结束原因，避免覆盖 session-expired。
-      this.clearSession(this.snapshot.sessionEndReason);
-      publishSessionEnd("logout");
+      if (generation === this.generation) {
+        this.clearSession(this.snapshot.sessionEndReason);
+        publishSessionEnd("logout");
+      }
     }
     return true;
   }
 
   async disableAccount(): Promise<boolean> {
+    const generation = this.generation;
     try {
-      await requestWithTokenRefresh(this.token || undefined, (token) =>
-        requestDisableAccount(
-          token,
-          AbortSignal.timeout(TERMINATION_TIMEOUT_MS),
-        ),
+      await withRequestDeadline(
+        (signal) =>
+          requestWithTokenRefresh(
+            this.token || undefined,
+            (token) => requestDisableAccount(token, signal),
+            signal,
+          ),
+        undefined,
+        TERMINATION_TIMEOUT_MS,
       );
     } finally {
-      this.clearSession(this.snapshot.sessionEndReason);
-      publishSessionEnd("logout");
+      if (generation === this.generation) {
+        this.clearSession(this.snapshot.sessionEndReason);
+        publishSessionEnd("logout");
+      }
     }
     return true;
   }
 
-  private setTokenPair(tokens: LoginResult): void {
-    persistTokenPair(tokens);
+  private setTokenPair(tokens: LoginResult, newSession = false): void {
+    persistTokenPair(tokens, newSession);
     this.commit(tokens.accessToken, "authenticated");
   }
 

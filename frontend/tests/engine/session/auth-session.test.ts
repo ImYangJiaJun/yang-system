@@ -6,6 +6,8 @@ import {
   SESSION_EXPIRED_EVENT,
   SessionExpiredError,
   requestWithTokenRefresh,
+  SESSION_REFRESHED_EVENT,
+  restoreSessionFromCookie,
 } from "@/engine/session/auth-session";
 
 function tokenResponse(accessToken: string) {
@@ -22,11 +24,98 @@ function tokenResponse(accessToken: string) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   clearStoredSession();
   vi.unstubAllGlobals();
 });
 
 describe("requestWithTokenRefresh", () => {
+  it("旧刷新结束不能清掉新一代的单飞请求", async () => {
+    const releases: ((response: Response) => void)[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            releases.push(resolve);
+          }),
+      ),
+    );
+    const old = restoreSessionFromCookie().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    clearStoredSession();
+    const current = restoreSessionFromCookie();
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[0](tokenResponse("obsolete"));
+    await old;
+    const same = restoreSessionFromCookie();
+    expect(releases).toHaveLength(2);
+    releases[1](tokenResponse("current"));
+    await expect(current).resolves.toEqual({ accessToken: "current" });
+    await expect(same).resolves.toEqual({ accessToken: "current" });
+  });
+  it.each([200, 401, 503])(
+    "旧 refresh 的 %s 响应不能覆盖新登录或发出会话事件",
+    async (status) => {
+      persistTokenPair({ accessToken: "old" });
+      let release!: (response: Response) => void;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          () =>
+            new Promise<Response>((resolve) => {
+              release = resolve;
+            }),
+        ),
+      );
+      const refreshed = vi.fn();
+      const expired = vi.fn();
+      window.addEventListener(SESSION_REFRESHED_EVENT, refreshed);
+      window.addEventListener(SESSION_EXPIRED_EVENT, expired);
+      const pending = requestWithTokenRefresh(
+        "old",
+        async () => new Response(null, { status: 401 }),
+      ).catch((error: unknown) => error);
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      persistTokenPair({ accessToken: "new-login" });
+      release(
+        status === 200
+          ? tokenResponse("obsolete")
+          : new Response("{}", { status }),
+      );
+      await pending;
+      expect(activeAccessToken()).toBe("new-login");
+      expect(refreshed).not.toHaveBeenCalled();
+      expect(expired).not.toHaveBeenCalled();
+      window.removeEventListener(SESSION_REFRESHED_EVENT, refreshed);
+      window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
+    },
+  );
+
+  it("刷新总预算包含 Web Locks 等待，取消后不会执行刷新", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal("navigator", {
+      locks: {
+        request: (_name: string, options: LockOptions) => {
+          signal = options.signal;
+          return new Promise((_resolve, reject) =>
+            signal?.addEventListener("abort", () => reject(signal?.reason), {
+              once: true,
+            }),
+          );
+        },
+      },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const pending = restoreSessionFromCookie().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(signal?.aborted).toBe(true);
+    expect(await pending).toMatchObject({ name: "TimeoutError" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
   it("访问令牌过期后用 HttpOnly Cookie 刷新并只重试一次", async () => {
     persistTokenPair({ accessToken: "access-old" });
     const requestLock = vi.fn(

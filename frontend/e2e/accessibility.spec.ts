@@ -1,7 +1,11 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-import { mockSessionRestore, resetDemoData } from "./support";
+import {
+  mockAnonymousSession,
+  mockSessionRestore,
+  resetDemoData,
+} from "./support";
 
 /**
  * 可访问性（ADR-5 §2.3）：核心页面 axe 零 critical/serious 违规 + 键盘可达性。
@@ -23,6 +27,7 @@ function expectNoSeriousViolations(
 }
 
 test("登录页满足 WCAG AA 且可以纯键盘提交", async ({ page }) => {
+  await mockAnonymousSession(page);
   await page.route("**/api/v1/users/login", (route) =>
     route.fulfill({
       status: 401,

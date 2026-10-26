@@ -22,7 +22,7 @@ export default function App() {
     }),
   );
   const [queryClient] = useState(
-    () => new QueryClient({ defaultOptions: { queries: { retry: 1 } } }),
+    () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
   );
   const router = useMemo(() => createBrowserRouter(appRoutes), []);
 

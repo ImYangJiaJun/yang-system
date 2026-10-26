@@ -105,6 +105,32 @@ afterEach(() => {
 });
 
 describe("公开门户查询页", () => {
+  it("输入变化取消已发出的旧建议请求，旧结果不覆盖新输入", async () => {
+    let oldSignal: AbortSignal | undefined;
+    let release!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes(SUGGEST_PATH)) {
+          oldSignal = init?.signal ?? undefined;
+          return new Promise<Response>((resolve) => {
+            release = resolve;
+          });
+        }
+        if (url.endsWith(METADATA_PATH)) return envelope(metadataBody());
+        return jsonResponse({ code: 401 }, 401);
+      }),
+    );
+    renderPortal();
+    const input = await screen.findByLabelText("查询");
+    await userEvent.type(input, "6222");
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    await userEvent.clear(input);
+    expect(oldSignal?.aborted).toBe(true);
+    release(envelope({ suggestions: ["622200000000"] }));
+    expect(screen.queryByText("6222 0000 0000")).toBeNull();
+  });
   it("未登录也能打开：不落登录页、不被会话骨架挡住", async () => {
     stubPortal();
     renderPortal();

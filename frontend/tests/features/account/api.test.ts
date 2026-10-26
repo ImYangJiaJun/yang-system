@@ -426,11 +426,11 @@ describe("fetchAvatar", () => {
     });
   });
 
-  it("401 映射为 ApiError", async () => {
+  it("头像401且刷新被拒时报告会话过期", async () => {
     stubFetch(() =>
       Promise.resolve(jsonResponse({ code: 40101, message: "未认证" }, 401)),
     );
-    await expect(fetchAvatar(42, "tok-1")).rejects.toThrow("未认证");
+    await expect(fetchAvatar(42, "tok-1")).rejects.toThrow("登录状态已过期");
   });
 });
 

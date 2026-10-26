@@ -1,3 +1,4 @@
+import { withRequestDeadline } from "@/engine";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 
 import { ApiError } from "@/engine/http/errors";
@@ -47,86 +48,98 @@ async function postAuthenticated(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<{ payload: ApiEnvelope; status: number; requestId?: string }> {
-  const response = await fetch(`${apiBase}${path}`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
-    body: JSON.stringify(body),
-    credentials: "include",
-    signal,
-  });
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
-    });
-  }
-  return { payload, status: response.status, requestId };
+  return withRequestDeadline(async (signal) => {
+    const response = await requestWithTokenRefresh(
+      accessToken,
+      (current) =>
+        fetch(`${apiBase}${path}`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            ...(current ? { Authorization: `Bearer ${current}` } : {}),
+          },
+          body: JSON.stringify(body),
+          credentials: "include",
+          signal,
+        }),
+      signal,
+    );
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    return { payload, status: response.status, requestId };
+  }, signal);
 }
 
 export async function fetchCurrentUser(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<CurrentUser> {
-  // 走共享刷新客户端：access token 过期时透明续期，而非硬失败 401。
-  const response = await requestWithTokenRefresh(accessToken, (token) =>
-    fetch(`${apiBase}/api/v1/users/me`, {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      credentials: "include",
+  return withRequestDeadline(async (signal) => {
+    // 走共享刷新客户端：access token 过期时透明续期，而非硬失败 401。
+    const response = await requestWithTokenRefresh(
+      accessToken,
+      (token) =>
+        fetch(`${apiBase}/api/v1/users/me`, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          credentials: "include",
+          signal,
+        }),
       signal,
-    }),
-  );
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
-    });
-  }
-  const data = recordData(payload.data);
-  if (
-    typeof data?.id !== "number" ||
-    typeof data.username !== "string" ||
-    !data.username
-  ) {
-    throw new ApiError("当前用户响应缺少有效资料", {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
-    });
-  }
-  return {
-    id: data.id,
-    username: data.username,
-    email: typeof data.email === "string" ? data.email : null,
-    emailVerifiedAt:
-      typeof data.email_verified_at === "number"
-        ? data.email_verified_at
-        : null,
-    status: data.status === "disabled" ? "disabled" : "active",
-    totpActivated: data.totp_activated === true,
-    avatarVersion:
-      typeof data.avatar_version === "string" && data.avatar_version
-        ? data.avatar_version
-        : null,
-    createdAt: data.created_at as number,
-    updatedAt: data.updated_at as number,
-  };
+    );
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    const data = recordData(payload.data);
+    if (
+      typeof data?.id !== "number" ||
+      typeof data.username !== "string" ||
+      !data.username
+    ) {
+      throw new ApiError("当前用户响应缺少有效资料", {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    return {
+      id: data.id,
+      username: data.username,
+      email: typeof data.email === "string" ? data.email : null,
+      emailVerifiedAt:
+        typeof data.email_verified_at === "number"
+          ? data.email_verified_at
+          : null,
+      status: data.status === "disabled" ? "disabled" : "active",
+      totpActivated: data.totp_activated === true,
+      avatarVersion:
+        typeof data.avatar_version === "string" && data.avatar_version
+          ? data.avatar_version
+          : null,
+      createdAt: data.created_at as number,
+      updatedAt: data.updated_at as number,
+    };
+  }, signal);
 }
 
 /// 当前用户资料的 TanStack Query 入口：认证会话就绪后拉取，token 变化自动重拉。
@@ -153,36 +166,40 @@ export async function fetchAvatar(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<AvatarContent> {
-  const response = await fetch(
-    `${apiBase}/api/v1/users/avatar?user_id=${userId}`,
-    {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      },
-      credentials: "include",
+  return withRequestDeadline(async (signal) => {
+    const response = await requestWithTokenRefresh(
+      accessToken,
+      (current) =>
+        fetch(`${apiBase}/api/v1/users/avatar?user_id=${userId}`, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            ...(current ? { Authorization: `Bearer ${current}` } : {}),
+          },
+          credentials: "include",
+          signal,
+        }),
       signal,
-    },
-  );
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
-    });
-  }
-  const data = recordData(payload.data);
-  return {
-    etag: typeof data?.etag === "string" && data.etag ? data.etag : null,
-    dataUrl:
-      typeof data?.data_url === "string" && data.data_url
-        ? data.data_url
-        : null,
-  };
+    );
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    const data = recordData(payload.data);
+    return {
+      etag: typeof data?.etag === "string" && data.etag ? data.etag : null,
+      dataUrl:
+        typeof data?.data_url === "string" && data.data_url
+          ? data.data_url
+          : null,
+    };
+  }, signal);
 }
 
 /// 上传当前用户头像：body 为 base64 内容与 MIME，成功返回新的内容版本（etag）。
@@ -307,42 +324,49 @@ export async function listSessions(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<SessionInfo[]> {
-  const response = await fetch(`${apiBase}/api/v1/users/sessions`, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
-    credentials: "include",
-    signal,
-  });
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
+  return withRequestDeadline(async (signal) => {
+    const response = await requestWithTokenRefresh(
+      accessToken,
+      (current) =>
+        fetch(`${apiBase}/api/v1/users/sessions`, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            ...(current ? { Authorization: `Bearer ${current}` } : {}),
+          },
+          credentials: "include",
+          signal,
+        }),
+      signal,
+    );
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    const data = recordData(payload.data);
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    return sessions.map((raw) => {
+      const session = raw as Record<string, unknown>;
+      return {
+        sessionId: String(session.session_id),
+        createdAt: session.created_at as number,
+        lastSeenAt: session.last_seen_at as number,
+        ip: String(session.ip),
+        userAgent: String(session.user_agent),
+        revokedAt:
+          typeof session.revoked_at === "number"
+            ? (session.revoked_at as number)
+            : null,
+        current: session.current === true,
+      };
     });
-  }
-  const data = recordData(payload.data);
-  const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
-  return sessions.map((raw) => {
-    const session = raw as Record<string, unknown>;
-    return {
-      sessionId: String(session.session_id),
-      createdAt: session.created_at as number,
-      lastSeenAt: session.last_seen_at as number,
-      ip: String(session.ip),
-      userAgent: String(session.user_agent),
-      revokedAt:
-        typeof session.revoked_at === "number"
-          ? (session.revoked_at as number)
-          : null,
-      current: session.current === true,
-    };
-  });
+  }, signal);
 }
 
 export async function revokeSession(
@@ -380,42 +404,47 @@ export async function fetchSecurityEvents(
   accessToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<SecurityEvent[]> {
-  const response = await requestWithTokenRefresh(accessToken, (token) =>
-    fetch(`${apiBase}/api/v1/users/security-events`, {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      credentials: "include",
+  return withRequestDeadline(async (signal) => {
+    const response = await requestWithTokenRefresh(
+      accessToken,
+      (token) =>
+        fetch(`${apiBase}/api/v1/users/security-events`, {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          credentials: "include",
+          signal,
+        }),
       signal,
-    }),
-  );
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
+    );
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    const data = recordData(payload.data);
+    const events = Array.isArray(data?.events) ? data.events : [];
+    return events.map((raw) => {
+      const event = raw as Record<string, unknown>;
+      return {
+        occurredAt: event.occurred_at as number,
+        ip: String(event.ip),
+        userAgent: String(event.user_agent),
+        result: event.result === "succeeded" ? "succeeded" : "failed",
+        failureReason:
+          typeof event.failure_reason === "string"
+            ? (event.failure_reason as string)
+            : null,
+      };
     });
-  }
-  const data = recordData(payload.data);
-  const events = Array.isArray(data?.events) ? data.events : [];
-  return events.map((raw) => {
-    const event = raw as Record<string, unknown>;
-    return {
-      occurredAt: event.occurred_at as number,
-      ip: String(event.ip),
-      userAgent: String(event.user_agent),
-      result: event.result === "succeeded" ? "succeeded" : "failed",
-      failureReason:
-        typeof event.failure_reason === "string"
-          ? (event.failure_reason as string)
-          : null,
-    };
-  });
+  }, signal);
 }
 
 /// 登录安全事件的 TanStack Query 入口：认证会话就绪后拉取。

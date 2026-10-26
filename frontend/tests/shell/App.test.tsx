@@ -2,6 +2,10 @@ import { render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/shell/App";
+import {
+  clearStoredSession,
+  persistTokenPair,
+} from "@/engine/session/auth-session";
 import { renderTestApp } from "@test/helpers/render-app";
 
 function jsonResponse(payload: unknown, status: number) {
@@ -12,12 +16,28 @@ function jsonResponse(payload: unknown, status: number) {
 }
 
 afterEach(() => {
+  clearStoredSession();
   vi.unstubAllGlobals();
   sessionStorage.clear();
   localStorage.clear();
 });
 
 describe("App", () => {
+  it("确定的403查询拒绝不自动重试", async () => {
+    window.history.replaceState({}, "", "/");
+    persistTokenPair({ accessToken: "test-access" });
+    let catalogRequests = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("ui-catalog")) catalogRequests += 1;
+        return jsonResponse({ code: 40301, message: "无权访问目录" }, 403);
+      }),
+    );
+    render(<App />);
+    await screen.findByText("无权访问目录");
+    expect(catalogRequests).toBe(1);
+  });
   it("只有 Action 没有 Module 时，不生成硬编码业务菜单", async () => {
     vi.stubGlobal(
       "fetch",

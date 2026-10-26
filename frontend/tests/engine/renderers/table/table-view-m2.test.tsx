@@ -174,6 +174,7 @@ afterEach(() => {
 
 describe("bulk Action 链路", () => {
   it("选中多行 → 批量栏 → 确认 → 提交 selected 行数组", async () => {
+    const consoleError = vi.spyOn(console, "error");
     const { captured } = installFetchMock();
     renderTableView();
 
@@ -213,6 +214,10 @@ describe("bulk Action 链路", () => {
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent("已删除"),
     );
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain(
+      "Cannot update a component",
+    );
+    consoleError.mockRestore();
   });
 });
 

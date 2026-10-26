@@ -1,3 +1,4 @@
+import { withRequestDeadline } from "@/engine";
 /**
  * 飞书查询门户的数据访问层。
  *
@@ -367,28 +368,34 @@ async function publicJson(
   init: RequestInit,
   token?: string,
 ): Promise<unknown> {
-  const response = await requestWithTokenRefresh(token, (current) =>
-    fetch(`${apiBase}${path}`, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        ...(current ? { Authorization: `Bearer ${current}` } : {}),
-        ...init.headers,
-      },
-      credentials: "omit",
-    }),
-  );
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const payload = (await parseJson(response)) as ApiEnvelope | undefined;
-  if (!response.ok || payload?.code !== 0) {
-    throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
-      status: response.status,
-      code: payload?.code,
-      requestId,
-      details: payload,
-    });
-  }
-  return payload.data;
+  return withRequestDeadline(async (signal) => {
+    const response = await requestWithTokenRefresh(
+      token,
+      (current) =>
+        fetch(`${apiBase}${path}`, {
+          ...init,
+          signal,
+          headers: {
+            Accept: "application/json",
+            ...(current ? { Authorization: `Bearer ${current}` } : {}),
+            ...init.headers,
+          },
+          credentials: "omit",
+        }),
+      signal,
+    );
+    const requestId = response.headers.get("x-request-id") ?? undefined;
+    const payload = (await parseJson(response)) as ApiEnvelope | undefined;
+    if (!response.ok || payload?.code !== 0) {
+      throw new ApiError(payload?.message ?? `HTTP ${response.status}`, {
+        status: response.status,
+        code: payload?.code,
+        requestId,
+        details: payload,
+      });
+    }
+    return payload.data;
+  }, init.signal ?? undefined);
 }
 
 /// 公开端点的失败 → 页面该做什么。

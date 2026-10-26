@@ -101,6 +101,14 @@ test("静态 view_id 覆盖通用页并可返回", async ({ page }) => {
 });
 
 test("批量删除：选中多行 → 批量栏 → 确认 → 提交", async ({ page }) => {
+  const renderErrors: string[] = [];
+  page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      message.text().includes("Cannot update a component")
+    )
+      renderErrors.push(message.text());
+  });
   await page.getByRole("checkbox", { name: "选择第 1 行" }).click();
   await page.getByRole("checkbox", { name: "选择第 2 行" }).click();
   await expect(page.getByText("已选 2 项")).toBeVisible();
@@ -108,6 +116,7 @@ test("批量删除：选中多行 → 批量栏 → 确认 → 提交", async ({
   await page.getByRole("button", { name: "批量删除项目" }).click();
   await expect(page.getByText("将删除所有选中项目")).toBeVisible();
   await page.getByRole("button", { name: "确认", exact: true }).click();
+  expect(renderErrors).toEqual([]);
 
   await expect(page.getByText("平台能力", { exact: true })).toHaveCount(0);
   await expect(page.getByText("通用渲染器", { exact: true })).toHaveCount(0);

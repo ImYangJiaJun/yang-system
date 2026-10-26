@@ -132,7 +132,7 @@ describe("withRefreshLock：明文 HTTP（无 Web Locks）退到存储租约", (
     expect(task).toHaveBeenCalledOnce();
   });
 
-  it("对方的租约一直有效时一直等，直到安全网才自己上", async () => {
+  it("对方的租约一直有效时超时报错，不无锁发起竞争刷新", async () => {
     // 安全网是给「既没释放、租约又一直在续」这种不可观测交错兜底的：
     // 继续等下去会变成「永远不续期 → 必然登出」，那比一次竞争更糟。
     vi.useFakeTimers();
@@ -142,13 +142,44 @@ describe("withRefreshLock：明文 HTTP（无 Web Locks）退到存储租约", (
     );
     const task = vi.fn(async () => "已续期");
 
-    const pending = withRefreshLock(task);
+    const pending = withRefreshLock(task).catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(WAIT_LIMIT_MS - 1_000);
     expect(task).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(2_000);
-    await expect(pending).resolves.toBe("已续期");
-    expect(task).toHaveBeenCalledOnce();
+    expect(await pending).toMatchObject({ name: "TimeoutError" });
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  it("等待租约时取消后不执行任务", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem(LOCK_KEY, leaseAt("peer", Date.now() + 60_000));
+    const controller = new AbortController();
+    const task = vi.fn(async () => "不应执行");
+    const pending = withRefreshLock(task, controller.signal).catch(
+      (error: unknown) => error,
+    );
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({ name: "AbortError" });
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  it("丢失租约后心跳不能覆盖新持有者", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const pending = withRefreshLock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    localStorage.setItem(LOCK_KEY, leaseAt("new-owner", Date.now() + 60_000));
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(readLease()?.owner).toBe("new-owner");
+    release();
+    await pending;
+    expect(readLease()?.owner).toBe("new-owner");
   });
 });
 

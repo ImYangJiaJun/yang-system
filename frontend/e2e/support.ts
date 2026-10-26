@@ -33,7 +33,18 @@ export async function mockSessionRestore(page: Page) {
   );
 }
 
+export async function mockAnonymousSession(page: Page) {
+  await page.route("**/api/v1/users/refresh", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: JSON.stringify({ code: 40102, message: "刷新会话 Cookie 缺失" }),
+    }),
+  );
+}
+
 export async function loginWithMockedCredentials(page: Page) {
+  await mockAnonymousSession(page);
   await page.route("**/api/v1/users/login", async (route) => {
     expect(route.request().postDataJSON()).toEqual({
       username: "alice",

@@ -1,4 +1,7 @@
 import { expect, test } from "@playwright/test";
+import { mockAnonymousSession } from "./support";
+
+test.beforeEach(async ({ page }) => mockAnonymousSession(page));
 
 /**
  * 登录/注册/重置 E2E（对齐旧 e2e/login.spec.ts 的行为断言）：

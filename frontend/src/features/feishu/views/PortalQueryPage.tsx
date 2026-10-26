@@ -76,6 +76,14 @@ export default function PortalQueryPage() {
   const [showDropdown, setShowDropdown] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const queryController = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      queryController.current?.abort();
+      if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
+    },
+    [slug, session],
+  );
 
   // 去抖调 suggest 端点：输入变化后 300ms 触发。触发门槛与后端同一语义——
   // 「去空格后含 ≥fuzzy_min_digits 位连续数字」，阈值取门户配置（元信息已带回）。
@@ -88,20 +96,41 @@ export default function PortalQueryPage() {
       return;
     }
 
+    const controller = new AbortController();
     const timer = setTimeout(async () => {
-      const results = await suggestPortal(slug, stripped, session);
+      const results = await suggestPortal(
+        slug,
+        stripped,
+        session,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
       setSuggestions(results);
       setShowDropdown(results.length > 0);
       setSelectedIndex(-1);
     }, 300);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [value, slug, session, minDigits]);
 
   const query = useMutation({
-    mutationFn: () =>
-      queryPortal(slug, value.trim(), passphrase || undefined, session),
+    mutationFn: () => {
+      queryController.current?.abort();
+      const controller = new AbortController();
+      queryController.current = controller;
+      return queryPortal(
+        slug,
+        value.trim(),
+        passphrase || undefined,
+        session,
+        controller.signal,
+      );
+    },
     onError: (cause) => {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
       const failure = portalFailureView(cause);
       if (failure.revealPassphrase) setPassphraseRevealed(true);
       if (failure.loginRequired) setLoginRequired(true);
