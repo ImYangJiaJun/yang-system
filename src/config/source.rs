@@ -72,6 +72,12 @@ const ENVIRONMENT_BINDINGS: &[EnvironmentBinding] = &[
         Integer
     ),
     environment_binding!(
+        "YANG_SYSTEM_HTTP_MAX_JSON_BODY_BYTES",
+        "http",
+        "max_json_body_bytes",
+        Integer
+    ),
+    environment_binding!(
         "YANG_SYSTEM_HTTP_REQUEST_TIMEOUT_SECONDS",
         "http",
         "request_timeout_seconds",
@@ -432,6 +438,10 @@ pub(crate) enum SecretKey {
     StepUpRetiringKeys,
     EmailSmtpPassword,
     EmailVerificationSecret,
+    SecurityTotpAeadKey,
+    EmailChangeSecret,
+    EmailMfaSecret,
+    EmailLoginSecret,
     FeishuManagementApiToken,
     FeishuEncryptionKey,
     FeishuAppSecret,
@@ -449,6 +459,10 @@ impl SecretKey {
             Self::StepUpRetiringKeys => "step_up_retiring_keys_json",
             Self::EmailSmtpPassword => "email_smtp_password",
             Self::EmailVerificationSecret => "email_verification_secret",
+            Self::SecurityTotpAeadKey => "security_totp_aead_key",
+            Self::EmailChangeSecret => "email_change_secret",
+            Self::EmailMfaSecret => "email_mfa_secret",
+            Self::EmailLoginSecret => "email_login_secret",
             Self::FeishuManagementApiToken => "feishu_management_api_token",
             Self::FeishuEncryptionKey => "feishu_encryption_key",
             Self::FeishuAppSecret => "feishu_app_secret",
@@ -466,6 +480,10 @@ const SECRET_KEYS: &[SecretKey] = &[
     SecretKey::StepUpRetiringKeys,
     SecretKey::EmailSmtpPassword,
     SecretKey::EmailVerificationSecret,
+    SecretKey::SecurityTotpAeadKey,
+    SecretKey::EmailChangeSecret,
+    SecretKey::EmailMfaSecret,
+    SecretKey::EmailLoginSecret,
     SecretKey::FeishuManagementApiToken,
     SecretKey::FeishuEncryptionKey,
     SecretKey::FeishuAppSecret,
@@ -480,6 +498,10 @@ const SECRET_BINDINGS: &[SecretBinding] = &[
     SecretBinding::json("step_up_retiring_keys_json", "step_up", "retiring_keys"),
     SecretBinding::text("email_smtp_password", "email.smtp", "password"),
     SecretBinding::text("email_verification_secret", "email.verification", "secret"),
+    SecretBinding::text("security_totp_aead_key", "security.totp", "aead_key"),
+    SecretBinding::text("email_change_secret", "email.change", "secret"),
+    SecretBinding::text("email_mfa_secret", "email.mfa", "secret"),
+    SecretBinding::text("email_login_secret", "email.login", "secret"),
     // 飞书集成：section 是点号路径，"feishu" 表示顶层 [feishu] 段
     SecretBinding::text(
         "feishu_management_api_token",
@@ -758,6 +780,104 @@ mod tests {
         fn read(&self, key: SecretKey) -> anyhow::Result<Option<String>> {
             Ok(self.0.get(&key).cloned())
         }
+    }
+
+    #[test]
+    fn totp_and_email_secret_bindings_override_nested_file_values() {
+        let raw = "[security.totp]\naead_key = 'file-totp'\n[email.change]\nsecret = 'file-change'\n[email.mfa]\nsecret = 'file-mfa'\n[email.login]\nsecret = 'file-login'\n";
+        let cases = [
+            (SecretKey::SecurityTotpAeadKey, "/security/totp/aead_key"),
+            (SecretKey::EmailChangeSecret, "/email/change/secret"),
+            (SecretKey::EmailMfaSecret, "/email/mfa/secret"),
+            (SecretKey::EmailLoginSecret, "/email/login/secret"),
+        ];
+        let provider = StaticSecretProvider(
+            cases
+                .iter()
+                .map(|(key, _)| (*key, format!("provider-{}", key.file_name())))
+                .collect(),
+        );
+        let merged: serde_json::Value = parse_with_sources(raw, &BTreeMap::new(), Some(&provider))
+            .unwrap_or_else(|error| panic!("secret 应合入对应嵌套字段: {error:#}"));
+        for (key, pointer) in cases {
+            assert_eq!(
+                merged.pointer(pointer).and_then(serde_json::Value::as_str),
+                Some(format!("provider-{}", key.file_name()).as_str()),
+                "{pointer} 未由 secret 覆盖"
+            );
+        }
+        let missing = StaticSecretProvider(BTreeMap::new());
+        let fallback: serde_json::Value = parse_with_sources(raw, &BTreeMap::new(), Some(&missing))
+            .unwrap_or_else(|error| panic!("缺失 secret 应保留文件配置: {error:#}"));
+        assert_eq!(fallback["security"]["totp"]["aead_key"], "file-totp");
+        for field in ["change", "mfa", "login"] {
+            assert_eq!(fallback["email"][field]["secret"], format!("file-{field}"));
+        }
+    }
+
+    #[test]
+    fn totp_and_new_email_secrets_do_not_expand_the_environment_allowlist() {
+        for name in [
+            "YANG_SYSTEM_SECURITY_TOTP_AEAD_KEY",
+            "YANG_SYSTEM_EMAIL_CHANGE_SECRET",
+            "YANG_SYSTEM_EMAIL_MFA_SECRET",
+            "YANG_SYSTEM_EMAIL_LOGIN_SECRET",
+        ] {
+            let error = match collect_environment([(
+                OsString::from(name),
+                OsString::from("private-test-value"),
+            )]) {
+                Ok(_) => panic!("未登记的敏感环境变量必须拒绝"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains(name));
+            assert!(!error.to_string().contains("private-test-value"));
+        }
+    }
+
+    #[test]
+    fn totp_and_email_secret_files_reject_invalid_contents_without_echoing_them() {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "yang-system-auth-secrets-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap_or_else(|error| panic!("应创建测试目录: {error}"));
+        let provider = DirectorySecretProvider::new(directory.clone())
+            .unwrap_or_else(|error| panic!("应接受测试目录: {error}"));
+        let mut accepted_invalid = Vec::new();
+        for key in [
+            SecretKey::SecurityTotpAeadKey,
+            SecretKey::EmailChangeSecret,
+            SecretKey::EmailMfaSecret,
+            SecretKey::EmailLoginSecret,
+        ] {
+            let path = directory.join(key.file_name());
+            for invalid in [
+                b"".as_slice(),
+                b"private-sentinel\nsecond-line",
+                b"private-sentinel\0tail",
+                &[0xff],
+            ] {
+                std::fs::write(&path, invalid)
+                    .unwrap_or_else(|error| panic!("应写入测试文件: {error}"));
+                let result =
+                    parse_with_sources::<serde_json::Value>("", &BTreeMap::new(), Some(&provider));
+                match result {
+                    Ok(_) => accepted_invalid.push(key.file_name()),
+                    Err(error) => assert!(
+                        !format!("{error:#}").contains("private-sentinel"),
+                        "错误不能回显 secret"
+                    ),
+                }
+            }
+            std::fs::remove_file(&path).unwrap_or_else(|error| panic!("应清理测试文件: {error}"));
+        }
+        std::fs::remove_dir(&directory).unwrap_or_else(|error| panic!("应清理测试目录: {error}"));
+        assert!(
+            accepted_invalid.is_empty(),
+            "这些 secret 的无效内容未被拒绝: {accepted_invalid:?}"
+        );
     }
 
     #[test]

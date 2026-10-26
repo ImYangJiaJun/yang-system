@@ -80,7 +80,7 @@ bind = "0.0.0.0:8080"
 url = "mysql://yang:replace-with-mysql-password@yang-mysql:3306/yang_system"
 
 [redis]
-# Redis 是**必需依赖**：授权版本新鲜度缓存、邮箱验证码、Step-up 单次消费都走它；不备份。
+# Redis 是**必需依赖**：授权版本新鲜度缓存、邮箱验证码都走它（Step-up 单次消费未装配）；不备份。
 url = "redis://yang-redis:6379/0"
 
 [token]
@@ -90,7 +90,7 @@ active_secret = "replace-with-token-active-secret-32-bytes-min"
 retiring_keys = []
 
 [step_up]
-# Step-up 使用独立签名域；**不得与 Access/Refresh Token 复用任何密钥**。
+# 框架的 Step-up 配置段仍要求独立签名域（当前应用未装配）；**不得与 Access/Refresh Token 复用任何密钥**。
 active_key_id = "prod-step-up-2026-09"
 active_secret = "replace-with-step-up-active-secret-32-bytes-min"
 retiring_keys = []
@@ -149,7 +149,9 @@ issue_refresh_credential_version = true
 # trusted_proxy_cidrs = ["127.0.0.1/32", "172.17.0.0/16"]
 
 # TOTP 第二因子（MFA）。
-# aead_key 是加密 users.totp_secret 的**独立密钥域**：禁止与 token/step-up/邮箱验证码密钥复用。
+# aead_key 是加密 users.totp_secret 的**独立密钥域**：密钥取配置原文 UTF-8 的 SHA-256
+# 摘要（不是截取前 32 位），禁止与 token/step-up/邮箱验证码密钥复用。
+# 更换会使已绑定用户无法登录（存量密文解不开），旧密钥必须独立备份；digits 只支持 6。
 # 删除此段则 MFA Action 不注册。
 [security.totp]
 aead_key = "replace-with-independent-totp-aead-key-32-min"

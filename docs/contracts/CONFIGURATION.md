@@ -19,6 +19,7 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `app.name` | `YANG_SYSTEM_APP_NAME` |
 | `email.template_dir` | `YANG_SYSTEM_EMAIL_TEMPLATE_DIR` |
 | `http.max_concurrency` | `YANG_SYSTEM_HTTP_MAX_CONCURRENCY` |
+| `http.max_json_body_bytes` | `YANG_SYSTEM_HTTP_MAX_JSON_BODY_BYTES` |
 | `mysql.url` | `YANG_SYSTEM_MYSQL_URL` |
 | `email.password_reset.link_base_url` | `YANG_SYSTEM_EMAIL_PASSWORD_RESET_LINK_BASE_URL` |
 | `token.active_secret` | `YANG_SYSTEM_TOKEN_ACTIVE_SECRET` |
@@ -52,7 +53,8 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 |---|---|
 | `app.name` | `yang-system` |
 | `http.bind` | `127.0.0.1:8080` |
-| `http.max_body_bytes` | `16777216`（16 MiB，允许至 16 MiB） |
+| `http.max_body_bytes` | `17825792`（17 MiB，包含 multipart 封装） |
+| `http.max_json_body_bytes` | `16777216`（16 MiB，不得超过总请求上限） |
 | `http.request_timeout_seconds` | `60` |
 | `http.max_concurrency` | `256` |
 | `mysql.max_connections` / `min_connections` | `20` / `2` |
@@ -82,11 +84,20 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `observability.traces_*` | 关闭；端点 `http://127.0.0.1:4317`，采样 `0.1`，导出超时 `5s` |
 | `observability.readiness_budget_ms` | `2000`（允许 50..=10000） |
 | `shutdown.total_timeout_seconds` | `30` |
-| `logging.filter` | `yang_system=info,tower_http=info` |
+| `logging.filter` | `yang_system=info,yang_base::transport=info,tower_http=info` |
 
 `app.environment=production` 时必须启用 `observability.metrics_enabled`，以保证
 独立管理面 `/metrics` 与预算化 `/health/ready` 一定存在；开发与测试环境可以显式
 关闭。
+
+上传单文件上限保持 16 MiB；multipart 总体上限为 17 MiB，包含最多 1 MiB
+封装与其他字段。普通 JSON 独立按 16 MiB 流式计数，不能只凭 Content-Length
+放行。旧配置若显式设置 `http.max_body_bytes = 16777216`，升级时须改为
+`17825792`（或删除覆盖、使用新默认值），否则注册 17 MiB 上传合同会拒绝启动；
+旧自定义小总量配置还须显式设置不大于它的 `max_json_body_bytes`。
+本地配置升级脚本保留显式数值，不自动放宽运维限额。并发容量跨路径、方法和
+Router 克隆共享，满载立即返回 503；总超时保持 408，取消 Future 不代表回滚
+已发生的外部副作用。
 
 `token.retiring_keys` 是对象数组，环境变量使用显式的
 `YANG_SYSTEM_TOKEN_RETIRING_KEYS_JSON`，例如：
@@ -110,6 +121,10 @@ config.toml < YANG_SYSTEM_* 环境变量 < 目录型 secret provider
 | `step_up_retiring_keys_json` | `step_up.retiring_keys`（JSON 对象数组） |
 | `email_smtp_password` | `email.smtp.password` |
 | `email_verification_secret` | `email.verification.secret` |
+| `security_totp_aead_key` | `security.totp.aead_key` |
+| `email_change_secret` | `email.change.secret` |
+| `email_mfa_secret` | `email.mfa.secret` |
+| `email_login_secret` | `email.login.secret` |
 | `feishu_management_api_token` | `feishu.management_api_token` |
 | `feishu_encryption_key` | `feishu.encryption_key` |
 
@@ -183,9 +198,10 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
 - 凭据内嵌在 `redis.url`（`redis://[:password@]host:port/db`，或 ACL 用户
   `redis://user:password@...`），经 secret 文件 `redis_url` 或
   `YANG_SYSTEM_REDIS_URL` 注入，轮换流程同上。
-- Redis 只是加速层（授权最终事实在 MySQL，含 Outbox）：轮换窗口内 Redis 短暂
-  不可用只影响限流计数、Step-up proof 与缓存命中率，不丢业务数据；但应用对
-  Redis 连接失败按失败关闭处理，重启期间保持 Redis 可达。
+- 授权事实在 MySQL，含 Outbox；但 Redis 还保存验证码、TOTP 消费水位、Token
+  黑名单和限流等安全状态，不能笼统视为可随意清空的缓存。连接失败会按失败关闭
+  处理；可连接但数据为空是另一种故障，不能仅靠连通性探针判定安全状态已恢复。
+  凭据轮换期间应保留 Redis 数据；丢失后的恢复须按具体消费状态重新验证。
 
 ### SMTP
 
@@ -249,17 +265,23 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
 
 ### TOTP 第二因子（`security.totp`）
 
-- `security.totp.aead_key` 是加密 `users.totp_secret` 的**独立密钥域**（32 字节）。
-  **启动校验拒绝**占位值、重复字节，且该密钥域不得与 token/step-up/邮箱验证码
-  密钥复用——AEAD 解密失败（密钥域不匹配）会按配置损坏拒绝登录的 MFA 阶段。
+- `security.totp.aead_key` 是加密 `users.totp_secret` 的**独立密钥域**：密钥取
+  配置原文 UTF-8 字节的 SHA-256 摘要，派生为 AES-256-GCM 密钥（不是截取原文前
+  32 位）；配置原文至少 32 字节。**启动校验拒绝**占位值、重复字节，且该密钥域
+  不得与 token/step-up/邮箱验证码密钥复用——AEAD 解密失败（密钥域不匹配）会按
+  配置损坏拒绝登录的 MFA 阶段。
+- `security.totp.digits` 只支持 6 位动态码（默认 6），其他取值会使启动校验失败。
 - 该段可省略：省略时 `totp_setup`/`totp_activate`/`totp_deactivate` Action 不注册，
-  登录与 Step-up 回退单因子（既有无 TOTP 账号不受影响）。
-- `totp_deactivate`（自助关闭双重验证）要求登录 + Step-up 重认证；已激活账号的
-  Step-up 会同时要求出示第二因子（动态码/恢复码/邮箱验证码），即必须证明仍持有
-  第二因子才能关闭它。停用成功后密钥、激活时间与全部恢复码即时作废，既有会话
-  全部失效（凭据版本递增），需重新登录。
-- 密钥轮换：滚动更新 `aead_key` 会让已存 TOTP 密文无法解密（用户在下次登录时
-  被要求重新 setup）——属预期行为；如需无缝轮换需先实现多 keyring 版本化。
+  登录回退单因子（既有无 TOTP 账号不受影响）。
+- `totp_deactivate`（自助关闭双重验证）只要求已登录：账号已激活 TOTP 时，登录
+  阶段本身已要求出示第二因子（动态码/恢复码/邮箱验证码），因此持有有效会话即
+  证明仍持有第二因子。该 Action 不再额外走 Step-up（当前应用未装配 Step-up 流程）。
+  停用成功后密钥、激活时间与全部恢复码即时作废，既有会话全部失效（凭据版本递增），
+  需重新登录。
+- 密钥轮换：直接更换 `aead_key` 会使已有 `users.totp_secret` 密文无法解密；登录的
+  MFA 阶段会因解密失败而拒绝登录，用户**不能**在下次登录时自行重新 setup。旧密钥
+  必须独立受控备份（它是恢复存量密文的唯一材料）。当前没有无缝轮换工具，也没有
+  多 keyring 版本化；如需无缝轮换须先实现密钥版本化。
 
 ### 飞书外部数据源集成（`feishu`）
 
@@ -300,9 +322,12 @@ Token 与 Step-up keyring 之外的凭据（`mysql.url`、`redis.url`、
 - `feishu.approval_create_rate_per_minute`（整数，默认 `90`，有效范围 `1..=100`）：
   审批实例创建的速率上限。**上限卡在官方的 100 次/分钟**——配更高没有任何作用
   （飞书会拒），只会让人以为「速率已经调高了」却仍成片撞限流。默认 90 留 10%
-  余量给手工操作与网络重试；重试同样在消耗配额，余量为 0 时连重试都没法做。
-  令牌桶落在 Redis 而不是进程内存，因此**跨重启守恒**（进程内桶每次重启清零，
-  会形成「重启 → 桶满 → 瞬间打爆配额」）。
+  余量给其他调用。每次真实创建出站（含重试与凭证刷新后重发）均领取名额，按
+  `ceil(60000 / rate)` 毫秒匀速放行，读取详情与附件操作不占创建名额。
+  配额按 `app_id` 存在 Redis；同一应用的所有部署须共享同一 Redis，独立 Redis
+  之间不协调。等待者不预订未来时间片，单次最多等待五秒，超时保留可重试结果。
+  2026-10-25 键名由 deployment 改为 app_id；升级时须停止旧版本创建写者后切换，
+  混版期间两个键不能保证共享配额。本地验证不代表此切换已部署。
 - `feishu.approval_scan_interval_seconds`（整数，默认 `30`，有效范围 `5..=600`）：
   审批派发 worker 的空转轮询间隔。下限防空转烧数据库，上限防「异步受理」变成
   摆设——再长的话用户点了页面按钮要等很久才开始处理。

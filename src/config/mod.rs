@@ -131,6 +131,8 @@ pub struct HttpSettings {
     pub bind: String,
     #[serde(default = "default_http_max_body_bytes")]
     pub max_body_bytes: usize,
+    #[serde(default = "default_http_max_json_body_bytes")]
+    pub max_json_body_bytes: usize,
     #[serde(default = "default_http_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
     #[serde(default = "default_http_max_concurrency")]
@@ -142,6 +144,7 @@ impl Default for HttpSettings {
         Self {
             bind: default_http_bind(),
             max_body_bytes: default_http_max_body_bytes(),
+            max_json_body_bytes: default_http_max_json_body_bytes(),
             request_timeout_seconds: default_http_request_timeout_seconds(),
             max_concurrency: default_http_max_concurrency(),
         }
@@ -153,8 +156,11 @@ fn default_http_bind() -> String {
 }
 
 const fn default_http_max_body_bytes() -> usize {
-    // 16 MiB。xlsx 文件导入的 MultipartSpec.max_total_bytes 取同一上限，
-    // 而启动期 fail-closed 要求它不大于本值——默认值更低会让最小配置起不来。
+    // 16 MiB 文件加最多 1 MiB multipart 封装；启动期不得低于 Action 总量合同。
+    17 * 1024 * 1024
+}
+
+const fn default_http_max_json_body_bytes() -> usize {
     16 * 1024 * 1024
 }
 
@@ -819,14 +825,15 @@ const fn default_auth_rate_limit_username_attempts() -> u64 {
 
 /// TOTP 第二因子配置（路线图 E-1b）：AEAD 密钥域与码位。
 ///
-/// `aead_key` 是加密 `users.totp_secret` 的独立密钥域（32 字节），
+/// `aead_key` 是加密 `users.totp_secret` 的独立密钥域（配置原文至少 32 字节），
 /// **禁止**与 token/step-up/邮箱验证码密钥复用——启动校验做交叉隔离检查。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TotpSettings {
-    /// AEAD 加密密钥（32 字节；hex 或 base64 或原文均可，取原始字节前 32 位）。
+    /// AEAD 加密密钥：配置原文 UTF-8 字节的 SHA-256 摘要用作 AES-256-GCM 密钥
+    /// （见 `addon::account::domain::mfa`），不是截取原文前 32 位。
     pub aead_key: String,
-    /// TOTP 一次性码位数（默认 6，允许 6..=8）。
+    /// TOTP 一次性码位数：仅支持 6（默认 6）。
     #[serde(default = "default_totp_digits")]
     pub digits: u32,
 }
@@ -853,7 +860,7 @@ impl Default for LoggingSettings {
 fn default_logging_filter() -> String {
     // `error` 是全局兜底：未显式匹配的 target（yang_base / yang_db / yang_runtime 等）
     // 也保留 ERROR。只写两个 target 指令会把框架层的错误整段静默丢弃。
-    "yang_system=info,tower_http=info,error".to_owned()
+    "yang_system=info,yang_base::transport=info,tower_http=info,error".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -944,8 +951,16 @@ impl Settings {
         }
         self.authorization.validate()?;
         self.bind_addr()?;
-        if self.http.max_body_bytes == 0 || self.http.max_body_bytes > 16 * 1024 * 1024 {
-            bail!("http.max_body_bytes 必须在 1..=16777216 范围内");
+        if self.http.max_body_bytes == 0 || self.http.max_body_bytes > 17 * 1024 * 1024 {
+            bail!("http.max_body_bytes 必须在 1..=17825792 范围内");
+        }
+        if self.http.max_json_body_bytes == 0
+            || self.http.max_json_body_bytes > 16 * 1024 * 1024
+            || self.http.max_json_body_bytes > self.http.max_body_bytes
+        {
+            bail!(
+                "http.max_json_body_bytes 必须在 1..=16777216 范围内，且不超过 http.max_body_bytes"
+            );
         }
         if self.http.request_timeout_seconds == 0 || self.http.request_timeout_seconds > 300 {
             bail!("http.request_timeout_seconds 必须在 1..=300 范围内");
@@ -975,16 +990,32 @@ impl Settings {
         self.email
             .validate(self.app.environment, &self.token, &self.step_up)?;
         self.security.validate()?;
-        // 跨段密钥域隔离：MFA/免密登录邮箱验证码密钥不得与 TOTP AEAD 密钥复用。
+        // 跨段密钥域隔离：TOTP AEAD 密钥不得与 Token/Step-up 或任何邮箱验证码密钥复用。
         if let Some(totp) = &self.security.totp {
-            for (name, section) in [
-                ("email.mfa.secret", &self.email.mfa),
-                ("email.login.secret", &self.email.login),
-            ] {
-                if let Some(section) = section {
-                    if section.secret == totp.aead_key {
-                        bail!("{name} 不得复用 security.totp.aead_key");
-                    }
+            validate_verification_secret(
+                "security.totp.aead_key",
+                &totp.aead_key,
+                &self.token,
+                &self.step_up,
+            )?;
+            if totp.aead_key == self.email.verification.secret {
+                bail!("security.totp.aead_key 不得复用注册验证码密钥（email.verification.secret）");
+            }
+            if let Some(change) = &self.email.change {
+                if totp.aead_key == change.secret {
+                    bail!("security.totp.aead_key 不得复用换绑验证码密钥（email.change.secret）");
+                }
+            }
+            if let Some(mfa) = &self.email.mfa {
+                if totp.aead_key == mfa.secret {
+                    bail!("security.totp.aead_key 不得复用 MFA 验证码密钥（email.mfa.secret）");
+                }
+            }
+            if let Some(login) = &self.email.login {
+                if totp.aead_key == login.secret {
+                    bail!(
+                        "security.totp.aead_key 不得复用免密登录验证码密钥（email.login.secret）"
+                    );
                 }
             }
         }
@@ -1621,8 +1652,8 @@ fn validate_step_up_key_id(key_id: &str) -> anyhow::Result<()> {
 }
 
 fn validate_totp_settings(totp: &TotpSettings) -> anyhow::Result<()> {
-    if !(6..=8).contains(&totp.digits) {
-        bail!("security.totp.digits 必须在 6..=8 范围内");
+    if totp.digits != 6 {
+        bail!("security.totp.digits 仅支持 6 位动态码");
     }
     if totp.aead_key.len() < 32 {
         bail!("security.totp.aead_key 至少需要 32 字节");
@@ -1698,6 +1729,7 @@ outbox_max_retry_seconds = 60
 [http]
 bind = "127.0.0.1:8080"
 max_body_bytes = 1024
+max_json_body_bytes = 1024
 request_timeout_seconds = 30
 max_concurrency = 256
 [mysql]
@@ -1814,9 +1846,8 @@ link_base_url = "http://localhost:5273"
 
         assert_eq!(settings.app.name, "yang-system");
         assert_eq!(settings.http.bind, "127.0.0.1:8080");
-        // 16 MiB：multipart 导入的 MultipartSpec 需要它，且启动期 fail-closed
-        // 要求 max_total_bytes <= max_body_bytes。默认值低于此会让最小配置起不来。
-        assert_eq!(settings.http.max_body_bytes, 16 * 1024 * 1024);
+        assert_eq!(settings.http.max_body_bytes, 17 * 1024 * 1024);
+        assert_eq!(settings.http.max_json_body_bytes, 16 * 1024 * 1024);
         assert_eq!(settings.http.request_timeout_seconds, 60);
         assert_eq!(settings.mysql.max_connections, 20);
         assert_eq!(settings.mysql.max_lifetime_seconds, Some(1800));
@@ -1893,7 +1924,7 @@ link_base_url = "http://localhost:5273"
         assert!(!settings.security.issue_refresh_credential_version);
         assert_eq!(
             settings.logging.filter,
-            "yang_system=info,tower_http=info,error"
+            "yang_system=info,yang_base::transport=info,tower_http=info,error"
         );
         assert_eq!(settings.shutdown.total_timeout_seconds, 30);
     }
@@ -1949,6 +1980,7 @@ link_base_url = "http://localhost:5273"
                 .filter(|line| {
                     let trimmed = line.trim();
                     !trimmed.starts_with("max_body_bytes")
+                        && !trimmed.starts_with("max_json_body_bytes")
                         && !trimmed.starts_with("request_timeout_seconds")
                         && !trimmed.starts_with("max_concurrency")
                         && !trimmed.starts_with("min_connections")
@@ -2179,6 +2211,177 @@ link_base_url = "http://localhost:5273"
         assert!(production_https.validate().is_ok());
     }
 
+    /// 配置不能允许校验器尚不支持的验证码位数。
+    #[test]
+    fn totp_configuration_only_accepts_the_supported_six_digits() {
+        let key = "totp-aead-0123456789abcdef0123456789abcdef";
+        let raw = format!(
+            "{}\n[security.totp]\naead_key = \"{key}\"\n",
+            valid_config()
+        );
+        let mut settings = Settings::parse(&raw)
+            .unwrap_or_else(|error| panic!("省略 digits 应使用受支持默认值: {error:#}"));
+        assert_eq!(
+            settings.security.totp.as_ref().map(|totp| totp.digits),
+            Some(6)
+        );
+        for digits in [0, 5, 6, 7, 8, 9, u32::MAX] {
+            settings.security.totp = Some(TotpSettings {
+                aead_key: key.to_owned(),
+                digits,
+            });
+            let result = settings.validate();
+            assert_eq!(
+                result.is_ok(),
+                digits == 6,
+                "digits={digits} 必须与六位校验器一致"
+            );
+            if let Err(error) = result {
+                assert!(error.to_string().contains("security.totp.digits"));
+                assert!(!error.to_string().contains(key));
+            }
+        }
+    }
+
+    #[test]
+    fn totp_key_is_isolated_from_all_authentication_secret_domains() {
+        let mut settings = Settings::parse(valid_config())
+            .unwrap_or_else(|error| panic!("测试配置应有效: {error:#}"));
+        settings.token.retiring_keys = vec![RetiringTokenKeySettings {
+            key_id: "token-old".into(),
+            secret: "retiring-token-0123456789abcdef0123456789abcdef".into(),
+        }];
+        settings.step_up.retiring_keys = vec![RetiringTokenKeySettings {
+            key_id: "step-old".into(),
+            secret: "retiring-step-0123456789abcdef0123456789abcdef".into(),
+        }];
+        for (slot, secret) in [
+            (
+                &mut settings.email.change,
+                "change-email-0123456789abcdef0123456789abcdef",
+            ),
+            (
+                &mut settings.email.mfa,
+                "mfa-email-0123456789abcdef0123456789abcdef",
+            ),
+            (
+                &mut settings.email.login,
+                "login-email-0123456789abcdef0123456789abcdef",
+            ),
+        ] {
+            let mut section = settings.email.verification.clone();
+            section.secret = secret.to_owned();
+            *slot = Some(section);
+        }
+        settings.security.totp = Some(TotpSettings {
+            aead_key: "independent-totp-0123456789abcdef0123456789abcdef".into(),
+            digits: 6,
+        });
+        assert!(settings.validate().is_ok(), "各域独立时必须可用");
+        let cases = [
+            ("Token active", settings.token.active_secret.clone()),
+            (
+                "Token retiring",
+                settings.token.retiring_keys[0].secret.clone(),
+            ),
+            ("Step-up active", settings.step_up.active_secret.clone()),
+            (
+                "Step-up retiring",
+                settings.step_up.retiring_keys[0].secret.clone(),
+            ),
+            ("注册邮箱", settings.email.verification.secret.clone()),
+            (
+                "换绑邮箱",
+                settings
+                    .email
+                    .change
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("测试换绑配置缺失"))
+                    .secret
+                    .clone(),
+            ),
+            (
+                "MFA 邮箱",
+                settings
+                    .email
+                    .mfa
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("测试 MFA 配置缺失"))
+                    .secret
+                    .clone(),
+            ),
+            (
+                "登录邮箱",
+                settings
+                    .email
+                    .login
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("测试登录配置缺失"))
+                    .secret
+                    .clone(),
+            ),
+        ];
+        for (domain, secret) in cases {
+            settings.security.totp = Some(TotpSettings {
+                aead_key: secret.clone(),
+                digits: 6,
+            });
+            let error = match settings.validate() {
+                Ok(()) => panic!("TOTP 复用 {domain} 密钥必须拒绝"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("不得复用"),
+                "{domain}: {error:#}"
+            );
+            assert!(!error.to_string().contains(&secret), "错误不得回显密钥");
+        }
+    }
+
+    #[test]
+    fn totp_and_email_secrets_create_optional_sections_with_safe_defaults() {
+        let provider = TestSecretProvider(BTreeMap::from([
+            (
+                SecretKey::SecurityTotpAeadKey,
+                "totp-provider-0123456789abcdef0123456789abcdef".into(),
+            ),
+            (
+                SecretKey::EmailChangeSecret,
+                "change-provider-0123456789abcdef0123456789abcdef".into(),
+            ),
+            (
+                SecretKey::EmailMfaSecret,
+                "mfa-provider-0123456789abcdef0123456789abcdef".into(),
+            ),
+            (
+                SecretKey::EmailLoginSecret,
+                "login-provider-0123456789abcdef0123456789abcdef".into(),
+            ),
+        ]));
+        let mut settings: Settings =
+            source::parse_with_sources(valid_config(), &BTreeMap::new(), Some(&provider))
+                .unwrap_or_else(|error| panic!("只由 secret 启用可选段也必须可解析: {error:#}"));
+        settings.normalize();
+        settings
+            .validate()
+            .unwrap_or_else(|error| panic!("secret 合成后应通过真实配置校验: {error:#}"));
+        assert_eq!(
+            settings.security.totp.as_ref().map(|totp| totp.digits),
+            Some(6)
+        );
+        for section in [
+            &settings.email.change,
+            &settings.email.mfa,
+            &settings.email.login,
+        ] {
+            let section = section
+                .as_ref()
+                .unwrap_or_else(|| panic!("secret 应启用可选邮箱段"));
+            assert_eq!(section.namespace, "test-local");
+            assert_eq!(section.ttl_seconds, 600);
+        }
+    }
+
     /// MFA 备用邮箱验证码配置段：独立 key 域/指标名，密钥跨域复用一律拒绝。
     #[test]
     fn mfa_email_verification_section_is_isolated_and_cross_checked() {
@@ -2351,6 +2554,10 @@ link_base_url = "http://localhost:5273"
                 "128".to_owned(),
             ),
             (
+                "YANG_SYSTEM_HTTP_MAX_JSON_BODY_BYTES".to_owned(),
+                "512".to_owned(),
+            ),
+            (
                 "YANG_SYSTEM_SECURITY_TRUSTED_PROXY_CIDRS".to_owned(),
                 "127.0.0.1/32, 10.42.0.0/24".to_owned(),
             ),
@@ -2401,6 +2608,7 @@ link_base_url = "http://localhost:5273"
         assert_eq!(settings.token.retiring_keys.len(), 1);
         assert_eq!(settings.token.retiring_keys[0].key_id, "provider-retiring");
         assert_eq!(settings.http.max_concurrency, 128);
+        assert_eq!(settings.http.max_json_body_bytes, 512);
         assert_eq!(settings.shutdown.total_timeout_seconds, 45);
         assert_eq!(settings.observability.traces_sample_ratio, 0.25);
         assert_eq!(
@@ -2833,6 +3041,32 @@ link_base_url = "http://localhost:5273"
             Err(error) => error,
         };
         assert!(error.to_string().contains("max_concurrency"));
+    }
+
+    #[test]
+    fn http_body_limits_keep_json_capacity_and_reserve_multipart_overhead() {
+        let raw = valid_config()
+            .replace("max_body_bytes = 1024", "max_body_bytes = 17825792")
+            .replace(
+                "max_json_body_bytes = 1024",
+                "max_json_body_bytes = 16777216",
+            );
+        let settings =
+            Settings::parse(&raw).unwrap_or_else(|error| panic!("分层边界应通过: {error}"));
+        assert_eq!(settings.http.max_body_bytes, 17 * 1024 * 1024);
+        assert_eq!(settings.http.max_json_body_bytes, 16 * 1024 * 1024);
+        for bad in [
+            raw.replace("max_body_bytes = 17825792", "max_body_bytes = 17825793"),
+            raw.replace("max_body_bytes = 17825792", "max_body_bytes = 0"),
+            raw.replace(
+                "max_json_body_bytes = 16777216",
+                "max_json_body_bytes = 16777217",
+            ),
+            raw.replace("max_json_body_bytes = 16777216", "max_json_body_bytes = 0"),
+            raw.replace("max_body_bytes = 17825792", "max_body_bytes = 16777215"),
+        ] {
+            assert!(Settings::parse(&bad).is_err(), "非法限额组合必须拒绝");
+        }
     }
 
     #[test]

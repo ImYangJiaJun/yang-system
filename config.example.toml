@@ -79,7 +79,9 @@ issue_refresh_credential_version = true
 # 示例：trusted_proxy_cidrs = ["127.0.0.1/32", "10.42.0.0/24"]
 
 # TOTP 第二因子（MFA）。aead_key 是加密 users.totp_secret 的独立密钥域：
-# 禁止与 token/step-up/邮箱验证码密钥复用。删除此段则 MFA Action 不注册。
+# 密钥取配置原文 UTF-8 的 SHA-256 摘要（不是截取前 32 位），禁止与
+# token/step-up/邮箱验证码密钥复用。直接更换会使存量密文无法解密、已绑定用户
+# 无法登录，旧密钥须独立备份；digits 只支持 6。删除此段则 MFA Action 不注册。
 [security.totp]
 aead_key = "replace-with-an-independent-32-byte-totp-aead-key"
 
