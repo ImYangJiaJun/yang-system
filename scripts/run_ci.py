@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -56,6 +57,7 @@ FRONTEND_PRODUCTION_AUDIT = Command(
     # audit 需要向 registry 提交完整依赖树，CI 网络抖动是已知故障源；
     # 放宽 pnpm 抓取超时并允许有限重试（仅网络错误，见 run()）。
     (
+        ("npm_config_registry", "https://registry.npmjs.org"),
         ("npm_config_fetch_retries", "5"),
         ("npm_config_fetch_retry_maxtimeout", "120000"),
         ("npm_config_fetch_timeout", "300000"),
@@ -89,6 +91,7 @@ FULL = (
         "Deploy script syntax",
         ("python", "scripts/check_deploy_syntax.py"),
     ),
+    Command("Deploy safety regressions", ("python", "scripts/test_deploy_safety.py")),
     Command("Rust formatting", ("cargo", "fmt", "--", "--check")),
     Command("Rust all-target tests", ("cargo", "test", "--all-targets", "--locked")),
     Command(
@@ -111,6 +114,34 @@ FULL = (
 )
 
 INTEGRATION = (
+    Command(
+        "TOTP atomic consumption integration",
+        ("cargo", "test", "--lib", "--locked", "addon::account::domain::context::tests::totp_step_consumption_is_atomic_and_monotonic", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Outbox prepared statement time boundary integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::authorization::outbox::tests::claim_refreshes_prepared_statement_time_boundary", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Redis fixed-window expiry integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::rate_limit::tests::real_redis_counter_preserves_subsecond_window_and_repairs_missing_expiry", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval create real-send spacing integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_rate_limit::tests::real_redis_create_gate_keeps_spacing_when_waiters_outlive_key_ttl", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval create bounded wait integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_rate_limit::tests::real_redis_create_gate_wait_is_bounded_and_does_not_reserve_future_slots", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval HTTP attempt limiter integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::outbound::tests::real_redis_http_create_limit_covers_retries_and_independent_transports", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval subsequent terminal events integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_event_worker::tests::terminal_task_still_syncs_later_reverted_and_deleted_events", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
     Command(
         "审批配置名称刷新与保旧审计集成测试",
         ("cargo", "test", "--lib", "--locked", "real_mysql_refresh_names_saves_deduplicates_preserves_and_audits", "--", "--ignored", "--test-threads=1"),
@@ -174,6 +205,38 @@ INTEGRATION = (
             "--ignored",
             "--test-threads=1",
         ),
+    ),
+    Command(
+        "Session cleanup bounded batches integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::session_cleanup::tests::real_mysql_cleanup_batches_and_drains_backlog", "--", "--ignored", "--test-threads=1"),
+    ),
+    Command(
+        "Read-only smoke isolation integration",
+        ("cargo", "test", "--lib", "--locked", "bootstrap::tests::smoke_mode_preserves_empty_schema_and_does_not_bind_http", "--", "--ignored", "--test-threads=1"),
+    ),
+    Command(
+        "Approval task exclusive claim integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_worker_claims_are_exclusive_and_old_owner_cannot_commit", "--", "--ignored", "--test-threads=1"),
+    ),
+    Command(
+        "Approval durable admission integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_execution_admission_preserves_first_snapshot_and_identity", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval unknown effects integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_execution_transport_confirms_success_and_quarantines_unknown", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval remote success persistence failure integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_execution_remote_success_local_failure_never_recreates", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval execution ownership integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_execution_rejects_lost_owner_generation_lease_and_phase", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval durable retry budget integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_execution_waiting_and_retry_budget_are_durable", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
         "Schema apply concurrency and retry integration",
@@ -470,6 +533,7 @@ def self_test() -> None:
     assert required_browser_commands <= actual_full_commands, (
         "full 门禁必须同时执行 dev-server 与 production-build Playwright"
     )
+    assert ("python", "scripts/test_deploy_safety.py") in actual_full_commands
     assert workflow.count(
         "pnpm --dir frontend exec playwright install --with-deps chromium"
     ) == 1, "quality job 必须安装 Playwright Chromium 与系统依赖"
@@ -520,6 +584,7 @@ def self_test() -> None:
         "--audit-level",
         "moderate",
     )
+    assert dict(FRONTEND_PRODUCTION_AUDIT.env)["npm_config_registry"] == "https://registry.npmjs.org"
     assert FULL.index(FRONTEND_PRODUCTION_AUDIT) < next(
         index for index, command in enumerate(FULL) if command.name == "Frontend full check"
     )
@@ -565,6 +630,25 @@ def self_test() -> None:
                 ) as source_file:
                     rust_sources.append(source_file.read())
     source_blob = "\n".join(rust_sources)
+    ignored_tests = set(re.findall(
+        r'#\[ignore(?:\s*=\s*"[^"]*")?\]\s*(?:#\[[^\]]+\]\s*)*(?:async\s+)?fn\s+(\w+)\s*\(',
+        source_blob,
+    ))
+    assert len(ignored_tests) == len(re.findall(r"#\[ignore\b", source_blob)), (
+        "ignored 测试清单解析不完整或存在重名，必须显式处理"
+    )
+    # 真实外发和既有回执依赖现场材料，不能在本地门禁中隐式发送或伪造。
+    manual_tests = {
+        "real_app_sends_rich_feedback_and_confirms_sender_and_content",
+        "saved_rich_feedback_receipt_preserves_title_content_styles_and_sender",
+    }
+    registered_ignored = {command.argv[4].rsplit("::", 1)[-1] for command in lib_filter_commands}
+    assert registered_ignored == ignored_tests - manual_tests, (
+        "ignored 库测试登记不一致: "
+        f"漏登记={sorted(ignored_tests - manual_tests - registered_ignored)} "
+        f"多余={sorted(registered_ignored - (ignored_tests - manual_tests))}"
+    )
+    assert manual_tests <= ignored_tests, "现场测试清单失效，必须重新核对"
     for command in lib_filter_commands:
         filter_name = command.argv[4]
         # cargo 的过滤是子串匹配，带模块路径的过滤名在源码里通常只出现叶子函数名。
@@ -588,6 +672,9 @@ def self_test() -> None:
 
 
 def main() -> int:
+    # pnpm 的 UTF-8 输出包含 Windows 默认 GBK 无法编码的字符。
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "profile",
