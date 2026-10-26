@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use yang_base::tools::Tools;
+use yang_runtime::shutdown::OwnedTask;
 
 static WORKER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -39,9 +39,9 @@ impl AuthorizationVersionPublisher for AuthorizationVersionCache {
     async fn publish(
         &self,
         user_id: i64,
-        authz_version: i64,
+        _authz_version: i64,
     ) -> anyhow::Result<CachePublishOutcome> {
-        AuthorizationVersionCache::publish(self, user_id, authz_version).await
+        self.invalidate(user_id).await
     }
 }
 
@@ -146,7 +146,7 @@ impl AuthorizationOutboxProcessor {
 /// 与 HTTP 服务同生共死的授权传播 Worker 句柄。
 pub struct AuthorizationOutboxWorker {
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedTask<()>,
 }
 
 impl AuthorizationOutboxWorker {
@@ -165,16 +165,20 @@ impl AuthorizationOutboxWorker {
         let task = tokio::spawn(run_loop(processor, poll_interval, receiver));
         Ok(Self {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         })
+    }
+
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
     }
 
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         let _ = self.shutdown.send(true);
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await.context("等待授权 Outbox Worker 退出失败")?;
+        self.task
+            .join()
+            .await
+            .context("等待授权 Outbox Worker 退出失败")?;
         Ok(())
     }
 }
@@ -182,9 +186,6 @@ impl AuthorizationOutboxWorker {
 impl Drop for AuthorizationOutboxWorker {
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
     }
 }
 
@@ -243,7 +244,7 @@ fn record_publish_success(event: &ClaimedAuthorizationEvent, outcome: CachePubli
         attempts = event.attempts,
         cache_outcome = ?outcome,
         authz_propagation_seconds = propagation_seconds,
-        "授权版本已传播至 Redis"
+        "授权事件已使 Redis 快照失效"
     );
 }
 
@@ -287,7 +288,7 @@ mod tests {
         let (shutdown, _receiver) = watch::channel(false);
         let worker = AuthorizationOutboxWorker {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         };
 
         drop(worker);
@@ -412,6 +413,11 @@ mod tests {
         .fetch_one(database.pool())
         .await?;
         ensure!(published == 20, "并发 claim 不得重复或遗漏事件");
+
+        ensure!(
+            publisher.read(700_001).await? == super::super::CachedAuthorizationVersion::Missing,
+            "历史事件只能使缓存失效，不能在键缺失或过期后重新创建旧授权版本"
+        );
 
         sqlx::query(
             "INSERT INTO authorization_outbox \

@@ -5,8 +5,8 @@
 //! 收敛周期内失效，而不是等到 access TTL 自然过期。无积压时上界是一个周期；
 //! 单轮最多 `GRANT_EXPIRY_BATCH` 行，积压时按批排空。
 //!
-//! 单实例假设：两个 Worker 重叠会重复递增版本/写 Outbox；当前部署按单实例 /
-//! 蓝绿不重叠。多副本需要额外的 claim（如 `SKIP LOCKED`）。
+//! 多实例通过用户授权行锁与 `expires_at` / `converged_at IS NULL` CAS 协作；
+//! 仅成功消费该过期事实的实例递增版本并写 Outbox，不依赖蓝绿部署互斥。
 //!
 //! 与其它后台 Worker 同构：watch 通道触发退出；必须在 `Tools` 关闭前 shutdown，
 //! 否则每轮只能拿到「Tools 已关闭」并空转刷错误日志。
@@ -16,9 +16,9 @@ use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use yang_base::action::{ActionContext, Request};
 use yang_base::tools::Tools;
+use yang_runtime::shutdown::OwnedTask;
 
 /// 收敛周期：无积压时过期行的存量 Token 最多再存活一个周期（加 Outbox 传播延迟）；
 /// 有积压时按 `GRANT_EXPIRY_BATCH` 逐轮排空。
@@ -31,7 +31,7 @@ const GRANT_EXPIRY_BATCH: usize =
 /// 与 HTTP 服务同生共死的过期直授收敛 Worker 句柄。
 pub struct GrantExpiryWorker {
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedTask<()>,
 }
 
 impl GrantExpiryWorker {
@@ -40,16 +40,20 @@ impl GrantExpiryWorker {
         let task = tokio::spawn(run_loop(tools, handle, receiver));
         Ok(Self {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         })
+    }
+
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
     }
 
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         let _ = self.shutdown.send(true);
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await.context("等待过期直授收敛 Worker 退出失败")?;
+        self.task
+            .join()
+            .await
+            .context("等待过期直授收敛 Worker 退出失败")?;
         Ok(())
     }
 }
@@ -57,9 +61,6 @@ impl GrantExpiryWorker {
 impl Drop for GrantExpiryWorker {
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
     }
 }
 

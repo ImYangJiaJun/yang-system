@@ -174,6 +174,15 @@ mod tests {
 
     #[async_trait]
     impl AuthorizationVersionSource for UnusedSource {
+        async fn is_session_active(
+            &self,
+            _pool: &MySqlPool,
+            _user_id: i64,
+            _session_id: &str,
+        ) -> Result<bool, BaseError> {
+            unreachable!("权限下钻不读取会话")
+        }
+
         async fn find_authorization_version(
             &self,
             _pool: &MySqlPool,

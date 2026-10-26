@@ -2,6 +2,7 @@
 
 状态：Accepted（C3-00）
 日期：2026-07-26
+修订：2026-10-25，Outbox 只失效缓存，事实快照使用绝对截止时间。
 适用范围：`account` 的认证、授权快照和授权事实写入路径
 
 ## 1. 决策背景
@@ -179,25 +180,28 @@ Redis key：
 yang-system:{deployment}:authz:version:{user_id}
 ```
 
-value 只保存十进制版本，TTL 固定为 5 秒。当前阶段不增加进程内 L1 缓存，避免额外一致性
+value 只保存十进制版本，新鲜度预算最多 5 秒，从读取事实之前开始。当前阶段不增加进程内 L1 缓存，避免额外一致性
 层和多实例差异。
 
 比较算法：
 
 1. Token 版本无效：拒绝。
-2. Redis 命中：
+2. Redis 原子读取值和 PTTL；没有有效过期时间或读取耗时已耗尽剩余 TTL 时按 miss 处理。有效命中：
    - `current == token`：通过；
    - `current > token`：旧 Token，立即拒绝；
    - `current < token`：缓存可能落后，回查 MySQL，不能直接通过。
 3. Redis miss、值损坏或连接失败：回查 MySQL 主库的用户状态和版本。
-4. MySQL 返回当前启用用户且版本相等：使用 Lua “仅当 incoming 更大或 key 不存在时写入”
-   Redis，并设置 5 秒 TTL，然后通过。
+4. 回查前用 Redis TIME 取得 5 秒后的绝对截止时间；MySQL 返回当前启用用户且版本相等时，
+   仅当 incoming 更大或 key 不存在才用 PXAT 回填，并拒绝已经到期的截止时间。
+   整个回查（含截止时间获取和回填）另受本地单调时钟 5 秒总预算约束，超时拒绝。
+   无法取得 Redis 截止时间时仍可查 MySQL，但不回填缓存。
 5. 用户不存在、已停用或版本不等：拒绝；当前版本大于 Token 时记录正常 stale 指标，
    Token 版本大于数据库时记录高优先级异常。
 6. Redis 与 MySQL 都无法完成比较：返回可识别的 503 授权检查不可用错误，不进入权限判断。
 
-Lua 更新不得在 incoming 小于或等于现值时延长 TTL，防止乱序事件或重复重放无限延长旧值。
-Redis eviction、重启和冷启动都退化为数据库回查，不会恢复旧权限。
+Lua 更新不得在 incoming 小于或等于现值时延长 TTL；延迟抵达的回填也不能从到达时重新计时。
+授权版本缓存 eviction、重启和冷启动退化为数据库回查；此结论只覆盖 authz_version，
+不能推广到另存于 Redis 的会话撤销、refresh 消费和 TOTP 防重放事实。
 
 ## 7. outbox 传播
 
@@ -205,10 +209,11 @@ worker 采用至少一次、可重放模型：
 
 1. 在短 MySQL 事务内用 `FOR UPDATE SKIP LOCKED` claim 小批 pending/租约过期事件，写入
    `processing + worker_id + lease_until` 后提交；
-2. 在事务外调用 Redis Lua 单调更新；
+2. 在事务外 DEL 该用户的授权版本缓存；事件内的历史版本绝不写回 Redis；
 3. 成功后用短事务把事件标记为 `published`；
 4. worker 崩溃时由租约到期重放；失败使用有上限的指数退避并保留 `last_error`；
-5. 重复、乱序和“Redis 成功但 published 标记失败”都由单调 Lua 与唯一键保证安全。
+5. 重复、乱序和“Redis 成功但 published 标记失败”重复执行 DEL；缺失键也视为成功。
+   延迟事件最多使新缓存失效、增加主库回查，不能在旧键过期后重新建立历史版本。
 
 默认目标：
 
@@ -226,17 +231,18 @@ worker 采用至少一次、可重放模型：
 |---|---|
 | Redis 正常、版本相等 | 通过 |
 | Redis 显示 Token 过期 | 401 `AUTHZ_STALE`（错误码 `400009`） |
-| Redis miss/损坏/超时，MySQL 正常 | 回查主库；相等才通过 |
-| Redis 重启 | 冷缓存回查主库，不使用旧权限 |
+| 授权版本缓存 miss/损坏，MySQL 正常 | 有界回查主库；相等才通过 |
+| 授权版本缓存不可用，MySQL 正常 | 比较器可以回查；完整请求还须通过前置的 Redis Token 撤销检查 |
+| Redis 重启并可达 | 授权版本冷缓存回查主库；其他安全事实丢失风险需独立处理 |
 | outbox 延迟/worker 停止 | 最多等待 key 剩余 TTL；过期后回查主库 |
-| MySQL 不可用但 Redis 有未过期有效版本 | 在 key 剩余 TTL 内按缓存比较；最坏陈旧窗口仍不超过 5 秒 |
+| MySQL 不可用但 Redis 有未过期有效版本 | 版本比较器可使用缓存，但完整请求的前置会话事实读取失败，返回 503 `AUTHZ_CHECK_UNAVAILABLE` |
 | 比较所需的 Redis 与 MySQL 都不可用 | 503 `AUTHZ_CHECK_UNAVAILABLE`（错误码 `400011`），失败关闭 |
 | Token 版本高于事实源 | 401 `AUTHZ_VERSION_INVALID`（错误码 `400010`）并告警 |
 | MySQL 回查确认用户不存在或停用 | 401，不能由较低缓存版本重新放行 |
 
-“失败关闭”指系统不能完成可信比较时不构造 `User`、不执行权限检查后的 Action；不要求把
-Redis 单点故障扩大为全站故障，主库回退是可信比较而不是降级放行。5 秒 TTL 是明确接受的
-授权陈旧上限，而不是依赖故障时无限延长的宽限期。
+“失败关闭”指系统不能完成可信比较时不构造 `User`、不执行权限检查后的 Action。
+完整受保护请求的前置 Token 撤销检查依赖 Redis，Redis 整体不可达时会先拒绝；
+比较器的主库回退不构成整条认证链可用性的保证。5 秒预算不因回填延迟或重放而续期。
 
 ## 9. 可观测性
 
@@ -253,7 +259,7 @@ Redis 单点故障扩大为全站故障，主库回退是可信比较而不是�
 传播 Worker；退出 HTTP 服务后先停止 Worker，再关闭 Redis/MySQL。Worker 使用
 `FOR UPDATE SKIP LOCKED` claim，Redis 调用位于 MySQL 事务外；失败采用有上界的
 指数退避，租约过期、重复事件、乱序事件以及“Redis 成功但 DB 完成标记失败”均通过
-至少一次重放与 Redis 单调脚本收敛。
+至少一次重放与幂等缓存删除收敛。
 
 日志包含 `request_id`、`user_id`、Token 版本、当前版本和稳定错误码；不记录 JWT、密码、
 完整 claims 或 Redis 凭据。对版本高于事实源、版本回退企图和超过 5 秒的传播延迟告警。

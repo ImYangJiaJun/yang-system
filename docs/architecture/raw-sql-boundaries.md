@@ -26,6 +26,9 @@ CRUD、租户注入和字段权限仍由 YANG `TableQuery` 承担；领域仓储
 
 <!-- raw-sql-boundary: schema-validator audit-schema-validator src/infrastructure/audit/schema.rs -->
 <!-- raw-sql-boundary: infrastructure-repository authorization-outbox src/infrastructure/authorization/outbox.rs -->
+<!-- raw-sql-boundary: domain-repository feishu-approval-execution src/addon/feishu/domain/approval_execution/repository.rs -->
+
+审批执行边界使用数据库行锁、执行代次与租约管理任务认领；未知外部写入禁止自动重放。SQL 结构固定，所有任务标识、持有者和结果通过绑定参数传入。
 
 ## 证据与变更流程
 
