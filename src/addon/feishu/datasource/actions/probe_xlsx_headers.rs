@@ -52,12 +52,21 @@ impl ProbeInput {
 /// **代价不是「只读一行」**：`Xlsx::new` 会**急切读完整个 `xl/sharedStrings.xml`**
 /// （真实 Excel 导出默认就走 sharedStrings 形态），所以这一层是 O(整份字符串表)，
 /// 只是不读 sheetData 的数据行——比全量导入便宜，但不是 O(表头行)。
+#[cfg(test)]
 fn probe(input: &ProbeInput) -> Result<serde_json::Value, BaseError> {
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    probe_with_budget(input, &mut xlsx::ParseBudget::new(&cancelled))
+}
+
+fn probe_with_budget(
+    input: &ProbeInput,
+    budget: &mut xlsx::ParseBudget<'_>,
+) -> Result<serde_json::Value, BaseError> {
     input.validate()?;
 
     let mut headers = Vec::with_capacity(input.files.len());
     for (name, bytes) in &input.files {
-        let header = xlsx::read_header(bytes).map_err(|error| {
+        let header = xlsx::read_header_with_budget(bytes, budget).map_err(|error| {
             BaseError::ParamInvalid("files".to_string(), format!("{name}：{error}"))
         })?;
         headers.push((name.clone(), header));
@@ -122,24 +131,25 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         .multipart(
             // **必须显式设上限**：MultipartSpec 默认 max_total_bytes = 32 MiB，
             // 超过 AxumTransportConfig.max_body_bytes 时**进程拒绝启动**（启动期
-            // fail-closed）。16 MiB 与 Task 3 抬到的新默认值对齐。
+            // fail-closed）。单文件 16 MiB，总体 17 MiB 为封装与字段预留空间。
             MultipartSpec::new([
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ])
             .max_fields(1)
             .max_files(32)
             .max_file_bytes(16 * 1024 * 1024)
-            .max_total_bytes(16 * 1024 * 1024),
+            .max_total_bytes(17 * 1024 * 1024),
         )
         .register()
 }
 
-/// Handler 只做三件事：把临时文件读进内存 → 调 [`probe`] → 包 `ApiResponse`。
+/// Handler 先取得共享容量、读取临时文件，再由 blocking 任务探测并返回响应。
 pub(super) async fn handle(
     _ctx: ActionContext,
     input: ProbeUploadInput,
-    _context: Arc<FeishuContext>,
+    context: Arc<FeishuContext>,
 ) -> Result<ApiResponse, BaseError> {
+    let permit = context.acquire_xlsx_permit()?;
     // 临时文件是请求作用域的，必须在这里读完（handler 返回后框架就删）。
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(input.files.len());
     for file in &input.files {
@@ -150,7 +160,14 @@ pub(super) async fn handle(
         files.push((name, bytes));
     }
 
-    let payload = probe(&ProbeInput { files })?;
+    let (payload, (), _permit) =
+        crate::addon::feishu::domain::xlsx_job::run(permit, (), move |cancelled| {
+            probe_with_budget(
+                &ProbeInput { files },
+                &mut xlsx::ParseBudget::new(cancelled),
+            )
+        })
+        .await?;
     ApiResponse::success(payload, "解析成功")
 }
 

@@ -294,18 +294,24 @@ async fn seed_operator(database: &Database) -> anyhow::Result<String> {
     .context("种入导入操作者失败")?;
     let user_id = result.last_insert_id() as i64;
 
-    token_manager()
+    let session_id = format!("xlsx-session-{unique}");
+    let token = token_manager()
         .generate_access_token(
             &user_id.to_string(),
             json!({
                 "version": 1,
                 "username": username,
                 "authz_version": 1,
+                "session_id": session_id,
                 "roles": ["user"],
                 "permissions": ["feishu.datasource.write", "feishu.datasource.read"],
             }),
         )
-        .map_err(|error| anyhow::anyhow!("签发导入操作者令牌失败: {error}"))
+        .map_err(|error| anyhow::anyhow!("签发导入操作者令牌失败: {error}"))?;
+    sqlx::query("INSERT INTO user_session (session_id,user_id,current_jti,created_at,last_seen_at,ip,user_agent) VALUES (?,?,?,UNIX_TIMESTAMP(),UNIX_TIMESTAMP(),'127.0.0.1','xlsx-fixture')")
+        .bind(session_id).bind(user_id).bind(token_manager().verify_token(&token)?.jti)
+        .execute(database.pool()).await?;
+    Ok(token)
 }
 
 // ---------------------------------------------------------------- 数据播种
@@ -1299,4 +1305,112 @@ async fn a_finished_import_reports_idle_progress() {
     }
     .await;
     finish(outcome, "进度端点").await;
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn resource_rejection_preserves_the_snapshot_and_releases_import_ownership() {
+    let outcome = async {
+        let (database, app, token) = prepare_app().await?;
+        let datasource_id = seed_xlsx_datasource(
+            &database,
+            "xlsx_import",
+            &[("value", "resource_value", None)],
+        )
+        .await?;
+        dispatch_import(&app, &token, datasource_id, &["zip_batch_budget.xlsx"]).await?;
+        assert_eq!(count_options(&database, "resource_value", true).await?, 1);
+        for files in [
+            vec!["shared_string_oversized.xlsx"],
+            vec!["zip_batch_budget.xlsx", "zip_batch_budget.xlsx"],
+        ] {
+            let rejected = dispatch_import(&app, &token, datasource_id, &files).await;
+            assert!(
+                matches!(rejected, Err(BaseError::ParamInvalid(_, _))),
+                "资源超限应明确拒绝：{rejected:?}"
+            );
+            assert_eq!(
+                count_options(&database, "resource_value", true).await?,
+                1,
+                "超限不得停用旧快照"
+            );
+            assert_eq!(
+                count_options(&database, "resource_value", false).await?,
+                1,
+                "超限不得写入部分结果"
+            );
+            assert_eq!(
+                dispatch_progress(&app, &token, datasource_id).await?["stage"],
+                "idle"
+            );
+            let probe = dispatch_probe(&app, &token, &["zip_batch_budget.xlsx"]).await?;
+            assert_eq!(probe.code, 0, "错误出口应释放共享容量");
+        }
+        Ok(())
+    }
+    .await;
+    finish(outcome, "资源拒绝保留快照与释放占用").await;
+}
+
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn a_database_blocked_import_keeps_the_shared_probe_capacity() {
+    let outcome = async {
+        let (database, app, token) = prepare_app().await?;
+        let datasource_id = seed_xlsx_datasource(
+            &database,
+            "xlsx_import",
+            &[("value", "resource_value", None)],
+        )
+        .await?;
+        let mut held = database.pool().begin().await?;
+        let _: i64 = sqlx::query_scalar(
+            "SELECT `id` FROM `feishu_datasource_field` WHERE `datasource_id` = ? FOR UPDATE",
+        )
+        .bind(datasource_id)
+        .fetch_one(&mut *held)
+        .await?;
+        let import_app = Arc::clone(&app);
+        let import_token = token.clone();
+        let importing = tokio::spawn(async move {
+            dispatch_import(
+                &import_app,
+                &import_token,
+                datasource_id,
+                &["zip_batch_budget.xlsx"],
+            )
+            .await
+        });
+        let progress_app = Arc::clone(&app);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if dispatch_progress(&progress_app, &token, datasource_id).await?["stage"]
+                    == "writing"
+                {
+                    break Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("导入没有进入写入阶段")??;
+        let probe = dispatch_probe(&app, &token, &["zip_batch_budget.xlsx"]).await;
+        assert!(
+            matches!(probe, Err(BaseError::RateLimitExceeded { .. })),
+            "写入等待期间不能提前放行 probe：{probe:?}"
+        );
+        held.rollback().await?;
+        let imported =
+            tokio::time::timeout(std::time::Duration::from_secs(5), importing).await???;
+        assert_eq!(imported.code, 0);
+        assert_eq!(
+            dispatch_probe(&app, &token, &["zip_batch_budget.xlsx"])
+                .await?
+                .code,
+            0
+        );
+        Ok(())
+    }
+    .await;
+    finish(outcome, "写库期间共享容量").await;
 }

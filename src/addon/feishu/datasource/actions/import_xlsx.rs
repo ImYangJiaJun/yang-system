@@ -166,14 +166,14 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         .multipart(
             // **必须显式设上限**：MultipartSpec 默认 max_total_bytes = 32 MiB，
             // 超过 AxumTransportConfig.max_body_bytes 时**进程拒绝启动**（启动期
-            // fail-closed）。16 MiB 与探表头端点、Task 3 抬到的新默认值对齐。
+            // fail-closed）。单文件 16 MiB，总体 17 MiB 为封装与字段预留空间。
             MultipartSpec::new([
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ])
             .max_fields(1)
             .max_files(32)
             .max_file_bytes(16 * 1024 * 1024)
-            .max_total_bytes(16 * 1024 * 1024),
+            .max_total_bytes(17 * 1024 * 1024),
         )
         .register()
 }
@@ -227,12 +227,13 @@ pub(super) async fn handle(
     // 为什么必须挡：`pull.rs` 是单 worker 串行跑的，天然不会自我并发；导入是人触发的，
     // 必然会（手抖点两下、两个运维同时操作）。逐绑定事务交错会让两次补集停用互相覆盖，
     // 而补集停用是**全量视图**语义——交错的后果是选项被错误地停用。
-    let _guard = ImportGuard::acquire(input.datasource_id).map_err(|ImportBusy| {
+    let guard = ImportGuard::acquire(input.datasource_id).map_err(|ImportBusy| {
         BaseError::ParamInvalid(
             "datasource_id".to_string(),
             "这条数据源正在导入中，请等它跑完再试".to_string(),
         )
     })?;
+    let permit = context.acquire_xlsx_permit()?;
     // 条目（互斥 + 进度）从这一刻起存在，到 `_guard` 被 drop 为止。
     //
     // **上传阶段的字节进度报不出来**：multipart body 在 transport 层读完才 dispatch，
@@ -252,51 +253,28 @@ pub(super) async fn handle(
             .map_err(|error| BaseError::ConfigError(format!("读上传文件 {name} 失败：{error}")))?;
         loaded.push((name, bytes));
     }
-    // **文件之间的表头必须一致**（集合相同，顺序可不同——按名取值，不按位置）。
-    //
-    // 这条**必须由本端点自己守**：`read_snapshot` 只逐文件比对**必需列**，从不做文件之间的
-    // 比对——它把这条前置条件留给了调用方。探表头那条路已经守了，但**「重新导入」不经过
-    // 探表头**（详情页直接调本端点），漏掉它就意味着：用户传了一组表头互不相同的文件，
-    // 会被**静默合并**成一份，而回执里的 `rows_read` 之和看起来完全正常。
-    //
-    // 代价是每份文件多解析一次表头（`read_header` 只驱动到表头行结束，不扫 sheetData；
-    // 贵的那一段是 `Xlsx::new` 读字符串表）。换的是「一条只在探表头存在的规则不会在
-    // 重新导入时消失」。
-    // 表头解析也是同步 CPU 活（`Xlsx::new` 会急切读完 sharedStrings）；与下面的
-    // snapshot 解析一样移进 spawn_blocking，避免占住 tokio worker。
-    let loaded = tokio::task::spawn_blocking(move || {
-        let mut headers = Vec::with_capacity(loaded.len());
-        for (index, (name, bytes)) in loaded.iter().enumerate() {
-            let header = xlsx::read_header(bytes).map_err(|error| {
-                BaseError::ParamInvalid("files".to_string(), format!("{name}：{error}"))
-            })?;
-            headers.push((name.clone(), header));
-            import_progress::report_loading(input.datasource_id, files_total, (index + 1) as u32);
-        }
-        xlsx::require_consistent_headers(&headers)
-            .map_err(|error| BaseError::ParamInvalid("files".to_string(), error.to_string()))?;
-        Ok::<_, BaseError>(loaded)
-    })
-    .await
-    .map_err(|error| BaseError::ConfigError(format!("表头解析任务失败：{error}")))??;
-
-    // 解析挪进 `spawn_blocking`：它是同步 CPU 活，15 万行要跑十几秒，占住一个 tokio
-    // worker 就意味着单 vCPU 部署上「进度 GET」与它抢同一个线程——而那正是进度要解决
-    // 的场景（页面卡住、什么都看不到）。
-    let snapshot = tokio::task::spawn_blocking(move || {
-        xlsx::read_snapshot_with_progress(&loaded, &columns, &mut |event| {
-            import_progress::report_parsing(
-                input.datasource_id,
-                event.file_index,
-                event.files_total,
-                event.rows_done,
-                event.rows_total,
-            );
+    // 解析与互斥凭证一起转交 blocking 任务。请求取消只设协作取消标志；
+    // 闭包实际结束前，新的 probe/导入和同源导入都不能抢走容量。
+    // 成功时凭证随快照返回，由当前 handler 持有至全部持久化结束。
+    let (snapshot, _guard, _permit) =
+        crate::addon::feishu::domain::xlsx_job::run(permit, guard, move |cancelled| {
+            xlsx::read_snapshot_with_budget(
+                &loaded,
+                &columns,
+                &mut xlsx::ParseBudget::new(cancelled),
+                &mut |event| {
+                    import_progress::report_parsing(
+                        input.datasource_id,
+                        event.file_index,
+                        event.files_total,
+                        event.rows_done,
+                        event.rows_total,
+                    );
+                },
+            )
+            .map_err(|error| BaseError::ParamInvalid("files".to_string(), error.to_string()))
         })
-    })
-    .await
-    .map_err(|error| BaseError::ConfigError(format!("解析任务失败：{error}")))?
-    .map_err(|error| BaseError::ParamInvalid("files".to_string(), error.to_string()))?;
+        .await?;
 
     // 表级空快照守卫——**与 pull.rs 同款**：解析出 0 行而库里仍有启用选项时，
     // 不停用、且整轮失败。绝不能照常跑补集停用。

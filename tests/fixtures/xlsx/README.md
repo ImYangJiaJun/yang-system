@@ -17,3 +17,8 @@ xlsx 是装着若干 XML 的 zip。用标准库 `zipfile` 手写最小结构，
 
 见 `docs/architecture/feishu-bank-branch-datasource-tasklist.md` Task 1 的表格。
 **改夹具必须重跑生成脚本**，不要手改二进制。
+
+资源边界回归另含：`shared_string_oversized.xlsx`（1 MiB 共享字符串、3 次引用）、
+`shared_string_repeated.xlsx`（4 KiB 字符串、32 次引用，用小预算验证累计展开），以及
+`zip_batch_budget.xlsx`（真实 129 MiB 可压缩扩展部件，验证两文件累计 ZIP 预算）。
+最后一个部件不交给 calamine 解压，文件本身约 130 KiB；生成器分块写入。

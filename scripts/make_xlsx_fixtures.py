@@ -301,7 +301,31 @@ def bank(**overrides: object) -> list[list[object]]:
     return [list(overrides.get("header", BANK_HEADER)), *overrides.get("rows", [])]
 
 
+def build_resource_fixtures() -> None:
+    """小压缩包、重复共享字符串：无需制造 GB 级分配即可复现展开风险。"""
+    write_xlsx(
+        OUT_DIR / "shared_string_oversized.xlsx",
+        [("Sheet1", [["value"], *[["x" * (1024 * 1024)]] * 3])],
+        shared_strings=True,
+    )
+    write_xlsx(
+        OUT_DIR / "shared_string_repeated.xlsx",
+        [("Sheet1", [["value", "other"], *[["x" * 4096, "kept"]] * 32])],
+        shared_strings=True,
+    )
+    # 真实的 129 MiB ZIP 展开部件，分块写入，不在生成器里分配同等大字符串。
+    # calamine 不消费该扩展部件；预检仍必须把它算入整批 ZIP 预算。
+    padded = OUT_DIR / "zip_batch_budget.xlsx"
+    write_xlsx(padded, [("Sheet1", [["value"], ["ok"]])])
+    with zipfile.ZipFile(padded, "a") as archive:
+        with archive.open(zip_entry("custom/padding.bin"), "w") as entry:
+            block = b"0" * (1024 * 1024)
+            for _ in range(129):
+                entry.write(block)
+
+
 def build() -> None:
+    build_resource_fixtures()
     common_rows = [
         bank_row(1, "中国工商银行成都春熙路支行", "中国工商银行", "102651000011"),
         bank_row(2, "中国工商银行成都天府大道支行", "中国工商银行", "102651000012"),

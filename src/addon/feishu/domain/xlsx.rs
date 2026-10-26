@@ -21,6 +21,9 @@
 //! `guarded` 把 panic 变成 [`XlsxError::Unreadable`]：畸形文件的结果是「这一份导入失败」，
 //! 而不是一次 panic。
 
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use calamine::{Cell, DataRef, Reader as _, Xlsx};
 
 /// zip 魔数：xlsx 是 zip，`PK\x03\x04`。
@@ -33,6 +36,108 @@ pub(crate) fn sniff_is_zip(bytes: &[u8]) -> bool {
 
 /// 解压后总大小上限：16 MiB 的压缩包可以膨胀到 GB 级，必须在交给 calamine 前挡住。
 const MAX_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 复用既有 256 MiB 字节边界，另限制对象数量与 Excel 可表达的单格长度。
+/// 计数是整批处理量，不能靠拆成多个文件重置。它不是进程 RSS 的保证。
+#[derive(Clone, Copy)]
+pub(crate) struct ParseLimits {
+    pub(crate) expanded_bytes: u64,
+    pub(crate) cells: u64,
+    pub(crate) rows: u64,
+    pub(crate) cell_utf16_units: usize,
+}
+
+impl Default for ParseLimits {
+    fn default() -> Self {
+        Self {
+            expanded_bytes: MAX_UNCOMPRESSED_BYTES,
+            cells: 4 * 1024 * 1024,
+            rows: 1024 * 1024,
+            cell_utf16_units: 32_767,
+        }
+    }
+}
+
+pub(crate) struct ParseBudget<'a> {
+    limits: ParseLimits,
+    cancelled: &'a AtomicBool,
+    zip_bytes: u64,
+    expanded_bytes: u64,
+    cells: u64,
+    rows: u64,
+}
+
+impl<'a> ParseBudget<'a> {
+    pub(crate) fn new(cancelled: &'a AtomicBool) -> Self {
+        Self {
+            limits: ParseLimits::default(),
+            cancelled,
+            zip_bytes: 0,
+            expanded_bytes: 0,
+            cells: 0,
+            rows: 0,
+        }
+    }
+
+    pub(crate) fn check_cancelled(&self) -> Result<(), XlsxError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(XlsxError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn charge(
+        counter: &mut u64,
+        amount: u64,
+        limit: u64,
+        resource: &'static str,
+    ) -> Result<(), XlsxError> {
+        *counter = counter.saturating_add(amount);
+        if *counter > limit {
+            return Err(XlsxError::BudgetExceeded { resource, limit });
+        }
+        Ok(())
+    }
+
+    fn visit_cell(&mut self) -> Result<(), XlsxError> {
+        self.check_cancelled()?;
+        Self::charge(&mut self.cells, 1, self.limits.cells, "整批遍历单元格数")
+    }
+
+    fn visit_rows(&mut self, count: usize) -> Result<(), XlsxError> {
+        Self::charge(
+            &mut self.rows,
+            count as u64,
+            self.limits.rows,
+            "整批遍历行数",
+        )
+    }
+
+    fn retain_text(&mut self, text: &str, key: &str) -> Result<(), XlsxError> {
+        self.check_cell_text(text)?;
+        Self::charge(
+            &mut self.expanded_bytes,
+            text.len().saturating_add(key.len()) as u64,
+            self.limits.expanded_bytes,
+            "整批展开文本字节数",
+        )
+    }
+
+    fn check_cell_text(&self, text: &str) -> Result<(), XlsxError> {
+        if text
+            .encode_utf16()
+            .take(self.limits.cell_utf16_units + 1)
+            .count()
+            > self.limits.cell_utf16_units
+        {
+            return Err(XlsxError::BudgetExceeded {
+                resource: "单元格 UTF-16 长度",
+                limit: self.limits.cell_utf16_units as u64,
+            });
+        }
+        Ok(())
+    }
+}
 
 fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
     let slice = bytes.get(offset..offset.checked_add(2)?)?;
@@ -49,9 +154,9 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
 /// 这是**成本极低的预检**：只读中央目录的大小字段，不解压任何 entry。结构不完整时
 /// 返回 `Ok`，让 calamine 给出更具体的「文件读不出来」错误；只有明确的超限才在
 /// 这里拒绝。ZIP64 的 0xFFFFFFFF 标记视为超限（无法证明其大小）。
-fn ensure_uncompressed_size_bounded(bytes: &[u8]) -> Result<(), XlsxError> {
+fn ensure_uncompressed_size_bounded(bytes: &[u8]) -> Result<u64, XlsxError> {
     if bytes.len() < 22 {
-        return Ok(());
+        return Ok(0);
     }
     let search_start = bytes.len().saturating_sub(22 + 65_535);
     let mut eocd = None;
@@ -65,13 +170,13 @@ fn ensure_uncompressed_size_bounded(bytes: &[u8]) -> Result<(), XlsxError> {
         }
     }
     let Some(eocd) = eocd else {
-        return Ok(());
+        return Ok(0);
     };
     let Some(cd_size) = read_u32_le(bytes, eocd + 12).map(|value| value as usize) else {
-        return Ok(());
+        return Ok(0);
     };
     let Some(cd_offset) = read_u32_le(bytes, eocd + 16).map(|value| value as usize) else {
-        return Ok(());
+        return Ok(0);
     };
     if cd_offset == u32::MAX as usize || cd_size == u32::MAX as usize {
         return Err(XlsxError::TooLarge {
@@ -82,7 +187,7 @@ fn ensure_uncompressed_size_bounded(bytes: &[u8]) -> Result<(), XlsxError> {
         .checked_add(cd_size)
         .filter(|end| *end <= bytes.len())
     else {
-        return Ok(());
+        return Ok(0);
     };
     let mut offset = cd_offset;
     let mut total = 0_u64;
@@ -112,7 +217,7 @@ fn ensure_uncompressed_size_bounded(bytes: &[u8]) -> Result<(), XlsxError> {
         };
         offset = next;
     }
-    Ok(())
+    Ok(total)
 }
 
 /// 列名长度上限，与 `field_id` 的 `max_length(64)` 对齐。
@@ -157,6 +262,10 @@ pub(crate) enum XlsxError {
     HeaderMissingColumns { file: String, missing: Vec<String> },
     /// 解压后总大小超过上限（疑似压缩炸弹）。
     TooLarge { limit: u64 },
+    /// 整批资源预算或单格能力超限；不返回部分成功。
+    BudgetExceeded { resource: &'static str, limit: u64 },
+    /// 请求已结束，阻塞解析在下一次协作检查处退出。
+    Cancelled,
 }
 
 impl std::fmt::Display for XlsxError {
@@ -187,6 +296,10 @@ impl std::fmt::Display for XlsxError {
             Self::TooLarge { limit } => {
                 write!(f, "解压后大小超过 {limit} 字节上限（疑似压缩炸弹）")
             }
+            Self::BudgetExceeded { resource, limit } => {
+                write!(f, "{resource}超过 {limit} 上限，请检查文件内容与导入规模")
+            }
+            Self::Cancelled => write!(f, "请求已取消，xlsx 解析已停止"),
         }
     }
 }
@@ -242,11 +355,27 @@ fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
 /// `xl/sharedStrings.xml`**（真实 Excel 导出默认就走 sharedStrings 形态），所以这一层是
 /// O(整份字符串表)，只是不读 sheetData 的数据行——比全量导入便宜，但不是 O(表头行)。
 /// 与 `probe_xlsx_headers` 的模块文档同一口径。
+#[cfg(test)]
 pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
+    let cancelled = AtomicBool::new(false);
+    read_header_with_budget(bytes, &mut ParseBudget::new(&cancelled))
+}
+
+pub(crate) fn read_header_with_budget(
+    bytes: &[u8],
+    budget: &mut ParseBudget<'_>,
+) -> Result<SheetHeader, XlsxError> {
+    budget.check_cancelled()?;
     if !sniff_is_zip(bytes) {
         return Err(XlsxError::NotZip);
     }
-    ensure_uncompressed_size_bounded(bytes)?;
+    let declared_bytes = ensure_uncompressed_size_bounded(bytes)?;
+    ParseBudget::charge(
+        &mut budget.zip_bytes,
+        declared_bytes,
+        MAX_UNCOMPRESSED_BYTES,
+        "整批 ZIP 声明解压字节数",
+    )?;
     // calamine 只能从 Read + Seek 构造。文件是请求作用域的临时文件，
     // 但这一层收 &[u8] 以便单测直接喂夹具字节。
     let cursor = std::io::Cursor::new(bytes);
@@ -255,6 +384,7 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
     })?;
 
     let sheet_names = workbook.sheet_names().to_vec();
+    budget.check_cancelled()?;
     let sheet_name = sheet_names.first().cloned().ok_or(XlsxError::EmptyHeader)?;
 
     // 只驱动表头那一行就 `break`（`header_row` 一旦确定，后续行直接跳出循环）——
@@ -268,15 +398,22 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
     let mut columns: Vec<(String, usize)> = Vec::new();
     let mut header_row = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_row = 0usize;
 
     // XlsxCellReader 是**手拉游标、不实现 Iterator**，必须 while let 驱动。
     while let Some(cell) = guarded("遍历单元格", || {
+        budget.check_cancelled()?;
         reader
             .next_cell()
             .map_err(|error| XlsxError::Unreadable(error.to_string()))
     })? {
         let (row, column) = cell.get_position();
-        let text = cell_text(cell);
+        budget.visit_cell()?;
+        let row_number = row as usize + 1;
+        budget.visit_rows(row_number.saturating_sub(last_row))?;
+        last_row = row_number;
+        let text = cell_text(&cell);
+        budget.check_cell_text(&text)?;
         let text = text.trim();
 
         if text.is_empty() {
@@ -299,6 +436,7 @@ pub(crate) fn read_header(bytes: &[u8]) -> Result<SheetHeader, XlsxError> {
                 name: text.to_string(),
             });
         }
+        budget.retain_text(text, "")?;
         columns.push((text.to_string(), column as usize + 1)); // 1-based 列号
     }
 
@@ -419,19 +557,35 @@ pub(crate) fn read_snapshot(
 /// `on_progress` 在每个文件的开头（`rows_done = 0`，此时才拿得到 `<dimension>` 分母）
 /// 与每越过一行时各调一次。它是**同步**回调，调用方要把它挪到 `spawn_blocking` 里
 /// 才不会占着 tokio worker——解析本来就是同步 CPU 活。
+#[cfg(test)]
 pub(crate) fn read_snapshot_with_progress(
     files: &[(String, Vec<u8>)],
     columns: &[String],
     on_progress: &mut dyn FnMut(SnapshotProgress),
 ) -> Result<ImportSnapshot, XlsxError> {
+    let cancelled = AtomicBool::new(false);
+    read_snapshot_with_budget(
+        files,
+        columns,
+        &mut ParseBudget::new(&cancelled),
+        on_progress,
+    )
+}
+
+pub(crate) fn read_snapshot_with_budget(
+    files: &[(String, Vec<u8>)],
+    columns: &[String],
+    budget: &mut ParseBudget<'_>,
+    on_progress: &mut dyn FnMut(SnapshotProgress),
+) -> Result<ImportSnapshot, XlsxError> {
     let wanted: std::collections::HashSet<&str> = columns.iter().map(String::as_str).collect();
     let mut rows = Vec::new();
     let mut per_file = Vec::with_capacity(files.len());
+    let mut headers = Vec::with_capacity(files.len());
 
     for (offset, (name, bytes)) in files.iter().enumerate() {
-        // 每个文件都重新解析表头：文件之间的一致性由调用方用
-        // `require_consistent_headers` 单独把守（那一层的错误文案更具体）。
-        let header = read_header(bytes)?;
+        // 每个文件都解析表头，整批返回前统一校验文件之间的一致性。
+        let header = read_header_with_budget(bytes, budget)?;
         let file_index = offset as u32 + 1;
         let files_total = files.len() as u32;
 
@@ -450,11 +604,12 @@ pub(crate) fn read_snapshot_with_progress(
         }
 
         let cursor = std::io::Cursor::new(bytes.as_slice());
-        ensure_uncompressed_size_bounded(bytes)?;
+        budget.check_cancelled()?;
         let mut workbook = guarded("打开工作簿", || {
             Xlsx::new(cursor).map_err(|error| XlsxError::Unreadable(error.to_string()))
         })?;
         let mut reader = guarded("打开工作表", || {
+            budget.check_cancelled()?;
             workbook
                 .worksheet_cells_reader(&header.sheet_name)
                 .map_err(|error| XlsxError::Unreadable(error.to_string()))
@@ -482,9 +637,11 @@ pub(crate) fn read_snapshot_with_progress(
         let mut current: RowValues = RowValues::new();
         let mut rows_read = 0usize;
         let mut pending = false;
+        let mut last_visited_row = 0usize;
 
         // **XlsxCellReader 是手拉游标、不实现 Iterator**，必须 while let 驱动。
         while let Some(cell) = guarded("遍历单元格", || {
+            budget.check_cancelled()?;
             reader
                 .next_cell()
                 .map_err(|error| XlsxError::Unreadable(error.to_string()))
@@ -492,6 +649,9 @@ pub(crate) fn read_snapshot_with_progress(
             let (row_index, column_index) = cell.get_position();
             let row_number = row_index as usize + 1;
             let column_number = column_index as usize + 1;
+            budget.visit_cell()?;
+            budget.visit_rows(row_number.saturating_sub(last_visited_row))?;
+            last_visited_row = row_number;
 
             // 表头行及其之前全部跳过。比的是 `header.header_row` 而**不是** `current_row`：
             // `current_row` 在下面会被更新成「当前正在收口的这一行」，拿它比 `<=` 的话，
@@ -519,6 +679,7 @@ pub(crate) fn read_snapshot_with_progress(
                     rows_done: (row_number - header.header_row) as u64,
                     rows_total,
                 });
+                budget.check_cancelled()?;
             }
 
             let Some(column_name) = by_index.get(&column_number) else {
@@ -529,12 +690,16 @@ pub(crate) fn read_snapshot_with_progress(
                 continue;
             }
 
-            let text = cell_text(cell).trim().to_string();
+            let text = cell_text(&cell);
+            budget.check_cell_text(&text)?;
+            let text = text.trim();
             if text.is_empty() {
                 continue; // 空单元格不进 map —— 省内存，且"缺值"与"空串"同义
             }
             pending = true;
-            current.insert((*column_name).to_string(), text);
+            // 先计费再复制：共享字符串只借用读取，不能先展开再检查。
+            budget.retain_text(text, column_name)?;
+            current.insert((*column_name).to_string(), text.to_string());
         }
 
         // 最后一个文件最后一行也要收口（`while let` 退出时没有"换行"事件）。
@@ -557,8 +722,11 @@ pub(crate) fn read_snapshot_with_progress(
             name: name.clone(),
             rows_read,
         });
+        headers.push((name.clone(), header));
     }
 
+    budget.check_cancelled()?;
+    require_consistent_headers(&headers)?;
     Ok(ImportSnapshot { rows, per_file })
 }
 
@@ -596,30 +764,204 @@ fn rows_total_from(dimension_end_row: u32, header_row: usize) -> Option<u64> {
 /// `DateTime`）交给 calamine 自己的 `as_datetime()` 换成可读形态
 /// （`NaiveDateTime` 的 `Display`，形如 `2024-01-01 00:00:00`）。
 /// 换算不出来（序列号越界）时退回序列号本身——**宁可难看，不可编**。
-fn cell_text(cell: Cell<DataRef<'_>>) -> String {
+fn cell_text<'a>(cell: &'a Cell<DataRef<'_>>) -> Cow<'a, str> {
     match cell.get_value() {
-        DataRef::String(text) => text.clone(),
-        DataRef::SharedString(text) => (*text).to_string(),
-        DataRef::Float(number) => number.to_string(),
-        DataRef::Int(number) => number.to_string(),
-        DataRef::Bool(value) => value.to_string(),
+        DataRef::String(text) => Cow::Borrowed(text),
+        DataRef::SharedString(text) => Cow::Borrowed(text),
+        DataRef::Float(number) => Cow::Owned(number.to_string()),
+        DataRef::Int(number) => Cow::Owned(number.to_string()),
+        DataRef::Bool(value) => Cow::Owned(value.to_string()),
         // 回归：`t="d"` 的单元格本来就是字符串，**原样透传**。
-        DataRef::DateTimeIso(text) => text.clone(),
+        DataRef::DateTimeIso(text) => Cow::Borrowed(text),
         // 回归：数值型日期走 `as_datetime()`，不是裸 f64。
-        DataRef::DateTime(value) => value
-            .as_datetime()
-            .map(|stamp| stamp.to_string())
-            .unwrap_or_else(|| value.as_f64().to_string()),
+        DataRef::DateTime(value) => Cow::Owned(
+            value
+                .as_datetime()
+                .map(|stamp| stamp.to_string())
+                .unwrap_or_else(|| value.as_f64().to_string()),
+        ),
         // xlsx 侧产不出它（`cells_reader` 的 `t="d"` 只走 `DateTimeIso`），
         // 一并透传是让这一臂不再是**静默丢弃**——与上面那条同一个道理。
-        DataRef::DurationIso(text) => text.clone(),
-        DataRef::Empty | DataRef::Error(_) => String::new(),
+        DataRef::DurationIso(text) => Cow::Borrowed(text),
+        DataRef::Empty | DataRef::Error(_) => Cow::Borrowed(""),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_a_shared_string_before_copying_it_into_snapshot_rows() {
+        let result = read_snapshot(
+            &[(
+                "large.xlsx".to_string(),
+                fixture("shared_string_oversized.xlsx"),
+            )],
+            &["value".to_string()],
+        );
+        assert!(
+            result.is_err(),
+            "超出 Excel 单格能力的共享字符串不能被逐引用复制进快照"
+        );
+    }
+
+    #[test]
+    fn repeated_shared_strings_are_charged_before_each_copy_and_across_files() {
+        let cancelled = AtomicBool::new(false);
+        let file = (
+            "repeated.xlsx".to_string(),
+            fixture("shared_string_repeated.xlsx"),
+        );
+        let mut budget = ParseBudget::new(&cancelled);
+        budget.limits.expanded_bytes = 200_000;
+        let first = read_snapshot_with_budget(
+            std::slice::from_ref(&file),
+            &["value".to_string()],
+            &mut budget,
+            &mut |_| {},
+        )
+        .unwrap_or_else(|error| panic!("单文件 32 × 4096 字节应通过：{error}"));
+        assert_eq!(first.rows.len(), 32);
+        let mut budget = ParseBudget::new(&cancelled);
+        budget.limits.expanded_bytes = 200_000;
+        let mut last_seen = (0, 0);
+        let result = read_snapshot_with_budget(
+            &[file.clone(), file],
+            &["value".to_string()],
+            &mut budget,
+            &mut |progress| last_seen = (progress.file_index, progress.rows_done),
+        );
+        assert!(matches!(
+            result,
+            Err(XlsxError::BudgetExceeded {
+                resource: "整批展开文本字节数",
+                ..
+            })
+        ));
+        assert_eq!(
+            last_seen,
+            (2, 17),
+            "第二个文件第 17 行即超限，不能读完才拒绝"
+        );
+    }
+
+    #[test]
+    fn cell_and_row_budgets_include_unselected_data_and_accumulate_across_files() {
+        let cancelled = AtomicBool::new(false);
+        let file = (
+            "repeated.xlsx".to_string(),
+            fixture("shared_string_repeated.xlsx"),
+        );
+        for (limits, resource) in [
+            (
+                ParseLimits {
+                    cells: 80,
+                    ..ParseLimits::default()
+                },
+                "整批遍历单元格数",
+            ),
+            (
+                ParseLimits {
+                    rows: 40,
+                    ..ParseLimits::default()
+                },
+                "整批遍历行数",
+            ),
+        ] {
+            let mut budget = ParseBudget::new(&cancelled);
+            budget.limits = limits;
+            let first = read_snapshot_with_budget(
+                std::slice::from_ref(&file),
+                &[],
+                &mut budget,
+                &mut |_| {},
+            )
+            .unwrap_or_else(|error| panic!("单文件应在小预算内：{error}"));
+            assert!(first.rows.is_empty(), "没选列仍必须计入工作量");
+            let mut budget = ParseBudget::new(&cancelled);
+            budget.limits = limits;
+            let result = read_snapshot_with_budget(
+                &[file.clone(), file.clone()],
+                &[],
+                &mut budget,
+                &mut |_| {},
+            );
+            assert!(
+                matches!(result, Err(XlsxError::BudgetExceeded { resource: actual, .. }) if actual == resource),
+                "{resource} 必须跨文件累计"
+            );
+        }
+    }
+
+    #[test]
+    fn zip_expansion_budget_is_shared_by_all_files() {
+        let cancelled = AtomicBool::new(false);
+        let file = ("padded.xlsx".to_string(), fixture("zip_batch_budget.xlsx"));
+        let mut budget = ParseBudget::new(&cancelled);
+        assert!(read_header_with_budget(&file.1, &mut budget).is_ok());
+        let result = read_header_with_budget(&file.1, &mut budget);
+        assert!(matches!(
+            result,
+            Err(XlsxError::BudgetExceeded {
+                resource: "整批 ZIP 声明解压字节数",
+                ..
+            })
+        ));
+        let result = read_snapshot(&[file.clone(), file], &["value".to_string()]);
+        assert!(matches!(
+            result,
+            Err(XlsxError::BudgetExceeded {
+                resource: "整批 ZIP 声明解压字节数",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cancellation_during_traversal_stops_before_retaining_the_next_row() {
+        let cancelled = AtomicBool::new(false);
+        let mut budget = ParseBudget::new(&cancelled);
+        let mut last_row = 0;
+        let result = read_snapshot_with_budget(
+            &[(
+                "repeated.xlsx".to_string(),
+                fixture("shared_string_repeated.xlsx"),
+            )],
+            &["value".to_string()],
+            &mut budget,
+            &mut |progress| {
+                last_row = progress.rows_done;
+                if progress.rows_done == 2 {
+                    cancelled.store(true, Ordering::Release);
+                }
+            },
+        );
+        assert!(matches!(result, Err(XlsxError::Cancelled)));
+        assert_eq!(last_row, 2, "取消后不能继续扫描其余 30 行");
+        assert!(budget.expanded_bytes < 5000, "第二行不能先复制再发现取消");
+    }
+
+    #[test]
+    fn the_text_budget_accepts_its_exact_boundary_and_rejects_one_byte_more() {
+        let cancelled = AtomicBool::new(false);
+        let file = (
+            "repeated.xlsx".to_string(),
+            fixture("shared_string_repeated.xlsx"),
+        );
+        // 两个五字节表头；32 个选中值各 4096 字节、列名各 5 字节。
+        for (limit, accepted) in [(131_242, true), (131_241, false)] {
+            let mut budget = ParseBudget::new(&cancelled);
+            budget.limits.expanded_bytes = limit;
+            let result = read_snapshot_with_budget(
+                std::slice::from_ref(&file),
+                &["value".to_string()],
+                &mut budget,
+                &mut |_| {},
+            );
+            assert_eq!(result.is_ok(), accepted, "展开文本预算 {limit}");
+        }
+    }
 
     #[test]
     fn zip_magic_is_accepted() {
