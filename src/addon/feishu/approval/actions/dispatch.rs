@@ -45,7 +45,7 @@ use crate::addon::feishu::approval::domain::request_log_writer::{
     normalized_requested_by, outcome_for, Outcome, RequestLog,
 };
 use crate::addon::feishu::domain::approval::{resolve_applicant, ApplicantResolution};
-use crate::addon::feishu::domain::approval_convert::{format_local, FixedOffset};
+use crate::addon::feishu::domain::approval_convert::{amount_currency, format_local, FixedOffset};
 use crate::addon::feishu::domain::approval_dispatch::{
     applicant_open_id, dispatch_one, widget_maps_from_rows, BitableBackfill,
     DispatchInput as OrchestrationInput, DispatchResult as OrchestrationResult,
@@ -943,7 +943,12 @@ async fn dispatch_single(
         .into_iter()
         .map(|record| record.into_map())
         .collect();
-    let Some(widgets) = widget_maps_from_rows(&map_maps, |_| None) else {
+    // 定义快照提前取：金额控件的币种只能从定义里的 `currencyRange` 派生
+    // （字段映射表没有币种列，见 `amount_currency`）。
+    let form_snapshot: String = config_row.optional("form_snapshot")?.unwrap_or_default();
+    let Some(widgets) = widget_maps_from_rows(&map_maps, |widget_id| {
+        amount_currency(&form_snapshot, widget_id)
+    }) else {
         tracing::warn!(stage = "config", "审批字段映射配置损坏，转换器标识非法");
         return Ok(DispatchOutcome::fail(
             50001,
@@ -1136,6 +1141,41 @@ async fn dispatch_single(
         .into_iter()
         .next();
     let Some(claim) = claim else {
+        // 任务存在但不可认领。`review` 是「外部写入结果未知，禁止自动重放」的
+        // 隔离态——没有任何 worker 会再处理它，报「已受理/正在处理」会让用户
+        // 一直等一条永远不会来的通知（2026-10-26 真机）。如实报失败：终态
+        // 通知链路会把原因发到飞书，请求记录也不会落进「已受理」桶。
+        let state = context
+            .approval_tasks()
+            .query()
+            .select_fields(&["state"])?
+            .where_primary_key_eq(serde_json::json!(task_id))?
+            .optional()
+            .await?
+            .and_then(|row| row.optional::<String>("state").ok().flatten())
+            .unwrap_or_default();
+        if state == "review" {
+            let mut outcome = DispatchOutcome::success(
+                Outcome::Failed,
+                Some(config_id),
+                Some(base_token),
+                Some(table_id),
+                false,
+                FeedbackStatus::Failed,
+                format!(
+                    "该记录上次写入飞书的结果未知，已转人工核查（任务 {task_id}）：请管理员先在任务列表核对是否已生成审批，确认未生成后再处理"
+                ),
+                None,
+            );
+            // 与成功路径同源的兜底接收人（请求传参优先、回退表格列，再退创建人）：
+            // 这条失败结论必须能发出去，否则用户点了按钮仍然什么都收不到。
+            outcome.applicant_open_id = resolved_applicant
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| applicant_open_id(&cells, &applicant_field));
+            outcome.creator_open_id = creator_open_id.clone();
+            return Ok(outcome);
+        }
         return Ok(DispatchOutcome::success(
             Outcome::Accepted,
             Some(config_id),
@@ -1223,7 +1263,7 @@ async fn dispatch_single(
             backfill_field_name: &backfill_field_name,
             approval_code: &approval_code,
             widgets: &widgets,
-            form_snapshot: config_row.optional("form_snapshot")?.unwrap_or_default(),
+            form_snapshot,
             timezone_offset,
             status_field: config_row
                 .optional::<String>("status_field")?

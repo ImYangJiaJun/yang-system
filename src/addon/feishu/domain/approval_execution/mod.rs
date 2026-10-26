@@ -291,6 +291,21 @@ mod tests {
                     .await?;
             assert_eq!((state.as_str(), phase.as_str()), ("review", "creating"));
         }
+        // 4xx + 非零业务码是远端**明确拒绝**（校验挡下、写入未发生）：必须原样
+        // 上抛让上层拿到真实错误码，且把阶段恢复到安全值——转 review 会把
+        // 「值不合法」伪装成「结果未知」，任务永久卡住（2026-10-26 真机事故）。
+        let claim = claimed(&context, &snapshot).await?;
+        let inner = ControlledTransport::reply(400, r#"{"code":1390001,"msg":"InvalidArgument"}"#);
+        let response = ExecutionTransport {
+            inner: &inner,
+            context: &context,
+            claim: &claim,
+        }
+        .send(request())
+        .await
+        .unwrap_or_else(|e| panic!("明确拒绝应按业务错误上抛: {e}"));
+        assert_eq!(response.status, 400);
+        assert_eq!(facts(&context, &claim).await?, ("ready".into(), None));
         for code in [
             i64::from(CODE_RATE_LIMITED),
             i64::from(CODES_TOKEN_EXPIRED[0]),

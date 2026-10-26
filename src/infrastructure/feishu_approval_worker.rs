@@ -50,7 +50,9 @@ use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::approval::domain::task_applicant_table::upsert_task_applicant;
 use crate::addon::feishu::domain::approval::instance_applink;
-use crate::addon::feishu::domain::approval_convert::{format_local, FixedOffset, WidgetMap};
+use crate::addon::feishu::domain::approval_convert::{
+    amount_currency, format_local, FixedOffset, WidgetMap,
+};
 use crate::addon::feishu::domain::approval_dispatch::{
     applicant_open_id as extract_applicant_open_id, backfill_in_chunks, dispatch_one,
     widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput, DispatchResult,
@@ -1023,7 +1025,12 @@ async fn load_task(
             .collect(),
     };
 
-    let Some(widgets) = widget_maps_from_rows(&maps, |_| None) else {
+    // 定义快照提前取：金额控件的币种只能从定义里的 `currencyRange` 派生
+    // （字段映射表没有币种列，见 `amount_currency`）。
+    let form_snapshot: String = config.optional("form_snapshot")?.unwrap_or_default();
+    let Some(widgets) = widget_maps_from_rows(&maps, |widget_id| {
+        amount_currency(&form_snapshot, widget_id)
+    }) else {
         tracing::warn!(
             stage = "claim",
             task_id,
@@ -1095,7 +1102,7 @@ async fn load_task(
             .filter(|v| !v.trim().is_empty()),
         timezone_offset,
         widgets,
-        form_snapshot: config.optional("form_snapshot")?.unwrap_or_default(),
+        form_snapshot,
         last_error: row.optional("last_error")?,
     }))
 }

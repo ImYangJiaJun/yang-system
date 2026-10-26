@@ -52,6 +52,40 @@ pub(crate) struct WidgetMap {
     pub(crate) currency: Option<String>,
 }
 
+/// 金额控件的币种：审批定义里该控件 `option.currencyRange` 的首值。
+///
+/// 字段映射表没有币种列（`WidgetMap.currency` 在生产路径恒为 `None`），而飞书
+/// 要求 `amount` 的 `value` 旁带 `currency`（《审批实例表单控件参数》「金额」）。
+/// 定义里的 `currencyRange` 是唯一权威来源；缺它整条创建会被 1390001 拒掉。
+pub(crate) fn amount_currency(form_snapshot: &str, widget_id: &str) -> Option<String> {
+    fn find<'a>(nodes: &'a [FormWidget], id: &str) -> Option<&'a FormWidget> {
+        for node in nodes {
+            if node.id == id {
+                return Some(node);
+            }
+            if let Some(found) = find(&node.children, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let form: Vec<FormWidget> = serde_json::from_str(form_snapshot).ok()?;
+    let node = find(&form, widget_id)?;
+    if node.r#type != "amount" {
+        return None;
+    }
+    let super::approval_match::WidgetOptions::Config(option) = node.option.as_ref()? else {
+        return None;
+    };
+    let currency = option
+        .get("currencyRange")?
+        .as_array()?
+        .first()?
+        .as_str()?
+        .trim();
+    (!currency.is_empty()).then(|| currency.to_string())
+}
+
 /// 值转换器。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Converter {
@@ -1566,6 +1600,18 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(rendered[0]["value"], json!(12.5));
         assert_eq!(rendered[0]["currency"], json!("CNY"));
+    }
+
+    #[test]
+    fn amount_currency_comes_from_the_definition_currency_range() {
+        // 真机定义里金额控件只给 `option.currencyRange`（无 `value`）；币种必须是
+        // `value` 的兄弟字段，缺了会被 1390001 拒掉。
+        let snapshot = r#"[{"id":"amount","type":"amount","option":{"currencyRange":["CNY","USD"]}},{"id":"detail","type":"fieldList","children":[{"id":"child","type":"amount","option":{"currencyRange":["HKD"]}}]},{"id":"text","type":"input"}]"#;
+        assert_eq!(amount_currency(snapshot, "amount"), Some("CNY".into()));
+        assert_eq!(amount_currency(snapshot, "child"), Some("HKD".into()));
+        assert_eq!(amount_currency(snapshot, "text"), None);
+        assert_eq!(amount_currency(snapshot, "missing"), None);
+        assert_eq!(amount_currency("broken", "amount"), None);
     }
 
     #[test]

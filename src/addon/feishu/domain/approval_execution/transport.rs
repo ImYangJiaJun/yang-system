@@ -76,6 +76,23 @@ impl OutboundTransport for ExecutionTransport<'_> {
                         .await
                         .map_err(storage)?;
                     return Ok(response);
+                } else if (400..500).contains(&response.status)
+                    && code.is_some_and(|code| code != 0)
+                {
+                    // 4xx + 非零业务码 = 远端**明确拒绝**：请求到达了飞书、被校验挡下，
+                    // 写入没有发生。恢复安全阶段并原样上抛，让 `classify` 给出真实
+                    // 错误码——若走 `mark_unknown`，「值不合法」这种可修的数据问题会被
+                    // 伪装成「外部写入结果未知」，任务永久卡在 review 且原始错误码丢失
+                    // （2026-10-26 真机：所有 create 失败都只剩 900001）。
+                    confirm_effect(self.context, self.claim, safe_phase, None)
+                        .await
+                        .map_err(storage)?;
+                    tracing::warn!(
+                        http_status = response.status,
+                        business_code = code,
+                        "飞书写入被远端明确拒绝（未执行），交上层按业务错误处置"
+                    );
+                    return Ok(response);
                 }
             }
             Err(error @ BaseError::RateLimitExceeded { .. }) => {
@@ -85,7 +102,11 @@ impl OutboundTransport for ExecutionTransport<'_> {
                     .map_err(storage)?;
                 return Err(error);
             }
-            Err(_) => {}
+            Err(error) => {
+                // 传输层错误才是真正的「结果未知」：请求可能已到飞书，也可能没有。
+                // 不记录它会让 review 的原因无从追溯（这里原本是 `Err(_) => {}`）。
+                tracing::warn!(error = %error, "飞书写入未获得传输层确认，结果未知");
+            }
         }
         mark_unknown(self.context, self.claim)
             .await
