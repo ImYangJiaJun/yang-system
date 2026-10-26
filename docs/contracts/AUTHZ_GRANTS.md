@@ -39,7 +39,7 @@
 | 权限 | 覆盖的 Action | 危害面 |
 |---|---|---|
 | `account.users.manage` | `admin_disable_user`、`admin_enable_user` | 改变账号启用状态；受 spec §8.1 admin-only 守卫与 §8.2 最后管理员守卫约束 |
-| `account.users.reset_credentials` | `admin_issue_password_reset` | 为任意账号签发密码重置凭证，可夺取该账号（含系统管理员）；受 Step-up 保护 |
+| `account.users.reset_credentials` | `admin_issue_password_reset` | 为任意账号签发密码重置凭证，可夺取该账号（含系统管理员）；受管理员等价权限授予闸门保护 |
 
 拆分后两条权限各自独立授予：只持 `account.users.manage` 不再能签发重置凭证。二者都由
 Action 的 `.permissions(...)` 声明并经冻结 Catalog 自动投影进权限目录，内置全权组
@@ -341,21 +341,21 @@ COMMIT;
 
 ## 管理接口
 
-| 接口 | 路由 | 所需权限 | Step-up |
+| 接口 | 路由 | 所需权限 | Step-up（当前未装配） |
 |---|---|---|---|
-| 授予权限 | `POST /api/v1/access/grants` | `access.grants.write` | 是 |
-| 撤销权限 | `POST /api/v1/access/grants/revoke` | `access.grants.write` | 是 |
+| 授予权限 | `POST /api/v1/access/grants` | `access.grants.write` | 否 |
+| 撤销权限 | `POST /api/v1/access/grants/revoke` | `access.grants.write` | 否 |
 | 查询用户授权 | `GET /api/v1/access/users/{user_id}/grants` | `access.grants.read` | 否 |
 | 查询权限目录 | `GET /api/v1/access/permissions` | `access.grants.read` | 否 |
-| 建组 | `POST /api/v1/access/groups` | 登录即可（authenticated-only） | 是 |
-| 改组展示信息 | `POST /api/v1/access/groups/update` | 登录即可（authenticated-only） | 是 |
-| 删组 | `POST /api/v1/access/groups/delete` | 登录即可（authenticated-only） | 是 |
+| 建组 | `POST /api/v1/access/groups` | 登录即可（authenticated-only） | 否 |
+| 改组展示信息 | `POST /api/v1/access/groups/update` | 登录即可（authenticated-only） | 否 |
+| 删组 | `POST /api/v1/access/groups/delete` | 登录即可（authenticated-only） | 否 |
 | 组列表 | `GET /api/v1/access/groups` | 登录即可（authenticated-only） | 否 |
 | 组详情 | `GET /api/v1/access/groups/{group_id}` | 登录即可（authenticated-only） | 否 |
-| 加组权限 | `POST /api/v1/access/groups/items` | 登录即可（authenticated-only） | 是 |
-| 移组权限 | `POST /api/v1/access/groups/items/remove` | 登录即可（authenticated-only） | 是 |
-| 加组成员 | `POST /api/v1/access/groups/members` | 登录即可（authenticated-only） | 是 |
-| 移组成员 | `POST /api/v1/access/groups/members/remove` | 登录即可（authenticated-only） | 是 |
+| 加组权限 | `POST /api/v1/access/groups/items` | 登录即可（authenticated-only） | 否 |
+| 移组权限 | `POST /api/v1/access/groups/items/remove` | 登录即可（authenticated-only） | 否 |
+| 加组成员 | `POST /api/v1/access/groups/members` | 登录即可（authenticated-only） | 否 |
+| 移组成员 | `POST /api/v1/access/groups/members/remove` | 登录即可（authenticated-only） | 否 |
 
 说明：
 
@@ -373,10 +373,10 @@ COMMIT;
   随 claims 投影，但**不被任何 Action 以 `.permissions(...)` 强制要求**——目录里的
   声明者记作模块名 `access.groups`（无 Action 声明）。`system_admin` 组成员的有效
   权限等于目录全集，因此仍持有这两粒键。
-- **Step-up 覆盖全部 7 个组写 Action**（`access/groups/mod.rs` 的 `step_up_targets`，
-  与 grants 只覆盖 grant/revoke 同例）。组条目与组成员的变更同样挂重认证中间件，
-  是「防自提权子集校验 + 最后管理员守卫 + Step-up」三层防线——即攻击者无法凭空
-  获得一个自己能写的新组，也无法越过后两条不变量。
+- **当前应用未装配 Step-up**：框架提供 `step_up_targets` 中间件能力，但本应用的
+  grants 与 9 个组 Action 均未注册，也不会返回 428。组写操作仍是「防自提权子集校验
+  + 最后管理员守卫」两层防线——攻击者无法凭空获得一个自己能写的新组；不要引用框架
+  测试把 Step-up 写成现网保护。
 - **管理员等价权限的授予闸门**：`POST /access/grants`、`POST /access/groups/items`、
   `POST /access/groups/members` 三条路径在涉及管理员等价权限（见「管理员等价权限」节）时，
   要求调用者是内置全权组 `system_admin` 成员，否则 403。闸门是 `access.grants.write`
@@ -407,7 +407,7 @@ VALUES (1, 'feishu.datasource.read',  0, UNIX_TIMESTAMP())
      , (1, 'feishu.option.read',      0, UNIX_TIMESTAMP());
 ```
 
-日常授权/撤销走 `POST /api/v1/access/grants[/revoke]`（Step-up 保护）。
+日常授权/撤销走 `POST /api/v1/access/grants[/revoke]`（当前应用未装配 Step-up，按权限键与授予闸门保护）。
 
 **注意**：`approval_options` / `upsert_options` / `delete_options` 三条机器入口是
 `public` Action，**不经过权限体系**——它们的凭证分别是「按数据源存储的 Token 摘要」与

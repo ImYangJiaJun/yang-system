@@ -14,7 +14,7 @@ OpenAPI 与前端页面。骨架以 `account` 为唯一业务 Addon，覆盖账�
 
 | Addon / Module | 控制台入口 | 当前能力 |
 |---|---|---|
-| `account.user` | 个人账户 / 用户中心 / 账号设置 | 邮箱验证码注册、登录（用户名/邮箱/邮箱验证码免密）、头像设置与展示、Refresh Cookie、全设备退出、当前用户、Step-up、账号中心（资料/改密/改用户名/换邮箱/停用/登录设备/安全事件）、自助密码找回；启用凭据版本切换后还提供改密、自助停用、密码重置、匿名化删除；管理动作（grants 化）：停用/启用用户、签发重置凭证、用户列表 |
+| `account.user` | 个人账户 / 用户中心 / 账号设置 | 邮箱验证码注册、登录（用户名/邮箱/邮箱验证码免密）、头像设置与展示、Refresh Cookie、全设备退出、当前用户、账号中心（资料/改密/改用户名/换邮箱/停用/登录设备/安全事件）、自助密码找回；启用凭据版本切换后还提供改密、自助停用、密码重置、匿名化删除；管理动作（grants 化）：停用/启用用户、签发重置凭证、用户列表 |
 | `access.grants` | —（预留端口，未接线） | 授权/权限管理端口：grant_permission / revoke_permission / list_permissions / list_user_grants；无冷启动引导，权限管理尚未交付 |
 | `feishu.approval` | 飞书审批 / 配置 | 业务名称搜索、启停筛选、独立配置详情、字段对应、同审批关联配置分页、配置 CRUD 与派发记录；管理员可补充名称快照 |
 
@@ -28,7 +28,11 @@ OpenAPI 与前端页面。骨架以 `account` 为唯一业务 Addon，覆盖账�
 安全边界不是只依赖前端隐藏按钮：Access Token 的授权快照通过
 `authz_version` 与 MySQL/Redis 当前事实比较，授权 writer 在同一事务中更新业务事实、
 单调递增版本并追加 Outbox。全设备退出、自助停用、改密和密码重置按各自契约使用
-Step-up、会话撤销或审计事件。
+会话撤销、凭据版本递增或审计事件；框架提供 Step-up 能力，但当前应用未装配。
+
+设备撤销与 Refresh 当前代次以 MySQL `user_session` 为准，授权缓存命中也会检查
+稳定会话。无会话标识的旧 Token 需要重新登录；轮换的条件更新成功前不会返回新令牌。
+升级兼容性与 Redis 丢失边界见[会话持久化契约](docs/contracts/SESSION_AUTHORITY.md)。
 
 `security.issue_refresh_credential_version` 是三阶段发布开关。本系统无旧实例，
 示例配置已为 `true`：同时启用 Refresh 凭据版本签发与依赖新版凭据版本契约的
@@ -139,8 +143,8 @@ Chrome/Edge ≥ 111、Firefox ≥ 128、Safari ≥ 16.4）。登录、注册、�
 加载失败时回退到通用 TableView。后端权限投影中不存在的模块和操作不会出现在前端，
 直接访问无权模块时同样 fail-closed。
 
-后端返回 Step-up challenge 时，通用操作链会打开重认证对话框，用当前账号凭据完成
-challenge 后携带一次性 proof 重试原操作。`/workbench` 是仅开发环境开放的 Catalog
+当前应用与前端均未装配 Step-up（没有 challenge/proof 对话框）；框架保留的
+Step-up 中间件能力未接线，不能把它当作现网防线。`/workbench` 是仅开发环境开放的 Catalog
 契约工作台；生产构建使用模块页和业务视图，不把工作台当作正式交付证明。
 
 本地联调前端：
@@ -192,12 +196,13 @@ Addon/Module/fields!/params!
  OpenAPI/UI  HTTP dispatch  Schema/Tables
                  │
                  ▼
- auth → authz_version → permission → Step-up guard → Action
+ auth → authz_version → permission → Action
                                                      │
                                                      ▼
                                        business fact + version + Outbox/audit
 ```
 
+- 框架另提供 Step-up guard 中间件，但当前应用未装配（没有任何 Action 注册 `step_up_targets`，也不会返回 428）。
 - `ToolsBuilder -> Tools` 由当前 `BuiltApp` 显式持有 MySQL、Redis、Token 等资源；没有进程级数据库/Redis/Tools 单例。
 - `params!` 同时生成强类型输入与 body/query/path/header 参数契约，请求只反序列化一次。
 - `fields!` 是 Schema、输入输出约束、OpenAPI、后台元数据和查询策略的字段事实来源。
@@ -205,8 +210,8 @@ Addon/Module/fields!/params!
 - `ctx.tables()` 统一执行字段权限、筛选、排序、分页与关系批量加载。
 - Token 授权快照同时包含角色、权限与 `authz_version`；Redis 只做短 TTL 加速，MySQL
   保持最终事实源，Outbox 重放不能让版本回退。
-- Step-up challenge/proof 使用独立 keyring，生产 proof 通过 Redis 原子单次消费；它不
-  替代 Action 内的事务授权或审计写入。
+- 框架的 Step-up challenge/proof 使用独立 keyring，生产 proof 通过 Redis 原子单次消费；
+  当前应用未装配 Step-up，不能把它当作现网保护，它也不能替代 Action 内的事务授权或审计写入。
 
 ## 生产发布与启动顺序
 
@@ -224,7 +229,7 @@ cargo run --locked --bin yang-system
 
 1. 按 `config.toml < YANG_SYSTEM_* 环境变量 < secret 目录` 合成并验证不可变运行配置。
 2. 初始化 JSON 日志与可选 OTLP tracing，并建立整个进程共享的关闭总预算。
-3. 创建 MySQL、Redis、Token/Step-up manager、SMTP sender 和授权缓存。
+3. 创建 MySQL、Redis、Token manager、SMTP sender 和授权缓存（Step-up 配置仍会校验，但应用未创建其 manager）。
 4. 用 `ToolsBuilder` 冻结当前应用独占资源，再由 `AppBuilder` 校验 Addon 依赖、
    关系/Action 引用和 route 冲突，冻结 Catalog/Registry。
 5. `DatabaseInitializer` 对完整 TableDefinition 集合执行全局预检和保数据增量同步。
@@ -275,7 +280,7 @@ Redis、SMTP、邮箱验证码、Token 等运行参数按
 `app.environment` 支持 `development|test|production`，缺省时按 `production`
 处理。示例配置仅面向本地开发，部署配置必须显式复核该标识。
 
-完整环境变量、目录型 secret provider、Token/Step-up keyring 轮换和关闭预算见
+完整环境变量、目录型 secret provider、Token keyring 轮换和关闭预算见
 [`docs/contracts/CONFIGURATION.md`](docs/contracts/CONFIGURATION.md)；指标、readiness、日志与 tracing 契约见
 [`docs/contracts/OBSERVABILITY.md`](docs/contracts/OBSERVABILITY.md)。
 
@@ -298,7 +303,7 @@ python scripts/run_ci.py integration
 
 | 位置 | 展示能力 |
 |---|---|
-| `addon/account/user/` | 邮箱注册、Cookie 会话、凭据/授权版本、Step-up、停用与全量撤销 |
+| `addon/account/user/` | 邮箱注册、Cookie 会话、凭据/授权版本、停用与全量撤销 |
 | `infrastructure/authorization/` | Redis 单调缓存、MySQL 回源、事务 Outbox 与发布 Worker |
 | `app.rs` 测试 | Catalog/Registry/OpenAPI 同源与条件 Action |
 

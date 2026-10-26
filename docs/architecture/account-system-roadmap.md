@@ -4,6 +4,7 @@
 > - 系统定位：**yang-system 是后续业务开发的通用系统底座**，不是框架参考骨架
 > - 依据：2026-09-05 对 `src/addon/account/`、`src/infrastructure/`、`frontend/src/`、`crates/yang-base` 的源码核实，以及 Ory Kratos / ZITADEL / Keycloak / Logto / better-auth / SuperTokens 等成熟方案的横评
 > - 关联文档：`docs/assessments/2026-07-30-account-authz-first-principles-review.md`（账号与授权体系评审）、`docs/architecture/session-ttl.md`、`docs/architecture/authorization-writers.md`
+> - Step-up 说明：框架保留 Step-up 能力，但当前应用未装配（没有任何 Action 注册 `step_up_targets`）；下文中出现的 Step-up 条目描述设计/框架能力，不代表现有防线。
 
 ## 实施进度（按阶段更新）
 
