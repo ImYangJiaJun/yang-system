@@ -82,7 +82,7 @@ describe("派发记录页 · 列表", () => {
     expect((await screen.findAllByText("张三")).length).toBe(3);
     expect(screen.getByText("成功")).toBeInTheDocument();
     expect(screen.getByText("等待")).toBeInTheDocument();
-    expect(screen.getByText("批量受理")).toBeInTheDocument();
+    expect(screen.getByText("已受理")).toBeInTheDocument();
     expect(screen.getByText("失败")).toBeInTheDocument();
     // 色标 tone 与结果对应
     expect(screen.getByText("成功").closest("[data-tone]")).toHaveAttribute(
@@ -93,7 +93,7 @@ describe("派发记录页 · 列表", () => {
       "data-tone",
       "warning",
     );
-    expect(screen.getByText("批量受理").closest("[data-tone]")).toHaveAttribute(
+    expect(screen.getByText("已受理").closest("[data-tone]")).toHaveAttribute(
       "data-tone",
       "info",
     );
@@ -101,7 +101,7 @@ describe("派发记录页 · 列表", () => {
       "data-tone",
       "danger",
     );
-    // 坐标与 record_id（默认值 recABC 出现两次：等待/批量受理两条是空态）
+    // 坐标与 record_id（默认值 recABC 出现两次：等待/已受理两条是空态）
     expect(screen.getAllByText(/appbcbWCzen6 \/ tblsRc9GRRX/).length).toBe(4);
     expect(screen.getAllByText("recABC").length).toBe(2);
     // message（截断列）

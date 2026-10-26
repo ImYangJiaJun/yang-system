@@ -247,6 +247,7 @@ fn post_content(text: &str, references: &[FeedbackReference]) -> serde_json::Val
     if !reasons.is_empty() {
         let label = if title == FeedbackStatus::Succeeded.heading()
             || title == FeedbackStatus::Accepted.heading()
+            || title == FeedbackStatus::Queued.heading()
         {
             "结果"
         } else {

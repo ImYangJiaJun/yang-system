@@ -151,7 +151,7 @@ export default function ApprovalRequestsPage() {
       <div>
         <h1 className="text-lg font-semibold">派发记录</h1>
         <p className="text-sm text-muted-foreground">
-          每一次派发入口请求一行：成功 / 等待 / 批量受理 /
+          每一次派发入口请求一行：成功 / 等待 / 已受理 /
           失败四桶，行内展开看请求与返回原文。
         </p>
       </div>

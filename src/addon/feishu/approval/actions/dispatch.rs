@@ -1159,8 +1159,8 @@ async fn dispatch_single(
             Some(base_token),
             Some(table_id),
             true,
-            FeedbackStatus::Accepted,
-            "任务已持久受理或已有处理结果，请查看任务状态；不会重复执行".into(),
+            FeedbackStatus::Queued,
+            "任务已被受理或正在处理，本轮不会重复执行".into(),
             None,
         );
         outcome.row_number = row_number;
@@ -1191,7 +1191,7 @@ async fn dispatch_single(
             Some(base_token),
             Some(table_id),
             true,
-            FeedbackStatus::Accepted,
+            FeedbackStatus::Queued,
             "任务将按首次受理快照继续处理".into(),
             None,
         ));
@@ -1374,6 +1374,7 @@ fn deferred_notification(outcome: &DispatchOutcome) -> bool {
             | FeedbackStatus::Retryable
             | FeedbackStatus::CreatedPendingBackfill
             | FeedbackStatus::Accepted
+            | FeedbackStatus::Queued
     )
 }
 
@@ -1442,7 +1443,7 @@ fn task_state(outcome: &DispatchOutcome) -> Option<(&'static str, Option<&str>)>
         | FeedbackStatus::CreatedPendingBackfill => {
             Some(("pending", Some(outcome.message.as_str())))
         }
-        FeedbackStatus::Accepted => None,
+        FeedbackStatus::Accepted | FeedbackStatus::Queued => None,
     }
 }
 
@@ -1768,6 +1769,7 @@ mod tests {
             FeedbackStatus::Retryable,
             FeedbackStatus::CreatedPendingBackfill,
             FeedbackStatus::Accepted,
+            FeedbackStatus::Queued,
         ] {
             let mut interim = DispatchOutcome::fail(0, Some(7), "中间态");
             interim.status = status;
@@ -1797,6 +1799,7 @@ mod tests {
             FeedbackStatus::Retryable,
             FeedbackStatus::CreatedPendingBackfill,
             FeedbackStatus::Accepted,
+            FeedbackStatus::Queued,
         ] {
             assert!(
                 deferred_notification(&interim(status)),
@@ -1867,6 +1870,7 @@ mod tests {
             FeedbackStatus::Retryable,
             FeedbackStatus::CreatedPendingBackfill,
             FeedbackStatus::Accepted,
+            FeedbackStatus::Queued,
         ] {
             assert!(
                 http_notification_recipient(&input, &with_status(status)).is_none(),

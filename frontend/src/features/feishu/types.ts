@@ -1176,7 +1176,7 @@ export const APPROVAL_OUTCOME_OPTIONS: ReadonlyArray<{
   { value: "all", label: "全部" },
   { value: "succeeded", label: "成功" },
   { value: "waiting", label: "等待" },
-  { value: "accepted", label: "批量受理" },
+  { value: "accepted", label: "已受理" },
   { value: "failed", label: "失败" },
 ];
 

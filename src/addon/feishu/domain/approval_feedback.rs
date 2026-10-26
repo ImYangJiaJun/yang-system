@@ -18,6 +18,9 @@ pub(crate) enum FeedbackStatus {
     Retryable,
     Failed,
     Accepted,
+    /// 单条记录已被受理但本轮没有执行（已在队列中/正被 worker 处理）。
+    /// 与 [`Self::Accepted`] 分开：后者是页面按钮的**批量**受理，正文不能写「批量」。
+    Queued,
 }
 
 impl FeedbackStatus {
@@ -29,6 +32,7 @@ impl FeedbackStatus {
             Self::Retryable => "retryable",
             Self::Failed => "failed",
             Self::Accepted => "accepted",
+            Self::Queued => "queued",
         }
     }
 
@@ -40,6 +44,7 @@ impl FeedbackStatus {
             Self::Retryable => "本轮未完成，审批是否创建尚未确认",
             Self::Failed => "本轮处理失败",
             Self::Accepted => "批量派发已受理",
+            Self::Queued => "任务已在队列中",
         }
     }
 
@@ -55,6 +60,7 @@ impl FeedbackStatus {
             Self::Accepted => {
                 "后台扫描所有启用配置中回填列为空的记录，结果稍后写入各表；此消息不代表处理完成。"
             }
+            Self::Queued => "无需重复点击；结果稍后写入表格，可在任务列表查看进度。",
         }
     }
 }
@@ -319,6 +325,7 @@ mod tests {
             ),
             (FeedbackStatus::Failed, "本轮处理失败", "核对审批配置"),
             (FeedbackStatus::Accepted, "批量派发已受理", "所有启用配置"),
+            (FeedbackStatus::Queued, "任务已在队列中", "无需重复点击"),
         ] {
             let body = render(
                 status,
