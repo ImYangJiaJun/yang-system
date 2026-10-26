@@ -1,0 +1,24 @@
+Local audit evidence, 2026-10-25. No production connection.
+
+Command: node docs/assessments/evidence/2026-10-25-session-race-check.mjs
+Exit code: 0
+REPRODUCED: late restore overwrites clear
+REPRODUCED: late restore overwrites new-login
+REPRODUCED: cleared auth-session accepts late refresh and emits refreshed event
+3 deterministic checks passed (vulnerable behavior reproduced; no backend bypass claim)
+
+Command: python docs/assessments/evidence/2026-10-25-redis-version-replay-check.py
+Exit code: 0
+image=sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+PASS: existing version 3 rejects old event 2
+REPRODUCED: after expiry, old event 2 is accepted with ttl=5s
+REPRODUCED: expiring portal count=31 receives a request, count=32 and window resets to 60s
+Boundary: real Redis + production Lua; no HTTP authorization or MySQL integration executed
+Removed only the disposable container created by this check; no volumes or host ports used
+
+Command: python docs/assessments/evidence/2026-10-25-review-coverage-check.py
+Exit code: 0
+PASS: all 68 original D conclusions have domain-level verdict rows
+PASS: all 36 original S definitions have exactly one main-ledger row
+PASS: all report-relative links resolve and report lines have no trailing whitespace
+PASS: reproducible edge source, dependency lock and raw output artifacts exist

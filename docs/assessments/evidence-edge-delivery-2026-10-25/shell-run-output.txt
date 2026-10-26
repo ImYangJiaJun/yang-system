@@ -1,0 +1,3 @@
+probe_code with curl exit=28 and status=200 returns=200
+stop_all_pairs with live backend still running returns=0 (caller can continue reset)
+failed dump pipeline without pipefail returns=0

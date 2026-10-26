@@ -1,0 +1,9 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running `target/edge-delivery-audit-repro\debug\edge-delivery-layer-repro.exe`
+separate Router layers: first=200 OK second=408 Request Timeout second_elapsed_ms=658 (each handler 450ms, timeout 650ms)
+split LoadShed: first=200 OK second=200 OK second_elapsed_ms=908
+combined LoadShed: first=200 OK second=503 Service Unavailable second_elapsed_ms=0
+default 404/405 TraceLayer on_request count=2
+per-route max_concurrency=1: cross-route peak=2
+per-method max_concurrency=1: same-path GET+POST peak=2
+shutdown take-then-await + Drop abort: after timeout task still completed=1
