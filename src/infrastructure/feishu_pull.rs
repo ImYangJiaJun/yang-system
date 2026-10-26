@@ -33,9 +33,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use yang_base::tools::Tools;
 use yang_base::BaseError;
+use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::domain::alert::{alert_pull_failure, FeishuAlertSenderHandle};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -161,7 +161,7 @@ fn now_unix() -> i64 {
 /// 对外暴露一个构造不了的类型没有意义。
 pub(crate) struct FeishuPullWorker {
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedTask<()>,
 }
 
 impl FeishuPullWorker {
@@ -219,17 +219,21 @@ impl FeishuPullWorker {
         );
         Ok(Self {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         })
     }
 
     /// 发信号并等待任务退出。
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
+    }
+
     pub(crate) async fn shutdown(mut self) -> anyhow::Result<()> {
         let _ = self.shutdown.send(true);
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await.context("等待飞书出站拉取 Worker 退出失败")?;
+        self.task
+            .join()
+            .await
+            .context("等待飞书出站拉取 Worker 退出失败")?;
         Ok(())
     }
 }

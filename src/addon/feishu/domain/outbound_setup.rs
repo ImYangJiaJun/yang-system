@@ -59,7 +59,13 @@ pub(crate) fn build(ctx: &ActionContext, settings: &FeishuSettings) -> Result<Ou
         ctx.tools().cache()?.clone(),
         &deployment,
     ));
-    let transport = Arc::new(HttpClientTransport::new(ctx.tools().http()?.clone()));
+    let transport = Arc::new(
+        HttpClientTransport::new(ctx.tools().http()?.clone()).with_approval_create_limit(
+            ctx.tools().cache()?.clone(),
+            &app_id,
+            settings.approval_create_rate_per_minute,
+        ),
+    );
     let sleeper = Arc::new(TokioSleeper);
     let tokens = TenantTokenProvider::new(
         cache,

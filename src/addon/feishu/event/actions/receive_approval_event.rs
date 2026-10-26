@@ -95,7 +95,7 @@ pub(super) async fn handle(
     // 飞书判定推送成功的**唯一**信号（响应体它不看），返回 200 会让这条事件
     // 永久丢失；5xx 触发飞书按 15s/5min/1h/6h 重推（最多 4 次、约 7.1 小时
     // 窗口），这是解密类故障唯一的自愈机会。
-    let event_body = match raw_body.get("encrypt").and_then(Value::as_str) {
+    let mut event_body = match raw_body.get("encrypt").and_then(Value::as_str) {
         Some(encrypted) => {
             tracing::debug!("检测到加密事件，开始解密");
             let Some(key_raw) = encrypt_key.as_deref() else {
@@ -108,17 +108,14 @@ pub(super) async fn handle(
             match crypto::decrypt_bytes(encrypted, &key) {
                 Ok(decrypted) => match serde_json::from_slice::<Value>(&decrypted) {
                     Ok(parsed) => {
-                        tracing::debug!(
-                            decrypted = %parsed,
-                            decrypted_size = decrypted.len(),
-                            "飞书事件解密成功"
-                        );
+                        tracing::debug!(decrypted_size = decrypted.len(), "飞书事件解密成功");
                         parsed
                     }
                     Err(e) => {
                         tracing::error!(
-                            error = %e,
-                            decrypted_preview = %String::from_utf8_lossy(&decrypted[..decrypted.len().min(200)]),
+                            category = ?e.classify(),
+                            line = e.line(),
+                            column = e.column(),
                             "飞书事件解密后不是合法 JSON"
                         );
                         return Err(BaseError::ValidationFailed(
@@ -164,6 +161,10 @@ pub(super) async fn handle(
         ));
     }
     tracing::debug!("飞书事件 verification_token 校验通过");
+    // 认证材料只参与本次校验，不进入诊断报文、数据库和备份。
+    if let Some(object) = event_body.as_object_mut() {
+        object.remove("token");
+    }
 
     // 提取事件字段（飞书推送结构：顶层有 type/event_callback/uuid/token，
     // 业务字段在 event 嵌套层里）
@@ -179,6 +180,19 @@ pub(super) async fn handle(
     let instance_code = event
         .and_then(|e| e.get("instance_code").and_then(Value::as_str))
         .unwrap_or("");
+    // 不替缺失身份造空键或推断 UUID；同一空键会把不同事件误判为重复投递。
+    if event_body.get("type").and_then(Value::as_str) != Some("event_callback")
+        || !matches!(event_type, "approval_instance" | "approval_task")
+        || event_id.trim().is_empty()
+        || event_id.chars().count() > 128
+        || instance_code.trim().is_empty()
+        || instance_code.chars().count() > 128
+    {
+        return Err(BaseError::ValidationFailed(
+            "event".into(),
+            "事件必须包含受支持的类型、非空顶层 uuid 与 instance_code（均最多 128 字符）".into(),
+        ));
+    }
     let status = event
         .and_then(|e| e.get("status").and_then(Value::as_str))
         .unwrap_or("");
@@ -282,4 +296,58 @@ fn raw_json(value: serde_json::Value) -> Result<ResponseBody, BaseError> {
     let body =
         serde_json::to_string(&value).map_err(|e| BaseError::JsonSerializeFailed(e.to_string()))?;
     ResponseBody::raw(body, "application/json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn missing_event_identity_is_rejected_before_database_access() -> anyhow::Result<()> {
+        let pool = Arc::new(sqlx::MySqlPool::connect_lazy(
+            "mysql://unused:unused@127.0.0.1:1/unused_test",
+        )?);
+        let context = crate::addon::feishu::build_context(
+            pool,
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?;
+        let tools = Arc::new(yang_base::tools::ToolsBuilder::new().build()?);
+        let valid = serde_json::json!({"token":"valid", "type":"event_callback", "uuid":"event-one", "event":{"type":"approval_instance", "instance_code":"instance-one"}});
+        for (field, value) in [
+            ("uuid", Value::Null),
+            ("uuid", Value::String(" ".into())),
+            ("uuid", Value::String("x".repeat(129))),
+            ("type", Value::String("unknown".into())),
+            ("event.type", Value::String("unknown".into())),
+            ("event.instance_code", Value::Null),
+        ] {
+            let mut body = valid.clone();
+            if let Some(nested) = field.strip_prefix("event.") {
+                body["event"][nested] = value;
+            } else {
+                body[field] = value;
+            }
+            let ctx = ActionContext::new(
+                yang_base::action::Request::new(serde_json::json!({})),
+                tools.clone(),
+            );
+            let error = handle(
+                ctx,
+                EventRequest(body),
+                context.as_ref().clone(),
+                Some("valid".into()),
+                None,
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("缺少事件身份必须拒绝"));
+            assert!(
+                matches!(error, BaseError::ValidationFailed(_, _)),
+                "必须在数据库访问前验证 {field}，实际：{error:?}"
+            );
+        }
+        Ok(())
+    }
 }

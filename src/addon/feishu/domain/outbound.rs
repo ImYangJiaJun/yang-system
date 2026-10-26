@@ -169,17 +169,52 @@ pub(crate) trait OutboundTransport: Send + Sync {
 /// 基于框架 `HttpClient` 的真实传输。
 pub(crate) struct HttpClientTransport {
     client: HttpClient,
+    approval_create_limit: Option<(yang_db::RedisClient, String, u32)>,
 }
 
 impl HttpClientTransport {
     pub(crate) fn new(client: HttpClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            approval_create_limit: None,
+        }
+    }
+
+    pub(crate) fn with_approval_create_limit(
+        mut self,
+        redis: yang_db::RedisClient,
+        app_id: &str,
+        rate_per_minute: u32,
+    ) -> Self {
+        self.approval_create_limit = Some((redis, app_id.to_string(), rate_per_minute));
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl OutboundTransport for HttpClientTransport {
     async fn send(&self, request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
+        if request.method == OutboundMethod::Post
+            && request
+                .url
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .ends_with("/open-apis/approval/v4/instances")
+        {
+            let (redis, app_id, rate) = self
+                .approval_create_limit
+                .as_ref()
+                .ok_or_else(|| BaseError::ConfigError("审批创建未配置共享限流器".to_string()))?;
+            super::approval_rate_limit::acquire_create_slot(redis, app_id, *rate)
+                .await
+                .map_err(|failure| {
+                    tracing::warn!(reason = %failure.message, "审批创建未取得名额，本次不出站");
+                    BaseError::RateLimitExceeded {
+                        retry_after_seconds: 1,
+                    }
+                })?;
+        }
         let builder = match request.method {
             OutboundMethod::Get => self.client.get(&request.url),
             OutboundMethod::Post => self.client.post(&request.url),
@@ -618,7 +653,14 @@ pub(crate) async fn send_with_retry(
             Err(error) => {
                 // 传输层错误按框架自己的可重试性分类：`HttpTimeout`(300004) 与
                 // `HttpRequestFailed`(300002) 是 Transient，其余（如 URL 非法）是 Client。
-                let kind = if error.is_retryable() {
+                let kind = if let BaseError::RateLimitExceeded {
+                    retry_after_seconds,
+                } = &error
+                {
+                    FailureKind::Retry {
+                        retry_after_seconds: Some(*retry_after_seconds),
+                    }
+                } else if error.is_retryable() {
                     FailureKind::Retry {
                         retry_after_seconds: None,
                     }
@@ -1176,6 +1218,107 @@ mod tests {
             timeout_secs: None,
             idempotent: true,
         }
+    }
+
+    #[tokio::test]
+    async fn unconfigured_http_transport_rejects_approval_create_before_connecting() {
+        let transport =
+            HttpClientTransport::new(HttpClient::new(1).unwrap_or_else(|error| panic!("{error}")));
+        let mut request = get_request();
+        request.method = OutboundMethod::Post;
+        request.url = "http://127.0.0.1:1/open-apis/approval/v4/instances".to_string();
+        let error = transport
+            .send(request)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("应拒绝出站"));
+        assert!(
+            matches!(error, BaseError::ConfigError(_)),
+            "缺少共享限流配置必须在连接前拒绝：{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_create_gate_exhaustion_remains_retryable_with_delay() {
+        let transport = ScriptedTransport::new(vec![
+            Err(BaseError::RateLimitExceeded {
+                retry_after_seconds: 1,
+            }),
+            Ok(response(200, r#"{"code":0}"#)),
+        ]);
+        let sleeper = RecordingSleeper::new();
+        let result = send_with_retry(&transport, &sleeper, &get_request(), PULL_RETRY).await;
+        assert!(result.is_ok(), "本地无名额不能误判成业务终态：{result:?}");
+        assert_eq!(sleeper.waits_ms(), [1_000]);
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 Redis DB 15；HTTP 仅访问本机受控服务"]
+    async fn real_redis_http_create_limit_covers_retries_and_independent_transports(
+    ) -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")?;
+        anyhow::ensure!(
+            url.trim_end_matches('/').ends_with("/15"),
+            "只允许 Redis DB 15"
+        );
+        let cache =
+            yang_db::RedisClient::connect_with_config(&url, yang_db::RedisConfig::default())
+                .await?;
+        let app_id = uuid::Uuid::new_v4().to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let mut arrivals = Vec::new();
+            for index in 0..4 {
+                let (mut socket, _) = listener.accept().await?;
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await?);
+                }
+                arrivals.push(std::time::Instant::now());
+                let (status, body) = if index == 0 {
+                    ("503 Unavailable", "unavailable")
+                } else {
+                    ("200 OK", r#"{"code":0}"#)
+                };
+                let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await?;
+            }
+            Ok::<_, std::io::Error>(arrivals)
+        });
+        let one = HttpClientTransport::new(HttpClient::new(2)?).with_approval_create_limit(
+            cache.clone(),
+            &app_id,
+            100,
+        );
+        let two = HttpClientTransport::new(HttpClient::new(2)?)
+            .with_approval_create_limit(cache, &app_id, 100);
+        let mut request = get_request();
+        request.method = OutboundMethod::Post;
+        request.url = format!("http://{address}/open-apis/approval/v4/instances");
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            base_backoff_ms: 0,
+            max_backoff_ms: 0,
+            max_retry_after_ms: 0,
+        };
+        send_with_retry(&one, &RecordingSleeper::new(), &request, policy).await?;
+        two.send(request.clone()).await?;
+        request.method = OutboundMethod::Get;
+        two.send(request).await?;
+        let arrivals = tokio::time::timeout(Duration::from_secs(5), server).await???;
+        for pair in arrivals[..3].windows(2) {
+            assert!(
+                pair[1].duration_since(pair[0]) >= Duration::from_millis(550),
+                "每个实际 create 请求都须领取名额：{arrivals:?}"
+            );
+        }
+        assert!(
+            arrivals[3].duration_since(arrivals[2]) < Duration::from_millis(400),
+            "只读详情不得消耗创建名额"
+        );
+        Ok(())
     }
 
     #[tokio::test]

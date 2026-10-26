@@ -35,9 +35,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use yang_base::tools::Tools;
 use yang_base::BaseError;
+use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::domain::alert::FeishuAlertSenderHandle;
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -57,7 +57,7 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// 飞书用户授权到期提醒 worker。
 pub(crate) struct FeishuOauthReminderWorker {
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedTask<()>,
 }
 
 impl FeishuOauthReminderWorker {
@@ -101,17 +101,20 @@ impl FeishuOauthReminderWorker {
         );
         Ok(Self {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         })
     }
 
     /// 发信号并等待任务退出。
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
+    }
+
     pub(crate) async fn shutdown(mut self) -> anyhow::Result<()> {
         let _ = self.shutdown.send(true);
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await
+        self.task
+            .join()
+            .await
             .map_err(|error| anyhow::anyhow!("等待飞书用户授权提醒 Worker 退出失败: {error}"))?;
         Ok(())
     }

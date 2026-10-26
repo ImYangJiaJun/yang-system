@@ -1,147 +1,91 @@
-//! 审批实例创建的全局令牌桶。
+//! 审批创建按应用共享的 Redis 匀速门控。
 //!
-//! # 为什么需要它
-//!
-//! 创建审批实例接口的限速是 **100 次/分钟**。批量处理（页面按钮）会连续创建
-//! 几十到几百个实例，不限速就会成片撞限流——而 `1395001` 虽被判为可重试，
-//! 反复退避重试本身也在消耗配额，形成「越重试越慢」的恶性循环。
-//!
-//! # 为什么桶放 Redis 而不是进程内存
-//!
-//! 这不是为了跨实例互斥（部署是单实例，既有决策 A10），而是**成本控制**：
-//! 进程内的桶在每次重启后清零，于是「重启 → 桶满 → 瞬间打爆配额」。
-//! 放 Redis 让配额跨重启守恒。
-//!
-//! # 为什么按固定间隔匀速放行
-//!
-//! 用「固定间隔 + 下次可取的绝对时间」而不是「每 60 秒重置计数」：后者会让
-//! 一分钟内的前 90 次立刻放行、后 60 秒全在等，实际速率是允许值的数倍。
-//! 匀速放行把瞬时速率也压在配额内。
-//!
-//! 时间基准取 **Redis 服务器的 `TIME`** 而不是本机时间：多实例（蓝绿切换瞬间
-//! 新旧共存）时本机时钟可能有偏差，而配额的权威方是 Redis。
+//! 每次真实出站（含重试）才领取名额，不为未来排队者预订时间片。
+//! Redis TIME 负责计算相对等待时间；本机时钟偏差不会提前放行。
+//! 同一应用的所有部署必须共享同一个 Redis，独立 Redis 无法协调配额。
 
-#![allow(dead_code)] // 限速先落地并自带测试；消费者（派发 worker）在后续任务接入。
-
+use std::time::Duration;
 use yang_db::RedisClient;
 
-use super::outbound::OutboundFailure;
+use super::outbound::{FailureKind, OutboundFailure};
 
-/// 令牌桶的 Redis 键。
-///
-/// 用单个键存「下次可取的时间戳（毫秒）」——这是最省的表示：桶容量恒为 1，
-/// 不需要存令牌数。
-pub(crate) fn bucket_key(deployment: &str) -> String {
-    format!("yang-system:{deployment}:feishu:approval_create_gate")
+pub(crate) fn bucket_key(app_id: &str) -> String {
+    format!("yang-system:feishu:app:{app_id}:approval_create_gate")
 }
 
-/// 两次创建之间的最小间隔（毫秒）。
-///
-/// 由速率算出：`60000 / rate_per_minute`（整数除法，向下取整）。
-/// 速率 90/分钟 → 666ms（实际放行 90.09 次/分钟，仍在官方 100 的配额内）。
-///
-/// **向下取整的方向是刻意的**：间隔偏小意味着实际速率略高于配置值，但那仍在
-/// 配置的意图之内（配置本身就留了余量）；反过来向上取整会让实际速率低于承诺，
-/// 排查「为什么这么慢」时会找不到原因。
+/// 向上取整保证实际速率不超过配置值；生产配置另校验官方 100/分钟上限。
 pub(crate) fn min_interval_ms(rate_per_minute: u32) -> u64 {
-    if rate_per_minute == 0 {
-        // 速率为 0 表示「不限制」在实际运维里没有意义，反而会让部署卡死。
-        // 按 1 次/分钟处理——比静默不限速安全。
-        return 60_000;
-    }
-    (60_000 / u64::from(rate_per_minute)).max(1)
+    60_000_u64.div_ceil(u64::from(rate_per_minute.max(1)))
 }
 
-/// 取一个创建名额，必要时等待。
-///
-/// 成功返回即表示「现在可以发起创建」。并发调用者由 Lua 脚本串行化：
-/// 每个调用者拿到一个独占的时间片，不会两个调用者同时放行。
+/// 最多等五秒；未取得名额时保留可重试结果，绝不带着过期预订出站。
 pub(crate) async fn acquire_create_slot(
     redis: &RedisClient,
-    deployment: &str,
+    app_id: &str,
     rate_per_minute: u32,
 ) -> Result<(), OutboundFailure> {
     let interval = min_interval_ms(rate_per_minute);
-    let key = bucket_key(deployment);
-
-    // 脚本返回「本次调用应等到的时间戳（毫秒）」。
-    //
-    // 用 Redis 的 `TIME` 取当前时间：多实例时钟偏差时以 Redis 为准。
-    // 脚本内不做 sleep（会阻塞 Redis 单线程），只算出一个目标时刻，
-    // 由调用方在本地等。
+    let key = bucket_key(app_id);
     let script = redis.script(
         r#"
-        local key = KEYS[1]
-        local interval = tonumber(ARGV[1])
-
         local now_parts = redis.call('TIME')
         local now = tonumber(now_parts[1]) * 1000 + math.floor(tonumber(now_parts[2]) / 1000)
-
-        local next_at = tonumber(redis.call('GET', key) or '0')
-        local target = math.max(now, next_at)
-
-        redis.call('SET', key, target + interval)
-        -- 键的 TTL 只需覆盖一个间隔再多一点，避免残留
-        redis.call('PEXPIRE', key, interval * 2)
-
-        return target
+        local next_at = tonumber(redis.call('GET', KEYS[1]) or '0')
+        if next_at > now then
+            return next_at - now
+        end
+        local interval = tonumber(ARGV[1])
+        redis.call('SET', KEYS[1], now + interval, 'PX', interval)
+        return 0
         "#,
     );
-
-    let target_ms: i64 = redis
-        .eval_script(&script, &[key], &[interval.to_string()])
+    let pending = async {
+        loop {
+            let wait_ms: u64 = redis
+                .eval_script(&script, std::slice::from_ref(&key), &[interval.to_string()])
+                .await
+                .map_err(|error| OutboundFailure {
+                    kind: FailureKind::Retry {
+                        retry_after_seconds: Some(1),
+                    },
+                    message: format!("取创建名额失败（Redis）：{error}"),
+                })?;
+            if wait_ms == 0 {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), pending)
         .await
-        .map_err(|error| OutboundFailure {
-            kind: super::outbound::FailureKind::Retry {
-                retry_after_seconds: None,
+        .map_err(|_| OutboundFailure {
+            kind: FailureKind::Retry {
+                retry_after_seconds: Some(1),
             },
-            message: format!("取创建名额失败（Redis）：{error}"),
-        })?;
-
-    // 本地等待到目标时刻。时间基准用 Redis 的时钟——本机与 Redis 有偏差时，
-    // 等久了只是慢一点，等少了会被限流，两者都不致命。
-    let now_ms = local_now_ms();
-    if target_ms > now_ms {
-        let wait = (target_ms - now_ms) as u64;
-        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-    }
-    Ok(())
+            message: "等待审批创建名额超时，本次未出站".to_string(),
+        })?
 }
-
-/// 本机当前时间（自 epoch 起的毫秒）。
-///
-/// 只用于算出「还要等多久」，权威时刻来自 Redis。
-fn local_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        // 系统时钟早于 epoch 是异常状态，但不应让审批派发崩掉——按 0 处理，
-        // 最坏情况是多等一会儿。
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn bucket_key_is_namespaced_by_deployment() {
-        // 与 tenant_token 的键同源命名空间，避免不同部署互相干扰。
-        let key = bucket_key("prod");
-        assert!(key.contains("prod"));
+    fn bucket_key_is_namespaced_by_app() {
+        let key = bucket_key("cli_test");
+        assert_eq!(key, "yang-system:feishu:app:cli_test:approval_create_gate");
         assert!(key.contains("feishu"));
         assert!(key.starts_with("yang-system:"), "{key}");
     }
 
     #[test]
-    fn different_deployments_get_different_keys() {
-        assert_ne!(bucket_key("prod"), bucket_key("staging"));
+    fn different_apps_get_different_keys() {
+        assert_ne!(bucket_key("cli_one"), bucket_key("cli_two"));
     }
 
     #[test]
     fn interval_matches_the_rate() {
-        // 整数除法向下取整：60000/90 = 666，60000/60 = 1000。
-        assert_eq!(min_interval_ms(90), 666);
+        // 间隔向上取整，不能让真实速率超过配置上限。
+        assert_eq!(min_interval_ms(90), 667);
         assert_eq!(min_interval_ms(60), 1_000);
         assert_eq!(min_interval_ms(120), 500);
     }
@@ -172,5 +116,90 @@ mod tests {
             effective_per_minute <= 100,
             "实际速率 {effective_per_minute}/分钟 超过官方上限"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 Redis DB 15"]
+    async fn real_redis_create_gate_keeps_spacing_when_waiters_outlive_key_ttl(
+    ) -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")?;
+        anyhow::ensure!(
+            url.trim_end_matches('/').ends_with("/15"),
+            "只允许 Redis DB 15"
+        );
+        let cache = RedisClient::connect_with_config(&url, yang_db::RedisConfig::default()).await?;
+        let app_id = uuid::Uuid::new_v4().to_string();
+        let started = std::time::Instant::now();
+        let mut tasks = tokio::task::JoinSet::new();
+        // 旧实现会一次预订 0..900ms，但键只活 200ms；后来的调用可抢走已预订时段。
+        for _ in 0..10 {
+            let cache = cache.clone();
+            let app_id = app_id.clone();
+            tasks.spawn(async move {
+                acquire_create_slot(&cache, &app_id, 600).await?;
+                Ok::<_, OutboundFailure>(started.elapsed())
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        for _ in 0..5 {
+            let cache = cache.clone();
+            let app_id = app_id.clone();
+            tasks.spawn(async move {
+                acquire_create_slot(&cache, &app_id, 600).await?;
+                Ok::<_, OutboundFailure>(started.elapsed())
+            });
+        }
+        let mut admitted = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            admitted.push(result??);
+        }
+        admitted.sort();
+        assert_eq!(admitted.len(), 15);
+        for pair in admitted.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= std::time::Duration::from_millis(85),
+                "并发等待者不得因键提前过期重叠放行：{admitted:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 Redis DB 15"]
+    async fn real_redis_create_gate_wait_is_bounded_and_does_not_reserve_future_slots(
+    ) -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")?;
+        anyhow::ensure!(
+            url.trim_end_matches('/').ends_with("/15"),
+            "只允许 Redis DB 15"
+        );
+        let cache = RedisClient::connect_with_config(&url, yang_db::RedisConfig::default()).await?;
+        let app_id = uuid::Uuid::new_v4().to_string();
+        acquire_create_slot(&cache, &app_id, 1).await?;
+        let key = bucket_key(&app_id);
+        let get = cache.script("return redis.call('GET', KEYS[1])");
+        let before: String = cache
+            .eval_script(&get, std::slice::from_ref(&key), &[])
+            .await?;
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(6),
+            acquire_create_slot(&cache, &app_id, 1),
+        )
+        .await?;
+        assert!(
+            matches!(
+                result,
+                Err(OutboundFailure {
+                    kind: FailureKind::Retry { .. },
+                    ..
+                })
+            ),
+            "过载只能保留可重试结果"
+        );
+        assert!(started.elapsed() < Duration::from_secs(6));
+        let after: String = cache.eval_script(&get, &[key], &[]).await?;
+        assert_eq!(before, after, "未放行的等待者不能预订或延长队列");
+        Ok(())
     }
 }

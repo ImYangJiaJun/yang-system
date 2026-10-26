@@ -19,8 +19,8 @@
 //! # 刷新必须串行
 //!
 //! `refresh_token` 一次性：两个并发刷新会让后一个拿到 `20073`，更糟的是把刚换到的
-//! 新凭证写丢（响应丢了就再也拿不回来）。这里用**进程内**静态锁 + 锁后复查，与仓库
-//! worker 的单实例假设一致；多实例部署要换成 Redis 锁（照 `TenantTokenCache`）。
+//! 新凭证写丢（响应丢了就再也拿不回来）。刷新事务持有单例行锁直至写回提交；
+//! 重新授权也更新同一行，所以跨进程刷新和授权不会拼出不同代次的身份与凭据。
 //!
 //! # state 为什么不落库
 //!
@@ -32,7 +32,6 @@ use std::sync::{LazyLock, Mutex};
 
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::Mutex as AsyncMutex;
 
 use yang_base::table::Record;
 use yang_base::BaseError;
@@ -475,7 +474,7 @@ pub(crate) async fn fetch_user_info(
 // ---------------------------------------------------------------------------
 
 /// 读出来的唯一一行。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub(crate) struct UserTokenRow {
     pub(crate) id: i64,
     pub(crate) open_id: String,
@@ -604,6 +603,7 @@ fn is_duplicate_key_error(error: &BaseError) -> bool {
 /// 刷新之后写回凭证。**不碰 `authorized_at`**（见 [`store_authorization`]）。
 async fn update_tokens(
     tokens: &Repository,
+    transaction: &mut yang_db::Transaction,
     id: i64,
     bundle: &TokenBundle,
 ) -> Result<(), BaseError> {
@@ -622,7 +622,7 @@ async fn update_tokens(
     tokens
         .query()
         .where_eq("id", json!(id))?
-        .update(row)
+        .update_in_tx(transaction, row)
         .await?;
     Ok(())
 }
@@ -682,12 +682,6 @@ pub(crate) fn access_token_is_fresh(expires_at: i64, now: i64) -> bool {
     expires_at - ACCESS_TOKEN_REFRESH_MARGIN_SECONDS > now
 }
 
-/// 进程内串行化刷新。
-///
-/// `ponytail:` 单实例假设（与仓库三个 worker 一致）。多实例部署要换成 Redis 锁，
-/// 照 `TenantTokenCache` 的 `acquire_lock`/`release_lock`。
-static REFRESH_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
-
 /// 取一个可用的 `user_access_token`；快过期就先刷新。
 ///
 /// 刷新在锁内**复查**一次：并发的两个调用里只有一个真去打飞书，另一个直接拿到
@@ -709,8 +703,42 @@ pub(crate) async fn user_access_token(
         return Ok(row.access_token);
     }
 
-    let _guard = REFRESH_LOCK.lock().await;
-    let Some(row) = load_single(tokens).await.map_err(storage)? else {
+    let database =
+        yang_db::Database::from_pool(tokens.pool().clone(), yang_db::DatabaseConfig::default())
+            .map_err(BaseError::from)
+            .map_err(storage)?;
+    let mut transaction = database
+        .transaction()
+        .await
+        .map_err(BaseError::from)
+        .map_err(storage)?;
+    // 锁等待有界；取消/失败由事务回滚释放，不能靠会过期的租约放行第二个刷新。
+    let locked = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        transaction.select_for_update::<UserTokenRow>(
+            yang_db::QueryBuilder::from_pool(tokens.pool(), yang_db::table!("feishu_user_token"))
+                .fields(&[
+                    yang_db::field!("id"),
+                    yang_db::field!("open_id"),
+                    yang_db::field!("user_name"),
+                    yang_db::field!("access_token"),
+                    yang_db::field!("access_token_expires_at"),
+                    yang_db::field!("refresh_token"),
+                    yang_db::field!("refresh_token_expires_at"),
+                    yang_db::field!("authorized_at"),
+                ])
+                .where_and(yang_db::field!("slot"), yang_db::CompareOp::Eq, SINGLE_SLOT)
+                .map_err(BaseError::from)
+                .map_err(storage)?,
+        ),
+    )
+    .await
+    .map_err(|_| UserTokenError::Failed {
+        message: "等待用户凭证刷新事务超时，请稍后重试".into(),
+    })?
+    .map_err(BaseError::from)
+    .map_err(storage)?;
+    let Some(row) = locked.into_iter().next() else {
         return Err(UserTokenError::NotAuthorized);
     };
     let now = now_unix_secs();
@@ -721,8 +749,13 @@ pub(crate) async fn user_access_token(
     let bundle = refresh_tokens(transport, sleeper, credentials, &row.refresh_token, now)
         .await
         .map_err(UserTokenError::from)?;
-    update_tokens(tokens, row.id, &bundle)
+    update_tokens(tokens, &mut transaction, row.id, &bundle)
         .await
+        .map_err(storage)?;
+    transaction
+        .commit()
+        .await
+        .map_err(BaseError::from)
         .map_err(storage)?;
     Ok(bundle.access_token)
 }
@@ -779,6 +812,25 @@ mod tests {
     }
 
     struct NoSleep;
+
+    struct PausedRefresh {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundTransport for PausedRefresh {
+        async fn send(&self, _request: OutboundRequest) -> Result<OutboundResponse, BaseError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(OutboundResponse {
+                status: 200,
+                body: success_body(),
+                bytes: None,
+                headers: Default::default(),
+            })
+        }
+    }
 
     #[async_trait::async_trait]
     impl Sleeper for NoSleep {
@@ -1159,11 +1211,89 @@ mod tests {
 
         // ---- 刷新分支：只换凭证，**不碰** `authorized_at` ----
         let third = bundle("access-third", "refresh-third", 300);
-        update_tokens(tokens, loaded.id, &third).await?;
+        let mut transaction = database.transaction().await?;
+        update_tokens(tokens, &mut transaction, loaded.id, &third).await?;
+        transaction.commit().await?;
         let loaded = expect_row(tokens, "刷新后应仍有一行").await?;
         assert_eq!(loaded.access_token, third.access_token);
         assert_eq!(loaded.refresh_token, third.refresh_token);
         assert_eq!(loaded.authorized_at, 1_800_000_000, "刷新不得重置授权时钟");
+
+        // 独立连接模拟另一进程的持锁刷新：进程内 Mutex 无法提供这层保护。
+        let mut competing = database.transaction().await?;
+        let _: Vec<(i64,)> = competing
+            .select_for_update(
+                yang_db::QueryBuilder::from_pool(
+                    database.pool(),
+                    yang_db::table!("feishu_user_token"),
+                )
+                .field(yang_db::field!("id"))
+                .where_and(
+                    yang_db::field!("slot"),
+                    yang_db::CompareOp::Eq,
+                    SINGLE_SLOT,
+                )?,
+            )
+            .await?;
+        let transport = std::sync::Arc::new(PausedRefresh {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let refresh = tokio::spawn({
+            let tokens = tokens.clone();
+            let transport = transport.clone();
+            async move { user_access_token(&tokens, transport.as_ref(), &NoSleep, &credentials()).await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), transport.started.notified())
+                .await
+                .is_err(),
+            "另一数据库连接持锁时不得发起刷新"
+        );
+        let blocked = tokio::time::timeout(Duration::from_secs(6), refresh).await??;
+        assert!(
+            matches!(blocked, Err(UserTokenError::Failed { message }) if message.contains("超时")),
+            "等待行锁须有界失败"
+        );
+        competing.commit().await?;
+        let refresh = tokio::spawn({
+            let tokens = tokens.clone();
+            let transport = transport.clone();
+            async move { user_access_token(&tokens, transport.as_ref(), &NoSleep, &credentials()).await }
+        });
+        tokio::time::timeout(Duration::from_secs(3), transport.started.notified()).await?;
+        let fresh = bundle(
+            "new-user-access",
+            "new-user-refresh",
+            now_unix_secs() + 7200,
+        );
+        let reauthorization = tokio::spawn({
+            let tokens = tokens.clone();
+            let fresh = fresh.clone();
+            async move {
+                store_authorization(
+                    &tokens,
+                    "ou_new_user",
+                    Some("新授权人"),
+                    &fresh,
+                    1_900_000_000,
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !reauthorization.is_finished(),
+            "重新授权应等待同一行上的旧刷新事务"
+        );
+        transport.release.notify_one();
+        assert!(refresh.await?.is_ok());
+        reauthorization.await??;
+        let latest = expect_row(tokens, "重新授权应落库").await?;
+        assert_eq!(latest.open_id, "ou_new_user");
+        assert_eq!(latest.access_token, fresh.access_token);
+        assert_eq!(latest.refresh_token, fresh.refresh_token);
+        assert_eq!(latest.authorized_at, 1_900_000_000);
 
         Ok(())
     }

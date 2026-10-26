@@ -64,7 +64,7 @@ pub(super) fn register(
 
 /// 处理 challenge 请求。
 ///
-/// 解密类失败返回 raw error body（不消耗全站可用性预算，飞书会重试）；
+/// 配置/密钥故障返回服务端错误，非法格式返回客户端错误，不能伪装成成功 ACK；
 /// verification_token 缺失或不匹配返回 403，**不再回显 challenge**。
 ///
 /// # 事件回调兼容
@@ -86,25 +86,31 @@ pub(super) async fn handle(
         Some(encrypted) => {
             let Some(key_raw) = encrypt_key.as_deref() else {
                 tracing::error!("飞书发送了加密请求，但 event_encrypt_key 未配置");
-                return raw_json(serde_json::json!({"error": "encrypt key not configured"}));
+                return Err(BaseError::ConfigError("飞书事件加密密钥未配置".into()));
             };
             let key = crypto::derive_key(key_raw);
             match crypto::decrypt_bytes(encrypted, &key) {
                 Ok(decrypted) => match serde_json::from_slice::<Value>(&decrypted) {
                     Ok(parsed) => {
-                        tracing::debug!(decrypted = %parsed, "飞书 challenge 解密成功");
+                        tracing::debug!(
+                            decrypted_size = decrypted.len(),
+                            "飞书 challenge 解密成功"
+                        );
                         parsed
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "飞书 challenge 解密后不是合法 JSON");
-                        return raw_json(
-                            serde_json::json!({"error": "decrypt produced invalid json"}),
-                        );
+                        tracing::error!(category = ?e.classify(), line = e.line(), column = e.column(), "飞书 challenge 解密后不是合法 JSON");
+                        return Err(BaseError::ValidationFailed(
+                            "decrypted_body".into(),
+                            "飞书事件解密后不是合法 JSON".into(),
+                        ));
                     }
                 },
                 Err(e) => {
                     tracing::error!(error = %e, "飞书 challenge 解密失败");
-                    return raw_json(serde_json::json!({"error": "decrypt failed"}));
+                    return Err(BaseError::ConfigError(
+                        "飞书事件解密失败，请检查密钥配置".into(),
+                    ));
                 }
             }
         }
@@ -142,13 +148,20 @@ pub(super) async fn handle(
 
     // 缺少 challenge 字段 → 无法应答
     if challenge.is_empty() {
-        tracing::warn!(body = %body, "飞书 challenge 请求缺少 challenge 字段");
-        return raw_json(serde_json::json!({"error": "missing challenge"}));
+        tracing::warn!("飞书 challenge 请求缺少 challenge 字段");
+        return Err(BaseError::ValidationFailed(
+            "challenge".into(),
+            "缺少 challenge".into(),
+        ));
     }
 
     // 类型校验
     if r#type != "url_verification" {
-        tracing::warn!(body = %body, r#type = %r#type, "飞书 challenge 请求 type 不是 url_verification");
+        tracing::warn!("飞书 challenge 请求 type 不是 url_verification");
+        return Err(BaseError::ValidationFailed(
+            "type".into(),
+            "不支持的飞书回调类型".into(),
+        ));
     }
 
     // verification_token 校验（fail-closed）：缺失或不匹配一律 403。
@@ -167,4 +180,171 @@ fn raw_json(value: serde_json::Value) -> Result<ResponseBody, BaseError> {
     let body =
         serde_json::to_string(&value).map_err(|e| BaseError::JsonSerializeFailed(e.to_string()))?;
     ResponseBody::raw(body, "application/json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn malformed_callbacks_never_return_success_ack() -> anyhow::Result<()> {
+        let pool = Arc::new(sqlx::MySqlPool::connect_lazy(
+            "mysql://unused:unused@127.0.0.1:1/unused_test",
+        )?);
+        let context = crate::addon::feishu::build_context(
+            pool,
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?;
+        let tools = Arc::new(yang_base::tools::ToolsBuilder::new().build()?);
+        let key = crypto::derive_key("test-key");
+        let invalid_json = crypto::encrypt_bytes(b"not-json", &key)?;
+        let mut failures = Vec::new();
+        for (body, encrypt_key, server_error) in [
+            (serde_json::json!({"encrypt":"invalid"}), None, true),
+            (
+                serde_json::json!({"encrypt":"invalid"}),
+                Some("test-key".into()),
+                true,
+            ),
+            (
+                serde_json::json!({"encrypt":invalid_json}),
+                Some("test-key".into()),
+                false,
+            ),
+            (
+                serde_json::json!({"token":"valid", "type":"url_verification"}),
+                None,
+                false,
+            ),
+            (
+                serde_json::json!({"token":"valid", "type":"unexpected", "challenge":"nonce"}),
+                None,
+                false,
+            ),
+        ] {
+            let ctx = ActionContext::new(
+                yang_base::action::Request::new(serde_json::json!({})),
+                tools.clone(),
+            );
+            let result = handle(
+                ctx,
+                ChallengeRequest(body.clone()),
+                context.as_ref().clone(),
+                "valid".into(),
+                encrypt_key,
+            )
+            .await;
+            let correct = match result {
+                Err(BaseError::ConfigError(_)) => server_error,
+                Err(BaseError::ValidationFailed(_, _)) => !server_error,
+                _ => false,
+            };
+            if !correct {
+                failures.push(body);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "无效回调不得返回成功 ACK，且应区分服务端故障与客户端格式错误：{failures:?}"
+        );
+        Ok(())
+    }
+
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("日志锁失败"))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn event_diagnostics_never_log_verification_tokens_or_decrypted_payloads(
+    ) -> anyhow::Result<()> {
+        const SECRET: &str = "test-verification-secret-never-log";
+        let pool = Arc::new(sqlx::MySqlPool::connect_lazy(
+            "mysql://unused:unused@127.0.0.1:1/unused_test",
+        )?);
+        let context = crate::addon::feishu::build_context(
+            pool,
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?;
+        let tools = Arc::new(yang_base::tools::ToolsBuilder::new().build()?);
+        let ctx = || {
+            ActionContext::new(
+                yang_base::action::Request::new(serde_json::json!({})),
+                tools.clone(),
+            )
+        };
+        let logs = Logs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let key = crypto::derive_key("test-encrypt-key");
+        for body in [
+            serde_json::json!({"token": SECRET}),
+            serde_json::json!({"token": SECRET, "type":"unexpected", "challenge":"nonce"}),
+            serde_json::json!({"encrypt": crypto::encrypt_json(&serde_json::json!({"token": SECRET,"type":"url_verification","challenge":"nonce"}), &key)?}),
+        ] {
+            let encrypted = body.get("encrypt").is_some();
+            let _ = handle(
+                ctx(),
+                ChallengeRequest(body),
+                context.as_ref().clone(),
+                SECRET.into(),
+                encrypted.then(|| "test-encrypt-key".into()),
+            )
+            .await;
+        }
+        let invalid =
+            crypto::encrypt_bytes(format!("{{\"token\":\"{SECRET}\",invalid").as_bytes(), &key)?;
+        let valid = crypto::encrypt_json(
+            &serde_json::json!({"token": SECRET,"type":"event_callback"}),
+            &key,
+        )?;
+        let _ = super::super::receive_approval_event::handle(
+            ctx(),
+            super::super::receive_approval_event::EventRequest(
+                serde_json::json!({"encrypt": valid}),
+            ),
+            context.as_ref().clone(),
+            Some("different-token".into()),
+            Some("test-encrypt-key".into()),
+        )
+        .await;
+        let _ = super::super::receive_approval_event::handle(
+            ctx(),
+            super::super::receive_approval_event::EventRequest(
+                serde_json::json!({"encrypt":invalid}),
+            ),
+            context.as_ref().clone(),
+            Some(SECRET.into()),
+            Some("test-encrypt-key".into()),
+        )
+        .await;
+        let bytes = logs
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("日志锁失败"))?
+            .clone();
+        let output = String::from_utf8(bytes)?;
+        assert!(output.contains("飞书"), "必须实际捕获诊断日志");
+        assert!(!output.contains(SECRET), "诊断泄露认证材料");
+        Ok(())
+    }
 }

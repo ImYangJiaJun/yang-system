@@ -30,7 +30,7 @@ if current == 1 then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 end
 local ttl = redis.call('TTL', KEYS[1])
-if ttl < 1 then
+if ttl == -1 then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
     ttl = tonumber(ARGV[1])
 end
@@ -74,6 +74,47 @@ pub(crate) async fn check_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "需要独立 Redis DB 15"]
+    async fn real_redis_counter_preserves_subsecond_window_and_repairs_missing_expiry(
+    ) -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")?;
+        anyhow::ensure!(
+            url.trim_end_matches('/').ends_with("/15"),
+            "只允许 Redis DB 15"
+        );
+        let cache =
+            yang_db::RedisClient::connect_with_config(&url, yang_db::RedisConfig::default())
+                .await?;
+        let keys = [query_key(42, &uuid::Uuid::new_v4().to_string())];
+        let args = [WINDOW_SECONDS.to_string()];
+        let script = cache.script(&format!(
+            "redis.call('SET', KEYS[1], 31, 'PX', 300)\n{COUNTER_SCRIPT}"
+        ));
+        let (count, ttl): (i64, i64) = cache.eval_script(&script, &keys, &args).await?;
+        assert_eq!((count, ttl), (32, 0), "窗口尾段不得续期");
+        let script = cache.script(COUNTER_SCRIPT);
+        for _ in 0..3 {
+            let (_, ttl): (i64, i64) = cache.eval_script(&script, &keys, &args).await?;
+            assert_eq!(ttl, 0, "持续超限请求不得延长原窗口");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        let (count, ttl): (i64, i64) = cache.eval_script(&script, &keys, &args).await?;
+        assert_eq!((count, ttl), (1, 60), "原窗口结束后应恢复额度");
+
+        let script = cache.script(&format!("redis.call('SET', KEYS[1], 31)\n{COUNTER_SCRIPT}"));
+        let (count, ttl): (i64, i64) = cache.eval_script(&script, &keys, &args).await?;
+        assert_eq!((count, ttl), (32, 60), "无过期异常键仍须修复");
+        let _: i64 = cache
+            .eval_script(
+                &cache.script("return redis.call('DEL', KEYS[1])"),
+                &keys,
+                &args,
+            )
+            .await?;
+        Ok(())
+    }
 
     #[test]
     fn the_key_shape_is_portal_id_then_client_ip() {
