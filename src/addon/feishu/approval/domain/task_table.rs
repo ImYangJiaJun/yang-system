@@ -81,6 +81,7 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     ("backfilled", "已回填"),
                     ("terminal", "终止"),
                     ("unnotified", "未通知"),
+                    ("review", "待人工核查"),
                 ])
                 .default("pending")
                 .filterable(true),
@@ -100,6 +101,9 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             // 事件订阅最近一次同步时间。
             last_synced_at => Timestamp::new().title("最近同步时间"),
             attempts => Int::new().title("已尝试次数").require(true).default(0),
+            generation => Int::new().title("执行代次").require(true).default(0),
+            effect_phase => Str::new().title("外部写入阶段").require(true).max_length(32).default("ready"),
+            dispatch_payload => Text::new().title("受理时配置与身份快照"),
             // 可重试退避的下次可认领时间。显式写入而非自动时间戳——
             // 退避由业务决定，不是「写入时刻」。
             available_at => Timestamp::new().title("下次可认领时间"),
@@ -193,7 +197,8 @@ mod tests {
                 "created",
                 "backfilled",
                 "terminal",
-                "unnotified"
+                "unnotified",
+                "review"
             ]
         );
         // 每个候选值都要有中文标签：控制台按状态扫列表，英文原值读不出来。

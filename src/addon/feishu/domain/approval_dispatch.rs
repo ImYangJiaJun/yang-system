@@ -111,6 +111,7 @@ impl DispatchResult {
 pub(crate) struct DispatchInput<'a> {
     pub(crate) fields: &'a [FieldItem],
     pub(crate) context: Option<&'a super::context::FeishuContext>,
+    pub(crate) execution: Option<&'a super::approval_execution::TaskClaim>,
     pub(crate) coordinates: &'a BitableCoordinates,
     pub(crate) record_id: &'a str,
     /// 该记录的原始单元格（键是字段 id）。
@@ -181,8 +182,7 @@ pub(crate) trait Backfill: Send + Sync {
     /// 合并为一次 `batch_update` 后只剩 1 次——实测 6 个字段从约 7s 降到约 1.2s。
     /// 值语义与 [`write`](Self::write) 逐字段一致（共用同一套类型转换）。
     ///
-    /// **单个字段值非法时隔离该字段、其余照写**（与逐条时代「各字段独立失败」
-    /// 等价）；整体请求失败才返回 `Err`。扩展字段是附带产物，调用方失败只 warn。
+    /// 任一配置字段不可写即返回错误，不能把缺少必要字段的回写记为完成。
     async fn write_fields(
         &self,
         record_id: &str,
@@ -338,25 +338,10 @@ impl Backfill for BitableBackfill<'_> {
     ) -> Result<(), OutboundFailure> {
         let mut cells = BTreeMap::new();
         for (field_id, value) in fields {
-            // 单个字段不可写（列被删/值非法）：隔离该字段、其余照写——
-            // 与逐条时代「各字段独立失败、各记一条 warn」的容错等价。
-            let prepared = self.find_field(field_id).and_then(|field| {
-                self.resolve_name(field)
-                    .and_then(|name| Self::cell_value(field, value).map(|cell| (name, cell)))
-            });
-            match prepared {
-                Ok((name, Some(cell))) => {
-                    cells.insert(name, cell);
-                }
-                Ok((_, None)) => {}
-                Err(failure) => {
-                    tracing::warn!(
-                        record_id,
-                        field_id,
-                        error = %failure.message,
-                        "扩展字段不可写，跳过该字段（不影响编号回填结论）"
-                    );
-                }
+            let field = self.find_field(field_id)?;
+            let name = self.resolve_name(field)?;
+            if let Some(cell) = Self::cell_value(field, value)? {
+                cells.insert(name, cell);
             }
         }
         if cells.is_empty() {
@@ -401,6 +386,38 @@ pub(crate) async fn dispatch_one(
     backfill: &dyn Backfill,
     input: &DispatchInput<'_>,
 ) -> DispatchResult {
+    // 已确认实例先恢复回填，不再受源字段或映射后续变化影响。
+    if let (Some(context), Some(claim)) = (input.context, input.execution) {
+        match super::approval_execution::facts(context, claim).await {
+            Ok((_, Some(code))) => {
+                return match get_instance(transport, sleeper, tokens, &code).await {
+                    Ok(GetOutcome::Found(detail)) => {
+                        let mut detail = *detail;
+                        fill_department_name(
+                            transport,
+                            sleeper,
+                            tokens,
+                            input.department_field,
+                            &mut detail,
+                        )
+                        .await;
+                        finish_backfill(backfill, input, &code, detail).await
+                    }
+                    _ => DispatchResult::CreatedPendingBackfill {
+                        message: "已创建实例暂不可查询，保留事实等待核查".into(),
+                        instance_code: code,
+                        serial_number: None,
+                    },
+                };
+            }
+            Ok((phase, None)) if phase == "ready" => {}
+            _ => {
+                return DispatchResult::Retryable {
+                    message: "任务执行权失效或外部结果未知，禁止重新创建".into(),
+                }
+            }
+        }
+    }
     // ---- 1. uuid ----
     let uuid = derive_uuid(
         &input.coordinates.app_token,
@@ -699,6 +716,24 @@ pub(crate) async fn dispatch_one(
         Err(failure) => return classify_failure(failure, input, backfill, uuid.as_str()).await,
     };
 
+    if let (Some(context), Some(claim)) = (input.context, input.execution) {
+        if super::approval_execution::confirm_effect(
+            context,
+            claim,
+            "created",
+            Some(&instance_code),
+        )
+        .await
+        .is_err()
+        {
+            return DispatchResult::CreatedPendingBackfill {
+                message: "审批实例已存在，但本地确认失败，已暂停后续写入".into(),
+                instance_code,
+                serial_number: None,
+            };
+        }
+    }
+
     // ---- 5. 取 serial_number ----
     //
     // 回捞路径已经拿到了详情，只有正常创建路径需要再查一次。
@@ -916,10 +951,17 @@ async fn finish_backfill(
         .await
     {
         Ok(()) => {
-            // 编号已落库 = 主产物达成，`Backfilled` 结论已定；扩展字段是附带，
-            // 写失败只 warn，**不改结论**（设计 §5.3）。
             tracing::debug!(stage = "backfill", instance_code = %detail.instance_code, serial_number = %serial_number, "审批编号回填成功");
-            write_extended(backfill, input, &detail).await;
+            if let Err(failure) = write_extended(backfill, input, &detail).await {
+                return DispatchResult::CreatedPendingBackfill {
+                    message: format!(
+                        "审批编号：{serial_number}；扩展字段回填失败：{}",
+                        super::approval_feedback::outbound_reason(&failure)
+                    ),
+                    instance_code: detail.instance_code.clone(),
+                    serial_number: Some(serial_number),
+                };
+            }
             DispatchResult::Backfilled {
                 serial_number,
                 instance_code: detail.instance_code.clone(),
@@ -946,15 +988,15 @@ async fn finish_backfill(
 /// 只剩 1 次（实测 6 个字段从约 7s 降到约 1.2s）。值语义不变：类型转换在
 /// [`Backfill::write_fields`] 的实现里与逐条路径**共用**同一套逻辑。
 ///
-/// **整体写失败只 `tracing::warn`**——编号是主产物，扩展字段是附带
-/// （与既有「回填失败不吞事实」原则一致）。值全部取自**已经拿到的**那一份
+/// 任一配置字段回填失败必须传给调用方，保留已创建实例并等待恢复，不能提前确认完成。
+/// 值全部取自**已经拿到的**那一份
 /// 详情，零额外 API 调用——唯一例外是部门名（`fill_department_name` 在调用方
 /// 预先解析，且只在配置了部门列时发生）。
 pub(crate) async fn write_extended(
     backfill: &dyn Backfill,
     input: &DispatchInput<'_>,
     detail: &InstanceDetail,
-) {
+) -> Result<(), OutboundFailure> {
     // 先把全部目标字段收集成 (field_id, value) 列表，一次合并写。
     let mut fields: Vec<(&str, Value)> = Vec::new();
 
@@ -1026,16 +1068,9 @@ pub(crate) async fn write_extended(
             record_id = input.record_id,
             "扩展回填无可写字段，跳过本次回写"
         );
-        return;
+        return Ok(());
     }
-    // 一次写入；失败只 warn，绝不改调用方的结论（`finish_backfill` 已定 `Backfilled`）。
-    if let Err(failure) = backfill.write_fields(input.record_id, &fields).await {
-        tracing::warn!(
-            error = %failure.message,
-            field_count = fields.len(),
-            "扩展字段合并回填失败（不影响编号回填结论）"
-        );
-    }
+    backfill.write_fields(input.record_id, &fields).await
 }
 
 /// 字符串毫秒时间戳 → `i64`。`"0"`（未完成）、空串、缺失、非数字一律 `None`。
@@ -1819,6 +1854,7 @@ mod tests {
         /// `write_fields` 的调用形态（record_id, 字段列表）——钉住「合并为一次」。
         batches: Mutex<Vec<(String, Vec<String>)>>,
         fail: bool,
+        fail_fields: bool,
         /// 毒记录名单：这批里出现任一即让整批失败（复刻全有全无语义）。
         poison: Mutex<Vec<String>>,
     }
@@ -1829,6 +1865,7 @@ mod tests {
                 writes: Mutex::new(Vec::new()),
                 batches: Mutex::new(Vec::new()),
                 fail: true,
+                fail_fields: false,
                 poison: Mutex::new(Vec::new()),
             }
         }
@@ -1838,6 +1875,7 @@ mod tests {
                 writes: Mutex::new(Vec::new()),
                 batches: Mutex::new(Vec::new()),
                 fail: false,
+                fail_fields: false,
                 poison: Mutex::new(vec![record_id.to_string()]),
             }
         }
@@ -1939,7 +1977,7 @@ mod tests {
                         .collect(),
                 ));
             }
-            if self.fail {
+            if self.fail || self.fail_fields {
                 return Err(OutboundFailure {
                     kind: FailureKind::Retry {
                         retry_after_seconds: None,
@@ -1958,6 +1996,7 @@ mod tests {
         DispatchInput {
             fields: &[],
             context: None,
+            execution: None,
             coordinates: &COORDINATES,
             record_id: "rec001",
             cells,
@@ -3341,6 +3380,64 @@ mod tests {
                 "kind={kind} value={bad}"
             );
             assert!(transport.requests().is_empty(), "kind={kind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn required_extended_backfill_failure_keeps_confirmed_instance_pending() {
+        let widgets = [widget("w1", "input")];
+        let cells = cells(&[("fld_applicant", json!([{"id":"ou_abc"}]))]);
+        let mut request = input(&cells, &widgets);
+        request.status_field = Some("fld_status");
+        let detail = InstanceDetail {
+            status: Some("PENDING".into()),
+            ..base_detail("INST-EXT", Some("SERIAL"))
+        };
+        let backfill = RecordingBackfill {
+            fail_fields: true,
+            ..Default::default()
+        };
+        let result = finish_backfill(&backfill, &request, "source-uuid", detail).await;
+        assert!(
+            matches!(result, DispatchResult::CreatedPendingBackfill { instance_code, serial_number: Some(serial), .. } if instance_code == "INST-EXT" && serial == "SERIAL")
+        );
+        assert_eq!(backfill.batches().len(), 1);
+        assert_eq!(
+            backfill.raw_writes()[0].1,
+            "审批编号",
+            "编号成功后扩展写失败仍不能确认完成"
+        );
+    }
+
+    #[tokio::test]
+    async fn required_extended_field_validation_cannot_silently_skip_a_column() {
+        for (field_id, value) in [
+            ("fldMissing", json!("x")),
+            ("fldStatus", json!({"invalid":true})),
+        ] {
+            let transport = ScriptedTransport::new(vec![]);
+            let fields = [FieldItem {
+                is_primary: false,
+                field_id: "fldStatus".into(),
+                field_name: "状态".into(),
+                field_type: Some(3),
+                ui_type: None,
+                property: None,
+            }];
+            let coords = coordinates();
+            let tokens = fake_tokens();
+            let writer = BitableBackfill {
+                transport: &transport,
+                sleeper: &NoSleep,
+                tokens: &tokens,
+                coordinates: &coords,
+                fields: &fields,
+            };
+            assert!(writer
+                .write_fields("recOne", &[(field_id, value)])
+                .await
+                .is_err());
+            assert!(transport.requests().is_empty(), "校验失败不能发部分更新");
         }
     }
 

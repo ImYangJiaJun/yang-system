@@ -8,12 +8,10 @@
 //! 任务流水属于已删除的配置，因此这里一并清掉；配置的请求流水仍保留在
 //! `feishu_approval_request_log`。
 //!
-//! # 不加未完结守卫
+//! # 保留未完成任务的恢复证据
 //!
-//! worker 对配置缺失本就是优雅的终态降级（设计 §2.2-1/2）：认领侧读不到启用配置即
-//! 把任务标 `unnotified`（那时配置行已不在，渲染不出展示名，通知根本走不到），
-//! 不重试、不坏数据。删除不需要等任务跑完。在途行此时必然仍为 `pending`
-//! （状态只在处理结束时写回），同事务清掉即可。
+//! 待执行、在途或未知结果任务阻止删除。删除与持久受理锁同一配置行，
+//! 避免检查后插入任务；未知远端写入不能通过删除重建绕过人工核查。
 
 use std::sync::Arc;
 
@@ -61,7 +59,7 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         )
         .route(HttpMethod::Post, "/api/v1/feishu/approval/configs/delete")
         .display_name("删除审批派发配置")
-        .description("删除配置、它的字段映射与全部任务行；请求流水保留")
+        .description("无待执行、在途或待核查任务时删除配置、字段映射与任务行；请求流水保留")
         .permissions(["feishu.approval.write"])
         .register()
 }
@@ -73,9 +71,45 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
 
-    // 删配置、删映射、删 pending 任务、写审计：同一事务，缺一不可。
+    // 守卫、删配置、删映射、删终态任务、写审计：同一事务，缺一不可。
     let mut transaction = ctx.begin_transaction().await?;
     let result: Result<serde_json::Value, BaseError> = async {
+        // 与受理事务锁同一配置行，避免检查通过后又插入一个在途任务。
+        transaction
+            .select_for_update::<yang_base::table::Record>(
+                yang_db::QueryBuilder::from_pool(
+                    context.approval_configs().pool(),
+                    yang_db::table!("feishu_approval_config"),
+                )
+                .fields(&[yang_db::field!("id")])
+                .where_and(
+                    yang_db::field!("id"),
+                    yang_db::CompareOp::Eq,
+                    input.config_id,
+                )
+                .map_err(BaseError::from)?,
+            )
+            .await
+            .map_err(BaseError::from)?;
+        let active = context
+            .approval_tasks()
+            .query()
+            .where_eq("config_id", serde_json::json!(input.config_id))?
+            .where_in(
+                "state",
+                ["pending", "creating", "created", "review"]
+                    .into_iter()
+                    .map(serde_json::Value::from)
+                    .collect(),
+            )?
+            .all_in_tx(&mut transaction)
+            .await?;
+        if !active.is_empty() {
+            return Err(BaseError::ParamInvalid(
+                "config_id".into(),
+                "配置仍有待执行、在途或结果未知任务；请先完成或核查，不能删除恢复证据".into(),
+            ));
+        }
         let deleted_maps = context
             .approval_field_maps()
             .query()

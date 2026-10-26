@@ -54,6 +54,8 @@ pub(crate) struct FeishuContext {
     #[allow(dead_code)]
     password_engine: Arc<PasswordEngine>,
     settings: Option<Arc<FeishuSettings>>,
+    /// probe 与导入共享容量，成功解析后的写库阶段也占用这一份预算。
+    xlsx_parse_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl FeishuContext {
@@ -90,6 +92,7 @@ impl FeishuContext {
             approval_event,
             password_engine,
             settings,
+            xlsx_parse_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -179,6 +182,16 @@ impl FeishuContext {
     /// 集成配置；`None` 表示 `[feishu]` 段缺席。
     pub(crate) fn settings(&self) -> Option<&FeishuSettings> {
         self.settings.as_deref()
+    }
+
+    pub(crate) fn acquire_xlsx_permit(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, BaseError> {
+        Arc::clone(&self.xlsx_parse_slots)
+            .try_acquire_owned()
+            .map_err(|_| BaseError::RateLimitExceeded {
+                retry_after_seconds: 1,
+            })
     }
 
     /// 外部选项接口的 AES 密钥；未配置 Key 时返回 `None`（表示明文返回）。

@@ -42,11 +42,11 @@ use std::time::Duration;
 
 use anyhow::Context;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use tracing::Instrument;
-use yang_base::table::{Record, SortOrder};
+use yang_base::table::Record;
 use yang_base::tools::Tools;
 use yang_base::BaseError;
+use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::approval::domain::task_applicant_table::upsert_task_applicant;
 use crate::addon::feishu::domain::approval::instance_applink;
@@ -55,11 +55,11 @@ use crate::addon::feishu::domain::approval_dispatch::{
     applicant_open_id as extract_applicant_open_id, backfill_in_chunks, dispatch_one,
     widget_maps_from_rows, BitableBackfill, DispatchInput as OrchestrationInput, DispatchResult,
 };
+use crate::addon::feishu::domain::approval_execution::{self, TaskClaim};
 use crate::addon::feishu::domain::approval_feedback;
 use crate::addon::feishu::domain::approval_notification::{
     FeedbackReference, NotificationRecipient, ReceiveIdType,
 };
-use crate::addon::feishu::domain::approval_rate_limit::acquire_create_slot;
 use crate::addon::feishu::domain::approval_uuid::derive_uuid;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -178,7 +178,7 @@ impl ApprovalDispatchHandle {
 /// 审批派发 worker。
 pub(crate) struct ApprovalDispatchWorker {
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedTask<()>,
 }
 
 impl ApprovalDispatchWorker {
@@ -197,7 +197,13 @@ impl ApprovalDispatchWorker {
             tools.cache()?.clone(),
             &deployment,
         ));
-        let transport = Arc::new(HttpClientTransport::new(tools.http()?.clone()));
+        let transport = Arc::new(
+            HttpClientTransport::new(tools.http()?.clone()).with_approval_create_limit(
+                tools.cache()?.clone(),
+                settings.app_id.as_deref().unwrap_or_default(),
+                settings.approval_create_rate_per_minute,
+            ),
+        );
         let sleeper = Arc::new(TokioSleeper);
         let tokens = Arc::new(
             TenantTokenProvider::new(
@@ -230,8 +236,6 @@ impl ApprovalDispatchWorker {
             tokens,
             transport,
             sleeper,
-            deployment,
-            rate_per_minute: settings.approval_create_rate_per_minute,
             timezone_offset,
         };
         let idle_poll = Duration::from_secs(settings.approval_scan_interval_seconds);
@@ -244,17 +248,22 @@ impl ApprovalDispatchWorker {
         );
         Ok(Self {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         })
+    }
+
+    /// 先广播停止，再由总关闭预算统一等待。
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
     }
 
     /// 发信号并等待任务退出。
     pub(crate) async fn shutdown(mut self) -> anyhow::Result<()> {
-        let _ = self.shutdown.send(true);
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await.context("等待审批派发 Worker 退出失败")?;
+        self.request_shutdown();
+        self.task
+            .join()
+            .await
+            .context("等待审批派发 Worker 退出失败")?;
         Ok(())
     }
 }
@@ -285,8 +294,6 @@ struct RoundRunner {
     tokens: Arc<TenantTokenProvider>,
     transport: Arc<HttpClientTransport>,
     sleeper: Arc<TokioSleeper>,
-    deployment: String,
-    rate_per_minute: u32,
     timezone_offset: FixedOffset,
 }
 
@@ -427,10 +434,8 @@ async fn run_round(
         if idled {
             break;
         }
-        // 取名额失败（Redis 故障）时中断整轮：没有名额继续处理只会把记录标成
-        // 失败，而它们其实只是「现在不该打飞书」。已处理完的保持原结论，
-        // 未处理的保持 `pending`，下一轮自然重扫。
-        let Some(redis) = runner.tools.cache().ok() else {
+        // 缺少共享设施时中断；具体名额在每次真实创建出站前领取。
+        if runner.tools.cache().is_err() {
             tracing::warn!("Redis 不可用，审批派发中断本轮");
             metrics::counter!(
                 "feishu_approval_round_total",
@@ -440,30 +445,10 @@ async fn run_round(
             .increment(1);
             idled = true;
             break;
-        };
-        tracing::debug!(stage = "rate_limit", task_id = task.id, config_id = task.config_id, record_id = %task.record_id, "审批任务等待创建名额");
-        let slot_started = std::time::Instant::now();
-        if let Err(failure) =
-            acquire_create_slot(redis, &runner.deployment, runner.rate_per_minute).await
-        {
-            tracing::warn!(error = %failure.message, "取创建名额失败，中断本轮");
-            metrics::counter!(
-                "feishu_approval_round_total",
-                "result" => "idle",
-                "reason" => "rate_limit"
-            )
-            .increment(1);
-            idled = true;
-            break;
         }
 
         let outcome = async {
             let task_started = std::time::Instant::now();
-            tracing::debug!(
-                stage = "rate_limit",
-                wait_ms = slot_started.elapsed().as_millis() as u64,
-                "审批任务取得创建名额，开始处理"
-            );
             let processed = process_one(runner, task).await;
             record_outcome(runner, task, &processed).await;
             tracing::debug!(
@@ -516,6 +501,7 @@ async fn run_round(
 
 /// 一条已认领的任务及其全部配置（一次查全，避免处理时再查库）。
 struct ClaimedTask {
+    claim: TaskClaim,
     id: i64,
     config_id: i64,
     record_id: String,
@@ -662,30 +648,14 @@ async fn seed_config(
     }
 
     let mut seeded = 0usize;
-    let mut restored = 0usize;
     let mut skipped = 0usize;
     for record in &pending_records {
         if record.record_id.is_empty() {
             continue;
         }
         match by_record.get(&record.record_id) {
-            Some((_, state)) if state == "pending" => {}
-            Some((task_id, state)) => {
-                // 拉回 `pending` 并清掉上一轮的结论：字段为空是**唯一**判据，
-                // 库里那条旧结论（失败原因或已回填）已经不再成立。
-                let mut row = Record::new();
-                row.insert("state", serde_json::json!("pending"));
-                row.insert("last_error", serde_json::Value::Null);
-                runner
-                    .context
-                    .approval_tasks()
-                    .query()
-                    .where_primary_key_eq(serde_json::json!(task_id))?
-                    .update(row)
-                    .await?;
-                restored += 1;
-                tracing::info!(stage = "seed", config_id, task_id, record_id = %record.record_id, from = %state, "审批任务被拉回待处理");
-            }
+            // 空单元格不能证明旧请求没有成功，也不能撤销另一个实例的执行权。
+            Some(_) => {}
             // 没有任务行 = 这条记录从没被受理过。轮询不建行（见
             // [`RoundTrigger::discovers_new_records`]）：建了就成「没人点也派发」。
             None if !trigger.discovers_new_records() => skipped += 1,
@@ -707,7 +677,6 @@ async fn seed_config(
         stage = "seed",
         config_id,
         seeded,
-        restored,
         // 轮询轮里这些是「没人点过、这轮不建行」的记录——不静默，留在日志里。
         skipped,
         duration_ms = started.elapsed().as_millis() as u64,
@@ -781,82 +750,45 @@ async fn persist_applicant(runner: &RoundRunner, config_id: i64, open_id: &str) 
 /// ——它以「回填列为空」为唯一判据，把崩溃遗留、人工清空要重试的行一并拉回
 /// `pending`。两者的分工是：**播种决定「谁该被处理」，认领决定「这一轮处理哪一批」**。
 async fn claim(runner: &RoundRunner, cursor: &ResumeCursor) -> anyhow::Result<Vec<ClaimedTask>> {
-    // 游标下界：上一轮已处理到的位置。空游标时不加条件（从头开始）。
-    let mut query = runner.context.approval_tasks().query();
-    query = query.where_eq("state", serde_json::json!("pending"))?;
-    if cursor.0 > 0 {
-        // 单独用 `where_gt` 而不与 `where_eq` 合并进一个 `WhereCondition` 组：
-        // 顶层条件本就是隐式 AND，这样写更短也少一处嵌套。
-        query = query.where_gt("id", serde_json::json!(cursor.0))?;
-    }
-    let rows = query
-        .order_by("id", SortOrder::Asc)?
-        // `page`/`page_size` 是 `select` 的缺省（`page_size` 缺省 10！），
-        // 不显式限定就会只取 10 行——认领批就是这里的一行代码。
-        .page(1, CLAIM_BATCH)?
-        // `last_error` 进投影是给通知去重用的（`should_notify` 拿它与本轮原因
-        // 比对），多取一列省掉「每条任务再查一次自己」的读。
-        .select_fields(&["id", "record_id", "config_id", "last_error"])?
-        .all()
-        .await?;
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut tasks = Vec::with_capacity(rows.len());
-    for row in rows {
-        match load_task(runner, &row).await? {
+    let claims =
+        approval_execution::claim_ready(&runner.context, cursor.0, None, CLAIM_BATCH).await?;
+    let mut tasks = Vec::with_capacity(claims.len());
+    for claim in claims {
+        let row = runner
+            .context
+            .approval_tasks()
+            .query()
+            .where_eq("id", serde_json::json!(claim.id))?
+            .optional()
+            .await?;
+        let Some(row) = row else {
+            continue;
+        };
+        match load_task(runner, &row, claim.clone()).await? {
             Some(task) => tasks.push(task),
             None => {
-                // 配置缺失/停用/时区无效：置 `unnotified`，不再反复认领。
-                // 走不到通知那一步（配置行都没了，渲染不出展示名），所以不能写
-                // `terminal`——那会谎称「已经有人被告知」。
-                let id = row.require("id")?;
-                mark_unnotified(runner, id, "所属配置不存在或已停用").await;
+                let mut row = Record::new();
+                row.insert("state", serde_json::json!("unnotified"));
+                row.insert(
+                    "last_error",
+                    serde_json::json!("所属配置不存在、已停用或映射无效"),
+                );
+                anyhow::ensure!(
+                    approval_execution::finish(&runner.context, &claim, &row, false).await?,
+                    "认领后失去执行权"
+                );
             }
         }
     }
     Ok(tasks)
 }
 
-/// 置 `unnotified`（配置缺失等无法继续、且**没有人会被通知**的情形）。
-///
-/// 不写 `terminal`：这条路径在 `load_task` 拿不到配置时就返回了，接收人链一次都
-/// 没解析过——写 `terminal` 等于宣称「已反馈」，而实际上没有任何消息出去。
-/// `unnotified` 与 `terminal` 一样退出认领集，但状态本身是「有人得来看看」的信号。
-///
-/// 必须清租约——否则它还会被 `lease_until <= now` 那条分支捞回来。
-async fn mark_unnotified(runner: &RoundRunner, id: i64, reason: &str) {
-    let mut row = Record::new();
-    row.insert("state", serde_json::json!("unnotified"));
-    row.insert("last_error", serde_json::json!(reason));
-    row.insert("lease_until", serde_json::Value::Null);
-    // 两步而非 `and_then`：`where_eq` 返回 `Result`，而 `update` 返回 future，
-    // 两者不能链在同一个闭包里。本函数**不**返回 `Result`——写不进去时把它记成
-    // 日志而不是冒泡，因为终态写失败不该中断「报告刚发生的事」。
-    //
-    // 最小乐观 CAS：claim 只认 `pending`，这里也只允许从 `pending` 推进。
-    // HTTP 同步派发可能在此期间已写入 `backfilled`/`terminal`，affected == 0
-    // 即「先写者胜」，不能把对方的终态覆盖成 `unnotified`。
-    let result = match runner
-        .context
-        .approval_tasks()
-        .query()
-        .where_eq("id", serde_json::json!(id))
-        .and_then(|query| query.where_eq("state", serde_json::json!("pending")))
-    {
-        Ok(query) => query.update(row).await,
-        Err(error) => Err(error),
-    };
-    match result {
-        Ok(0) => tracing::warn!(task_id = id, "任务状态已被并发路径推进，跳过置 unnotified"),
-        Ok(_) => {}
-        Err(error) => tracing::warn!(error = %error, task_id = id, "置审批任务终态失败"),
-    }
-}
-
 /// 读一条任务的配置与字段映射。
-async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<ClaimedTask>> {
+async fn load_task(
+    runner: &RoundRunner,
+    row: &Record,
+    claim: TaskClaim,
+) -> anyhow::Result<Option<ClaimedTask>> {
     let config_id: i64 = row.require("config_id")?;
     let task_id: i64 = row.require("id")?;
 
@@ -879,6 +811,14 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         return Ok(None);
     };
 
+    let snapshot = row
+        .optional::<String>("dispatch_payload")?
+        .map(|payload| serde_json::from_str::<approval_execution::DispatchSnapshot>(&payload))
+        .transpose()?;
+    let config = snapshot
+        .as_ref()
+        .map(|snapshot| Record::from(snapshot.config.clone()))
+        .unwrap_or(config);
     // 发起人是**后续查询**，不是认领批的列（认领投影只有 id/record_id/config_id/last_error）：
     // 全表异步受理拿不到发起人，Action 解析后落在属性扩展表里（设计 §6.3）。
     let applicant = runner
@@ -888,20 +828,26 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
         .where_eq("task_id", serde_json::json!(task_id))?
         .optional()
         .await?;
-    let applicant_open_id = match applicant {
-        Some(applicant) => applicant.optional::<String>("open_id")?,
-        None => None,
+    let applicant_open_id = match snapshot.as_ref() {
+        Some(snapshot) => snapshot.applicant.clone(),
+        None => match applicant {
+            Some(applicant) => applicant.optional::<String>("open_id")?,
+            None => None,
+        },
     };
-
-    let map_rows = runner
-        .context
-        .approval_field_maps()
-        .query()
-        .where_eq("config_id", serde_json::json!(config_id))?
-        .all()
-        .await?;
-    let maps: Vec<serde_json::Map<String, serde_json::Value>> =
-        map_rows.iter().map(|row| row.clone().into_map()).collect();
+    let maps = match snapshot.as_ref() {
+        Some(snapshot) => snapshot.maps.clone(),
+        None => runner
+            .context
+            .approval_field_maps()
+            .query()
+            .where_eq("config_id", serde_json::json!(config_id))?
+            .all()
+            .await?
+            .into_iter()
+            .map(Record::into_map)
+            .collect(),
+    };
 
     let Some(widgets) = widget_maps_from_rows(&maps, |_| None) else {
         tracing::warn!(
@@ -943,6 +889,7 @@ async fn load_task(runner: &RoundRunner, row: &Record) -> anyhow::Result<Option<
     };
 
     Ok(Some(ClaimedTask {
+        claim,
         id: task_id,
         config_id,
         record_id: row.require("record_id")?,
@@ -1110,21 +1057,27 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
         "审批源记录字段映射完成"
     );
 
+    let guarded = approval_execution::ExecutionTransport {
+        inner: runner.transport(),
+        context: &runner.context,
+        claim: &task.claim,
+    };
     let backfill = BitableBackfill {
-        transport: runner.transport(),
+        transport: &guarded,
         sleeper: runner.sleeper.as_ref(),
         tokens: &runner.tokens,
         coordinates: &coordinates,
         fields: &fields,
     };
     let result = dispatch_one(
-        runner.transport(),
+        &guarded,
         runner.sleeper.as_ref(),
         &runner.tokens,
         &backfill,
         &OrchestrationInput {
             fields: &fields,
             context: Some(&runner.context),
+            execution: Some(&task.claim),
             coordinates: &coordinates,
             record_id: &task.record_id,
             cells: &cells,
@@ -1264,6 +1217,13 @@ fn should_notify(task: &ClaimedTask, outcome: &DispatchResult) -> bool {
 /// 重复一条消息远轻于静默丢失一条。
 async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &TaskOutcome) {
     let outcome = &processed.result;
+    if !approval_execution::is_owned(&runner.context, &task.claim)
+        .await
+        .unwrap_or(false)
+    {
+        tracing::warn!(task_id = task.id, "任务执行权已失效，拒绝通知与结果写回");
+        return;
+    }
 
     // 通知：**任何结论都要反馈**（2026-10-15 原则：只要用户发起请求，成功/失败
     // 都要发一条消息，失败附原因）。中间态的重复由 [`should_notify`] 按
@@ -1320,30 +1280,20 @@ async fn record_outcome(runner: &RoundRunner, task: &ClaimedTask, processed: &Ta
         state,
         "审批任务处理结论，等待和可重试任务保留 pending；具体原因见阶段日志和任务 last_error"
     );
-    // 最小乐观 CAS：claim 只认 `pending`，这里也只允许从 `pending` 推进。
-    // HTTP 同步派发与 worker 可能同时处理同一条记录——如果同步路径已把状态推进
-    // （例如已写 `backfilled`/`terminal`），本次回写必须放手：affected == 0 表示
-    // 「先写者胜」，通知可能已由对方发过，状态以先写者为准。
-    // 不改 uuid 幂等与通知语义：uuid 仍是重复建单的最后防线，通知去重仍看
-    // `should_notify`；这里只决定「谁有权落最终状态」。
-    let result = match runner
-        .context
-        .approval_tasks()
-        .query()
-        .where_eq("id", serde_json::json!(task.id))
-        .and_then(|query| query.where_eq("state", serde_json::json!("pending")))
-    {
-        Ok(query) => query.update(row).await,
-        Err(error) => Err(error),
-    };
-    match result {
-        Ok(0) => tracing::warn!(
-            task_id = task.id,
-            state,
-            "任务状态已被并发路径推进，跳过回写（通知可能已发，状态以先写者为准）"
-        ),
-        Ok(_) => tracing::debug!(stage = "persist", state, "审批任务状态写回成功"),
-        Err(error) => tracing::warn!(error = %error, task_id = task.id, "写回审批任务状态失败"),
+    let retry = matches!(
+        outcome,
+        DispatchResult::Retryable { .. } | DispatchResult::CreatedPendingBackfill { .. }
+    );
+    match approval_execution::finish(&runner.context, &task.claim, &row, retry).await {
+        Ok(true) => tracing::debug!(stage = "persist", state, "审批任务状态写回成功"),
+        Ok(false) => {
+            tracing::warn!(task_id = task.id, "任务执行权已失效，拒绝写回");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, task_id=task.id, "审批任务结果未能持久确认");
+            return;
+        }
     }
 
     // 指标：按结论分桶。`terminal` 与 `waiting` 分开是关键——前者要人动，
@@ -1661,6 +1611,119 @@ fn _assert_widget_map_type(_: &WidgetMap) {}
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库和 Redis DB 15"]
+    async fn real_mysql_worker_claims_are_exclusive_and_old_owner_cannot_commit(
+    ) -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = yang_db::Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "只允许测试库");
+        crate::schema::sync_with_database(
+            database,
+            yang_db::DatabaseConfig::default(),
+            Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let redis_url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")?;
+        anyhow::ensure!(
+            redis_url.trim_end_matches('/').ends_with("/15"),
+            "只允许 Redis DB 15"
+        );
+        let redis =
+            yang_db::RedisClient::connect_with_config(&redis_url, yang_db::RedisConfig::default())
+                .await?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let mut runners = Vec::new();
+        for _ in 0..2 {
+            // 两个独立连接池模拟两个应用实例，不能靠进程内锁通过。
+            let database = yang_db::Database::connect(&url).await?;
+            let context = crate::addon::feishu::build_context(
+                Arc::new(database.pool().clone()),
+                Arc::new(crate::config::SecuritySettings::default()),
+                None,
+            )?;
+            let transport = Arc::new(HttpClientTransport::new(yang_base::http::HttpClient::new(
+                1,
+            )?));
+            let tokens = Arc::new(TenantTokenProvider::new(
+                Arc::new(RedisTenantTokenCache::new(redis.clone(), &namespace)),
+                transport.clone(),
+                Arc::new(TokioSleeper),
+                FeishuCredentials {
+                    app_id: "test".into(),
+                    app_secret: "test".into(),
+                },
+                &namespace,
+            )?);
+            runners.push(RoundRunner {
+                tools: Arc::new(yang_base::tools::ToolsBuilder::new().build()?),
+                context,
+                tokens,
+                transport,
+                sleeper: Arc::new(TokioSleeper),
+                timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
+            });
+        }
+        let pool = runners[0].context.approval_tasks().pool();
+        let config_id = sqlx::query("INSERT INTO feishu_approval_config (title,base_token,table_id,approval_code,applicant_field,backfill_field,base_timezone,enabled,created_at,updated_at) VALUES ('认领测试','claimTest',?,'DEF-CLAIM','fldPerson','fldNumber','Asia/Shanghai',true,NOW(),NOW())")
+            .bind(format!("tbl{namespace}")).execute(pool).await?.last_insert_id();
+        sqlx::query("INSERT INTO feishu_approval_field_map (config_id,widget_id,widget_type,bitable_field,created_at,updated_at) VALUES (?,'widget','input','fldValue',NOW(),NOW())")
+            .bind(config_id).execute(pool).await?;
+        let task_id = sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,last_error,created_at,updated_at) VALUES (?, ?, ?, 'pending','等待输入',NOW(),NOW())")
+            .bind(config_id).bind(format!("rec{namespace}")).bind(&namespace)
+            .execute(pool).await?.last_insert_id() as i64;
+        let cursor = ResumeCursor(task_id - 1);
+        let (one, two) = tokio::join!(claim(&runners[0], &cursor), claim(&runners[1], &cursor));
+        let one = one?;
+        let two = two?;
+        let count = one
+            .iter()
+            .chain(&two)
+            .filter(|task| task.id == task_id)
+            .count();
+        let old = one
+            .iter()
+            .chain(&two)
+            .find(|task| task.id == task_id)
+            .ok_or_else(|| anyhow::anyhow!("应至少认领一次"))?;
+        sqlx::query("UPDATE feishu_approval_task SET worker_id='new-owner',last_error='新持有者的结果' WHERE id=?")
+            .bind(task_id).execute(pool).await?;
+        record_outcome(
+            &runners[0],
+            old,
+            &TaskOutcome::early(DispatchResult::Waiting {
+                reason: "等待输入".into(),
+            }),
+        )
+        .await;
+        let saved: String =
+            sqlx::query_scalar("SELECT last_error FROM feishu_approval_task WHERE id=?")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await?;
+        sqlx::query("DELETE FROM feishu_approval_task WHERE id=?")
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_field_map WHERE config_id=?")
+            .bind(config_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_config WHERE id=?")
+            .bind(config_id)
+            .execute(pool)
+            .await?;
+        assert_eq!(
+            (count, saved.as_str()),
+            (1, "新持有者的结果"),
+            "同一任务只能由一个实例持有执行权，旧持有者不得覆盖新结果"
+        );
+        Ok(())
+    }
+
     #[test]
     fn created_pending_backfill_keeps_instance_and_known_serial_number() {
         for number in [None, Some("SN-001".to_string())] {
@@ -1769,6 +1832,12 @@ mod tests {
     /// 最小 `ClaimedTask`：只给通知判定用得到的字段赋值。
     fn claimed(last_error: Option<&str>) -> ClaimedTask {
         ClaimedTask {
+            claim: TaskClaim {
+                id: 1,
+                owner: "test".into(),
+                generation: 1,
+                attempts: 0,
+            },
             id: 1,
             config_id: 1,
             record_id: "rec1".to_string(),

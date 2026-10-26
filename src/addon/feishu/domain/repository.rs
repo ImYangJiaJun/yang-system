@@ -4,7 +4,7 @@
 //! 但表查询本身只要求角色满足字段 Audience（默认 `Everyone`），因此不需要伪造用户；
 //! 用受信角色是为了让 `secret` 字段（`token_hash`）对 writer 可用。
 //!
-//! 本模块刻意只提供**构造与查询入口**，不包装具体读写动作——那些动作由各自的
+//! 本模块只提供构造、查询及事务锁所需的连接池，不包装具体读写动作——那些动作由各自的
 //! Action 组合，避免这里长成一个什么都做的上帝对象。
 
 use std::sync::Arc;
@@ -34,6 +34,11 @@ impl Repository {
         self.definition
             .bind(Arc::clone(&self.pool))
             .query([SYSTEM_ROLE])
+    }
+
+    /// 跨进程串行化所需的事务与行锁使用同一个连接池。
+    pub(crate) fn pool(&self) -> &MySqlPool {
+        &self.pool
     }
 }
 

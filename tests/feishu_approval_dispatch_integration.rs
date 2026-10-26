@@ -109,6 +109,7 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "authorization_outbox",
         "feishu_approval_event",
         "feishu_approval_request_log",
+        "feishu_approval_task_applicant",
         "feishu_approval_task",
         "feishu_approval_field_map",
         "feishu_approval_config",
@@ -228,18 +229,24 @@ async fn seed_operator(database: &Database) -> anyhow::Result<String> {
     .context("种入审批控制台操作者失败")?;
     let user_id = result.last_insert_id() as i64;
 
-    token_manager()
+    let session_id = format!("approval-session-{unique}");
+    let token = token_manager()
         .generate_access_token(
             &user_id.to_string(),
             json!({
                 "version": 1,
                 "username": username,
                 "authz_version": 1,
+                "session_id": session_id,
                 "roles": ["user"],
                 "permissions": ["feishu.approval.read", "feishu.approval.write"],
             }),
         )
-        .map_err(|error| anyhow::anyhow!("签发控制台操作者令牌失败: {error}"))
+        .map_err(|error| anyhow::anyhow!("签发控制台操作者令牌失败: {error}"))?;
+    sqlx::query("INSERT INTO user_session (session_id,user_id,current_jti,created_at,last_seen_at,ip,user_agent) VALUES (?,?,?,UNIX_TIMESTAMP(),UNIX_TIMESTAMP(),'127.0.0.1','approval-fixture')")
+        .bind(session_id).bind(user_id).bind(token_manager().verify_token(&token)?.jti)
+        .execute(database.pool()).await?;
+    Ok(token)
 }
 
 /// 清理 + 同步 Schema + 重连 + 种操作者 + 装配应用，返回 `(database, app, token)`。
@@ -982,8 +989,7 @@ async fn console_crud_loop_on_a_seeded_config() {
     finish(outcome, "配置 CRUD 闭环").await;
 }
 
-/// delete_config 必须清掉该配置的**全部**任务行：task 表的 record_id 是全局
-/// 唯一键，保留完结行会让重建配置后的同记录播种永久卡住（#31）。
+/// 未完成任务必须保留恢复证据；全部确定终态后删除可释放 record_id 唯一键。
 #[tokio::test]
 #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
 async fn delete_config_clears_all_tasks_and_unblocks_recreated_config() {
@@ -1004,6 +1010,22 @@ async fn delete_config_clears_all_tasks_and_unblocks_recreated_config() {
         .await
         .context("种入申请人扩展行失败")?;
 
+        for state in ["pending", "creating", "created", "review"] {
+            sqlx::query("UPDATE feishu_approval_task SET state=? WHERE config_id=? AND record_id='recPending'")
+                .bind(state).bind(config_id).execute(database.pool()).await?;
+            let authorization = format!("Bearer {token}");
+            let rejected = dispatch(&app, "feishu.approval", "delete_config", json!({"config_id":config_id}), &[("authorization", authorization.as_str())], &[]).await;
+            ensure!(rejected.is_err(), "{state} 任务必须阻止删除");
+            let preserved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_task WHERE config_id=?")
+                .bind(config_id).fetch_one(database.pool()).await?;
+            ensure!(preserved == 4, "拒绝删除必须保留全部任务证据");
+            let applicants: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_task_applicant a JOIN feishu_approval_task t ON t.id=a.task_id WHERE t.config_id=?")
+                .bind(config_id).fetch_one(database.pool()).await?;
+            ensure!(applicants == 1, "拒绝删除不得丢失任务身份快照");
+        }
+        sqlx::query("UPDATE feishu_approval_task SET state='terminal' WHERE config_id=? AND record_id='recPending'")
+            .bind(config_id).execute(database.pool()).await?;
+
         let deleted = dispatch_as_operator(
             &app,
             "delete_config",
@@ -1014,8 +1036,8 @@ async fn delete_config_clears_all_tasks_and_unblocks_recreated_config() {
         ensure!(deleted.code == 0, "delete_config 必须成功: {deleted:?}");
         let data = response_data(&deleted)?;
         ensure!(
-            data["deleted_pending_tasks"] == json!(1),
-            "pending 任务计数必须保留: {data}"
+            data["deleted_pending_tasks"] == json!(0),
+            "待执行任务不能进入删除路径: {data}"
         );
         ensure!(
             data["deleted_tasks"] == json!(4),
@@ -1395,42 +1417,68 @@ async fn terminal_event_can_be_queried_and_requeued_but_success_cannot() {
 async fn shared_challenge_url_accepts_encrypted_event_callback() {
     const ENCRYPTED_EVENT: &str = "MnoNzE4lNEff09rLlyBpEmYF7iHKL+Xg2xgIOQ/MrjulRcPe9Sc+TaNW12vq3kmIHE2d5RSa1RHIvXRmd4oV7O1klWfqmk6VtFvE3t1z0biayg//TeaSGzR0uItaqyITp741crRS6FsRMytSnfkpvc+Jptd6my5GVCNdR5MUrV/pgpPSBzI9vilCME5vprmw2VRW3Xs6Jm4CwyOS/2jovSdgFWBymTpp8TXRoyoPGT0Tm+IyZsXSLujQDbCHFUBNV3o/Pof9m4aLj+uGD4hoGVBUPbdWY9BinZj/xqKYkPQ=";
 
-    let outcome = async {
-        let database = connect_database().await?;
-        reset_database(&database).await?;
-        sync_with_database(database, database_config(), security_settings()).await?;
-        let database = connect_database().await?;
-        let redis = connect_redis().await?;
+    let outcome =
+        async {
+            let database = connect_database().await?;
+            reset_database(&database).await?;
+            sync_with_database(database, database_config(), security_settings()).await?;
+            let database = connect_database().await?;
+            let redis = connect_redis().await?;
 
-        let mut settings =
-            (*feishu_settings(Some("cli_test_app"), Some("cli_test_secret"))).clone();
-        settings.event_verification_token = Some("test-event-token".to_string());
-        settings.event_encrypt_key = Some("test-event-encrypt-key".to_string());
-        let app = build_feishu_app(&database, &redis, Arc::new(settings), None).await?;
+            let mut settings =
+                (*feishu_settings(Some("cli_test_app"), Some("cli_test_secret"))).clone();
+            settings.event_verification_token = Some("test-event-token".to_string());
+            settings.event_encrypt_key = Some("test-event-encrypt-key".to_string());
+            let app = build_feishu_app(&database, &redis, Arc::new(settings), None).await?;
 
-        // challenge 端点必须成功解密、委托事件 handler 并落库，而不是 401。
-        let _ = dispatch(
-            &app,
-            "feishu.event",
-            "event_challenge",
-            json!({ "encrypt": ENCRYPTED_EVENT }),
-            &[],
-            &[],
-        )
-        .await?;
+            // challenge 端点必须成功解密、委托事件 handler 并落库，而不是 401。
+            let _ = dispatch(
+                &app,
+                "feishu.event",
+                "event_challenge",
+                json!({ "encrypt": ENCRYPTED_EVENT }),
+                &[],
+                &[],
+            )
+            .await?;
 
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM feishu_approval_event WHERE event_id = 'evt-shared-url-001'",
-        )
-        .fetch_one(database.pool())
-        .await?;
-        ensure!(
-            count == 1,
-            "共用 challenge URL 的加密事件必须落库，实际 {count} 行"
-        );
-        Ok(())
-    }
-    .await;
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feishu_approval_event WHERE event_id = 'evt-shared-url-001'",
+            )
+            .fetch_one(database.pool())
+            .await?;
+            ensure!(
+                count == 1,
+                "共用 challenge URL 的加密事件必须落库，实际 {count} 行"
+            );
+            let raw: String = sqlx::query_scalar(
+            "SELECT raw_payload FROM feishu_approval_event WHERE event_id = 'evt-shared-url-001'",
+        ).fetch_one(database.pool()).await?;
+            ensure!(
+                !raw.contains("test-event-token"),
+                "事件诊断快照不得持久化 verification token"
+            );
+            let payload: Value = serde_json::from_str(&raw)?;
+            ensure!(payload.get("token").is_none(), "认证字段应从诊断报文移除");
+            // 同一事件仍由 UUID 唯一索引去重。
+            let _ = dispatch(
+                &app,
+                "feishu.event",
+                "event_challenge",
+                json!({"encrypt":ENCRYPTED_EVENT}),
+                &[],
+                &[],
+            )
+            .await?;
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM feishu_approval_event WHERE event_id = 'evt-shared-url-001'",
+            )
+            .fetch_one(database.pool())
+            .await?;
+            ensure!(count == 1, "相同事件 UUID 不得重复入队");
+            Ok(())
+        }
+        .await;
 
     finish(outcome, "共用订阅 URL 加密事件").await;
 }

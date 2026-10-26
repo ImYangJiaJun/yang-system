@@ -3,20 +3,17 @@
 //! 骨架与 `feishu_approval_worker` 一致：`watch` 通道 + `JoinHandle`，`shutdown()` 发信号后
 //! `await` 任务退出；`Drop` 也发一次，避免忘记关闭时任务悬挂。
 //!
-//! # 单实例部署
-//!
-//! 与审批派发 worker 同一条决策：`deploy/deploy-blue-green.sh` 的 `cutover` 先 `stop_pair`
-//! 停线上再起新的，两实例不重叠。所以**不做跨实例互斥**。
+//! shortcut: 事件领取尚无跨进程互斥，处理多实例旧回写覆盖需要 N3 的串行写者与对账。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tracing::Instrument;
 use yang_base::table::{Record, SortOrder};
 use yang_base::tools::Tools;
+use yang_runtime::shutdown::OwnedTask;
 
 use crate::addon::feishu::approval::domain::event_table::MAX_EVENT_RETRY_COUNT;
 use crate::addon::feishu::domain::approval::{get_instance, subscribe_approval, GetOutcome};
@@ -43,7 +40,7 @@ const _: () = assert!(EVENT_BATCH <= yang_base::table::MAX_TABLE_QUERY_PAGE_SIZE
 /// 事件处理 worker。
 pub(crate) struct FeishuEventWorker {
     shutdown: watch::Sender<bool>,
-    task: Option<JoinHandle<()>>,
+    task: OwnedTask<()>,
 }
 
 impl FeishuEventWorker {
@@ -101,17 +98,21 @@ impl FeishuEventWorker {
         );
         Ok(Self {
             shutdown,
-            task: Some(task),
+            task: OwnedTask::new(task),
         })
+    }
+
+    /// 先广播停止，再由总关闭预算统一等待。
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown.send(true);
     }
 
     /// 发信号并等待任务退出。
     pub(crate) async fn shutdown(mut self) -> anyhow::Result<()> {
-        let _ = self.shutdown.send(true);
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await
+        self.request_shutdown();
+        self.task
+            .join()
+            .await
             .map_err(|error| anyhow::anyhow!("等待事件处理 Worker 退出失败: {error}"))?;
         Ok(())
     }
@@ -136,7 +137,7 @@ struct RoundRunner {
     tools: Arc<Tools>,
     context: Arc<FeishuContext>,
     tokens: Arc<TenantTokenProvider>,
-    transport: Arc<HttpClientTransport>,
+    transport: Arc<dyn OutboundTransport>,
     sleeper: Arc<TokioSleeper>,
     timezone_offset: FixedOffset,
 }
@@ -273,11 +274,6 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
                     tracing::warn!(error = %error, event_id = event.id, "更新事件重试信息失败");
                 }
             }
-            EventOutcome::Skipped => {
-                if let Err(error) = mark_processed(runner, event.id).await {
-                    tracing::warn!(error = %error, event_id = event.id, "标记跳过事件失败");
-                }
-            }
         }
     }
 
@@ -322,8 +318,6 @@ async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>>
 enum EventOutcome {
     Processed,
     Failed(String),
-    /// 幂等跳过（同实例已终态）。
-    Skipped,
 }
 
 /// 处理一条事件：反查 task -> 加载 config -> 富化 -> 回写。
@@ -354,21 +348,19 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         .query()
         .where_eq("instance_code", serde_json::json!(&event.instance_code));
     let task_rows = match task_query_result {
-        Ok(query) => {
-            match query.select_fields(&["id", "record_id", "config_id", "instance_status"]) {
-                Ok(query) => match query.all().await {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        tracing::error!(error = %error, "查询 task 表失败");
-                        return EventOutcome::Failed(format!("查询 task 表失败: {error}"));
-                    }
-                },
+        Ok(query) => match query.select_fields(&["id", "record_id", "config_id"]) {
+            Ok(query) => match query.all().await {
+                Ok(rows) => rows,
                 Err(error) => {
-                    tracing::error!(error = %error, "投影字段失败");
-                    return EventOutcome::Failed(format!("投影字段失败: {error}"));
+                    tracing::error!(error = %error, "查询 task 表失败");
+                    return EventOutcome::Failed(format!("查询 task 表失败: {error}"));
                 }
+            },
+            Err(error) => {
+                tracing::error!(error = %error, "投影字段失败");
+                return EventOutcome::Failed(format!("投影字段失败: {error}"));
             }
-        }
+        },
         Err(error) => {
             tracing::error!(error = %error, "构造 task 查询失败");
             return EventOutcome::Failed(format!("构造 task 查询失败: {error}"));
@@ -415,21 +407,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         "找到对应的派发任务"
     );
 
-    // 终态收敛：task 行已是终态，后续事件幂等跳过。
-    if let Ok(Some(status)) = task_row.optional::<String>("instance_status") {
-        match status.as_str() {
-            "APPROVED" | "REJECTED" | "CANCELED" | "DELETED" => {
-                tracing::info!(
-                    task_id,
-                    task_status = %status,
-                    "任务已终态，事件幂等跳过"
-                );
-                return EventOutcome::Skipped;
-            }
-            _ => {}
-        }
-    }
-
+    // 事件 UUID 在入站去重；终态之后仍可能撤销或删除，须重新读取最新详情。
     // 2. 加载 config
     tracing::debug!(config_id, "步骤 2: 加载审批配置");
     let config = match runner
@@ -605,6 +583,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
     let input = DispatchInput {
         fields: &fields,
         context: Some(&runner.context),
+        execution: None,
         coordinates: &coordinates,
         record_id: &record_id,
         cells: &serde_json::Map::new(),
@@ -628,7 +607,9 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         record_id = %record_id,
         "步骤 6: 调用 write_extended 回写多维表格"
     );
-    write_extended(&backfill, &input, &detail).await;
+    if let Err(failure) = write_extended(&backfill, &input, &detail).await {
+        return EventOutcome::Failed(format!("扩展字段回填失败: {}", failure.message));
+    }
     tracing::info!(
         record_id = %record_id,
         "多维表格回写完成"
@@ -639,6 +620,13 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         tracing::debug!(task_id, status = %status, "步骤 7: 更新 task 的 instance_status");
         let mut row = Record::new();
         row.insert("instance_status", serde_json::json!(status));
+        row.insert(
+            "last_synced_at",
+            serde_json::json!(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64),
+        );
         let result = runner
             .context
             .approval_tasks()
@@ -648,12 +636,14 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
             Ok(query) => {
                 if let Err(error) = query.update(row).await {
                     tracing::warn!(error = %error, task_id, "更新 task instance_status 失败");
+                    return EventOutcome::Failed(format!("保存审批同步事实失败: {error}"));
                 } else {
                     tracing::info!(task_id, status = %status, "task instance_status 更新成功");
                 }
             }
             Err(error) => {
                 tracing::warn!(error = %error, task_id, "构造 task 更新查询失败");
+                return EventOutcome::Failed(format!("构造审批同步事实查询失败: {error}"));
             }
         }
     }
@@ -749,6 +739,161 @@ async fn mark_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EventReplay {
+        status: String,
+        reverted: bool,
+        fail_write: bool,
+        writes: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboundTransport for EventReplay {
+        async fn send(
+            &self,
+            request: crate::addon::feishu::domain::outbound::OutboundRequest,
+        ) -> Result<crate::addon::feishu::domain::outbound::OutboundResponse, yang_base::BaseError>
+        {
+            use serde_json::json;
+            let body = if request.url.contains("/instances/") {
+                json!({"code":0,"data":{"instance_code":"INST-TERMINAL","status":self.status,"reverted":self.reverted,"serial_number":"SN-1"}})
+            } else if request.url.ends_with("/fields") {
+                json!({"code":0,"data":{"has_more":false,"total":2,"items":[{"field_id":"fldNumber","field_name":"编号","type":1},{"field_id":"fldStatus","field_name":"状态","type":1}]}})
+            } else if request.url.ends_with("/records/batch_update") {
+                self.writes
+                    .lock()
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .push(request.json_body.unwrap_or_default());
+                if self.fail_write {
+                    json!({"code":1254060,"msg":"模拟回填失败"})
+                } else {
+                    json!({"code":0,"data":{}})
+                }
+            } else {
+                panic!("不得发生其它出站请求: {}", request.url);
+            };
+            Ok(crate::addon::feishu::domain::outbound::OutboundResponse {
+                status: 200,
+                body: body.to_string(),
+                bytes: None,
+                headers: Default::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库和 Redis DB 15"]
+    async fn terminal_task_still_syncs_later_reverted_and_deleted_events() -> anyhow::Result<()> {
+        use crate::addon::feishu::domain::tenant_token::TenantTokenCache;
+        use serde_json::json;
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = yang_db::Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "只允许测试库");
+        crate::schema::sync_with_database(
+            database,
+            yang_db::DatabaseConfig::default(),
+            Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let database = yang_db::Database::connect(&url).await?;
+        let context = crate::addon::feishu::build_context(
+            Arc::new(database.pool().clone()),
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?;
+        let redis_url = std::env::var("YANG_SYSTEM_TEST_REDIS_URL")?;
+        anyhow::ensure!(
+            redis_url.trim_end_matches('/').ends_with("/15"),
+            "只允许 Redis DB 15"
+        );
+        let redis =
+            yang_db::RedisClient::connect_with_config(&redis_url, yang_db::RedisConfig::default())
+                .await?;
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let cache = Arc::new(RedisTenantTokenCache::new(redis, &namespace));
+        cache.put("test-tenant", 7200).await?;
+        let config_id = sqlx::query("INSERT INTO feishu_approval_config (title,base_token,table_id,approval_code,applicant_field,backfill_field,status_field,base_timezone,enabled,created_at,updated_at) VALUES ('事件测试','appTest',?,'DEF-TEST','fldPerson','fldNumber','fldStatus','Asia/Shanghai',true,NOW(),NOW())")
+            .bind(format!("tbl{namespace}")).execute(database.pool()).await?.last_insert_id();
+        let instance_code = format!("INST-{namespace}");
+        let task_id = sqlx::query("INSERT INTO feishu_approval_task (config_id,record_id,uuid,state,instance_code,instance_status,created_at,updated_at) VALUES (?,? ,?,'backfilled',?,'APPROVED',NOW(),NOW())")
+            .bind(config_id).bind(format!("rec{namespace}")).bind(&namespace).bind(&instance_code).execute(database.pool()).await?.last_insert_id();
+        for (status, reverted, expected, fail_write) in [
+            ("APPROVED", true, "已通过(已撤销)", false),
+            ("DELETED", false, "已删除", false),
+            ("APPROVED", false, "已通过", true),
+        ] {
+            let transport = Arc::new(EventReplay {
+                status: status.into(),
+                reverted,
+                fail_write,
+                writes: Default::default(),
+            });
+            let tokens = Arc::new(TenantTokenProvider::new(
+                cache.clone(),
+                transport.clone(),
+                Arc::new(TokioSleeper),
+                FeishuCredentials {
+                    app_id: "cli_test".into(),
+                    app_secret: "test-secret".into(),
+                },
+                &namespace,
+            )?);
+            let runner = RoundRunner {
+                tools: Arc::new(yang_base::tools::ToolsBuilder::new().build()?),
+                context: context.clone(),
+                tokens,
+                transport: transport.clone(),
+                sleeper: Arc::new(TokioSleeper),
+                timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
+            };
+            let event = PendingEvent {
+                id: 1,
+                instance_code: instance_code.clone(),
+                retry_count: 0,
+            };
+            match process_event_inner(&runner, &event).await {
+                EventOutcome::Processed if !fail_write => {}
+                EventOutcome::Processed => panic!("回填失败不能把事件确认完成"),
+                EventOutcome::Failed(_) if fail_write => {
+                    let saved: String = sqlx::query_scalar(
+                        "SELECT instance_status FROM feishu_approval_task WHERE id=?",
+                    )
+                    .bind(task_id)
+                    .fetch_one(database.pool())
+                    .await?;
+                    assert_eq!(saved, "DELETED", "回填失败不得提前更新本地同步事实");
+                    continue;
+                }
+                EventOutcome::Failed(message) => panic!("事件同步失败: {message}"),
+            }
+            {
+                let writes = transport.writes.lock().unwrap_or_else(|e| panic!("{e}"));
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0]["records"][0]["fields"]["状态"], json!(expected));
+            }
+            let (saved, synced): (String, Option<i64>) = sqlx::query_as(
+                "SELECT instance_status,last_synced_at FROM feishu_approval_task WHERE id=?",
+            )
+            .bind(task_id)
+            .fetch_one(database.pool())
+            .await?;
+            assert_eq!(saved, status);
+            assert!(synced.is_some(), "记录最新同步时间");
+        }
+        sqlx::query("DELETE FROM feishu_approval_task WHERE id=?")
+            .bind(task_id)
+            .execute(database.pool())
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_config WHERE id=?")
+            .bind(config_id)
+            .execute(database.pool())
+            .await?;
+        cache.invalidate().await?;
+        Ok(())
+    }
 
     #[test]
     fn event_batch_stays_within_framework_limit() {
