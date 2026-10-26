@@ -105,7 +105,7 @@ cd <lib_yang>\project\yang-system\deploy
 .\deploy.ps1 -Mode deploy
 ```
 
-它会：构建两个镜像 → 导出压缩 → 上传 → 远程 `smoke`（起绿容器并做健康检查）→ 远程 `cutover`（切流量）。
+它会：构建两个镜像 → 导出压缩 → 上传 → 远程 `smoke`（后端只读检查 + 前端静态页面）→ 远程 `cutover`（启动业务服务并切流量）。
 
 **首次部署时线上容器不存在**，脚本会提示「没有可备份的线上容器」，这是正常的。
 
@@ -129,7 +129,7 @@ cd <lib_yang>\project\yang-system\deploy
 服务器上也可以直接操作：
 `./deploy-blue-green.sh {status|logs|smoke|cutover|deploy|rollback|refresh}`。
 
-**建议**：生产变更先 `-Mode smoke`，确认绿容器健康再 `-Mode cutover`——两段之间线上完全不受影响。
+**建议**：生产变更先 `-Mode smoke`，确认只读报告与静态页面检查通过，再 `-Mode cutover`。只读预检会使用数据库连接和查询资源，但不修改业务数据。
 
 **重试提速**：构建两个镜像要 8~9 分钟（网络受限时更久）。若一次部署在**上传或远程步骤**
 失败、而改动没变，别重跑构建——加 `-SkipBuild` 复用上次导出的镜像包：
@@ -416,3 +416,22 @@ curl --noproxy '*' -I http://127.0.0.1:18654/
   交给 compose 会互相打架。`compose.infra.yaml` 只管 MySQL/Redis。
 - **回退保留一个版本**：`cutover` 会把上一版容器停掉并改名为 `*-blue`，镜像备份为
   `:previous`。再切一次会覆盖掉它——**连续两次部署后就不能回退到第一版了**。
+# 2026-10-25 发布安全约束
+
+服务器需要 `python3`（readiness JSON）与 `acl/setfacl`（配置读权限）。脚本将配置限制为部署用户可写、应用 UID 10001 可读，并使用同 UID、无网络临时容器验证；userns/idmap 不兼容时会停止发布，禁止用 root 读取结果代替。
+
+本机发布构建要求应用仓与基础库仓均为干净的已提交版本，镜像携带两仓 revision 和 `local-build` 标签；这不等于 CI 证明。构建前后均核对版本。上传在私有临时目录完成，最终文件替换与服务器部署共享 `.deploy-lock`。并发操作会拒绝；异常退出遗留锁时，先确认没有发布进程，再人工清理锁，禁止盲删。
+
+冒烟完成后 `.releases/green` 绑定实际镜像 ID 和配置 SHA-256，cutover 使用这些 ID，标签漂移不会更换制品；配置变更要求重新冒烟。`.releases/live` / `blue` 保存匹配配置快照及原容器身份。首次升级旧环境登记的配置仍需现场确认与进程已加载内容一致。快照含凭据，不得提交，须按备份 Runbook 加密独立托管。
+
+production（含缺省环境）拒绝非 IPv4 loopback 边缘/管理面绑定，必须先配置受信 TLS 网关。`BIND_ADDR=auto` 沿用旧公网绑定也会在修改容器前拒绝。test/development 仍允许显式测试暴露；IPv6 发布/探针/回退尚未实现，不能通过 production 预检。
+
+切流量任一步失败会非零退出并保留旧容器 ID 与匹配配置；没有锁内 schema 兼容证明时不自动启动旧版本。核对 schema 执行记录、旧写者兼容性及目标库后，使用 `deploy.ps1 -Mode rollback -RollbackSchemaCompatible`，或服务器 `ROLLBACK_SCHEMA_COMPATIBLE=yes ./deploy-blue-green.sh rollback`。该声明不替代 schema gate。回滚前绑定地址必须与当前期望一致，禁止恢复时悄悄扩大暴露面。
+
+容器停止预算 310 秒覆盖应用允许的总关闭预算上限 300 秒。停止失败、运行状态未知或仍有受管后端写者时拒绝 DROP；外部写者仍需维护窗口人工确认。
+
+`smoke` 以 `--smoke-check` 一次性启动后端，读取完整 schema 计划和旧数据预检、检查 MySQL/Redis 后退出；不 apply DDL，不创建 HTTP/管理面监听器、业务 worker 或 OTLP exporter。首次部署须先 `infra-up` 建库。部署要求进程在 60 秒内成功退出并返回 `yang-system-smoke-v1` / `mode=read_only` / `status=ok` JSON，结果存入对应发布快照的 `smoke.json`。cutover 还核对退出码、精确启动参数、镜像 ID 和配置摘要，旧镜像不支持该入口时会拒绝。前端 nginx 独立运行，仅发布宿主 loopback 冒烟端口，API 此时不可达。后端绿容器显示 `Exited (0)` 是预期状态。
+
+这份预检不是锁内 schema 执行证明，也不证明旧写者兼容或正常业务服务已经可用；业务启动和带依赖的 readiness 在 cutover 才验证。readiness 与静态边缘探针共享 60 秒总截止时间，每次 curl 还受最多 5 秒及剩余时间双重约束。
+
+TLS 安全模板与现场验收见 `deploy/tls/README.md`；可执行备份入口见 `docs/operations/RUNBOOK_BACKUP.md`。上述历史部署说明如与本节不一致，以本节安全约束为准。

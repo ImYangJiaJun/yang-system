@@ -29,6 +29,7 @@ def shell_binary() -> str | None:
     return shutil.which("bash")
 
 SHELL_SCRIPTS = (
+    ROOT / "deploy/backup-mysql.sh",
     ROOT / "deploy/deploy-blue-green.sh",
     ROOT / "deploy/verify-feishu-user-identity.sh",
     ROOT / "deploy/verify-portal-suggest.sh",

@@ -63,6 +63,9 @@ param(
     # 用于「构建已成功、但上传或远程步骤失败」后的重试：构建要 8~9 分钟，不该重付。
     [switch]$SkipBuild,
 
+    # 仅在核对锁内 schema 记录与旧写者兼容性之后给出；不是自动兼容性证明。
+    [switch]$RollbackSchemaCompatible,
+
     # ---------- 两个附加动作（默认都不开；详见文件头用法）----------
     #
     # -SyncConfig：把本机 deploy/config.cloud.toml 上传到服务器，**就地替换**服务器上那份
@@ -103,6 +106,7 @@ param(
     [string]$SshKey  = 'C:\Users\16040\.ssh\yjj_47.109.148.207',
     # ↑↑↑ 改到这里为止 ↑↑↑
 
+    [ValidatePattern('^/[A-Za-z0-9_./-]+$')]
     [string]$RemoteDir = '/home/yjj/yang-system',
     [string]$BackendImage  = 'yang-system-backend:live',
     [string]$FrontendImage = 'yang-system-frontend:live',
@@ -195,6 +199,16 @@ if ($ResetDb -and $ModeExplicit -and $Mode -ne 'deploy') {
 # 这组选项把这种「静默黑洞」变成**有界失败**，而不是让整个部署无限挂起。
 $SshOpts = @('-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4')
 
+# 干净的两仓 commit 才能解释制品内容；构建后再核对一次以发现并发编辑。
+function Get-CleanRevision([string]$Repository) {
+    $dirty = & git -C $Repository status --porcelain --untracked-files=normal
+    if ($LASTEXITCODE -ne 0) { throw '无法读取源码状态' }
+    if ($dirty) { throw "发布构建要求干净源码，请先提交当前仓库改动：$Repository" }
+    $revision = & git -C $Repository rev-parse HEAD
+    if ($LASTEXITCODE -ne 0) { throw '无法读取源码版本' }
+    return $revision
+}
+
 function Exec([scriptblock]$block) {
     & $block
     if ($LASTEXITCODE -ne 0) { throw "命令失败（退出码 $LASTEXITCODE）" }
@@ -230,6 +244,7 @@ function Get-RemoteEnv {
     # 少了它远端会拒绝执行清库（fail-closed），这正是我们要的。
     if ($SyncConfig) { $pairs['SYNC_CONFIG'] = '1' }
     if ($AllowMissingEventToken) { $pairs['ALLOW_MISSING_EVENT_TOKEN'] = '1' }
+    if ($RollbackSchemaCompatible) { $pairs['ROLLBACK_SCHEMA_COMPATIBLE'] = 'yes' }
     if ($ResetDb) {
         $pairs['RESET_DB'] = '1'
         if ($ResetConfirmed) { $pairs['RESET_DB_CONFIRM'] = 'yes' }
@@ -417,16 +432,30 @@ function Get-LocalCloudConfigPath {
 # 纯运维路径（不给 -Mode 的 -SyncConfig / -ResetDb）也**必须**走这一步：远端 refresh 是**新版**
 # 脚本里才有的子命令，服务器上那份还是旧的时，main() 会打进 usage 后 exit 1，本地只看到一句
 # 「命令失败（退出码 1）」——完全指不出方向（2026-09-24 复审发现）。构建/上传路径本来就会同步。
+# 上传期间目录即为 0700；最终替换与远端部署使用同一把锁。
+function Send-AtomicArtifact([string]$LocalPath, [string]$RemoteName) {
+    if ($RemoteName -notmatch '^[A-Za-z0-9_.-]+$') { throw '远端文件名含不支持的字符' }
+    $incoming = "$RemoteDir/.upload-$([guid]::NewGuid().ToString('N'))"
+    Exec { ssh -n @SshOpts -i $SshKey $sshTarget "umask 077; mkdir '$incoming'" }
+    try {
+        Exec { scp @SshOpts -i $SshKey $LocalPath "${sshTarget}:$incoming/payload" }
+        Exec { ssh -n @SshOpts -i $SshKey $sshTarget "set -eu; cd '$RemoteDir'; mkdir .deploy-lock; trap 'rmdir .deploy-lock' EXIT; chmod 600 '$incoming/payload'; mv '$incoming/payload' '$RemoteName'" }
+    }
+    finally {
+        & ssh -n @SshOpts -i $SshKey $sshTarget "rm -f '$incoming/payload'; rmdir '$incoming'"
+    }
+}
+
 function Send-DeployArtifacts {
     $deployScriptPath = Join-Path $scriptDir $DeployScript
     # 部署脚本是硬依赖：缺了它远端根本没法执行，所以这里**失败关闭**，不像下面两个可选文件那样跳过。
     if (-not (Test-Path $deployScriptPath)) { throw "本机缺少部署脚本：$deployScriptPath" }
-    Exec { scp @SshOpts -i $SshKey $deployScriptPath "${sshTarget}:${RemoteDir}/" }
+    Send-AtomicArtifact $deployScriptPath $DeployScript
     Write-Host "    已同步 $DeployScript"
-    foreach ($extra in @('compose.infra.yaml', 'config.cloud.example.toml')) {
+    foreach ($extra in @('compose.infra.yaml', 'config.cloud.example.toml', 'backup-mysql.sh')) {
         $local = Join-Path $scriptDir $extra
         if (Test-Path $local) {
-            Exec { scp @SshOpts -i $SshKey $local "${sshTarget}:${RemoteDir}/" }
+            Send-AtomicArtifact $local $extra
             Write-Host "    已同步 $extra"
         }
     }
@@ -451,13 +480,13 @@ function Assert-LocalCloudConfigReady {
             Where-Object { $_.Line -notmatch '^\s*#' }
     if ($hits) {
         Write-Host "    本机配置里仍有未填写的占位值：" -ForegroundColor Red
-        $hits | ForEach-Object { Write-Host ("      {0}: {1}" -f $_.LineNumber, $_.Line.Trim()) -ForegroundColor Red }
+        $hits | ForEach-Object { Write-Host ("      第 {0} 行（值已隐藏）" -f $_.LineNumber) -ForegroundColor Red }
         throw "先填完再上传：$local"
     }
     if (-not ($lines -match '^\s*\[authorization\]')) { throw "$local 看起来不完整（缺 [authorization] 段）。" }
     $url = Get-ConfigScalar $lines 'mysql' 'url'
     if (-not $url) { throw "$local 里读不到 [mysql].url。" }
-    if ($url -notmatch '^mysql://') { throw "[mysql].url 必须以 mysql:// 开头，实际读到：$url" }
+    if ($url -notmatch '^mysql://') { throw "[mysql].url 必须以 mysql:// 开头，不回显凭据" }
     # 服务器上应当连的是**容器名**（如 yang-mysql）。指向 loopback 基本可以断定是拿错了文件
     # （本机开发配置）——那会让服务器去连它自己的 3306，而那里并没有 MySQL。
     $dbHost = ($url -split '@')[-1].Split('/')[0].Split(':')[0]
@@ -473,7 +502,7 @@ function Assert-LocalCloudConfigReady {
 function Send-LocalConfig {
     $local = Get-LocalCloudConfigPath
     Assert-LocalCloudConfigReady | Out-Null   # 与构建前那道预检同一份实现，重复调用代价可忽略
-    Exec { scp @SshOpts -i $SshKey $local "${sshTarget}:${RemoteDir}/config.cloud.toml.upload" }
+    Send-AtomicArtifact $local 'config.cloud.toml.upload'
     Write-Host "    已上传到 $RemoteDir/config.cloud.toml.upload（远端校验后就地安装）" -ForegroundColor Green
 }
 
@@ -578,13 +607,23 @@ if ($SkipBuild) {
     Write-Host "    ⚠️ 该包可能已与当前工作区源码不一致，确认它就是你要发布的那一份。" -ForegroundColor Yellow
 }
 else {
+    $applicationRevision = Get-CleanRevision $projectDir
+    $frameworkRevision = Get-CleanRevision $libYangRoot
+    $buildLabels = @('--label', "org.opencontainers.image.revision=$applicationRevision",
+        '--label', "io.yang-system.framework-revision=$frameworkRevision",
+        '--label', 'io.yang-system.source-dirty=false', '--label', 'io.yang-system.validation=local-build')
     Write-Host "`n==> [1/5] 构建后端镜像 $BackendImage" -ForegroundColor Cyan
     Write-Host "    上下文：$libYangRoot（必须在仓库根，前端/后端都靠它解析 ../../crates）"
-    Exec { docker build -f (Join-Path $libYangRoot $backendDockerfile) -t $BackendImage $libYangRoot }
+    Exec { docker build @buildLabels -f (Join-Path $libYangRoot $backendDockerfile) -t $BackendImage $libYangRoot }
 
     Write-Host "`n==> [2/5] 构建前端镜像 $FrontendImage" -ForegroundColor Cyan
     Write-Host "    上下文：$frontendDir"
-    Exec { docker build -f (Join-Path $frontendDir 'deploy/Dockerfile') -t $FrontendImage $frontendDir }
+    Exec { docker build @buildLabels -f (Join-Path $frontendDir 'deploy/Dockerfile') -t $FrontendImage $frontendDir }
+
+    if ((Get-CleanRevision $projectDir) -ne $applicationRevision -or
+        (Get-CleanRevision $libYangRoot) -ne $frameworkRevision) {
+        throw '构建期间源码版本发生变化，拒绝导出制品'
+    }
 
     # ---------- 2. 导出并 gzip 压缩 ----------
     Write-Host "`n==> [3/5] 导出镜像并压缩" -ForegroundColor Cyan
@@ -608,13 +647,7 @@ Write-Host "`n==> [4/5] 上传到 ${sshTarget}:${RemoteDir}" -ForegroundColor Cy
 #    （见上面对 $SshOpts 的说明），而且远端目录本来就应该先建好——参考实现
 #    D:\code\ProfitScope\web\deploy.ps1 也是直接 scp，没有这一步。
 #    代价是远端目录不存在时 scp 会失败，所以下面把失败翻译成可操作的提示。
-& scp @SshOpts -i $SshKey $tarGz "${sshTarget}:${RemoteDir}/"
-if ($LASTEXITCODE -ne 0) {
-    throw "上传失败（退出码 $LASTEXITCODE）。`n" +
-          "      若报 'No such file or directory'，说明服务器上还没有 $RemoteDir；`n" +
-          "      请先登录服务器执行 mkdir -p $RemoteDir，再重跑本脚本`n" +
-          "      （加 -SkipBuild 可复用已构建的镜像包，免去重新构建）。"
-}
+Send-AtomicArtifact $tarGz $TarFile
 # 部署脚本 + compose + 模板（**不含**本机的 config.cloud.toml）。与纯运维路径共用同一个实现，
 # 免得两处清单各写一份然后漂移。
 Send-DeployArtifacts
@@ -636,7 +669,7 @@ else {
             Write-Host "    服务器上已有 config.cloud.toml，跳过（不覆盖你的凭据）" -ForegroundColor Green
         }
         1 {
-            Exec { ssh -n @SshOpts -i $SshKey $sshTarget "cp $RemoteDir/config.cloud.example.toml $RemoteDir/config.cloud.toml" }
+            Exec { ssh -n @SshOpts -i $SshKey $sshTarget "umask 077; cp $RemoteDir/config.cloud.example.toml $RemoteDir/config.cloud.toml" }
             Write-Host "    服务器上还没有 config.cloud.toml，已从模板复制一份。" -ForegroundColor Yellow
             Write-Host "    ⚠️ 请登录服务器填写里面的所有 replace-with-*，然后重跑本脚本。" -ForegroundColor Yellow
             Write-Host "       （或改成本机填好一份，用 -SyncConfig 推上去）" -ForegroundColor Yellow

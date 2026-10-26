@@ -41,6 +41,7 @@
 #   受信 TLS 边缘终止并覆盖 Forwarded/X-Forwarded-*。
 # -----------------------------------------------------------------------------
 set -euo pipefail
+umask 077
 
 # ---------- 配置 ----------
 APP_DIR="${APP_DIR:-/home/yjj/yang-system}"
@@ -135,6 +136,83 @@ running() {
 
 cd "$APP_DIR" || die "找不到部署目录：$APP_DIR"
 
+# mkdir 在同一文件系统内互斥；异常断电遗留的锁必须先核实 PID，再由运维移除。
+acquire_deploy_lock() {
+  mkdir "$APP_DIR/.deploy-lock" 2>/dev/null || die "已有发布锁 .deploy-lock；禁止并发部署/刷新"
+  printf '%s\n' "$$" > "$APP_DIR/.deploy-lock/pid"
+}
+
+release_deploy_lock() {
+  rm -f "$APP_DIR/.deploy-lock/pid"
+  rmdir "$APP_DIR/.deploy-lock" 2>/dev/null || true
+}
+
+# 宿主部署用户可写、应用 UID 仅可读。实际 userns/idmap 仍由容器读取预检确认。
+secure_runtime_config() {
+  chmod 600 "$1" || return 1
+  setfacl -m u:10001:r-- "$1" || return 1
+}
+
+verify_runtime_config() {
+  secure_runtime_config "$APP_DIR/$CONFIG_FILE" || die "无法设置配置最小权限（需要 acl/setfacl）"
+  docker run --rm --network none --user 10001:10001 --entrypoint sh \
+    -v "$APP_DIR/$CONFIG_FILE:/app/config.toml:ro" "$BACKEND_IMAGE" \
+    -c 'test -r /app/config.toml' || die "应用 UID 无法读取配置；请核对文件 ACL 与 userns/idmap"
+}
+
+# manifest 只保存不可变镜像 ID 与私有配置快照，读取时不执行文件内容。
+record_release() {
+  local slot="$1" backend="$2" frontend="$3" directory
+  mkdir -p "$APP_DIR/.releases" || return 1
+  chmod 700 "$APP_DIR/.releases" || return 1
+  directory=$(mktemp -d "$APP_DIR/.releases/release.XXXXXXXX") || return 1
+  docker inspect -f '{{.Image}}' "$backend" > "$directory/backend" || return 1
+  docker inspect -f '{{.Image}}' "$frontend" > "$directory/frontend" || return 1
+  cp "$APP_DIR/$CONFIG_FILE" "$directory/config.toml" || return 1
+  chmod 600 "$directory/config.toml" || return 1
+  sha256sum "$directory/config.toml" | cut -d ' ' -f1 > "$directory/config.sha256" || return 1
+  printf '%s\n' 'unknown: no locked schema validation recorded' > "$directory/schema-validation"
+  printf '%s\n' "$directory" > "$APP_DIR/.releases/$slot.tmp" || return 1
+  mv "$APP_DIR/.releases/$slot.tmp" "$APP_DIR/.releases/$slot"
+}
+
+release_directory() {
+  local directory
+  read -r directory < "$APP_DIR/.releases/$1" || return 1
+  case "$directory" in "$APP_DIR"/.releases/release.*) ;;
+    *) err "发布记录路径无效"; return 1 ;;
+  esac
+  [ -d "$directory" ] || return 1
+  printf '%s' "$directory"
+}
+
+load_release() {
+  local directory
+  directory=$(release_directory "$1") || return 1
+  read -r BACKEND_IMAGE < "$directory/backend" || return 1
+  read -r FRONTEND_IMAGE < "$directory/frontend" || return 1
+  case "$BACKEND_IMAGE:$FRONTEND_IMAGE" in sha256:*:sha256:*) ;;
+    *) err "发布记录缺少不可变镜像 ID"; return 1 ;;
+  esac
+}
+
+assert_release_config() {
+  local directory expected actual
+  directory=$(release_directory "$1") || return 1
+  read -r expected < "$directory/config.sha256" || return 1
+  actual=$(sha256sum "$APP_DIR/$CONFIG_FILE") || return 1
+  [ "${actual%% *}" = "$expected" ] || { err "配置与 $1 发布快照不同，必须重新冒烟"; return 1; }
+}
+
+restore_release_config() {
+  local directory expected actual
+  directory=$(release_directory "$1") || return 1
+  read -r expected < "$directory/config.sha256" || return 1
+  actual=$(sha256sum "$directory/config.toml") || return 1
+  [ "${actual%% *}" = "$expected" ] || { err "配置快照校验失败"; return 1; }
+  cat "$directory/config.toml" > "$APP_DIR/$CONFIG_FILE" || return 1
+}
+
 # 精确清理：只删「yang-system 开头」且未被任何容器（含已停止的蓝容器）引用的旧镜像，
 # 不碰同机其它项目的镜像，也不做宿主机全局 prune。
 prune_unused_images() {
@@ -183,7 +261,7 @@ require_config() {
          | grep -vE '^[0-9]+:[[:space:]]*#' || true)
   if [ -n "$hits" ]; then
     err "配置文件里仍有未填写的占位值："
-    printf '%s\n' "$hits" | sed 's/^/    /' >&2
+    printf '%s\n' "$hits" | cut -d: -f1 | sed 's/^/    行号（值已隐藏）：/' >&2
     die "请先填写这些项再部署：$config_path"
   fi
   # 防「空文件 / 半截模板」：上面的占位检查对空文件零命中，会直接放行。
@@ -230,7 +308,7 @@ load_mysql_env() {
 
   case "$url" in
     mysql://*) ;;
-    *) die "[mysql].url 必须以 mysql:// 开头，实际读到：$url" ;;
+    *) die "[mysql].url 协议无效，必须以 mysql:// 开头（不回显凭据）" ;;
   esac
 
   userpass=${url#mysql://}
@@ -267,7 +345,7 @@ load_root_password() {
     need openssl
     MYSQL_ROOT_PASSWORD=$(openssl rand -hex 24)
     ( umask 077; printf '%s' "$MYSQL_ROOT_PASSWORD" > "$ROOT_PW_FILE" )
-    chmod 600 "$ROOT_PW_FILE" 2>/dev/null || true
+    chmod 600 "$ROOT_PW_FILE" || die "无法限制 root 密码文件权限"
     info "已生成 MySQL root 密码并保存到 $ROOT_PW_FILE（请纳入备份；不要提交到仓库）"
   fi
   export MYSQL_ROOT_PASSWORD
@@ -287,7 +365,7 @@ ensure_database() {
   # 这里曾经写成 `... 2>/dev/null || true`，把 Access denied 一并吞掉，于是认证失败
   # 被误报成「数据库不存在，正在创建」——2026-09-23 实际踩过，排查方向被完全带偏。
   local exists rc=0
-  exists=$(docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$MYSQL_CONTAINER" \
+  exists=$(MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
              mysql -uroot -N -B \
              -e "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='$MYSQL_DATABASE'" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -301,21 +379,22 @@ ensure_database() {
   fi
 
   info "数据库 $MYSQL_DATABASE 不存在，正在创建…"
-  docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$MYSQL_CONTAINER" \
+  MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -uroot -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DATABASE\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" \
     || die "建库失败。请确认 $ROOT_PW_FILE 里的 root 密码正确，或 MySQL 是外部实例（那就由 DBA 建库）"
   # 顺带授权给应用账号：用外部 MySQL 时这个账号可能还没有该库的权限。
-  docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$MYSQL_CONTAINER" \
+  MYSQL_PWD="$MYSQL_ROOT_PASSWORD" docker exec -i -e MYSQL_PWD "$MYSQL_CONTAINER" \
     mysql -uroot -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DATABASE\`.* TO '$MYSQL_USER'@'%'" >/dev/null 2>&1 || true
   ok "数据库 $MYSQL_DATABASE 已创建"
 }
 
 # ---------- 容器起停 ----------
+# Docker 停止预算 310s 覆盖应用配置允许的总关闭预算上限 300s（不是 worker 单独预算）。
 # 起一对容器：后端是 netns 拥有者（发布端口），前端加入它的命名空间。
 # 顺序不能反：--network container:<backend> 要求 backend 先存在。
 start_pair() {
   local backend="$1" frontend="$2" host_port="$3" metrics_port="$4"
-  docker rm -f "$frontend" "$backend" >/dev/null 2>&1 || true
+  remove_pair "$backend" "$frontend" || return 1
 
   docker run -d --name "$backend" \
     --network "$NET" \
@@ -324,18 +403,36 @@ start_pair() {
     --add-host host.docker.internal:host-gateway \
     -v "$APP_DIR/$CONFIG_FILE:/app/config.toml:ro" \
     --restart unless-stopped \
-    "$BACKEND_IMAGE" >/dev/null
+    --stop-timeout 310 \
+    "$BACKEND_IMAGE" >/dev/null || return 1
   ok "后端已启动：$backend（边缘 ${BIND_ADDR}:${host_port} → 8081，管理面 ${METRICS_BIND_ADDR}:${metrics_port} → 9090）"
 
   docker run -d --name "$frontend" \
     --network "container:${backend}" \
     --restart unless-stopped \
-    "$FRONTEND_IMAGE" >/dev/null
+    --stop-timeout 310 \
+    "$FRONTEND_IMAGE" >/dev/null || return 1
   ok "前端已启动：$frontend（共享 ${backend} 的网络命名空间，不单独发布端口）"
 }
 
-stop_pair() { docker stop "$2" "$1" >/dev/null 2>&1 || true; }
-remove_pair() { docker rm -f "$2" "$1" >/dev/null 2>&1 || true; }
+stop_pair() {
+  local container
+  for container in "$2" "$1"; do
+    if exists "$container"; then
+      docker stop --time 310 "$container" >/dev/null || return 1
+      case "$(container_state "$container")" in
+        exited|created) ;;
+        *) err "无法确认容器 $container 已停止，拒绝继续"; return 1 ;;
+      esac
+    fi
+  done
+}
+remove_pair() {
+  local container
+  for container in "$2" "$1"; do
+    if exists "$container"; then docker rm -f "$container" >/dev/null || return 1; fi
+  done
+}
 
 # 健康检查：应用边缘（nginx 首页）+ 后端管理面 readiness。
 # 首页在未登录时会 307 跳登录，属正常，不能只认 200。
@@ -346,15 +443,14 @@ remove_pair() { docker rm -f "$2" "$1" >/dev/null 2>&1 || true; }
 #      并把理由指向 MySQL/Redis 或端口。
 #  (2) **必须 --max-time**。否则一次挂起的连接就吃掉整个预算，打印的「最多 60 秒」并不成立。
 probe_code() {
-  # ⚠️ 不能写成 `curl ... || echo 000`：curl 退出码非 0 时**可能已经打印了状态码**
-  #    （写目标出错、或 --max-time 在收到状态行之后才超时都会这样——2026-09-24 彩排实测：
-  #    Git Bash 把 -o /dev/null 的路径转换坏掉后 curl 打了 "200" 且 rc=23，于是这里返回
-  #    "200000"，`[[ == 200 ]]` 永远不成立 → 健康检查假失败 → 误触发配置回滚）。
-  #    只取前 3 位，取不到数字才算 000。
-  local out
-  out=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 5 "$1" 2>/dev/null) || true
+  # 先收到 200 再超时/截断仍是失败，不能丢弃 curl 的退出码。
+  local out budget="${2:-5}"
+  if ! out=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time "$budget" "$1" 2>/dev/null); then
+    printf '000'
+    return
+  fi
   case "$out" in
-    [1-5][0-9][0-9]*) printf '%s' "${out:0:3}" ;;
+    [1-5][0-9][0-9]) printf '%s' "$out" ;;
     *)                 printf '000' ;;
   esac
 }
@@ -369,11 +465,17 @@ probe_host() {
 }
 
 wait_http() {
-  local url="$1" tries="${2:-40}" code i
+  local url="$1" tries="${2:-40}" code i remaining budget
+  local deadline="${3:-$((SECONDS + tries * 2))}"
   for ((i=1; i<=tries; i++)); do
-    code=$(probe_code "$url")
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || return 1
+    budget=$((remaining < 5 ? remaining : 5))
+    code=$(probe_code "$url" "$budget")
     [[ "$code" =~ ^(2|3)[0-9][0-9]$ ]] && return 0
-    sleep 2
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || return 1
+    sleep "$((remaining < 2 ? remaining : 2))"
   done
   return 1
 }
@@ -381,11 +483,20 @@ wait_http() {
 # 管理面 /health/ready 带依赖检查（MySQL/Redis）。就绪返回 200；未就绪返回非 2xx。
 # $3 可选：管理面的绑定地址（默认 $METRICS_BIND_ADDR）。refresh 会传容器的**实际**绑定进来。
 wait_ready() {
-  local port="$1" tries="${2:-40}" bind="${3:-$METRICS_BIND_ADDR}" code i
+  local port="$1" tries="${2:-40}" bind="${3:-$METRICS_BIND_ADDR}" response i remaining budget
+  local deadline="${4:-$((SECONDS + tries * 2))}"
   for ((i=1; i<=tries; i++)); do
-    code=$(probe_code "http://$(probe_host "$bind"):${port}/health/ready")
-    [[ "$code" == "200" ]] && return 0
-    sleep 2
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || return 1
+    budget=$((remaining < 5 ? remaining : 5))
+    if response=$(curl --fail --silent --noproxy '*' --max-time "$budget" \
+        "http://$(probe_host "$bind"):${port}/health/ready") \
+      && printf '%s' "$response" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if r.get("data", {}).get("status") == "ready" else 1)' 2>/dev/null; then
+      return 0
+    fi
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || return 1
+    sleep "$((remaining < 2 ? remaining : 2))"
   done
   return 1
 }
@@ -394,13 +505,14 @@ wait_ready() {
 health_check() {
   local host_port="$1" metrics_port="$2" label="$3"
   local bind="${4:-$BIND_ADDR}" metrics_bind="${5:-$METRICS_BIND_ADDR}"
-  if wait_ready "$metrics_port" 30 "$metrics_bind"; then
+  local deadline=$((SECONDS + 60))
+  if wait_ready "$metrics_port" 30 "$metrics_bind" "$deadline"; then
     ok "$label 后端 readiness 通过（依赖就绪）"
   else
     warn "$label 后端 readiness 未通过（检查 MySQL/Redis 与 config.cloud.toml）"
     return 1
   fi
-  if wait_http "http://$(probe_host "$bind"):${host_port}/" 15; then
+  if wait_http "http://$(probe_host "$bind"):${host_port}/" 15 "$deadline"; then
     ok "$label 应用边缘 HTTP 响应正常"
   else
     warn "$label 应用边缘无响应"
@@ -437,6 +549,16 @@ resolve_bind_addr() {
     BIND_ADDR="127.0.0.1"
     info "BIND_ADDR=auto：未发现线上容器或读不到绑定，使用安全默认 127.0.0.1（仅本机可达）"
   fi
+}
+
+assert_binding_policy() {
+  local environment
+  environment=$(toml_get app environment "${1:-}")
+  case "$environment" in test|development) return 0 ;; esac
+  # 当前发布参数采用 IPv4 形态；IPv6 必须先完善绑定/探针/回退解析再启用。
+  python3 -c 'import ipaddress,sys; sys.exit(0 if all((a:=ipaddress.ip_address(x)).version == 4 and a.is_loopback for x in sys.argv[1:]) else 1)' \
+    "$BIND_ADDR" "$METRICS_BIND_ADDR" \
+    || die "production 只允许 IPv4 loopback 发布边缘与管理面，请经受信 TLS 网关访问"
 }
 
 # ---------- refresh 用的辅助函数 ----------
@@ -551,7 +673,7 @@ preflight_release_config() {
   fi
 }
 
-# 执行一条**写入/DDL** 语句。任何失败都必须立刻中止并把 MySQL 的原始报错打出来——
+# 执行一条**写入/DDL** 语句。失败必须中止；驱动可能回显口令，只输出脱敏语句与退出码。
 # 这是清库路径，绝不允许出现 `|| true`（那等于把「没清掉」当成「清掉了」）。
 mysql_exec() {
   local out rc=0
@@ -561,7 +683,6 @@ mysql_exec() {
           mysql -uroot 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     err "MySQL 语句失败（退出码 $rc）：$(redact_sql "$1")"
-    printf '%s\n' "$out" | sed 's/^/      /' >&2
     return 1
   fi
 }
@@ -621,26 +742,39 @@ stop_all_pairs() {
   # 容器根本没停（同族的「假报成功」，2026-09-24 审查发现）。
   local b_state f_state
   if running "$LIVE_FRONTEND"; then LIVE_FRONTEND_WAS_RUNNING=1; fi
-  stop_pair "$LIVE_BACKEND" "$LIVE_FRONTEND"
   PAIRS_STOPPED=1
+  stop_pair "$LIVE_BACKEND" "$LIVE_FRONTEND" || die "线上容器停止失败，未执行清库"
   b_state=$(container_state "$LIVE_BACKEND")
   f_state=$(container_state "$LIVE_FRONTEND")
   info "已请求停止 $LIVE_BACKEND（现在 $b_state）+ $LIVE_FRONTEND（现在 $f_state）"
   if running "$LIVE_BACKEND" || running "$LIVE_FRONTEND"; then
-    warn "有容器没停下来——清库期间它们仍可能持有连接（DROP 会成功，但它们会持续报错）。"
+    die "有容器未停止，拒绝清库"
   fi
   # 只把「绿**后端**曾在跑」记为需要恢复：它是 netns 拥有者。
   # 用 `running 后端 || running 前端` 当判据会把一个**本来停着**的绿后端也在收尾时拉起来，
   # 与本文件「已经停着的绿容器不去动它」的约定相反（2026-09-24 复审发现）。
   if running "$GREEN_BACKEND"; then
     GREEN_WAS_RUNNING=1
-    stop_pair "$GREEN_BACKEND" "$GREEN_FRONTEND"
+    stop_pair "$GREEN_BACKEND" "$GREEN_FRONTEND" || die "绿容器停止失败，未执行清库"
     info "已请求停止 $GREEN_BACKEND（现在 $(container_state "$GREEN_BACKEND")）+ $GREEN_FRONTEND（现在 $(container_state "$GREEN_FRONTEND")）"
   elif running "$GREEN_FRONTEND"; then
     # 前端单独在跑（后端已经不在）本来就是个坏状态：停掉，但不把它当成「需要恢复」。
     info "绿前端 $GREEN_FRONTEND 单独在跑（绿后端不在），一并停掉且不恢复。"
-    stop_pair "$GREEN_BACKEND" "$GREEN_FRONTEND"
+    stop_pair "$GREEN_BACKEND" "$GREEN_FRONTEND" || die "绿容器停止失败，未执行清库"
   fi
+}
+
+assert_writers_stopped() {
+  local container state
+  for container in "$LIVE_BACKEND" "$GREEN_BACKEND" "$BLUE_BACKEND"; do
+    if exists "$container"; then
+      state=$(container_state "$container")
+      case "$state" in
+        exited|created) ;;
+        *) die "受管写者 $container 状态为 $state，拒绝清库" ;;
+      esac
+    fi
+  done
 }
 
 # 容器的当前状态字符串（running / exited / restarting …）；读不到就打 unknown。
@@ -832,7 +966,7 @@ install_staged_config() {
   # 可覆盖变量，所以补一道一行的护栏。
   [ "$staged" != "$dst" ] || die "STAGED_CONFIG 不能与 CONFIG_FILE 相同（会自我截断）：$staged"
   # 它含明文凭据，先收紧权限（cmd_refresh 也收紧一次，这里再兜一道）。
-  chmod 600 "$staged" 2>/dev/null || true
+  chmod 600 "$staged" || die "无法限制暂存配置权限"
 
   if [ -f "$dst" ]; then
     CONFIG_BACKUP="$dst.bak.$(date +%Y%m%d-%H%M%S)"
@@ -842,13 +976,14 @@ install_staged_config() {
     cp "$dst" "$CONFIG_BACKUP" || die "备份现有配置失败：$CONFIG_BACKUP"
     # 备份里是同一份明文凭据：权限收到 600，并只保留最近几份（否则每次 -SyncConfig 都会在
     # 服务器上多加一份可读的生产凭据，永不清理）。
-    chmod 600 "$CONFIG_BACKUP" 2>/dev/null || true
+    chmod 600 "$CONFIG_BACKUP" || die "无法限制备份配置权限"
     prune_config_backups "$dst"
     ok "现有配置已备份为 $CONFIG_BACKUP（chmod 600，只保留最近 5 份）"
   else
     CONFIG_BACKUP=""
-    warn "服务器上原本没有 $dst，将新建一份（权限按当前 umask）。"
+    ( umask 077; : > "$dst" ) || die "无法创建正式配置"
   fi
+  secure_runtime_config "$dst" || die "无法限制正式配置权限（需要 acl/setfacl）"
 
   # 写之前先核对「容器正在读的就是这个文件」，见该函数的注释（防静默不生效）。
   assert_config_mount_is_live || return 1
@@ -1053,6 +1188,7 @@ restore_config_backup() {
 # 应用带着活动连接时会持续报错，而它一旦被 `--restart unless-stopped` 重启，就会用**旧**
 # 代码把旧 schema 同步进刚清空的库——那正好毁掉「用清库来应用破坏性 schema 变更」的意图。
 reset_database() {
+  assert_writers_stopped
   local tables size
   tables=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$MYSQL_DATABASE'") \
     || die "读不到 $MYSQL_DATABASE 的表数量，拒绝继续（无法确认目标库的身份）。"
@@ -1169,14 +1305,14 @@ cmd_infra_up() {
 }
 
 prepare() {
-  need docker; need curl; need gunzip
-  ensure_network
+  need docker; need curl; need gunzip; need python3; need setfacl
   require_config
+  assert_binding_policy
+  ensure_network
   load_mysql_env
   # 配置与存量数据都在**起绿容器之前**只读预检；失败即中止，线上不受影响。
   preflight_release_config
-  # 部署前先确保库存在——应用只建表不建库，库缺失时容器会起来就退出。
-  ensure_database
+  # 冒烟不得建库；首次部署先运行 infra-up，库缺失由只读检查明确失败。
   preflight_release_data
   # 优先用镜像包；包不在时退回复用本机已有镜像。
   # **上传成功后两侧都会删包**（deploy.ps1 删本机的，cmd_cutover 删服务器上的），
@@ -1195,6 +1331,8 @@ prepare() {
   else
     die "既找不到镜像包 $BACKEND_TAR，本机也没有可用的 $BACKEND_IMAGE / $FRONTEND_IMAGE。请先在本机跑 deploy.ps1 上传。"
   fi
+
+  verify_runtime_config
 
   # 备份当前线上镜像，供 rollback 用。
   local old_backend old_frontend
@@ -1220,160 +1358,161 @@ prepare() {
   fi
 }
 
+validate_smoke_report() {
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if r.get("interface") == "yang-system-smoke-v1" and r.get("mode") == "read_only" and r.get("status") == "ok" and type(r.get("schema_changes")) is int and r["schema_changes"] >= 0 else 1)' "$1"
+}
+
+# 一次性进程不监听业务 HTTP、不执行 DDL、不启动任何业务 worker，也不导出 traces。
+run_read_only_smoke() {
+  local report="$APP_DIR/.smoke-report.tmp"
+  rm -f "$report"
+  if ! timeout --kill-after=5 60 docker run --name "$GREEN_BACKEND" \
+    --network "$NET" --no-healthcheck --stop-timeout 5 \
+    --add-host host.docker.internal:host-gateway \
+    -v "$APP_DIR/$CONFIG_FILE:/app/config.toml:ro" \
+    "$BACKEND_IMAGE" --smoke-check > "$report"; then
+    docker rm -f "$GREEN_BACKEND" >/dev/null 2>&1 || true
+    die "后端只读冒烟失败或超过 60 秒；未启动业务服务"
+  fi
+  validate_smoke_report "$report" || die "后端未返回受支持的只读冒烟契约"
+}
+
+verify_smoke_evidence() {
+  local directory
+  directory=$(release_directory green) || return 1
+  validate_smoke_report "$directory/smoke.json" || return 1
+  [ "$(docker inspect -f '{{.State.Status}}:{{.State.ExitCode}}' "$GREEN_BACKEND")" = exited:0 ] \
+    || { err "后端冒烟进程没有成功退出"; return 1; }
+  [ "$(docker inspect -f '{{json .Args}}' "$GREEN_BACKEND")" = '["--smoke-check"]' ] \
+    || { err "后端冒烟启动参数不匹配"; return 1; }
+  wait_http "http://127.0.0.1:${GREEN_HOST_PORT}/" 15
+}
+
 cmd_smoke() {
+  need timeout
   prepare
-  # 首次部署时线上还不存在——这不是错误，直接起绿容器即可。
-  if running "$LIVE_BACKEND"; then
-    info "线上容器在运行，起绿容器做冒烟（线上不受影响）"
-  else
-    warn "线上容器未运行（首次部署？）——绿容器起来后将直接用于 cutover"
+  if exists "$LIVE_BACKEND" && exists "$LIVE_FRONTEND"; then
+    if [ -f "$APP_DIR/.releases/live" ]; then
+      assert_release_config live || die "线上配置快照不匹配，请先通过 refresh 安装并验证配置"
+    else
+      record_release live "$LIVE_BACKEND" "$LIVE_FRONTEND"
+      warn "首次登记旧版配置：需现场核对它与运行时实际加载内容一致"
+    fi
   fi
-  start_pair "$GREEN_BACKEND" "$GREEN_FRONTEND" "$GREEN_HOST_PORT" "$METRICS_GREEN_PORT"
-  info "等待绿容器就绪（最多 60 秒）…"
-  if health_check "$GREEN_HOST_PORT" "$METRICS_GREEN_PORT" "绿容器"; then
-    echo "   查看日志：docker logs -f $GREEN_BACKEND"
-    echo "   外部验证（在宿主机上）：curl -I --noproxy '*' http://$(probe_host "$BIND_ADDR"):${GREEN_HOST_PORT}/"
-    echo "   确认无误后切流量：$0 cutover"
-  else
-    warn "绿容器健康检查未通过！线上容器未受影响。"
-    echo "   排查：docker logs $GREEN_BACKEND"
-    echo "         docker logs $GREEN_FRONTEND"
-    echo "   清理：docker rm -f $GREEN_FRONTEND $GREEN_BACKEND"
-    exit 1
+  remove_pair "$GREEN_BACKEND" "$GREEN_FRONTEND"
+  run_read_only_smoke
+  # 独立 nginx 仅验证静态产物；没有 backend netns，API 不可达。探针端口仅供本机。
+  docker run -d --name "$GREEN_FRONTEND" --network "$NET" \
+    -p "127.0.0.1:${GREEN_HOST_PORT}:8081" --stop-timeout 5 \
+    "$FRONTEND_IMAGE" >/dev/null
+  wait_http "http://127.0.0.1:${GREEN_HOST_PORT}/" 15 || die "前端静态冒烟失败"
+  record_release green "$GREEN_BACKEND" "$GREEN_FRONTEND"
+  local directory
+  directory=$(release_directory green)
+  mv "$APP_DIR/.smoke-report.tmp" "$directory/smoke.json"
+  verify_smoke_evidence || die "冒烟证据验证失败"
+  ok "后端只读冒烟和前端静态检查通过；业务服务将在 cutover 时启动"
+  echo "   切流量：$0 cutover"
+}
+
+# Docker 失败可能发生在任意一次 stop/rename/run，按原容器 ID 保留恢复身份。
+CUTOVER_ACTIVE=0
+OLD_BACKEND_ID=""
+OLD_FRONTEND_ID=""
+cutover_on_exit() {
+  local rc=$?
+  if [ "$CUTOVER_ACTIVE" = 1 ] && [ "$rc" -ne 0 ]; then
+    err "切流量失败；保留原容器 ID 与 .releases/blue 配置快照"
+    # 只停新后端，不能误删尚未 rename 的原容器。
+    local current
+    current=$(docker inspect -f '{{.Id}}' "$LIVE_BACKEND" 2>/dev/null) || current=""
+    if [ -n "$current" ] && [ "$current" != "$OLD_BACKEND_ID" ]; then
+      stop_pair "$LIVE_BACKEND" "$LIVE_FRONTEND" || warn "失败新版本未能停止，请立即检查"
+    fi
+    # schema 证明由锁内策略产出；环境变量声明不构成证明，不自动跨 schema 启动旧版。
+    err "未自动启动旧版：需核对本次锁内 schema 执行记录，再用 rollback 恢复匹配配置"
+    err "原后端 ID: ${OLD_BACKEND_ID:-无}；原前端 ID: ${OLD_FRONTEND_ID:-无}"
   fi
+  release_deploy_lock
+  return "$rc"
 }
 
 cmd_cutover() {
-  need docker
-  running "$GREEN_BACKEND" || die "绿容器 $GREEN_BACKEND 未运行（先执行 $0 smoke）"
-  info "切流量前再次健康检查…"
-  wait_ready "$METRICS_GREEN_PORT" 10 || die "绿容器 readiness 未通过，中止切流量（线上不受影响）"
-  wait_http "http://$(probe_host "$BIND_ADDR"):${GREEN_HOST_PORT}/" 10 || die "绿容器边缘未响应，中止切流量（线上不受影响）"
+  need docker; need python3
+  assert_binding_policy
+  exists "$GREEN_BACKEND" || die "缺少只读冒烟容器，请先 smoke"
+  load_release green || die "缺少有效冒烟发布记录，请重新 smoke"
+  assert_release_config green || die "配置已改变，拒绝切流量"
+  [ "$(docker inspect -f '{{.Image}}' "$GREEN_BACKEND")" = "$BACKEND_IMAGE" ] \
+    && [ "$(docker inspect -f '{{.Image}}' "$GREEN_FRONTEND")" = "$FRONTEND_IMAGE" ] \
+    || die "绿容器镜像与冒烟记录不一致"
+  verify_smoke_evidence || die "缺少有效只读冒烟证据，请重新 smoke"
 
-  info "备份线上容器为蓝（停止但不删除，供回退）…"
-  remove_pair "$BLUE_BACKEND" "$BLUE_FRONTEND"
   if exists "$LIVE_BACKEND"; then
+    exists "$LIVE_FRONTEND" || die "线上容器对不完整，需先修复再切流量"
+    [ -f "$APP_DIR/.releases/live" ] || die "缺少线上配置快照，需重新 smoke"
+    OLD_BACKEND_ID=$(docker inspect -f '{{.Id}}' "$LIVE_BACKEND")
+    OLD_FRONTEND_ID=$(docker inspect -f '{{.Id}}' "$LIVE_FRONTEND")
+    # 在停旧版之前写全恢复记录，包含部分 rename 失败时仍可定位的不可变 ID。
+    cp "$APP_DIR/.releases/live" "$APP_DIR/.releases/blue"
+    printf '%s\n' "$OLD_BACKEND_ID" > "$APP_DIR/.releases/blue-backend-container"
+    printf '%s\n' "$OLD_FRONTEND_ID" > "$APP_DIR/.releases/blue-frontend-container"
+  fi
+  CUTOVER_ACTIVE=1
+  trap cutover_on_exit EXIT
+  remove_pair "$BLUE_BACKEND" "$BLUE_FRONTEND"
+  if [ -n "$OLD_BACKEND_ID" ]; then
     stop_pair "$LIVE_BACKEND" "$LIVE_FRONTEND"
     docker rename "$LIVE_FRONTEND" "$BLUE_FRONTEND"
-    docker rename "$LIVE_BACKEND"  "$BLUE_BACKEND"
-    ok "旧容器已备份为 $BLUE_BACKEND + $BLUE_FRONTEND（已停止）"
-  else
-    warn "没有可备份的线上容器（首次部署）"
+    docker rename "$LIVE_BACKEND" "$BLUE_BACKEND"
   fi
-
-  info "在线上端口 ${LIVE_HOST_PORT} 启动新版本…"
   start_pair "$LIVE_BACKEND" "$LIVE_FRONTEND" "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT"
-
-  info "清理绿容器…"
+  health_check "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT" "线上" || die "新版本健康检查失败"
+  cp "$APP_DIR/.releases/green" "$APP_DIR/.releases/live"
+  CUTOVER_ACTIVE=0
   remove_pair "$GREEN_BACKEND" "$GREEN_FRONTEND"
-  # ⚠️ `docker rm -f | true` 后无条件说「已清理」是假的：rm 被拒（daemon 异常、容器卡在
-  #    removing）时绿容器其实还在占着 ${GREEN_HOST_PORT}/${METRICS_GREEN_PORT}。
-  if exists "$GREEN_BACKEND" || exists "$GREEN_FRONTEND"; then
-    warn "绿容器未完全清理（可能仍占着 ${GREEN_HOST_PORT}/${METRICS_GREEN_PORT}）：docker ps -a --filter name=yang-"
-  else
-    ok "已清理临时绿容器"
-  fi
-
-  # ⚠️ 只在文件确实存在时才宣称「已清理」。`rm -f` 对不存在的文件也返回 0，而
-  #    `-Mode cutover` 这条路径根本不经过 prepare（服务器上的包通常已被上一次删掉），
-  #    所以旧版那句「已清理镜像包 xxx」在**合法路径上必然为假**（2026-09-23 审计发现）。
-  if [ -e "$BACKEND_TAR" ]; then
-    rm -f "$BACKEND_TAR"
-    ok "已清理镜像包 $BACKEND_TAR"
-  else
-    info "镜像包 $BACKEND_TAR 本就不存在，无需清理"
-  fi
-
-  prune_unused_images
-
-  if health_check "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT" "线上"; then
-    ok "部署完成 ✔"
-    # ⚠️ 这里以前**写死** `127.0.0.1`，与容器实际绑定无关：改绑 0.0.0.0 后上一行说
-    #    「边缘 0.0.0.0:18654」而这里说「对外入口 http://127.0.0.1:18654/」，自相矛盾，
-    #    人只会记住最后这句（2026-09-23 因此误判过一次）。
-    #    现在**只陈述本脚本能观测到的事实**，不替安全组下结论：
-    #      · 实际绑定       —— docker inspect，可观测
-    #      · loopback ⇒ 公网不可达 —— 由绑定可证
-    #      · 0.0.0.0  ⇒ **能否真从公网访问取决于云安全组与宿主防火墙，脚本探测不到**
-    #        （本文件的默认端口注释就记着反例：绑了所有网卡但安全组不放行的端口照样不可达）
-    local edge_bind edge_host
-    if ! edge_bind=$(docker inspect -f \
-        '{{with index .HostConfig.PortBindings "8081/tcp"}}{{(index . 0).HostIp}}:{{(index . 0).HostPort}}{{end}}' \
-        "$LIVE_BACKEND" 2>/dev/null) || [ -z "$edge_bind" ]; then
-      warn "读不到 $LIVE_BACKEND 的端口绑定（docker inspect 失败，或该端口未发布）——"
-      warn "  下面的暴露面结论不可信，请手工核对：docker ps --filter name=$LIVE_BACKEND"
-      edge_bind="（未知）"
-    fi
-    edge_host="${edge_bind%%:*}"
-    echo "   应用边缘绑定：${edge_bind}（容器内 8081）"
-    echo "   宿主机自测：curl --noproxy '*' -I http://127.0.0.1:${LIVE_HOST_PORT}/"
-    case "$edge_host" in
-      127.0.0.1)
-        warn "公网不可达：应用边缘只绑在 loopback（BIND_ADDR 的安全默认值）。"
-        warn "  若本意是公网直接访问，请重新发布：BIND_ADDR=0.0.0.0 LIVE_HOST_PORT=$LIVE_HOST_PORT $0 deploy"
-        warn "  （deploy.ps1 用 -EdgeBindAddr 0.0.0.0）" ;;
-      0.0.0.0)
-        info "应用边缘已绑到所有网卡。**能否从公网访问取决于云安全组与宿主防火墙，本脚本探测不到**"
-        info "  ——请从外网直连验证：curl.exe --noproxy \"*\" -I http://<公网IP>:${LIVE_HOST_PORT}/"
-        info "  且这是明文 http：凭据 / 会话 Cookie / 密码重置令牌都不加密；生产请改经受信 TLS 边缘。" ;;
-      *)
-        info "应用边缘绑在 ${edge_host}（既非 loopback 也非全网卡）。是否公网可达脚本探测不到，请从外网验证。" ;;
-    esac
-    echo "   观察：docker logs -f $LIVE_BACKEND"
-    echo "   回退：$0 rollback"
-  else
-    warn "部署后健康检查未通过，建议立即回退：$0 rollback"
-    exit 1
-  fi
+  [ ! -e "$BACKEND_TAR" ] || rm -f "$BACKEND_TAR"
+  ok "部署完成：后端 $BACKEND_IMAGE；前端 $FRONTEND_IMAGE；边缘 ${BIND_ADDR}:${LIVE_HOST_PORT}"
 }
 
 cmd_rollback() {
-  need docker
-  exists "$BLUE_BACKEND" || die "没有备份容器 $BLUE_BACKEND，无法回退"
-  info "回退到上一版本…"
-  remove_pair "$LIVE_BACKEND" "$LIVE_FRONTEND"
-
-  # 先删掉 :live 标签，再把备份镜像重新打回 :live —— 让回退后的线上镜像与标签一致。
-  if docker image inspect "$BACKEND_BACKUP" >/dev/null 2>&1; then
-    docker tag "$BACKEND_BACKUP" "$BACKEND_IMAGE" >/dev/null 2>&1 || true
+  need docker; need python3
+  assert_binding_policy
+  # 此声明必须来自发布记录和现场审查，不能替代锁内 schema gate。
+  [ "${ROLLBACK_SCHEMA_COMPATIBLE:-}" = yes ] \
+    || die "回滚前须核对锁内 schema 记录与旧写者兼容性，确认后设置 ROLLBACK_SCHEMA_COMPATIBLE=yes"
+  load_release blue || die "缺少上一版镜像/配置记录，拒绝回滚"
+  local old_backend old_frontend actual expected current
+  read -r old_backend < "$APP_DIR/.releases/blue-backend-container"
+  read -r old_frontend < "$APP_DIR/.releases/blue-frontend-container"
+  # 在动线上之前验证原容器仍在，且回退不会悄悄改变绑定/公网暴露面。
+  actual=$(container_binding "$old_backend" 8081)
+  expected="${BIND_ADDR}:${LIVE_HOST_PORT}"
+  [ "$actual" = "$expected" ] || die "回退容器边缘绑定与期望不同，拒绝自动恢复"
+  [ "$(container_binding "$old_backend" 9090)" = "${METRICS_BIND_ADDR}:${METRICS_LIVE_PORT}" ] \
+    || die "回退容器管理面绑定与期望不同，拒绝自动恢复"
+  [ "$(docker inspect -f '{{.Image}}' "$old_backend")" = "$BACKEND_IMAGE" ] \
+    && [ "$(docker inspect -f '{{.Image}}' "$old_frontend")" = "$FRONTEND_IMAGE" ] \
+    || die "回退容器镜像不符"
+  stop_pair "$LIVE_BACKEND" "$LIVE_FRONTEND"
+  current=$(docker inspect -f '{{.Id}}' "$LIVE_FRONTEND" 2>/dev/null) || current=""
+  if [ -n "$current" ] && [ "$current" != "$old_frontend" ]; then docker rm "$current" >/dev/null; fi
+  current=$(docker inspect -f '{{.Id}}' "$LIVE_BACKEND" 2>/dev/null) || current=""
+  if [ -n "$current" ] && [ "$current" != "$old_backend" ]; then docker rm "$current" >/dev/null; fi
+  restore_release_config blue || die "配置快照恢复失败，旧版尚未启动"
+  verify_runtime_config
+  # 已有正确名字（例如第一步 rename 就失败）时，Docker rename 自己会拒绝，须先比较。
+  if [ "$(docker inspect -f '{{.Name}}' "$old_backend")" != "/$LIVE_BACKEND" ]; then
+    docker rename "$old_backend" "$LIVE_BACKEND"
   fi
-  if docker image inspect "$FRONTEND_BACKUP" >/dev/null 2>&1; then
-    docker tag "$FRONTEND_BACKUP" "$FRONTEND_IMAGE" >/dev/null 2>&1 || true
+  if [ "$(docker inspect -f '{{.Name}}' "$old_frontend")" != "/$LIVE_FRONTEND" ]; then
+    docker rename "$old_frontend" "$LIVE_FRONTEND"
   fi
-
-  docker rename "$BLUE_FRONTEND" "$LIVE_FRONTEND"
-  docker rename "$BLUE_BACKEND"  "$LIVE_BACKEND"
-  # 顺序要紧：后端要先起（它是 netns 拥有者），前端才能加入它的命名空间。
   docker start "$LIVE_BACKEND" >/dev/null
   docker start "$LIVE_FRONTEND" >/dev/null
-  ok "已回退并启动 $LIVE_BACKEND + $LIVE_FRONTEND"
-
-  # ⚠️ 回退复用的是**旧容器**（docker rename + start），而**端口绑定在容器创建时就固定了**，
-  #    `docker start` 不会改它。所以若该容器当初是用不同的 BIND_ADDR / LIVE_HOST_PORT
-  #    创建的，回退会让**公网暴露面静默变化**——典型场景：从 0.0.0.0:18654 退回
-  #    127.0.0.1:8154，外网直接打不开，而脚本不会有任何提示。2026-09-23 已知该风险。
-  local expected="${BIND_ADDR}:${LIVE_HOST_PORT}"
-  local actual
-  actual=$(docker inspect -f \
-    '{{with index .HostConfig.PortBindings "8081/tcp"}}{{(index . 0).HostIp}}:{{(index . 0).HostPort}}{{end}}' \
-    "$LIVE_BACKEND" 2>/dev/null || true)
-  if [ "$actual" != "$expected" ]; then
-    warn "回退后的端口绑定是「${actual:-未知}」，与当前期望的「$expected」不一致！"
-    warn "  端口绑定在容器创建时就固定，docker start 不会改。外网可达性可能与预期不同。"
-    warn "  要让绑定生效必须重新发布：BIND_ADDR=$BIND_ADDR LIVE_HOST_PORT=$LIVE_HOST_PORT $0 deploy"
-  else
-    ok "端口绑定与期望一致（$actual）"
-  fi
-
-  info "等待就绪…"
-  if health_check "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT" "回退后"; then
-    ok "回退成功"
-  else
-    warn "回退后健康检查未通过，查看：docker logs $LIVE_BACKEND"
-    # ⚠️ 必须非 0 退出：以前只 warn，脚本以 0 结束，`deploy.ps1 -Mode rollback` 会因为
-    #    ssh 退出码为 0 而报告「完成」——**回退失败被当成回退成功**（2026-09-23 审计发现）。
-    exit 1
-  fi
+  health_check "$LIVE_HOST_PORT" "$METRICS_LIVE_PORT" "回退后" || die "回退后健康检查失败"
+  cp "$APP_DIR/.releases/blue" "$APP_DIR/.releases/live"
+  ok "已恢复上一版镜像与匹配配置"
 }
 
 # 刷新配置 / 重置数据库。
@@ -1384,12 +1523,12 @@ cmd_rollback() {
 #   连不上库，健康检查必然失败，看起来像「新配置是坏的」。合成一条还能让失败回滚同时知道
 #   「配置改没改、库清没清」。
 cmd_refresh() {
-  need docker; need curl
+  need docker; need curl; need python3; need setfacl
   if [ "$SYNC_CONFIG" != 1 ] && [ "$RESET_DB" != 1 ]; then
     die "refresh 至少要给一个动作：SYNC_CONFIG=1（安装新配置）和/或 RESET_DB=1（清空数据库）。见 $0 的 usage。"
   fi
   # 退出兜底：容器停过就起回去、暂存配置不留在盘上（理由见 refresh_on_exit 的注释）。
-  trap refresh_on_exit EXIT
+  trap 'refresh_on_exit; release_deploy_lock' EXIT
 
   # 「换库名」时旧库会被留成孤儿：我们只清 [mysql].url 现在指向的那个库。
   local old_database=""
@@ -1404,14 +1543,16 @@ cmd_refresh() {
     # 暂存文件含明文凭据：在**任何进一步动作之前**先收紧权限。以前 chmod 只在安装函数里做，
     # 于是「预校验就失败」的路径会让它一直以 644 躺在服务器上（2026-09-24 审查发现）。
     # 退出时 refresh_on_exit 还会把它删掉。
-    chmod 600 "$APP_DIR/$STAGED_CONFIG" 2>/dev/null || true
+    chmod 600 "$APP_DIR/$STAGED_CONFIG" || die "无法限制暂存配置权限"
     # 先验暂存文件，再动服务器上那份好的：顺序反过来就等于「覆盖完才发现新配置不合格」。
     require_config "$APP_DIR/$STAGED_CONFIG"
+    assert_binding_policy "$APP_DIR/$STAGED_CONFIG"
     # 顺带把 [mysql].url 试解析一遍（写坏了当场中止），并把 MYSQL_* 设成**新配置**的值。
     load_mysql_env "$APP_DIR/$STAGED_CONFIG"
     preflight_release_config "$APP_DIR/$STAGED_CONFIG"
   else
     require_config
+    assert_binding_policy
     load_mysql_env
     preflight_release_config
   fi
@@ -1440,6 +1581,7 @@ cmd_refresh() {
   if [ "$SYNC_CONFIG" = 1 ]; then
     install_staged_config
     require_config   # 装完再验一遍**落盘的那份**，防写入被截断
+    verify_runtime_config
   fi
 
   # ---- 3) 停下来（清库与换配置都要重启应用，见本函数头部说明） ----
@@ -1497,7 +1639,7 @@ cmd_refresh() {
         if health_check "$edge_port" "$metrics_port" "线上（重启前端后）" "$edge_bind" "$metrics_bind"; then
           verified=1
           CONFIG_APPLIED=0
-          warn "  边缘已恢复——原因就是前端 netns 滞留（后端重启换代，前端不会自己跟过去）。"
+          warn "  重启前端后边缘已恢复；netns 根因仍需现场证据确认。"
         fi
       else
         warn "重启 $LIVE_FRONTEND 失败。"
@@ -1548,6 +1690,7 @@ cmd_refresh() {
     fi
     exit 0
   fi
+  record_release live "$LIVE_BACKEND" "$LIVE_FRONTEND"
   ok "refresh 完成 ✔"
 }
 
@@ -1565,6 +1708,12 @@ cmd_deploy() {
 
 # ---------- 入口 ----------
 main() {
+  case "${1:-}" in
+    infra-up|smoke|cutover|deploy|rollback|refresh)
+      acquire_deploy_lock
+      trap release_deploy_lock EXIT
+      ;;
+  esac
   # 只有 smoke / deploy 接受位置参数（镜像包名）。这一行以前对所有子命令生效，于是
   # `logs <容器名>` 会顺手把容器名也塞进 BACKEND_TAR。refresh 不接受位置参数，更不该
   # 让一个手滑多写的词悄悄改变镜像包名——所以这里先把子命令圈定，再取参数。

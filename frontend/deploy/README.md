@@ -35,6 +35,22 @@ Rust 服务监听 `127.0.0.1:8080`，Nginx 监听 `8081`（所有网卡）。
 命名空间设为一年 `immutable`。`/assets` 缺失文件严格返回 404；只有非后端、
 非资产的前端路由才 fallback 到 `index.html`。
 
+上传采用分层限额：业务单文件最多 **16 MiB**（16,777,216 字节），
+multipart/HTTP 整体最多 **17 MiB**（17,825,792 字节），为封装与其他字段
+预留最多 1 MiB；因此 Nginx 配置为 `client_max_body_size 17m`。
+普通 JSON 仍由后端独立限制为 16 MiB。边缘只限制请求总字节，不能替代
+后端的单文件与 JSON 检查。`node frontend/scripts/verify-nginx-runtime.mjs`
+在固定摘要生产镜像验证 16 MiB 文件加封装、恰好 17 MiB 与超出 1 字节，
+同时覆盖 Content-Length 与 chunked 传输；该脚本需 Docker，人工上游仅用于
+确认边缘完整转发字节，不代表真实业务上传或后端解析器验收。
+
+文本资源开启 gzip 与 `Vary: Accept-Encoding`，PNG 等已压缩格式不重复压缩。
+访问日志仅记录 method、status、request ID、响应字节、请求耗时，以及
+`upstream_status`、`upstream_response_time`，不记录路径、query 或 Referer。
+上游状态与耗时支持定位 502 等故障；多次尝试时保留 Nginx 的逗号分隔值。
+内建 error 日志无法按字段脱敏原始请求行，因此使用 `crit`，普通故障的
+原始文本详情不再保留；诊断应结合安全访问日志和后端日志。
+
 HSTS 只有经 HTTPS 返回时浏览器才会执行。本地 HTTP E2E 验证的是响应合同，
 不等同于已证明某个公网域名的 TLS、证书、DNS 或边缘配置。首次真实发布仍须
 取得目标环境 smoke 的终态证据。
