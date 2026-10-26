@@ -685,9 +685,12 @@ fn assemble_telephone(widget: &WidgetMap, cell: &Value) -> Result<Value, Convert
 }
 
 fn number_from_cell(widget: &WidgetMap, cell: &Value) -> Result<Value, ConvertError> {
-    // 公式字段（type 20 / Number）的单元格是**单元素数组**：实测 `[1]`。
-    // 只接受恰好一个数值，多值公式不静默截断。
-    let scalar = match cell {
+    // 公式字段（type 20 / Number）的单元格有两种实测形态：
+    // - 单条 GET：`[1]`
+    // - batch_get（worker 实际走的路径）：`{"type":2,"value":[1]}`
+    // 两种都取「恰好一个数值」；多值公式不静默截断。
+    let value = cell.get("value").unwrap_or(cell);
+    let scalar = match value {
         Value::Array(items) if items.len() == 1 => Some(&items[0]),
         Value::Array(_) => None,
         other => Some(other),
@@ -1391,18 +1394,23 @@ mod tests {
 
     #[test]
     fn formula_array_cell_takes_its_single_number_and_rejects_multiple() {
-        // 真机 Base 公式字段（type 20 / Number）的单元格是单元素数组：[1]。
+        // 真机 Base 公式字段（type 20 / Number）有两种单元格形态：
+        // 单条 GET 是 `[1]`，worker 走的 batch_get 是 `{"type":2,"value":[1]}`。
         // 只认恰好一个值；多值公式不能被静默截成第一个。
         let widgets = [widget("w1", "formula")];
-        assert_eq!(
-            render(&widgets, &cells(&[("fld_src", json!([1]))])).unwrap_or_else(|e| panic!("{e}"))
-                [0]["value"],
-            json!(1)
-        );
-        assert!(
-            render(&widgets, &cells(&[("fld_src", json!([1, 2]))])).is_err(),
-            "多值公式不能静默截断"
-        );
+        for cell in [json!([1]), json!({"type": 2, "value": [1]})] {
+            assert_eq!(
+                render(&widgets, &cells(&[("fld_src", cell)])).unwrap_or_else(|e| panic!("{e}"))[0]
+                    ["value"],
+                json!(1)
+            );
+        }
+        for cell in [json!([1, 2]), json!({"type": 2, "value": [1, 2]})] {
+            assert!(
+                render(&widgets, &cells(&[("fld_src", cell)])).is_err(),
+                "多值公式不能静默截断"
+            );
+        }
     }
 
     #[test]
