@@ -2663,6 +2663,7 @@ mod tests {
                 end_time_field: None,
                 department_field: None,
                 handler_field: None,
+                batch_scope_field: None,
             },
         )
         .await;
@@ -2783,6 +2784,7 @@ mod tests {
                 base_token: &source, table_id: E2E_TABLE_ID, approval_code: E2E_APPROVAL_CODE,
                 applicant_field: "fldApplicant", backfill_field: "fldSerial", base_timezone: "Asia/Shanghai", maps: Some(&maps),
                 status_field: None, flow_field: None, start_time_field: None, end_time_field: None, department_field: None, handler_field: None,
+                batch_scope_field: None,
             }).await?;
             let mut transaction = database.transaction().await?;
             let config_id = insert_plan(&context, &mut transaction, &plan).await?;
@@ -3018,6 +3020,7 @@ mod tests {
                 end_time_field: None,
                 department_field: None,
                 handler_field: None,
+                batch_scope_field: None,
             },
         )
         .await
@@ -3263,6 +3266,7 @@ mod tests {
                 end_time_field: None,
                 department_field: None,
                 handler_field: None,
+                batch_scope_field: None,
             },
         )
         .await

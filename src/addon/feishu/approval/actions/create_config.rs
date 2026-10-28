@@ -75,6 +75,10 @@ pub(super) struct CreateConfigInput {
     pub(super) department_field: Option<String>,
     #[serde(default)]
     pub(super) handler_field: Option<String>,
+    /// 批量范围复选框列（可选）。`field_id` **或**列名都接受，落库统一存 id；
+    /// 留空 = 不启用，播种仍按旧行为（只处理回填列为空的记录）。
+    #[serde(default)]
+    pub(super) batch_scope_field: Option<String>,
 }
 
 impl ParamInput for CreateConfigInput {
@@ -191,6 +195,7 @@ pub(super) async fn handle(
             end_time_field: input.end_time_field.as_deref(),
             department_field: input.department_field.as_deref(),
             handler_field: input.handler_field.as_deref(),
+            batch_scope_field: input.batch_scope_field.as_deref(),
         },
     )
     .await
@@ -318,6 +323,7 @@ mod tests {
             end_time_field: None,
             department_field: None,
             handler_field: None,
+            batch_scope_field: None,
         }
     }
 
@@ -338,11 +344,13 @@ mod tests {
             "base_token": "appX", "table_id": "tblX", "approval_code": "CODE",
             "applicant_field": "申请人", "backfill_field": "审批编号",
             "base_timezone": "Asia/Shanghai",
-            "status_field": "申请状态", "handler_field": "fldHandler"
+            "status_field": "申请状态", "handler_field": "fldHandler",
+            "batch_scope_field": "纳入批量"
         }))
         .unwrap_or_else(|error| panic!("可选回填列应接受: {error}"));
         assert_eq!(parsed.status_field.as_deref(), Some("申请状态"));
         assert_eq!(parsed.handler_field.as_deref(), Some("fldHandler"));
+        assert_eq!(parsed.batch_scope_field.as_deref(), Some("纳入批量"));
         assert!(parsed.flow_field.is_none(), "未给的回填列落 None");
         assert!(parsed.validate().is_ok());
 
@@ -354,6 +362,7 @@ mod tests {
         }))
         .unwrap_or_else(|error| panic!("{error}"));
         assert!(legacy.status_field.is_none() && legacy.handler_field.is_none());
+        assert!(legacy.batch_scope_field.is_none(), "省略批量范围列落 None");
     }
 
     #[test]

@@ -2210,6 +2210,8 @@ function parseApprovalConfigItem(
     approvalId: asNullableString(raw.approval_id),
     applicantField: asString(raw.applicant_field),
     backfillField: asString(raw.backfill_field),
+    batchScopeField: asNullableString(raw.batch_scope_field),
+    batchScopeFieldName: asNullableString(raw.batch_scope_field_name),
     statusField: asNullableString(raw.status_field),
     flowField: asNullableString(raw.flow_field),
     startTimeField: asNullableString(raw.start_time_field),
@@ -2311,6 +2313,8 @@ export type CreateApprovalConfigInput = {
   approvalId?: string;
   applicantField: string;
   backfillField: string;
+  /// 批量范围复选框列（field_id 或列名）；留空 = 不启用。
+  batchScopeField?: string;
   /// 六个可选回填扩展列（field_id 或列名）；留空 = 不回填该列。
   statusField?: string;
   flowField?: string;
@@ -2369,6 +2373,9 @@ export async function createApprovalConfig(
         : {}),
       applicant_field: input.applicantField.trim(),
       backfill_field: input.backfillField.trim(),
+      ...(input.batchScopeField?.trim()
+        ? { batch_scope_field: input.batchScopeField.trim() }
+        : {}),
       base_timezone: input.baseTimezone.trim(),
       ...extendedBackfillFields(input),
       ...(input.maps === undefined
@@ -2397,6 +2404,8 @@ export type UpdateApprovalConfigPatch = {
   baseTimezone?: string;
   /// 审批定义的数字 ID；`""` 表示清空（**必须发送**，不能当「未给」省略）。
   approvalId?: string;
+  /// 批量范围复选框列；空串 = 清空（**必须发送**，不能当「未给」省略），未给 = 不改。
+  batchScopeField?: string;
   /// 六个可选回填扩展列；未给 = 不改（空串同样不改）。
   statusField?: string;
   flowField?: string;
@@ -2420,6 +2429,9 @@ export async function updateApprovalConfig(
   // 空串也要发：后端把它当「清空该列」，省略才是「不改」。
   if (patch.approvalId !== undefined)
     body.approval_id = patch.approvalId.trim();
+  // 与其他回填列不同：空串也要发（后端据此写 NULL），省略才是「不改」。
+  if (patch.batchScopeField !== undefined)
+    body.batch_scope_field = patch.batchScopeField.trim();
   Object.assign(body, extendedBackfillFields(patch));
   if (patch.maps !== undefined)
     body.maps = patch.maps.map((map) => ({

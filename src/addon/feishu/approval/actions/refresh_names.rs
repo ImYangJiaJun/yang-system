@@ -225,6 +225,24 @@ async fn refresh(
                 missing = true;
             }
         }
+        // 批量范围列是可选配置：只有配置了才补展示名；解析不到记 missing。
+        let batch_scope: Option<String> = row.optional("batch_scope_field")?;
+        if let Some(field_id) = batch_scope
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            match fields
+                .as_ref()
+                .and_then(|items| items.iter().find(|item| item.field_id == field_id))
+                .and_then(|item| display_name(Some(&item.field_name)))
+            {
+                Some(name) => {
+                    record.insert("batch_scope_field_name", serde_json::json!(name));
+                }
+                None => missing = true,
+            }
+        }
         if missing {
             incomplete_ids.push(id);
         }

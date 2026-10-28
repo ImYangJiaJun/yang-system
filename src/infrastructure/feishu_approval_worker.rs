@@ -690,7 +690,14 @@ struct ClaimedTask {
 
 /// 播种：把「回填列为空」的多维表格记录变成待处理任务。
 ///
-/// # 判据只有一个：回填列是不是空的
+/// # 判据：回填列为空；配置了批量范围列时还要求该复选框已勾选
+///
+/// 未配置 `batch_scope_field` 时判据只有一个：回填列是不是空的。
+/// 配置后，只有「复选框为 true 且回填列为空」的记录才会被播种——勾选这一位
+/// 是用户自己指定的批量提交范围。
+///
+/// **勾选只在受理/播种时点生效**：已在队列中的任务不因取消勾选而撤回；取消勾选
+/// 只影响后续播种（已入队的照旧处理，回填成功后自然退出判据）。
 ///
 /// 这也是使用方的**重试通道**——清空那一格就等于「这条再来一遍」。所以已存在的
 /// 任务行不是「跳过」，而是**按需拉回 `pending`**：
@@ -716,6 +723,7 @@ async fn seed_tasks(runner: &RoundRunner, trigger: RoundTrigger) -> anyhow::Resu
             "table_id",
             "approval_code",
             "backfill_field",
+            "batch_scope_field",
         ])?
         .where_eq("enabled", serde_json::json!(true))?;
     let configs = all_pages(configs, SEED_MAX_CONFIG_PAGES).await?;
@@ -739,7 +747,38 @@ async fn seed_tasks(runner: &RoundRunner, trigger: RoundTrigger) -> anyhow::Resu
     Ok(seeded)
 }
 
+/// 解析批量范围复选框列的当前字段名；未配置返回 `None`。
+///
+/// 运行期校验与配置期同一纪律：字段必须存在且是复选框（type=7）；类型码缺失时
+/// 放行（拿不到元数据就不拒绝本来可用的配置，照 `check_backfill_targets`）。
+/// 失败文案必须可行动——点名字段 id 或「应为复选框」。
+fn resolve_batch_scope_field_name(
+    fields: &[bitable::FieldItem],
+    field_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(field_id) = field_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let field = fields
+        .iter()
+        .find(|field| field.field_id == field_id)
+        .with_context(|| {
+            format!("批量范围复选框列的字段 id {field_id} 在多维表格里不存在（可能已被删除）")
+        })?;
+    if let Some(field_type) = field.field_type {
+        anyhow::ensure!(
+            field_type == 7,
+            "批量范围列「{}」的类型是 type={field_type}，应为复选框（type=7）",
+            field.field_name
+        );
+    }
+    Ok(Some(bitable::resolve_field_name(fields, field_id)?))
+}
+
 /// 单条配置的播种。
+///
+/// 筛选条件是「回填列为空」；配置了批量范围列时再加一条「该复选框已勾选」
+/// （见 [`bitable::pending_records_filter`] 与 [`resolve_batch_scope_field_name`]）。
 async fn seed_config(
     runner: &RoundRunner,
     config: &Record,
@@ -751,7 +790,8 @@ async fn seed_config(
     let table_id: String = config.require("table_id")?;
     let approval_code: String = config.require("approval_code")?;
     let backfill_field_id: String = config.require("backfill_field")?;
-    tracing::debug!(stage = "seed", config_id, table_id = %table_id, backfill_field = %backfill_field_id, "审批派发开始扫描回填列为空的记录");
+    let batch_scope_field: Option<String> = config.optional("batch_scope_field")?;
+    tracing::debug!(stage = "seed", config_id, table_id = %table_id, backfill_field = %backfill_field_id, batch_scope_field = ?batch_scope_field, "审批派发开始扫描回填列为空的记录");
 
     let coordinates = BitableCoordinates {
         app_token: base_token.clone(),
@@ -769,13 +809,16 @@ async fn seed_config(
     .await
     .map_err(|failure| anyhow::anyhow!("读取表结构失败：{}", failure.message))?;
     let backfill_name = bitable::resolve_field_name(&fields, &backfill_field_id)?;
+    // 批量范围列（可选）：运行期再校验一次存在与类型，配置后字段被删/改类型
+    // 会让该配置本轮播种失败并告警，而不是静默扫描全表。
+    let batch_scope_name = resolve_batch_scope_field_name(&fields, batch_scope_field.as_deref())?;
 
     let pending_records = bitable::search_all_records(
         runner.transport(),
         runner.sleeper.as_ref(),
         &runner.tokens,
         &coordinates,
-        bitable::empty_field_filter(&backfill_name),
+        bitable::pending_records_filter(&backfill_name, batch_scope_name.as_deref()),
         SEED_MAX_PAGES,
     )
     .await
@@ -2276,6 +2319,60 @@ mod tests {
         assert!(
             batch_seconds < 120,
             "认领批 {CLAIM_BATCH} 条在限速下占 {batch_seconds}s，超过 2 分钟"
+        );
+    }
+
+    /// 造一个字段项；`field_type` 为 `None` 模拟缺失类型码的旧响应。
+    fn field_item(field_id: &str, field_name: &str, field_type: Option<i32>) -> bitable::FieldItem {
+        bitable::FieldItem {
+            is_primary: false,
+            field_id: field_id.to_string(),
+            field_name: field_name.to_string(),
+            field_type,
+            ui_type: None,
+            property: None,
+        }
+    }
+
+    #[test]
+    fn batch_scope_field_resolves_only_checkbox_columns() {
+        let fields = [
+            field_item("fldScope", "纳入批量", Some(7)),
+            field_item("fldText", "备注", Some(1)),
+        ];
+        assert_eq!(
+            resolve_batch_scope_field_name(&fields, Some("fldScope"))
+                .unwrap_or_else(|error| panic!("复选框应可解析: {error}")),
+            Some("纳入批量".to_string())
+        );
+        // 未配置 / 空串 / 纯空白 → 不启用。
+        for absent in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                resolve_batch_scope_field_name(&fields, absent)
+                    .unwrap_or_else(|error| panic!("未配置不该报错: {error}")),
+                None,
+                "{absent:?} 应视为未配置"
+            );
+        }
+        // 文本列被拒，文案要指出应为复选框。
+        let error = resolve_batch_scope_field_name(&fields, Some("fldText"))
+            .err()
+            .unwrap_or_else(|| panic!("文本列必须被拒"));
+        assert!(
+            error.to_string().contains("type=7"),
+            "要说明应为复选框: {error}"
+        );
+        // 字段被删 → 点名 id。
+        let error = resolve_batch_scope_field_name(&fields, Some("fldGone"))
+            .err()
+            .unwrap_or_else(|| panic!("缺字段必须被拒"));
+        assert!(error.to_string().contains("fldGone"), "实际: {error}");
+        // 类型码缺失时放行，只解析名字。
+        let unknown = [field_item("fldScope", "纳入批量", None)];
+        assert_eq!(
+            resolve_batch_scope_field_name(&unknown, Some("fldScope"))
+                .unwrap_or_else(|error| panic!("类型码缺失不应拦: {error}")),
+            Some("纳入批量".to_string())
         );
     }
 

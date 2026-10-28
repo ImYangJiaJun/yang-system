@@ -2536,6 +2536,14 @@
                     "description": "多维表格 token。",
                     "type": "string"
                   },
+                  "batch_scope_field": {
+                    "default": null,
+                    "description": "批量范围复选框列（可选）。`field_id` **或**列名都接受，落库统一存 id； 留空 = 不启用，播种仍按旧行为（只处理回填列为空的记录）。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "department_field": {
                     "default": null,
                     "type": [
@@ -3817,7 +3825,7 @@
     },
     "/api/v1/feishu/approval/configs/update": {
       "post": {
-        "description": "更新配置名、启用开关、Base 时区、逐项字段映射或六个可选回填列；坐标与审批三件套不可改",
+        "description": "更新配置名、启用开关、Base 时区、逐项字段映射、六个可选回填列或批量范围列；坐标与审批三件套不可改",
         "operationId": "feishu.approval.update_config",
         "parameters": [],
         "requestBody": {
@@ -3866,6 +3874,14 @@
                   "base_timezone": {
                     "default": null,
                     "description": "Base 时区（IANA 名）；省略即不改。",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "batch_scope_field": {
+                    "default": null,
+                    "description": "批量范围复选框列（可选）。`field_id` **或**列名都接受，落库统一存 id； `Some(\"\")` = 清空（回到旧行为：只按回填列为空扫描）。",
                     "type": [
                       "string",
                       "null"

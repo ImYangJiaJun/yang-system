@@ -18,8 +18,8 @@ use yang_db::{field, table, CompareOp, QueryBuilder};
 
 use crate::addon::feishu::domain::approval_match::{columns_from_fields, FieldMapping};
 use crate::addon::feishu::domain::approval_provision::{
-    build_plan, check_backfill_targets, display_name, fill_table_names, insert_maps,
-    resolve_optional_id, ProvisionInput,
+    build_plan, check_backfill_targets, check_batch_scope_field, display_name, fill_table_names,
+    insert_maps, resolve_optional_id, ProvisionInput,
 };
 use crate::addon::feishu::domain::bitable::{list_all_fields, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
@@ -62,6 +62,10 @@ pub(super) struct UpdateConfigInput {
     pub(super) department_field: Option<String>,
     #[serde(default)]
     pub(super) handler_field: Option<String>,
+    /// 批量范围复选框列（可选）。`field_id` **或**列名都接受，落库统一存 id；
+    /// `Some("")` = 清空（回到旧行为：只按回填列为空扫描）。
+    #[serde(default)]
+    pub(super) batch_scope_field: Option<String>,
 }
 
 impl ParamInput for UpdateConfigInput {
@@ -71,14 +75,16 @@ impl ParamInput for UpdateConfigInput {
 }
 
 impl UpdateConfigInput {
-    /// 六个可选回填列里有没有给（`Some("")` 也算——那是「清空该列」）。
-    fn has_backfill_fields(&self) -> bool {
+    /// 任一列坐标（六个可选回填列或批量范围列）有没有给
+    /// （`Some("")` 也算——那是「清空该列」）。
+    fn has_column_updates(&self) -> bool {
         self.status_field.is_some()
             || self.flow_field.is_some()
             || self.start_time_field.is_some()
             || self.end_time_field.is_some()
             || self.department_field.is_some()
             || self.handler_field.is_some()
+            || self.batch_scope_field.is_some()
     }
 
     fn validate(&self) -> Result<(), BaseError> {
@@ -93,10 +99,10 @@ impl UpdateConfigInput {
             && self.base_timezone.is_none()
             && self.approval_id.is_none()
             && self.maps.is_none()
-            && !self.has_backfill_fields()
+            && !self.has_column_updates()
         {
             return Err(BaseError::ParamInvalid(
-                "title/enabled/base_timezone/approval_id/maps/回填列".to_string(),
+                "title/enabled/base_timezone/approval_id/maps/回填列/批量范围列".to_string(),
                 "至少提供一个要更新的字段".to_string(),
             ));
         }
@@ -143,7 +149,7 @@ pub(super) fn register(module: ModuleSpec, context: Arc<FeishuContext>) -> Modul
         .route(HttpMethod::Post, "/api/v1/feishu/approval/configs/update")
         .display_name("更新审批派发配置")
         .description(
-            "更新配置名、启用开关、Base 时区、逐项字段映射或六个可选回填列；坐标与审批三件套不可改",
+            "更新配置名、启用开关、Base 时区、逐项字段映射、六个可选回填列或批量范围列；坐标与审批三件套不可改",
         )
         .permissions(["feishu.approval.write"])
         .register()
@@ -156,10 +162,11 @@ pub(super) async fn handle(
 ) -> Result<ApiResponse, BaseError> {
     input.validate()?;
 
-    let backfill_requested = input.has_backfill_fields();
+    let column_updates = input.has_column_updates();
 
-    // 飞书元数据校验（字段映射与六个可选回填列）在事务外完成，避免网络请求占用数据库事务。
-    let (plan, columns) = if input.maps.is_some() || backfill_requested {
+    // 飞书元数据校验（字段映射、六个可选回填列与批量范围列）在事务外完成，
+    // 避免网络请求占用数据库事务。
+    let (plan, columns) = if input.maps.is_some() || column_updates {
         let coordinates = context
             .approval_configs()
             .query()
@@ -195,6 +202,8 @@ pub(super) async fn handle(
                     end_time_field: None,
                     department_field: None,
                     handler_field: None,
+                    // 批量范围列同样走下面单独的轻校验（只拉一次字段）。
+                    batch_scope_field: None,
                 },
             )
             .await
@@ -211,8 +220,8 @@ pub(super) async fn handle(
             None
         };
 
-        // 六个可选回填列：拉一次字段校验存在且类型匹配（设计 §5.1）。
-        let columns = if backfill_requested {
+        // 六个可选回填列 + 批量范围列：拉一次字段校验存在且类型匹配（设计 §5.1）。
+        let columns = if column_updates {
             let field_coordinates = BitableCoordinates {
                 app_token: coordinates.require::<String>("base_token")?,
                 table_id: coordinates.require::<String>("table_id")?,
@@ -240,6 +249,15 @@ pub(super) async fn handle(
             if !reasons.is_empty() {
                 return Err(BaseError::ParamInvalid(
                     "回填列".to_string(),
+                    reasons.join("；"),
+                ));
+            }
+            // 批量范围列：可选，给了就必须是复选框。
+            let reasons =
+                check_batch_scope_field(&columns, &fields, input.batch_scope_field.as_deref());
+            if !reasons.is_empty() {
+                return Err(BaseError::ParamInvalid(
+                    "batch_scope_field".to_string(),
                     reasons.join("；"),
                 ));
             }
@@ -343,6 +361,19 @@ pub(super) async fn handle(
                     record.insert(name, serde_json::json!(resolve_optional_id(columns, value)));
                 }
             }
+        }
+        // 批量范围列：`Some("")` = 清空（写 NULL）；同时刷新展示名。
+        if let (Some(value), Some(columns)) = (input.batch_scope_field.as_deref(), columns.as_ref())
+        {
+            let id = resolve_optional_id(columns, Some(value));
+            let name = id.as_deref().and_then(|id| {
+                columns
+                    .iter()
+                    .find(|column| column.field_id == id)
+                    .map(|column| column.field_name.clone())
+            });
+            record.insert("batch_scope_field", serde_json::json!(id));
+            record.insert("batch_scope_field_name", serde_json::json!(name));
         }
 
         let affected = context
@@ -456,6 +487,7 @@ mod tests {
             end_time_field: None,
             department_field: None,
             handler_field: None,
+            batch_scope_field: None,
         }
     }
 
@@ -485,6 +517,10 @@ mod tests {
             },
             UpdateConfigInput {
                 status_field: Some("申请状态".to_string()),
+                ..input()
+            },
+            UpdateConfigInput {
+                batch_scope_field: Some("纳入批量".to_string()),
                 ..input()
             },
         ] {
@@ -532,7 +568,7 @@ mod tests {
             handler_field: Some(String::new()),
             ..input()
         };
-        assert!(value.has_backfill_fields());
+        assert!(value.has_column_updates());
         assert!(value.validate().is_ok(), "空串是清空语义，不是没给");
     }
 
@@ -541,11 +577,13 @@ mod tests {
         let parsed = serde_json::from_value::<UpdateConfigInput>(serde_json::json!({
             "config_id": 1,
             "status_field": "fldStatus",
-            "handler_field": "当前处理人"
+            "handler_field": "当前处理人",
+            "batch_scope_field": "纳入批量"
         }))
         .unwrap_or_else(|error| panic!("回填列应接受: {error}"));
         assert_eq!(parsed.status_field.as_deref(), Some("fldStatus"));
         assert_eq!(parsed.handler_field.as_deref(), Some("当前处理人"));
+        assert_eq!(parsed.batch_scope_field.as_deref(), Some("纳入批量"));
         assert!(parsed.flow_field.is_none());
         assert!(parsed.validate().is_ok());
 
@@ -553,7 +591,8 @@ mod tests {
             "config_id": 1, "title": "新名"
         }))
         .unwrap_or_else(|error| panic!("{error}"));
-        assert!(!legacy.has_backfill_fields());
+        assert!(!legacy.has_column_updates());
+        assert!(legacy.batch_scope_field.is_none(), "省略批量范围列落 None");
     }
 
     #[test]

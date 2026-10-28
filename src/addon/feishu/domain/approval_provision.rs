@@ -62,6 +62,9 @@ pub(crate) struct ProvisionInput<'a> {
     pub(crate) end_time_field: Option<&'a str>,
     pub(crate) department_field: Option<&'a str>,
     pub(crate) handler_field: Option<&'a str>,
+    /// 批量范围复选框列（可选）。`field_id` **或**列名都接受；`None`/空 = 不启用，
+    /// 播种仍按旧行为（只处理回填列为空的记录）。给了就必须是复选框（type=7）。
+    pub(crate) batch_scope_field: Option<&'a str>,
 }
 
 /// 建配置失败。
@@ -132,6 +135,9 @@ pub(crate) struct ProvisionPlan {
     pub(crate) end_time_field_id: Option<String>,
     pub(crate) department_field_id: Option<String>,
     pub(crate) handler_field_id: Option<String>,
+    /// 批量范围复选框列的 `field_id` 与展示名（可选）。`None` = 未启用。
+    pub(crate) batch_scope_field_id: Option<String>,
+    pub(crate) batch_scope_field_name: Option<String>,
     pub(crate) base_timezone: String,
     /// 审批定义的 `form` 原文快照。
     ///
@@ -237,6 +243,12 @@ pub(crate) async fn build_plan(
         input.department_field,
         input.handler_field,
     );
+    if !reasons.is_empty() {
+        return Err(ProvisionError::Invalid(reasons));
+    }
+
+    // 批量范围复选框列：可选，给了就校验存在且是复选框（type=7）。
+    let reasons = check_batch_scope_field(&columns, &fields, input.batch_scope_field);
     if !reasons.is_empty() {
         return Err(ProvisionError::Invalid(reasons));
     }
@@ -420,6 +432,14 @@ fn plan(
     let end_time_field_id = resolve_optional_id(columns, input.end_time_field);
     let department_field_id = resolve_optional_id(columns, input.department_field);
     let handler_field_id = resolve_optional_id(columns, input.handler_field);
+    // 批量范围列不是回填目标，不参与「同一格被多列写」的查重；只解析 id 与当前列名。
+    let batch_scope_field_id = resolve_optional_id(columns, input.batch_scope_field);
+    let batch_scope_field_name = batch_scope_field_id.as_deref().and_then(|id| {
+        columns
+            .iter()
+            .find(|column| column.field_id == id)
+            .map(|column| column.field_name.clone())
+    });
     reasons.extend(duplicate_backfill_targets(
         &applicant.field_id,
         &backfill.field_id,
@@ -455,6 +475,8 @@ fn plan(
         end_time_field_id,
         department_field_id,
         handler_field_id,
+        batch_scope_field_id,
+        batch_scope_field_name,
         base_timezone: input.base_timezone.trim().to_string(),
         approval_name: approval_name.trim().to_string(),
         form_snapshot: form_snapshot.to_string(),
@@ -534,6 +556,48 @@ pub(crate) fn check_backfill_targets(
         }
     }
     reasons
+}
+
+/// 校验批量范围复选框列：列存在且类型是复选框（type=7）。未给（`None`/空）跳过。
+///
+/// 与 [`check_backfill_targets`] 同一纪律：列由 `columns_from_fields(fields)` 派生，
+/// 取不到字段或类型码缺失都不拦——拿不到元数据就不拒绝本来可用的配置。
+pub(crate) fn check_batch_scope_field(
+    columns: &[Column],
+    fields: &[FieldItem],
+    batch_scope_field: Option<&str>,
+) -> Vec<String> {
+    let Some(given) = batch_scope_field
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Vec::new();
+    };
+    let Some(column) = resolve_field_coord(columns, given) else {
+        return vec![format!(
+            "批量范围复选框列在多维表格里没有对应列（给定「{given}」）"
+        )];
+    };
+    let Some(field) = fields
+        .iter()
+        .find(|field| field.field_id == column.field_id)
+    else {
+        return Vec::new();
+    };
+    let Some(field_type) = field.field_type else {
+        return Vec::new();
+    };
+    if field_type != 7 {
+        let type_label = field
+            .ui_type
+            .clone()
+            .unwrap_or_else(|| format!("type={field_type}"));
+        return vec![format!(
+            "批量范围复选框列「{}」的类型是 {type_label}（type={field_type}），应为复选框（type=7）",
+            column.field_name
+        )];
+    }
+    Vec::new()
 }
 
 /// 六个可选回填目标与申请/回填列之间不得重复使用同一 `field_id`。
@@ -628,6 +692,15 @@ pub(crate) async fn insert_plan(
         serde_json::json!(&plan.applicant_field_id),
     );
     config_row.insert("backfill_field", serde_json::json!(&plan.backfill_field_id));
+    // 批量范围复选框列（可选）：`None` 落 `NULL`。
+    config_row.insert(
+        "batch_scope_field",
+        serde_json::json!(&plan.batch_scope_field_id),
+    );
+    config_row.insert(
+        "batch_scope_field_name",
+        serde_json::json!(&plan.batch_scope_field_name),
+    );
     // 六个可选回填列（设计 §5.1）：`None` 落 `NULL`，与 `option_source_key` 同一写法。
     config_row.insert("status_field", serde_json::json!(&plan.status_field_id));
     config_row.insert("flow_field", serde_json::json!(&plan.flow_field_id));
@@ -1279,6 +1352,7 @@ mod tests {
             end_time_field: None,
             department_field: None,
             handler_field: None,
+            batch_scope_field: None,
         }
     }
 
@@ -2007,6 +2081,79 @@ mod tests {
             None
         )
         .is_empty());
+    }
+
+    #[test]
+    fn batch_scope_field_accepts_checkbox_and_skips_absent() {
+        let fields = [
+            field("fldScope", "纳入批量", 7),
+            field("fldText", "备注", 1),
+        ];
+        let columns = columns_from_fields(&fields);
+        // 复选框(7) 通过；None/空串/纯空白都视为未配置。
+        assert!(check_batch_scope_field(&columns, &fields, Some("fldScope")).is_empty());
+        assert!(check_batch_scope_field(&columns, &fields, None).is_empty());
+        for blank in ["", "   "] {
+            assert!(check_batch_scope_field(&columns, &fields, Some(blank)).is_empty());
+        }
+        // 文本列被拒，文案要含列名与「应为复选框」。
+        let reasons = check_batch_scope_field(&columns, &fields, Some("fldText"));
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].contains("备注") && reasons[0].contains("复选框"),
+            "{}",
+            reasons[0]
+        );
+        // 不存在的列被拒。
+        let reasons = check_batch_scope_field(&columns, &fields, Some("没有的列"));
+        assert!(
+            reasons[0].contains("没有对应列") && reasons[0].contains("没有的列"),
+            "{}",
+            reasons[0]
+        );
+        // 类型码缺失时放行（拿不到元数据就不拒绝本来可用的配置）。
+        let unknown = [FieldItem {
+            field_type: None,
+            ..field("fldScope", "纳入批量", 7)
+        }];
+        let columns = columns_from_fields(&unknown);
+        assert!(check_batch_scope_field(&columns, &unknown, Some("fldScope")).is_empty());
+    }
+
+    #[test]
+    fn plan_resolves_batch_scope_field_to_id_and_name() {
+        let result = plan(
+            &ProvisionInput {
+                batch_scope_field: Some("批量范围"),
+                ..input("fldP", "fldB")
+            },
+            "t",
+            &[FormWidget {
+                id: "w1".to_string(),
+                name: "SWIFT Address".to_string(),
+                r#type: "input".to_string(),
+                required: false,
+                option: None,
+                external_data: None,
+                value: serde_json::Value::Null,
+                children: Vec::new(),
+            }],
+            &[
+                column("fldP", "申请人", &[]),
+                column("fldB", "审批编号", &[]),
+                column("fldScope", "批量范围", &[]),
+                column("fldC", "SWIFT Address", &[]),
+            ],
+            &BTreeMap::new(),
+            "[]",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            result.batch_scope_field_id.as_deref(),
+            Some("fldScope"),
+            "存 id 不存列名"
+        );
+        assert_eq!(result.batch_scope_field_name.as_deref(), Some("批量范围"));
     }
 
     #[test]

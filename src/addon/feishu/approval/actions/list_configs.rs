@@ -28,12 +28,14 @@ pub(super) const CONFIG_ITEM_COLUMNS: &[&str] = &[
     "approval_name",
     "applicant_field_name",
     "backfill_field_name",
+    "batch_scope_field_name",
     "base_token",
     "table_id",
     "approval_code",
     "approval_id",
     "applicant_field",
     "backfill_field",
+    "batch_scope_field",
     "status_field",
     "flow_field",
     "start_time_field",
@@ -130,6 +132,10 @@ pub(super) struct ConfigItem {
     applicant_field: String,
     /// 回填字段 ID。
     backfill_field: String,
+    /// 批量范围复选框列的 field_id；`None` = 未启用（播种只看回填列为空）。
+    batch_scope_field: Option<String>,
+    /// 批量范围复选框列的展示名（缓存；仅供控制台展示）。
+    batch_scope_field_name: Option<String>,
     /// 六个可选回填目标列的 field_id（设计 §5.1）。`None` = 未配置该列回填。
     status_field: Option<String>,
     flow_field: Option<String>,
@@ -319,6 +325,8 @@ pub(super) async fn handle(
             approval_id: record.optional("approval_id")?,
             applicant_field: record.require("applicant_field")?,
             backfill_field: record.require("backfill_field")?,
+            batch_scope_field: record.optional("batch_scope_field")?,
+            batch_scope_field_name: record.optional("batch_scope_field_name")?,
             status_field: record.optional("status_field")?,
             flow_field: record.optional("flow_field")?,
             start_time_field: record.optional("start_time_field")?,
@@ -416,6 +424,8 @@ mod tests {
             approval_id: None,
             applicant_field: "fldP".to_string(),
             backfill_field: "fldB".to_string(),
+            batch_scope_field: Some("fldScope".to_string()),
+            batch_scope_field_name: Some("纳入批量".to_string()),
             status_field: Some("fldStatus".to_string()),
             flow_field: None,
             start_time_field: None,
@@ -450,5 +460,14 @@ mod tests {
             Some(&serde_json::json!("fldHandler"))
         );
         assert_eq!(value.get("flow_field"), Some(&serde_json::json!(null)));
+        // 批量范围列同样按 `Option` 形态返回。
+        assert_eq!(
+            value.get("batch_scope_field"),
+            Some(&serde_json::json!("fldScope"))
+        );
+        assert_eq!(
+            value.get("batch_scope_field_name"),
+            Some(&serde_json::json!("纳入批量"))
+        );
     }
 }

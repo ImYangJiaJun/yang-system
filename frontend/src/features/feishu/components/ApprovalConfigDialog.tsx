@@ -180,6 +180,11 @@ export function ApprovalConfigDialog({
     initialConfig?.backfillField ?? "",
   );
   const [backfillManual, setBackfillManual] = useState(false);
+  // 批量范围复选框列（可选）：空串 = 不启用。
+  const [batchScopeField, setBatchScopeField] = useState(
+    initialConfig?.batchScopeField ?? "",
+  );
+  const [batchScopeManual, setBatchScopeManual] = useState(false);
   // 六个可选回填扩展列：空串 = 不回填。
   const [extendedFields, setExtendedFields] = useState<Record<string, string>>(
     () => ({
@@ -241,6 +246,9 @@ export function ApprovalConfigDialog({
     applicantField.trim() !== "" &&
     backfillField.trim() !== "" &&
     timezone.trim() !== "";
+
+  // 第 4 步摘要与提交共用：新建非空才发；编辑态与原值不同才发（清空发空串，后端写 NULL）。
+  const batchScope = batchScopeField.trim();
 
   async function loadTables() {
     setTablesPending(true);
@@ -359,6 +367,8 @@ export function ApprovalConfigDialog({
       const value = extendedFields[key]?.trim();
       if (value) extended[key] = value;
     }
+    // 编辑态：与原值比较决定是否发送（清空发空串，后端写 NULL）。
+    const savedBatchScope = (initialConfig?.batchScopeField ?? "").trim();
     const input: CreateApprovalConfigInput = {
       baseToken,
       tableId,
@@ -366,6 +376,7 @@ export function ApprovalConfigDialog({
       ...(approvalId.trim() ? { approvalId: approvalId.trim() } : {}),
       applicantField,
       backfillField,
+      ...(batchScope ? { batchScopeField: batchScope } : {}),
       baseTimezone: timezone,
       ...extended,
       maps: Object.entries(maps)
@@ -387,6 +398,9 @@ export function ApprovalConfigDialog({
           ...(title !== initialConfig.title ? { title } : {}),
           ...(approvalId !== (initialConfig.approvalId ?? "")
             ? { approvalId }
+            : {}),
+          ...(batchScope !== savedBatchScope
+            ? { batchScopeField: batchScope }
             : {}),
           ...extended,
         });
@@ -826,6 +840,15 @@ export function ApprovalConfigDialog({
               onChange={setBackfillField}
               disabled={Boolean(initialConfig)}
             />
+            <FieldPick
+              label="批量范围复选框列（可选）"
+              description="勾选该列且回填列为空的记录才参与批量提交；留空保持现状（只按回填列为空扫描）。"
+              fields={fields.filter((f) => f.type === 7)}
+              value={batchScopeField}
+              manual={batchScopeManual}
+              onManualChange={setBatchScopeManual}
+              onChange={setBatchScopeField}
+            />
             {EXTENDED_BACKFILL_FIELDS.map((field) => (
               <FieldPick
                 key={field.key}
@@ -894,6 +917,15 @@ export function ApprovalConfigDialog({
                   backfillField
                 }
               />
+              {batchScope ? (
+                <SummaryRow
+                  label="批量范围复选框列"
+                  value={
+                    fields.find((f) => f.fieldId === batchScope)?.fieldName ??
+                    batchScope
+                  }
+                />
+              ) : null}
               {EXTENDED_BACKFILL_FIELDS.map((field) => {
                 const value = extendedFields[field.key] ?? "";
                 return value.trim() ? (

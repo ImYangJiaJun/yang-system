@@ -43,6 +43,8 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             approval_name => Str::new().title("审批名称").max_length(512).searchable(true),
             applicant_field_name => Str::new().title("申请人列名称").max_length(512),
             backfill_field_name => Str::new().title("回填列名称").max_length(512),
+            // 批量范围复选框列的展示名（仅供控制台展示；可选，空 = 未启用）。
+            batch_scope_field_name => Str::new().title("批量范围复选框列名称").max_length(512),
             // --- 多维表格坐标 ---
             //
             // 两列都必填：扫描与回写都直接打这两个路径段，缺一个就无法定位表格。
@@ -82,6 +84,14 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             backfill_field => Str::new()
                 .title("回填字段 ID")
                 .require(true)
+                .max_length(128),
+            // --- 批量范围（可选）---
+            //
+            // 存**复选框列**的 field_id（与 applicant_field/backfill_field 同一形态），
+            // 可空。配置后播种只处理「该复选框为 true 且回填列为空」的记录；
+            // 空 = 旧行为（只按回填列为空扫描）。
+            batch_scope_field => Str::new()
+                .title("批量范围复选框列 ID")
                 .max_length(128),
             // --- 可选回填扩展（设计 §5.1）---
             //

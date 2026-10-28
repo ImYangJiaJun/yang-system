@@ -1562,17 +1562,34 @@ pub(crate) async fn search_all_records(
     })
 }
 
-/// 「某列为空」的筛选体。
+/// 「回填列为空（且批量范围复选框已勾选）」的筛选体。
 ///
 /// `isEmpty` 的 `value` 必须是**空数组**（官方字段目标值说明：operator 为
 /// `isEmpty`/`isNotEmpty` 时需填空值 `[]`）——传 null 或不传都会吃 `1254018`。
-pub(crate) fn empty_field_filter(field_name: &str) -> serde_json::Value {
+///
+/// 配置了批量范围列时追加第二个条件。官方《记录筛选参数填写指南》：复选框的
+/// `value` 是**字符串布尔**、operator 仅支持 `is`，所以是
+/// `{field_name, operator: "is", value: ["true"]}`。两个条件用 `and` 连接。
+pub(crate) fn pending_records_filter(
+    backfill_field_name: &str,
+    batch_scope_field_name: Option<&str>,
+) -> serde_json::Value {
+    let mut conditions = vec![serde_json::json!({
+        "field_name": backfill_field_name,
+        "operator": "isEmpty",
+        "value": []
+    })];
+    if let Some(name) = batch_scope_field_name {
+        conditions.push(serde_json::json!({
+            "field_name": name,
+            "operator": "is",
+            "value": ["true"]
+        }));
+    }
     serde_json::json!({
         "filter": {
             "conjunction": "and",
-            "conditions": [
-                { "field_name": field_name, "operator": "isEmpty", "value": [] }
-            ]
+            "conditions": conditions
         },
         // 系统字段（创建人/创建时间…）没有 field_id，取回来会在重映射那步报错。
         "automatic_fields": false,
@@ -1816,6 +1833,45 @@ mod tests {
         let url = search_records_url("appbcbWCzen6", "tblsRc9GRRX")
             .unwrap_or_else(|error| panic!("应可构造: {error}"));
         assert!(url.ends_with("/records/search"), "{url}");
+    }
+
+    #[test]
+    fn pending_records_filter_without_scope_keeps_the_old_single_condition() {
+        let body = pending_records_filter("审批编号", None);
+        assert_eq!(body["filter"]["conjunction"], "and");
+        let conditions = body["filter"]["conditions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("conditions 必须是数组: {body}"));
+        assert_eq!(
+            conditions.len(),
+            1,
+            "未配置批量范围列时只有 isEmpty 一个条件"
+        );
+        assert_eq!(
+            conditions[0],
+            serde_json::json!({ "field_name": "审批编号", "operator": "isEmpty", "value": [] })
+        );
+        assert_eq!(body["automatic_fields"], false);
+    }
+
+    #[test]
+    fn pending_records_filter_with_scope_requires_a_checked_checkbox() {
+        let body = pending_records_filter("审批编号", Some("纳入批量"));
+        let conditions = body["filter"]["conditions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("conditions 必须是数组: {body}"));
+        assert_eq!(conditions.len(), 2, "两个条件必须同时成立");
+        assert_eq!(
+            conditions[1],
+            serde_json::json!({
+                "field_name": "纳入批量",
+                "operator": "is",
+                "value": ["true"]
+            }),
+            "复选框 value 是字符串布尔，operator 只能是 is"
+        );
+        assert_eq!(body["filter"]["conjunction"], "and");
+        assert_eq!(body["automatic_fields"], false);
     }
 
     #[test]

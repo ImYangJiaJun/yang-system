@@ -30,6 +30,7 @@ const FIELDS: BitableField[] = [
   { fieldId: "fldApp", fieldName: "申请人", type: 1 },
   { fieldId: "fldBack", fieldName: "审批编号", type: 1 },
   { fieldId: "fldAmount", fieldName: "费用金额", type: 1 },
+  { fieldId: "fldBatch", fieldName: "纳入批量", type: 7 },
 ];
 
 const TABLES: BitableTable[] = [{ tableId: TABLE_ID, name: "差旅报销台账" }];
@@ -953,6 +954,79 @@ describe("建配置向导 · 第四步（提交）", () => {
     );
     const arg = vi.mocked(client.createConfig).mock.calls[0]?.[0];
     expect(arg).not.toHaveProperty("flowField");
+  });
+
+  it("选批量范围复选框列后随 create_config 发送，下拉只列复选框类型", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    await driveToStep2(user, client);
+    await user.type(screen.getByLabelText("审批定义 Code"), "CODE-TRAVEL");
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    await user.click(
+      await screen.findByRole("combobox", { name: "申请人员字段" }),
+    );
+    await user.click(await screen.findByRole("option", { name: /申请人/ }));
+    await user.click(screen.getByRole("combobox", { name: "回填字段" }));
+    await user.click(await screen.findByRole("option", { name: /审批编号/ }));
+
+    // 批量范围下拉只列复选框（type 7）的列
+    await user.click(
+      screen.getByRole("combobox", { name: "批量范围复选框列（可选）" }),
+    );
+    expect(
+      await screen.findByRole("option", { name: /纳入批量/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /申请人/ }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: /纳入批量/ }));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    // 第四步摘要展示所选列
+    expect(await screen.findByText("批量范围复选框列")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "创建配置" }));
+
+    await waitFor(() =>
+      expect(client.createConfig).toHaveBeenCalledWith(
+        expect.objectContaining({ batchScopeField: "fldBatch" }),
+      ),
+    );
+  });
+
+  it("编辑态清空批量范围复选框列时发送空串", async () => {
+    const user = userEvent.setup();
+    const client = stubClient();
+    render(
+      <ApprovalConfigDialog
+        client={client}
+        onCancel={vi.fn()}
+        initialConfig={{ ...SAVED_CONFIG, batchScopeField: "fldBatch" }}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "预览控件" }));
+    await screen.findByRole("combobox", { name: "费用金额对应的多维表格字段" });
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+
+    // 切到手填后清空（下拉没有「清空」项）
+    const wrapper = screen
+      .getByRole("combobox", { name: "批量范围复选框列（可选）" })
+      .closest("div") as HTMLElement;
+    await user.click(
+      within(wrapper).getByRole("button", { name: "列表没有想要的列？手填" }),
+    );
+    await user.clear(screen.getByPlaceholderText("field_id 或列名"));
+    await user.click(screen.getByRole("button", { name: "下一步" }));
+    await user.click(await screen.findByRole("button", { name: "保存配置" }));
+
+    await waitFor(() =>
+      expect(client.updateConfig).toHaveBeenCalledWith(
+        7,
+        expect.objectContaining({ batchScopeField: "" }),
+      ),
+    );
   });
 
   it("提交失败：服务端原因展示在最后一步，向导不关", async () => {

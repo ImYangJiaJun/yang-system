@@ -1151,6 +1151,9 @@ export type ApprovalConfigItem = {
   approvalId?: string | null;
   applicantField: string;
   backfillField: string;
+  /// 批量范围复选框列 `field_id` 与展示名；空 = 未启用（保持旧行为）。
+  batchScopeField?: string | null;
+  batchScopeFieldName?: string | null;
   /// 六个可选回填扩展列（设计 §5.1）：存目标列 `field_id`，空 = 不回填该列。
   /// 后端 `list_configs` 尚未投影这六列时为 null，等其落地自然填充。
   statusField?: string | null;

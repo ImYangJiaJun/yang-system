@@ -604,7 +604,7 @@ export function ApprovalConfigDetails({
             </p>
             <p className="rounded-md border border-border bg-muted/50 p-3 text-sm">
               省略 record_id
-              会唤醒所有启用配置的待处理队列，并非只处理请求中指定的数据表；后台处理回填列为空的记录。批量按钮请仅在需要处理整个队列时使用。
+              会唤醒所有启用配置的待处理队列，并非只处理请求中指定的数据表；后台处理回填列为空的记录（配置了批量范围复选框列时，仅处理已勾选的记录）。批量按钮请仅在需要处理整个队列时使用。
             </p>
             <p className="text-xs text-muted-foreground">
               若提示「配置不存在」，检查派发链接里的配置标识是否正确；若提示「Token
@@ -672,6 +672,13 @@ export function ApprovalConfigDetails({
                   ["Approval Code", item.approvalCode, true],
                   ["申请人列标识", item.applicantField, false],
                   ["编号回填列标识", item.backfillField, false],
+                  [
+                    "批量范围复选框列",
+                    item.batchScopeFieldName ??
+                      item.batchScopeField ??
+                      "未启用",
+                    false,
+                  ],
                   ["配置时区", item.baseTimezone, false],
                   [
                     "表单结构缓存时间",

@@ -459,7 +459,7 @@ export interface paths {
         put?: never;
         /**
          * 更新审批派发配置
-         * @description 更新配置名、启用开关、Base 时区、逐项字段映射或六个可选回填列；坐标与审批三件套不可改
+         * @description 更新配置名、启用开关、Base 时区、逐项字段映射、六个可选回填列或批量范围列；坐标与审批三件套不可改
          */
         post: operations["feishu.approval.update_config"];
         delete?: never;
@@ -4478,6 +4478,11 @@ export interface operations {
                     base_timezone: string;
                     /** @description 多维表格 token。 */
                     base_token: string;
+                    /**
+                     * @description 批量范围复选框列（可选）。`field_id` **或**列名都接受，落库统一存 id； 留空 = 不启用，播种仍按旧行为（只处理回填列为空的记录）。
+                     * @default null
+                     */
+                    batch_scope_field?: string | null;
                     /** @default null */
                     department_field?: string | null;
                     /** @default null */
@@ -5196,6 +5201,11 @@ export interface operations {
                      * @default null
                      */
                     base_timezone?: string | null;
+                    /**
+                     * @description 批量范围复选框列（可选）。`field_id` **或**列名都接受，落库统一存 id； `Some("")` = 清空（回到旧行为：只按回填列为空扫描）。
+                     * @default null
+                     */
+                    batch_scope_field?: string | null;
                     /**
                      * Format: int64
                      * @description 目标配置的 `id`。
