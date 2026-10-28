@@ -1596,6 +1596,22 @@ pub(crate) fn pending_records_filter(
     })
 }
 
+/// `batch_get` 里「没取到」的两种原因各自的用户文案；两边都空返回 `None`。
+///
+/// `absent` 与 `forbidden` 的处置完全不同：前者重试无解（记录已删除/从未存在），
+/// 后者要找管理员在多维表格高级权限里放行。合并成一句「被拒或不存在」会把用户
+/// 引向错误的方向，所以分开写。
+fn describe_unfetched(forbidden: &[String], absent: &[String]) -> Option<String> {
+    let mut parts = Vec::new();
+    if !forbidden.is_empty() {
+        parts.push(format!("应用无权读取该记录（高级权限拒绝）：{forbidden:?}"));
+    }
+    if !absent.is_empty() {
+        parts.push(format!("记录不存在（可能已被删除）：{absent:?}"));
+    }
+    (!parts.is_empty()).then(|| parts.join("；"))
+}
+
 /// 按 `record_id` 列表取记录（`records/batch_get`，单次最多 100 条）。
 ///
 /// # 为什么不是「查询记录 + filter」
@@ -1660,13 +1676,10 @@ pub(crate) async fn get_records_by_ids(
 
     // 高级权限拒绝与「不存在」都显式报错，而不是静默返回空——空集会让调用方
     // 误判成「记录已删」，随后把任务置终态，而记录其实还在。
-    if !data.forbidden_record_ids.is_empty() || !data.absent_record_ids.is_empty() {
+    if let Some(message) = describe_unfetched(&data.forbidden_record_ids, &data.absent_record_ids) {
         return Err(OutboundFailure {
             kind: FailureKind::Fatal { code: 0 },
-            message: format!(
-                "取记录被拒或记录不存在：forbidden={:?} absent={:?}",
-                data.forbidden_record_ids, data.absent_record_ids
-            ),
+            message,
         });
     }
     Ok(data.records)
@@ -1787,6 +1800,32 @@ pub(crate) struct BatchGetRecordsData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfetched_records_explain_absent_and_forbidden_separately() {
+        assert_eq!(describe_unfetched(&[], &[]), None);
+        let message = describe_unfetched(&[], &["recGone".into()]).unwrap_or_default();
+        assert!(
+            message.contains("记录不存在") && message.contains("recGone"),
+            "{message}"
+        );
+        assert!(!message.contains("无权"), "absent 不该提权限：{message}");
+        let message = describe_unfetched(&["recHidden".into()], &[]).unwrap_or_default();
+        assert!(
+            message.contains("无权读取") && message.contains("recHidden"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("不存在"),
+            "forbidden 不该说记录不存在：{message}"
+        );
+        let message =
+            describe_unfetched(&["recHidden".into()], &["recGone".into()]).unwrap_or_default();
+        assert!(
+            message.contains("recHidden") && message.contains("recGone"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn feedback_document_links_reject_untrusted_urls() {

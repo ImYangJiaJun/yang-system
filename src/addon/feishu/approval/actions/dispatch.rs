@@ -1140,6 +1140,28 @@ async fn dispatch_single(
         .map_err(|e| BaseError::ConfigError(e.to_string()))?
         .into_iter()
         .next();
+    // 点击是**显式的人工重试**：任务没在跑、又停在可重试状态（review / terminal /
+    // unnotified / 退避中的 pending）时，先把执行状态重置回 pending 再认领一次，
+    // 而不是直接回「已转人工核查 / 已被受理」。任务行与 uuid 都不变——uuid 是
+    // 飞书创建接口的幂等键，重新发起不会建出第二条审批（真建过会回 60012，
+    // 走按 uuid 回捞）。
+    let claim = match claim {
+        Some(claim) => Some(claim),
+        None => {
+            if approval_execution::reopen(context, task_id)
+                .await
+                .map_err(|e| BaseError::ConfigError(e.to_string()))?
+            {
+                approval_execution::claim_ready(context, 0, Some(task_id), 1)
+                    .await
+                    .map_err(|e| BaseError::ConfigError(e.to_string()))?
+                    .into_iter()
+                    .next()
+            } else {
+                None
+            }
+        }
+    };
     let Some(claim) = claim else {
         // 任务存在但不可认领。`review` 是「外部写入结果未知，禁止自动重放」的
         // 隔离态——没有任何 worker 会再处理它，报「已受理/正在处理」会让用户

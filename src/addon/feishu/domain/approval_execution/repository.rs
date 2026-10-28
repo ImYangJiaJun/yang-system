@@ -44,9 +44,17 @@ pub(crate) async fn admit(
         stored_config == config_id && stored_uuid == uuid,
         "该记录归属另一审批配置，拒绝复用任务"
     );
+    // 快照只在缺席时补写（`COALESCE` 保证第一份胜出）。不再要求「未认领且
+    // ready」：review/终态的任务被重新点击时也要带回受理快照（申请人/接收人），
+    // 已有快照绝不会被覆盖。
     // tenant-boundary: raw-sql feishu-approval-admit-snapshot
-    sqlx::query("UPDATE feishu_approval_task SET dispatch_payload=COALESCE(dispatch_payload,?) WHERE id=? AND worker_id IS NULL AND effect_phase='ready'")
-        .bind(&payload).bind(id).execute(&mut *transaction).await?;
+    sqlx::query(
+        "UPDATE feishu_approval_task SET dispatch_payload=COALESCE(dispatch_payload,?) WHERE id=?",
+    )
+    .bind(&payload)
+    .bind(id)
+    .execute(&mut *transaction)
+    .await?;
     // 后来的请求不能为首次未提供身份的任务补入另一个申请人。
     let stored_payload: Option<String> =
         // tenant-boundary: raw-sql feishu-approval-admit-identity-snapshot
@@ -68,6 +76,33 @@ pub(crate) async fn admit(
     }
     transaction.commit().await?;
     Ok(id)
+}
+
+/// 把「重新点击」变成一次人工重试：任务不在执行中、又停在可重试状态时，
+/// 重置回 `pending` 并让调用方立刻重新认领。
+///
+/// # 为什么安全
+///
+/// 任务行与 `uuid` 都不动——`uuid` 由 `base/table/approval_code/record_id`
+/// 确定性派生，是飞书创建接口的幂等键：若上次其实建出了实例，重新 create
+/// 会拿到 `60012` 并走按 uuid 回捞，不会产生第二条审批。
+///
+/// # 收窄条件
+///
+/// - 只有 `pending / review / terminal / unnotified` 可重开；`backfilled`
+///   编号已落表，重开没有意义。
+/// - 有执行者持有有效租约时不动（条件 UPDATE 兜底），避免把正在写入的任务
+///   抢回来并发执行。
+/// - 顺带清退避（`available_at`）与重试计数：点击的语义就是「现在再来一次」。
+pub(crate) async fn reopen(context: &FeishuContext, task_id: i64) -> anyhow::Result<bool> {
+    // tenant-boundary: raw-sql feishu-approval-reopen
+    let result = sqlx::query(
+        "UPDATE feishu_approval_task SET state='pending', effect_phase=IF(instance_code IS NULL,'ready','created'), worker_id=NULL, lease_until=NULL, attempts=0, available_at=NULL, last_error=NULL, updated_at=UNIX_TIMESTAMP() WHERE id=? AND state IN ('pending','review','terminal','unnotified') AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP())",
+    )
+    .bind(task_id)
+    .execute(context.approval_tasks().pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub(crate) async fn facts(

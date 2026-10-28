@@ -67,7 +67,7 @@ use crate::addon::feishu::domain::approval_uuid::derive_uuid;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
-    HttpClientTransport, OutboundTransport, TokioSleeper,
+    FailureKind, HttpClientTransport, OutboundTransport, TokioSleeper,
 };
 use crate::addon::feishu::domain::repository::all_pages;
 use crate::addon::feishu::domain::tenant_token::{
@@ -848,13 +848,23 @@ async fn seed_config(
     }
 
     let mut seeded = 0usize;
+    let mut reopened = 0usize;
     let mut skipped = 0usize;
     for record in &pending_records {
         if record.record_id.is_empty() {
             continue;
         }
         match by_record.get(&record.record_id) {
-            // 空单元格不能证明旧请求没有成功，也不能撤销另一个实例的执行权。
+            // 受理点击（[`RoundTrigger::Manual`]）是显式的人工重试：把不在执行中、
+            // 停在可重试状态（review / terminal / unnotified / 退避中）的任务重置回
+            // pending，本轮认领时重跑。uuid 不变，飞书侧按 uuid 幂等，不会重复建单。
+            Some((id, _)) if trigger.discovers_new_records() => {
+                if approval_execution::reopen(&runner.context, *id).await? {
+                    reopened += 1;
+                }
+            }
+            // 轮询不拉起旧行：空单元格不能证明旧请求没有成功，也不能撤销
+            // 另一个实例的执行权。
             Some(_) => {}
             // 没有任务行 = 这条记录从没被受理过。轮询不建行（见
             // [`RoundTrigger::discovers_new_records`]）：建了就成「没人点也派发」。
@@ -877,6 +887,7 @@ async fn seed_config(
         stage = "seed",
         config_id,
         seeded,
+        reopened,
         // 轮询轮里这些是「没人点过、这轮不建行」的记录——不静默，留在日志里。
         skipped,
         duration_ms = started.elapsed().as_millis() as u64,
@@ -1174,6 +1185,22 @@ impl TaskOutcome {
     }
 }
 
+/// 读源记录失败的处置。
+///
+/// `Fatal`（记录不存在 / 无权限 / 坐标不合法）重试修不好，必须转终态——否则
+/// 每轮重发同一条「稍后重试」通知，跑满重试预算后仍是转 review（2026-10-28
+/// 真机：记录被删后 5 个任务每 30 秒报一次「取记录被拒或记录不存在」）。
+/// 只有 `Retry` / `TokenExpired` 这类瞬态失败值得下一轮再来。
+fn record_read_failure(
+    failure: crate::addon::feishu::domain::outbound::OutboundFailure,
+) -> DispatchResult {
+    let message = format!("读取记录失败：{}", failure.message);
+    match failure.kind {
+        FailureKind::Fatal { .. } => DispatchResult::Terminal { message },
+        _ => DispatchResult::Retryable { message },
+    }
+}
+
 /// 处理一条记录。
 async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
     let coordinates = BitableCoordinates {
@@ -1255,9 +1282,7 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
             },
             Err(failure) => {
                 tracing::warn!(stage = "record", kind = ?failure.kind, "审批任务读取源记录失败");
-                return TaskOutcome::early(DispatchResult::Retryable {
-                    message: format!("读取记录失败：{}", failure.message),
-                });
+                return TaskOutcome::early(record_read_failure(failure));
             }
         };
 
@@ -1885,6 +1910,40 @@ fn _assert_widget_map_type(_: &WidgetMap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_read_failures_are_terminal_only_when_fatal() {
+        let failure = |kind| crate::addon::feishu::domain::outbound::OutboundFailure {
+            kind,
+            message: "记录不存在（可能已被删除）：[\"recGone\"]".into(),
+        };
+        for fatal in [
+            FailureKind::Fatal { code: 0 },
+            FailureKind::Fatal { code: 1254302 },
+        ] {
+            assert!(
+                matches!(
+                    record_read_failure(failure(fatal)),
+                    DispatchResult::Terminal { .. }
+                ),
+                "{fatal:?} 应转终态，不再按可重试空转"
+            );
+        }
+        for transient in [
+            FailureKind::Retry {
+                retry_after_seconds: None,
+            },
+            FailureKind::TokenExpired,
+        ] {
+            assert!(
+                matches!(
+                    record_read_failure(failure(transient)),
+                    DispatchResult::Retryable { .. }
+                ),
+                "{transient:?} 应保持可重试"
+            );
+        }
+    }
 
     #[tokio::test]
     #[ignore = "需要独立 MySQL 测试库和 Redis DB 15"]

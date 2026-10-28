@@ -76,14 +76,14 @@ impl OutboundTransport for ExecutionTransport<'_> {
                         .await
                         .map_err(storage)?;
                     return Ok(response);
-                } else if (400..500).contains(&response.status)
-                    && code.is_some_and(|code| code != 0)
-                {
-                    // 4xx + 非零业务码 = 远端**明确拒绝**：请求到达了飞书、被校验挡下，
-                    // 写入没有发生。恢复安全阶段并原样上抛，让 `classify` 给出真实
-                    // 错误码——若走 `mark_unknown`，「值不合法」这种可修的数据问题会被
-                    // 伪装成「外部写入结果未知」，任务永久卡在 review 且原始错误码丢失
-                    // （2026-10-26 真机：所有 create 失败都只剩 900001）。
+                } else if code.is_some_and(|code| code != 0) {
+                    // 非零业务码 = 远端**明确拒绝**：响应来自飞书本身、请求已被解析
+                    // 并挡下，写入没有发生。**不能只认 4xx**——飞书的大量业务错误走
+                    // HTTP 200 + 非零 code（见本模块文档第一条），只认 4xx 会把它们
+                    // 静默推进 review：任务永久卡住、真实错误码丢成 900001
+                    // （2026-10-26 真机是 4xx 形态；2026-10-28 真机以 200 形态复发：
+                    // 同一配置 5 条记录转 review，飞书侧实际零实例）。恢复安全阶段并
+                    // 原样上抛，让 `classify` 给出真实错误码。
                     confirm_effect(self.context, self.claim, safe_phase, None)
                         .await
                         .map_err(storage)?;
@@ -94,6 +94,14 @@ impl OutboundTransport for ExecutionTransport<'_> {
                     );
                     return Ok(response);
                 }
+                // 走到这里 = 响应拿到了但形态无法确认写入结果（非 JSON、HTTP 非 2xx
+                // 且无业务码、或 2xx + code=0 却缺 instance_code）。转 review 之后
+                // 没有任何原始信息可复核——2026-10-28 真机 5 条 review 连响应原文都
+                // 追不到，所以把状态码与响应体前缀留在这里。
+                tracing::warn!(
+                    response = %summarize(response.status, &response.body),
+                    "飞书写入响应无法确认，转人工核查"
+                );
             }
             Err(error @ BaseError::RateLimitExceeded { .. }) => {
                 // 本地配额在连接前拒绝，不属于未知外部副作用。

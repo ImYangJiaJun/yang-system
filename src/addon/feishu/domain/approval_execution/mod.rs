@@ -4,7 +4,7 @@ mod repository;
 mod transport;
 pub(crate) use repository::{
     admit, begin_effect, claim_ready, confirm_effect, facts, finish, is_owned, mark_unknown,
-    TaskClaim,
+    reopen, TaskClaim,
 };
 pub(crate) use transport::ExecutionTransport;
 
@@ -238,6 +238,75 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "需要独立 MySQL 测试库"]
+    async fn real_mysql_reopen_restarts_retryable_tasks_but_never_running_or_backfilled(
+    ) -> anyhow::Result<()> {
+        let context = context().await?;
+        let snapshot = snapshot(&context).await?;
+
+        // review / terminal / unnotified / 退避中的 pending 都能被「重新点击」拉起。
+        for state in ["review", "terminal", "unnotified", "pending"] {
+            let claim = claimed(&context, &snapshot).await?;
+            sqlx::query(
+                "UPDATE feishu_approval_task SET state=?, effect_phase='creating', worker_id=NULL, lease_until=NULL, attempts=4, available_at=UNIX_TIMESTAMP()+600, last_error='x' WHERE id=?",
+            )
+            .bind(state)
+            .bind(claim.id)
+            .execute(context.approval_tasks().pool())
+            .await?;
+            assert!(reopen(&context, claim.id).await?, "{state} 应可重开");
+            let (new_state, phase, attempts): (String, String, i64) = sqlx::query_as(
+                "SELECT state,effect_phase,attempts FROM feishu_approval_task WHERE id=?",
+            )
+            .bind(claim.id)
+            .fetch_one(context.approval_tasks().pool())
+            .await?;
+            assert_eq!(
+                (new_state.as_str(), phase.as_str(), attempts),
+                ("pending", "ready", 0)
+            );
+            // 退避被清掉后立刻可认领（= 点击当场重新发起）。
+            assert!(
+                !claim_ready(&context, 0, Some(claim.id), 1)
+                    .await?
+                    .is_empty(),
+                "{state} 重开后应能立刻认领"
+            );
+        }
+
+        // 快照缺席的 review 行（seed 建出来的那种）重新受理时要补写快照，
+        // 否则点击路径会因「快照不一致」把任务退回 pending 而不是当场重跑。
+        let record = format!("rec{}", uuid::Uuid::new_v4().simple());
+        let id = admit(&context, &snapshot, &record).await?;
+        sqlx::query("UPDATE feishu_approval_task SET state='review', effect_phase='creating', dispatch_payload=NULL, worker_id=NULL, lease_until=NULL WHERE id=?")
+            .bind(id)
+            .execute(context.approval_tasks().pool())
+            .await?;
+        assert_eq!(admit(&context, &snapshot, &record).await?, id);
+        let payload: Option<String> =
+            sqlx::query_scalar("SELECT dispatch_payload FROM feishu_approval_task WHERE id=?")
+                .bind(id)
+                .fetch_one(context.approval_tasks().pool())
+                .await?;
+        assert!(payload.is_some(), "review 行重新受理时应补写缺席的快照");
+
+        // 编号已回填的任务重开没有意义。
+        let claim = claimed(&context, &snapshot).await?;
+        sqlx::query(
+            "UPDATE feishu_approval_task SET state='backfilled', worker_id=NULL, lease_until=NULL WHERE id=?",
+        )
+        .bind(claim.id)
+        .execute(context.approval_tasks().pool())
+        .await?;
+        assert!(!reopen(&context, claim.id).await?, "backfilled 不应被重开");
+
+        // 租约有效 = 有 worker 正在执行，不许抢。
+        let claim = claimed(&context, &snapshot).await?;
+        assert!(!reopen(&context, claim.id).await?, "执行中的任务不应被重开");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
     async fn real_mysql_execution_transport_confirms_success_and_quarantines_unknown(
     ) -> anyhow::Result<()> {
         let context = context().await?;
@@ -262,7 +331,6 @@ mod tests {
         for response in [
             None,
             Some((200, "not-json")),
-            Some((200, r#"{"code":50001}"#)),
             Some((500, r#"{"code":0,"data":{"instance_code":"UNCONFIRMED"}}"#)),
             Some((200, r#"{"code":0,"data":{}}"#)),
         ] {
@@ -305,6 +373,24 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("明确拒绝应按业务错误上抛: {e}"));
         assert_eq!(response.status, 400);
+        assert_eq!(facts(&context, &claim).await?, ("ready".into(), None));
+
+        // 同一语义的另一种载体：飞书大量业务错误走 **HTTP 200 + 非零业务码**
+        // （见 outbound 模块文档）。只认 4xx 会把它们静默推进 review——任务
+        // 永久卡住、真实错误码丢成 900001（2026-10-28 真机：同一配置 5 条记录
+        // 转 review，飞书侧零实例）。
+        let claim = claimed(&context, &snapshot).await?;
+        let inner =
+            ControlledTransport::reply(200, r#"{"code":1395006,"msg":"invalid widget value"}"#);
+        let response = ExecutionTransport {
+            inner: &inner,
+            context: &context,
+            claim: &claim,
+        }
+        .send(request())
+        .await
+        .unwrap_or_else(|e| panic!("200+业务码的明确拒绝应按业务错误上抛: {e}"));
+        assert_eq!(response.status, 200);
         assert_eq!(facts(&context, &claim).await?, ("ready".into(), None));
         for code in [
             i64::from(CODE_RATE_LIMITED),
