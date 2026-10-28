@@ -94,10 +94,13 @@ pub(crate) async fn admit(
 /// - 有执行者持有有效租约时不动（条件 UPDATE 兜底），避免把正在写入的任务
 ///   抢回来并发执行。
 /// - 顺带清退避（`available_at`）与重试计数：点击的语义就是「现在再来一次」。
+/// - **保留 `last_error`**：它是通知去重的判据（`should_notify` 比较「本轮原因 ==
+///   上一轮原因」）。重开时清空会让同一结论每点一次都重发一条通知——2026-10-28
+///   真机：批量点击反复收到另一张表的旧 waiting 报错。
 pub(crate) async fn reopen(context: &FeishuContext, task_id: i64) -> anyhow::Result<bool> {
     // tenant-boundary: raw-sql feishu-approval-reopen
     let result = sqlx::query(
-        "UPDATE feishu_approval_task SET state='pending', effect_phase=IF(instance_code IS NULL,'ready','created'), worker_id=NULL, lease_until=NULL, attempts=0, available_at=NULL, last_error=NULL, updated_at=UNIX_TIMESTAMP() WHERE id=? AND state IN ('pending','review','terminal','unnotified') AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP())",
+        "UPDATE feishu_approval_task SET state='pending', effect_phase=IF(instance_code IS NULL,'ready','created'), worker_id=NULL, lease_until=NULL, attempts=0, available_at=NULL, updated_at=UNIX_TIMESTAMP() WHERE id=? AND state IN ('pending','review','terminal','unnotified') AND (worker_id IS NULL OR lease_until<=UNIX_TIMESTAMP())",
     )
     .bind(task_id)
     .execute(context.approval_tasks().pool())

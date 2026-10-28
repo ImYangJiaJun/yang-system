@@ -254,15 +254,21 @@ mod tests {
             .execute(context.approval_tasks().pool())
             .await?;
             assert!(reopen(&context, claim.id).await?, "{state} 应可重开");
-            let (new_state, phase, attempts): (String, String, i64) = sqlx::query_as(
-                "SELECT state,effect_phase,attempts FROM feishu_approval_task WHERE id=?",
-            )
-            .bind(claim.id)
-            .fetch_one(context.approval_tasks().pool())
-            .await?;
+            let (new_state, phase, attempts, last_error): (String, String, i64, Option<String>) =
+                sqlx::query_as(
+                    "SELECT state,effect_phase,attempts,last_error FROM feishu_approval_task WHERE id=?",
+                )
+                .bind(claim.id)
+                .fetch_one(context.approval_tasks().pool())
+                .await?;
             assert_eq!(
                 (new_state.as_str(), phase.as_str(), attempts),
                 ("pending", "ready", 0)
+            );
+            assert_eq!(
+                last_error.as_deref(),
+                Some("x"),
+                "reopen 必须保留 last_error，通知去重靠它"
             );
             // 退避被清掉后立刻可认领（= 点击当场重新发起）。
             assert!(

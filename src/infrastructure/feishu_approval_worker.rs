@@ -444,8 +444,9 @@ async fn watch_progress(heartbeat: ProgressHeartbeat, mut shutdown: watch::Recei
 /// （`approval_dispatch.rs` 的 D2 传参路径）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RoundTrigger {
-    /// 受理请求：HTTP Action 收到点击后投的信号。
-    Manual,
+    /// 受理请求：HTTP Action 收到点击后投的信号。携带**被点击的配置** id——
+    /// 「重新点击 = 人工重试」只对该配置生效。
+    Manual(i64),
     /// 自动轮询。
     Poll,
 }
@@ -453,7 +454,7 @@ enum RoundTrigger {
 impl RoundTrigger {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Manual => "manual",
+            Self::Manual(_) => "manual",
             Self::Poll => "poll",
         }
     }
@@ -465,8 +466,26 @@ impl RoundTrigger {
     /// 回写的，于是用户收到一条点一下就自愈的假警报，而且该行落 `pending`
     /// （`outcome_record` 对 `Waiting` 的映射），每轮轮询都会把它重新处理一遍。
     fn discovers_new_records(self) -> bool {
-        matches!(self, Self::Manual)
+        matches!(self, Self::Manual(_))
     }
+
+    /// 手动受理指向的配置；轮询为 `None`。
+    fn manual_config(self) -> Option<i64> {
+        match self {
+            Self::Manual(config_id) => Some(config_id),
+            Self::Poll => None,
+        }
+    }
+}
+
+/// 本轮是否应对该配置执行「点击即人工重试」的 reopen。
+///
+/// `seed_tasks` 每轮遍历**所有**启用配置。若按 [`RoundTrigger::discovers_new_records`]
+/// 全局重开，点 A 表会把 B 表停在 waiting 的旧任务一并重置——`reopen` 会清空
+/// `last_error`，而它是通知去重的判据，于是每次点击都重发 B 表的同一条旧报错
+/// （2026-10-28 真机）。人工重试只属于被点击的配置。
+fn reopens_on_click(trigger: RoundTrigger, config_id: i64) -> bool {
+    trigger.manual_config() == Some(config_id)
 }
 
 /// 主循环：等信号或到点，然后跑一轮。
@@ -492,7 +511,7 @@ async fn run_loop(
             // 手动触发：投一个信号即跑一轮，与自动轮询走**完全同一条路径**；
             // 携带的受理发起人（已解析成 open_id）随本轮落到待处理任务行。
             Some((config_id, applicant)) = requests.recv() => {
-                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id)), RoundTrigger::Manual).await;
+                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id)), RoundTrigger::Manual(config_id)).await;
             }
             _ = ticker.tick() => {
                 run_round(&runner, &mut cursor, None, RoundTrigger::Poll).await;
@@ -855,10 +874,11 @@ async fn seed_config(
             continue;
         }
         match by_record.get(&record.record_id) {
-            // 受理点击（[`RoundTrigger::Manual`]）是显式的人工重试：把不在执行中、
-            // 停在可重试状态（review / terminal / unnotified / 退避中）的任务重置回
-            // pending，本轮认领时重跑。uuid 不变，飞书侧按 uuid 幂等，不会重复建单。
-            Some((id, _)) if trigger.discovers_new_records() => {
+            // 受理点击是**被点击配置**的显式人工重试：把不在执行中、停在可重试状态
+            // （review / terminal / unnotified / 退避中）的任务重置回 pending，本轮认领
+            // 时重跑。uuid 不变，飞书侧按 uuid 幂等，不会重复建单。
+            // 只重开本配置：点 A 表不能替 B 表重试，否则 B 的旧报错会随每次点击重发。
+            Some((id, _)) if reopens_on_click(trigger, config_id) => {
                 if approval_execution::reopen(&runner.context, *id).await? {
                     reopened += 1;
                 }
@@ -2441,8 +2461,18 @@ mod tests {
         // 时只能报「请填写该人员列」，可那一列本来就是点击时由系统回写的——
         // 用户会收到一条自愈的假警报（2026-10-16 实测：批量前 30 秒的轮询先报了两条
         // 「需要修正数据」，点击后两条「已创建」）。
-        assert!(RoundTrigger::Manual.discovers_new_records());
+        assert!(RoundTrigger::Manual(1).discovers_new_records());
         assert!(!RoundTrigger::Poll.discovers_new_records());
+    }
+
+    #[test]
+    fn manual_retry_reopens_only_the_clicked_config() {
+        // 点 A 表的批量按钮会播种所有启用配置，但「人工重试」只属于被点的配置：
+        // 否则 B 表停在 waiting 的旧任务会被重置，清空的 last_error 让通知去重失效，
+        // 每次点击都重发 B 的旧报错。
+        assert!(reopens_on_click(RoundTrigger::Manual(4), 4));
+        assert!(!reopens_on_click(RoundTrigger::Manual(4), 2));
+        assert!(!reopens_on_click(RoundTrigger::Poll, 4));
     }
 
     #[test]
