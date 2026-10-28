@@ -823,6 +823,54 @@ pub(crate) fn labels_from_cell(cell: &Value) -> Vec<String> {
         .collect()
 }
 
+/// 十进制文案归一：`9.1330` → `9.133`，`1.0000` → `1`，`+1.0` → `1`。
+///
+/// 只认纯十进制（可选正负号、最多一个小数点、其余全是数字）。带单位、生效期
+/// 后缀、指数、多个小数点的文案一律返回 `None`——那些是**真的不同**，猜只会
+/// 把记录配到错误的选项上。
+pub(crate) fn normalize_decimal_label(label: &str) -> Option<String> {
+    let text = label.trim();
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (integer, fraction) = match rest.split_once('.') {
+        Some((integer, fraction)) => (integer, Some(fraction)),
+        None => (rest, None),
+    };
+    if integer.chars().any(|c| !c.is_ascii_digit())
+        || fraction.is_some_and(|fraction| fraction.chars().any(|c| !c.is_ascii_digit()))
+        || (integer.is_empty() && fraction.map_or(true, str::is_empty))
+    {
+        return None;
+    }
+    let integer = integer.trim_start_matches('0');
+    let integer = if integer.is_empty() { "0" } else { integer };
+    let fraction = fraction.unwrap_or_default().trim_end_matches('0');
+    let canonical = if fraction.is_empty() {
+        integer.to_string()
+    } else {
+        format!("{integer}.{fraction}")
+    };
+    Some(if negative && canonical != "0" {
+        format!("-{canonical}")
+    } else {
+        canonical
+    })
+}
+
+/// 两侧文案是否数值等价。
+///
+/// 汇率这类数字列两侧口径不同：多维表格的查找/公式列会带固定小数位
+/// （`9.1330`），选项台账里的 label 来自数字单元格的最短表示（`9.133`）。
+/// 逐字相等会把同一条汇率判成「没有匹配的启用选项」（2026-10-28 真机）。
+pub(crate) fn labels_equivalent(left: &str, right: &str) -> bool {
+    left == right
+        || normalize_decimal_label(left)
+            .zip(normalize_decimal_label(right))
+            .is_some_and(|(left, right)| left == right)
+}
+
 /// 多维表格单元格取文本。多态单元格（`[{"text": …}]`）取第一个 text。
 fn text_from_cell(cell: &Value) -> String {
     match unwrap_typed_cell(cell) {
@@ -1863,6 +1911,24 @@ mod tests {
         let rendered = render(&[radio], &cells(&[("fld_src", json!(0.0435))]))
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(rendered[0]["value"], json!("fldazessde:a88795fb787f"));
+    }
+
+    #[test]
+    fn numeric_labels_are_compared_by_value_not_decimal_places() {
+        // 真机（2026-10-28）：业务表查找列给出 "9.1330"/"1.0000"，选项台账里是
+        // "9.133"/"1"；逐字相等永远匹配不上，派发停在「没有匹配的启用选项」。
+        assert!(labels_equivalent("9.1330", "9.133"));
+        assert!(labels_equivalent("1.0000", "1"));
+        assert!(labels_equivalent("7", "7.0"));
+        assert!(labels_equivalent("+1.0", "1"));
+        assert!(labels_equivalent("-0.50", "-0.5"));
+        assert!(!labels_equivalent("9.1330", "9.1335"));
+        assert!(!labels_equivalent("7.10 元", "7.1"));
+        assert!(!labels_equivalent("1e3", "1000"));
+        assert_eq!(normalize_decimal_label("9.1330").as_deref(), Some("9.133"));
+        assert_eq!(normalize_decimal_label("1.0000").as_deref(), Some("1"));
+        assert_eq!(normalize_decimal_label("9.133").as_deref(), Some("9.133"));
+        assert_eq!(normalize_decimal_label("汇率"), None);
     }
 
     #[test]

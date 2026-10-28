@@ -616,7 +616,7 @@ async fn handle_dispatch(
     match input.record_id.as_deref() {
         // ---- 单条：同步处理 ----
         Some(record_id) => {
-            match dispatch_single(
+            let outcome = match dispatch_single(
                 ctx,
                 context,
                 config_id,
@@ -627,10 +627,21 @@ async fn handle_dispatch(
             )
             .await
             {
-                Ok(outcome) => Ok(outcome),
+                Ok(outcome) => outcome,
                 // 单条内部的 `?` 出口：config_id 在调用点已知，失败记录带上它。
-                Err(error) => Ok(DispatchOutcome::internal(Some(config_id), error)),
+                Err(error) => DispatchOutcome::internal(Some(config_id), error),
+            };
+            // 单条点击也唤醒 worker：否则「结论变化」要等下一次 30s 轮询才发通知。
+            // 唤醒只是提前跑同一轮（`Manual` 会重开本配置的旧行并保留 last_error，
+            // 通知去重不受影响）；worker 没起时下一轮轮询仍会处理，不阻断响应。
+            if let Ok(handle) = ctx.tools().extension::<ApprovalDispatchHandle>() {
+                if let Err(error) =
+                    handle.request_dispatch(config_id, outcome.requested_applicant_open_id.clone())
+                {
+                    tracing::warn!(config_id, error = %error, "审批派发唤醒 Worker 失败");
+                }
             }
+            Ok(outcome)
         }
         // ---- 全表：异步受理 ----
         //

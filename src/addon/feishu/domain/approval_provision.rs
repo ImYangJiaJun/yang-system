@@ -1051,22 +1051,7 @@ pub(crate) async fn resolve_external_options(
             .into_iter()
             .filter(|l| !l.trim().is_empty())
         {
-            let rows = context
-                .options()
-                .query()
-                .select_fields(&["option_id", "label"])?
-                .where_eq("source_key", serde_json::json!(source))?
-                .where_eq("enabled", serde_json::json!(true))?
-                .where_eq("label", serde_json::json!(label))?
-                // 同文案多选项时取排序最前：先按数据源自己的 `sort_order`，
-                // `option_id` 兜底决胜（与出站点 `approval_options.rs` 同序，
-                // 复合索引 idx_feishu_option_pick 正好覆盖，无 filesort）。
-                .order_by("sort_order", SortOrder::Asc)?
-                .order_by("option_id", SortOrder::Asc)?
-                .page(1, 2)?
-                .all()
-                .await
-                .map_err(|e| ProvisionError::Store(e.to_string()))?;
+            let rows = option_rows_for_label(context, source, &label).await?;
             let option_id = match pick_option(&rows, source, &label) {
                 Ok(id) => {
                     // 同名重复不再阻塞，但这是数据质量问题：排进日志提醒清理。
@@ -1163,26 +1148,86 @@ fn option_match_feedback(
         one_line(label, 160), one_line(&widget.widget_id, 100), one_line(&widget.bitable_field, 100), one_line(source, 100))
 }
 
-/// 从「完全匹配的启用选项」里确定性挑一个。
+/// 查源下与文案匹配的启用选项。
+///
+/// 先逐字查——绝大多数文案走这条快路径。没有命中且文案是纯十进制时，再按
+/// 数值等价补查：多维表格的查找/公式列会带固定小数位（`9.1330`），而选项
+/// 台账里的 label 来自数字单元格的最短表示（`9.133`）。逐字相等会让同一条
+/// 汇率永远判成「没有匹配的启用选项」（2026-10-28 真机：9.1330 / 1.0000）。
+async fn option_rows_for_label(
+    context: &FeishuContext,
+    source: &str,
+    label: &str,
+) -> Result<Vec<Record>, ProvisionError> {
+    let exact = option_rows_matching(context, source, Some(label), None).await?;
+    if !exact.is_empty() {
+        return Ok(exact);
+    }
+    let Some(canonical) = super::approval_convert::normalize_decimal_label(label) else {
+        return Ok(exact);
+    };
+    if canonical != label.trim() {
+        let canonical_exact = option_rows_matching(context, source, Some(&canonical), None).await?;
+        if !canonical_exact.is_empty() {
+            return Ok(canonical_exact);
+        }
+    }
+    // 反向口径（选项侧带尾零、单元格侧已归一）用前缀粗筛；真正的等价比对由
+    // pick_option 做。`canonical` 只含数字/小数点/负号，不必转义 LIKE 元字符。
+    option_rows_matching(context, source, None, Some(&format!("{canonical}%"))).await
+}
+
+/// 选项查询：`exact` 与 `like` 二选一，排序/截断口径与出站点一致。
+async fn option_rows_matching(
+    context: &FeishuContext,
+    source: &str,
+    exact: Option<&str>,
+    like: Option<&str>,
+) -> Result<Vec<Record>, ProvisionError> {
+    let mut query = context
+        .options()
+        .query()
+        .select_fields(&["option_id", "label"])?
+        .where_eq("source_key", serde_json::json!(source))?
+        .where_eq("enabled", serde_json::json!(true))?;
+    if let Some(label) = exact {
+        query = query.where_eq("label", serde_json::json!(label))?;
+    }
+    if let Some(pattern) = like {
+        query = query.where_like("label", pattern.to_string())?;
+    }
+    query
+        // 同文案多选项时取排序最前：先按数据源自己的 `sort_order`，
+        // `option_id` 兜底决胜（与出站点 `approval_options.rs` 同序，
+        // 复合索引 idx_feishu_option_pick 正好覆盖，无 filesort）。
+        .order_by("sort_order", SortOrder::Asc)?
+        .order_by("option_id", SortOrder::Asc)?
+        // 前缀粗筛可能带回同前缀的邻值，多取一些再在 Rust 里按数值等价精筛。
+        .page(1, 20)?
+        .all()
+        .await
+        .map_err(|e| ProvisionError::Store(e.to_string()))
+}
+
+/// 从「与当前文案等价的启用选项」里确定性挑一个。
 ///
 /// 2026-10-16 决策：同名重复不再阻塞。控件展示与用户看到的就是**文案**，option_id
 /// 只是背后载体——同一个文案配多条启用选项时，任一 id 渲染出的文本都相同，取
 /// 排序最前（`sort_order` 升序、`option_id` 决胜，见调用点的 order_by）。只有
 /// 「一个都匹配不上」才失败。
 fn pick_option(rows: &[Record], source: &str, label: &str) -> Result<String, ProvisionError> {
-    let Some(row) = rows.first() else {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "数据源「{source}」的文案「{label}」没有匹配的启用选项"
-        )]));
-    };
-    // 查询已按 label 过滤，这里再比一次是防御 DB 比较宽松（大小写/排序规则）
-    // 导致的「返回了但不完全相等」——宁可在配置期失败，也不把不相等的文案发出去。
-    if row.require::<String>("label")? != label {
-        return Err(ProvisionError::Invalid(vec![format!(
-            "数据源「{source}」的文案「{label}」没有匹配的启用选项"
-        )]));
+    // 查询已按文案过滤，这里再比一次是防御 DB 比较宽松（大小写/排序规则）
+    // 导致的「返回了但不完全相等」；数字文案按数值等价（`9.1330` == `9.133`）。
+    // LIKE 粗筛可能带回同前缀的邻值，所以挑**第一条等价**的，而不是第一条。
+    for row in rows {
+        let stored = row.require::<String>("label")?;
+        if super::approval_convert::labels_equivalent(&stored, label) {
+            return Ok(row.require("option_id")?);
+        }
     }
-    Ok(row.require("option_id")?)
+    Err(ProvisionError::Invalid(vec![format!(
+        "数据源「{source}」的文案「{label}」没有匹配的启用选项"
+    )]))
 }
 
 /// 扫字段绑定表时的页数上界。绑定行数量级在百级（每数据源几列），给足余量。
@@ -1293,6 +1338,23 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{e}")),
             "id1",
             "同名重复取排序最前，不再判为歧义"
+        );
+        // 数字文案按数值等价：固定小数位（查找/公式列的 9.1330）对上最短表示
+        // （选项台账的 9.133）。
+        assert_eq!(
+            pick_option(&[row("9.133", "id1")], "source", "9.1330")
+                .unwrap_or_else(|e| panic!("{e}")),
+            "id1"
+        );
+        assert_eq!(
+            pick_option(&[row("9.1330", "id1")], "source", "9.133")
+                .unwrap_or_else(|e| panic!("{e}")),
+            "id1",
+            "反向口径（选项侧带尾零）也必须命中"
+        );
+        assert!(
+            pick_option(&[row("9.1335", "id1")], "source", "9.1330").is_err(),
+            "同前缀但数值不同不能命中"
         );
         assert!(pick_option(&[], "source", "银行").is_err());
         assert!(pick_option(&[row("银行 ", "id1")], "source", "银行").is_err());
