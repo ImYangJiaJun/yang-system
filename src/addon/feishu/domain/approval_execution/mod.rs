@@ -70,6 +70,7 @@ impl DispatchSnapshot {
 mod tests {
     use super::*;
     use crate::addon::feishu::domain::{context::FeishuContext, outbound::*};
+    use anyhow::Context;
     use std::collections::BTreeMap;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -236,8 +237,8 @@ mod tests {
         assert_eq!(
             configs,
             vec![
-                first.config["id"].as_i64().expect("配置 id 应存在"),
-                other.config["id"].as_i64().expect("配置 id 应存在"),
+                first.config["id"].as_i64().context("配置 id 应存在")?,
+                other.config["id"].as_i64().context("配置 id 应存在")?,
             ],
             "同一 record_id 在两个配置下各有一条任务行"
         );
