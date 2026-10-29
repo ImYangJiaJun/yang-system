@@ -1,5 +1,5 @@
 /**
- * 凭据拷贝清单：**一块一个字段绑定**，两种情况下三项可复制。
+ * 凭据拷贝清单：**一块一个字段绑定**，每个字段三处可复制，带父字段的绑定多一项「联动 key」。
  *
  * # 为什么不是表格（2026-09-25 改）
  *
@@ -11,8 +11,9 @@
  * 按钮被推出视野，等于把交付环节做成了猜谜。所以改成块：地址整行完整显示（`break-all`
  * 换行而不截断），复制按钮与它同排。轮换与复制的距离由布局拉开，不再只靠一条分隔线。
  *
- * # 三项还是两项：取决于有没有父字段
+ * # 三项还是四项：取决于有没有父字段
  *
+ * - **字段名**：值在本地（绑定的 `field_name`），要原样抄进审批后台，复制不发请求。
  * - **接口地址**：本地拼的，一个请求都不发。
  * - **Token**：走**回显端点**取当前值，只读、不重新生成。
  * - **联动 key**（只有带父字段的绑定有）：父绑定的 `field_id`，运维要把它填进审批后台
@@ -24,7 +25,7 @@
  *
  * # 「复制」与「轮换」的分工（决策 D10）
  *
- * - **复制是纯读**：误点复制不能有任何后果。三项复制一个都不写状态。
+ * - **复制是纯读**：误点复制不能有任何后果。每个复制点（含字段名）都不写状态。
  * - **轮换是写**：独立按钮、必须二次确认，确认框里写清后果——已配置该字段的控件会
  *   **立即失效**，得把新 Token 粘回审批后台。
  *
@@ -225,9 +226,9 @@ export function CredentialChecklist({
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        一块一个字段：接口地址与 Token 都可以直接复制，复制不改变任何状态，
-        误点没有后果；要换 Token 走那一块里的「轮换」。 带父字段的还多一项「联动
-        key」。审批控件里另有
+        一块一个字段：字段名、接口地址与 Token
+        都可以直接复制，复制不改变任何状态， 误点没有后果；要换 Token
+        走那一块里的「轮换」。 带父字段的还多一项「联动 key」。审批控件里另有
         <span className="font-medium">一格 Key</span>
         （做加密用的那个）——本项目不做 Key 加密，那一格留空，它与这里的「联动
         key」不是一回事。
@@ -235,8 +236,8 @@ export function CredentialChecklist({
 
       {client === undefined ? (
         <p className="text-xs text-muted-foreground">
-          当前身份没有回显与轮换凭据的权限：地址与联动 key 照旧可复制，Token
-          与轮换这两项用不了。
+          当前身份没有回显与轮换凭据的权限：字段名、地址与联动 key
+          照旧可复制，Token 与轮换这两项用不了。
         </p>
       ) : null}
 
@@ -279,7 +280,7 @@ export function CredentialChecklist({
       <ul className="divide-y divide-border rounded-lg border border-border">
         {items.map((item) => {
           const url = approvalOptionsUrl(base, item.sourceKey);
-          // 一页有多块、每块最多三个复制点，所以可访问名必须点名**是哪一个字段的哪一项**：
+          // 一页有多块、每块最多四个复制点，所以可访问名必须点名**是哪一个字段的哪一项**：
           // 只喊「复制」的话，屏幕阅读器用户无从分辨。
           const buttonName = (action: string) =>
             `${action}：${credentialLabel(item)}`;
@@ -291,10 +292,37 @@ export function CredentialChecklist({
               data-slot="credential-row"
               className="space-y-2.5 p-4"
             >
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <span className="text-sm font-medium">
+              {/* `items-center`：字段名旁多了一个按钮，按基线对齐会让它往下坠。 */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                {/* `select-all` 不是装饰：复制失败时的提示对所有「本来就显示着的值」
+                    说「点一下即可全选」，这一行也得兑现。 */}
+                <span className="text-sm font-medium select-all">
                   {item.fieldName ?? "（字段名还没解析出来）"}
                 </span>
+                {item.fieldName === null ? null : (
+                  // 字段名要原样抄进审批后台的表单设计——全角、空格、星号都算数，
+                  // 手抄差一个字符就对不上，所以给一个纯读的复制点（决策 D10）。
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 text-muted-foreground"
+                    aria-label={buttonName("复制字段名")}
+                    onClick={() =>
+                      void copyShown(
+                        item,
+                        "字段名",
+                        `${item.sourceKey}#fieldname`,
+                        item.fieldName ?? "",
+                      )
+                    }
+                  >
+                    {copied("fieldname") ? (
+                      <Check aria-hidden="true" />
+                    ) : (
+                      <Copy aria-hidden="true" />
+                    )}
+                  </Button>
+                )}
                 <span className="font-mono text-xs text-muted-foreground">
                   {item.sourceKey}
                 </span>

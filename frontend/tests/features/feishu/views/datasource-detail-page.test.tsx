@@ -560,6 +560,11 @@ describe("飞书数据源详情页 · 体检与凭据清单", () => {
     await user.click(screen.getByRole("button", { name: "凭据配置" }));
 
     await waitFor(() => expect(credentialRows()).toHaveLength(1));
+    // 标题只写「凭据配置」：这一段管整条数据源的凭据，不再带选中字段的前缀。
+    expect(
+      screen.getByRole("heading", { name: "凭据配置" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /· 凭据配置$/ })).toBeNull();
     const [row] = credentialRows();
     expect(row).toHaveTextContent("费用类型/Fee Type*");
     expect(row).toHaveTextContent(

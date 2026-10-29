@@ -49,6 +49,11 @@ export type FeishuApiStubOptions = {
   /// **默认关**：没有这一组就等于「当前身份没有维护权限」，详情页不渲染入口。
   /// 打开时会连带登记 `health_check`——维护对话框打开就要拉一份体检报告。
   fieldMaintenance?: boolean;
+  /// 目录里有没有 `feishu.datasource.pull_now`（出站拉取 `settings.can_pull()` 是否为真）。
+  /// **默认有**：服务端只在出站凭证齐备时才注册这一粒，所以置 false 就是一台没开
+  /// 导出站拉取的部署——目录里查不到它，页面据此不渲染「立即拉取」，建源后也静默
+  /// 跳过自动拉取。
+  pullAction?: boolean;
   /// 各端点的响应。返回 Response 时原样使用（用来构造错误态）。
   datasourceList?: Handler;
   optionList?: Handler;
@@ -136,6 +141,8 @@ function catalogFor(options: FeishuApiStubOptions) {
     (options.tableConfig ?? false) ? "1" : "0",
     // 同理，维护三粒也改变目录形状。
     (options.fieldMaintenance ?? false) ? "1" : "0",
+    // pull_now 一关，目录里就少一粒 Action——同样是形状变化。
+    (options.pullAction ?? true) ? "1" : "0",
   ].join("");
   const revision = `${flags}${"a".repeat(64)}`.slice(0, 64);
   const actions = [APPROVAL_OPTIONS_ACTION];
@@ -184,13 +191,19 @@ function catalogFor(options: FeishuApiStubOptions) {
         "POST",
         "/api/v1/feishu/datasources/bitable-fields",
       ),
-      // 服务端只在 can_pull()（出站凭证齐备）时才注册这一个。目录里没有它，
-      // 就等于这个部署没开导出站拉取——页面据此不渲染按钮。
-      action(
-        "feishu.datasource.pull_now",
-        "POST",
-        "/api/v1/feishu/datasources/pull-now",
-      ),
+    );
+    // 服务端只在 can_pull()（出站凭证齐备）时才注册这一个。目录里没有它，
+    // 就等于这个部署没开导出站拉取——页面据此不渲染按钮，建源后也不排自动拉取。
+    if (options.pullAction ?? true) {
+      actions.push(
+        action(
+          "feishu.datasource.pull_now",
+          "POST",
+          "/api/v1/feishu/datasources/pull-now",
+        ),
+      );
+    }
+    actions.push(
       // xlsx 文件导入（T12 的探表头、T14 的重新导入）。服务端两侧同样要求
       // `feishu.datasource.write`，所以跟着这一组权限位走；它们**不出网**，
       // 因此不受 can_pull 门控——没有飞书凭证的环境里它们照样注册。

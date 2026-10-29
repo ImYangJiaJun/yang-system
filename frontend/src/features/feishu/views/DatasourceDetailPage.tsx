@@ -1339,12 +1339,7 @@ export default function DatasourceDetailPage() {
             gap === null &&
             datasource !== null && (
               <section className="rounded-lg border border-border bg-card p-6">
-                <h2 className="text-lg font-semibold">
-                  {bindings.find(
-                    (binding) => binding.sourceKey === optionSourceKey,
-                  )?.fieldName ?? optionSourceKey}{" "}
-                  · 凭据配置
-                </h2>
+                <h2 className="text-lg font-semibold">凭据配置</h2>
                 <p className="mb-6 text-sm text-muted-foreground">
                   配置飞书审批控件时复制以下信息。每个字段有独立的接口地址、Token
                   和联动 key。

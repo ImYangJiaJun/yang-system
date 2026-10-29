@@ -44,7 +44,7 @@ const itemFixture: CredentialItem = {
 };
 
 /// 可访问名的三处拼装。抽出来是为了让「按钮叫什么」这件事在用例里只有一处定义
-/// ——一页多行、每行最多三个复制点，名字里必须点名是哪一个。
+/// ——一页多行、每行最多四个复制点，名字里必须点名是哪一个。
 const copyName = (what: string, name = FIELD_NAME) => `复制${what}：${name}`;
 const rotateName = (name = FIELD_NAME) => `轮换 Token：${name}`;
 
@@ -86,7 +86,7 @@ function stubClipboard() {
 }
 
 describe("凭据拷贝清单", () => {
-  it("没有父字段的块只有两项可复制：接口地址与 Token", () => {
+  it("没有父字段的块只有三项可复制：字段名、接口地址与 Token", () => {
     // 本次不做 Key 加密（设计决策 D11），控件里那一格留空——它与联动 key 不是一回事
     const { client } = stubClient();
     render(
@@ -97,7 +97,8 @@ describe("凭据拷贝清单", () => {
       />,
     );
 
-    expect(screen.getAllByRole("button", { name: /^复制/ })).toHaveLength(2);
+    // 字段名本身也是复制点（它要原样抄进审批后台），所以是三项而不是两项
+    expect(screen.getAllByRole("button", { name: /^复制/ })).toHaveLength(3);
     expect(screen.queryByText("联动 key")).toBeNull();
     expect(screen.getByText(URL_OF_ITEM)).toBeInTheDocument();
     // 字段名与控件标识只是标签，但它们必须看得见——不然不知道在配哪一列
@@ -200,6 +201,43 @@ describe("凭据拷贝清单", () => {
     vi.unstubAllGlobals();
   });
 
+  it("字段名可一键复制：值在本地，回显与轮换一个都不摸", async () => {
+    // 字段名要原样抄进审批后台（全角、空格、星号都算数），所以复制必须是纯读（决策 D10）
+    const user = userEvent.setup();
+    const writeText = stubClipboard();
+    const { client, reveal, rotate } = stubClient();
+    render(
+      <CredentialChecklist
+        items={[itemFixture]}
+        origin={ORIGIN}
+        client={client}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: copyName("字段名") }));
+
+    expect(writeText).toHaveBeenCalledWith(FIELD_NAME);
+    expect(reveal).not.toHaveBeenCalled();
+    expect(rotate).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("字段名还没解析出来时不画复制按钮，占位文案照旧说清", () => {
+    // `fieldName` 可能为 null（投影解析不到绑定的列名）。这时若画一个复制按钮，
+    // 只会把空串写进剪贴板，用户还以为抄到了真的字段名——索性不给这个复制点。
+    const { client } = stubClient();
+    render(
+      <CredentialChecklist
+        items={[{ ...itemFixture, fieldName: null }]}
+        origin={ORIGIN}
+        client={client}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /^复制字段名/ })).toBeNull();
+    expect(screen.getByText("（字段名还没解析出来）")).toBeInTheDocument();
+  });
+
   it("回显失败时说清原因，不假装复制成功", async () => {
     const user = userEvent.setup();
     const writeText = stubClipboard();
@@ -287,7 +325,8 @@ describe("凭据拷贝清单", () => {
         client={client}
       />,
     );
-    expect(screen.getAllByRole("button", { name: /^复制/ })).toHaveLength(4);
+    // 每块三个复制点（字段名 / 接口地址 / Token），两块共六个
+    expect(screen.getAllByRole("button", { name: /^复制/ })).toHaveLength(6);
     expect(
       screen.getAllByRole("button", { name: /^轮换 Token：/ }),
     ).toHaveLength(2);
@@ -327,8 +366,8 @@ describe("凭据拷贝清单：联动 key", () => {
 
     expect(screen.getByText("联动 key")).toBeInTheDocument();
     expect(screen.getByText("fldParent")).toBeInTheDocument();
-    // 三项都可复制
-    expect(screen.getAllByRole("button", { name: /^复制/ })).toHaveLength(3);
+    // 四项都可复制：字段名、接口地址、Token、联动 key
+    expect(screen.getAllByRole("button", { name: /^复制/ })).toHaveLength(4);
     // 说清它是给哪个控件用的
     expect(screen.getByText(/父字段「费用类别」/)).toBeInTheDocument();
   });

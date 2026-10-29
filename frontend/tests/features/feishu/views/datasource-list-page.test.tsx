@@ -15,6 +15,7 @@ import {
 } from "./harness";
 
 const LIST_PATH = "/api/v1/feishu/datasources/query";
+const PULL_NOW_PATH = "/api/v1/feishu/datasources/pull-now";
 
 /// 造 count 行数据源：标识 `ds_01`..、名称「数据源 01」..——默认排序（`source_key Asc`）
 /// 下顺序与数组一致，按页断言才不用再排一遍。
@@ -552,6 +553,109 @@ describe("飞书数据源列表页 · 建源入口是表级向导", () => {
         { field_id: "fldA", source_key: "tbla_flda", parent_field_id: null },
       ],
     });
+
+    // 建源之后自动排一次拉取：恰好一次、POST 带表级主键，且排在创建之后——
+    // 数据源行得先存在，`pull_now` 的预检就是按这个 id 查库的。
+    const pullCalls = calls.filter((call) => call.url.endsWith(PULL_NOW_PATH));
+    expect(pullCalls).toHaveLength(1);
+    expect(pullCalls[0]?.method).toBe("POST");
+    expect(pullCalls[0]?.body).toEqual({ datasource_id: 7 });
+    const createIndex = calls.findIndex(
+      (call) =>
+        call.method === "POST" &&
+        call.url.endsWith("/api/v1/feishu/datasources/table"),
+    );
+    expect(createIndex).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf(pullCalls[0]!)).toBeGreaterThan(createIndex);
+  });
+
+  it("自动拉取没排上：创建照旧成功、预检照旧跑，并把失败如实说出来", async () => {
+    // 拉取是建源之后的追加动作：它失败不能把「已经建好了」说成创建失败，
+    // 也不能挡掉预检（那是此刻唯一能验证凭据的一步）。但这声失败必须被说出来——
+    // 否则用户只会看到一个选项表还是空的详情页，不知道去点「立即拉取」。
+    const user = userEvent.setup();
+    stubFeishuApi({
+      ...wizardStub({
+        datasourceList: () =>
+          listPage([
+            datasourceWire({
+              id: 7,
+              source_key: "dept_sales",
+              title: "部门",
+              fields: [
+                { field_id: "fldA", source_key: "dept_sales", enabled: true },
+              ],
+            }),
+          ]),
+      }),
+      approvalOptions: () => ({ result: { options: [{ id: "a" }] } }),
+      pullNow: () =>
+        jsonResponse({ code: 42901, message: "出站凭证还没配置" }, 400),
+    });
+    renderList();
+    await createViaWizard(user);
+
+    // 预检回执照旧出现：拉取失败没有把它挡掉
+    expect(
+      await screen.findByText(/把这一段粘回飞书审批后台/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/拉到了 1 个选项/)).toBeInTheDocument();
+
+    // 拉取失败如实出现在错误条里，原因与服务端原文一致，并给出可自救的下一步
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("已创建「部门」");
+    expect(alert).toHaveTextContent("自动拉取没有排上");
+    expect(alert).toHaveTextContent("出站凭证还没配置");
+    expect(alert).toHaveTextContent("立即拉取");
+
+    // 创建本身成功：向导关闭，列表照常
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("目录里没有 pull_now（部署没开导出站拉取）：建源成功但不排自动拉取", async () => {
+    // `can_pull()` 为假的部署根本不注册这一粒 Action。建源后的自动拉取因此被
+    // **静默**跳过：那是这个部署的正常状态，不该在屏幕上留一条错误条把人往
+    // 「立即拉取」上引（那一粒在这个目录里也不存在）。
+    const user = userEvent.setup();
+    const calls = stubFeishuApi({
+      ...wizardStub({
+        datasourceList: () =>
+          listPage([
+            datasourceWire({
+              id: 7,
+              source_key: "dept_sales",
+              title: "部门",
+              fields: [
+                { field_id: "fldA", source_key: "dept_sales", enabled: true },
+              ],
+            }),
+          ]),
+      }),
+      approvalOptions: () => ({ result: { options: [{ id: "a" }] } }),
+      pullAction: false,
+    });
+    renderList();
+    await createViaWizard(user);
+
+    // 建源照旧打到表级端点
+    expect(
+      calls.some(
+        (call) =>
+          call.method === "POST" &&
+          call.url.endsWith("/api/v1/feishu/datasources/table"),
+      ),
+    ).toBe(true);
+    // 预检照旧跑：跳过的是拉取那一步，不是创建之后的整条收尾
+    expect(
+      await screen.findByText(/把这一段粘回飞书审批后台/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/拉到了 1 个选项/)).toBeInTheDocument();
+    // 一次都没打 pull-now
+    expect(countCalls(calls, PULL_NOW_PATH)).toBe(0);
+    // 跳过不留痕：一个错误条都不该有
+    expect(screen.queryByRole("alert")).toBeNull();
+    // 创建本身成功：向导关闭
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("服务端拒绝创建时，后端原文回显在向导里且不出现预检回执", async () => {

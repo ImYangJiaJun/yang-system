@@ -27,6 +27,8 @@ import { useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
 
+import { useUiCatalog } from "@/engine";
+
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -37,8 +39,10 @@ import {
 } from "@/shared/ui/dialog";
 
 import {
+  DATASOURCE_OPERATION_IDS,
   enabledBindingInputs,
   feishuQueryKeys,
+  hasOperation,
   useDatasourceList,
   useFeishuActions,
   useTableWizardClient,
@@ -138,6 +142,7 @@ export default function DatasourceListPage() {
   const actions = useFeishuActions();
   const wizardClient = useTableWizardClient();
   const xlsxClient = useXlsxImportClient();
+  const catalog = useUiCatalog();
   const controller = useListQuery();
   const listQuery = useDatasourceList(controller.query);
 
@@ -325,7 +330,7 @@ export default function DatasourceListPage() {
     }
   }
 
-  /// 向导提交成功：关掉向导、回读列表，若服务端回了一组凭据就拿第一条跑一次预检。
+  /// 向导提交成功：关掉向导、回读列表、排一次拉取，若服务端回了一组凭据就拿第一条跑一次预检。
   function submitWizard(
     created: CreatedTable,
     submission: CreateTableSubmission,
@@ -333,6 +338,23 @@ export default function DatasourceListPage() {
     closeWizard();
     void (async () => {
       await refreshList();
+      // 建完就排一次拉取：新源的选项表此刻是空的，而「建完就能看到选项」才是
+      // 这条源可用的证明；少了这一步，人得自己进详情页点「立即拉取」。
+      // 目录里没有 pull_now 等于这个部署没开导出站拉取（见 api.ts 的
+      // DATASOURCE_OPERATION_IDS），此时静默跳过——那是正常状态，不是错误。
+      if (hasOperation(catalog.data, DATASOURCE_OPERATION_IDS.pullNow)) {
+        try {
+          await actions.pullNow(created.datasourceId);
+        } catch (cause) {
+          // 拉取只是「排上队」这一步没成功：源已经建好了（服务端受理后异步跑）。
+          // 所以不抛、也不挡下面的预检——预检是此刻唯一能验证凭据的一步。
+          // 原因原样带上，否则用户只会看到「已创建」，却不知道选项为什么还是空的。
+          setActionError(
+            `已创建「${submission.title}」，但自动拉取没有排上：${messageOf(cause)}。` +
+              "可到详情页手动点「立即拉取」。",
+          );
+        }
+      }
       const first = created.credentials[0];
       if (first !== undefined) {
         await runPrecheck(
