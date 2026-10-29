@@ -451,6 +451,34 @@ if ((Get-CleanRevision fixture) -ne 'abc123') { throw 'wrong commit' }
                                 text=True, encoding="utf-8", capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_build_identity_allows_dirty_only_on_request(self):
+        path = (ROOT / "deploy/deploy.ps1").as_posix().replace("'", "''")
+        script = r'''
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('__PATH__',[ref]$null,[ref]$null)
+foreach ($name in @('Get-CleanRevision','Get-BuildIdentity')) {
+    $definition=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
+    if (-not $definition) { throw "missing $name" }
+    Invoke-Expression $definition.Extent.Text
+}
+$global:statusOutput=' M src/lib.rs'; $global:diffOutput='+x'; $global:hashOutput='feedface'
+function git { $global:LASTEXITCODE=0; if ($args -contains 'status') { $global:statusOutput } elseif ($args -contains 'diff') { $global:diffOutput } elseif ($args -contains 'hash-object') { $global:hashOutput } else { 'abc123' } }
+$rejected=$false
+try { Get-BuildIdentity fixture } catch { $rejected=$true }
+if (-not $rejected) { throw 'dirty identity accepted without -AllowDirty' }
+$first=Get-BuildIdentity fixture -AllowDirty
+if ($first.Revision -ne 'abc123' -or -not $first.Dirty) { throw 'dirty identity misreported' }
+if ((Get-BuildIdentity fixture -AllowDirty).Fingerprint -ne $first.Fingerprint) { throw 'fingerprint unstable' }
+$global:hashOutput='deadbeef'
+if ((Get-BuildIdentity fixture -AllowDirty).Fingerprint -eq $first.Fingerprint) { throw 'edit during build undetected' }
+$global:statusOutput=$null
+$clean=Get-BuildIdentity fixture -AllowDirty
+if ($clean.Dirty -or $clean.Revision -ne 'abc123') { throw 'clean identity misreported' }
+'''.replace("__PATH__", path)
+        result = subprocess.run([shutil.which("pwsh") or "powershell", "-NoProfile", "-Command", script],
+                                text=True, encoding="utf-8", capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_upload_is_private_before_transfer_and_installed_under_lock(self):
         path = (ROOT / "deploy/deploy.ps1").as_posix().replace("'", "''")
         script = r'''

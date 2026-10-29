@@ -27,6 +27,7 @@
 #   .\deploy.ps1 -Mode logs       # 追踪线上后端容器日志（Ctrl+C 退出）
 #   .\deploy.ps1 -Mode logs -LogContainer yang-backend-green   # 追踪绿容器
 #   .\deploy.ps1 -SkipBuild       # 跳过构建+导出，复用已有镜像包直接上传（上传/远程失败后的重试）
+#   .\deploy.ps1 -AllowDirty      # 工作区有未提交改动也构建部署（镜像标记 source-dirty=true；仅联调/紧急验证，制品不可复现，构建期间源码再变会中止）
 #
 # 两个附加动作开关（默认都不做；可以单独用，也可以一起开）：
 #   .\deploy.ps1 -SyncConfig              # 只做一件事：把本机 deploy/config.cloud.toml
@@ -62,6 +63,12 @@ param(
     # 跳过 [1/5]~[3/5]（构建 + 导出），复用已存在的 $TarFile 直接上传。
     # 用于「构建已成功、但上传或远程步骤失败」后的重试：构建要 8~9 分钟，不该重付。
     [switch]$SkipBuild,
+
+    # 允许从**带未提交改动的工作区**构建（默认关闭 = 仍要求干净源码）。
+    # 打开后镜像标记 io.yang-system.source-dirty=true，制品**不可复现**——只用于联调 / 紧急验证，
+    # 正式发布应先提交再构建。构建前后仍核对 HEAD + 工作区指纹，构建期间源码（含未提交内容）
+    # 再变一样会中止导出。只对会构建的路径有意义（-Mode deploy/upload/smoke 且不带 -SkipBuild）。
+    [switch]$AllowDirty,
 
     # 仅在核对锁内 schema 记录与旧写者兼容性之后给出；不是自动兼容性证明。
     [switch]$RollbackSchemaCompatible,
@@ -194,6 +201,21 @@ if ($ResetDb -and $ModeExplicit -and $Mode -ne 'deploy') {
           "      只重置数据库：      .\deploy.ps1 -ResetDb"
 }
 
+if ($AllowDirty) {
+    # -AllowDirty 只改变构建行为；不会构建的组合里它什么也不做——按本脚本的规矩「写了却
+    # 静默不生效的参数就是 bug」直接拒绝，而不是让调用方误以为脏代码已经跑起来了。
+    # 会构建的路径：显式 -Mode deploy/upload/smoke，或不给 -Mode（且没开 -SyncConfig/-ResetDb）
+    # 时的默认完整部署；两种情况都还得不带 -SkipBuild。
+    $willBuild = (-not $SkipBuild) -and (
+        ($ModeExplicit -and $Mode -in @('deploy','upload','smoke')) -or
+        (-not $ModeExplicit -and -not $postRequested))
+    if (-not $willBuild) {
+        throw "-AllowDirty 只影响构建路径（-Mode deploy/upload/smoke，且不带 -SkipBuild）。`n" +
+              "      当前组合不会构建：-Mode $Mode、-SkipBuild=$SkipBuild、附加动作=$postRequested。`n" +
+              "      请去掉 -AllowDirty（不构建时它毫无作用），或改成会构建的调用方式。"
+    }
+}
+
 # SSH/SCP 公共健壮性选项。实测踩过：TCP 已建立、认证也成功，但命令请求丢失，
 # 两端互等数分钟（客户端 ssh 进程 CPU≈0；服务器上会话已建、却没有任何子进程）。
 # 这组选项把这种「静默黑洞」变成**有界失败**，而不是让整个部署无限挂起。
@@ -203,10 +225,36 @@ $SshOpts = @('-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'S
 function Get-CleanRevision([string]$Repository) {
     $dirty = & git -C $Repository status --porcelain --untracked-files=normal
     if ($LASTEXITCODE -ne 0) { throw '无法读取源码状态' }
-    if ($dirty) { throw "发布构建要求干净源码，请先提交当前仓库改动：$Repository" }
+    if ($dirty) { throw "发布构建要求干净源码，请先提交当前仓库改动：$Repository（确需从脏工作区构建请加 -AllowDirty）" }
     $revision = & git -C $Repository rev-parse HEAD
     if ($LASTEXITCODE -ne 0) { throw '无法读取源码版本' }
     return $revision
+}
+
+# 构建身份 = 仓库 HEAD + 是否肮脏 + 工作区指纹。
+#
+# 默认（不加 -AllowDirty）直接委托 Get-CleanRevision：脏工作区就拒绝，语义与以前完全一致。
+#
+# 为什么脏构建只比 HEAD 不够：有未提交改动时 HEAD 本来就不动，构建期间把同一个文件再改一遍，
+# 前后 HEAD 一模一样——「构建期间源码又变了」会被漏掉。所以指纹由两部分组成：
+#   1. `git status --porcelain` 的输出：新增 / 删除 / 重命名 / 未跟踪文件出现或消失都在这里；
+#   2. `git diff HEAD` 的哈希：同一路径上的内容修改（改了几次，diff 哈希就变几次）。
+# 刻意的上限：**未跟踪文件**的内容不进 `git diff HEAD`，构建期间改一个未跟踪文件不会被指纹
+# 发现（status 只看出它还在）。这个瑕疵只存在于 -AllowDirty 的联调场景，正式构建不受影响。
+function Get-BuildIdentity([string]$Repository, [switch]$AllowDirty) {
+    if (-not $AllowDirty) {
+        $revision = Get-CleanRevision $Repository
+        return [pscustomobject]@{ Revision = $revision; Dirty = $false; Fingerprint = $revision }
+    }
+    $status = & git -C $Repository status --porcelain --untracked-files=normal
+    if ($LASTEXITCODE -ne 0) { throw '无法读取源码状态' }
+    $revision = & git -C $Repository rev-parse HEAD
+    if ($LASTEXITCODE -ne 0) { throw '无法读取源码版本' }
+    # 管道里最后一个原生命令（hash-object）决定 $LASTEXITCODE，所以它代表指纹计算是否成功。
+    $diffHash = & git -C $Repository diff HEAD | & git hash-object --stdin
+    if ($LASTEXITCODE -ne 0) { throw '无法计算工作区指纹' }
+    $fingerprint = $revision + '|' + (@($status) -join "`n") + '|' + ("$diffHash").Trim()
+    return [pscustomobject]@{ Revision = $revision; Dirty = [bool]$status; Fingerprint = $fingerprint }
 }
 
 function Exec([scriptblock]$block) {
@@ -607,11 +655,20 @@ if ($SkipBuild) {
     Write-Host "    ⚠️ 该包可能已与当前工作区源码不一致，确认它就是你要发布的那一份。" -ForegroundColor Yellow
 }
 else {
-    $applicationRevision = Get-CleanRevision $projectDir
-    $frameworkRevision = Get-CleanRevision $libYangRoot
-    $buildLabels = @('--label', "org.opencontainers.image.revision=$applicationRevision",
-        '--label', "io.yang-system.framework-revision=$frameworkRevision",
-        '--label', 'io.yang-system.source-dirty=false', '--label', 'io.yang-system.validation=local-build')
+    $applicationIdentity = Get-BuildIdentity $projectDir -AllowDirty:$AllowDirty
+    $frameworkIdentity = Get-BuildIdentity $libYangRoot -AllowDirty:$AllowDirty
+    $sourceDirty = $applicationIdentity.Dirty -or $frameworkIdentity.Dirty
+    if ($sourceDirty) {
+        # 故意喊大声：这份镜像来自**未提交代码**，与任何 commit 都对不上，只适合联调 / 紧急验证。
+        Write-Host "`n    ⚠️ -AllowDirty：镜像将包含**未提交代码**（标记 io.yang-system.source-dirty=true），制品不可复现。" -ForegroundColor Yellow
+        Write-Host "       仅限联调 / 紧急验证；正式发布请先提交。" -ForegroundColor Yellow
+    }
+    # PS 5.1 没有三元运算符，标签值老实 if/else。
+    $dirtyLabel = 'false'
+    if ($sourceDirty) { $dirtyLabel = 'true' }
+    $buildLabels = @('--label', "org.opencontainers.image.revision=$($applicationIdentity.Revision)",
+        '--label', "io.yang-system.framework-revision=$($frameworkIdentity.Revision)",
+        '--label', "io.yang-system.source-dirty=$dirtyLabel", '--label', 'io.yang-system.validation=local-build')
     Write-Host "`n==> [1/5] 构建后端镜像 $BackendImage" -ForegroundColor Cyan
     Write-Host "    上下文：$libYangRoot（必须在仓库根，前端/后端都靠它解析 ../../crates）"
     Exec { docker build @buildLabels -f (Join-Path $libYangRoot $backendDockerfile) -t $BackendImage $libYangRoot }
@@ -620,9 +677,11 @@ else {
     Write-Host "    上下文：$frontendDir"
     Exec { docker build @buildLabels -f (Join-Path $frontendDir 'deploy/Dockerfile') -t $FrontendImage $frontendDir }
 
-    if ((Get-CleanRevision $projectDir) -ne $applicationRevision -or
-        (Get-CleanRevision $libYangRoot) -ne $frameworkRevision) {
-        throw '构建期间源码版本发生变化，拒绝导出制品'
+    # 构建后再算一次身份：干净构建下 Get-BuildIdentity 仍走 Get-CleanRevision（脏了直接抛错），
+    # 保证与以前一致；-AllowDirty 下则比对 HEAD + 工作区指纹，能抓住「构建期间同一文件又被改」。
+    if ((Get-BuildIdentity $projectDir -AllowDirty:$AllowDirty).Fingerprint -ne $applicationIdentity.Fingerprint -or
+        (Get-BuildIdentity $libYangRoot -AllowDirty:$AllowDirty).Fingerprint -ne $frameworkIdentity.Fingerprint) {
+        throw '构建期间源码发生变化（含未提交改动的内容变化），拒绝导出制品'
     }
 
     # ---------- 2. 导出并 gzip 压缩 ----------
