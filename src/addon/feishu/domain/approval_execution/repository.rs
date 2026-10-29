@@ -35,8 +35,9 @@ pub(crate) async fn admit(
         .bind(config_id).bind(record_id).bind(&uuid).bind(&payload).execute(&mut *transaction).await?;
     // tenant-boundary: raw-sql feishu-approval-admit-owner
     let (id, stored_config, stored_uuid): (i64, i64, String) = sqlx::query_as(
-        "SELECT id,config_id,uuid FROM feishu_approval_task WHERE record_id=? FOR UPDATE",
+        "SELECT id,config_id,uuid FROM feishu_approval_task WHERE config_id=? AND record_id=? FOR UPDATE",
     )
+    .bind(config_id)
     .bind(record_id)
     .fetch_one(&mut *transaction)
     .await?;

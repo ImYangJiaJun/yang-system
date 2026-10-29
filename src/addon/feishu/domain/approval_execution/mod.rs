@@ -222,10 +222,24 @@ mod tests {
         .fetch_one(context.approval_tasks().pool())
         .await?;
         assert_eq!(attached, 0, "首次未指定身份也不能由后续请求改写");
+        // record_id 只在多维表格内唯一（复制 Base 会原样保留它），同一 record 在
+        // 另一个配置下必须能独立建任务：产生第二条任务行，归属各自的配置。
         let other = snapshot(&context).await?;
-        assert!(
-            admit(&context, &other, &record).await.is_err(),
-            "跨配置不能复用全局 record_id"
+        let other_id = admit(&context, &other, &record).await?;
+        assert_ne!(other_id, id, "跨配置应产生第二条任务行");
+        let configs: Vec<i64> = sqlx::query_scalar(
+            "SELECT config_id FROM feishu_approval_task WHERE record_id=? ORDER BY id",
+        )
+        .bind(&record)
+        .fetch_all(context.approval_tasks().pool())
+        .await?;
+        assert_eq!(
+            configs,
+            vec![
+                first.config["id"].as_i64().expect("配置 id 应存在"),
+                other.config["id"].as_i64().expect("配置 id 应存在"),
+            ],
+            "同一 record_id 在两个配置下各有一条任务行"
         );
         sqlx::query("UPDATE feishu_approval_config SET enabled=false WHERE id=?")
             .bind(first.config["id"].as_i64())

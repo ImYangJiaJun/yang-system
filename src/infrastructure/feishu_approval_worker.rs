@@ -890,16 +890,16 @@ async fn seed_config(
             // [`RoundTrigger::discovers_new_records`]）：建了就成「没人点也派发」。
             None if !trigger.discovers_new_records() => skipped += 1,
             None => {
-                // 幂等键与派发路径**同源**：同一个 record 只有一条任务行，
-                // 重复播种会撞 `record_id` 唯一索引而不是建出第二条。
+                // 幂等键与派发路径**同源**：同一个 record 在同一配置下只有一条
+                // 任务行，重复播种会撞 (config_id, record_id) 复合唯一键而不是
+                // 建出第二条。跨配置复用 record_id 是合法情形（复制多维表格会
+                // 保留 record_id），所以这里不能用全局唯一键判重。
                 let uuid = derive_uuid(&base_token, &table_id, &approval_code, &record.record_id);
-                let mut row = Record::new();
-                row.insert("config_id", serde_json::json!(config_id));
-                row.insert("record_id", serde_json::json!(&record.record_id));
-                row.insert("uuid", serde_json::json!(uuid));
-                row.insert("state", serde_json::json!("pending"));
-                runner.context.approval_tasks().query().insert(row).await?;
-                seeded += 1;
+                if insert_seeded_task(&runner.context, config_id, &record.record_id, &uuid).await? {
+                    seeded += 1;
+                } else {
+                    skipped += 1;
+                }
             }
         }
     }
@@ -914,6 +914,27 @@ async fn seed_config(
         "审批配置播种完成"
     );
     Ok(seeded)
+}
+
+/// 播种一条任务行；插入失败只告警并返回 `false`。
+///
+/// 单条失败不能中止整轮：否则一条坏记录会让该配置的其余新记录永远不派发。
+async fn insert_seeded_task(
+    context: &FeishuContext,
+    config_id: i64,
+    record_id: &str,
+    uuid: &str,
+) -> anyhow::Result<bool> {
+    let mut row = Record::new();
+    row.insert("config_id", serde_json::json!(config_id));
+    row.insert("record_id", serde_json::json!(record_id));
+    row.insert("uuid", serde_json::json!(uuid));
+    row.insert("state", serde_json::json!("pending"));
+    if let Err(error) = context.approval_tasks().query().insert(row).await {
+        tracing::warn!(config_id, record_id, error = %error, "播种任务行失败，跳过该记录");
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// 把受理请求携带的发起人 open_id 落到该配置下的待处理任务行（设计 §6.3）。
@@ -2076,6 +2097,79 @@ mod tests {
             (1, "新持有者的结果"),
             "同一任务只能由一个实例持有执行权，旧持有者不得覆盖新结果"
         );
+        Ok(())
+    }
+
+    /// 复制多维表格会保留 record_id：同一 record 在两个配置下必须各能建一条任务
+    /// 行，而同一配置内重复播种必须被容错跳过（不能中止整轮）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn real_mysql_seed_task_row_is_unique_per_config_not_globally() -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = yang_db::Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "只允许测试库");
+        crate::schema::sync_with_database(
+            database,
+            yang_db::DatabaseConfig::default(),
+            Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let database = yang_db::Database::connect(&url).await?;
+        let context = crate::addon::feishu::build_context(
+            Arc::new(database.pool().clone()),
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?;
+        let pool = context.approval_tasks().pool();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let mut configs = Vec::new();
+        for suffix in ["a", "b"] {
+            let id = sqlx::query("INSERT INTO feishu_approval_config (title,base_token,table_id,approval_code,applicant_field,backfill_field,base_timezone,enabled,created_at,updated_at) VALUES ('播种唯一性测试','appSeed',?,'DEF-SEED','fldPerson','fldNumber','Asia/Shanghai',true,NOW(),NOW())")
+                .bind(format!("tbl{namespace}{suffix}"))
+                .execute(pool)
+                .await?
+                .last_insert_id() as i64;
+            configs.push(id);
+        }
+        let record_id = format!("rec{namespace}");
+        assert!(
+            insert_seeded_task(&context, configs[0], &record_id, &format!("{namespace}a")).await?,
+            "首个配置应插入成功"
+        );
+        assert!(
+            insert_seeded_task(&context, configs[1], &record_id, &format!("{namespace}b")).await?,
+            "复制表的同一 record_id 在另一配置下必须能建任务"
+        );
+        assert!(
+            !insert_seeded_task(&context, configs[0], &record_id, &format!("{namespace}c")).await?,
+            "同一配置重复播种应被容错跳过而不是中止整轮"
+        );
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT config_id,record_id FROM feishu_approval_task WHERE record_id=? ORDER BY config_id",
+        )
+        .bind(&record_id)
+        .fetch_all(pool)
+        .await?;
+        assert_eq!(
+            rows,
+            vec![
+                (configs[0], record_id.clone()),
+                (configs[1], record_id.clone())
+            ]
+        );
+        sqlx::query("DELETE FROM feishu_approval_task WHERE record_id=?")
+            .bind(&record_id)
+            .execute(pool)
+            .await?;
+        for config_id in configs {
+            sqlx::query("DELETE FROM feishu_approval_config WHERE id=?")
+                .bind(config_id)
+                .execute(pool)
+                .await?;
+        }
         Ok(())
     }
 

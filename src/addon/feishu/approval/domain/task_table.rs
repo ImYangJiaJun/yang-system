@@ -24,14 +24,24 @@
 //! `docker stop`（SIGTERM → 10 秒后 SIGKILL）静默杀掉处理中的批次，没有这个状态
 //! 就没有任何痕迹。
 
-use yang_base::definition::{Int, Key, Radio, Str, TableSpec, Text, Timestamp};
+use yang_base::definition::{
+    FieldName, FieldRef, Int, Key, Radio, Str, TableName, TableSpec, Text, Timestamp,
+};
 use yang_base::BaseError;
+
+fn field_ref(table_name: &TableName, field: &str) -> Result<FieldRef, BaseError> {
+    let field = FieldName::new(field).map_err(|error| BaseError::ConfigError(error.to_string()))?;
+    Ok(FieldRef::new(table_name.clone(), field))
+}
 
 /// 认领队列表。
 ///
 /// # 两个唯一的键
 ///
-/// - `record_id` 唯一：同一行不能有两个进行中的任务，并发点击靠它挡住。
+/// - `(config_id, record_id)` 同一配置内唯一：同一行不能有两个进行中的任务，并发
+///   点击靠它挡住。**不能只对 `record_id` 建全局唯一键**——`record_id` 只在多维
+///   表格内唯一，复制 Base/表时副本会原样保留 `record_id`，全局唯一会让副本里的
+///   同一记录永远建不出任务。
 /// - `uuid` 唯一：它是 `60012` 响应丢失时**唯一**的对账键（`serial_number` 无法
 ///   反查实例，官方 FAQ 明文「暂不支持通过审批单编号获取审批实例详情」）。
 ///
@@ -40,7 +50,8 @@ use yang_base::BaseError;
 /// 外键规则被框架硬编码为 `RESTRICT` 且不可改，而 `schema_sync` 只增不删——
 /// 外键一旦声明即永久存在。`config_id` 用整数列 + 应用层校验。
 pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
-    Ok(TableSpec::new(yang_base::table!("feishu_approval_task"))
+    let table_name = yang_base::table!("feishu_approval_task");
+    Ok(TableSpec::new(table_name.clone())
         .title("飞书审批派发任务")
         .fields(yang_base::fields! {
             // 排序与筛选都要：认领查询按 `id` 升序取批（`page` 分页依赖排序），
@@ -60,7 +71,6 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             record_id => Str::new()
                 .title("多维表格记录 ID")
                 .require(true)
-                .unique(true)
                 .max_length(128)
                 .filterable(true),
             // 派生的幂等键。**必须持久化**：响应丢失时 instance_code 根本不存在，
@@ -116,7 +126,16 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
             last_error => Text::new().title("最近错误"),
             created_at => Timestamp::new().created_at().title("创建时间"),
             updated_at => Timestamp::new().updated_at().title("更新时间").sortable(true),
-        }))
+        })
+        // record_id 只在多维表格内唯一：复制 Base/表会保留 record_id，唯一性只能
+        // 限定到「同一配置内」。
+        .unique_named(
+            "uk_feishu_approval_task_config_record",
+            [
+                field_ref(&table_name, "config_id")?,
+                field_ref(&table_name, "record_id")?,
+            ],
+        ))
 }
 
 #[cfg(test)]
@@ -243,6 +262,31 @@ mod tests {
             .unwrap_or_else(|| panic!("config_id 字段必须存在"));
         assert!(config_id.is_required());
         assert!(config_id.is_filterable(), "按配置取任务依赖该位");
+    }
+
+    #[test]
+    fn record_id_is_unique_only_within_a_config() {
+        // 复制多维表格会原样保留 record_id，只对 record_id 建全局唯一键会让副本
+        // 里的同一记录永远建不出任务。唯一性必须限定到 (config_id, record_id)。
+        let spec = table_spec().unwrap_or_else(|error| panic!("表声明应有效: {error}"));
+        let index = spec
+            .indexes
+            .iter()
+            .find(|index| index.name.as_deref() == Some("uk_feishu_approval_task_config_record"))
+            .unwrap_or_else(|| panic!("必须声明 (config_id, record_id) 复合唯一索引"));
+        assert!(index.unique, "复合索引必须是唯一索引");
+        let columns: Vec<&str> = index
+            .fields
+            .iter()
+            .map(|field| field.field().as_str())
+            .collect();
+        assert_eq!(columns, ["config_id", "record_id"], "索引列顺序必须一致");
+        assert!(
+            !spec.indexes.iter().any(|index| index.unique
+                && index.fields.len() == 1
+                && index.fields[0].field().as_str() == "record_id"),
+            "record_id 不能保留全局唯一索引"
+        );
     }
 
     #[test]

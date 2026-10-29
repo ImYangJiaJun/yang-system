@@ -219,8 +219,16 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_worker_claims_are_exclusive_and_old_owner_cannot_commit", "--", "--ignored", "--test-threads=1"),
     ),
     Command(
+        "Approval seed record uniqueness integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_seed_task_row_is_unique_per_config_not_globally", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "Approval durable admission integration",
         ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_execution_admission_preserves_first_snapshot_and_identity", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval reopen retryable tasks integration",
+        ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_reopen_restarts_retryable_tasks_but_never_running_or_backfilled", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
         "Approval unknown effects integration",
