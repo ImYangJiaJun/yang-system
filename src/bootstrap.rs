@@ -9,7 +9,9 @@ use crate::addon::feishu::domain::alert::{FeishuAlertSender, FeishuAlertSenderHa
 use crate::app::{build_app, YANG_SYSTEM_METRIC_NAMES};
 use crate::authorization::{AuthorizationOutboxWorker, AuthorizationVersionCache};
 use crate::config::Settings;
-use crate::feishu_approval_worker::{ApprovalDispatchHandle, ApprovalDispatchWorker};
+use crate::feishu_approval_worker::{
+    ApprovalDispatchHandle, ApprovalDispatchRequest, ApprovalDispatchWorker,
+};
 use crate::feishu_event_worker::FeishuEventWorker;
 use crate::feishu_oauth_reminder::FeishuOauthReminderWorker;
 use crate::feishu_pull::{FeishuPullHandle, FeishuPullWorker};
@@ -276,7 +278,7 @@ async fn run_after_tools_created(
     telemetry: Option<&mut TelemetryRuntime>,
     feishu_pull_handle: FeishuPullHandle,
     feishu_pull_requests: mpsc::UnboundedReceiver<Option<i64>>,
-    approval_dispatch_requests: mpsc::UnboundedReceiver<(i64, Option<String>)>,
+    approval_dispatch_requests: mpsc::UnboundedReceiver<ApprovalDispatchRequest>,
     mode: StartupMode,
 ) -> anyhow::Result<()> {
     let application = build_app(Arc::clone(&tools), Arc::new(settings.security.clone()))
@@ -284,6 +286,12 @@ async fn run_after_tools_created(
     // `application.runtime` 稍后会被移进 `Arc`，收敛句柄必须在那之前取出。
     let grant_expiry = application.grant_expiry_handle();
 
+    // 旧版全局唯一索引（record_id 单列）会让复制 Base 后的同 record_id 无法在另一
+    // 配置下派发，而 schema 同步只增不删——所以在同步/预检之前 fail-closed。
+    // 只读冒烟同样 fail-fast：它要证明的正是「这个库能安全跑新版本」。
+    crate::schema::ensure_legacy_task_record_index_absent(initializer_mysql.pool())
+        .await
+        .context("启动前检查旧版审批任务唯一索引失败")?;
     let initializer = DatabaseInitializer::new(initializer_mysql);
     let definitions =
         crate::schema::definitions(&application.runtime).context("构建完整数据库 schema 失败")?;

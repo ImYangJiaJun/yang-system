@@ -223,6 +223,18 @@ INTEGRATION = (
         ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_seed_task_row_is_unique_per_config_not_globally", "--", "--ignored", "--exact", "--test-threads=1"),
     ),
     Command(
+        "Approval targeted task lookup integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_seed_existing_lookup_survives_large_task_history", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Approval applicant scoping integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::feishu_approval_worker::tests::real_mysql_persist_applicant_scopes_to_touched_records", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
+        "Legacy task record index guard integration",
+        ("cargo", "test", "--lib", "--locked", "infrastructure::schema::tests::real_mysql_legacy_task_record_index_guard_blocks_startup", "--", "--ignored", "--exact", "--test-threads=1"),
+    ),
+    Command(
         "Approval durable admission integration",
         ("cargo", "test", "--lib", "--locked", "addon::feishu::domain::approval_execution::tests::real_mysql_execution_admission_preserves_first_snapshot_and_identity", "--", "--ignored", "--exact", "--test-threads=1"),
     ),

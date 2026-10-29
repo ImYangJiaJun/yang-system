@@ -36,7 +36,7 @@
 //! `uuid` 是最后一道防线：即使某条记录被重复处理，飞书也只会回 `60012`，
 //! 走回捞路径拿到同一个实例，不会重复建单。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -69,7 +69,7 @@ use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
     FailureKind, HttpClientTransport, OutboundTransport, TokioSleeper,
 };
-use crate::addon::feishu::domain::repository::all_pages;
+use crate::addon::feishu::domain::repository::{all_pages, PAGE_SIZE};
 use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
 };
@@ -87,12 +87,12 @@ use crate::infrastructure::audit;
 /// 让「条件没生效」以显式报错出现。
 const SEED_MAX_PAGES: u32 = 20;
 
-/// 播种时最多翻多少页已有任务行（每页 `PAGE_SIZE` 行，用来判「新建还是拉回待处理」）。
+/// 按 record_id 定向读取任务行时的片大小。
 ///
-/// 行数与多维表格的记录数同量级，所以必须真翻页，不能「一次读够」。这里只是防失控的
-/// 上界；超了 `all_pages` 会**报错**而不是截断——截断会让没读到的行被当成「不存在」，
-/// 于是重复插入，而重复插入撞的是唯一索引，报错点离真正的原因很远。
-const SEED_MAX_TASK_PAGES: usize = 20;
+/// 与框架 `where_in` 的 IN 列表上限（500）取齐：超了是**拒绝**（`ParamInvalid`），
+/// 不是截断。那个常量是 yang-base 的 `pub(crate)`，仓外只能用字面量，
+/// 所以「与它同步」只能靠这条注释，而运行期还有下面的页数守卫兜底。
+const TASK_LOOKUP_CHUNK: usize = 500;
 
 /// 播种时最多翻多少页启用中的配置行。配置是「一张多维表格一条」，量级个位到十位。
 const SEED_MAX_CONFIG_PAGES: usize = 10;
@@ -148,6 +148,12 @@ impl ResumeCursor {
     }
 }
 
+/// 手动受理信号：`(config_id, 受理发起人 open_id, 单条点击的记录 id)`。
+///
+/// 第三项 `Some` 表示单条点击，发起人只落到被点的那一行；批量受理为 `None`，
+/// 落到本轮播种/重开的所有行（见 [`persist_applicant`]）。
+pub type ApprovalDispatchRequest = (i64, Option<String>, Option<String>);
+
 /// 手动触发的共享句柄。
 ///
 /// 照 `FeishuPullHandle` 的先例：注册进 `Tools` 供 Action 取用。
@@ -157,14 +163,14 @@ impl ResumeCursor {
 /// 生产装配仍只有 `bootstrap.rs` 一处调用 [`ApprovalDispatchHandle::new`]。
 #[derive(Clone)]
 pub struct ApprovalDispatchHandle {
-    trigger: mpsc::UnboundedSender<(i64, Option<String>)>,
+    trigger: mpsc::UnboundedSender<ApprovalDispatchRequest>,
 }
 
 impl ApprovalDispatchHandle {
     /// 建一对：句柄给 Action，接收端给 worker。
     ///
     /// 无界通道：触发是低频动作，没有一个值得让 HTTP 请求等它的背压。
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<(i64, Option<String>)>) {
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<ApprovalDispatchRequest>) {
         let (trigger, requests) = mpsc::unbounded_channel();
         (Self { trigger }, requests)
     }
@@ -174,16 +180,23 @@ impl ApprovalDispatchHandle {
     /// `config_id` 标识本次受理命中的配置；`applicant` 为 `None` 时语义与旧行为
     /// 完全一致（只跑一轮，不落发起人）。
     ///
+    /// `record_id` 限定发起人落库的作用域：单条点击带**被点的那一条**，发起人只
+    /// 写到它自己；批量受理为 `None`，写到本轮播种/重开的所有行。取值越界会把
+    /// 一个点击人的身份广播给该配置下所有跨轮待处理的任务（见 [`persist_applicant`]）。
+    ///
     /// 接收端已消失（worker 没起或正在退出）时返回错误——静默丢弃会让按钮
     /// 显示「已受理」而实际什么都没发生。
     pub(crate) fn request_dispatch(
         &self,
         config_id: i64,
         applicant: Option<String>,
+        record_id: Option<String>,
     ) -> Result<(), BaseError> {
-        self.trigger.send((config_id, applicant)).map_err(|_| {
-            BaseError::ConfigError("审批派发 Worker 未在运行，无法受理全表派发".to_string())
-        })
+        self.trigger
+            .send((config_id, applicant, record_id))
+            .map_err(|_| {
+                BaseError::ConfigError("审批派发 Worker 未在运行，无法受理全表派发".to_string())
+            })
     }
 }
 
@@ -204,7 +217,7 @@ impl ApprovalDispatchWorker {
         tools: Arc<Tools>,
         settings: &FeishuSettings,
         context: Arc<FeishuContext>,
-        requests: mpsc::UnboundedReceiver<(i64, Option<String>)>,
+        requests: mpsc::UnboundedReceiver<ApprovalDispatchRequest>,
     ) -> anyhow::Result<Self> {
         let deployment = deployment_namespace(&tools)?;
         let cache = Arc::new(RedisTenantTokenCache::new(
@@ -492,7 +505,7 @@ fn reopens_on_click(trigger: RoundTrigger, config_id: i64) -> bool {
 async fn run_loop(
     runner: RoundRunner,
     idle_poll: Duration,
-    mut requests: mpsc::UnboundedReceiver<(i64, Option<String>)>,
+    mut requests: mpsc::UnboundedReceiver<ApprovalDispatchRequest>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     // 启动后**立即**跑第一轮（`interval` 的首个 tick 是立刻可用的），兼作
@@ -510,8 +523,9 @@ async fn run_loop(
             }
             // 手动触发：投一个信号即跑一轮，与自动轮询走**完全同一条路径**；
             // 携带的受理发起人（已解析成 open_id）随本轮落到待处理任务行。
-            Some((config_id, applicant)) = requests.recv() => {
-                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id)), RoundTrigger::Manual(config_id)).await;
+            // 第三个字段是单条点击的记录 id（批量为 None），用来限定落库作用域。
+            Some((config_id, applicant, record_id)) = requests.recv() => {
+                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id, record_id)), RoundTrigger::Manual(config_id)).await;
             }
             _ = ticker.tick() => {
                 run_round(&runner, &mut cursor, None, RoundTrigger::Poll).await;
@@ -522,8 +536,10 @@ async fn run_loop(
 
 /// 跑一轮：播种 → （受理发起人落库）→ 认领 → 逐条处理 → 写回结果。
 ///
-/// `applicant` 是手动受理请求携带的发起人（已解析成 open_id）；`None` 表示本轮
-/// 由自动轮询触发，不落发起人。
+/// `applicant` 是手动受理请求携带的 `(config_id, 发起人 open_id, record_id)`；
+/// `None` 表示本轮由自动轮询触发，不落发起人。第三项 `record_id` 为 `Some` 时是
+/// 单条点击，发起人只落到被点的那一行；为 `None` 时是批量受理，落到本轮播种/重开
+/// 的所有行（见 [`persist_applicant`]）。
 ///
 /// # 播种是这条链路的地基
 ///
@@ -541,30 +557,43 @@ async fn run_loop(
 async fn run_round(
     runner: &RoundRunner,
     cursor: &mut ResumeCursor,
-    applicant: Option<(i64, String)>,
+    applicant: Option<(i64, String, Option<String>)>,
     trigger: RoundTrigger,
 ) {
     let started = std::time::Instant::now();
     tracing::Span::current().record("trigger", trigger.as_str());
     runner.heartbeat.mark("seed", None);
     tracing::debug!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
-    match seed_tasks(
+    let report = match seed_tasks(
         runner,
         trigger,
-        applicant.as_ref().map(|(_, open_id)| open_id.as_str()),
+        applicant.as_ref().map(|(_, open_id, _)| open_id.as_str()),
     )
     .await
     {
-        Ok(0) => {}
-        Ok(seeded) => tracing::info!(seeded, "审批派发播种了新任务"),
+        Ok(report) => report,
         // 播种失败不中断整轮：已有的待处理任务仍然值得跑，而播种下一轮还会再来。
-        Err(error) => tracing::warn!(error = %error, "审批派发播种失败"),
+        Err(error) => {
+            tracing::warn!(error = %error, "审批派发播种失败");
+            SeedReport::default()
+        }
+    };
+    if report.seeded > 0 {
+        tracing::info!(seeded = report.seeded, "审批派发播种了新任务");
     }
-    // 受理请求携带的发起人：**播种之后**落库，本轮新播种的行此刻已是 `pending`，
-    // 与既有待处理行一起被写入。放在播种前会漏掉本轮新行——首点会静默回退到表格列
-    // （可能是错的或空的），要再点一次才对（见 [`persist_applicant`]）。
-    if let Some((config_id, open_id)) = applicant {
-        persist_applicant(runner, config_id, &open_id).await;
+    // 受理请求携带的发起人：**播种之后**落库，本轮新播种/重开的行此刻已是
+    // `pending`。放在播种前会漏掉本轮新行——首点会静默回退到表格列（可能是错的
+    // 或空的），要再点一次才对。作用域由 `record_id` 与 `report.touched` 双重限定
+    // （见 [`persist_applicant`]）。
+    if let Some((config_id, open_id, record_id)) = applicant {
+        persist_applicant(
+            runner,
+            config_id,
+            &open_id,
+            record_id.as_deref(),
+            &report.touched,
+        )
+        .await;
     }
     runner.heartbeat.mark("claim", None);
     let claimed = match claim(runner, cursor).await {
@@ -713,6 +742,27 @@ struct ClaimedTask {
     last_error: Option<String>,
 }
 
+/// 单条配置的播种结果。
+#[derive(Debug, Default)]
+struct SeedOutcome {
+    seeded: usize,
+    reopened: usize,
+    skipped: usize,
+    /// 本轮**新播种或 reopen** 的 record_id。
+    ///
+    /// 受理发起人只该落到这些行上：广播到该配置的全部 `pending` 行会把一个点击人
+    /// 的身份覆盖到别的记录上（见 [`persist_applicant`]）。
+    touched: Vec<String>,
+}
+
+/// 一轮播种的汇总结果。
+#[derive(Debug, Default)]
+struct SeedReport {
+    seeded: usize,
+    /// 本轮新播种/重开的 `(config_id, record_id)`，跨配置汇总。
+    touched: Vec<(i64, String)>,
+}
+
 /// 播种：把「回填列为空」的多维表格记录变成待处理任务。
 ///
 /// # 判据：回填列为空；配置了批量范围列时还要求该复选框已勾选
@@ -734,14 +784,16 @@ struct ClaimedTask {
 /// | `backfilled` | 人工清空要重发 | 拉回 `pending`（uuid 幂等兜底，不会重复建单） |
 /// | `pending` | 已在队列里 | 不动 |
 ///
-/// # 为什么要读全表而不是「只看有任务的行」
+/// # 为什么要扫多维表格而不是「只看有任务的行」
 ///
 /// 首次运行时库里一条任务都没有——不扫表就永远不会有第一条。
+/// （这里说的是**多维表格侧**的扫描；任务行侧已改为按本轮记录定向查询，
+/// 见 [`load_tasks_by_record`]。）
 async fn seed_tasks(
     runner: &RoundRunner,
     trigger: RoundTrigger,
     applicant: Option<&str>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<SeedReport> {
     let configs = runner
         .context
         .approval_configs()
@@ -765,18 +817,97 @@ async fn seed_tasks(
         "审批派发读取启用配置完成"
     );
 
-    let mut seeded = 0usize;
+    let mut report = SeedReport::default();
     for config in configs {
+        let config_id: i64 = config.require("id").unwrap_or_default();
         match seed_config(runner, &config, trigger, applicant).await {
-            Ok(count) => seeded += count,
+            Ok(outcome) => {
+                report.seeded += outcome.seeded;
+                report.touched.extend(
+                    outcome
+                        .touched
+                        .into_iter()
+                        .map(|record_id| (config_id, record_id)),
+                );
+            }
             // 一条配置坏掉不该拖垮别的配置：记下来，下一轮再来。
             Err(error) => {
-                let config_id: i64 = config.require("id").unwrap_or_default();
                 tracing::warn!(error = %error, config_id, "审批派发播种跳过该配置");
             }
         }
     }
-    Ok(seeded)
+    Ok(report)
+}
+
+/// 按 record_id 定向读取某配置下的任务行：`record_id → (task_id, state)`。
+///
+/// # 为什么不再读全表
+///
+/// 旧实现用 [`all_pages`] 读该配置的**全部**任务行，页数上界是固定的 20 页
+/// （`PAGE_SIZE=100`）：任务行累计到 2000 行后，每一轮播种都在读取这一步失败，
+/// 而任务行没有保留期清理，于是该配置的播种**永久**停摆。这里改成只查本轮
+/// 待处理记录：行数与本轮记录同量级，与历史任务积累无关。
+///
+/// # 分片与页数守卫
+///
+/// `where_in` 的 IN 列表上限是 500（超了是 `ParamInvalid` 拒绝），所以按
+/// [`TASK_LOOKUP_CHUNK`] 切片。每片最多命中 `chunk.len()` 行，即最多
+/// `chunk.len().div_ceil(PAGE_SIZE)` 个满页；预期再给一页（整页倍数时最后一页
+/// 为空）。超了说明 `config_id`/`record_id` 筛选没生效，**报错而不是截断**——
+/// 截断会把没读到的行当成「不存在」，进而重复插入、撞唯一索引。
+async fn load_tasks_by_record(
+    context: &FeishuContext,
+    config_id: i64,
+    record_ids: &[String],
+) -> anyhow::Result<BTreeMap<String, (i64, String)>> {
+    // 去重并跳过空串：分片大小按有效 id 算，重复 id 不该占份额。
+    let mut unique: Vec<&String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for record_id in record_ids {
+        if record_id.is_empty() {
+            continue;
+        }
+        if seen.insert(record_id.as_str()) {
+            unique.push(record_id);
+        }
+    }
+
+    let mut by_record = BTreeMap::new();
+    for chunk in unique.chunks(TASK_LOOKUP_CHUNK) {
+        let values: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|record_id| serde_json::json!(record_id))
+            .collect();
+        let query = context
+            .approval_tasks()
+            .query()
+            .select_fields(&["id", "record_id", "state"])?
+            .where_eq("config_id", serde_json::json!(config_id))?
+            .where_in("record_id", values)?;
+        let max_pages = chunk.len().div_ceil(PAGE_SIZE) + 1;
+        let mut rows: Vec<Record> = Vec::with_capacity(chunk.len());
+        for page in 1..=max_pages {
+            let batch = query.clone().page(page, PAGE_SIZE)?.all().await?;
+            let got = batch.len();
+            rows.extend(batch);
+            if got < PAGE_SIZE {
+                break;
+            }
+            anyhow::ensure!(
+                page < max_pages,
+                "按 record_id 读取配置 {config_id} 的任务行超过预期页数：\
+                 片大小 {}，{max_pages} 页仍满页",
+                chunk.len()
+            );
+        }
+        for row in rows {
+            by_record.insert(
+                row.require("record_id")?,
+                (row.require("id")?, row.require("state")?),
+            );
+        }
+    }
+    Ok(by_record)
 }
 
 /// 解析批量范围复选框列的当前字段名；未配置返回 `None`。
@@ -811,12 +942,15 @@ fn resolve_batch_scope_field_name(
 ///
 /// 筛选条件是「回填列为空」；配置了批量范围列时再加一条「该复选框已勾选」
 /// （见 [`bitable::pending_records_filter`] 与 [`resolve_batch_scope_field_name`]）。
+///
+/// 任务行的存在性用 [`load_tasks_by_record`] 按**本轮待处理记录**定向查询，
+/// 不再读该配置的全量任务历史——行数与本轮待处理记录同量级。
 async fn seed_config(
     runner: &RoundRunner,
     config: &Record,
     trigger: RoundTrigger,
     applicant: Option<&str>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<SeedOutcome> {
     let started = std::time::Instant::now();
     let config_id: i64 = config.require("id")?;
     let base_token: String = config.require("base_token")?;
@@ -871,31 +1005,22 @@ async fn seed_config(
             )
             .await;
         }
-        return Ok(0);
+        return Ok(SeedOutcome::default());
     }
 
-    // 已有的任务行：按 record_id 建索引，决定「新建」还是「拉回 pending」。
-    let existing = all_pages(
-        runner
-            .context
-            .approval_tasks()
-            .query()
-            .select_fields(&["id", "record_id", "state"])?
-            .where_eq("config_id", serde_json::json!(config_id))?,
-        SEED_MAX_TASK_PAGES,
-    )
-    .await?;
-    let mut by_record: BTreeMap<String, (i64, String)> = BTreeMap::new();
-    for row in &existing {
-        by_record.insert(
-            row.require("record_id")?,
-            (row.require("id")?, row.require("state")?),
-        );
-    }
+    // 已有的任务行：**只查本轮待处理记录**，行数与本轮记录同量级，与历史任务
+    // 积累无关（旧实现读全表，任务行到 2000 后整配置播种永久失败）。
+    // 按 record_id 建索引，决定「新建」还是「拉回 pending」。
+    let record_ids: Vec<String> = pending_records
+        .iter()
+        .map(|record| record.record_id.clone())
+        .collect();
+    let by_record = load_tasks_by_record(&runner.context, config_id, &record_ids).await?;
 
     let mut seeded = 0usize;
     let mut reopened = 0usize;
     let mut skipped = 0usize;
+    let mut touched: Vec<String> = Vec::new();
     for record in &pending_records {
         if record.record_id.is_empty() {
             continue;
@@ -908,6 +1033,7 @@ async fn seed_config(
             Some((id, _)) if reopens_on_click(trigger, config_id) => {
                 if approval_execution::reopen(&runner.context, *id).await? {
                     reopened += 1;
+                    touched.push(record.record_id.clone());
                 }
             }
             // 轮询不拉起旧行：空单元格不能证明旧请求没有成功，也不能撤销
@@ -924,23 +1050,30 @@ async fn seed_config(
                 let uuid = derive_uuid(&base_token, &table_id, &approval_code, &record.record_id);
                 if insert_seeded_task(&runner.context, config_id, &record.record_id, &uuid).await? {
                     seeded += 1;
+                    touched.push(record.record_id.clone());
                 } else {
                     skipped += 1;
                 }
             }
         }
     }
+    let outcome = SeedOutcome {
+        seeded,
+        reopened,
+        skipped,
+        touched,
+    };
     tracing::debug!(
         stage = "seed",
         config_id,
-        seeded,
-        reopened,
+        seeded = outcome.seeded,
+        reopened = outcome.reopened,
         // 轮询轮里这些是「没人点过、这轮不建行」的记录——不静默，留在日志里。
-        skipped,
+        skipped = outcome.skipped,
         duration_ms = started.elapsed().as_millis() as u64,
         "审批配置播种完成"
     );
-    Ok(seeded)
+    Ok(outcome)
 }
 
 /// 「点击受理、命中 0 条」反馈的接收人：只有被点击的配置、且拿得到点击人时才发。
@@ -1095,7 +1228,19 @@ async fn insert_seeded_task(
     Ok(true)
 }
 
-/// 把受理请求携带的发起人 open_id 落到该配置下的待处理任务行（设计 §6.3）。
+/// 把受理请求携带的发起人 open_id 落到**本轮受影响**的任务行（设计 §6.3）。
+///
+/// # 作用域：只写本轮播种/重开的行
+///
+/// 旧实现按 `config_id + state='pending'` 取行，会把点击人的身份广播给该配置下
+/// **所有**跨轮待处理的任务——以后那些任务会以错误的身份建单、通知发错人、回填
+/// 写错申请人。现在作用域由两个条件收窄：
+///
+/// - `touched`：本轮 [`seed_config`] 新播种或 `reopen` 的 `(config_id, record_id)`；
+/// - `record_filter`：单条点击时**被点的那一条**记录 id（批量受理为 `None`）。
+///
+/// 两者取交集后只对仍为 `state == "pending"` 的行 upsert（覆盖语义不变——同一任务
+/// 的发起人以最新一次受理为准）。批量只写本轮播种/重开行，单条只写被点行。
 ///
 /// # 为什么在播种之后
 ///
@@ -1103,42 +1248,46 @@ async fn insert_seeded_task(
 /// 在本轮播种出来，播种前写会**漏掉本轮新行**——首点会静默回退到表格列（可能是错的
 /// 或空的），要再点一次才对。所以写在播种之后、认领之前。
 ///
+/// # touched 为空直接返回
+///
+/// 单条点击若该记录既未播种也未 reopen，admit 已在快照里落了身份，不需要广播；
+/// 此时一次查询都不该发。
+///
 /// # 失败只 warn
 ///
 /// 落库失败不该中断整轮：受理发起人只是**增强**，任务照旧处理（回退表格列），
 /// 下一轮按钮或轮询还会再写。
-async fn persist_applicant(runner: &RoundRunner, config_id: i64, open_id: &str) {
-    let built = runner
-        .context
-        .approval_tasks()
-        .query()
-        .select_fields(&["id"])
-        .and_then(|query| query.where_eq("config_id", serde_json::json!(config_id)))
-        .and_then(|query| query.where_eq("state", serde_json::json!("pending")));
-    let rows = match built {
-        Ok(query) => match all_pages(query, SEED_MAX_TASK_PAGES).await {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::warn!(error = %error, config_id, "读取待处理任务行失败，受理发起人未落库");
-                return;
-            }
-        },
+async fn persist_applicant(
+    runner: &RoundRunner,
+    config_id: i64,
+    open_id: &str,
+    record_filter: Option<&str>,
+    touched: &[(i64, String)],
+) {
+    let record_ids: Vec<String> = touched
+        .iter()
+        .filter(|(id, _)| *id == config_id)
+        .map(|(_, record_id)| record_id)
+        .filter(|record_id| record_filter.map_or(true, |filter| filter == record_id.as_str()))
+        .cloned()
+        .collect();
+    if record_ids.is_empty() {
+        return;
+    }
+
+    let tasks = match load_tasks_by_record(&runner.context, config_id, &record_ids).await {
+        Ok(tasks) => tasks,
         Err(error) => {
-            tracing::warn!(error = %error, config_id, "构造待处理任务查询失败，受理发起人未落库");
+            tracing::warn!(error = %error, config_id, "读取本轮任务行失败，受理发起人未落库");
             return;
         }
     };
-
-    for row in rows {
-        let task_id: i64 = match row.require("id") {
-            Ok(id) => id,
-            Err(error) => {
-                tracing::warn!(error = %error, "任务行缺少 id，跳过受理发起人落库");
-                continue;
-            }
-        };
+    for (record_id, (task_id, state)) in tasks {
+        if state != "pending" {
+            continue;
+        }
         if let Err(error) = upsert_task_applicant(&runner.context, task_id, open_id).await {
-            tracing::warn!(error = %error, task_id, "受理发起人落库失败");
+            tracing::warn!(error = %error, task_id, record_id, "受理发起人落库失败");
         }
     }
 }
@@ -2840,5 +2989,475 @@ mod tests {
         let (stage, task_id, _, warned) = heartbeat.snapshot().unwrap_or_else(|| panic!("有快照"));
         assert_eq!((stage, task_id), ("idle", None));
         assert!(!warned, "恢复推进后重置告警标记");
+    }
+
+    // -----------------------------------------------------------------------
+    // 定向任务查询 / 受理发起人作用域（真实 MySQL）
+    // -----------------------------------------------------------------------
+
+    /// 连接测试库、跑与应用启动相同的 schema 同步，并构造上下文。
+    async fn real_mysql_context() -> anyhow::Result<(yang_db::Database, Arc<FeishuContext>)> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = yang_db::Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "只允许测试库");
+        crate::schema::sync_with_database(
+            database,
+            yang_db::DatabaseConfig::default(),
+            Arc::new(crate::config::SecuritySettings::default()),
+        )
+        .await?;
+        let database = yang_db::Database::connect(&url).await?;
+        let context = crate::addon::feishu::build_context(
+            Arc::new(database.pool().clone()),
+            Arc::new(crate::config::SecuritySettings::default()),
+            None,
+        )?;
+        Ok((database, context))
+    }
+
+    /// 批量插入任务行（多行 INSERT，避免两千次往返）。
+    async fn insert_task_rows(
+        pool: &sqlx::MySqlPool,
+        config_id: i64,
+        record_ids: &[String],
+        uuid_prefix: &str,
+    ) -> anyhow::Result<()> {
+        for (chunk_index, chunk) in record_ids.chunks(500).enumerate() {
+            let placeholders = vec!["(?,?,?,'pending',NOW(),NOW())"; chunk.len()].join(",");
+            let sql = format!(
+                "INSERT INTO feishu_approval_task \
+                 (config_id,record_id,uuid,state,created_at,updated_at) VALUES {placeholders}"
+            );
+            let mut query = sqlx::query(&sql);
+            for (offset, record_id) in chunk.iter().enumerate() {
+                query = query
+                    .bind(config_id)
+                    .bind(record_id)
+                    .bind(format!("{uuid_prefix}-{}", chunk_index * 500 + offset));
+            }
+            query.execute(pool).await?;
+        }
+        Ok(())
+    }
+
+    async fn insert_single_task(
+        pool: &sqlx::MySqlPool,
+        config_id: i64,
+        record_id: &str,
+        uuid: &str,
+        state: &str,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query(
+            "INSERT INTO feishu_approval_task \
+             (config_id,record_id,uuid,state,created_at,updated_at) VALUES (?,?,?,?,NOW(),NOW())",
+        )
+        .bind(config_id)
+        .bind(record_id)
+        .bind(uuid)
+        .bind(state)
+        .execute(pool)
+        .await?
+        .last_insert_id() as i64)
+    }
+
+    async fn applicant_of(pool: &sqlx::MySqlPool, task_id: i64) -> anyhow::Result<Option<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT open_id FROM feishu_approval_task_applicant WHERE task_id=?",
+        )
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(anyhow::Error::from)
+    }
+
+    async fn insert_lookup_config(
+        pool: &sqlx::MySqlPool,
+        namespace: &str,
+        suffix: &str,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query("INSERT INTO feishu_approval_config (title,base_token,table_id,approval_code,applicant_field,backfill_field,base_timezone,enabled,created_at,updated_at) VALUES ('定向查询测试','appLookup',?,'DEF-LOOKUP','fldPerson','fldNumber','Asia/Shanghai',true,NOW(),NOW())")
+            .bind(format!("tbl{namespace}{suffix}"))
+            .execute(pool)
+            .await?
+            .last_insert_id() as i64)
+    }
+
+    /// 旧实现按 `config_id` 读该配置的**全部**任务行：跑满 20 页（2000 行）即报错，
+    /// 而任务行没有保留期清理 ⇒ 该配置的播种永久停摆。
+    ///
+    /// 新实现按本轮 record_id 定向查询，行数与历史任务量无关。这里覆盖：
+    /// - 1999 / 2000 / 2001 / 2100 行历史 + 1 条目标记录都能命中（2000 是回归关键，
+    ///   2100 是「整页倍数无短页」）；
+    /// - 分片边界 499 / 500 / 501 / 1000 / 1001（500 是 `where_in` 的 IN 列表上限）；
+    /// - 重复 / 空串 record_id 不改变结果；
+    /// - 另一配置占用同一 record_id 时本配置结果不受影响。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn real_mysql_seed_existing_lookup_survives_large_task_history() -> anyhow::Result<()> {
+        let (_database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_lookup_config(pool, &namespace, "a").await?;
+        let other_config_id = insert_lookup_config(pool, &namespace, "b").await?;
+
+        let mut history: Vec<String> = Vec::new();
+        let mut total_rows = 0usize;
+        for total in [1999usize, 2000, 2001, 2100] {
+            // 让该配置的任务行**总数**恰好到 total，其中最后一条是本轮目标记录。
+            let need = total - total_rows - 1;
+            let start = history.len();
+            let new_ids: Vec<String> = (start..start + need)
+                .map(|index| format!("{namespace}-history-{index}"))
+                .collect();
+            insert_task_rows(pool, config_id, &new_ids, &format!("{namespace}-h{total}")).await?;
+            history.extend(new_ids);
+            total_rows += need;
+
+            let target = format!("{namespace}-target-{total}");
+            insert_task_rows(
+                pool,
+                config_id,
+                std::slice::from_ref(&target),
+                &format!("{namespace}-t{total}"),
+            )
+            .await?;
+            total_rows += 1;
+            assert_eq!(total_rows, total, "历史行数构造错误");
+
+            let found =
+                load_tasks_by_record(&context, config_id, std::slice::from_ref(&target)).await?;
+            let expected_id: i64 = sqlx::query_scalar(
+                "SELECT id FROM feishu_approval_task WHERE config_id=? AND record_id=?",
+            )
+            .bind(config_id)
+            .bind(&target)
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(
+                found.get(&target),
+                Some(&(expected_id, "pending".to_string())),
+                "{total} 行历史后仍应命中本轮记录（旧实现从 2000 行起整配置播种必败）"
+            );
+        }
+
+        // 2100 行历史下「本轮只新增这一条」仍成立：插入与历史任务量无关。
+        let fresh = format!("{namespace}-fresh");
+        let before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_task WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(pool)
+                .await?;
+        assert!(
+            insert_seeded_task(&context, config_id, &fresh, &format!("{namespace}-fresh")).await?,
+            "2100 行历史后新记录仍应能播种"
+        );
+        let after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM feishu_approval_task WHERE config_id=?")
+                .bind(config_id)
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(after, before + 1, "本轮只应新增这一条任务行");
+
+        // 分片边界：每片 ≤ 500（`where_in` 上限），翻页守卫不得误报。
+        for size in [499usize, 500, 501, 1000, 1001] {
+            let ids = &history[..size];
+            let found = load_tasks_by_record(&context, config_id, ids).await?;
+            assert_eq!(found.len(), size, "片大小 {size} 必须全部命中");
+            for record_id in ids {
+                assert_eq!(
+                    found.get(record_id).map(|(_, state)| state.as_str()),
+                    Some("pending"),
+                    "记录 {record_id} 的状态读错"
+                );
+            }
+
+            // 重复与空串：去重/跳过之后结果集不变，也不会占掉分片名额。
+            let mut noisy = ids.to_vec();
+            noisy.push(ids[0].clone());
+            noisy.push(String::new());
+            let found = load_tasks_by_record(&context, config_id, &noisy).await?;
+            assert_eq!(found.len(), size, "重复/空串 id 不该改变结果集");
+        }
+
+        // 跨配置复用 record_id 是合法情形（复制 Base 会保留）：本配置只该读到自己的行。
+        let shared = format!("{namespace}-shared");
+        let own_id = insert_single_task(
+            pool,
+            config_id,
+            &shared,
+            &format!("{namespace}-sa"),
+            "pending",
+        )
+        .await?;
+        let foreign_id = insert_single_task(
+            pool,
+            other_config_id,
+            &shared,
+            &format!("{namespace}-sb"),
+            "pending",
+        )
+        .await?;
+        let found =
+            load_tasks_by_record(&context, config_id, std::slice::from_ref(&shared)).await?;
+        assert_eq!(
+            found.get(&shared),
+            Some(&(own_id, "pending".to_string())),
+            "按 config_id 收窄后不应读到另一配置的同 record_id 行"
+        );
+        assert!(
+            found.values().all(|(id, _)| *id != foreign_id),
+            "另一配置的任务行不得串进结果"
+        );
+
+        sqlx::query("DELETE FROM feishu_approval_task WHERE config_id IN (?,?)")
+            .bind(config_id)
+            .bind(other_config_id)
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_config WHERE id IN (?,?)")
+            .bind(config_id)
+            .bind(other_config_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 假 token 缓存：本组用例不碰飞书网络，只需 provider 能构造。
+    struct FakeTokenCache;
+
+    #[async_trait::async_trait]
+    impl crate::addon::feishu::domain::tenant_token::TenantTokenCache for FakeTokenCache {
+        async fn get(&self) -> anyhow::Result<Option<String>> {
+            Ok(Some("t-fake".to_string()))
+        }
+        async fn put(&self, _token: &str, _ttl_seconds: i64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn invalidate(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn acquire_lock(&self, _owner: &str, _ttl_seconds: i64) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn release_lock(&self, _owner: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 单条点击的受理发起人只能落到**被点的那一行**；批量只能落到**本轮播种/重开**
+    /// 的行。旧实现按 `config_id + state='pending'` 广播，会把一个点击人的身份覆盖
+    /// 到该配置下所有跨轮待处理任务上（建单身份、通知接收人、回填申请人全部出错）。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn real_mysql_persist_applicant_scopes_to_touched_records() -> anyhow::Result<()> {
+        let (_database, context) = real_mysql_context().await?;
+        let pool = context.approval_tasks().pool().clone();
+        let namespace = uuid::Uuid::new_v4().simple().to_string();
+        let config_id = insert_lookup_config(&pool, &namespace, "a").await?;
+        let other_config_id = insert_lookup_config(&pool, &namespace, "b").await?;
+
+        let r1 = format!("{namespace}-r1");
+        let r2 = format!("{namespace}-r2");
+        let r3 = format!("{namespace}-r3");
+        let r4 = format!("{namespace}-r4");
+        let r5 = format!("{namespace}-r5");
+        let r1_id =
+            insert_single_task(&pool, config_id, &r1, &format!("{namespace}-r1"), "pending")
+                .await?;
+        let r2_id =
+            insert_single_task(&pool, config_id, &r2, &format!("{namespace}-r2"), "pending")
+                .await?;
+        let r3_id =
+            insert_single_task(&pool, config_id, &r3, &format!("{namespace}-r3"), "pending")
+                .await?;
+        let r4_id = insert_single_task(
+            &pool,
+            config_id,
+            &r4,
+            &format!("{namespace}-r4"),
+            "terminal",
+        )
+        .await?;
+        let r5_id = insert_single_task(
+            &pool,
+            other_config_id,
+            &r5,
+            &format!("{namespace}-r5"),
+            "pending",
+        )
+        .await?;
+        // R2 是跨轮 pending 的旧任务，已有自己的发起人。
+        sqlx::query(
+            "INSERT INTO feishu_approval_task_applicant (task_id, open_id) VALUES (?, 'ou_old')",
+        )
+        .bind(r2_id)
+        .execute(&pool)
+        .await?;
+
+        let transport = Arc::new(HttpClientTransport::new(yang_base::http::HttpClient::new(
+            1,
+        )?));
+        let tokens = Arc::new(TenantTokenProvider::new(
+            Arc::new(FakeTokenCache),
+            Arc::clone(&transport) as Arc<dyn OutboundTransport>,
+            Arc::new(TokioSleeper),
+            FeishuCredentials {
+                app_id: "test".into(),
+                app_secret: "test".into(),
+            },
+            &namespace,
+        )?);
+        let runner = RoundRunner {
+            tools: Arc::new(yang_base::tools::ToolsBuilder::new().build()?),
+            context: Arc::clone(&context),
+            tokens,
+            transport,
+            sleeper: Arc::new(TokioSleeper),
+            timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
+            heartbeat: ProgressHeartbeat::default(),
+        };
+
+        // 批量受理（filter=None）：只写本轮 touched（R1/R3）。R2 虽同为 pending、
+        // R4 虽然被 touched，都不该被写；另一配置的 R5 也不该被写。
+        persist_applicant(
+            &runner,
+            config_id,
+            "ou_new",
+            None,
+            &[
+                (config_id, r1.clone()),
+                (config_id, r3.clone()),
+                (config_id, r4.clone()),
+                (other_config_id, r5.clone()),
+            ],
+        )
+        .await;
+        assert_eq!(
+            applicant_of(&pool, r1_id).await?,
+            Some("ou_new".to_string())
+        );
+        assert_eq!(
+            applicant_of(&pool, r3_id).await?,
+            Some("ou_new".to_string())
+        );
+        assert_eq!(
+            applicant_of(&pool, r2_id).await?,
+            Some("ou_old".to_string()),
+            "跨轮 pending 的旧任务不得被本轮点击人的身份覆盖"
+        );
+        assert_eq!(
+            applicant_of(&pool, r4_id).await?,
+            None,
+            "非 pending 行不写发起人"
+        );
+        assert_eq!(
+            applicant_of(&pool, r5_id).await?,
+            None,
+            "另一配置的行不写发起人"
+        );
+
+        // 单条点击（filter=Some(R1)）：只写 R1，R3 保持上一轮的值。
+        persist_applicant(
+            &runner,
+            config_id,
+            "ou_second",
+            Some(&r1),
+            &[(config_id, r1.clone()), (config_id, r3.clone())],
+        )
+        .await;
+        assert_eq!(
+            applicant_of(&pool, r1_id).await?,
+            Some("ou_second".to_string())
+        );
+        assert_eq!(
+            applicant_of(&pool, r3_id).await?,
+            Some("ou_new".to_string()),
+            "单条点击不得改写其它记录"
+        );
+
+        // 单条点击的记录不在 touched 集合：零写入。
+        persist_applicant(
+            &runner,
+            config_id,
+            "ou_wrong",
+            Some(&r2),
+            &[(config_id, r1.clone()), (config_id, r3.clone())],
+        )
+        .await;
+        assert_eq!(
+            applicant_of(&pool, r2_id).await?,
+            Some("ou_old".to_string()),
+            "被点记录不在本轮 touched 时不得广播/写入"
+        );
+        assert_eq!(
+            applicant_of(&pool, r1_id).await?,
+            Some("ou_second".to_string())
+        );
+
+        // 其它配置的 touched 条目即使带着本配置也存在的 record_id，也不能落库：
+        // 查询本身按 config_id 收口，但这条断言钉的是「先按 config 过滤」这层意图，
+        // 防止将来把查询的 config 条件挪走后跨配置记录借同 id 波及本配置的任务行。
+        persist_applicant(
+            &runner,
+            config_id,
+            "ou_foreign",
+            None,
+            &[(other_config_id, r1.clone())],
+        )
+        .await;
+        assert_eq!(
+            applicant_of(&pool, r1_id).await?,
+            Some("ou_second".to_string()),
+            "其它配置的 touched 条目不得写本配置的行"
+        );
+
+        // touched 为空：直接返回，零查询零写入。
+        persist_applicant(&runner, config_id, "ou_empty", None, &[]).await;
+        assert_eq!(
+            applicant_of(&pool, r2_id).await?,
+            Some("ou_old".to_string())
+        );
+        assert_eq!(
+            applicant_of(&pool, r3_id).await?,
+            Some("ou_new".to_string())
+        );
+
+        // upsert 的覆盖语义保留：同一任务再次被 touch 时以最新受理人为准。
+        persist_applicant(
+            &runner,
+            config_id,
+            "ou_batch",
+            None,
+            &[(config_id, r2.clone())],
+        )
+        .await;
+        assert_eq!(
+            applicant_of(&pool, r2_id).await?,
+            Some("ou_batch".to_string()),
+            "同一任务的最新受理人应覆盖旧值"
+        );
+
+        sqlx::query("DELETE FROM feishu_approval_task_applicant WHERE task_id IN (?,?,?,?,?)")
+            .bind(r1_id)
+            .bind(r2_id)
+            .bind(r3_id)
+            .bind(r4_id)
+            .bind(r5_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_task WHERE config_id IN (?,?)")
+            .bind(config_id)
+            .bind(other_config_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("DELETE FROM feishu_approval_config WHERE id IN (?,?)")
+            .bind(config_id)
+            .bind(other_config_id)
+            .execute(&pool)
+            .await?;
+        Ok(())
     }
 }

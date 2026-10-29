@@ -34,9 +34,10 @@ use crate::addon::feishu::domain::context::FeishuContext;
 ///
 /// # 为什么收在这里
 ///
-/// `task_id` 上**没有**唯一索引，查-改-插这套动作在两条路径上必须同口径：各写一遍
-/// 就可能一边插入、一边更新，给同一个任务留下两行发起人（读取侧只取 `optional()`
-/// 的第一行，谁是「那个发起人」就变成看运气）。
+/// 查-改-插这套动作在两条路径上必须同口径：各写一遍就可能一边插入、一边更新，
+/// 给同一个任务留下两行发起人（读取侧只取 `optional()` 的第一行，谁是「那个发起人」
+/// 就变成看运气）。`task_id` 上的唯一索引 `uk_feishu_approval_task_applicant_task_id`
+/// （见本文件 `table_spec`）是最后一道防线：并发插入时后者撞键，退化成更新。
 pub(crate) async fn upsert_task_applicant(
     context: &FeishuContext,
     task_id: i64,

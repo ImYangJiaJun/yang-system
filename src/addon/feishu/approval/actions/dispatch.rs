@@ -635,9 +635,13 @@ async fn handle_dispatch(
             // 唤醒只是提前跑同一轮（`Manual` 会重开本配置的旧行并保留 last_error，
             // 通知去重不受影响）；worker 没起时下一轮轮询仍会处理，不阻断响应。
             if let Ok(handle) = ctx.tools().extension::<ApprovalDispatchHandle>() {
-                if let Err(error) =
-                    handle.request_dispatch(config_id, outcome.requested_applicant_open_id.clone())
-                {
+                if let Err(error) = handle.request_dispatch(
+                    config_id,
+                    outcome.requested_applicant_open_id.clone(),
+                    // 单条点击：发起人只落到被点的那一行，不能广播给同配置的
+                    // 其它跨轮待处理任务。
+                    Some(record_id.to_string()),
+                ) {
                     tracing::warn!(config_id, error = %error, "审批派发唤醒 Worker 失败");
                 }
             }
@@ -694,7 +698,8 @@ async fn handle_dispatch(
                 Ok(handle) => handle,
                 Err(error) => return Ok(DispatchOutcome::internal(Some(config_id), error)),
             };
-            if let Err(error) = handle.request_dispatch(config_id, resolved) {
+            // 批量受理：`record_id = None`，发起人落到本轮播种/重开的所有行。
+            if let Err(error) = handle.request_dispatch(config_id, resolved, None) {
                 return Ok(DispatchOutcome::internal(Some(config_id), error));
             }
             tracing::debug!(

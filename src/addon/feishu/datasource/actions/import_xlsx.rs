@@ -42,7 +42,8 @@ use yang_db::Transaction;
 
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::derive::{
-    derive_options, snapshot_digest, DerivedOption, RawValue,
+    derive_options, snapshot_digest, truncate_label, DerivedOption, RawValue,
+    OPTION_LABEL_MAX_CHARS,
 };
 use crate::addon::feishu::domain::import_progress::{self, ImportBusy, ImportGuard};
 use crate::addon::feishu::domain::linkage::Linkage;
@@ -390,7 +391,7 @@ async fn import_binding(
         let raw_label = row.get(&binding.field_id).cloned().unwrap_or_default();
         // **设计 §5.7**：取数文案超 `label` 的 255 上限时截断。不截断的话会在**插库时**
         // 才炸（列是 max_length(255)），而那时的错误不会告诉你是哪一行、什么值。
-        let (label, anomaly) = truncate_label(&raw_label, LABEL_LIMIT);
+        let (label, anomaly) = truncate_label(&raw_label, OPTION_LABEL_MAX_CHARS);
         let ancestors: Vec<String> = ancestor_columns
             .iter()
             .map(|column| row.get(column).cloned().unwrap_or_default())
@@ -667,30 +668,6 @@ async fn persist_binding_status(
     Ok(())
 }
 
-/// `feishu_option.label` 的列上限。
-const LABEL_LIMIT: usize = 255;
-
-/// 截断到上限，并按需给出异常原因。返回 `(文案, 原因)`。
-///
-/// **`option_id` 按截断后的值算**（调用方在截断之后才派生），这是设计 §5.7 明写的
-/// 取舍：否则 `id` 与 `label` 对不上，而「改文案 = 新 id」是补集停用语义的地基。
-/// 代价认了：两个前 255 字相同的长值会碰撞成同一个 `option_id`，后者被
-/// `derive_options` 去重掉——宁可少一个选项并留下 `extra` 里的异常记录，
-/// 也不要一个 id 与内容不符的行。
-fn truncate_label(value: &str, limit: usize) -> (String, Option<String>) {
-    if value.chars().count() <= limit {
-        return (value.to_string(), None);
-    }
-    let truncated: String = value.chars().take(limit).collect();
-    (
-        truncated,
-        Some(format!(
-            "取数文案超过 {limit} 字符（原长 {}），已截断",
-            value.chars().count()
-        )),
-    )
-}
-
 /// 回执里的异常清单上限。超出时**不静默截断**——带 `truncated_details` 与总数。
 const ANOMALY_LIMIT: usize = 100;
 
@@ -900,7 +877,7 @@ mod tests {
 
     #[test]
     fn a_label_within_the_limit_is_not_touched() {
-        let (label, anomaly) = truncate_label("中国工商银行成都春熙路支行", LABEL_LIMIT);
+        let (label, anomaly) = truncate_label("中国工商银行成都春熙路支行", OPTION_LABEL_MAX_CHARS);
         assert_eq!(label, "中国工商银行成都春熙路支行");
         assert!(anomaly.is_none(), "没超限就不该背异常标记");
     }
@@ -909,8 +886,8 @@ mod tests {
     fn an_overlong_label_is_truncated_to_the_column_limit() {
         // 上限按**字符**而非字节算：`label` 是 varchar(255)，一个汉字在三字节的
         // 存储下仍是**一列**字符。按字节截会把 255 个汉字截成 85 个。
-        let (label, anomaly) = truncate_label(&"长".repeat(300), LABEL_LIMIT);
-        assert_eq!(label.chars().count(), LABEL_LIMIT);
+        let (label, anomaly) = truncate_label(&"长".repeat(300), OPTION_LABEL_MAX_CHARS);
+        assert_eq!(label.chars().count(), OPTION_LABEL_MAX_CHARS);
         let reason = anomaly.unwrap_or_else(|| panic!("超长必须带原因"));
         assert!(reason.contains("300"), "原因要报出原长: {reason}");
     }

@@ -20,6 +20,61 @@ pub fn definitions(runtime: &BuiltApp) -> Result<Vec<TableDefinition>, BaseError
     Ok(definitions)
 }
 
+/// 旧版 `feishu_approval_task` 上的全局唯一索引名。
+///
+/// 早期版本只对 `record_id` 建唯一键；复制多维表格会原样保留 `record_id`，
+/// 副本里的同一记录在另一配置下就会撞键。现行定义是 `(config_id, record_id)`
+/// 复合唯一键。
+const LEGACY_TASK_RECORD_INDEX: &str = "uk_feishu_approval_task_record_id";
+
+/// 启动前的 fail-closed 门禁：旧库不得残留全局唯一索引
+/// `uk_feishu_approval_task_record_id`。
+///
+/// `schema_sync` 只增不删（见 `crates/yang-base/src/database/schema_sync/plan.rs`），
+/// 所以这个索引不会随新定义消失：启动全绿，直到跨配置的同 record_id 记录播种时
+/// 撞旧键（只 WARN 跳过），或单条点击在 `ON DUPLICATE` 之后按 `config_id+record_id`
+/// 查不到行而报错。
+///
+/// 发现即**拒绝启动**，不做自动 DROP（DDL 需人工批准）。未命中（含表不存在、
+/// 全新库）返回 `Ok`。
+pub(crate) async fn ensure_legacy_task_record_index_absent(
+    pool: &sqlx::MySqlPool,
+) -> Result<(), BaseError> {
+    // 经 yang-db 的参数化入口执行：本仓库把直接 `sqlx::query` 收口在显式 raw-sql
+    // 边界清单里，本门禁不属于那几类（见 docs/architecture/raw-sql-boundaries.md）。
+    let database =
+        Database::from_pool(pool.clone(), DatabaseConfig::default()).map_err(|error| {
+            BaseError::DatabaseInitFailed(format!("构造旧版唯一索引门禁查询失败：{error}"))
+        })?;
+
+    #[derive(sqlx::FromRow)]
+    struct CountRow {
+        count: i64,
+    }
+    let rows: Vec<CountRow> = database
+        .query_with_params(
+            "SELECT COUNT(*) AS count FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() \
+               AND table_name = 'feishu_approval_task' \
+               AND index_name = ?",
+            vec![serde_json::json!(LEGACY_TASK_RECORD_INDEX)],
+        )
+        .await
+        .map_err(|error| {
+            BaseError::DatabaseInitFailed(format!("检查旧版审批任务唯一索引失败：{error}"))
+        })?;
+    if rows.first().map_or(0, |row| row.count) == 0 {
+        return Ok(());
+    }
+    Err(BaseError::DatabaseInitFailed(format!(
+        "检测到旧版全局唯一索引 {LEGACY_TASK_RECORD_INDEX}（feishu_approval_task.record_id \
+         单列唯一）。它会导致复制多维表格后，同一 record_id 无法在另一配置下派发\
+         （播种撞旧键被跳过、单条点击落库失败）。schema 同步只增不删，不会自动移除它。\
+         请由 DBA 审核后手工执行（DB 写操作需单独批准）：\
+         ALTER TABLE feishu_approval_task DROP INDEX {LEGACY_TASK_RECORD_INDEX};"
+    )))
+}
+
 /// 在已经连接的测试或离线作业数据库上应用与应用启动完全相同的声明式 Schema。
 pub async fn sync_with_database(
     database: Database,
@@ -29,8 +84,12 @@ pub async fn sync_with_database(
     let initializer_database = Database::from_pool(database.pool().clone(), database_config)
         .map_err(anyhow::Error::from)?;
     let initializer = DatabaseInitializer::new(initializer_database);
+    let guard_pool = database.pool().clone();
     let tools = Arc::new(ToolsBuilder::new().mysql(database).build()?);
     let result = async {
+        ensure_legacy_task_record_index_absent(&guard_pool)
+            .await
+            .map_err(anyhow::Error::from)?;
         let application = crate::app::build_schema_app(Arc::clone(&tools), security)?;
         let definitions = definitions(&application.runtime)?;
         let references = definitions.iter().collect::<Vec<_>>();
@@ -313,5 +372,102 @@ mod tests {
                 "user_avatar",
             ]
         );
+    }
+
+    /// 幂等清理：只在索引存在时 DROP。测试可能在任意一步失败，清理本身不能报
+    /// 「索引不存在」。
+    async fn drop_legacy_index_if_present(pool: &sqlx::MySqlPool) -> anyhow::Result<()> {
+        let present: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND table_name = 'feishu_approval_task' \
+               AND index_name = ?",
+        )
+        .bind(LEGACY_TASK_RECORD_INDEX)
+        .fetch_one(pool)
+        .await?;
+        if present > 0 {
+            sqlx::query(
+                "ALTER TABLE feishu_approval_task DROP INDEX uk_feishu_approval_task_record_id",
+            )
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// 旧库残留 `uk_feishu_approval_task_record_id`（record_id 单列唯一）时，
+    /// 跨配置同 record_id 会在播种/单条点击处失败，而 `schema_sync` 只增不删。
+    /// 门禁必须 fail-closed：命中即拒绝，且文案给出可执行的 ALTER；清掉后放行。
+    #[tokio::test]
+    #[ignore = "需要独立 MySQL 测试库"]
+    async fn real_mysql_legacy_task_record_index_guard_blocks_startup() -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = yang_db::Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        anyhow::ensure!(name.ends_with("_test"), "只允许测试库");
+        let pool = database.pool().clone();
+        // 先清理上次中断可能留下的旧索引——否则下面的 schema 同步会被本门禁挡住。
+        drop_legacy_index_if_present(&pool).await?;
+
+        sync_with_database(
+            database,
+            DatabaseConfig::default(),
+            Arc::new(SecuritySettings::default()),
+        )
+        .await?;
+        let database = yang_db::Database::connect(&url).await?;
+        let pool = database.pool();
+
+        // 全新库 / 已清理的库：放行。
+        ensure_legacy_task_record_index_absent(pool).await?;
+
+        // 测试库是多用例共享的：其它用例按新语义会留下「同 record_id 跨配置」的行，
+        // 不先收敛就建不出旧全局唯一索引，测试会以 1062 假失败（不是门禁的问题）。
+        sqlx::query(
+            "DELETE t FROM feishu_approval_task t JOIN ( \
+               SELECT record_id, MIN(id) AS keep_id FROM feishu_approval_task \
+               GROUP BY record_id HAVING COUNT(*) > 1 \
+             ) d ON t.record_id = d.record_id AND t.id <> d.keep_id",
+        )
+        .execute(pool)
+        .await?;
+        // 手工迁移遗漏的旧全局唯一索引：必须挡住启动。
+        sqlx::query(
+            "CREATE UNIQUE INDEX uk_feishu_approval_task_record_id \
+             ON feishu_approval_task (record_id)",
+        )
+        .execute(pool)
+        .await?;
+        // 此时现行的 (config_id, record_id) 复合唯一键仍在（部分手工迁移的形态）：
+        // 两个索引并存也必须报错——旧的还在就不算迁移完成。
+        let composite: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND table_name = 'feishu_approval_task' \
+               AND index_name = 'uk_feishu_approval_task_config_record'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert!(
+            composite > 0,
+            "现行复合唯一键应仍在，形成两索引并存的回归形态"
+        );
+
+        let error = ensure_legacy_task_record_index_absent(pool)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("旧版全局唯一索引残留必须挡住启动"))?;
+        let message = error.to_string();
+        assert!(
+            message.contains("DROP INDEX") && message.contains("uk_feishu_approval_task_record_id"),
+            "错误文案必须给出可执行的 ALTER: {message}"
+        );
+
+        // 清理必须幂等，清掉后门禁放行。
+        drop_legacy_index_if_present(pool).await?;
+        drop_legacy_index_if_present(pool).await?;
+        ensure_legacy_task_record_index_absent(pool).await?;
+        Ok(())
     }
 }

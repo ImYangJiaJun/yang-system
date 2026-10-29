@@ -735,6 +735,66 @@ async fn dispatch_batch_acceptance_writes_an_accepted_request_log() {
     finish(outcome, "批量受理落记录").await;
 }
 
+/// 单条点击的唤醒信号必须携带被点记录 id：worker 据此把受理发起人限定到那一行，
+/// 而不是广播给同配置下所有跨轮 pending 任务（见 `persist_applicant`）。
+///
+/// 单条路径必然尝试出站；夹具不装 HTTP 客户端，结论会失败——但信号在结果映射之后
+/// 发送，与出站成败无关，正好用来钉参数。
+#[tokio::test]
+#[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL 与 YANG_SYSTEM_TEST_REDIS_URL"]
+async fn single_dispatch_signal_carries_the_clicked_record_id() {
+    let outcome = async {
+        let database = connect_database().await?;
+        reset_database(&database).await?;
+        sync_with_database(database, database_config(), security_settings())
+            .await
+            .context("同步 Schema 失败")?;
+        let database = connect_database().await?;
+        let redis = connect_redis().await?;
+        let (config_id, config_key) =
+            seed_config(&database, "appSignalTest", "tblSignalTest", true).await?;
+
+        // 接收端保持存活：worker 没起，信号只是进通道。
+        let (handle, mut receiver) = ApprovalDispatchHandle::new();
+        let app = build_feishu_app(
+            &database,
+            &redis,
+            feishu_settings(Some("cli_dummy_app"), Some("dummy-secret")),
+            Some(handle),
+        )
+        .await?;
+
+        // 单条点击：出站必失败，但唤醒信号必须已经投递。
+        let _ = dispatch_as_workflow(
+            &app,
+            &config_key,
+            json!({ "token": seed_token(&config_key), "record_id": "recSignal" }),
+        )
+        .await;
+
+        let (got_config, applicant, record_id) = receiver
+            .try_recv()
+            .context("单条派发必须唤醒 worker（信号进通道）")?;
+        ensure!(
+            got_config == config_id,
+            "信号必须携带命中的配置: {got_config}"
+        );
+        ensure!(
+            record_id.as_deref() == Some("recSignal"),
+            "单条点击的唤醒信号必须携带被点记录 id，否则发起人会被广播: {record_id:?}"
+        );
+        ensure!(
+            applicant.is_none(),
+            "未传 applicant 时信号里的发起人必须为空: {applicant:?}"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    finish(outcome, "单条派发信号携带 record_id").await;
+}
+
 /// provision 失败（夹具不装 HTTP 客户端，`outbound_setup::build` 必然失败）：
 /// 冒泡为 Err + failed 行。
 ///

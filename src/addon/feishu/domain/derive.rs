@@ -74,6 +74,38 @@ const SEPARATOR: char = '\u{1f}';
 /// `option_id` 里哈希部分的长度（hex 字符数）。
 const HASH_PREFIX_LEN: usize = 12;
 
+/// `feishu_option.label` 的列上限（**字符数**）。
+///
+/// 必须与 `option/table.rs` 的 `label => Str::new().max_length(255)` 同步：这里是
+/// 派生期的截断阈值，那里是写库校验的硬上限。写大了不会在读的时候报错，而是插库
+/// 时抛 `StringTooLong`，`persist_binding` 整个事务回滚、digest 不推进，于是 pull
+/// 每轮都在同一张表上失败（`pull.rs` 的 `?` 直接中止整表）。
+pub(crate) const OPTION_LABEL_MAX_CHARS: usize = 255;
+
+/// 截断到上限，并按需给出异常原因。返回 `(文案, 原因)`。
+///
+/// **`option_id` 按截断后的值算**（调用方在截断之后才派生），这是设计 §5.7 明写的
+/// 取舍：否则 `id` 与 `label` 对不上，而「改文案 = 新 id」是补集停用语义的地基。
+/// 代价认了：两个前 255 字相同的长值会碰撞成同一个 `option_id`，后者被
+/// [`derive_options`] 去重掉——宁可少一个选项并留下异常记录，也不要一个 id 与
+/// 内容不符的行。
+///
+/// 收在 `domain` 而不是某条调用路径里：xlsx 导入与飞书拉取必须同一口径，
+/// 各写一份迟早漂移。
+pub(crate) fn truncate_label(value: &str, limit: usize) -> (String, Option<String>) {
+    if value.chars().count() <= limit {
+        return (value.to_string(), None);
+    }
+    let truncated: String = value.chars().take(limit).collect();
+    (
+        truncated,
+        Some(format!(
+            "取数文案超过 {limit} 字符（原长 {}），已截断",
+            value.chars().count()
+        )),
+    )
+}
+
 /// 一行待派生的原始取值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RawValue<'a> {
@@ -166,6 +198,11 @@ pub(crate) fn ancestor_key(ancestor_sources: &[&str], ancestors: &[&str]) -> Str
 ///
 /// 空文案（trim 后为空）一律跳过：空单元格不贡献任何值。
 ///
+/// 超过 [`OPTION_LABEL_MAX_CHARS`] 的文案先截断，**再用截断后的值派生 `option_id`**：
+/// 否则写库时 `StringTooLong` 会让整轮拉取失败，而只在写库处截断又会造成 id 与
+/// label 不一致。截断后前 255 字相同的两个值会得到同一个 id，由下面的 `seen`
+/// 去重（接受的取舍，见 [`truncate_label`]）。
+///
 /// `ancestor_sources` 是从**根到直接父**的 `source_key` 链；没有父时传空切片。
 /// 有父文案却缺父源配置时**不猜**，按无父处理——猜错会让整棵子树挂到错误的父上。
 pub(crate) fn derive_options(
@@ -180,16 +217,29 @@ pub(crate) fn derive_options(
         if label.is_empty() {
             continue;
         }
+        // 列上限 255：超长文案会在**插库时**才炸（`StringTooLong`），而 pull 的
+        // `?` 会让整表每轮同步都失败。必须在派生 `option_id` **之前**截断，否则
+        // id 与最终写库的 label 对不上（「改文案 = 新 id」的前提就破了）。
+        let original_chars = label.chars().count();
+        let (label, anomaly) = truncate_label(label, OPTION_LABEL_MAX_CHARS);
+        if anomaly.is_some() {
+            tracing::warn!(
+                source_key,
+                original_chars,
+                truncated_chars = label.chars().count(),
+                "选项文案超过列上限，已按截断后的文案派生"
+            );
+        }
         let parent_key = ancestor_key(ancestor_sources, value.ancestors);
         // 本行的 id = 同一条折叠再叠上本行，所以 `child.parent_key == parent.option_id`
         // 是构造性成立的（见模块文档）。
-        let option_id = option_id_of(source_key, Some(&parent_key), label);
+        let option_id = option_id_of(source_key, Some(&parent_key), &label);
         if !seen.insert(option_id.clone()) {
             continue;
         }
         derived.push(DerivedOption {
             option_id,
-            label: label.to_string(),
+            label,
             parent_key,
             sort_order: derived.len() as i64,
         });
@@ -562,5 +612,111 @@ mod tests {
         // 不 bump 的话「口径变了而源内容没变」的字段摘要相同 → 跳过写库 →
         // 旧的错误 parent_key 永远留在库里。
         assert_eq!(DERIVE_RULE_VERSION, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // label 列上限（`feishu_option.label max_length(255)`）
+    //
+    // 不截断的话，超长文案会在**插库时**才炸（`StringTooLong`），
+    // `persist_binding` 整个事务回滚、digest 不推进，pull 每轮都在同一张表上失败。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_label_at_the_column_limit_is_not_truncated() {
+        // 与 `option/table.rs` 的 `label` 列 `max_length(255)` 绑定：常量改动必须
+        // 同步改列宽，否则这里直接失败（防止只在两边各写一个「看起来一致」的值）。
+        assert_eq!(
+            OPTION_LABEL_MAX_CHARS, 255,
+            "标签上限必须与 feishu_option.label 的 max_length(255) 一致"
+        );
+        let at_limit = "京".repeat(OPTION_LABEL_MAX_CHARS);
+        let (label, anomaly) = truncate_label(&at_limit, OPTION_LABEL_MAX_CHARS);
+        assert_eq!(label, at_limit);
+        assert!(anomaly.is_none(), "恰好 255 字符不该被截断");
+
+        let derived = derive_options("demo", &[], &values(&[at_limit.as_str()]));
+        assert_eq!(derived[0].label, at_limit);
+        assert_eq!(derived[0].label.chars().count(), OPTION_LABEL_MAX_CHARS);
+    }
+
+    #[test]
+    fn an_overlong_label_is_truncated_before_the_id_is_derived() {
+        let long = "长".repeat(OPTION_LABEL_MAX_CHARS + 1);
+        let (truncated, anomaly) = truncate_label(&long, OPTION_LABEL_MAX_CHARS);
+        assert_eq!(truncated.chars().count(), OPTION_LABEL_MAX_CHARS);
+        assert!(anomaly.is_some(), "超长必须带异常原因");
+
+        let derived = derive_options("demo", &[], &values(&[long.as_str()]));
+        assert_eq!(derived[0].label, truncated);
+        // id 必须按**截断后**的文案派生：只在写库处截断会造成 id 与 label 不一致。
+        let expected = derive_options("demo", &[], &values(&[truncated.as_str()]));
+        assert_eq!(derived[0].option_id, expected[0].option_id);
+        assert_ne!(
+            derived[0].option_id,
+            option_id_of("demo", None, &long),
+            "id 不能仍按未截断的原文案派生"
+        );
+    }
+
+    #[test]
+    fn label_limits_count_characters_not_bytes() {
+        // `label` 是 varchar(255)：一个汉字/emoji 在 utf8mb4 存储下占多字节，
+        // 但列上限按**字符**算。按字节截会把 255 个汉字截成 85 个。
+        for unit in ["汉", "😀"] {
+            let at_limit = unit.repeat(OPTION_LABEL_MAX_CHARS);
+            assert!(
+                truncate_label(&at_limit, OPTION_LABEL_MAX_CHARS)
+                    .1
+                    .is_none(),
+                "{unit} 恰好 {OPTION_LABEL_MAX_CHARS} 字符不得截断"
+            );
+            let over = unit.repeat(OPTION_LABEL_MAX_CHARS + 1);
+            let (label, anomaly) = truncate_label(&over, OPTION_LABEL_MAX_CHARS);
+            assert_eq!(
+                label.chars().count(),
+                OPTION_LABEL_MAX_CHARS,
+                "{unit} 必须按字符截断"
+            );
+            assert!(anomaly.is_some());
+        }
+    }
+
+    #[test]
+    fn labels_sharing_the_first_255_chars_collapse_to_one_option() {
+        // 截断会改变超长项的 id（接受的取舍）：前 255 字相同的两个值必须落到
+        // 同一个 id，由 `seen` 去重，而不是写出两行 id 相同、label 不同的选项。
+        let prefix = "同".repeat(OPTION_LABEL_MAX_CHARS);
+        let first = format!("{prefix}甲");
+        let second = format!("{prefix}乙");
+        let rows = [
+            RawValue {
+                ancestors: &[],
+                label: &first,
+            },
+            RawValue {
+                ancestors: &[],
+                label: &second,
+            },
+        ];
+        let derived = derive_options("demo", &[], &rows);
+        assert_eq!(derived.len(), 1, "截断后 id 相同的长值只能保留一个");
+        assert_eq!(derived[0].label, prefix);
+    }
+
+    #[test]
+    fn overlong_and_normal_labels_mix_with_a_stable_digest() {
+        let long = "超".repeat(OPTION_LABEL_MAX_CHARS + 10);
+        let labels = ["北京", long.as_str(), "上海"];
+        let rows = values(&labels);
+        let first = derive_options("demo", &[], &rows);
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[0].label, "北京");
+        assert_eq!(first[1].label.chars().count(), OPTION_LABEL_MAX_CHARS);
+        assert_eq!(first[2].label, "上海");
+
+        // 同一批输入下一轮派生同一摘要：越界文案截断后 digest 稳定推进，
+        // 下一轮走 unchanged 快路径，不会每轮重写。
+        let second = derive_options("demo", &[], &rows);
+        assert_eq!(snapshot_digest(&first), snapshot_digest(&second));
     }
 }

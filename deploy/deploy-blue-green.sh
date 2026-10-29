@@ -610,6 +610,8 @@ preflight_release_data() {
   if [ "$MYSQL_HOST" != "$MYSQL_CONTAINER" ]; then
     warn "MySQL 由外部实例提供（host=${MYSQL_HOST}），跳过发布前数据预检。"
     warn "  请先以只读账号执行验收报告 §4.1 的三条 SELECT，确认无重复/损坏数据再部署。"
+    warn "  另需人工核对 information_schema.statistics：feishu_approval_task 上不得残留旧版唯一索引"
+    warn "  uk_feishu_approval_task_record_id（存在则新版本会在启动/只读冒烟阶段拒绝启动）。"
     return 0
   fi
   if ! running "$MYSQL_CONTAINER"; then
@@ -648,6 +650,12 @@ preflight_release_data() {
   请先修正这些行（DB 写操作需单独批准），再重新部署。
   预检 SQL：SELECT id, slug FROM \`${db}\`.\`feishu_datasource_portal\` WHERE (exposed_columns IS NOT NULL AND JSON_VALID(exposed_columns)=0) OR (result_labels IS NOT NULL AND JSON_VALID(result_labels)=0);"
   fi
+  present=$(mysql_scalar "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${db}' AND table_name='feishu_approval_task' AND index_name='uk_feishu_approval_task_record_id'") || die "发布前预检查询失败"
+  require_integer "旧版任务唯一索引存在性" "$present" || die "发布前预检查询结果异常"
+  [ "$present" = "0" ] || die "检测到旧版全局唯一索引 uk_feishu_approval_task_record_id（feishu_approval_task.record_id 单列唯一）。
+  它会让复制 Base 后同 record_id 无法在另一配置派发（播种撞旧键被跳过、单条点击落库失败）。
+  请由 DBA 审核后手工执行（DB 写操作需单独批准），再重新部署：
+  ALTER TABLE feishu_approval_task DROP INDEX uk_feishu_approval_task_record_id;"
   ok "发布前数据预检通过"
 }
 
