@@ -548,7 +548,13 @@ async fn run_round(
     tracing::Span::current().record("trigger", trigger.as_str());
     runner.heartbeat.mark("seed", None);
     tracing::debug!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
-    match seed_tasks(runner, trigger).await {
+    match seed_tasks(
+        runner,
+        trigger,
+        applicant.as_ref().map(|(_, open_id)| open_id.as_str()),
+    )
+    .await
+    {
         Ok(0) => {}
         Ok(seeded) => tracing::info!(seeded, "审批派发播种了新任务"),
         // 播种失败不中断整轮：已有的待处理任务仍然值得跑，而播种下一轮还会再来。
@@ -731,13 +737,20 @@ struct ClaimedTask {
 /// # 为什么要读全表而不是「只看有任务的行」
 ///
 /// 首次运行时库里一条任务都没有——不扫表就永远不会有第一条。
-async fn seed_tasks(runner: &RoundRunner, trigger: RoundTrigger) -> anyhow::Result<usize> {
+async fn seed_tasks(
+    runner: &RoundRunner,
+    trigger: RoundTrigger,
+    applicant: Option<&str>,
+) -> anyhow::Result<usize> {
     let configs = runner
         .context
         .approval_configs()
         .query()
         .select_fields(&[
             "id",
+            "title",
+            "base_name",
+            "table_name",
             "base_token",
             "table_id",
             "approval_code",
@@ -754,7 +767,7 @@ async fn seed_tasks(runner: &RoundRunner, trigger: RoundTrigger) -> anyhow::Resu
 
     let mut seeded = 0usize;
     for config in configs {
-        match seed_config(runner, &config, trigger).await {
+        match seed_config(runner, &config, trigger, applicant).await {
             Ok(count) => seeded += count,
             // 一条配置坏掉不该拖垮别的配置：记下来，下一轮再来。
             Err(error) => {
@@ -802,6 +815,7 @@ async fn seed_config(
     runner: &RoundRunner,
     config: &Record,
     trigger: RoundTrigger,
+    applicant: Option<&str>,
 ) -> anyhow::Result<usize> {
     let started = std::time::Instant::now();
     let config_id: i64 = config.require("id")?;
@@ -844,6 +858,19 @@ async fn seed_config(
     .map_err(|failure| anyhow::anyhow!("筛选待处理记录失败：{}", failure.message))?;
     tracing::debug!(stage = "seed", config_id, table_id = %table_id, field_count = fields.len(), pending_records = pending_records.len(), "审批派发待处理记录扫描完成");
     if pending_records.is_empty() {
+        // 点击受理却命中 0 条：给点击人一条 IM 说明，别让「没勾选就点」完全静默。
+        // 发送是 best-effort（见 [`notify_empty_selection`]）：失败不改变播种结论。
+        if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
+            notify_empty_selection(
+                runner,
+                config_id,
+                open_id,
+                config,
+                &backfill_name,
+                batch_scope_name.as_deref(),
+            )
+            .await;
+        }
         return Ok(0);
     }
 
@@ -914,6 +941,137 @@ async fn seed_config(
         "审批配置播种完成"
     );
     Ok(seeded)
+}
+
+/// 「点击受理、命中 0 条」反馈的接收人：只有被点击的配置、且拿得到点击人时才发。
+///
+/// 轮询轮与其它配置的播种都不能发：轮询每 30 秒一轮，「回填列为空」命中 0 条是
+/// 常态，发出去就是定时骚扰；其它配置的播种也不是这次点击引发的。
+/// 工作流没传 applicant 时没有接收人，宁可不发也不能猜。
+fn empty_selection_recipient(
+    trigger: RoundTrigger,
+    config_id: i64,
+    applicant: Option<&str>,
+) -> Option<&str> {
+    if trigger.manual_config() != Some(config_id) {
+        return None;
+    }
+    applicant
+        .map(str::trim)
+        .filter(|open_id| !open_id.is_empty())
+}
+
+/// 「点击受理、命中 0 条」的 IM 正文。
+///
+/// 首行必须是【…】：`approval_notification::post_content` 首行作卡片标题，其余
+/// 按「标签：内容」渲染成卡片行（「配置」行由调用方拼在标题之后）。
+fn empty_selection_feedback(batch_scope_name: Option<&str>, backfill_name: &str) -> String {
+    match batch_scope_name {
+        Some(scope) => format!(
+            "【批量提交未处理任何记录】\n\
+             原因：表内没有「{scope}」已勾选且「{backfill_name}」为空的记录，本次点击没有新增提交。\n\
+             下一步：请勾选需要提交记录的「{scope}」列后重新点击批量提交。"
+        ),
+        None => format!(
+            "【批量提交未处理任何记录】\n\
+             原因：表内没有「{backfill_name}」为空的记录，本次点击没有新增提交。\n\
+             下一步：所有记录都已有审批编号；如需重新提交，请清空对应记录的「{backfill_name}」后再点击。"
+        ),
+    }
+}
+
+/// 点击受理命中 0 条时向点击人发一条 IM 说明。
+///
+/// best-effort，与其它 Worker 通知一致：任何失败只告警，**不返回 Err**，
+/// 不中断本轮其余配置的播种。
+async fn notify_empty_selection(
+    runner: &RoundRunner,
+    config_id: i64,
+    open_id: &str,
+    config: &Record,
+    backfill_name: &str,
+    batch_scope_name: Option<&str>,
+) {
+    let title = approval_feedback::display_name(
+        config.optional::<String>("title").ok().flatten().as_deref(),
+    );
+    let base_name = approval_feedback::display_name(
+        config
+            .optional::<String>("base_name")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+    let table_name = approval_feedback::display_name(
+        config
+            .optional::<String>("table_name")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+
+    let body = empty_selection_feedback(batch_scope_name, backfill_name);
+    let (header, rest) = body.split_once('\n').unwrap_or((body.as_str(), ""));
+    let text = format!("{header}\n配置：{title}\n{rest}");
+
+    // 表链接照 [`send_worker_notification`]：坐标校验失败就不带链接。
+    let base_token: String = config
+        .optional("base_token")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let table_id: String = config
+        .optional("table_id")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let table_url = (|| -> anyhow::Result<String> {
+        bitable::validate_path_segment("base_token", &base_token)?;
+        bitable::validate_path_segment("table_id", &table_id)?;
+        Ok(format!(
+            "https://www.feishu.cn/base/{base_token}?table={table_id}"
+        ))
+    })()
+    .ok();
+
+    let references = vec![FeedbackReference {
+        label: "多维表",
+        text: format!("{base_name} / {table_name}"),
+        href: table_url,
+    }];
+    let recipient = NotificationRecipient {
+        receive_id_type: ReceiveIdType::OpenId,
+        receive_id: open_id.to_string(),
+    };
+
+    let result = crate::addon::feishu::domain::approval_notification::send_feedback(
+        runner.transport(),
+        runner.sleeper.as_ref(),
+        &runner.tokens,
+        &recipient,
+        &text,
+        &references,
+    )
+    .await;
+    match result.status {
+        crate::addon::feishu::domain::approval_notification::NotificationStatus::Sent => {
+            tracing::info!(
+                config_id,
+                open_id,
+                message_id = ?result.message_id,
+                "审批派发：点击受理命中 0 条，已向点击人发送说明"
+            );
+        }
+        status => {
+            tracing::warn!(
+                config_id,
+                open_id,
+                status = ?status,
+                message = %result.message,
+                "审批派发：点击受理命中 0 条，说明消息未送达"
+            );
+        }
+    }
 }
 
 /// 播种一条任务行；插入失败只告警并返回 `false`。
@@ -2547,6 +2705,51 @@ mod tests {
                 .unwrap_or_else(|error| panic!("类型码缺失不应拦: {error}")),
             Some("纳入批量".to_string())
         );
+    }
+
+    #[test]
+    fn empty_selection_recipient_gates_on_click_and_applicant() {
+        // 只有「点击受理、点的是本配置」且有发起人才反馈：轮询每轮都可能命中 0 条，
+        // 其它配置也不是这次点击引发的，都会变成定时骚扰。
+        assert_eq!(
+            empty_selection_recipient(RoundTrigger::Manual(3), 3, Some("ou_x")),
+            Some("ou_x")
+        );
+        assert_eq!(
+            empty_selection_recipient(RoundTrigger::Poll, 3, Some("ou_x")),
+            None
+        );
+        assert_eq!(
+            empty_selection_recipient(RoundTrigger::Manual(3), 4, Some("ou_x")),
+            None
+        );
+        assert_eq!(
+            empty_selection_recipient(RoundTrigger::Manual(3), 3, None),
+            None
+        );
+        assert_eq!(
+            empty_selection_recipient(RoundTrigger::Manual(3), 3, Some("  ")),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_selection_feedback_names_scope_and_backfill() {
+        let scoped = empty_selection_feedback(Some("纳入批量"), "审批编号");
+        assert!(
+            scoped.starts_with("【批量提交未处理任何记录】"),
+            "首行是卡片标题: {scoped}"
+        );
+        assert!(
+            scoped.contains("纳入批量") && scoped.contains("勾选"),
+            "要说明范围列没勾选: {scoped}"
+        );
+        assert!(scoped.contains("审批编号"), "要点名回填列: {scoped}");
+
+        let unscoped = empty_selection_feedback(None, "审批编号");
+        assert!(unscoped.starts_with("【批量提交未处理任何记录】"));
+        assert!(!unscoped.contains("纳入批量"), "未配置范围列不该提它");
+        assert!(unscoped.contains("审批编号"));
     }
 
     #[test]
