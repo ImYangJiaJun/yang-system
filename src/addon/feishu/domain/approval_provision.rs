@@ -760,6 +760,21 @@ pub(crate) async fn insert_maps(
         map_row.insert("required", serde_json::json!(widget.required));
         map_row.insert("bitable_field", serde_json::json!(&widget.bitable_field));
         map_row.insert("bitable_field_name", serde_json::json!(column_name));
+        // 日期区间两列模式：结束列同样存 id + 展示名（未配置落 `NULL`）。
+        let interval_end_field_name = widget.interval_end_field.as_deref().and_then(|field_id| {
+            plan.columns
+                .iter()
+                .find(|column| column.field_id == field_id)
+                .map(|column| column.field_name.clone())
+        });
+        map_row.insert(
+            "interval_end_field",
+            serde_json::json!(&widget.interval_end_field),
+        );
+        map_row.insert(
+            "interval_end_field_name",
+            serde_json::json!(&interval_end_field_name),
+        );
         map_row.insert(
             "option_source_key",
             serde_json::json!(&widget.option_source_key),
@@ -1281,6 +1296,7 @@ mod tests {
             widget_id: "w".into(),
             widget_type: "radioV2".into(),
             bitable_field: "fldCompany".into(),
+            interval_end_field: None,
             required: true,
             converter: Converter::Option,
             option_map: Default::default(),
@@ -1713,6 +1729,7 @@ mod tests {
             let maps = [FieldMapping {
                 widget_id: "plain".into(),
                 bitable_field: "field".into(),
+                interval_end_field: None,
                 option_source_key: Some(source),
             }];
             assert!(matches!(

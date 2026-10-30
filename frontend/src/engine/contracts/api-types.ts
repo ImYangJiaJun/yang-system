@@ -1786,6 +1786,11 @@ export interface components {
         FieldMapping: {
             bitable_field: string;
             /**
+             * @description 日期区间控件专用：结束日期取值列（`field_id`）。只对 `dateInterval` 控件生效； 省略时要求来源单元格本身就是 `{start, end}` 对象（旧行为）。
+             * @default null
+             */
+            interval_end_field: string | null;
+            /**
              * @description 外部选项来源的稳定标识；省略时按控件名称自动识别。
              * @default null
              */

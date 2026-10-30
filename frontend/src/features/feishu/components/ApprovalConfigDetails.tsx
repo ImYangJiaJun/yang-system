@@ -462,6 +462,15 @@ export function ApprovalConfigDetails({
                         表格列
                       </span>
                       {nameOf(map.bitableFieldName, "列名称待补充")}
+                      {map.intervalEndFieldName ? (
+                        <p className="mt-1 break-words text-xs text-muted-foreground">
+                          区间结束列：
+                          {nameOf(
+                            map.intervalEndFieldName,
+                            map.intervalEndField ?? "",
+                          )}
+                        </p>
+                      ) : null}
                     </div>
                     <div className="break-words">
                       <span className="mb-1 block text-xs text-muted-foreground sm:hidden">

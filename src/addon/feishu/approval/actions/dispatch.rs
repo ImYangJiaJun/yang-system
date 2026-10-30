@@ -2726,6 +2726,7 @@ mod tests {
             option_map: Default::default(),
             option_source_key: None,
             currency: None,
+            interval_end_field: None,
         }];
         let error = crate::addon::feishu::domain::approval_provision::resolve_external_options(
             &e2e_context(),
@@ -2806,7 +2807,7 @@ mod tests {
                 context.options().query().insert(yang_base::table::Record::new().set("option_id", format!("{source}_{suffix}")).set("source_key", row_source).set("label", label).set("enabled", enabled)).await?;
             }
             let snapshot = json!([{"id":"detail","type":"fieldList","children":[{"id":"linked","name":name,"type":"radioV2","externalData":{"externalDataLinkage":true}}]}]).to_string();
-            let mut widgets = vec![WidgetMap { widget_id: "linked".into(), widget_type: "radioV2".into(), bitable_field: "fldRegression".into(), required: true, converter: Converter::Option, option_map: Default::default(), option_source_key: None, currency: None }];
+            let mut widgets = vec![WidgetMap { widget_id: "linked".into(), widget_type: "radioV2".into(), bitable_field: "fldRegression".into(), required: true, converter: Converter::Option, option_map: Default::default(), option_source_key: None, currency: None, interval_end_field: None }];
             let mut cells = serde_json::Map::from_iter([("fldRegression".into(), json!("正确")), ("fldApplicant".into(), json!([{"id":E2E_APPLICANT_OPEN_ID}]))]);
             resolve_external_options(&context, &snapshot, &mut widgets, &cells, &[]).await?;
             assert_eq!(widgets[0].option_map, std::collections::BTreeMap::from([("正确".into(), format!("{source}_good"))]));

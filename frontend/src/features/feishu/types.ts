@@ -1128,6 +1128,10 @@ export type ApprovalConfigMap = {
   widgetType: string;
   bitableField: string;
   bitableFieldName: string | null;
+  /// 日期区间控件的结束日期列（两列模式）；单列模式为 null。对齐靠 id。
+  intervalEndField?: string | null;
+  /// 结束日期列名（缓存，仅供展示）。
+  intervalEndFieldName?: string | null;
   required: boolean;
   /// 值转换器：`direct` / `date` / `option`。
   converter: string;

@@ -2176,6 +2176,8 @@ function parseApprovalConfigMap(
     widgetType: asString(raw.widget_type),
     bitableField: asString(raw.bitable_field),
     bitableFieldName: asNullableString(raw.bitable_field_name),
+    intervalEndField: asNullableString(raw.interval_end_field),
+    intervalEndFieldName: asNullableString(raw.interval_end_field_name),
     required: raw.required === true,
     converter: asString(raw.converter),
     optionSourceKey: asNullableString(raw.option_source_key),
@@ -2326,6 +2328,8 @@ export type CreateApprovalConfigInput = {
   maps?: Array<{
     widgetId: string;
     bitableField: string;
+    /// 日期区间控件专用：结束日期列（field_id）；省略 = 单列区间对象模式。
+    intervalEndField?: string;
     optionSourceKey?: string;
   }>;
 };
@@ -2384,6 +2388,9 @@ export async function createApprovalConfig(
             maps: input.maps.map((map) => ({
               widget_id: map.widgetId,
               bitable_field: map.bitableField,
+              ...(map.intervalEndField === undefined
+                ? {}
+                : { interval_end_field: map.intervalEndField }),
               ...(map.optionSourceKey === undefined
                 ? {}
                 : { option_source_key: map.optionSourceKey }),
@@ -2437,6 +2444,9 @@ export async function updateApprovalConfig(
     body.maps = patch.maps.map((map) => ({
       widget_id: map.widgetId,
       bitable_field: map.bitableField,
+      ...(map.intervalEndField === undefined
+        ? {}
+        : { interval_end_field: map.intervalEndField }),
       ...(map.optionSourceKey === undefined
         ? {}
         : { option_source_key: map.optionSourceKey }),

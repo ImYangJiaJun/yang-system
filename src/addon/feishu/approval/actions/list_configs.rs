@@ -58,6 +58,8 @@ pub(super) const MAP_ITEM_COLUMNS: &[&str] = &[
     "widget_type",
     "bitable_field",
     "bitable_field_name",
+    "interval_end_field",
+    "interval_end_field_name",
     "required",
     "converter",
     "option_source_key",
@@ -76,6 +78,10 @@ pub(super) struct FieldMapItem {
     bitable_field: String,
     /// 多维表格字段名（缓存，仅供展示）。
     bitable_field_name: Option<String>,
+    /// 日期区间控件的结束日期列 ID（两列模式）；单列模式为 `None`。
+    interval_end_field: Option<String>,
+    /// 结束日期列名（缓存，仅供展示）。
+    interval_end_field_name: Option<String>,
     /// 该控件在审批定义里是否必填。
     required: bool,
     /// 值转换器：`direct` / `date` / `option`。
@@ -100,6 +106,8 @@ pub(super) fn group_maps(rows: &[Record]) -> Result<HashMap<i64, Vec<FieldMapIte
             widget_type: row.require("widget_type")?,
             bitable_field: row.require("bitable_field")?,
             bitable_field_name: row.optional("bitable_field_name")?,
+            interval_end_field: row.optional("interval_end_field")?,
+            interval_end_field_name: row.optional("interval_end_field_name")?,
             option_source_key: row.optional("option_source_key")?,
             required: row.optional("required")?.unwrap_or(false),
             converter: row.optional("converter")?.unwrap_or_default(),

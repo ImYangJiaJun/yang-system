@@ -401,6 +401,7 @@ mod tests {
             option_map: Default::default(),
             option_source_key: None,
             currency: None,
+            interval_end_field: None,
         };
         let fields = serde_json::from_value::<Vec<FieldItem>>(
             json!([{"field_id":"fld_date","field_name":"预计付款日"}]),
@@ -452,6 +453,7 @@ mod tests {
             option_map: Default::default(),
             option_source_key: None,
             currency: None,
+            interval_end_field: None,
         };
         let fields = serde_json::from_value::<Vec<FieldItem>>(
             json!([{"field_id":"fld_fee","field_name":"费用类型"}]),
@@ -483,6 +485,7 @@ mod tests {
             option_map: Default::default(),
             option_source_key: None,
             currency: None,
+            interval_end_field: None,
         };
         let fields = serde_json::from_value::<Vec<FieldItem>>(
             json!([{"field_id":"fld_reason","field_name":"请假事由"}]),

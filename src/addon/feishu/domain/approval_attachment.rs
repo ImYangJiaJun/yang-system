@@ -246,6 +246,7 @@ mod tests {
             option_map: BTreeMap::new(),
             option_source_key: None,
             currency: None,
+            interval_end_field: None,
         }
     }
 
@@ -260,6 +261,7 @@ mod tests {
             option_map: BTreeMap::new(),
             option_source_key: None,
             currency: None,
+            interval_end_field: None,
         };
         let valid = json!({"file_token":"Token1", "name":"凭证.pdf", "size":1});
         for (key, value) in [

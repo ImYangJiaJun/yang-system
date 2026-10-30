@@ -546,6 +546,10 @@ pub(crate) fn match_by_name(form: &[FormWidget], columns: &[Column]) -> MatchOut
 pub(crate) struct FieldMapping {
     pub(crate) widget_id: String,
     pub(crate) bitable_field: String,
+    /// 日期区间控件专用：结束日期取值列（`field_id`）。只对 `dateInterval` 控件生效；
+    /// 省略时要求来源单元格本身就是 `{start, end}` 对象（旧行为）。
+    #[serde(default)]
+    pub(crate) interval_end_field: Option<String>,
     /// 外部选项来源的稳定标识；省略时按控件名称自动识别。
     #[serde(default)]
     pub(crate) option_source_key: Option<String>,
@@ -639,6 +643,7 @@ pub(crate) fn match_fields(
 
     let flat = mapping_widgets(form);
     let mut selected = BTreeMap::new();
+    let mut selected_end: BTreeMap<&str, &str> = BTreeMap::new();
     for map in maps.into_iter().flatten() {
         if let Some(source) = &map.option_source_key {
             if source.trim().is_empty() || source.len() > 64 {
@@ -680,6 +685,45 @@ pub(crate) fn match_fields(
                 "控件「{}」重复配置",
                 map.widget_id
             )));
+        }
+        if let Some(end_field) = map
+            .interval_end_field
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            // 结束列只对日期区间控件有意义；别的控件配了它只会静默不生效。
+            if !flat
+                .iter()
+                .any(|(widget, _)| widget.id == map.widget_id && widget.r#type == "dateInterval")
+            {
+                errors.push(MatchError::InvalidMapping(format!(
+                    "控件「{}」不是日期区间控件，不能配置结束日期列",
+                    map.widget_id
+                )));
+            }
+            if !columns.iter().any(|column| column.field_id == end_field) {
+                errors.push(MatchError::InvalidMapping(format!(
+                    "多维表格列「{end_field}」不存在"
+                )));
+            }
+            if let Some(column) = columns.iter().find(|column| column.field_id == end_field) {
+                // 只认日期列（多维表格 type=5）。取不到类型码就不拦——与
+                // `check_backfill_targets` 的既有纪律一致，不拿缺元数据拒绝可用配置。
+                if column.field_type.is_some_and(|kind| kind != 5) {
+                    errors.push(MatchError::InvalidMapping(format!(
+                        "控件「{}」的结束日期列「{}」不是日期列",
+                        map.widget_id, column.field_name
+                    )));
+                }
+            }
+            if end_field == map.bitable_field {
+                errors.push(MatchError::InvalidMapping(format!(
+                    "控件「{}」的开始列与结束列不能是同一列",
+                    map.widget_id
+                )));
+            }
+            selected_end.insert(map.widget_id.as_str(), end_field);
         }
     }
 
@@ -757,6 +801,21 @@ pub(crate) fn match_fields(
         }
         column_owner.insert(column.field_id.clone(), widget.name.clone());
 
+        // 结束列同样占位：一列不能既当某控件的开始列、又当另一个控件的结束列。
+        if let Some(end_field) = selected_end.get(widget.id.as_str()) {
+            if let Some(end_column) = columns.iter().find(|column| column.field_id == *end_field) {
+                if let Some(previous) = column_owner.get(&end_column.field_id) {
+                    errors.push(MatchError::ColumnReused {
+                        column: end_column.field_name.clone(),
+                        first: previous.clone(),
+                        second: widget.name.clone(),
+                    });
+                    continue;
+                }
+                column_owner.insert(end_column.field_id.clone(), widget.name.clone());
+            }
+        }
+
         if let Err(error) = check_type_compatibility(widget, column) {
             // 类型不匹配只在**必填**时报错：可选控件对不上可以留空，
             // 让它进映射反而会在提交时被 1390001 拒掉整单。
@@ -805,6 +864,9 @@ pub(crate) fn match_fields(
             option_map,
             option_source_key: None,
             currency: None,
+            interval_end_field: selected_end
+                .get(widget.id.as_str())
+                .map(|field| (*field).to_string()),
         });
     }
 
@@ -1045,6 +1107,13 @@ mod tests {
         }
     }
 
+    fn datetime_column(name: &str, id: &str) -> Column {
+        Column {
+            field_type: Some(5),
+            ..column(name, id, &[])
+        }
+    }
+
     fn multi_column(name: &str, id: &str, options: &[&str]) -> Column {
         Column {
             field_type: Some(4),
@@ -1063,6 +1132,7 @@ mod tests {
         FieldMapping {
             widget_id: widget.to_string(),
             bitable_field: field.to_string(),
+            interval_end_field: None,
             option_source_key: None,
         }
     }
@@ -1154,6 +1224,146 @@ mod tests {
         };
         assert_eq!(maps.len(), 1);
         assert_eq!(maps[0].bitable_field, "chosen");
+    }
+
+    #[test]
+    fn interval_end_field_is_accepted_for_date_interval_and_rejected_elsewhere() {
+        let date_interval = FormWidget {
+            id: "interval".to_string(),
+            name: "申报区间/DateInterval".to_string(),
+            r#type: "dateInterval".to_string(),
+            required: true,
+            option: None,
+            external_data: None,
+            value: serde_json::Value::Null,
+            children: Vec::new(),
+        };
+        let note = FormWidget {
+            id: "note".to_string(),
+            name: "备注".to_string(),
+            r#type: "input".to_string(),
+            required: true,
+            option: None,
+            external_data: None,
+            value: serde_json::Value::Null,
+            children: Vec::new(),
+        };
+        let form = vec![date_interval, note];
+        let columns = vec![
+            datetime_column("开始日期", "fld_start"),
+            datetime_column("结束日期", "fld_end"),
+            column("备注", "fld_note", &[]),
+            column("文本列", "fld_text", &[]),
+        ];
+
+        // 日期区间：开始/结束两列放行，结束列随映射保存。
+        let ok = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                FieldMapping {
+                    interval_end_field: Some("fld_end".into()),
+                    ..mapping("interval", "fld_start")
+                },
+                mapping("note", "fld_note"),
+            ]),
+        );
+        let MatchOutcome::Matched(widgets) = ok else {
+            panic!("两列区间映射应通过: {ok:?}");
+        };
+        let interval = widgets
+            .iter()
+            .find(|widget| widget.widget_id == "interval")
+            .unwrap_or_else(|| panic!("区间控件映射必须存在"));
+        assert_eq!(interval.interval_end_field.as_deref(), Some("fld_end"));
+
+        // 非日期区间控件配结束列：配置错误，指名控件。
+        let bad = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                mapping("interval", "fld_start"),
+                FieldMapping {
+                    interval_end_field: Some("fld_end".into()),
+                    ..mapping("note", "fld_note")
+                },
+            ]),
+        );
+        let MatchOutcome::Invalid(errors) = bad else {
+            panic!("非日期区间控件配结束列必须被拒绝");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("不是日期区间控件")),
+            "{errors:?}"
+        );
+
+        // 结束列不存在：配置错误。
+        let missing = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                FieldMapping {
+                    interval_end_field: Some("fld_missing".into()),
+                    ..mapping("interval", "fld_start")
+                },
+                mapping("note", "fld_note"),
+            ]),
+        );
+        let MatchOutcome::Invalid(errors) = missing else {
+            panic!("结束列不存在必须被拒绝");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("fld_missing")),
+            "{errors:?}"
+        );
+
+        // 结束列与开始列相同：配置错误。
+        let same = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                FieldMapping {
+                    interval_end_field: Some("fld_start".into()),
+                    ..mapping("interval", "fld_start")
+                },
+                mapping("note", "fld_note"),
+            ]),
+        );
+        let MatchOutcome::Invalid(errors) = same else {
+            panic!("开始列与结束列相同必须被拒绝");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("不能是同一列")),
+            "{errors:?}"
+        );
+
+        // 结束列不是日期列（文本）：配置错误。
+        let not_date = match_fields(
+            &form,
+            &columns,
+            Some(&[
+                FieldMapping {
+                    interval_end_field: Some("fld_text".into()),
+                    ..mapping("interval", "fld_start")
+                },
+                mapping("note", "fld_note"),
+            ]),
+        );
+        let MatchOutcome::Invalid(errors) = not_date else {
+            panic!("结束列不是日期列必须被拒绝");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("不是日期列")),
+            "{errors:?}"
+        );
     }
 
     #[test]

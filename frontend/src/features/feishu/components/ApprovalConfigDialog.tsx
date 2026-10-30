@@ -162,6 +162,14 @@ export function ApprovalConfigDialog({
       ]) ?? [],
     ),
   );
+  // 日期区间控件（dateInterval）的结束日期列：空串 = 不配置（开始列须为区间对象）。
+  const [endFields, setEndFields] = useState<Record<string, string>>(
+    Object.fromEntries(
+      initialConfig?.maps
+        .filter((map) => Boolean(map.intervalEndField))
+        .map((map) => [map.widgetId, map.intervalEndField ?? ""]) ?? [],
+    ),
+  );
   const [optionDatasources, setOptionDatasources] = useState<
     Record<string, number>
   >({});
@@ -241,6 +249,13 @@ export function ApprovalConfigDialog({
         !field ||
         (mappingWidgets.some((w) => w.id === id) &&
           fields.some((f) => f.fieldId === field)),
+    ) &&
+    Object.entries(endFields).every(
+      ([id, field]) =>
+        !field ||
+        (mappingWidgets.some((w) => w.id === id) &&
+          Boolean(maps[id]) &&
+          fields.some((f) => f.fieldId === field && f.type === 5)),
     );
   const step3Ready =
     applicantField.trim() !== "" &&
@@ -384,6 +399,9 @@ export function ApprovalConfigDialog({
         .map(([widgetId, bitableField]) => ({
           widgetId,
           bitableField,
+          ...(endFields[widgetId]
+            ? { intervalEndField: endFields[widgetId] }
+            : {}),
           ...(mappingWidgets.find((widget) => widget.id === widgetId)
             ?.usesExternalOptions && optionSources[widgetId]
             ? { optionSourceKey: optionSources[widgetId] }
@@ -716,13 +734,19 @@ export function ApprovalConfigDialog({
                               <Select
                                 value={maps[widget.id] || "__none__"}
                                 disabled={widgetsPending}
-                                onValueChange={(value) =>
+                                onValueChange={(value) => {
                                   setMaps((previous) => ({
                                     ...previous,
                                     [widget.id]:
                                       value === "__none__" ? "" : value,
-                                  }))
-                                }
+                                  }));
+                                  if (value === "__none__") {
+                                    setEndFields((previous) => ({
+                                      ...previous,
+                                      [widget.id]: "",
+                                    }));
+                                  }
+                                }}
                               >
                                 <SelectTrigger
                                   aria-label={`${widget.qualifiedName ?? widget.name}对应的多维表格字段`}
@@ -754,6 +778,73 @@ export function ApprovalConfigDialog({
                                   ))}
                                 </SelectContent>
                               </Select>
+                              {widget.type === "dateInterval" ? (
+                                <div className="mt-2">
+                                  <Select
+                                    value={endFields[widget.id] || "__none__"}
+                                    disabled={
+                                      widgetsPending || !maps[widget.id]
+                                    }
+                                    onValueChange={(value) =>
+                                      setEndFields((previous) => ({
+                                        ...previous,
+                                        [widget.id]:
+                                          value === "__none__" ? "" : value,
+                                      }))
+                                    }
+                                  >
+                                    <SelectTrigger
+                                      aria-label={`${widget.qualifiedName ?? widget.name}的结束日期列`}
+                                      className="w-full min-w-48"
+                                    >
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="__none__">
+                                        结束列不配置（开始列须为区间对象）
+                                      </SelectItem>
+                                      {endFields[widget.id] &&
+                                      !fields.some(
+                                        (f) =>
+                                          f.fieldId === endFields[widget.id],
+                                      ) ? (
+                                        <SelectItem
+                                          value={endFields[widget.id]}
+                                        >
+                                          字段已删除（{endFields[widget.id]}）
+                                        </SelectItem>
+                                      ) : null}
+                                      {endFields[widget.id] &&
+                                      fields.some(
+                                        (f) =>
+                                          f.fieldId === endFields[widget.id] &&
+                                          f.type !== 5,
+                                      ) ? (
+                                        <SelectItem
+                                          value={endFields[widget.id]}
+                                        >
+                                          字段不是日期列（
+                                          {endFields[widget.id]}）
+                                        </SelectItem>
+                                      ) : null}
+                                      {fields
+                                        .filter((field) => field.type === 5)
+                                        .map((field) => (
+                                          <SelectItem
+                                            key={field.fieldId}
+                                            value={field.fieldId}
+                                          >
+                                            {field.fieldName}（{field.fieldId}）
+                                          </SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                  </Select>
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    日期区间控件：配了结束列就按开始/结束两列合成区间；留空则要求开始列本身存
+                                    {" {start, end} "}区间对象。
+                                  </p>
+                                </div>
+                              ) : null}
                               {widget.usesExternalOptions ? (
                                 <OptionSourcePicker
                                   widget={widget}
@@ -955,6 +1046,15 @@ export function ApprovalConfigDialog({
                       ? "（明细分组）"
                       : "（控件组）"
                     : ` → ${fields.find((f) => f.fieldId === maps[widget.id])?.fieldName ?? "不映射"}`}
+                  {maps[widget.id] &&
+                  widget.type === "dateInterval" &&
+                  endFields[widget.id] ? (
+                    <span className="block text-xs text-muted-foreground">
+                      结束日期列：
+                      {fields.find((f) => f.fieldId === endFields[widget.id])
+                        ?.fieldName ?? endFields[widget.id]}
+                    </span>
+                  ) : null}
                   {maps[widget.id] && widget.usesExternalOptions ? (
                     <span className="block text-xs text-muted-foreground">
                       外部选项：

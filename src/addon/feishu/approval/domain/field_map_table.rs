@@ -58,6 +58,14 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                     .max_length(128),
                 // 仅供控制台展示；对齐靠 `bitable_field`（字段 id）。
                 bitable_field_name => Str::new().title("多维表格字段名").max_length(255),
+                // 日期区间控件专用（两列模式）：结束日期的取值列。留空则沿用
+                // 「单元格本身是 {start, end} 对象」的旧形态。展示名同 bitable_field_name。
+                interval_end_field => Str::new()
+                    .title("区间结束日期列 ID")
+                    .max_length(128),
+                interval_end_field_name => Str::new()
+                    .title("区间结束日期列名")
+                    .max_length(255),
                 // --- 值转换 ---
                 //
                 // 三种：`direct`（文本/数字类直取）、`date`（毫秒时间戳 → RFC3339）、
@@ -154,7 +162,12 @@ mod tests {
     fn optional_columns_are_nullable() {
         // `bitable_field_name` 是展示用的补充信息；`option_map` 只对单选/多选有意义。
         let definition = definition();
-        for name in ["bitable_field_name", "option_map"] {
+        for name in [
+            "bitable_field_name",
+            "option_map",
+            "interval_end_field",
+            "interval_end_field_name",
+        ] {
             let field = definition
                 .field(name)
                 .unwrap_or_else(|| panic!("{name} 字段必须存在"));

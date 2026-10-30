@@ -1331,6 +1331,10 @@ pub(crate) fn widget_maps_from_rows(
                 .get("option_source_key")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            interval_end_field: row
+                .get("interval_end_field")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         });
     }
     Some(widgets)
@@ -1503,6 +1507,7 @@ mod tests {
             widget_type: kind.to_string(),
             required: false,
             bitable_field: "fld_title".to_string(),
+            interval_end_field: None,
             converter: Converter::Direct,
             option_map: BTreeMap::new(),
             option_source_key: None,
@@ -3290,9 +3295,12 @@ mod tests {
         assert!(widgets[0].option_source_key.is_none(), "旧行保持兼容");
         let mut saved_rows = rows.clone();
         saved_rows[0].insert("option_source_key".into(), json!("fldq7lcb6y"));
+        saved_rows[0].insert("interval_end_field".into(), json!("fld_end"));
         let saved =
             widget_maps_from_rows(&saved_rows, |_| None).unwrap_or_else(|| panic!("应可解析"));
         assert_eq!(saved[0].option_source_key.as_deref(), Some("fldq7lcb6y"));
+        assert!(widgets[0].interval_end_field.is_none(), "旧行保持兼容");
+        assert_eq!(saved[0].interval_end_field.as_deref(), Some("fld_end"));
         assert_eq!(widgets.len(), 1);
         assert!(widgets[0].required);
         assert_eq!(

@@ -42,6 +42,12 @@ pub(crate) struct WidgetMap {
     pub(crate) required: bool,
     /// 多维表格字段 id（取值来源）。
     pub(crate) bitable_field: String,
+    /// 日期区间控件专用：结束日期的取值列 id（可选）。
+    ///
+    /// 配了它就走「两列」模式：`bitable_field` 是开始列、本字段是结束列，两列
+    /// 都是毫秒时间戳，组装成 `{start, end, interval}`。为空时沿用旧行为——
+    /// 单元格本身就是 `{start, end}` 对象。
+    pub(crate) interval_end_field: Option<String>,
     /// 值转换器。
     pub(crate) converter: Converter,
     /// 单选/多选的选项映射：多维表格文案 → 审批控件 option value。
@@ -403,6 +409,29 @@ fn assemble_widget(
         };
     };
 
+    // 日期区间配了结束列时，结束值也必须存在：半截区间发给飞书只会在审批侧
+    // 缺结束时间，按「没有值」处理（数据问题，补齐即可，不必判成配置错误）。
+    // 只对 `dateInterval` 生效——脏行把该列配到别的控件上时不得窃取无关单元格。
+    let interval_end_cell = if widget.widget_type == "dateInterval" {
+        match widget.interval_end_field.as_deref() {
+            None => None,
+            Some(field) => match input.cells.get(field).filter(|value| !is_empty(value)) {
+                Some(value) => Some(value),
+                None => {
+                    return if widget.required {
+                        Err(ConvertError::MissingRequired {
+                            widget_id: widget.widget_id.clone(),
+                        })
+                    } else {
+                        Ok(None)
+                    };
+                }
+            },
+        }
+    } else {
+        None
+    };
+
     check_converter_matches(widget)?;
 
     let value = if is_media(&widget.widget_type) {
@@ -423,7 +452,9 @@ fn assemble_widget(
     } else {
         match widget.converter {
             Converter::Direct => assemble_direct(widget, cell)?,
-            Converter::Date => assemble_date(widget, cell, input.timezone_offset)?,
+            Converter::Date => {
+                assemble_date(widget, cell, interval_end_cell, input.timezone_offset)?
+            }
             Converter::Option => assemble_option(widget, cell)?,
         }
     };
@@ -622,13 +653,29 @@ fn connection_codes(cell: &Value) -> Result<Vec<String>, String> {
 ///
 /// 单点日期与日期区间的单元格形态不同（前者是数字，后者是 `{start, end}`），
 /// 所以先按控件类型分流，再各自解析——顺序反了会让区间单元格先撞上
-/// 「期望毫秒时间戳」。
+/// 「期望毫秒时间戳」。日期区间另有「两列」模式：开始/结束分别取自两个列
+/// （`interval_end_cell` 非空时生效），不再要求单元格是对象。
 fn assemble_date(
     widget: &WidgetMap,
     cell: &Value,
+    interval_end_cell: Option<&Value>,
     offset: FixedOffset,
 ) -> Result<Value, ConvertError> {
     if widget.widget_type == "dateInterval" {
+        // 两列模式：开始列就是 `bitable_field`，结束列由 `interval_end_field` 指定。
+        if let Some(end_cell) = interval_end_cell {
+            let start = cell.as_i64();
+            let end = end_cell.as_i64();
+            let (Some(start), Some(end)) = (start, end) else {
+                return Err(ConvertError::BadValue {
+                    widget_id: widget.widget_id.clone(),
+                    reason: format!(
+                        "日期区间的开始/结束列都应是毫秒时间戳，实际是 {cell} / {end_cell}"
+                    ),
+                });
+            };
+            return Ok(date_interval_value(start, end, offset));
+        }
         let start = cell.get("start").and_then(Value::as_i64);
         let end = cell.get("end").and_then(Value::as_i64);
         let (Some(start), Some(end)) = (start, end) else {
@@ -637,12 +684,7 @@ fn assemble_date(
                 reason: format!("日期区间字段期望 {{start, end}} 两个毫秒时间戳，实际是 {cell}"),
             });
         };
-        let days = (end - start) as f64 / 86_400_000.0;
-        return Ok(json!({
-            "start": format_rfc3339(start, offset),
-            "end": format_rfc3339(end, offset),
-            "interval": days,
-        }));
+        return Ok(date_interval_value(start, end, offset));
     }
 
     let millis = cell.as_i64().ok_or_else(|| ConvertError::BadValue {
@@ -650,6 +692,16 @@ fn assemble_date(
         reason: format!("日期字段期望毫秒时间戳，实际是 {cell}"),
     })?;
     Ok(Value::String(format_rfc3339(millis, offset)))
+}
+
+/// 日期区间在审批侧的取值：`{start, end, interval}`，时间带偏移量、时长按天。
+fn date_interval_value(start: i64, end: i64, offset: FixedOffset) -> Value {
+    let days = (end - start) as f64 / 86_400_000.0;
+    json!({
+        "start": format_rfc3339(start, offset),
+        "end": format_rfc3339(end, offset),
+        "interval": days,
+    })
 }
 
 /// 单选/多选：多维表格文案 → 审批控件 option value。
@@ -1004,6 +1056,7 @@ mod tests {
             widget_type: kind.to_string(),
             required: false,
             bitable_field: "fld_src".to_string(),
+            interval_end_field: None,
             // 默认转换器按控件类型取，避免每个用例都要手写一遍；
             // 专门测「不匹配」的用例再显式覆盖它。
             converter: expected_converter(kind),
@@ -1732,6 +1785,45 @@ mod tests {
             json!("2026-09-29T00:00:00+08:00")
         );
         assert_eq!(rendered[0]["value"]["interval"], json!(1.0));
+    }
+
+    #[test]
+    fn date_interval_from_two_columns_produces_start_end_and_days() {
+        // 两列模式：开始/结束分别来自两个毫秒时间戳列（多维表格的 datetime 列）。
+        let mut interval = widget("w1", "dateInterval");
+        interval.bitable_field = "fld_start".to_string();
+        interval.interval_end_field = Some("fld_end".to_string());
+        let rendered = render(
+            &[interval],
+            &cells(&[
+                ("fld_start", json!(1_790_524_800_000_i64)),
+                ("fld_end", json!(1_790_611_200_000_i64)),
+            ]),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            rendered[0]["value"]["start"],
+            json!("2026-09-28T00:00:00+08:00")
+        );
+        assert_eq!(
+            rendered[0]["value"]["end"],
+            json!("2026-09-29T00:00:00+08:00")
+        );
+        assert_eq!(rendered[0]["value"]["interval"], json!(1.0));
+    }
+
+    #[test]
+    fn date_interval_two_columns_missing_end_is_missing_value() {
+        // 结束列为空 = 没有值：必填时按「等待补齐」处理，不判配置错误。
+        let mut interval = widget("w1", "dateInterval");
+        interval.bitable_field = "fld_start".to_string();
+        interval.interval_end_field = Some("fld_end".to_string());
+        interval.required = true;
+        let error = render_error(
+            &[interval],
+            &cells(&[("fld_start", json!(1_790_524_800_000_i64))]),
+        );
+        assert!(error.contains("缺少必填控件"), "{error}");
     }
 
     #[test]
