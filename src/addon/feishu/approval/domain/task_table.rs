@@ -75,11 +75,14 @@ pub(crate) fn table_spec() -> Result<TableSpec, BaseError> {
                 .filterable(true),
             // 派生的幂等键。**必须持久化**：响应丢失时 instance_code 根本不存在，
             // 它是唯一还能拿回来的对账键。
+            // filterable 必开：事件 worker 在 instance_code 未命中时按事件 uuid
+            // 反查 task 行（`resolve_missing_task`），fail-closed 漏了只在运行期报错。
             uuid => Str::new()
                 .title("幂等键")
                 .require(true)
                 .unique(true)
-                .max_length(64),
+                .max_length(64)
+                .filterable(true),
             state => Radio::<String>::new()
                 .title("状态")
                 .require(true)
@@ -177,6 +180,17 @@ mod tests {
             .field("record_id")
             .unwrap_or_else(|| panic!("record_id 字段必须存在"));
         assert!(record_id.is_filterable(), "HTTP 结果回写的 upsert 依赖该位");
+    }
+
+    #[test]
+    fn uuid_is_filterable_for_event_fallback_lookup() {
+        // 事件 worker 在 instance_code 未命中时按事件 uuid 反查任务行，
+        // DSL 的 filterable 是 fail-closed——漏了只在运行期报 FieldPermissionDenied。
+        let definition = definition();
+        let uuid = definition
+            .field("uuid")
+            .unwrap_or_else(|| panic!("uuid 字段必须存在"));
+        assert!(uuid.is_filterable(), "事件 uuid 回查依赖该位");
     }
 
     #[test]

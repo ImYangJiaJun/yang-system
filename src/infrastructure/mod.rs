@@ -9,3 +9,4 @@ pub mod feishu_pull;
 pub mod grant_expiry_worker;
 pub mod schema;
 pub mod session_cleanup;
+mod worker_shutdown;

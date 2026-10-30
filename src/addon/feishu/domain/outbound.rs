@@ -112,6 +112,11 @@ pub(crate) const CODE_UUID_CONFLICT: i32 = 60012;
 /// 那会把刚建成的实例写成「找不到」，反而制造第二条不可恢复路径。
 pub(crate) const CODE_INSTANCE_NOT_FOUND: i32 = 1390003;
 
+/// 审批定义事件订阅的幂等结果：已订阅或已取消订阅（subscribe/unsubscribe 共用）。
+///
+/// 对订阅调用方是**成功**；出站层只把日志降为 DEBUG，调用方仍收到 Err 并自行处置。
+pub(crate) const CODE_SUBSCRIPTION_EXISTED: i32 = 1390007;
+
 // ---------------------------------------------------------------------------
 // 请求/响应
 // ---------------------------------------------------------------------------
@@ -464,6 +469,48 @@ pub(crate) fn summarize(status: u16, body: &str) -> String {
     }
 }
 
+/// 生成「跨轮去重」用的稳定文案：抹掉飞书响应体里每轮变化的 `log_id` 值。
+///
+/// 只用于去重键比较，不改变日志与 `last_error` 的原文（排障仍需要 log_id）。
+/// 识别的形态是紧凑 JSON 的 `"log_id":"..."`（`summarize` 保留原始响应体）；
+/// 没有该字段时原样返回。
+pub(crate) fn dedup_key(message: &str) -> String {
+    const KEY: &str = "\"log_id\"";
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = rest.find(KEY) {
+        out.push_str(&rest[..start]);
+        let bytes = rest.as_bytes();
+        let mut cursor = start + KEY.len();
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let mut value_end = None;
+        if bytes.get(cursor) == Some(&b':') {
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b'"') {
+                let mut end = cursor + 1;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    end += 1;
+                }
+                value_end = Some((end + 1).min(bytes.len()));
+            }
+        }
+        match value_end {
+            Some(end) => rest = &rest[end..],
+            None => {
+                out.push_str(&rest[start..cursor]);
+                rest = &rest[cursor..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// 出站失败。
 #[derive(Debug)]
 pub(crate) struct OutboundFailure {
@@ -608,6 +655,14 @@ pub(crate) fn disposition(
     }
 }
 
+/// Give 分支里哪些业务码是「上层已按成功/预期处理」的结果。
+///
+/// 目前只有订阅幂等码 [`CODE_SUBSCRIPTION_EXISTED`]：`subscribe_approval` 会把它
+/// 当成功并记 INFO。这类结果不该刷 WARN，也不该计入 failed 指标。
+fn is_idempotent_outcome(code: Option<i32>) -> bool {
+    code == Some(CODE_SUBSCRIPTION_EXISTED)
+}
+
 /// **唯一的重试入口。**
 ///
 /// 成功返回响应；失败返回最后一次的 [`OutboundFailure`]（连同它的 `kind`，
@@ -693,14 +748,32 @@ pub(crate) async fn send_with_retry(
                 sleeper.sleep(Duration::from_millis(wait_ms)).await;
             }
             Disposition::Give => {
-                tracing::warn!(endpoint, method = ?request.method, http_status, business_code = code,
-                    attempt, max_attempts = policy.max_attempts, ?kind,
-                    hint = fatal_hint(code.unwrap_or_default()).unwrap_or_default(),
-                    response = %message,
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    "飞书出站调用结束，失败交给上层处理");
-                metrics::counter!("feishu_outbound_request_total", "result" => "failed")
-                    .increment(1);
+                if is_idempotent_outcome(code) {
+                    // 1390007 由订阅调用方按幂等成功处理；WARN 会把「重复订阅」
+                    // 误报成故障（每次启动约 49 条），这里降为 DEBUG 且不计 failed。
+                    tracing::debug!(endpoint, method = ?request.method, http_status,
+                        business_code = code, attempt, response = %message,
+                        "飞书出站调用结束，幂等结果交给上层处理");
+                } else if matches!(kind, FailureKind::InstanceNotFound) {
+                    // 1390003 是派发前 uuid 预检的预期结果（实例尚未创建），上层
+                    // 按重试/回捞处理；保留 failed 计数，但不再刷 WARN。
+                    tracing::debug!(endpoint, method = ?request.method, http_status,
+                        business_code = code, attempt, max_attempts = policy.max_attempts,
+                        ?kind, response = %message,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "飞书出站调用结束，实例暂不可查询，交给上层处理");
+                    metrics::counter!("feishu_outbound_request_total", "result" => "failed")
+                        .increment(1);
+                } else {
+                    tracing::warn!(endpoint, method = ?request.method, http_status, business_code = code,
+                        attempt, max_attempts = policy.max_attempts, ?kind,
+                        hint = fatal_hint(code.unwrap_or_default()).unwrap_or_default(),
+                        response = %message,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "飞书出站调用结束，失败交给上层处理");
+                    metrics::counter!("feishu_outbound_request_total", "result" => "failed")
+                        .increment(1);
+                }
                 return Err(OutboundFailure { kind, message });
             }
         }
@@ -899,13 +972,42 @@ mod tests {
     #[test]
     fn business_errors_on_http_200_are_not_success() {
         // 这四类官方都标 HTTP 200；按状态码判会把它们全当成功
-        for code in [1254003, 1254040, 1254041, 1254302] {
+        for code in [1254003, 1254040, 1254041, 1254043, 1254302] {
             let kind = classify(200, &empty_headers(), &body_with_code(code));
             assert!(
                 matches!(kind, Some(FailureKind::Fatal { code: got }) if got == code),
                 "HTTP 200 + code={code} 必须判为失败，实际: {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn subscription_existed_is_an_expected_idempotent_outcome() {
+        assert!(is_idempotent_outcome(Some(CODE_SUBSCRIPTION_EXISTED)));
+        assert!(!is_idempotent_outcome(Some(1254041)));
+        assert!(!is_idempotent_outcome(None));
+    }
+
+    #[test]
+    fn dedup_key_ignores_volatile_log_id() {
+        let first = r#"读取表结构失败：HTTP 200: {"code":1254041,"msg":"TableIdNotFound","error":{"log_id":"202610302006475EEE222FAB5367081525","troubleshooter":"x"}}"#;
+        let second = r#"读取表结构失败：HTTP 200: {"code":1254041,"msg":"TableIdNotFound","error":{"log_id":"20261030200711470CD6846424D37AE20A","troubleshooter":"x"}}"#;
+        assert_eq!(
+            dedup_key(first),
+            dedup_key(second),
+            "仅 log_id 不同必须同键"
+        );
+        assert!(
+            !dedup_key(first).contains("202610302006475EEE222FAB5367081525"),
+            "去重键不得携带 log_id 值"
+        );
+        assert_ne!(
+            dedup_key(first),
+            dedup_key(&first.replace("TableIdNotFound", "PermissionDenied")),
+            "根因变化必须换键"
+        );
+        assert_eq!(dedup_key("无 log_id 的文案"), "无 log_id 的文案");
+        assert_eq!(dedup_key(r#"{"log_id" : "x-y"}"#), "{}", "容忍空白");
     }
 
     #[test]

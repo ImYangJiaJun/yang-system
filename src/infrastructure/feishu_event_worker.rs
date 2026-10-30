@@ -24,7 +24,7 @@ use crate::addon::feishu::domain::approval_dispatch::{
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
-    HttpClientTransport, OutboundTransport, TokioSleeper,
+    FailureKind, HttpClientTransport, OutboundFailure, OutboundTransport, TokioSleeper,
 };
 use crate::addon::feishu::domain::tenant_token::{
     FeishuCredentials, RedisTenantTokenCache, TenantTokenProvider,
@@ -152,8 +152,14 @@ impl RoundRunner {
 async fn run_loop(runner: RoundRunner, idle_poll: Duration, mut shutdown: watch::Receiver<bool>) {
     // 按定义订阅是运行时状态，控制台重配、发布新版本都可能被清掉——每次启动
     // 重订一遍，链路自愈（设计 §7.2 第 2 步）。失败只 warn，不挡运行。
-    if let Err(error) = subscribe_enabled_configs(&runner).await {
-        tracing::warn!(error = %error, "启动期订阅审批定义失败（下次启动会重试）");
+    let subscribe = async {
+        if let Err(error) = subscribe_enabled_configs(&runner).await {
+            tracing::warn!(error = %error, "启动期订阅审批定义失败（下次启动会重试）");
+        }
+    };
+    if !super::worker_shutdown::run_round_or_shutdown(shutdown.clone(), subscribe).await {
+        tracing::info!("飞书事件处理 Worker 收到关闭信号（启动订阅阶段）");
+        return;
     }
     let mut ticker = tokio::time::interval(idle_poll);
     loop {
@@ -165,7 +171,11 @@ async fn run_loop(runner: RoundRunner, idle_poll: Duration, mut shutdown: watch:
                 }
             }
             _ = ticker.tick() => {
-                run_round(&runner, "poll").await;
+                let round = run_round(&runner, "poll");
+                if !super::worker_shutdown::run_round_or_shutdown(shutdown.clone(), round).await {
+                    tracing::info!("飞书事件处理 Worker 收到关闭信号，已取消进行中的轮次");
+                    return;
+                }
             }
         }
     }
@@ -241,6 +251,7 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
 
     tracing::info!(count = events.len(), "事件处理认领到待处理事件");
     let mut processed = 0usize;
+    let mut skipped = 0usize;
     let mut failed = 0usize;
     let mut terminal = 0usize;
 
@@ -253,14 +264,31 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
                     tracing::warn!(error = %error, event_id = event.id, "标记事件已处理失败");
                 }
             }
+            EventOutcome::Skipped(reason) => {
+                skipped += 1;
+                metrics::counter!("feishu_event_skipped_total").increment(1);
+                tracing::info!(
+                    event_id = event.id,
+                    instance_code = %event.instance_code,
+                    reason = %reason,
+                    "事件与本系统任务无关，已跳过并标记处理"
+                );
+                if let Err(error) = mark_processed(runner, event.id).await {
+                    tracing::warn!(error = %error, event_id = event.id, "标记已跳过事件失败");
+                }
+            }
             EventOutcome::Failed(message) => {
                 failed += 1;
                 let new_count = event.retry_count + 1;
                 if new_count >= MAX_EVENT_RETRY_COUNT {
-                    if let Err(error) = mark_terminal_event(runner, event.id, &message).await {
+                    terminal += 1;
+                    let terminal_message =
+                        format!("连续失败超 {MAX_EVENT_RETRY_COUNT} 次: {message}");
+                    if let Err(error) =
+                        mark_terminal_event(runner, event.id, &terminal_message).await
+                    {
                         tracing::warn!(error = %error, event_id = event.id, "置事件终态失败");
                     }
-                    terminal += 1;
                     // 终态丢弃是刻意的毒事件隔离；但必须可观测，否则「状态列停在旧值」
                     // 只能靠翻库发现。计数器给告警/看板，error 日志留单条证据。
                     metrics::counter!("feishu_event_terminal_total").increment(1);
@@ -274,12 +302,25 @@ async fn run_round(runner: &RoundRunner, trigger: &str) {
                     tracing::warn!(error = %error, event_id = event.id, "更新事件重试信息失败");
                 }
             }
+            EventOutcome::Terminal(message) => {
+                terminal += 1;
+                if let Err(error) = mark_terminal_event(runner, event.id, &message).await {
+                    tracing::warn!(error = %error, event_id = event.id, "置事件终态失败");
+                }
+                metrics::counter!("feishu_event_terminal_total").increment(1);
+                tracing::error!(
+                    event_id = event.id,
+                    error = %message,
+                    "飞书事件被远端明确拒绝（不可重试），已置终态并从队列移除"
+                );
+            }
         }
     }
 
     tracing::info!(
         claimed = events.len(),
         processed,
+        skipped,
         failed,
         terminal,
         duration_ms = started.elapsed().as_millis() as u64,
@@ -316,8 +357,186 @@ async fn claim_events(runner: &RoundRunner) -> anyhow::Result<Vec<PendingEvent>>
 
 /// 事件处理结果。
 enum EventOutcome {
+    /// 已处理并回写完成。
     Processed,
+    /// 可重试失败（下一轮重新认领）。
     Failed(String),
+    /// 确认与本系统无关（无 task 行且实例归属可判定为外部/已删除），直接收口。
+    Skipped(String),
+    /// 远端明确拒绝（Fatal），不再重试，立即置终态留痕。
+    Terminal(String),
+}
+
+/// task 行里后续步骤依赖的三个字段。
+struct TaskIdentity {
+    task_id: i64,
+    record_id: String,
+    config_id: i64,
+}
+
+/// 提取 task 身份；失败时保持既有日志与文案。
+fn require_task_identity(row: &Record) -> Result<TaskIdentity, String> {
+    let task_id: i64 = match row.require("id") {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::error!(error = %error, "task 行缺 id");
+            return Err(format!("task 行缺 id: {error}"));
+        }
+    };
+    let record_id: String = match row.require("record_id") {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::error!(error = %error, task_id, "task 行缺 record_id");
+            return Err(format!("task 行缺 record_id: {error}"));
+        }
+    };
+    let config_id: i64 = match row.require("config_id") {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::error!(error = %error, task_id, "task 行缺 config_id");
+            return Err(format!("task 行缺 config_id: {error}"));
+        }
+    };
+    Ok(TaskIdentity {
+        task_id,
+        record_id,
+        config_id,
+    })
+}
+
+/// 从事件原始报文里取**实例 uuid**。
+///
+/// 只认 `approval_instance` 事件的 `event.uuid`——它是创建实例时传入的幂等键；
+/// 顶层 `uuid` 是事件 id，语义不同（见 `receive_approval_event.rs` 的说明）。
+/// `approval_task` 事件没有这个字段，调用方改用实例详情回显的 uuid。
+fn event_instance_uuid(raw_payload: &str) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_str(raw_payload).ok()?;
+    let event = body.get("event")?;
+    if event.get("type")?.as_str()? != "approval_instance" {
+        return None;
+    }
+    let uuid = event.get("uuid")?.as_str()?.trim();
+    if uuid.is_empty() {
+        None
+    } else {
+        Some(uuid.to_ascii_lowercase())
+    }
+}
+
+/// instance_code 查不到 task 行时的归属判定结果。
+enum MissingTaskResolution {
+    /// 按实例 uuid 反查到了本系统的 task 行（instance_code 尚未落库的竞态窗口）。
+    Found(Record),
+    /// 可以确定永远不会出现 task 行：外部实例或任务行已被删除。
+    Absent,
+    /// 暂时无法判定（报文/网络/数据库异常），保持可重试。
+    Transient(String),
+}
+
+/// 读取事件原始报文并解析实例 uuid。
+async fn load_event_uuid(runner: &RoundRunner, event_id: i64) -> Result<Option<String>, String> {
+    let row = runner
+        .context
+        .approval_events()
+        .query()
+        .where_eq("id", serde_json::json!(event_id))
+        .map_err(|error| format!("构造事件报文查询失败: {error}"))?
+        .select_fields(&["raw_payload"])
+        .map_err(|error| format!("投影事件报文失败: {error}"))?
+        .optional()
+        .await
+        .map_err(|error| format!("读取事件报文失败: {error}"))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let raw = row
+        .optional::<String>("raw_payload")
+        .map_err(|error| format!("解析事件报文失败: {error}"))?;
+    Ok(raw.as_deref().and_then(event_instance_uuid))
+}
+
+/// 事件在 task 表里查不到时，用实例 uuid 判断归属。
+///
+/// 判定链：
+/// 1. `approval_instance` 事件的 `event.uuid` 直接可用；
+/// 2. `approval_task` 事件从实例详情回显取 uuid；
+/// 3. 实例详情暂时查不到（1390003）或网络失败 → Transient，绝不据此跳过；
+/// 4. uuid 为空（非本系统 API 创建的外部实例）或 task 表无此 uuid → Absent。
+async fn resolve_missing_task(runner: &RoundRunner, event: &PendingEvent) -> MissingTaskResolution {
+    let uuid = match load_event_uuid(runner, event.id).await {
+        Ok(uuid) => uuid,
+        Err(message) => return MissingTaskResolution::Transient(message),
+    };
+    let uuid = match uuid {
+        Some(uuid) => Some(uuid),
+        None => match get_instance(
+            runner.transport(),
+            runner.sleeper.as_ref(),
+            &runner.tokens,
+            &event.instance_code,
+        )
+        .await
+        {
+            Ok(GetOutcome::Found(detail)) => detail
+                .uuid
+                .as_deref()
+                .map(str::trim)
+                .filter(|uuid| !uuid.is_empty())
+                .map(str::to_ascii_lowercase),
+            // 1390003 在并发窗口里也代表「实例还没建好」，不是「外部实例」。
+            Ok(GetOutcome::NotFound) => {
+                return MissingTaskResolution::Transient(
+                    "实例暂不可查询（1390003），下一轮重试".to_string(),
+                )
+            }
+            Err(failure) => {
+                return MissingTaskResolution::Transient(format!(
+                    "获取实例详情失败: {}",
+                    failure.message
+                ))
+            }
+        },
+    };
+    let Some(uuid) = uuid else {
+        // 没有创建时传入的 uuid：不可能是本系统通过 API 创建的实例。
+        return MissingTaskResolution::Absent;
+    };
+    let query = match runner
+        .context
+        .approval_tasks()
+        .query()
+        .where_eq("uuid", serde_json::json!(uuid))
+    {
+        Ok(query) => query,
+        Err(error) => {
+            return MissingTaskResolution::Transient(format!("构造 uuid 反查失败: {error}"))
+        }
+    };
+    let query = match query.select_fields(&["id", "record_id", "config_id"]) {
+        Ok(query) => query,
+        Err(error) => {
+            return MissingTaskResolution::Transient(format!("投影 uuid 反查失败: {error}"))
+        }
+    };
+    match query.all().await {
+        Ok(rows) => rows
+            .into_iter()
+            .next()
+            .map_or(MissingTaskResolution::Absent, MissingTaskResolution::Found),
+        Err(error) => {
+            MissingTaskResolution::Transient(format!("按 uuid 反查 task 表失败: {error}"))
+        }
+    }
+}
+
+/// 出站失败 → 事件结论：Fatal（远端明确拒绝，重试无意义）立即终态；
+/// 其余保持可重试。与审批派发侧的 Fatal→Terminal 映射保持一致。
+fn outbound_failure_outcome(prefix: &str, failure: OutboundFailure) -> EventOutcome {
+    let message = format!("{prefix}: {}", failure.message);
+    match failure.kind {
+        FailureKind::Fatal { .. } => EventOutcome::Terminal(message),
+        _ => EventOutcome::Failed(message),
+    }
 }
 
 /// 处理一条事件：反查 task -> 加载 config -> 富化 -> 回写。
@@ -367,37 +586,39 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         }
     };
 
-    let task_row = match task_rows.first() {
-        Some(row) => row,
-        None => {
-            tracing::warn!(
-                instance_code = %event.instance_code,
-                "事件对应的审批任务不存在，可能尚未派发"
-            );
-            return EventOutcome::Failed("task 行不存在".to_string());
-        }
-    };
-
-    let task_id: i64 = match task_row.require("id") {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::error!(error = %error, "task 行缺 id");
-            return EventOutcome::Failed(format!("task 行缺 id: {error}"));
-        }
-    };
-    let record_id: String = match task_row.require("record_id") {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::error!(error = %error, task_id, "task 行缺 record_id");
-            return EventOutcome::Failed(format!("task 行缺 record_id: {error}"));
-        }
-    };
-    let config_id: i64 = match task_row.require("config_id") {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::error!(error = %error, task_id, "task 行缺 config_id");
-            return EventOutcome::Failed(format!("task 行缺 config_id: {error}"));
-        }
+    let (task_id, record_id, config_id) = match task_rows.first() {
+        Some(row) => match require_task_identity(row) {
+            Ok(identity) => (identity.task_id, identity.record_id, identity.config_id),
+            Err(message) => return EventOutcome::Failed(message),
+        },
+        None => match resolve_missing_task(runner, event).await {
+            MissingTaskResolution::Found(row) => {
+                // instance_code 尚未落库的竞态窗口：按实例 uuid 找到了本系统任务行。
+                metrics::counter!("feishu_event_task_uuid_fallback_total").increment(1);
+                tracing::info!(
+                    event_id = event.id,
+                    instance_code = %event.instance_code,
+                    "instance_code 未命中，按实例 uuid 找到 task 行"
+                );
+                match require_task_identity(&row) {
+                    Ok(identity) => (identity.task_id, identity.record_id, identity.config_id),
+                    Err(message) => return EventOutcome::Failed(message),
+                }
+            }
+            MissingTaskResolution::Absent => {
+                return EventOutcome::Skipped(
+                    "task 行不存在且实例归属为非本系统或任务已删除".to_string(),
+                );
+            }
+            MissingTaskResolution::Transient(message) => {
+                tracing::debug!(
+                    event_id = event.id,
+                    error = %message,
+                    "task 行缺失且归属暂不可判定，保持重试"
+                );
+                return EventOutcome::Failed(message);
+            }
+        },
     };
 
     tracing::debug!(
@@ -524,7 +745,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
                 instance_code = %event.instance_code,
                 "获取实例详情失败"
             );
-            return EventOutcome::Failed(format!("获取实例详情失败: {}", failure.message));
+            return outbound_failure_outcome("获取实例详情失败", failure);
         }
     };
 
@@ -559,7 +780,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         }
         Err(failure) => {
             tracing::error!(error = %failure.message, "读取表结构失败");
-            return EventOutcome::Failed(format!("读取表结构失败: {}", failure.message));
+            return outbound_failure_outcome("读取表结构失败", failure);
         }
     };
     let backfill = BitableBackfill {
@@ -608,7 +829,7 @@ async fn process_event_inner(runner: &RoundRunner, event: &PendingEvent) -> Even
         "步骤 6: 调用 write_extended 回写多维表格"
     );
     if let Err(failure) = write_extended(&backfill, &input, &detail).await {
-        return EventOutcome::Failed(format!("扩展字段回填失败: {}", failure.message));
+        return outbound_failure_outcome("扩展字段回填失败", failure);
     }
     tracing::info!(
         record_id = %record_id,
@@ -707,7 +928,8 @@ async fn mark_retry(
     Ok(())
 }
 
-/// 置事件终态（连续失败超限）。
+/// 置事件终态（重试耗尽或远端明确拒绝）。`error_message` 按传入原样落库——
+/// 「连续失败超 N 次」的前缀由重试耗尽那个调用点拼接，避免把即时终态写歪。
 async fn mark_terminal_event(
     runner: &RoundRunner,
     event_id: i64,
@@ -720,12 +942,7 @@ async fn mark_terminal_event(
     let mut row = Record::new();
     row.insert("processed_at", serde_json::json!(now));
     row.insert("retry_count", serde_json::json!(MAX_EVENT_RETRY_COUNT));
-    row.insert(
-        "last_error",
-        serde_json::json!(format!(
-            "连续失败超 {MAX_EVENT_RETRY_COUNT} 次: {error_message}"
-        )),
-    );
+    row.insert("last_error", serde_json::json!(error_message));
     runner
         .context
         .approval_events()
@@ -765,7 +982,8 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{e}"))
                     .push(request.json_body.unwrap_or_default());
                 if self.fail_write {
-                    json!({"code":1254060,"msg":"模拟回填失败"})
+                    // 1254607 Data not ready 是官方「稍后重试」：验证可重试失败仍走 Failed。
+                    json!({"code":1254607,"msg":"模拟暂时失败"})
                 } else {
                     json!({"code":0,"data":{}})
                 }
@@ -868,6 +1086,8 @@ mod tests {
                     continue;
                 }
                 EventOutcome::Failed(message) => panic!("事件同步失败: {message}"),
+                EventOutcome::Skipped(message) => panic!("不应跳过真实任务事件: {message}"),
+                EventOutcome::Terminal(message) => panic!("可重试回填失败不应立即终态: {message}"),
             }
             {
                 let writes = transport.writes.lock().unwrap_or_else(|e| panic!("{e}"));
@@ -893,6 +1113,64 @@ mod tests {
             .await?;
         cache.invalidate().await?;
         Ok(())
+    }
+
+    #[test]
+    fn event_instance_uuid_reads_only_instance_events() {
+        let instance = r#"{"uuid":"event-id","event":{"type":"approval_instance","uuid":"EF21C6FA-5A3F-8753-9BE8-C01690F2E1EA"}}"#;
+        assert_eq!(
+            event_instance_uuid(instance).as_deref(),
+            Some("ef21c6fa-5a3f-8753-9be8-c01690f2e1ea")
+        );
+        let task = r#"{"uuid":"event-id","event":{"type":"approval_task","uuid":"X"}}"#;
+        assert_eq!(
+            event_instance_uuid(task),
+            None,
+            "顶层事件 id / approval_task 的 uuid 不得当实例 uuid"
+        );
+        assert_eq!(event_instance_uuid("not-json"), None);
+        let empty = r#"{"event":{"type":"approval_instance","uuid":"  "}}"#;
+        assert_eq!(event_instance_uuid(empty), None);
+    }
+
+    #[test]
+    fn fatal_outbound_failure_terminalizes_event() {
+        use crate::addon::feishu::domain::outbound::{classify, FailureKind};
+
+        let fatal = classify(
+            200,
+            &Default::default(),
+            r#"{"code":1254043,"msg":"record not found"}"#,
+        )
+        .unwrap_or_else(|| panic!("1254043 必须判失败"));
+        assert!(matches!(fatal, FailureKind::Fatal { .. }));
+        assert!(matches!(
+            outbound_failure_outcome(
+                "扩展字段回填失败",
+                OutboundFailure {
+                    kind: fatal,
+                    message: "record not found".to_string(),
+                }
+            ),
+            EventOutcome::Terminal(_)
+        ));
+
+        let retry = classify(
+            200,
+            &Default::default(),
+            r#"{"code":1254607,"msg":"Data not ready"}"#,
+        )
+        .unwrap_or_else(|| panic!("1254607 必须判失败"));
+        assert!(matches!(
+            outbound_failure_outcome(
+                "扩展字段回填失败",
+                OutboundFailure {
+                    kind: retry,
+                    message: "Data not ready".to_string(),
+                }
+            ),
+            EventOutcome::Failed(_)
+        ));
     }
 
     #[test]

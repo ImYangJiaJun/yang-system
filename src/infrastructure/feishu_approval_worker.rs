@@ -68,7 +68,7 @@ use crate::addon::feishu::domain::approval_uuid::derive_uuid;
 use crate::addon::feishu::domain::bitable::{self, BitableCoordinates};
 use crate::addon::feishu::domain::context::FeishuContext;
 use crate::addon::feishu::domain::outbound::{
-    FailureKind, HttpClientTransport, OutboundTransport, TokioSleeper,
+    dedup_key, FailureKind, HttpClientTransport, OutboundTransport, TokioSleeper,
 };
 use crate::addon::feishu::domain::repository::{all_pages, PAGE_SIZE};
 use crate::addon::feishu::domain::tenant_token::{
@@ -532,10 +532,23 @@ async fn run_loop(
             // 携带的受理发起人（已解析成 open_id）随本轮落到待处理任务行。
             // 第三个字段是单条点击的记录 id（批量为 None），用来限定落库作用域。
             Some((config_id, applicant, record_id)) = requests.recv() => {
-                run_round(&runner, &mut cursor, applicant.map(|open_id| (config_id, open_id, record_id)), RoundTrigger::Manual(config_id)).await;
+                let round = run_round(
+                    &runner,
+                    &mut cursor,
+                    applicant.map(|open_id| (config_id, open_id, record_id)),
+                    RoundTrigger::Manual(config_id),
+                );
+                if !super::worker_shutdown::run_round_or_shutdown(shutdown.clone(), round).await {
+                    tracing::info!("审批派发 Worker 收到关闭信号，已取消进行中的轮次");
+                    return;
+                }
             }
             _ = ticker.tick() => {
-                run_round(&runner, &mut cursor, None, RoundTrigger::Poll).await;
+                let round = run_round(&runner, &mut cursor, None, RoundTrigger::Poll);
+                if !super::worker_shutdown::run_round_or_shutdown(shutdown.clone(), round).await {
+                    tracing::info!("审批派发 Worker 收到关闭信号，已取消进行中的轮次");
+                    return;
+                }
             }
         }
     }
@@ -792,11 +805,13 @@ fn note_seed_failure(
     config_id: i64,
     message: &str,
 ) -> SeedFailureNote {
+    // 飞书响应体里的 log_id 每轮都不同；不去掉它，同一根因会被当成新失败每轮刷 WARN。
+    let key = dedup_key(message);
     let mut failures = failures.lock().unwrap_or_else(|error| error.into_inner());
     match failures.get(&config_id) {
-        Some(previous) if previous.as_str() == message => SeedFailureNote::Repeat,
+        Some(previous) if previous == &key => SeedFailureNote::Repeat,
         _ => {
-            failures.insert(config_id, message.to_owned());
+            failures.insert(config_id, key);
             SeedFailureNote::Warn
         }
     }
@@ -887,8 +902,9 @@ async fn seed_tasks(
             // 坏配置每轮都失败，只在首次/文案变化时告警，其余降 DEBUG，
             // 否则每 30 秒一对 WARN、6 小时 1500+ 条。
             Err(error) => {
-                // 用完整错误链（`{:#}`）作去重键：同一根因的文案必须稳定，
-                // 换了根因（文案变化）要重新告警。
+                // 用完整错误链（`{:#}`）的稳定化文案作去重键：同一根因必须稳定
+                //（飞书响应体里的 log_id 每轮都在变，去重时抹掉）；
+                // 换了根因（业务码/文案变化）仍要重新告警。
                 let message = format!("{error:#}");
                 match note_seed_failure(&runner.seed_failures, config_id, &message) {
                     SeedFailureNote::Warn => {
@@ -2374,6 +2390,29 @@ mod tests {
                 "{transient:?} 应保持可重试"
             );
         }
+    }
+
+    /// 飞书响应体里的 log_id 每轮不同；去重键必须忽略它，否则同一根因每轮刷 WARN。
+    #[test]
+    fn seed_failure_dedup_ignores_volatile_log_id() {
+        let failures = Mutex::new(HashMap::new());
+        let first = r#"读取表结构失败：HTTP 200: {"code":1254041,"msg":"TableIdNotFound","error":{"log_id":"202610302006475EEE222FAB5367081525"}}"#;
+        let second = r#"读取表结构失败：HTTP 200: {"code":1254041,"msg":"TableIdNotFound","error":{"log_id":"20261030200711470CD6846424D37AE20A"}}"#;
+        assert_eq!(
+            note_seed_failure(&failures, 24, first),
+            SeedFailureNote::Warn
+        );
+        assert_eq!(
+            note_seed_failure(&failures, 24, second),
+            SeedFailureNote::Repeat,
+            "仅 log_id 变化不得重复告警"
+        );
+        let changed = first.replace("TableIdNotFound", "PermissionDenied");
+        assert_eq!(
+            note_seed_failure(&failures, 24, &changed),
+            SeedFailureNote::Warn,
+            "根因变化仍要重新告警"
+        );
     }
 
     /// 播种失败跨轮去重：首次/变化的文案才告警，恢复后重置。
