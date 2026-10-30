@@ -108,10 +108,13 @@ async fn reset_database(database: &Database) -> anyhow::Result<()> {
         "login_event",
         "audit_event",
         "authorization_outbox",
-        // 组与授权事实表：首账号引导会把注册者写进内置全权组，`user_group` 与
-        // `system_owner` 因此对 `users` 持有 RESTRICT 外键；`authz_grant` 无外键，
-        // 但按 `user_id` 计数时会串到下一轮。漏删它们时收尾 `DROP users` 会以
-        // 3730 失败（`permission_groups_integration` 的夹具同因）。
+        // 组与授权事实表：首账号引导会把注册者写进内置全权组，`user_group`
+        // 因此对 `users` 持有 RESTRICT 外键（`fk_user_group_user`）；漏删它时
+        // 收尾 `DROP users` 会以 3730 失败。`system_owner` 表**没有**外键，但它
+        // 存的是「引导已发生过」的哨兵行——不删的话下一轮首账号不会再晋升管理员，
+        // 删除目标会被 §8.2 的守卫（无人是管理员）挡住。`authz_grant` 同样无外键，
+        // 但按 `user_id` 计数时会串到下一轮（`permission_groups_integration` 的
+        // 夹具同因）。
         "user_group",
         "permission_group_item",
         "permission_group",

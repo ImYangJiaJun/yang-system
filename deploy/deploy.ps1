@@ -97,7 +97,7 @@ param(
     #   ⚠️ **不可逆**：MySQL 没有备份机制，清掉就没了。默认要求交互确认（见 -Yes）。
     #   ⚠️ 清库之后**没有任何账号存在**，但**不需要手工 SQL**：引导哨兵行（`system_owner`）随库
     #      一起被删，「首个成功注册的账号在同一事务内被引导为系统管理员」这条主路径随即重新
-    #      生效（注册需邮箱验证码，见 src/addon/account/user/actions/register.rs）。所以清完请
+    #      生效（注册只收用户名+密码，见 src/addon/account/user/actions/register.rs）。所以清完请
     #      **立刻**自己注册第一个账号——谁先注册谁成为管理员。手工 SQL 只是**灾备路径**
     #      （哨兵行被误删、或要给某个既有账号补授权时才用），见 docs/contracts/AUTHZ_GRANTS.md。
     [switch]$ResetDb,
@@ -438,7 +438,7 @@ function Confirm-PostSteps {
         Write-Host "    保留        : MySQL 容器、数据卷、root 密码、同机其它库"
         Write-Host "    不可恢复    : MySQL 没有备份机制，库内数据删除后找不回来" -ForegroundColor Red
         Write-Host "    清库之后    : 库是空的，但**不需要手工 SQL**——引导哨兵行随库一起被删，" -ForegroundColor Yellow
-        Write-Host "                  「首个成功注册的账号自动成为系统管理员」随即重新生效（注册需邮箱验证码）。" -ForegroundColor Yellow
+        Write-Host "                  「首个成功注册的账号自动成为系统管理员」随即重新生效（注册只收用户名+密码）。" -ForegroundColor Yellow
         Write-Host "                  清完请**立刻**自己注册第一个账号——谁先注册谁成为管理员。" -ForegroundColor Red
         Write-Host "    旧 Token    : 清库会删掉 users 行，请求期的授权版本校验因此会拒绝**绝大多数**旧" -ForegroundColor Yellow
         Write-Host "                  Token（缓存未命中/版本不等时会回查 MySQL，用户不存在的直接拒）。但重建后" -ForegroundColor Yellow

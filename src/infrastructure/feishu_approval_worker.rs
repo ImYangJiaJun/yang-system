@@ -26,17 +26,18 @@
 //! # 崩溃恢复
 //!
 //! 蓝绿 cutover 用 `docker stop`（SIGTERM → 10 秒后 SIGKILL）会静默杀掉处理中的
-//! 批次。本 worker 靠两件事恢复，不需要租约：
+//! 批次。状态推进只发生在处理结束时（`record_outcome`），所以崩溃会让一批任务
+//! 停在 `pending`（`worker_id` 与租约还在）。
 //!
-//! 1. **`claim` 只认领 `pending`**（单实例 + 单线程 ⇒ 此时没有别人在处理 `creating`）；
-//! 2. **状态推进只发生在处理结束时**（`record_outcome`），所以崩溃最多让一批任务
-//!    停在 `creating`，而 `feishu_approval_task` 从不因「还停着」而阻塞下一轮
-//!    ——`claim` 的条件里没有它。
+//! 恢复**不靠轮询播种**：轮询对已存在的任务行不做任何事。真正的恢复在
+//! `claim_ready` 的过期租约清扫——只读阶段（`effect_phase` 为 `ready`/`created`）
+//! 可被直接重新认领；外部写入结果未知（`creating`/`backfilling`）的行被写成
+//! `review`，之后靠人工点击 `reopen` 重开。
 //!
 //! `uuid` 是最后一道防线：即使某条记录被重复处理，飞书也只会回 `60012`，
 //! 走回捞路径拿到同一个实例，不会重复建单。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -266,6 +267,7 @@ impl ApprovalDispatchWorker {
             sleeper,
             timezone_offset,
             heartbeat: heartbeat.clone(),
+            seed_failures: Arc::default(),
         };
         let idle_poll = Duration::from_secs(settings.approval_scan_interval_seconds);
         let task = tokio::spawn(run_loop(runner, idle_poll, requests, receiver.clone()));
@@ -336,6 +338,11 @@ struct RoundRunner {
     sleeper: Arc<TokioSleeper>,
     timezone_offset: FixedOffset,
     heartbeat: ProgressHeartbeat,
+    /// 播种失败跨轮去重：`config_id → 上次失败的完整文案`。
+    ///
+    /// 坏表配置每轮都会失败，原实现每 30 秒刷一对 WARN；记住文案后相同失败
+    /// 只在首次（或文案变化时）告警，恢复时补一条 INFO（见 [`note_seed_failure`]）。
+    seed_failures: Arc<Mutex<HashMap<i64, String>>>,
 }
 
 impl RoundRunner {
@@ -546,13 +553,16 @@ async fn run_loop(
 /// `claim` 只认领**已存在**的任务行，而任务行从来不是人工建的——所以没有
 /// [`seed_tasks`] 的话，队列永远是空的，页面按钮点一次就只受理一个空轮。
 ///
-/// # 崩溃恢复也靠播种
+/// # 崩溃恢复不靠轮询播种
 ///
 /// 状态推进发生在 [`record_outcome`]（逐条、处理结束时）。进程在轮中被
-/// `docker stop` 杀掉时，剩下的任务停在 `creating`，而 `claim` 只要 `pending`——
-/// 没有播种的话它们**永远**不会被再认领。播种把「回填列为空」当成唯一判据，
-/// 于是 `creating`（崩溃遗留）、`terminal`（人工清空字段要重试）、`backfilled`
-/// （清空字段要重发）都会被拉回 `pending`。
+/// `docker stop` 杀掉时，剩下的任务仍是 `pending`（`worker_id` 与租约还在）。
+/// 轮询时播种对**已存在**的任务行一律不动（见 [`seed_config`] 的
+/// `Some(_) => {}` 分支），人工点击的 `reopen` 白名单是
+/// `pending`/`review`/`terminal`/`unnotified`。真正的恢复在 [`claim`] 调用的
+/// `claim_ready`：过期租约的只读阶段（`effect_phase` 为 `ready`/`created`）
+/// 可直接重新认领；外部写入结果未知（`creating`/`backfilling`）的行被清扫成
+/// `review`，之后靠人工点击重开。
 #[tracing::instrument(name = "approval_round", skip_all, fields(trigger, cursor_start = cursor.0))]
 async fn run_round(
     runner: &RoundRunner,
@@ -763,6 +773,40 @@ struct SeedReport {
     touched: Vec<(i64, String)>,
 }
 
+/// 一次播种失败该落哪条日志。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeedFailureNote {
+    /// 首次失败或失败文案变了：需要 WARN。
+    Warn,
+    /// 与上次失败文案相同：已经告过警，本轮降为 DEBUG。
+    Repeat,
+}
+
+/// 记一次播种失败并判断日志级别（纯判断，不写日志）。
+fn note_seed_failure(
+    failures: &Mutex<HashMap<i64, String>>,
+    config_id: i64,
+    message: &str,
+) -> SeedFailureNote {
+    let mut failures = failures.lock().unwrap_or_else(|error| error.into_inner());
+    match failures.get(&config_id) {
+        Some(previous) if previous.as_str() == message => SeedFailureNote::Repeat,
+        _ => {
+            failures.insert(config_id, message.to_owned());
+            SeedFailureNote::Warn
+        }
+    }
+}
+
+/// 记一次播种成功：清掉该配置上次的失败文案，返回是否「从失败中恢复」。
+fn note_seed_success(failures: &Mutex<HashMap<i64, String>>, config_id: i64) -> bool {
+    failures
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&config_id)
+        .is_some()
+}
+
 /// 播种：把「回填列为空」的多维表格记录变成待处理任务。
 ///
 /// # 判据：回填列为空；配置了批量范围列时还要求该复选框已勾选
@@ -774,15 +818,16 @@ struct SeedReport {
 /// **勾选只在受理/播种时点生效**：已在队列中的任务不因取消勾选而撤回；取消勾选
 /// 只影响后续播种（已入队的照旧处理，回填成功后自然退出判据）。
 ///
-/// 这也是使用方的**重试通道**——清空那一格就等于「这条再来一遍」。所以已存在的
-/// 任务行不是「跳过」，而是**按需拉回 `pending`**：
+/// 这也是使用方的**重试通道**——清空那一格就等于「这条再来一遍」。但轮询**不会**
+/// 动已存在的任务行（见 [`seed_config`] 里 `Some(_) => {}` 分支）；只有点击被点
+/// 配置时才走 `reopen`，而它的白名单只有 `pending`/`review`/`terminal`/`unnotified`：
 ///
 /// | 库里状态 | 字段为空意味着 | 处置 |
 /// |---|---|---|
-/// | `creating` | 上一轮崩在这条上 | 拉回 `pending` |
-/// | `terminal` | 人工清空要重试 | 拉回 `pending` |
-/// | `backfilled` | 人工清空要重发 | 拉回 `pending`（uuid 幂等兜底，不会重复建单） |
-/// | `pending` | 已在队列里 | 不动 |
+/// | `pending` | 已在队列里（含崩溃遗留的进行中行） | 轮询不动；点击时重置为 `pending` |
+/// | `review` / `unnotified` | 外部写入结果未知 / 结论没送到人 | 点击时拉回 `pending` |
+/// | `terminal` | 人工清空要重试 | 点击时拉回 `pending` |
+/// | `backfilled` | 编号已落表，重开无意义 | 不重开（`reopen` 白名单不含它） |
 ///
 /// # 为什么要扫多维表格而不是「只看有任务的行」
 ///
@@ -822,6 +867,9 @@ async fn seed_tasks(
         let config_id: i64 = config.require("id").unwrap_or_default();
         match seed_config(runner, &config, trigger, applicant).await {
             Ok(outcome) => {
+                if note_seed_success(&runner.seed_failures, config_id) {
+                    tracing::info!(config_id, "审批派发播种恢复");
+                }
                 report.seeded += outcome.seeded;
                 report.touched.extend(
                     outcome
@@ -831,8 +879,24 @@ async fn seed_tasks(
                 );
             }
             // 一条配置坏掉不该拖垮别的配置：记下来，下一轮再来。
+            // 坏配置每轮都失败，只在首次/文案变化时告警，其余降 DEBUG，
+            // 否则每 30 秒一对 WARN、6 小时 1500+ 条。
             Err(error) => {
-                tracing::warn!(error = %error, config_id, "审批派发播种跳过该配置");
+                // 用完整错误链（`{:#}`）作去重键：同一根因的文案必须稳定，
+                // 换了根因（文案变化）要重新告警。
+                let message = format!("{error:#}");
+                match note_seed_failure(&runner.seed_failures, config_id, &message) {
+                    SeedFailureNote::Warn => {
+                        tracing::warn!(error = %message, config_id, "审批派发播种跳过该配置");
+                    }
+                    SeedFailureNote::Repeat => {
+                        tracing::debug!(
+                            error = %message,
+                            config_id,
+                            "审批派发播种仍然失败，文案与上一轮相同（已告警过）"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1010,7 +1074,7 @@ async fn seed_config(
 
     // 已有的任务行：**只查本轮待处理记录**，行数与本轮记录同量级，与历史任务
     // 积累无关（旧实现读全表，任务行到 2000 后整配置播种永久失败）。
-    // 按 record_id 建索引，决定「新建」还是「拉回 pending」。
+    // 按 record_id 建索引，决定「新建」还是（点击时）`reopen`。
     let record_ids: Vec<String> = pending_records
         .iter()
         .map(|record| record.record_id.clone())
@@ -1297,17 +1361,15 @@ async fn persist_applicant(
 /// 判据是 `feishu_approval_task` 的状态，**不是**多维表格的回填字段是否为空
 /// ——后者是输出位，用它当扫描键会把「填一半」的行永久钉死（见模块文档）。
 ///
-/// # 为什么认领条件里没有 `lease_until`
+/// # 只认 `pending`：崩溃遗留由过期租约清扫
 ///
-/// 原设计照搬 `authorization_outbox` 的 `state='creating' AND lease_until <= now`，
-/// 那条是**跨实例**并发的产物。本 worker 是单实例（部署形态决策 A10）+ 单线程
-/// 循环，每轮开始时根本没有别的执行者持有 `creating`，再判租约只是多一次时钟
-/// 依赖。
+/// 崩溃留下的行 `state` 仍是 `pending`，但 `worker_id` 与租约还在，所以要靠
+/// 租约判断是否还有人持有：`claim_ready` 先把过期租约里外部写入结果未知
+/// （`effect_phase` 为 `creating`/`backfilling`）的行写成 `review`（等人工点击
+/// 重开），再把过期租约的只读阶段（`ready`/`created`）重新认领。
 ///
-/// **但「只认 `pending`」这条不能单独成立**：轮中崩溃留下的 `creating` 行永远不会
-/// 自己回到 `pending`，`claim` 也就永远不再看它们。补上这一环的是 [`seed_tasks`]
-/// ——它以「回填列为空」为唯一判据，把崩溃遗留、人工清空要重试的行一并拉回
-/// `pending`。两者的分工是：**播种决定「谁该被处理」，认领决定「这一轮处理哪一批」**。
+/// **播种不参与这条恢复路径**：它只给没有任务行的记录建行，轮询对已存在的行
+/// 不做任何事。
 async fn claim(runner: &RoundRunner, cursor: &ResumeCursor) -> anyhow::Result<Vec<ClaimedTask>> {
     let claims =
         approval_execution::claim_ready(&runner.context, cursor.0, None, CLAIM_BATCH).await?;
@@ -1533,6 +1595,20 @@ impl TaskOutcome {
     }
 }
 
+/// 只读请求失败的统一处置：`Fatal` 重试修不好，转终态；其余按可重试。
+///
+/// 记录读取与表结构读取共用这一份映射，避免两处各自演进后漂移。
+fn read_failure_result(
+    failure: crate::addon::feishu::domain::outbound::OutboundFailure,
+    prefix: &str,
+) -> DispatchResult {
+    let message = format!("{prefix}：{}", failure.message);
+    match failure.kind {
+        FailureKind::Fatal { .. } => DispatchResult::Terminal { message },
+        _ => DispatchResult::Retryable { message },
+    }
+}
+
 /// 读源记录失败的处置。
 ///
 /// `Fatal`（记录不存在 / 无权限 / 坐标不合法）重试修不好，必须转终态——否则
@@ -1542,11 +1618,7 @@ impl TaskOutcome {
 fn record_read_failure(
     failure: crate::addon::feishu::domain::outbound::OutboundFailure,
 ) -> DispatchResult {
-    let message = format!("读取记录失败：{}", failure.message);
-    match failure.kind {
-        FailureKind::Fatal { .. } => DispatchResult::Terminal { message },
-        _ => DispatchResult::Retryable { message },
-    }
+    read_failure_result(failure, "读取记录失败")
 }
 
 /// 处理一条记录。
@@ -1571,12 +1643,11 @@ async fn process_one(runner: &RoundRunner, task: &ClaimedTask) -> TaskOutcome {
     .await
     {
         Ok(fields) => fields,
-        // 表结构拿不到多半是凭证/网络抖动，判可重试。
+        // 与记录读取同一套映射：表不存在/无权限等 `Fatal` 重试修不好，转终态；
+        // 凭证/网络抖动等瞬态失败仍按可重试。
         Err(failure) => {
             tracing::warn!(stage = "fields", kind = ?failure.kind, "审批任务读取表结构失败");
-            return TaskOutcome::early(DispatchResult::Retryable {
-                message: format!("读取表结构失败：{}", failure.message),
-            });
+            return TaskOutcome::early(read_failure_result(failure, "读取表结构失败"));
         }
     };
 
@@ -2293,6 +2364,35 @@ mod tests {
         }
     }
 
+    /// 播种失败跨轮去重：首次/变化的文案才告警，恢复后重置。
+    #[test]
+    fn seed_failures_warn_once_until_message_changes_or_recovers() {
+        let failures = Mutex::new(HashMap::new());
+        let message = "读取表结构失败：字段不存在";
+        assert_eq!(
+            note_seed_failure(&failures, 7, message),
+            SeedFailureNote::Warn,
+            "首次失败必须告警"
+        );
+        assert_eq!(
+            note_seed_failure(&failures, 7, message),
+            SeedFailureNote::Repeat,
+            "同文案每轮重复时不刷 WARN"
+        );
+        assert_eq!(
+            note_seed_failure(&failures, 7, "读取表结构失败：token 失效"),
+            SeedFailureNote::Warn,
+            "文案变化说明根因变了，必须重新告警"
+        );
+        assert!(note_seed_success(&failures, 7), "之前失败过应报告恢复");
+        assert!(!note_seed_success(&failures, 7), "没有失败记录时不算恢复");
+        assert_eq!(
+            note_seed_failure(&failures, 7, "读取表结构失败：token 失效"),
+            SeedFailureNote::Warn,
+            "成功后重置，同一文案再次失败要重新告警"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "需要独立 MySQL 测试库和 Redis DB 15"]
     async fn real_mysql_worker_claims_are_exclusive_and_old_owner_cannot_commit(
@@ -2348,6 +2448,7 @@ mod tests {
                 sleeper: Arc::new(TokioSleeper),
                 timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
                 heartbeat: ProgressHeartbeat::default(),
+                seed_failures: Arc::default(),
             });
         }
         let pool = runners[0].context.approval_tasks().pool();
@@ -3318,6 +3419,7 @@ mod tests {
             sleeper: Arc::new(TokioSleeper),
             timezone_offset: FixedOffset::from_iana("Asia/Shanghai")?,
             heartbeat: ProgressHeartbeat::default(),
+            seed_failures: Arc::default(),
         };
 
         // 批量受理（filter=None）：只写本轮 touched（R1/R3）。R2 虽同为 pending、

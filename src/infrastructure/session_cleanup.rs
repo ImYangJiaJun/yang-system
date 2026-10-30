@@ -83,7 +83,8 @@ async fn run_loop(pool: MySqlPool, mut shutdown: watch::Receiver<bool>) {
             }
             Err(error) => {
                 metrics::counter!("session_cleanup_runs_total", "result" => "error").increment(1);
-                tracing::error!(error = %error, "会话保留期清理失败");
+                // Display 只打印最外层 context，用 {:#} 展开完整错误链。
+                tracing::error!(error = %format!("{error:#}"), "会话保留期清理失败");
             }
         }
         tokio::select! {
@@ -114,6 +115,10 @@ async fn cleanup_once(pool: &MySqlPool) -> anyhow::Result<u64> {
 }
 
 async fn delete_stale_candidates(pool: &MySqlPool, candidates: Vec<String>) -> anyhow::Result<u64> {
+    // 候选为空 = 本轮没有过期行可删，本身就是成功；空 IN 会被 yang-db 渲染层拒绝。
+    if candidates.is_empty() {
+        return Ok(0);
+    }
     // 用数据库时钟做比较（DSL 的 UNIX_TIMESTAMP() 表达式），不把应用时钟带进
     // 删除谓词；重新检查保留期，保护 SELECT 后被 refresh 触碰的会话。
     let deleted = QueryBuilder::from_pool(pool, table!("user_session"))
@@ -347,6 +352,24 @@ mod tests {
                 .push_bind("cleanup-test");
         });
         query.build().execute(pool).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "需要 YANG_SYSTEM_TEST_DATABASE_URL"]
+    async fn cleanup_with_no_candidates_is_ok() -> anyhow::Result<()> {
+        let url = std::env::var("YANG_SYSTEM_TEST_DATABASE_URL")?;
+        let database = Database::connect(&url).await?;
+        let name: String = sqlx::query_scalar("SELECT DATABASE()")
+            .fetch_one(database.pool())
+            .await?;
+        ensure!(name.ends_with("_test"), "拒绝在非测试数据库清理会话");
+        // 空候选集没有过期行可删，删除路径必须返回 Ok(0)，而不是渲染空 IN 报错。
+        ensure!(
+            delete_stale_candidates(database.pool(), Vec::new()).await? == 0,
+            "空候选集不应删除任何行"
+        );
+        database.close().await;
         Ok(())
     }
 }

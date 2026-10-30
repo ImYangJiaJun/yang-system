@@ -587,8 +587,17 @@ pub(crate) async fn subscribe_approval(
 
     match send_approval(transport, sleeper, tokens, request, &PULL_RETRY).await {
         Ok(_) => Ok(()),
-        // 1390007 = subscription existed：已被清掉后的重订也走这条，不是失败。
-        Err(failure) if failure.kind == FailureKind::Fatal { code: 1390007 } => Ok(()),
+        // 1390007 = 已订阅或已取消订阅（subscription existed）：按幂等成功处理，
+        // 重试只会再拿到同一个码。若订阅实际已被取消，事件会断流——留一条 INFO
+        // 让「订阅状态被清掉」在日志里可见。
+        Err(failure) if failure.kind == FailureKind::Fatal { code: 1390007 } => {
+            tracing::info!(
+                approval_code,
+                code = 1390007,
+                "审批定义事件订阅已存在或已取消，按幂等成功处理；若订阅实际已被取消，事件会断流"
+            );
+            Ok(())
+        }
         Err(failure) => Err(failure),
     }
 }
