@@ -574,10 +574,14 @@ async fn run_round(
     tracing::Span::current().record("trigger", trigger.as_str());
     runner.heartbeat.mark("seed", None);
     tracing::debug!(stage = "seed", "审批派发轮次开始，扫描所有启用配置");
+    // 单条点击的 record_id：传给播种，让「0 条待处理」通知不发给单条点击
+    // （dispatch_single 已经处理了那条记录并给了用户反馈）。
+    let clicked_record_id = applicant.as_ref().and_then(|(_, _, rid)| rid.as_deref());
     let report = match seed_tasks(
         runner,
         trigger,
         applicant.as_ref().map(|(_, open_id, _)| open_id.as_str()),
+        clicked_record_id,
     )
     .await
     {
@@ -838,6 +842,7 @@ async fn seed_tasks(
     runner: &RoundRunner,
     trigger: RoundTrigger,
     applicant: Option<&str>,
+    clicked_record_id: Option<&str>,
 ) -> anyhow::Result<SeedReport> {
     let configs = runner
         .context
@@ -865,7 +870,7 @@ async fn seed_tasks(
     let mut report = SeedReport::default();
     for config in configs {
         let config_id: i64 = config.require("id").unwrap_or_default();
-        match seed_config(runner, &config, trigger, applicant).await {
+        match seed_config(runner, &config, trigger, applicant, clicked_record_id).await {
             Ok(outcome) => {
                 if note_seed_success(&runner.seed_failures, config_id) {
                     tracing::info!(config_id, "审批派发播种恢复");
@@ -1014,6 +1019,7 @@ async fn seed_config(
     config: &Record,
     trigger: RoundTrigger,
     applicant: Option<&str>,
+    clicked_record_id: Option<&str>,
 ) -> anyhow::Result<SeedOutcome> {
     let started = std::time::Instant::now();
     let config_id: i64 = config.require("id")?;
@@ -1057,17 +1063,23 @@ async fn seed_config(
     tracing::debug!(stage = "seed", config_id, table_id = %table_id, field_count = fields.len(), pending_records = pending_records.len(), "审批派发待处理记录扫描完成");
     if pending_records.is_empty() {
         // 点击受理却命中 0 条：给点击人一条 IM 说明，别让「没勾选就点」完全静默。
-        // 发送是 best-effort（见 [`notify_empty_selection`]）：失败不改变播种结论。
-        if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
-            notify_empty_selection(
-                runner,
-                config_id,
-                open_id,
-                config,
-                &backfill_name,
-                batch_scope_name.as_deref(),
-            )
-            .await;
+        // 但**单条点击**不通知：`dispatch_single` 已经处理了那条记录并给了用户反馈，
+        // 这里的全表扫描发现 0 条是因为那条已被处理——再发"批量提交未处理任何记录"
+        // 会让用户以为自己的点击走错了路径（2026-10-30 真机）。
+        let is_single_click = trigger.manual_config() == Some(config_id)
+            && clicked_record_id.is_some();
+        if !is_single_click {
+            if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
+                notify_empty_selection(
+                    runner,
+                    config_id,
+                    open_id,
+                    config,
+                    &backfill_name,
+                    batch_scope_name.as_deref(),
+                )
+                .await;
+            }
         }
         return Ok(SeedOutcome::default());
     }
@@ -3000,6 +3012,24 @@ mod tests {
         assert!(unscoped.starts_with("【批量提交未处理任何记录】"));
         assert!(!unscoped.contains("纳入批量"), "未配置范围列不该提它");
         assert!(unscoped.contains("审批编号"));
+    }
+
+    #[test]
+    fn single_click_does_not_notify_empty_selection() {
+        // 单条点击时 dispatch_single 已经处理了那条记录并给了用户反馈。
+        // 播种的全表扫描发现 0 条是因为那条已被处理——再发"批量提交未处理任何记录"
+        // 会让用户以为自己的点击走错了路径（2026-10-30 真机）。
+        let is_single_click = |trigger: RoundTrigger, config_id: i64, clicked_record_id: Option<&str>| {
+            trigger.manual_config() == Some(config_id) && clicked_record_id.is_some()
+        };
+        // 单条点击：本配置 + 有 record_id → 不发
+        assert!(is_single_click(RoundTrigger::Manual(5), 5, Some("recXXX")));
+        // 批量点击：本配置 + record_id = None → 发（原有的空选反馈）
+        assert!(!is_single_click(RoundTrigger::Manual(5), 5, None));
+        // 其它配置的播种：即使有 record_id 也不发（不属于本次点击）
+        assert!(!is_single_click(RoundTrigger::Manual(5), 3, Some("recXXX")));
+        // 轮询：不发（原有逻辑）
+        assert!(!is_single_click(RoundTrigger::Poll, 5, Some("recXXX")));
     }
 
     #[test]
