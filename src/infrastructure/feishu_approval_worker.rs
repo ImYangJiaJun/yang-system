@@ -1066,8 +1066,8 @@ async fn seed_config(
         // 但**单条点击**不通知：`dispatch_single` 已经处理了那条记录并给了用户反馈，
         // 这里的全表扫描发现 0 条是因为那条已被处理——再发"批量提交未处理任何记录"
         // 会让用户以为自己的点击走错了路径（2026-10-30 真机）。
-        let is_single_click = trigger.manual_config() == Some(config_id)
-            && clicked_record_id.is_some();
+        let is_single_click =
+            trigger.manual_config() == Some(config_id) && clicked_record_id.is_some();
         if !is_single_click {
             if let Some(open_id) = empty_selection_recipient(trigger, config_id, applicant) {
                 notify_empty_selection(
@@ -3019,9 +3019,10 @@ mod tests {
         // 单条点击时 dispatch_single 已经处理了那条记录并给了用户反馈。
         // 播种的全表扫描发现 0 条是因为那条已被处理——再发"批量提交未处理任何记录"
         // 会让用户以为自己的点击走错了路径（2026-10-30 真机）。
-        let is_single_click = |trigger: RoundTrigger, config_id: i64, clicked_record_id: Option<&str>| {
-            trigger.manual_config() == Some(config_id) && clicked_record_id.is_some()
-        };
+        let is_single_click =
+            |trigger: RoundTrigger, config_id: i64, clicked_record_id: Option<&str>| {
+                trigger.manual_config() == Some(config_id) && clicked_record_id.is_some()
+            };
         // 单条点击：本配置 + 有 record_id → 不发
         assert!(is_single_click(RoundTrigger::Manual(5), 5, Some("recXXX")));
         // 批量点击：本配置 + record_id = None → 发（原有的空选反馈）
